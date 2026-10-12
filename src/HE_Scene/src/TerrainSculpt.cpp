@@ -12,6 +12,26 @@
 namespace TerrainSculpt
 {
 
+// Only the chunks under the rect have to be rebuilt. `dirty` is left alone:
+// setting it would rebuild all 64+ of them, which is the difference between a
+// brush and a regeneration. Public so a caller that edits sculptHeights
+// directly outside this file's own ops (WaterLake.cpp's ground-patch restore,
+// Thema 174 Schritt 14) can mark the same rect dirty the same way.
+void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ)
+{
+    if (tc.regionDirty)
+    {
+        tc.dirtyMinX = std::min(tc.dirtyMinX, mnX); tc.dirtyMaxX = std::max(tc.dirtyMaxX, mxX);
+        tc.dirtyMinZ = std::min(tc.dirtyMinZ, mnZ); tc.dirtyMaxZ = std::max(tc.dirtyMaxZ, mxZ);
+    }
+    else
+    {
+        tc.dirtyMinX = mnX; tc.dirtyMaxX = mxX;
+        tc.dirtyMinZ = mnZ; tc.dirtyMaxZ = mxZ;
+        tc.regionDirty = true;
+    }
+}
+
 namespace
 {
     // The same stable per-vertex hash the interactive Roughen brush uses: a value
@@ -24,24 +44,6 @@ namespace
         n ^= n >> 4u; n *= 0x27D4EB2Du; n ^= n >> 15u;
         return static_cast<float>(n & 0x00FFFFFFu)
              / static_cast<float>(0x01000000u) * 2.0f - 1.0f;
-    }
-
-    // Only the chunks under the rect have to be rebuilt. `dirty` is left alone:
-    // setting it would rebuild all 64+ of them, which is the difference between a
-    // brush and a regeneration.
-    void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ)
-    {
-        if (tc.regionDirty)
-        {
-            tc.dirtyMinX = std::min(tc.dirtyMinX, mnX); tc.dirtyMaxX = std::max(tc.dirtyMaxX, mxX);
-            tc.dirtyMinZ = std::min(tc.dirtyMinZ, mnZ); tc.dirtyMaxZ = std::max(tc.dirtyMaxZ, mxZ);
-        }
-        else
-        {
-            tc.dirtyMinX = mnX; tc.dirtyMaxX = mxX;
-            tc.dirtyMinZ = mnZ; tc.dirtyMaxZ = mxZ;
-            tc.regionDirty = true;
-        }
     }
 
     // Beyond any landscape; keeps the index arithmetic of excavatePolygon finite.
@@ -230,12 +232,14 @@ Result apply(TerrainComponent& tc, float localX, float localZ, Op op,
 }
 
 Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
-                    float radius, float falloff, float floorY, float blend)
+                    float radius, float falloff, float floorY, float blend, float wetLevel)
 {
     Result r;
     if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
     if (!std::isfinite(localX) || !std::isfinite(localZ) || !std::isfinite(radius) ||
         !std::isfinite(falloff) || !std::isfinite(floorY) || !std::isfinite(blend)) return r;
+    const bool capToWet = !std::isnan(wetLevel);          // NaN (the default): disabled
+    if (capToWet && !std::isfinite(wetLevel)) return r;   // an infinity is bad input, not "disabled"
 
     radius  = std::max(0.0f, radius);
     falloff = std::max(0.0f, falloff);
@@ -281,10 +285,40 @@ Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
             float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
             const float was = h;
             const float f = std::clamp(w * blend, 0.0f, 1.0f);
-            // f == 1 assigns: h + 1 * (floor - h) is not bit-equal to floor, and
-            // "the bed is at the floor" is what a caller checks.
-            if (h > floorY && f > 0.0f)
-                h = (f >= 1.0f) ? floorY : h + f * (floorY - h);
+
+            if (!capToWet)
+            {
+                // f == 1 assigns: h + 1 * (floor - h) is not bit-equal to floor, and
+                // "the bed is at the floor" is what a caller checks.
+                if (was > floorY && f > 0.0f)
+                    h = (f >= 1.0f) ? floorY : was + f * (floorY - was);
+            }
+            else
+            {
+                // How far the old, uncapped dig would have gone.
+                const float oldBlended = (was > floorY && f > 0.0f)
+                                        ? ((f >= 1.0f) ? floorY : was + f * (floorY - was))
+                                        : was;
+                // The raw ceiling for THIS dab: below half weight, the circle's own
+                // paint (the identical weight, WaterField::addCircle) would not have
+                // turned this ground wet from a single dab, so the target is the
+                // water's level, not the floor — nothing ever sinks below the water
+                // the dab did not wet. From half weight to full it eases linearly to
+                // the floor, same shape as the weight itself. NOT blended further
+                // (unlike `oldBlended`): on uphill ground this is what lets the edge
+                // of the stroke's own wet reach land exactly on the level in one dab,
+                // instead of only halfway there and still above it (which would clip
+                // the water at the lattice corner it was just painted onto — "water
+                // stops too early" on a slope, the OTHER half of what a blend-only
+                // cap gets wrong).
+                const float capTarget = (w >= 1.0f) ? floorY
+                                       : (w < 0.5f)  ? wetLevel
+                                                     : wetLevel + (w - 0.5f) / 0.5f * (floorY - wetLevel);
+                // Whichever digs less wins (max: digging lowers) — never past where
+                // this dab's own paint already wets it — then never past the
+                // original height (min: an excavation never raises).
+                h = std::min(was, std::max(oldBlended, capTarget));
+            }
             if (h != was)
             {
                 ++r.changed;
@@ -312,7 +346,8 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
 {
     Result r;
     if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
-    if (polygon.size() < 3 || !std::isfinite(params.amount) || !std::isfinite(params.falloff)) return r;
+    if (polygon.size() < 3 || !std::isfinite(params.amount) || !std::isfinite(params.falloff) ||
+        !std::isfinite(params.bankIn) || !std::isfinite(params.edgeHeight)) return r;
 
     glm::vec2 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
     double area2 = 0.0;
@@ -328,6 +363,7 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     if (std::fabs(area2) <= 1e-12) return r;   // a line or a point: nothing to dig
 
     const float falloff = std::max(0.0f, params.falloff);
+    const float bankIn  = std::max(0.0f, params.bankIn);
     const float depth   = std::max(0.0f, params.amount);
 
     ensureHeights(tc);
@@ -342,7 +378,7 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     // says about a slanted edge. A fraction of a grid cell, far below anything a
     // caller means by "outside".
     const float onEdge  = 1e-4f * std::min(stepX, stepZ);
-    const float reach   = std::max(falloff, onEdge);
+    const float reach   = std::max({ falloff, bankIn, onEdge });
 
     r.ok = true;   // legal request; a polygon entirely off the terrain simply changes nothing
 
@@ -405,9 +441,10 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
         }
     }
 
-    // ── Distance of the rest to the outline, only where the bank reaches ────
+    // ── Distance of the rest to the outline, only where a bank reaches ──────
     // Edge by edge, over the vertices within `reach` of that edge's box: a long
     // outline costs its length times the bank width, not the polygon's area.
+    // Inside vertices are skipped too, UNLESS `bankIn` needs their distance.
     constexpr float kFar = std::numeric_limits<float>::max();
     std::vector<float> dist2(cells, kFar);
     for (size_t i = 0; i < polygon.size(); ++i)
@@ -424,17 +461,18 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
             for (int xi = ex0; xi <= ex1; ++xi)
             {
                 const size_t c = at(xi, zi);
-                if (inside[c]) continue;
+                if (inside[c] && bankIn <= 0.0f) continue;
                 const float wx = -halfX + static_cast<float>(xi) * stepX;
                 dist2[c] = std::min(dist2[c], segmentDist2(wx, wz, a, b));
             }
         }
     }
 
-    // 1 on and inside the outline, 0 from `falloff` outward, smoothstep between.
-    auto weightAt = [&](size_t c) -> float
+    // 0 outside the bank, 1 on the outline and inward of it, smoothstep across
+    // `falloff` between — the OUTWARD bank, same as ever, `bankIn` does not
+    // touch it. Only called for vertices outside the polygon.
+    auto outWeight = [&](size_t c) -> float
     {
-        if (inside[c]) return 1.0f;
         const float d2 = dist2[c];
         if (d2 >= kFar) return 0.0f;
         const float d = std::sqrt(d2);
@@ -444,6 +482,17 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
         return t * t * (3.0f - 2.0f * t);
     };
 
+    // Floor mode, `bankIn` > 0: the clamp ceiling for a vertex `d` metres inside
+    // the outline. `edgeHeight` right on it, `amount` from `bankIn` in and
+    // beyond — see ExcavateParams::bankIn.
+    auto insideTarget = [&](float d) -> float
+    {
+        if (d >= bankIn) return params.amount;
+        const float t = d / bankIn;
+        const float s = t * t * (3.0f - 2.0f * t);
+        return params.edgeHeight + s * (params.amount - params.edgeHeight);
+    };
+
     float mn = std::numeric_limits<float>::max();
     float mx = std::numeric_limits<float>::lowest();
     int cx0 = x1, cx1 = x0, cz0 = z1, cz1 = z0;   // vertices that actually moved
@@ -451,23 +500,66 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     for (int zi = z0; zi <= z1; ++zi)
         for (int xi = x0; xi <= x1; ++xi)
         {
-            const float w = weightAt(at(xi, zi));
-            if (w <= 0.0f) continue;
-
+            const size_t c = at(xi, zi);
             float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
             const float was = h;
+            float newH = was;
 
-            if (params.mode == ExcavateMode::Floor)
+            if (inside[c])
             {
-                // w == 1 assigns, it does not blend: h + 1 * (floor - h) is not
-                // bit-equal to floor, and "the bottom is at the floor" is the
-                // thing a caller checks.
-                if (h > params.amount)
-                    h = (w >= 1.0f) ? params.amount : h + w * (params.amount - h);
+                if (bankIn <= 0.0f)
+                {
+                    // w == 1 assigns, it does not blend: h + 1 * (floor - h) is not
+                    // bit-equal to floor, and "the bottom is at the floor" is the
+                    // thing a caller checks.
+                    if (params.mode == ExcavateMode::Floor) { if (was > params.amount) newH = params.amount; }
+                    else                                      newH = was - depth;
+                }
+                else
+                {
+                    const float d2 = dist2[c];
+                    const float d  = (d2 >= kFar) ? bankIn : std::sqrt(d2);
+                    if (params.mode == ExcavateMode::Floor)
+                    {
+                        const float target = insideTarget(d);
+                        if (was > target) newH = target;
+                    }
+                    else
+                    {
+                        const float t = (d >= bankIn) ? 1.0f : d / bankIn;
+                        const float s = t * t * (3.0f - 2.0f * t);
+                        newH = was - s * depth;
+                    }
+                }
             }
             else
-                h = (w >= 1.0f) ? h - depth : h - w * depth;
+            {
+                const float w = outWeight(c);
+                if (w <= 0.0f) continue;
+                if (params.mode == ExcavateMode::Floor)
+                {
+                    // `bankIn` > 0: this is the water-aware mode (ExcavateParams::
+                    // bankIn), and the outward bank has to agree with the inward one
+                    // AT the outline (both reach exactly `edgeHeight` there) or the
+                    // two meet as a cliff — ground just inside pulled down to
+                    // `edgeHeight`, ground just outside still at its old height,
+                    // whatever that was (Thema 174 Schritt 13, second pass: the
+                    // first pass set `falloff` to 0 instead, which silently was that
+                    // cliff on any ground that was not already flat at the outline).
+                    // Outward of the outline the ground only ever eases DOWN toward
+                    // `edgeHeight` where it stood above it — never below the water's
+                    // own level, so the dry-moat bug this schritt fixes cannot come
+                    // back — and back up to its own old height by `falloff` metres
+                    // out, same shape as ever.
+                    const float outTarget = (bankIn > 0.0f) ? params.edgeHeight : params.amount;
+                    if (was > outTarget)
+                        newH = (w >= 1.0f) ? outTarget : was + w * (outTarget - was);
+                }
+                else
+                    newH = (w >= 1.0f) ? was - depth : was - w * depth;
+            }
 
+            h = newH;
             if (h != was)
             {
                 ++r.changed;

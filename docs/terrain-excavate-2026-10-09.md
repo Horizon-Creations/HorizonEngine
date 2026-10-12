@@ -31,6 +31,13 @@ nicht gemischt: `h + 1·(floor − h)` ist nicht bit-gleich), außerhalb der Bö
 bleibt er bit-gleich. Ein Vertex auf der Linie zählt als innen, bei schrägen Kanten
 bis auf Rundung.
 
+Seit Thema 174 Schritt 13 gibt es (nur `Floor`) zusätzlich `bankIn`/`edgeHeight`: eine
+zweite Böschung, **nach innen** von der Linie gemessen. Innerhalb bleibt es wie oben
+(der Floor, ab `bankIn` Metern von der Linie); dazwischen blendet die Höhe smoothstep
+von `edgeHeight` genau auf der Linie zum Floor. `bankIn = 0` (Default) ist bit-gleich
+zum alten Verhalten — nur `WaterLake.cpp` setzt es, siehe `terrain-excavate`-Hinweis
+unten und `docs/water-lake-2026-10-10.md`.
+
 Aufwand: Innen/Außen per Scanline je Gitterzeile, der Abstand nur kantenweise in
 der Böschung. Ein See von 600 m Durchmesser mit 256 Punkten und 20 m Böschung auf
 1025² Vertices braucht im Debug-Build rund 90 ms.
@@ -72,8 +79,13 @@ Wahrheit neben dem Editor-Snapshot, die niemand auslöst; er ist nicht gebaut.
   `polygonFromPolyline(polyline, toTerrainLocal)` umrechnen, die Matrix aus
   `HE::worldMatrixOf` beider Entities (nicht aus `TransformComponent::worldMatrix`,
   die ist einen Frame alt).
-* Mit `falloff` > 0 schneidet die Böschung den Spiegel etwas außerhalb des Umrisses;
-  die Beschneidung aus Schritt 5 lässt das Wasser dort enden, nicht auf der Spline.
+* Mit `falloff` > 0 sinkt die Böschung außerhalb des Umrisses unter den Spiegel, ohne
+  dass dort Wasser liegt (die Fläche rastert nur das Polygon) — ein trockener, zu
+  tiefer Ring, den die Beschneidung aus Schritt 5 nicht zudeckt. Für einen See ist das
+  falsch (Thema 174, Schritt 13, Bugfix): `WaterLake.cpp` benutzt seitdem `bankIn` +
+  `edgeHeight` (unten in `TerrainSculpt.h`) statt `falloff` — die Böschung liegt dann
+  innerhalb des Umrisses, blendet von dort zum Spiegel, und das Wasser (unverändert
+  auf dem Polygon gerastert) erreicht die Spline wirklich.
 
 ## Falle, die der Test gefangen hat
 

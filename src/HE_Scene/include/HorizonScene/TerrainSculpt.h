@@ -1,6 +1,7 @@
 #pragma once
 #include <glm/vec2.hpp>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 struct TerrainComponent;
@@ -57,6 +58,13 @@ namespace TerrainSculpt
     // longer be the vertex it read back.
     void ensureHeights(TerrainComponent& tc);
 
+    // Widen TerrainComponent's region-dirty rect (terrain-local XZ) to cover
+    // [mnX, mxX] × [mnZ, mxZ], same merge as every op in this file. For a caller
+    // that edits sculptHeights directly, outside apply/lowerToFloor/excavatePolygon
+    // (WaterLake.cpp's ground-patch restore, moving a lake's own dig when its
+    // transform moves: see WaterLake.h).
+    void markRegionDirty(TerrainComponent& tc, float mnX, float mnZ, float mxX, float mxZ);
+
     struct Result
     {
         bool     ok       = false;   // false = the arguments could not be applied
@@ -95,13 +103,41 @@ namespace TerrainSculpt
     // without a step. `blend` is the caller's pacing: 1 = one dab does all of it,
     // a held button passes a fraction per frame.
     //
+    // `wetLevel`, finite (Thema 174 Schritt 13): the water's own level, so a dab
+    // never lowers the ground below it where a SINGLE dab's own circle would not
+    // paint that ground wet — the circle's weight at half strength (0.5, the
+    // circle's own coverage-wet boundary: `WaterField::addCircle` reaches a
+    // coverage half of 255 at the same weight, for one full-strength dab) is the
+    // line. Below it (w < 0.5) the CEILING is `wetLevel`, whatever `floor` says;
+    // from there to w = 1 it eases linearly to `floor`, same as the weight itself
+    // eases. The result is the LOWER of that ceiling-blend and the plain old
+    // blend toward `floor` (never raised past either): on flat ground that is the
+    // ceiling (the old blend alone would dig too far); on ground ABOVE the level
+    // (an upward slope under the stroke) the plain blend alone would often UNDER-
+    // dig — at w = 0.5 it only reaches halfway down, short of the level, which
+    // would leave this exact lattice corner un-wet right where the paint just
+    // wet it, "water stops too early" on a slope. Taking the lower of the two
+    // reaches the level in one dab at w = 0.5 on any starting height, up or down.
+    // Without this cap entirely, a dab's falloff ring reaches well past where its
+    // own paint ever turns the coverage wet (coverage needs w ≥ 0.5, the dig used
+    // to reach all the way to `floor` as soon as w > 0): a dry ring, sunk below
+    // the water's own level, around every stroke — the water brush's share of the
+    // bug `WaterLake.cpp`'s outward bank had (see ExcavateParams::bankIn).
+    // NaN (the default) disables this and reproduces the old, unbounded dig bit
+    // for bit — every caller before Schritt 13 passed none. The cap is per dab,
+    // not per the stroke's accumulated coverage: a point several dabs have nudged
+    // toward wet without any one of them alone reaching w ≥ 0.5 there stays capped
+    // a little shallow rather than risk the dry ring the other way; that is a
+    // shallower shore, never a moat.
+    //
     // Same contract as apply: terrain-local coordinates, ensureHeights first, the
     // region-dirty rect (vertices that moved, one grid step wider) and not `dirty`,
     // undo is the caller's. ok = false for a degenerate terrain, a non-positive
     // radius + falloff or a non-finite argument; a dab off the terrain is ok with
     // changed = 0.
     Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
-                        float radius, float falloff, float floorY, float blend);
+                        float radius, float falloff, float floorY, float blend,
+                        float wetLevel = std::numeric_limits<float>::quiet_NaN());
 
     // ── Excavation under a polygon ───────────────────────────────────────────
     // The ground inside a polygon goes down to a floor, with a soft bank around
@@ -126,6 +162,32 @@ namespace TerrainSculpt
         // crease — the brush's linear ramp would leave a visible edge on a pit
         // this wide). 0 = a hard edge. Beyond it the ground is not touched at all.
         float        falloff = 2.0f;
+        // Width of a second bank, world units, measured INWARD from the outline
+        // instead of outward. Within it, Floor mode's clamp eases from
+        // `edgeHeight` (right on the outline) down to `amount` (this far in and
+        // beyond); Dig mode's depth eases from 0 (right on the outline) up to the
+        // full depth the same way, `edgeHeight` unused. 0 = disabled, the whole
+        // inside is `amount` (or the full depth) as `falloff` alone describes.
+        //
+        // Floor mode only, with this > 0, ALSO changes what the OUTWARD `falloff`
+        // bank eases toward: `edgeHeight` instead of `amount`. Both banks then
+        // reach the exact same height right on the outline (`edgeHeight`) and the
+        // ground never has a seam there — without this, `falloff` alone eases
+        // outward toward `amount` (the DEEP floor), so ground just outside the
+        // outline could sink to the SAME depth as the lake bed, well below the
+        // water's own level, with no water ever laid over it there (a dry moat
+        // around the shape, outside what the caller drew — the bug this pairing
+        // exists to fix, Thema 174 Schritt 13 first pass) — OR, with `falloff` set
+        // to 0 to dodge that (the same schritt's own first attempt), ground just
+        // inside drops to `edgeHeight` while ground one vertex outside stays at
+        // its old height, whatever that was: a cliff on any ground that was not
+        // already flat at the outline (second pass). Set both to the SAME width
+        // for a lake's "Bank": the ground only ever eases DOWN where it stands
+        // above `edgeHeight`, continuously inward to the bed and outward back up
+        // to the old ground, and nothing anywhere sinks below the water's level
+        // without the water (laid over the same polygon) reaching it too.
+        float        bankIn     = 0.0f;
+        float        edgeHeight = 0.0f;   // Floor mode only
     };
 
     // The polygon is terrain-local XZ (x → glm::vec2::x, z → ::y), no closing
@@ -138,7 +200,9 @@ namespace TerrainSculpt
     // Heights are computed per terrain VERTEX: a vertex inside the outline gets
     // exactly the floor (or exactly its old height minus the depth), one beyond
     // the bank keeps its old bits. A vertex on the outline counts as inside, up to
-    // rounding on a slanted edge.
+    // rounding on a slanted edge. With `bankIn` set (Floor mode), a vertex inside
+    // the outline but within `bankIn` of it is eased toward `edgeHeight` instead —
+    // see ExcavateParams::bankIn.
     //
     // Like apply: calls ensureHeights first, writes sculptHeights only, and marks
     // the region-dirty rect (the vertices that moved, plus one grid step so the

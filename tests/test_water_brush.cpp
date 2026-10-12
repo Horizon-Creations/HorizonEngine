@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace water = HE::water;
@@ -288,7 +289,9 @@ TEST_CASE("Water brush: the pacing is the amount, painted cells start dry and cr
 
 // ── Digging ──────────────────────────────────────────────────────────────────
 
-TEST_CASE("Water brush dig: the ground under the brush goes down to the bed, the bank eases, a deeper pit stays")
+TEST_CASE("Water brush dig: the ground under the brush goes down to the bed, the bank eases, a deeper pit stays "
+          "(Thema 174 Schritt 13: capped at the water's own level below half weight, see TerrainSculpt::lowerToFloor "
+          "wetLevel — a single dab's own paint does not turn its ground wet below half weight either)")
 {
     TerrainComponent tc = makeLand(10.0f);                    // flat at 10
     const size_t pitIdx = 32u * 65u + 33u;                    // (x = 1, z = 0), inside the radius
@@ -313,21 +316,131 @@ TEST_CASE("Water brush dig: the ground under the brush goes down to the bed, the
     CHECK(h(0, 0) == floorY);                                 // bit equal: assigned, not blended
     CHECK(h(3, 0) == floorY);                                 // inside the radius of 4
     CHECK(h(1, 0) == 4.0f);                                   // the existing pit stays
-    CHECK(h(5, 0) < 10.0f);                                   // on the bank (weight 0.5 at 5 m)
-    CHECK(h(5, 0) > floorY);
-    CHECK(h(5, 0) == doctest::Approx(10.0f + 0.5f * (floorY - 10.0f)));
+    // At 5 m (weight exactly 0.5, the circle's own coverage-wet boundary for a
+    // single dab) the target IS the water's level (10.3) — above the untouched
+    // ground (10) already, by the stroke's own levelOffset, so nothing is dug
+    // here at all: digging further would sink it BELOW the level without this
+    // one dab's own paint ever reaching it (the bug this schritt fixes).
+    CHECK(h(5, 0) == 10.0f);                                  // bit equal: untouched, not bit equal to `before`'s coincidence
     CHECK(h(7, 0) == 10.0f);                                  // beyond radius + falloff
     CHECK(h(0, 7) == 10.0f);
 
     // Never raises: every vertex is at or below where it was.
     for (size_t i = 0; i < before.size(); ++i) CHECK(tc.sculptHeights[i] <= before[i]);
 
-    // The terrain rebuilds only what moved: a rectangle around the brush, not everything.
+    // The terrain rebuilds only what moved: a rectangle around the brush, not
+    // everything. Only out to the radius (4 m) now, one grid step wider: the 5 m
+    // ring no longer moves at all (capped at the level, already there).
     CHECK(tc.regionDirty);
     CHECK_FALSE(tc.dirty);
-    CHECK(tc.dirtyMinX <= -6.0f);
-    CHECK(tc.dirtyMaxX >= 6.0f);
+    CHECK(tc.dirtyMinX <= -5.0f);
+    CHECK(tc.dirtyMaxX >= 5.0f);
     CHECK(tc.dirtyMaxX < 12.0f);
+}
+
+TEST_CASE("lowerToFloor wetLevel: capped at the level below half weight, eased to the floor above it, "
+          "NaN (the default, omitted here) reproduces the old, uncapped dig bit for bit")
+{
+    // radius 2, falloff 4: half weight (a single dab's own coverage-wet boundary,
+    // WaterField::kWet at 255/2) lands exactly on the grid at 4 m, and 3 m (weight
+    // 0.75) shows the eased zone between it and the radius, not just the two ends.
+    TerrainComponent tc = makeLand(10.0f);
+    REQUIRE(sculpt::lowerToFloor(tc, 0.0f, 0.0f, 2.0f, 4.0f, 6.0f, 1.0f, 10.0f).ok);
+    auto h = [&](int x) { return tc.sculptHeights[32u * 65u + static_cast<size_t>(32 + x)]; };
+    CHECK(h(0) == 6.0f);                                      // weight 1: exactly the floor
+    CHECK(h(2) == 6.0f);                                      // weight 1, on the radius: exactly the floor
+    // weight 0.75: the raw ceiling eases to 8 (halfway from the level to the
+    // floor); the old blend alone would only reach 7 (further, since it blends
+    // all the way toward the floor) — the ceiling wins (max, digging is
+    // lowering, so the LESS-dug of the two is kept), landing on 8 exactly, not
+    // blended a second time.
+    CHECK(h(3) == 8.0f);
+    CHECK(h(3) > 6.0f);
+    CHECK(h(3) < 10.0f);
+    CHECK(h(4) == 10.0f);                                     // weight exactly 0.5: target is the level (10), already there — untouched
+    CHECK(h(5) == 10.0f);                                     // weight 0.25, below half: capped at the level, untouched
+    CHECK(h(6) == 10.0f);                                     // beyond radius + falloff: untouched either way
+
+    // wetLevel omitted (NaN): the old, uncapped dig, bit for bit.
+    TerrainComponent old = makeLand(10.0f);
+    REQUIRE(sculpt::lowerToFloor(old, 0.0f, 0.0f, 2.0f, 4.0f, 6.0f, 1.0f).ok);
+    auto ho = [&](int x) { return old.sculptHeights[32u * 65u + static_cast<size_t>(32 + x)]; };
+    CHECK(ho(4) == doctest::Approx(10.0f + 0.5f * (6.0f - 10.0f)).epsilon(1e-5));   // the old formula did dig here
+    CHECK(ho(4) < h(4));
+    CHECK(ho(5) < h(5));
+
+    // An infinity (not NaN) is bad input, not "disabled": ok = false, nothing moves.
+    TerrainComponent bad = makeLand(10.0f);
+    const std::vector<float> badBefore = bad.sculptHeights;
+    CHECK_FALSE(sculpt::lowerToFloor(bad, 0.0f, 0.0f, 2.0f, 4.0f, 6.0f, 1.0f,
+                                     std::numeric_limits<float>::infinity()).ok);
+    CHECK(bad.sculptHeights == badBefore);
+}
+
+TEST_CASE("lowerToFloor wetLevel: on ground ABOVE the level, the edge of a single dab's own wet reach "
+          "still lands exactly ON the level — blending the ceiling a second time (like a first attempt "
+          "at this fix did) would leave it short instead, 'water stops too early' on a slope")
+{
+    // Ground one metre above the level (10): a gentle upward slope under the
+    // stroke, the ground the dab's own falloff ring digs INTO, not out of.
+    // radius 2, falloff 4, floor 8 (depth 2 under the level): at 4 m (weight
+    // exactly 0.5, the circle's own coverage-wet boundary) blending the capped
+    // ceiling a SECOND time (h = was + f*(wetLevel - was), the shape a first
+    // attempt at this fix used) gives 11 + 0.5*(10 - 11) = 10.5 — ABOVE the
+    // level, the water the SAME dab just painted there would not reach the
+    // ground. Taking the raw ceiling instead (not re-blended), maxed against the
+    // plain old blend toward the floor (11 + 0.5*(8 - 11) = 9.5, already at or
+    // past the level here) and never raised past the original height: min(11,
+    // max(9.5, 10)) = 10 — the level, exactly, in one dab.
+    TerrainComponent tc = makeLand(11.0f);
+    REQUIRE(sculpt::lowerToFloor(tc, 0.0f, 0.0f, 2.0f, 4.0f, 8.0f, 1.0f, 10.0f).ok);
+    auto h = [&](int x) { return tc.sculptHeights[32u * 65u + static_cast<size_t>(32 + x)]; };
+    CHECK(h(4) == 10.0f);
+    CHECK(h(0) == 8.0f);        // weight 1: exactly the floor regardless of the old height
+}
+
+TEST_CASE("Water brush dig: after a stroke, nothing is dug below the water's level where the water itself "
+          "is not wet there (Thema 174 Schritt 13: the dry-ring half of the bug WaterLake.cpp's outward bank "
+          "had, fixed the same way — capped at the level outside a single dab's own wet reach)")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    const std::vector<float> before = tc.sculptHeights;
+    brush::Params p = params();           // radius 4, falloff 2, levelOffset 0.3
+    p.dig = true;
+    p.digDepth = 2.0f;
+    const brush::Stroke s = drag(tc, { -6.0f, 0.0f }, { 6.0f, 0.0f }, p, 10);
+    REQUIRE(s.body != water::kNoBody);
+    REQUIRE(tc.water.bodies.size() == 1);
+
+    // Flat ground with a positive levelOffset sits below the water's own level
+    // EVERYWHERE, dug or not (that offset is the whole point — see WaterBrush.h),
+    // so "below the level" is not the test; "actually dug" is. Every vertex this
+    // stroke lowered at all must be wet, the same invariant the lake fix checks.
+    //
+    // "Wet" is what the water MESH itself would say: the lattice corner at this
+    // position (the bilinear average of its four cells, water::coverageAt) at or
+    // past water::kContourIso / 255 — the exact threshold WaterMesh.cpp's marching
+    // squares uses, NOT water::bodyAt (the coarser "which single cell contains
+    // this point" query, off by up to half a cell from the nearest lattice
+    // corner, which a point right at a dab's edge can cross).
+    const uint32_t res = tc.resolution;
+    uint32_t dug = 0, dugButDry = 0;
+    for (uint32_t zi = 0; zi < res; ++zi)
+        for (uint32_t xi = 0; xi < res; ++xi)
+        {
+            const size_t i = static_cast<size_t>(zi) * res + xi;
+            if (tc.sculptHeights[i] == before[i]) continue;    // untouched: nothing to check here
+            ++dug;
+            const float wx = -32.0f + static_cast<float>(xi), wz = -32.0f + static_cast<float>(zi);
+            if (water::coverageAt(tc, wx, wz) < 0.5f)
+            {
+                ++dugButDry;
+                MESSAGE("dry but dug: (" << wx << "," << wz << ") lowered by "
+                        << (before[i] - tc.sculptHeights[i]) << " to " << tc.sculptHeights[i]);
+            }
+        }
+    CHECK(dug > 0u);              // the stroke actually dug something
+    CHECK(dugButDry == 0u);       // and none of it is dry
 }
 
 TEST_CASE("Water brush dig: a dab repeated at one spot converges on the bed instead of digging without end")

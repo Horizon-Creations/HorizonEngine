@@ -759,7 +759,12 @@ TEST_CASE("spline ui: the Lake section makes a lake of a closed spline in one un
 	r.frame();
 	CHECK(r.undo.undoDepth() == depth1 + 1);
 	CHECK(r.undo.undoLabel() == "Dig Lake");
-	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));
+	// x = 20 is only ~2 m inside the new outline (radius ~10 centred on x = 12) —
+	// within the default 4 m INWARD bank (Thema 174 Schritt 13), so it eases
+	// toward the floor (8) rather than reaching it outright, like the water's own
+	// level (10) at the outline and the floor deep inside.
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) > 8.0f);
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) < 10.0f);
 	REQUIRE(r.undo.undo());                                 // the dig alone: the water stays where the points put it
 	r.ctx.selection.clear();
 	r.frame();
@@ -779,7 +784,9 @@ TEST_CASE("spline ui: the Lake section makes a lake of a closed spline in one un
 	CHECK(r.undo.undoDepth() == depth2 + 1);
 	CHECK(lakeui::landOf(r).water.bodies.empty());
 	CHECK(reg.all_of<SplineComponent>(lakeui::theSpline(r)));
-	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));
+	// Remove Lake keeps the bed: still the same shore slope as right after Dig Again.
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) > 8.0f);
+	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) < 10.0f);
 }
 
 TEST_CASE("spline ui: an open line offers no lake, only the way to one")

@@ -107,7 +107,8 @@ Seen und Pinselwasser gleichermaßen, weil sie im Netzbau sitzt, nicht in den Ze
 man sieht, wie der See ans Ufer stößt; sie dort zu ändern ändert sie für das ganze Landscape.
 
 **Wasserspiegel „aus dem Boden“** nimmt den tiefsten Boden unter der Kontur (vor dem Graben gelesen) plus *Above
-Ground*. Das Bett liegt `Depth` darunter, die Böschung `Bank` Meter weit nach außen (Smoothstep).
+Ground*. Das Bett liegt `Depth` darunter, die Böschung `Bank` Meter weit **nach innen** von der Kontur (Smoothstep,
+seit Schritt 13 — vorher nach außen, siehe unten).
 
 ## To Lake: Kontur extrahieren
 
@@ -193,3 +194,61 @@ D3D11/D3D12/Vulkan (Schritte 9 und 10): die Fläche ist ein gewöhnliches Mesh m
 OpenGL gesehen. Handbuch-Eintrag und Gesamtabnahme (Schritt 11). Neue Wasser-Shader-Features, Strömung, Auftrieb:
 außerhalb des Themas. Nicht gebaut: eine Anzeige der Kontur des Pinsel-Anteils im Viewport; die Spline-Hilfslinien
 zeigen die Kontur, der Pinsel-Anteil ist an der Wasserfläche selbst zu sehen.
+
+## Nachtrag Schritt 13: die Böschung grub zu weit, das Wasser blieb zu klein
+
+Rückmeldung mit Screenshot: Beim Lake-Werkzeug (und, über denselben Mechanismus, bei `Dig Again`) grub die Böschung
+**nach außen** über die gezeichnete Kontur hinaus — der beschriebene Vertrag oben ("Böschung `Bank` Meter weit nach
+außen") war ursächlich korrekt umgesetzt, aber für eine Wasserfläche falsch gewählt: die Böschung sinkt von der
+Kontur aus `Bank` Meter weit über das umgebende Gelände hinweg bis knapp an den Wasserspiegel heran (bei flachem
+Gelände sogar bis exakt an ihn), aber die Wasserfläche selbst (`water::create`) rastert nur das gezeichnete Polygon,
+nicht die Böschung davor. Das Ergebnis: ein **trockener, abgesenkter Ring außerhalb der Spline**, tiefer als der
+eigene Wasserspiegel, aber ohne Wasser darüber — sichtbar als freigelegter, zu tief wirkender Aushub, während die
+Wasserfläche schon an der Kontur endet, bevor die Böschung überhaupt beginnt.
+
+Die Fläche selbst endete also schon immer exakt an der Kontur (korrekt); die wahrgenommene "Wasser hört zu früh auf"
+kam von der sichtbar freigelegten, zu tiefen Böschung direkt daneben — optisch nicht von der Kontur zu unterscheiden,
+ohne den Code zu lesen.
+
+**Fix, erster Durchgang:** `TerrainSculpt::ExcavateParams` bekommt `bankIn`/`edgeHeight` (`TerrainSculpt.h`/`.cpp`),
+eine zweite, nach INNEN gemessene Böschungszone: `amount` (das Bett) bleibt der Boden ab `bankIn` Meter von der
+Kontur nach innen, dazwischen blendet die Höhe smoothstep-artig zu `edgeHeight` (dem Wasserspiegel) genau auf der
+Kontur. `apply()` und `dig()` in `WaterLake.cpp` setzten `bankIn = bank`, `edgeHeight = level`, `falloff = 0` —
+außerhalb der Kontur sollte nichts mehr angerührt werden.
+
+Vorher/Nachher am selben Fall (`HE_DUMP_LAKEEDIT=drawn`, D3D11, Bohnen-Spline, Tiefe 2,5 m, Bank 6 m, flaches
+Gelände): vorher ein sichtbar abgesenkter, beschatteter Ring direkt außerhalb der Kontur (4267 gegrabene
+Bodenvertices für 2564 Wasserzellen), nachher kein Ring mehr (2565 gegrabene Bodenvertices, fast genau die
+Zellenzahl):
+
+![Vorher: abgesenkter Ring außerhalb der Kontur](water-lake/bugfix-13-before-d3d11.png)
+![Nachher: Boden und Wasserkante schließen bündig ab](water-lake/bugfix-13-after-d3d11.png)
+
+**Zweiter Durchgang — der erste Durchgang grub eine Klippe:** `falloff = 0` heißt "außerhalb der Kontur wird
+nichts berührt". Auf **flachem** Gelände (der Zeuge oben) fällt das nicht auf, weil der Boden an der Kontur dort
+ohnehin schon beim Wasserspiegel liegt. Auf geneigtem oder unebenem Gelände — genau der Fall in den
+Original-Screenshots des Menschen — ist der Boden an den meisten Stellen der Kontur HÖHER als der Wasserspiegel
+(`level` ist der NIEDRIGSTE Punkt entlang der ganzen Kontur, also liegt der Rest darüber). Innen wird dieser Punkt
+auf `edgeHeight` heruntergezogen; einen Gitterschritt weiter außen bleibt der Boden unverändert auf seiner alten,
+höheren Höhe — eine Klippe, keine sanfte Böschung. Der Mensch hat genau das über die Queen präzisiert: "am Ufer
+soll das Ausheben nicht steil/abrupt runtergehen, sondern eine langsame Abflachung zum Ufer hin stattfinden".
+
+Der Fix: `falloff` bleibt auf `bank` (nicht 0), aber wenn `bankIn > 0` ist, zielt die AUSSEN-Böschung jetzt
+ebenfalls auf `edgeHeight` statt auf `amount` (`excavatePolygon`s Außen-Zweig, `TerrainSculpt.cpp`). Beide Seiten
+erreichen exakt dieselbe Höhe direkt auf der Kontur, der Boden senkt sich draußen nur dort ab, wo er über dem
+Wasserspiegel steht (nie darunter — das Moat-Problem kommt dadurch nicht zurück), und blendet nach `bank` Metern
+weich zurück zum unveränderten Gelände. `apply()`/`dig()` in `WaterLake.cpp` setzen `falloff = bank` wieder.
+
+Vorher/Nachher am selben Fall, diesmal über dem WATERLAKE-Zeugen-Hang (`0,12·x + 1,2·sin(0,15·z)`, neuer Modus
+`HE_DUMP_LAKEEDIT=slope`): der größte Höhensprung zwischen zwei benachbarten Bodenvertices fällt von 8,89 m (erster
+Durchgang, sichtbar gezackt/stufig am Ufer) auf 1,74 m (zweiter Durchgang, durchgehend sanft):
+
+![Vorher: gezackte Klippe am Ufer auf geneigtem Gelände](water-lake/bugfix-13-slope-before-d3d11.png)
+![Nachher: durchgehend sanfte Böschung auf beiden Seiten der Kontur](water-lake/bugfix-13-slope-after-d3d11.png)
+
+**Was weiterhin gilt, auch nach dem Fix:** `Floor`-Modus hebt das Gelände nie an. Ein Ring oder eine Klippe, die mit
+einem der beiden fehlerhaften Zwischenstände schon in eine bestehende Szene gegraben wurde, bleibt dort liegen —
+ein erneutes Create Lake oder Dig Again senkt nur weiter ab, es hebt den alten Fehlgriff nicht wieder an. Betroffene
+Seen brauchen Undo (solange die Historie reicht) oder von Hand nachsculpten (Raise/Flatten). Derselbe Mechanismus,
+anderer Code, traf auch den Wasser-Pinsel (`TerrainSculpt::lowerToFloor`) — siehe `docs/water-brush-2026-10-09.md`,
+Nachtrag Schritt 13 (dort war die Außen-/Innen-Geometrie von Anfang an gekoppelt, kein zweiter Durchgang nötig).

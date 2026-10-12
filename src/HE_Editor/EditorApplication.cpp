@@ -7514,6 +7514,15 @@ void EditorApplication::dumpFrameHeadless()
 	//               outline moved, the channel and the island did not.
 	//   =converted  a pond painted with the brush (dug), then "To Lake": the same
 	//               pond, now with a spline of its own to edit.
+	//   =undo       drawn, then Ctrl+Z through EditorUndo — the editor's own
+	//               protocol (snapshotNow("Create Lake") right before L::create,
+	//               the same order SplineTool's button uses): the lake must
+	//               disappear, the spline must stay.
+	//   =redo       undo, then Ctrl+Shift+Z: the lake must come back, same body.
+	//   =slope      drawn, but over a bank instead of flat ground (the WATERLAKE
+	//               witness's own bank heightfield, Thema 174 Schritt 13: both
+	//               sides of the outline meet at the water's own level, a gentle
+	//               shore, not the cliff a `falloff = 0` first attempt left here).
 	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
 	// numbers as a twin to the picture.
 	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
@@ -7524,6 +7533,8 @@ void EditorApplication::dumpFrameHeadless()
 		const std::string_view mode(le);
 		const bool extend  = mode == "extended" || mode == "reshaped";
 		const bool reshape = mode == "reshaped";
+		const bool undoIt  = mode == "undo" || mode == "redo";
+		const bool redoIt  = mode == "redo";
 
 		const Entity land = m_editorWorld->createEntity("LakeLandscape");
 		TransformComponent ltf;
@@ -7536,8 +7547,21 @@ void EditorApplication::dumpFrameHeadless()
 		ltc.seed        = 0;
 		ltc.dirty       = true;
 		ltc.water.res   = 128;
+		if (mode == "slope")
+		{
+			// The WATERLAKE witness's own bank heightfield (EditorApplication.cpp,
+			// HE_DUMP_WATERLAKE=slope), same shape, so the two witnesses agree.
+			ltc.sculptHeights.assign(static_cast<size_t>(ltc.resolution) * ltc.resolution, 0.0f);
+			for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+				for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+				{
+					const float x = -50.0f + 100.0f * static_cast<float>(xi) / static_cast<float>(ltc.resolution - 1);
+					const float z = -50.0f + 100.0f * static_cast<float>(zi) / static_cast<float>(ltc.resolution - 1);
+					ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] = 0.12f * x + 1.2f * std::sin(0.15f * z);
+				}
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
-		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat (or banked) chunks first
 		auto& tc = reg.get<TerrainComponent>(land);
 
 		// Terrain-local XZ outline of a bean, a spline of nine points at the
@@ -7584,13 +7608,38 @@ void EditorApplication::dumpFrameHeadless()
 			L::Params lp;
 			lp.levelFromGround = true; lp.levelOffset = 0.0f;
 			lp.dig = true; lp.depth = 2.5f; lp.bank = 6.0f;
+			if (undoIt)
+			{
+				m_undo.setWorld(m_editorWorld.get());
+				m_undo.clearHistory();
+				m_undo.snapshotNow("Create Lake");   // SplineTool's button: snapshot, then L::create
+			}
 			const L::Created made = L::create(*m_editorWorld, land, spline, lp);
 			body = made.body;
 			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			// The largest height step between adjacent terrain vertices, anywhere:
+			// the number a cliff at the outline would show up as, against the
+			// smooth background slope's own per-step change (a few tenths of a
+			// metre here). The twin to the picture for `=slope` (Thema 174 Schritt
+			// 13): a cliff at the bank reads as a clear outlier, a gentle one does
+			// not.
+			float worstStep = 0.0f;
+			{
+				const uint32_t res = tc.resolution;
+				for (uint32_t zi = 0; zi < res; ++zi)
+					for (uint32_t xi = 0; xi < res; ++xi)
+					{
+						const float here = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
+						if (xi + 1 < res)
+							worstStep = std::max(worstStep, std::fabs(tc.sculptHeights[static_cast<size_t>(zi) * res + xi + 1] - here));
+						if (zi + 1 < res)
+							worstStep = std::max(worstStep, std::fabs(tc.sculptHeights[static_cast<size_t>(zi + 1) * res + xi] - here));
+					}
+			}
 			char buf[200];
-			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s",
+			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s, worst step %.3f m",
 			              made.ok ? "made" : "FAILED", made.level, made.cells, made.ground,
-			              made.error.empty() ? "" : ", error ", made.error.c_str());
+			              made.error.empty() ? "" : ", error ", made.error.c_str(), worstStep);
 			note = buf;
 
 			if (extend)
@@ -7635,6 +7684,44 @@ void EditorApplication::dumpFrameHeadless()
 				              HE::water::bodyAt(tc, chx, chz) == body ? 1 : 0,
 				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0);
 				note += b3;
+			}
+			if (undoIt)
+			{
+				// m_undo.undo()/redo() restore a full snapshot, replacing every
+				// entity (same as the WATERBRUSH witness above) — land/spline/tc
+				// no longer name anything afterwards, find them again by component.
+				auto findTerrain = [&]() -> TerrainComponent& {
+					auto view = reg.view<TerrainComponent>();
+					return reg.get<TerrainComponent>(*view.begin());
+				};
+				auto findSpline = [&]() -> Entity {
+					auto view = reg.view<SplineComponent>();
+					return view.begin() != view.end() ? *view.begin() : entt::null;
+				};
+				const uint32_t beforeUndo = tc.water.wetCells(body);
+				const bool undone = m_undo.undo();
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				const uint32_t afterUndo = findTerrain().water.wetCells(body);
+				bool redone = false;
+				uint32_t afterRedo = afterUndo;
+				if (redoIt)
+				{
+					redone = m_undo.redo();
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					afterRedo = findTerrain().water.wetCells(body);
+				}
+				shown = findSpline();
+				char ub[200];
+				std::snprintf(ub, sizeof ub, "; undo %s: %u -> %u cells",
+				              undone ? "ok" : "FAILED", beforeUndo, afterUndo);
+				note += ub;
+				if (redoIt)
+				{
+					char rb[120];
+					std::snprintf(rb, sizeof rb, "; redo %s: -> %u cells",
+					              redone ? "ok" : "FAILED", afterRedo);
+					note += rb;
+				}
 			}
 		}
 		m_selection.clear();

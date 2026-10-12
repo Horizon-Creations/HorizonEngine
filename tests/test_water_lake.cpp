@@ -91,6 +91,14 @@ namespace
 
     bool noWater(const TerrainComponent& tc) { return tc.water.bodies.empty() && tc.water.coverage.empty(); }
 
+    // A vertex of makeLand's grid (65 over 64 m, a vertex on every whole metre).
+    float sculptAt(const TerrainComponent& tc, float x, float z)
+    {
+        const int xi = static_cast<int>(std::lround(x + 32.0f));
+        const int zi = static_cast<int>(std::lround(z + 32.0f));
+        return tc.sculptHeights[static_cast<size_t>(zi) * 65u + static_cast<size_t>(xi)];
+    }
+
     // A stroke the way the Landscape tool makes it: begin, a dab at every step, end.
     brush::Stroke drag(TerrainComponent& tc, glm::vec2 a, glm::vec2 b, const brush::Params& p, int steps = 8)
     {
@@ -226,7 +234,9 @@ TEST_CASE("Water lake: the default level is the lowest ground under the outline"
     CHECK(lake::lowestGround(tc, rect(0, 0, 4, 4)) == doctest::Approx(10.0f));
 }
 
-TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, and the bank eases back")
+TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, and the bank eases INWARD "
+          "(Thema 174 Schritt 13: an outward bank left a dry ring below the water's own level, outside the "
+          "outline, that the water never covered — see docs/water-lake-2026-10-10.md)")
 {
     TerrainComponent tc = makeLand(10.0f);
     tc.sculptHeights[static_cast<size_t>(32) * 65 + 32] = 5.0f;   // a pit already deeper than the lake's bed
@@ -241,14 +251,16 @@ TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, 
     REQUIRE(r.ok);
     CHECK(r.changed > 0u);
     auto h = [&](int x, int z) { return tc.sculptHeights[static_cast<size_t>(z + 32) * 65 + (x + 32)]; };
-    CHECK(h(0, 5) == doctest::Approx(7.0f));                  // inside: the floor, exactly
-    CHECK(h(-9, -9) == doctest::Approx(7.0f));
+    CHECK(h(0, 5) == doctest::Approx(7.0f));                  // 5 m from the nearest edge, past the 4 m bank: the floor
+    CHECK(h(-9, -9) > 7.0f);                                   // 1 m from the nearest edge: in the INWARD bank
+    CHECK(h(-9, -9) < 10.0f);
+    CHECK(h(10, 0) == doctest::Approx(10.0f));                 // ON the outline: eased to the level, not past it
     CHECK(h(0, 0) == doctest::Approx(5.0f));                  // the pit that was deeper stays deeper
-    CHECK(h(13, 0) > 7.0f);                                    // in the bank: between floor and old ground
-    CHECK(h(13, 0) < 10.0f);
-    CHECK(h(25, 0) == doctest::Approx(10.0f));                 // beyond the bank: untouched
+    CHECK(h(13, 0) == 10.0f);                                  // OUTSIDE the outline: bit-equal, never touched
+    CHECK(h(25, 0) == 10.0f);                                  // far outside: likewise
     CHECK(tc.regionDirty);                                     // chunks under it are rebuilt, not all of them
     CHECK_FALSE(tc.dirty);
+    CHECK(tc.dirtyMaxX <= 11.0f);                               // one grid step past the outline, never past the old 4 m bank
 
     // A deeper pit than asked for stays where it is.
     tc.sculptHeights[static_cast<size_t>(32) * 65 + 34] = 2.0f;
@@ -258,6 +270,62 @@ TEST_CASE("Water lake dig: the ground goes down to level minus depth, never up, 
     // Not a lake, no dig.
     CHECK_FALSE(lake::dig(tc, 999, 3.0f, 4.0f).ok);
     CHECK_FALSE(lake::dig(tc, id, std::numeric_limits<float>::quiet_NaN(), 4.0f).ok);
+}
+
+TEST_CASE("Water lake dig: the water (laid over the same outline) reaches every vertex the dig left at the "
+          "level or below — no dry ring, inside or outside, on a slope")
+{
+    // A slope, not flat ground: the old ground along the outline is NOT all the
+    // same height, so `level` (the lowest point on it) is below most of it — the
+    // exact case an outward bank got wrong, since it never reached inward to
+    // bring the rest of the outline down to the level too.
+    TerrainComponent tc = makeLand(10.0f, 0.3f);     // height 10 at x = 0, 0.3 m per metre of x
+    const uint16_t id = lake::create(tc, HE::UUID::generate(), rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(id != water::kNoBody);
+    REQUIRE(lake::dig(tc, id, 2.0f, 5.0f).ok);                  // depth 2, bank 5: amount = 8
+
+    auto h = [&](int x, int z) { return tc.sculptHeights[static_cast<size_t>(z + 32) * 65 + (x + 32)]; };
+    const float kLevelTol = 1e-4f;
+    // Every vertex ON the outline (whatever the old slope put there) is at or
+    // below the level now, so the water the same outline rasters reaches it.
+    for (int x = -10; x <= 10; ++x)
+    {
+        CHECK(h(x, -10) <= 10.0f + kLevelTol);
+        CHECK(h(x, 10)  <= 10.0f + kLevelTol);
+    }
+    for (int z = -10; z <= 10; ++z)
+    {
+        CHECK(h(-10, z) <= 10.0f + kLevelTol);
+        CHECK(h(10, z)  <= 10.0f + kLevelTol);
+    }
+    // Outward of the outline (Thema 174 Schritt 13, second pass): ground above
+    // the level still only ever EASES toward it (a smoothstep blend of the old
+    // height toward `edgeHeight`, same shape as ever, just a different target) —
+    // never raised, never past `edgeHeight` the other way, so the two sides meet
+    // AT the outline without a seam. This is a blend, not a clamp like the
+    // inward side: a point well out in the band can still sit above the level,
+    // easing the rest of the way only as it nears the outline. What matters is
+    // the step right AT the outline, which is what a cliff would show up as.
+    //
+    // The first pass (`falloff = 0`, nothing outward touched at all) left h(11)
+    // at its old 13.3 here — a 3.3 m step across the outline alone (h(10) = 10).
+    // This pass:
+    CHECK(h(11, 0) == doctest::Approx(10.3432f).epsilon(1e-3));   // d = 1: eased to within 0.34 m of the outline, not 3.3
+    CHECK(h(12, 0) == doctest::Approx(11.2672f).epsilon(1e-3));   // d = 2
+    CHECK(h(13, 0) == doctest::Approx(12.5272f).epsilon(1e-3));   // d = 3
+    CHECK(h(14, 0) == doctest::Approx(13.7632f).epsilon(1e-3));   // d = 4
+    CHECK(h(15, 0) == doctest::Approx(10.0f + 0.3f * 15.0f));     // d = 5 = falloff: untouched, the band's far edge
+    CHECK(h(16, 0) == doctest::Approx(10.0f + 0.3f * 16.0f));     // further out: untouched too
+    // Never raised anywhere in the band, and monotonic back up to the old slope:
+    // no local bump, no second step hiding further out.
+    float prev = h(10, 0);
+    for (int x = 11; x <= 16; ++x)
+    {
+        const float cur = h(x, 0);
+        CHECK(cur >= prev);
+        CHECK(cur <= 10.0f + 0.3f * static_cast<float>(x) + kLevelTol);
+        prev = cur;
+    }
 }
 
 // ── The merge rule, one consequence at a time ───────────────────────────────
@@ -673,16 +741,67 @@ TEST_CASE("Water lake sync: moving a spline point reshapes the water, never the 
     CHECK(sameBits(rig.tc().sculptHeights, dug));
     CHECK_FALSE(rig.tc().regionDirty);
     CHECK(lake::syncSplines(rig.world) == 0u);                   // same fingerprint: nothing to do
+}
 
-    // Move the whole spline entity: the water follows.
+// Thema 174 Schritt 14: unlike a point edit, moving the lake's own ENTITY (what
+// the viewport gizmo does, or a reparent) is "the lake as a whole" and takes its
+// dug bed with it — see WaterLake.h, "WHAT EDITS TOUCH WHAT". Was, before this
+// schritt, indistinguishable from a point edit (both just reshaped the water),
+// which is the dry-ring-at-the-old-spot / cliff-at-the-new-one bug a human
+// report would read as "the lake tool digs too deep" all over again.
+TEST_CASE("Water lake sync: moving the whole spline entity moves the water AND the ground it dug")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f, 2.0f, true)).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);                 // nothing moved since create
+
+    // (0, -8), not the outline's own centre (0, 0): the spline is a 4-point rect
+    // through a Catmull-Rom curve, which bulges past its corners (±10 reads back
+    // as roughly ±12.5, Thema 174 Schritt 8's own lesson on this exact shape), and
+    // the dig's bank reaches another 4 m beyond THAT outline — an 8 m move is not
+    // enough to clear the centre from the NEW outline's reach, so checking there
+    // after the move would be asking "did the fresh dig at the new spot also
+    // happen to touch the old centre", not "was the old bed lifted". (0, -8) stays
+    // south of both outlines' bank throughout.
+    const float bedBefore = sculptAt(rig.tc(), 0.0f, -8.0f);     // deep inside the outline: the floor, 10.5 - 2
+    CHECK(bedBefore < 9.0f);
+
     rig.world.registry().get<TransformComponent>(sp).position.z += 8.0f;
-    CHECK(lake::syncSplines(rig.world) == 1u);
+    CHECK(lake::syncSplines(rig.world) == 1u);                   // the water reshape, same count as a point edit
     CHECK(wetAt(rig.tc(), 0.5f, 16.5f));
     CHECK_FALSE(wetAt(rig.tc(), 0.5f, -9.5f));
 
-    // Dig Again is what digs under the new place.
-    CHECK(lake::dig(rig.world, sp, 2.0f, 3.0f).changed > 0u);
-    CHECK_FALSE(sameBits(rig.tc().sculptHeights, dug));
+    // The old bed is lifted back off (its own dig's delta subtracted back out,
+    // not a bit-exact restore — see GroundPatch), and a fresh one dug at the new
+    // spot, the same depth and bank the original "Create Lake" used.
+    CHECK(sculptAt(rig.tc(), 0.0f, -8.0f) > 9.5f);
+    CHECK(sculptAt(rig.tc(), 0.0f, 8.0f) < 9.0f);
+
+    // Dig Again still works at the new place, same as ever, an explicit action
+    // with its own bank.
+    const std::vector<float> afterMove = rig.tc().sculptHeights;
+    CHECK(lake::dig(rig.world, sp, 2.0f, 1.0f).changed > 0u);
+    CHECK_FALSE(sameBits(rig.tc().sculptHeights, afterMove));
+}
+
+// A lake with no ground patch of its own (never dug in this session: loaded from
+// a scene, or converted from a painted pond) has nothing to lift off the old
+// spot, so moving it only reshapes the water — same as a point edit, and the
+// only thing the old behaviour ever did. Not a loss: the ground for a body like
+// this was never this lake's to move in the first place.
+TEST_CASE("Water lake sync: moving a lake with no ground patch of its own only reshapes")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f)).ok);   // dig = false
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+    const std::vector<float> ground = rig.tc().sculptHeights;
+
+    rig.world.registry().get<TransformComponent>(sp).position.z += 8.0f;
+    CHECK(lake::syncSplines(rig.world) == 1u);
+    CHECK(wetAt(rig.tc(), 0.5f, 16.5f));
+    CHECK(sameBits(rig.tc().sculptHeights, ground));
 }
 
 TEST_CASE("Water lake sync: the landscape moving under a still spline reshapes the water")

@@ -83,8 +83,11 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
     d.cells = r.changed;
     if (p.dig && p.digDepth > 0.0f && std::isfinite(p.digDepth))
     {
+        // wetLevel = the stroke's own water level (Thema 174 Schritt 13): a dab
+        // never digs ground below it where the SAME dab's own circle would not
+        // paint that ground wet, so the dig never outruns the water it is under.
         const TerrainSculpt::Result g =
-            TerrainSculpt::lowerToFloor(tc, x, z, p.radius, p.falloff, s.level - p.digDepth, p.amount);
+            TerrainSculpt::lowerToFloor(tc, x, z, p.radius, p.falloff, s.level - p.digDepth, p.amount, s.level);
         d.ground = g.changed;
         d.ok = d.ok || g.ok;
     }

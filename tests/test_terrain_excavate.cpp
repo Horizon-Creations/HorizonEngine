@@ -238,6 +238,139 @@ TEST_CASE("Excavate: the bank is a smoothstep of the distance from the outline")
     CHECK(tc.sculptHeights[(32 + 12) * 65 + (32 + 12)] == doctest::Approx(was + w * (2.0f - was)).epsilon(1e-5));
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// bankIn: a second bank, measured INWARD (Thema 174 Schritt 13)
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Excavate bankIn: the clamp eases from edgeHeight on the outline to the floor, inward; "
+          "nothing outside ever moves")
+{
+    TerrainComponent tc = makeLand();
+    const std::vector<float> before = tc.sculptHeights;
+    sculpt::ExcavateParams p = floorAt(2.0f, 0.0f);   // falloff = 0: the outward bank is off
+    p.bankIn = 4.0f;
+    p.edgeHeight = 9.0f;                              // well above the flat ground (10ish) is pointless to test with;
+                                                       // below the ground at the outline, above the floor
+    REQUIRE(sculpt::excavatePolygon(tc, rect(-10, -10, 10, 10), p).ok);
+
+    // Deep interior (5 m from the nearest edge, past the 4 m bank): exactly the floor.
+    CHECK(tc.sculptHeights[32 * 65 + 32] == 2.0f);
+    // Outside: bit-equal, the OUTWARD falloff being 0 means nothing there moves at all.
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 11)] == before[32 * 65 + (32 + 11)]);
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 14)] == before[32 * 65 + (32 + 14)]);
+
+    // Along z = 0, x = 6..10 (east edge at x = 10): 4, 3, 2, 1, 0 m inside the outline.
+    // The reference is the same smoothstep as the outward bank, just the other way:
+    // edgeHeight on the outline (d = 0), the floor at bankIn (d = 4) and beyond.
+    for (int x = 6; x <= 10; ++x)
+    {
+        const int d = 10 - x;
+        const float was = before[32 * 65 + (32 + x)];
+        float want;
+        if (d >= 4) want = 2.0f;
+        else
+        {
+            const float t = static_cast<float>(d) / 4.0f, s = t * t * (3.0f - 2.0f * t);
+            want = 9.0f + s * (2.0f - 9.0f);
+        }
+        want = std::min(was, want);        // never raises
+        CHECK(tc.sculptHeights[32 * 65 + (32 + x)] == doctest::Approx(want).epsilon(1e-4));
+    }
+    // On the outline itself (d = 0): clamped to edgeHeight, not past it.
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 10)] == doctest::Approx(9.0f).epsilon(1e-4));
+    // The bank rises (toward the old ground / the clamp easing off) moving outward from the floor.
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 6)] < tc.sculptHeights[32 * 65 + (32 + 9)]);
+}
+
+TEST_CASE("Excavate bankIn + falloff together: the outward bank targets edgeHeight too, so both sides "
+          "meet AT the outline without a cliff — Thema 174 Schritt 13's second pass")
+{
+    // The first pass set `falloff` to 0 for the lake tool (nothing outward moves
+    // at all) to stop the old outward bank from sinking the ground below the
+    // water's level outside the outline (dry moat, the first half of the bug).
+    // On ground that is not flat right at the outline, that traded the moat for
+    // a cliff instead: the vertex just inside gets clamped to `edgeHeight`, the
+    // vertex one step outside stays at its old height, whatever that was. This
+    // is the fix: `falloff` back on, but its target is `edgeHeight` too (not
+    // `amount`), whenever `bankIn` > 0 — both banks reach the exact same height
+    // right on the outline, and the ground only ever eases DOWN toward it,
+    // outward as much as inward, never below it outward.
+    TerrainComponent tc = makeLand();
+    for (uint32_t zi = 0; zi < 65; ++zi)
+        for (uint32_t xi = 0; xi < 65; ++xi)
+            tc.sculptHeights[zi * 65 + xi] = 10.0f + 0.5f * (-32.0f + static_cast<float>(xi));   // a 0.5 m/m slope in x
+    const std::vector<float> before = tc.sculptHeights;
+
+    sculpt::ExcavateParams p = floorAt(2.0f, 3.0f);   // amount 2, falloff 3 m outward
+    p.bankIn = 3.0f;                                   // same width inward
+    p.edgeHeight = 9.0f;                                // the "water level"
+    REQUIRE(sculpt::excavatePolygon(tc, rect(-10, -10, 10, 10), p).ok);
+
+    auto h = [&](int x) { return tc.sculptHeights[32 * 65 + (32 + x)]; };
+    // East edge, original height 10 + 0.5*10 = 15, well above edgeHeight 9.
+    CHECK(h(9)  == doctest::Approx(7.18519f).epsilon(1e-4));   // 1 m inward (d = 1 of the 3 m bankIn)
+    CHECK(h(10) == doctest::Approx(9.0f).epsilon(1e-4));       // ON the outline: exactly edgeHeight, from EITHER side
+    CHECK(h(11) == doctest::Approx(10.68519f).epsilon(1e-4));  // 1 m outward (d = 1 of the 3 m falloff)
+    CHECK(h(12) == doctest::Approx(14.18519f).epsilon(1e-4));  // 2 m outward
+    CHECK(h(13) == doctest::Approx(before[32 * 65 + (32 + 13)]).epsilon(1e-5));   // d = falloff: untouched
+    CHECK(h(14) == doctest::Approx(before[32 * 65 + (32 + 14)]).epsilon(1e-5));   // further out: untouched too
+    // The step across the outline (h(10) - h(9), h(11) - h(10)) is no bigger
+    // than the steps either side of it: no special jump sits AT the outline.
+    CHECK(std::fabs(h(11) - h(10)) <= std::fabs(h(10) - h(9)) + 0.5f);
+    // West edge, original height 10 - 0.5*10 = 5, already below edgeHeight 9:
+    // never raised, inward or outward.
+    CHECK(h(-10) == doctest::Approx(before[32 * 65 + (32 - 10)]).epsilon(1e-5));
+    CHECK(h(-11) == doctest::Approx(before[32 * 65 + (32 - 11)]).epsilon(1e-5));
+}
+
+TEST_CASE("Excavate bankIn: zero is bit-identical to the old, distance-independent floor")
+{
+    TerrainComponent a = makeLand();
+    REQUIRE(sculpt::excavatePolygon(a, rect(-10, -10, 10, 10), floorAt(2.0f, 3.0f)).ok);   // bankIn = 0, default
+
+    TerrainComponent b = makeLand();
+    sculpt::ExcavateParams p = floorAt(2.0f, 3.0f);
+    p.bankIn = 0.0f;
+    p.edgeHeight = 123.0f;                 // must be ignored: bankIn <= 0 means it is never read
+    REQUIRE(sculpt::excavatePolygon(b, rect(-10, -10, 10, 10), p).ok);
+
+    CHECK(sameBits(a.sculptHeights, b.sculptHeights));
+}
+
+TEST_CASE("Excavate bankIn: never raises, even where edgeHeight is above the old ground")
+{
+    TerrainComponent tc = makeLand();
+    // A pit already below the floor, one vertex in from the outline (inside the bank).
+    tc.sculptHeights[32 * 65 + (32 + 9)] = -5.0f;
+    const std::vector<float> before = tc.sculptHeights;
+
+    sculpt::ExcavateParams p = floorAt(2.0f, 0.0f);
+    p.bankIn = 4.0f;
+    p.edgeHeight = 100.0f;                 // far above anything on the terrain
+    REQUIRE(sculpt::excavatePolygon(tc, rect(-10, -10, 10, 10), p).ok);
+
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 9)] == -5.0f);              // the deeper pit stays
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 10)] == before[32 * 65 + (32 + 10)]);  // on the outline: unchanged, not raised to 100
+    CHECK(tc.sculptHeights[32 * 65 + 32] == 2.0f);                     // deep interior still reaches the floor
+}
+
+TEST_CASE("Excavate bankIn: Dig mode mirrors the depth inward, from nothing on the outline to the full depth")
+{
+    TerrainComponent tc = makeLand();
+    const std::vector<float> before = tc.sculptHeights;
+    sculpt::ExcavateParams p = digBy(3.0f, 0.0f);     // falloff = 0: the outward bank is off
+    p.bankIn = 4.0f;
+    REQUIRE(sculpt::excavatePolygon(tc, rect(-10, -10, 10, 10), p).ok);
+
+    CHECK(tc.sculptHeights[32 * 65 + 32] == before[32 * 65 + 32] - 3.0f);        // deep interior: the full depth
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 10)] == before[32 * 65 + (32 + 10)]); // on the outline: untouched (depth 0)
+    CHECK(tc.sculptHeights[32 * 65 + (32 + 11)] == before[32 * 65 + (32 + 11)]); // outside: untouched
+    // One metre in (d = 1 of 4): a quarter of the way, smoothstepped.
+    const int xi = 32 + 9;
+    const float t = 0.25f, s = t * t * (3.0f - 2.0f * t);
+    CHECK(tc.sculptHeights[32 * 65 + xi] == doctest::Approx(before[32 * 65 + xi] - s * 3.0f).epsilon(1e-4));
+}
+
 TEST_CASE("Excavate: a concave polygon leaves the notch alone beyond the bank")
 {
     TerrainComponent tc = makeLand();
