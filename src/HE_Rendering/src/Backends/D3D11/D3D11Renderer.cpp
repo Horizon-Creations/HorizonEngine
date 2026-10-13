@@ -42,6 +42,7 @@
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D12/Vulkan)
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
+#include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
@@ -63,6 +64,8 @@
 #include <Diagnostics/Logger.h>
 
 using Microsoft::WRL::ComPtr;
+// Every FXC call below goes through the stopwatch (D3DStartupTiming.h).
+using HE::d3dtiming::timedD3DCompile;
 
 // [blind] added D3D11 sky+IBL+debuglines parity
 
@@ -2250,12 +2253,12 @@ struct D3D11RendererImpl
         // Compile position prepass VS+PS
         {
             ComPtr<ID3DBlob> vsBlob, psBlob, err;
-            if (FAILED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
                                   "VSPos", "vs_5_0", 0, 0, &vsBlob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
             }
-            if (FAILED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
                                   "PSPos", "ps_5_0", 0, 0, &psBlob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
@@ -2265,7 +2268,7 @@ struct D3D11RendererImpl
             // Instanced twin for GeometryPass batches. Optional: without it every
             // batch loops through VSPos, so a failure is logged, not returned.
             ComPtr<ID3DBlob> ivsBlob;
-            if (SUCCEEDED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+            if (SUCCEEDED(timedD3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
                                      "VSPosInstanced", "vs_5_0", 0, 0, &ivsBlob, &err)))
                 device->CreateVertexShader(ivsBlob->GetBufferPointer(), ivsBlob->GetBufferSize(),
                                            nullptr, &ssaoPosVSInstanced);
@@ -2280,7 +2283,7 @@ struct D3D11RendererImpl
         // Compile SSAO main PS
         {
             ComPtr<ID3DBlob> blob, err;
-            if (FAILED(D3DCompile(kSSAOHLSL, strlen(kSSAOHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOHLSL, strlen(kSSAOHLSL), nullptr, nullptr, nullptr,
                                   "SSAOMain", "ps_5_0", 0, 0, &blob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
@@ -2290,7 +2293,7 @@ struct D3D11RendererImpl
         // Compile SSAO blur PS
         {
             ComPtr<ID3DBlob> blob, err;
-            if (FAILED(D3DCompile(kSSAOBlurHLSL, strlen(kSSAOBlurHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOBlurHLSL, strlen(kSSAOBlurHLSL), nullptr, nullptr, nullptr,
                                   "SSAOBlurMain", "ps_5_0", 0, 0, &blob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
@@ -2685,14 +2688,14 @@ struct D3D11RendererImpl
         }
         ComPtr<ID3DBlob> vsb, psb, err;
         // SPIRV-Cross emits the GLSL-sourced entry point as `main`.
-        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "reflPrepassVS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(vc.source.c_str(), vc.source.size(), "reflPrepassVS", nullptr, nullptr,
                               "main", "vs_5_0", 0, 0, &vsb, &err)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: refl pre-pass VS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "reflPrepassPS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(fc.source.c_str(), fc.source.size(), "reflPrepassPS", nullptr, nullptr,
                               "main", "ps_5_0", 0, 0, &psb, &err)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: refl pre-pass PS compile failed: ")
@@ -2751,7 +2754,7 @@ struct D3D11RendererImpl
         auto makePS = [&](const std::string& src, const char* name,
                           ComPtr<ID3D11PixelShader>& out) -> bool {
             ComPtr<ID3DBlob> blob, err;
-            if (FAILED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
                                   "main", "ps_5_0", 0, 0, &blob, &err)))
             {
                 // A log line holds 512 bytes and fxc lists its warnings first:
@@ -3260,7 +3263,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& blob) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
                                   entry, profile, flags, 0, &blob, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s",
@@ -3791,7 +3794,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& out) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s",
@@ -3888,7 +3891,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& out) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
                 HE_LOG_ERROR(RHI, "D3D11Renderer: TAA shader '%s' failed: %s", entry,
@@ -4143,14 +4146,14 @@ struct D3D11RendererImpl
 #endif
         ComPtr<ID3DBlob> vsBlob, psBlob, err;
         const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
-        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: VS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: PS compile failed: ")
@@ -4169,13 +4172,13 @@ struct D3D11RendererImpl
 
         // Depth-only vertex shader for the shadow pass.
         ComPtr<ID3DBlob> dvsBlob;
-        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (SUCCEEDED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepth", "vs_5_0", flags, 0, &dvsBlob, &err)))
             device->CreateVertexShader(dvsBlob->GetBufferPointer(), dvsBlob->GetBufferSize(), nullptr, &depthVS);
         // Its instanced twin (one draw per same-mesh caster run, reads t3 like
         // VSMainInstanced). Optional: without it every run loops through VSDepth.
         ComPtr<ID3DBlob> divsBlob;
-        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (SUCCEEDED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepthInstanced", "vs_5_0", flags, 0, &divsBlob, &err)))
             device->CreateVertexShader(divsBlob->GetBufferPointer(), divsBlob->GetBufferSize(),
                                        nullptr, &depthVSInstanced);
@@ -4186,7 +4189,7 @@ struct D3D11RendererImpl
         // Instanced geometry VS (A3) + the per-instance {mvp,model} structured buffer
         // it reads at t3 (dynamic, refilled per instanced batch via MAP_WRITE_DISCARD).
         ComPtr<ID3DBlob> ivsBlob;
-        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (SUCCEEDED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSMainInstanced", "vs_5_0", flags, 0, &ivsBlob, &err)))
         {
             device->CreateVertexShader(ivsBlob->GetBufferPointer(), ivsBlob->GetBufferSize(), nullptr, &vsInstanced);
@@ -4371,22 +4374,24 @@ struct D3D11RendererImpl
                 device->CreateShaderResourceView(tex.Get(), &ad, &dummyArrayTexture);
             }
         }
-        createPostFX();
-        createSSAOPipeline();
-        createSkyPipeline();
-        createDebugLinePipeline();
-        createSkinnedPipeline();
-        createUIPipeline();
-        createMaterialResources(); // A4: node-graph material CBs + sampler
+        // Each sub-step timed on its own ([startup] D3D11 phase=…, Thema 196).
+        using HE::d3dtiming::Phase;
+        { Phase t("D3D11", "createPostFX");            createPostFX(); }
+        { Phase t("D3D11", "createSSAOPipeline");      createSSAOPipeline(); }
+        { Phase t("D3D11", "createSkyPipeline");       createSkyPipeline(); }
+        { Phase t("D3D11", "createDebugLinePipeline"); createDebugLinePipeline(); }
+        { Phase t("D3D11", "createSkinnedPipeline");   createSkinnedPipeline(); }
+        { Phase t("D3D11", "createUIPipeline");        createUIPipeline(); }
+        { Phase t("D3D11", "createMaterialResources"); createMaterialResources(); } // A4: node-graph material CBs + sampler
         // GI up front rather than on the first GI draw. Two reasons: the shader
         // compile is the expensive part and belongs in init, not in a frame; and
         // a compile failure here clears giSupported BEFORE GetCapabilities() is
         // first read, so the editor's GI toggle reflects reality from the start.
         // Idempotent (giPipelinesBuilt), so the lazy call in runGiShadow is a no-op.
-        createGiPipelines();
+        { Phase t("D3D11", "createGiPipelines");       createGiPipelines(); }
         // The deferred path likewise (Thema 150): supportsDeferredRendering must be
         // true before the editor first asks, and only if the resolve really built.
-        createDeferredPipelines();
+        { Phase t("D3D11", "createDeferredPipelines"); createDeferredPipelines(); }
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
@@ -4676,14 +4681,14 @@ struct D3D11RendererImpl
         auto compilePair = [&](const std::string& vsSrc, const std::string& psSrc, const char* origin) -> bool {
             ComPtr<ID3DBlob> cerr;
             vsb.Reset(); psb.Reset();
-            if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
+            if (FAILED(timedD3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
                                   "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
             {
                 HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material VS compile failed (") + origin + "): "
                     + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
                 return false;
             }
-            if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
+            if (FAILED(timedD3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
                                   "main", "ps_5_0", cflags, 0, &psb, &cerr)))
             {
                 HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material PS compile failed (") + origin + "): "
@@ -4820,14 +4825,14 @@ struct D3D11RendererImpl
         cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsb, psb, cerr;
-        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
                               "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal VS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
                               "main", "ps_5_0", cflags, 0, &psb, &cerr)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal PS compile failed: ")
@@ -4845,7 +4850,7 @@ struct D3D11RendererImpl
             const HE::MaterialShaderLibrary::Compiled& gc = m_matShaderLib.decalFragmentSampled(Backend::HLSL);
             ComPtr<ID3DBlob> gsb, gerr;
             if (!gc.ok || gc.source.empty()
-                || FAILED(D3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
+                || FAILED(timedD3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
                                      "main", "ps_5_0", cflags, 0, &gsb, &gerr))
                 || FAILED(device->CreatePixelShader(gsb->GetBufferPointer(), gsb->GetBufferSize(),
                                                     nullptr, &decalGBufPS)))
@@ -5159,7 +5164,7 @@ struct D3D11RendererImpl
                            const char* consequence = "the deferred path stays off") -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (SUCCEEDED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+            if (SUCCEEDED(timedD3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
                                      entry, profile, flags, 0, &out, &err)))
                 return true;
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: deferred ") + name + " compile failed — "
@@ -5397,7 +5402,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& out) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src, srcLen, entry, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src, srcLen, entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s",
@@ -5505,13 +5510,13 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsB, psB, err;
-        if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
+        if (FAILED(timedD3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "VSLine", "vs_5_0", flags, 0, &vsB, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11 DebugLine VS compile failed");
             return false;
         }
-        if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
+        if (FAILED(timedD3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "PSLine", "ps_5_0", flags, 0, &psB, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11 DebugLine PS compile failed");
@@ -5657,7 +5662,7 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsBlob, err;
-        if (FAILED(D3DCompile(kSkinnedHLSL, std::strlen(kSkinnedHLSL), "skinned",
+        if (FAILED(timedD3DCompile(kSkinnedHLSL, std::strlen(kSkinnedHLSL), "skinned",
                               nullptr, nullptr, "VSMainSkinned", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             const char* msg = err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown";
@@ -5706,7 +5711,7 @@ struct D3D11RendererImpl
         auto compile = [&](const char* entry, ComPtr<ID3D11PixelShader>& out) -> bool
         {
             ComPtr<ID3DBlob> b, err;
-            if (FAILED(D3DCompile(kWorldPreviewPSHLSL, std::strlen(kWorldPreviewPSHLSL), "worldpreview",
+            if (FAILED(timedD3DCompile(kWorldPreviewPSHLSL, std::strlen(kWorldPreviewPSHLSL), "worldpreview",
                                   nullptr, nullptr, entry, "ps_5_0", flags, 0, &b, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s", (std::string("D3D11 world preview '") + entry + "': "
@@ -5777,14 +5782,14 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsBlob, psBlob, err;
-        if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
+        if (FAILED(timedD3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
                               "UIVSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11: UI VS compile failed");
             if (err) OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
             return;
         }
-        if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
+        if (FAILED(timedD3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
                               "UIPSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11: UI PS compile failed");
@@ -6036,12 +6041,21 @@ struct D3D11RendererImpl
     }
 };
 
+// Initialize() start → first Render(); see D3DStartupTiming.h.
+static HE::d3dtiming::StartupClock s_startupClock;
+
 D3D11Renderer::D3D11Renderer()  : m_impl(new D3D11RendererImpl{}) {}
 D3D11Renderer::~D3D11Renderer() { delete m_impl; }
 
 void D3D11Renderer::Initialize(HE::Window* window)
 {
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initializing");
+    using HE::d3dtiming::Phase;
+    s_startupClock.begin();
+    Phase initPhase("D3D11", "Initialize");
+    // No debug layer in any build: the device is created with flags 0 (no
+    // D3D11_CREATE_DEVICE_DEBUG); stated here so the timeline answers it too.
+    HE_LOG_INFO(RHI, "%s", "[startup] D3D11 device flags=0 (no debug layer)");
     SDL_PropertiesID props = SDL_GetWindowProperties(window->GetNativeWindow());
     HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
         props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
@@ -6066,19 +6080,32 @@ void D3D11Renderer::Initialize(HE::Window* window)
     scd.SwapEffect                         = DXGI_SWAP_EFFECT_DISCARD;
 
     D3D_FEATURE_LEVEL fl;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &scd, &m_impl->swapchain,
-        &m_impl->device, &fl, &m_impl->context);
+    HRESULT hr;
+    {
+        Phase phase("D3D11", "D3D11CreateDeviceAndSwapChain");
+        hr = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &scd, &m_impl->swapchain,
+            &m_impl->device, &fl, &m_impl->context);
+    }
     if (FAILED(hr))
         throw std::runtime_error("D3D11Renderer: D3D11CreateDeviceAndSwapChain failed");
 
-    m_impl->createRTV();
-    m_impl->createDepth(m_impl->width, m_impl->height);
-    if (!m_impl->createPipeline())
-        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
-    m_impl->createCube();
+    {
+        Phase phase("D3D11", "createRTV+createDepth");
+        m_impl->createRTV();
+        m_impl->createDepth(m_impl->width, m_impl->height);
+    }
+    {
+        Phase phase("D3D11", "createPipeline");
+        if (!m_impl->createPipeline())
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
+    }
+    {
+        Phase phase("D3D11", "createCube");
+        m_impl->createCube();
+    }
     // Deferred-path debug/headless knobs, GL's and Metal's: HE_RENDER_PATH=1/
     // deferred forces the path without touching config, HE_DUMP_GBUFFER=1..4
     // seeds a raw G-buffer view (the editor pushes its own view mode every
@@ -8010,6 +8037,7 @@ void D3D11Renderer::Render()
     if (m_overlayCallback) m_overlayCallback(nullptr);
     p.gpuTimerEndFrame();
     p.swapchain->Present(p.vsync ? 1 : 0, 0);
+    s_startupClock.endFirstFrame("D3D11");
 }
 
 IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
