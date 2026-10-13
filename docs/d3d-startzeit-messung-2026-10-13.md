@@ -58,6 +58,39 @@ Je Backend Lauf 1 kalt (vorher `%LOCALAPPDATA%\D3DSCache` und den Shader-Cache d
 z. B. `%LOCALAPPDATA%\NVIDIA\DXCache`) und Lauf 2 warm. Einmal mit dem echten Projekt des Menschen. FXC ist
 in beiden Läufen gleich teuer, nur `Create*Shader`/PSO profitieren vom Treiber-Cache.
 
+## Messwerte (NN-WS03, RTX 4070, 13.10.2026, Schritt 4)
+
+Release-Build dieses Zweigs (c309cdb8) in einem privaten Baum (`C:/hw196`, `-DDEPLOY_DIR`), Editor versteckt
+(`HE_HIDDEN_WINDOW=1 HE_BACKGROUND_FPS=0 HE_EXIT_AFTER_FRAMES=300 HE_COLLAB_OFFLINE=1`), eigenes `APPDATA`.
+**Das Rezept oben mit `HE_DUMP_RHI` stürzt ohne `HE_DUMP_PATH` bei D3D in Frame 1 ab** (Overlay nimmt das Backend
+aus der Config): Backend stattdessen per Config wählen, `{"RHI": 2}` = D3D11, `3` = D3D12, `1` = Vulkan.
+Lauf 1 war für diesen Exe-Pfad der erste überhaupt (Treiber-Cache kalt), Lauf 2 warm. Projekt = Kopie von
+HEProject des Menschen (45 Assets). Skript: `C:/hw196/measure.ps1` (nicht eingecheckt), Logs `C:/hw196/runs/`.
+
+| Lauf | Renderer-Init | davon FXC (Aufrufe) | OnInit | 1. Frame seit `Run` | langsamer Frame danach |
+|---|---|---|---|---|---|
+| D3D11 leer, kalt | 8290 ms | 7808 ms (41) | 103 ms | 8737 ms | – |
+| D3D11 leer, warm | ≈ gleich | 7761 ms (41) | | Wand ≈ 8,7 s | – |
+| D3D11 Projekt | 8270 ms | 7776 ms (41) | 49 ms | 8581 ms | f3 1124 ms (matPS 851 ms FXC) |
+| D3D12 leer, kalt | 8868 ms | 8108 ms (46) | 98 ms | 9223 ms | – |
+| D3D12 leer, warm | ≈ gleich | 8046 ms (46) | | Wand ≈ 9,1 s | – |
+| D3D12 Projekt | 8677 ms | 8066 ms (46) | 106 ms | 9046 ms | f2 1157 ms (matPS 846 ms FXC) |
+| Vulkan leer, kalt | 898 ms | – | 72 ms | 1366 ms | – |
+| Vulkan Projekt | 620 ms | – | 71 ms | 1005 ms | f2 482 ms |
+
+Phasen D3D11 (kalt): CreateDeviceAndSwapChain 103 ms, **createSkyPipeline 5247 ms (FXC 5033)**, createPostFX 1022
+(FXC 1020), createDeferredPipelines 945 (795), createGiPipelines 501 (500), Rest < 100 ms je Phase.
+D3D12 (kalt): D3D12CreateDevice 157 ms, **createSkyPipeline 5322 (5050)**, createPostFXPipelines 1038 (1012),
+createDeferredPipelines 969 (801), createGiPipelines 550 (499), createSkinnedPipeline 379 (375).
+Teuerste Einzel-Compiles (D3D11): Sky-PS `main/main ps_5_0` **5032 ms**, PostFX-PS `main/main` 971 ms,
+`resolveClusteredPS` 455, `resolvePS` 335, `scene/PSMain` 290, `gi/GiShadowCS` 184, `gi/GiProbeCS` 135.
+
+**Befund (gemessen):** Beide D3D-Backends sind betroffen, gleich stark. ~90 % des Renderer-Starts ist FXC
+(`D3DCompile`) im Haupt-Thread, gut 60 % davon ein einziger Shader (der per shaderc/SPIRV-Cross übersetzte Himmel).
+Warm ≈ kalt, weil FXC nichts cacht; alles außer FXC zusammen ist nur ~0,5 s (D3D11) bzw. ~0,6-0,8 s (D3D12).
+Debug-Layer aus (D3D11 `flags=0`, D3D12 `gpuDebug=0`), Device/Swapchain ~0,1-0,2 s, Ressourcen nicht messbar.
+D3D liegt ~8 s über Vulkan (Renderer-Init 0,6-0,9 s, erster Frame 1,0-1,4 s).
+
 ## Handoff
 
 **Erledigt:** Instrumentierung (oben), Debug-Layer-Prüfung (statisch), Metal-Vergleichswert aus Logs.
