@@ -702,6 +702,190 @@ TEST_CASE("A project override of an engine default is the one that ships")
     he_test::removeAllQuiet(outputDir);
 }
 
+// ─── The EngineContent download cache as the third "Engine/" tier ─────────────
+// Thema 189: since the landscape texture arrays moved to the EngineContent server
+// (Thema 177), the editor reads them from %APPDATA%/HorizonEngine/EngineContentCache
+// — the resolver's last tier — and the exporter packed only Content + the shipped
+// defaults. M_AutoLandscape's path refs baked to null UUIDs, silently, and the
+// game drew the landscape white.
+namespace
+{
+    // The fixture of the bug, scaled down: a shipped engine material whose graph
+    // samples two "Engine/Textures/Landscape/…" arrays by PATH (graphTextureIds
+    // empty, as in the real M_AutoLandscape), and the arrays written the way
+    // landscape_tex_gen writes them (bare META path, own folder as content root).
+    struct CacheTierFixture
+    {
+        std::filesystem::path contentDir, engineDir, cacheDir, outputDir;
+        const HE::UUID matId    {0x0000000000000412ULL, 0x1ULL};
+        const HE::UUID albedoId {0x000000000000040FULL, 0x1ULL};
+        const HE::UUID maskId   {0x0000000000000411ULL, 0x1ULL};
+        static constexpr char kAlbedo[] = "Engine/Textures/Landscape/T_Albedo_Array.hasset";
+        static constexpr char kMask[]   = "Engine/Textures/Landscape/T_Mask_Array.hasset";
+
+        explicit CacheTierFixture(const std::string& tag)
+        {
+            const auto tmp = std::filesystem::temp_directory_path();
+            contentDir = tmp / ("he_test_" + tag + "_content");
+            engineDir  = tmp / ("he_test_" + tag + "_engine");
+            cacheDir   = tmp / ("he_test_" + tag + "_cache");
+            outputDir  = tmp / ("he_test_" + tag + "_out");
+            for (const auto& d : { contentDir, engineDir, cacheDir, outputDir })
+                he_test::removeAllQuiet(d);
+            std::filesystem::create_directories(contentDir);
+
+            ContentManager gen((engineDir / "Materials").string());
+            MaterialAsset m;
+            m.type              = HE::AssetType::Material;
+            m.id                = matId;
+            m.name              = "M_Auto";
+            m.path              = "M_Auto.hasset";
+            m.graphTexturePaths = { kAlbedo, kMask };
+            REQUIRE(gen.saveAsset(m));
+        }
+        ~CacheTierFixture()
+        {
+            for (const auto& d : { contentDir, engineDir, cacheDir, outputDir })
+                he_test::removeAllQuiet(d);
+        }
+
+        static void writeTexture(const std::filesystem::path& root, const std::string& name,
+                                 const HE::UUID& id)
+        {
+            ContentManager cm((root / "Textures" / "Landscape").string());
+            TextureAsset t;
+            t.type     = HE::AssetType::Texture;
+            t.id       = id;
+            t.name     = name;
+            t.path     = name + ".hasset";
+            t.width    = 1;
+            t.height   = 1;
+            t.channels = 4;
+            t.data     = { 10, 20, 30, 255 };
+            REQUIRE(cm.saveAsset(t));
+        }
+
+        ExportResult run(bool withCache, std::vector<std::string>* warnings)
+        {
+            ExportSettings s;
+            s.compress         = false;
+            s.engineContentDir = engineDir;
+            if (withCache) s.engineContentCacheDir = cacheDir;
+            if (warnings)
+                s.onWarning = [warnings](const std::string& w) { warnings->push_back(w); };
+            return ProjectExporter::exportProject(contentDir, "CacheGame", "", outputDir, s);
+        }
+
+        // The texture UUIDs the packed material carries (what the game samples).
+        std::vector<HE::UUID> bakedTextureIds() const
+        {
+            ContentManager cm;
+            REQUIRE(cm.loadPak((outputDir / "CacheGame.hpak").string()));
+            const MaterialAsset* mat = cm.getMaterial(matId);
+            REQUIRE(mat != nullptr);
+            CHECK(mat->graphTexturePaths.empty());   // the pack drops the paths: the ids are all there is
+            return mat->graphTextureIds;
+        }
+    };
+
+    bool mentions(const std::vector<std::string>& lines, const std::string& what)
+    {
+        return std::any_of(lines.begin(), lines.end(),
+                           [&](const std::string& l) { return l.find(what) != std::string::npos; });
+    }
+}
+
+TEST_CASE("Engine content that exists only in the download cache ships in the pak")
+{
+    CacheTierFixture fx("engcache");
+    CacheTierFixture::writeTexture(fx.cacheDir, "T_Albedo_Array", fx.albedoId);
+    CacheTierFixture::writeTexture(fx.cacheDir, "T_Mask_Array",   fx.maskId);
+
+    std::vector<std::string> warnings;
+    const auto result = fx.run(/*withCache*/ true, &warnings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 3);   // the material + both arrays from the cache
+
+    {
+        HpakReader reader;
+        REQUIRE(reader.open((fx.outputDir / "CacheGame.hpak").string()));
+        CHECK(reader.hasEntry(fx.albedoId));
+        CHECK(reader.hasEntry(fx.maskId));
+    }
+
+    const auto ids = fx.bakedTextureIds();
+    REQUIRE(ids.size() == 2);
+    CHECK(ids[0] == fx.albedoId);
+    CHECK(ids[1] == fx.maskId);
+    CHECK(warnings.empty());
+
+    // The game also resolves them by the path a script or the editor stores.
+    ContentManager cm;
+    REQUIRE(cm.mountPak((fx.outputDir / "CacheGame.hpak").string()));
+    CHECK(cm.loadAsset(CacheTierFixture::kAlbedo) == fx.albedoId);
+}
+
+TEST_CASE("Without the cache tier the dropped texture refs are reported, not silent")
+{
+    // The negative control of the case above — the exact pak the human shipped:
+    // the arrays are only in the cache and the exporter is not told about it.
+    CacheTierFixture fx("engnocache");
+    CacheTierFixture::writeTexture(fx.cacheDir, "T_Albedo_Array", fx.albedoId);
+    CacheTierFixture::writeTexture(fx.cacheDir, "T_Mask_Array",   fx.maskId);
+
+    std::vector<std::string> warnings;
+    const auto result = fx.run(/*withCache*/ false, &warnings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 1);
+
+    const auto ids = fx.bakedTextureIds();
+    REQUIRE(ids.size() == 2);
+    CHECK(ids[0] == HE::UUID{});
+    CHECK(ids[1] == HE::UUID{});
+    CHECK(warnings.size() == 2);
+    CHECK(mentions(warnings, CacheTierFixture::kAlbedo));
+    CHECK(mentions(warnings, CacheTierFixture::kMask));
+}
+
+TEST_CASE("The cache only fills Engine/ paths the shipped defaults do not have")
+{
+    // resolveAbsolutePath reads the cache LAST: a shipped default at the same path
+    // is what the editor shows, so it is what must ship — even when the cached
+    // copy carries another UUID (a stale download of an older generation). And a
+    // cached file whose UUID a different asset already owns is a real collision
+    // (the 0x400 Water material vs T_Landscape_Grass_Albedo of Thema 189): it
+    // cannot ship, and the export says so.
+    CacheTierFixture fx("engcacheshadow");
+    const HE::UUID staleMaskId{0x0000000000000411ULL, 0x2ULL};
+    CacheTierFixture::writeTexture(fx.engineDir, "T_Mask_Array",   fx.maskId);
+    CacheTierFixture::writeTexture(fx.cacheDir,  "T_Mask_Array",   staleMaskId);
+    CacheTierFixture::writeTexture(fx.cacheDir,  "T_Albedo_Array", fx.albedoId);
+    CacheTierFixture::writeTexture(fx.cacheDir,  "T_Grass",        fx.matId);   // collides
+
+    std::vector<std::string> warnings;
+    const auto result = fx.run(/*withCache*/ true, &warnings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 3);   // material, shipped mask, cached albedo
+
+    {
+        HpakReader reader;
+        REQUIRE(reader.open((fx.outputDir / "CacheGame.hpak").string()));
+        CHECK(reader.hasEntry(fx.maskId));
+        CHECK_FALSE(reader.hasEntry(staleMaskId));
+    }
+
+    const auto ids = fx.bakedTextureIds();
+    REQUIRE(ids.size() == 2);
+    CHECK(ids[0] == fx.albedoId);
+    CHECK(ids[1] == fx.maskId);
+
+    // Exactly one warning: the collision. The shadowed stale mask is the
+    // resolver's order at work, not a problem worth a line.
+    REQUIRE(warnings.size() == 1);
+    CHECK(mentions(warnings, "Engine/Textures/Landscape/T_Grass.hasset"));
+    CHECK(mentions(warnings, "Engine/Materials/M_Auto.hasset"));
+}
+
 TEST_CASE("ProjectExporter packs the GameInstance graph into the pak")
 {
     // Regression: GameInstance.hcode (project root, .hcode ext) was never shipped,

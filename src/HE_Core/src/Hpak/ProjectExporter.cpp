@@ -660,6 +660,7 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
     packSettings.onAsset = settings.onAsset;
+    packSettings.onWarning = settings.onWarning;
     return std::nullopt;
 }
 
@@ -821,12 +822,18 @@ static std::optional<ExportResult> packContent(
         }
     }
 
-    // The project's own Content first, then the engine defaults under "Engine/".
-    // Order matters: a project-local override (Content/Engine/…) carries the same
-    // UUID as the default it shadows and must be the one that ships.
+    // The project's own Content first, then the engine defaults under "Engine/",
+    // then the EngineContent download cache behind them — the three tiers of
+    // ContentManager::resolveAbsolutePath, in its order. Order matters: a
+    // project-local override (Content/Engine/…) carries the same UUID as the
+    // default it shadows and must be the one that ships.
     std::vector<HpakWriter::SourceRoot> roots{ { contentDir, {} } };
     if (!settings.engineContentDir.empty())
+    {
         roots.push_back({ settings.engineContentDir, "Engine/" });
+        if (!settings.engineContentCacheDir.empty())
+            roots.push_back({ settings.engineContentCacheDir, "Engine/", /*fallbackOnly*/ true });
+    }
 
     HpakWriter packer;
     ctx.assetsPacked = packer.addDirectories(roots, ctx.packSettings, settings.progress,
