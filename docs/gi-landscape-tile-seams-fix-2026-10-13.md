@@ -53,12 +53,20 @@ kein Shader, kein Backend-Code geändert.
 - **Decisions taken:** Feinere Seite passt sich an (gröbere bleibt unverändert, keine Varianten-
   kombinatorik); fehlender Nachbar (Rand, nicht gebaut/gestreamt) = Kante bleibt; Kopie bleibt
   beim Zurückschalten liegen und wird bei gleichem Schlüssel wiederverwendet.
+- **Scope assumption:** vernäht werden Chunks *eines* Landscape-Entities (die Diagnose aus
+  Schritt 1). Kachelt die Szene des Menschen mehrere Landscape-Entities nebeneinander (Post 1306
+  offen), läuft diese Naht durch kein `stitchSeams`-Gitter: anderer Fix.
 - **Decisions suggested, not taken:** LOD-Kamera = Bildkamera (`EditorApplication.cpp:3512` im
   Play, `GameApplication.cpp:3308` `isMain`/aktiv) — nach dem Nähen nur noch kosmetisch.
+  `LODSystem` hat keine Hysterese: ein Chunk genau auf `maxDistance` springt bei Kamerazittern
+  hin und her, und jeder Sprung baut die genähte Kopie neu (→ `InvalidateMesh` → ganzer GI-BVH
+  auf D3D11/GL/Metal-SW). Abhilfe bei Bedarf: kleiner Cache je Chunk (letzte 2 `stitchKey → UUID`)
+  oder Hysterese für Terrain-LOD, wie `kTessBuildMargin/kTessReleaseMargin`.
 - **Traps:** Jeder Neubau einer genähten Kopie ruft `InvalidateMesh`; D3D11/GL/Metal-SW verwerfen
   dann ihren ganzen GI-BVH (wie schon bei jedem Tess-Refill/Sculpt-Schritt) — nur bei
   LOD-Wechseln, nicht pro Frame. Die dunklen Keile unten rechts im Bergzeugen sind grobe
   LOD2-Facetten im Schatten (LODSCALE 0.1), keine Naht. doctest: `REQUIRE((e != entt::null))`.
 - **Next steps:** 1. Schritt 3: Streaming/LOD-Wechsel live (Editor-Play, Kamera fliegen), Szene mit
-  Displacement-Textur. 2. Schritt 4: D3D11/D3D12/Vulkan auf NN-WS03 mit demselben Dump
+  Displacement-Textur; an einer LOD-Grenze schweben mit `HE_GI_FORCE_SW=1` und die
+  `TerrainSeams`-Zeit/Neubauten pro Sekunde im Profiler (F9) zählen (Flip-Flop oben). 2. Schritt 4: D3D11/D3D12/Vulkan auf NN-WS03 mit demselben Dump
   (`HE_DUMP_TERRAINTICK=1 HE_DUMP_LODSCALE=0.1 HE_DUMP_MTROUGH=1`, A/B `HE_DUMP_NOSTITCH=1`).
