@@ -38,6 +38,9 @@ ist der Rest (Treiber-Cache-abhängig, FXC nicht).
    diesen Schritt nicht. Das passt zum Symptom „nur D3D langsam“.
 3. **Erster Frame:** `WarmupMaterials` reiht nur ein, `drainMaterialWarmup` übersetzt die Materialshader im
    ersten `DrawScene` (VS+PS je Material, ebenfalls FXC). Das zeigen `app slow frame` und die D3DCompile-Zeilen.
+   Achtung beim Auswerten: Der Editor öffnet das Projekt erst ab Frame 1, die Warmup-Compiles fallen also
+   oft *nach* `D3D1x first frame: compiles=…`. Die Summe stimmt nur über alle `D3DCompile`-Zeilen
+   (nach dem ersten Frame nur die ≥ 50 ms, Materialshader liegen in der Regel darüber).
 
 ## Metal-Vergleichswert (aus vorhandenen Logs, kein neuer Lauf)
 
