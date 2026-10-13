@@ -8,11 +8,17 @@
 // tMin 0.02, toward the sun. A ray that is blocked with the skirts in the
 // BVH but free without them is a shadow that only the skirts cast.
 //
-// Build (from the repo root, no engine build needed):
+// Build (from the repo root, no engine build needed; nlohmann is only pulled in
+// by Assets.h, any configured build tree's _deps has it):
 //   clang++ -std=c++20 -O2 -Isrc/HE_Scene/include -Isrc/HE_Core/include \
-//     -Isrc/HE_Rendering/include -Ivendor/glm -DHE_RENDERING_API= -DHE_SCENE_API= \
+//     -Isrc/HE_Rendering/include -Isrc/HE_Rendering/glm \
+//     -I<build>/_deps/nlohmann_json-src/include \
 //     scripts/gi-seam-repro/seam_probe.cpp src/HE_Scene/src/TerrainMeshGenerator.cpp \
 //     src/HE_Rendering/src/GiBvh.cpp -Wl,-dead_strip -o /tmp/seam_probe && /tmp/seam_probe
+//
+// Result on 13.10.2026 (docs/gi-landscape-tile-seams-ursache-2026-10-13.md):
+// same LOD 0 skirt-only hits and no step; LOD0|LOD1 and LOD0|LOD2 add
+// +1.5 % / +7 % surface-blocked rays next to the seam, step pixels 15 / 35 %.
 #include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonRendering/GiBvh.h>
 

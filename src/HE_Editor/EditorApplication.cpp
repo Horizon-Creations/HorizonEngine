@@ -7898,7 +7898,7 @@ void EditorApplication::dumpFrameHeadless()
 			LODSystem::update(*m_editorWorld, camPos);
 		}
 		int perLevel[5] = {};   // LOD0..3, refined
-		for (auto [e, lod] : reg.view<LODComponent, TerrainChunkComponent>().each())
+		for (auto [e, lod, cc] : reg.view<LODComponent, TerrainChunkComponent>().each())
 			++perLevel[lod.current == LODComponent::kRefined ? 4 : std::min<int>(lod.current, 3)];
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TERRAINTICK chunks LOD0=%d LOD1=%d LOD2=%d "
 			"LOD3=%d refined=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1], perLevel[2],
