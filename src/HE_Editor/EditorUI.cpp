@@ -58,8 +58,7 @@
 #include "EditorShortcuts.h"           // the chords the menus print and the keys fire
 #include "EditorTabs.h"                // find-or-focus for every way of opening an asset tab
 #include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
-#include "ToolchainDialog.h"
-#include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "ToolSetupDialog.h"             // startup check: cmake, compiler, git, Git LFS, identity
 #include "ProjectPreflight.h"            // engine-content check in front of every project open
 #include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
@@ -768,13 +767,11 @@ void EditorUI::render(AppContext& ctx, float dt)
     // config to read — before anything can draw a panel and report it closed.
     loadPanelVisibility(ctx);
 
-    // ── Startup toolchain check — overlays either screen below ───────────────
-    ToolchainDialog::DrawToolchainDialog(ctx);
-
-    // ── Startup source-control check ─────────────────────────────────────────
-    // Same placement, and for the same reason: it must overlay the Project Hub
-    // as well as the editor, since a user can clone a project before opening one.
-    GitMissingDialog::DrawGitMissingDialog(ctx);
+    // ── Startup tool check — overlays either screen below ────────────────────
+    // cmake, the C++ compiler, git, Git LFS and the git identity in one dialog. It
+    // must overlay the Project Hub as well as the editor, since a user can clone a
+    // project before opening one.
+    ToolSetupDialog::DrawToolSetupDialog(ctx);
     // Clone from GitHub: raised from the Hub and from Preferences, so drawn here
     // over both. It only leaves a .heproj path behind; the Hub and the editor
     // each open it through their own path (takeOpenRequest).

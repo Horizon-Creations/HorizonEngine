@@ -24,8 +24,11 @@
 //                          opens the download page instead.
 //   elevation Unavailable  not run: only a terminal `sudo` can do it, and the UI
 //                          shows that command.
-// Git LFS is not installed by any of these beyond what the route bundles itself
-// (Git for Windows does); see GitInstallPlan::bringsLfs.
+// Git LFS has its own target (GitInstallTarget::GitLfs) over the same routes, with
+// the package named in the plan's lfsInstallCommand: GitHub.GitLFS, git-lfs from
+// Homebrew, the distro's git-lfs. There is none for DownloadInstaller (LFS is in the
+// installer) and none for the Command Line Tools (Apple ships no LFS); those get the
+// manual hint. Git for Windows brings LFS itself, see GitInstallPlan::bringsLfs.
 
 #include "SourceControl/GitLocator.h"
 #include "SourceControl/ScCommon.h"
@@ -38,6 +41,9 @@
 #include <vector>
 
 namespace HE::Sc {
+
+// What a run installs. The routes are the same for both; only the package differs.
+enum class GitInstallTarget { Git, GitLfs };
 
 // The process an install route starts, in argv form — never one shell string, so
 // apt's `&&` reaches `sh -c` as one argument instead of being split by pkexec.
@@ -63,7 +69,8 @@ struct GitInstallLaunch
 // The launch for a plan, or nothing when the route cannot be run by the engine
 // (None, DownloadInstaller, or no way to get administrator rights). Pure: decides
 // from the plan alone and starts nothing, so every route is testable anywhere.
-HE_SC_API std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan);
+HE_SC_API std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan,
+                                                            GitInstallTarget target = GitInstallTarget::Git);
 
 // Where the manual fallback points when the engine cannot install by itself.
 HE_SC_API const char* gitDownloadPageUrl(HostPlatform platform);
@@ -76,6 +83,11 @@ struct GitInstallOutcome
 	std::string gitVersion;         // "2.47.1" when gitRunnable
 	std::filesystem::path gitPath;  // the git that ran
 
+	// For GitInstallTarget::GitLfs: `git lfs version` ran afterwards (the verdict
+	// for that target; gitRunnable stays what it was before the run).
+	bool        lfsRunnable = false;
+	std::string lfsVersion;         // "3.6.1" when lfsRunnable
+
 	// One sentence for the dialog: what happened, and what to do when it failed.
 	std::string message;
 };
@@ -87,6 +99,7 @@ struct GitInstallOutcome
 // cannot interrupt a package manager that is already running.
 HE_SC_API GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
                                           const std::function<void(const std::string&)>& onLine,
-                                          const std::atomic<bool>* cancel = nullptr);
+                                          const std::atomic<bool>* cancel = nullptr,
+                                          GitInstallTarget target = GitInstallTarget::Git);
 
 } // namespace HE::Sc

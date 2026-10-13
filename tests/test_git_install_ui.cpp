@@ -91,9 +91,10 @@ namespace
 
 		// The machine as the probe saw it, and what the editor would do.
 		GitProbe    probe;
-		int         installs = 0, logReads = 0, cancels = 0;
+		int         installs = 0, lfsInstalls = 0, logReads = 0, cancels = 0;
 		std::string log;
-		bool        installing = false, done = false, ok = false;
+		bool        installing = false, done = false, ok = false, installIsLfs = false;
+		bool        drawLfs = false;   // draw the Git LFS remedy instead of git's
 
 		AppContext make()
 		{
@@ -128,11 +129,13 @@ namespace
 			};
 			ctx.gitProbe        = &probe;
 			ctx.startGitInstall = [this]{ ++installs; };
+			ctx.startGitLfsInstall = [this]{ ++lfsInstalls; };
 			ctx.cancelGitInstall = [this]{ ++cancels; };
 			ctx.gitInstallLog   = [this]{ ++logReads; return log; };
 			ctx.gitInstalling   = installing;
 			ctx.gitInstallDone  = done;
 			ctx.gitInstallOk    = ok;
+			ctx.gitInstallIsLfs = installIsLfs;
 			return ctx;
 		}
 
@@ -157,7 +160,8 @@ namespace
 		{
 			// The column the startup dialog wraps at, so the shots read like it.
 			EditorWidgets::WrapText wrap(560.0f);
-			GitMissingDialog::drawGitInstallRemedy(ctx);
+			if (bits.drawLfs) GitMissingDialog::drawLfsInstallRemedy(ctx);
+			else              GitMissingDialog::drawGitInstallRemedy(ctx);
 		}
 		ImGui::End();
 		EditorWidgets::drawQueuedHelp();
@@ -328,4 +332,51 @@ TEST_CASE("Git remedy: the wait for Apple's installer can be cancelled")
 	clickAt(bits, items.at(idOf("Cancel")));
 	CHECK(bits.cancels == 1);
 	CHECK(bits.installs == 0);
+}
+
+TEST_CASE("Git LFS remedy: the same routes, its own button and its own callback")
+{
+	Harness h;
+	ContextBits bits;
+	bits.drawLfs = true;
+
+	SUBCASE("Homebrew: Install Git LFS starts the LFS install, not git's")
+	{
+		bits.plan(HostPlatform::MacOS, { "brew", "xcode-select" });
+		REQUIRE(gitInstallLaunch(bits.probe.install, GitInstallTarget::GitLfs).has_value());
+		frame(bits, false);
+		const auto items = itemsOnScreen(bits);
+		REQUIRE(items.count(idOf("Install Git LFS")) == 1);
+		CHECK(items.count(idOf("Install Git")) == 0);
+		CHECK(items.count(idOf("Copy LFS Command")) == 1);   // "brew install git-lfs" by hand
+		CHECK(items.count(idOf("git-lfs.com")) == 1);
+		dump(bits, "lfs-remedy-homebrew");
+		clickAt(bits, items.at(idOf("Install Git LFS")));
+		CHECK(bits.lfsInstalls == 1);
+		CHECK(bits.installs == 0);
+	}
+	SUBCASE("Command Line Tools only: Apple ships no LFS, so there is no button")
+	{
+		bits.plan(HostPlatform::MacOS, { "xcode-select" });
+		frame(bits, false);
+		const auto items = itemsOnScreen(bits);
+		CHECK(items.count(idOf("Install Git LFS")) == 0);
+		CHECK(items.count(idOf("git-lfs.com")) == 1);
+		CHECK(bits.lfsInstalls == 0);
+	}
+	SUBCASE("while git installs, the LFS button is off and git's log is not shown here")
+	{
+		bits.plan(HostPlatform::Linux, { "apt-get", "pkexec" });
+		bits.installing = true;
+		bits.installIsLfs = false;
+		bits.log = "Installing git through apt.\n";
+		frame(bits, false);
+		CHECK(bits.logReads == 0);   // that log belongs to the git remedy
+		bits.installing = false;
+		const auto items = itemsOnScreen(bits);
+		REQUIRE(items.count(idOf("Install Git LFS")) == 1);
+		bits.installing = true;
+		clickAt(bits, items.at(idOf("Install Git LFS")));
+		CHECK(bits.lfsInstalls == 0);
+	}
 }

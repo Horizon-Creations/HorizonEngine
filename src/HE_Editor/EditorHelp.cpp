@@ -4718,43 +4718,56 @@ namespace
 	  "editor, which are the two things that change its answer.",
 	  "", "editor#preferences" },
 
-	// ── The build-tools dialog ───────────────────────────────────────────────
-	// Shown at startup when cmake or a C++ compiler is missing. Its own scope
-	// because its "Recheck" and the settings page's are the same word for the
-	// same probe in two very different situations.
-	{ "Build Tools/Install Automatically", "Install Automatically",
-	  "Installs cmake and the compiler through this system's package manager — "
-	  "Homebrew and the Xcode Command Line Tools on macOS, winget on Windows, "
-	  "apt, dnf or pacman on Linux. It can be a several hundred MB download, and "
-	  "the log below says what it is doing.",
+	// ── The tool setup dialog (ToolSetupDialog) ──────────────────────────────
+	// cmake, the C++ compiler, git, Git LFS and the git identity in one list. It
+	// opens at startup when something is missing and from every "Set Up…" notice.
+	// Its own scope because its "Recheck" and the settings page's are the same word
+	// for the same probes in two very different situations.
+	{ "Tool Setup/Install", "Install",
+	  "Installs this one tool with the system's package manager: winget on Windows, "
+	  "Homebrew or Apple's Command Line Tools on macOS, apt, dnf, pacman or zypper "
+	  "on Linux. The row names the package and says what to expect first (a "
+	  "Windows permission prompt, a password dialog, Apple's installer window). It "
+	  "runs in plain sight: the row shows the phase and how long it has been "
+	  "running, and Install log has the installer's own output. Only one install "
+	  "runs at a time.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Copy 'brew install cmake'", "Copy the brew command",
-	  "Puts the install command on the clipboard, for running it in your own "
-	  "terminal instead of letting the editor do it.",
+	{ "Tool Setup/Install All Missing", "Install All Missing",
+	  "Installs every missing tool the editor can install, one after another. "
+	  "cmake and the compiler go in one run, so there is one password prompt for "
+	  "both. It stops at the first failure instead of asking for a password for "
+	  "each of the rest. Tools the editor cannot install here are left for Manual "
+	  "install below.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Copy winget Command", "Copy the winget command",
-	  "Puts the install command for CMake and the Visual Studio C++ Build Tools "
-	  "on the clipboard, for running it in your own shell.",
+	{ "Tool Setup/Retry", "Retry",
+	  "Runs the install for this tool again. The log of the failed run is still "
+	  "there until the new one starts.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Copy 'sudo apt install build-essential cmake'", "Copy the apt command",
-	  "Puts the install command on the clipboard. On a distribution without apt, "
-	  "the package names are the same for dnf and pacman.",
+	{ "Tool Setup/Show Log", "Show Log",
+	  "Opens the installer's output below the list, where the last lines say why "
+	  "it stopped.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/cmake.org", "cmake.org",
-	  "Opens the CMake download page in a browser, for installing it by hand.",
+	{ "Tool Setup/Copy Command", "Copy the install command",
+	  "Puts the command on the clipboard, for running it in your own terminal "
+	  "instead of letting the editor do it. Press Recheck afterwards; no restart "
+	  "is needed.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Download Page", "Download Page",
-	  "Opens Microsoft's page for the Visual Studio C++ Build Tools, which is "
-	  "where the compiler comes from on Windows.",
+	{ "Tool Setup/Open Download Page", "Open Download Page",
+	  "Opens the tool's download page in a browser, for installing it by hand.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Don't show this again", "",
+	{ "Tool Setup/Don't show this at startup", "",
 	  "Stops this dialog appearing at startup. The tools stay missing, and "
 	  "Preferences » Editor » Tool Status still says so — this only silences the "
-	  "interruption.",
+	  "interruption. Every \"Set Up…\" notice still opens it.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Recheck", "Recheck",
-	  "Probes for cmake and a compiler again. A clean result closes this dialog "
-	  "on its own, so this is what to press after an install finishes elsewhere.",
+	{ "Tool Setup/Recheck", "Recheck",
+	  "Looks for cmake, a compiler, git and Git LFS again, without restarting the "
+	  "editor. This is what to press after installing something by hand. When "
+	  "everything is found the dialog closes on its own.",
+	  "", "horizoncode#compiler" },
+	{ "Tool Setup/Set Up…", "Set Up…",
+	  "Opens the tool setup dialog on the row of the missing tool, where it can be "
+	  "installed.",
 	  "", "horizoncode#compiler" },
 
 	// ── The recovery dialog (SceneRecoveryDialog) ────────────────────────────
@@ -8815,15 +8828,9 @@ namespace
 	// state the same facts about the same machine, and its remedy buttons are
 	// drawn by helpers the page calls too. "Save Identity" is already an entry
 	// there and is deliberately not repeated here.
-	{ "Source Control/Don't show this again", "",
-	  "Stops this dialog appearing at startup. Nothing is installed or configured "
-	  "by dismissing it: source control stays unavailable, and the Tools page in "
-	  "Preferences still reports git, Git LFS and your git identity as missing.",
-	  "", "editor#preferences" },
 	{ "Source Control/Recheck", "",
-	  "Looks for git and Git LFS again, without restarting the editor. A clean "
-	  "result closes this dialog by itself, so this is what to press once an "
-	  "install has finished elsewhere.",
+	  "Looks for git and Git LFS again, without restarting the editor. This is "
+	  "what to press once an install has finished elsewhere.",
 	  "", "editor#preferences" },
 	// The git remedy (GitMissingDialog::drawGitInstallRemedy) opens this scope
 	// itself, so these three hold in the dialog, Preferences, the clone dialog
@@ -8847,22 +8854,21 @@ namespace
 	  "by hand. On Windows without winget this is the Git for Windows installer, "
 	  "which brings Git LFS along.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy winget Command", "Copy the winget command",
-	  "Puts the winget command for Git LFS on the clipboard, to run in your own "
-	  "shell. Press Recheck afterwards rather than restarting.",
+	{ "Source Control/Install Git LFS", "Install Git LFS",
+	  "Installs Git LFS the same way: winget on Windows, Homebrew on macOS, the "
+	  "distribution's package manager on Linux. Git LFS is what keeps meshes, "
+	  "textures and audio out of the repository's own history, so a clone does not "
+	  "drag down every version of every asset. Where the editor cannot install it "
+	  "(Apple's Command Line Tools have no LFS), the command to run yourself is "
+	  "shown instead.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy 'brew install git-lfs'", "Copy the brew command",
-	  "Puts the command on the clipboard, to run in your own terminal. Press "
-	  "Recheck afterwards rather than restarting.",
+	{ "Source Control/Copy LFS Command", "Copy the Git LFS command",
+	  "Puts the Git LFS install command on the clipboard, to run in your own "
+	  "terminal. Press Recheck afterwards rather than restarting.",
 	  "", "editor#preferences" },
 	{ "Source Control/git-lfs.com", "git-lfs.com",
 	  "Opens the Git LFS home page, where it can be downloaded and installed by "
 	  "hand.",
-	  "", "editor#preferences" },
-	{ "Source Control/Copy 'sudo apt install git-lfs'", "Copy the apt command for Git LFS",
-	  "Puts the command on the clipboard, to run in your own terminal. Git LFS is "
-	  "what keeps meshes, textures and audio out of the repository's own history, "
-	  "so a clone does not drag down every version of every asset.",
 	  "", "editor#preferences" },
 
 	// ── The issue reporter ───────────────────────────────────────────────────
@@ -9134,7 +9140,7 @@ namespace
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
 		{ "Collision Layers/", "editor-settings", "Settings Reference", "Collision layers" },
-		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
+		{ "Tool Setup/",      "editor-settings", "Settings Reference", "Build tools" },
 		// The recovery dialog is the autosave's other half, so its three
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },

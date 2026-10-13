@@ -123,6 +123,13 @@ struct GitInstallPlan
 	std::string installCommand;
 	std::string manualCommand;
 
+	// The same two for Git LFS, which no route but Git for Windows brings along.
+	// Empty where the route has no package for it the editor can name: the
+	// downloadable Git for Windows installer (LFS is inside it already) and the
+	// Xcode Command Line Tools (LFS needs Homebrew there).
+	std::string lfsInstallCommand;
+	std::string lfsManualCommand;
+
 	// Whether the route installs Git LFS along with git. Git for Windows bundles
 	// it; Homebrew, the Command Line Tools and distro `git` packages do not, and
 	// GitProbe::ready() requires LFS.

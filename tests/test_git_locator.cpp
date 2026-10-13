@@ -349,6 +349,47 @@ TEST_CASE("Install launch: Linux goes through pkexec sh -c with the whole line a
 	CHECK_FALSE(gitInstallLaunch(planWith(HostPlatform::Linux, { "pkexec" })).has_value());
 }
 
+TEST_CASE("Install launch for Git LFS: the same routes with the LFS package")
+{
+	constexpr auto Lfs = GitInstallTarget::GitLfs;
+
+	const auto w = gitInstallLaunch(planWith(HostPlatform::Windows, { "winget" }), Lfs);
+	REQUIRE(w.has_value());
+	CHECK(w->exe == fs::path("winget"));
+	const std::vector<std::string> wantWinget = {
+		"install", "--id", "GitHub.GitLFS", "-e", "--source", "winget",
+		"--accept-source-agreements", "--accept-package-agreements" };
+	CHECK(w->args == wantWinget);
+	CHECK(w->userPrompt.find("Git LFS") != std::string::npos);
+
+	const auto brew = gitInstallLaunch(planWith(HostPlatform::MacOS, { "brew", "xcode-select" }), Lfs);
+	REQUIRE(brew.has_value());
+	CHECK(brew->args == std::vector<std::string>{ "install", "git-lfs" });
+
+	const auto apt = gitInstallLaunch(planWith(HostPlatform::Linux, { "apt-get", "pkexec" }), Lfs);
+	REQUIRE(apt.has_value());
+	CHECK(apt->args.back() == "export DEBIAN_FRONTEND=noninteractive; "
+	                          "apt-get update && apt-get install -y git-lfs");
+	const auto pac = gitInstallLaunch(planWith(HostPlatform::Linux, { "pacman" }, /*isRoot=*/true), Lfs);
+	REQUIRE(pac.has_value());
+	CHECK(pac->args == std::vector<std::string>{ "-c", "pacman -S --needed --noconfirm git-lfs" });
+
+	// No package to name: the Command Line Tools (Apple ships no LFS) and the
+	// downloadable Windows installer (LFS is inside it). Git itself still has its route.
+	const GitInstallPlan clt = planWith(HostPlatform::MacOS, { "xcode-select" });
+	CHECK(clt.lfsInstallCommand.empty());
+	CHECK_FALSE(gitInstallLaunch(clt, Lfs).has_value());
+	CHECK(gitInstallLaunch(clt).has_value());
+	CHECK_FALSE(gitInstallLaunch(planWith(HostPlatform::Windows, {}), Lfs).has_value());
+
+	// Without rights it is the manual command, with sudo where it is needed.
+	const GitInstallPlan noRights = planWith(HostPlatform::Linux, { "dnf" });
+	CHECK_FALSE(gitInstallLaunch(noRights, Lfs).has_value());
+	CHECK(noRights.lfsManualCommand == "sudo dnf install -y git-lfs");
+	CHECK(planWith(HostPlatform::Linux, { "apt-get" }).lfsManualCommand ==
+	      "sudo apt-get update && sudo apt-get install -y git-lfs");
+}
+
 TEST_CASE("runGitInstall without a runnable route explains itself and starts nothing")
 {
 	for (const GitInstallPlan& plan : { planWith(HostPlatform::Linux, { "apt-get" }),

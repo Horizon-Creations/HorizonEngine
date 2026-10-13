@@ -277,6 +277,10 @@ GitInstallPlan planGitInstall(HostPlatform platform,
 		{
 			p.installCommand = "winget install --id Git.Git -e --source winget";
 			p.manualCommand  = p.installCommand;
+			// Only reached when git came from somewhere else (Git for Windows
+			// ships LFS, so after its own install this is never needed).
+			p.lfsInstallCommand = "winget install --id GitHub.GitLFS -e --source winget";
+			p.lfsManualCommand  = p.lfsInstallCommand;
 			p.reason = "winget is available; it installs Git for Windows (with Git LFS)";
 		}
 		else
@@ -302,6 +306,8 @@ GitInstallPlan planGitInstall(HostPlatform platform,
 			// git-lfs afterwards. The Command Line Tools are a 700 MB GUI install.
 			p.elevation      = GitInstallElevation::NotNeeded;
 			p.installCommand = "brew install git";
+			p.lfsInstallCommand = "brew install git-lfs";
+			p.lfsManualCommand  = p.lfsInstallCommand;
 			p.reason         = "Homebrew is available; it installs git without a dialog";
 		}
 		else
@@ -315,12 +321,16 @@ GitInstallPlan planGitInstall(HostPlatform platform,
 	}
 	case HostPlatform::Linux:
 	{
-		struct Manager { const char* tool; GitInstallRoute route; const char* command; };
+		struct Manager { const char* tool; GitInstallRoute route; const char* command; const char* lfsCommand; };
 		static const Manager kManagers[] = {
-			{ "apt-get", GitInstallRoute::Apt,    "apt-get update && apt-get install -y git" },
-			{ "dnf",     GitInstallRoute::Dnf,    "dnf install -y git" },
-			{ "pacman",  GitInstallRoute::Pacman, "pacman -S --needed --noconfirm git" },
-			{ "zypper",  GitInstallRoute::Zypper, "zypper --non-interactive install git" },
+			{ "apt-get", GitInstallRoute::Apt,    "apt-get update && apt-get install -y git",
+			                                      "apt-get update && apt-get install -y git-lfs" },
+			{ "dnf",     GitInstallRoute::Dnf,    "dnf install -y git",
+			                                      "dnf install -y git-lfs" },
+			{ "pacman",  GitInstallRoute::Pacman, "pacman -S --needed --noconfirm git",
+			                                      "pacman -S --needed --noconfirm git-lfs" },
+			{ "zypper",  GitInstallRoute::Zypper, "zypper --non-interactive install git",
+			                                      "zypper --non-interactive install git-lfs" },
 		};
 		const Manager* chosen = nullptr;
 		for (const Manager& m : kManagers)
@@ -336,7 +346,9 @@ GitInstallPlan planGitInstall(HostPlatform platform,
 		}
 		p.route          = chosen->route;
 		p.installCommand = chosen->command;
+		p.lfsInstallCommand = chosen->lfsCommand;
 		appendCommand(p.manualCommand, chosen->command, !isRoot);
+		appendCommand(p.lfsManualCommand, chosen->lfsCommand, !isRoot);
 
 		if (isRoot)
 		{
