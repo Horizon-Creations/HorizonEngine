@@ -134,6 +134,12 @@ keinen Systemtext.) Der Text landet über `m_lastManifestError` / `lastManifestE
    Cargo und npm bekannt. Ausschliessen lässt es sich nur auf dem betroffenen
    Rechner.
 
+**Erster Diskriminator: welcher Build.** Der Preflight (Commit 6574ccc4, 09.10.2026)
+steht auf `release/0.7.0`, aber (Stand 13.10.) **nicht** auf `main`. Ein Editor aus
+`main` oder aus einem Release vor 0.7.0 hat nur einen Aufrufer beim Start. Dort
+ist die Race unmöglich und Hypothese 2 rückt nach vorn. Die Race gilt nur für
+Builds ab dem 09.10. mit dem Preflight.
+
 **Diskriminator im Windows-Log** (`HorizonEngine.log` neben `HorizonEditor.exe`,
 nach Selbst-Update auch `HorizonEngine.1.log`):
 
