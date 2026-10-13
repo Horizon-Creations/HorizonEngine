@@ -1514,6 +1514,11 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::PopStyleColor();
 		ImGui::Spacing();
 		GitMissingDialog::drawGitInstallRemedy(ctx);
+		// The fallback ends in "then press Recheck", so the panel needs one too.
+		ImGui::Spacing();
+		if (ctx.gitInstalling) ImGui::BeginDisabled();
+		if (EditorWidgets::button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
+		if (ctx.gitInstalling) ImGui::EndDisabled();
 		ImGui::End();
 		return;
 	}

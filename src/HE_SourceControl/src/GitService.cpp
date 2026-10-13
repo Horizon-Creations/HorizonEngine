@@ -384,7 +384,9 @@ void GitService::workerMain()
 		{
 			// Asked first: findRepoRoot without git comes back empty, which below
 			// reads as "no repository" — for a project that may well be one.
-			if (!gitExecutable())
+			m_openPath = cmd.path;
+			m_openedWithoutGit = !gitExecutable();
+			if (m_openedWithoutGit)
 			{
 				m_root.clear();
 				HE_SC_WARN("git is not installed; repository detection for %s skipped",
@@ -892,6 +894,17 @@ void GitService::workerMain()
 		if (wantStatus)
 		{
 			m_statusPending.store(false, std::memory_order_release);
+			// git arrived since the open (installed by the editor, or by hand and
+			// then Recheck, which refreshes the locator): the detection the open
+			// had to skip runs now, so an existing repository shows up without
+			// reopening the project.
+			if (m_root.empty() && m_openedWithoutGit && gitExecutable())
+			{
+				m_openedWithoutGit = false;
+				m_root = GitCli::findRepoRoot(m_openPath);
+				HE_SC_INFO("git is available now; repository: %s",
+				           m_root.empty() ? "none" : m_root.string().c_str());
+			}
 			if (m_root.empty())
 			{
 				ev.statusValid = true;

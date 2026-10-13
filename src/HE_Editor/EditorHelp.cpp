@@ -8655,6 +8655,11 @@ namespace
 	// that installs and configures git. Several of these carry no topic: the
 	// shipped manual has no source-control chapter, and a link to a near-miss is
 	// worse than none.
+	{ "Source Control Panel/Recheck##git", "Recheck",
+	  "Looks for git again, without restarting the editor. Press this after "
+	  "installing git yourself; when it is found, the panel reads this project's "
+	  "repository at once. An install started with Install Git does this by itself.",
+	  "", "editor#preferences" },
 	{ "Source Control Panel/New branch…", "New branch",
 	  "Opens the branch dialog, starting from the current state of the project "
 	  "rather than from a commit in the history. It is unavailable while a git "

@@ -384,7 +384,7 @@ struct AppContext
 	// only by the user pressing "Install Git". Same shape as the toolchain install
 	// above: a worker streams the installer's output, the dialog polls the log
 	// each frame, and the probe re-runs when it ends — and if git now runs, the
-	// project's repository is opened again, so the panel picks up where it was.
+	// project's repository is looked up again, so the panel picks up where it was.
 	std::function<void()> startGitInstall;
 	std::function<std::string()> gitInstallLog; // thread-safe snapshot of the streamed output
 	bool gitInstalling   = false; // an install is currently running
@@ -1165,15 +1165,16 @@ private:
 	void applyGitIdentity(std::string name, std::string email);
 	// Installing git (see startGitInstall). Its own log and flags, not the
 	// toolchain install's: both can run at once and must not share a log.
-	// m_gitInstallReopen is raised by the worker when git runs afterwards and
-	// consumed on the frame thread, which is the only one that may re-open the
-	// project in m_git.
 	std::thread       m_gitInstallThread;
 	std::atomic<bool> m_gitInstallRunning{false};
 	std::atomic<bool> m_gitInstallFinished{false};
 	std::atomic<bool> m_gitInstallOk{false};
 	std::atomic<bool> m_gitInstallCancel{false};
-	std::atomic<bool> m_gitInstallReopen{false};
+	// Raised by any probe that found a runnable git (after Install Git, or a
+	// Recheck after installing by hand) and consumed on the frame thread, the
+	// only one that may re-open the project in m_git — which it does when the
+	// last open had no git to ask (GitController::gitMissing).
+	std::atomic<bool> m_gitReopenRepo{false};
 	std::mutex        m_gitInstallLogMutex;
 	std::string       m_gitInstallLog;
 	void startGitInstall();

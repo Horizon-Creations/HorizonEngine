@@ -2183,6 +2183,7 @@ void EditorApplication::startGitProbe()
 	{
 		HE::Sc::GitProbe probe = HE::Sc::probeGit();
 		m_gitProbe = std::move(probe);
+		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
 		m_gitChecked.store(true, std::memory_order_release);
 	});
 }
@@ -2385,7 +2386,8 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 // installer line lands in m_gitInstallLog, which the dialog shows live, and the
 // start and the verdict go to the engine log. Afterwards the probe runs again —
 // inline, like applyGitIdentity, since startGitProbe would join this thread — and
-// when git runs, the frame thread re-opens the project's repository.
+// when git runs, the frame thread asks GitService for a refresh, which runs the
+// repository detection the project's open had to skip.
 void EditorApplication::startGitInstall()
 {
 	if (m_gitInstallRunning.load(std::memory_order_acquire)) return;
@@ -2422,7 +2424,7 @@ void EditorApplication::startGitInstall()
 		m_gitChecked.store(true, std::memory_order_release);
 
 		m_gitInstallOk.store(res.gitRunnable, std::memory_order_release);
-		if (res.gitRunnable) m_gitInstallReopen.store(true, std::memory_order_release);
+		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
 		m_gitInstallRunning.store(false, std::memory_order_release);
 		m_gitInstallFinished.store(true, std::memory_order_release);
 	});
@@ -4575,15 +4577,11 @@ void EditorApplication::OnRender(float dt)
 		// check is finished by a handshake this pump is the one to see.
 		pollClaudeProbe();
 
-	// git was just installed (startGitInstall): ask again where the repository
-	// is. The open that ran without git only knew "no git", and the user's
-	// project is what they installed it for.
-	if (m_gitInstallReopen.exchange(false, std::memory_order_acq_rel) &&
-	    !m_git.projectRoot().empty())
-	{
-		const std::filesystem::path root = m_git.projectRoot();   // openProject closes first
-		m_git.openProject(root);
-	}
+	// A probe just found git: refresh at once rather than at the next poll. If
+	// the project was opened without git, that refresh is what runs the skipped
+	// repository detection (GitService), so the panel picks up where it was.
+	if (m_gitReopenRepo.exchange(false, std::memory_order_acq_rel) && m_git.gitMissing())
+		m_git.requestRefresh();
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
 	// Reward moment (EditorRewards.h): COMMITTED — no AppContext here, so

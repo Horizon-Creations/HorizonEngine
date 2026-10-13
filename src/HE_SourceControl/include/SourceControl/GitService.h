@@ -270,6 +270,10 @@ private:
 
 	// Worker-only. Not shared: the main thread reads m_status instead.
 	std::filesystem::path m_root;
+	// What the last open was asked about, and whether it had no git to ask: the
+	// next refresh that finds git runs the skipped repository detection.
+	std::filesystem::path m_openPath;
+	bool                  m_openedWithoutGit = false;
 
 	// Main-thread-only.
 	RepoStatus                             m_status;
