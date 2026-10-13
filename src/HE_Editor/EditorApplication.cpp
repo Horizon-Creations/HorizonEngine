@@ -933,9 +933,11 @@ void EditorApplication::OnInit()
 		// automatically, so HiDPI crispness comes from the high-pixel-density
 		// drawable — NOT from pre-scaling the size here (the old DisplayFramebuffer
 		// Scale/FontGlobalScale trick no longer maps to the new font system).
-		const float sizeBody       = 13.0f;
-		const float sizeSubheading = 16.0f;
-		const float sizeHeading    = 19.0f;
+		// 13/16/19 read as tiny on a 1440p/4K monitor even after raising the UI
+		// Font Scale; 16/19/23 is the default a fresh install should start from.
+		const float sizeBody       = 16.0f;
+		const float sizeSubheading = 19.0f;
+		const float sizeHeading    = 23.0f;
 
 		if (std::filesystem::exists(fontPath))
 		{
@@ -954,7 +956,12 @@ void EditorApplication::OnInit()
 
 		// Monospace font for the script code editor — ImGui's built-in ProggyClean is
 		// monospace, so the columns/line-numbers align without shipping a new TTF.
-		m_fontMono = io.Fonts->AddFontDefault();
+		// Sized to match the body font; the bitmap default is only crisp at 13 px.
+		{
+			ImFontConfig monoCfg;
+			monoCfg.SizePixels = sizeBody;
+			m_fontMono = io.Fonts->AddFontDefaultVector(&monoCfg);
+		}
 
 		// No io.Fonts->Build() here — since ImGui 1.92 the renderer backends
 		// own the font atlas (ImGuiBackendFlags_RendererHasTextures) and build

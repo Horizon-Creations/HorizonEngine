@@ -904,7 +904,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 
 	row("fontscale", "Appearance", [&]{
-		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 3.0f, "%.2fx");
 	});
 
 	row("cpucache", "Content Browser", [&]{
