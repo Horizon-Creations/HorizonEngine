@@ -295,9 +295,8 @@ eine Zeile "Log file: ..." den Ausweichort). Cache: `%APPDATA%\HorizonEngine\Eng
    could not be reached." mit "Working from the catalogue of the last successful
    connection", der Content Browser zeigt die Engine-Assets aus dem Cache-Manifest.
 
-Ergebnis je Szenario mit Logauszug hier nachtragen. Stand 13.10.: noch nicht
-durchgeführt (kein Windows-Rechner an diesem Gerät; die Queen organisiert einen
-Lauf auf NN-WS03).
+Ergebnis: alle vier bestanden, auf NN-WS03 am 13.10., siehe "Windows-Abnahme
+(Schritt 6)" unten.
 
 ## Build und Tests (Schritt 4)
 
@@ -336,3 +335,147 @@ Sitzung schon einen Live-Katalog hat. Das ändert macOS/Linux im Randfall "erste
 Refresh ok, späterer scheitert" (vorher fälschlich "kein Katalog"); gewollt, aber
 kein reiner Windows-Fix. (4) Schneller Neustart über Prozessgrenzen (alter Editor
 lädt noch) deckt nur der Windows-Rename-Retry (~0,6 s) ab, nicht der Mutex.
+Punkte (1) und (2) erledigt Schritt 6.
+
+## Windows-Abnahme (Schritt 6)
+
+NN-WS03 (Windows 11, RTX 4070, Defender-Echtzeitschutz an), 13.10. 12:52–13:08.
+Editor aus diesem Zweig (Stand ef88ec00, Release, MSVC 14.51), gebaut in
+`C:\hw187` mit eigenem `DEPLOY_DIR`, EngineContent-Konto aus der
+`EngineContentCredentials.cmake` des Haupt-Checkouts einkompiliert, Backend D3D12
+wie beim Nutzer. **Per Skript, nicht von Hand geklickt:** verstecktes Fenster
+(`HE_HIDDEN_WINDOW=1`, `HE_BACKGROUND_FPS=0`, damit der erste Frame so früh kommt
+wie sichtbar), eigenes `APPDATA` (`C:\hw187\appdata`, Config und Cache des
+Menschen unberührt), Kopie von dessen Projekt `HEProject` (die Startszene, 0
+Engine-Assets im Preflight, also kein Dialog), Schliessen per `WM_CLOSE`. Das
+Skript liegt als `docs/engine-content-manifest-windows-abnahme.ps1` bei. Die Logs
+liegen nur lokal in `C:\hw187\evidence` (sie enthalten Host und Konto); Host und
+Konto sind unten durch `<user>@<host>` ersetzt.
+
+### Der Originalfehler auf genau diesem Rechner
+
+Der installierte Editor des Menschen (`HorizonEngineBuild\Editor`, 0.7.0
+"Nimbus", D3D11/D3D12) hat den Fehler in allen drei vorhandenen Logs vom 12.10.,
+jedes Mal beim Start mit `HEProject`:
+
+```
+[22:50:13.577] [Main ] Project preflight: checking C:\Users\conno\Downloads\HEProject\HEProject.heproj
+[22:50:13.832] [t4f37] EngineContent: <user>@<host>:22 reachable                     <- Probe beginnt ihren Refresh
+[22:50:13.929] [t3057] EngineContent manifest refreshed (87 entries)                 <- Preflight-Thread
+[22:50:14.160] [t4f37] Could not fetch EngineContent manifest: Could not finalize downloaded file
+                       '...\EngineContentCache\.manifest.json.tmp': The process cannot access the file
+                       because it is being used by another process.
+```
+
+Nach dem Diskriminator oben ist das Hypothese 1: Pfad `.manifest.json.tmp`, ein
+`refreshed` eines anderen Thread-Kürzels 230 ms davor, und die Probe war schon
+vor dem Ende des Preflight-Downloads losgelaufen. Im echten Cache lag dazu noch
+ein Rest `.manifest.json.tmp.partial` (16801 B, 1 s jünger als `manifest.json`).
+Damit ist Punkt (1) oben geklärt: Lock-Quelle beim Nutzer = Eigen-Race,
+Build = 0.7.0 mit Preflight.
+
+### Zeitlinie alt gegen neu
+
+t0 = `Project preflight: checking`, t1 = Probe `reachable` (ab da lädt sie), t2 =
+erstes `refreshed`, t3 = zweites `refreshed` bzw. der Fehler. t1 < t2 heisst: der
+zweite Aufrufer kam, während der erste noch lud, die Race wurde also wirklich
+provoziert.
+
+| Lauf | t1−t0 | t2−t0 | t3−t0 | t1 < t2 | Ergebnis |
+|---|---|---|---|---|---|
+| alt 12.10. 19:20 | 236 | 332 | 595 | ja | Fehler 32, "could not be read" |
+| alt 12.10. 19:37 | 313 | 426 | 656 | ja | Fehler 32 |
+| alt 12.10. 22:50 | 255 | 352 | 583 | ja | Fehler 32 |
+| neu, 19 Starts mit Server (ms, Spanne) | 243–406 | 333–549 | 668–1038 | 18 von 19 | 19× zwei `refreshed`, 0× `Could not` |
+
+Neu läuft der zweite Refresh nach dem ersten (t3−t2 = 326–617 ms, ein ganzer
+eigener Download); das alte Muster "Fehler 230–260 ms nach dem ersten" tritt
+nicht mehr auf.
+
+### Die vier Szenarien
+
+1. **Normaler Start** (`s1_normal_a` mit leerem Cache, `s1_normal_b` mit Cache):
+   bestanden. Je zwei `EngineContent manifest refreshed (87 entries)` auf zwei
+   Threads, Preflight "0 engine asset(s) referenced …", kein `Could not`, Cache
+   danach nur `manifest.json` (+ `Textures\`), Exit 0. Der Probe-Thread schreibt
+   danach `Engine content folder refreshed.`, was nur im `haveManifest`-Zweig nach
+   `setEngineRemoteAssets` passiert; das ist der Log-Beleg für den Merge in den
+   Content Browser. Die Engine-Ansicht selbst wurde nicht angesehen (verstecktes
+   Fenster; `asset_list` über MCP läuft nur übers Dateisystem und sieht die
+   Remote-Einträge nicht). Die Startmeldung "could not be read" landet nur im
+   `NotificationStore`, nicht im Log; ihr Pfad setzt ein gescheitertes Refresh
+   voraus, und davon gab es keins.
+2. **Schneller Neustart, dreimal** (`s2_fastrestart_1..3`, Neustart ~0,2 s nach
+   Prozessende): bestanden, 3/3 wie 1, in allen dreien t1 < t2 (Überlappung
+   provoziert und serialisiert).
+3. **Start nach Absturz:**
+   * *Kill mitten im Download:* das Skript pollt den Cache im Millisekundentakt
+     und beendet den Editor per `TerminateProcess`, sobald
+     `.manifest.json.tmp.partial` existiert (`s3_kill_on_partial_1`). Rest danach:
+     `.manifest.json.tmp.partial` (0 B). Normaler Start darauf
+     (`s3_restart_after_kill`): bestanden, Rest weg, zwei `refreshed`. Ein erster
+     Versuch mit `taskkill /F` kam zu spät (Download schon fertig, nichts liegen
+     geblieben).
+   * *Gesäte Reste:* der echte 16801-B-Rest des Menschen als
+     `.manifest.json.tmp.partial` plus Müll in `.manifest.json.tmp` und
+     `manifest.json.tmp` (`s3_seeded_leftovers_2`): bestanden, alle drei weg, zwei
+     `refreshed`. Hier kam die Probe 3 ms nach dem ersten `refreshed`, keine
+     Überlappung, was für dieses Szenario keine Rolle spielt.
+4. **Server nicht erreichbar** (`s4_server_unreachable_2`): Das Netz von NN-WS03
+   abzuschalten ging nicht (keine Adminrechte, andere Instanzen und der Mensch
+   arbeiten darauf). Stattdessen war nur im Test-Deploy ein `HorizonContentSync.dll`
+   mit dem Host `he-offline.invalid` eingebaut (DNS-Fehler wie bei gezogenem Netz),
+   gegen den Cache aus den Läufen davor; danach zurückgebaut und per String im DLL
+   geprüft. Bestanden:
+   ```
+   [tc0a6] EngineContent: cannot reach <user>@he-offline.invalid:22 — Could not resolve he-offline.invalid
+   [tc0a6] EngineContent manifest loaded from the local cache (87 entries)
+   [tc0a6] Engine content folder refreshed.
+   [t2d97] Could not fetch EngineContent manifest: Could not resolve he-offline.invalid
+   [t2d97] EngineContent manifest loaded from the local cache (87 entries)
+   [Main ] Project preflight: 0 engine asset(s) referenced, 0 already here, 0 downloaded, 0 missing
+   ```
+   Damit gilt `probe.configured && !probe.reachable` mit `haveManifest == true`,
+   also kommt die Warnung "could not be reached … Working from the catalogue of the
+   last successful connection" (aus dem Code geschlossen, siehe oben zum
+   `NotificationStore`). Nebenbei: offline versucht der Editor die drei
+   `T_Landscape_*_Array`-Texturen der Startszene immer wieder zu laden (169
+   Warnungen in 17 s). Das gehört nicht zu diesem Thema.
+
+### Der Fremdhalter ist auch echt
+
+In 2 der 19 Starts mit Server (`s1_normal_b`, `s3_restart_after_kill`) scheiterte
+das Umbenennen `.partial → .manifest.json.tmp` des **zweiten** Refreshs einmal mit
+Fehler 32, obwohl der erste Refresh da schon fertig war:
+
+```
+[12:53:35.220] [tbc3c] EngineContent manifest refreshed (87 entries)
+[12:53:35.532] [t06e6] Renaming '.manifest.json.tmp' failed (32: The process cannot access the file
+                       because it is being used by another process.) — retry 1 of 5
+[12:53:35.573] [t06e6] EngineContent manifest refreshed (87 entries)
+```
+
+Eine Eigen-Race ist das nicht mehr (der Mutex war frei, der andere Thread fertig),
+also hielt jemand anderes die frisch geschlossene `.partial` ohne
+`FILE_SHARE_DELETE`, sehr wahrscheinlich Defender. Ohne Adminrechte liessen sich
+Ausschlüsse, `handle.exe` und Process Monitor nicht benutzen, deshalb ist der
+Halter nicht benannt. Ein Versuch (20 ms) reichte jedes Mal, nie mehr als
+`retry 1 of 5`. Hypothese 2 gibt es also auf diesem Rechner auch. Ohne den Retry
+aus Schritt 2 wären das zwei Startfehler gewesen, auch mit Mutex.
+
+### Was diese Abnahme nicht zeigt
+
+* Die UI selbst (Benachrichtigungen, Engine-Ordner im Content Browser) wurde
+  nicht angesehen, nur über die Log-Pfade belegt (verstecktes Fenster, der Mensch
+  arbeitet an diesem Rechner).
+* Neustart über Prozessgrenzen (neuer Editor startet, während der alte noch lädt)
+  wurde nicht gezielt provoziert; der Abstand Prozessende → Neustart war ~0,2 s.
+* Falle beim Skript, gefunden und behoben: Das alte `HorizonEngine.log` bleibt
+  liegen, bis der neue Editor es kürzt. Ein Poll in diesem Fenster las die
+  `refreshed`-Zeilen des **vorigen** Laufs und schickte `WM_CLOSE` mitten in die
+  Initialisierung. Folge: dreimal Ende bei Frame 1 ohne Preflight
+  (`s3_seeded_leftovers`, `s4_server_unreachable`, `stat_10`, deshalb wiederholt)
+  und neunmal ein ins Leere gegangenes `taskkill` mit Zwangsbeenden nach 20 s
+  (`stat_1..9`; die Manifest-Daten dieser Läufe sind gültig, beide Refreshes waren
+  vorher fertig). Das Skript löscht das Log jetzt vor dem Start; danach 3/3
+  saubere Exits (`fixed_1..3`).
