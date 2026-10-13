@@ -520,7 +520,11 @@ TEST_CASE("Relay: a relay nobody runs is a failed connect, and a host keeps retr
 
     auto host = RelayTransport::host(dead, "s");
     REQUIRE(host);   // not fatal: the relay may come up later
-    pumpUntil(nullptr, { host.get() }, [] { return false; }, std::chrono::milliseconds(200));
+    // Waited for, not a fixed pause: Linux and macOS refuse a dead loopback
+    // port at once, Windows retries the SYN for about two seconds before
+    // WSAECONNREFUSED, and only then does the listener know what is wrong.
+    pumpUntil(nullptr, { host.get() }, [&] { return !host->lastError().empty(); },
+              std::chrono::seconds(10));
     CHECK_FALSE(host->listening());
     CHECK(drain(*host).empty());   // the listener's failure is not a peer event
     CHECK_FALSE(host->lastError().empty());
