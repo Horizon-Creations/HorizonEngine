@@ -2,7 +2,8 @@
 
 Stand 13.10.2026. Geschrieben auf dem Mac (MacBook-Air): **keine D3D-Messung möglich**, hier
 gibt es weder Windows-SDK noch D3D-Gerät. Die Instrumentierung ist eingebaut, die zwei Kaltstarts
-auf NN-WS03 stehen noch aus (Rezept unten).
+auf NN-WS03 stehen noch aus (Rezept unten). **Nachtrag Schritt 4:** gemessen und behoben auf NN-WS03, siehe
+„Messwerte“ und „Behebung“ weiter unten.
 
 ## Was jetzt geloggt wird
 
@@ -90,18 +91,64 @@ Teuerste Einzel-Compiles (D3D11): Sky-PS `main/main ps_5_0` **5032 ms**, PostFX-
 Warm ≈ kalt, weil FXC nichts cacht; alles außer FXC zusammen ist nur ~0,5 s (D3D11) bzw. ~0,6-0,8 s (D3D12).
 Debug-Layer aus (D3D11 `flags=0`, D3D12 `gpuDebug=0`), Device/Swapchain ~0,1-0,2 s, Ressourcen nicht messbar.
 D3D liegt ~8 s über Vulkan (Renderer-Init 0,6-0,9 s, erster Frame 1,0-1,4 s).
+Request 74: Der Deploy des Menschen (`HorizonEngineBuild/Editor`) ist Release (`HorizonCore.dll` → `MSVCP140.dll`,
+nicht `140D`), sein Log vom 13.10. 17:21 (D3D12) zeigt ~6,3 s zwischen Swapchain und „material resources created“.
+
+## Behebung: FXC-Bytecode-Cache auf Platte (Schritt 4)
+
+`src/HE_Rendering/src/Backends/D3D_Shared/D3DShaderCache.h`, aufgerufen in `timedD3DCompile` (alle 55 Aufrufe
+beider Backends, keiner mit Defines/Include-Handler). Schlüssel = FNV-1a (`Hpak::hash64`) über Quelltext, Entry,
+Target, beide Flag-Wörter und Größe+Zeitstempel der geladenen `d3dcompiler_47.dll`. Datei = 136-Byte-Header (wiederholt
+die Anfrage feldweise, dazu Größe und Hash des Bytecodes) + DXBC; jede Abweichung ist ein Miss → FXC, dann neu
+geschrieben (temp + rename). Nur Erfolge werden gespeichert. Ab 2048 Dateien fliegt das älteste Viertel (ein Treffer
+setzt die mtime). Ort: `SDL_GetPrefPath(...)/d3dshadercache` wie `glprogcache` — **SDL fragt die Shell, nicht
+`%APPDATA%`**: ein Scratch-APPDATA isoliert den Cache nicht, `HE_D3D_SHADER_CACHE_DIR=<dir>` tut es.
+`HE_D3D_SHADER_CACHE=0` schaltet ab, `HE_D3D_SHADER_DUMP=<dir>` schreibt jede Quelle als `.hlsl` (für fxc von Hand).
+Die Logzeile eines Treffers endet auf ` cached`, `first frame:` zählt `cached=`.
+
+| Lauf (gleicher Aufbau wie oben) | Renderer-Init | FXC | 1. Frame seit `Run` | langsamer Frame |
+|---|---|---|---|---|
+| D3D11 Cache leer (+ Treiber-Cache leer) | 8372 ms | 7884 ms | 8699 ms | – |
+| D3D11 Cache warm (3 Läufe) | 455-471 ms | 7 ms (41/41 cached) | 787-794 ms | – |
+| D3D11 Projekt, 1. / 2. Start | 471 / 469 ms | +matPS 851 / cached | 794 / 787 ms | f2 1129 / **278** ms |
+| D3D12 Cache leer (+ Treiber-Cache leer) | 9705 ms | 7973 ms | 10071 ms | – |
+| D3D12 Cache warm | 561-618 ms | 7 ms (46/46) | 886-952 ms | – |
+| D3D12 Projekt, 1. / 2. Start | 563 / 614 ms | +matPS / cached | 885 / 938 ms | f3 1262 / **264** ms |
+| Vulkan Projekt (unverändert, kein D3D-Code) | 648 ms | – | 1028 ms | f2 259 ms |
+
+**Ergebnis:** Ab dem zweiten Start liegt D3D11/D3D12 auf Vulkan-Niveau (erster Frame 0,8-0,95 s gegen 1,0 s; ab dem
+zweiten Projektstart auch der langsame Frame, 264-278 ms gegen 259 ms). Der allererste Start und der erste Start nach
+jeder Shader-Quelländerung bleiben bei ~8,4 / 9,7 s. Ein Treffer kostet ~0,2 ms; `createSkyPipeline` braucht warm noch
+~200 ms (`CreatePixelShader` des 215-KB-Sky-Bytecodes, nicht FXC).
+
+**Verifiziert:** (1) Alle 41 Cache-Dateien von D3D11 byte-identisch mit `fxc.exe` aus derselben Quelle (Dump) und
+denselben Flags (`/Gfp` für 1024, `/Ges` für 2048): 41/41, 0 Abweichungen. (2) Negativkontrolle im Editor: ein Byte mitten
+im Sky-Bytecode gekippt bzw. Datei halbiert → genau dieser Shader neu übersetzt (40/41 cached, 5,2 s), Exit 0, nächster
+Start wieder 41/41. (3) `tests/test_d3d_shader_cache.cpp` (Treffer = gleiche Bytes, Flags/Quelle im Schlüssel,
+gekipptes Byte, Kürzung, Fehlschlag schreibt nichts): 57 Assertions grün, mit abgeschaltetem Hash-Check 3 rot.
+(4) `he_tests` komplett 5157/5157 (Release, Scratch-APPDATA). (5) Bild-A/B D3D11 (SKYTEST): Boden-Bänder exakt 0, der
+Himmel weicht ab, weil die Wolken an `m_wallTime = SDL_GetTicks()` hängen (`D3D11Renderer.cpp` ~7940, `HE_SKY_TIME`
+pinnt diesen Pass nicht) und der Lauf mit Cache 8 s früher aufnimmt; Cache-gegen-Cache und Ohne-gegen-Ohne rauschen nur.
+
+**Erstes Mal bleibt teuer — kein Flag hilft:** fxc.exe auf der Sky-PS-Quelle (abzüglich ~1 s Prozessstart):
+`/Gfp` Standard, `/O1`, `/O3` ≈ 5,0 s; `/O0` ≈ 4,0 s; `/Od` ≈ 1,0 s, aber doppelt so großer Bytecode (unoptimiert,
+GPU-Kosten ungemessen); ohne `/Gfp` 6 s. Nicht geändert.
 
 ## Handoff
 
-**Erledigt:** Instrumentierung (oben), Debug-Layer-Prüfung (statisch), Metal-Vergleichswert aus Logs.
-Verifiziert: `Application.cpp` per `-fsyntax-only` mit den echten Flags des Release-Baums (rc 0);
-`D3DStartupTiming.h` per `-fsyntax-only -Wall -Wextra -Wformat` gegen ein D3D-Stub-Header, mit Negativkontrolle.
-**Nicht verifiziert:** Die Renderer-.cpp kompilieren nur auf Windows (CI). Es gibt keine einzige D3D-Millisekunde.
-Ohne die steht die Aussage „welche Phase kostet“ nur als Verdacht (Punkt 2) da.
-
-**Nächste Schritte, in Reihenfolge:**
-1. Auf NN-WS03 diesen Zweig Release bauen, Rezept oben für D3D11 und D3D12 (kalt + warm), `[startup]`-Zeilen in
-   diese Datei unter „Messwerte“ eintragen.
-2. Antwort auf Request 74 (Debug- oder Release-Build beim Menschen?) einarbeiten. Bei Debug ist Punkt 1 im Befund die Ursache.
-3. Erst dann Schritt 2 (Beheben). Naheliegend, wenn FXC dominiert: Bytecode-Cache auf Platte (Schlüssel = Hash aus
-   Quelltext + Entry + Profil + Flags), Kompilieren beim Build (fxc offline) oder parallel per JobSystem.
+**Erledigt (Schritt 4, NN-WS03):** Messung D3D11/D3D12/Vulkan kalt, warm und mit Projekt (ce054993), Behebung per
+Bytecode-Cache plus Test, Messung danach (Tabellen oben). Der Zweig ist gepusht, CI ist angestoßen (Link im Hive-Post).
+**Entscheidungen:** Cache in `timedD3DCompile` statt Offline-fxc beim Build. Die Shader entstehen zur Laufzeit
+(Sky per shaderc, Materialien aus Graphen), ein Build-Schritt deckt sie nicht ab. Die Sky-Flags bleiben unverändert.
+**Nicht verifiziert:** D3D12-Bytecode gegen fxc (nur D3D11-Dateien geprüft; D3D12 läuft durch denselben Code). GPU-Laufzeit
+unverändert (Bytecode identisch, daher nicht nachgemessen). Der Game-Player (HorizonGame) nutzt denselben Pfad, gemessen
+ist nur der Editor.
+**Fallen:** `HE_DUMP_RHI` ohne `HE_DUMP_PATH` stürzt D3D ab (Backend per config.json). Der Cache liegt im echten
+Roaming-Ordner, ein Scratch-APPDATA isoliert ihn nicht (für „kalt“ das Verzeichnis löschen oder `HE_D3D_SHADER_CACHE_DIR`).
+Der Wolkenhimmel in D3D11-Captures hängt an der Zeit seit Start: Bilder mit unterschiedlicher Startdauer weichen im Himmel ab.
+**Nächste Schritte:**
+1. Optional: den Erststart senken (8-10 s, unverändert). Den Sky-PS (5 s) und die übrigen Compiles parallel per JobSystem
+   übersetzen (FXC ist thread-safe; untere Grenze ≈ Sky allein ~5 s), oder den Sky asynchron bauen und die ersten Frames
+   mit dem kleinen `kSkyPSHLSL` zeichnen. Beides berührt `createSkyPipeline` in beiden Backends.
+2. Schritt 3 des Themas (Messung wiederholen, Bericht) ist mit den Tabellen oben im Kern erledigt. Offen bleibt die
+   Bestätigung durch den Menschen auf seinem Deploy.

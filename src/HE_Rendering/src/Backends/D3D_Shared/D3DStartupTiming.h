@@ -20,11 +20,14 @@
 // hitches a user would notice mid-session.
 #include <Diagnostics/Log.h>
 
+#include "Backends/D3D_Shared/D3DShaderCache.h"
+
 #include <d3dcompiler.h>
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 namespace HE::d3dtiming
 {
@@ -40,8 +43,9 @@ inline double msSince(Clock::time_point t0)
 // backend's numbers; a phase reports the difference across its own scope.
 struct CompileStats
 {
-    uint32_t calls = 0;
-    double   ms    = 0.0;
+    uint32_t calls  = 0;
+    uint32_t cached = 0;    // of calls, answered from the bytecode cache
+    double   ms     = 0.0;
 };
 inline CompileStats& compileStats()
 {
@@ -59,24 +63,45 @@ inline bool& startupOpen()
 // After startup only compiles at least this slow are logged.
 inline constexpr double kLogSlowCompileMs = 50.0;
 
-// D3DCompile with a stopwatch. Drop-in: same parameters, same result.
+// D3DCompile with a stopwatch, in front of the bytecode cache
+// (D3DShaderCache.h). Drop-in: same parameters, same result — a hit hands back
+// the bytes FXC produced for the same request earlier, with no error blob.
 inline HRESULT timedD3DCompile(LPCVOID src, SIZE_T srcSize, LPCSTR sourceName,
                                const D3D_SHADER_MACRO* defines, ID3DInclude* include,
                                LPCSTR entry, LPCSTR target, UINT flags1, UINT flags2,
                                ID3DBlob** code, ID3DBlob** errors)
 {
     const Clock::time_point t0 = Clock::now();
-    const HRESULT hr = ::D3DCompile(src, srcSize, sourceName, defines, include,
-                                    entry, target, flags1, flags2, code, errors);
+    const bool cacheable = d3dcache::enabled() && !defines && !include && code && src;
+    d3dcache::Request req;
+    if (cacheable || std::getenv("HE_D3D_SHADER_DUMP"))
+    {
+        req = d3dcache::makeRequest(src, srcSize, entry, target, flags1, flags2);
+        d3dcache::dumpSource(req, sourceName);
+    }
+    ID3DBlob* hit = cacheable ? d3dcache::load(req) : nullptr;
+    HRESULT hr = S_OK;
+    if (hit)
+    {
+        *code = hit;
+        if (errors) *errors = nullptr;
+    }
+    else
+    {
+        hr = ::D3DCompile(src, srcSize, sourceName, defines, include,
+                          entry, target, flags1, flags2, code, errors);
+        if (cacheable && SUCCEEDED(hr)) d3dcache::store(req, *code);
+    }
     const double ms = msSince(t0);
     CompileStats& s = compileStats();
     ++s.calls;
     s.ms += ms;
+    if (hit) ++s.cached;
     if (startupOpen() || ms >= kLogSlowCompileMs)
         HE_LOG_INFO(RHI, "[startup] D3DCompile %s/%s %s ms=%.1f bytes=%zu%s",
                     sourceName ? sourceName : "-", entry ? entry : "-",
                     target ? target : "-", ms, static_cast<size_t>(srcSize),
-                    SUCCEEDED(hr) ? "" : " FAILED");
+                    hit ? " cached" : SUCCEEDED(hr) ? "" : " FAILED");
     return hr;
 }
 
@@ -144,8 +169,8 @@ struct StartupClock
         done          = true;
         startupOpen() = false;
         const CompileStats& s = compileStats();
-        HE_LOG_INFO(RHI, "[startup] %s first frame: ms=%.1f since Initialize, compiles=%u compileMs=%.1f",
-                    backend, msSince(t0), s.calls, s.ms);
+        HE_LOG_INFO(RHI, "[startup] %s first frame: ms=%.1f since Initialize, compiles=%u cached=%u compileMs=%.1f",
+                    backend, msSince(t0), s.calls, s.cached, s.ms);
     }
 };
 
