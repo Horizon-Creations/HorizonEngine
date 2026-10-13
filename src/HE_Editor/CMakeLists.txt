@@ -342,6 +342,7 @@ add_executable(HorizonEditor WIN32
 	CollabPanel.cpp
 	CollabPresenceBar.cpp
 	CollabUndo.cpp
+	TeamController.cpp
 	EngineContentSyncBar.cpp
 	McpStatusBar.cpp
 	EngineContentPublishDialog.cpp

@@ -15,6 +15,7 @@ add_library(HorizonNet SHARED
 	src/TcpTransport.cpp
 	src/RelayFanout.cpp
 	src/RelayTransport.cpp
+	src/TeamClient.cpp
 	src/UdpTransport.cpp
 	src/LossyTransport.cpp
 	src/SecureTransport.cpp

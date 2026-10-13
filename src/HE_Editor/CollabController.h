@@ -221,6 +221,25 @@ public:
 	// True while the running session goes through a relay.
 	bool viaRelay() const { return m_viaRelay; }
 
+	// ── Team sessions (topic 197) ────────────────────────────────────────────
+	// A session set up from the team server (TeamController): always through
+	// `relay`, which is the team server itself, whatever relayAddress() says —
+	// the session was announced there, so that is where the members look for
+	// it. The join code is not handed out but derived from the session id on
+	// both sides (HE::Net::TeamClient::joinCodeForSession), because the team
+	// server's JOIN answer carries only session, host and peer.
+	//
+	// Hosting mints the session id and listens as RelayTransport::kHostPeerId;
+	// the caller announces it afterwards with OPEN_SESSION. Joining dials
+	// `hostPeer` in `sessionId` as `selfPeer` (the member name, so the host can
+	// tell who is connecting; empty = a random id).
+	bool startTeamHosting(const HE::Net::RelayAddress& relay, const std::string& displayName);
+	bool joinTeamSession(const HE::Net::RelayAddress& relay, const std::string& sessionId,
+	                     const std::string& hostPeer, const std::string& selfPeer,
+	                     const std::string& displayName);
+	// The running (or connecting) session was set up through the team server.
+	bool teamSession() const { return m_teamSession; }
+
 	// The one answer to "does an asset of this kind travel". Everything that
 	// used to ask isSyncableAssetType asks this instead: the static predicate is
 	// still the type rule, and this is that rule OR the session's decision to
@@ -1292,6 +1311,15 @@ private:
 	// The relay link inside m_secure, non-owning, for its listening() and its
 	// refusal reasons. nullptr whenever m_viaRelay is false.
 	HE::Net::RelayTransport* m_relayLink = nullptr;
+	// Team sessions. The override is set only for the duration of the
+	// startTeamHosting call (relayForNewSession prefers it to m_relayAddress);
+	// the peers and the flag live as long as the session and are cleared by
+	// teardown().
+	bool                  m_teamSession = false;
+	bool                  m_teamHostPending = false;
+	HE::Net::RelayAddress m_teamRelay;
+	std::string           m_relayHostPeer;   // empty = RelayTransport::kHostPeerId
+	std::string           m_relaySelfPeer;   // empty = a random client id
 	// A host turned us away because we had not agreed. Held until the panel has
 	// asked the user, because it is a question and not a failure.
 	bool          m_largeAssetsPrompt = false;
@@ -1305,6 +1333,10 @@ private:
 		std::string   sessionId;   // what a relay join dials instead of host:port
 		std::string   joinCode;
 		std::string   displayName;
+		// A team join: host:port is the team server, and these are the peers.
+		bool          team = false;
+		std::string   hostPeer;
+		std::string   selfPeer;
 		bool          valid = false;
 	};
 	LastJoin      m_lastJoin;

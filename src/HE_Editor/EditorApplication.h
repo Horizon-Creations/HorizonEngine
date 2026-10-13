@@ -8,6 +8,7 @@
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
@@ -517,6 +518,9 @@ struct AppContext
 	// Live collaboration session (see CollabController). Null until the editor
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
+	// The team server connection (see TeamController): login, presence, and
+	// the team sessions it sets up on `collab`. Null in tests.
+	TeamController* team = nullptr;
 
 	// The MCP bridge, for the two places that have to show what it is actually
 	// doing: the Remote Control page in Preferences and the footer chip. READ
@@ -771,6 +775,9 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	// The team server: sign-in, presence, invitations. Sets team sessions up on
+	// m_collab, so it is declared after it. Pumped right after it.
+	TeamController   m_team{ m_collab };
 	// Editor-wide "something happened" channel — see NotificationStore.h. Owned
 	// here and handed to the UI through AppContext, the same shape m_collab and
 	// m_git use, except that this one is written from worker threads too and

@@ -6,7 +6,8 @@ invitations and the per-session join setting (step 9) live in the relay server
 (repo `Horizon-Creations/CollabSession`, branch `claude/he-net-relay-server`, on
 the Mac at `~/VSCode/EngineCollab/CollabSession`). Accounts persist in
 `--data-dir/teams.txt`; presence, sessions and invitations are memory only.
-The engine side (`HE_Net` team subsystem) has not started.
+The engine side (step 10) is in: `HE::Net::TeamClient` and the editor's
+`TeamController` (section "Engine side" below); the Team page and panel are not.
 The relay protocol (`docs/relay-server-protocol.md`) is unchanged.
 
 The full specification is the README section "Team-Server" in that repo. In short,
@@ -54,39 +55,83 @@ Step 9 additions (README sections "Anwesenheit", "Team-Sitzungen", "Ereignisse")
   the session or when the invitee goes offline; removing a member closes its
   connections and sessions. Limits 8 sessions per connection, 64 per team.
 
+Server state after step 9: CollabSession `claude/he-net-relay-server` @ e3f4649 (pushed,
+no PR), CI green on all three jobs
+(https://github.com/Horizon-Creations/CollabSession/actions/runs/38472878828). Nothing
+deployed yet. Server decisions: join setting per session (not persisted), the team server
+does not police relay pairing, host = connection, events never go to the causing connection.
+
+## Engine side (step 10)
+
+- **`HE::Net::TeamClient`** (`src/HE_Net/include/Net/TeamClient.h`): one team connection
+  over `TcpTransport`. `connect(server, team, member, password, Login|CreateTeam)`, then
+  `update()` per frame. Every frame is dispatched by type (STATUS / TEAM_REPLY /
+  TEAM_EVENT); replies are matched by request id and run their `ReplyFn` after the frame
+  loop. Requests made before the link is up go out right behind TEAM_LOGIN. PING every
+  20 s; no answer to the oldest request within 30 s (or no login within 30 s) closes it
+  ("stopped answering"). Caches `members()` (admin/you/online) and `sessions()`
+  (open/invited/hosting): fetched at login, refetched after our own changes (the server
+  does not echo them) and on members-changed, patched by presence/session/invited events;
+  `revision()` moves on every change. invited/joining/declined (and the rest) also go to
+  `pollEvent()`. `loginRefused()` = bad-login/invalid/team-exists: do not retry.
+- **Join code:** the JOIN reply carries no join code, so both ends derive it:
+  `TeamClient::joinCodeForSession(sessionId)` (HMAC-SHA256 under "HorizonEngine team session
+  v1", 32 hex). Whoever knows a team session's id can enter it: the members and the server.
+- **`CollabController`**: `startTeamHosting(relay, name)` (startHosting with the relay forced
+  to the team server and the derived code; listens as `kHostPeerId`) and
+  `joinTeamSession(relay, session, hostPeer, selfPeer, name)` (CONNECT to `hostPeer` as
+  `selfPeer`); `teamSession()`. The large-asset retry dials a team join again the same way.
+- **`TeamController`** (`src/HE_Editor/TeamController.h`, ImGui-free): owns the TeamClient,
+  `signIn`/`createTeam`/`signOut`, statuses SignedOut/Connecting/SignedIn/Reconnecting/
+  Failed. Reconnects with backoff 1-30 s unless the login was refused (a refused first
+  login or a dropped first connect is Failed, for the person to retry). Password in memory
+  only. `hostSession(open)` = startTeamHosting + OPEN_SESSION (a refusal leaves the collab
+  session again); `setSessionOpen`, `invite`, `join` (JOIN, then joinTeamSession with the
+  member name as relay peer id), `decline`, `addMember`/`removeMember`/`changePassword`.
+  When the collab session ends, it sends CLOSE_SESSION; after a reconnect it announces
+  the still-running session again. Notices (invitations, joining, declined, refusals) via
+  `pollNotice()` and the editor NotificationStore.
+- **Editor:** `EditorApplication::m_team`, pumped right after `m_collab.update`, signed out
+  at shutdown, `AppContext::team` for the panel. No settings page, no panel, no config
+  fields yet (step 11).
+
 ## Handoff
 
-- **Topic / step:** 197, step 9 (presence, invite, join setting; plan step 2, retry)
-- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ e3f4649 (pushed:
-  8e97b36 feature, e3f4649 test fix for Linux; 9 commits ahead of `main`, no PR). This doc: HE
-  `claude/team-server-teams-mitglieder-anwesenheit`.
-- **Done:** everything in "Step 9 additions" above.
-- **Files touched (CollabSession):** `src/Protocol.{h,cpp}` (Type::TeamEvent, TeamOp 5-12,
-  TeamResult 11-16, TeamEventKind, flags, `MakeSessionList`/`MakeJoinReply`/event
-  builders), `src/RelayServer.{h,cpp}` (`HandleSessionRequest`, `LeaveTeam` from
-  `Detach`, `EndSession`, `ForgetInvites`, `Push`/`PushTeam` with high-water drop,
-  `IsOnline`, `lastHeard` + `CheckTimeouts`), `src/main.cpp` (`--team-idle-timeout`),
-  `tests/team_test.py` (event-aware reader, 6 new tests), `README.md`.
-- **Verified:** `ctest --test-dir /tmp/collab-build` 3/3 (team_protocol 18/18, relay_protocol
-  unchanged), same 3/3 in an ASan/UBSan `-fno-sanitize-recover=all` build; three negative
-  controls on a copy (no ForgetInvites on offline, no event high-water drop, no idle
-  timeout) each fail exactly their test.
-- **CI:** run 38472456102 on 8e97b36: macOS green, both Linux jobs red on
-  `test_client_that_does_not_read_its_events` only (Linux autotunes the server's send
-  buffer to MBs, the fixed 1.8 MB of events never reached the 1 MiB mark); e3f4649 sends
-  batches until the drop is logged. Its run is **green on all three jobs**:
-  https://github.com/Horizon-Creations/CollabSession/actions/runs/38472878828
-- **Not verified:** nothing deployed to 212.227.140.164 (step 5).
-- **Decisions taken:** join setting per *session* (live, not persisted; teams.txt format
-  unchanged); team server does not police relay pairing; host = connection; one invite
-  per member (decline from any of its connections clears it); events to the causing
-  connection are suppressed; the host may not JOIN its own session (bad-request).
-- **Suggested, not taken:** a persisted per-team default "others may join" (needs a
-  teams.txt format change + old-format load test); tying relay CONNECT to a JOIN ticket.
-- **Traps:** events interleave with replies: a client (and tests) must read frames by
-  type, never assume the next frame is the reply. `team_test.py` keeps them in `EVENTS`.
-  The previous step's traps still apply (build in `/tmp/collab-build`, `python3 -B`, don't
-  switch the human's checkout branch).
-- **Next steps:** 1. Plan step 3: `HE_Net` team client (login, PING every 20 s, event
-  reader, LIST_*/OPEN/INVITE/JOIN → existing relay transport). 2. Editor Team page and
-  panel. 3. Deploy with `deploy/deploy.sh horizon@212.227.140.164 7777`. 4. E2E.
+- **Topic / step:** 197, step 10 (plan step 3, HE_Net team subsystem)
+- **Branch / commit:** `claude/team-server-teams-mitglieder-anwesenheit` (pushed; commit in
+  the Hive result post). Server unchanged: CollabSession e3f4649.
+- **Done:** "Engine side (step 10)" above.
+- **Files touched:** `src/HE_Net/{include/Net/TeamClient.h,src/TeamClient.cpp,CMakeLists.txt}`,
+  `src/HE_Editor/TeamController.{h,cpp}` (+ editor CMakeLists), `src/HE_Editor/CollabController.{h,cpp}`
+  (team entry points, `relayForNewSession` override, `beginLink` peer ids, `LastJoin`),
+  `src/HE_Editor/EditorApplication.{h,cpp}` (m_team, AppContext::team),
+  `tests/test_net_team.cpp`, `tests/CMakeLists.txt` (source list, `he_net` resource lock).
+- **Verified (Mac, Release, worktree build `out/build/release`):** `he_tests
+  --source-file=*test_net_team.cpp` 8/8 cases, 268 assertions, 8 runs in a row, with
+  `HE_TEST_TEAM_SERVER=127.0.0.1:47791` pointing at a local `collab_server` built from
+  e3f4649 (`--data-dir` in /tmp). The live case drives three real TeamController +
+  CollabController pairs: create team, add members, presence both ways, invitation-only
+  refusal, invite → decline → invite → join (scene arrives), open session joined by a
+  never-invited member, CLOSE on leave, offline on sign-out; the server log shows each
+  step and the relay pairing as peer `Bob`/`Cleo`. Regressions green: test_net_relay (27,
+  also with HE_TEST_RELAY on the same server), test_collab_controller (74), test_net_collab
+  (111), test_mcp_tools_collab (5), test_net_tcp (12). HorizonEditor build: see Hive result.
+- **Not verified:** against the rented host (step 5 not deployed); the editor GUI (no UI yet);
+  Windows/Linux only through CI.
+- **Decisions taken:** join code derived from the session id (above) instead of a server
+  change; member name as the joiner's relay peer id (protocol recommendation); a second
+  editor of the same member joining the same session gets the relay's id-taken (known,
+  not handled); a refused announcement leaves the collab session; no config fields until
+  the Team page exists.
+- **Suggested, not taken:** host-side gate matching INCOMING peer ids against `joining`
+  events (would make invitation-only binding on the relay too); keychain storage for the
+  password so a restart signs in again.
+- **Traps:** `ReplyFn` callbacks run inside `TeamClient::update()`: they must not destroy
+  the client (TeamController never resets `m_client` from one). A fake server must skip
+  frames queued behind a refused login. The server keeps an invitation after JOIN (a
+  re-join logs "(invited)"), so the open-session path needs a never-invited member.
+- **Next steps:** 1. Step 11: Preferences "Team" page (server address, team, member; replaces
+  the Collaboration relay field) and a Team panel on `AppContext::team` (members with
+  online dots, sessions, Invite/Join/Decline, admin add/remove), with EditorHelp entries.
+  2. Deploy the server (`deploy/deploy.sh horizon@212.227.140.164 7777`). 3. E2E with two
+  editors against the host; rerun `test_net_team` with `HE_TEST_TEAM_SERVER` pointed there.
