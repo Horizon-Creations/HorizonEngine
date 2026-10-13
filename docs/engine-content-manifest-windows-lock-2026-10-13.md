@@ -223,7 +223,8 @@ derselbe Fall stattdessen.
 `tests/test_engine_content_manifest_refresh.cpp` treibt den echten
 `EngineContentSync`-Code über `refreshManifestWith`; nur der SFTP-Download ist
 ersetzt, durch eine Nachbildung von `sftpGetFile` (`ofstream` auf `.partial`,
-in zwei Hälften geschrieben, dazwischen 3 ms offen, dann `fs::rename`). Drei Fälle:
+in zwei Hälften geschrieben, dazwischen 3 ms offen, dann wie das Original
+`detail::renameReplacing`). Drei Fälle:
 
 1. **Die zwei Startaufrufer** (SFTP-Probe und Projekt-Preflight): 100 Runden, je
    zwei Threads, die gleichzeitig losgehen. Erwartet: kein Refresh scheitert, nie

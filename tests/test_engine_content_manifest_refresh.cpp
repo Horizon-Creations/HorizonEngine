@@ -99,8 +99,10 @@ HE::Cs::SftpResult fetchLikeSftp(const std::string& localPath, const std::string
 		while (std::chrono::steady_clock::now() < until) std::this_thread::yield();
 		out.write(json.data() + half, static_cast<std::streamsize>(json.size() - half));
 	}
+	// The real finalize, retry included: Defender looking at the fresh .partial on
+	// a Windows runner must not fail the stand-in where sftpGetFile would not fail.
 	std::error_code ec;
-	fs::rename(partial, localPath, ec);
+	HE::Cs::detail::renameReplacing(partial, localPath, ec);
 	if (ec) return { false, "rename: " + std::to_string(ec.value()) + " " + ec.message() };
 	return { true, {} };
 }
