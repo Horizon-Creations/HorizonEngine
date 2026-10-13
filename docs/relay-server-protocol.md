@@ -91,9 +91,10 @@ From the Mac without logging in:
 The ssh key `~/.ssh/id_ed25519` has a passphrase; it must be in the agent
 (`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`) for scripts to use it.
 
-Port 7777 has to be open inbound in front of the VPS (IONOS cloud firewall
-policy, and ufw on the host if active); the service itself listens on all
-addresses (`*:7777`).
+Port 7777 has to be open inbound twice: in the IONOS cloud firewall policy
+and in the host's own packet filter (a ufw ruleset is loaded even though
+`ufw.service` shows inactive; `sudo ufw allow 7777/tcp`). The service itself
+listens on all addresses (`*:7777`).
 
 ## Model in one paragraph
 

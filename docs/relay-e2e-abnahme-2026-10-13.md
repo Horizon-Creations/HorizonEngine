@@ -150,8 +150,14 @@ in its config but its service is inactive, and neither nftables nor firewalld
 runs, so the IONOS cloud firewall is the likely place. At 15:43, after the
 human had added a rule, 7777 still did not answer from the Mac, while the Mac
 reached port 7777 elsewhere (portquiz.net) and the relay journal showed no
-connection attempt from outside. So the rule did not yet apply to this server
-(policy not assigned, source restricted, or not saved).
+connection attempt from outside. At 15:51, with the IONOS panel saying the
+cloud firewall now lets 7777 through, it was still closed. The host does run a
+packet filter after all: nf_tables is loaded with 606 references, together with
+xt_recent, xt_LOG, xt_limit, xt_hl, ip6t_rt and ipt_REJECT, the module set of a
+loaded ufw ruleset (even though `ufw.service` shows inactive). Reading or
+changing it needs the sudo password. To open it, on the server:
+`sudo ufw allow 7777/tcp && sudo ufw status` (or the nftables/iptables
+equivalent). No reboot is needed for that.
 
 So that the run against the real server did not have to wait for that, the
 same E2E ran through an ssh tunnel (`ssh -L 47777:127.0.0.1:7777`), so the
