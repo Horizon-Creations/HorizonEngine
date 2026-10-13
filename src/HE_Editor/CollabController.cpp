@@ -238,7 +238,15 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		return false;
 	}
 
-	m_net = std::make_unique<NetSession>(m_secure.get(), NetRole::Host);
+	if (m_relayLink)
+	{
+		HE::Net::RelayFanout::Config fan;
+		fan.role = NetRole::Host;
+		m_fanout = HE::Net::RelayFanout::over(m_secure.get(), m_relayLink, fan);
+	}
+	m_net = std::make_unique<NetSession>(m_fanout ? static_cast<HE::Net::ITransport*>(m_fanout.get())
+	                                              : m_secure.get(),
+	                                     NetRole::Host);
 
 	CollabSession::Config cfg;
 	cfg.displayName  = displayName;
@@ -903,7 +911,15 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 		return false;
 	}
 
-	m_net = std::make_unique<NetSession>(m_secure.get(), NetRole::Client);
+	if (m_relayLink)
+	{
+		HE::Net::RelayFanout::Config fan;
+		fan.role = NetRole::Client;
+		m_fanout = HE::Net::RelayFanout::over(m_secure.get(), m_relayLink, fan);
+	}
+	m_net = std::make_unique<NetSession>(m_fanout ? static_cast<HE::Net::ITransport*>(m_fanout.get())
+	                                              : m_secure.get(),
+	                                     NetRole::Client);
 
 	CollabSession::Config cfg;
 	cfg.displayName  = displayName;
@@ -1633,6 +1649,7 @@ void CollabController::teardown()
 	// into the transport, so they must go first.
 	m_collab.reset();
 	m_net.reset();
+	m_fanout.reset();        // points into m_secure
 	m_secure.reset();
 	m_relayLink = nullptr;   // lived inside m_secure
 	m_viaRelay  = false;
@@ -1841,7 +1858,8 @@ void CollabController::update(std::uint64_t nowMs)
 
 	if (!m_secure || !m_net || !m_collab) return;
 
-	m_secure->update();   // drives the transport + handshake
+	if (m_fanout) m_fanout->update();   // m_secure's update, plus the relay's broadcasts
+	else          m_secure->update();   // drives the transport + handshake
 	m_net->pump();        // dispatches framed messages
 	m_collab->update(nowMs);
 

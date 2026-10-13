@@ -80,6 +80,9 @@ std::vector<std::uint8_t> NetSession::frame(MessageId id, const BitWriter& paylo
 void NetSession::fanOut(const std::vector<ConnectionId>& to, MessageId id,
                         const BitWriter& payload, SendMode mode) {
     if (!m_transport || to.empty()) return;
+    // One recipient is a plain send; a broadcast would only tell everyone
+    // else that it was not for them.
+    if (to.size() == 1) return send(to.front(), id, payload, mode);
     const std::vector<std::uint8_t> bytes = frame(id, payload);
     HE_LOG_TRACE(Net, "msg %u fanned out to %zu peer(s) (%s)", static_cast<unsigned>(id),
                  to.size(), detail::logBytes(bytes.size()).c_str());

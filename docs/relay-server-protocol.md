@@ -1,11 +1,12 @@
 # HE_Net relay server: protocol and engine mapping
 
 Status (2026-10-13): **server steps 1 and 2 done** (1:1 pairing, broadcast
-fan-out), **engine step 3 done** (configurable relay address, all links
-through the relay when one is set). Broadcast on the engine side (step 4) is
-not built yet. Without a configured relay HE_Net connects peer-to-peer exactly
-as before: `TcpTransport` and `UdpTransport` are unchanged, and the relay code
-is only constructed when an address is set.
+fan-out), **engine steps 3 and 4 done** (configurable relay address, all links
+through the relay when one is set; the host hands messages for many clients
+to the relay once). Without a configured relay HE_Net connects peer-to-peer
+exactly as before: `TcpTransport` and `UdpTransport` are unchanged, the relay
+code is only constructed when an address is set, and `NetSession` keeps its
+per-peer send loop for every transport that does not fan out.
 
 ## Engine side as built (step 3)
 
@@ -144,29 +145,71 @@ unchanged over a relay connection. Only the socket setup differs:
 - The relay never sees plaintext: it forwards the bytes after `paired` as they
   are, including SecureTransport's handshake and AES-GCM frames.
 
-## How broadcast maps onto the engine (step 4, not built yet)
+## Broadcast on the engine side (step 4, as built)
 
-- **Host** (`NetSession::broadcast`, `CollabSession`'s broadcast helpers):
-  when a relay is configured, write the message once as a `BROADCAST` frame on
-  the listener connection instead of once per connection. Messages with an
-  `except` connection (e.g. `broadcastLock(..., except)`) either stay on the
-  per-pair path or let the originator drop its own echo; the relay has no
-  exclude list.
-- **Client**: after `paired`, open the `SUBSCRIBE` connection and feed its
-  frames into the same dispatch as messages from the host. It is receive-only,
-  so `SecureTransport` (a two-way handshake) cannot run on it: broadcast
-  payloads need message-level encryption, for example a session group key the
-  host hands to every client over its already encrypted pair. Until that
-  exists, broadcast must stay off for sessions that need confidentiality.
-- Late joiners: request the snapshot over the pair after subscribing, so no
-  change falls between snapshot and first broadcast (deduplicate by sequence
-  number if needed, because the two streams are not ordered against each
-  other).
+Stack with a relay: `NetSession → RelayFanout → SecureTransport → RelayTransport`.
+`RelayFanout` (`src/HE_Net/include/Net/RelayFanout.h`) is only constructed when
+a relay is set (CollabController host/join, NetGameSession host/join).
+
+- **API.** `NetSession::broadcast`, `broadcastExcept(except, …)` and
+  `sendTo(conns, …)`. With a transport whose `fansOut()` is true (asked once,
+  at construction) the message is framed once and handed to
+  `ITransport::sendToMany` once; otherwise it is the same `send()` loop as
+  before. One recipient is always a plain send.
+- **RelayTransport** gained the raw primitives: `sendBroadcast` (host, a
+  type-5 frame on the listener; false while the listener is not registered),
+  `subscribe(conn)`/`subscribed(conn)`/`pollBroadcast` (client). A
+  subscription the relay refuses leaves the pair alone; one that ends after
+  it was granted closes the pair, `lastError()` says "the relay's broadcast
+  stream ended".
+- **Encryption.** The host draws a random 32-byte group key per session and
+  sends it to each client as the first message on its encrypted pair (KEY:
+  flags, key, next broadcast index, the client's slot). A broadcast frame is
+  `[u64 index][AES-256-GCM(plain) || tag]`, nonce `"HEBC" || index`; the index
+  only grows, so a nonce never repeats under one key. The relay sees only
+  ciphertext.
+- **Order.** Pair and broadcast stream are not ordered against each other,
+  and the app above relies on host send order, so the client merges them back
+  into it. Every host→client pair message carries `W` = broadcasts issued
+  before it and waits until that many are applied. A broadcast plaintext is
+  `[u16 n][n × (u32 slot, u64 pair count)][u16 m][m × u32 excluded slot][payload]`:
+  for each subscribed client that got pair messages since the previous
+  broadcast, how many it has been sent; the client applies the broadcast once
+  it has processed that many. A client that got nothing per pair costs no
+  entry.
+- **Switch.** KEY → the client subscribes → relay `subscribed` → the client
+  sends SUBSCRIBED over the pair → from the host's next broadcast on it is on
+  the relay. Before that it gets each broadcast per pair as a copy (or a skip
+  when excluded) carrying the same index, so a broadcast that also arrived
+  over the relay meanwhile is dropped as a duplicate. Every index after KEY
+  reaches every client exactly once, and late joiners need nothing special:
+  the snapshot goes over the pair and the merge keeps it ahead of the
+  changes after it.
+- **Except lists.** "Everyone but the sender" (collab's relays of a client's
+  edit, presence, transform) is a list of excluded slots in the frame; an
+  excluded client advances its index and drops the payload.
+- **Loss is loud.** A gap that cannot close drops the link with a reason:
+  a subscription the relay ended, a host whose listener was down when it
+  broadcast (it drops the clients that were on the relay), or a hold over
+  `Config::maxHoldMs` (30 s) or `maxHeldBytes` (64 MiB).
+
+What goes through it: `NetSession::broadcast` everywhere (collab host
+presence, components, doc deltas, structural ops, transforms, lock updates,
+asset op applies; game despawn and bye), collab's "everyone but the sender"
+relays (`broadcastExcept`), and the game's property tables, property deltas
+and RPCs to all clients (`sendTo`). **Not** through it: the game's per-client
+snapshots (`GameReplication::sendSnapshots` builds each client its own
+datagram, interest-culled and with its own input ack, so there is nothing
+identical to share) and collab's chunked asset uploads to the other clients
+(`sendAssetChunks`, several messages per recipient).
+
+Tests: `tests/test_net_relay.cpp`, the "Relay fan-out:" cases. The FakeRelay
+speaks SUBSCRIBE/BROADCAST and can hold either stream to force both
+cross-stream orders; one case runs three editors through it, one runs against
+a real `collab_server` when `HE_TEST_RELAY` is set.
 
 ## Open (later steps of topic 193)
 
-- Engine side of broadcast, including the
-  broadcast encryption described above (step 4).
 - Access control on the relay itself (today anyone who can reach the port may
   open sessions; the content stays end-to-end encrypted).
 - Deployment on the rented Linux server (service unit, firewall), plus the

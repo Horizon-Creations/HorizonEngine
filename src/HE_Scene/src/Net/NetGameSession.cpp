@@ -5,6 +5,7 @@
 #include "HorizonScene/Net/NetMessages.h"
 
 #include <Diagnostics/Log.h>
+#include <Net/RelayFanout.h>
 #include <Net/RelayTransport.h>
 #include <Net/SecureTransport.h>
 #include <Net/UdpTransport.h>
@@ -156,6 +157,7 @@ bool NetGameSession::host(const HostOptions& options)
 			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
 			return false;
 		}
+		RelayTransport* const relayLink = link.get();   // for the fan-out below
 		SecureTransport::Config sec;
 		sec.joinSecret        = m_joinCode;
 		sec.role              = NetRole::Host;
@@ -168,7 +170,11 @@ bool NetGameSession::host(const HostOptions& options)
 			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
 			return false;
 		}
-		if (!hostOn(std::move(secure), options)) return false;
+		// Messages for every client go to the relay once, which makes the
+		// copies (property deltas, despawns); per-client snapshots stay per link.
+		RelayFanout::Config fan;
+		fan.role = NetRole::Host;
+		if (!hostOn(RelayFanout::wrap(std::move(secure), relayLink, fan), options)) return false;
 		m_viaRelay = true;
 		// No port of our own and no LAN announcement: an address nobody listens
 		// on would only send people into a wall. The join code is the invitation.
@@ -287,7 +293,9 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
 			return false;
 		}
-		if (!joinOn(std::move(secure), options)) return false;
+		RelayFanout::Config fan;
+		fan.role = NetRole::Client;
+		if (!joinOn(RelayFanout::wrap(std::move(secure), relayLink, fan), options)) return false;
 		m_viaRelay  = true;
 		m_relayLink = relayLink;
 		// Said, because a typed address that is silently not dialled looks

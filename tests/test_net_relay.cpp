@@ -1030,7 +1030,8 @@ TEST_CASE("Relay fan-out: one frame to the relay reaches every client, in order,
 TEST_CASE("Relay fan-out: a broadcast never overtakes an earlier message, nor the other way round")
 {
     FakeRelay relay;
-    FanSession fs(&relay, relay.address(), "fanOrder", 1);
+    // Two clients: a broadcast to a single peer is a plain send.
+    FanSession fs(&relay, relay.address(), "fanOrder", 2);
     FanEnd& client = *fs.clients[0];
     const ConnectionId conn = fs.conn(0);
 
@@ -1051,7 +1052,7 @@ TEST_CASE("Relay fan-out: a broadcast never overtakes an earlier message, nor th
     fs.host->s->broadcast(kFanMsg, text("broadcast C"));
     fs.host->s->send(conn, kFanMsg, text("unicast D"));
     pumpFan(&relay, fs.all, [] { return false; }, std::chrono::milliseconds(300));
-    CHECK(relay.heldBroadcast.size() == 1);
+    CHECK(relay.heldBroadcast.size() == 2);   // one copy per subscriber
     CHECK(client.got.size() == 2);   // D is there, and waits for C
     relay.holdBroadcasts = false;
     relay.release();
@@ -1083,39 +1084,44 @@ TEST_CASE("Relay fan-out: everyone but the sender, with a client that is not on 
     fs.host->s->send(fs.conn(0), kFanMsg, text("for c0"));
     fs.host->s->broadcastExcept(fs.host->names.at("c2"), kFanMsg, text("not for c2"));
     fs.host->s->send(fs.host->names.at("c2"), kFanMsg, text("for c2"));
-    fs.host->s->sendTo({ fs.conn(1) }, kFanMsg, text("only c1"));
+    fs.host->s->sendTo({ fs.conn(1), fs.host->names.at("c2") }, kFanMsg, text("c1 and c2"));
+    fs.host->s->sendTo({ fs.conn(1) }, kFanMsg, text("only c1"));   // one recipient: a plain send
     REQUIRE(pumpFan(&relay, fs.all, [&] {
-        return c0.got.size() == 2 && c1.got.size() == 3 && c2.got.size() == 2;
+        return c0.got.size() == 2 && c1.got.size() == 4 && c2.got.size() == 3;
     }));
     pumpFan(&relay, fs.all, [] { return false; }, std::chrono::milliseconds(100));
     CHECK(c0.got == seq({ "for c0", "not for c2" }));
-    CHECK(c1.got == seq({ "not for c0", "not for c2", "only c1" }));
-    CHECK(c2.got == seq({ "not for c0", "for c2" }));
+    CHECK(c1.got == seq({ "not for c0", "not for c2", "c1 and c2", "only c1" }));
+    CHECK(c2.got == seq({ "not for c0", "for c2", "c1 and c2" }));
 
     const auto after = fs.host->t->stats();
-    CHECK(after.relayFrames - before.relayFrames == 3);   // c0 and c1 always learn the index
-    CHECK(after.pairCopies - before.pairCopies == 1);     // "not for c0" to c2
-    CHECK(after.pairSkips - before.pairSkips == 2);       // "not for c2", "only c1" — c2's turn passed
+    CHECK(after.relayFrames - before.relayFrames == 3);   // c0 and c1 learn every index
+    CHECK(after.pairCopies - before.pairCopies == 2);     // "not for c0", "c1 and c2" to c2
+    CHECK(after.pairSkips - before.pairSkips == 1);       // "not for c2": c2's turn passed
+    CHECK(after.unicasts - before.unicasts == 3);         // "for c0", "for c2", "only c1"
 }
 
 TEST_CASE("Relay fan-out: a client joining mid-stream gets each broadcast exactly once across the switch")
 {
     FakeRelay relay;
-    const std::string secret = SecureTransport::generateJoinSecret();
-    auto host = fanEnd(RelayTransport::host(relay.address(), "fanJoin"), NetRole::Host, secret);
+    // One client already on the relay, so a broadcast has more than one
+    // recipient (to a single peer it would be a plain send).
+    FanSession fs(&relay, relay.address(), "fanJoin", 1);
+    FanEnd* host = fs.host.get();
     // A message the host sends the moment it knows the client, before any broadcast.
     host->s->onConnect([&](ConnectionId c) { host->s->send(c, kFanMsg, text("welcome")); });
-    REQUIRE(pumpFan(&relay, { host.get() }, [&] { return host->relay->listening(); }));
 
-    auto client = fanEnd(RelayTransport::connect(relay.address(), "fanJoin"), NetRole::Client, secret);
-    std::vector<FanEnd*> all{ host.get(), client.get() };
+    auto client = fanEnd(RelayTransport::connect(relay.address(), "fanJoin"), NetRole::Client, fs.secret);
+    std::vector<FanEnd*> all = fs.all;
+    all.push_back(client.get());
+    const auto before = host->t->stats();
     // The host broadcasts once per pump, all the way through the client's
     // join, KEY, subscription and switch to the relay.
     int n = 0;
     int afterSwitch = 0;
     REQUIRE(pumpFan(&relay, all, [&] {
-        if (!host->s->connections().empty()) host->s->broadcast(kFanMsg, text(std::to_string(n++)));
-        if (host->t->relayedPeers() == 1) ++afterSwitch;
+        if (host->s->connections().size() == 2) host->s->broadcast(kFanMsg, text(std::to_string(n++)));
+        if (host->t->relayedPeers() == 2) ++afterSwitch;
         return afterSwitch >= 30;
     }));
     REQUIRE(pumpFan(&relay, all, [&] { return client->got.size() >= static_cast<std::size_t>(n) + 1; }));
@@ -1124,8 +1130,8 @@ TEST_CASE("Relay fan-out: a client joining mid-stream gets each broadcast exactl
     REQUIRE(client->got.size() == static_cast<std::size_t>(n) + 1);
     CHECK(client->got[0] == "welcome");
     for (int i = 0; i < n; ++i) CHECK(client->got[static_cast<std::size_t>(i) + 1] == std::to_string(i));
-    CHECK(host->t->stats().pairCopies > 0);    // before the switch
-    CHECK(host->t->stats().relayFrames > 0);   // after it
+    CHECK(host->t->stats().pairCopies > before.pairCopies);     // before the switch
+    CHECK(host->t->stats().relayFrames >= before.relayFrames + 30);   // after it
     CHECK(client->t->onRelay());
 }
 
@@ -1144,7 +1150,7 @@ TEST_CASE("Relay fan-out: a broadcast stream that ends takes the link down, with
 TEST_CASE("Relay fan-out: a host whose relay listener is gone drops the clients that relied on it")
 {
     FakeRelay relay;
-    FanSession fs(&relay, relay.address(), "fanNoListener", 1);
+    FanSession fs(&relay, relay.address(), "fanNoListener", 2);
     const std::string key = "fanNoListener/host";
     const ConnectionId l = relay.listeners.at(key);
     relay.t->disconnect(l);
@@ -1156,6 +1162,56 @@ TEST_CASE("Relay fan-out: a host whose relay listener is gone drops the clients 
     CHECK(fs.host->t->lastError().find("could not be handed to the relay") != std::string::npos);
     fs.host->s->pump();
     CHECK(fs.host->s->connections().empty());
+}
+
+TEST_CASE("Relay fan-out: an editor session through the relay relays presence as broadcasts")
+{
+    FakeRelay relay;
+    HorizonWorld hostWorld, worldA, worldB, worldC;
+    hostWorld.createEntity("Cube");
+    CollabController host, a, b, c;
+    host.setWorld(&hostWorld);
+    a.setWorld(&worldA);
+    b.setWorld(&worldB);
+    c.setWorld(&worldC);
+    for (CollabController* e : { &host, &a, &b, &c }) e->setRelayAddress(addressText(relay));
+    REQUIRE(host.startHosting(0, "Anna"));
+    REQUIRE(pumpCollab(&relay, { &host }, [&] {
+        return relay.listeners.count(host.sessionId() + "/host") == 1;
+    }));
+    REQUIRE(a.joinBySessionId(host.sessionId(), host.joinCode(), "Bob"));
+    REQUIRE(b.joinBySessionId(host.sessionId(), host.joinCode(), "Cleo"));
+    REQUIRE(c.joinBySessionId(host.sessionId(), host.joinCode(), "Dora"));
+    REQUIRE(pumpCollab(&relay, { &host, &a, &b, &c }, [&] {
+        for (CollabController* e : { &a, &b, &c })
+            if (e->status() != CollabController::Status::Joined) return false;
+        return relay.subscribers[host.sessionId() + "/host"].size() == 3;
+    }));
+    // Give the host time to read the SUBSCRIBED notices.
+    pumpCollab(&relay, { &host, &a, &b, &c }, [] { return false; }, std::chrono::milliseconds(200));
+    CHECK(entityCount(worldC) == entityCount(hostWorld));
+
+    const int framesBefore = relay.broadcastFrames;
+    const float hostPos[3] = { 1.0f, 2.0f, 3.0f };
+    const float aPos[3]    = { 7.0f, 8.0f, 9.0f };
+    const float rot[4]     = { 0.0f, 0.0f, 0.0f, 1.0f };
+    host.setLocalPresence(hostPos, rot, {});
+    a.setLocalPresence(aPos, rot, {});
+    auto at = [](const HE::Net::PresenceState* p, const float* pos) {
+        return p && p->valid && p->cameraPos[0] == pos[0] && p->cameraPos[2] == pos[2];
+    };
+    CHECK(pumpCollab(&relay, { &host, &a, &b, &c }, [&] {
+        return at(a.presenceOf(host.localParticipant()), hostPos) &&
+               at(c.presenceOf(host.localParticipant()), hostPos) &&
+               at(b.presenceOf(a.localParticipant()), aPos) &&   // relayed by the host, except to a
+               at(c.presenceOf(a.localParticipant()), aPos);
+    }));
+    // The host's own presence and its relay of a's: through the relay, once each.
+    CHECK(relay.broadcastFrames - framesBefore >= 2);
+    c.leave();
+    b.leave();
+    a.leave();
+    host.leave();
 }
 
 TEST_CASE("Relay fan-out: without it, NetSession sends per peer exactly as before")
@@ -1213,11 +1269,14 @@ TEST_CASE("Relay fan-out: without it, NetSession sends per peer exactly as befor
     f.pump();
     f.broadcast(kFanMsg, text("x"));
     f.broadcastExcept(2, kFanMsg, text("x"));
-    f.sendTo({ 3 }, kFanMsg, text("x"));
+    f.sendTo({ 3, 1 }, kFanMsg, text("x"));
+    f.sendTo({ 3 }, kFanMsg, text("x"));   // one recipient: a plain send
     REQUIRE(fan.many.size() == 3);
     CHECK(fan.many[0] == std::vector<ConnectionId>{ 1, 2, 3 });
     CHECK(fan.many[1] == std::vector<ConnectionId>{ 1, 3 });
-    CHECK(fan.many[2] == std::vector<ConnectionId>{ 3 });
+    CHECK(fan.many[2] == std::vector<ConnectionId>{ 3, 1 });
+    REQUIRE(fan.sent.size() == 4);
+    CHECK(fan.sent[3].first == 3);
     for (auto& [c, bytes] : fan.sent) CHECK(bytes == one);
 }
 
@@ -1248,6 +1307,7 @@ TEST_CASE("Relay fan-out: against a real collab_server (HE_TEST_RELAY=host:port)
         CHECK(c0.got[static_cast<std::size_t>(i) + 1] == std::to_string(i));
         CHECK(c1.got[static_cast<std::size_t>(i)] == std::to_string(i));
     }
-    CHECK(fs.host->t->stats().relayFrames - before.relayFrames == 21);
+    // 20 broadcasts; "not for c1" has one recipient left and is a plain send.
+    CHECK(fs.host->t->stats().relayFrames - before.relayFrames == 20);
     CHECK(fs.host->t->stats().pairCopies == before.pairCopies);
 }

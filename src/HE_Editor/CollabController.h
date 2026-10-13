@@ -19,6 +19,7 @@
 #include <Net/CollabSession.h>
 #include <Net/LanBeacon.h>
 #include <Net/PortMapper.h>
+#include <Net/RelayFanout.h>
 #include <Net/RelayTransport.h>
 #include <Types/Enums.h>   // HE::AssetType — the .hasset header's real type
 
@@ -1202,6 +1203,9 @@ private:
 
 	std::unique_ptr<SceneStateProvider>        m_provider;
 	std::unique_ptr<HE::Net::SecureTransport>  m_secure;   // owns the TcpTransport
+	// Through a relay only: over m_secure, hands messages for every peer to the
+	// relay once. NetSession runs on it when it exists, on m_secure otherwise.
+	std::unique_ptr<HE::Net::RelayFanout>      m_fanout;
 	std::unique_ptr<HE::Net::NetSession>       m_net;
 	std::unique_ptr<HE::Net::CollabSession>    m_collab;
 
