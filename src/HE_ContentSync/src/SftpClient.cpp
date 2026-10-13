@@ -1,5 +1,6 @@
 #include "ContentSync/SftpClient.h"
 #include "ContentSync/CsLog.h"
+#include "CsRename.h"
 
 #include <Net/Socket.h>
 
@@ -379,7 +380,7 @@ SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRe
 		return { false, "Download of '" + remoteRelPath + "' failed: " + readError };
 	}
 
-	fs::rename(tmpPath, local, ec);
+	detail::renameReplacing(tmpPath, local, ec);
 	if (ec)
 	{
 		std::error_code rmEc;

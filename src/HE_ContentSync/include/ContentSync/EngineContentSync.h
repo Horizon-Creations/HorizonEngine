@@ -16,6 +16,7 @@
 
 #include "ContentSync/CsCommon.h"
 #include "ContentSync/EngineContentManifest.h"
+#include "ContentSync/SftpClient.h"
 
 #include <Types/UUID.h>
 
@@ -71,7 +72,17 @@ public:
 	// on a worker thread (mirrors probeSftp/probeGit). Leaves the previously
 	// held manifest untouched on failure, so a transient network blip does not
 	// erase an Editor session's already-known remote catalogue.
+	// Safe to call from several threads at once (the startup probe and the
+	// project preflight both do): the calls run one after another, each with its
+	// own download.
 	bool refreshManifestBlocking();
+
+	// refreshManifestBlocking() with the download swapped out: `fetch` puts the
+	// manifest at the local path it is given (the real one is sftpGetFile), and
+	// everything after it — reading, adopting, caching, the serialization — is
+	// the real code. Lets a test drive concurrent refreshes without a server.
+	using ManifestFetchFn = std::function<SftpResult(const std::string& localPath)>;
+	bool refreshManifestWith(const ManifestFetchFn& fetch);
 
 	// Why the last refreshManifestBlocking() failed, scrubbed of the password;
 	// empty after a success. The Editor's notification quotes it — without it
@@ -94,9 +105,10 @@ public:
 	// the directory walk. So a user working offline could neither see nor manage
 	// their own local copies.
 	//
-	// Returns true when a cached manifest was read and adopted. Never overwrites a
-	// manifest that was fetched from the server this session — a live catalogue
-	// always wins over yesterday's copy.
+	// Returns true when a manifest is held afterwards: the cached one was read
+	// and adopted, or one was already fetched from the server this session. That
+	// live one is never overwritten — a live catalogue always wins over
+	// yesterday's copy.
 	bool loadCachedManifest();
 
 	// Record that the local copy of `relativePath` is gone, so the catalogue keeps
@@ -155,6 +167,10 @@ private:
 	Job                    m_current;
 	bool                   m_draining = false;
 	DownloadQueueStatus    m_status;
+
+	// Held across a whole refresh, network included: the refreshes share one temp
+	// path (see refreshManifestWith). Never taken while holding m_manifestMutex.
+	std::mutex             m_refreshMutex;
 
 	mutable std::mutex     m_manifestMutex;
 	EngineContentManifest  m_manifest;
