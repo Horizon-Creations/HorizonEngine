@@ -66,16 +66,21 @@ into `GitProbe.h`) is asked first. pkexec 126/127 (cancelled / no agent) get the
   `GitService` gitMissing state + self-healing repo detection, help entries, tests.
 - **Verified (Mac M5, Release, `out/build/release`):** `HorizonEditor` and `he_tests` build. `he_tests
   --source-file=*test_git_locator*,*test_git_install_ui*,*test_sourcecontrol_probe*,*test_git_roundtrip*,*test_git_panel_ops*,*test_git_status_parse*`
-  → 87/87 cases, 1075 assertions. New: 4 `gitInstallLaunch`/`runGitInstall` cases in
+  → 88/88 cases, 1085 assertions (`ctest -R test_git_install_ui` registered too). New: 4 `gitInstallLaunch`/`runGitInstall` cases in
   `test_git_locator.cpp` (every route's argv, apt `&&` as one `sh -c` arg, fallbacks start nothing) and
   `tests/test_git_install_ui.cpp` (headless: Install Git present iff the route can run, a click reaches
-  `startGitInstall`, fallbacks show Copy/Download, disabled + log while installing). Frames
+  `startGitInstall`, fallbacks show Copy/Download, disabled + log while installing, Cancel only for
+  the Apple-installer wait and it reaches `cancelGitInstall`). Frames
   looked at (`HE_UI_DUMP_DIR`). `editor_help_audit --check` green (1145/1145). Editor headless smoke
   run (`HE_EXIT_AFTER_FRAMES=120`): probe line, clean exit, rc 0.
 - **Not verified:** no real install ran anywhere. winget / brew / xcode-select / pkexec were not
   executed, and the GitService self-heal was not driven (this Mac always has `/usr/bin/git`, so
   "no git" cannot be simulated in-process). Windows and Linux: CI only.
-- **Decisions:** click-to-install, no auto-start; Windows without winget = download page; no LFS install;
+- **Open (not this step):** `GitResult::gitMissing` (GitCli.cpp:107) still has no consumer (only
+  matters if git is uninstalled under a running editor; all UI gates read the probe).
+  `ReportIssueDialog` still needs git for the stored token and shows no remedy.
+- **Decisions:** click-to-install, no auto-start; Cancel (`AppContext::cancelGitInstall`) only ends
+  the wait for Apple's installer, never a running winget/apt; Windows without winget = download page; no LFS install;
   self-heal in GitService instead of close/open (close joins the worker).
 - **Traps:** `runGitInstall` really installs: never call it in a test with a runnable plan.
   `editor_help_audit` assigns scopes by reading the file top to bottom, so a nested `Help::Scope`

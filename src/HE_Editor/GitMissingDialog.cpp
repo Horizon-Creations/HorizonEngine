@@ -97,6 +97,14 @@ void drawGitInstallRemedy(AppContext& ctx)
 		ImGui::SameLine();
 		ImGui::TextDisabled(installing ? "Installing\xe2\x80\xa6 (progress below)"
 		                               : "or do it yourself:");
+		// Only where it can keep its word: the wait for Apple's installer stops at
+		// once (a dismissed dialog would otherwise hold this for an hour), while a
+		// running winget or apt cannot be interrupted, so it gets no button.
+		if (installing && launch->returnsBeforeInstalled && ctx.cancelGitInstall)
+		{
+			ImGui::SameLine();
+			if (EditorWidgets::smallButton("Cancel")) ctx.cancelGitInstall();
+		}
 	}
 	else if (plan.route == HE::Sc::GitInstallRoute::DownloadInstaller)
 	{

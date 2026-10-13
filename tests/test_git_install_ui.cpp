@@ -91,7 +91,7 @@ namespace
 
 		// The machine as the probe saw it, and what the editor would do.
 		GitProbe    probe;
-		int         installs = 0, logReads = 0;
+		int         installs = 0, logReads = 0, cancels = 0;
 		std::string log;
 		bool        installing = false, done = false, ok = false;
 
@@ -128,6 +128,7 @@ namespace
 			};
 			ctx.gitProbe        = &probe;
 			ctx.startGitInstall = [this]{ ++installs; };
+			ctx.cancelGitInstall = [this]{ ++cancels; };
 			ctx.gitInstallLog   = [this]{ ++logReads; return log; };
 			ctx.gitInstalling   = installing;
 			ctx.gitInstallDone  = done;
@@ -285,6 +286,8 @@ TEST_CASE("Git remedy: while installing, the button is off and the installer's o
 	frame(bits, false);
 	CHECK(bits.logReads > 0);   // the log is asked for every frame while it runs
 	dump(bits, "git-remedy-installing");
+	// A running apt cannot be stopped, so nothing offers to.
+	CHECK(itemsOnScreen(bits).count(idOf("Cancel")) == 0);
 
 	// Disabled, so pressing where it is does nothing — the button itself is
 	// still drawn, so its place is found the same way.
@@ -303,4 +306,26 @@ TEST_CASE("Git remedy: while installing, the button is off and the installer's o
 	frame(bits, false);
 	CHECK(bits.logReads > 0);
 	dump(bits, "git-remedy-install-failed");
+}
+
+TEST_CASE("Git remedy: the wait for Apple's installer can be cancelled")
+{
+	Harness h;
+	ContextBits bits;
+	bits.plan(HostPlatform::MacOS, { "xcode-select" });
+	REQUIRE(gitInstallLaunch(bits.probe.install)->returnsBeforeInstalled);
+
+	// Not before the install runs: there is nothing to stop yet.
+	frame(bits, false);
+	CHECK(itemsOnScreen(bits).count(idOf("Cancel")) == 0);
+
+	bits.installing = true;
+	bits.log = "Installing git through xcode-select.\nWaiting for Apple's installer to finish\xe2\x80\xa6\n";
+	frame(bits, false);
+	const auto items = itemsOnScreen(bits);
+	REQUIRE(items.count(idOf("Cancel")) == 1);
+	dump(bits, "git-remedy-clt-waiting");
+	clickAt(bits, items.at(idOf("Cancel")));
+	CHECK(bits.cancels == 1);
+	CHECK(bits.installs == 0);
 }

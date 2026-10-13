@@ -386,6 +386,9 @@ struct AppContext
 	// each frame, and the probe re-runs when it ends — and if git now runs, the
 	// project's repository is looked up again, so the panel picks up where it was.
 	std::function<void()> startGitInstall;
+	// Stops waiting for Apple's installer (the only wait that can be stopped:
+	// a package manager that is already running cannot be interrupted).
+	std::function<void()> cancelGitInstall;
 	std::function<std::string()> gitInstallLog; // thread-safe snapshot of the streamed output
 	bool gitInstalling   = false; // an install is currently running
 	bool gitInstallDone  = false; // the last install finished (success or failure)

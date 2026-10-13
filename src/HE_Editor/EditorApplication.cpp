@@ -11260,6 +11260,7 @@ AppContext EditorApplication::makeContext()
 		                           { applyGitIdentity(std::move(n), std::move(e)); },
 		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
 		.startGitInstall     = [this]{ startGitInstall(); },
+		.cancelGitInstall    = [this]{ m_gitInstallCancel.store(true, std::memory_order_release); },
 		.gitInstallLog       = [this]{ std::lock_guard<std::mutex> lk(m_gitInstallLogMutex); return m_gitInstallLog; },
 		.gitInstalling       = m_gitInstallRunning.load(std::memory_order_acquire),
 		.gitInstallDone      = m_gitInstallFinished.load(std::memory_order_acquire),
