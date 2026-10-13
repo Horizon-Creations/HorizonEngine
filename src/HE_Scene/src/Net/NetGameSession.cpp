@@ -274,6 +274,7 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
 			return false;
 		}
+		RelayTransport* const relayLink = link.get();   // see m_relayLink
 		SecureTransport::Config sec;
 		sec.joinSecret        = options.joinCode;
 		sec.role              = NetRole::Client;
@@ -287,7 +288,8 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 			return false;
 		}
 		if (!joinOn(std::move(secure), options)) return false;
-		m_viaRelay = true;
+		m_viaRelay  = true;
+		m_relayLink = relayLink;
 		// Said, because a typed address that is silently not dialled looks
 		// like a bug to whoever typed it.
 		HE_LOG_INFO(Replication, "Joining through the relay server at %s:%u (the address "
@@ -616,7 +618,8 @@ void NetGameSession::leave()
 	m_net.reset();
 	m_transport.reset();
 	m_udp = nullptr;   // it lived inside the chain that just went away
-	m_viaRelay = false;
+	m_viaRelay  = false;
+	m_relayLink = nullptr;   // so did this
 
 	m_roster.clear();
 	m_pending.clear();
@@ -1016,6 +1019,28 @@ void NetGameSession::update(float dt)
 	if (!m_net || !m_transport) return;
 
 	m_transport->update();
+
+	// A join the relay refused (nobody hosts that join code there, or the host
+	// did not take it in time). The link died inside the secure layer before it
+	// was a connection, so nothing below would ever notice.
+	if (m_relayLink && m_status == Status::Connecting &&
+	    m_relayLink->connectionCount() == 0 && !m_relayLink->lastError().empty())
+	{
+		const std::string& why = m_relayLink->lastError();
+		m_error = "The relay server could not connect you (" + why + ")." +
+		          (why.rfind("no-such-peer", 0) == 0
+		               ? std::string(" Nobody hosts a session with that join code on this "
+		                             "relay: check the code, and that the host uses the "
+		                             "same relay server.")
+		               : std::string());
+		m_status              = Status::Failed;
+		m_disconnectExplained = true;
+		m_relayLink           = nullptr;   // reported once
+		push(Event::Kind::Disconnected, m_localPlayer,
+		     static_cast<int>(DisconnectReason::Timeout));
+		HE_LOG_WARN(Replication, "%s", m_error.c_str());
+		return;
+	}
 
 	// BEFORE pump, not after: a refusal decided during THIS pump has not been
 	// written to the socket yet, and cutting the link in the same frame takes

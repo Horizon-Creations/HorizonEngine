@@ -101,9 +101,9 @@ public:
 
     // Host side: keep a listener connection to the relay for `sessionId` and
     // turn every incoming client into a peer link. Returns nullptr only for
-    // arguments that can never work (an invalid id, an unresolvable relay);
-    // a relay that is down is retried in the background, and listening()
-    // says when it has taken us.
+    // an invalid id; a relay that is down or unreachable is retried in the
+    // background (1 s doubling to 30 s), listening() says when it has taken
+    // us and lastError() why it has not.
     static std::unique_ptr<RelayTransport> host(const RelayAddress& relay,
                                                 const std::string& sessionId,
                                                 const std::string& selfId = kHostPeerId);
@@ -111,7 +111,8 @@ public:
     // Client side: one link to `hostId` in `sessionId` through the relay.
     // Non-null as soon as the attempt starts; the outcome arrives as Connected
     // (paired) or Disconnected (refused, timed out, relay unreachable) from
-    // poll(), exactly like TcpTransport::connect. An empty `selfId` picks a
+    // poll(), exactly like TcpTransport::connect — including its nullptr for a
+    // connect the OS refuses on the spot. An empty `selfId` picks a
     // random one, which is what callers want: it only has to be unique in the
     // session.
     static std::unique_ptr<RelayTransport> connect(const RelayAddress& relay,

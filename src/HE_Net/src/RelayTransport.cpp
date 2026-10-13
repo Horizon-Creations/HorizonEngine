@@ -224,17 +224,19 @@ std::unique_ptr<RelayTransport> RelayTransport::host(const RelayAddress& relay,
     t->m_sessionId = sessionId;
     t->m_selfId    = selfId;
     t->m_isHost    = true;
-    t->m_listener  = t->openLink(Role::Listen, {}, {});
-    if (!t->m_listener) {
-        // Resolve or socket failure: the address itself is the problem, and a
-        // retry loop would only repeat it every few seconds in the log.
-        HE_LOG_ERROR(Net, "Relay host: cannot start a connection to %s:%u",
-                     relay.host.c_str(), static_cast<unsigned>(relay.port));
-        return nullptr;
-    }
     HE_LOG_INFO(Net, "Relay host: registering session %s as '%s' at %s:%u",
                 detail::logSessionId(sessionId).c_str(), selfId.c_str(),
                 relay.host.c_str(), static_cast<unsigned>(relay.port));
+    t->m_listener = t->openLink(Role::Listen, {}, {});
+    if (!t->m_listener) {
+        // Refused on the spot (nothing listens there right now) or not
+        // resolvable — the socket layer does not tell the two apart. Either way
+        // the host keeps trying: a relay that restarts must not end a session,
+        // and lastError() says what is wrong in the meantime.
+        HE_LOG_WARN(Net, "Relay host: cannot reach %s:%u yet — retrying",
+                    relay.host.c_str(), static_cast<unsigned>(relay.port));
+        t->scheduleListenerRetry(nowMs());
+    }
     return t;
 }
 

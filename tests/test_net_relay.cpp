@@ -434,15 +434,17 @@ TEST_CASE("Relay: a relay nobody runs is a failed connect, and a host keeps retr
     }
     const RelayAddress dead{ "127.0.0.1", deadPort };
 
-    auto client = RelayTransport::connect(dead, "s");
-    REQUIRE(client);
-    std::vector<NetEvent> ev;
-    REQUIRE(pumpUntil(nullptr, { client.get() }, [&] {
-        for (auto& e : drain(*client)) ev.push_back(std::move(e));
-        return !ev.empty();
-    }));
-    CHECK(ev[0].type == NetEventType::Disconnected);
-    CHECK_FALSE(client->lastError().empty());
+    // As TcpTransport::connect: an immediate refusal is nullptr, a pending one
+    // ends in Disconnected. Either is a failed connect; a hang is not.
+    if (auto client = RelayTransport::connect(dead, "s")) {
+        std::vector<NetEvent> ev;
+        REQUIRE(pumpUntil(nullptr, { client.get() }, [&] {
+            for (auto& e : drain(*client)) ev.push_back(std::move(e));
+            return !ev.empty();
+        }));
+        CHECK(ev[0].type == NetEventType::Disconnected);
+        CHECK_FALSE(client->lastError().empty());
+    }
 
     auto host = RelayTransport::host(dead, "s");
     REQUIRE(host);   // not fatal: the relay may come up later
@@ -549,33 +551,6 @@ TEST_CASE("Relay: SecureTransport and NetSession run unchanged over a relay link
     CHECK(relay.forwarded > 0);
 }
 
-TEST_CASE("Relay: against a real collab_server (HE_TEST_RELAY=host:port)")
-{
-    const char* env = std::getenv("HE_TEST_RELAY");
-    if (!env || !*env) {
-        MESSAGE("HE_TEST_RELAY not set — skipped (start collab_server and point it there)");
-        return;
-    }
-    RelayAddress addr;
-    REQUIRE(parseRelayAddress(env, addr));
-    // A fresh session per run: a relay that still holds a previous run's
-    // listener would otherwise answer id-taken.
-    const std::string session = "he-test-" + std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count() % 1000000007);
-    CHECK(secureRoundTrip(nullptr, addr, session) == "ueber den relay");
-
-    // And a refusal from the real thing: nobody listens in this session.
-    auto lost = RelayTransport::connect(addr, session + "-empty");
-    REQUIRE(lost);
-    std::vector<NetEvent> ev;
-    REQUIRE(pumpUntil(nullptr, { lost.get() }, [&] {
-        for (auto& e : drain(*lost)) ev.push_back(std::move(e));
-        return !ev.empty();
-    }));
-    CHECK(ev[0].type == NetEventType::Disconnected);
-    CHECK(lost->lastError().find("no-such-peer") != std::string::npos);
-}
-
 // ─── The editor and the game, through the relay ──────────────────────────────
 // What the settings fields switch on: CollabController and NetGameSession with
 // a relay address, end to end over the fake relay. Without an address both run
@@ -589,12 +564,12 @@ std::string addressText(const FakeRelay& r) {
 }
 
 template <typename Fn>
-bool pumpCollab(FakeRelay& relay, std::vector<CollabController*> ends, Fn done,
+bool pumpCollab(FakeRelay* relay, std::vector<CollabController*> ends, Fn done,
                 std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::uint64_t now = 1;
     for (;;) {
-        relay.pump();
+        if (relay) relay->pump();
         for (CollabController* c : ends) c->update(now);
         if (done()) return true;
         if (std::chrono::steady_clock::now() >= deadline) return false;
@@ -627,7 +602,7 @@ TEST_CASE("Relay: two editors share a session through the relay, joined by sessi
     CHECK(host.viaRelay());
     CHECK(host.port() == 0);              // no port of our own was opened
     REQUIRE_FALSE(host.sessionId().empty());
-    REQUIRE(pumpCollab(relay, { &host }, [&] {
+    REQUIRE(pumpCollab(&relay, { &host }, [&] {
         return host.directoryStatus().find("Hosting through the relay") != std::string::npos;
     }));
     REQUIRE(relay.listeners.count(host.sessionId() + "/host") == 1);
@@ -638,7 +613,7 @@ TEST_CASE("Relay: two editors share a session through the relay, joined by sessi
     client.setRelayAddress(addressText(relay));
     REQUIRE(client.joinBySessionId(host.sessionId(), host.joinCode(), "Bob"));
     CHECK(client.viaRelay());
-    REQUIRE(pumpCollab(relay, { &host, &client }, [&] {
+    REQUIRE(pumpCollab(&relay, { &host, &client }, [&] {
         return client.status() == CollabController::Status::Joined;
     }));
     CHECK(entityCount(clientWorld) == entityCount(hostWorld));
@@ -667,7 +642,7 @@ TEST_CASE("Relay: an editor joining a session nobody hosts fails at once with th
     client.setRelayAddress(addressText(relay));
     REQUIRE(client.joinBySessionId("nosuchsession", "SOMECODE", "Bob"));
     // Well inside the 20 s connect deadline: the refusal is the answer.
-    REQUIRE(pumpCollab(relay, { &client }, [&] {
+    REQUIRE(pumpCollab(&relay, { &client }, [&] {
         return client.status() == CollabController::Status::Failed;
     }, std::chrono::seconds(5)));
     CHECK(client.lastError().find("no-such-peer") != std::string::npos);
@@ -709,6 +684,18 @@ TEST_CASE("Relay: a game session hosts and joins through the relay with only the
     CHECK(host.viaRelay());
     CHECK(host.boundPort() == 0);          // no UDP port was opened
 
+    // A join before the host is registered is refused (no-such-peer), as on
+    // the real relay; a person starts the host first, the test waits for it.
+    const std::string relaySession = RelayTransport::sessionIdForJoinCode(host.joinCode());
+    const auto registered = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!relay.listeners.count(relaySession + "/host") &&
+           std::chrono::steady_clock::now() < registered) {
+        relay.pump();
+        host.update(1.0f / 60.0f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(relay.listeners.count(relaySession + "/host") == 1);
+
     NetGameSession::JoinOptions joinOpts;
     joinOpts.displayName  = "Anna";
     joinOpts.joinCode     = host.joinCode();
@@ -727,9 +714,113 @@ TEST_CASE("Relay: a game session hosts and joins through the relay with only the
     }
     CHECK(client.status() == NetGameSession::Status::Joined);
     CHECK(host.roster().size() == 2u);
-    CHECK(relay.listeners.count(RelayTransport::sessionIdForJoinCode(host.joinCode()) + "/host") == 1);
 
     client.leave();
     host.leave();
     CHECK_FALSE(host.viaRelay());
+}
+
+TEST_CASE("Relay: a game join nobody hosts fails with the relay's reason instead of hanging")
+{
+    FakeRelay relay;
+    NetGameSession client;
+    HorizonWorld world;
+    client.setWorld(&world);
+    NetGameSession::JoinOptions joinOpts;
+    joinOpts.joinCode     = "NOBODY-HOSTS-THIS-CODE";
+    joinOpts.relayAddress = addressText(relay);
+    REQUIRE(client.joinDirect("127.0.0.1", 1, joinOpts));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (client.status() == NetGameSession::Status::Connecting &&
+           std::chrono::steady_clock::now() < deadline) {
+        relay.pump();
+        client.update(1.0f / 60.0f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(client.status() == NetGameSession::Status::Failed);
+    CHECK(client.lastError().find("no-such-peer") != std::string::npos);
+}
+
+TEST_CASE("Relay: against a real collab_server (HE_TEST_RELAY=host:port)")
+{
+    const char* env = std::getenv("HE_TEST_RELAY");
+    if (!env || !*env) {
+        MESSAGE("HE_TEST_RELAY not set — skipped (start collab_server and point it there)");
+        return;
+    }
+    RelayAddress addr;
+    REQUIRE(parseRelayAddress(env, addr));
+    // A fresh session per run: a relay that still holds a previous run's
+    // listener would otherwise answer id-taken.
+    const std::string session = "he-test-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count() % 1000000007);
+    CHECK(secureRoundTrip(nullptr, addr, session) == "ueber den relay");
+
+    // And a refusal from the real thing: nobody listens in this session.
+    auto lost = RelayTransport::connect(addr, session + "-empty");
+    REQUIRE(lost);
+    std::vector<NetEvent> ev;
+    REQUIRE(pumpUntil(nullptr, { lost.get() }, [&] {
+        for (auto& e : drain(*lost)) ev.push_back(std::move(e));
+        return !ev.empty();
+    }));
+    CHECK(ev[0].type == NetEventType::Disconnected);
+    CHECK(lost->lastError().find("no-such-peer") != std::string::npos);
+
+    // The editor path, end to end through the real server.
+    {
+        HorizonWorld hostWorld, clientWorld;
+        hostWorld.createEntity("Cube");
+        CollabController host, client;
+        host.setWorld(&hostWorld);
+        client.setWorld(&clientWorld);
+        host.setRelayAddress(env);
+        client.setRelayAddress(env);
+        REQUIRE(host.startHosting(0, "Anna"));
+        REQUIRE(pumpCollab(nullptr, { &host }, [&] {
+            return host.directoryStatus().find("Hosting through the relay") != std::string::npos;
+        }));
+        REQUIRE(client.joinBySessionId(host.sessionId(), host.joinCode(), "Bob"));
+        CHECK(pumpCollab(nullptr, { &host, &client }, [&] {
+            return client.status() == CollabController::Status::Joined;
+        }));
+        CHECK(entityCount(clientWorld) == entityCount(hostWorld));
+        client.leave();
+        host.leave();
+    }
+
+    // And the game path.
+    {
+        NetGameSession::HostOptions hostOpts;
+        hostOpts.announceLan  = false;
+        hostOpts.relayAddress = env;
+        HorizonWorld   hostWorld, clientWorld;
+        NetGameSession host, client;
+        host.setWorld(&hostWorld);
+        client.setWorld(&clientWorld);
+        REQUIRE(host.host(hostOpts));
+        // Give the listener a moment to register (no relay-side view here).
+        const auto settle = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+        while (std::chrono::steady_clock::now() < settle) {
+            host.update(1.0f / 60.0f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        NetGameSession::JoinOptions joinOpts;
+        joinOpts.displayName  = "Anna";
+        joinOpts.joinCode     = host.joinCode();
+        joinOpts.relayAddress = env;
+        REQUIRE(client.joinDirect("203.0.113.1", 9, joinOpts));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (client.status() == NetGameSession::Status::Connecting &&
+               std::chrono::steady_clock::now() < deadline) {
+            host.update(1.0f / 60.0f);
+            client.update(1.0f / 60.0f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        CHECK(client.status() == NetGameSession::Status::Joined);
+        CHECK(host.roster().size() == 2u);
+        client.leave();
+        host.leave();
+    }
 }

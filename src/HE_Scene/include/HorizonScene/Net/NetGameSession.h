@@ -54,7 +54,7 @@
 
 class HorizonWorld;
 namespace HE { struct ProjectAntiCheatSettings; }
-namespace HE::Net { class SecureTransport; class UdpTransport; }
+namespace HE::Net { class RelayTransport; class SecureTransport; class UdpTransport; }
 
 // No HE_API — HorizonScene exports every symbol (see GameReplication.h).
 class NetGameSession
@@ -468,6 +468,10 @@ private:
 	HE::Net::UdpTransport*        m_udp = nullptr;
 	// host()/joinDirect() went through a relay server (HostOptions::relayAddress).
 	bool                          m_viaRelay = false;
+	// That relay link, non-owning like m_udp, for its refusal reason: a join the
+	// relay turns down (nobody hosts that code) dies inside the secure layer
+	// before it is a connection, and would otherwise sit in Connecting for good.
+	HE::Net::RelayTransport*      m_relayLink = nullptr;
 
 	// The project's Multiplayer page, copied at the moment it was handed over.
 	// Default-constructed until somebody does, which is the behaviour every
