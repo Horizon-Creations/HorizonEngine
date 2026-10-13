@@ -217,3 +217,83 @@ Bekannte Restkante: Wiederholt `writeCachedManifest` unter Windows (Fremdhalter
 auf `manifest.json`), wartet es bis ~0,6 s unter `m_manifestMutex`; ein
 `manifest()` des UI-Threads wartet dann mit. Nur im Fehlerfall, vorher scheiterte
 derselbe Fall stattdessen.
+
+## Regressionstest (Schritt 3)
+
+`tests/test_engine_content_manifest_refresh.cpp` treibt den echten
+`EngineContentSync`-Code über `refreshManifestWith`; nur der SFTP-Download ist
+ersetzt, durch eine Nachbildung von `sftpGetFile` (`ofstream` auf `.partial`,
+in zwei Hälften geschrieben, dazwischen 3 ms offen, dann `fs::rename`). Drei Fälle:
+
+1. **Die zwei Startaufrufer** (SFTP-Probe und Projekt-Preflight): 100 Runden, je
+   zwei Threads, die gleichzeitig losgehen. Erwartet: kein Refresh scheitert, nie
+   laufen zwei Downloads zugleich, `lastManifestError()` leer,
+   `loadCachedManifest()` sagt `true`, das `manifest.json` auf der Platte hat den
+   neuen Inhalt, kein `.manifest.json.tmp` bleibt liegen. Das ist der
+   ursprüngliche Lock-Konflikt.
+2. **Start nach einem gekillten Editor:** garbage in `.manifest.json.tmp.partial`,
+   `.manifest.json.tmp` und `manifest.json.tmp` (was ein Kill mitten im Download
+   oder im Cache-Schreiben hinterlässt), dann ein Refresh. Erwartet: Erfolg, alle
+   drei Reste weg. Dazu ein Refresh bei unerreichbarem Server: scheitert, behält
+   das vorige Manifest im Speicher und auf der Platte.
+3. **Fremdhalter für einen Moment** (Defender, Indexer): ein zweiter Thread hält
+   60 ms lang die Quelle eines `detail::renameReplacing` bzw. das `manifest.json`,
+   während ein Refresh das neue darüber schreibt. Erwartet überall: Erfolg und der
+   neue Inhalt auf der Platte. Unter Windows zusätzlich mindestens eine
+   "Renaming '...' retry"-WARN-Zeile im Log-Ring (der Retry-Pfad lief wirklich),
+   unter macOS/Linux keine. Das ist der einzige Test, der den Windows-Retry ausführt.
+
+**Isolation.** `engineContentCacheDir()` löst sich einmal pro Prozess aus `HOME`
+(macOS), `XDG_CONFIG_HOME` (Linux) bzw. `APPDATA` (Windows) auf und enthält auf
+einem Entwicklerrechner den echten Katalog. ctest startet die Datei deshalb mit
+allen dreien im eigenen Temp-Ordner und setzt `HE_TEST_ENGINE_CONTENT_HOME`
+(`tests/CMakeLists.txt`, nach der Registrierungsschleife). Ohne die Variable (ein
+nackter `he_tests`-Lauf) tun die Fälle nichts und sagen das per MESSAGE; mit ihr
+bricht ein Fall ab, wenn der Cache-Ordner trotzdem ausserhalb liegt. Gebaut wird
+die Datei nur, wenn es `HorizonContentSync` gibt (libssh2 gefunden).
+
+**Gegenprobe auf macOS (13.10., MacBook Air, auf Akku):** eigenständig mit doctest
+gegen die gebaute `libHorizonContentSync.dylib`: 3/3 Fälle, 39/39 Assertions grün,
+fünfmal hintereinander, ~1,2 s. Ohne Isolation: 3 Fälle "not run", das echte
+`manifest.json` unverändert (mtime/Grösse verglichen). **Negativkontrolle:** mit
+auskommentiertem `lock_guard(m_refreshMutex)` scheitern 100 von 200 Refreshes
+(`rename: 2 No such file or directory`, also auch unter POSIX) und zwei Downloads
+laufen gleichzeitig; Quelle danach wiederhergestellt. Der Test ist damit kein
+Windows-only-Test: er fällt auf jeder Plattform, sobald die Refreshes wieder
+überlappen. `he_tests` selbst wurde lokal nicht gebaut; die Windows/Linux-Hälfte
+liefert die CI-Matrix (`ci.yml` führt jedes `tests/test_*.cpp` per ctest aus).
+
+Falle beim Schreiben: `sleep_for(3 ms)` wurde auf dem Mac im Akkubetrieb zu ~90 ms
+(Timer-Coalescing), 200 Refreshes dauerten 18 s. Die Pause ist deshalb eine
+`yield`-Schleife gegen `steady_clock`.
+
+### Manuelle Windows-Abnahme (Editor, nicht automatisierbar)
+
+Die drei Startszenarien aus dem Thema brauchen einen echten Windows-Editor mit
+konfiguriertem EngineContent-Endpunkt (`cmake/EngineContentCredentials.cmake`) und
+ein Projekt, damit der Preflight läuft (Build ab release/0.7.0 mit diesem Zweig).
+Log: `HorizonEngine.log` neben der exe (ist der Ordner nicht beschreibbar, nennt
+eine Zeile "Log file: ..." den Ausweichort). Cache: `%APPDATA%\HorizonEngine\EngineContentCache`.
+
+1. **Normaler Start** mit Projekt. Erwartet: zweimal "EngineContent manifest
+   refreshed (N entries)" (Probe und Preflight, nacheinander), keine Meldung "The
+   EngineContent catalogue could not be read", kein Preflight-Serverfehler, die
+   Engine-Assets im Content Browser.
+2. **Schneller Neustart:** Editor schliessen und sofort wieder starten, dreimal
+   hintereinander. Erwartet wie 1. Taucht "Renaming '...' failed (32|5: ...) —
+   retry n of 5" auf, hielt jemand anderes die Datei (Defender/Indexer oder der
+   noch nicht ganz beendete vorige Editor); solange danach "refreshed" folgt, hat
+   der Retry gegriffen. Tritt "retry 5 of 5" mit Fehlermeldung auf: Prozess mit
+   Handle suchen (`handle.exe manifest` aus Sysinternals) und hier eintragen.
+3. **Start nach Absturz:** Editor in den ersten Sekunden des Starts, bevor
+   "EngineContent manifest refreshed" im Log steht, im Task-Manager beenden, in `EngineContentCache` nachsehen, ob
+   `.manifest.json.tmp*` liegen geblieben ist, dann normal starten. Erwartet wie
+   1., die Reste sind danach weg. Einen eigenen Content-Server-Prozess, der
+   abstürzen könnte, gibt es nicht (siehe "Es gibt keinen lokalen Content-Server").
+4. **Server nicht erreichbar** (Netz aus): Start meldet "The EngineContent server
+   could not be reached." mit "Working from the catalogue of the last successful
+   connection", der Content Browser zeigt die Engine-Assets aus dem Cache-Manifest.
+
+Ergebnis je Szenario mit Logauszug hier nachtragen. Stand 13.10.: noch nicht
+durchgeführt (kein Windows-Rechner an diesem Gerät; die Queen organisiert einen
+Lauf auf NN-WS03).

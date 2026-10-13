@@ -28,8 +28,9 @@
 //    the same interleaving goes through silently — why only Windows ever saw it.
 // This is the witness for the mechanism, not the fix: the fix (Schritt 2) runs the
 // refreshes one after another (EngineContentSync::m_refreshMutex), so they never hold
-// the shared path at the same time, and the regression test (Schritt 3) drives the
-// real EngineContentSync code through refreshManifestWith.
+// the shared path at the same time, and the regression test (Schritt 3,
+// test_engine_content_manifest_refresh.cpp) drives the real EngineContentSync code
+// through refreshManifestWith.
 
 namespace fs = std::filesystem;
 

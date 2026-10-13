@@ -1157,6 +1157,23 @@ if(TARGET HorizonSelfUpdate)
         HE_TEST_UPDATER_EXE="$<TARGET_FILE:HorizonUpdater>")
 endif()
 
+# The EngineContent manifest regression test (Thema 187, Schritt 3): drives the
+# real EngineContentSync refresh, so it needs HorizonContentSync (present only
+# with libssh2, like HorizonSelfUpdate) and its private src/ for CsRename.h. Its
+# ctest entry gets its own HOME/APPDATA below — see the ENVIRONMENT after the loop.
+if(TARGET HorizonContentSync)
+    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp)
+    target_link_libraries(he_tests PRIVATE HorizonContentSync)
+    target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
+    if(WIN32)
+        add_custom_command(TARGET he_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:HorizonContentSync> $<TARGET_FILE_DIR:he_tests>
+            VERBATIM
+        )
+    endif()
+endif()
+
 # Shared material shader layer (CPU-only: glslang + SPIRV-Cross under the hood) — lets
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
@@ -1256,6 +1273,20 @@ foreach(_src IN LISTS _he_test_sources)
     set_tests_properties(${_stem} PROPERTIES
         ENVIRONMENT "TMPDIR=${_tmp};TMP=${_tmp};TEMP=${_tmp}")
 endforeach()
+
+# EngineContentSync writes the cached manifest into GlobalState::engineContentCacheDir(),
+# which resolves once per process from HOME (macOS), XDG_CONFIG_HOME (Linux) or
+# APPDATA (Windows) — on a developer machine, the real catalogue. Point all three
+# into the test's own temp dir; the test refuses to run without
+# HE_TEST_ENGINE_CONTENT_HOME. set_tests_properties REPLACES the ENVIRONMENT set
+# in the loop, so the TMPDIR trio is repeated.
+if(TARGET HorizonContentSync)
+    set(_tmp "${_he_tmp_root}/test_engine_content_manifest_refresh")
+    set(_home "${_tmp}/home")
+    file(MAKE_DIRECTORY "${_home}")
+    set_tests_properties(test_engine_content_manifest_refresh PROPERTIES
+        ENVIRONMENT "TMPDIR=${_tmp};TMP=${_tmp};TEMP=${_tmp};HOME=${_home};XDG_CONFIG_HOME=${_home};APPDATA=${_home};HE_TEST_ENGINE_CONTENT_HOME=${_home}")
+endif()
 
 # ── "Does every control explain itself?" ─────────────────────────────────────
 # A missing tooltip is invisible: nothing fails to build and nothing fails a
