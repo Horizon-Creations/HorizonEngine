@@ -21,9 +21,11 @@ Das Auto-Landscape-Material, die Texturdaten und der Runtime-Loader sind unverä
 ## 2. Nachweis (NN-WS03, 2026-10-13)
 
 * `he_tests` (Release, `C:/hw189b`, `DEPLOY_DIR=C:/hw189b/deploy`, Scratch-APPDATA): `test_project_exporter.cpp`
-  33/33, alle Fälle mit pak/hpak/export/incremental im Namen 80/80. Drei neue Fälle:
+  34/34; alle zehn Testdateien, die `HpakWriter`/`exportProject` benutzen (`grep -l`), 623/623. Vier neue Fälle:
   Cache-only-Arrays werden gepackt und gebacken (auch per Pfad über `__asset_index__` auflösbar);
-  Negativkontrolle ohne Cache → Refs `0:0` + zwei Warnungen; ausgelieferter Default verdeckt eine
+  Negativkontrolle ohne Cache → Refs `0:0` + zwei Warnungen; **inkrementeller Re-Export über das kaputte Pak**
+  (`incremental` ist Default `true`, der Fall des Menschen): das Material wird neu gebacken statt mit `0:0`
+  übernommen (`assetsReused == 0`, Kontrolle davor: unverändert = 1 reused); ausgelieferter Default verdeckt eine
   veraltete Cache-Kopie (andere UUID), Kollision unter anderem Pfad ergibt genau eine Warnung.
 * Negativkontrolle des Schattenwurfs: `fallbackOnly`-Prüfung abgeschaltet → der dritte Fall scheitert
   (4 statt 3 Einträge, alte UUID gepackt und gebacken). Danach zurückgesetzt.
@@ -48,7 +50,7 @@ Das Auto-Landscape-Material, die Texturdaten und der Runtime-Loader sind unverä
 ## Handoff
 
 - **Topic / step:** Thema 189, Schritt 2 von 3 (Ursache beheben)
-- **Branch / commit:** `claude/landscape-material-export-textures`, Fix `3aa588df`, dieses Dokument im Commit danach (gepusht)
+- **Branch / commit:** `claude/landscape-material-export-textures`, Fix `3aa588df`, Doku `1064ebe2`, Re-Export-Test + Doku-Nachtrag im Commit danach (gepusht)
 - **Done:** Exporter packt den EngineContent-Cache als dritte, verdeckte `Engine/`-Wurzel; stille Null-Refs und
   UUID-Kollisionen werden gemeldet. Tests + E2E auf D3D11 grün (§2).
 - **Verified:** §2. **Not verified:** Vulkan- und D3D12-Spiel mit dem neuen Pak (Schritt 3; das Pak ist

@@ -765,10 +765,12 @@ namespace
             REQUIRE(cm.saveAsset(t));
         }
 
-        ExportResult run(bool withCache, std::vector<std::string>* warnings)
+        ExportResult run(bool withCache, std::vector<std::string>* warnings,
+                         bool incremental = false)
         {
             ExportSettings s;
             s.compress         = false;
+            s.incremental      = incremental;
             s.engineContentDir = engineDir;
             if (withCache) s.engineContentCacheDir = cacheDir;
             if (warnings)
@@ -845,6 +847,42 @@ TEST_CASE("Without the cache tier the dropped texture refs are reported, not sil
     CHECK(warnings.size() == 2);
     CHECK(mentions(warnings, CacheTierFixture::kAlbedo));
     CHECK(mentions(warnings, CacheTierFixture::kMask));
+}
+
+TEST_CASE("An incremental re-export over the broken pak re-bakes the now resolvable refs")
+{
+    // What the human actually does next: export again into the folder that holds
+    // the white-landscape pak. M_AutoLandscape's own bytes are unchanged, so only
+    // its recorded deps ("path -> 0:0") can tell the incremental cache that the
+    // entry must not be carried over verbatim.
+    CacheTierFixture fx("engcacheincr");
+    CacheTierFixture::writeTexture(fx.cacheDir, "T_Albedo_Array", fx.albedoId);
+    CacheTierFixture::writeTexture(fx.cacheDir, "T_Mask_Array",   fx.maskId);
+
+    REQUIRE(fx.run(/*withCache*/ false, nullptr, /*incremental*/ true).success);
+    {
+        const auto ids = fx.bakedTextureIds();
+        REQUIRE(ids.size() == 2);
+        CHECK(ids[0] == HE::UUID{});
+    }
+
+    // The same pak again, untouched content: the material is reused as it was.
+    {
+        const auto again = fx.run(/*withCache*/ false, nullptr, /*incremental*/ true);
+        REQUIRE(again.success);
+        CHECK(again.assetsReused == 1);
+    }
+
+    std::vector<std::string> warnings;
+    const auto result = fx.run(/*withCache*/ true, &warnings, /*incremental*/ true);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 3);
+    CHECK(result.assetsReused == 0);   // the material is re-baked, not carried over
+    const auto ids = fx.bakedTextureIds();
+    REQUIRE(ids.size() == 2);
+    CHECK(ids[0] == fx.albedoId);
+    CHECK(ids[1] == fx.maskId);
+    CHECK(warnings.empty());
 }
 
 TEST_CASE("The cache only fills Engine/ paths the shipped defaults do not have")
