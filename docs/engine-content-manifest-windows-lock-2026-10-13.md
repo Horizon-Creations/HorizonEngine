@@ -298,3 +298,41 @@ eine Zeile "Log file: ..." den Ausweichort). Cache: `%APPDATA%\HorizonEngine\Eng
 Ergebnis je Szenario mit Logauszug hier nachtragen. Stand 13.10.: noch nicht
 durchgeführt (kein Windows-Rechner an diesem Gerät; die Queen organisiert einen
 Lauf auf NN-WS03).
+
+## Build und Tests (Schritt 4)
+
+Stand 371e2462, MacBook Air (Release, Ninja `-j8`, `HE_BUILD_TESTS`/shaderc ON,
+`out/build/release` im Worktree), 13.10.:
+
+- **Vollbau** 930/930 Schritte, rc 0, Editor gelinkt. Keine Warnung aus den
+  geänderten Dateien (nur die bekannten Vendor-/Deprecation-Warnungen).
+- **Gezielt:** `test_engine_content_manifest_refresh` 3/3 Fälle, 39 Assertions (also
+  wirklich gelaufen, nicht "not run"); `test_engine_content_manifest_lock` 2/2, 6;
+  `test_contentmanager` 85/85; die drei Self-Update-Suiten (SftpClient-Mitnutzer) 30/30.
+- **Volle Suite** (`ctest -j4`, `HE_CONFIG_DIR` ungesetzt, Wegwerf-`HOME`): 280
+  Einträge, 278 bestanden, 0 rot, 2 übersprungen (`runtime_size_app_basic/advanced`:
+  kein `out/deploy/App*` zum Messen, unabhängig von diesem Thema), 548 s.
+- **Negativkontrolle in `he_tests`** (nicht nur im Einzel-Build von Schritt 3):
+  `lock_guard(m_refreshMutex)` auskommentiert → `test_engine_content_manifest_refresh`
+  rot, 103 von 200 Refreshes scheitern (`rename: 2 No such file or directory`),
+  `maxInFetch == 2`, `lastManifestError()` gesetzt. Quelle zurückgesetzt, neu gebaut,
+  wieder grün.
+- **Editor-Start** (versteckt, `HE_EXIT_AFTER_FRAMES=120`, Wegwerf-`HOME`): 120 Frames,
+  sauberes Herunterfahren, 0 Fehler. Der Manifest-Pfad läuft dabei NICHT: dieser
+  Build hat kein EngineContent-Konto einkompiliert (`probe.configured == false`).
+- **CI** Run 38379510241 (371e2462): Windows, macOS, Linux, Linux-lavapipe grün; im
+  Windows-Job `test_engine_content_manifest_lock` 0,12 s und
+  `test_engine_content_manifest_refresh` 1,65 s bestanden. ctest zeigt bestandene
+  Ausgabe nicht, die Fallzahl unter Windows ist also nicht sichtbar. Die Laufzeit
+  spricht dafür, dass die Fälle liefen (ohne Isolation kehren sie sofort zurück),
+  ein Beweis ist sie nicht.
+
+Was offen bleibt: (1) Die Lock-Quelle beim Nutzer ist aus Code und
+Fehlercode-Semantik erschlossen, nicht an einem Log der betroffenen Maschine
+gesehen. Welcher Build dort lief, ist ungeklärt (die Startup-Race gibt es nur mit
+dem Projekt-Preflight). (2) Die manuelle Windows-Abnahme oben steht aus. (3)
+`loadCachedManifest()` antwortet jetzt auf allen Plattformen `true`, wenn diese
+Sitzung schon einen Live-Katalog hat. Das ändert macOS/Linux im Randfall "erster
+Refresh ok, späterer scheitert" (vorher fälschlich "kein Katalog"); gewollt, aber
+kein reiner Windows-Fix. (4) Schneller Neustart über Prozessgrenzen (alter Editor
+lädt noch) deckt nur der Windows-Rename-Retry (~0,6 s) ab, nicht der Mutex.
