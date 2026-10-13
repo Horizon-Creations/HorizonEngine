@@ -1,8 +1,8 @@
 # HE_Net relay server: protocol and engine mapping
 
-Status (2026-10-13): **server step 1 done** (1:1 pairing, no broadcast yet). The
-engine side is untouched; without a configured relay HE_Net connects
-peer-to-peer exactly as before.
+Status (2026-10-13): **server steps 1 and 2 done** (1:1 pairing, broadcast
+fan-out). The engine side is untouched; without a configured relay HE_Net
+connects peer-to-peer exactly as before.
 
 ## Where the server lives
 
@@ -13,7 +13,8 @@ Separate repository, not part of this tree:
 - Binary `collab_server [port]`, default port 7777, C++17 without
   dependencies, epoll on Linux (the rented server), poll() on macOS for tests
 - The repository's `README.md` is the authoritative protocol description;
-  `tests/relay_test.py` is the executable one (15 end-to-end cases)
+  `tests/relay_test.py` is the executable one (25 end-to-end cases, 10 of
+  them broadcast)
 
 ## Model in one paragraph
 
@@ -25,6 +26,11 @@ connection with `ACCEPT session/self/clientId/token`. Both ends get
 `STATUS paired`, and from then on the relay forwards raw bytes in both
 directions without reading them. Sessions are isolated; peer ids are unique
 per session while connected.
+
+Broadcast rides on top of that: the host sends `BROADCAST` frames on its
+listener connection, and every client that is **paired with that host** and
+has opened one extra `SUBSCRIBE session/self/hostId` connection receives each
+payload once. The host sends an update once; the relay makes the copies.
 
 ## Wire summary (protocol v1)
 
@@ -39,14 +45,36 @@ length + bytes. Ids are 1..64 chars of `[A-Za-z0-9_-]` (the
 | 2 | STATUS (relay → client) | code u8, text str8 |
 | 3 | INCOMING (relay → listener) | peer str8, token str8 (16 bytes) |
 | 4 | GONE (relay → listener) | peer str8: a waiting client gave up |
+| 5 | BROADCAST (listener → relay) | the rest of the frame is the payload, up to 64 MiB |
+
+Roles: 1 listen, 2 connect, 3 accept, 4 subscribe (target = host id, no
+token; only accepted while `self` is paired with that host in the session).
 
 Status codes: 0 listening, 1 waiting, 2 paired (last control frame, raw bytes
-follow); refusals, after which the relay closes: 16 bad-hello, 17 bad-version,
+follow), 3 subscribed (last control frame, broadcast frames follow);
+refusals, after which the relay closes: 16 bad-hello, 17 bad-version,
 18 id-taken, 19 no-such-peer, 20 timeout, 21 full, 22 not-expected.
 
+A subscriber receives each broadcast as `[uint32 BE length][payload]`, which is
+exactly `TcpTransport`'s framing; the `HERL|1|5` header is stripped.
+
 Close semantics: if one end closes, the other end gets all pending bytes and
-then a FIN. If the listener closes, waiting clients get no-such-peer, and
-existing pairs keep running.
+then a FIN. If the listener closes, waiting clients get no-such-peer, existing
+pairs keep running, and subscribers get their queued broadcasts and then a
+FIN. A subscription ends with the pair it was granted for.
+
+Broadcast rules that matter to the engine:
+
+- No replay: a subscriber gets broadcasts from the next whole frame after it
+  subscribed. The initial state has to come over the pair (snapshot), the
+  broadcast carries the changes after it.
+- No ordering between the pair stream and the broadcast stream (two TCP
+  connections). Within the broadcast stream all subscribers see the same
+  frames in the host's order.
+- Back-pressure: the slowest subscriber pauses reading from the host's
+  listener (1 MiB high / 256 KiB low water). A subscriber stuck above the high
+  mark for `--stall-timeout` (10 s) is dropped; the others go on.
+- A subscriber sends nothing; the relay drops it if it does.
 
 ## How the engine side maps onto it (step 3, not built yet)
 
@@ -69,11 +97,29 @@ unchanged over a relay connection. Only the socket setup differs:
 - The relay never sees plaintext: it forwards the bytes after `paired` as they
   are, including SecureTransport's handshake and AES-GCM frames.
 
+## How broadcast maps onto the engine (step 4, not built yet)
+
+- **Host** (`NetSession::broadcast`, `CollabSession`'s broadcast helpers):
+  when a relay is configured, write the message once as a `BROADCAST` frame on
+  the listener connection instead of once per connection. Messages with an
+  `except` connection (e.g. `broadcastLock(..., except)`) either stay on the
+  per-pair path or let the originator drop its own echo; the relay has no
+  exclude list.
+- **Client**: after `paired`, open the `SUBSCRIBE` connection and feed its
+  frames into the same dispatch as messages from the host. It is receive-only,
+  so `SecureTransport` (a two-way handshake) cannot run on it: broadcast
+  payloads need message-level encryption, for example a session group key the
+  host hands to every client over its already encrypted pair. Until that
+  exists, broadcast must stay off for sessions that need confidentiality.
+- Late joiners: request the snapshot over the pair after subscribing, so no
+  change falls between snapshot and first broadcast (deduplicate by sequence
+  number if needed, because the two streams are not ordered against each
+  other).
+
 ## Open (later steps of topic 193)
 
-- Broadcast fan-out (host sends once, relay delivers to all clients of the
-  session). With per-pair `SecureTransport` keys a broadcast payload needs its
-  own encryption story; that belongs to steps 2 and 4.
+- Engine side of the relay (step 3) and of broadcast, including the
+  broadcast encryption described above (step 4).
 - Access control on the relay itself (today anyone who can reach the port may
   open sessions; the content stays end-to-end encrypted).
 - Deployment on the rented Linux server (service unit, firewall), plus the
