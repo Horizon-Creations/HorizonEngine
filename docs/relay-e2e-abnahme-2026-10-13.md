@@ -13,16 +13,16 @@ engine design: `docs/relay-server-protocol.md`.
 | 4 editor processes, 1 host + 3 guests, **through the relay** | macOS, relay on 127.0.0.1 | PASS, 51 checks |
 | Same 4 editors **without relay** (`HE_NET_RELAY=off`) | macOS | PASS, 43 checks, relay saw nothing |
 | Relay on the rented server (212.227.140.164:7777) | Debian 12 VPS | **running** as systemd user service `collab-relay` (build f61c9f1), see "Rented server" |
-| 4 editors (1 host + 3 guests) against the **rented** relay | macOS → VPS through an ssh tunnel | PASS, 47 checks; port 7777 itself not yet reachable from outside (firewall) |
+| 4 editors (1 host + 3 guests) against the **rented** relay | macOS → VPS through an ssh tunnel | PASS, 47 checks |
+| Same, **directly** to 212.227.140.164:7777 over the internet | macOS → VPS | PASS, 47 checks (after the port was opened at 15:52) |
 | Second platform (Windows/Linux client) | — | **not done**: no client on NN-WS03/NN-RP01 reachable from this step |
 | CI (Windows/Linux/macOS build + full ctest) | GitHub | 38396486313: Windows did not compile (MSVC, fixed in 58f1e4f2); 38400975745: Windows builds, 279/280 (timing in one test, fixed in a896172a), others green; 38407041777 (a896172a) still running |
 
 So: unicast and broadcast through a real relay work with several real editor
 processes that only dial out, and peer-to-peer works unchanged. The relay
 runs permanently on the rented server, and the same four editors share a
-session through it (over an ssh tunnel, because the server's port 7777 was
-still closed by a firewall from outside). Not shown: a client reaching the
-rented relay without the tunnel, and a client on a second operating system.
+session through it, directly over the internet. Not shown: a client on a
+second operating system.
 
 ## How it was run
 
@@ -186,11 +186,30 @@ of them (1739 + 24 × 4 framing = 1835 bytes), and the two that left earlier
 missed the last ones, which announced their own departure. Joins 0.1–1.2 s,
 syncs 0.0–0.3 s over the internet.
 
+### Direct, without the tunnel (PASS, 47 checks)
+
+At 15:52 port 7777 answered from outside. The same run with
+`--relay 212.227.140.164:7777`: every new session link of every editor is a
+connection to `212.227.140.164:7777` (host 4, each guest 2: pair and
+subscription), and the server journal shows them arriving from the Mac's
+public address:
+
+```
+[accept session=2fl3k6.. peer=host -> c-h21toqs1q91b] paired with #17
+[accept session=2fl3k6.. peer=host -> c-nfy71v5lbmhg] paired with #18
+[accept session=2fl3k6.. peer=host -> c-1k5vekjgfxnk] paired with #19
+[subscribe … -> host] subscribed to #16 (1 subscribers)   … (2 subscribers)   … (3 subscribers)
+[subscribe … peer=c-h21toqs1q91b -> host] disconnected after 5.3 s, received 1484 broadcast bytes
+[subscribe … peer=c-nfy71v5lbmhg -> host] disconnected after 5.1 s, received 1484 broadcast bytes
+[subscribe … peer=c-1k5vekjgfxnk -> host] disconnected after 5.2 s, received 1571 broadcast bytes
+[listen session=2fl3k6.. peer=host] disconnected after 8.3 s, forwarded 1491 bytes in 20 broadcasts
+```
+
+Joins 0.2–1.0 s, broadcast and unicast syncs 0.0–0.2 s over the internet.
+
 ## Gaps (not shown by this step)
 
-1. **Port 7777 from outside.** See above; once it is open:
-   `scripts/he_collab_relay_e2e.py OUT --relay 212.227.140.164:7777 --guests 3`.
-2. **Second operating system.** The editors here all run on macOS. A Windows or
+1. **Second operating system.** The editors here all run on macOS. A Windows or
    Linux client would need NN-WS03 or NN-RP01 to run either
    `he_tests --test-case='*real collab_server*'` with
    `HE_TEST_RELAY=<relay>`, or an editor from this script, against the same
