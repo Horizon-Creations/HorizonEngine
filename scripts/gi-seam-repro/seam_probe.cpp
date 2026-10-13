@@ -19,6 +19,10 @@
 // Result on 13.10.2026 (docs/gi-landscape-tile-seams-ursache-2026-10-13.md):
 // same LOD 0 skirt-only hits and no step; LOD0|LOD1 and LOD0|LOD2 add
 // +1.5 % / +7 % surface-blocked rays next to the seam, step pixels 15 / 35 %.
+// Schritt 2 (stitchTerrainChunkEdges on the finer side): LOD0|LOD1, |LOD2,
+// |LOD3 and tess x4|LOD0 all 0 step rays and 0 skirt-only hits; surface-
+// blocked 29 362 / 25 568 / 30 362 / 32 053 against 31 639 for same LOD (the
+// coarser side has less relief of its own to shadow with).
 #include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonRendering/GiBvh.h>
 
@@ -155,13 +159,22 @@ std::vector<float> field()
 }
 
 // Chunk (cx, 0) of the 2x2 grid at `verts` per side, or the tessellated level.
-Chunk build(const std::vector<float>& h, int cx, uint32_t verts, bool tess)
+// stitchCells > 0 (Schritt 2): its right edge (the seam) stitched onto a
+// neighbour of that many cells, as TerrainSystem::stitchSeams does.
+Chunk build(const std::vector<float>& h, int cx, uint32_t verts, bool tess, uint32_t stitchCells = 0)
 {
 	const float u0 = 0.5f * cx, u1 = u0 + 0.5f;
-	const StaticMeshAsset m = tess
+	StaticMeshAsset m = tess
 		? generateTerrainChunkMeshTessellated(h, kRes, kSize, kSize, u0, 0.0f, u1, 0.5f,
 		                                      verts, 1.0f, TerrainDisplacementMap{})
 		: generateTerrainChunkMesh(h, kRes, kSize, kSize, u0, 0.0f, u1, 0.5f, verts, 1.0f);
+	if (stitchCells)
+	{
+		const StaticMeshAsset lod0 = generateTerrainChunkMesh(h, kRes, kSize, kSize, u0, 0.0f, u1, 0.5f, 65, 1.0f);
+		TerrainChunkStitch st;
+		st.edgeCells[1] = stitchCells;
+		m = stitchTerrainChunkEdges(m, verts - 1, lod0, 64, st);
+	}
 	return makeChunk(m, -32.0f + 64.0f * cx, -32.0f, verts);
 }
 } // namespace
@@ -177,20 +190,24 @@ int main()
 			suns.push_back(glm::vec3(std::cos(e) * std::cos(a), std::sin(e), std::cos(e) * std::sin(a)));
 		}
 
-	struct Case { const char* name; uint32_t vA; bool tA; uint32_t vB; bool tB; };
+	struct Case { const char* name; uint32_t vA; bool tA; uint32_t vB; bool tB; uint32_t stitch = 0; };
 	const Case cases[] = {
 		{ "same LOD (LOD0 | LOD0)       ", 65, false, 65, false },
 		{ "LOD0 | LOD1                  ", 65, false, 33, false },
 		{ "LOD0 | LOD2                  ", 65, false, 17, false },
 		{ "tessellated x2 | LOD0        ", 129, true, 65, false },
 		{ "tessellated x4 | LOD0        ", 257, true, 65, false },
+		{ "LOD0 | LOD1, stitched        ", 65, false, 33, false, 32 },
+		{ "LOD0 | LOD2, stitched        ", 65, false, 17, false, 16 },
+		{ "LOD0 | LOD3, stitched        ", 65, false,  9, false,  8 },
+		{ "tessellated x4 | LOD0, stitch", 257, true, 65, false, 64 },
 	};
 	std::printf("rays from the rendered surface within 0.35 m of the seam, %zu sun directions\n", suns.size());
 	std::printf("%-30s %10s %10s %12s %10s | step pixels: %8s %10s\n",
 	            "case", "rays", "terrain", "SKIRT ONLY", "share", "rays", "shadowed");
 	for (const Case& c : cases)
 	{
-		const Chunk a = build(h, 0, c.vA, c.tA);
+		const Chunk a = build(h, 0, c.vA, c.tA, c.stitch);
 		const Chunk b = build(h, 1, c.vB, c.tB);
 		const Count ca = probeSide(a, b, -1.0f, suns);
 		const Count cb = probeSide(b, a, +1.0f, suns);

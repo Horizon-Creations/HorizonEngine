@@ -7896,13 +7896,20 @@ void EditorApplication::dumpFrameHeadless()
 		{
 			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
 			LODSystem::update(*m_editorWorld, camPos);
+			// HE_DUMP_NOSTITCH=1: the unstitched seams, for the A/B against the fix.
+			if (const char* ns = std::getenv("HE_DUMP_NOSTITCH"); !(ns && *ns == '1'))
+				TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
 		}
 		int perLevel[5] = {};   // LOD0..3, refined
+		int stitched = 0;
 		for (auto [e, lod, cc] : reg.view<LODComponent, TerrainChunkComponent>().each())
+		{
 			++perLevel[lod.current == LODComponent::kRefined ? 4 : std::min<int>(lod.current, 3)];
+			if (lod.stitchedMeshId != HE::UUID{}) ++stitched;
+		}
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TERRAINTICK chunks LOD0=%d LOD1=%d LOD2=%d "
-			"LOD3=%d refined=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1], perLevel[2],
-			perLevel[3], perLevel[4], camPos.x, camPos.y, camPos.z);
+			"LOD3=%d refined=%d stitched=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1],
+			perLevel[2], perLevel[3], perLevel[4], stitched, camPos.x, camPos.y, camPos.z);
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)

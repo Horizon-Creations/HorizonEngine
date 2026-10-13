@@ -20,6 +20,13 @@ struct TerrainChunkComponent {
     // tessActive = the mesh is filled and hooked in as LODComponent::refinedMeshId.
     HE::UUID     tessMeshId{};
     bool         tessActive = false;
+
+    // Stitched copy of the drawn level (TerrainSystem::stitchSeams): its edges
+    // follow a coarser neighbour so the seam has no step. Registered once per
+    // chunk and replaced afterwards, like tessMeshId. stitchKey says which
+    // level and neighbour layout the mesh holds; 0 = nothing valid in it.
+    HE::UUID     stitchMeshId{};
+    uint64_t     stitchKey = 0;
 };
 
 namespace HE
