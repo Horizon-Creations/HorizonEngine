@@ -183,3 +183,37 @@ bestätigt die Windows-CI: grün heisst, MSVC verhält sich wie oben beschrieben
 * Gegen Hypothese 2 zusätzlich unter Windows ein kurzes Wiederholen von
   `rename` bei 32/5 (wenige Versuche, ~50-100 ms), wie es Git for Windows macht.
   macOS/Linux bleiben davon unberührt.
+
+## Was Schritt 2 umgesetzt hat
+
+* **Serialisiert statt eindeutiger Namen.** `EngineContentSync::m_refreshMutex`
+  hält einen ganzen Refresh, vom Download über Lesen und `fs::remove` bis zur
+  Übernahme (`refreshManifestWith`, `EngineContentSync.cpp`). Damit treffen sich
+  die zwei Startaufrufer nie mehr auf `.manifest.json.tmp(.partial)`, weder unter
+  Windows (Rename gegen offenes Handle) noch unter POSIX (`remove` des einen löscht
+  die Datei des anderen). Der feste Temp-Name bleibt: eindeutige Namen hätten nur
+  Absturzreste zum Aufräumen gebracht. Nicht `m_manifestMutex`, denn den hält
+  `manifest()` auf dem UI-Thread, und der darf nie aufs Netz warten.
+* **Kein Zusammenlegen der zwei Aufrufe.** Der zweite Aufrufer lädt nach dem ersten
+  selbst neu (~400 ms auf einem Worker-Thread). Ihm das Ergebnis des ersten zu
+  geben, könnte einem Refresh nach einem Publish den Katalog von davor liefern.
+* **Windows-Rename mit kurzem Wiederholen** (`src/HE_ContentSync/src/CsRename.h`,
+  `detail::renameReplacing`): nur unter `_WIN32`, nur bei 32/5, fünf Versuche mit
+  20/40/80/160/320 ms. Jeder Versuch schreibt eine WARN-Zeile ("Renaming '...'
+  failed (32: ...) — retry n of 5"); taucht sie in einem Windows-Log auf, ist das
+  ein Fremdhalter (Hypothese 2), denn die Eigen-Race gibt es nicht mehr. Benutzt
+  von `sftpGetFile` (Manifest und jeder Asset-Download) und `writeCachedManifest`.
+  Unter macOS/Linux ist es genau ein `fs::rename` wie vorher.
+* **"Kein Cache" gelogen behoben:** `loadCachedManifest()` gibt `true` zurück,
+  wenn das Manifest in dieser Sitzung schon live ist (ohne neu zu laden). Beide
+  Aufrufer werten es als "Manifest vorhanden".
+* **Testnaht für Schritt 3:** `refreshManifestWith(fetch)` ist
+  `refreshManifestBlocking()` mit austauschbarem Download; alles danach ist der
+  echte Code. Ein Test kann so zwei Threads gegen das echte EngineContentSync
+  laufen lassen, ohne Server. `engineContentCacheDir()` folgt `HOME`
+  (macOS/Linux) bzw. `APPDATA` (Windows) und wird einmal pro Prozess aufgelöst.
+
+Bekannte Restkante: Wiederholt `writeCachedManifest` unter Windows (Fremdhalter
+auf `manifest.json`), wartet es bis ~0,6 s unter `m_manifestMutex`; ein
+`manifest()` des UI-Threads wartet dann mit. Nur im Fehlerfall, vorher scheiterte
+derselbe Fall stattdessen.

@@ -2,6 +2,7 @@
 #include "ContentSync/CsLog.h"
 #include "ContentSync/SftpClient.h"
 #include "ContentSync/SftpCredentials.h"
+#include "CsRename.h"
 
 #include <Diagnostics/GlobalState.h>
 #include <JobSystem/JobSystem.h>
@@ -51,7 +52,7 @@ bool writeCachedManifest(const EngineContentManifest& manifest)
 		}
 	}
 	std::error_code ec;
-	fs::rename(tmpPath, finalPath, ec);
+	detail::renameReplacing(tmpPath, finalPath, ec);
 	if (ec)
 	{
 		fs::remove(tmpPath, ec);
@@ -76,11 +77,31 @@ bool EngineContentSync::refreshManifestBlocking()
 		return false;
 	}
 
-	const fs::path tmpPath = GlobalState::engineContentCacheDir() / ".manifest.json.tmp";
 	// Retried on a failed CONNECTION only (see sftpWithConnectRetry): the probe
 	// that just succeeded does not make this second connection a given.
-	const SftpResult dl = sftpWithConnectRetry(
-		[&] { return sftpGetFile(endpoint, kManifestRemoteName, tmpPath.string()); });
+	return refreshManifestWith([&endpoint](const std::string& localPath)
+	{
+		return sftpWithConnectRetry(
+			[&] { return sftpGetFile(endpoint, kManifestRemoteName, localPath); });
+	});
+}
+
+bool EngineContentSync::refreshManifestWith(const ManifestFetchFn& fetch)
+{
+	// One refresh at a time, from the download to the adoption (Thema 187). At
+	// startup the SFTP probe worker and the project preflight both refresh, and
+	// both download through the same fixed temp name: on Windows one's rename of
+	// .partial / onto .tmp then fails on the other's still-open fstream ("used by
+	// another process" — the other process being this editor), on POSIX one's
+	// remove() can delete the file the other just renamed into place. The second
+	// caller simply downloads again once the first is done: reusing the first's
+	// result could hand a refresh that follows a publish the catalogue from before it.
+	// NOT m_manifestMutex: that one is held by manifest() on the UI thread and must
+	// never wait for the network.
+	std::lock_guard<std::mutex> refreshLock(m_refreshMutex);
+
+	const fs::path tmpPath = GlobalState::engineContentCacheDir() / ".manifest.json.tmp";
+	const SftpResult dl = fetch(tmpPath.string());
 	if (!dl.ok)
 	{
 		const std::string why = HE::Cs::detail::scrub(dl.error);
@@ -132,7 +153,11 @@ std::string EngineContentSync::lastManifestError() const
 bool EngineContentSync::loadCachedManifest()
 {
 	std::lock_guard<std::mutex> lock(m_manifestMutex);
-	if (m_manifestIsLive) return false;   // this session already has the real thing
+	// This session already has the real thing — which is "a manifest is there" to
+	// every caller. Answering false here told the loser of two startup refreshes
+	// that there was "no cached copy on this machine" and made it skip the Engine
+	// tree merge, with the catalogue loaded all along (Thema 187).
+	if (m_manifestIsLive) return true;
 
 	std::ifstream in(cachedManifestPath(), std::ios::binary);
 	if (!in) return false;
