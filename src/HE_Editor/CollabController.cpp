@@ -903,6 +903,7 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	sec.role             = NetRole::Client;
 	sec.requireEncryption = true;
 
+	m_fanout.reset();   // points into the m_secure being replaced, if any
 	m_secure = SecureTransport::wrap(std::move(link), sec);
 	if (!m_secure)
 	{
