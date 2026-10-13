@@ -53,6 +53,9 @@ add_executable(he_tests
     # over a map and the Linux files in a temp folder. Nothing here reaches the real
     # registry or the real XDG folders.
     test_heproj_registration.cpp
+    # The EngineContent manifest "used by another process" on Windows: what each
+    # platform does when a refresh renames onto a temp file the other one holds.
+    test_engine_content_manifest_lock.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp

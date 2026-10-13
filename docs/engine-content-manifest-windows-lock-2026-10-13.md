@@ -1,0 +1,179 @@
+# EngineContent-Manifest unter Windows "von einem anderen Prozess verwendet" (Thema 187, Schritt 1)
+
+Stand 13.10.2026. Diagnose auf dem Mac aus Code, echten Editor-Logs und einem
+Plattform-Zeugentest. Auf Windows selbst wurde der Editor in diesem Schritt NICHT
+gestartet (kein Windows-Rechner an diesem Gerät, kein Log vom betroffenen Rechner
+verfügbar, Rückfrage an die Queen ergab keins). Was Windows betrifft, stützt sich
+die Diagnose auf das Fehlercode-Verhalten von MSVC/Win32, das
+`tests/test_engine_content_manifest_lock.cpp` auf der Windows-CI festnagelt.
+
+## Ergebnis in einem Satz
+
+Der Prozess, der die Datei hält, ist der Editor selbst: Beim Start laden zwei
+Threads desselben Editors das Manifest gleichzeitig in denselben festen Temp-Pfad
+(`<EngineContentCache>/.manifest.json.tmp` bzw. `.manifest.json.tmp.partial`), und
+unter Windows scheitert das `std::filesystem::rename` des einen an einem offenen
+Handle des anderen. Die Windows-Meldung für ERROR_SHARING_VIOLATION lautet "Der
+Prozess kann nicht auf die Datei zugreifen, da sie von einem anderen Prozess
+verwendet wird", obwohl dieser "andere Prozess" derselbe Editor ist.
+
+## Es gibt keinen lokalen Content-Server
+
+Der "Engine Content Server" ist ein SFTP-Host beim Webhoster
+(`engineContentEndpoint()`, `src/HE_ContentSync/src/SftpClient.cpp`). Lokal
+schreibt und liest nur der Editor. Damit fallen aus dem Themenvorschlag weg:
+
+* Zombie-Prozess eines Content-Servers: es gibt keinen lokalen Server-Prozess.
+* Race "Server schreibt, Editor liest": der Server schreibt nichts auf die lokale
+  Platte; der Download legt die Datei selbst an.
+* Eigene Instanz-Sperre der Engine: es gibt keine (keine Lock-Datei, kein
+  `LockFileEx`, kein `_SH_DENY*`, kein `FILE_SHARE_*` in `src/` ausser `HiddenShell.cpp`).
+
+## Wo das Manifest geöffnet wird und mit welchen Flags
+
+| Stelle | Datei | Öffnen |
+|---|---|---|
+| `sftpGetFile` (`SftpClient.cpp:340-382`) | `.manifest.json.tmp.partial` schreiben, dann `fs::rename` → `.manifest.json.tmp` | `std::ofstream(binary\|trunc)` |
+| `refreshManifestBlocking` (`EngineContentSync.cpp:79-98`) | `.manifest.json.tmp` lesen, dann `fs::remove` | `std::ifstream(binary)` |
+| `writeCachedManifest` (`EngineContentSync.cpp:30-61`) | `manifest.json.tmp` → `fs::rename` → `manifest.json` (Offline-Cache) | `std::ofstream`, unter `m_manifestMutex` |
+| `loadCachedManifest` (`EngineContentSync.cpp:132-149`) | `manifest.json` lesen | `std::ifstream`, unter `m_manifestMutex` |
+
+MSVCs `basic_filebuf::open` geht über `_Fiopen` mit `_SH_DENYNO`, das heisst
+`FILE_SHARE_READ | FILE_SHARE_WRITE`, **nie `FILE_SHARE_DELETE`**. MSVCs
+`std::filesystem::rename` ist `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)`. Ein
+Umbenennen, dessen Quelle oder Ziel jemand ohne `FILE_SHARE_DELETE` offen hält,
+scheitert deshalb:
+
+* Quelle offen → `ERROR_SHARING_VIOLATION` (32), "...von einem anderen Prozess verwendet wird"
+* Ziel offen → `ERROR_ACCESS_DENIED` (5), "Zugriff verweigert"
+
+Unter macOS/Linux tauscht `rename(2)` den Verzeichniseintrag unter jedem offenen
+Deskriptor aus, dieselbe Verschränkung geht dort still durch. Das ist der Grund,
+warum der Fehler nur auf Windows auffiel.
+
+Die beiden Cache-Zugriffe (`writeCachedManifest`, `loadCachedManifest`) laufen
+unter `m_manifestMutex` und können sich innerhalb des Prozesses nicht treffen. Der
+Download-Pfad dagegen läuft **ohne jede Sperre**.
+
+## Die zwei gleichzeitigen Aufrufer
+
+1. `EditorApplication::startSftpProbe()` (`EditorApplication.cpp:2191`, gestartet
+   am Ende von OnInit, `:2060`): `probeSftp()` (eigene SSH-Sitzung, fasst keine
+   Dateien an, `SftpProbe.cpp`), danach `refreshManifestBlocking()` (`:2214`).
+2. `ProjectPreflight::run()` (`ProjectPreflight.cpp:117`, seit Commit 6574ccc4 vom
+   09.10.2026): sobald ein letztes Projekt oder ein beim Start übergebenes Projekt
+   da ist, setzt `requestAtStartup()` es, und der **erste Frame** startet den Job,
+   der sofort `refreshManifestBlocking()` aufruft.
+
+Beide benutzen `GlobalState::engineContentCacheDir() / ".manifest.json.tmp"`
+(`EngineContentSync.cpp:79`) und `sftpGetFile` hängt daran `.partial` an
+(`SftpClient.cpp:340`). Jeder Editorstart mit zuletzt geöffnetem Projekt macht also
+zwei Downloads auf dieselben zwei Dateinamen.
+
+### Beleg aus echten Starts (macOS, `out/deploy/Editor/HorizonEngine*.log`)
+
+Jeder der vier vorhandenen Logs zeigt zwei Refreshes auf zwei Threads:
+
+```
+[08:12:22.578] OnInit complete — entering main loop
+[08:12:22.668] [Main ] Project preflight: checking .../Catania.heproj
+[08:12:22.995] [t06ca] EngineContent: ...webspace-host.com:22 reachable      <- Probe fertig, Probe-Thread startet seinen Refresh
+[08:12:23.089] [td911] EngineContent manifest refreshed (87 entries)          <- Preflight-Thread
+[08:12:23.469] [t06ca] EngineContent manifest refreshed (87 entries)          <- Probe-Thread
+```
+
+Abstände der beiden "refreshed" in den vier Logs: 380, 252, 427 und 355 ms. Eine
+SSH-Sitzung bis zum Download dauert hier ~400 ms. Die Fenster liegen also direkt
+aneinander. Ob sie sich treffen, hängt davon ab, wann der erste Frame kommt und wie
+lange Anmeldung und Download dauern. Auf dem Mac verpassen sie sich meist knapp,
+und wenn nicht, merkt es POSIX nicht.
+
+## Wie der Fehler beim Nutzer ankommt
+
+Die einzige Stelle auf diesem Weg, die einen Windows-Systemtext in eine sichtbare
+Meldung bringt, ist `ec.message()` in `sftpGetFile`:
+
+```
+Could not finalize downloaded file '<cache>\.manifest.json.tmp': <Systemtext>
+```
+
+(`writeCachedManifest` verschluckt sein `ec`, "Could not create local file" trägt
+keinen Systemtext.) Der Text landet über `m_lastManifestError` / `lastManifestError()` in:
+
+* Startmeldung `"The EngineContent catalogue could not be read."` ... `"reading its
+  manifest failed: Could not finalize downloaded file ...: Der Prozess kann nicht
+  auf die Datei zugreifen, da sie von einem anderen Prozess verwendet wird."`
+  (`EditorApplication.cpp:2251-2263`), wenn der Probe-Thread verliert;
+* den Preflight-Dialog (`ProjectPreflight.cpp:313`, `serverDetail`), wenn der
+  Preflight-Thread verliert.
+
+### Folgefehler, die Schritt 2 mit erledigen muss
+
+* **Falsches "kein Cache"**: Verliert der Probe-Thread, ruft er
+  `loadCachedManifest()` auf, das `false` liefert, weil der Gewinner schon
+  `m_manifestIsLive` gesetzt hat. Die Meldung sagt dann "There is no cached copy on
+  this machine", obwohl das Manifest geladen ist, und die Engine-Ansicht wird von
+  diesem Thread nicht neu gemischt.
+* **`m_lastManifestError` gewinnt der Letzte**: Der Gewinner löscht ihn, der
+  Verlierer setzt ihn, je nach Reihenfolge steht danach der falsche Zustand drin.
+* **Auch auf POSIX nicht sauber**: Beide Threads `trunc`-öffnen dieselbe `.partial`
+  und schreiben hinein; das `fs::remove(.manifest.json.tmp)` des einen kann die
+  gerade umbenannte Datei des anderen löschen, bevor der sie liest (leer gelesen →
+  "the manifest on the server could not be parsed"). Ein Wiederholen des Rename nur
+  unter Windows reicht deshalb nicht.
+
+## Zwei Hypothesen und wie man sie unterscheidet
+
+1. **Thread-Race im Editor (Hauptbefund).** Strukturell nachgewiesen (zwei
+   Aufrufer, gleicher Pfad, keine Sperre), zeitlich durch die Logs belegt, das
+   Windows-Verhalten durch den Zeugentest. Erklärt Windows-only, "anderer Prozess"
+   ohne zweiten Editor und das Auftreten beim Start.
+2. **Virenscanner/Indexer (Nebenkandidat).** Defender und der Suchindexer öffnen
+   frisch geschlossene Dateien kurz. Halten sie dabei kein `FILE_SHARE_DELETE`,
+   scheitert dasselbe `MoveFileExW` auch ohne zweiten Thread. Das ist von Git,
+   Cargo und npm bekannt. Ausschliessen lässt es sich nur auf dem betroffenen
+   Rechner.
+
+**Diskriminator im Windows-Log** (`HorizonEngine.log` neben `HorizonEditor.exe`,
+nach Selbst-Update auch `HorizonEngine.1.log`):
+
+```
+findstr /C:"Could not finalize downloaded file" /C:"Could not fetch EngineContent manifest" ^
+        /C:"EngineContent manifest refreshed" /C:"Project preflight: checking" HorizonEngine*.log
+```
+
+* Fehlerpfad endet auf `.manifest.json.tmp` UND innerhalb ~1 s steht ein
+  `manifest refreshed` eines **anderen** Thread-Kürzels → Race bestätigt.
+* Fehler ohne zweiten Refresh in der Nähe, oder auf einem anderen Pfad (einem
+  Asset-Download, `manifest.json`) → Scanner/Indexer. Dann mit `handle.exe
+  -a .manifest.json` bzw. Process Monitor (Filter Path contains `.manifest.json`,
+  Result SHARING VIOLATION) den Halter bestimmen.
+
+Mit `handle.exe` würde man im Race-Fall `HorizonEditor.exe` selbst als Halter von
+`.manifest.json.tmp.partial` sehen. Das Fenster ist Millisekunden kurz, deshalb ist
+Process Monitor dafür besser geeignet als `handle.exe`.
+
+## Zeugentest
+
+`tests/test_engine_content_manifest_lock.cpp` spielt die zwei Stellen, an denen
+sich die Threads treffen, deterministisch nach, mit einem zweiten `std::fstream`
+als zweitem Thread:
+
+* `.partial` umbenennen, während ein `ofstream` darauf offen ist → Windows erwartet 32, POSIX Erfolg;
+* auf `.manifest.json.tmp` umbenennen, während ein `ifstream` darauf offen ist → Windows erwartet 5, POSIX Erfolg.
+
+Auf dem Mac (eigenständig gebaut mit doctest) 2/2 Fälle grün. Die Windows-Hälfte
+bestätigt die Windows-CI: grün heisst, MSVC verhält sich wie oben beschrieben.
+
+## Was Schritt 2 daraus macht (Vorschlag, nicht umgesetzt)
+
+* Den Download-Teil von `refreshManifestBlocking()` serialisieren (eigene Mutex
+  über Download + Lesen + Entfernen) oder je Aufruf einen eindeutigen Temp-Namen
+  verwenden. Besser beides: die Mutex verhindert auch den doppelten Download, ein
+  zweiter Aufrufer kann das gerade geholte Manifest übernehmen statt neu zu laden.
+* `loadCachedManifest()`-Fallback nicht als "kein Cache" melden, wenn das Manifest
+  in dieser Sitzung schon live ist (`haveManifest` = Manifest vorhanden, nicht
+  "dieser Aufruf hat geladen").
+* Gegen Hypothese 2 zusätzlich unter Windows ein kurzes Wiederholen von
+  `rename` bei 32/5 (wenige Versuche, ~50-100 ms), wie es Git for Windows macht.
+  macOS/Linux bleiben davon unberührt.
