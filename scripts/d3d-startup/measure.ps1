@@ -12,7 +12,9 @@
 # HE_DUMP_RHI outside dump mode crashes D3D at frame 1. -Cold deletes the FXC
 # bytecode cache and this exe's NVIDIA DXCache files. The bytecode cache sits in the
 # REAL roaming folder (SDL_GetPrefPath ignores %APPDATA%), so a scratch APPDATA does
-# not make a run cold by itself.
+# not make a run cold by itself; -CacheDir (HE_D3D_SHADER_CACHE_DIR) keeps a run
+# out of it altogether, and -Cold then clears that dir instead. -NoCache sets
+# HE_D3D_SHADER_CACHE=0: FXC on every start, the pre-fix behaviour, same binary.
 param(
     [Parameter(Mandatory)] [string]$Exe,
     [Parameter(Mandatory)] [string]$OutDir,
@@ -21,7 +23,9 @@ param(
     [switch]$Cold,
     [string]$Project = "",     # .heproj to open, or empty for the bare editor
     [int]$Frames = 300,
-    [string]$Dump = ""         # HE_D3D_SHADER_DUMP: every compiled HLSL source as a file
+    [string]$Dump = "",        # HE_D3D_SHADER_DUMP: every compiled HLSL source as a file
+    [string]$CacheDir = "",    # HE_D3D_SHADER_CACHE_DIR: a private bytecode cache
+    [switch]$NoCache           # HE_D3D_SHADER_CACHE=0
 )
 $ErrorActionPreference = "Stop"
 Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' } |
@@ -42,7 +46,7 @@ if ($Cold -and (Test-Path $mineList)) {
 $before = @{}
 if (Test-Path $dx) { Get-ChildItem $dx -File | ForEach-Object { $before[$_.Name] = $_.LastWriteTimeUtc } }
 
-$sc = "$env:USERPROFILE\AppData\Roaming\HorizonCreations\HorizonEngine\d3dshadercache"
+$sc = if ($CacheDir) { $CacheDir } else { "$env:USERPROFILE\AppData\Roaming\HorizonCreations\HorizonEngine\d3dshadercache" }
 if ($Cold -and (Test-Path $sc)) { Remove-Item $sc -Recurse -Force; "cold: removed d3dshadercache" }
 
 $appdata = Join-Path $OutDir "appdata\rhi$Rhi"
@@ -59,6 +63,8 @@ $env:APPDATA = $appdata
 $env:HE_HIDDEN_WINDOW = "1"; $env:HE_BACKGROUND_FPS = "0"
 $env:HE_EXIT_AFTER_FRAMES = "$Frames"; $env:HE_COLLAB_OFFLINE = "1"
 if ($Dump) { $env:HE_D3D_SHADER_DUMP = $Dump }
+if ($CacheDir) { $env:HE_D3D_SHADER_CACHE_DIR = $CacheDir }
+if ($NoCache) { $env:HE_D3D_SHADER_CACHE = "0" }
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -PassThru

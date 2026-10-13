@@ -136,22 +136,74 @@ pinnt diesen Pass nicht) und der Lauf mit Cache 8 s früher aufnimmt; Cache-gege
 `/Gfp` Standard, `/O1`, `/O3` ≈ 5,0 s; `/O0` ≈ 4,0 s; `/Od` ≈ 1,0 s, aber doppelt so großer Bytecode (unoptimiert,
 GPU-Kosten ungemessen); ohne `/Gfp` 6 s. Nicht geändert.
 
+## Wiederholungsmessung, Build, Tests (Schritt 3, 13.10.2026)
+
+Gleicher Aufbau wie in Schritt 4 (NN-WS03, RTX 4070, Release-Baum `C:/hw196` auf HEAD 01f1fffc, Editor versteckt,
+300 Frames, Projektkopie HEProject), aber jeder Lauf mit **privatem** Bytecode-Cache (`measure.ps1 -CacheDir`, neu),
+damit der Roaming-Ordner des Menschen unberührt bleibt. „Vorher“ = dasselbe Binary mit `-NoCache`
+(`HE_D3D_SHADER_CACHE=0`: kein Hash, kein Datei-Zugriff, jeder Shader durch FXC wie vor 11041d41). Spalte
+„Schritt 4 vor Fix“ = das echte Vor-Fix-Binary c309cdb8 aus der Tabelle oben. Median aus 3 Läufen, Bereich in Klammern.
+
+| Backend, Fall | Renderer-Init | 1. Frame seit `Run` | Schritt 4 vor Fix (Init / 1. Frame) |
+|---|---|---|---|
+| D3D11 leer, **ohne Cache** | 8860 ms (8819-9234) | 9173 ms (9145-9555) | 8290 / 8737 ms |
+| D3D11 leer, Cache leer (Erststart) | 9073 ms | 9406 ms | |
+| D3D11 leer, **Cache warm** | **463 ms** (451-483, 5 Läufe) | **793 ms** (787-799) | |
+| D3D11 Projekt, ohne Cache | 8658 / 8835 ms | 8964 / 9162 ms, langsamer Frame 1156 / 1134 ms | 8270 / 8581 ms |
+| D3D11 Projekt, warm (ab 2. Projektstart) | 453-470 ms | 753-797 ms, langsamer Frame 273-309 ms | |
+| D3D12 leer, **ohne Cache** | 9057 ms (8645-10356) | 9422 ms (9000-10732) | 8868 / 9223 ms |
+| D3D12 leer, Cache leer (Erststart) | 9545 ms | 9922 ms | |
+| D3D12 leer, **Cache warm** | **566 ms** (560-596, 5 Läufe) | **886 ms** (881-913) | |
+| D3D12 Projekt, ohne Cache | 8654 / 8631 ms | 9012 / 8984 ms, langsamer Frame 1273 / 1123 ms | 8677 / 9046 ms |
+| D3D12 Projekt, warm (ab 2. Projektstart) | 563-574 ms | 880-898 ms, langsamer Frame 260-269 ms | |
+| Vulkan leer (6 Läufe) | 639 ms (605-836) | 1022 ms (976-1291, 1291 = allererster Lauf) | 898 / 1366 ms (kalt) |
+| Vulkan Projekt (6 Läufe) | 606 ms (599-626) | 991 ms (980-1004), langsamer Frame 255-261 ms | 620 / 1005 ms |
+| OpenGL leer (6 Läufe) | 134 ms (134-151) | 562 ms (550-622) | – |
+| OpenGL Projekt (3 Läufe) | 134 ms | 557 ms, langsamer Frame 259-273 ms | – |
+
+**Ergebnis:** Warm sinkt der erste Frame auf D3D11 von 9,2 auf 0,79 s (-91 %), auf D3D12 von 9,4 auf 0,89 s (-91 %).
+Damit liegen beide unter Vulkan (1,0 s) und über OpenGL (0,56 s). Ab dem zweiten Projektstart ist auch der Material-Frame
+(matPS über FXC, ~850 ms) weg: 260-309 ms, so viel wie Vulkan/GL (255-273 ms). FXC-Summe warm 6-7 ms bei 41/41 bzw. 46/46
+Treffern. Die Werte aus Schritt 4 sind damit reproduziert. **Erststart unverändert:** Mit leerem Cache bleibt es bei 9,4 s
+(D3D11) bzw. 9,9 s (D3D12). Das gilt für den allerersten Start und für den ersten Start nach jeder HLSL-/Sky-Änderung, also
+praktisch nach jedem Engine-Update, das Shader anfasst. Ohne Cache misst dieser Lauf ~0,5 s mehr als Schritt 4 vor dem Fix
+(Sky-PS 5,2-6,2 s gegen 5,0 s). Das ist Streuung der FXC-Zeit zwischen Sitzungen, nicht der Cache: abgeschaltet ruft er
+nichts auf.
+**Andere Backends:** Der Fix (11041d41) ändert nur `D3D_Shared/*`, den Test und die Doku. Für Vulkan, GL und Metal kommen
+von diesem Zweig nur die `[startup]`-Zeilen in `Application.cpp` dazu (drei `steady_clock`-Lesungen, Log-Zeilen bis
+Frame 300). Vulkan misst 0,61-0,64 s Init und 1,0 s bis zum ersten Frame, so viel wie Schritt 4 vor dem Fix (0,62 / 1,0 s
+mit Projekt). **Metal ist nicht gemessen** (Windows-Gerät). Die Metal-Dateien sind unberührt, und CI 38432202765 auf
+11041d41 ist grün (macOS, Windows, Linux, Linux lavapipe).
+**Build/Tests:** Alle Targets in `C:/hw196` ohne Restarbeit (`cmake --build -j 8`, ninja: nichts zu tun). Die
+Shader-Prüfung meldet 55 HLSL + 58 GLSL fehlerfrei. `he_tests` komplett (Release, Scratch-APPDATA,
+`HE_NET_LOOPBACK_ONLY=1`): 5157/5157 Fälle, 1 305 582 Assertions, 0 Fehler, 382 s. `test_d3d_shader_cache` allein: 57/57.
+**D3D12-Bytecode gegen fxc.exe** (offen aus Schritt 4): Ein D3D12-Projektlauf mit `HE_D3D_SHADER_DUMP` lieferte 44
+eindeutige Schlüssel. Jede Quelle wurde mit `fxc.exe` 10.0.26100 und den Flags aus dem Datei-Header übersetzt: **44/44
+byte-identisch**. Negativkontrolle: ein gekipptes Byte im Sky-PS einer Cache-Kopie meldet genau diesen Shader (43/1).
+**Auffälligkeiten (nicht Teil dieses Themas):**
+(1) D3D12 braucht beim Beenden 3,0 s zwischen `D3D12Renderer: shutdown — waiting for GPU` und `all resources released`
+(`D3D12Renderer::Shutdown`, `D3D12Renderer.cpp` ~10013). Das tritt mit und ohne Cache auf, deshalb läuft ein D3D12-Lauf
+insgesamt ~9 s statt ~6 s. Ursache nicht untersucht.
+(2) D3D12 übersetzt 5 Shader pro Start doppelt (46 Aufrufe, 41 Schlüssel): Der Erststart hat schon 5 Treffer.
+(3) Ein Process-Listing direkt nach `HasExited` zeigt die eben beendete PID noch kurz. Es lief kein fremder Editor parallel
+(vor jedem Lauf geprüft).
+
 ## Handoff
 
-**Erledigt (Schritt 4, NN-WS03):** Messung D3D11/D3D12/Vulkan kalt, warm und mit Projekt (ce054993), Behebung per
-Bytecode-Cache plus Test, Messung danach (Tabellen oben). Der Zweig ist gepusht, CI ist angestoßen (Link im Hive-Post).
-**Entscheidungen:** Cache in `timedD3DCompile` statt Offline-fxc beim Build. Die Shader entstehen zur Laufzeit
-(Sky per shaderc, Materialien aus Graphen), ein Build-Schritt deckt sie nicht ab. Die Sky-Flags bleiben unverändert.
-**Nicht verifiziert:** D3D12-Bytecode gegen fxc (nur D3D11-Dateien geprüft; D3D12 läuft durch denselben Code). GPU-Laufzeit
-unverändert (Bytecode identisch, daher nicht nachgemessen). Der Game-Player (HorizonGame) nutzt denselben Pfad, gemessen
-ist nur der Editor.
-**Fallen:** `HE_DUMP_RHI` ohne `HE_DUMP_PATH` stürzt D3D ab (Backend per config.json). Der Cache liegt im echten
-Roaming-Ordner, ein Scratch-APPDATA isoliert ihn nicht (für „kalt“ das Verzeichnis löschen oder `HE_D3D_SHADER_CACHE_DIR`).
-Der Wolkenhimmel in D3D11-Captures hängt an der Zeit seit Start: Bilder mit unterschiedlicher Startdauer weichen im Himmel ab.
-Im echten Roaming-`d3dshadercache` des Menschen liegen ~44 Dateien aus diesem Zweig (gültig oder Miss, harmlos).
+**Erledigt (Schritt 3, NN-WS03):** Messung vorher/nachher auf D3D11, D3D12, Vulkan und GL (Tabelle oben, Logs in
+`C:/hw196/runs3`, `runs3b`). Voller Build und `he_tests` grün. D3D12-Bytecode 44/44 gleich fxc. `measure.ps1` hat jetzt
+`-CacheDir` und `-NoCache`. Davor Schritt 4: Messung, Behebung per Bytecode-Cache (11041d41) und Test.
+**Entscheidungen:** „Vorher“ wird mit demselben Binary und abgeschaltetem Cache gemessen, gegengelesen mit dem echten
+Vor-Fix-Binary aus Schritt 4. Für den Vulkan-Vergleich wurde kein eigener release/0.7.0-Build gebaut: Der Fix ändert nur
+D3D-Dateien.
+**Nicht verifiziert:** Metal-Startzeit (kein Mac, nur CI grün). HorizonGame (gleicher Codepfad, nicht gemessen).
+GPU-Laufzeit (Bytecode identisch). Der Deploy des Menschen profitiert erst nach dem Merge und einem Start, der den Cache füllt.
+**Fallen:** `HE_DUMP_RHI` ohne `HE_DUMP_PATH` stürzt D3D ab, das Backend kommt per config.json. Der Cache liegt im echten
+Roaming-Ordner, für Messungen daher `-CacheDir`. Der Wolkenhimmel in D3D11-Captures hängt an der Zeit seit Start. Die
+FXC-Zeit streut zwischen Sitzungen um ~0,5 s.
 **Nächste Schritte:**
-1. Optional: den Erststart senken (8-10 s, unverändert). Den Sky-PS (5 s) und die übrigen Compiles parallel per JobSystem
-   übersetzen (FXC ist thread-safe; untere Grenze ≈ Sky allein ~5 s), oder den Sky asynchron bauen und die ersten Frames
-   mit dem kleinen `kSkyPSHLSL` zeichnen. Beides berührt `createSkyPipeline` in beiden Backends.
-2. Schritt 3 des Themas (Messung wiederholen, Bericht) ist mit den Tabellen oben im Kern erledigt. Offen bleibt die
-   Bestätigung durch den Menschen auf seinem Deploy.
+1. Optional, eigenes Thema: den Erststart senken (9-10 s). Compiles parallel per JobSystem (untere Grenze ≈ Sky-PS ~5 s)
+   oder Sky asynchron bauen und anfangs den kleinen `kSkyPSHLSL` zeichnen. Beides betrifft `createSkyPipeline` in beiden
+   Backends.
+2. Optional: die 3 s Shutdown-Wartezeit von D3D12 und die 5 Doppel-Compiles ansehen.
+3. Bestätigung durch den Menschen auf seinem Deploy nach dem Merge (zweiter Start).
