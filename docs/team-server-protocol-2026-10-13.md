@@ -57,8 +57,8 @@ Step 9 additions (README sections "Anwesenheit", "Team-Sitzungen", "Ereignisse")
 ## Handoff
 
 - **Topic / step:** 197, step 9 (presence, invite, join setting; plan step 2, retry)
-- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ 8e97b36 (pushed,
-  one commit on a555f14; 8 commits ahead of CollabSession `main`, no PR). This doc: HE
+- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ e3f4649 (pushed:
+  8e97b36 feature, e3f4649 test fix for Linux; 9 commits ahead of `main`, no PR). This doc: HE
   `claude/team-server-teams-mitglieder-anwesenheit`.
 - **Done:** everything in "Step 9 additions" above.
 - **Files touched (CollabSession):** `src/Protocol.{h,cpp}` (Type::TeamEvent, TeamOp 5-12,
@@ -71,9 +71,12 @@ Step 9 additions (README sections "Anwesenheit", "Team-Sitzungen", "Ereignisse")
   unchanged), same 3/3 in an ASan/UBSan `-fno-sanitize-recover=all` build; three negative
   controls on a copy (no ForgetInvites on offline, no event high-water drop, no idle
   timeout) each fail exactly their test.
-- **Not verified:** CollabSession CI run 38472456102 was still running at handoff
-  (https://github.com/Horizon-Creations/CollabSession/actions/runs/38472456102); nothing
-  deployed to 212.227.140.164 (step 5).
+- **CI:** run 38472456102 on 8e97b36: macOS green, both Linux jobs red on
+  `test_client_that_does_not_read_its_events` only (Linux autotunes the server's send
+  buffer to MBs, the fixed 1.8 MB of events never reached the 1 MiB mark); e3f4649 sends
+  batches until the drop is logged. Its run:
+  https://github.com/Horizon-Creations/CollabSession/actions/runs/38472878828
+- **Not verified:** nothing deployed to 212.227.140.164 (step 5).
 - **Decisions taken:** join setting per *session* (live, not persisted; teams.txt format
   unchanged); team server does not police relay pairing; host = connection; one invite
   per member (decline from any of its connections clears it); events to the causing
