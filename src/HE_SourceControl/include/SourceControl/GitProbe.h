@@ -67,6 +67,12 @@ struct GitProbe
 // Runs several git invocations; blocking, and belongs on a worker thread.
 HE_SC_API GitProbe probeGit();
 
+// Is there a real git behind `found`? Only ever false on macOS for /usr/bin/git
+// without the Command Line Tools (the xcrun shim). Never runs the shim — it asks
+// `xcode-select -p`, which just exits non-zero — so it is safe to call while
+// Apple's installer may be up. Starts a process; worker thread only.
+HE_SC_API bool developerToolsPresent(const std::optional<std::filesystem::path>& found);
+
 // ── Pure helpers, exposed so version parsing is testable without git present ──
 // git reports "git version 2.43.0" and, on Apple systems, "git version 2.39.3
 // (Apple Git-146)"; git-lfs reports "git-lfs/3.4.1 (GitHub; darwin arm64; go

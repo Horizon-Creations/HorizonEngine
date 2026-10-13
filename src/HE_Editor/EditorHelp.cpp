@@ -8820,28 +8820,31 @@ namespace
 	  "result closes this dialog by itself, so this is what to press once an "
 	  "install has finished elsewhere.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy 'xcode-select --install'", "Copy the Xcode tools command",
-	  "Puts the command on the clipboard, to run in your own terminal. On macOS "
-	  "git arrives with the Xcode Command Line Tools, so that one command is the "
-	  "whole install.",
+	// The git remedy (GitMissingDialog::drawGitInstallRemedy) opens this scope
+	// itself, so these three hold in the dialog, Preferences, the clone dialog
+	// and the Source Control panel alike.
+	{ "Source Control/Install Git", "Install Git",
+	  "Installs git with this machine's own installer: winget on Windows, Homebrew "
+	  "or Apple's Command Line Tools on macOS, the distribution's package manager "
+	  "on Linux. It runs in the background, but in plain sight: the installer's "
+	  "output appears below the button, and Windows, macOS or Linux may ask for "
+	  "permission or a password on the way. When git runs afterwards, the editor "
+	  "looks again by itself and source control picks up where it was.",
 	  "", "editor#preferences" },
-	{ "Source Control/git-scm.com", "git-scm.com",
-	  "Opens git's own download page in a browser, for installing it by hand "
-	  "instead of through a package manager.",
-	  "", "editor#preferences" },
-	{ "Source Control/Copy winget Command", "Copy the winget command",
-	  "Puts a winget install command on the clipboard, to run in your own shell. "
-	  "It is the command for whichever piece this bullet is about — git itself, "
-	  "or Git LFS. After installing Git for Windows, restart the editor so it "
-	  "picks up the new PATH.",
+	{ "Source Control/Copy Install Command", "Copy the install command",
+	  "Puts the command shown above on the clipboard, to run in your own "
+	  "terminal. This is the way when the editor cannot install git itself, for "
+	  "example on Linux without a graphical password prompt. Press Recheck "
+	  "afterwards; no restart is needed.",
 	  "", "editor#preferences" },
 	{ "Source Control/Download Page", "Download Page",
-	  "Opens the Git for Windows download page, which is where git comes from on "
-	  "Windows.",
+	  "Opens git's download page for this system in a browser, for installing it "
+	  "by hand. On Windows without winget this is the Git for Windows installer, "
+	  "which brings Git LFS along.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy 'sudo apt install git'", "Copy the apt command",
-	  "Puts the command on the clipboard, to run in your own terminal. The editor "
-	  "does not install git for you on Linux; it only says what is missing.",
+	{ "Source Control/Copy winget Command", "Copy the winget command",
+	  "Puts the winget command for Git LFS on the clipboard, to run in your own "
+	  "shell. Press Recheck afterwards rather than restarting.",
 	  "", "editor#preferences" },
 	{ "Source Control/Copy 'brew install git-lfs'", "Copy the brew command",
 	  "Puts the command on the clipboard, to run in your own terminal. Press "

@@ -168,6 +168,8 @@ public:
 
 	// ── State for the UI ─────────────────────────────────────────────────────
 	bool                     isRepo() const { return m_service.isRepo(); }
+	// No git to ask: !isRepo() then says nothing about the project (GitService::gitMissing).
+	bool                     gitMissing() const { return m_service.gitMissing(); }
 	const HE::Sc::RepoStatus& status() const { return m_service.status(); }
 	bool                     busy()   const { return m_service.busy(); }
 	// Something the user asked for is under way (see GitService::busyWithWork). The panels

@@ -64,6 +64,8 @@ std::string runCapture(const std::vector<std::string>& args, bool& ok)
 	return trimmed(r.out);
 }
 
+} // namespace
+
 // Only asked on macOS, and only about /usr/bin/git: is there a real git behind
 // the xcrun shim? The usual install folders first, then `xcode-select -p`, which
 // prints the active developer directory (also a custom Xcode location) and just
@@ -85,8 +87,6 @@ bool developerToolsPresent(const std::optional<std::filesystem::path>& found)
 	const HE::Proc::Result r = HE::Proc::run(o);
 	return r.ok() && std::filesystem::exists(trimmed(r.out) + "/usr/bin/git", ec);
 }
-
-} // namespace
 
 const char* providerName(ProviderKind kind)
 {

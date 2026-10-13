@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include <SourceControl/GitInstall.h>
 #include <SourceControl/GitLocator.h>
 #include <SourceControl/GitProbe.h>
 #include <Platform/Process.h>
@@ -274,6 +275,98 @@ TEST_CASE("gitInstallRouteName covers every route")
 	std::set<std::string> names;
 	for (GitInstallRoute r : all) names.insert(gitInstallRouteName(r));
 	CHECK(names.size() == std::size(all));
+}
+
+// ─── From plan to installer process (GitInstall.h) ───────────────────────────
+// Only the pure half: runGitInstall would really install git, so it is run here
+// only for plans that must NOT start anything.
+
+TEST_CASE("Install launch: winget gets the agreement flags so it never waits on stdin")
+{
+	const auto l = gitInstallLaunch(planWith(HostPlatform::Windows, { "winget" }));
+	REQUIRE(l.has_value());
+	CHECK(l->exe == fs::path("winget"));
+	const std::vector<std::string> want = {
+		"install", "--id", "Git.Git", "-e", "--source", "winget",
+		"--accept-source-agreements", "--accept-package-agreements" };
+	CHECK(l->args == want);
+	CHECK_FALSE(l->returnsBeforeInstalled);
+	CHECK_FALSE(l->userPrompt.empty());   // UAC: the user is told before it pops up
+	CHECK(l->display.rfind("winget install --id Git.Git", 0) == 0);
+
+	// No winget: the downloadable installer is a route, but not one the engine
+	// runs — the UI opens the download page instead.
+	const GitInstallPlan d = planWith(HostPlatform::Windows, {});
+	CHECK(d.route == GitInstallRoute::DownloadInstaller);
+	CHECK_FALSE(gitInstallLaunch(d).has_value());
+}
+
+TEST_CASE("Install launch: Homebrew runs as the user, the Command Line Tools are waited for")
+{
+	const auto brew = gitInstallLaunch(planWith(HostPlatform::MacOS, { "brew", "xcode-select" }));
+	REQUIRE(brew.has_value());
+	CHECK(brew->exe == fs::path("brew"));
+	CHECK(brew->args == std::vector<std::string>{ "install", "git" });
+	CHECK_FALSE(brew->returnsBeforeInstalled);
+	CHECK(brew->userPrompt.empty());
+
+	const auto clt = gitInstallLaunch(planWith(HostPlatform::MacOS, { "xcode-select" }));
+	REQUIRE(clt.has_value());
+	CHECK(clt->exe == fs::path("xcode-select"));
+	CHECK(clt->args == std::vector<std::string>{ "--install" });
+	CHECK(clt->returnsBeforeInstalled);   // exits at once; git comes minutes later
+	CHECK_FALSE(clt->userPrompt.empty());
+
+	CHECK_FALSE(gitInstallLaunch(planWith(HostPlatform::MacOS, {})).has_value());
+}
+
+TEST_CASE("Install launch: Linux goes through pkexec sh -c with the whole line as ONE argument")
+{
+	const auto apt = gitInstallLaunch(planWith(HostPlatform::Linux, { "apt-get", "pkexec" }));
+	REQUIRE(apt.has_value());
+	CHECK(apt->exe == fs::path("pkexec"));
+	REQUIRE(apt->args.size() == 3);
+	CHECK(apt->args[0] == "/bin/sh");
+	CHECK(apt->args[1] == "-c");
+	// `&&` stays inside the shell line; pkexec <cmd> would hand it to apt-get.
+	CHECK(apt->args[2] == "export DEBIAN_FRONTEND=noninteractive; "
+	                      "apt-get update && apt-get install -y git");
+	CHECK_FALSE(apt->userPrompt.empty());   // the polkit password dialog
+
+	const auto dnf = gitInstallLaunch(planWith(HostPlatform::Linux, { "dnf", "pkexec" }));
+	REQUIRE(dnf.has_value());
+	CHECK(dnf->args.back() == "dnf install -y git");   // the debconf variable is apt's alone
+
+	const auto root = gitInstallLaunch(planWith(HostPlatform::Linux, { "pacman" }, /*isRoot=*/true));
+	REQUIRE(root.has_value());
+	CHECK(root->exe == fs::path("/bin/sh"));
+	CHECK(root->args == std::vector<std::string>{ "-c", "pacman -S --needed --noconfirm git" });
+	CHECK(root->userPrompt.empty());
+
+	// The fallback cases: a package manager without a way to get rights, and
+	// no package manager at all. Neither starts anything.
+	CHECK_FALSE(gitInstallLaunch(planWith(HostPlatform::Linux, { "zypper" })).has_value());
+	CHECK_FALSE(gitInstallLaunch(planWith(HostPlatform::Linux, { "pkexec" })).has_value());
+}
+
+TEST_CASE("runGitInstall without a runnable route explains itself and starts nothing")
+{
+	for (const GitInstallPlan& plan : { planWith(HostPlatform::Linux, { "apt-get" }),
+	                                    planWith(HostPlatform::Windows, {}),
+	                                    GitInstallPlan{} })
+	{
+		std::vector<std::string> lines;
+		const GitInstallOutcome o =
+			runGitInstall(plan, [&lines](const std::string& l) { lines.push_back(l); });
+		CHECK_FALSE(o.launched);
+		CHECK_FALSE(o.gitRunnable);
+		CHECK_FALSE(o.message.empty());
+		// The reason reaches the visible log too, not only the return value.
+		REQUIRE(lines.size() == 1);
+		CHECK(lines[0] == o.message);
+	}
+	for (HostPlatform p : { HostPlatform::Windows, HostPlatform::MacOS, HostPlatform::Linux })
+		CHECK(std::string(gitDownloadPageUrl(p)).rfind("https://git-scm.com/", 0) == 0);
 }
 
 // ─── This machine ────────────────────────────────────────────────────────────

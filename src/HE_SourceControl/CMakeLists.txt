@@ -11,6 +11,7 @@
 # LFS is the entire reason this module exists (see docs/source-control-design.md).
 add_library(HorizonSourceControl SHARED
 	src/GitLocator.cpp
+	src/GitInstall.cpp
 	src/GitProbe.cpp
 	src/StatusParser.cpp
 	src/GitCli.cpp

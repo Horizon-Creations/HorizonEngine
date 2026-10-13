@@ -3,10 +3,12 @@
 #include "EditorHelp.h"               // the Preferences page's "Source Control" scope, reused
 #include "EditorWidgets.h"            // pinDialogToEditorWindow
 
+#include <SourceControl/GitInstall.h>
 #include <SourceControl/GitProbe.h>
 
 #include <SDL3/SDL.h>
 #include <cstring>
+#include <optional>
 #include <string>
 
 #ifdef HE_IMGUI_ENABLED
@@ -43,25 +45,108 @@ void remedyButtons(const char* buttonLabel, const char* command,
 	}
 }
 
+// What "Install Git" is about to do, in the terms the user will then see it
+// happen in — a UAC prompt, Apple's window, a password dialog.
+std::string routeSentence(const HE::Sc::GitInstallPlan& plan)
+{
+	using Route = HE::Sc::GitInstallRoute;
+	switch (plan.route)
+	{
+	case Route::Winget:
+		return "The editor can install Git for Windows (Git LFS included) through winget.";
+	case Route::Homebrew:
+		return "The editor can install git with Homebrew. No password is needed.";
+	case Route::XcodeCommandLineTools:
+		return "The editor can start Apple's installer for the Command Line Tools, "
+		       "which bring git (a download of several hundred MB).";
+	default:
+		break;
+	}
+	return std::string("The editor can install git with ") +
+	       HE::Sc::gitInstallRouteName(plan.route) + ".";
+}
+
 } // namespace
 
-// Public (shared with the Preferences ▸ Editor ▸ Source Control page).
-void drawGitInstallRemedy()
+// Public: drawn wherever an action needs git (see the header).
+void drawGitInstallRemedy(AppContext& ctx)
 {
-#if defined(__APPLE__)
-	ImGui::TextWrapped("On macOS, git comes with the Xcode Command Line Tools.");
-	remedyButtons("Copy 'xcode-select --install'", "xcode-select --install",
-	              "git-scm.com", "https://git-scm.com/downloads");
-#elif defined(_WIN32)
-	ImGui::TextWrapped("Install Git for Windows, then restart the editor so it "
-	                   "picks up the new PATH.");
-	remedyButtons("Copy winget Command", "winget install --id Git.Git -e",
-	              "Download Page", "https://git-scm.com/download/win");
-#else
-	ImGui::TextWrapped("Install git through your distribution's package manager.");
-	remedyButtons("Copy 'sudo apt install git'", "sudo apt install git",
-	              "git-scm.com", "https://git-scm.com/downloads");
-#endif
+	// Its own scope, so the four places that draw this resolve one set of
+	// entries, whichever scope they have open around it.
+	HE::Ed::Help::Scope helpScope("Source Control");
+
+	// The probe is null while the install's own re-probe runs; the plan it
+	// answered with before is the one being carried out, so it stays on screen.
+	static HE::Sc::GitInstallPlan s_plan;
+	if (ctx.gitProbe) s_plan = ctx.gitProbe->install;
+	const HE::Sc::GitInstallPlan& plan = s_plan;
+
+	const bool installing = ctx.gitInstalling;
+	const std::optional<HE::Sc::GitInstallLaunch> launch = HE::Sc::gitInstallLaunch(plan);
+
+	if (launch)
+	{
+		ImGui::TextWrapped("%s", routeSentence(plan).c_str());
+		if (!launch->userPrompt.empty()) ImGui::TextWrapped("%s", launch->userPrompt.c_str());
+		ImGui::Spacing();
+
+		if (installing) ImGui::BeginDisabled();
+		if (EditorWidgets::primaryButton("Install Git") && ctx.startGitInstall)
+			ctx.startGitInstall();
+		if (installing) ImGui::EndDisabled();
+		ImGui::SameLine();
+		ImGui::TextDisabled(installing ? "Installing\xe2\x80\xa6 (progress below)"
+		                               : "or do it yourself:");
+	}
+	else if (plan.route == HE::Sc::GitInstallRoute::DownloadInstaller)
+	{
+		// The engine ships no installer and does not fetch executables itself;
+		// the official one is a download away, and the locator finds the git it
+		// installs without a restart.
+		ImGui::TextWrapped("Download and run the Git for Windows installer (it includes "
+		                   "Git LFS), then press Recheck. No restart is needed.");
+	}
+	else
+	{
+		// The fallback says WHY, so "cannot" does not read as "broken".
+		ImGui::TextWrapped("The editor cannot install git here by itself: %s.",
+		                   plan.reason.empty() ? "no install route was found" : plan.reason.c_str());
+		if (!plan.manualCommand.empty())
+			ImGui::TextWrapped("Run this in a terminal, then press Recheck:");
+	}
+
+	if (!plan.manualCommand.empty())
+	{
+		ImGui::TextWrapped("%s", plan.manualCommand.c_str());
+		if (EditorWidgets::smallButton("Copy Install Command"))
+			ImGui::SetClipboardText(plan.manualCommand.c_str());
+		ImGui::SameLine();
+	}
+	if (EditorWidgets::smallButton("Download Page"))
+		SDL_OpenURL(HE::Sc::gitDownloadPageUrl(HE::Sc::currentPlatform()));
+
+	// ── Live progress log ────────────────────────────────────────────────────
+	// Shown in every place that draws this, not just where the button was
+	// pressed: it is one install, and the user may have moved on to another panel.
+	if (ctx.gitInstallLog && (installing || ctx.gitInstallDone))
+	{
+		const std::string log = ctx.gitInstallLog();
+		if (!log.empty())
+		{
+			ImGui::Spacing();
+			ImGui::BeginChild("##gitinstalllog", ImVec2(0.0f, 150.0f), true);
+			// Wrapped for the same reason as the toolchain dialog's log: the
+			// sentence that says why an install stopped is at the end of a long line.
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextUnformatted(log.c_str());
+			ImGui::PopTextWrapPos();
+			if (installing) ImGui::SetScrollHereY(1.0f);
+			ImGui::EndChild();
+		}
+		if (!installing && ctx.gitInstallDone && !ctx.gitInstallOk)
+			ImGui::TextDisabled("git was not installed. See the log above, then retry "
+			                    "or install it yourself.");
+	}
 }
 
 void drawLfsInstallRemedy()
@@ -216,7 +301,7 @@ void DrawGitMissingDialog(AppContext& ctx)
 		{
 			ImGui::BulletText("git was not found.");
 			ImGui::Indent();
-			drawGitInstallRemedy();
+			drawGitInstallRemedy(ctx);
 			ImGui::Unindent();
 			ImGui::Spacing();
 		}
@@ -323,9 +408,10 @@ void DrawGitMissingDialog(AppContext& ctx)
 		EditorWidgets::checkbox("Don't show this again", &s_dontShowAgain);
 		ImGui::Spacing();
 
-		if (s_checking) ImGui::BeginDisabled();
+		const bool recheckBlocked = s_checking || ctx.gitInstalling;   // the install re-probes itself
+		if (recheckBlocked) ImGui::BeginDisabled();
 		if (EditorWidgets::button("Recheck") && ctx.recheckGit) ctx.recheckGit();
-		if (s_checking) ImGui::EndDisabled();
+		if (recheckBlocked) ImGui::EndDisabled();
 		ImGui::SameLine();
 
 		if (s_checking)

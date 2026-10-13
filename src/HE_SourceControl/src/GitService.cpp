@@ -3,6 +3,7 @@
 #include "SourceControl/GitCli.h"
 #include "SourceControl/GitHubApi.h"
 #include "SourceControl/GitHubTokenStore.h"
+#include "SourceControl/GitLocator.h"
 #include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
@@ -381,6 +382,17 @@ void GitService::workerMain()
 		{
 		case Kind::Open:
 		{
+			// Asked first: findRepoRoot without git comes back empty, which below
+			// reads as "no repository" — for a project that may well be one.
+			if (!gitExecutable())
+			{
+				m_root.clear();
+				HE_SC_WARN("git is not installed; repository detection for %s skipped",
+				           cmd.path.string().c_str());
+				ev.statusValid = true;
+				ev.gitMissing  = true;
+				break;
+			}
 			m_root = GitCli::findRepoRoot(cmd.path);
 			if (m_root.empty())
 			{
@@ -883,6 +895,9 @@ void GitService::workerMain()
 			if (m_root.empty())
 			{
 				ev.statusValid = true;
+				// Cached lookup, no process: a periodic refresh must not quietly
+				// turn "git missing" back into "no repository".
+				ev.gitMissing  = !gitExecutable();
 			}
 			else
 			{
@@ -971,6 +986,7 @@ void GitService::pump(std::size_t maxEvents)
 			m_stashes        = std::move(ev.stashes);
 		}
 		if (!ev.statusValid)       continue;
+		m_gitMissing = ev.gitMissing;
 		// Swapped in whole. A partially updated snapshot is the bug class this
 		// design exists to remove.
 		ev.status.generation = ++m_generation;

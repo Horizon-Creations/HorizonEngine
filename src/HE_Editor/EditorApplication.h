@@ -33,6 +33,7 @@
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected in the preview (no kick)
 #include <HorizonScene/Net/NetGameSession.h>        // the multiplayer session (plan Â§5.6)
 #include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
+#include <SourceControl/GitInstall.h>
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/SftpProbe.h>
@@ -378,6 +379,17 @@ struct AppContext
 	// and the fix is one git config call, not an install.
 	std::function<void(std::string name, std::string email)> setGitIdentity;
 	bool gitIdentityApplying = false;
+
+	// Installing git when the probe found none (HE::Sc::runGitInstall), started
+	// only by the user pressing "Install Git". Same shape as the toolchain install
+	// above: a worker streams the installer's output, the dialog polls the log
+	// each frame, and the probe re-runs when it ends — and if git now runs, the
+	// project's repository is opened again, so the panel picks up where it was.
+	std::function<void()> startGitInstall;
+	std::function<std::string()> gitInstallLog; // thread-safe snapshot of the streamed output
+	bool gitInstalling   = false; // an install is currently running
+	bool gitInstallDone  = false; // the last install finished (success or failure)
+	bool gitInstallOk    = false; // finished, and `git --version` ran afterwards
 
 	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
 	// same null-means-still-running convention as the two above. Read-only: it
@@ -1151,6 +1163,20 @@ private:
 	std::thread       m_gitIdentityThread;
 	std::atomic<bool> m_gitIdentityApplying{false};
 	void applyGitIdentity(std::string name, std::string email);
+	// Installing git (see startGitInstall). Its own log and flags, not the
+	// toolchain install's: both can run at once and must not share a log.
+	// m_gitInstallReopen is raised by the worker when git runs afterwards and
+	// consumed on the frame thread, which is the only one that may re-open the
+	// project in m_git.
+	std::thread       m_gitInstallThread;
+	std::atomic<bool> m_gitInstallRunning{false};
+	std::atomic<bool> m_gitInstallFinished{false};
+	std::atomic<bool> m_gitInstallOk{false};
+	std::atomic<bool> m_gitInstallCancel{false};
+	std::atomic<bool> m_gitInstallReopen{false};
+	std::mutex        m_gitInstallLogMutex;
+	std::string       m_gitInstallLog;
+	void startGitInstall();
 
 #ifdef HE_HAVE_LIBSSH2
 	// EngineContent SFTP reachability probe. Same lifecycle as the other
