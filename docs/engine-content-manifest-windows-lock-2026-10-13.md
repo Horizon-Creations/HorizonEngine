@@ -383,7 +383,7 @@ provoziert.
 
 | Lauf | t1−t0 | t2−t0 | t3−t0 | t1 < t2 | Ergebnis |
 |---|---|---|---|---|---|
-| alt 12.10. 19:20 | 236 | 332 | 595 | ja | Fehler 32, "could not be read" |
+| alt 12.10. 19:20 | 236 | 332 | 595 | ja | Fehler 32 |
 | alt 12.10. 19:37 | 313 | 426 | 656 | ja | Fehler 32 |
 | alt 12.10. 22:50 | 255 | 352 | 583 | ja | Fehler 32 |
 | neu, 19 Starts mit Server (ms, Spanne) | 243–406 | 333–549 | 668–1038 | 18 von 19 | 19× zwei `refreshed`, 0× `Could not` |
@@ -461,7 +461,12 @@ also hielt jemand anderes die frisch geschlossene `.partial` ohne
 Ausschlüsse, `handle.exe` und Process Monitor nicht benutzen, deshalb ist der
 Halter nicht benannt. Ein Versuch (20 ms) reichte jedes Mal, nie mehr als
 `retry 1 of 5`. Hypothese 2 gibt es also auf diesem Rechner auch. Ohne den Retry
-aus Schritt 2 wären das zwei Startfehler gewesen, auch mit Mutex.
+wären genau diese zwei Treffer trotzdem unsichtbar geblieben: Sie lagen beide auf
+dem zweiten Refresh, das Manifest war schon live, `loadCachedManifest()` sagt dann
+`true`, und es gibt nur eine WARN-Zeile. Wofür der Retry wirklich da ist, ist
+derselbe Treffer auf dem ersten oder einzigen Aufrufer: dem Preflight (dessen
+Serverfehler im Dialog) oder einem ersten Start ohne Cache ("could not be read").
+Bei 2 von 19 Starts auf dem zweiten Refresh ist das kein theoretischer Fall.
 
 ### Was diese Abnahme nicht zeigt
 
