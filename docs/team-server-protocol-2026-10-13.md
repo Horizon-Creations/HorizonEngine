@@ -31,8 +31,9 @@ for whoever writes the `HE_Net` client:
 ## Handoff
 
 - **Topic / step:** 197, step 8 (data model + login; plan step 1, third attempt)
-- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ ae5d379 (pushed), on top
-  of f61c9f1: 6ff8f77 store+crypto, 57c4bda protocol+server, ae5d379 deploy+README.
+- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ a555f14 (pushed), on top
+  of f61c9f1: 6ff8f77 store+crypto, 57c4bda protocol+server, ae5d379 deploy+README,
+  a555f14 one more test. The branch is 7 commits ahead of CollabSession `main`, no PR.
   This doc: HE `claude/team-server-teams-mitglieder-anwesenheit`.
 - **Done:** create team, log in, list/add/remove members, change password, all persisted.
 - **Files touched (CollabSession):** `src/TeamStore.{h,cpp}` (model, file, rules),
