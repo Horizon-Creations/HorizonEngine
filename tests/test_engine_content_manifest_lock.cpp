@@ -26,9 +26,10 @@
 //    is ERROR_ACCESS_DENIED (5).
 //  • macOS/Linux: rename() swaps the directory entry under any open descriptor, so
 //    the same interleaving goes through silently — why only Windows ever saw it.
-// This is the witness for the mechanism, not yet the fix: the fix (Schritt 2) must
-// keep the two refreshes from sharing a path at all, and the regression test
-// (Schritt 3) drives the real EngineContentSync code.
+// This is the witness for the mechanism, not the fix: the fix (Schritt 2) runs the
+// refreshes one after another (EngineContentSync::m_refreshMutex), so they never hold
+// the shared path at the same time, and the regression test (Schritt 3) drives the
+// real EngineContentSync code through refreshManifestWith.
 
 namespace fs = std::filesystem;
 
