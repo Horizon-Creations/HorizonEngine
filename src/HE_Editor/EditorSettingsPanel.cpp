@@ -223,32 +223,36 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		}
 		else
 		{
-			// A two-column row: the setting on the left, its pin toggle in a fixed
-			// column on the right. The pin used to be a bare checkbox squeezed in
-			// front of the widget, which put two unlabelled checkboxes side by side
-			// on every boolean setting — indistinguishable, and neither said what it
-			// did. A table also handles a multi-line setting properly: the pin stays
-			// at the row's top right instead of drifting down after the last slider.
+			// A two-column row: a narrow gutter on the left with the pin, the setting
+			// beside it. The pin is a bare star, not a labelled button: a "☆ Pin"
+			// button at the far right edge sat on its own above every setting, away
+			// from the thing it belonged to, and repeated its caption down the whole
+			// page. A star in the gutter reads as a marker on the row — dim while
+			// unpinned, amber once pinned — and the tooltip says what it does. A
+			// table keeps it at the row's first line when a setting runs several.
 			ImGui::PushID(key);
 			if (ImGui::BeginTable("##row", 2, ImGuiTableFlags_SizingFixedFit))
 			{
+				ImGui::TableSetupColumn("##pin",     ImGuiTableColumnFlags_WidthFixed, 26.0f);
 				ImGui::TableSetupColumn("##setting", ImGuiTableColumnFlags_WidthStretch);
-				ImGui::TableSetupColumn("##pin",     ImGuiTableColumnFlags_WidthFixed, 72.0f);
 				ImGui::TableNextRow();
 
 				ImGui::TableSetColumnIndex(0);
-				widget();
+				using namespace HE::Ed;
+				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::alpha(Theme::AccentHi, 0.18f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::alpha(Theme::AccentHi, 0.30f));
+				ImGui::PushStyleColor(ImGuiCol_Text, fav ? Theme::AccentHi
+				                                         : Theme::alpha(Theme::TextDim, 0.7f));
+				if (ImGui::SmallButton(fav ? "\xe2\x98\x85##pin" : "\xe2\x98\x86##pin"))
+					toggleFavorite(cfg, key);
+				ImGui::PopStyleColor(4);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(fav ? "Unpin from the Quick Settings panel"
+					                      : "Pin to the Quick Settings panel");
 
 				ImGui::TableSetColumnIndex(1);
-				// Labelled, so it is obvious what the control is for, and coloured
-				// when active so a pinned setting is visible at a glance.
-				if (fav) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-				if (ImGui::SmallButton(fav ? "\xe2\x98\x85 Pinned" : "\xe2\x98\x86 Pin"))
-					toggleFavorite(cfg, key);
-				if (fav) ImGui::PopStyleColor();
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip(fav ? "Remove from the Quick Settings panel"
-					                      : "Show this setting in the Quick Settings panel");
+				widget();
 				ImGui::EndTable();
 			}
 			ImGui::PopID();
@@ -626,7 +630,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			HE::Net::RelayAddress parsed;
 			std::string why;
 			if (!HE::Net::parseRelayAddress(cfg.CollabRelayAddress, parsed, &why))
-				ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Not usable: %s", why.c_str());
+				ImGui::TextColored(HE::Ed::Theme::Warn, "Not usable: %s", why.c_str());
 		}
 		hint("Leave empty to connect directly, peer to peer — the default, and "
 		     "exactly how sessions worked before. With a relay server set, this "
@@ -672,7 +676,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			if (running)
 			{
 				const std::size_t clients = ctx.mcp->clientCount();
-				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+				ImGui::TextColored(HE::Ed::Theme::Ok,
 				                   "Listening on 127.0.0.1:%u \xE2\x80\x94 %zu client%s connected",
 				                   static_cast<unsigned>(ctx.mcp->port()),
 				                   clients, clients == 1 ? "" : "s");
@@ -685,7 +689,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			else if (wanted)
 			{
 				// The honest reading of a ticked box with a dead socket.
-				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+				ImGui::TextColored(HE::Ed::Theme::Warn,
 				                   "Enabled, but the listener is not up.");
 				hint("The port could not be opened, or the endpoint file could not be "
 				     "written; the editor log says which. Nothing is listening, so no "
@@ -805,7 +809,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 
 		if (!s_claudeTools.ready())
 		{
-			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "%s",
+			ImGui::TextColored(HE::Ed::Theme::Warn, "%s",
 			                   s_claudeTools.blocker.c_str());
 			// Without this the blocked state is a dead end: the button that would
 			// re-probe is the one that is greyed out, so installing the CLI would
@@ -820,8 +824,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (s_claudeJob)
 		{
 			const Setup::Outcome& r = s_claudeJob->outcome;
-			ImGui::TextColored(r.ok ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f)
-			                        : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
+			ImGui::TextColored(r.ok ? HE::Ed::Theme::Ok
+			                        : HE::Ed::Theme::Bad,
 			                   "%s", r.message.c_str());
 			// The transcript, collapsed. It is here for the failure that the one
 			// line above cannot explain — a CLI version that words its refusal
@@ -864,7 +868,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (!in) return;
 		// Connection readout answers "is my pad even seen?" before any tuning.
 		if (in->gamepad().connected)
-			ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Gamepad connected");
+			ImGui::TextColored(HE::Ed::Theme::Ok, "Gamepad connected");
 		else
 			ImGui::TextDisabled("No gamepad connected");
 
@@ -1040,8 +1044,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)
-		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press \xe2\x98\x86 Pin "
-		     "on the settings you want here.");
+		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press the star (\xe2\x98\x86) "
+		     "next to the settings you want here.");
 }
 
 // ─── Preferences tab state ───────────────────────────────────────────────────
@@ -1130,7 +1134,7 @@ void drawGitMessages(GitController* git)
 	if (git->lastError().empty() && !git->lastInfo().empty())
 	{
 		ImGui::Spacing();
-		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());
+		ImGui::TextColored(HE::Ed::Theme::Ok, "%s", git->lastInfo().c_str());
 	}
 	if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
@@ -1168,7 +1172,7 @@ void drawRepositorySection(AppContext& ctx)
 	{
 		// The install instructions are the section directly above this one, so
 		// this only has to say why the repository controls are missing.
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 		ImGui::TextWrapped("git was not found on this machine — install it above to "
 		                   "put this project under source control.");
 		ImGui::PopStyleColor();
@@ -1197,7 +1201,7 @@ void drawRepositorySection(AppContext& ctx)
 		if (!lfs)
 		{
 			ImGui::Spacing();
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 			ImGui::TextWrapped("git-lfs was not found — the repository will work, "
 			                   "but large assets will not be tracked through LFS "
 			                   "until it is installed.");
@@ -1214,7 +1218,7 @@ void drawRepositorySection(AppContext& ctx)
 
 	// ── Branch line ─────────────────────────────────────────────────────────
 	if (st.detached)
-		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "Detached HEAD");
+		ImGui::TextColored(HE::Ed::Theme::Warn, "Detached HEAD");
 	else
 		ImGui::Text("Branch: %s", st.branch.empty() ? "(unknown)" : st.branch.c_str());
 	if (!st.initialCommit && !st.upstream.empty())
@@ -1581,12 +1585,12 @@ ImVec4 statusColor(StatusLevel s)
 {
 	switch (s)
 	{
-	case StatusLevel::Ok:       return ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
-	case StatusLevel::Warn:     return ImVec4(1.00f, 0.78f, 0.35f, 1.0f);
-	case StatusLevel::Missing:  return ImVec4(1.00f, 0.50f, 0.45f, 1.0f);
+	case StatusLevel::Ok:       return HE::Ed::Theme::Ok;
+	case StatusLevel::Warn:     return HE::Ed::Theme::Warn;
+	case StatusLevel::Missing:  return HE::Ed::Theme::Bad;
 	case StatusLevel::Checking: break;
 	}
-	return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+	return HE::Ed::Theme::TextDim;
 }
 
 const char* statusMark(StatusLevel s)
@@ -2182,7 +2186,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	// Its own shade, taller rows, and the active page marked with an accent bar
 	// at the rail's edge — the way every settings sidebar this decade says
 	// "you are here". The Selectable's own blue fill comes from the theme.
-	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.09f, 0.095f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.075f));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 12.0f));
 	ImGui::BeginChild("##prefnav", ImVec2(210.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
 	                  ImGuiWindowFlags_NoScrollbar);
@@ -2236,7 +2240,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	ImGui::BeginChild("##prefbody", ImVec2(0.0f, -footerH));
 	if (category)
 	{
-		EditorWidgets::hint("Press \xe2\x98\x86 Pin on a setting to keep it in the Quick Settings "
+		EditorWidgets::hint("Press the star (\xe2\x98\x86) next to a setting to keep it in the Quick Settings "
 		                    "panel next to the viewport.");
 		ImGui::Spacing();
 		DrawEngineSettings(ctx, SettingsMode::Preferences, category);

@@ -8577,19 +8577,6 @@ namespace
 	  "guest needs those two values and never an address. Your open scene becomes "
 	  "the session's scene.",
 	  "", "collaboration#starting" },
-	{ "Collaboration Session/Announce this session on the local network", "",
-	  "Announces that a session exists here, so people on the same network find "
-	  "it in their list and join without an address. The join code is never "
-	  "announced, so it still has to be given out. It is one switch for both "
-	  "halves of discovery: the same setting also listens for other people's "
-	  "sessions, whether or not you are hosting.",
-	  "", "collaboration#starting" },
-	{ "Collaboration Session/Look for sessions on this network", "",
-	  "Listens for hosts announcing themselves nearby and lists what it hears: "
-	  "who is hosting, which project, and how many people are in it. Picking a "
-	  "row fills in the session ID for you; the join code is still typed, because "
-	  "it is the only thing keeping strangers on this network out.",
-	  "", "collaboration#starting" },
 	{ "Collaboration Session/Join code", "",
 	  "The code the host gives you, and the only thing keeping strangers out of a "
 	  "session they can otherwise see. It is never announced on the network and "
