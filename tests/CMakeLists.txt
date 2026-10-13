@@ -119,6 +119,10 @@ add_executable(he_tests
     # The "git is missing" remedy: Install Git exactly when the route can run,
     # the manual way otherwise. Nothing is installed (the callback is a counter).
     test_git_install_ui.cpp
+    # The missing-tools dialog (cmake, compiler, git, Git LFS, identity): which
+    # row shows what, which installer each button starts, the queue. Nothing is
+    # installed (every callback is a counter).
+    test_tool_setup_ui.cpp
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
@@ -799,6 +803,10 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads the probe and the
     # git-install callbacks; HorizonSourceControl is linked below.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
+    # The missing-tools dialog, for test_tool_setup_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. It reads both probes and the two installers'
+    # callbacks; HorizonScene (HcCodegen) and HorizonSourceControl are linked below.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
@@ -873,6 +881,8 @@ set_source_files_properties(
     test_asset_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     test_git_install_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
+    test_tool_setup_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp

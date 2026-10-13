@@ -2388,7 +2388,7 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 // inline, like applyGitIdentity, since startGitProbe would join this thread — and
 // when git runs, the frame thread asks GitService for a refresh, which runs the
 // repository detection the project's open had to skip.
-void EditorApplication::startGitInstall()
+void EditorApplication::startGitInstall(bool lfs)
 {
 	if (m_gitInstallRunning.load(std::memory_order_acquire)) return;
 	// The plan is part of the probe; without an answer there is nothing to run.
@@ -2406,8 +2406,9 @@ void EditorApplication::startGitInstall()
 	m_gitInstallFinished.store(false, std::memory_order_release);
 	m_gitInstallOk.store(false, std::memory_order_release);
 	m_gitInstallCancel.store(false, std::memory_order_release);
+	m_gitInstallIsLfs.store(lfs, std::memory_order_release);
 	m_gitInstallRunning.store(true, std::memory_order_release);
-	m_gitInstallThread = std::thread([this, plan]
+	m_gitInstallThread = std::thread([this, plan, lfs]
 	{
 		const auto onLine = [this](const std::string& line)
 		{
@@ -2416,14 +2417,16 @@ void EditorApplication::startGitInstall()
 			m_gitInstallLog += '\n';
 		};
 		const HE::Sc::GitInstallOutcome res =
-			HE::Sc::runGitInstall(plan, onLine, &m_gitInstallCancel);
+			HE::Sc::runGitInstall(plan, onLine, &m_gitInstallCancel,
+			                      lfs ? HE::Sc::GitInstallTarget::GitLfs
+			                          : HE::Sc::GitInstallTarget::Git);
 
 		m_gitChecked.store(false, std::memory_order_release);
 		HE::Sc::GitProbe probe = HE::Sc::probeGit();
 		m_gitProbe = std::move(probe);
 		m_gitChecked.store(true, std::memory_order_release);
 
-		m_gitInstallOk.store(res.gitRunnable, std::memory_order_release);
+		m_gitInstallOk.store(lfs ? res.lfsRunnable : res.gitRunnable, std::memory_order_release);
 		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
 		m_gitInstallRunning.store(false, std::memory_order_release);
 		m_gitInstallFinished.store(true, std::memory_order_release);
@@ -2432,7 +2435,7 @@ void EditorApplication::startGitInstall()
 
 // Kick off a best-effort auto-install of the missing toolchain pieces on a worker
 // thread (see HcCodegen::installToolchain). Installer output streams into m_installLog
-// (guarded by m_installLogMutex); the "Toolchain Missing" dialog shows it live and,
+// (guarded by m_installLogMutex); the tool setup dialog shows it live and,
 // on completion, re-runs the probe. No-op if an install is already running.
 void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 {
@@ -11260,11 +11263,13 @@ AppContext EditorApplication::makeContext()
 		                           { applyGitIdentity(std::move(n), std::move(e)); },
 		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
 		.startGitInstall     = [this]{ startGitInstall(); },
+		.startGitLfsInstall  = [this]{ startGitInstall(/*lfs=*/true); },
 		.cancelGitInstall    = [this]{ m_gitInstallCancel.store(true, std::memory_order_release); },
 		.gitInstallLog       = [this]{ std::lock_guard<std::mutex> lk(m_gitInstallLogMutex); return m_gitInstallLog; },
 		.gitInstalling       = m_gitInstallRunning.load(std::memory_order_acquire),
 		.gitInstallDone      = m_gitInstallFinished.load(std::memory_order_acquire),
 		.gitInstallOk        = m_gitInstallOk.load(std::memory_order_acquire),
+		.gitInstallIsLfs     = m_gitInstallIsLfs.load(std::memory_order_acquire),
 		.routerProbe        = m_routerChecked.load(std::memory_order_acquire)
 		                           ? &m_routerProbe : nullptr,
 		.recheckRouter       = [this]{ startRouterProbe(); },

@@ -1,4 +1,5 @@
 #include "ExportDialogPanel.h"
+#include "ToolSetupDialog.h"         // the missing cmake/compiler notice and its "Set Up…" button
 #include <algorithm>
 #include <cstdint>
 #include "BuildProgressDialog.h"         // the window a running export is watched in
@@ -1039,7 +1040,15 @@ void render(AppContext& ctx)
                 // absolute column as the rest.
                 EditorWidgets::WrapText wrap(550.0f);
                 if (!hcToolchainOk)
-                    ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+                {
+                    // The notice carries the way out: "Set Up…" opens the tool
+                    // dialog on the missing row (cmake first, then the compiler).
+                    const ToolSetupDialog::Tool missing =
+                        (ctx.toolchainProbe && !ctx.toolchainProbe->cmakeFound)
+                            ? ToolSetupDialog::Tool::Cmake : ToolSetupDialog::Tool::Compiler;
+                    ToolSetupDialog::drawMissingBanner(ctx, missing,
+                        "Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+                }
                 else
                     ImGui::TextDisabled("Disabled — this editor has no HorizonCode SDK (<editor>/SDK). "
                                         "HorizonCode will ship interpreted.");

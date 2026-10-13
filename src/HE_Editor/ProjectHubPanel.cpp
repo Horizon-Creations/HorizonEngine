@@ -10,6 +10,7 @@
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "DocsPanel.h"                   // Help ▸ Documentation — readable before a project exists
 #include "GitCloneDialog.h"              // Open Project ▸ Clone from GitHub...
+#include "ToolSetupDialog.h"             // "C++ needs cmake and a compiler" notice with its Set Up… button
 #include "ProjectLaunchOpen.h"           // a .heproj double-clicked in the file manager
 #include "HorizonVersion.h"
 #ifdef __APPLE__
@@ -226,7 +227,7 @@ void render(AppContext& ctx)
         // A C++ project is useless without cmake + a working compiler, so drop it from the
         // picker when the startup probe couldn't find them. A null probe = it hasn't
         // finished yet → don't hide prematurely. Index 3 == Cpp (matches kLangNames /
-        // ProjectScriptLanguage). See DrawToolchainDialog / HcCodegen::probeToolchain.
+        // ProjectScriptLanguage). See ToolSetupDialog / HcCodegen::probeToolchain.
         const bool cppToolchainOk =
             !ctx.toolchainProbe ||
             (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
@@ -252,7 +253,11 @@ void render(AppContext& ctx)
         if (!cppToolchainOk)
         {
             ImGui::SetCursorPosX(padding);
-            ImGui::TextDisabled("C++ needs cmake + a C++ compiler (not found on this machine).");
+            const ToolSetupDialog::Tool missing =
+                (ctx.toolchainProbe && !ctx.toolchainProbe->cmakeFound)
+                    ? ToolSetupDialog::Tool::Cmake : ToolSetupDialog::Tool::Compiler;
+            ToolSetupDialog::drawMissingBanner(ctx, missing,
+                "C++ needs cmake and a C++ compiler, and neither is set up on this machine.");
         }
 
         // Advanced Shader Effects — applications only, and forced on otherwise.

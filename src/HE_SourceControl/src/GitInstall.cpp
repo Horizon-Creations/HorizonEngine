@@ -51,9 +51,13 @@ const char* gitDownloadPageUrl(HostPlatform platform)
 	return "https://git-scm.com/downloads";
 }
 
-std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan)
+std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan, GitInstallTarget target)
 {
 	if (!plan.canInstallAutomatically()) return std::nullopt;
+	const bool lfs = target == GitInstallTarget::GitLfs;
+	// No package the plan can name (the Windows installer, the Command Line
+	// Tools) means no automatic route for LFS either.
+	if (lfs && plan.lfsInstallCommand.empty()) return std::nullopt;
 
 	GitInstallLaunch l;
 	switch (plan.route)
@@ -62,17 +66,19 @@ std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan)
 		// The two --accept flags are what keep winget from stopping at its first
 		// run to ask about the source agreement — on stdin, which nobody sees.
 		l.exe  = "winget";
-		l.args = { "install", "--id", "Git.Git", "-e", "--source", "winget",
+		l.args = { "install", "--id", lfs ? "GitHub.GitLFS" : "Git.Git", "-e", "--source", "winget",
 		           "--accept-source-agreements", "--accept-package-agreements" };
-		l.userPrompt = "Windows may ask for permission (UAC) while Git for Windows installs.";
+		l.userPrompt = lfs ? "Windows may ask for permission (UAC) while Git LFS installs."
+		                   : "Windows may ask for permission (UAC) while Git for Windows installs.";
 		break;
 
 	case GitInstallRoute::Homebrew:
 		l.exe  = "brew";
-		l.args = { "install", "git" };
+		l.args = { "install", lfs ? "git-lfs" : "git" };
 		break;
 
 	case GitInstallRoute::XcodeCommandLineTools:
+		if (lfs) return std::nullopt;
 		l.exe  = "xcode-select";
 		l.args = { "--install" };
 		l.returnsBeforeInstalled = true;
@@ -85,11 +91,12 @@ std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan)
 	case GitInstallRoute::Pacman:
 	case GitInstallRoute::Zypper:
 	{
-		if (plan.installCommand.empty()) return std::nullopt;
+		const std::string& command = lfs ? plan.lfsInstallCommand : plan.installCommand;
+		if (command.empty()) return std::nullopt;
 		// pkexec starts its program with a clean environment, so this has to be
 		// set inside the shell line: without it a debconf question would wait on
 		// a terminal that does not exist until the timeout.
-		std::string line = plan.installCommand;
+		std::string line = command;
 		if (plan.route == GitInstallRoute::Apt)
 			line = "export DEBIAN_FRONTEND=noninteractive; " + line;
 
@@ -125,15 +132,18 @@ std::optional<GitInstallLaunch> gitInstallLaunch(const GitInstallPlan& plan)
 
 GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
                                 const std::function<void(const std::string&)>& onLine,
-                                const std::atomic<bool>* cancel)
+                                const std::atomic<bool>* cancel,
+                                GitInstallTarget target)
 {
 	GitInstallOutcome out;
 	const auto emit = [&](const std::string& line) { if (onLine) onLine(line); };
+	const bool lfs = target == GitInstallTarget::GitLfs;
+	const std::string what = lfs ? "Git LFS" : "git";
 
-	const std::optional<GitInstallLaunch> launch = gitInstallLaunch(plan);
+	const std::optional<GitInstallLaunch> launch = gitInstallLaunch(plan, target);
 	if (!launch)
 	{
-		out.message = "The editor cannot install git on this machine by itself (" +
+		out.message = "The editor cannot install " + what + " on this machine by itself (" +
 		              plan.reason + ").";
 		emit(out.message);
 		return out;
@@ -147,7 +157,7 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 		const auto found = HE::Proc::which(exe.string());
 		if (!found)
 		{
-			out.message = exe.string() + " is no longer available, so git cannot be "
+			out.message = exe.string() + " is no longer available, so " + what + " cannot be "
 			              "installed automatically.";
 			emit(out.message);
 			return out;
@@ -155,9 +165,9 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 		exe = *found;
 	}
 
-	HE_SC_INFO("Installing git through %s: %s", gitInstallRouteName(plan.route),
+	HE_SC_INFO("Installing %s through %s: %s", what.c_str(), gitInstallRouteName(plan.route),
 	           launch->display.c_str());
-	emit(std::string("Installing git through ") + gitInstallRouteName(plan.route) + ".");
+	emit("Installing " + what + " through " + gitInstallRouteName(plan.route) + ".");
 	if (!launch->userPrompt.empty()) emit(launch->userPrompt);
 	emit("$ " + launch->display);
 
@@ -211,7 +221,23 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 	// installing something that is not on any PATH this process can see.
 	invalidateGitLocation();
 	const auto found = gitExecutable();
-	if (found && developerToolsPresent(found))
+	if (lfs)
+	{
+		// `git lfs version` is what the probe asks, with the PATH repairs it
+		// does for it; asking the probe keeps one answer to "is LFS here?".
+		const GitProbe after = probeGit();
+		out.lfsRunnable = after.lfsFound;
+		out.lfsVersion  = after.lfsVersion;
+		out.gitRunnable = after.gitFound;
+		out.gitVersion  = after.gitVersion;
+		out.gitPath     = after.gitPath;
+		if (out.lfsRunnable)
+		{
+			emit("$ git lfs version");
+			emit("git-lfs/" + out.lfsVersion);
+		}
+	}
+	else if (found && developerToolsPresent(found))
 	{
 		HE::Proc::Options v;
 		v.exe       = *found;
@@ -229,10 +255,11 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 		}
 	}
 
-	if (out.gitRunnable)
+	if (lfs ? out.lfsRunnable : out.gitRunnable)
 	{
-		out.message = "git " + out.gitVersion + " is installed at " + out.gitPath.string() + ".";
-		HE_SC_INFO("git install finished: %s", out.message.c_str());
+		out.message = lfs ? "Git LFS " + out.lfsVersion + " is installed."
+		                  : "git " + out.gitVersion + " is installed at " + out.gitPath.string() + ".";
+		HE_SC_INFO("%s install finished: %s", what.c_str(), out.message.c_str());
 	}
 	else
 	{
@@ -253,10 +280,10 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 		else if (r.timedOut)
 			out.message = "The installer did not finish in time. Check it, then press Recheck.";
 		else
-			out.message = "The installer ended, but git still does not run. See the log above; "
-			              "you can also install git manually.";
-		HE_SC_WARN("git install did not produce a runnable git (route %s, exit %d)",
-		           gitInstallRouteName(plan.route), r.exitCode);
+			out.message = "The installer ended, but " + what + " still does not run. See the log "
+			              "above; you can also install " + what + " manually.";
+		HE_SC_WARN("%s install did not produce a runnable %s (route %s, exit %d)", what.c_str(),
+		           what.c_str(), gitInstallRouteName(plan.route), r.exitCode);
 	}
 	emit(out.message);
 	return out;

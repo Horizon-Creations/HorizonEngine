@@ -1,6 +1,6 @@
 #include "EditorSettingsPanel.h"
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
-#include "ToolchainDialog.h"             // Tool Status > cmake/compiler "Fix" opens the dialog
+#include "ToolSetupDialog.h"             // Tool Status "Fix" opens the setup dialog on that tool's row
 #include "GitController.h"               // Source Control page
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
@@ -1480,7 +1480,7 @@ void drawGitSetupSection(AppContext& ctx)
 			"it those would be committed straight into the repository, which most "
 			"hosts reject above 100 MB per file and which makes every clone "
 			"download the entire history of every asset.");
-		GitMissingDialog::drawLfsInstallRemedy();
+		GitMissingDialog::drawLfsInstallRemedy(ctx);
 		ImGui::Unindent();
 		ImGui::Spacing();
 	}
@@ -1683,16 +1683,20 @@ void drawStatusPage(AppContext& ctx)
 		ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("##fix",  ImGuiTableColumnFlags_WidthFixed, 44.0f);
 
-		// Every git row leads to the same place: the one page that reports the
-		// install and configures the repository.
+		// Every row that can be fixed by installing something leads to the same
+		// place: the setup dialog, opened on that tool's row. It asks for a fresh
+		// probe first (the question being asked is "is it still missing?"). The
+		// credential helper has no install behind it and stays on the Source
+		// Control page, where it is configured.
 		const auto openSourceControl = []{ s_page = Page::Repository; };
-		// cmake and the compiler have no settings page of their own — the remedy
-		// is the install dialog that already carries the per-platform steps. It
-		// opens on a completed probe, so the recheck is what makes it appear (and
-		// the answer it shows is a fresh one, which is the question being asked).
-		const auto showToolchainHelp = [&ctx]{
-			if (ctx.recheckToolchain) ctx.recheckToolchain();
-			ToolchainDialog::requestShow();
+		const auto showSetup = [&ctx](ToolSetupDialog::Tool tool)
+		{
+			return [&ctx, tool]
+			{
+				if (ctx.recheckToolchain) ctx.recheckToolchain();
+				if (ctx.recheckGit)       ctx.recheckGit();
+				ToolSetupDialog::requestShow(tool);
+			};
 		};
 
 		// ── Source control ───────────────────────────────────────────────────
@@ -1711,7 +1715,7 @@ void drawStatusPage(AppContext& ctx)
 			              ? (g.gitVersion.empty() ? std::string("found") : g.gitVersion) +
 			                (g.gitPath.empty() ? "" : " at " + g.gitPath.string())
 			              : std::string("not found — source control is unavailable"),
-			          openSourceControl);
+			          showSetup(ToolSetupDialog::Tool::Git));
 
 			// A warning, not an error: the repository works without LFS, it just
 			// commits big binaries the wrong way.
@@ -1719,14 +1723,14 @@ void drawStatusPage(AppContext& ctx)
 			          g.lfsFound ? g.lfsVersion
 			                     : std::string("not found — large assets would be committed "
 			                                   "directly into the repository"),
-			          openSourceControl);
+			          showSetup(ToolSetupDialog::Tool::GitLfs));
 
 			statusRow("git identity",
 			          g.identityConfigured ? StatusLevel::Ok : StatusLevel::Warn,
 			          g.identityConfigured ? g.userName + " <" + g.userEmail + ">"
 			                               : std::string("user.name / user.email are not set — "
 			                                             "commits will fail"),
-			          openSourceControl);
+			          showSetup(ToolSetupDialog::Tool::GitIdentity));
 
 			statusRow("Credential helper",
 			          g.credentialHelper.empty() ? StatusLevel::Warn : StatusLevel::Ok,
@@ -1749,10 +1753,10 @@ void drawStatusPage(AppContext& ctx)
 			          t.cmakeFound ? t.cmakeVersion
 			                       : std::string("not found — needed for C++ export codegen "
 			                                     "and C++ projects"),
-			          showToolchainHelp);
+			          showSetup(ToolSetupDialog::Tool::Cmake));
 			statusRow("C++ compiler", t.compilerFound ? StatusLevel::Ok : StatusLevel::Missing,
 			          t.compilerFound ? t.compilerId : std::string("not found"),
-			          showToolchainHelp);
+			          showSetup(ToolSetupDialog::Tool::Compiler));
 		}
 
 		// ── Collaboration ────────────────────────────────────────────────────

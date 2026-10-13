@@ -344,13 +344,13 @@ struct AppContext
 
 	// Startup toolchain probe (cmake + C++ compiler), run once on a background
 	// thread so a slow/missing toolchain never blocks editor init. Null until
-	// the probe finishes. The "Toolchain Missing" dialog (EditorUI) opens when
+	// the probe finishes. The tool setup dialog (ToolSetupDialog) opens when
 	// it's non-null and something's missing, unless suppressed in preferences.
 	const HE::hccg::ToolchainProbe* toolchainProbe = nullptr;
 	std::function<void()> recheckToolchain; // re-runs the probe (after the user installs something)
 
 	// Auto-install of the missing toolchain (see HcCodegen::installToolchain). The
-	// "Toolchain Missing" dialog calls startToolchainInstall(needCmake, needCompiler);
+	// tool setup dialog calls startToolchainInstall(needCmake, needCompiler);
 	// the install runs on a background thread and streams output, which the dialog
 	// shows live by polling toolchainInstallLog() each frame.
 	std::function<void(bool needCmake, bool needCompiler)> startToolchainInstall;
@@ -386,13 +386,18 @@ struct AppContext
 	// each frame, and the probe re-runs when it ends — and if git now runs, the
 	// project's repository is looked up again, so the panel picks up where it was.
 	std::function<void()> startGitInstall;
+	// The same for Git LFS (HE::Sc::GitInstallTarget::GitLfs): same worker, log and
+	// flags — only one install runs at a time — so gitInstallIsLfs says which of
+	// the two the log and the done/ok flags belong to.
+	std::function<void()> startGitLfsInstall;
 	// Stops waiting for Apple's installer (the only wait that can be stopped:
 	// a package manager that is already running cannot be interrupted).
 	std::function<void()> cancelGitInstall;
 	std::function<std::string()> gitInstallLog; // thread-safe snapshot of the streamed output
 	bool gitInstalling   = false; // an install is currently running
 	bool gitInstallDone  = false; // the last install finished (success or failure)
-	bool gitInstallOk    = false; // finished, and `git --version` ran afterwards
+	bool gitInstallOk    = false; // finished, and `git --version` (LFS: `git lfs version`) ran afterwards
+	bool gitInstallIsLfs = false; // the install that is running / last ran is Git LFS, not git
 
 	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
 	// same null-means-still-running convention as the two above. Read-only: it
@@ -1172,6 +1177,7 @@ private:
 	std::atomic<bool> m_gitInstallRunning{false};
 	std::atomic<bool> m_gitInstallFinished{false};
 	std::atomic<bool> m_gitInstallOk{false};
+	std::atomic<bool> m_gitInstallIsLfs{false};   // what the run above is installing
 	std::atomic<bool> m_gitInstallCancel{false};
 	// Raised by any probe that found a runnable git (after Install Git, or a
 	// Recheck after installing by hand) and consumed on the frame thread, the
@@ -1180,7 +1186,7 @@ private:
 	std::atomic<bool> m_gitReopenRepo{false};
 	std::mutex        m_gitInstallLogMutex;
 	std::string       m_gitInstallLog;
-	void startGitInstall();
+	void startGitInstall(bool lfs = false);
 
 #ifdef HE_HAVE_LIBSSH2
 	// EngineContent SFTP reachability probe. Same lifecycle as the other
