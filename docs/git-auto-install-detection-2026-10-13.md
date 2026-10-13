@@ -10,7 +10,7 @@ Detection only. Nothing installs, nothing asks the user.
 | API | What it does |
 |---|---|
 | `gitExecutable()` | Absolute path of the git to launch, cached behind a mutex. **Never spawns a process** (it is reached from the frame thread). Windows: `Proc::which("git")` (only an `.exe` counts, CreateProcess cannot run `git.cmd`), then the **registry** PATH as it is *now* (HKLM Session Manager\Environment, then HKCU Environment, `ExpandEnvironmentStringsW`), then `%ProgramW6432%/%ProgramFiles%/%ProgramFiles(x86)%\Git\cmd` and `%LOCALAPPDATA%\Programs\Git\cmd`. POSIX: `Proc::which` (Homebrew prefixes added by `augmentToolPath`) |
-| `invalidateGitLocation()` | Drops the cache. Called by `probeGit()` (= Recheck), and on every `launchFailed` |
+| `invalidateGitLocation()` | Drops the cache. Called by `probeGit()` (= Recheck), and when a *located* (absolute) git fails to launch. A bare `"git"` failing keeps the cached "not found" |
 | `gitLaunchPath()` | Located path, or the bare `"git"` when nothing was located, so nothing regresses if the OS knows a git the locator does not |
 | `splitPathList`, `findExecutableInDirs` | Pure PATH helpers (quotes, empty entries, dirs named `git`, POSIX exec bit) |
 | `classifyGitBinary(platform, found, developerToolsPresent)` | `NotFound / Stub / Runnable`. `Stub` = macOS `/usr/bin/git` without CLT/Xcode |
@@ -65,7 +65,8 @@ route names, and a machine smoke test (locator ⊇ `Proc::which`, probe agrees, 
   `gitMissing` threaded through (or a `gitExecutable()` check first). Git LFS: `bringsLfs` says
   which routes carry it, and the queen still has to decide whether LFS gets installed too.
 - **Next steps:** 1. `EditorApplication::startGitInstall()` that runs `probe.install`
-  (winget / download / brew / xcode-select / pkexec + `installCommand`), modelled on
+  (winget / download / brew / xcode-select / `pkexec sh -c '<installCommand>'`, never
+  `pkexec <installCommand>`, since apt's line contains `&&`), modelled on
   `startToolchainInstall`. Then `invalidateGitLocation()` + `probeGit()`. 2. A dialog for
   `canInstallAutomatically() == false` that shows `manualCommand` + `reason`. 3. Hook the UI gates
   from step 1 §2 and a `gitMissing` result into it.

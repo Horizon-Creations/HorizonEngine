@@ -60,7 +60,7 @@ std::string runCapture(const std::vector<std::string>& args, bool& ok)
 
 	const HE::Proc::Result r = HE::Proc::run(o);
 	ok = r.ok();
-	if (r.launchFailed) invalidateGitLocation();
+	if (r.launchFailed && o.exe.is_absolute()) invalidateGitLocation();
 	return trimmed(r.out);
 }
 

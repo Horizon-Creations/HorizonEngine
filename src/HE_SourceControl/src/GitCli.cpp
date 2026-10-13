@@ -44,7 +44,7 @@ HE::Proc::Result runCredential(const HE::Proc::Options& o)
 	HE::Proc::Result r = HE::Proc::run(o);
 	if (r.launchFailed)
 	{
-		invalidateGitLocation();
+		if (o.exe.is_absolute()) invalidateGitLocation();
 		r.err = "git could not be started — is it installed and on PATH?";
 	}
 	return r;
@@ -106,8 +106,10 @@ GitResult runImpl(const std::filesystem::path& cwd,
 	{
 		g.gitMissing = true;
 		// A located git that will not start was removed underneath us; look
-		// again next time instead of failing on the stale path forever.
-		invalidateGitLocation();
+		// again next time instead of failing on the stale path forever. A bare
+		// "git" failing just confirms the cached "not found" — keep it, or every
+		// call while git is missing would redo the whole lookup.
+		if (o.exe.is_absolute()) invalidateGitLocation();
 		g.err = "git could not be started — is it installed and on PATH?";
 		HE_SC_ERROR("git could not be started for:%s", joinForLog(args).c_str());
 	}

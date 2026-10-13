@@ -115,9 +115,11 @@ struct GitInstallPlan
 	// Every route that exists here, preferred first. `route` is front() or None.
 	std::vector<GitInstallRoute> available;
 
-	// The command the route runs, without any elevation prefix (step 3 wraps it
-	// in pkexec as needed), and the one line a user would type in a terminal —
-	// with `sudo` where it is required. Both empty for DownloadInstaller/None.
+	// The command the route runs, without any elevation prefix, and the one line
+	// a user would type in a terminal — with `sudo` where it is required. Both
+	// empty for DownloadInstaller/None. installCommand can contain `&&` (apt runs
+	// update first), so it is a shell line: run it as `pkexec sh -c '<cmd>'`,
+	// never as `pkexec <cmd>`, which would hand `&&` to apt-get as an argument.
 	std::string installCommand;
 	std::string manualCommand;
 
