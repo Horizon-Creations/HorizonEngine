@@ -1,11 +1,12 @@
 # Team server: data model, login protocol (topic 197, server side)
 
-Status (2026-10-13): **server step done**: teams, members (name + PBKDF2
-password hash) and a login protocol live in the relay server (repo
-`Horizon-Creations/CollabSession`, branch `claude/he-net-relay-server`, on
-the Mac at `~/VSCode/EngineCollab/CollabSession`), persisted in
-`--data-dir/teams.txt`. Presence, invitations and join settings are the next
-server step; the engine side (`HE_Net` team subsystem) has not started.
+Status (2026-10-13): **both server steps done**: teams, members (name + PBKDF2
+password hash) and a login protocol (step 8), then presence, team sessions,
+invitations and the per-session join setting (step 9) live in the relay server
+(repo `Horizon-Creations/CollabSession`, branch `claude/he-net-relay-server`, on
+the Mac at `~/VSCode/EngineCollab/CollabSession`). Accounts persist in
+`--data-dir/teams.txt`; presence, sessions and invitations are memory only.
+The engine side (`HE_Net` team subsystem) has not started.
 The relay protocol (`docs/relay-server-protocol.md`) is unchanged.
 
 The full specification is the README section "Team-Server" in that repo. In short,
@@ -28,43 +29,61 @@ for whoever writes the `HE_Net` client:
 - Names: 1-64 of `[A-Za-z0-9_-]`, case-insensitive (display keeps the first spelling).
   Passwords 8-255 bytes. The team's creator is its admin; a team keeps at least one admin.
 
+Step 9 additions (README sections "Anwesenheit", "Team-Sitzungen", "Ereignisse"):
+
+- **Presence:** online = at least one team connection (per member, not per connection).
+  LIST_MEMBERS flag bit2 = online. A connection silent for `--team-idle-timeout` (60 s)
+  gets STATUS `timeout` (20) and is closed, so the client sends op 5 PING every ~20 s.
+- **Ops 6-12:** OPEN_SESSION `session, peer, open u8`; CLOSE_SESSION `session` (host);
+  SET_SESSION_OPEN `session, open u8` (host); LIST_SESSIONS (body `count u16` +
+  `count × (session, host, peer str8, flags u8)`, bit0 open, bit1 you're invited, bit2
+  this connection hosts); INVITE `session, member` (host, member online); DECLINE
+  `session`; JOIN `session` (open or invited; body `session, host, peer`). New results
+  11 not-online, 12 no-such-session, 13 not-host, 14 not-allowed, 15 session-exists,
+  16 not-invited. "Host" = the announcing *connection*, not the member.
+- **TEAM_EVENT (type 9)** `kind u8 | fields`, pushed any time after logged-in, between
+  replies: 1 presence `member, online u8`; 2 members-changed; 3 session `session, host,
+  peer, open u8`; 4 session-closed `session`; 5 invited `session, host, peer` (to every
+  connection of the invitee); 6 joining / 7 declined `session, member` (to the host
+  connection). The causing connection never gets its own event.
+- **Building the collab session:** host OPEN_SESSION then relay LISTEN (same session and
+  peer id); joiner JOIN then relay CONNECT (session, own peer id = member name
+  recommended, target = host peer). The relay does not check team membership; the
+  random session id is the secret, as before.
+- **Lifetime:** a session ends with its announcing connection; an invitation ends with
+  the session or when the invitee goes offline; removing a member closes its
+  connections and sessions. Limits 8 sessions per connection, 64 per team.
+
 ## Handoff
 
-- **Topic / step:** 197, step 8 (data model + login; plan step 1, third attempt)
-- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ a555f14 (pushed), on top
-  of f61c9f1: 6ff8f77 store+crypto, 57c4bda protocol+server, ae5d379 deploy+README,
-  a555f14 one more test. The branch is 7 commits ahead of CollabSession `main`, no PR.
-  This doc: HE `claude/team-server-teams-mitglieder-anwesenheit`.
-- **Done:** create team, log in, list/add/remove members, change password, all persisted.
-- **Files touched (CollabSession):** `src/TeamStore.{h,cpp}` (model, file, rules),
-  `src/Crypto.{h,cpp}` (SHA-256/HMAC/PBKDF2, no deps), `src/Protocol.{h,cpp}` (types 6-8,
-  codes 4/23-26, `ParseTeamLogin`/`ParseTeamRequest`), `src/RelayServer.cpp`
-  (`HandleTeamLogin`, `ProcessTeamRequests`, `HandleTeamRequest`, `DropMember`, `State::Team`
-  in `Detach`), `src/main.cpp` (`--data-dir`, `--max-teams`, `--max-members`,
-  `--hash-iterations`), `deploy/*` (data dir `~/collab-relay/data`), `tests/team_test.py`,
-  `tests/team_store_test.cpp`.
-- **Verified:** `ctest --test-dir /tmp/collab-build` 3/3 (relay_protocol 25/25 unchanged,
-  team_protocol 12/12, team_store all vectors), the same with ASan/UBSan
-  `-fno-sanitize-recover=all`; a deliberately wrong expectation fails (negative control);
-  GitHub CI on 57c4bda green on linux-epoll, linux-epoll-sanitizers, macos-poll.
-- **Not verified:** nothing deployed to 212.227.140.164 (step 5); `deploy.sh` only
-  `bash -n` + unit rendered locally.
-- **Decisions taken:** separate team connection with its own first frame (relay path
-  untouched); hashing synchronous on the event loop, default 20000 iterations (~25 ms
-  per login on the M-Mac, plain C is ~4x slower than OpenSSL's SHA instructions),
-  iterations stored per member so they can rise later; strict store loading (refuse
-  to start rather than drop accounts); no `--data-dir` = memory only + loud warning.
-- **Decisions suggested, not taken:** a hashing worker thread (then 100k+ iterations);
-  per-IP rate limit for failed logins (today: one attempt per connection); a key or
-  switch that restricts who may create teams (today anyone reaching the port, capped by
-  `--max-teams`); deleting a team.
-- **Pending (topic 197):** presence + invite/join in the server (step 2: `m_teamConns`
-  in `RelayServer.h` already tracks logged-in connections per team, add flag bit 2
-  "online" to LIST_MEMBERS and push events), HE_Net client, editor UI, deploy, E2E.
-- **Traps:** build in `/tmp/collab-build`, not the human's `build/`; the human's checkout
-  is the working copy, don't switch its branch; `python3 -B` or `tests/__pycache__`
-  appears (now in `.gitignore`); `relay_test.py` is imported by `team_test.py`.
-- **Next steps:** 1. Server step 2: presence events on the team connection
-  (new TEAM_EVENT type 9 server → client), `online` flag, invite (target member gets
-  an event with a session id) and a per-team "others may join" setting, tests in
-  `team_test.py`. 2. Deploy with `deploy/deploy.sh horizon@212.227.140.164 7777`.
+- **Topic / step:** 197, step 9 (presence, invite, join setting; plan step 2, retry)
+- **Branch / commit:** CollabSession `claude/he-net-relay-server` @ 8e97b36 (pushed,
+  one commit on a555f14; 8 commits ahead of CollabSession `main`, no PR). This doc: HE
+  `claude/team-server-teams-mitglieder-anwesenheit`.
+- **Done:** everything in "Step 9 additions" above.
+- **Files touched (CollabSession):** `src/Protocol.{h,cpp}` (Type::TeamEvent, TeamOp 5-12,
+  TeamResult 11-16, TeamEventKind, flags, `MakeSessionList`/`MakeJoinReply`/event
+  builders), `src/RelayServer.{h,cpp}` (`HandleSessionRequest`, `LeaveTeam` from
+  `Detach`, `EndSession`, `ForgetInvites`, `Push`/`PushTeam` with high-water drop,
+  `IsOnline`, `lastHeard` + `CheckTimeouts`), `src/main.cpp` (`--team-idle-timeout`),
+  `tests/team_test.py` (event-aware reader, 6 new tests), `README.md`.
+- **Verified:** `ctest --test-dir /tmp/collab-build` 3/3 (team_protocol 18/18, relay_protocol
+  unchanged), same 3/3 in an ASan/UBSan `-fno-sanitize-recover=all` build; three negative
+  controls on a copy (no ForgetInvites on offline, no event high-water drop, no idle
+  timeout) each fail exactly their test.
+- **Not verified:** CollabSession CI run 38472456102 was still running at handoff
+  (https://github.com/Horizon-Creations/CollabSession/actions/runs/38472456102); nothing
+  deployed to 212.227.140.164 (step 5).
+- **Decisions taken:** join setting per *session* (live, not persisted; teams.txt format
+  unchanged); team server does not police relay pairing; host = connection; one invite
+  per member (decline from any of its connections clears it); events to the causing
+  connection are suppressed; the host may not JOIN its own session (bad-request).
+- **Suggested, not taken:** a persisted per-team default "others may join" (needs a
+  teams.txt format change + old-format load test); tying relay CONNECT to a JOIN ticket.
+- **Traps:** events interleave with replies: a client (and tests) must read frames by
+  type, never assume the next frame is the reply. `team_test.py` keeps them in `EVENTS`.
+  The previous step's traps still apply (build in `/tmp/collab-build`, `python3 -B`, don't
+  switch the human's checkout branch).
+- **Next steps:** 1. Plan step 3: `HE_Net` team client (login, PING every 20 s, event
+  reader, LIST_*/OPEN/INVITE/JOIN → existing relay transport). 2. Editor Team page and
+  panel. 3. Deploy with `deploy/deploy.sh horizon@212.227.140.164 7777`. 4. E2E.
