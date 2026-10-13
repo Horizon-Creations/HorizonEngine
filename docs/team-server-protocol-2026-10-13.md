@@ -115,7 +115,8 @@ does not police relay pairing, host = connection, events never go to the causing
   never-invited member, CLOSE on leave, offline on sign-out; the server log shows each
   step and the relay pairing as peer `Bob`/`Cleo`. Regressions green: test_net_relay (27,
   also with HE_TEST_RELAY on the same server), test_collab_controller (74), test_net_collab
-  (111), test_mcp_tools_collab (5), test_net_tcp (12). HorizonEditor build: see Hive result.
+  (111), test_mcp_tools_collab (5), test_net_tcp (12). `HorizonEditor` and `he_tests` build
+  green (rc 0) on the final state, after a `touch` of `TeamClient.h`.
 - **Not verified:** against the rented host (step 5 not deployed); the editor GUI (no UI yet);
   Windows/Linux only through CI.
 - **Decisions taken:** join code derived from the session id (above) instead of a server

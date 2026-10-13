@@ -231,11 +231,15 @@ struct FakeTeamServer {
 };
 
 // Pumps the fake server and every client on one injected clock; returns once
-// `done` holds. The wall-clock deadline only bounds a broken test.
+// `done` holds. The wall-clock deadline only bounds a broken test, so it is
+// generous: on a loaded Mac a 1 ms sleep can take tens of ms, and the
+// heartbeat case runs ~100 steps.
+constexpr auto kWallDeadline = std::chrono::seconds(30);
+
 template <typename Fn>
 bool pumpTeam(FakeTeamServer& server, std::vector<TeamClient*> clients, std::uint64_t& now,
               Fn done, std::uint64_t stepMs = 16) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto deadline = std::chrono::steady_clock::now() + kWallDeadline;
     for (;;) {
         server.pump();
         for (TeamClient* c : clients) c->update(now);
@@ -368,7 +372,7 @@ TEST_CASE("Team: a refused login closes with the reason and is not retried")
     TeamController team(collab);
     REQUIRE(team.signIn("127.0.0.1:" + std::to_string(server.t->boundPort()), "studio", "Anna",
                         "wrong-password"));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto deadline = std::chrono::steady_clock::now() + kWallDeadline;
     std::uint64_t t = 1;
     while (team.status() != TeamController::Status::Failed &&
            std::chrono::steady_clock::now() < deadline) {
@@ -433,7 +437,7 @@ TEST_CASE("Team: the controller reconnects after a lost link")
 
     std::uint64_t t = 1;
     auto pumpUntil = [&](auto done) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        const auto deadline = std::chrono::steady_clock::now() + kWallDeadline;
         while (!done()) {
             if (std::chrono::steady_clock::now() >= deadline) return false;
             server.pump();
