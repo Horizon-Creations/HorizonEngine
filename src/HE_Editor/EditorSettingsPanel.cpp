@@ -1451,7 +1451,7 @@ void drawGitSetupSection(AppContext& ctx)
 	{
 		ImGui::BulletText("git was not found.");
 		ImGui::Indent();
-		GitMissingDialog::drawGitInstallRemedy();
+		GitMissingDialog::drawGitInstallRemedy(ctx);
 		ImGui::Unindent();
 		ImGui::Spacing();
 	}

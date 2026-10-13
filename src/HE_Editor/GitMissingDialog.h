@@ -8,11 +8,13 @@ struct AppContext;
 // pointer on AppContext means "still checking" so it never flashes during
 // startup.
 //
-// Deliberately does NOT offer an auto-install. Installing git is a
-// several-hundred-megabyte, per-platform affair with its own privilege prompts,
-// and getting it wrong leaves a half-installed toolchain; the dialog gives the
-// exact command instead. git-lfs is the piece that will eventually ship with the
-// editor, which removes the most common gap without installing anything.
+// Offers to install git (HE::Sc::runGitInstall through ctx.startGitInstall), but
+// only when asked: installing git is several hundred megabytes and usually a
+// password prompt, so it starts on "Install Git" and shows the installer's
+// output while it runs — never in the background. Where the editor cannot do it
+// (no package manager it knows, no way to get administrator rights, Windows
+// without winget) the same spot says why and gives the command and the download
+// page instead. git-lfs is not installed here; only Git for Windows brings it.
 //
 // It DOES fix the identity in place, because that one is a two-field form rather
 // than an install: user.name / user.email being unset is the most common reason
@@ -25,8 +27,12 @@ namespace GitMissingDialog
 	// permanently dismissed it (an explicit request should always show the result).
 	void requestShow();
 
-	// Platform-specific install instructions (copy-a-command + open-a-page pair),
-	// shared with the Preferences ▸ Editor ▸ Source Control page.
-	void drawGitInstallRemedy();
+	// "git is missing, here is how it gets here": the Install Git button with its
+	// live log when the probe found a route the editor can run, otherwise the
+	// reason plus the command to copy and the download page. Drawn wherever an
+	// action needs git — this dialog, Preferences ▸ Source Control, the clone
+	// dialog and the Source Control panel — so the first of them the user reaches
+	// is where the install starts. Opens its own "Source Control" help scope.
+	void drawGitInstallRemedy(AppContext& ctx);
 	void drawLfsInstallRemedy();
 }

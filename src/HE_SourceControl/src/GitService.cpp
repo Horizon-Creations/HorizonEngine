@@ -3,6 +3,7 @@
 #include "SourceControl/GitCli.h"
 #include "SourceControl/GitHubApi.h"
 #include "SourceControl/GitHubTokenStore.h"
+#include "SourceControl/GitLocator.h"
 #include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
@@ -381,6 +382,19 @@ void GitService::workerMain()
 		{
 		case Kind::Open:
 		{
+			// Asked first: findRepoRoot without git comes back empty, which below
+			// reads as "no repository" — for a project that may well be one.
+			m_openPath = cmd.path;
+			m_openedWithoutGit = !gitExecutable();
+			if (m_openedWithoutGit)
+			{
+				m_root.clear();
+				HE_SC_WARN("git is not installed; repository detection for %s skipped",
+				           cmd.path.string().c_str());
+				ev.statusValid = true;
+				ev.gitMissing  = true;
+				break;
+			}
 			m_root = GitCli::findRepoRoot(cmd.path);
 			if (m_root.empty())
 			{
@@ -880,9 +894,23 @@ void GitService::workerMain()
 		if (wantStatus)
 		{
 			m_statusPending.store(false, std::memory_order_release);
+			// git arrived since the open (installed by the editor, or by hand and
+			// then Recheck, which refreshes the locator): the detection the open
+			// had to skip runs now, so an existing repository shows up without
+			// reopening the project.
+			if (m_root.empty() && m_openedWithoutGit && gitExecutable())
+			{
+				m_openedWithoutGit = false;
+				m_root = GitCli::findRepoRoot(m_openPath);
+				HE_SC_INFO("git is available now; repository: %s",
+				           m_root.empty() ? "none" : m_root.string().c_str());
+			}
 			if (m_root.empty())
 			{
 				ev.statusValid = true;
+				// Cached lookup, no process: a periodic refresh must not quietly
+				// turn "git missing" back into "no repository".
+				ev.gitMissing  = !gitExecutable();
 			}
 			else
 			{
@@ -971,6 +999,7 @@ void GitService::pump(std::size_t maxEvents)
 			m_stashes        = std::move(ev.stashes);
 		}
 		if (!ev.statusValid)       continue;
+		m_gitMissing = ev.gitMissing;
 		// Swapped in whole. A partially updated snapshot is the bug class this
 		// design exists to remove.
 		ev.status.generation = ++m_generation;

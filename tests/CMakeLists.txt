@@ -116,6 +116,9 @@ add_executable(he_tests
     # Its sibling for asset tabs: per-row answers carry the row's key, and it
     # waits for the scene's offer.
     test_asset_recovery_ui.cpp
+    # The "git is missing" remedy: Install Git exactly when the route can run,
+    # the manual way otherwise. Nothing is installed (the callback is a counter).
+    test_git_install_ui.cpp
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
@@ -367,6 +370,7 @@ add_executable(he_tests
     test_mcp_client_setup.cpp
     test_mcp_claude_probe.cpp
     test_sourcecontrol_probe.cpp
+    test_git_locator.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
     test_git_panel_ops.cpp
@@ -791,6 +795,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    # The git-missing dialog and its remedy, for test_git_install_ui.cpp: same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It reads the probe and the
+    # git-install callbacks; HorizonSourceControl is linked below.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
@@ -863,6 +871,8 @@ set_source_files_properties(
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
     test_asset_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
+    test_git_install_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp

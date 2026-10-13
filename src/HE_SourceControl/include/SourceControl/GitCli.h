@@ -25,6 +25,11 @@ struct GitResult
 	int         exitCode = -1;
 	std::string out;
 	std::string err;      // git's own message, already scrubbed of credentials
+	// git itself could not be started — not installed, or removed since it was
+	// located. A different answer from any failure git reports, and one a caller
+	// must not read as "not a repository" (GitService's project-open check would
+	// otherwise offer `git init` on an existing repository).
+	bool        gitMissing = false;
 };
 
 class HE_SC_API GitCli {

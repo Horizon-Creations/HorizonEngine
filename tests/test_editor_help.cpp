@@ -441,7 +441,7 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Source Control Panel",  "Restore project to this commit…" },
 		{ "Source Control",        "Recheck" },
 		{ "Source Control",        "Copy winget Command" },
-		{ "Source Control",        "git-scm.com" },
+		{ "Source Control",        "Download Page" },
 		{ "Source Control",        "Save Identity" },
 		{ "Report Issue",          "File on GitHub" },
 		{ "Report Issue",          "Warnings & errors" },

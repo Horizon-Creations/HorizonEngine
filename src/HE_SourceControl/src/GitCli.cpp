@@ -1,4 +1,5 @@
 #include "SourceControl/GitCli.h"
+#include "SourceControl/GitLocator.h"
 
 #include "ScLog.h"
 
@@ -35,6 +36,20 @@ std::vector<std::string> helperOverrideArgs(const std::string& helper)
 	return { "-c", "credential.helper=", "-c", "credential.helper=" + helper };
 }
 
+// The credential calls feed stdin, so they build their own Options instead of
+// going through runImpl; this is the part of runImpl they still need. A git
+// that will not start is reported as such rather than as a credential failure.
+HE::Proc::Result runCredential(const HE::Proc::Options& o)
+{
+	HE::Proc::Result r = HE::Proc::run(o);
+	if (r.launchFailed)
+	{
+		if (o.exe.is_absolute()) invalidateGitLocation();
+		r.err = "git could not be started — is it installed and on PATH?";
+	}
+	return r;
+}
+
 using EnvList = std::vector<std::pair<std::string, std::string>>;
 
 GitResult runImpl(const std::filesystem::path& cwd,
@@ -59,7 +74,7 @@ GitResult runImpl(const std::filesystem::path& cwd,
                   const EnvList& extraEnv)
 {
 	HE::Proc::Options o;
-	o.exe       = "git";
+	o.exe       = gitLaunchPath();
 	o.args      = args;
 	o.cwd       = cwd;
 	o.timeoutMs = timeoutMs;
@@ -89,6 +104,12 @@ GitResult runImpl(const std::filesystem::path& cwd,
 
 	if (r.launchFailed)
 	{
+		g.gitMissing = true;
+		// A located git that will not start was removed underneath us; look
+		// again next time instead of failing on the stale path forever. A bare
+		// "git" failing just confirms the cached "not found" — keep it, or every
+		// call while git is missing would redo the whole lookup.
+		if (o.exe.is_absolute()) invalidateGitLocation();
 		g.err = "git could not be started — is it installed and on PATH?";
 		HE_SC_ERROR("git could not be started for:%s", joinForLog(args).c_str());
 	}
@@ -912,7 +933,7 @@ bool GitCli::approveCredential(const std::filesystem::path& root,
                                const std::string& helperOverride)
 {
 	HE::Proc::Options o;
-	o.exe       = "git";
+	o.exe       = gitLaunchPath();
 	o.args      = helperOverrideArgs(helperOverride);
 	o.args.insert(o.args.end(), { "credential", "approve" });
 	o.cwd       = root;
@@ -923,7 +944,7 @@ bool GitCli::approveCredential(const std::filesystem::path& root,
 	o.stdinData = "protocol=https\nhost=" + host + "\nusername=" + username +
 	              "\npassword=" + secret + "\n\n";
 
-	const HE::Proc::Result r = HE::Proc::run(o);
+	const HE::Proc::Result r = runCredential(o);
 	if (!r.ok())
 	{
 		// Whatever git printed — its own messages never echo the password field.
@@ -944,7 +965,7 @@ bool GitCli::fillCredential(const std::filesystem::path& root,
 	outSecret.clear();
 
 	HE::Proc::Options o;
-	o.exe       = "git";
+	o.exe       = gitLaunchPath();
 	o.args      = helperOverrideArgs(helperOverride);
 	o.args.insert(o.args.end(), { "credential", "fill" });
 	o.cwd       = root;
@@ -958,7 +979,7 @@ bool GitCli::fillCredential(const std::filesystem::path& root,
 	o.env.emplace_back("GCM_INTERACTIVE", "never");     // Git Credential Manager
 	o.stdinData = "protocol=https\nhost=" + host + "\n\n";
 
-	const HE::Proc::Result r = HE::Proc::run(o);
+	const HE::Proc::Result r = runCredential(o);
 	if (!r.ok())
 	{
 		// The ordinary "nothing stored" outcome, not a failure to report: git
@@ -1004,7 +1025,7 @@ bool GitCli::rejectCredential(const std::filesystem::path& root,
                               const std::string& helperOverride)
 {
 	HE::Proc::Options o;
-	o.exe       = "git";
+	o.exe       = gitLaunchPath();
 	o.args      = helperOverrideArgs(helperOverride);
 	o.args.insert(o.args.end(), { "credential", "reject" });
 	o.cwd       = root;
@@ -1018,7 +1039,7 @@ bool GitCli::rejectCredential(const std::filesystem::path& root,
 	if (!secret.empty())   o.stdinData += "password=" + secret + "\n";
 	o.stdinData += "\n";
 
-	const HE::Proc::Result r = HE::Proc::run(o);
+	const HE::Proc::Result r = runCredential(o);
 	if (!r.ok())
 	{
 		if (err) *err = r.err.empty() ? "git credential reject failed" : trimTrailing(r.err);

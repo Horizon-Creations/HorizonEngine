@@ -2174,12 +2174,16 @@ void EditorApplication::pollClaudeProbe()
 
 void EditorApplication::startGitProbe()
 {
+	// A git install re-probes when it ends; a second probe now would write
+	// m_gitProbe at the same time.
+	if (m_gitInstallRunning.load(std::memory_order_acquire)) return;
 	if (m_gitThread.joinable()) m_gitThread.join();
 	m_gitChecked.store(false, std::memory_order_release);
 	m_gitThread = std::thread([this]
 	{
 		HE::Sc::GitProbe probe = HE::Sc::probeGit();
 		m_gitProbe = std::move(probe);
+		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
 		m_gitChecked.store(true, std::memory_order_release);
 	});
 }
@@ -2354,7 +2358,7 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 		auto config = [](const char* key, const std::string& value)
 		{
 			HE::Proc::Options o;
-			o.exe       = "git";
+			o.exe       = HE::Sc::gitLaunchPath();
 			o.args      = { "config", "--global", key, value };
 			o.timeoutMs = 5000;
 			// A probe must never stop to ask something it cannot display.
@@ -2374,6 +2378,55 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 		m_gitProbe = std::move(probe);
 		m_gitChecked.store(true, std::memory_order_release);
 		m_gitIdentityApplying.store(false, std::memory_order_release);
+	});
+}
+
+// Install git through the route the last probe found (HE::Sc::runGitInstall), on a
+// worker. Only ever started by the user ("Install Git"), and never quiet: every
+// installer line lands in m_gitInstallLog, which the dialog shows live, and the
+// start and the verdict go to the engine log. Afterwards the probe runs again —
+// inline, like applyGitIdentity, since startGitProbe would join this thread — and
+// when git runs, the frame thread asks GitService for a refresh, which runs the
+// repository detection the project's open had to skip.
+void EditorApplication::startGitInstall()
+{
+	if (m_gitInstallRunning.load(std::memory_order_acquire)) return;
+	// The plan is part of the probe; without an answer there is nothing to run.
+	if (!m_gitChecked.load(std::memory_order_acquire)) return;
+	const HE::Sc::GitInstallPlan plan = m_gitProbe.install;
+
+	if (m_gitInstallThread.joinable()) m_gitInstallThread.join();
+	// A Recheck still in flight would write m_gitProbe at the same time as the
+	// re-probe below. It is bounded by the probe's own timeouts.
+	if (m_gitThread.joinable()) m_gitThread.join();
+	{
+		std::lock_guard<std::mutex> lk(m_gitInstallLogMutex);
+		m_gitInstallLog.clear();
+	}
+	m_gitInstallFinished.store(false, std::memory_order_release);
+	m_gitInstallOk.store(false, std::memory_order_release);
+	m_gitInstallCancel.store(false, std::memory_order_release);
+	m_gitInstallRunning.store(true, std::memory_order_release);
+	m_gitInstallThread = std::thread([this, plan]
+	{
+		const auto onLine = [this](const std::string& line)
+		{
+			std::lock_guard<std::mutex> lk(m_gitInstallLogMutex);
+			m_gitInstallLog += line;
+			m_gitInstallLog += '\n';
+		};
+		const HE::Sc::GitInstallOutcome res =
+			HE::Sc::runGitInstall(plan, onLine, &m_gitInstallCancel);
+
+		m_gitChecked.store(false, std::memory_order_release);
+		HE::Sc::GitProbe probe = HE::Sc::probeGit();
+		m_gitProbe = std::move(probe);
+		m_gitChecked.store(true, std::memory_order_release);
+
+		m_gitInstallOk.store(res.gitRunnable, std::memory_order_release);
+		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
+		m_gitInstallRunning.store(false, std::memory_order_release);
+		m_gitInstallFinished.store(true, std::memory_order_release);
 	});
 }
 
@@ -4524,6 +4577,11 @@ void EditorApplication::OnRender(float dt)
 		// check is finished by a handshake this pump is the one to see.
 		pollClaudeProbe();
 
+	// A probe just found git: refresh at once rather than at the next poll. If
+	// the project was opened without git, that refresh is what runs the skipped
+	// repository detection (GitService), so the panel picks up where it was.
+	if (m_gitReopenRepo.exchange(false, std::memory_order_acq_rel) && m_git.gitMissing())
+		m_git.requestRefresh();
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
 	// Reward moment (EditorRewards.h): COMMITTED — no AppContext here, so
@@ -11201,7 +11259,13 @@ AppContext EditorApplication::makeContext()
 		.setGitIdentity      = [this](std::string n, std::string e)
 		                           { applyGitIdentity(std::move(n), std::move(e)); },
 		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
-		.routerProbe         = m_routerChecked.load(std::memory_order_acquire)
+		.startGitInstall     = [this]{ startGitInstall(); },
+		.cancelGitInstall    = [this]{ m_gitInstallCancel.store(true, std::memory_order_release); },
+		.gitInstallLog       = [this]{ std::lock_guard<std::mutex> lk(m_gitInstallLogMutex); return m_gitInstallLog; },
+		.gitInstalling       = m_gitInstallRunning.load(std::memory_order_acquire),
+		.gitInstallDone      = m_gitInstallFinished.load(std::memory_order_acquire),
+		.gitInstallOk        = m_gitInstallOk.load(std::memory_order_acquire),
+		.routerProbe        = m_routerChecked.load(std::memory_order_acquire)
 		                           ? &m_routerProbe : nullptr,
 		.recheckRouter       = [this]{ startRouterProbe(); },
 		// Plain reads, no atomics: m_claudeState is written only in
@@ -12907,6 +12971,14 @@ void EditorApplication::OnShutdown()
 	// The auto-install worker can outlive the dialog (installs take minutes); join
 	// it too so we never destroy it joinable.
 	if (m_installThread.joinable()) m_installThread.join();
+	// Same for the git install. The cancel flag ends its wait for Apple's
+	// installer at once; a package manager that is already running cannot be
+	// interrupted and is waited for (bounded by runGitInstall's timeout).
+	if (m_gitInstallThread.joinable())
+	{
+		m_gitInstallCancel.store(true, std::memory_order_release);
+		m_gitInstallThread.join();
+	}
 
 	// Both ends of the notification channel, closed here rather than in the
 	// destructor: the log sink and the global pointer are process-wide, and the

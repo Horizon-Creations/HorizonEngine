@@ -196,6 +196,11 @@ public:
 	// time, for no reason the user could see.
 	bool               busyWithWork() const { return m_work.load(std::memory_order_acquire) > 0; }
 	const std::string& lastError() const { return m_lastError; }
+	// The last open found no git to run at all. Distinct from !isRepo() on
+	// purpose: without git an EXISTING repository looks exactly like "no
+	// repository yet", and offering `git init` there would be wrong. The UI shows
+	// the install remedy instead; the editor re-opens the project once git runs.
+	bool               gitMissing() const { return m_gitMissing; }
 
 	// Called from pump(), i.e. on the main thread, after a refresh lands.
 	void setOnStatusChanged(std::function<void(const RepoStatus&)> fn) { m_onStatus = std::move(fn); }
@@ -235,6 +240,7 @@ private:
 		RepoStatus  status;
 		std::string error;
 		std::filesystem::path clonedRoot;    // applied even alongside an error
+		bool        gitMissing = false;      // with statusValid: no git to ask
 	};
 
 	void workerMain();
@@ -264,6 +270,10 @@ private:
 
 	// Worker-only. Not shared: the main thread reads m_status instead.
 	std::filesystem::path m_root;
+	// What the last open was asked about, and whether it had no git to ask: the
+	// next refresh that finds git runs the skipped repository detection.
+	std::filesystem::path m_openPath;
+	bool                  m_openedWithoutGit = false;
 
 	// Main-thread-only.
 	RepoStatus                             m_status;
@@ -277,6 +287,7 @@ private:
 	std::vector<std::string>               m_stashes;
 	std::map<std::string, std::vector<GitCli::ChangedFile>> m_commitFiles;
 	std::uint64_t                          m_generation = 0;
+	bool                                   m_gitMissing = false;
 	std::function<void(const RepoStatus&)> m_onStatus;
 };
 

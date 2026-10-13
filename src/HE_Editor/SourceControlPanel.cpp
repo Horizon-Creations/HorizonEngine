@@ -6,6 +6,7 @@
 #include "EditorHelp.h"        // "Source Control Panel/<label>" scope for the tooltips
 #include "EditorWidgets.h"     // primary/danger/cancel buttons
 #include "GitController.h"
+#include "GitMissingDialog.h"      // the install remedy, when git is missing
 #include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
 #include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
 
@@ -1502,6 +1503,25 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	}
 
 	const HE::Sc::RepoStatus& st = git->status();
+
+	// Before "not a repository": without git there is no telling, and a project
+	// that IS a repository would otherwise be offered a fresh `git init`.
+	if (git->gitMissing() || (ctx.gitProbe && !ctx.gitProbe->gitFound))
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
+		ImGui::TextWrapped("git is not installed on this machine, so this project's "
+		                   "source control cannot be read.");
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+		GitMissingDialog::drawGitInstallRemedy(ctx);
+		// The fallback ends in "then press Recheck", so the panel needs one too.
+		ImGui::Spacing();
+		if (ctx.gitInstalling) ImGui::BeginDisabled();
+		if (EditorWidgets::button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
+		if (ctx.gitInstalling) ImGui::EndDisabled();
+		ImGui::End();
+		return;
+	}
 
 	if (!git->isRepo())
 	{
