@@ -41,7 +41,8 @@ runs it (`bundle` / `run <case>`); its header lists the steps for setting up the
 | Case | Plan | What happened | Logs |
 |---|---|---|---|
 | user `tester`, no pkexec (**no rights**) | `apt` / `Unavailable` | nothing started. Message: "cannot install git … without pkexec … run the command in a terminal", manual `sudo apt-get update && sudo apt-get install -y git`. GitService: `gitMissing=1`, not "no repo" | `C:\hw195\e2e-linux\case-norights.log` |
-| `tester`, pkexec installed, no polkitd/agent (headless, SSH, WSL) | `apt` / `Pkexec` | pkexec exits **127** right away ("Error getting authority"). Message: "pkexec could not ask for a password (no authentication agent is running). Run the command below in a terminal instead." No hang | `case-pkexec-nobus.log` |
+| `tester`, pkexec installed, no polkitd/agent (headless, SSH, WSL) | `apt` / `Pkexec` | pkexec exits **127** right away ("Error getting authority"). Message: "pkexec could not get administrator rights: no password dialog could be shown …, or this account may not install software. Run the command below in a terminal instead." No hang | `case-pkexec-nobus.log` |
+| `tester`, polkitd running, rule says **NO** (an account without admin rights on a desktop) | `apt` / `Pkexec` | pkexec "Not authorized", **also exit 127**. Before the fix the user read "no authentication agent is running", which was wrong. Now: "This account is not allowed to install software (pkexec: not authorized). Ask an administrator to run the command below in a terminal." | `case-pkexec-denied.log` |
 | `tester`, pkexec + system bus + polkitd, rule allows `tester` (stands in for the password dialog) | `apt` / `Pkexec` | `pkexec /bin/sh -c '…apt-get install -y git'` **installed git (8.1 s)**, `git --version` = 2.53.0, GitService logged "git is available now; repository: …", `isRepo=1 branch=main` without a restart | `case-pkexec-polkit.log` |
 | root, second fresh distro | `apt` / `AlreadyRoot` | `/bin/sh -c` apt **installed git (12.0 s)**, 2.53.0, repo `main` detected again without a restart | `case-root.log` |
 
@@ -77,6 +78,12 @@ There is no Mac access from NN-WS03. Still open: the CLT route (`xcode-select --
 wait + Cancel) on a Mac without Command Line Tools, the Homebrew route, and the shim
 detection of `/usr/bin/git` (`GitBinaryState::Stub`).
 
+**Fixed here (`GitInstall.cpp`, `runGitInstall`):** pkexec exit 127 used to be explained only
+as "no authentication agent". The installer output is now watched for "Not authorized", which
+gets its own message. Any other 127, including a translated "Not authorized", gets a message
+that names both causes. Exit 126 (password dialog dismissed) needs an interactive agent and
+is **not verified**.
+
 ## 6. Seen along the way (not changed)
 
 * A repository owned by a different uid ("dubious ownership") reads as "no repository" in
@@ -87,16 +94,18 @@ detection of `/usr/bin/git` (`GitBinaryState::Stub`).
 ## Handoff
 
 - **Topic / step:** 195, step 4 of 4 (verification). Branch `claude/engine-auto-git-install`.
-- **Done:** help test fixed (`tests/test_editor_help.cpp:443`). Harness
+- **Done:** help test fixed (`tests/test_editor_help.cpp:443`). pkexec "Not authorized" message
+  (`src/HE_SourceControl/src/GitInstall.cpp`, `runGitInstall`). Harness
   `docs/git-auto-install-e2e/` + `.gitattributes` (LF for its `.sh`). This doc.
 - **Verified (how):** builds and tests in sections 1–4 on Windows/MSVC and Linux/GCC.
-  Linux end to end on fresh distros: all four cases in section 3, real apt installs, logs
+  Linux end to end on fresh distros: all five cases in section 3 (the two pkexec failures again
+  after the message fix; git/help tests 107/107 Linux, 106/106 Windows), real apt installs, logs
   under `C:\hw195\e2e-linux\`. Windows: locator registry fallback + no-winget fallback
   through the harness.
 - **Not verified:** Windows real install (winget + UAC, then the panel without a restart) on a
   machine without git. All of macOS. The editor GUI with a real install on any OS (the UI is
   covered only by `test_git_install_ui.cpp`, headless). The polkit **password dialog** itself
-  (a rule allowed it). dnf/pacman/zypper routes (only argv tests).
+  (a rule allowed or denied it) and its cancel (exit 126). dnf/pacman/zypper routes (only argv tests).
 - **Decisions:** the harness stays outside CMake/he_tests (lesson 286). The help test follows
   step 3's label instead of bringing the old button back.
 - **Open for the queen / human:** (1) Windows VM/Sandbox and a Mac without CLT for the
@@ -107,4 +116,5 @@ detection of `/usr/bin/git` (`GitBinaryState::Stub`).
   Git → UAC → panel shows the repo; also the harness: `git_install_e2e.exe <repo> --install`
   (build line in section 4).
   2. Mac without CLT (tart VM): the same with `--install` → Apple dialog → wait.
-  3. Clean up the WSL distros: `wsl --unregister hw195-nogit` / `hw195-nogit2`.
+  3. The WSL test distros `hw195-nogit`/`hw195-nogit2` are unregistered again. Rebuild them per
+  the header of `linux-fresh-distro.sh`; the tarball is in `C:\hw195\fresh\`.

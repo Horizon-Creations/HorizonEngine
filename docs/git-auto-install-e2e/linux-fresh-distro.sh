@@ -20,6 +20,10 @@
 # Cases, in this order (the last one installs for real):
 #   run <out> norights   as tester, no pkexec    -> Apt/Unavailable, manual sudo line, nothing started
 #   run <out> pkexec     as tester, pkexec added -> Apt/Pkexec, launch through pkexec /bin/sh -c
+#                        Without polkitd it fails with 127 at once. With a system bus
+#                        (dbus-daemon --system --fork), /usr/lib/polkit-1/polkitd and a rule in
+#                        /etc/polkit-1/rules.d returning polkit.Result.YES for tester (stands in for
+#                        the password) it installs; Result.NO gives the "Not authorized" case.
 #   run <out> root       as root                 -> Apt/AlreadyRoot, apt-get installs git, repo shows up
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"

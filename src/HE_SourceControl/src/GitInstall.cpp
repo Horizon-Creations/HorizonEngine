@@ -161,12 +161,22 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 	if (!launch->userPrompt.empty()) emit(launch->userPrompt);
 	emit("$ " + launch->display);
 
+	// pkexec exits 127 both when no password dialog could be shown and when
+	// polkit refused this account outright; only its own line tells them apart,
+	// and the second one is the plain "no administrator rights" case.
+	bool pkexecNotAuthorized = false;
+	const auto watch = [&](std::string_view l)
+	{
+		if (l.find("Not authorized") != std::string_view::npos) pkexecNotAuthorized = true;
+		emit(std::string(l));
+	};
+
 	HE::Proc::Options o;
 	o.exe          = exe;
 	o.args         = launch->args;
 	o.timeoutMs    = kInstallTimeoutMs;
-	o.onStdoutLine = [&](std::string_view l) { emit(std::string(l)); };
-	o.onStderrLine = [&](std::string_view l) { emit(std::string(l)); };
+	o.onStdoutLine = watch;
+	o.onStderrLine = watch;
 	const HE::Proc::Result r = HE::Proc::run(o);
 
 	out.launched = !r.launchFailed;
@@ -229,9 +239,15 @@ GitInstallOutcome runGitInstall(const GitInstallPlan& plan,
 		// The cases that end up here have different fixes, so say which one.
 		if (plan.elevation == GitInstallElevation::Pkexec && r.exitCode == 126)
 			out.message = "The administrator password dialog was cancelled, so nothing was installed.";
+		else if (plan.elevation == GitInstallElevation::Pkexec && r.exitCode == 127 &&
+		         pkexecNotAuthorized)
+			out.message = "This account is not allowed to install software (pkexec: not "
+			              "authorized). Ask an administrator to run the command below in a terminal.";
 		else if (plan.elevation == GitInstallElevation::Pkexec && r.exitCode == 127)
-			out.message = "pkexec could not ask for a password (no authentication agent is "
-			              "running). Run the command below in a terminal instead.";
+			// Also where a translated "Not authorized" lands, so name both causes.
+			out.message = "pkexec could not get administrator rights: no password dialog could "
+			              "be shown (no authentication agent is running), or this account may "
+			              "not install software. Run the command below in a terminal instead.";
 		else if (launch->returnsBeforeInstalled)
 			out.message = "Apple's installer has not finished. Complete it, then press Recheck.";
 		else if (r.timedOut)
