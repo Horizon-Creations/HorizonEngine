@@ -50,7 +50,7 @@ namespace EditorSelfUpdate
 	{
 		Idle,            // nothing asked yet
 		Checking,
-		NotConfigured,   // no HE_SELFUPDATE_* account; `message` says what is missing
+		NotConfigured,   // no usable update account (compiled in or HE_SELFUPDATE_*); `message` says why
 		UpToDate,
 		RemoteOlder,     // the server's build is older; never offered
 		NoBuild,         // newer, but nothing for this platform
@@ -89,9 +89,10 @@ namespace EditorSelfUpdate
 		std::filesystem::path stagingRoot;
 	};
 
-	// The real thing: the HE_SELFUPDATE_* account (read when a check starts, so a
-	// changed environment needs no restart), SFTP, defaultStagingDir(), and the
-	// real preflightTakeover/beginTakeover.
+	// The real thing: the update account (loadSelfUpdateConfig: HE_SELFUPDATE_* or
+	// the compiled-in one, read when a check starts, so a changed environment
+	// needs no restart), SFTP, defaultStagingDir(), and the real
+	// preflightTakeover/beginTakeover.
 	Backend productBackend();
 
 	class Session

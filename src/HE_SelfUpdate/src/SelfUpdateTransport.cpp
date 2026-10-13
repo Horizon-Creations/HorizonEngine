@@ -25,7 +25,7 @@ public:
 		// names the EngineContent endpoint, which would send a reader of the log
 		// to the wrong account.
 		if (!m_endpoint.configured() || m_endpoint.password.empty())
-			return { false, "the self-update SFTP account is not configured (HE_SELFUPDATE_HOST/USER/PASSWORD)", false };
+			return { false, "the self-update SFTP account is not configured (none compiled in, HE_SELFUPDATE_HOST/USER/PASSWORD not set)", false };
 		if (!isSafeRelativePath(remoteRelPath))
 			return { false, "refusing to fetch an unsafe remote path: '" + remoteRelPath + "'", false };
 
