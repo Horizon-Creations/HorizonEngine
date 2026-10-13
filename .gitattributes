@@ -14,6 +14,7 @@ scripts/linux_assets/*.sh text eol=lf
 scripts/linux_assets/*.desktop text eol=lf
 scripts/linux_assets/*.xml text eol=lf
 scripts/linux_assets/*.png binary
+docs/git-auto-install-e2e/*.sh text eol=lf
 
 ###############################################################################
 # Set default behavior for command prompt diff.
