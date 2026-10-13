@@ -30,6 +30,15 @@ int main(int argc, char** argv)
 	setenv("HE_COLLAB_OFFLINE", "1", 1);
 #endif
 
+	// A relay address in the developer's environment would route every
+	// peer-to-peer test through somebody's relay server. The relay tests set
+	// their addresses explicitly (and HE_TEST_RELAY for the real server).
+#if defined(_WIN32)
+	_putenv_s("HE_NET_RELAY", "");
+#else
+	unsetenv("HE_NET_RELAY");
+#endif
+
 	// Every listener the suite opens binds the loopback address rather than
 	// every interface (see HE::Net::socketLoopbackOnly). On Windows the first
 	// run of an exe from a new path that binds a non-loopback address raises the

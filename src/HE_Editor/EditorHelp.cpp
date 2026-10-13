@@ -3742,6 +3742,11 @@ namespace
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
 	  "", "collaboration#bigassets" },
+	{ "Preferences/Collaboration/Relay Server (host:port)", "",
+	  "Empty: connect directly, peer to peer. With an address, hosting and joining "
+	  "only make outgoing connections to that relay server, and guests join by "
+	  "session ID and join code. Everyone in a session needs the same relay.",
+	  "", "collaboration" },
 	{ "Preferences/Viewport/Camera Speed", "",
 	  "How fast the editor's fly camera moves, in units per second. The viewport "
 	  "toolbar's speed field is the same value.",

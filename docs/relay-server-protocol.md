@@ -1,8 +1,49 @@
 # HE_Net relay server: protocol and engine mapping
 
 Status (2026-10-13): **server steps 1 and 2 done** (1:1 pairing, broadcast
-fan-out). The engine side is untouched; without a configured relay HE_Net
-connects peer-to-peer exactly as before.
+fan-out), **engine step 3 done** (configurable relay address, all links
+through the relay when one is set). Broadcast on the engine side (step 4) is
+not built yet. Without a configured relay HE_Net connects peer-to-peer exactly
+as before: `TcpTransport` and `UdpTransport` are unchanged, and the relay code
+is only constructed when an address is set.
+
+## Engine side as built (step 3)
+
+- `HE::Net::RelayTransport` (`src/HE_Net/include/Net/RelayTransport.h`) is an
+  `ITransport` that owns one `TcpTransport` connection to the relay per link.
+  `RelayTransport::host(relay, sessionId)` keeps the listener connection
+  (retried with backoff, 1 s up to 30 s, if the relay is down or restarts) and
+  turns each `INCOMING` into an `ACCEPT` connection; `RelayTransport::connect(relay,
+  sessionId)` picks a random client id (`c-` + 12 chars) and dials host id
+  `host`. `Connected` is emitted only on `paired`; a refusal or close before
+  that is `Disconnected` for a link that never connected, and `lastError()`
+  carries the relay's reason (`no-such-peer: …`). Sends before `paired` are
+  held, not put on the wire. Every `SendMode` is reliable-ordered (one TCP
+  stream).
+- Address text: `parseRelayAddress("host:port" | "[v6]:port" | "host")`,
+  default port 7777. `HE_NET_RELAY=<addr>` overrides every setting,
+  `HE_NET_RELAY=off` forces peer-to-peer (`effectiveRelayAddress`). The test
+  runner unsets it.
+- **Collaboration** (editor): Preferences > Collaboration > *Relay Server
+  (host:port)*, stored as `CollabRelayAddress` in the editor config. With an
+  address, hosting mints the session id first, registers it on the relay and
+  skips port mapping, directory and LAN beacon; guests join by session id +
+  join code (a join by address is refused with an explanation). A relay
+  refusal fails the join at once with the reason instead of after the 20 s
+  connect deadline.
+- **Gameplay** (`NetGameSession`): Project Settings > Multiplayer > *Relay
+  server*, `multiplayer.relayAddress` in `Config/ProjectSettings.json`,
+  reaching `HostOptions/JoinOptions::relayAddress` through the defaults. The
+  relay session id is `RelayTransport::sessionIdForJoinCode(code)`
+  (HMAC-SHA256 under a fixed label, `g-` + 32 hex), so the existing Join
+  dialogs keep working: with a relay the joiner needs only the code, and the
+  typed address/port are not dialled (logged). The relay is TCP-only, so a
+  game session through it runs on TCP instead of UdpTransport: unreliable
+  sends arrive reliably and later under loss, `linkStats()` reports 0. A UDP
+  relay would be a server feature of its own.
+- Tests: `tests/test_net_relay.cpp`, against an in-process fake relay that
+  decodes HELLO by hand, plus one case against a real `collab_server` when
+  `HE_TEST_RELAY=host:port` is set.
 
 ## Where the server lives
 
@@ -76,7 +117,7 @@ Broadcast rules that matter to the engine:
   mark for `--stall-timeout` (10 s) is dropped; the others go on.
 - A subscriber sends nothing; the relay drops it if it does.
 
-## How the engine side maps onto it (step 3, not built yet)
+## How the engine side maps onto it (step 3, the design; as built above)
 
 The design goal is that `SecureTransport` and the session protocol run
 unchanged over a relay connection. Only the socket setup differs:
@@ -118,7 +159,7 @@ unchanged over a relay connection. Only the socket setup differs:
 
 ## Open (later steps of topic 193)
 
-- Engine side of the relay (step 3) and of broadcast, including the
+- Engine side of broadcast, including the
   broadcast encryption described above (step 4).
 - Access control on the relay itself (today anyone who can reach the port may
   open sessions; the content stays end-to-end encrypted).

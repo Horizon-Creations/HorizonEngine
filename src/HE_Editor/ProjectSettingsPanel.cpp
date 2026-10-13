@@ -10,6 +10,7 @@
 #include <Renderer/UIFont.h>             // icon names, the plate colour parser, font scripts
 #include <Physics/CollisionLayers.h>     // the project collision matrix
 #include <Project/ProjectSettings.h>     // Config/ProjectSettings.json
+#include <Net/RelayTransport.h>          // Multiplayer > Relay server: the field's parse check
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -1240,6 +1241,25 @@ void drawMultiplayerPage(AppContext& ctx)
 	hint("Automatic port forwarding (UPnP, NAT-PMP, PCP) so players outside the "
 	     "local network can reach the host. Stored, but nothing reads it yet — "
 	     "same later step as the directory above.");
+	// Edited as text, committed when the field is left — a half-typed address
+	// written to disk on every keystroke would be a file nobody meant.
+	Row::inputText("Relay server (host:port)##mprelay", &m.relayAddress);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	if (!m.relayAddress.empty())
+	{
+		HE::Net::RelayAddress parsed;
+		std::string why;
+		if (!HE::Net::parseRelayAddress(m.relayAddress, parsed, &why))
+			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Not usable: %s", why.c_str());
+	}
+	hint("Empty: the host opens a UDP port and players connect to it directly, "
+	     "as always. With a relay server, nobody opens a port: the host "
+	     "registers the session on the relay and players connect out to it, "
+	     "finding the session by the join code alone (the address and port of "
+	     "the Join dialog are then not used). The session then runs over TCP "
+	     "through the relay, so it is a little later under packet loss than "
+	     "direct UDP. Everyone needs the same relay. The relay only passes "
+	     "encrypted bytes along. Port 7777 if none is given.");
 	Row::dragInt("Max remote calls per second##mprpc", &m.rpcPerSecond, 1.0f,
 	             MP::kMinRpcPerSecond, MP::kMaxRpcPerSecond);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();

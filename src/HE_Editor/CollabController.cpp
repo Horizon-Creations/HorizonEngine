@@ -185,15 +185,41 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	teardown();
 	m_error.clear();
 
-	auto listener = TcpTransport::listen(port);
-	if (!listener)
+	HE::Net::RelayAddress relay;
+	bool viaRelay = false;
+	if (!relayForNewSession(relay, viaRelay)) return false;
+
+	std::unique_ptr<HE::Net::ITransport> listener;
+	if (viaRelay)
 	{
-		m_error  = "Could not open port " + std::to_string(port) +
-		           " (already in use, or blocked by the firewall).";
-		m_status = Status::Failed;
-		return false;
+		// The session id is our address on the relay, so it has to exist before
+		// the transport does. No port is opened: the relay is dialled outwards.
+		m_sessionId = SessionDirectory::newSessionId();
+		auto link = HE::Net::RelayTransport::host(relay, m_sessionId);
+		if (!link)
+		{
+			m_error  = "Could not reach the relay server at " + relay.host + ":" +
+			           std::to_string(relay.port) + ".";
+			m_status = Status::Failed;
+			return false;
+		}
+		m_relayLink = link.get();
+		m_viaRelay  = true;
+		listener    = std::move(link);
 	}
-	m_port = listener->boundPort();
+	else
+	{
+		auto tcp = TcpTransport::listen(port);
+		if (!tcp)
+		{
+			m_error  = "Could not open port " + std::to_string(port) +
+			           " (already in use, or blocked by the firewall).";
+			m_status = Status::Failed;
+			return false;
+		}
+		m_port   = tcp->boundPort();
+		listener = std::move(tcp);
+	}
 
 	// Machine-generated, never user-chosen: an observer who captures a handshake
 	// could brute-force a weak passphrase offline.
@@ -235,6 +261,22 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 
 	m_isHost = true;
 	m_status = Status::Hosting;
+
+	// Through a relay there is nothing to publish, forward or announce: the
+	// directory and the LAN beacon would hand out an address nobody listens on,
+	// and the port mapper would open a port nobody uses. The session id and the
+	// join code are the whole invitation.
+	if (m_viaRelay)
+	{
+		Logger::Log(Logger::LogLevel::Info,
+		            ("Collab: hosting through the relay server " + relay.host + ":" +
+		             std::to_string(relay.port)).c_str());
+		m_directoryStatus = "Connecting to the relay server " + relay.host + ":" +
+		                    std::to_string(relay.port) + "...";
+		m_portMapStatus.clear();
+		return true;
+	}
+
 	Logger::Log(Logger::LogLevel::Info,
 	            ("Collab: hosting on " + m_localAddress + ":" + std::to_string(m_port)).c_str());
 
@@ -706,6 +748,25 @@ bool CollabController::joinBySessionId(const std::string& sessionId,
 		return false;
 	}
 
+	// ── Through a relay server ──
+	// Before the LAN shortcut and the directory: with a relay set, every
+	// connection goes to the relay, and the session id is what it pairs us by.
+	HE::Net::RelayAddress relay;
+	bool viaRelay = false;
+	if (!relayForNewSession(relay, viaRelay)) return false;
+	if (viaRelay)
+	{
+		if (!HE::Net::RelayTransport::isValidId(sessionId))
+		{
+			m_error  = "That is not a session ID (letters, digits, - and _ only).";
+			m_status = Status::Failed;
+			return false;
+		}
+		m_sessionId = sessionId;
+		m_viaRelay  = true;
+		return beginLink(relay.host, relay.port, joinCode, displayName);
+	}
+
 	// ── Is that session right here? ──
 	// Then use the address and port it announced, and never ask the directory.
 	// See lanEndpointFor for why this is a correctness fix and not a shortcut.
@@ -776,11 +837,29 @@ bool CollabController::joinSession(const std::string& host, std::uint16_t port,
 {
 	teardown();
 	m_error.clear();
+
+	// A relay set means no direct connection to anybody — including the one
+	// this call is asking for. Refused out loud rather than quietly turned into
+	// something else: the address does not tell the relay which session.
+	HE::Net::RelayAddress relay;
+	bool viaRelay = false;
+	if (!relayForNewSession(relay, viaRelay)) return false;
+	if (viaRelay)
+	{
+		m_error  = "A relay server is set (" + relay.host + ":" + std::to_string(relay.port) +
+		           "), so sessions are joined by session ID and join code, never by "
+		           "address. Join by session ID, or clear the relay server under "
+		           "Preferences > Collaboration to connect to " + host + " directly.";
+		m_status = Status::Failed;
+		return false;
+	}
 	return beginLink(host, port, joinCode, displayName);
 }
 
 // Shared by the direct path and the one that resolved an address from the
-// directory, so both establish the link identically.
+// directory, so both establish the link identically. Through a relay
+// (m_viaRelay, set by joinBySessionId) host and port are the RELAY's, and the
+// session id picks the host there.
 bool CollabController::beginLink(const std::string& host, std::uint16_t port,
                                  const std::string& joinCode,
                                  const std::string& displayName)
@@ -793,7 +872,17 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 		return false;
 	}
 
-	auto link = TcpTransport::connect(host, port);
+	std::unique_ptr<HE::Net::ITransport> link;
+	if (m_viaRelay)
+	{
+		auto r = HE::Net::RelayTransport::connect(HE::Net::RelayAddress{ host, port }, m_sessionId);
+		m_relayLink = r.get();
+		link        = std::move(r);
+	}
+	else
+	{
+		link = TcpTransport::connect(host, port);
+	}
 	if (!link)
 	{
 		m_error  = "Could not reach " + host + ":" + std::to_string(port) + ".";
@@ -841,6 +930,7 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_lastJoin.port        = port;
 	m_lastJoin.joinCode    = joinCode;
 	m_lastJoin.displayName = displayName;
+	m_lastJoin.sessionId   = m_viaRelay ? m_sessionId : std::string();
 	m_lastJoin.valid       = true;
 
 	m_joinCode      = joinCode;
@@ -861,8 +951,8 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	// The project key goes in the line: it is what the host compares the join
 	// against, and a refusal is otherwise only diagnosable from the HOST's log.
 	Logger::Log(Logger::LogLevel::Info,
-	            ("Collab: connecting to " + host + ":" + std::to_string(port) +
-	             " as project \"" + (m_projectLabel.empty() ? std::string("(none)") : m_projectLabel) +
+	            ("Collab: connecting " + std::string(m_viaRelay ? "through the relay server " : "to ") +
+	             host + ":" + std::to_string(port) + " as project \"" + (m_projectLabel.empty() ? std::string("(none)") : m_projectLabel) +
 	             "\" (id " + (m_projectId.empty() ? std::string("<none — no project open>") : m_projectId) +
 	             ")").c_str());
 	return true;
@@ -1544,6 +1634,8 @@ void CollabController::teardown()
 	m_collab.reset();
 	m_net.reset();
 	m_secure.reset();
+	m_relayLink = nullptr;   // lived inside m_secure
+	m_viaRelay  = false;
 
 	m_isHost        = false;
 	// Starting or leaving a session is the one moment the last one's ejection
@@ -1704,6 +1796,13 @@ void CollabController::update(std::uint64_t nowMs)
 				m_error = "The session could not be looked up in time. Check the "
 				          "session ID, and that you are online.";
 			}
+			else if (m_viaRelay)
+			{
+				m_error = "No answer through the relay server " + m_connectTarget + ":" +
+					std::to_string(m_port) + " after 20 seconds. Check that the relay "
+					"server is running and that this machine may connect out to that "
+					"port.";
+			}
 			else if (m_connectIsLan)
 			{
 				m_error = "No answer from " + m_connectTarget + ":" +
@@ -1745,6 +1844,8 @@ void CollabController::update(std::uint64_t nowMs)
 	m_secure->update();   // drives the transport + handshake
 	m_net->pump();        // dispatches framed messages
 	m_collab->update(nowMs);
+
+	if (m_relayLink && !updateRelayStatus()) return;   // false: the join failed and is gone
 
 	// A client whose link dropped is no longer in a session; say so rather than
 	// leaving a stale "Joined" in the UI.
@@ -1823,6 +1924,68 @@ void CollabController::setSyncLargeAssets(bool on)
 	m_syncLargeAssets = on;
 }
 
+// ─── Relay server ────────────────────────────────────────────────────────────
+
+bool CollabController::relayForNewSession(HE::Net::RelayAddress& relay, bool& use)
+{
+	use = false;
+	const std::string text = HE::Net::effectiveRelayAddress(m_relayAddress);
+	if (text.empty()) return true;   // peer-to-peer, as before the relay existed
+
+	std::string why;
+	if (!HE::Net::parseRelayAddress(text, relay, &why))
+	{
+		// Not a fallback to direct: somebody set a relay because direct does
+		// not work for them, or because they do not want it.
+		m_error  = "The relay server address \"" + text + "\" cannot be used (" + why +
+		           "). Fix it under Preferences > Collaboration, or clear it to connect "
+		           "directly.";
+		m_status = Status::Failed;
+		return false;
+	}
+	use = true;
+	return true;
+}
+
+bool CollabController::updateRelayStatus()
+{
+	const HE::Net::RelayAddress& r = m_relayLink->relay();
+	const std::string where = r.host + ":" + std::to_string(r.port);
+	const std::string& why  = m_relayLink->lastError();
+
+	if (m_isHost)
+	{
+		// The listener is retried in the background, so this line is all a host
+		// sees of a relay that is down — and the reason guests get no-such-peer.
+		std::string s = m_relayLink->listening()
+			? "Hosting through the relay server " + where + ". Share the session ID "
+			  "and the join code; nobody needs a port forward."
+			: "The relay server " + where + " has not taken the session yet" +
+			  (why.empty() ? std::string() : " (" + why + ")") +
+			  " — retrying. Guests cannot join until it does.";
+		if (s != m_directoryStatus) m_directoryStatus = std::move(s);
+		return true;
+	}
+
+	// A refusal arrives at once (no-such-peer, timeout); the connect deadline
+	// would only repeat it twenty seconds later with less to say.
+	if (m_status != Status::Connecting || m_relayLink->connectionCount() != 0 || why.empty())
+		return true;
+
+	std::string hint;
+	if (why.rfind("no-such-peer", 0) == 0)
+		hint = " No host is running that session on this relay server: check the "
+		       "session ID, and that the host uses the same relay server.";
+	else if (why.rfind("timeout", 0) == 0)
+		hint = " The host's editor did not take the connection in time.";
+	m_error = "The relay server " + where + " could not connect you (" + why + ")." + hint;
+	Logger::Log(Logger::LogLevel::Warning, ("Collab: " + m_error).c_str());
+	teardown();
+	m_status            = Status::Failed;
+	m_connectDeadlineMs = 0;
+	return false;
+}
+
 void CollabController::setMaxAssetMB(int mb)
 {
 	// Clamped rather than refused: this comes from a config file that a user can
@@ -1860,6 +2023,15 @@ bool CollabController::retryJoinWithLargeAssets()
 	const std::uint16_t port = m_lastJoin.port;
 	const std::string   code = m_lastJoin.joinCode;
 	const std::string   name = m_lastJoin.displayName;
+	// A relay join is dialled again the way it was made, by session id: the
+	// relay's address alone does not say which session.
+	if (!m_lastJoin.sessionId.empty())
+	{
+		const std::string sid = m_lastJoin.sessionId;
+		Logger::Log(Logger::LogLevel::Info,
+		            "Collab: agreeing to large-asset sync and joining through the relay again");
+		return joinBySessionId(sid, code, name);
+	}
 	Logger::Log(Logger::LogLevel::Info,
 	            ("Collab: agreeing to large-asset sync and dialling " + host + ":" +
 	             std::to_string(port) + " again").c_str());

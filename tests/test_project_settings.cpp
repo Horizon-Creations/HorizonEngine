@@ -525,6 +525,8 @@ TEST_CASE("ProjectMultiplayerSettings: default-constructed is what a session alr
 	CHECK(s.multiplayer.maxPendingInputs      == 64);
 	CHECK(s.multiplayer.discoverLan);
 	CHECK(s.multiplayer.rpcPerSecond == 60);
+	// No relay: peer-to-peer, as every project hosted before the relay existed.
+	CHECK(s.multiplayer.relayAddress.empty());
 
 	s.multiplayer.tickHz = 60.0f;
 	CHECK_FALSE(s.isDefault());
@@ -546,6 +548,7 @@ TEST_CASE("ProjectMultiplayerSettings: toJson writes the plan's shape and fromJs
 	a.multiplayer.discoverDirectory     = false;
 	a.multiplayer.portMapping           = false;
 	a.multiplayer.rpcPerSecond          = 200;
+	a.multiplayer.relayAddress          = "relay.example.com:7777";
 
 	json j;
 	a.toJson(j);
@@ -563,6 +566,7 @@ TEST_CASE("ProjectMultiplayerSettings: toJson writes the plan's shape and fromJs
 	CHECK(m["discovery"]["directory"]   == false);
 	CHECK(m["discovery"]["portMapping"] == false);
 	CHECK(m["rpcPerSecond"] == 200);
+	CHECK(m["relayAddress"] == "relay.example.com:7777");
 
 	HE::ProjectSettings b;
 	b.fromJson(j);
@@ -582,6 +586,7 @@ TEST_CASE("ProjectMultiplayerSettings: a file from before it existed is the defa
 	CHECK(s.multiplayer.tickHz      == doctest::Approx(30.0f));
 	CHECK(s.multiplayer.maxPendingInputs == 64);
 	CHECK(s.multiplayer.discoverLan);
+	CHECK(s.multiplayer.relayAddress.empty());
 }
 
 TEST_CASE("ProjectMultiplayerSettings: clamp corrects a hand-edited file but keeps port 0")

@@ -182,6 +182,7 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && multiplayer.discoverLan == o.multiplayer.discoverLan
         && multiplayer.discoverDirectory == o.multiplayer.discoverDirectory
         && multiplayer.portMapping == o.multiplayer.portMapping
+        && multiplayer.relayAddress == o.multiplayer.relayAddress
         && multiplayer.rpcPerSecond == o.multiplayer.rpcPerSecond;
 }
 
@@ -359,6 +360,9 @@ void ProjectSettings::toJson(json& out) const
                          { "directory",   multiplayer.discoverDirectory },
                          { "portMapping", multiplayer.portMapping } } },
         { "rpcPerSecond", multiplayer.rpcPerSecond },
+        // "" = direct. Not under "discovery": it decides how the session is
+        // reached at all, not how it is found.
+        { "relayAddress", multiplayer.relayAddress },
     };
 }
 
@@ -466,6 +470,7 @@ void ProjectSettings::fromJson(const json& in)
         readBool(di, "directory",   multiplayer.discoverDirectory);
         readBool(di, "portMapping", multiplayer.portMapping);
         readNumber(m, "rpcPerSecond", multiplayer.rpcPerSecond);
+        readString(m, "relayAddress", multiplayer.relayAddress);
     }
 
     clamp();
