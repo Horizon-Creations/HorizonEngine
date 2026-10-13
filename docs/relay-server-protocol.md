@@ -64,6 +64,37 @@ Separate repository, not part of this tree:
   `tests/relay_test.py` is the executable one (25 end-to-end cases, 10 of
   them broadcast)
 
+### Running instance (rented server)
+
+Since 2026-10-13 the relay runs on **212.227.140.164:7777** (Debian 12, user
+`horizon`) as the systemd **user** service `collab-relay` with lingering on, so
+it survives logouts and reboots. The account has no passwordless sudo, which
+is why it is not a system service. Installed and updated from the Mac with
+`deploy/deploy.sh horizon@212.227.140.164 7777` in the CollabSession checkout
+(sends the committed HEAD as a `git archive` over ssh and builds it there;
+running version in `~/collab-relay/bin/VERSION`).
+
+Stop, restart, logs (on the server, `ssh horizon@212.227.140.164`):
+
+```bash
+systemctl --user status collab-relay         # running? since when, which PID
+systemctl --user stop collab-relay           # stop (until start or reboot)
+systemctl --user start collab-relay          # start again
+systemctl --user restart collab-relay        # restart (drops every open session)
+systemctl --user disable --now collab-relay  # stop and do not start on boot any more
+journalctl --user -u collab-relay -f         # live log, one line per connection event
+journalctl --user -u collab-relay --since today
+```
+
+From the Mac without logging in:
+`ssh horizon@212.227.140.164 systemctl --user restart collab-relay`.
+The ssh key `~/.ssh/id_ed25519` has a passphrase; it must be in the agent
+(`ssh-add --apple-use-keychain ~/.ssh/id_ed25519`) for scripts to use it.
+
+Port 7777 has to be open inbound in front of the VPS (IONOS cloud firewall
+policy, and ufw on the host if active); the service itself listens on all
+addresses (`*:7777`).
+
 ## Model in one paragraph
 
 Every relay connection carries exactly one peer-to-peer link. A host keeps one
