@@ -75,6 +75,13 @@ public:
     struct SourceRoot {
         std::filesystem::path dir;
         std::string           pathPrefix;
+        // A lower tier of a namespace an earlier root already serves (the
+        // EngineContent download cache behind the shipped "Engine/" defaults):
+        // a file here only fills an addressed path NO earlier root has, the way
+        // ContentManager::resolveAbsolutePath checks the cache last. Without it
+        // a cached copy under a different UUID than the default it sits behind
+        // would take that path in the bake while the editor shows the default.
+        bool                  fallbackOnly = false;
     };
 
     // Scan rootDir recursively for *.hasset files. UUID is read from the
@@ -126,6 +133,11 @@ public:
     // learns the type of an asset it has already loaded, which is too late for
     // discoverAssets — the call that finds a game's startup classes).
     const std::unordered_map<HE::UUID, uint16_t>& packedTypes() const { return m_packedTypes; }
+    // After addDirectory: what the pack dropped that the author would expect to
+    // ship — a reference whose target is in no root (baked to a null UUID) and a
+    // file whose UUID an asset at a DIFFERENT path already claimed (a real
+    // collision, not an override). Each is also passed to PackSettings::onWarning.
+    const std::vector<std::string>& warnings() const { return m_warnings; }
 
 private:
     struct PendingEntry {
@@ -142,5 +154,6 @@ private:
     std::vector<std::pair<HE::UUID, Hpak::CachedEntry>> m_entryInfos; // filled by addDirectory
     std::unordered_map<std::string, HE::UUID>  m_packedPaths; // filled by addDirectory
     std::unordered_map<HE::UUID, uint16_t>     m_packedTypes; // filled by addDirectory
+    std::vector<std::string>                   m_warnings;    // filled by addDirectory
     int m_reused = 0;
 };

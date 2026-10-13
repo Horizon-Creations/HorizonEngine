@@ -1599,6 +1599,12 @@ void startExport(AppContext& ctx)
                 // built-in asset at all and every default primitive renders as the
                 // renderers' fallback cube.
                 es.engineContentDir = ctx.contentManager->engineContentRoot();
+                // …and what the editor fetched from the EngineContent server, which
+                // the resolver reads after the shipped defaults (the landscape
+                // texture arrays live nowhere else since Thema 177). Only what this
+                // machine has downloaded can ship: an "Engine/" ref to a file that
+                // was never fetched still packs as a null, now with a warning below.
+                es.engineContentCacheDir = GlobalState::engineContentCacheDir();
                 // Ship the whole Python payload — interpreter, stdlib and the
                 // HorizonPython backend plugin — only for Python-language
                 // projects. A non-Python game never starts an interpreter, and
@@ -1635,6 +1641,13 @@ void startExport(AppContext& ctx)
                 es.onAsset = [](const std::string& relPath, bool reused)
                 {
                     Build::log(0, (reused ? "reused  " : "packed  ") + relPath);
+                };
+                // What the pack had to leave out (a reference to a file no root
+                // has, a UUID two assets share): the game would otherwise just
+                // draw a fallback with no explanation anywhere.
+                es.onWarning = [](const std::string& msg)
+                {
+                    Build::log(1, msg);
                 };
                 es.onStage = [stepPackage, stepCleanup](const char* what)
                 {

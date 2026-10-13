@@ -67,6 +67,15 @@ struct HE_API ExportSettings {
     // defaults are not packed (the pre-existing behaviour; tools that pack a bare
     // directory keep it).
     std::filesystem::path engineContentDir;
+    // The per-machine EngineContent download cache (GlobalState::engineContentCacheDir())
+    // — the resolver's THIRD "Engine/" tier, after the project override and
+    // engineContentDir. Content that lives only on the EngineContent server (the
+    // landscape texture arrays since Thema 177) reaches the editor through it and
+    // nowhere else, so a pak built without it baked M_AutoLandscape's texture refs
+    // to null UUIDs and the game drew the landscape white. Packed as a fallback
+    // root: it only fills "Engine/" paths engineContentDir does not have. Ignored
+    // when engineContentDir is empty, the same gate the resolver applies.
+    std::filesystem::path engineContentCacheDir;
     // Content-relative path of the project's default SaveGameTemplate asset
     // (.heproj "defaultSaveTemplate") — written into project.hcfg so
     // save.create() in the shipped game resolves the same schema.
@@ -205,6 +214,9 @@ struct HE_API ExportSettings {
     // `progress`. This is what lets a build window list WHAT was packed, not only
     // how many.
     std::function<void(const std::string&, bool)> onAsset;
+    // Optional, one call per problem the pack found and worked around by leaving
+    // something out (see Hpak::PackSettings::onWarning). Same thread rule as `progress`.
+    std::function<void(const std::string&)> onWarning;
     // Precompile node-graph material shaders into the pak for these graphics backends
     // (bitmask of 1u << HE::RendererBackend). 0 → no precompile (runtime cross-compile).
     // `compileShaderVariants` is supplied by the editor (it links the shader compiler):

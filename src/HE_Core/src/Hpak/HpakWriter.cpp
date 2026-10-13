@@ -946,8 +946,24 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     // engine default it shadows) keeps the shared default out of the archive,
     // instead of writing two TOC entries the reader would pick between blindly.
     std::unordered_set<HE::UUID> claimed;
+    // Who claimed each UUID (addressed path), to tell an override (same path in a
+    // later root, dropped quietly) from a collision (different path, warned).
+    std::unordered_map<HE::UUID, std::string> claimedBy;
+    // Every addressed path some root has, claimed or not: a fallbackOnly root
+    // may only fill the gaps, exactly like the resolver's last tier.
+    std::unordered_set<std::string> addressed;
     m_packedPaths.clear();
     m_packedTypes.clear();
+    m_warnings.clear();
+    auto warn = [&](std::string msg)
+    {
+        if (settings.onWarning) settings.onWarning(msg);
+        m_warnings.push_back(std::move(msg));
+    };
+    auto uuidText = [](const HE::UUID& id)
+    {
+        return std::to_string(id.hi) + ":" + std::to_string(id.lo);
+    };
     for (const SourceRoot& root : roots)
     {
         if (root.dir.empty()) continue;
@@ -978,6 +994,8 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
             for (const auto& pat : settings.excludePatterns)
                 if (!pat.empty() && Hpak::globMatch(pat, rel)) { excluded = true; break; }
             if (excluded) { it.increment(ec); continue; }
+            // A lower tier never replaces what an earlier root serves at this path.
+            if (!addressed.insert(rel).second && root.fallbackOnly) { it.increment(ec); continue; }
 
             do {
                 std::ifstream f(p.path(), std::ios::binary);
@@ -987,7 +1005,18 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
 
                 HE::UUID id; std::string path; uint16_t type = 0;
                 if (!metaFromHasset(bytes, id, path, type) || id == HE::UUID{}) break;
-                if (!claimed.insert(id).second) break;  // already packed from an earlier root
+                if (!claimed.insert(id).second)  // already packed from an earlier root
+                {
+                    // Same addressed path = an override shadowing its default (the
+                    // point of the root order). A different path is two assets that
+                    // share a UUID, and this one silently goes missing in the game.
+                    const std::string& owner = claimedBy[id];
+                    if (owner != rel)
+                        warn(rel + ": UUID " + uuidText(id) + " is already taken by " + owner
+                             + " - not packed, references to it resolve to nothing");
+                    break;
+                }
+                claimedBy[id] = rel;
                 // Runtime UUID→type index. Recorded AFTER the claim check so it
                 // describes the entry that actually ships, and keyed by UUID, so
                 // the two path spellings below collapse into one type entry.
@@ -1055,6 +1084,16 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         parentHashMemo.emplace(path, h);
         return h;
     };
+    // A path ref that resolved to no packed asset bakes a null UUID: the game
+    // then draws the renderers' fallback (white texture, default cube) with not a
+    // line in its log. Say it here, where the author can still act on it.
+    auto warnUnresolved = [&](const std::string& relPath, const Hpak::PackDeps& d)
+    {
+        for (const auto& [path, uuid] : d.refs)
+            if (uuid == HE::UUID{})
+                warn(relPath + ": reference to " + path
+                     + " is in no packed root - baked as a null UUID");
+    };
     auto depsHold = [&](const Hpak::PackDeps& d) -> bool
     {
         for (const auto& [path, uuid] : d.refs)
@@ -1091,6 +1130,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 {
                     addPackedEntry(pe.id, se);
                     ++m_reused;
+                    warnUnresolved(pe.relPath, cit->second.deps);
                     m_srcHashes.emplace_back(pe.id, cit->second.srcHash);
                     m_entryInfos.emplace_back(pe.id, cit->second);
                     ++count;
@@ -1125,6 +1165,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         deps.parents.erase(std::unique(deps.parents.begin(), deps.parents.end(),
                            [](const auto& a, const auto& b) { return a.first == b.first; }),
                            deps.parents.end());
+        warnUnresolved(pe.relPath, deps);
         m_entryInfos.emplace_back(pe.id, Hpak::CachedEntry{ srcHash, inHash, std::move(deps) });
 
         // ── Level 2: the output is what the previous archive already holds ──────
