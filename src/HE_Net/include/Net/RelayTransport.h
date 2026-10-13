@@ -38,6 +38,10 @@
 // addressing is needed because the connection itself is the address.
 
 #include "Net/ITransport.h"
+// The full type, not a forward declaration: on MSVC the dllexport of this class
+// defines its inline default constructor in every TU of the DLL, and that
+// needs ~unique_ptr<TcpTransport> (through Link) to see a complete type.
+#include "Net/TcpTransport.h"
 
 #include <cstdint>
 #include <deque>
@@ -46,8 +50,6 @@
 #include <vector>
 
 namespace HE::Net {
-
-class TcpTransport;
 
 // Where the relay is. Parsed from what a person types into a settings field.
 struct RelayAddress {
