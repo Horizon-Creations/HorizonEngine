@@ -10,6 +10,11 @@ Das ist die Lücke, die `docs/auto-landscape-material-textures.md` §20.4 Punkt 
 Regression, sondern ein fehlendes Stück, das seit Thema 177 Schritt 7 trifft: Seitdem sind die
 Platzhalter aus git entfernt und die echten Texturen liegen nur noch auf dem Server.
 
+**Antwort auf die Frage des Themas:** Es liegt weder an den komprimierten Texturdaten noch am
+Runtime-Loader. Dieselben Dateien rendern, einmal gepackt, auf D3D11 und Vulkan wie im Editor
+(Kontrolle B, §3). Der Fehler sitzt davor: Der Export packt unvollständig. Man sieht das an den fehlenden
+Manifest-/TOC-Einträgen 0x40F–0x411 und an den Material-Refs, die zu `0:0` gebacken sind.
+
 ## 1. Symptom
 
 | Lauf | Landschaft | Boden-Mittelwert RGB (y 600–900) |
@@ -17,7 +22,7 @@ Platzhalter aus git entfernt und die echten Texturen liegen nur noch auf dem Ser
 | Editor (GL), Arrays nur im Cache | texturiert (Gras/Erde) | – (Screenshot) |
 | Spiel des Menschen (`HEProject.hpak` vom 12.10.), D3D11 | weiß-grau, Sechsecke | 166 176 198 |
 | dasselbe Pak, Vulkan | identisch | 166 176 198 |
-| dasselbe Pak, GL (Log des Menschen) | gleiches Bild laut Thema | – |
+| dasselbe Pak, GL (Backend des Menschen laut Log) | weiß-grau, Sechsecke | 143 154 179 |
 | Kontrolle B (Arrays im Pak), D3D11 | texturiert, wie Editor | 68 63 46 |
 | Kontrolle B, Vulkan | texturiert, wie Editor | 68 63 46 |
 
@@ -80,8 +85,9 @@ Der Projekt-Override ist damit auch ein **Workaround für den Menschen**, solang
 `LandscapeTexGen/main.cpp:81`, `:345`) haben beide `0x400:1`, beide Generatoren beanspruchen den 0x400-Block.
 `HpakWriter.cpp:944-990` lässt die erste Wurzel gewinnen und verwirft die zweite still. Das trifft
 M_AutoLandscape nicht (es liest nur die Arrays), aber jedes eigene Material mit der losen Gras-Albedo. Ein Fix,
-der den ganzen Cache nach `engineContentRoot` packt, würde Grass_Albedo still verlieren. Im Editor wählt
-`m_diskRegistry` je nach Scan-Reihenfolge. Das ist ein eigenes Thema und wird hier nicht weiterverfolgt.
+der den ganzen Cache nach `engineContentRoot` packt, würde Grass_Albedo still verlieren. Wie der Editor die
+Kollision auflöst (`m_diskRegistry`, Scan-Reihenfolge), ist **nicht geprüft**. Das ist ein eigenes Thema und
+wird hier nicht weiterverfolgt.
 
 ## Handoff
 
@@ -90,11 +96,12 @@ der den ganzen Cache nach `engineContentRoot` packt, würde Grass_Albedo still v
 - **Done:** Bug reproduziert und Ursache benannt: Der Exporter packt die dritte Engine-Content-Stufe (SFTP-Cache)
   nicht, und der Packer macht fehlende Refs still zu Null-UUIDs.
 - **Files touched:** dieses Dokument, `scripts/landscape-export-repro/{run_editor.ps1,pkg.py}`. Kein Code geändert.
-- **Verified:** A/B aus §3 mit Bildern in `C:\hw189\shots\{editor_A,editor_B,gA_d3d11,gB_d3d11,gB_vk,d3d11b,vk}`,
+- **Verified:** A/B aus §3 mit Bildern in `C:\hw189\shots\{editor_A,editor_B,gA_d3d11,gB_d3d11,gB_vk,d3d11b,vk,gl}`,
   Pak-Manifeste `C:\hw189\out_{A,B}\HEProject.hpak.manifest`, META-UUIDs der Cache-Dateien.
 - **Not verified:** D3D12-Spiel. Der Editor wurde nur auf GL aufgenommen, der Mensch nutzt D3D12; die Auflösung
-  ist backend-unabhängig (`ContentManager`). Die BCn-Kochung der Arrays wurde nicht geprüft (Packer kocht Arrays
-  nicht um, laut `auto-landscape-material-textures.md` Z. 522).
+  ist backend-unabhängig (`ContentManager`). Das Format der Arrays wurde nicht ausgelesen, für die Ursache
+  ist es unerheblich (B rendert richtig).
+- **Scratch:** `C:\hw189` (~2,5 GB: Editor-Kopie, appdata_A/B, out_A/B, Spielkopien) bleibt für Schritt 3 stehen.
 - **Decisions suggested, not taken (für Schritt 2 / Queen):**
   1. Exporter nimmt den Cache als dritte Wurzel (`{engineContentCacheDir(), "Engine/"}`) **nach** `engineContentDir`,
      aber besser nur die vom Projekt referenzierten Dateien (sonst 15 × 16 MiB lose Texturen mehr, und die 0x400-Kollision).
