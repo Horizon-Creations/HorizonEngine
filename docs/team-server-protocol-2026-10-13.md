@@ -74,7 +74,7 @@ Step 9 additions (README sections "Anwesenheit", "Team-Sitzungen", "Ereignisse")
 - **CI:** run 38472456102 on 8e97b36: macOS green, both Linux jobs red on
   `test_client_that_does_not_read_its_events` only (Linux autotunes the server's send
   buffer to MBs, the fixed 1.8 MB of events never reached the 1 MiB mark); e3f4649 sends
-  batches until the drop is logged. Its run:
+  batches until the drop is logged. Its run is **green on all three jobs**:
   https://github.com/Horizon-Creations/CollabSession/actions/runs/38472878828
 - **Not verified:** nothing deployed to 212.227.140.164 (step 5).
 - **Decisions taken:** join setting per *session* (live, not persisted; teams.txt format
