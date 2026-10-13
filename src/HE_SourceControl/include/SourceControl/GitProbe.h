@@ -19,6 +19,7 @@
 // control unavailable" is not an actionable message, and three of the four have
 // completely different remedies.
 
+#include "SourceControl/GitLocator.h"
 #include "SourceControl/ScCommon.h"
 
 #include <filesystem>
@@ -30,7 +31,15 @@ struct GitProbe
 {
 	bool                  gitFound = false;
 	std::string           gitVersion;         // "2.43.0", empty when unparsable
-	std::filesystem::path gitPath;
+	std::filesystem::path gitPath;            // the located binary, even when it is not runnable
+
+	// Found is not the same as runnable: on a fresh Mac /usr/bin/git exists but
+	// is a shim (Stub). gitFound is only true once `git --version` actually ran.
+	GitBinaryState        gitBinary = GitBinaryState::NotFound;
+
+	// How git would be installed on this machine. Filled on every probe; the
+	// editor reads it when gitFound is false.
+	GitInstallPlan        install;
 
 	bool        lfsFound = false;
 	std::string lfsVersion;                   // "3.4.1"

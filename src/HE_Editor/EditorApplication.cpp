@@ -2354,7 +2354,7 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 		auto config = [](const char* key, const std::string& value)
 		{
 			HE::Proc::Options o;
-			o.exe       = "git";
+			o.exe       = HE::Sc::gitLaunchPath();
 			o.args      = { "config", "--global", key, value };
 			o.timeoutMs = 5000;
 			// A probe must never stop to ask something it cannot display.

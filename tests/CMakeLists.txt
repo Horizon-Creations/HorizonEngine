@@ -367,6 +367,7 @@ add_executable(he_tests
     test_mcp_client_setup.cpp
     test_mcp_claude_probe.cpp
     test_sourcecontrol_probe.cpp
+    test_git_locator.cpp
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
     test_git_panel_ops.cpp
