@@ -94,6 +94,8 @@ presence events on the same TCP stream. So a sync runs on its own connection:
    ticket 16 bytes`. Answer STATUS `sc-ready` (5), or `bad-login` (23, ticket unknown,
    expired or used), `no-project` (27), `bad-hello` (16), `bad-version` (17), then close.
 3. Removing a member (`DropMember`) also closes its sync connections and drops its tickets.
+4. The sync connection **stays open** across saves for as long as the editor has the project
+   open (TCP keepalive as for team connections). A new ticket is only needed after it drops.
 
 ### 4.2 Frames after `sc-ready`
 
@@ -117,7 +119,7 @@ SC_DATA stream of the same request, in the line format given per op, then the SC
 | 6 | COMMIT | `base_rev u64`, `message str16`; stream of entries | `rev u64`; stream of outcomes (5.6) |
 | 7 | LOG | `from_rev u64`, `count u16` | stream: rev, member, time, message, outcomes |
 | 8 | CREATE_PROJECT | – (admin) | – |
-| 9 | BACKUP_SET | `url str16` (admin) | `pubkey str16` (the deploy key) |
+| 9 | BACKUP_SET | `url str16`, `branch str8` (admin) | `pubkey str16` (the deploy key) |
 | 10 | BACKUP_STATUS | – | `pushed_rev u64`, `state u8`, `last_error str16`, `time u64` |
 
 COMMIT entry line: `op \t path \t base_sha256|- \t new_sha256|- \n` with op `A` add, `M`
@@ -147,7 +149,7 @@ For each entry with base `b`, uploaded `n` and current head content `h`:
 | `h == n` | nothing to do | `same` |
 | delete, `h != b` | keep `h`; the deletion is dropped (somebody changed it since) | `delete-dropped` |
 | modify, path deleted at head | take `n` (a change beats a deletion) | `restored` |
-| add, path exists at head (add/add) | 3-way with an empty base, by file class | as below |
+| add, path exists at head (add/add) | scene/json: 3-way with an empty base (uuid/key union, 5.3); text and whole: 5.5 (a line merge with an empty base would glue two files into one) | `merged` / `merged-arrival` / `replaced` |
 | otherwise | 3-way merge of (`b`, `h`, `n`) by file class (5.2) | `merged` / `merged-arrival` / `replaced` |
 
 The whole COMMIT becomes **one** new revision. The reply lists every entry's outcome and the
@@ -236,8 +238,10 @@ already are), they move to a structural merge like 5.3.
   value). That branch is pushed with the backup, so the history is readable on GitHub.
 * Never as a sibling file inside the project (`Foo.conflict.hasset`): a `.hasset` carries its
   UUID in META, a copy would put two assets on one UUID in the content manager.
-* The arrival's own content never loses except via `delete-dropped` (no content lost), so
-  only head's side has to be preserved.
+* Outside the 5.3 repairs, the arrival's own content never loses (`delete-dropped` loses no
+  content), so head's side is what gets preserved. When a repair fires, the repair can drop
+  something from either side, so **both** pre-merge versions go to the branch
+  (`r<rev>/<path>.head`, `r<rev>/<path>.arrival`).
 
 ## 6. Editor side
 
@@ -295,16 +299,20 @@ connection itself (plain `TcpTransport` framing).
 * **Push:** worker job after each new revision, debounced (30 s quiet, at most 5 min
   behind under continuous saving), plus once on clean shutdown. `GIT_SSH_COMMAND="ssh -i
   backup_key -o IdentitiesOnly=yes -o UserKnownHostsFile=<known_hosts>"`, `git push <url>
-  main horizon-conflicts` (never `--force`), then `git lfs push --all <url>` when the
+  main:<branch> horizon-conflicts` (never `--force`), then `git lfs push --all <url>` when the
   revision added LFS objects.
-* **Format on GitHub:** an ordinary repo whose `main` is exactly the server's `main`: the
+* **Format on GitHub:** an ordinary repo whose `<branch>` (default `main`) is exactly the server's `main`: the
   project tree, one commit per save with the member as author and the trailers above;
   large media through LFS with `.gitattributes` entries; branch `horizon-conflicts`.
   Anyone can clone it and open the project with the direct git mode.
 * **Failure:** a rejected non-fast-forward (someone pushed to that repo) stops the backup,
   state `diverged`, admin sees it in BACKUP_STATUS and a toast; the server never
-  overwrites. Network errors retry with backoff. A first push into a non-empty repo is
-  refused the same way.
+  overwrites. Network errors retry with backoff. A first push into a branch that already
+  exists on GitHub is refused the same way.
+* **Existing repos:** the backup target is `url` + **branch** (BACKUP_SET gets a `branch str8`,
+  default `main`; the conflicts branch is always `horizon-conflicts`). A team that already has its
+  project on GitHub points the backup at that repo with a fresh branch such as
+  `horizon-backup`, so the server never collides with the history pushed there directly.
 * Disaster recovery (a new server from the GitHub backup via `clone --mirror`) is possible
   by construction but not part of this topic.
 
