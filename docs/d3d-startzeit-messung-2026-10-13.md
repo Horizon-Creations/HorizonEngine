@@ -147,12 +147,12 @@ damit der Roaming-Ordner des Menschen unberührt bleibt. „Vorher“ = dasselbe
 | Backend, Fall | Renderer-Init | 1. Frame seit `Run` | Schritt 4 vor Fix (Init / 1. Frame) |
 |---|---|---|---|
 | D3D11 leer, **ohne Cache** | 8860 ms (8819-9234) | 9173 ms (9145-9555) | 8290 / 8737 ms |
-| D3D11 leer, Cache leer (Erststart) | 9073 ms | 9406 ms | |
+| D3D11 leer, Bytecode-Cache leer (Erststart)* | 9073 ms | 9406 ms | beide Caches leer: 8372 / 8699 ms |
 | D3D11 leer, **Cache warm** | **463 ms** (451-483, 5 Läufe) | **793 ms** (787-799) | |
 | D3D11 Projekt, ohne Cache | 8658 / 8835 ms | 8964 / 9162 ms, langsamer Frame 1156 / 1134 ms | 8270 / 8581 ms |
 | D3D11 Projekt, warm (ab 2. Projektstart) | 453-470 ms | 753-797 ms, langsamer Frame 273-309 ms | |
 | D3D12 leer, **ohne Cache** | 9057 ms (8645-10356) | 9422 ms (9000-10732) | 8868 / 9223 ms |
-| D3D12 leer, Cache leer (Erststart) | 9545 ms | 9922 ms | |
+| D3D12 leer, Bytecode-Cache leer (Erststart)* | 9545 ms | 9922 ms | beide Caches leer: 9705 / 10071 ms |
 | D3D12 leer, **Cache warm** | **566 ms** (560-596, 5 Läufe) | **886 ms** (881-913) | |
 | D3D12 Projekt, ohne Cache | 8654 / 8631 ms | 9012 / 8984 ms, langsamer Frame 1273 / 1123 ms | 8677 / 9046 ms |
 | D3D12 Projekt, warm (ab 2. Projektstart) | 563-574 ms | 880-898 ms, langsamer Frame 260-269 ms | |
@@ -160,6 +160,10 @@ damit der Roaming-Ordner des Menschen unberührt bleibt. „Vorher“ = dasselbe
 | Vulkan Projekt (6 Läufe) | 606 ms (599-626) | 991 ms (980-1004), langsamer Frame 255-261 ms | 620 / 1005 ms |
 | OpenGL leer (6 Läufe) | 134 ms (134-151) | 562 ms (550-622) | – |
 | OpenGL Projekt (3 Läufe) | 134 ms | 557 ms, langsamer Frame 259-273 ms | – |
+
+\* Der NVIDIA-DXCache war hier nur teilweise geleert: `-Cold` löscht nur die Dateien, die der erste Lauf eines
+OutDir aufgezeichnet hat, und das war ein D3D11-Lauf. Die D3D12-Zeile lief daher vermutlich mit warmem Treiber-Cache.
+Die Werte mit beiden Caches leer stammen aus Schritt 4.
 
 **Ergebnis:** Warm sinkt der erste Frame auf D3D11 von 9,2 auf 0,79 s (-91 %), auf D3D12 von 9,4 auf 0,89 s (-91 %).
 Damit liegen beide unter Vulkan (1,0 s) und über OpenGL (0,56 s). Ab dem zweiten Projektstart ist auch der Material-Frame
@@ -169,6 +173,8 @@ Treffern. Die Werte aus Schritt 4 sind damit reproduziert. **Erststart unveränd
 praktisch nach jedem Engine-Update, das Shader anfasst. Ohne Cache misst dieser Lauf ~0,5 s mehr als Schritt 4 vor dem Fix
 (Sky-PS 5,2-6,2 s gegen 5,0 s). Das ist Streuung der FXC-Zeit zwischen Sitzungen, nicht der Cache: abgeschaltet ruft er
 nichts auf.
+**OpenGL** lief mit warmem `glprogcache` im echten Roaming-Ordner (SDL ignoriert `%APPDATA%` auch dort). Ein
+Vorher-Wert für GL fehlt; dass GL nicht langsamer wurde, folgt aus dem Code (nächster Absatz), nicht aus einer Messung.
 **Andere Backends:** Der Fix (11041d41) ändert nur `D3D_Shared/*`, den Test und die Doku. Für Vulkan, GL und Metal kommen
 von diesem Zweig nur die `[startup]`-Zeilen in `Application.cpp` dazu (drei `steady_clock`-Lesungen, Log-Zeilen bis
 Frame 300). Vulkan misst 0,61-0,64 s Init und 1,0 s bis zum ersten Frame, so viel wie Schritt 4 vor dem Fix (0,62 / 1,0 s
@@ -200,7 +206,8 @@ D3D-Dateien.
 GPU-Laufzeit (Bytecode identisch). Der Deploy des Menschen profitiert erst nach dem Merge und einem Start, der den Cache füllt.
 **Fallen:** `HE_DUMP_RHI` ohne `HE_DUMP_PATH` stürzt D3D ab, das Backend kommt per config.json. Der Cache liegt im echten
 Roaming-Ordner, für Messungen daher `-CacheDir`. Der Wolkenhimmel in D3D11-Captures hängt an der Zeit seit Start. Die
-FXC-Zeit streut zwischen Sitzungen um ~0,5 s.
+FXC-Zeit streut zwischen Sitzungen um ~0,5 s. Die DXCache-Liste von `measure.ps1` wird nur beim ersten Lauf
+eines OutDir angelegt; für einen echten Kaltstart je Backend einen eigenen OutDir nehmen.
 **Nächste Schritte:**
 1. Optional, eigenes Thema: den Erststart senken (9-10 s). Compiles parallel per JobSystem (untere Grenze ≈ Sky-PS ~5 s)
    oder Sky asynchron bauen und anfangs den kleinen `kSkyPSHLSL` zeichnen. Beides betrifft `createSkyPipeline` in beiden
