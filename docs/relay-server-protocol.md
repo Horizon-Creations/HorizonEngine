@@ -212,5 +212,8 @@ a real `collab_server` when `HE_TEST_RELAY` is set.
 
 - Access control on the relay itself (today anyone who can reach the port may
   open sessions; the content stays end-to-end encrypted).
-- Deployment on the rented Linux server (service unit, firewall), plus the
-  end-to-end acceptance with real clients (step 5).
+- Deployment on the rented Linux server (service unit, firewall), and a client
+  on a second operating system. The end-to-end run with several real editor
+  processes (relay and peer-to-peer, on macOS against a local relay) is in
+  `docs/relay-e2e-abnahme-2026-10-13.md`; the script for repeating it against
+  any relay is `scripts/he_collab_relay_e2e.py`.

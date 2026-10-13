@@ -150,28 +150,45 @@ void registerCollabTools(McpToolRegistry& registry, ::CollabController& collab,
 		t.name        = "collab_join";
 		t.description =
 			"Join a collaboration session by address, port and join code — the "
-			"panel's direct-connect path. Returns while the link is still being set "
-			"up (status `connecting`); poll collab_status until it says `joined`, at "
-			"which point the host's scene has REPLACED this editor's world, or "
-			"`failed` with the reason in `error`.";
+			"panel's direct-connect path — or by session ID and join code, the "
+			"panel's \"Join by session ID\" path (the only one when a relay server is "
+			"set). Returns while the link is still being set up (status "
+			"`connecting`); poll collab_status until it says `joined`, at which point "
+			"the host's scene has REPLACED this editor's world, or `failed` with the "
+			"reason in `error`.";
 		t.inputSchema = objectSchema(json{
-			{ "host",     stringProp("Address of the hosting editor, e.g. 127.0.0.1.") },
-			{ "port",     json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", 65535 },
-			                    { "description", "The host's port, from its collab_host." } } },
-			{ "joinCode", stringProp("The join code the host's collab_host returned.") },
-			{ "name",     stringProp("Display name for this session. Defaults to the "
-			                         "editor's stored identity.") },
-		}, { "host", "port", "joinCode" });
+			{ "host",      stringProp("Address of the hosting editor, e.g. 127.0.0.1.") },
+			{ "port",      json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", 65535 },
+			                     { "description", "The host's port, from its collab_host." } } },
+			{ "sessionId", stringProp("Instead of host and port: the session ID from the "
+			                          "host's collab_host or collab_status.") },
+			{ "joinCode",  stringProp("The join code the host's collab_host returned.") },
+			{ "name",      stringProp("Display name for this session. Defaults to the "
+			                          "editor's stored identity.") },
+		}, { "joinCode" });
 		t.mutates = true;
 		t.handler = [c, hooks](const json& args) -> ToolResult {
 			if (!hooks.projectOpen || !hooks.projectOpen()) return failNoProject();
 			if (c->active()) return failAlreadyActive(*c);
+			const std::string sessionId = strArg(args, "sessionId");
 			const std::string host = strArg(args, "host");
 			const std::string code = strArg(args, "joinCode");
+			if (!sessionId.empty())
+			{
+				if (!host.empty() || args.contains("port"))
+					return ToolResult::fail("invalid_payload",
+					                        "give either 'sessionId' or 'host' and 'port', not both");
+				if (code.empty())
+					return ToolResult::fail("invalid_payload", "'joinCode' is required");
+				if (!c->joinBySessionId(sessionId, code, nameFrom(args, hooks)))
+					return ToolResult::fail("join_failed", c->lastError());
+				return ToolResult::ok(statusJson(*c));
+			}
 			std::uint16_t port = 0;
 			if (host.empty() || code.empty() || !portFrom(args, 0, port) || port == 0)
 				return ToolResult::fail("invalid_payload",
-				                        "'host', 'port' (1..65535) and 'joinCode' are all required");
+				                        "'host', 'port' (1..65535) and 'joinCode' are all required, "
+				                        "or 'sessionId' and 'joinCode'");
 			if (!c->joinSession(host, port, code, nameFrom(args, hooks)))
 				return ToolResult::fail("join_failed", c->lastError());
 			return ToolResult::ok(statusJson(*c));
