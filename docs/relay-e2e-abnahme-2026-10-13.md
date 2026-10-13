@@ -15,7 +15,7 @@ engine design: `docs/relay-server-protocol.md`.
 | Relay on the rented server (212.227.140.164:7777) | Debian 12 VPS | **running** as systemd user service `collab-relay` (build f61c9f1), see "Rented server" |
 | 4 editors (1 host + 3 guests) against the **rented** relay | macOS → VPS through an ssh tunnel | PASS, 47 checks; port 7777 itself not yet reachable from outside (firewall) |
 | Second platform (Windows/Linux client) | — | **not done**: no client on NN-WS03/NN-RP01 reachable from this step |
-| CI (Windows/Linux/macOS build + full ctest) | GitHub | step 4's head (run 38396486313): Linux, macOS, lavapipe green, **Windows red** (MSVC, fixed here, see "Tests"); this step's push starts a new run |
+| CI (Windows/Linux/macOS build + full ctest) | GitHub | 38396486313: Windows did not compile (MSVC, fixed in 58f1e4f2); 38400975745: Windows builds, 279/280 (timing in one test, fixed in a896172a), others green; 38407041777 (a896172a) still running |
 
 So: unicast and broadcast through a real relay work with several real editor
 processes that only dial out, and peer-to-peer works unchanged. The relay
@@ -117,8 +117,18 @@ constructor in every TU of the DLL, and through `Link` that needs
 `~unique_ptr<TcpTransport>` on a complete type; Clang/GCC only instantiate it
 where it is used. Fix: `RelayTransport.h` includes `Net/TcpTransport.h`
 instead of forward-declaring it (no `windows.h` comes along: `Socket.h` only
-uses `<cstdint>`). Mac build green. Whether Windows is green comes from the
-next CI run.
+uses `<cstdint>`). Mac build green.
+
+The next Windows run (38400975745, head 10c700e5) built, and 279 of 280 tests
+passed. The one failure was "Relay: a relay nobody runs is a failed connect,
+and a host keeps retrying": the host's `lastError()` was still empty. Windows
+retries the SYN to a dead loopback port for about two seconds before
+`WSAECONNREFUSED`, while Linux and macOS refuse at once, and the test only
+pumped for a fixed 200 ms. The code was right (`onLinkClosed` sets the error
+once the refusal arrives; the client half of the same test waits for its event
+and passed on Windows). Fix `a896172a`: the test waits for the error, up to
+10 s. Linux, macOS and lavapipe were green in that run. CI for `a896172a`:
+run 38407041777, not yet finished when this report was written.
 
 ## Rented server
 
@@ -135,7 +145,13 @@ The service listens on `*:7777` and is reachable on the server itself, also
 through its public address. **From outside, port 7777 did not answer** at the
 time of the run (port 22 did): a firewall in front of the VPS (IONOS cloud
 firewall policy, or the host's own) still blocks it. Opening it needs the IONOS
-panel or root, so the human was asked (request #70).
+panel or root, so the human was asked (request #70). The host's ufw is enabled
+in its config but its service is inactive, and neither nftables nor firewalld
+runs, so the IONOS cloud firewall is the likely place. At 15:43, after the
+human had added a rule, 7777 still did not answer from the Mac, while the Mac
+reached port 7777 elsewhere (portquiz.net) and the relay journal showed no
+connection attempt from outside. So the rule did not yet apply to this server
+(policy not assigned, source restricted, or not saved).
 
 So that the run against the real server did not have to wait for that, the
 same E2E ran through an ssh tunnel (`ssh -L 47777:127.0.0.1:7777`), so the
