@@ -7870,6 +7870,41 @@ void EditorApplication::dumpFrameHeadless()
 			(std::string("EditorApplication: HE_DUMP_MOUNTAINTEST landscape added (") + mt + ")").c_str());
 	}
 
+	// ── Terrain LOD tick (HE_DUMP_TERRAINTICK=1, Thema 190) ──────────────────
+	// The dump renders straight from OnInit and never ticks the world, so every
+	// chunk stays at LOD0 and no tessellated level is built: a seam between two
+	// chunks at DIFFERENT detail never exists here. This runs the two systems
+	// that pick a chunk's level, from the dump camera, a few times (the refined
+	// level is built a few chunks per tick). HE_DUMP_LODSCALE sets every
+	// landscape's lodDistanceScale (0.1 = LOD steps every ~0.6 chunk widths),
+	// HE_DUMP_TESS its tessellationFactor (2 | 4). The log line counts the
+	// chunks per level — the witness that the seam under test is a mixed one.
+	if (const char* tt = std::getenv("HE_DUMP_TERRAINTICK"); tt && *tt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const char* ls = std::getenv("HE_DUMP_LODSCALE");
+		const char* ts = std::getenv("HE_DUMP_TESS");
+		for (auto [e, tc] : reg.view<TerrainComponent>().each())
+		{
+			if (ls && *ls) tc.lodDistanceScale   = static_cast<float>(std::atof(ls));
+			if (ts && *ts) tc.tessellationFactor = std::atoi(ts);
+			tc.dirty = true;
+		}
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const glm::vec3 camPos = m_editorCamera.position();
+		for (int i = 0; i < std::max(1, std::atoi(tt)) * 8; ++i)
+		{
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			LODSystem::update(*m_editorWorld, camPos);
+		}
+		int perLevel[5] = {};   // LOD0..3, refined
+		for (auto [e, lod] : reg.view<LODComponent, TerrainChunkComponent>().each())
+			++perLevel[lod.current == LODComponent::kRefined ? 4 : std::min<int>(lod.current, 3)];
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TERRAINTICK chunks LOD0=%d LOD1=%d LOD2=%d "
+			"LOD3=%d refined=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1], perLevel[2],
+			perLevel[3], perLevel[4], camPos.x, camPos.y, camPos.z);
+	}
+
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
 	// Warm the material pipelines before rendering (mirrors openScene) so the dump
