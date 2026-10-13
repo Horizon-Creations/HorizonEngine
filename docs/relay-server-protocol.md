@@ -40,7 +40,13 @@ is only constructed when an address is set.
   typed address/port are not dialled (logged). The relay is TCP-only, so a
   game session through it runs on TCP instead of UdpTransport: unreliable
   sends arrive reliably and later under loss, `linkStats()` reports 0. A UDP
-  relay would be a server feature of its own.
+  relay would be a server feature of its own. A join the relay refuses fails
+  at once with the reason (`lastError()`); without that the session would
+  sit in Connecting, because SecureTransport drops a link that dies
+  mid-handshake without surfacing it.
+- A guest that dials before the host's listener is registered gets
+  `no-such-peer`; that is the relay being right, not a race to paper over.
+  Tests wait for the registration first.
 - Tests: `tests/test_net_relay.cpp`, against an in-process fake relay that
   decodes HELLO by hand, plus one case against a real `collab_server` when
   `HE_TEST_RELAY=host:port` is set.
