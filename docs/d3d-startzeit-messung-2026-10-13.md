@@ -50,14 +50,16 @@ Renderer-Init 798 ms bzw. 212 ms, OnInit 106 ms bzw. 455 ms, erster Frame 1,45 s
 
 ## Messrezept für NN-WS03 (PowerShell, Release-Build dieses Zweigs)
 
+~~`HE_DUMP_RHI=D3D11` + `HE_EXIT_AFTER_FRAMES`~~ stürzt bei D3D ohne `HE_DUMP_PATH` in Frame 1 ab. Stattdessen
+`scripts/d3d-startup/measure.ps1` (wählt das Backend per Scratch-`config.json`, startet versteckt, druckt die
+`[startup]`-Zeilen und die FXC-Summe):
 ```
-$env:HE_DUMP_RHI = "D3D11"          # danach "D3D12"
-$env:HE_HIDDEN_WINDOW = "0"; $env:HE_EXIT_AFTER_FRAMES = "300"
-.\HorizonEditor.exe ; Select-String '\[startup\]' .\HorizonEngine.log
+.\scripts\d3d-startup\measure.ps1 -Exe C:\hwNN\deploy\Editor\HorizonEditor.exe -OutDir C:\hwNN\runs -Rhi 2 -Label d3d11_kalt -Cold
+.\scripts\d3d-startup\measure.ps1 ... -Rhi 3 -Label d3d12_warm            # 1 Vulkan, 2 D3D11, 3 D3D12
+.\scripts\d3d-startup\measure.ps1 ... -Rhi 2 -Label d3d11_proj -Project C:\hwNN\proj\X\X.heproj
 ```
-Je Backend Lauf 1 kalt (vorher `%LOCALAPPDATA%\D3DSCache` und den Shader-Cache des GPU-Herstellers leeren,
-z. B. `%LOCALAPPDATA%\NVIDIA\DXCache`) und Lauf 2 warm. Einmal mit dem echten Projekt des Menschen. FXC ist
-in beiden Läufen gleich teuer, nur `Create*Shader`/PSO profitieren vom Treiber-Cache.
+`-Cold` löscht den FXC-Bytecode-Cache (echter Roaming-Ordner) und die NVIDIA-DXCache-Datei dieser Exe.
+`%LOCALAPPDATA%\D3DSCache` gibt es auf NN-WS03 nicht.
 
 ## Messwerte (NN-WS03, RTX 4070, 13.10.2026, Schritt 4)
 
@@ -66,7 +68,7 @@ Release-Build dieses Zweigs (c309cdb8) in einem privaten Baum (`C:/hw196`, `-DDE
 **Das Rezept oben mit `HE_DUMP_RHI` stürzt ohne `HE_DUMP_PATH` bei D3D in Frame 1 ab** (Overlay nimmt das Backend
 aus der Config): Backend stattdessen per Config wählen, `{"RHI": 2}` = D3D11, `3` = D3D12, `1` = Vulkan.
 Lauf 1 war für diesen Exe-Pfad der erste überhaupt (Treiber-Cache kalt), Lauf 2 warm. Projekt = Kopie von
-HEProject des Menschen (45 Assets). Skript: `C:/hw196/measure.ps1` (nicht eingecheckt), Logs `C:/hw196/runs/`.
+HEProject des Menschen (45 Assets). Skript: `scripts/d3d-startup/measure.ps1`, Logs lagen in `C:/hw196/runs/`.
 
 | Lauf | Renderer-Init | davon FXC (Aufrufe) | OnInit | 1. Frame seit `Run` | langsamer Frame danach |
 |---|---|---|---|---|---|
@@ -146,6 +148,7 @@ ist nur der Editor.
 **Fallen:** `HE_DUMP_RHI` ohne `HE_DUMP_PATH` stürzt D3D ab (Backend per config.json). Der Cache liegt im echten
 Roaming-Ordner, ein Scratch-APPDATA isoliert ihn nicht (für „kalt“ das Verzeichnis löschen oder `HE_D3D_SHADER_CACHE_DIR`).
 Der Wolkenhimmel in D3D11-Captures hängt an der Zeit seit Start: Bilder mit unterschiedlicher Startdauer weichen im Himmel ab.
+Im echten Roaming-`d3dshadercache` des Menschen liegen ~44 Dateien aus diesem Zweig (gültig oder Miss, harmlos).
 **Nächste Schritte:**
 1. Optional: den Erststart senken (8-10 s, unverändert). Den Sky-PS (5 s) und die übrigen Compiles parallel per JobSystem
    übersetzen (FXC ist thread-safe; untere Grenze ≈ Sky allein ~5 s), oder den Sky asynchron bauen und die ersten Frames
