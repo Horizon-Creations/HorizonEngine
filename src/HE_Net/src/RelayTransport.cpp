@@ -340,6 +340,9 @@ void RelayTransport::serviceLink(Link& l) {
                     // forwards TcpTransport framing 1:1, so this is the frame
                     // the far end's send() produced.
                     m_events.push_back(NetEvent{ NetEventType::Data, l.outer, std::move(ev.data) });
+                } else if (l.stage == Stage::Subscribed) {
+                    // One broadcast payload, header already stripped by the relay.
+                    m_broadcasts.push_back(Broadcast{ l.forConn, std::move(ev.data) });
                 } else {
                     onControlFrame(l, ev.data);
                 }
@@ -381,7 +384,8 @@ void RelayTransport::onControlFrame(Link& l, const std::vector<std::uint8_t>& f)
                 m_lastError = std::string(statusName(code)) + (text.empty() ? "" : ": " + text);
                 HE_LOG_WARN(Net, "Relay refused the %s for session %s: %s",
                             l.role == Role::Listen ? "listener"
-                            : l.role == Role::Accept ? "accept" : "connect",
+                            : l.role == Role::Accept ? "accept"
+                            : l.role == Role::Subscribe ? "subscription" : "connect",
                             detail::logSessionId(m_sessionId).c_str(), m_lastError.c_str());
                 l.tcp->disconnect(l.inner);
                 onLinkClosed(l, "refused");
@@ -413,6 +417,12 @@ void RelayTransport::onControlFrame(Link& l, const std::vector<std::uint8_t>& f)
                             l.peer.c_str(), static_cast<unsigned long long>(l.outer));
                 for (auto& msg : l.held) l.tcp->send(l.inner, msg, SendMode::ReliableOrdered);
                 l.held.clear();
+                return;
+            }
+            if (sc == StatusCode::Subscribed && l.role == Role::Subscribe && l.stage == Stage::Hello) {
+                l.stage = Stage::Subscribed;
+                HE_LOG_INFO(Net, "Relay: subscribed to '%s' broadcasts (conn %llu)",
+                            l.peer.c_str(), static_cast<unsigned long long>(l.forConn));
                 return;
             }
             return protocolError("unexpected STATUS for this connection");
@@ -463,6 +473,31 @@ void RelayTransport::onLinkClosed(Link& l, const char* why) {
         return;
     }
 
+    if (l.role == Role::Subscribe) {
+        if (l.stage != Stage::Subscribed) {
+            // Refused or never reached: the pair is untouched, and the caller
+            // simply never sees subscribed() — it stays on per-pair delivery.
+            HE_LOG_WARN(Net, "Relay: subscription to '%s' not granted — %s (conn %llu)",
+                        l.peer.c_str(), why, static_cast<unsigned long long>(l.forConn));
+            return;
+        }
+        // Granted and now gone (relay dropped a stalled subscriber, or the
+        // host's listener went away). What it would have carried is lost, so
+        // the pair goes too: a session that silently misses broadcasts is
+        // worse than one that says it lost the connection.
+        Link* pair = findLink(l.forConn, Role::Connect);
+        m_lastError = std::string("the relay's broadcast stream ended (") + why + ")";
+        HE_LOG_WARN(Net, "Relay: broadcast stream from '%s' ended — %s; closing the link "
+                         "(conn %llu), broadcasts after this point would be missing",
+                    l.peer.c_str(), why, static_cast<unsigned long long>(l.forConn));
+        if (pair && !pair->dead) {
+            pair->tcp->disconnect(pair->inner);
+            pair->dead = true;
+            m_events.push_back(NetEvent{ NetEventType::Disconnected, pair->outer, {} });
+        }
+        return;
+    }
+
     if (l.role == Role::Connect) {
         // Before "paired" this is a failed connect, after it a dropped link;
         // either way the caller's one connection is gone.
@@ -470,6 +505,11 @@ void RelayTransport::onLinkClosed(Link& l, const char* why) {
         HE_LOG_INFO(Net, "Relay: link to '%s' closed — %s (conn %llu)", l.peer.c_str(), why,
                     static_cast<unsigned long long>(l.outer));
         m_events.push_back(NetEvent{ NetEventType::Disconnected, l.outer, {} });
+        // Its subscription ends with it (the relay ends it too).
+        if (Link* sub = findLink(l.outer, Role::Subscribe); sub && !sub->dead) {
+            sub->tcp->disconnect(sub->inner);
+            sub->dead = true;
+        }
         return;
     }
 
@@ -486,6 +526,61 @@ void RelayTransport::onLinkClosed(Link& l, const char* why) {
 void RelayTransport::scheduleListenerRetry(std::uint64_t now) {
     m_listenerRetryAtMs = now + m_listenerBackoffMs;
     m_listenerBackoffMs = std::min(m_listenerBackoffMs * 2, kMaxBackoffMs);
+}
+
+RelayTransport::Link* RelayTransport::findLink(ConnectionId conn, Role role) {
+    for (auto& l : m_links) {
+        if (l->role != role) continue;
+        if ((role == Role::Subscribe ? l->forConn : l->outer) == conn) return l.get();
+    }
+    return nullptr;
+}
+
+// ─── Broadcast ───────────────────────────────────────────────────────────────
+
+bool RelayTransport::sendBroadcast(const std::uint8_t* data, std::size_t len) {
+    if (!m_isHost || !m_listener || m_listener->dead || m_listener->stage != Stage::Listening)
+        return false;
+    std::vector<std::uint8_t> frame;
+    frame.reserve(kHeaderSize + len);
+    putHeader(frame, FrameType::Broadcast);
+    frame.insert(frame.end(), data, data + len);
+    m_listener->tcp->send(m_listener->inner, frame, SendMode::ReliableOrdered);
+    return true;
+}
+
+bool RelayTransport::subscribe(ConnectionId conn) {
+    Link* pair = findLink(conn, Role::Connect);
+    if (m_isHost || !pair || pair->dead || pair->stage != Stage::Paired) return false;
+    if (Link* sub = findLink(conn, Role::Subscribe); sub && !sub->dead) return false;
+    auto link = openLink(Role::Subscribe, pair->peer, {});
+    if (!link) {
+        HE_LOG_WARN(Net, "Relay: cannot open the subscription to '%s' (conn %llu) — staying "
+                         "on per-link delivery",
+                    pair->peer.c_str(), static_cast<unsigned long long>(conn));
+        return false;
+    }
+    link->forConn = conn;
+    HE_LOG_INFO(Net, "Relay: subscribing to '%s' broadcasts (conn %llu)", pair->peer.c_str(),
+                static_cast<unsigned long long>(conn));
+    m_links.push_back(std::move(link));
+    return true;
+}
+
+bool RelayTransport::subscribed(ConnectionId conn) const {
+    for (const auto& l : m_links) {
+        if (l->role == Role::Subscribe && l->forConn == conn && !l->dead)
+            return l->stage == Stage::Subscribed;
+    }
+    return false;
+}
+
+bool RelayTransport::pollBroadcast(ConnectionId& conn, std::vector<std::uint8_t>& out) {
+    if (m_broadcasts.empty()) return false;
+    conn = m_broadcasts.front().conn;
+    out  = std::move(m_broadcasts.front().data);
+    m_broadcasts.pop_front();
+    return true;
 }
 
 // ─── ITransport ──────────────────────────────────────────────────────────────
@@ -517,14 +612,24 @@ bool RelayTransport::poll(NetEvent& out) {
 
 void RelayTransport::disconnect(ConnectionId conn) {
     // Local close: no Disconnected event for the initiator (ITransport contract).
+    // The link's subscription, if any, goes with it.
+    if (Link* sub = findLink(conn, Role::Subscribe)) {
+        sub->tcp->disconnect(sub->inner);
+        sub->dead = true;
+    }
     for (auto it = m_links.begin(); it != m_links.end(); ++it) {
-        if ((*it)->outer != conn) continue;
+        if ((*it)->outer != conn || (*it)->role == Role::Subscribe) continue;
         HE_LOG_INFO(Net, "Relay: closing link to '%s' locally (conn %llu)",
                     (*it)->peer.c_str(), static_cast<unsigned long long>(conn));
         (*it)->tcp->disconnect((*it)->inner);
         m_links.erase(it);
-        return;
+        break;
     }
+    m_links.erase(std::remove_if(m_links.begin(), m_links.end(),
+                                 [](const std::unique_ptr<Link>& l) {
+                                     return l->dead && l->role == Role::Subscribe;
+                                 }),
+                  m_links.end());
 }
 
 std::size_t RelayTransport::connectionCount() const {

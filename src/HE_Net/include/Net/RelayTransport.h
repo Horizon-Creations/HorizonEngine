@@ -144,6 +144,28 @@ public:
     // the relay could not be reached. Empty while nothing has gone wrong.
     const std::string& lastError() const { return m_lastError; }
 
+    // ── Broadcast (protocol: BROADCAST on the listener, SUBSCRIBE per client) ──
+    // Raw relay primitives; RelayFanout (Net/RelayFanout.h) is what puts
+    // encrypted, ordered session traffic on them. The payloads here are opaque.
+
+    // Host: one BROADCAST frame on the listener connection; the relay copies
+    // it to every subscriber of this host. False (nothing sent) while the
+    // listener is not registered — whatever was meant for the subscribers is
+    // then lost, and the caller has to treat them as out of step.
+    bool sendBroadcast(const std::uint8_t* data, std::size_t len);
+
+    // Client: open the receive-only SUBSCRIBE connection for the paired link
+    // `conn`. False if `conn` is not a paired link or a subscription for it
+    // exists already. A refusal leaves the pair alone (subscribed() just never
+    // becomes true); a subscription that ENDS after it was granted closes the
+    // pair as well, with lastError() saying so — the broadcasts it would have
+    // carried are gone, and a session that goes on without them is out of step.
+    bool subscribe(ConnectionId conn);
+    // The relay has confirmed the subscription for `conn` (STATUS subscribed).
+    bool subscribed(ConnectionId conn) const;
+    // The next broadcast payload, and the pair link whose host sent it.
+    bool pollBroadcast(ConnectionId& conn, std::vector<std::uint8_t>& out);
+
     // ── Wire helpers (also used by tests) ────────────────────────────────────
     // A HELLO payload, without TcpTransport's length prefix.
     static std::vector<std::uint8_t> encodeHello(Role role, const std::string& session,
@@ -165,6 +187,7 @@ private:
         Waiting,      // client: relay accepted the CONNECT, host not yet
         Listening,    // host listener: registered
         Paired,       // raw bytes from here on
+        Subscribed,   // subscribe: broadcast payloads from here on
     };
 
     struct Link {
@@ -176,7 +199,13 @@ private:
         std::string  peer;                    // accept: the client id; connect: the host id
         std::string  token;                   // accept only; never logged
         std::vector<std::vector<std::uint8_t>> held;   // sends before "paired"
+        ConnectionId forConn = 0;             // subscribe: the paired link it belongs to
         bool         dead   = false;
+    };
+
+    struct Broadcast {
+        ConnectionId              conn = 0;
+        std::vector<std::uint8_t> data;
     };
 
     std::unique_ptr<Link> openLink(Role role, const std::string& peer,
@@ -185,6 +214,7 @@ private:
     void onControlFrame(Link& l, const std::vector<std::uint8_t>& frame);
     void onLinkClosed(Link& l, const char* why);
     void scheduleListenerRetry(std::uint64_t nowMs);
+    Link* findLink(ConnectionId outer, Role role);
 
     RelayAddress m_relay;
     std::string  m_sessionId;
@@ -202,6 +232,7 @@ private:
     std::vector<std::unique_ptr<Link>> m_links;
     ConnectionId                       m_nextId = 1;
     std::deque<NetEvent>               m_events;
+    std::deque<Broadcast>              m_broadcasts;
 };
 
 } // namespace HE::Net

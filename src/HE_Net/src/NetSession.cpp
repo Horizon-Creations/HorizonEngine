@@ -7,7 +7,7 @@
 namespace HE::Net {
 
 NetSession::NetSession(ITransport* transport, NetRole role)
-    : m_transport(transport), m_role(role) {}
+    : m_transport(transport), m_fansOut(transport && transport->fansOut()), m_role(role) {}
 
 void NetSession::on(MessageId id, MessageHandler handler) {
     m_handlers[id] = std::move(handler);
@@ -36,6 +36,7 @@ void NetSession::send(ConnectionId conn, MessageId id, const BitWriter& payload,
 }
 
 void NetSession::broadcast(MessageId id, const BitWriter& payload, SendMode mode) {
+    if (m_fansOut) return fanOut(m_connections, id, payload, mode);
     // Snapshot the peer list: a handler could mutate it, and send() must not be
     // iterating a container that shifts underneath it.
     const std::vector<ConnectionId> peers = m_connections;
@@ -44,6 +45,45 @@ void NetSession::broadcast(MessageId id, const BitWriter& payload, SendMode mode
     for (const ConnectionId conn : peers) {
         send(conn, id, payload, mode);
     }
+}
+
+void NetSession::broadcastExcept(ConnectionId except, MessageId id, const BitWriter& payload,
+                                 SendMode mode) {
+    if (m_fansOut) {
+        std::vector<ConnectionId> to;
+        to.reserve(m_connections.size());
+        for (const ConnectionId c : m_connections)
+            if (c != except) to.push_back(c);
+        return fanOut(to, id, payload, mode);
+    }
+    // The loop the callers wrote by hand before this existed, unchanged.
+    for (const ConnectionId other : m_connections) {
+        if (other != except) send(other, id, payload, mode);
+    }
+}
+
+void NetSession::sendTo(const std::vector<ConnectionId>& to, MessageId id,
+                        const BitWriter& payload, SendMode mode) {
+    if (m_fansOut) return fanOut(to, id, payload, mode);
+    for (const ConnectionId conn : to) send(conn, id, payload, mode);
+}
+
+std::vector<std::uint8_t> NetSession::frame(MessageId id, const BitWriter& payload) const {
+    // The same bytes send() puts on the wire.
+    BitWriter framed;
+    framed.writeUInt16(id);
+    const std::vector<std::uint8_t> pd = payload.data();
+    if (!pd.empty()) framed.writeBytes(pd.data(), pd.size());
+    return framed.data();
+}
+
+void NetSession::fanOut(const std::vector<ConnectionId>& to, MessageId id,
+                        const BitWriter& payload, SendMode mode) {
+    if (!m_transport || to.empty()) return;
+    const std::vector<std::uint8_t> bytes = frame(id, payload);
+    HE_LOG_TRACE(Net, "msg %u fanned out to %zu peer(s) (%s)", static_cast<unsigned>(id),
+                 to.size(), detail::logBytes(bytes.size()).c_str());
+    m_transport->sendToMany(to.data(), to.size(), bytes.data(), bytes.size(), mode);
 }
 
 void NetSession::disconnect(ConnectionId conn) {

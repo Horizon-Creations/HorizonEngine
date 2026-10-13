@@ -13,6 +13,7 @@ add_library(HorizonNet SHARED
 	src/Socket.cpp
 	src/LoopbackTransport.cpp
 	src/TcpTransport.cpp
+	src/RelayFanout.cpp
 	src/RelayTransport.cpp
 	src/UdpTransport.cpp
 	src/LossyTransport.cpp

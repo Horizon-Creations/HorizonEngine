@@ -11,8 +11,13 @@
 #include <Net/SecureTransport.h>
 #include <Net/TcpTransport.h>
 
+#include <Net/RelayFanout.h>
+
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
+#include <initializer_list>
 #include <iterator>
 #include <map>
 #include <string>
@@ -41,15 +46,58 @@ struct FakeRelay {
         std::string session, self, target, token;
         ConnectionId partner = 0;
         bool        paired   = false;
+        bool        helloDone = false;
     };
 
     std::unique_ptr<TcpTransport>  t = TcpTransport::listenLoopback(0);
     std::map<ConnectionId, Conn>   conns;
     std::map<std::string, ConnectionId> listeners;   // session + "/" + peer
     std::map<std::string, std::pair<ConnectionId, std::string>> waiting;   // session/client → conn, token
+    std::map<std::string, std::vector<ConnectionId>> subscribers;          // session/host → subscribe conns
     int  hellos  = 0;
     int  forwarded = 0;
+    int  broadcastFrames = 0;      // BROADCAST frames read from listeners
+    int  broadcastCopies = 0;      // payloads written to subscribers
     bool withholdAccept = false;   // INCOMING never sent: the host "does not answer"
+    // Hold one stream to force an order between the two: the relay does not
+    // order a client's pair against its broadcast stream, and neither does this.
+    bool holdToClients  = false;   // pair bytes host → client
+    bool holdBroadcasts = false;
+    bool refuseSubscribe = false;  // every SUBSCRIBE refused: clients stay per pair
+    std::vector<std::uint8_t> lastBroadcast;   // what the relay got to see
+    std::vector<std::pair<ConnectionId, std::vector<std::uint8_t>>> heldPair, heldBroadcast;
+
+    void release() {
+        for (auto& [c, d] : heldPair)
+            if (conns.count(c)) t->send(c, d, SendMode::ReliableOrdered);
+        for (auto& [c, d] : heldBroadcast)
+            if (conns.count(c)) t->send(c, d, SendMode::ReliableOrdered);
+        heldPair.clear();
+        heldBroadcast.clear();
+    }
+
+    // The relay ends every subscription (as for a stalled subscriber).
+    void dropSubscribers() {
+        t->update();
+        for (auto& [key, subs] : subscribers)
+            for (ConnectionId s : subs) { t->disconnect(s); conns.erase(s); }
+        subscribers.clear();
+    }
+
+    void broadcast(ConnectionId listener, const std::vector<std::uint8_t>& f) {
+        REQUIRE(f.size() >= 6);
+        REQUIRE(std::string(f.begin(), f.begin() + 4) == "HERL");
+        REQUIRE(f[5] == 5);
+        ++broadcastFrames;
+        const Conn& l = conns[listener];
+        const std::vector<std::uint8_t> payload(f.begin() + 6, f.end());
+        lastBroadcast = payload;
+        for (ConnectionId s : subscribers[l.session + "/" + l.self]) {
+            ++broadcastCopies;
+            if (holdBroadcasts) heldBroadcast.emplace_back(s, payload);
+            else                t->send(s, payload, SendMode::ReliableOrdered);
+        }
+    }
 
     RelayAddress address() const { return RelayAddress{ "127.0.0.1", t->boundPort() }; }
 
@@ -71,10 +119,15 @@ struct FakeRelay {
             if (ev.type == NetEventType::Disconnected) { closed(ev.conn); continue; }
             Conn& c = conns[ev.conn];
             if (c.paired) {
-                t->send(c.partner, ev.data, SendMode::ReliableOrdered);
+                if (holdToClients && conns[c.partner].role == 2)
+                    heldPair.emplace_back(c.partner, ev.data);
+                else
+                    t->send(c.partner, ev.data, SendMode::ReliableOrdered);
                 ++forwarded;
                 continue;
             }
+            if (c.helloDone && c.role == 1) { broadcast(ev.conn, ev.data); continue; }
+            if (c.helloDone) continue;   // a subscriber has nothing to say
             hello(ev.conn, ev.data);
         }
     }
@@ -86,6 +139,8 @@ struct FakeRelay {
         conns.erase(it);
         for (auto l = listeners.begin(); l != listeners.end();)
             l = (l->second == id) ? listeners.erase(l) : std::next(l);
+        for (auto& [key, subs] : subscribers)
+            subs.erase(std::remove(subs.begin(), subs.end(), id), subs.end());
         if (partner != 0 && conns.count(partner)) {
             t->update();
             t->disconnect(partner);   // FIN travels through
@@ -113,6 +168,7 @@ struct FakeRelay {
         pos = 7;
         str8(c.session); str8(c.self); str8(c.target); str8(c.token);
         CHECK(pos == f.size());
+        c.helloDone = true;
 
         const std::string key = c.session + "/" + c.self;
         switch (c.role) {
@@ -149,6 +205,21 @@ struct FakeRelay {
                 conns[client].partner = id;
                 status(id, RelayTransport::StatusCode::Paired);
                 status(client, RelayTransport::StatusCode::Paired);
+                break;
+            }
+            case 4: { // subscribe: only while `self` is paired with `target`
+                bool pairedWithHost = false;
+                for (const auto& [cid, o] : conns)
+                    if (cid != id && o.role == 2 && o.paired && o.session == c.session &&
+                        o.self == c.self && o.target == c.target)
+                        pairedWithHost = true;
+                if (!pairedWithHost || refuseSubscribe) {
+                    refuse(id, RelayTransport::StatusCode::NotExpected, "not paired with " + c.target);
+                    return;
+                }
+                CHECK(c.token.empty());
+                subscribers[c.session + "/" + c.target].push_back(id);
+                status(id, RelayTransport::StatusCode::Subscribed);
                 break;
             }
             default:
@@ -824,4 +895,359 @@ TEST_CASE("Relay: against a real collab_server (HE_TEST_RELAY=host:port)")
         client.leave();
         host.leave();
     }
+}
+
+// ─── Broadcast through the relay (step 4) ────────────────────────────────────
+// The host hands a message for many clients to the relay once. RelayFanout
+// carries the group key over each pair, and on the client merges the pair and
+// the broadcast stream back into the order the host sent in.
+
+namespace {
+constexpr MessageId kFanMsg  = kFirstUserMessage + 42;
+constexpr MessageId kFanName = kFirstUserMessage + 43;
+
+BitWriter text(const std::string& s) {
+    BitWriter w;
+    w.writeString(s);
+    return w;
+}
+
+struct FanEnd {
+    RelayTransport*                     relay = nullptr;
+    std::unique_ptr<RelayFanout>        t;
+    std::unique_ptr<NetSession>         s;
+    std::vector<std::string>            got;
+    std::map<std::string, ConnectionId> names;   // host: who is which connection
+};
+
+std::unique_ptr<FanEnd> fanEnd(std::unique_ptr<RelayTransport> r, NetRole role,
+                               const std::string& secret) {
+    REQUIRE(r);
+    auto e   = std::make_unique<FanEnd>();
+    e->relay = r.get();
+    auto sec = SecureTransport::wrap(std::move(r), SecureTransport::Config{ secret, role, true });
+    REQUIRE(sec);
+    RelayFanout::Config cfg;
+    cfg.role = role;
+    e->t = RelayFanout::wrap(std::move(sec), e->relay, cfg);
+    REQUIRE(e->t);
+    e->s = std::make_unique<NetSession>(e->t.get(), role);
+    FanEnd* raw = e.get();
+    e->s->on(kFanMsg, [raw](ConnectionId, BitReader& r2) {
+        std::string v;
+        r2.readString(v);
+        raw->got.push_back(v);
+    });
+    e->s->on(kFanName, [raw](ConnectionId c, BitReader& r2) {
+        std::string v;
+        r2.readString(v);
+        raw->names[v] = c;
+    });
+    return e;
+}
+
+template <typename Fn>
+bool pumpFan(FakeRelay* relay, const std::vector<FanEnd*>& ends, Fn done,
+             std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        if (relay) relay->pump();
+        for (FanEnd* e : ends) {
+            e->t->update();
+            e->s->pump();
+        }
+        if (done()) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+// A host and `n` clients in `session`, every client on the relay (unless the
+// relay refuses subscriptions) and introduced to the host by name c0, c1, ….
+struct FanSession {
+    std::string                          secret = SecureTransport::generateJoinSecret();
+    std::unique_ptr<FanEnd>              host;
+    std::vector<std::unique_ptr<FanEnd>> clients;
+    std::vector<FanEnd*>                 all;
+
+    FanSession(FakeRelay* relay, const RelayAddress& addr, const std::string& session,
+               int n, bool expectOnRelay = true) {
+        host = fanEnd(RelayTransport::host(addr, session), NetRole::Host, secret);
+        all.push_back(host.get());
+        if (relay) {
+            REQUIRE(pumpFan(relay, all, [&] { return host->relay->listening(); }));
+        } else {
+            pumpFan(nullptr, all, [] { return false; }, std::chrono::milliseconds(300));
+        }
+        for (int i = 0; i < n; ++i) {
+            clients.push_back(fanEnd(RelayTransport::connect(addr, session), NetRole::Client, secret));
+            all.push_back(clients.back().get());
+        }
+        REQUIRE(pumpFan(relay, all, [&] {
+            for (auto& c : clients) if (c->s->connections().empty()) return false;
+            return true;
+        }));
+        for (int i = 0; i < n; ++i)
+            clients[static_cast<std::size_t>(i)]->s->broadcast(kFanName, text("c" + std::to_string(i)));
+        REQUIRE(pumpFan(relay, all, [&] {
+            if (host->names.size() != static_cast<std::size_t>(n)) return false;
+            return !expectOnRelay || host->t->relayedPeers() == static_cast<std::size_t>(n);
+        }));
+    }
+    ConnectionId conn(int i) const { return host->names.at("c" + std::to_string(i)); }
+};
+
+std::vector<std::string> seq(std::initializer_list<const char*> l) {
+    return std::vector<std::string>(l.begin(), l.end());
+}
+
+} // namespace
+
+TEST_CASE("Relay fan-out: one frame to the relay reaches every client, in order, encrypted")
+{
+    FakeRelay relay;
+    FanSession fs(&relay, relay.address(), "fanOne", 3);
+    for (auto& c : fs.clients) CHECK(c->t->onRelay());
+
+    const auto before       = fs.host->t->stats();
+    const int  framesBefore = relay.broadcastFrames;
+    for (int i = 0; i < 5; ++i) fs.host->s->broadcast(kFanMsg, text("tick " + std::to_string(i)));
+    REQUIRE(pumpFan(&relay, fs.all, [&] {
+        for (auto& c : fs.clients) if (c->got.size() < 5) return false;
+        return true;
+    }));
+    for (auto& c : fs.clients)
+        CHECK(c->got == seq({ "tick 0", "tick 1", "tick 2", "tick 3", "tick 4" }));
+    // Once per message for the host, three times per message for the relay.
+    CHECK(fs.host->t->stats().relayFrames - before.relayFrames == 5);
+    CHECK(fs.host->t->stats().pairCopies == before.pairCopies);
+    CHECK(relay.broadcastFrames - framesBefore == 5);
+    // The relay never sees the plaintext.
+    const std::string seen(relay.lastBroadcast.begin(), relay.lastBroadcast.end());
+    CHECK(seen.find("tick") == std::string::npos);
+}
+
+TEST_CASE("Relay fan-out: a broadcast never overtakes an earlier message, nor the other way round")
+{
+    FakeRelay relay;
+    FanSession fs(&relay, relay.address(), "fanOrder", 1);
+    FanEnd& client = *fs.clients[0];
+    const ConnectionId conn = fs.conn(0);
+
+    // Unicast first, broadcast second — and the pair is the slow stream.
+    relay.holdToClients = true;
+    fs.host->s->send(conn, kFanMsg, text("unicast A"));
+    fs.host->s->broadcast(kFanMsg, text("broadcast B"));
+    pumpFan(&relay, fs.all, [] { return false; }, std::chrono::milliseconds(300));
+    CHECK(relay.heldPair.size() == 1);
+    CHECK(client.got.empty());   // B is there, and waits for A
+    relay.holdToClients = false;
+    relay.release();
+    REQUIRE(pumpFan(&relay, fs.all, [&] { return client.got.size() == 2; }));
+    CHECK(client.got == seq({ "unicast A", "broadcast B" }));
+
+    // Broadcast first, unicast second — and the broadcast is the slow stream.
+    relay.holdBroadcasts = true;
+    fs.host->s->broadcast(kFanMsg, text("broadcast C"));
+    fs.host->s->send(conn, kFanMsg, text("unicast D"));
+    pumpFan(&relay, fs.all, [] { return false; }, std::chrono::milliseconds(300));
+    CHECK(relay.heldBroadcast.size() == 1);
+    CHECK(client.got.size() == 2);   // D is there, and waits for C
+    relay.holdBroadcasts = false;
+    relay.release();
+    REQUIRE(pumpFan(&relay, fs.all, [&] { return client.got.size() == 4; }));
+    CHECK(client.got == seq({ "unicast A", "broadcast B", "broadcast C", "unicast D" }));
+}
+
+TEST_CASE("Relay fan-out: everyone but the sender, with a client that is not on the relay")
+{
+    FakeRelay relay;
+    FanSession fs(&relay, relay.address(), "fanExcept", 2);
+    // A third client whose subscription the relay refuses: it stays per pair.
+    relay.refuseSubscribe = true;
+    fs.clients.push_back(fanEnd(RelayTransport::connect(relay.address(), "fanExcept"),
+                                NetRole::Client, fs.secret));
+    FanEnd& c2 = *fs.clients.back();
+    fs.all.push_back(&c2);
+    REQUIRE(pumpFan(&relay, fs.all, [&] { return !c2.s->connections().empty(); }));
+    c2.s->broadcast(kFanName, text("c2"));
+    REQUIRE(pumpFan(&relay, fs.all, [&] { return fs.host->names.size() == 3; }));
+    pumpFan(&relay, fs.all, [] { return false; }, std::chrono::milliseconds(200));
+    CHECK_FALSE(c2.t->onRelay());
+    CHECK(fs.host->t->relayedPeers() == 2);
+
+    FanEnd& c0 = *fs.clients[0];
+    FanEnd& c1 = *fs.clients[1];
+    const auto before = fs.host->t->stats();
+    fs.host->s->broadcastExcept(fs.conn(0), kFanMsg, text("not for c0"));
+    fs.host->s->send(fs.conn(0), kFanMsg, text("for c0"));
+    fs.host->s->broadcastExcept(fs.host->names.at("c2"), kFanMsg, text("not for c2"));
+    fs.host->s->send(fs.host->names.at("c2"), kFanMsg, text("for c2"));
+    fs.host->s->sendTo({ fs.conn(1) }, kFanMsg, text("only c1"));
+    REQUIRE(pumpFan(&relay, fs.all, [&] {
+        return c0.got.size() == 2 && c1.got.size() == 3 && c2.got.size() == 2;
+    }));
+    pumpFan(&relay, fs.all, [] { return false; }, std::chrono::milliseconds(100));
+    CHECK(c0.got == seq({ "for c0", "not for c2" }));
+    CHECK(c1.got == seq({ "not for c0", "not for c2", "only c1" }));
+    CHECK(c2.got == seq({ "not for c0", "for c2" }));
+
+    const auto after = fs.host->t->stats();
+    CHECK(after.relayFrames - before.relayFrames == 3);   // c0 and c1 always learn the index
+    CHECK(after.pairCopies - before.pairCopies == 1);     // "not for c0" to c2
+    CHECK(after.pairSkips - before.pairSkips == 2);       // "not for c2", "only c1" — c2's turn passed
+}
+
+TEST_CASE("Relay fan-out: a client joining mid-stream gets each broadcast exactly once across the switch")
+{
+    FakeRelay relay;
+    const std::string secret = SecureTransport::generateJoinSecret();
+    auto host = fanEnd(RelayTransport::host(relay.address(), "fanJoin"), NetRole::Host, secret);
+    // A message the host sends the moment it knows the client, before any broadcast.
+    host->s->onConnect([&](ConnectionId c) { host->s->send(c, kFanMsg, text("welcome")); });
+    REQUIRE(pumpFan(&relay, { host.get() }, [&] { return host->relay->listening(); }));
+
+    auto client = fanEnd(RelayTransport::connect(relay.address(), "fanJoin"), NetRole::Client, secret);
+    std::vector<FanEnd*> all{ host.get(), client.get() };
+    // The host broadcasts once per pump, all the way through the client's
+    // join, KEY, subscription and switch to the relay.
+    int n = 0;
+    int afterSwitch = 0;
+    REQUIRE(pumpFan(&relay, all, [&] {
+        if (!host->s->connections().empty()) host->s->broadcast(kFanMsg, text(std::to_string(n++)));
+        if (host->t->relayedPeers() == 1) ++afterSwitch;
+        return afterSwitch >= 30;
+    }));
+    REQUIRE(pumpFan(&relay, all, [&] { return client->got.size() >= static_cast<std::size_t>(n) + 1; }));
+    pumpFan(&relay, all, [] { return false; }, std::chrono::milliseconds(100));
+
+    REQUIRE(client->got.size() == static_cast<std::size_t>(n) + 1);
+    CHECK(client->got[0] == "welcome");
+    for (int i = 0; i < n; ++i) CHECK(client->got[static_cast<std::size_t>(i) + 1] == std::to_string(i));
+    CHECK(host->t->stats().pairCopies > 0);    // before the switch
+    CHECK(host->t->stats().relayFrames > 0);   // after it
+    CHECK(client->t->onRelay());
+}
+
+TEST_CASE("Relay fan-out: a broadcast stream that ends takes the link down, with a reason")
+{
+    FakeRelay relay;
+    FanSession fs(&relay, relay.address(), "fanLoss", 1);
+    FanEnd& client = *fs.clients[0];
+    relay.dropSubscribers();
+    REQUIRE(pumpFan(&relay, fs.all, [&] {
+        return client.s->connections().empty() && fs.host->s->connections().empty();
+    }));
+    CHECK(client.relay->lastError().find("broadcast stream ended") != std::string::npos);
+}
+
+TEST_CASE("Relay fan-out: a host whose relay listener is gone drops the clients that relied on it")
+{
+    FakeRelay relay;
+    FanSession fs(&relay, relay.address(), "fanNoListener", 1);
+    const std::string key = "fanNoListener/host";
+    const ConnectionId l = relay.listeners.at(key);
+    relay.t->disconnect(l);
+    relay.conns.erase(l);
+    relay.listeners.erase(key);
+    REQUIRE(pumpFan(&relay, fs.all, [&] { return !fs.host->relay->listening(); }));
+
+    fs.host->s->broadcast(kFanMsg, text("into the void"));
+    CHECK(fs.host->t->lastError().find("could not be handed to the relay") != std::string::npos);
+    fs.host->s->pump();
+    CHECK(fs.host->s->connections().empty());
+}
+
+TEST_CASE("Relay fan-out: without it, NetSession sends per peer exactly as before")
+{
+    struct Recorder final : ITransport {
+        std::vector<std::pair<ConnectionId, std::vector<std::uint8_t>>> sent;
+        std::vector<std::vector<ConnectionId>> many;
+        std::deque<NetEvent> ev;
+        bool fans = false;
+        void update() override {}
+        void send(ConnectionId c, const std::uint8_t* d, std::size_t n, SendMode) override {
+            sent.emplace_back(c, std::vector<std::uint8_t>(d, d + n));
+        }
+        bool poll(NetEvent& out) override {
+            if (ev.empty()) return false;
+            out = ev.front();
+            ev.pop_front();
+            return true;
+        }
+        void disconnect(ConnectionId) override {}
+        std::size_t connectionCount() const override { return 3; }
+        bool fansOut() const override { return fans; }
+        void sendToMany(const ConnectionId* to, std::size_t count, const std::uint8_t* d,
+                        std::size_t n, SendMode) override {
+            many.emplace_back(to, to + count);
+            sent.emplace_back(0, std::vector<std::uint8_t>(d, d + n));
+        }
+    };
+    auto connect3 = [](Recorder& r) {
+        for (ConnectionId c : { 1u, 2u, 3u }) r.ev.push_back(NetEvent{ NetEventType::Connected, c, {} });
+    };
+
+    Recorder p2p;
+    connect3(p2p);
+    NetSession s(&p2p, NetRole::Host);
+    s.pump();
+    s.send(1, kFanMsg, text("x"));
+    const std::vector<std::uint8_t> one = p2p.sent.at(0).second;
+    p2p.sent.clear();
+    s.broadcast(kFanMsg, text("x"));
+    s.broadcastExcept(2, kFanMsg, text("x"));
+    s.sendTo({ 3, 1 }, kFanMsg, text("x"));
+    const std::vector<ConnectionId> order{ 1, 2, 3, 1, 3, 3, 1 };
+    REQUIRE(p2p.sent.size() == order.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        CHECK(p2p.sent[i].first == order[i]);
+        CHECK(p2p.sent[i].second == one);   // the same bytes a single send() writes
+    }
+    CHECK(p2p.many.empty());
+
+    Recorder fan;
+    fan.fans = true;
+    connect3(fan);
+    NetSession f(&fan, NetRole::Host);
+    f.pump();
+    f.broadcast(kFanMsg, text("x"));
+    f.broadcastExcept(2, kFanMsg, text("x"));
+    f.sendTo({ 3 }, kFanMsg, text("x"));
+    REQUIRE(fan.many.size() == 3);
+    CHECK(fan.many[0] == std::vector<ConnectionId>{ 1, 2, 3 });
+    CHECK(fan.many[1] == std::vector<ConnectionId>{ 1, 3 });
+    CHECK(fan.many[2] == std::vector<ConnectionId>{ 3 });
+    for (auto& [c, bytes] : fan.sent) CHECK(bytes == one);
+}
+
+TEST_CASE("Relay fan-out: against a real collab_server (HE_TEST_RELAY=host:port)")
+{
+    const char* env = std::getenv("HE_TEST_RELAY");
+    if (!env || !*env) {
+        MESSAGE("HE_TEST_RELAY not set — skipped (start collab_server and point it there)");
+        return;
+    }
+    RelayAddress addr;
+    REQUIRE(parseRelayAddress(env, addr));
+    const std::string session = "he-fan-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count() % 1000000007);
+    FanSession fs(nullptr, addr, session, 2);
+    FanEnd& c0 = *fs.clients[0];
+    FanEnd& c1 = *fs.clients[1];
+    const auto before = fs.host->t->stats();
+    fs.host->s->send(fs.conn(0), kFanMsg, text("first, per pair"));
+    for (int i = 0; i < 20; ++i) fs.host->s->broadcast(kFanMsg, text(std::to_string(i)));
+    fs.host->s->broadcastExcept(fs.conn(1), kFanMsg, text("not for c1"));
+    fs.host->s->send(fs.conn(1), kFanMsg, text("last, per pair"));
+    REQUIRE(pumpFan(nullptr, fs.all, [&] { return c0.got.size() == 22 && c1.got.size() == 21; }));
+    CHECK(c0.got.front() == "first, per pair");
+    CHECK(c0.got.back() == "not for c1");
+    CHECK(c1.got.back() == "last, per pair");
+    for (int i = 0; i < 20; ++i) {
+        CHECK(c0.got[static_cast<std::size_t>(i) + 1] == std::to_string(i));
+        CHECK(c1.got[static_cast<std::size_t>(i)] == std::to_string(i));
+    }
+    CHECK(fs.host->t->stats().relayFrames - before.relayFrames == 21);
+    CHECK(fs.host->t->stats().pairCopies == before.pairCopies);
 }
