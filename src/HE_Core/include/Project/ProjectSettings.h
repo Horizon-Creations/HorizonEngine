@@ -360,6 +360,15 @@ struct HE_API ProjectMultiplayerSettings
     // switch that does nothing, so the page says so on the row.
     bool discoverDirectory = true;
     bool portMapping       = true;
+    // A relay server, "host:port" (port optional, default 7777), or empty for
+    // the direct path. With an address, Play as Host / net.host register the
+    // session there and joiners connect to it, so every socket is OUTGOING and
+    // nobody needs a port forward. The session on the relay is derived from
+    // the join code, so a joiner needs nothing but the code; address and port
+    // of the Join dialog are then ignored. Over the relay the session runs on
+    // TCP, so unreliable sends arrive reliably (and later under loss).
+    // HE_NET_RELAY overrides it. docs/relay-server-protocol.md.
+    std::string relayAddress;
 
     // Remote calls a client may make per second before the host counts the
     // excess as an observation (§7.6), measured over a two-second window.

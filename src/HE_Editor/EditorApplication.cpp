@@ -1296,6 +1296,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabLanDiscovery           = globalstate.getCustomConfigBool("CollabLanDiscovery", m_editorConfig.CollabLanDiscovery);
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
+	m_editorConfig.CollabRelayAddress           = globalstate.getCustomConfigString("CollabRelayAddress", m_editorConfig.CollabRelayAddress);
 	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
@@ -4477,6 +4478,8 @@ void EditorApplication::OnRender(float dt)
 		// what keeps the peers from ending up under two different rules.
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
+		// Read when a session starts, so pushing it mid-session moves nothing.
+		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
 		m_collab.update(nowMs);
 
 		// ── The MCP bridge ────────────────────────────────────────────────
@@ -13057,6 +13060,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
+	globalstate.setCustomConfigEntry("CollabRelayAddress",         m_editorConfig.CollabRelayAddress);
 	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
 	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);

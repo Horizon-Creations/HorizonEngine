@@ -19,6 +19,7 @@
 #include <SourceControl/GitHubTokenStore.h>  // kHost: which remote the sign-in covers
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
+#include <Net/RelayTransport.h>          // Collaboration > Relay Server: the field's parse check
 #include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
 #include <Types/Enums.h>
@@ -614,6 +615,29 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "lower, the refusal travels back and you are told whose limit stopped "
 		     "it — otherwise the obvious response, saving again, would produce the "
 		     "same silence.");
+	});
+
+	row("collabrelay", "Collaboration", [&]{
+		Row::inputText("Relay Server (host:port)##collabrelay", &cfg.CollabRelayAddress);
+		// Said right under the field, while it is being typed: a malformed
+		// address is otherwise only discovered when hosting refuses to start.
+		if (!cfg.CollabRelayAddress.empty())
+		{
+			HE::Net::RelayAddress parsed;
+			std::string why;
+			if (!HE::Net::parseRelayAddress(cfg.CollabRelayAddress, parsed, &why))
+				ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Not usable: %s", why.c_str());
+		}
+		hint("Leave empty to connect directly, peer to peer — the default, and "
+		     "exactly how sessions worked before. With a relay server set, this "
+		     "editor never connects to another one directly and never opens a "
+		     "port: hosting registers the session on the relay, and guests join "
+		     "it there by session ID and join code. That is what to use when the "
+		     "host cannot forward a port. Everybody in a session has to use the "
+		     "same relay. The relay only passes bytes along; the session stays "
+		     "encrypted end to end with the join code. Port 7777 if none is "
+		     "given; IPv6 addresses go in brackets, [2001:db8::1]:7777. Takes "
+		     "effect for the next session you host or join.");
 	});
 
 	// ── Remote Control (the MCP bridge) ──────────────────────────────────────
@@ -2287,6 +2311,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			// the session config carries as its own default (Config::maxAssetBytes,
 			// which is the asset ceiling now — the join snapshot keeps its own).
 			cfg.CollabMaxAssetMB  = 64;
+			// Peer-to-peer. A session already running stays on the relay it
+			// started with; the setting is read at the next host or join.
+			cfg.CollabRelayAddress.clear();
 			// Remote control goes back OFF, unconditionally and whatever it is
 			// doing right now. Every other setting here resets to "what a fresh
 			// editor does"; for this one that default is also the security model's

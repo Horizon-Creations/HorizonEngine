@@ -64,6 +64,14 @@ struct EditorConfig
 	// only thing bounding what one peer can make another allocate.
 	int CollabMaxAssetMB = 64;
 
+	// A relay server for collaboration sessions, "host:port" (port optional,
+	// default 7777). Empty — the default — means peer-to-peer, exactly as it
+	// was before the relay existed. With an address, hosting and joining make
+	// only OUTGOING connections to that server, which pairs host and guests by
+	// session id and forwards their (still end-to-end encrypted) bytes. For
+	// when the host cannot open a port. docs/relay-server-protocol.md.
+	std::string CollabRelayAddress;
+
 	// The MCP bridge: let an external client (a Claude instance, through the
 	// stdio shim) drive this editor — read what is open, and from a later step
 	// on place and move objects in the scene.

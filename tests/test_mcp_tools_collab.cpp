@@ -6,6 +6,7 @@
 #include <HorizonScene/HorizonWorld.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <thread>
 
@@ -175,9 +176,75 @@ TEST_CASE("collab tools: refusals a client can act on")
 	                                   { "joinCode", "x" } }).errorCode == "invalid_payload");
 	CHECK(s.call("collab_join", json{ { "host", "127.0.0.1" }, { "port", 5 } })
 	          .errorCode == "invalid_payload");
+	CHECK(s.call("collab_join", json{ { "sessionId", "abc" }, { "host", "127.0.0.1" },
+	                                   { "port", 5 }, { "joinCode", "x" } })
+	          .errorCode == "invalid_payload");
+	CHECK(s.call("collab_join", json{ { "sessionId", "abc" } }).errorCode == "invalid_payload");
 	// Nothing ran, so nothing is left behind.
 	CHECK(s.collab.status() == CollabController::Status::Idle);
 
 	// Leaving without a session is a no-op, not a failure.
 	CHECK_FALSE(s.call("collab_leave").isError);
+}
+
+// With a relay set, a join by address is refused (the address does not say
+// which session), so the tools need the panel's other path: the session id.
+TEST_CASE("collab tools: with a relay set, collab_join goes by session id")
+{
+	Side s(true);
+	// Nothing listens there: the relay is dialled, not trusted to exist.
+	s.collab.setRelayAddress("127.0.0.1:1");
+
+	const ToolResult byAddress = s.call("collab_join", json{
+		{ "host", "127.0.0.1" }, { "port", 5 }, { "joinCode", "x" } });
+	REQUIRE(byAddress.isError);
+	CHECK(byAddress.errorCode == "join_failed");
+	CHECK(byAddress.errorMessage.find("session ID") != std::string::npos);
+
+	const ToolResult byId = s.call("collab_join", json{
+		{ "sessionId", "some-session" }, { "joinCode", "x" } });
+	// Either refused at once (connect to a closed port) or a link that fails
+	// in the next updates — never a direct connection, never silence.
+	if (!byId.isError)
+	{
+		Side other(true);
+		pumpUntil(s, other, [&] { return s.collab.status() == CollabController::Status::Failed; });
+	}
+	CHECK(s.collab.status() == CollabController::Status::Failed);
+	s.collab.leave();
+}
+
+// The real thing: host and join THROUGH the tools via a running collab_server.
+TEST_CASE("collab tools: host and join by session id through a real relay (HE_TEST_RELAY)")
+{
+	const char* env = std::getenv("HE_TEST_RELAY");
+	if (!env || !*env) {
+		MESSAGE("HE_TEST_RELAY not set — skipped (start collab_server and point it there)");
+		return;
+	}
+	Side host(true);
+	Side guest(true);
+	host.collab.setRelayAddress(env);
+	guest.collab.setRelayAddress(env);
+
+	const ToolResult h = host.call("collab_host", json{ { "name", "Host A" } });
+	REQUIRE_FALSE(h.isError);
+	const std::string sid  = h.content["sessionId"].get<std::string>();
+	const std::string code = h.content["joinCode"].get<std::string>();
+	CHECK_FALSE(sid.empty());
+	REQUIRE(pumpUntil(host, guest, [&] {
+		return host.collab.directoryStatus().find("Hosting through the relay") != std::string::npos;
+	}));
+
+	const ToolResult j = guest.call("collab_join", json{
+		{ "sessionId", sid }, { "joinCode", code }, { "name", "Guest B" } });
+	REQUIRE_FALSE(j.isError);
+	REQUIRE(pumpUntil(host, guest, [&] {
+		return guest.collab.status() == CollabController::Status::Joined &&
+		       host.collab.participants().size() == 2;
+	}));
+	CHECK(rosterHas(guest.call("collab_status").content, "Host A"));
+	CHECK(rosterHas(host.call("collab_status").content, "Guest B"));
+	guest.call("collab_leave");
+	host.call("collab_leave");
 }

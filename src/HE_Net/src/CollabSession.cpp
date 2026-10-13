@@ -569,9 +569,7 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     announce.writeString(name);
     writeAvatar(announce, joiner.avatar);
     writeColor(announce, joiner.color);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgParticipantJoined, announce);
-    }
+    m_net->broadcastExcept(conn, kMsgParticipantJoined, announce);
 
     HE_LOG_INFO(Net, "Collab: \"%s\" joined as participant %u (%zu in session)",
                 name.c_str(), static_cast<unsigned>(id), m_participants.size());
@@ -639,9 +637,7 @@ void CollabSession::retireParticipant(ParticipantId id, ConnectionId conn,
 
     BitWriter w;
     w.writeUInt32(id);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != except) m_net->send(other, kMsgParticipantLeft, w);
-    }
+    m_net->broadcastExcept(except, kMsgParticipantLeft, w);
 }
 
 // ─── Moderation ──────────────────────────────────────────────────────────────
@@ -1171,9 +1167,7 @@ void CollabSession::handlePresenceUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(id);
     writePresenceBody(w, state);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgPresenceRelay, w, SendMode::Unreliable);
-    }
+    m_net->broadcastExcept(conn, kMsgPresenceRelay, w, SendMode::Unreliable);
 }
 
 void CollabSession::handlePresenceRelay(BitReader& r) {
@@ -1253,9 +1247,7 @@ void CollabSession::handleComponentsUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(sender);
     writeComponentBody(w, u.netId, u.blob);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgComponentsRelay, w);
-    }
+    m_net->broadcastExcept(conn, kMsgComponentsRelay, w);
 }
 
 void CollabSession::handleComponentsRelay(BitReader& r) {
@@ -1377,9 +1369,7 @@ void CollabSession::handleDocDeltasUpdate(ConnectionId conn, BitReader& r) {
     // here, not an author, and renumbering would make every peer's ordering
     // depend on which of them the host told first.
     writeDocDeltaBody(w, subject, path, batch, revision);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgDocDeltasRelay, w);
-    }
+    m_net->broadcastExcept(conn, kMsgDocDeltasRelay, w);
 }
 
 void CollabSession::handleDocDeltasRelay(BitReader& r) {
@@ -1530,9 +1520,7 @@ void CollabSession::handleStructuralUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(sender);
     writeStructuralBody(w, c);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgStructuralRelay, w);
-    }
+    m_net->broadcastExcept(conn, kMsgStructuralRelay, w);
 }
 
 void CollabSession::handleStructuralRelay(BitReader& r) {
@@ -1922,8 +1910,7 @@ void CollabSession::broadcastAssetOpApply(AssetOp op, const std::string& path,
     w.writeString(path);
     w.writeString(newPath);
     w.writeByte(folder ? 1 : 0);
-    for (const ConnectionId c : m_net->connections())
-        m_net->send(c, kMsgAssetOpApply, w);
+    m_net->broadcast(kMsgAssetOpApply, w);
     // The host applies through the same callback as everyone else, so there is
     // one code path for "this happened" rather than two that must agree.
     if (m_onOpApply) m_onOpApply(by, op, path, newPath, folder);
@@ -2327,9 +2314,7 @@ void CollabSession::handleTransformUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(sender);
     writeTransformBody(w, d);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgTransformRelay, w, SendMode::Unreliable);
-    }
+    m_net->broadcastExcept(conn, kMsgTransformRelay, w, SendMode::Unreliable);
 }
 
 void CollabSession::handleTransformRelay(BitReader& r) {

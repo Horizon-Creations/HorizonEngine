@@ -768,6 +768,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 		ImGui::Spacing();
 		ImGui::TextDisabled("Or join by ID:");
+		// With a relay set this is the only way in (a join by address is refused),
+		// so it says where the join goes.
+		if (const std::string relay = HE::Net::effectiveRelayAddress(collab->relayAddress());
+		    !relay.empty())
+			ImGui::TextDisabled("Through the relay server %s (Preferences > Collaboration).",
+			                    relay.c_str());
 		ImGui::InputText("Session ID", s_joinSessionId, sizeof(s_joinSessionId));
 		EditorWidgets::helpForLabel("Session ID");
 		ImGui::InputText("Join code",  s_joinCode,      sizeof(s_joinCode));
@@ -817,11 +823,20 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// listener and looks just as much like the answer. They are different
 		// sockets on different protocols, and confusing them sends you looking
 		// for a bug in the wrong place.
-		ImGui::Text("Listening on %s:%u",
-		            collab->localAddress().empty() ? "this machine"
-		                                           : collab->localAddress().c_str(),
-		            unsigned(collab->port()));
-		if (ImGui::IsItemHovered())
+		if (collab->viaRelay())
+		{
+			// No port here: guests reach the session through the relay by its id.
+			ImGui::Text("Hosting through the relay server %s",
+			            HE::Net::effectiveRelayAddress(collab->relayAddress()).c_str());
+		}
+		else
+		{
+			ImGui::Text("Listening on %s:%u",
+			            collab->localAddress().empty() ? "this machine"
+			                                           : collab->localAddress().c_str(),
+			            unsigned(collab->port()));
+		}
+		if (!collab->viaRelay() && ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip(
 				"This is the session itself (TCP), and the port guests connect to.\n"
@@ -885,8 +900,14 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// Two different machines' addresses, so they are labelled as such. Showing
 		// the directory-observed address as "local" implied this machine sits on
 		// the internet, when on any NAT it is the router that does.
-		ImGui::TextDisabled("This machine: %s:%u", collab->localAddress().c_str(),
-		                    static_cast<unsigned>(collab->port()));
+		// Through a relay this machine has no port anybody dials; what guests
+		// need is the session ID and the code above, and the relay to be the same.
+		if (collab->viaRelay())
+			ImGui::TextDisabled("Through the relay server: %s",
+			                    HE::Net::effectiveRelayAddress(collab->relayAddress()).c_str());
+		else
+			ImGui::TextDisabled("This machine: %s:%u", collab->localAddress().c_str(),
+			                    static_cast<unsigned>(collab->port()));
 		if (!collab->publicAddress().empty())
 		{
 			// Whose address this is cannot be told from its family. "IPv6, so it

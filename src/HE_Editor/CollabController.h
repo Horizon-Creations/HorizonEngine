@@ -19,6 +19,8 @@
 #include <Net/CollabSession.h>
 #include <Net/LanBeacon.h>
 #include <Net/PortMapper.h>
+#include <Net/RelayFanout.h>
+#include <Net/RelayTransport.h>
 #include <Types/Enums.h>   // HE::AssetType — the .hasset header's real type
 
 #include <cstdint>
@@ -200,6 +202,24 @@ public:
 	static constexpr int kMaxAssetMB = 512;
 	void setMaxAssetMB(int mb);
 	int  maxAssetMB() const { return m_maxAssetMB; }
+
+	// ── Relay server (topic 193) ─────────────────────────────────────────────
+	// "host:port" of a relay (docs/relay-server-protocol.md), or empty for the
+	// direct peer-to-peer path, which is then exactly what it always was.
+	// Pushed down by the editor every frame like the two above; HE_NET_RELAY
+	// overrides it (see HE::Net::effectiveRelayAddress). Read when a session
+	// starts, not mid-session: a running session stays on the path it began on.
+	//
+	// With a relay, every connection is OUTGOING to it: the host registers the
+	// session id there instead of opening a port (no port forward, no directory
+	// entry, no LAN beacon — none of those would lead anyone to us), and a
+	// guest joins by session id + join code. A join by address is refused
+	// while a relay is set, because connecting to that address directly is
+	// exactly what the setting says not to do.
+	void setRelayAddress(const std::string& address) { m_relayAddress = address; }
+	const std::string& relayAddress() const { return m_relayAddress; }
+	// True while the running session goes through a relay.
+	bool viaRelay() const { return m_viaRelay; }
 
 	// The one answer to "does an asset of this kind travel". Everything that
 	// used to ask isSyncableAssetType asks this instead: the static predicate is
@@ -1131,6 +1151,16 @@ private:
 	void pumpDirectory(std::uint64_t nowMs);
 	bool beginLink(const std::string& host, std::uint16_t port,
 	               const std::string& joinCode, const std::string& displayName);
+	// The relay in force for a session about to start. True with `relay` empty
+	// when none is set (peer-to-peer), true with it filled when one is; false,
+	// with m_error and Status::Failed, when one is set but cannot be parsed —
+	// refusing beats silently connecting directly after all.
+	bool relayForNewSession(HE::Net::RelayAddress& relay, bool& use);
+	// Per frame while a relay link exists: the host's status line follows the
+	// relay listener, and a guest's join fails at once with the relay's reason
+	// instead of waiting out the connect deadline. False when it tore the
+	// session down.
+	bool updateRelayStatus();
 
 	class SceneStateProvider;
 
@@ -1173,6 +1203,9 @@ private:
 
 	std::unique_ptr<SceneStateProvider>        m_provider;
 	std::unique_ptr<HE::Net::SecureTransport>  m_secure;   // owns the TcpTransport
+	// Through a relay only: over m_secure, hands messages for every peer to the
+	// relay once. NetSession runs on it when it exists, on m_secure otherwise.
+	std::unique_ptr<HE::Net::RelayFanout>      m_fanout;
 	std::unique_ptr<HE::Net::NetSession>       m_net;
 	std::unique_ptr<HE::Net::CollabSession>    m_collab;
 
@@ -1252,6 +1285,13 @@ private:
 	// above this IS read again mid-session — setMaxAssetMB pushes it straight
 	// into the live session, because it binds nothing but this machine.
 	int           m_maxAssetMB = 64;
+	// The relay setting as the editor last pushed it, and whether the current
+	// session took that path (decided once, at startHosting / join).
+	std::string   m_relayAddress;
+	bool          m_viaRelay = false;
+	// The relay link inside m_secure, non-owning, for its listening() and its
+	// refusal reasons. nullptr whenever m_viaRelay is false.
+	HE::Net::RelayTransport* m_relayLink = nullptr;
 	// A host turned us away because we had not agreed. Held until the panel has
 	// asked the user, because it is a question and not a failure.
 	bool          m_largeAssetsPrompt = false;
@@ -1262,6 +1302,7 @@ private:
 	struct LastJoin {
 		std::string   host;
 		std::uint16_t port = 0;
+		std::string   sessionId;   // what a relay join dials instead of host:port
 		std::string   joinCode;
 		std::string   displayName;
 		bool          valid = false;

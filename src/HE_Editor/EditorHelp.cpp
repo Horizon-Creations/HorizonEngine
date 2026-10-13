@@ -3742,6 +3742,11 @@ namespace
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
 	  "", "collaboration#bigassets" },
+	{ "Preferences/Collaboration/Relay Server (host:port)", "",
+	  "Empty: connect directly, peer to peer. With an address, hosting and joining "
+	  "only make outgoing connections to that relay server, and guests join by "
+	  "session ID and join code. Everyone in a session needs the same relay.",
+	  "", "collaboration" },
 	{ "Preferences/Viewport/Camera Speed", "",
 	  "How fast the editor's fly camera moves, in units per second. The viewport "
 	  "toolbar's speed field is the same value.",
@@ -4386,6 +4391,17 @@ namespace
 	  "local network can reach a host that sits behind a router.\n\n"
 	  "STORED BUT NOT YET READ: same later step as the directory above. A host "
 	  "on the internet needs the forwarding set up by hand for now.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Relay server (host:port)", "Relay server (host:port)",
+	  "A relay server that every connection of a game session goes through, "
+	  "for when the host cannot open a port. Empty is the default: the host "
+	  "opens a UDP port and players connect to it directly.\n\n"
+	  "With an address, nobody opens a port: the host registers the session on "
+	  "the relay and players connect out to it, finding the session by the join "
+	  "code alone; the address and port of the Join dialog are not used. The "
+	  "session then runs over TCP, so it arrives a little later under packet "
+	  "loss than direct UDP. Everyone needs the same relay, which only passes "
+	  "encrypted bytes along. Port 7777 if none is given.",
 	  "", "collaboration#gameplay" },
 	{ "Multiplayer/Max remote calls per second", "Max remote calls per second",
 	  "What one client may ask the host to run per second before the excess "
