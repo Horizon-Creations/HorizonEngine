@@ -47,7 +47,10 @@ nicht 0 px, sondern das Rauschen B gegen B2.
 | D3D12, F | – | 0,38 / 0,34 | – | 59,8 | 0 |
 
 Die Abweichung von D liegt auf jedem Backend im Rauschen. Die Negativkontrolle A ist auf demselben Weg
-weit davon entfernt, die Messung sieht den Fehler also. In den Spiel-Logs stehen nur Frame-Hitch-, Tick-Budget- und
+weit davon entfernt, die Messung sieht den Fehler also. Im Bild liegen vor allem Gras und Erde. Dass auch die übrigen
+Layer (Fels, Schnee) stimmen, zeigt das Manifest: `srcHash`/`inHash` von 0x40F/0x410/0x411 sind in D und B
+identisch, alle Slices der drei Arrays also bytegleich mit der Referenz. Das Vulkan-Spiel lief mit
+Validierungsschicht (`validation layer ENABLED` im Log), ohne `[ERROR]`. In den Spiel-Logs stehen nur Frame-Hitch-, Tick-Budget- und
 PlayerController-Warnungen, und die gleich auch in A und B. Bilder: `C:\hw189\shots\g3{A,B,B2,D,F}_{d3d11,d3d12,vk}`.
 
 ## Handoff
