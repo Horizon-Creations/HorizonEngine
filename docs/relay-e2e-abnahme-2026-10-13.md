@@ -217,10 +217,10 @@ Joins 0.2–1.0 s, broadcast and unicast syncs 0.0–0.2 s over the internet.
    relay code paths are only covered by CI (in-process FakeRelay, no real
    relay, because CollabSession is a private repo and the public HE CI cannot
    check it out without a token).
-3. **Game sessions** (`NetGameSession`) through the relay are covered by the
+2. **Game sessions** (`NetGameSession`) through the relay are covered by the
    real-relay test case (host + join with only the join code), not by
    separate game processes.
-4. Guest editors whose world the session replaced do not end on SIGTERM
+3. Guest editors whose world the session replaced do not end on SIGTERM
    (unsaved changes) and get killed after 10 s; their block-buffered logs are
    cut off. The script therefore takes the guest-side witnesses from the
    relay log, not from the guests' logs.
