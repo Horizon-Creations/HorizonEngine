@@ -1,5 +1,7 @@
 #include "TaskBoardPanel.h"
 #include "TaskBoard.h"               // the data and its file
+#include "TaskBoardTeam.h"           // assignees and notices, with a team server
+#include "NotificationStore.h"       // the steady clock the team bridge is pumped with
 #include "EditorApplication.h"       // AppContext, ProjectManager
 #include "EditorAssetTypeCache.h"    // which icon an asset chip gets
 #include "AssetThumbnailCache.h"     // ...and the rendered preview that beats it
@@ -76,6 +78,16 @@ namespace
 	Store       s_store;
 	std::string s_author;
 
+	// The team bridge (setTeam), and whether s_author is the member name it
+	// set — taken back when the link signs out, so edits are not recorded
+	// under a team name the editor is no longer signed in as.
+	HE::TaskBoardTeam* s_team = nullptr;
+	bool               s_teamAuthor = false;
+	// The From the Team list: notices that arrived after this were not looked at.
+	std::uint64_t      s_teamSeenMs = 0;
+	std::function<std::uint64_t()> s_teamClock;   // empty: NotificationStore::nowMs
+	std::uint64_t teamNow() { return s_teamClock ? s_teamClock() : HE::Ed::NotificationStore::nowMs(); }
+
 	Jump        s_jump;
 
 	// The details' subject and the board's view.
@@ -102,6 +114,7 @@ namespace
 	// What the last frame drew (cardRect / chipRect / lastDrawStats).
 	std::unordered_map<HE::UUID, Rect>              s_cardRects;
 	std::unordered_map<HE::UUID, std::vector<Rect>> s_chipRects;
+	std::unordered_map<int, std::vector<Rect>>      s_teamRects;   // by TeamItem
 	DrawStats                                       s_stats;
 
 	// When the orphan marks were last refreshed (refreshOrphans below).
@@ -166,6 +179,7 @@ namespace
 		s_posted.clear();
 		s_cardRects.clear();
 		s_chipRects.clear();
+		s_teamRects.clear();
 		s_stats = DrawStats{};
 		s_orphansNext = {};
 		s_orphansGen = ~0u;
@@ -202,10 +216,26 @@ TaskBoard* board(AppContext& ctx)
 	return &s_store.board;
 }
 
+namespace
+{
+	// After a saved edit: the team hears about the updates it added. Only a
+	// SAVED edit — one the file does not have yet would be announced before
+	// anybody could pull it.
+	void tellTeam(const TaskBoard& before, const TaskBoard& after)
+	{
+		if (!s_team || !s_team->connected()) return;
+		s_team->afterEdit(before, after, fs::path(s_store.root).filename().string(), teamNow());
+	}
+}
+
 bool edit(AppContext& ctx, const std::function<bool(TaskBoard&)>& fn)
 {
 	TaskBoard* b = board(ctx);
 	if (!b || !fn) return false;
+	// The board as it was, for tellTeam — copied only while there is a team.
+	const bool tell = s_team && s_team->connected();
+	TaskBoard before;
+	if (tell) before = *b;
 	if (!fn(*b)) return false;   // nothing changed (no such task, a duplicate link)
 	if (s_store.unreadable)
 	{
@@ -215,14 +245,27 @@ bool edit(AppContext& ctx, const std::function<bool(TaskBoard&)>& fn)
 		return false;
 	}
 	std::string err;
-	if (HE::saveTaskBoard(s_store.root, *b, &err)) { stampDisk(s_store); s_store.unsaved = false; s_store.error.clear(); return true; }
+	if (HE::saveTaskBoard(s_store.root, *b, &err))
+	{
+		stampDisk(s_store); s_store.unsaved = false; s_store.error.clear();
+		if (tell) tellTeam(before, *b);
+		return true;
+	}
 
 	// Refused. If the file changed under the board, take what arrived and put
 	// the edit on top of it — once.
 	if (diskChanged(s_store) && loadFromDisk(s_store))
 	{
+		// What arrived is not ours to announce: compare against it, not the
+		// board from before the pull.
+		if (tell) before = s_store.board;
 		fn(s_store.board);
-		if (HE::saveTaskBoard(s_store.root, s_store.board, &err)) { stampDisk(s_store); return true; }
+		if (HE::saveTaskBoard(s_store.root, s_store.board, &err))
+		{
+			stampDisk(s_store);
+			if (tell) tellTeam(before, s_store.board);
+			return true;
+		}
 	}
 	s_store.unsaved = true;
 	s_store.error = "The task board could not be saved: " + err;
@@ -231,7 +274,22 @@ bool edit(AppContext& ctx, const std::function<bool(TaskBoard&)>& fn)
 
 const std::string& lastError() { return s_store.error; }
 
-void setAuthor(std::string name) { s_author = std::move(name); }
+void setAuthor(std::string name) { s_author = std::move(name); s_teamAuthor = false; }
+
+void               setTeam(HE::TaskBoardTeam* team) { s_team = team; }
+HE::TaskBoardTeam* team() { return s_team; }
+
+void pumpTeam()
+{
+	const std::string me = s_team ? s_team->self() : std::string{};
+	if (s_team) s_team->update(teamNow());
+	// Edits are recorded under the member name while signed in — and the
+	// footer's "mine" counts by the same name.
+	if (!me.empty()) { s_author = me; s_teamAuthor = true; }
+	else if (s_teamAuthor) { s_author.clear(); s_teamAuthor = false; }
+}
+
+void setTeamClock(std::function<std::uint64_t()> now) { s_teamClock = std::move(now); }
 
 std::string author()
 {
@@ -264,12 +322,24 @@ bool chipRect(const HE::UUID& task, int link, Rect& out)
 	return true;
 }
 
+bool teamRect(TeamItem item, int index, Rect& out)
+{
+	const auto it = s_teamRects.find((int)item);
+	if (it == s_teamRects.end() || index < 0 || index >= (int)it->second.size()) return false;
+	out = it->second[(size_t)index];
+	return true;
+}
+
 DrawStats lastDrawStats() { return s_stats; }
 
 void reset()
 {
 	s_store = Store{};
 	s_author.clear();
+	s_team = nullptr;
+	s_teamAuthor = false;
+	s_teamSeenMs = 0;
+	s_teamClock = {};
 	s_filter.clear();
 	s_view = View::List;
 	forgetPanelState();
@@ -313,11 +383,13 @@ void DrawTaskBoardWindow(AppContext& ctx, bool& open)
 {
 	// Every control here is looked up as "Task Board/<its label>".
 	HE::Ed::Help::Scope helpScope("Task Board");
+	pumpTeam();   // notices arrive while the window is closed, too
 	resolvePendingSelect(ctx);
 	if (!open) return;
 
 	s_cardRects.clear();
 	s_chipRects.clear();
+	s_teamRects.clear();
 	s_stats = DrawStats{};
 
 	ImGui::SetNextWindowSize(ImVec2(520.0f, 600.0f), ImGuiCond_FirstUseEver);
@@ -375,6 +447,13 @@ namespace
 		for (const TaskLink& l : t.links) if (has(l.label)) return true;
 		for (const std::string& a : t.assignees) if (has(a)) return true;
 		return false;
+	}
+
+	// The item just submitted, for teamRect().
+	void noteTeamRect(TeamItem item)
+	{
+		const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+		s_teamRects[(int)item].push_back(Rect{ a.x, a.y, z.x, z.y });
 	}
 
 	int columnOf(const Task& t)
@@ -887,6 +966,61 @@ namespace
 		ImGui::TextDisabled("%d open  ·  %d in progress  ·  %d blocked  ·  %d done",
 		                    count[0], count[1], count[2], count[3]);
 
+		// ── From the Team: what the others did to tasks that concern you ──
+		// Only once something has come in; the bell has the same lines, this
+		// list is the one that takes you to the task.
+		if (s_team && !s_team->recent().empty())
+		{
+			int fresh = 0;
+			for (const auto& r : s_team->recent()) fresh += r.atMs > s_teamSeenMs;
+			const bool openList = EditorWidgets::smallButton("From the Team");
+			noteTeamRect(TeamItem::FromTeam);
+			// Under the button, not at the mouse, where it would cover it.
+			const ImVec2 listAt(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 2.0f);
+			if (openList)
+			{
+				ImGui::OpenPopup("##fromTeam");
+				s_teamSeenMs = s_team->recent().front().atMs;
+			}
+			ImGui::SameLine();
+			if (fresh > 0) ImGui::TextColored(HE::Ed::Theme::AccentBright, "%d new", fresh);
+			else           ImGui::TextDisabled("%d", (int)s_team->recent().size());
+			ImGui::SetNextWindowPos(listAt, ImGuiCond_Appearing);
+			if (ImGui::BeginPopup("##fromTeam"))
+			{
+				int row = 0;
+				for (const auto& r : s_team->recent())
+				{
+					const bool here = b.find(r.notice.task) != nullptr;
+					ImGui::PushID(row++);
+					const bool clicked = ImGui::Selectable(r.text.c_str(), false, here ? 0 : ImGuiSelectableFlags_Disabled);
+					noteTeamRect(TeamItem::FromTeamRow);
+					if (clicked && here) s_selected = r.notice.task;
+					ImGui::PopID();
+					if (!r.notice.text.empty())
+					{
+						ImGui::Indent();
+						ImGui::TextDisabled("%s", r.notice.text.c_str());
+						ImGui::Unindent();
+					}
+					// A task created on another machine is on this board after the
+					// next pull; until then there is nothing to open. One from
+					// another of the team's projects is on that project's board.
+					if (!here)
+					{
+						const std::string project = fs::path(s_store.root).filename().string();
+						ImGui::Indent();
+						if (!r.notice.project.empty() && r.notice.project != project)
+							ImGui::TextDisabled("In project %s.", r.notice.project.c_str());
+						else
+							ImGui::TextDisabled("Not on this board yet: pull to see it.");
+						ImGui::Unindent();
+					}
+				}
+				ImGui::EndPopup();
+			}
+		}
+
 		if (!s_store.error.empty())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.55f, 0.40f, 1.0f));
@@ -1004,6 +1138,45 @@ namespace
 		int prio = t.priority == TaskPriority::Other ? 1 : (int)t.priority;
 		if (EditorWidgets::Row::combo("Priority", &prio, kPriorityLabels, 4))
 			post([id, prio](TaskBoard& bb) { return bb.setPriority(id, (TaskPriority)prio, HE::taskNowMs()); });
+
+		// ── Assigned To: only with a team to assign to ──
+		// Without a team server there is nobody to pick from, and a name typed
+		// by hand would reach nobody: the field is not drawn at all.
+		if (s_team && s_team->connected())
+		{
+			ImGui::TextUnformatted("Assigned To");
+			const bool labelHelp = EditorWidgets::helpForLabel("Assigned To");
+			std::string preview;
+			for (std::size_t k = 0; k < t.assignees.size(); ++k) preview += (k ? ", " : "") + t.assignees[k];
+			if (preview.empty()) preview = "Nobody";
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			const bool listOpen = ImGui::BeginCombo("##assignedTo", preview.c_str());
+			noteTeamRect(TeamItem::AssignedTo);
+			if (listOpen)
+			{
+				for (const HE::TaskTeamMember& m : s_team->members())
+				{
+					const bool on = std::any_of(t.assignees.begin(), t.assignees.end(),
+					                            [&](const std::string& a) { return HE::sameTaskMember(a, m.name); });
+					const std::string label = m.name + (m.online ? "" : "  (offline)") + "##member";
+					ImGui::PushID(m.name.c_str());
+					// Stays open: assigning two people is two ticks, not two trips.
+					const bool picked = ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_DontClosePopups);
+					noteTeamRect(TeamItem::Assignee);
+					if (picked)
+					{
+						std::vector<std::string> next;
+						for (const std::string& a : t.assignees)
+							if (!HE::sameTaskMember(a, m.name)) next.push_back(a);
+						if (!on) next.push_back(m.name);
+						post([id, next](TaskBoard& bb) { return bb.assign(id, next, author(), HE::taskNowMs()); });
+					}
+					ImGui::PopID();
+				}
+				ImGui::EndCombo();
+			}
+			if (!labelHelp) EditorWidgets::helpForLabel("Assigned To");
+		}
 
 		EditorWidgets::Row::inputTextMultiline("Description", &s_desc, ImGui::GetTextLineHeight() * 3.5f);
 		if (ImGui::IsItemDeactivatedAfterEdit() && s_desc != t.description)
@@ -1154,7 +1327,7 @@ namespace
 }
 
 #else
-void DrawTaskBoardWindow(AppContext&, bool&) {}
+void DrawTaskBoardWindow(AppContext&, bool&) { pumpTeam(); }
 #endif
 
 } // namespace TaskBoardPanel

@@ -4,6 +4,9 @@
 
 #include "TaskBoardPanel.h"
 #include "TaskBoard.h"
+#include "TaskBoardTeam.h"
+#include "FakeTaskTeam.h"
+#include "NotificationStore.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorCommands.h"      // uuidOf
 #include "EditorSelection.h"
@@ -676,4 +679,112 @@ TEST_CASE("task board ui: a pull under the open board is read, and an edit lands
 	he_ui::Image img;
 	for (int i = 0; i < 2; ++i) frame(ctx, false, i == 1 ? &img : nullptr);
 	shotTo(img, "taskboard_conflict");
+}
+
+TEST_CASE("task board ui: Assigned To only with a signed-in team; a pick assigns on disk and reaches the assignee")
+{
+	Harness harness;
+	Project proj("he_taskboard_ui_team");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	g_open = true;
+
+	// Two editors of one team: Anna's is this panel, Bob's only its bridge.
+	he_test::FakeTaskTeam server;
+	for (const char* m : { "Anna", "Bob" }) server.addMember(m);
+	auto& annaLink = server.editor("Anna");
+	auto& bobLink  = server.editor("Bob");
+	HE::TaskBoardTeam annaTeam, bobTeam;
+	annaTeam.setLink(&annaLink);
+	bobTeam.setLink(&bobLink);
+	HE::Ed::NotificationStore bobBell;
+	bobTeam.setNotifications(&bobBell);
+	// One clock for every pump: the panel's and the server's.
+	TaskBoardPanel::setTeamClock([&] { return server.nowMs; });
+
+	HE::UUID id;
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](HE::TaskBoard& b) {
+		id = b.add("Retexture the crates", TaskBoardPanel::author(), HE::taskNowMs())->id;
+		return true;
+	}));
+	TaskBoardPanel::selectTask(id);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	auto frames = [&](int n, he_ui::Image* shot = nullptr) {
+		for (int i = 0; i < n; ++i) frame(ctx, false, i == n - 1 ? shot : nullptr);
+	};
+
+	// No team server: no field, and the board is the local one it always was.
+	TaskBoardPanel::Rect r;
+	he_ui::Image local;
+	frames(3, &local);
+	CHECK_FALSE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::AssignedTo, 0, r));
+	CHECK_FALSE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::FromTeam, 0, r));
+	CHECK(TaskBoardPanel::author() == "Tester");
+
+	// A team whose link is signed out: still none.
+	annaLink.signedIn = false;
+	TaskBoardPanel::setTeam(&annaTeam);
+	frames(3);
+	CHECK_FALSE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::AssignedTo, 0, r));
+	CHECK(TaskBoardPanel::author() == "Tester");
+
+	// Signed in: the field is there, and edits are made as the member.
+	annaLink.signedIn = true;
+	he_ui::Image team;
+	frames(3, &team);
+	REQUIRE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::AssignedTo, 0, r));
+	CHECK(TaskBoardPanel::author() == "Anna");
+	shotTo(team, "taskboard_team_assigned_to");
+	// The field is new ink in the details, against the local frame.
+	CHECK(diffIn(local, team, int(r.x0), int(r.y0), int(r.x1), int(r.y1)) > 200);
+
+	// Open the list and tick Bob (the roster's second).
+	clickAt(ctx, centre(r));
+	TaskBoardPanel::Rect bobRow;
+	REQUIRE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::Assignee, 1, bobRow));
+	he_ui::Image list;
+	frames(1, &list);
+	shotTo(list, "taskboard_team_assignee_list");
+	clickAt(ctx, centre(bobRow));
+	{
+		HE::TaskBoard disk;
+		REQUIRE(HE::loadTaskBoard(proj.root(), disk).ok);
+		REQUIRE(disk.find(id) != nullptr);
+		CHECK(disk.find(id)->assignees == std::vector<std::string>{ "Bob" });
+		CHECK(disk.find(id)->assignedBy == "Anna");
+		REQUIRE_FALSE(disk.find(id)->updates.empty());
+		CHECK(disk.find(id)->updates.back().author == "Anna");
+	}
+	CHECK(annaTeam.pending() == 1);
+	// Click away: the list closes.
+	clickAt(ctx, ImVec2(float(W) - 2.0f, float(H) - 2.0f));
+
+	// It settles, the panel's own pump sends it, the server carries it.
+	server.pump(HE::TaskBoardTeam::kAssignSettleMs, { &bobTeam });
+	frames(1);
+	CHECK(annaLink.sent.size() == 1);
+	server.pump(server.latencyMs, { &bobTeam });
+	REQUIRE(bobBell.snapshot().size() == 1);
+	CHECK(bobBell.snapshot()[0].text == "Anna assigned you “Retexture the crates”");
+
+	// Bob's side of the panel: From the Team appears, and its row opens the task.
+	TaskBoardPanel::setTeam(&bobTeam);
+	TaskBoardPanel::selectTask(HE::UUID{});
+	frames(3);
+	CHECK(TaskBoardPanel::author() == "Bob");
+	REQUIRE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::FromTeam, 0, r));
+	clickAt(ctx, centre(r));
+	TaskBoardPanel::Rect row;
+	REQUIRE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::FromTeamRow, 0, row));
+	he_ui::Image fromTeam;
+	frames(1, &fromTeam);
+	shotTo(fromTeam, "taskboard_team_from_the_team");
+	clickAt(ctx, centre(row));
+	CHECK(TaskBoardPanel::selectedTask() == id);
+
+	// Signing out takes the member name back off the edits.
+	bobLink.signedIn = false;
+	frames(2);
+	CHECK(TaskBoardPanel::author() != "Bob");
+	CHECK_FALSE(TaskBoardPanel::teamRect(TaskBoardPanel::TeamItem::AssignedTo, 0, r));
 }

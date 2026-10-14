@@ -2656,6 +2656,20 @@ namespace
 	  "The details: what is wrong, what done looks like, where to start. "
 	  "Saved when you leave the field.",
 	  "", "" },
+	// Only while signed in to a team server (Preferences ▸ Team).
+	{ "Task Board/Assigned To", "",
+	  "Who on your team does this task. Tick members in the list, one or "
+	  "several; untick to take it from them. Whoever it concerns hears about "
+	  "it: the people it is given to or taken from, whoever created it and "
+	  "whoever wrote in its history. Someone who is not online hears it when "
+	  "they sign in. Without a team server the field is not shown.",
+	  "", "" },
+	{ "Task Board/From the Team", "From the Team",
+	  "What your teammates did to tasks that concern you: assigned you one, "
+	  "changed a status, wrote a comment. The same lines are in the bell. "
+	  "Click one to open the task — a task created on another machine shows "
+	  "up here after your next pull.",
+	  "", "" },
 	{ "Task Board/Link Selection", "Link Selection",
 	  "Links the entities selected in the scene to this task. Dragging an "
 	  "entity from the World Outliner onto the task does the same. A link "

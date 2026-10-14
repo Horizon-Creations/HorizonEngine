@@ -1,11 +1,12 @@
 #pragma once
 #include <Types/UUID.h>
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
 struct AppContext;
-namespace HE { class TaskBoard; }
+namespace HE { class TaskBoard; class TaskBoardTeam; }
 
 // ── Task Board (Window ▸ Task Board) ──────────────────────────────────────────
 // The project's to-do list (TaskBoard.h) as a panel: the tasks grouped by
@@ -59,6 +60,23 @@ namespace TaskBoardPanel
 	void setAuthor(std::string name);
 	std::string author();
 
+	// ── Team (TaskBoardTeam.h) ────────────────────────────────────────────────
+	// The bridge to the team server, or null (the default): the board is local.
+	// Not owned. While its link is signed in, the window pumps it every frame
+	// (also while closed), records edits under the member name, posts every
+	// saved edit's new updates to the team, and offers the Assigned To field
+	// and the From the Team list; while it is not, none of that is drawn.
+	void               setTeam(HE::TaskBoardTeam* team);
+	HE::TaskBoardTeam* team();
+	// One frame of the team: send and receive (TaskBoardTeam::update), and keep
+	// author() on the member name while signed in. DrawTaskBoardWindow calls it
+	// first thing; a test without ImGui calls it itself.
+	void pumpTeam();
+	// The steady milliseconds the bridge is pumped and told about edits with.
+	// Empty (the default): NotificationStore::nowMs(). A test passes the one
+	// fake clock all its pumps share.
+	void setTeamClock(std::function<std::uint64_t()> now);
+
 	// What a chip click asked EditorUI to do. One-shot: takeJump() returns it
 	// once and clears it.
 	struct Jump
@@ -80,8 +98,8 @@ namespace TaskBoardPanel
 	View view();
 	void setView(View v);
 
-	// Forget the board and every bit of panel state — the next board() loads
-	// afresh. For tests; a project switch is noticed by itself.
+	// Forget the board and every bit of panel state, the team bridge included —
+	// the next board() loads afresh. For tests; a project switch is noticed by itself.
 	void reset();
 
 	// ── What the last frame drew, for the UI test ────────────────────────────
@@ -90,6 +108,11 @@ namespace TaskBoardPanel
 	struct Rect { float x0 = 0, y0 = 0, x1 = 0, y1 = 0; };
 	bool cardRect(const HE::UUID& task, Rect& out);
 	bool chipRect(const HE::UUID& task, int link, Rect& out);
+	// The team's controls: the Assigned To field, the members in its open list
+	// (index = roster order), the From the Team button and the rows of its
+	// open list (newest first). False when not drawn last frame.
+	enum class TeamItem { AssignedTo, Assignee, FromTeam, FromTeamRow };
+	bool teamRect(TeamItem item, int index, Rect& out);
 	// Cards drawn, and cards stepped over with a placeholder because they were
 	// off screen — the row clipping, counted.
 	struct DrawStats { int drawn = 0; int skipped = 0; };

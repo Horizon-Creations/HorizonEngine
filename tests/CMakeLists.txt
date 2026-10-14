@@ -226,6 +226,9 @@ add_executable(he_tests
     test_export_profiles.cpp
     test_project_settings.cpp
     test_task_board.cpp
+    # Assigning, posting updates and notices between two editors over a fake
+    # team link, on one fake clock.
+    test_taskboard_team.cpp
     test_export_backend.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
@@ -517,6 +520,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     # The task board's data and its project file (test_task_board.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
+    # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExecTrace.cpp
     # The stopped run as watch rows (test_hc_watch.cpp) — ImGui-free like the trace.
