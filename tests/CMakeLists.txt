@@ -219,6 +219,7 @@ add_executable(he_tests
     test_project_exporter.cpp
     test_export_profiles.cpp
     test_project_settings.cpp
+    test_task_board.cpp
     test_export_backend.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
@@ -508,6 +509,8 @@ add_executable(he_tests
     # apply a delete), so the tests cannot link without it — and asserting what
     # lands in it is how those posts are covered at all.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
+    # The task board's data and its project file (test_task_board.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExecTrace.cpp
     # The stopped run as watch rows (test_hc_watch.cpp) — ImGui-free like the trace.

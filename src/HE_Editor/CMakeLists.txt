@@ -274,6 +274,8 @@ add_executable(HorizonEditor WIN32
 	ContentBrowserPanel.cpp
 	NotificationStore.cpp
 	NotificationBar.cpp
+	# The project's to-do list (Config/TaskBoard.json): data and file only, no ImGui.
+	TaskBoard.cpp
 	InspectorPanel.cpp
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
