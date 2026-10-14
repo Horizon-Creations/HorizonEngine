@@ -3121,3 +3121,200 @@ TEST_CASE("Structural sync: local-only entities are never recorded as published"
     CHECK(known.count(land)  == 1);
     CHECK(known.count(chunk) == 0);
 }
+
+// ─── Topic 198 step 2: the entity-sync gaps ──────────────────────────────────
+
+TEST_CASE("Structural sync: a move in the hierarchy is reported once, a fresh entity never")
+{
+    HorizonWorld world;
+    const Entity a = world.createEntity("A");
+    const Entity b = world.createEntity("B");
+    auto& reg = world.registry();
+
+    HE::Ed::StructEntitySet known{ world.rootEntity(), a, b };
+    HE::Ed::StructParentMap parents;
+    // First sight records, and reports nothing: B's create (or the snapshot)
+    // already told the peers where it is.
+    HE::Ed::recordMissingParents(reg, known, parents);
+    CHECK(HE::Ed::reparentedSince(reg, known, parents).empty());
+
+    REQUIRE(world.reparentEntity(b, a));
+    const auto moved = HE::Ed::reparentedSince(reg, known, parents);
+    REQUIRE(moved.size() == 1);
+    CHECK((moved[0].entity == b));
+    CHECK((moved[0].from == world.rootEntity()));
+    CHECK((moved[0].to == a));
+
+    // Pure: until the caller records the send, it keeps coming up (a reparent
+    // the connection did not take is retried, not forgotten).
+    CHECK(HE::Ed::reparentedSince(reg, known, parents).size() == 1);
+    parents[b] = a;
+    CHECK(HE::Ed::reparentedSince(reg, known, parents).empty());
+}
+
+TEST_CASE("Structural sync: a new group does not carry the entities it adopted")
+{
+    // Group makes a fresh entity and moves existing ones under it in one frame.
+    // Inside the group's create the adopted entities would arrive a second time
+    // on every peer (same uuids, preserved), next to the originals.
+    HorizonWorld world;
+    const Entity crate = world.createEntity("Crate");
+    const Entity lamp  = world.createEntity("Lamp");
+    auto& reg = world.registry();
+    HE::Ed::StructEntitySet known{ world.rootEntity(), crate, lamp };
+
+    const Entity group = world.createEntity("Group");
+    const Entity label = world.createEntity("Label");   // genuinely new, under the group
+    REQUIRE(world.reparentEntity(crate, group));
+    REQUIRE(world.reparentEntity(lamp,  group));
+    REQUIRE(world.reparentEntity(label, group));
+    const auto childrenBefore = reg.get<HierarchyComponent>(group).children;
+
+    std::vector<std::uint8_t> blob;
+    {
+        HE::Ed::DetachKnownDescendants adopted(reg, group, known);
+        CHECK(adopted.detached().size() == 2);
+        SceneSerializer ser;
+        blob = ser.serializeSubtree(world, group);
+    }
+    // Put back exactly, order included.
+    CHECK(reg.get<HierarchyComponent>(group).children == childrenBefore);
+    CHECK((HE::Ed::structParentOf(reg, crate) == group));
+
+    HorizonWorld peer;
+    const std::size_t before = countEntities(peer);
+    SceneSerializer ser;
+    REQUIRE((ser.instantiatePrefab(peer, blob, entt::null, /*preserveIds=*/true) != entt::null));
+    // Group + Label only.
+    CHECK(countEntities(peer) == before + 2);
+}
+
+TEST_CASE("CollabController: a re-parent reaches the peer with the new local transform")
+{
+    HorizonWorld hostWorld;
+    const Entity parent = hostWorld.createEntity("Parent");
+    const Entity child  = hostWorld.createEntity("Child");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    std::uint32_t gotEntity = 0, gotParent = 0;
+    bool gotTransform = false;
+    float gotX = 0.0f;
+    client.onRemoteReparent([&](std::uint32_t e, std::uint32_t p, const float* t) {
+        gotEntity = e;
+        gotParent = p;
+        gotTransform = t != nullptr;
+        if (t) gotX = t[0];
+    });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    REQUIRE(hostWorld.reparentEntity(child, parent));
+    const float t[9] = { 7.0f, 0, 0, 0, 0, 0, 1, 1, 1 };
+    REQUIRE(host.publishReparent(static_cast<std::uint32_t>(entt::to_integral(child)),
+                                 static_cast<std::uint32_t>(entt::to_integral(parent)), t));
+    REQUIRE(pumpUntil(host, client, [&] { return gotEntity != 0; }));
+
+    auto& creg = clientWorld.registry();
+    const auto ce = static_cast<Entity>(static_cast<entt::id_type>(gotEntity));
+    const auto cp = static_cast<Entity>(static_cast<entt::id_type>(gotParent));
+    REQUIRE(creg.valid(ce));
+    REQUIRE(creg.valid(cp));
+    CHECK(creg.get<NameComponent>(ce).name == "Child");
+    CHECK(creg.get<NameComponent>(cp).name == "Parent");
+    CHECK(gotTransform);
+    CHECK(gotX == doctest::Approx(7.0f));
+}
+
+TEST_CASE("SceneSerializer: a whole-state component write takes removed components away")
+{
+    HorizonWorld world;
+    const Entity src = world.createEntity("Lamp");
+    const Entity dst = world.createEntity("Lamp");
+    auto& reg = world.registry();
+    reg.emplace<TransformComponent>(src);
+    reg.emplace<TransformComponent>(dst);
+    reg.emplace<LightComponent>(dst);   // removed on the sender, still here
+
+    SceneSerializer ser;
+    const auto blob = ser.serializeEntityComponents(world, src);
+
+    SUBCASE("update leaves what the blob lacks alone (multi-edit patches rely on it)")
+    {
+        REQUIRE(ser.applyEntityComponents(world, dst, blob));
+        CHECK(reg.all_of<LightComponent>(dst));
+    }
+    SUBCASE("replace removes it")
+    {
+        REQUIRE(ser.replaceEntityComponents(world, dst, blob));
+        CHECK_FALSE(reg.all_of<LightComponent>(dst));
+        CHECK(reg.all_of<TransformComponent>(dst));
+    }
+    SUBCASE("a terrain keeps its generated mesh, which its state never lists")
+    {
+        reg.emplace<TerrainComponent>(dst);
+        reg.emplace<MeshComponent>(dst);
+        const auto own = ser.serializeEntityComponents(world, dst);
+        REQUIRE(ser.replaceEntityComponents(world, dst, own));
+        CHECK(reg.all_of<MeshComponent>(dst));
+        CHECK(reg.all_of<TerrainComponent>(dst));
+    }
+}
+
+TEST_CASE("CollabController: the end of a quick drag is not lost to the rate limit")
+{
+    HorizonWorld hostWorld;
+    const Entity target = hostWorld.createEntity("Target");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    float lastX = -1.0f;
+    int received = 0;
+    client.onRemoteTransform([&](std::uint64_t, const float pos[3], const float[3], const float[3]) {
+        lastX = pos[0];
+        ++received;
+    });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::uint64_t subject =
+        host.subjectFor(static_cast<std::uint32_t>(entt::to_integral(target)));
+    host.followSelection(subject);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsLock(subject); }));
+
+    const float r[3] = { 0, 0, 0 }, s[3] = { 1, 1, 1 };
+    const float p1[3] = { 1.0f, 0, 0 }, p2[3] = { 2.0f, 0, 0 };
+    // On pumpUntil's clock, which starts at 0 again: the held-back value may
+    // only leave once 33 ms of it have passed, not by accident of the numbers.
+    host.publishTransform(subject, p1, r, s, 0);    // goes out
+    host.publishTransform(subject, p2, r, s, 10);   // inside the 33 ms window
+
+    SUBCASE("deselecting right away still sends it, before the lock goes")
+    {
+        host.followSelection(0);
+    }
+    SUBCASE("and so does simply letting time pass")
+    {
+    }
+    REQUIRE(pumpUntil(host, client, [&] { return lastX == doctest::Approx(2.0f); },
+                      std::chrono::seconds(5)));
+    CHECK(received == 2);
+}

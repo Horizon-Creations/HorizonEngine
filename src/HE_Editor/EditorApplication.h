@@ -768,6 +768,11 @@ private:
 	void copySelectedEntity(bool cut);
 	void pasteEntityClipboard();
 	void deleteSelectedEntity();
+	// In a session: the targets whose subtree no other participant holds a lock
+	// in. The rest are left alone and the user is told, once, by name — a delete
+	// the session refuses must not happen here either, or the entity is gone on
+	// this machine and alive on every other one.
+	std::vector<Entity> withoutPeerHeld(const std::vector<Entity>& targets, const char* verb);
 	// The selection roots that may be copied or removed: valid, not built-in
 	// (root, sun, moon), and not under another selected entity.
 	std::vector<Entity> editableSelectionRoots() const;
@@ -884,6 +889,12 @@ private:
 	// nothing said. Entries leave on the first success or when the retries run
 	// out; see syncStructuralChanges for why there is a limit at all.
 	std::unordered_map<Entity, int> m_structureUnsendable;
+	// The parent each known entity had when the diff last looked (StructuralSync.h
+	// reparentedSince), so a move in the hierarchy is published like a create.
+	std::unordered_map<Entity, Entity> m_structureParent;
+	// Known entities that are gone but whose destroy the session refused, and for
+	// how many frames: the same retry rule as m_structureUnsendable.
+	std::unordered_map<Entity, int> m_structureUndeletable;
 	void syncStructuralChanges();
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the

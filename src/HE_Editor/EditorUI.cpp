@@ -1227,6 +1227,41 @@ static bool activeTabUsesWorldUndo(const AppContext& ctx)
 	    || path == LevelScriptPanel::kTabPath
 	    || ParticleGraphEditorPanel::isParticleAsset(path);
 }
+
+// The one door onto "the" undo history for every control that has one: the
+// footer buttons, the Ctrl+Z chord, the native menu command and the Edit menu.
+// In a session it is CollabUndo (your own changes, as republished inverses);
+// outside one it is the snapshot stack. The Edit menu used to be the only one
+// that knew about the session, so Ctrl+Z in a session restored a whole-world
+// snapshot: every entity came back under a new handle, the structural diff
+// published a destroy and a create for all of them, and peers' concurrent edits
+// were reverted (docs/collab-sync-audit-entities-2026-10-14.md, gap 4.1).
+static bool sessionUndoActive(const AppContext& ctx)
+{
+	return ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
+}
+static bool canUndoNow(const AppContext& ctx)
+{
+	if (sessionUndoActive(ctx)) return ctx.collabUndo->canUndo();
+	return ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo;
+}
+static bool canRedoNow(const AppContext& ctx)
+{
+	if (sessionUndoActive(ctx)) return ctx.collabUndo->canRedo();
+	return ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo;
+}
+static void undoNow(AppContext& ctx)
+{
+	if (!canUndoNow(ctx)) return;
+	if (sessionUndoActive(ctx)) ctx.collabUndo->undo();
+	else                        ctx.undo();
+}
+static void redoNow(AppContext& ctx)
+{
+	if (!canRedoNow(ctx)) return;
+	if (sessionUndoActive(ctx)) ctx.collabUndo->redo();
+	else                        ctx.redo();
+}
 #endif
 
 void EditorUI::renderEditor(AppContext& ctx, float dt)
@@ -1935,12 +1970,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
-			case MC::Undo:
-				if (ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo) ctx.undo();
-				break;
-			case MC::Redo:
-				if (ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo) ctx.redo();
-				break;
+			case MC::Undo:      undoNow(ctx); break;
+			case MC::Redo:      redoNow(ctx); break;
 			case MC::Cut:       if (canEditEntity()  && ctx.cutEntity)       ctx.cutEntity();       break;
 			case MC::Copy:      if (canEditEntity()  && ctx.copyEntity)      ctx.copyEntity();      break;
 			case MC::Paste:     if (canPasteEntity() && ctx.pasteEntity)     ctx.pasteEntity();     break;
@@ -3303,8 +3334,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.20f));
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 0.0f));
 
-			const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
-			const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
+			const bool canUndo = canUndoNow(ctx);
+			const bool canRedo = canRedoNow(ctx);
 
 			ImGui::BeginDisabled(!canUndo);
 			bool doUndo;
@@ -3337,8 +3368,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
 			}
 
-			if (doUndo && canUndo && ctx.undo) ctx.undo();
-			if (doRedo && canRedo && ctx.redo) ctx.redo();
+			if (doUndo) undoNow(ctx);
+			if (doRedo) redoNow(ctx);
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);

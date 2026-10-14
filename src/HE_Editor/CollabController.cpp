@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -1138,7 +1139,12 @@ void CollabController::wireCallbacks()
 		{
 			const std::uint32_t local  = entityForNetId(c.netId);
 			const std::uint32_t parent = c.parentNet ? entityForNetId(c.parentNet) : 0;
-			if (local != 0 && m_onRemoteReparent) m_onRemoteReparent(local, parent);
+			// The sender's new local transform, when it sent one (9 floats).
+			float t[9];
+			const bool hasT = c.blob.size() == sizeof(t);
+			if (hasT) std::memcpy(t, c.blob.data(), sizeof(t));
+			if (local != 0 && m_onRemoteReparent)
+				m_onRemoteReparent(local, parent, hasT ? t : nullptr);
 			break;
 		}
 		}
@@ -1916,6 +1922,11 @@ void CollabController::update(std::uint64_t nowMs)
 	m_net->pump();        // dispatches framed messages
 	m_collab->update(nowMs);
 
+	// A value the rate limit held back, once its window has passed (the drag
+	// stopped, so nothing else will carry it out).
+	if (m_hasPendingTransform && nowMs - m_lastTransformSendMs >= 33)
+		flushPendingTransform(nowMs);
+
 	if (m_relayLink && !updateRelayStatus()) return;   // false: the join failed and is gone
 
 	// A client whose link dropped is no longer in a session; say so rather than
@@ -2449,6 +2460,11 @@ void CollabController::publishTransform(std::uint64_t subject,
 	                           rotEuler[0], rotEuler[1], rotEuler[2],
 	                           scale[0], scale[1], scale[2] };
 
+	// Another subject's held-back value goes first, or this one's send would
+	// make it the "last" and the other's final position would never leave.
+	if (m_hasPendingTransform && m_pendingTransformSubject != subject)
+		flushPendingTransform(nowMs);
+
 	// Same argument as presence: a gizmo drag produces a change every frame, and
 	// most of them are indistinguishable. Send only real movement, and at most
 	// at a fixed rate.
@@ -2460,26 +2476,50 @@ void CollabController::publishTransform(std::uint64_t subject,
 			if (std::fabs(current[i] - m_lastTransform[i]) > 0.0005f) { moved = true; break; }
 		}
 	}
-	if (!moved) return;
+	if (!moved)
+	{
+		// Back where the last send left it: whatever was held back is older
+		// than what the peers already have.
+		m_hasPendingTransform = false;
+		return;
+	}
 	if (m_hasLastTransform && subject == m_lastTransformSubject &&
 	    nowMs - m_lastTransformSendMs < 33)   // ~30 Hz while dragging
 	{
+		m_pendingTransformSubject = subject;
+		std::memcpy(m_pendingTransform, current, sizeof(current));
+		m_hasPendingTransform = true;
 		return;
 	}
 
+	if (sendTransformNow(subject, current, nowMs)) m_hasPendingTransform = false;
+}
+
+bool CollabController::sendTransformNow(std::uint64_t subject, const float v[9],
+                                        std::uint64_t nowMs)
+{
 	HE::Net::CollabSession::TransformDelta d;
 	d.subject = subject;
-	for (int i = 0; i < 3; ++i) d.position[i] = pos[i];
-	for (int i = 0; i < 3; ++i) d.rotation[i] = rotEuler[i];
-	for (int i = 0; i < 3; ++i) d.scale[i]    = scale[i];
+	for (int i = 0; i < 3; ++i) d.position[i] = v[i];
+	for (int i = 0; i < 3; ++i) d.rotation[i] = v[3 + i];
+	for (int i = 0; i < 3; ++i) d.scale[i]    = v[6 + i];
 
-	if (m_collab->sendTransform(d))
-	{
-		m_lastTransformSubject = subject;
-		for (int i = 0; i < 9; ++i) m_lastTransform[i] = current[i];
-		m_hasLastTransform    = true;
-		m_lastTransformSendMs = nowMs;
-	}
+	if (!m_collab->sendTransform(d)) return false;
+	m_lastTransformSubject = subject;
+	std::memcpy(m_lastTransform, v, sizeof(m_lastTransform));
+	m_hasLastTransform    = true;
+	m_lastTransformSendMs = nowMs;
+	return true;
+}
+
+void CollabController::flushPendingTransform(std::uint64_t nowMs)
+{
+	if (!m_hasPendingTransform) return;
+	m_hasPendingTransform = false;
+	// Only while we still hold it: after the lock has gone, someone else may
+	// already be moving it, and a late value of ours would land on top.
+	if (!m_collab || !inSession() || !m_collab->ownsLock(m_pendingTransformSubject)) return;
+	sendTransformNow(m_pendingTransformSubject, m_pendingTransform, nowMs);
 }
 
 // ─── Component edits ─────────────────────────────────────────────────────────
@@ -2635,7 +2675,8 @@ bool CollabController::publishDestroy(std::uint32_t entityHandle)
 }
 
 bool CollabController::publishReparent(std::uint32_t entityHandle,
-                                       std::uint32_t newParentHandle)
+                                       std::uint32_t newParentHandle,
+                                       const float* localTransform9)
 {
 	if (!m_collab || !inSession()) return false;
 
@@ -2643,6 +2684,11 @@ bool CollabController::publishReparent(std::uint32_t entityHandle,
 	c.kind      = HE::Net::CollabSession::StructuralChange::Kind::Reparented;
 	c.netId     = netIdFor(entityHandle);
 	c.parentNet = newParentHandle ? netIdFor(newParentHandle) : 0;
+	if (localTransform9)
+	{
+		c.blob.resize(9 * sizeof(float));
+		std::memcpy(c.blob.data(), localTransform9, c.blob.size());
+	}
 	return m_collab->sendStructural(c);
 }
 
@@ -4098,6 +4144,9 @@ void CollabController::followSelection(std::uint64_t subject)
 {
 	if (!m_collab || !inSession()) return;
 	if (subject == m_heldSubject) return;   // nothing changed — stay quiet
+
+	// The end of the last drag, before the lock that lets it through is gone.
+	flushPendingTransform(m_lastUpdateMs);
 
 	// Give up the previous one first: holding two at once would block an entity
 	// nobody is even looking at any more.

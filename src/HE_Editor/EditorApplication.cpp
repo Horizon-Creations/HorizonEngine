@@ -551,7 +551,10 @@ void EditorApplication::OnInit()
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
 		SceneSerializer serializer;
-		serializer.applyEntityComponents(*m_editorWorld, e, blob);
+		// Replace, not update: every blob on this wire is a whole entity's state
+		// (serializeEntityComponents at the sender, from every build that ever
+		// sent one), so a component it lacks was removed over there.
+		serializer.replaceEntityComponents(*m_editorWorld, e, blob);
 		// Mark the transform dirty so the renderer rebuilds its matrix; other
 		// components are read fresh each frame.
 		if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
@@ -564,17 +567,35 @@ void EditorApplication::OnInit()
 		if (!m_editorWorld->registry().valid(e)) return;
 		m_selection.remove(e);
 		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
 		m_editorWorld->destroyEntity(e);
 	});
 
-	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle) {
+	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle,
+	                                 const float* t) {
 		if (!m_editorWorld) return;
+		auto& reg = m_editorWorld->registry();
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
-		if (!m_editorWorld->registry().valid(e)) return;
+		if (!reg.valid(e)) return;
 		const Entity parent = parentHandle
 			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
 			: m_editorWorld->rootEntity();
 		m_editorWorld->reparentEntity(e, parent);
+		// Echo protection, the counterpart of the m_structureKnown.erase in
+		// onRemoteDestroy: the diff compares against this record, and without it
+		// the next pass would publish the peer's move straight back at them.
+		m_structureParent[e] = HE::Ed::structParentOf(reg, e);
+		// The sender's local transform under the new parent (Group keeps the
+		// world pose, so it changed); without it the entity would jump.
+		if (t)
+			if (auto* tc = reg.try_get<TransformComponent>(e))
+			{
+				tc->position = glm::vec3(t[0], t[1], t[2]);
+				tc->rotation = glm::vec3(t[3], t[4], t[5]);
+				tc->scale    = glm::vec3(t[6], t[7], t[8]);
+				tc->dirty    = true;
+			}
+		m_editorWorld->markHierarchyDirty();
 	});
 
 	// ── Per-user undo/redo for the session ───────────────────────────────────
@@ -608,6 +629,54 @@ void EditorApplication::OnInit()
 			m_collab.publishAsset(path, contentManager().resolveSavePath(path));
 		},
 		[this](std::uint64_t subject) { return m_collab.ownsLock(subject); });
+
+	// The structural half (MCP commands record these through CollabUndoSink).
+	// Never set before, so a session Ctrl+Z on such an entry popped it and did
+	// nothing. Each one is a plain world edit: the structural diff publishes a
+	// create, destroy or re-parent the same way it publishes the user's own,
+	// which is what makes an undo "just another change" for the peers.
+	const auto entityOf = [this](std::uint64_t subject) -> Entity {
+		const std::uint32_t h = subject ? m_collab.entityForNetId(subject) : 0;
+		const Entity e = h ? static_cast<Entity>(static_cast<entt::id_type>(h)) : entt::null;
+		return (m_editorWorld && e != entt::null && m_editorWorld->registry().valid(e))
+			? e : entt::null;
+	};
+	m_collabUndo.setStructuralHandlers(
+		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& subtree,
+		                 std::uint64_t parentSubject) {
+			if (!m_editorWorld || entityOf(subject) != entt::null) return;   // already back
+			SceneSerializer serializer;
+			// preserveIds: it returns under the identity the peers name it by.
+			serializer.instantiatePrefab(*m_editorWorld, subtree, entityOf(parentSubject),
+			                             /*preserveIds=*/true);
+			m_editorWorld->markHierarchyDirty();
+		},
+		[this, entityOf](std::uint64_t subject) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			if (withoutPeerHeld({ e }, "removed by undo").empty()) return;
+			m_selection.remove(e);
+			m_editorWorld->destroyEntity(e);
+		},
+		[this, entityOf](std::uint64_t subject, std::uint64_t parentSubject) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			const Entity p = entityOf(parentSubject);
+			m_editorWorld->reparentEntity(e, p != entt::null ? p : m_editorWorld->rootEntity());
+			m_editorWorld->markHierarchyDirty();
+		},
+		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& bytes) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			SceneSerializer serializer;
+			// Both sides of a Components entry are whole states (EditorCommands
+			// records them so), so the undo can take a component away again.
+			serializer.replaceEntityComponents(*m_editorWorld, e, bytes);
+			if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
+				tc->dirty = true;
+			m_collab.publishComponents(static_cast<std::uint32_t>(entt::to_integral(e)),
+			                           serializer.serializeEntityComponents(*m_editorWorld, e));
+		});
 
 	// ── Authored-asset sync ──────────────────────────────────────────────────
 	// Every asset type funnels through ContentManager::saveAsset, so one hook
@@ -846,6 +915,10 @@ void EditorApplication::OnInit()
 		// seedNetIds) and marks the current entity set as known to the
 		// structural diff, so nothing gets re-announced as freshly created.
 		m_structureKnown.clear();
+		// Rebuilt lazily by the next diff (recordMissingParents) from the world
+		// the snapshot left, which is exactly the parentage the peers share.
+		m_structureParent.clear();
+		m_structureUndeletable.clear();
 		// The level script came with the new scene, so the mirror describes a
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
@@ -10529,7 +10602,11 @@ void EditorApplication::setupEditorCommands()
 		// delete it would be the opposite of what is wanted — the peers would
 		// never hear that the client removed anything. deleteSelectedEntity, the
 		// human's path, does not erase either.
-		if (origin == HE::Ed::Origin::Remote) m_structureKnown.erase(e);
+		if (origin == HE::Ed::Origin::Remote)
+		{
+			m_structureKnown.erase(e);
+			m_structureParent.erase(e);
+		}
 	};
 	m_commands.setHooks(std::move(h));
 }
@@ -10676,7 +10753,14 @@ void EditorApplication::syncStructuralChanges()
 	for (const Entity e : HE::Ed::newSubtreeRoots(reg, current, m_structureKnown))
 	{
 		SceneSerializer serializer;
-		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
+		std::vector<std::uint8_t> blob;
+		{
+			// Entities the peers already have that were moved under this new
+			// subtree (Group) stay out of its blob — see DetachKnownDescendants.
+			// The re-parent pass below moves the originals instead.
+			HE::Ed::DetachKnownDescendants adopted(reg, e, m_structureKnown);
+			blob = serializer.serializeSubtree(*m_editorWorld, e);
+		}
 		bool sent = true;
 		if (!blob.empty() && inSession)
 		{
@@ -10745,6 +10829,73 @@ void EditorApplication::syncStructuralChanges()
 		HE::Ed::markSubtreeKnown(reg, e, localOnlyFn, m_structureKnown);
 	}
 
+	// ── Re-parented ──
+	// After the creates, so a move under a group made this frame finds the group
+	// already announced (one TCP stream: the peer reads the create first).
+	//
+	// A known entity gets its parent recorded the first time it is seen here, and
+	// its wire id cached with it: publishDestroy only looks ids up, it cannot read
+	// them from an entity that is already gone, and the children of a subtree that
+	// arrived or was created mid-session were never asked for theirs — deleting
+	// one before anybody had selected it sent nothing at all.
+	for (const Entity e : m_structureKnown)
+		if (reg.valid(e) && !m_structureParent.count(e))
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+	HE::Ed::recordMissingParents(reg, m_structureKnown, m_structureParent);
+
+	const Entity worldRoot = m_editorWorld->rootEntity();
+	const auto wireHandle = [&](Entity p) -> std::uint32_t {
+		// The world root is "no parent" on the wire: every peer has its own root
+		// entity and maps 0 onto it (onRemoteReparent).
+		return (p == entt::null || p == worldRoot)
+			? 0u : static_cast<std::uint32_t>(entt::to_integral(p));
+	};
+	for (const HE::Ed::StructReparent& m :
+	     HE::Ed::reparentedSince(reg, m_structureKnown, m_structureParent))
+	{
+		// A parent whose create has not gone out yet (refused, retrying) would
+		// resolve to nothing on the far side, and the receiver would read that as
+		// "the world root". Wait for it; the record stays, so this comes up again.
+		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
+			continue;
+
+		const std::uint64_t subject =
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(m.entity)));
+		const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+		if (lock && lock->owner != m_collab.localParticipant())
+		{
+			// Someone else is editing it: the host would refuse the move, and a
+			// move that only happened here is the silent divergence this pass
+			// exists to end. Put it back and say so.
+			const Entity back = reg.valid(m.from) ? m.from : worldRoot;
+			m_editorWorld->reparentEntity(m.entity, back);
+			m_editorWorld->markHierarchyDirty();
+			const std::string name =
+				reg.all_of<NameComponent>(m.entity) ? reg.get<NameComponent>(m.entity).name
+				                                    : std::string("The entity");
+			m_notifications.post(HE::Ed::NoteLevel::Warning,
+				"\"" + name + "\" was not moved: " + lock->ownerName + " is editing it.",
+				"It stays where it was. Try again once they have deselected it.");
+			continue;
+		}
+
+		const float* t9 = nullptr;
+		float t[9];
+		if (const auto* tc = reg.try_get<TransformComponent>(m.entity))
+		{
+			const float v[9] = { tc->position.x, tc->position.y, tc->position.z,
+			                     tc->rotation.x, tc->rotation.y, tc->rotation.z,
+			                     tc->scale.x,    tc->scale.y,    tc->scale.z };
+			std::memcpy(t, v, sizeof(t));
+			t9 = t;
+		}
+		// False here is a connection that is momentarily gone (the lock case was
+		// answered above): leave the record, the next pass sends it again.
+		if (m_collab.publishReparent(static_cast<std::uint32_t>(entt::to_integral(m.entity)),
+		                             wireHandle(m.to), t9))
+			m_structureParent[m.entity] = m.to;
+	}
+
 	// ── Destroyed ──
 	// Collected first: erasing from the set while iterating it would invalidate
 	// the iterator.
@@ -10755,8 +10906,22 @@ void EditorApplication::syncStructuralChanges()
 	}
 	for (const Entity e : gone)
 	{
-		m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e)));
+		// A destroy that did not go out is not one the peers know about. This
+		// used to erase the entry either way, so a refused destroy left the
+		// entity alive everywhere but here. The delete paths now refuse a
+		// peer-held subtree up front (withoutPeerHeld, EditorCommands), so what
+		// is left is a connection gap: retry for a second's worth of frames,
+		// the same rule as an unsendable create, then stop.
+		if (!m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e))))
+		{
+			constexpr int kSendRetryFrames = 60;
+			if (++m_structureUndeletable[e] < kSendRetryFrames) continue;
+			HE_LOG_WARN(Editor, "Collab: a deletion could not be sent to the others; "
+			                    "the entity may still exist on their machines");
+		}
+		m_structureUndeletable.erase(e);
 		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
 	}
 }
 
@@ -10893,9 +11058,12 @@ void EditorApplication::copySelectedEntity(bool cut)
 	m_entityClipboard = std::move(blobs);
 
 	if (!cut) return;
+	// The copy stands either way; only the removal half is refused.
+	const std::vector<Entity> removable = withoutPeerHeld(sources, "cut");
+	if (removable.empty()) return;
 	m_selection.clear();
 	if (!m_isPlaying) m_undo.snapshotNow("Cut Entity"); // see duplicateSelectedEntity()
-	for (Entity src : sources)
+	for (Entity src : removable)
 	{
 		// Re-checked rather than trusted: the roots are disjoint subtrees, but
 		// entt reuses handles and a stale one could name something else.
@@ -10937,6 +11105,60 @@ void EditorApplication::pasteEntityClipboard()
 	m_editorWorld->markHierarchyDirty();
 }
 
+std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>& targets,
+                                                      const char* verb)
+{
+	if (!m_collab.inSession() || !m_editorWorld) return targets;
+	auto& reg = m_editorWorld->registry();
+	const HE::Net::ParticipantId me = m_collab.localParticipant();
+
+	// The whole subtree: a destroy takes the children with it, and the host only
+	// checks the lock of the entity the message names — a child somebody was
+	// editing used to die with an unheld parent.
+	std::string holder;
+	std::function<bool(Entity)> heldByPeer = [&](Entity e) -> bool {
+		if (!reg.valid(e)) return false;
+		const std::uint64_t subject =
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+		if (const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+		    lock && lock->owner != me)
+		{
+			holder = lock->ownerName;
+			return true;
+		}
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			for (const Entity c : h->children)
+				if (heldByPeer(c)) return true;
+		return false;
+	};
+
+	std::vector<Entity> allowed;
+	std::string refusedName;
+	std::string refusedHolder;
+	int refused = 0;
+	for (const Entity e : targets)
+	{
+		if (!heldByPeer(e)) { allowed.push_back(e); continue; }
+		if (++refused == 1)
+		{
+			refusedName   = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
+			                                             : std::string("An entity");
+			refusedHolder = holder;
+		}
+	}
+	if (refused > 0)
+	{
+		const std::string what = refused == 1
+			? "\"" + refusedName + "\" was not " + verb
+			: std::to_string(refused) + " entities were not " + verb;
+		m_notifications.post(HE::Ed::NoteLevel::Warning,
+			what + ": " + refusedHolder + " is editing it or something under it.",
+			"Nothing was removed for them on any machine. Try again once they have "
+			"deselected it.");
+	}
+	return allowed;
+}
+
 void EditorApplication::deleteSelectedEntity()
 {
 	if (!m_editorWorld) return;
@@ -10947,6 +11169,7 @@ void EditorApplication::deleteSelectedEntity()
 		if (e != entt::null && m_editorWorld->registry().valid(e) &&
 		    !m_editorWorld->isBuiltin(e))
 			targets.push_back(e);
+	targets = withoutPeerHeld(targets, "deleted");
 	if (targets.empty()) return;
 
 	m_selection.clear();
@@ -11220,12 +11443,18 @@ AppContext EditorApplication::makeContext()
 		// EditorUI, fed by a "why" string or callback on AppContext. Both live
 		// outside this file, which is why there is no message here rather than an
 		// unreachable one.
+		// In a session the snapshot stack must never restore: it would bring the
+		// whole world back under new handles and revert everyone else's work
+		// (EditorUI routes its controls to collabUndo; this is the backstop for
+		// any caller that reaches the callback directly).
 		.undo                = [this]{
 			if (m_isPlaying) return;
+			if (m_collab.inSession()) { m_collabUndo.undo(); return; }
 			if (m_undo.undo()) m_selection.clear();
 		},
 		.redo                = [this]{
 			if (m_isPlaying) return;
+			if (m_collab.inSession()) { m_collabUndo.redo(); return; }
 			if (m_undo.redo()) m_selection.clear();
 		},
 		.duplicateEntity     = [this]{ duplicateSelectedEntity(); },

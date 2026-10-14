@@ -1502,6 +1502,25 @@ void render(AppContext& ctx, float dt)
 						movable.erase(std::remove_if(movable.begin(), movable.end(),
 						                             [&reg](Entity e) { return reg.all_of<EditorLockComponent>(e); }),
 						              movable.end());
+						// In a session, also every member but the primary whose
+						// collab lock we do not hold — the inspector's rule
+						// (membersToSkip). Only the primary is locked and its
+						// transform published, so the others moved on this
+						// screen and on nobody else's. The primary stays: its
+						// lock is a host round trip and may still be in flight.
+						if (ctx.collab && ctx.collab->inSession())
+						{
+							const Entity primary = ctx.selection.primary();
+							const auto me = ctx.collab->localParticipant();
+							movable.erase(std::remove_if(movable.begin(), movable.end(),
+								[&](Entity e) {
+									if (e == primary) return false;
+									const HE::Net::LockInfo* lock = ctx.collab->lockFor(
+										ctx.collab->subjectFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+									return !lock || lock->owner != me;
+								}),
+								movable.end());
+						}
 					}
 					// Surface / vertex snapping: what a move drag lands on, asked
 					// of this frame's extract. Only built when the mode calls for

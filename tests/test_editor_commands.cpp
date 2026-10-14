@@ -8,6 +8,9 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
+
+#include <nlohmann/json.hpp>
 
 #include <map>
 #include <string>
@@ -510,6 +513,66 @@ TEST_CASE("A destroy carries the whole subtree, and undo restores all of it")
 	// And back where it was in the hierarchy, not orphaned at the root.
 	CHECK((parentOf(h.world, backChild) != h.world.rootEntity()));
 	CHECK((parentOf(h.world, backChild) != entt::null));
+}
+
+TEST_CASE("A destroy is refused while someone else holds an entity under it")
+{
+	// The host only checks the lock of the entity a destroy names, so a child a
+	// peer was editing used to die with an unheld parent here and live on
+	// everywhere else. The gateway walks the subtree before anything goes.
+	Harness h;
+	h.sessionOn = true;
+	const Entity parent = h.world.createEntity("Parent");
+	const Entity child  = h.world.createEntity("Child");
+	const Entity grand  = h.world.createEntity("Grandchild");
+	REQUIRE(h.world.reparentEntity(child, parent));
+	REQUIRE(h.world.reparentEntity(grand, child));
+	h.ownedLocks.push_back(h.subjectFor(static_cast<std::uint32_t>(entt::to_integral(parent))));
+	h.lockedElsewhere.push_back(h.subjectFor(static_cast<std::uint32_t>(entt::to_integral(grand))));
+
+	CHECK(h.cmds.execute(Command::destroy(parent), Origin::User).error == CmdError::LockedByOther);
+	CHECK(h.cmds.execute(Command::destroy(parent), Origin::External).error == CmdError::LockedByOther);
+	CHECK(h.world.registry().valid(grand));
+	CHECK(h.destroyed.empty());
+
+	// A peer's destroy was agreed at the host; it is never second-guessed here.
+	CHECK(h.cmds.execute(Command::destroy(parent), Origin::Remote).ok());
+
+	SUBCASE("outside a session the same delete goes through")
+	{
+		Harness o;
+		const Entity p2 = o.world.createEntity("Parent");
+		const Entity c2 = o.world.createEntity("Child");
+		REQUIRE(o.world.reparentEntity(c2, p2));
+		o.lockedElsewhere.push_back(o.subjectFor(static_cast<std::uint32_t>(entt::to_integral(c2))));
+		CHECK(o.cmds.execute(Command::destroy(p2), Origin::User).ok());
+	}
+}
+
+TEST_CASE("A component write publishes the whole entity, not the caller's patch")
+{
+	// Peers apply a component blob as a REPLACEMENT now (so a Remove Component
+	// reaches them). A one-key patch from an MCP client sent as-is would strip
+	// every other component over there.
+	Harness h;
+	h.sessionOn = true;
+	const Entity e = h.world.createEntity("Crate");
+	h.world.registry().emplace<TransformComponent>(e);
+	h.world.registry().emplace<LightComponent>(e);
+	h.ownedLocks.push_back(h.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+
+	std::vector<std::uint8_t> published;
+	h.cmds.hooks().publishComponents = [&](std::uint32_t, const std::vector<std::uint8_t>& b) {
+		published = b;
+	};
+	nlohmann::json patch;
+	patch["transform"] = { { "position", { 4.0, 5.0, 6.0 } } };
+	REQUIRE(h.cmds.execute(Command::setComponents(e, nlohmann::json::to_cbor(patch)),
+	                       Origin::External).ok());
+	REQUIRE_FALSE(published.empty());
+	const auto sent = nlohmann::json::from_cbor(published);
+	CHECK(sent.contains("transform"));
+	CHECK(sent.contains("light"));
 }
 
 TEST_CASE("entityByUuid finds what uuidOf named, and nothing else")

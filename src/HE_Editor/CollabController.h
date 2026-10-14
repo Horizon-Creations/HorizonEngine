@@ -521,7 +521,13 @@ public:
 	bool publishCreate(std::uint32_t entityHandle, std::uint32_t parentHandle,
 	                   const std::vector<std::uint8_t>& blob);
 	bool publishDestroy(std::uint32_t entityHandle);
-	bool publishReparent(std::uint32_t entityHandle, std::uint32_t newParentHandle);
+	// A reparent keeps the entity's LOCAL transform, which is relative to a
+	// different parent afterwards — so a caller that re-posed it (Group keeps the
+	// world pose) passes the new local transform (pos3, rotEuler3, scale3) along.
+	// It rides in the structural message's blob, which every build reads and
+	// ignores for a reparent, so the wire is unchanged for older peers.
+	bool publishReparent(std::uint32_t entityHandle, std::uint32_t newParentHandle,
+	                     const float* localTransform9 = nullptr);
 
 	// Remote structural changes, translated back into local handles. The editor
 	// performs the actual ECS work — CollabController never touches the registry.
@@ -535,7 +541,9 @@ public:
 	{
 		m_onRemoteDestroy = std::move(fn);
 	}
-	void onRemoteReparent(std::function<void(std::uint32_t, std::uint32_t)> fn)
+	//   onRemoteReparent(handle, parentHandle (0 = world root), transform9 or
+	//   nullptr when the sender sent none)
+	void onRemoteReparent(std::function<void(std::uint32_t, std::uint32_t, const float*)> fn)
 	{
 		m_onRemoteReparent = std::move(fn);
 	}
@@ -1385,6 +1393,16 @@ private:
 	float         m_lastTransform[9] {};   // pos3 + rotEuler3 + scale3
 	bool          m_hasLastTransform = false;
 	std::uint64_t m_lastTransformSendMs = 0;
+	// The newest value the rate limit held back. Without it the END of a quick
+	// drag was lost for good: the last frames fall inside the 33 ms window, the
+	// user lets go and deselects, and the peers keep the object a few frames
+	// short of where it was put. Sent by update() once the window has passed,
+	// and before the lock goes (followSelection), whichever comes first.
+	std::uint64_t m_pendingTransformSubject = 0;
+	float         m_pendingTransform[9] {};
+	bool          m_hasPendingTransform = false;
+	bool sendTransformNow(std::uint64_t subject, const float v[9], std::uint64_t nowMs);
+	void flushPendingTransform(std::uint64_t nowMs);
 
 	std::function<void(std::uint64_t, const float[3], const float[3], const float[3])>
 		m_onRemoteTransform;
@@ -1479,7 +1497,7 @@ private:
 	// does not read as an edit.
 	std::unordered_map<std::uint32_t, std::uint64_t> m_lastComponentHashes;
 	std::function<void(std::uint32_t)>                m_onRemoteDestroy;
-	std::function<void(std::uint32_t, std::uint32_t)> m_onRemoteReparent;
+	std::function<void(std::uint32_t, std::uint32_t, const float*)> m_onRemoteReparent;
 	// Set while applying a received asset, so writing it to disk does not bounce
 	// straight back out as our own change.
 	bool m_applyingRemoteAsset = false;
