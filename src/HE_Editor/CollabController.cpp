@@ -1501,6 +1501,8 @@ void CollabController::wireCallbacks()
 					          rel) != m_pendingLockReleases.end();
 				if (!tabWants && !releaseQueued)
 				{
+					// `l` lives in the session's lock table, which this erases from
+					// (host and client alike): nothing after it may read `l`.
 					m_collab->releaseLock(l.subject);
 					return;
 				}

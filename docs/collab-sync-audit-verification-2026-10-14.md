@@ -50,7 +50,14 @@ them the script's `hc_set_node` payload), 2 for the material value, and 4 that w
    `McpToolsHc.cpp` promised otherwise. A human always edits with the tab open, so step 4's fix
    did not cover it. Fix: `hc.beginEdit` seeds the mirror before the mutation, `hc.endEdit` marks
    the graph (`m_collabUntabbedEdits`), the collab pass asks the host, claims, sends the diff and
-   lets the lock go once nothing differs. Nothing runs per frame without such an edit.
+   lets the lock go once nothing differs. Nothing runs per frame without such an edit. The mark
+   is dropped when a session starts or ends (next to `m_terrainSync.reset()`).
+
+Two CI reds of the previous run (38635995907, before this step) were this topic's tests:
+macOS `test_collab_controller` "Lock grant" `CHECK_FALSE(client.ownsAssetLock)` is the race of
+fix 1; the settle idle subcase waited 100 ticks for Bob's transforms (now bounded by the wall
+clock like its other waits); Windows :3691 compared two spellings of one path (now
+`fs::equivalent`).
 
 Tests: `test_net_collab` "a client's release is final at once, not one round trip later",
 `test_collab_controller` "Lock grant: the next save right after the claim went back still reaches
@@ -74,8 +81,8 @@ run against a graph on the stack in `test_mcp_hc`, without `EditorApplication`).
 - **Branch / commit:** `claude/audit-vollst-ndige-bestandsaufnahme-was-ber-live-collab-sitz` @ 51442c38 + this doc (pushed: see the post)
 - **Done:** every synced object type verified live with three editors incl. late join, rejoin, save/idle, team-server opt-in; two lost-update paths found and fixed.
 - **Files touched:** `src/HE_Net/src/CollabSession.cpp` (releaseLock), `src/HE_Editor/EditorApplication.cpp` (hc.beginEdit/endEdit, updateAssetCollabSync untabbed loop), `EditorApplication.h` (`m_collabUntabbedEdits`), `McpToolsHc.cpp` (comment), `tests/test_net_collab.cpp`, `tests/test_collab_controller.cpp`, `scripts/he_collab_full_pass.py`.
-- **Verified:** build `he_tests` + `HorizonEditor` (Release, `out/build/release`); full pass 77/77 both modes; two-editor 42/42; `test_net_collab` 114/114, `test_collab_controller` 88/88, `test_mcp_hc` 20/20, `test_mcp_tools_collab` 7/7; negative control above; full ctest: see the result post.
+- **Verified:** build `he_tests` + `HorizonEditor` (Release, `out/build/release`); full pass 77/77 both modes; two-editor 42/42; `test_net_collab` 114/114, `test_collab_controller` 88/88, `test_mcp_hc` 20/20, `test_mcp_tools_collab` 7/7; negative control above; full `ctest -j4 -E test_material_graph` 285/287: `test_heproj_registration` (ccache-relative `__FILE__`, known since step 3) and `test_hpak` "scanContentDirectory" (5 instead of 2, also alone; not touched by this branch, green on CI).
 - **Not verified:** dropped link (only clean leave), relay path, host in-tray ask, Group/Remove Component live, HC class assets + animator graph live, material functions/instances live, panel text in team mode, Windows/Linux (CI).
 - **Decisions taken:** fix only what the run proved lost and what was local (2 fixes); the contributor list (3.3) stays a follow-up; the release is local-first (the host's word still decides, a release of a lock we do not own changes nothing locally).
-- **Traps:** run `he_tests` from `out/build/release`; the CI Windows red `test_collab_controller.cpp` catch-up path check (step 7/8 handoffs) is not touched here.
+- **Traps:** run `he_tests` from `out/build/release`; in a hidden editor watch files, not log lines; MCP `terrain_*` needs `retry_lock` and a client reconnect to hand the landscape over; any non-tab writer of the Level Script / Game Instance must mark `m_collabUntabbedEdits`.
 - **Next steps:** 1. Contributor list in `onSessionSettled` → `GitController::handOverToTeamServer` (spec 3.3). 2. A dropped-link rejoin in the script (kill B's socket, not `collab_leave`). 3. Topic 199 step 4 takes the gates in spec 3.11.

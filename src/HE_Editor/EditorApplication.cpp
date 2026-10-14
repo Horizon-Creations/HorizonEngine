@@ -4807,6 +4807,9 @@ void EditorApplication::OnRender(float dt)
 		{
 			m_terrainSync.reset();
 			m_terrainSyncLive = m_collab.inSession();
+			// Same for a closed-tab HC edit still waiting to go out: the next
+			// session's peers get it with the snapshot, not as a claim of ours.
+			m_collabUntabbedEdits.clear();
 		}
 		if (m_terrainSyncLive && m_editorWorld)
 		{

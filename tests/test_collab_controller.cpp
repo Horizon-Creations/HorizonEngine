@@ -3688,7 +3688,9 @@ TEST_CASE("Catch-up: a client whose link dropped rejoins and gets what it missed
     fs::create_directories(fs::path(disk.path(brick)).parent_path());
     const fs::path annaFile = writeHAsset("he_collab_catchup_rejoin/Content/Materials/Brick.hasset",
                                           HE::AssetType::Material, "brick-while-away");
-    REQUIRE(annaFile.string() == disk.path(brick));
+    // The same file, not the same string: on Windows one side carries '/'
+    // from the relative name and the other '\'.
+    REQUIRE(fs::equivalent(annaFile, fs::path(disk.path(brick))));
     anna.publishAsset(brick, annaFile.string());
 
     std::vector<std::uint8_t> got;
@@ -3862,7 +3864,11 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
             anna.update(clock); bob.update(clock);
             clock += 50;
         }
-        REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 5000));
+        // Bounded by tickUntil's wall clock like the waits above, not by 100
+        // ticks: a slow CI runner delivered the transforms later than that (red
+        // on macOS CI). Safe to wait long: the scene cannot be written, so the
+        // key stays pending however far the clock runs.
+        REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 600000));
         // Quiet long enough, but Anna is in Play: nothing is reported as kept.
         CHECK_FALSE(tickUntil([&] { return !kept.empty(); }, CollabSettle::kIdleMs + 1000));
         CHECK(anna.settlePending(CollabSettle::kSceneKey));
