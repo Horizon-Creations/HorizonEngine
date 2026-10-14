@@ -158,3 +158,14 @@ The page shots are TeamView's body only (heading + body), not the Preferences ra
   step 5). 2. E2E with two real editors against the host (step 6): Preferences ▸ Team →
   `212.227.140.164:7777`, Create Team / Add Member / Sign In, Window ▸ Team → Host,
   Invite, Join; rerun test_team_ui and test_net_team with `HE_TEST_TEAM_SERVER` there.
+- **Step 5 (deploy), 2026-10-14: blocked, nothing deployed.** The host still runs
+  f61c9f1 (relay only, unit without `--data-dir`). A worker session may not run
+  `deploy/deploy.sh`: the auto-mode classifier denies it as "Production Deploy". The human
+  runs it (`cd ~/VSCode/EngineCollab/CollabSession && deploy/deploy.sh
+  horizon@212.227.140.164 7777`, HEAD e3f4649) or allows it. Baseline against the host
+  before that: `HE_TEST_RELAY=212.227.140.164:7777 he_tests --source-file=*test_net_relay.cpp
+  --test-case=*real collab_server*` 2/2 (79 assertions); the team live case of
+  test_net_team fails at sign-in, as expected on the old server. After the deploy, check
+  `~/collab-relay/bin/VERSION` = e3f4649 and `--data-dir` in the unit's ExecStart, then rerun
+  both live cases (relay must stay 2/2, team must pass). Every live team run leaves a
+  `he-test-N` team on the server (the protocol has no delete-team).
