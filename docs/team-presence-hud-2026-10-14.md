@@ -136,30 +136,75 @@ still open; click on the stack pins, a click elsewhere unpins; sign-out removes 
 Step-3 test: click now pins, `Open Team Window` asks for the window. Screenshots
 `team-footer-online-stack`, `-menu`, `-menu-hosting`.
 
+## Step 5: the slide when someone joins
+
+A member who leaves the stack because they joined the session now travels: their
+face slides from where it stood in the stack (from the "+N" if it was not shown) to
+their face in the session's cluster, 0.4 s ease-out (`TeamView::kJoinSlideSeconds`),
+turning from the team's rounded square into a circle on the way, green dot fading.
+The session cluster leaves that face out until the slide lands. Joining only:
+someone who leaves the session reappears in the stack at once.
+
+- **Detection** `stepJoins` (`TeamView.cpp:359`), once per ImGui frame from whichever
+  footer call comes first: last frame's stack positions (`s_stackLast`, recorded by
+  `drawFooterOnline` `:452/:460`) against this frame's `onlineOutsideSession()`. A
+  name that left the stack while its member is still online and not you is "in the
+  session" by step 3's rule; gone offline gets no slide. Slides hold name, start
+  rect and start time only; member and target are looked up by name every frame.
+  Dropped when done, when the member is back in the stack, or on sign-out.
+- **Hide query** `footerJoining(team, name)` (`TeamView.h:159`, `.cpp:600`), called by
+  `CollabPresenceBar::DrawFooter` (`CollabPresenceBar.cpp:357`) for every shown face
+  before it draws it. It runs the step itself, so the face is already left out on the
+  join frame (the cluster is drawn before the stack in EditorUI's chain).
+- **Target** `CollabPresenceBar::FooterFaces()` (`.h:46`): every shown face's rect by
+  participant name, skipped ones included. Matched in any case
+  (`TeamController::sameMemberName`, the rule's own comparison, now public). No
+  face to land on (session "+N", no cluster) → the slide is dropped, not drawn.
+- **Ghost** `drawFooterJoins` (`TeamView.cpp:608`), called from `EditorUI.cpp:3439`
+  after the online block, outside its `onlineW > 0` guard (the stack is gone when the
+  last one online joined). Footer draw list only, no width: the chain is unchanged.
+  `faceAt` gained a `roundness` (default 0.2, unchanged for every other caller).
+
+Test `test_team_ui.cpp:990`: the harness footer got a session stand-in (grey circles,
+`Ui::session`, hides via `footerJoining`, reports `sessionFaces`). Bob joins: on the
+join frame he is out of the stack, the ghost is at his old stack rect, his session
+face hidden; frame 6 strictly between, blue pixels in the ghost; frame 22 within
+1 px of the target, still hidden; frame 26 ghost gone, session face at the target.
+Cleo joins as "cleo" (any case) and leaves: back in the stack, nothing sliding.
+No session cluster: the slide is dropped. Shots `team-footer-joining`, `-joined`.
+
+Not done: the other faces jump when one leaves the stack (the stack re-lays out and
+the session cluster grows by a face; both right-anchored in the chain). A picture
+face keeps square cells while its frame rounds (cells are rectangles, ImGui cannot
+clip round); it lasts 0.4 s and the real round face replaces it.
+
 ## Handoff
 
-- **Topic / step:** 202, step 4 of 6 (stacked online faces, hover menu with Invite).
+- **Topic / step:** 202, step 5 of 6 (the slide from the online stack to the session).
 - **Branch:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
-  (code 02768795 + this doc). Server CollabSession b4a47a5 still **not deployed** (step 1).
-- **Done:** "Step 4" above.
+  (code 6a5b63c7 + this doc). Server CollabSession b4a47a5 still **not deployed** (step 1).
+- **Done:** "Step 5" above; steps 2-4 above stand unchanged.
 - **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor -j8, rc 0):**
-  `test_team_ui` 9/9 (600 assertions); screenshots looked at (stack: B blue on top, three
-  grey faces under it with dark seams, four green dots, "+2", rule, Anna; menu: six rows,
-  greyed Invite unhosted, "invited" after Eli's press). `editor_help_audit.py --check`
-  1173/1173. Hidden `HorizonEditor` 120 frames, scratch HE_CONFIG_DIR: clean exit, 0
-  errors (smoke only). Full he_tests without test_material_graph: 5116/5116
-  cases, 1289521 assertions, rc 0.
-- **Not verified:** the real editor by hand (menu over docked panels, beside the real
-  session cluster and its menu; both menus pinned at once is possible and untested);
-  the green dots still touch the footer's bottom edge in the crop (step 3's ~1.5 px
-  overhang; look at it under the editor's body font in step 6); Windows/Linux only via CI.
-- **Decisions:** click pins the menu (as the session's cluster does) instead of opening
-  the Team window; the window is one button away in the menu. The menu lists everyone
-  online-outside, no cap or scroll (teams are small). Invite rule = the Team window's.
-- **Traps:** a button in an overlay menu needs `AllowWhenBlockedByActiveItem` in the
-  hover test that keeps the menu open. Test harness `Ui::footer()` calls the menu after
-  the footer's `End()` with the probe still set, like EditorUI's overlay pass.
-- **Next steps:** 1. Step 5: the slide, keyed by member name, from this stack to
-  `CollabPresenceBar` (onlineLayout gives the face positions). 2. Probably give
-  `CollabPresenceBar::drawMenuWindow` the same hover flag (check its Remove/Block
-  unpinned). 3. Deploy b4a47a5 (the human).
+  `test_team_ui` 10/10 (672 assertions); shots looked at (frame 6: blue B past the rule,
+  over Anna's stand-in on its way to slot 2, half round, dot fading; landed: two
+  session circles, Cleo still in the stack). `editor_help_audit.py --check` 1173/1173
+  (no new labelled control). Hidden `HorizonEditor` 120 frames, scratch HE_CONFIG_DIR:
+  clean exit, 0 errors (smoke only; no session in it). Full he_tests without
+  test_material_graph: 5117/5117 cases, 1289250 assertions, rc 0.
+- **Not verified:** the slide in the real editor (CollabPresenceBar is compiled without
+  ImGui in he_tests, so `FooterFaces()` and the skip in `DrawFooter` are covered only by
+  the harness stand-in that mirrors them); step 4's open items (menus over docked
+  panels, green dot vs. the footer's bottom edge); Windows/Linux only via CI.
+- **Decisions:** joining only, no reverse slide. Start from the "+N" for a member not
+  shown; no target face (session "+N") → no slide. The ghost is drawn in the footer,
+  outside the width chain. `faceAt` got `roundness` instead of a second face drawer.
+- **Traps:** EditorUI draws the session cluster *before* the stack, so the hide query
+  must run the per-frame step itself (`stepJoins`, keyed on `ImGui::GetFrameCount()`),
+  or the joining face shows at its target for one frame. Slide state is file-static:
+  a new ImGui context (next test) starts at frame 0 again; sign-out clears it.
+- **Next steps:** 1. Step 6: look at the slide in the real editor with two editors in a
+  team session (two scratch HE_CONFIG_DIRs, local collab_server), plus step 4's items.
+  2. Maybe ease the other faces' jump when the stack loses one. 3. Probably give
+  `CollabPresenceBar::drawMenuWindow` `AllowWhenBlockedByActiveItem` (step 4).
+  4. Deploy b4a47a5 (the human).
+
