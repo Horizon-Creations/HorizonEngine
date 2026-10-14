@@ -60,3 +60,41 @@ closes them.
   on the host and a refusal notice on the joiner, as for live saves.
 * Asset kinds that do not travel (meshes, textures without large-asset sync) are not caught up;
   they were never in the touched set.
+
+## Handoff
+
+- **Topic / step:** 198, step 7 of 11
+- **Branch / commit:** `claude/audit-vollst-ndige-bestandsaufnahme-was-ber-live-collab-sitz` @ 4de4c611 + this doc commit (pushed)
+- **Done:** a late joiner's and a rejoiner's edits now reach every peer; every joiner is caught
+  up on the session's files, ops and GameInstance graph; a client's save that waited for the lock
+  goes out on the grant; Collab panel offers Rejoin after a lost connection.
+- **Files touched:** `src/HE_Editor/CollabController.cpp:2932` acceptRevision (per originator),
+  `:4405` noteSessionOp, `:4435` catchUpJoiner, `:1058` join/leave hooks, `:1468` publish on
+  grant, `:3090` deferral, `:2147` canRejoin/rejoinLastSession/redialLastJoin;
+  `CollabController.h` (m_seenRevision, m_sessionTouched/Ops, m_publishOnGrant, LastJoin.banned/joined);
+  `src/HE_Net/src/CollabSession.cpp:2020` sendAssetTo / sendAssetOpApplyTo;
+  `src/HE_Editor/EditorApplication.cpp:939` GameInstance file apply; `CollabPanel.cpp:1360` Rejoin;
+  `EditorHelp.cpp` "Collaboration Session/Rejoin".
+- **Verified:** out/build/release: `he_tests` (75 steps) and `HorizonEditor` (85 steps) build rc 0.
+  New tests `test_collab_controller.cpp:3517-3745` (5 cases, 52 assertions) green; negative
+  control: with the path-only revision key and without the grant deferral, "Revisions" and
+  "Lock grant" fail. test_collab_controller 86/86; test_net_collab 113, collab_docsync 24,
+  collab_undo 9, editor_help 19, mcp_tools_collab 7, terrain_sync 10, editor_commands 13. Full
+  he_tests minus test_material_graph (`HOME=$(mktemp -d)`): 5132/5132. `editor_help_audit.py
+  --check` 1168/1168.
+- **Not verified:** no live two-editor run (Rejoin button, GameInstance catch-up in
+  EditorApplication.cpp: build-checked only, not in he_tests). The kick stands in for a dropped
+  link in the rejoin test. Relay path not exercised (same frames, TCP to the relay).
+- **Decisions taken:** no seq/acks on live frames (TCP + host relay order); state-based catch-up
+  from the host disk, only session-touched files; no protocol bump (no new frames or shapes);
+  rejoin is host-authoritative, offline edits are replaced.
+- **Decisions suggested, not taken:** switch `sendTransform` to reliable before any UDP path;
+  a joiner notice "caught up on N changes" (only a host log line now).
+- **Pending:** step 8 (save/idle hook to the server) can reuse `m_sessionTouched` as "what the
+  session changed". Rename-then-recreate replay limit (section 5).
+- **Traps:** CollabSession.h edit rebuilt only 75 he_tests steps here, not ~410. `cp` back of a
+  backed-up .cpp updates mtime, so ninja rebuilds it (good for a negative control).
+  `onParticipantJoined/Left` had no caller before; the controller now owns both slots.
+- **Next steps:** 1. Step 8: hook `EditorUI::saveAsset` / idle detection, start from
+  `CollabController::m_sessionTouched`. 2. Step 11 live run: drop Bob's network (not a kick),
+  edit a material + GameInstance on Anna, press Rejoin, check both arrive; late join with Cara.
