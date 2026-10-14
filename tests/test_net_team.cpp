@@ -446,6 +446,10 @@ TEST_CASE("Team: a refused session token is forgotten, at start and while signed
     CHECK(team.lastError().find("wrong team") == std::string::npos);
     CHECK_FALSE(fs::exists(dir.file()));
     CHECK_FALSE(team.usingToken());
+    TeamController::Notice atStart;
+    REQUIRE(team.pollNotice(atStart));   // said where it is seen, not only in the Team window
+    CHECK(atStart.error);
+    CHECK(atStart.text.find("no longer valid") != std::string::npos);
     const int logins = server.logins;
     for (int i = 0; i < 50; ++i) {
         server.pump();

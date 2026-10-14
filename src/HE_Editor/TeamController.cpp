@@ -419,6 +419,10 @@ void TeamController::update(std::uint64_t nowMs)
 				m_error = "The saved sign-in is no longer valid";
 				m_error += !m_wasLoggedIn || why.empty() ? std::string(".") : " (" + why + ").";
 				m_error += " Sign in with your password.";
+				// At start nobody has the Team window open, and the editor was
+				// expected to be signed in: say so where it is seen. (A live
+				// connection gets its notice below.)
+				if (!m_wasLoggedIn) notice(m_error, true);
 				Logger::Log(Logger::LogLevel::Info,
 				            ("Team: the saved session was refused" + (why.empty() ? std::string() : " — " + why)).c_str());
 			}

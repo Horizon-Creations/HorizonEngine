@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
