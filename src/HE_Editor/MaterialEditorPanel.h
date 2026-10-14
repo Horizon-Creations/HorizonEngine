@@ -67,6 +67,10 @@ namespace MaterialEditorPanel
 	// owner answers" dispatch as save() and reloadFromDisk().
 	CollabDocSync::DocBindings collabDocs(const std::string& assetPath);
 
+	// Forget the cached graph of the material function at `contentPath` (codegen
+	// and FunctionCall pins read it). Called when the function's file was
+	// re-read from disk; the panel's own save clears it by itself.
+	void forgetFunctionGraph(const std::string& contentPath);
 
 	// One-shot "open this asset in an editor tab" request, set by the canvas (e.g.
 	// double-clicking a Material Function node) and consumed by EditorUI's tab bar.

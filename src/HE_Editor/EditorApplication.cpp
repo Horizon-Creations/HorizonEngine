@@ -3197,6 +3197,10 @@ void EditorApplication::OnRender(float dt)
 		{
 			m_hotReloadTimer = 0.0f;
 			auto changed = contentManager().pollHotReload();
+			// A peer's file was re-read the moment it arrived (applyAssetBytes);
+			// what follows is the part of a reload it still needs.
+			changed.insert(changed.end(), m_reloadedByPeer.begin(), m_reloadedByPeer.end());
+			m_reloadedByPeer.clear();
 			// One recompile per MODULE, not per entity running it: a script on
 			// twenty entities is one module, and reloading it twenty times only
 			// costs twenty compiles of the same source.
@@ -3218,6 +3222,20 @@ void EditorApplication::OnRender(float dt)
 					break;
 				case HE::AssetType::Material:
 					renderer()->InvalidateMaterial(id);
+					// An instance carries a derived copy of its parent's shader and
+					// parameter block. The Material Editor re-derives them on every
+					// edit it makes; a master that changed on disk (a collaborator's
+					// edit, a pull) has to do the same, or its instances keep
+					// rendering the old graph.
+					if (const MaterialAsset* m = contentManager().getMaterial(id))
+						if (m->parentMaterialPath.empty())
+							contentManager().syncMaterialInstancesOf(m->path);
+					break;
+				case HE::AssetType::MaterialFunction:
+					// The Material Editor caches function graphs for codegen and for
+					// the pins of FunctionCall nodes; only its own save cleared them.
+					if (const MaterialFunctionAsset* fn = contentManager().getMaterialFunction(id))
+						MaterialEditorPanel::forgetFunctionGraph(fn->path);
 					break;
 				case HE::AssetType::Texture:
 					// Texture GPU caches are keyed by material UUID, not texture UUID.
@@ -11012,8 +11030,29 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 	}
 	// Only content assets are registered with the ContentManager; a raw source
 	// file has nothing to reload there. The open tab is refreshed by the caller.
-	if (relativePath.rfind(kSourceKeyPrefix, 0) != 0)
-		contentManager().loadAsset(relativePath);
+	if (relativePath.rfind(kSourceKeyPrefix, 0) == 0) return;
+
+	// loadAsset is a no-op for a path that is already loaded, and every asset a
+	// tab shows IS loaded: the tab reload the caller does next would re-read the
+	// copy from before the peer's edit, seed its collab mirror from it, and keep
+	// showing that once the hot-reload poll caught up, because nothing reloads
+	// the tab a second time. So the copy is replaced here, the way the poll
+	// replaces one (same UUID, every reference stays valid), and not left to the
+	// poll noticing a newer mtime.
+	ContentManager& cm = contentManager();
+	if (cm.isLoaded(relativePath))
+	{
+		const HE::UUID old = cm.idForPath(relativePath);
+		cm.unloadAsset(old);
+		const HE::UUID id = cm.loadAsset(relativePath);
+		if (!(id == HE::UUID{}))
+		{
+			m_reloadedByPeer.push_back(id);
+			m_hotReloadTimer = 1.5f;   // the poll's follow-up, on the next frame
+		}
+		return;
+	}
+	cm.loadAsset(relativePath);
 }
 
 // ─── Duplicate / cut / copy / paste / delete ──────────────────────────────────

@@ -974,6 +974,11 @@ private:
 	// the tabs are told to reload AFTER that poll, which the restore forces to
 	// run on the next frame — otherwise a tab would re-read the stale copy.
 	std::vector<std::string> m_reloadTabsAfterPoll;
+	// Assets a collaboration peer's file just replaced. applyAssetBytes re-reads
+	// them on the spot, so the tab reload right after it sees the new bytes; the
+	// per-type follow-up a hot reload gets (renderer caches, material instances,
+	// prefab placements) runs on the next poll, which the arrival forces.
+	std::vector<HE::UUID> m_reloadedByPeer;
 	// Set by the quit the UI hands us (AppContext::quit), which only fires once
 	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
 	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
