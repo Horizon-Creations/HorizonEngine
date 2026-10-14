@@ -205,10 +205,11 @@ void TaskBoardTeam::queue(const std::string& to, TaskNotice n, std::uint64_t now
 	if (n.kind == TaskNoticeKind::Assigned)
 	{
 		// A newer assignment of the same task to the same person replaces one
-		// still settling: the picker ticked twice, the team hears the result.
+		// not sent yet — still settling (the picker ticked twice) or held for
+		// someone not online: they hear how it stands, once.
 		m_outbox.erase(std::remove_if(m_outbox.begin(), m_outbox.end(), [&](const Outgoing& w) {
 			return w.notice.kind == TaskNoticeKind::Assigned && w.notice.task == n.task &&
-			       sameTaskMember(w.to, to) && w.dueMs > nowMs;
+			       sameTaskMember(w.to, to);
 		}), m_outbox.end());
 	}
 	o.payload = encodeTaskNotice(n);

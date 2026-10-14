@@ -313,12 +313,20 @@ TEST_CASE("task board team: a member who is not online gets it when they are; th
 	CHECK(anna.link.sent.empty());       // nobody to give it to yet
 	CHECK(anna.bridge.pending() == 2);
 
+	// Anna changes Bob's task again while he is away: the held notice is
+	// replaced, and he hears how it stands, once.
+	anna.edit([&](TaskBoard& b) { b.assign(a, { "Bob", "Anna" }, "Anna", kWall + 3); }, server.nowMs);
+	CHECK(anna.bridge.pending() == 2);
+
 	// Bob opens his editor five minutes later: his notice goes, Cleo's waits.
 	frame(5 * 60'000);
 	bob.link.signedIn = true;
 	frame(16);
 	frame(server.latencyMs);
 	CHECK(bob.bellTexts() == std::vector<std::string>{ "Anna assigned you “Crates”" });
+	CHECK(bob.link.received == 1);
+	REQUIRE(bob.bridge.recent().size() == 1);
+	CHECK(bob.bridge.recent().front().notice.assignees == std::vector<std::string>{ "Bob", "Anna" });
 	CHECK(anna.bridge.pending() == 1);
 
 	// Cleo stays away past the outbox's time: dropped, and never delivered

@@ -38,7 +38,9 @@ op and the server change are a follow-up step once 0.7.0 is merged. Until then
   whoever it was taken from. Never yourself. Only names on the team, in the
   team's spelling, case-insensitive, each once.
 - **When:** an assignment settles for 1.5 s (`kAssignSettleMs`), so three ticks in
-  the picker are one notice per person, carrying the final list. A recipient who
+  the picker are one notice per person, carrying the final list (a newer
+  assignment of the same task replaces any unsent one for that person, also one
+  held for somebody offline). A recipient who
   is not online is held until they are; everything is held while the link is
   down. After 15 min (`kOutboxTtlMs`) a notice is dropped: the change is in the
   file by then.
@@ -98,7 +100,9 @@ session must not run it.
 2. `TeamController`: `notifyMember(member, payload)` and a `pollTaskNotice()`
    queue fed from `handleEvent` (event 9 must NOT go to the generic notice text).
 3. `src/HE_Editor/TaskBoardTeamLink.{h,cpp}`: `TaskTeamLink` over TeamController:
-   `connected()` = `signedIn() && noticesSupported()`, `self()` = `member()`,
+   `connected()` = `signedIn() && noticesSupported() && !members().empty()` (an
+   edit made before the roster is in would find nobody on the team to tell and
+   queue nothing), `self()` = `member()`,
    `members()` from `members()` (name, online; empty between login and the
    LIST_MEMBERS reply, which the bridge reads as "not known yet" and holds the
    outbox, never as "everybody left"), `send()` = `notifyMember` (a not-online
