@@ -95,6 +95,14 @@ void probe(const char* label, const std::string& row = {})
 	                     (ImGui::GetItemFlags() & ImGuiItemFlags_Disabled) != 0 });
 }
 
+// The same for something drawn without an item of its own (a face inside a
+// cluster that has one hit box).
+void probeRect(const char* label, const std::string& row, ImVec2 mn, ImVec2 mx)
+{
+	if (!s_probe) return;
+	s_probe->push_back({ label, row, mn.x, mn.y, mx.x, mx.y, false });
+}
+
 // Defined below the two entry points. The entry points come first because they
 // open the "Team" help scope every control in this file is looked up under,
 // and scripts/editor_help_audit.py reads a file top to bottom.
@@ -248,6 +256,103 @@ bool drawFooterStatus(TeamController& team, const Settings& settings, Form& form
 		ImGui::OpenPopup(kSignInModal);
 	drawSignInModal(team, settings, form);
 	return clicked && s == TeamController::Status::SignedIn;
+}
+
+namespace
+{
+// Enough faces to see at a glance who is around, then a count: the same cap
+// as the session's cluster, so the two together cannot run into the counters.
+constexpr int   kOnlineShown = 4;
+constexpr float kOnlineGap   = 3.0f;
+
+// Split out so footerOnlineWidth() and drawFooterOnline() cannot disagree.
+struct OnlineLayout
+{
+	int   shown  = 0;
+	int   extra  = 0;
+	float face   = 0.0f;
+	float width  = 0.0f;
+	float extraW = 0.0f;
+	char  extraLabel[16] = {};
+};
+
+OnlineLayout onlineLayout(std::size_t online)
+{
+	OnlineLayout l;
+	if (online == 0) return l;
+	l.face  = footerStatusWidth();
+	l.shown = std::min<int>(kOnlineShown, static_cast<int>(online));
+	l.extra = static_cast<int>(online) - l.shown;
+	if (l.extra > 0)
+	{
+		std::snprintf(l.extraLabel, sizeof(l.extraLabel), "+%d", l.extra);
+		l.extraW = ImGui::CalcTextSize(l.extraLabel).x + 4.0f;
+	}
+	l.width = l.shown * l.face + (l.shown - 1) * kOnlineGap + l.extraW;
+	return l;
+}
+} // namespace
+
+float footerOnlineWidth(const TeamController& team)
+{
+	return onlineLayout(team.onlineOutsideSession().size()).width;
+}
+
+bool drawFooterOnline(TeamController& team, bool sessionBeside)
+{
+	const std::vector<const HE::Net::TeamMember*> online = team.onlineOutsideSession();
+	const OnlineLayout l = onlineLayout(online.size());
+	if (l.shown == 0) return false;
+
+	// One hit box for the whole cluster, as for the session's faces.
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton("##teamOnline", ImVec2(l.width, l.face));
+	probe("##teamOnline");
+	const bool clicked = ImGui::IsItemClicked();
+	const bool hovered = ImGui::IsItemHovered();
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	for (int i = 0; i < l.shown; ++i)
+	{
+		const HE::Net::TeamMember& m = *online[static_cast<std::size_t>(i)];
+		const ImVec2 p(origin.x + i * (l.face + kOnlineGap), origin.y);
+		faceAt(dl, p, &m, m.color, m.name, l.face);
+		// The green dot in the corner says "online", and is the mark the
+		// session's faces never carry: those people are not online somewhere,
+		// they are here.
+		const float  r = std::max(2.5f, l.face * 0.17f);
+		const ImVec2 c(p.x + l.face - r * 0.8f, p.y + l.face - r * 0.8f);
+		dl->AddCircleFilled(c, r + 1.0f, IM_COL32(0, 0, 0, 170));
+		dl->AddCircleFilled(c, r, Theme::u32(Theme::Ok));
+		probeRect("##teamOnlineFace", m.name, p, ImVec2(p.x + l.face, p.y + l.face));
+	}
+	if (l.extra > 0)
+	{
+		dl->AddText(ImVec2(origin.x + l.width - l.extraW + 4.0f,
+		                   origin.y + (l.face - ImGui::GetTextLineHeight()) * 0.5f),
+		            ImGui::GetColorU32(ImGuiCol_TextDisabled), l.extraLabel);
+	}
+
+	// The rule between "online in the team" and "in this session", in the
+	// middle of the footer's 16 px gap.
+	if (sessionBeside)
+	{
+		const float x = std::floor(origin.x + l.width + 8.0f) + 0.5f;
+		dl->AddLine(ImVec2(x, origin.y + 1.0f), ImVec2(x, origin.y + l.face - 1.0f),
+		            Theme::u32(Theme::TextDim), 1.0f);
+	}
+
+	if (hovered)
+	{
+		std::string names;
+		for (const HE::Net::TeamMember* m : online)
+			names += (names.empty() ? "" : ", ") + m->name;
+		ImGui::SetTooltip(team.sessionRunning()
+		                      ? "Online in the team, not in this session: %s\nClick to open the Team window."
+		                      : "Online in the team: %s\nClick to open the Team window.",
+		                  names.c_str());
+	}
+	return clicked;
 }
 
 namespace

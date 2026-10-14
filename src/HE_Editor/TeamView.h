@@ -14,6 +14,8 @@
 //                                  sees next to your name (topic 202)
 //   the footer, right of the bell  your own status: your face, or a red X that
 //                                  opens a sign-in modal (topic 202)
+//   the footer, left of the        who else in the team is online and not in
+//   session's faces                the session (topic 202)
 //
 // Takes a TeamController and the three config strings, never AppContext — which
 // is what lets tests/test_team_ui.cpp draw the real thing headless against a
@@ -103,6 +105,22 @@ namespace TeamView
 	float footerStatusWidth();
 	// True when your face was clicked: the caller opens Window ▸ Team.
 	bool drawFooterStatus(TeamController& team, const Settings& settings, Form& form);
+
+	// ── The footer: who else in the team is online (topic 202) ──
+	// The members TeamController::onlineOutsideSession() names, left of the
+	// session's own cluster (CollabPresenceBar). Set apart from it on purpose:
+	// team faces are rounded squares with a green "online" dot, the session's
+	// are rings in the participant colour, and a thin rule stands between the
+	// two while both are there. Joining the session moves a member from this
+	// cluster to that one.
+	//
+	// footerOnlineWidth is 0 when there is nobody to show (not signed in, or
+	// everyone online is in the session) and the footer leaves the slot out.
+	float footerOnlineWidth(const TeamController& team);
+	// `sessionBeside`: the session cluster is drawn right of this one, so the
+	// rule between them is drawn. True when the cluster was clicked: the
+	// caller opens Window ▸ Team.
+	bool drawFooterOnline(TeamController& team, bool sessionBeside);
 
 	// ── Test seam ──
 	// Where each control was drawn in the last frame, by label and the row it

@@ -694,6 +694,31 @@ bool TeamController::decline(const std::string& session)
 	return true;
 }
 
+// ─── Presence ────────────────────────────────────────────────────────────────
+
+std::vector<const HE::Net::TeamMember*> TeamController::onlineOutsideSession() const
+{
+	if (!signedIn()) return {};
+	std::vector<std::string> names;
+	if (m_collab.inSession())
+		for (const HE::Net::Participant& p : m_collab.participants()) names.push_back(p.name);
+	return onlineOutside(members(), names);
+}
+
+std::vector<const HE::Net::TeamMember*> TeamController::onlineOutside(
+	const std::vector<HE::Net::TeamMember>& members, const std::vector<std::string>& inSession)
+{
+	std::vector<const HE::Net::TeamMember*> out;
+	for (const HE::Net::TeamMember& m : members)
+	{
+		if (!m.online || m.you) continue;
+		const bool there = std::any_of(inSession.begin(), inSession.end(),
+		                               [&](const std::string& n) { return sameName(n, m.name); });
+		if (!there) out.push_back(&m);
+	}
+	return out;
+}
+
 // ─── Members ─────────────────────────────────────────────────────────────────
 
 bool TeamController::addMember(const std::string& name, const std::string& password, bool admin)

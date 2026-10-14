@@ -115,8 +115,16 @@ namespace
 			ImGui::PopStyleVar();
 			TeamView::setProbe(&items);
 			ImGui::TextUnformatted("Ready");
-			ImGui::SameLine(float(w) - TeamView::footerStatusWidth() - 8.0f - 60.0f);
+			const float statusX = float(w) - TeamView::footerStatusWidth() - 8.0f - 60.0f;
+			ImGui::SameLine(statusX);
 			if (TeamView::drawFooterStatus(team, settings(), form)) openTeamWindow = true;
+			// Who else is online, left of it with the editor's 16 px gap (the
+			// bell and the session's own faces between them are EditorUI's).
+			if (const float onlineW = TeamView::footerOnlineWidth(team); onlineW > 0.0f)
+			{
+				ImGui::SameLine(statusX - 16.0f - onlineW);
+				if (TeamView::drawFooterOnline(team, team.sessionRunning())) openTeamWindow = true;
+			}
 			TeamView::setProbe(nullptr);
 			ImGui::End();
 		}
@@ -675,6 +683,134 @@ TEST_CASE("Team UI: the footer status — a red X opens the sign-in modal, signe
 	CHECK(ui.teamName == "studio");
 	CHECK(ui.find("Team##teamname"));
 	shot("team-footer-modal-ask-team.bmp");
+}
+
+TEST_CASE("Team presence: online, not you, not in the session — matched by name, any case (topic 202)")
+{
+	std::vector<HE::Net::TeamMember> members(4);
+	members[0].name = "Anna"; members[0].online = true; members[0].you = true;
+	members[1].name = "Bob";  members[1].online = true;
+	members[2].name = "Cleo"; members[2].online = true;
+	members[3].name = "Dana";
+
+	auto names = [](const std::vector<const HE::Net::TeamMember*>& v) {
+		std::vector<std::string> out;
+		for (const auto* m : v) out.push_back(m->name);
+		return out;
+	};
+	CHECK(names(TeamController::onlineOutside(members, {})) == std::vector<std::string>{ "Bob", "Cleo" });
+	CHECK(names(TeamController::onlineOutside(members, { "Anna", "bob" })) == std::vector<std::string>{ "Cleo" });
+	CHECK(TeamController::onlineOutside(members, { "BOB", "Cleo" }).empty());
+	// Someone in the session who is not in the team changes nothing.
+	CHECK(names(TeamController::onlineOutside(members, { "Guest" })) == std::vector<std::string>{ "Bob", "Cleo" });
+}
+
+TEST_CASE("Team UI: the footer shows who else is online; joining the session takes them out of it (topic 202)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.roster     = { "Anna", "Bob", "Cleo", "Dana" };
+	server.alsoOnline = { "Bob", "Cleo" };      // Dana is offline
+	server.setProfile("Bob", 40, 110, 240);    // blue, no picture: a blue square
+
+	HorizonWorld     world, bobWorld;
+	CollabController collab, bobCollab;        // Anna's editor, and Bob's for the session
+	collab.setWorld(&world);
+	bobCollab.setWorld(&bobWorld);
+	TeamController team(collab);
+	Ui ui{ team };
+	ui.server   = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	ui.teamName = "studio";
+	ui.member   = "anna";
+
+	std::uint64_t now = 1;
+	auto pump   = [&] { server.pump(); collab.update(now); bobCollab.update(now); team.update(now); now += 16; };
+	auto footer = [&] { ui.frame(Surface::Footer, pump); };
+	auto away   = [&] { ImGui::GetIO().AddMousePosEvent(2.0f, 2.0f); };
+	auto shot   = [&](const char* name) {
+		he_ui::Image img;
+		away();
+		footer();
+		ui.frame(Surface::Footer, pump, false, &img);
+		REQUIRE(img.valid());
+		dump(img, name);
+		return img;
+	};
+	auto face = [&](const char* who) { return ui.find("##teamOnlineFace", who); };
+
+	// Signed out: nobody is shown, whatever the server knows.
+	away();
+	footer();
+	CHECK(TeamView::footerOnlineWidth(team) == 0.0f);
+	CHECK(ui.find("##teamOnline") == nullptr);
+
+	// Signed in as Anna: Bob and Cleo, left of her own status, in the footer;
+	// not Anna (that is the status) and not Dana (offline).
+	REQUIRE(team.signIn(ui.server, ui.teamName, ui.member, "correct-horse"));
+	REQUIRE(frameUntil(footer, [&] { return team.signedIn() && face("Bob") && face("Cleo"); }));
+	footer();
+	CHECK(face("Anna") == nullptr);
+	CHECK(face("Dana") == nullptr);
+	REQUIRE(ui.find("##teamOnline"));
+	REQUIRE(ui.find("##teamStatus"));
+	CHECK(ui.find("##teamOnline")->x1 <= ui.find("##teamStatus")->x0 - 16.0f);
+	CHECK(ui.find("##teamOnline")->y0 >= float(kPageH) - kFooterH);
+	CHECK(face("Bob")->x1 <= face("Cleo")->x0);   // roster order
+	{
+		const he_ui::Image img = shot("team-footer-online.bmp");
+		CHECK(pixelsIn(img, *face("Bob"), isBlue) > 20);
+		// The green "online" dot in the face's corner (Theme::Ok).
+		CHECK(pixelsIn(img, *face("Cleo"), [](std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+			return g > 150 && g > r + 40 && g > b + 40;
+		}) > 3);
+	}
+
+	// A click asks for the Team window, like your own face.
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamOnline"));
+	CHECK(ui.openTeamWindow);
+	ui.openTeamWindow = false;
+
+	// Anna hosts, Bob joins: he is in the session now, so he leaves the online
+	// cluster (the session's own faces show him) and Cleo stays.
+	REQUIRE(collab.startHosting(0, "Anna"));
+	REQUIRE(bobCollab.joinSession("127.0.0.1", collab.port(), collab.joinCode(), "Bob"));
+	REQUIRE(frameUntil(footer, [&] { return collab.participants().size() == 2; }));
+	footer();
+	CHECK(face("Bob") == nullptr);
+	REQUIRE(face("Cleo"));
+	{
+		const he_ui::Image img = shot("team-footer-online-bob-in-session.bmp");
+		CHECK(pixelsIn(img, *ui.find("##teamOnline"), isBlue) == 0);
+	}
+
+	// Bob leaves the session: back on the online side.
+	bobCollab.leave();
+	REQUIRE(frameUntil(footer, [&] { return face("Bob") != nullptr; }));
+
+	// Everyone in the session: the slot is gone, not an empty cluster.
+	collab.leave();
+	REQUIRE(collab.startHosting(0, "Anna"));
+	HorizonWorld cleoWorld;
+	CollabController cleoCollab;
+	cleoCollab.setWorld(&cleoWorld);
+	REQUIRE(bobCollab.joinSession("127.0.0.1", collab.port(), collab.joinCode(), "Bob"));
+	REQUIRE(cleoCollab.joinSession("127.0.0.1", collab.port(), collab.joinCode(), "cleo"));
+	REQUIRE(frameUntil(footer, [&] {
+		cleoCollab.update(now);
+		return collab.participants().size() == 3;
+	}));
+	footer();
+	CHECK(TeamView::footerOnlineWidth(team) == 0.0f);
+	CHECK(ui.find("##teamOnline") == nullptr);
+	cleoCollab.leave();
+	bobCollab.leave();
+	collab.leave();
+
+	// Signed out: gone too.
+	team.signOut();
+	footer();
+	CHECK(ui.find("##teamOnline") == nullptr);
 }
 
 TEST_CASE("Team UI: two editors through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")

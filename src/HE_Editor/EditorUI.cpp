@@ -3369,7 +3369,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// The chain is hand-maintained: inserting a widget here means editing
 		// EVERY block to its left as well, or the two overlap silently. Right to
 		// left the order is: FPS, your team status, notification bell, presence,
-		// download queue, session activity.
+		// online team members, download queue, session activity, MCP.
 
 		// Your team status, between the counters and the bell (topic 202): your
 		// face while signed in to the team server, a red X otherwise, which opens
@@ -3417,8 +3417,24 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			CollabPresenceBar::DrawFooter(ctx);
 		}
 
+		// Who else in the team is online and NOT in the session, left of the
+		// session's faces (topic 202): rounded squares with a green dot, and a
+		// rule between the two clusters, so "online somewhere" never reads as
+		// "here with you". Joining moves a face from this cluster to that one.
+		// Signed in it is there with or without a session.
+		const float onlineW = ctx.team ? TeamView::footerOnlineWidth(*ctx.team) : 0.0f;
+		if (onlineW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
+			                - (presenceW > 0.0f ? 16.0f : 0.0f));
+			if (TeamView::drawFooterOnline(*ctx.team, presenceW > 0.0f))
+				revealFloatingWindow(s_showTeam, "Team");
+		}
+
 		// EngineContent SFTP download queue — right-aligned, left of the presence
-		// cluster. Deliberately part of the RIGHT group rather than growing
+		// clusters. Deliberately part of the RIGHT group rather than growing
 		// rightwards from source control on the left: the label is an asset
 		// filename of unbounded length, and a left-anchored item that grows runs
 		// straight through the centred "Ready" text below. Right-aligning bounds
@@ -3426,10 +3442,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float syncW = EngineContentSyncBar::FooterWidth(ctx);
 		if (syncW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - syncW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
-			                - (presenceW > 0.0f ? 16.0f : 0.0f));
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f));
 			EngineContentSyncBar::DrawFooter(ctx);
 		}
 
@@ -3446,10 +3463,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float actW = CollabActivityBar::FooterWidth(ctx);
 		if (actW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - syncW - actW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f)
 			                - (syncW > 0.0f ? 16.0f : 0.0f));
 			if (CollabActivityBar::DrawFooter(ctx))
 				revealFloatingWindow(s_showCollab, "Collaboration");
@@ -3467,10 +3485,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// inserting anywhere else means editing everything to its left as well.
 		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - syncW - actW - mcpW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f)
 			                - (syncW > 0.0f ? 16.0f : 0.0f)
 			                - (actW > 0.0f ? 16.0f : 0.0f));
 			McpStatusBar::DrawFooter(ctx);

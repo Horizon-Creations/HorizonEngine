@@ -140,6 +140,21 @@ public:
 	bool join(const std::string& session);
 	bool decline(const std::string& session);
 
+	// ── Presence (topic 202) ──
+	// The members the footer shows on the "online" side: signed in somewhere,
+	// not you, and not a participant of the collab session running next door
+	// (team or not). Roster order; empty while not signed in. Pointers into
+	// members(), so only good until the next update().
+	//
+	// "In the session" is a participant with the member's name: a team
+	// session's participants are named after their member (hostSession and
+	// join pass member() as the display name), so the moment someone joins
+	// they leave this list and show up in the session's own cluster.
+	std::vector<const HE::Net::TeamMember*> onlineOutsideSession() const;
+	// The rule on its own, against a given list of participant names.
+	static std::vector<const HE::Net::TeamMember*> onlineOutside(
+		const std::vector<HE::Net::TeamMember>& members, const std::vector<std::string>& inSession);
+
 	// ── Members (admins) ──
 	bool addMember(const std::string& name, const std::string& password, bool admin);
 	bool removeMember(const std::string& name);
