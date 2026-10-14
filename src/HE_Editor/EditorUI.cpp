@@ -73,6 +73,7 @@
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
 #include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
+#include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "EditorRewards.h"               // the footer's "Saved"/"Build succeeded" moments
@@ -3214,6 +3215,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (SourceControlPanel::DrawFooterStatus(ctx))
 			revealFloatingWindow(s_showSourceControl, "Source Control");
 
+		// The task board, next to it — the other thing down here about the
+		// project rather than the editor. Its list opens from the overlay pass;
+		// its width stops short of the centred status line (TaskBoardFooter.h).
+		ImGui::SameLine(0.0f, 14.0f);
+		TaskBoardFooter::DrawFooter(ctx, TaskBoardFooter::budget(ImGui::GetCursorPosX(), ImGui::GetWindowWidth()));
+
 		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 		// The resolution is the actual viewport framebuffer size the scene renders at.
 		std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
@@ -4126,6 +4133,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     // nothing unless their own footer half ran this frame.
     CollabPresenceBar::DrawOverlay(ctx);
     NotificationBar::DrawOverlay(ctx);
+    if (TaskBoardFooter::DrawOverlay(ctx)) revealFloatingWindow(s_showTaskBoard, "Task Board");
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

@@ -115,7 +115,7 @@ AREAS: dict[str, list[str]] = {
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp",
                   "TextureViewerPanel.cpp", "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp",
-                  "TaskBoardPanel.cpp"],
+                  "TaskBoardPanel.cpp", "TaskBoardFooter.cpp"],
     "components": ["InspectorPanel.cpp"],
     "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolchainDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],

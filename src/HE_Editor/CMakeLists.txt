@@ -278,6 +278,8 @@ add_executable(HorizonEditor WIN32
 	TaskBoard.cpp
 	# ...and the panel that shows it (Window ▸ Task Board).
 	TaskBoardPanel.cpp
+	# ...and its count, next task and tick-off list in the footer.
+	TaskBoardFooter.cpp
 	InspectorPanel.cpp
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp

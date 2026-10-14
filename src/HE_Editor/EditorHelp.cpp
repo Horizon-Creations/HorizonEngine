@@ -2678,6 +2678,26 @@ namespace
 	  "Removes the task from the board and from Config/TaskBoard.json. What "
 	  "it linked to is not touched.",
 	  "", "" },
+	// The board's widget in the footer, and the list it opens. The widget and
+	// the rows are drawn by hand, so they are looked up by key.
+	{ "Task Board/Footer", "Tasks",
+	  "How many tasks are still open in this project — everything not Done — "
+	  "and, in the accent colour, how many of them are assigned to you; then "
+	  "the next one: yours first, blocked ones last, then by priority. Click "
+	  "for the list of open tasks, where you can tick one off.",
+	  "", "" },
+	{ "Task Board/Tick Off", "Done",
+	  "Marks the task Done, with your name in its history, and saves the "
+	  "board. The row stays in the list until it closes — untick it to put "
+	  "the task back the way it was.",
+	  "", "" },
+	{ "Task Board/Footer Task", "",
+	  "Opens the Task Board with this task's details.",
+	  "", "" },
+	{ "Task Board/Open Task Board", "Open Task Board",
+	  "Brings up the Task Board panel (Window ▸ Task Board), where tasks are "
+	  "added, linked and assigned.",
+	  "", "" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
