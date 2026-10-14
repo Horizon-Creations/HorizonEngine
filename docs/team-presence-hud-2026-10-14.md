@@ -7,7 +7,7 @@ participant icons are, set apart from them, stacked, revealed on hover (invite f
 never remove). Team accounts get a picture and a colour like collab participants.
 
 Plan (from the Hive): 1. profile picture and colour for team accounts (server, protocol,
-editor UI to set them) — **this document's step 1**; 2. own status icon left of the bell
+editor UI to set them) — **this document's step 1**; 2. own status icon right of the bell
 (signed in: own face; otherwise a red X that opens a sign-in modal); 3. presence HUD;
 4. stacked icons with hover reveal + Invite; 5. the icon slides from online to in-session
 on join; 6. verification.
@@ -54,54 +54,52 @@ drawn with ImDrawList rectangles because TeamView has no renderer. Help: `Team/C
 Picture...`, `Change Picture...`, `Remove Picture`, `Use Collaboration Profile`, `None`,
 `Custom` in `EditorHelp.cpp`.
 
+## Step 2: your own status right of the bell
+
+`TeamView::footerStatusWidth()` / `drawFooterStatus(team, settings, form)`
+(`TeamView.h:92-105`, `TeamView.cpp:189`): one text-line square (the bell's slot height).
+Signed in: your face (`faceAt`, `TeamView.cpp:290`, the draw-list half of `face()`), a
+click returns true and EditorUI opens Window ▸ Team. Otherwise two strokes: red
+(`Theme::Bad`) for signed out / refused / reconnecting, amber while a first sign-in is
+under way; a click opens the "Team Sign-In" modal (`drawSignInModal`, `TeamView.cpp:464`):
+member + password (the existing `Team/Member`, `Team/Password`, `Team/Sign In` help
+entries), server and team only when one was empty as it opened, the status line with the
+refusal, Sign In or Enter calls `TeamController::signIn` (works from Failed and
+Reconnecting: `begin()` disconnects first), Cancel. The modal stays open on a refusal and
+closes itself once signed in. Hover tooltip per state. In `EditorUI.cpp:3373-3391` the
+slot sits between FPS and the bell; `teamSlot` (width + 10 px) is subtracted in every block
+to its left. Test: `test_team_ui.cpp:571`.
+
 ## Handoff
 
-- **Topic / step:** 202, step 1 of 6 (team profiles: server, protocol, editor UI).
+- **Topic / step:** 202, step 2 of 6 (own status icon + sign-in modal).
 - **Branch / commit:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
-  @ 421f51a8 + face fix (pushed; contains topic 201's branch @ 538cc513). Server:
-  CollabSession `claude/he-net-relay-server` @ b4a47a5 (pushed, CI green:
-  https://github.com/Horizon-Creations/CollabSession/actions/runs/38548406552). **Not
-  deployed**: the rented host still runs an older build (no tokens, no profiles); against
-  it the editor just shows "no profiles yet" (`profilesSupported()` false).
-- **Done:** "Step 1" above. Code: `TeamClient.h` (TeamColor, TeamMember profile fields,
-  ops 16-19, `kAvatarFetchesInFlight`), `TeamClient.cpp` (`setProfile`, `mergeProfiles`,
-  `fetchAvatars`, GetAvatar branch at the top of `applyReply`), `TeamController.cpp`
-  ("Your profile" at the end; colour flush in `update()`), `TeamView.cpp` (`face()`,
-  `drawColourRow()`, `drawProfile()`, picture dialog), `FakeTeamServer.h` (ops 16-19,
-  `setProfile()`, `noProfiles`, `writeBmp()`).
-- **Verified (Mac, Release, `out/build/release`, full build of he_tests + HorizonEditor
-  rc 0):** server `team_store_test` all passed, `team_test.py` 24/24 (new: test_profiles,
-  test_profiles_survive_a_restart), `relay_test.py` 25/25. Engine: `test_net_team` 20/20
-  (1068 assertions) and `test_team_ui` 5/5 (345), both again with
-  `HE_TEST_TEAM_SERVER=127.0.0.1:47812` (local collab_server b4a47a5): 20/20 (1151) and
-  5/5 (365); server log shows "set its picture (64 px)", "set its colour", "removed its
-  picture". Regressions: test_collab_controller 74/74, test_mcp_tools_collab 7/7,
-  test_editor_help 19/19, test_mcp_tools_settings 20/20, test_net_relay 27/27.
-  `editor_help_audit.py --check` 1172/1172. Screenshot looked at:
-  `team-panel-profile.bmp` (HE_UI_DUMP_DIR), profile section + faces in the roster.
-- **Not verified:** the real editor window by hand (the SDL picture dialog in TeamView
-  passes no parent window); Windows/Linux only through CI run
-  https://github.com/Horizon-Creations/HorizonEngine/actions/runs/38558101088 (still
-  running at hand-off); the rented host (not deployed).
-- **Decisions:** separate ops instead of extending LIST_MEMBERS (old clients/servers keep
-  working; unknown op = bad-request, unknown event = skipped). Pictures as raw 64 px
-  RGBA8 (the collab avatar format, `CollabController::resampleSquareRgba`), stored as
-  files beside teams.txt, colour in teams.txt (format 3 only while a colour is set). The
-  team profile is its own server-side copy; "Use Collaboration Profile" copies the collab
-  identity on request, nothing is uploaded on its own. Colour picks are debounced (400 ms).
-  Faces drawn with ImDrawList rectangles (TeamView has no renderer).
-- **Suggested, not taken:** upload the collab identity automatically when a team account
-  has no profile yet; rounded clipping of the picture corners in `face()` (square pixels
-  stick out of the rounded frame slightly).
-- **Traps:** the fake server answered unknown ops with ok + empty body, which a client
-  reads as a broken reply: every new op must be added to `FakeTeamServer.h` or all team
-  tests drop their connection. The server's `members()` test helper asserts no trailing
-  bytes, a reason not to append to existing replies. Deploying a format-3 teams.txt makes
-  rollback to an older server impossible until all colours are None.
-- **Next steps:** 1. Step 2: own status icon left of the bell — `TeamController::self()`
-  + `ownColor()` give face and colour; signed-out/failed = red X opening a sign-in modal
-  (reuse `TeamView` sign-in fields; `resume()` already does the automatic login).
-  2. Step 3/4: HUD next to `CollabPresenceBar` (footer) — online members = `members()`
-  with `online && !in session`; pictures via `CollabPresenceBar`'s `avatarTexture()` cache
-  keyed by member + `avatarId`; Invite = `TeamController::invite()`. 3. Deploy b4a47a5
-  (the human: `deploy/deploy.sh`), then rerun the two live cases against the host.
+  @ 5a5caae1 (+ this doc). Server CollabSession b4a47a5 is still **not deployed** (step 1).
+- **Done:** "Step 2" above.
+- **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor built -j8, rc 0):**
+  `test_team_ui` 6/6 (433 assertions; new case: X is red in pixels, modal opens, wrong
+  password refused and shown, Enter signs in, modal closes, face is blue in pixels with no
+  red, face click asks for the Team window, Cancel, empty team asks for team+server and
+  keeps the rows while typing). Screenshots looked at: `team-footer-signed-out`,
+  `-modal-refused`, `-signed-in`, `-modal-ask-team` (HE_UI_DUMP_DIR). `test_net_team` 20/20,
+  `test_editor_help` 19/19, `test_collab_controller` 74/74, `test_mcp_tools_collab` 7/7,
+  `editor_help_audit.py --check` 1172/1172. Hidden `HorizonEditor` 120 frames with a scratch
+  HE_CONFIG_DIR: clean exit, 0 errors (a smoke run; whether the footer was on screen
+  without a project is not shown by the log). Full he_tests: see the result post.
+- **Not verified:** the real editor window by hand (footer placement next to the real bell,
+  the modal over docked panels); Windows/Linux only through CI.
+- **Decisions:** placement *right* of the bell as the board says (step 1's handoff said
+  left). Connecting = amber X, Reconnecting = red X (its modal can retry at once with the
+  password). The modal lives in TeamView (no AppContext) so tests draw it; server/team rows
+  decided once at open (else they vanish with the first letter). Esc is not wired to
+  Cancel (ImGui modals ignore it; not tested, so not claimed).
+- **Suggested, not taken:** a dim grey X (or none) when no team server is configured at
+  all: every editor without a team now shows a red X in the footer.
+- **Traps:** the footer chain in EditorUI is hand-maintained: a new slot must be
+  subtracted in every block to its left. `face()` calls Dummy; in a fixed slot use
+  `faceAt`. In tests the footer surface clears `items` itself (drawSettings/drawPanel
+  clear the probe, drawFooterStatus does not).
+- **Next steps:** 1. Step 3/4: presence HUD next to `CollabPresenceBar` — online members
+  = `members()` with `online && !in session`; faces via `faceAt` or `CollabPresenceBar`'s
+  texture cache keyed by member + `avatarId`; Invite = `TeamController::invite()`.
+  2. Deploy b4a47a5 (the human, `deploy/deploy.sh`), then the live cases against the host.
