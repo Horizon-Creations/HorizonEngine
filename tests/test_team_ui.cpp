@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -404,6 +405,112 @@ TEST_CASE("Team UI: the window shows members, presence and sessions, and its but
 		dump(img, "team-panel-hosting.bmp");
 	}
 
+	team.signOut();
+}
+
+TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Picture (topic 202)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.alsoOnline = { "Bob" };
+	server.setProfile("Bob", 0x30, 0x90, 0xf0, 8, 0xc0);   // a picture, so the roster shows one
+	const std::string picture = (std::filesystem::temp_directory_path() /
+	                             ("he_team_ui_face_" + std::to_string(wallMs()) + ".bmp")).string();
+	writeBmp(picture, 5, 5, 0xd0, 0x60, 0x20);
+
+	CollabController collab;
+	TeamController   team(collab);
+	Ui ui{ team };
+	ui.server   = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	ui.teamName = "studio";
+	ui.member   = "Anna";
+
+	std::uint64_t now = 1;
+	auto pump  = [&] { server.pump(); collab.update(now); team.update(now); now += 16; };
+	auto panel = [&] { ui.frame(Surface::Panel, pump); };
+
+	ImGui::GetIO().AddMousePosEvent(float(kPanelW) - 2.0f, float(kPanelH) - 2.0f);
+	REQUIRE(team.signIn(ui.server, ui.teamName, ui.member, "correct-horse"));
+	REQUIRE(frameUntil(panel, [&] {
+		const HE::Net::TeamMember* bob = nullptr;
+		for (const auto& m : team.members()) if (m.name == "Bob") bob = &m;
+		return team.signedIn() && bob && bob->avatarSize == 8;
+	}));
+	panel();
+	// No picture of ours yet: Choose, no Remove; the eight preset swatches.
+	REQUIRE(ui.find("Choose Picture..."));
+	CHECK(ui.find("Remove Picture") == nullptr);
+	CHECK(ui.count("##swatch") == 8);
+	REQUIRE(ui.find("Use Collaboration Profile"));
+
+	// A swatch: shown at once, sent once it has settled (op 16).
+	REQUIRE(ui.click(Surface::Panel, pump, "##swatch", "2"));
+	const HE::Net::ParticipantColor want = HE::Net::kParticipantPalette[2];
+	CHECK(team.ownColor() == HE::Net::TeamColor{ want.r, want.g, want.b });
+	REQUIRE(frameUntil(panel, [&] {
+		const auto& p = server.profiles["anna"];
+		return p.r == want.r && p.g == want.g && p.b == want.b;
+	}));
+	CHECK(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(16)) == 1);
+
+	// Choose Picture: the file the chooser hands over is decoded, scaled to
+	// 64 px and uploaded (op 17); then Change and Remove are offered.
+	TeamView::setPictureChooser([&] { return picture; });
+	REQUIRE(ui.click(Surface::Panel, pump, "Choose Picture..."));
+	REQUIRE(frameUntil(panel, [&] { return team.self() && team.self()->avatarSize == 64; }));
+	CHECK(server.profiles["anna"].size == 64);
+	CHECK(server.profiles["anna"].rgba[0] == 0xd0);
+	panel();
+	REQUIRE(ui.find("Change Picture..."));
+	REQUIRE(ui.find("Remove Picture"));
+	CHECK(ui.form.profileError.empty());
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(kPanelW) - 2.0f, float(kPanelH) - 2.0f);
+		panel();
+		ui.frame(Surface::Panel, pump, false, &img);
+		REQUIRE(img.valid());
+		dump(img, "team-panel-profile.bmp");
+	}
+
+	// A file that is not an image: said under the picture, nothing sent.
+	const int uploads = static_cast<int>(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(17)));
+	TeamView::setPictureChooser([&] { return picture + ".missing"; });
+	REQUIRE(ui.click(Surface::Panel, pump, "Change Picture..."));
+	CHECK(ui.form.profileError.find("could not be read as an image") != std::string::npos);
+	CHECK(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(17)) == uploads);
+
+	REQUIRE(ui.click(Surface::Panel, pump, "Remove Picture"));
+	REQUIRE(frameUntil(panel, [&] { return team.self()->avatarId == 0; }));
+	panel();
+	REQUIRE(ui.find("Choose Picture..."));
+	CHECK(ui.find("Remove Picture") == nullptr);
+	CHECK(ui.form.profileError.empty());
+
+	TeamView::setPictureChooser({});
+	std::filesystem::remove(picture);
+	team.signOut();
+}
+
+TEST_CASE("Team UI: against a server without profiles the section says so (topic 202)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.noProfiles = true;
+	CollabController collab;
+	TeamController   team(collab);
+	Ui ui{ team };
+	std::uint64_t now = 1;
+	auto pump  = [&] { server.pump(); collab.update(now); team.update(now); now += 16; };
+	auto panel = [&] { ui.frame(Surface::Panel, pump); };
+	REQUIRE(team.signIn("127.0.0.1:" + std::to_string(server.t->boundPort()), "studio", "Anna", "correct-horse"));
+	REQUIRE(frameUntil(panel, [&] { return team.signedIn() && !team.profilesSupported(); }));
+	panel();
+	CHECK(ui.find("Choose Picture...") == nullptr);
+	CHECK(ui.count("##swatch") == 0);
+	REQUIRE(ui.find("Host Session"));   // the rest of the window as before
 	team.signOut();
 }
 

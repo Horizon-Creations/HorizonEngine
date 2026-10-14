@@ -8739,6 +8739,34 @@ namespace
 	  "Changes your team password on the server. This editor keeps its "
 	  "connection; your other editors use the new one at their next sign-in.",
 	  "", "collaboration" },
+	{ "Team/Choose Picture...", "",
+	  "Picks an image file (PNG, JPG, BMP, TGA, GIF) as your team picture. It is "
+	  "cropped to a square and scaled to 64 pixels here, then kept by the team "
+	  "server: every member sees it next to your name, on any computer you sign "
+	  "in from.",
+	  "", "collaboration" },
+	{ "Team/Change Picture...", "",
+	  "Picks another image file as your team picture. Cropped to a square and "
+	  "scaled to 64 pixels; the team sees the new one right away.",
+	  "", "collaboration" },
+	{ "Team/Remove Picture", "",
+	  "Removes your team picture from the server. The team sees your colour with "
+	  "your initial instead.",
+	  "", "collaboration" },
+	{ "Team/Use Collaboration Profile", "",
+	  "Copies the picture and colour you set in the Collaboration window to your "
+	  "team profile, so you look the same in a session and in the team. Without a "
+	  "picture there, the team picture is removed too.",
+	  "", "collaboration" },
+	{ "Team/None", "",
+	  "No colour of your own: the team shows you in grey, and in a session the "
+	  "host picks a free colour for you.",
+	  "", "collaboration" },
+	{ "Team/Custom", "",
+	  "Any colour, not just the presets. The team sees it shortly after you stop "
+	  "changing it. Two members may have the same colour; in a session the host "
+	  "gives one of them another if they collide.",
+	  "", "collaboration" },
 
 	{ "Session Participants/Block", "",
 	  "Removes this person from the session and refuses them if they try to "

@@ -1,14 +1,22 @@
 #include "TeamView.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <cfloat>
 #include <cstdio>
 
 #if __has_include(<imgui.h>)
 #include "EditorHelp.h"      // "Team/<label>" for every control below
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include <Net/CollabSession.h>    // kParticipantPalette, the colour presets
 #include <Net/RelayTransport.h>   // the server field's parse check
 #include <imgui.h>
+#endif
+#if defined(HE_IMGUI_ENABLED) && __has_include(<SDL3/SDL_dialog.h>)
+#include <SDL3/SDL_dialog.h>
+#define HE_TEAMVIEW_FILE_DIALOG 1
 #endif
 
 namespace TeamView
@@ -18,6 +26,12 @@ namespace
 {
 std::vector<ProbedItem>* s_probe = nullptr;
 
+// "Choose Picture...": the OS dialog answers on whichever thread it likes, so
+// the path waits here until the next frame picks it up (as in CollabPanel).
+std::function<std::string()> s_chooser;
+std::string                  s_pickPath;
+std::atomic<bool>            s_pickReady{ false };
+
 void wipe(std::string& secret)
 {
 	std::fill(secret.begin(), secret.end(), '\0');
@@ -26,6 +40,7 @@ void wipe(std::string& secret)
 } // namespace
 
 void setProbe(std::vector<ProbedItem>* out) { s_probe = out; }
+void setPictureChooser(std::function<std::string()> choose) { s_chooser = std::move(choose); }
 
 void Form::wipeSecrets()
 {
@@ -89,6 +104,7 @@ void drawSignIn(TeamController& team, const Settings& settings, Form& form);
 void drawMembers(TeamController& team, Form& form);
 void drawSessions(TeamController& team, Form& form);
 void drawAdmin(TeamController& team, Form& form);
+void drawProfile(TeamController& team, Form& form);
 void drawOwnPassword(TeamController& team, Form& form);
 
 } // namespace
@@ -111,6 +127,11 @@ void drawSettings(TeamController& team, const Settings& settings, Form& form)
 	                    "restart, until you sign out. Create Team makes a new team on the server "
 	                    "with you as its first admin. Members, presence and invitations are in "
 	                    "Window \xc2\xbb Team.");
+	if (team.signedIn())
+	{
+		ImGui::Spacing();
+		drawProfile(team, form);
+	}
 	drawRecent(form);
 }
 
@@ -153,6 +174,7 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 	drawSessions(team, form);
 	if (team.isAdmin()) drawAdmin(team, form);
 	ImGui::Spacing();
+	if (team.signedIn()) drawProfile(team, form);
 	drawOwnPassword(team, form);
 	drawRecent(form);
 }
@@ -183,6 +205,63 @@ void presenceDot(bool online, const ImVec4& colour)
 	if (online) dl->AddCircleFilled(c, h * 0.22f, Theme::u32(colour));
 	else        dl->AddCircle(c, h * 0.20f, Theme::u32(colour), 0, 1.5f);
 	ImGui::Dummy(ImVec2(h, h));
+}
+
+ImU32 colourU32(HE::Net::TeamColor c)
+{
+	return c.unset() ? Theme::u32(Theme::TextDim) : IM_COL32(c.r, c.g, c.b, 255);
+}
+
+// A member's face: their picture if there is one, else their colour with the
+// initial on it, framed in their colour either way. Drawn from the pixels with
+// rectangles rather than a texture: this file has no renderer (see TeamView.h),
+// and a face is a few hundred rectangles at most.
+void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::string& name, float size)
+{
+	const ImVec2 p  = ImGui::GetCursorScreenPos();
+	const ImVec2 q(p.x + size, p.y + size);
+	ImDrawList*  dl = ImGui::GetWindowDrawList();
+	const ImU32  frame    = colourU32(colour);
+	const float  rounding = size * 0.2f;
+
+	if (m && m->avatarSize > 0 && m->avatarRgba.size() == std::size_t(m->avatarSize) * m->avatarSize * 4)
+	{
+		// One rectangle per cell, a cell no smaller than ~1.5 px: a 64 px picture
+		// in a 19 px row is 12x12 cells, in the 48 px preview 32x32.
+		const int   src   = m->avatarSize;
+		const int   cells = std::max(1, std::min(src, static_cast<int>(size / 1.5f)));
+		const float cell  = size / static_cast<float>(cells);
+		dl->AddRectFilled(p, q, Theme::u32(Theme::TextDim), rounding);
+		for (int y = 0; y < cells; ++y)
+			for (int x = 0; x < cells; ++x)
+			{
+				const int sx = (x * src + src / 2) / cells;
+				const int sy = (y * src + src / 2) / cells;
+				const std::uint8_t* px = &m->avatarRgba[(std::size_t(sy) * src + sx) * 4];
+				const ImVec2 a(p.x + x * cell, p.y + y * cell);
+				// Half a pixel of overlap, or the seams show as a grid.
+				dl->AddRectFilled(a, ImVec2(a.x + cell + 0.5f, a.y + cell + 0.5f),
+				                  IM_COL32(px[0], px[1], px[2], px[3]));
+			}
+	}
+	else
+	{
+		dl->AddRectFilled(p, q, frame, rounding);
+		if (!name.empty())
+		{
+			const char initial[2] = { static_cast<char>(std::toupper(static_cast<unsigned char>(name[0]))), 0 };
+			const float  fontSize = size * 0.6f;
+			const ImVec2 ts       = ImGui::GetFont()->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, initial);
+			// Dark text on a light colour, light on a dark one.
+			const float lum = colour.unset() ? 0.4f
+			                                 : (0.299f * colour.r + 0.587f * colour.g + 0.114f * colour.b) / 255.0f;
+			dl->AddText(ImGui::GetFont(), fontSize,
+			            ImVec2(p.x + (size - ts.x) * 0.5f, p.y + (size - ts.y) * 0.5f),
+			            lum > 0.6f ? IM_COL32(20, 20, 20, 255) : IM_COL32(245, 245, 245, 255), initial);
+		}
+	}
+	dl->AddRect(p, q, frame, rounding, 0, std::max(1.5f, size * 0.06f));
+	ImGui::Dummy(ImVec2(size, size));
 }
 
 // One line: a dot in the status colour, the status, and what the controller
@@ -314,10 +393,11 @@ void drawMembers(TeamController& team, Form& form)
 	const bool admin   = team.isAdmin();
 	// Constant row height (a frame) so the rows stay a list and not a layout
 	// that moves when somebody comes online and grows a button.
-	if (ImGui::BeginTable("##teammembers", 3, ImGuiTableFlags_SizingFixedFit |
+	if (ImGui::BeginTable("##teammembers", 4, ImGuiTableFlags_SizingFixedFit |
 	                                              ImGuiTableFlags_RowBg))
 	{
 		ImGui::TableSetupColumn("##dot",  ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
+		ImGui::TableSetupColumn("##face", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFrameHeight());
 		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("##act",  ImGuiTableColumnFlags_WidthFixed);
 		for (const auto& m : members)
@@ -327,7 +407,12 @@ void drawMembers(TeamController& team, Form& form)
 			ImGui::TableSetColumnIndex(0);
 			presenceDot(m.online, m.online ? Theme::Ok : Theme::TextDim);
 
+			// The face is the row's height, so a picture arriving later does
+			// not move anything.
 			ImGui::TableSetColumnIndex(1);
+			face(&m, m.you ? team.ownColor() : m.color, m.name, ImGui::GetFrameHeight());
+
+			ImGui::TableSetColumnIndex(2);
 			ImGui::AlignTextToFramePadding();
 			ImGui::TextColored(m.online ? Theme::Text : Theme::TextDim, "%s", m.name.c_str());
 			if (m.you || m.admin)
@@ -337,7 +422,7 @@ void drawMembers(TeamController& team, Form& form)
 				                    m.admin ? "admin" : "");
 			}
 
-			ImGui::TableSetColumnIndex(2);
+			ImGui::TableSetColumnIndex(3);
 			if (!m.you)
 			{
 				// Only an online member can be invited: the server delivers the
@@ -466,6 +551,146 @@ void drawAdmin(TeamController& team, Form& form)
 		form.newAdmin = false;
 	}
 	EditorWidgets::hint("Tell them the password yourself; they can change it once signed in.");
+}
+
+// ── Your profile ─────────────────────────────────────────────────────────────
+
+void openPictureDialog()
+{
+	if (s_chooser)
+	{
+		s_pickPath = s_chooser();
+		s_pickReady.store(true, std::memory_order_release);
+		return;
+	}
+#ifdef HE_TEAMVIEW_FILE_DIALOG
+	static const SDL_DialogFileFilter kFilters[] = { { "Images", "png;jpg;jpeg;bmp;tga;gif" } };
+	SDL_ShowOpenFileDialog(
+		[](void* /*userdata*/, const char* const* filelist, int /*filter*/)
+		{
+			// Our own slot, not ctx.dialogBridge: that one is read as a scene or
+			// project to open (see CollabPanel's picture picker).
+			s_pickPath = (filelist && filelist[0]) ? filelist[0] : "";
+			s_pickReady.store(true, std::memory_order_release);
+		},
+		nullptr, nullptr, kFilters, 1, nullptr, false);
+#endif
+}
+
+void consumePicturePick(TeamController& team, Form& form)
+{
+	if (!s_pickReady.load(std::memory_order_acquire)) return;
+	s_pickReady.store(false, std::memory_order_relaxed);
+	const std::string path = s_pickPath;
+	s_pickPath.clear();
+	if (path.empty()) return;   // cancelled
+	std::string error;
+	if (team.setAvatarFromFile(path, error)) form.profileError.clear();
+	else                                     form.profileError = error;
+}
+
+// The presets the Collaboration window offers, None, and a free picker. A pick
+// shows at once; the controller sends it once it has stopped changing.
+void drawColourRow(TeamController& team, HE::Net::TeamColor mine)
+{
+	constexpr float kSwatch = 18.0f;
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("Colour");
+	int index = 0;
+	for (const HE::Net::ParticipantColor& preset : HE::Net::kParticipantPalette)
+	{
+		ImGui::SameLine(index == 0 ? ImGui::GetFontSize() * 4.0f : 0.0f, index == 0 ? -1.0f : 3.0f);
+		ImGui::PushID(index);
+		const HE::Net::TeamColor c{ preset.r, preset.g, preset.b };
+		const ImVec4 col(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, 1.0f);
+		const bool   chosen = !mine.unset() && mine == c;
+		ImGui::PushStyleColor(ImGuiCol_Button,        col);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive,  col);
+		ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(1, 1, 1, chosen ? 1.0f : 0.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, chosen ? 2.0f : 0.0f);
+		if (ImGui::Button("##swatch", ImVec2(kSwatch, kSwatch))) team.setColor(c);
+		probe("##swatch", std::to_string(index));
+		ImGui::PopStyleVar();
+		ImGui::PopStyleColor(4);
+		ImGui::PopID();
+		++index;
+	}
+
+	ImGui::SameLine();
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, mine.unset() ? 2.0f : 0.0f);
+	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, mine.unset() ? 1.0f : 0.0f));
+	if (EditorWidgets::button("None##teamcolour", ImVec2(0.0f, kSwatch))) team.setColor({});
+	probe("None##teamcolour");
+	ImGui::PopStyleColor();
+	ImGui::PopStyleVar();
+
+	ImGui::SameLine();
+	float custom[3] = { mine.r / 255.0f, mine.g / 255.0f, mine.b / 255.0f };
+	if (ImGui::ColorEdit3("Custom##teamcolour", custom,
+	                      ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
+	{
+		HE::Net::TeamColor picked;
+		picked.r = static_cast<std::uint8_t>(std::clamp(custom[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+		picked.g = static_cast<std::uint8_t>(std::clamp(custom[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+		picked.b = static_cast<std::uint8_t>(std::clamp(custom[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+		// Black is "no colour" on the wire; nudged, so picking it is not None.
+		if (picked.unset()) picked.r = picked.g = picked.b = 1;
+		team.setColor(picked);
+	}
+	EditorWidgets::helpForLabel("Custom");
+	probe("Custom##teamcolour");
+}
+
+void drawProfile(TeamController& team, Form& form)
+{
+	EditorWidgets::subHeading("Your Profile");
+	if (!team.profilesSupported())
+	{
+		EditorWidgets::hint("This team server keeps no colour or picture per member yet; it needs "
+		                    "an update.");
+		return;
+	}
+	consumePicturePick(team, form);
+
+	const HE::Net::TeamMember* me     = team.self();
+	const HE::Net::TeamColor   colour = team.ownColor();
+	// Two rows tall, the height of the buttons beside it.
+	const float faceSize = ImGui::GetFrameHeight() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
+	face(me, colour, team.member(), faceSize);
+	ImGui::SameLine();
+	ImGui::BeginGroup();
+	const bool  hasPicture = me && me->avatarId != 0;
+	const char* chooseLabel = hasPicture ? "Change Picture..." : "Choose Picture...";
+	const bool  choose = EditorWidgets::button(chooseLabel);
+	probe(chooseLabel);
+	bool remove = false;
+	if (hasPicture)
+	{
+		ImGui::SameLine();
+		remove = EditorWidgets::dangerSmallButton("Remove Picture");
+		probe("Remove Picture");
+	}
+	const bool useCollab = EditorWidgets::button("Use Collaboration Profile");
+	probe("Use Collaboration Profile");
+	ImGui::EndGroup();
+
+	if (choose || remove || useCollab) form.profileError.clear();
+	if (choose)    openPictureDialog();
+	if (remove)    team.clearAvatar();
+	if (useCollab) team.useCollabProfile();
+
+	drawColourRow(team, colour);
+	if (!form.profileError.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+		ImGui::TextWrapped("%s", form.profileError.c_str());
+		ImGui::PopStyleColor();
+	}
+	EditorWidgets::hint("The team sees this picture and colour next to your name, on every "
+	                    "editor of theirs and yours. Use Collaboration Profile copies the ones "
+	                    "from the Collaboration window. In a session the host may still give you "
+	                    "another colour if yours is taken.");
 }
 
 void drawOwnPassword(TeamController& team, Form& form)

@@ -567,6 +567,159 @@ TEST_CASE("Team: against a server without tokens the password stays in memory, a
     CHECK(server.loginOps.back() == 1);
 }
 
+// ─── Profiles: colour and picture per member (topic 202) ─────────────────────
+
+TEST_CASE("Team: profile requests speak the protocol")
+{
+    std::vector<std::uint8_t> color = header(7);
+    u32(color, 7);
+    color.push_back(16);
+    color.insert(color.end(), { 0xe0, 0x40, 0x30 });
+    CHECK(TeamClient::encodeRequest(7, TeamClient::Op::SetColor, { 0xe0, 0x40, 0x30 }) == color);
+
+    std::vector<std::uint8_t> fields = { 2 };
+    fields.insert(fields.end(), 16, 0x55);
+    std::vector<std::uint8_t> avatar = header(7);
+    u32(avatar, 8);
+    avatar.push_back(17);
+    avatar.insert(avatar.end(), fields.begin(), fields.end());
+    CHECK(TeamClient::encodeRequest(8, TeamClient::Op::SetAvatar, fields) == avatar);
+}
+
+TEST_CASE("Team: profiles are listed, pictures fetched when new, changes arrive as events")
+{
+    FakeTeamServer server;
+    REQUIRE(server.t);
+    server.setProfile("Bob", 0x30, 0x90, 0xf0, 8, 0x7f);   // before anybody is online
+
+    auto c = TeamClient::connect(server.address(), "studio", "Anna", "correct-horse");
+    REQUIRE(c);
+    std::uint64_t now = 1;
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] {
+        const TeamMember* bob = c->findMember("Bob");
+        return bob && !bob->avatarRgba.empty();
+    }));
+    CHECK(c->profilesSupported());
+    const TeamMember* bob = c->findMember("Bob");
+    CHECK(bob->color == TeamColor{ 0x30, 0x90, 0xf0 });
+    CHECK(bob->avatarId == server.profiles["bob"].id);
+    CHECK(bob->avatarSize == 8);
+    CHECK(bob->avatarRgba == std::vector<std::uint8_t>(8 * 8 * 4, 0x7f));
+    CHECK(server.avatarFetches == 1);   // Anna has no picture: nothing to fetch
+    REQUIRE(c->findMember("Anna"));
+    CHECK(c->findMember("Anna")->color.unset());
+    CHECK(c->findMember("Anna")->avatarId == 0);
+
+    // Our own colour and picture: on the server, and back in our list.
+    TeamClient::Reply colored, pictured;
+    c->setColor(TeamColor{ 1, 2, 3 }, [&](const TeamClient::Reply& r) { colored = r; });
+    c->setAvatar(4, std::vector<std::uint8_t>(4 * 4 * 4, 0x11), [&](const TeamClient::Reply& r) { pictured = r; });
+    CHECK(c->setAvatar(4, std::vector<std::uint8_t>(5), {}) == 0);   // not 4x4 pixels: not sent
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] {
+        const TeamMember* me = c->findMember("Anna");
+        return colored.ok() && pictured.ok() && me->color == TeamColor{ 1, 2, 3 } && me->avatarSize == 4;
+    }));
+    CHECK(server.profiles["anna"].rgba == std::vector<std::uint8_t>(4 * 4 * 4, 0x11));
+    CHECK(c->findMember("Anna")->avatarRgba == std::vector<std::uint8_t>(4 * 4 * 4, 0x11));
+    const int fetchesBefore = server.avatarFetches;
+
+    // Bob changes his on another editor: an event, a new picture fetched; a
+    // colour-only change fetches nothing.
+    server.setProfile("Bob", 0x10, 0x20, 0x30, 2, 0x99);
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] { return c->findMember("Bob")->avatarSize == 2; }));
+    CHECK(c->findMember("Bob")->color == TeamColor{ 0x10, 0x20, 0x30 });
+    CHECK(c->findMember("Bob")->avatarRgba == std::vector<std::uint8_t>(2 * 2 * 4, 0x99));
+    CHECK(server.avatarFetches == fetchesBefore + 1);
+    TeamClient::Event ev;
+    bool sawProfile = false;
+    while (c->pollEvent(ev))
+        if (ev.kind == TeamClient::EventKind::Profile && ev.member == "Bob") {
+            sawProfile = true;
+            CHECK(ev.avatarId == server.profiles["bob"].id);
+        }
+    CHECK(sawProfile);
+
+    // Picture removed: gone from the list without a fetch.
+    server.setProfile("Bob", 0x10, 0x20, 0x30, 0);
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] { return c->findMember("Bob")->avatarId == 0; }));
+    CHECK(c->findMember("Bob")->avatarRgba.empty());
+    CHECK(server.avatarFetches == fetchesBefore + 1);
+
+    // A fresh member list keeps what is known about the profiles.
+    c->listMembers();
+    std::uint64_t rev = c->revision();
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] { return c->revision() != rev; }));
+    CHECK(c->findMember("Anna")->avatarSize == 4);
+    CHECK(c->findMember("Bob")->color == TeamColor{ 0x10, 0x20, 0x30 });
+}
+
+TEST_CASE("Team: a server from before profiles leaves the connection alone")
+{
+    FakeTeamServer server;
+    REQUIRE(server.t);
+    server.noProfiles = true;
+    auto c = TeamClient::connect(server.address(), "studio", "Anna", "correct-horse");
+    REQUIRE(c);
+    std::uint64_t now = 1;
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] { return !c->profilesSupported(); }));
+    CHECK(c->loggedIn());
+    REQUIRE(pumpTeam(server, { c.get() }, now, [&] { return c->members().size() == 2; }));
+    CHECK(c->findMember("Bob")->color.unset());
+}
+
+TEST_CASE("Team: the controller sends a settled colour once and uploads a picture file at 64 px")
+{
+    FakeTeamServer server;
+    REQUIRE(server.t);
+    std::uint64_t t = 1;
+    CollabController collab;
+    TeamController team(collab);
+    CHECK_FALSE(team.setColor(TeamColor{ 1, 1, 1 }));   // not signed in
+    REQUIRE(team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+    REQUIRE(pumpTeams(server, { &team }, t, [&] { return team.signedIn() && team.self(); }));
+    CHECK(team.profilesSupported());
+
+    // A picker being dragged: many picks, one request, with the last colour.
+    for (std::uint8_t i = 1; i <= 5; ++i) {
+        REQUIRE(team.setColor(TeamColor{ i, 0x40, 0x80 }));
+        CHECK(team.ownColor() == TeamColor{ i, 0x40, 0x80 });   // shown at once
+        server.pump();
+        team.update(t += 50);
+    }
+    CHECK(countOf(server.ops, 16) == 0);
+    REQUIRE(pumpTeams(server, { &team }, t, [&] { return team.self()->color == TeamColor{ 5, 0x40, 0x80 }; }));
+    CHECK(countOf(server.ops, 16) == 1);
+    CHECK(server.profiles["anna"].r == 5);
+
+    // A picture file: decoded, cropped square, scaled to 64 px and uploaded.
+    const fs::path dir = fs::temp_directory_path() / ("he_team_avatar_" + std::to_string(t));
+    fs::create_directories(dir);
+    writeBmp((dir / "face.bmp").string(), 6, 4, 0xd0, 0x30, 0x20);
+    std::string error;
+    REQUIRE(team.setAvatarFromFile((dir / "face.bmp").string(), error));
+    CHECK(error.empty());
+    REQUIRE(pumpTeams(server, { &team }, t, [&] { return team.self()->avatarSize == 64; }));
+    const auto& sent = server.profiles["anna"];
+    REQUIRE(sent.size == 64);
+    REQUIRE(sent.rgba.size() == 64 * 64 * 4);
+    CHECK(sent.rgba[0] == 0xd0);
+    CHECK(sent.rgba[1] == 0x30);
+    CHECK(sent.rgba[2] == 0x20);
+    CHECK(sent.rgba[3] == 0xff);
+
+    // Not an image: refused here with a reason, nothing sent.
+    { std::ofstream(dir / "notes.bmp") << "not a picture"; }
+    const int before = countOf(server.ops, 17);
+    CHECK_FALSE(team.setAvatarFromFile((dir / "notes.bmp").string(), error));
+    CHECK(error.find("could not be read as an image") != std::string::npos);
+    CHECK(countOf(server.ops, 17) == before);
+
+    REQUIRE(team.clearAvatar());
+    REQUIRE(pumpTeams(server, { &team }, t, [&] { return team.self()->avatarId == 0; }));
+    CHECK(team.self()->avatarRgba.empty());
+    fs::remove_all(dir);
+}
+
 // ─── Two editors, the real server ────────────────────────────────────────────
 
 namespace {
@@ -810,4 +963,61 @@ TEST_CASE("Team: saved session tokens through a real collab_server (HE_TEST_TEAM
         REQUIRE(pumpEditors({ anna.get(), &stale }, [&] { return stale.team.status() == TeamController::Status::Failed; }));
     }
     anna->team.signOut();
+}
+
+TEST_CASE("Team: profiles through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")
+{
+    const char* env = std::getenv("HE_TEST_TEAM_SERVER");
+    if (!env || !*env) {
+        MESSAGE("HE_TEST_TEAM_SERVER not set — skipped (start collab_server and point it there)");
+        return;
+    }
+    const std::string teamName = "he-prof-" + std::to_string(
+        std::chrono::system_clock::now().time_since_epoch().count() % 1000000007);
+
+    Editor anna;
+    REQUIRE(anna.team.createTeam(env, teamName, "Anna", "anna-password"));
+    REQUIRE(pumpEditors({ &anna }, [&] { return anna.team.signedIn() && anna.team.self(); }));
+    REQUIRE(anna.team.profilesSupported());
+    REQUIRE(anna.team.addMember("Bob", "bob-password", false));
+    REQUIRE(pumpEditors({ &anna }, [&] { return anna.team.members().size() == 2; }));
+    Editor bob;
+    REQUIRE(bob.team.signIn(env, teamName, "Bob", "bob-password"));
+    REQUIRE(pumpEditors({ &anna, &bob }, [&] { return bob.team.signedIn() && anna.sees("Bob", true); }));
+
+    // Anna sets a colour and a full 64 px picture; Bob's editor shows both.
+    std::vector<std::uint8_t> pixels(64 * 64 * 4);
+    for (std::size_t i = 0; i < pixels.size(); ++i) pixels[i] = static_cast<std::uint8_t>(i * 7);
+    REQUIRE(anna.team.setColor(TeamColor{ 0xe0, 0x40, 0x30 }));
+    REQUIRE(anna.team.setAvatar(64, pixels));
+    REQUIRE(pumpEditors({ &anna, &bob }, [&] {
+        const TeamMember* seen = nullptr;
+        for (const TeamMember& m : bob.team.members())
+            if (m.name == "Anna") seen = &m;
+        return seen && seen->color == TeamColor{ 0xe0, 0x40, 0x30 } && seen->avatarRgba == pixels;
+    }));
+    // And her own list agrees with the server.
+    REQUIRE(pumpEditors({ &anna, &bob }, [&] { return anna.team.self()->avatarRgba == pixels; }));
+    const std::uint32_t id = anna.team.self()->avatarId;
+    CHECK(id != 0);
+
+    // A second editor of Bob's signs in later and gets the same from the list.
+    Editor bob2;
+    REQUIRE(bob2.team.signIn(env, teamName, "Bob", "bob-password"));
+    REQUIRE(pumpEditors({ &anna, &bob, &bob2 }, [&] {
+        for (const TeamMember& m : bob2.team.members())
+            if (m.name == "Anna") return m.avatarId == id && m.avatarRgba == pixels;
+        return false;
+    }));
+
+    // Removed again: Bob sees the initial-and-colour form.
+    REQUIRE(anna.team.clearAvatar());
+    REQUIRE(pumpEditors({ &anna, &bob }, [&] {
+        for (const TeamMember& m : bob.team.members())
+            if (m.name == "Anna") return m.avatarId == 0 && m.avatarRgba.empty();
+        return false;
+    }));
+    REQUIRE(anna.team.removeMember("Bob"));
+    REQUIRE(pumpEditors({ &anna }, [&] { return anna.team.members().size() == 1; }));
+    anna.team.signOut();
 }

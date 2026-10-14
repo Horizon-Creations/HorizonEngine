@@ -145,6 +145,39 @@ public:
 	bool removeMember(const std::string& name);
 	bool changePassword(const std::string& oldPassword, const std::string& newPassword);
 
+	// ── Your profile (topic 202) ──
+	// The colour and picture the team sees next to your name — the team's
+	// counterpart of a collab participant's (CollabController::Identity), but
+	// kept by the team server for the account, so every editor of yours and
+	// every member shows the same one.
+	//
+	// False when the server predates profiles (the page says so instead).
+	bool profilesSupported() const { return !m_client || m_client->profilesSupported(); }
+	// Our roster entry (colour, picture), or null before the roster arrives.
+	const HE::Net::TeamMember* self() const;
+	// The colour to show as ours: a pick that is still on its way wins over
+	// what the server last said.
+	HE::Net::TeamColor ownColor() const;
+	// Sends the colour once it has stopped changing for kColorSettleMs, so a
+	// colour picker being dragged is one request, not one per frame (each is a
+	// write of the team file and an event to every member). Unset clears it.
+	bool setColor(HE::Net::TeamColor color);
+	// Decodes an image file (whatever stb_image reads), crops it square and
+	// scales it to kAvatarSize, then uploads it. False with a sentence for the UI.
+	bool setAvatarFromFile(const std::string& imagePath, std::string& error);
+	// Square RGBA8, `size` per side (at most TeamClient::kMaxAvatarSize).
+	bool setAvatar(std::uint16_t size, const std::vector<std::uint8_t>& rgba);
+	bool clearAvatar();
+	// Uploads the collab identity's picture and colour (Collaboration window)
+	// as the team profile: one picture and one colour wherever you show up.
+	// A collab identity without a picture removes the team picture as well.
+	bool useCollabProfile();
+	// The decode/crop/scale step of setAvatarFromFile on its own.
+	static bool decodeAvatarFile(const std::string& imagePath, std::vector<std::uint8_t>& rgba,
+	                             std::string& error);
+	static constexpr int           kAvatarSize    = 64;
+	static constexpr std::uint64_t kColorSettleMs = 400;
+
 	// What happened that the user should read: refusals, invitations, someone
 	// joining or declining. `error` marks the ones that are failures.
 	struct Notice
@@ -215,4 +248,9 @@ private:
 	std::string           m_joining;       // JOIN sent, reply pending
 
 	std::deque<Notice>    m_notices;
+
+	// A colour picked but not yet sent (see setColor).
+	bool                  m_colorPending = false;
+	HE::Net::TeamColor    m_pendingColor;
+	std::uint64_t         m_colorDueMs = 0;
 };

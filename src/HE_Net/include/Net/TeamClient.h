@@ -33,6 +33,14 @@
 // indistinguishable from a wrong password; the server also pushes bad-login to
 // a live token connection when the token is revoked under it.
 //
+// Profiles (topic 202): every member has a colour and a picture of its own
+// choosing (SET_COLOR / SET_AVATAR, raw RGBA8 up to 64x64 — decoding an image
+// file is the editor's job, as for a collab participant). LIST_PROFILES gives
+// colours and a picture id per member; pictures are fetched with GET_AVATAR
+// only when the id is new, a couple at a time, and land in TeamMember. A server
+// from before profiles answers LIST_PROFILES with bad-request: profilesSupported()
+// turns false and everything else works as before.
+//
 // Poll-driven like every transport here: update() once per frame, nothing
 // blocks, no threads. Passwords and tokens never reach a log, and session ids only
 // abbreviated — for a team session the id is the key to the session (see
@@ -55,11 +63,28 @@
 
 namespace HE::Net {
 
+// A member's chosen colour. All zero is "none chosen", the same convention as
+// a collab ParticipantColor, so one converts into the other field by field.
+struct TeamColor {
+    std::uint8_t r = 0, g = 0, b = 0;
+    bool unset() const { return r == 0 && g == 0 && b == 0; }
+    bool operator==(const TeamColor& o) const { return r == o.r && g == o.g && b == o.b; }
+    bool operator!=(const TeamColor& o) const { return !(*this == o); }
+};
+
 struct TeamMember {
     std::string name;            // the spelling the member was created with
     bool        admin  = false;
     bool        you    = false;  // the member this connection is logged in as
     bool        online = false;  // at least one team connection (any editor of theirs)
+
+    // Profile. avatarId names the picture the server has (0: none); the
+    // pixels follow once fetched, so avatarRgba can lag behind it for a
+    // moment — and stays empty when there is no picture.
+    TeamColor                 color;
+    std::uint32_t             avatarId   = 0;
+    std::uint16_t             avatarSize = 0;   // pixels per side of avatarRgba
+    std::vector<std::uint8_t> avatarRgba;       // avatarSize^2 * 4 bytes RGBA8
 };
 
 struct TeamSessionInfo {
@@ -88,6 +113,7 @@ public:
         OpenSession = 6, CloseSession = 7, SetSessionOpen = 8, ListSessions = 9,
         Invite = 10, Decline = 11, Join = 12,
         IssueToken = 13, RevokeToken = 14, RevokeAllTokens = 15,
+        SetColor = 16, SetAvatar = 17, ListProfiles = 18, GetAvatar = 19,
     };
     enum class Result : std::uint8_t {
         Ok = 0, BadRequest = 1, InvalidName = 2, InvalidPassword = 3, MemberExists = 4,
@@ -99,8 +125,14 @@ public:
     };
     enum class EventKind : std::uint8_t {
         Presence = 1, MembersChanged = 2, Session = 3, SessionClosed = 4,
-        Invited = 5, Joining = 6, Declined = 7,
+        Invited = 5, Joining = 6, Declined = 7, Profile = 8,
     };
+
+    // Largest picture side the server keeps (and the editor sends).
+    static constexpr std::uint16_t kMaxAvatarSize = 64;
+    // Pictures fetched at once. The server buffers at most 1 MiB for a client
+    // that does not read, and 64 pictures are about that.
+    static constexpr std::size_t kAvatarFetchesInFlight = 2;
 
     // The server closes a connection after 60 s without a frame; three pings
     // per window survive one being late.
@@ -139,6 +171,10 @@ public:
         EventKind   kind = EventKind::Presence;
         std::string session, host, peer, member;
         bool        flag = false;           // presence: online; session: open
+        // Profile: the member's new colour and picture id (the picture itself
+        // is in members() once fetched).
+        TeamColor     color;
+        std::uint32_t avatarId = 0;
     };
 
     // Starts connecting and logs in (or creates the team, whose first admin
@@ -221,6 +257,17 @@ public:
     std::uint32_t revokeAllTokens(ReplyFn done = {});
     // Which credential this connection presented.
     LoginOp       loginOp() const { return m_loginOp; }
+    // Our own profile. setColor with an unset colour clears it; setAvatar
+    // takes square RGBA8 pixels, `size` 1..kMaxAvatarSize per side, or size 0
+    // and no pixels to remove the picture. Returns 0 without asking when the
+    // pixels do not match the size.
+    std::uint32_t setColor(TeamColor color, ReplyFn done = {});
+    std::uint32_t setAvatar(std::uint16_t size, const std::vector<std::uint8_t>& rgba,
+                            ReplyFn done = {});
+    std::uint32_t listProfiles(ReplyFn done = {});
+    // False once the server refused LIST_PROFILES as unknown (it predates
+    // profiles); true before that is known.
+    bool          profilesSupported() const { return m_profilesSupported; }
 
     // ── Helpers ──
     // The SecureTransport join secret of a team session, derived from its
@@ -254,6 +301,20 @@ private:
         ReplyFn       done;
         std::uint64_t sentMs = 0;
         std::vector<std::uint8_t> held;   // made before the link was up; sent behind the login
+        // GetAvatar: whose picture, and which one it was when asked.
+        std::string   member;
+        std::uint32_t avatarId = 0;
+    };
+
+    // What the server said about one member's profile, kept apart from
+    // m_members so that a fresh member list does not forget it.
+    struct Profile {
+        TeamColor                 color;
+        std::uint32_t             avatarId = 0;
+        std::uint32_t             pixelsId = 0;   // which picture avatarRgba is
+        std::uint16_t             avatarSize = 0;
+        std::vector<std::uint8_t> avatarRgba;
+        bool                      queued = false;  // a fetch is waiting or under way
     };
 
     std::uint32_t request(Op op, std::vector<std::uint8_t> fields, ReplyFn done);
@@ -262,9 +323,16 @@ private:
     void          onStatus(std::uint8_t code, const std::string& text);
     void          onReply(const std::uint8_t* p, std::size_t n);
     void          onEvent(const std::uint8_t* p, std::size_t n);
-    void          applyReply(Reply& reply, const std::uint8_t* body, std::size_t n);
+    void          applyReply(Reply& reply, const std::uint8_t* body, std::size_t n,
+                             const Pending& pending);
     void          fail(std::uint8_t code, std::string why);
     void          changed() { ++m_revision; }
+    // Records a member's colour and picture id, queues the picture if it is new.
+    void          setProfile(const std::string& name, TeamColor color, std::uint32_t avatarId);
+    // Copies m_profiles into m_members.
+    void          mergeProfiles();
+    // Sends GET_AVATAR for queued pictures while fewer than the limit are out.
+    void          fetchAvatars();
 
     std::unique_ptr<TcpTransport> m_tcp;
     ConnectionId                  m_conn = kInvalidConnection;
@@ -288,6 +356,11 @@ private:
     std::vector<TeamSessionInfo> m_sessions;
     std::uint64_t                m_revision = 0;
     std::deque<Event>            m_events;
+
+    std::map<std::string, Profile> m_profiles;      // lower-cased name → profile
+    std::deque<std::string>        m_avatarQueue;   // lower-cased names to fetch
+    std::size_t                    m_avatarFetches = 0;
+    bool                           m_profilesSupported = true;
     // Callbacks are collected and run after the frame is applied, so a callback
     // that issues a request (or closes us) never re-enters the frame loop.
     std::vector<std::pair<ReplyFn, Reply>> m_ready;

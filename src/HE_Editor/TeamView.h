@@ -10,6 +10,8 @@
 //                                  the team announced, Host / Invite / Join /
 //                                  Decline, and (for admins) adding and removing
 //                                  members
+//   both, signed in                your profile: the colour and picture the team
+//                                  sees next to your name (topic 202)
 //
 // Takes a TeamController and the three config strings, never AppContext — which
 // is what lets tests/test_team_ui.cpp draw the real thing headless against a
@@ -22,6 +24,7 @@
 #include "TeamController.h"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -54,6 +57,9 @@ namespace TeamView
 		// Your own password
 		std::string oldPassword;
 		std::string changedPassword;
+
+		// Your profile: why the last picture could not be used.
+		std::string profileError;
 
 		// The controller's notices, newest last, so the window can say what
 		// happened to a press (a refusal arrives a few frames later).
@@ -96,4 +102,8 @@ namespace TeamView
 		bool        disabled = false;
 	};
 	void setProbe(std::vector<ProbedItem>* out);
+	// Replaces the OS file dialog behind "Choose Picture...": returns the path
+	// to use, empty for "cancelled". Empty function (the default): the editor
+	// opens the SDL dialog; a build without it (the tests) does nothing.
+	void setPictureChooser(std::function<std::string()> choose);
 }

@@ -1,6 +1,7 @@
 #include "TeamController.h"
 
 #include "CollabController.h"
+#include "vendor/stb_image.h"   // profile pictures; implementation in stb_image_impl.cpp
 
 #include <Diagnostics/Logger.h>
 #include <Net/RelayTransport.h>
@@ -302,6 +303,7 @@ void TeamController::disconnect()
 	m_wasLoggedIn = false;
 	m_hosted.clear();
 	m_joining.clear();
+	m_colorPending = false;
 }
 
 void TeamController::signOut()
@@ -400,6 +402,12 @@ void TeamController::update(std::uint64_t nowMs)
 		while (m_client->pollEvent(ev)) handleEvent(ev);
 
 		if (m_client->loggedIn() && m_status != Status::SignedIn) onLoggedIn();
+
+		if (m_colorPending && nowMs >= m_colorDueMs && m_client->loggedIn())
+		{
+			m_colorPending = false;
+			m_client->setColor(m_pendingColor, reportFailure("Could not change your colour"));
+		}
 
 		if (m_client->state() == TeamClient::State::Closed)
 		{
@@ -731,4 +739,93 @@ bool TeamController::changePassword(const std::string& oldPassword, const std::s
 			notice("Could not change the password: " + TeamClient::describeResult(r.result, r.text), true);
 	});
 	return true;
+}
+
+// ─── Your profile ────────────────────────────────────────────────────────────
+
+const HE::Net::TeamMember* TeamController::self() const
+{
+	for (const HE::Net::TeamMember& m : members())
+		if (m.you) return &m;
+	return nullptr;
+}
+
+HE::Net::TeamColor TeamController::ownColor() const
+{
+	if (m_colorPending) return m_pendingColor;
+	const HE::Net::TeamMember* me = self();
+	return me ? me->color : HE::Net::TeamColor{};
+}
+
+bool TeamController::setColor(HE::Net::TeamColor color)
+{
+	if (!requireSignedIn("change your colour")) return false;
+	m_pendingColor = color;
+	m_colorPending = true;
+	m_colorDueMs   = m_nowMs + kColorSettleMs;
+	return true;
+}
+
+bool TeamController::decodeAvatarFile(const std::string& imagePath, std::vector<std::uint8_t>& rgba,
+                                      std::string& error)
+{
+	error.clear();
+	int w = 0, h = 0, channels = 0;
+	unsigned char* pixels = stbi_load(imagePath.c_str(), &w, &h, &channels, 4);
+	if (!pixels || w <= 0 || h <= 0)
+	{
+		const char* why = stbi_failure_reason();
+		error = std::string("That file could not be read as an image") +
+		        (why ? std::string(" (") + why + ")." : ".");
+		if (pixels) stbi_image_free(pixels);
+		return false;
+	}
+	// The collab picture's crop and filter, so the same file looks the same
+	// in a session and in the team.
+	rgba = CollabController::resampleSquareRgba(pixels, w, h, kAvatarSize);
+	stbi_image_free(pixels);
+	return true;
+}
+
+bool TeamController::setAvatarFromFile(const std::string& imagePath, std::string& error)
+{
+	if (!requireSignedIn("change your picture"))
+	{
+		error = m_error;
+		return false;
+	}
+	std::vector<std::uint8_t> rgba;
+	if (!decodeAvatarFile(imagePath, rgba, error)) return false;
+	return setAvatar(kAvatarSize, rgba);
+}
+
+bool TeamController::setAvatar(std::uint16_t size, const std::vector<std::uint8_t>& rgba)
+{
+	if (!requireSignedIn("change your picture")) return false;
+	if (size > TeamClient::kMaxAvatarSize || rgba.size() != std::size_t(size) * size * 4)
+	{
+		m_error = "The picture is not a square of at most 64 pixels.";
+		return false;
+	}
+	m_client->setAvatar(size, rgba, reportFailure("Could not change your picture"));
+	return true;
+}
+
+bool TeamController::clearAvatar()
+{
+	return setAvatar(0, {});
+}
+
+bool TeamController::useCollabProfile()
+{
+	if (!requireSignedIn("use your collaboration profile")) return false;
+	const CollabController::Identity& id = CollabController::localIdentity();
+	setColor(HE::Net::TeamColor{ id.color.r, id.color.g, id.color.b });
+	// Sent now, not after the settle time: this is one press, not a drag.
+	m_colorDueMs = m_nowMs;
+	const std::uint16_t size = id.avatarSize;
+	if (size > 0 && size <= TeamClient::kMaxAvatarSize &&
+	    id.avatarRgba.size() == std::size_t(size) * size * 4)
+		return setAvatar(size, id.avatarRgba);
+	return clearAvatar();
 }

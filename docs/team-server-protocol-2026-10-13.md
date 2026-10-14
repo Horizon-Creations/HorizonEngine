@@ -2,6 +2,8 @@
 
 > Session tokens (stay signed in across restarts, topic 201): see
 > `docs/team-login-persist-2026-10-14.md`.
+> Member profiles (colour and picture, ops 16-19, event 8, topic 202): see
+> `docs/team-presence-hud-2026-10-14.md`.
 
 Status (2026-10-13): **both server steps done**: teams, members (name + PBKDF2
 password hash) and a login protocol (step 8), then presence, team sessions,
