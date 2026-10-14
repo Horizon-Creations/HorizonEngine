@@ -64,18 +64,25 @@ Rule: while in a session a client neither uploads nor pulls (design §2 already 
 uploads; pulls must pause too, see 3.8). On leaving, it fetches HEAD + MANIFEST first. A file
 the session touched whose bytes equal head gets head as its base without an upload. One that
 differs gets head's version (the host has kept the session's state, step 8) unless the client
-changed it after leaving. *Check:* A and B in a session edit `Main.hescene`. The host uploads.
-C (not in the session) changes another field. B leaves and saves something else. C's field
-survives in head.
+changed it after leaving. *Check:* A and B in a session change field F of an entity in
+`Main.hescene`. The host uploads. C (not in the session) then changes the **same** field F.
+B leaves and saves something else. C's value of F is still in head. (If C changes a field the
+session did not touch, the per-field merge keeps it anyway. Such a check passes without
+the rule.)
 
 **3.2 First sync without a state file.** This covers a project just switched to team mode,
-a clone of the backup repo, and a member's second machine. Without a state file every file
-looks like an add. That means an add/add merge for the whole tree, `replaced` outcomes, and
-a whole tree of losers on `horizon-conflicts` for files that are actually identical.
-Rule: with no state file, MANIFEST head first. A file whose sha256 equals head's is based on
-head. Only real differences upload, as `M` against head (the user is asked first if more
-than a handful differ). *Check:* clone the backup, open it. The first sync uploads nothing
-and `horizon-conflicts` stays empty.
+a clone of the backup repo, and a member's second machine. Identical files are no problem:
+design §5.1 checks `h == n → same` before the add/add row, and HAVE skips blobs the server
+already holds. The gap is files that **differ** while their base is unknown. Seeding
+base = head would be wrong: it collapses to `h == b → take n`, so a stale clone's scene
+would replace head's newer entities, which is worse than the add/add union.
+Rule: find the rev the tree came from. The backup's commits are server revisions one to one
+(design §3, §7), so a clone maps its git HEAD oid to a rev through LOG/HEAD. The bases then
+come from that rev's MANIFEST (op 2 with `rev`). Only without a known rev fall back to the
+design's add/add, and ask the user first when more than a handful of files differ.
+*Check:* clone the backup at r N while head is at r N+2 (someone changed entity X). Change
+entity Y locally and sync. Both X's and Y's changes are in head, and `horizon-conflicts`
+gets nothing.
 
 **3.3 A session's revision names everyone who worked in it.** Today the host's upload would
 record every participant's edits under the host's name. `CollabSettle::Settled`
