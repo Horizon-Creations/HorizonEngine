@@ -25,12 +25,24 @@ Normalen-Diskontinuität an Chunk-Grenzen (die Normalen sind dort identisch,
 | **A** | DDGI: im Terrain **vergrabene Sonden** werden nicht verworfen. Der Chebyshev-Sichttest läuft am **rohen** Oberflächenpunkt, ohne den in DDGI üblichen Surface-Bias (P + N·b + V·b). Wo der Strahl einer vergrabenen Sonde genau am Schattierungspunkt aus dem Gelände austritt, ist mittlere Tiefe ≈ Abstand: der Test besteht und die dunkle Sonde bekommt volles Gewicht. Das ergibt dunkle, harte Linien und Bänder **entlang der Höhenlinie, an der eine Sondenschicht das Terrain schneidet**. Steile Hänge drehen N zur Sonde hin (Backface-Gewicht steigt). | **alle** (Sampler in 7 Kopien, §3.4) | Linie/Stufe auf Kontur, nur im indirekten Licht | `sampleDDGIIrradiance` in `scene.frag`, D3D11/D3D12/Metal/GL-Renderer, `MaterialShaderLibrary.cpp` |
 | **B** | Der GI-G-Buffer (liefert den Startpunkt der Sonnen-Schattenstrahlen) hat auf D3D11/D3D12 einen **`D16_UNORM`**-Tiefenpuffer. Bei near 0.1 / far 5000 ist eine Tiefenstufe z²/6554 m: 0,1 m bei 25 m, 1,5 m bei 100 m, 6 m bei 200 m. Die **Skirts** (senkrechte Wände unter jeder Chunk-Kante, Tiefe `max(Zelle/2, Höhenspanne/4)`) gewinnen dann den Tiefentest gegen die Nachbar-Oberfläche. Der gespeicherte Strahlstart liegt **unter** dem Nachbar-Chunk, der Sonnenstrahl trifft Gelände: dunkle Striche **genau auf den Chunk-Nähten**. Steile Chunks haben tiefere Skirts, also breitere Striche. | **nur D3D11, D3D12** (Vulkan/Metal D32, GL D24) | gestrichelte Linie auf Chunk-Naht, im Sonnenschatten-Maskenterm | `D3D11Renderer.cpp:3346`, `D3D12Renderer.cpp:6956` + `:7157`, Skirt `TerrainMeshGenerator.cpp:332-372` |
 
-**Für den Menschen (Vulkan) ist A die Ursache**, B kann auf Vulkan nicht
-auftreten (gemessen, §3.2). Die Zuordnung „zwischen Landscape-Parts“ im
-Titel ist sehr wahrscheinlich eine Fehldeutung: Die Linien von A liegen auf
-Sondenschichten (Abstand der Sonden), nicht auf Chunk-Grenzen. B ist ein
-echter, eigener D3D-Fehler, der genau auf Chunk-Grenzen liegt, und gehört in
-Schritt 2 mit repariert.
+**Korrektur nach dem Test am echten Terrain (§3.5): Auf dem Terrain des
+Menschen ist weder A noch B das, was man sieht.** Mit seiner Konfiguration
+(Vulkan, deferred, Auto-Material, echte Texturen, TOD 0.4) liegen die
+dunklen, hart begrenzten Flächen an den steilen Flanken **mit GI aus genauso**
+an derselben Stelle wie mit GI an; CSM und RT-Maske stimmen überein. Es sind
+echte Sonnenschatten bzw. sonnenabgewandte Flanken. GI macht sie heller
+(≈ 44 → ≈ 59 Luma bei Albedo ≈ 129, beleuchtet ≈ 190), nicht dunkler. Was
+„falsch“ wirkt, ist, wie **dunkel und hart** sie sind (Schatten/Licht ≈
+0,23 ohne GI, ≈ 0,3 mit GI), nicht wo sie liegen. A tritt dort nicht auf:
+das gemessene Gitter (15×4×15, 171,25 m) hat Schichten bei y ≈ −52 und 119,
+keine schneidet das Terrain (−1…68 m). B kann auf Vulkan nicht auftreten
+(§3.2).
+
+A und B sind trotzdem echte Fehler (gemessen an den Zeugen) und gehören in
+Schritt 2. Die Zuordnung „zwischen Landscape-Parts“ im Titel ist sehr
+wahrscheinlich eine Fehldeutung: auf Vulkan liegt nichts davon auf
+Chunk-Grenzen. Bevor Schritt 2 „die“ Ursache repariert, braucht es den
+Original-Screenshot oder Kamera/TOD/Backend des Menschen (§6).
 
 ## 2. Zeugen und Werkzeug
 
@@ -117,20 +129,46 @@ Nebenbefund, **alle** RT-Backends: Zeilen 532–535 im Fernbild sind der
 mit kopierter Oberflächennormale; mit GI wird sie vom eigenen Gelände
 verschattet, ohne GI nicht. Nur von außerhalb des Terrains zu sehen.
 
-### 3.3 Das Projekt des Menschen
+### 3.3 Das Projekt des Menschen (Schätzung, gemessen in §3.5)
 
 `C:\Users\conno\Downloads\HEProject`, `StartupScene.hescene`: **ein**
 Terrain, 2000 × 2000 m, Auflösung 1025 (16×16 Chunks à 125 m, Zelle 1,95 m),
 gemalte Höhen −1,1…67,9 m, Gebirgsblock bei x −500…125, z 125…750, nur 1,4 %
 der Fläche steiler als 30°. **Kein** Material am Terrain (Standard).
 
-Das Gitter dieser Szene ist **nicht gemessen** (der Headless-Dump baut für ein
-geladenes Projekt keine Chunks, §5). Geschätzt mit `FitGIProbeGrid` über die
-Terrain-Box allein: **171 m Abstand, 15×4×15**, Schichten bei y ≈ −52, 119,
-d. h. eine ganze Schicht liegt **unter** dem Gelände. Jeder Punkt mischt dann
-vergrabene Sonden ein; an steilen, der Sonde zugewandten Hängen steigt deren
-Backface-Gewicht, an Kämmen bricht der Sichttest hart um. Das passt zur
-Beschreibung, ist aber eine Schätzung, kein Messwert.
+Geschätzt mit `FitGIProbeGrid` über die Terrain-Box: **171 m Abstand,
+15×4×15**, Schichten bei y ≈ −52, 119. Im Live-Lauf (§3.5) **gemessen**:
+15×4×15, 171,25 m. Keine Schicht schneidet das Gelände, die Kontur-Variante
+von A kann hier also nicht entstehen. Eine Schicht liegt ganz **unter** dem
+Gelände; ob diese vergrabenen Sonden die Füllung sichtbar verfälschen, ist
+nicht getrennt gemessen (§3.5 zeigt nur: GI an hellt die Schatten auf).
+
+### 3.5 Das echte Terrain, live (Vulkan, deferred)
+
+`scripts/landscape-gi-edge-repro/live204.py`: startet die Deploy-Kopie mit
+eigenem APPDATA (Projekt-**Kopie** in `C:\hw204\proj`, `RHI` 1, RenderPath 1,
+`HE_MCP=1`, `HE_COLLAB_OFFLINE=1`, Fenster minimiert ohne Fokus), kopiert den
+EngineContentCache des Menschen hinein (echte Texturen) und holt drei Bilder
+über `scene_screenshot` (`south`, `oblique`, `close` auf den Bergblock). In
+der Kopie ist `timeOfDay` 0.0 → 0.4 gesetzt (die Szene steht auf Mitternacht,
+`autoAdvance` aus; der Screenshot des Menschen war Tag). Log: 256 Chunks
+gebaut, **GI probe grid 15x4x15 (900 probes), spacing 171.251556**.
+
+Albedo-Ansicht (`LIVE204_VIEWMODE=basecolor`): die steilen Flanken sind
+hellbraunes Gestein, nicht dunkel. Normalen-Ansicht: glatt, nach außen. Licht:
+Fels-Pixel (Albedo ≈ 129), die im GI-aus-Bild im Schatten liegen
+(Luma < 60), Mittelwert:
+
+| Ansicht | GI an | GI an, indirekt 0 | GI aus | beleuchteter Fels |
+|---|---|---|---|---|
+| close | 58,6 | 34,5 | 45,4 | ≈ 190 |
+| oblique | 56,2 | 33,5 | 42,9 | ≈ 190 |
+| south | 64,6 | 36,5 | 43,6 | ≈ 190 |
+
+Lage und Kanten der dunklen Flächen sind in allen drei Varianten gleich
+(Augenschein, `grid_close.png`): Rinne hinter einem Grat, sonnenabgewandte
+Flanken. Keine Linien auf Chunk-Nähten (125 m). Bilder liegen nur lokal in
+`C:\hw204\live2` (keine Screenshots nach git).
 
 ### 3.4 Der Sampler (identisch in allen Kopien)
 
@@ -159,8 +197,10 @@ nicht einzeln nachverfolgt.
 - **LOD-/Tessellations-Risse**: erst ab 6 Chunkbreiten bzw. an der
   50-m-Tessellationsgrenze (beim Menschen aus, Faktor 1).
 - **Sonnen-RT-Maske selbst** (Terminator auf groben Dreiecken): in AUTOLAND und
-  MOUNTAINTEST stimmen Maske (`GIIndirectIntensity=0`) und CSM in den
-  sonnenbeschienenen Bereichen auf ±3 Luma überein, Referenzmaske bitgleich.
+  MOUNTAINTEST (≈ 1 m Zellen) stimmen Maske (`GIIndirectIntensity=0`) und CSM
+  in den sonnenbeschienenen Bereichen auf ±3 Luma überein, Referenzmaske
+  bitgleich. Am echten Terrain (1,95 m Zellen, §3.5) liegen die Schatten mit
+  RT-Maske und mit CSM an derselben Stelle (Augenschein, keine Pixel-Metrik).
 - **BLAS-Staleness**: Cache nach Mesh-UUID, `InvalidateMesh` leert ihn.
 - Rand-Normale: `sampleFieldNormal` klemmt u,v auf [0,1], am **äußeren**
   Terrainrand ist die Steigung halbiert. Wirkt nur am Außenrand, nicht innen.
@@ -171,7 +211,12 @@ nicht einzeln nachverfolgt.
   ein per `LastProjectPath` geladenes Projekt baut er **keine
   Terrain-Chunks** (Bild ohne Gelände). Die Zeugen rufen
   `TerrainSystem::updateTerrains` selbst. Für das echte Projekt braucht es
-  den Live-Weg (`HE_DUMP_LIVE` + MCP) oder einen Zeugen, der die Höhen lädt.
+  den Live-Weg: `live204.py` (MCP `scene_screenshot`, Kamera per
+  `position`/`look_at`, Ansicht per `HE_DUMP_VIEWMODE`, das das Viewport
+  auch live jeden Frame übernimmt). `scene_screenshot`-Namen dürfen keinen
+  Punkt enthalten.
+- Die Szene des Menschen steht auf `timeOfDay` 0.0 (Nacht); ohne Anpassung
+  der Kopie misst man Mondlicht.
 - Aufnahmen müssen den **RenderPath des Menschen** treffen (deferred). Mit
   dem Auto-Material ist A dort eine harte Stufe statt einer dünnen Linie.
 - Pixel→Welt bei Draufsicht: Höhenunterschiede verschieben den Maßstab
@@ -182,6 +227,14 @@ nicht einzeln nachverfolgt.
 
 ## 6. Für Schritt 2
 
+- **Zuerst klären, was der Mensch genau meint** (Queen → Mensch): Original-
+  Screenshot oder Backend, GI an/aus, Tageszeit, Kamera. Auf seinem Terrain
+  mit Vulkan sind die harten dunklen Flächen echte Schatten, die mit und ohne
+  GI gleich liegen (§3.5). Wenn er „zu dunkel/zu hart“ meint, ist das ein
+  Füll-/Ambient-Thema (Schatten/Licht ≈ 0,23 ohne GI, 0,3 mit GI; laut
+  `cap158auto.ps1` bekommen Graph-Materialien auf D3D11/D3D12/Vulkan kein
+  Sky-IBL, `fog.z = 0`), kein falscher Schattenwurf. A/B am echten Terrain
+  mit `live204.py` wiederholen, bevor ein Fix als „die“ Lösung gilt.
 - **A (alle Backends)**: DDGI-Surface-Bias für den Sichttest einführen
   (P + N·normalBias + V·viewBias, skaliert mit dem Sondenabstand), und
   vergrabene Sonden deaktivieren (Klassifikation: Anteil Rückseiten-Treffer
