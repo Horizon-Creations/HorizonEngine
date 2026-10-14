@@ -18,7 +18,8 @@ D3D11 hat keinen Debug-Layer, dort zählt nur Bild und Logzeile.
 
 ¹ „Exakt deckungsgleich“ ist das nicht, und zwei Abweichungen bleiben zur Entscheidung des Menschen (siehe unten):
 - Die Fläche ist bergab bis ~2 m größer als die Grube, weil der Boden dort von Natur aus unter dem Pegel liegt.
-- Bergauf steht über dem Wasser eine bis 4 m hohe, am Nordrand gezackte Böschung.
+- Bergauf steht über dem Wasser eine bis 4 m hohe, am Nordrand gezackte Böschung. **Seit Schritt 4 (14.10.)
+  behoben:** Dort ist jetzt eine flache Böschung, siehe [Schritt 4](#schritt-4-böschung-statt-wand-14102026).
 
 Die Logzahlen sind auf allen drei Backends identisch (die Geometrie entsteht auf der CPU). Die Bilder weichen von
 Vulkan im Mittel um 1,0/255 (mit animiertem Wasser) bzw. 0,4/255 (Boden allein) ab.
@@ -55,7 +56,48 @@ trockener Vertices erfasst es nicht. Bergauf schneidet der Pinsel bis auf den
 Wasserspiegel, und darüber steht eine senkrechte Böschung von bis zu 4 m (Gelände über dem Pegel, das abgetragen
 wurde). Am Nordrand ist sie gezackt, weil das Vertexgitter (1 m) gegen die Uferlinie der 4-m-Wasserzellen läuft.
 Trockener Grubenboden ist dort nicht zu sehen. Mit `HE_DUMP_WATERHIDESHEET=1` sieht man den Boden allein; auf dem
-Bild ist dann nur die Wand zu sehen.
+Bild ist dann nur die Wand zu sehen. *(Stand 13.10. Seit Schritt 4 steht dort eine flache Böschung, siehe unten.)*
+
+## Schritt 4: Böschung statt Wand (14.10.2026)
+
+Geprüft auf dem MacBook Air (Metal, Release-Build des Zweigs, Stand a35abc85). NN-WS03 war offline, deshalb
+**D3D11, D3D12 und Vulkan sind für diesen Schritt noch nicht geprüft.** Die Geometrie entsteht auf der CPU; die
+Logzahlen waren in Schritt 3 auf allen drei Backends identisch, das ersetzt die Abnahme auf Hardware aber nicht.
+
+`WaterBrush::shapeBank` senkt nach dem Graben das Gelände außerhalb der Fläche, das höher steht als
+`foot + 0,5 · d / (1 − d / reach)`, auf diese Höhe:
+- `d` ist der Abstand zur Uferlinie selbst (`water::shoreSegments`, dieselbe Zellregel wie `insideSheet` und das
+  Mesh), nicht zum nächsten Vertex unter Wasser. Die 1-m-Treppe gegen die 4-m-Wasserzellen verschwindet so.
+- `foot` liegt bei Pegel + Overshoot des Ufer-Clips + 1 cm. Die Böschung sinkt nie unter die Reichweite des
+  Wassers: Sie ist trockenes Ufer, keine Grube, und die Fläche breitet sich nicht auf sie aus.
+- `reach` ist Radius + Falloff des Pinsels. Dort wird das Profil senkrecht, deshalb gibt es keinen Absatz zum
+  alten Gelände, und dahinter bewegt sich nichts.
+- Die Zielhöhe hängt nur vom Ufer ab. Ein gehaltener Dab gräbt die Böschung nicht tiefer (Test).
+- Wo die Uferlinie vom Ufer-Clip kommt, wandert sie nach außen, wenn die Böschung den Eckpunkt absenkt. Deshalb
+  wird die Böschung bis zu 8-mal neu geformt, bis sich nichts mehr um mehr als 1 mm bewegt.
+
+`HE_DUMP_WATERBRUSH=pit`, gleiche Szene wie oben, Metal:
+
+| | gegrabene Vertices | davon trocken (Grube) | Böschung | Uferwand höchstens | steilste Stufe je 1 m |
+|---|---|---|---|---|---|
+| Fix | 1759 | **0** | 408 (tiefster 0,07 m über Pegel) | **0,58 m** | 1,12 m |
+| Negativkontrolle (Böschung aus) | 1337 | **0** | 0 | **4,10 m** | – |
+
+„Uferwand“ heißt: Wie hoch steht der erste Vertex neben dem Wasser über dem Pegel. Die 0,58 m sind das Profil
+selbst, denn ein Vertex liegt bis zu 1 m neben der Uferlinie. Die Negativkontrolle gibt die Zahlen aus Schritt 3
+wieder (1337 Vertices). Das Bild der Fix-Version ist über zwei Läufe bitgleich, und 0 `[ERROR]` im Log.
+
+![Fix: flache Böschung bis an die Wasserlinie](water-lake/thema188-bank-after-metal.png)
+![Negativkontrolle: 4-m-Wand, oben gezackt](water-lake/thema188-bank-negctrl-metal.png)
+
+Kamera der Nahaufnahme: `HE_DUMP_CAMX=12 HE_DUMP_CAMY=312 HE_DUMP_CAMZ=34 HE_DUMP_PITCH=-28` (dazu
+`HE_SKY_TIME=30 HE_DUMP_TOD=0.45 HE_DUMP_COVERAGE=0 HE_DUMP_CLOUDMODE=0 HE_DUMP_RENDERPATH=0 HE_DUMP_AA=0`).
+Negativkontrolle, nie committen: in `WaterBrush.cpp` (`dab`) `shapeBank(...)` durch `0u` ersetzen.
+
+Tests (`test_water_brush.cpp`): In allen Pinsel-Fällen bergauf ist die Uferwand 0,55 bis 0,58 m (vorher bis 4 m),
+die steilste Stufe 0,84 bis 1,2 m je Meter, und es bleiben 0 trockene Grubenvertices. Flaches Gelände unter dem
+Pegel bekommt keine Böschung. Neu ist der Test für einen gehaltenen Dab: Nach dem 10. Dab bewegt sich neben dem
+Wasser nichts mehr. 536 Wasser-, Terrain-, See- und Sculpt-Fälle sind grün (Release, macOS).
 
 ## Lake-Werkzeug: Das Bett geht mit
 
