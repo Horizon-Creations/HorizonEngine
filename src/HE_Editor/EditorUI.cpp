@@ -40,6 +40,7 @@
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
+#include "EditorUiShot.h"                // HE_DUMP_UI trigger shots of the running UI
 #include "ProfilerPanel.h"               // Window > Performance Profiler window
 #include "ConsolePanel.h"                // Window > Console — every HE_LOG record, all levels
 #include "HcExecTrace.h"                 // the console's "go to node": which tab to open
@@ -922,6 +923,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     // HE_DUMP_TUTORIALUI only: the tour card's placement, pictured from this
     // frame's draw data (a no-op without the variable).
     TutorialPanel::witnessAfterRender();
+    // HE_DUMP_UI only: this frame's whole UI on a trigger file, for drivers that
+    // need to SEE the footer, a menu or a panel of a hidden editor.
+    HE::Ed::UiShot::liveAfterRender();
 
     // ── Multi-viewport / platform windows ─────────────────────────────────────
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)

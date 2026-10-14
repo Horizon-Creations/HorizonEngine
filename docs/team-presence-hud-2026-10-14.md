@@ -178,33 +178,44 @@ the session cluster grows by a face; both right-anchored in the chain). A pictur
 face keeps square cells while its frame rounds (cells are rectangles, ImGui cannot
 clip round); it lasts 0.4 s and the real round face replaces it.
 
+## Step 6 (stopped by the queen, WIP)
+
+The footer has never been seen in a real editor: `HE_DUMP_LIVE` and the MCP screenshot
+tools render the scene only (`CaptureViewport` / `RenderSceneImage`), no ImGui. So:
+
+- `src/HE_Editor/EditorUiShot.{h,cpp}` (new): `HE::Ed::UiShot::captureDrawData(path)`, the
+  tutorial witness's CPU capture moved out of `TutorialPanel.cpp` (which now calls it), and
+  `liveAfterRender()`: `HE_DUMP_UI=<dir>` + `HE_DUMP_UI_TRIGGER=<file>`, trigger line
+  `<name> [frames] [x y]` → `<dir>/<name>-NNN.bmp` for `frames` frames, mouse at x y
+  (negative = away), trigger removed after the last. Called in `EditorUI.cpp` right after
+  `ImGui::Render()`. Added to `src/HE_Editor/CMakeLists.txt` beside the rasteriser.
+- `scripts/he_team_presence_shots.py` (new): local `collab_server`, hidden editors Anna (A)
+  and Bob (B), Cleo/Dan/Eli/Fay online over `team_test.py` sockets with their colours (Dan
+  a striped picture), shots online / menu (hover) / hosting / 45-frame join burst / joined
+  / left, colour boxes in the footer as checks.
+- `/tmp/collab-build/collab_server` rebuilt at b4a47a5 (the old binary predated profiles).
+
 ## Handoff
 
-- **Topic / step:** 202, step 5 of 6 (the slide from the online stack to the session).
-- **Branch:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
-  (code 6a5b63c7 + this doc). Server CollabSession b4a47a5 still **not deployed** (step 1).
-- **Done:** "Step 5" above; steps 2-4 above stand unchanged.
-- **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor -j8, rc 0):**
-  `test_team_ui` 10/10 (672 assertions); shots looked at (frame 6: blue B past the rule,
-  over Anna's stand-in on its way to slot 2, half round, dot fading; landed: two
-  session circles, Cleo still in the stack). `editor_help_audit.py --check` 1173/1173
-  (no new labelled control). Hidden `HorizonEditor` 120 frames, scratch HE_CONFIG_DIR:
-  clean exit, 0 errors (smoke only; no session in it). Full he_tests without
-  test_material_graph: 5117/5117 cases, 1289250 assertions, rc 0.
-- **Not verified:** the slide in the real editor (CollabPresenceBar is compiled without
-  ImGui in he_tests, so `FooterFaces()` and the skip in `DrawFooter` are covered only by
-  the harness stand-in that mirrors them); step 4's open items (menus over docked
-  panels, green dot vs. the footer's bottom edge); Windows/Linux only via CI.
-- **Decisions:** joining only, no reverse slide. Start from the "+N" for a member not
-  shown; no target face (session "+N") → no slide. The ghost is drawn in the footer,
-  outside the width chain. `faceAt` got `roundness` instead of a second face drawer.
-- **Traps:** EditorUI draws the session cluster *before* the stack, so the hide query
-  must run the per-frame step itself (`stepJoins`, keyed on `ImGui::GetFrameCount()`),
-  or the joining face shows at its target for one frame. Slide state is file-static:
-  a new ImGui context (next test) starts at frame 0 again; sign-out clears it.
-- **Next steps:** 1. Step 6: look at the slide in the real editor with two editors in a
-  team session (two scratch HE_CONFIG_DIRs, local collab_server), plus step 4's items.
-  2. Maybe ease the other faces' jump when the stack loses one. 3. Probably give
-  `CollabPresenceBar::drawMenuWindow` `AllowWhenBlockedByActiveItem` (step 4).
-  4. Deploy b4a47a5 (the human).
-
+- **Topic / step:** 202, step 6 of 6, **stopped by the queen before anything ran**.
+- **Branch:** this doc + WIP commit (EditorUiShot, script). Server b4a47a5 still not deployed.
+- **Verified:** nothing of step 6. The code is **not compiled** yet: the HorizonEditor
+  build (`out/build/release`, CMake re-ran, 1112 steps incl. assimp) reached ~900/1112
+  and was cut off by the 600 s limit; no compile error seen up to there (EditorUiShot.cpp
+  had not been reached). The script has never run.
+- **Not verified:** everything steps 3-5 left open (real editor: stack beside the real
+  session cluster, menu over docked panels, green dot vs. footer edge, the slide).
+- **Decisions:** UI capture by trigger file in the running editor rather than a visible
+  window; members without an editor come from raw sockets (no `team_set_color` MCP tool
+  needed); local server only (the rented host lacks ops 16-19).
+- **Traps:** no Pillow on this Mac (script reads BMP itself, converts with `sips`); the
+  build tree may rebuild far more than expected after a CMake re-run: start it with
+  `run_in_background` and poll, not a 600 s foreground call.
+- **Next steps:** 1. `ninja -C out/build/release -j8 HorizonEditor` to the end, fix
+  compile errors in EditorUiShot.cpp/TutorialPanel.cpp if any. 2. `python3 -B
+  scripts/he_team_presence_shots.py /tmp/presence-shots`, look at `shots/*.png`
+  (the hover point comes from Cleo's colour in a-online), attach the key ones to the
+  topic. 3. `he_tests --source-file='*test_team_ui.cpp'`, full he_tests (without
+  test_material_graph), `editor_help_audit.py --check`. 4. Write the step-6 report here.
+  Findings to pass on (not fixed): `CollabPresenceBar::drawMenuWindow` lacks
+  `AllowWhenBlockedByActiveItem`; the other faces jump when the stack loses one.
