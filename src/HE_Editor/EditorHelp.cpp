@@ -1820,6 +1820,12 @@ namespace
 	  "by itself when a run stops; while nothing is stopped it shows the Game "
 	  "Instance's variables live.",
 	  "", "horizoncode#debugging" },
+	{ "Window/Task Board", "",
+	  "The project's to-do list: tasks with a status and a priority, linked to "
+	  "the assets, entities, scenes and panels they are about. Kept in "
+	  "Config/TaskBoard.json, so it travels with the project through source "
+	  "control and the whole team sees the same list.",
+	  "", "editor#menus" },
 	{ "View/View Mode", "",
 	  "How the Scene window draws the whole scene: Lit, Unlit, Wireframe, or "
 	  "one channel of the G-buffer. The same picker as the toolbar's View Mode "
@@ -2607,6 +2613,71 @@ namespace
 	  "Takes Break on Next Node back before anything has run, so the next node "
 	  "goes through as usual.",
 	  "", "horizoncode#debugging" },
+
+	// ── Task Board ───────────────────────────────────────────────────────────
+	// The project's to-do list. The cards, the chips and the panel names in
+	// Link Panel are the board's own data, built at run time; the fixed
+	// controls are the toolbar, the details of the selected task and the
+	// banner a file that cannot be read or written raises.
+	{ "Task Board/New Task", "New Task",
+	  "Adds a task to the board, selects it and opens its details, where you "
+	  "give it a title. It is saved into Config/TaskBoard.json at once.",
+	  "", "" },
+	{ "Task Board/Columns", "Columns",
+	  "Shows the board as four lanes — Open, In Progress, Blocked, Done. Drag "
+	  "a card into another lane to change its status.",
+	  "", "" },
+	{ "Task Board/List", "List",
+	  "Shows the board as one list, grouped by status. Done is folded away "
+	  "until you open it.",
+	  "", "" },
+	{ "Task Board/Reload", "Reload",
+	  "Reads Config/TaskBoard.json again. For a file that could not be read — "
+	  "fix it first (a merge conflict leaves <<<<<<< markers in it) — or to "
+	  "drop an edit that could not be saved and take what is on disk instead.",
+	  "", "" },
+	{ "Task Board/Retry Save", "Retry Save",
+	  "Writes the board to Config/TaskBoard.json again, after a save failed "
+	  "(the file was locked or read-only).",
+	  "", "" },
+	{ "Task Board/Title", "",
+	  "What the task is, in a sentence. Saved when you leave the field.",
+	  "", "" },
+	{ "Task Board/Status", "",
+	  "Open, In Progress, Blocked or Done. Each change is written into the "
+	  "task's history with your name; on the board the card moves to its "
+	  "group or lane.",
+	  "", "" },
+	{ "Task Board/Priority", "",
+	  "Low, Normal, High or Urgent — the colour of the stripe down the card's "
+	  "left edge.",
+	  "", "" },
+	{ "Task Board/Description", "",
+	  "The details: what is wrong, what done looks like, where to start. "
+	  "Saved when you leave the field.",
+	  "", "" },
+	{ "Task Board/Link Selection", "Link Selection",
+	  "Links the entities selected in the scene to this task. Dragging an "
+	  "entity from the World Outliner onto the task does the same. A link "
+	  "remembers the entity by its id and the scene it is in, so it still "
+	  "finds it after a reload; click the chip to select it again.",
+	  "", "" },
+	{ "Task Board/Link Scene", "Link Scene",
+	  "Links the open scene to this task. Click the chip to open it — through "
+	  "the unsaved-changes prompt, like File ▸ Open Scene.",
+	  "", "" },
+	{ "Task Board/Link Panel", "Link Panel",
+	  "Links an editor panel to this task — for work that is about the editor "
+	  "itself. Click the chip to bring the panel up. Assets are linked by "
+	  "dragging them from the Content Browser onto the task.",
+	  "", "" },
+	{ "Task Board/Add Comment", "Add Comment",
+	  "Adds what you wrote to the task's history, with your name and the time.",
+	  "", "" },
+	{ "Task Board/Delete Task", "Delete Task",
+	  "Removes the task from the board and from Config/TaskBoard.json. What "
+	  "it linked to is not touched.",
+	  "", "" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
@@ -8298,6 +8369,7 @@ namespace
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
+		{ "Task Board/",       "editor-interface", "Editor Interface", "Task Board" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },

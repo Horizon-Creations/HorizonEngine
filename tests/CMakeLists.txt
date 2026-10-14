@@ -94,6 +94,9 @@ add_executable(he_tests
     # The Watch window, driven the same way: sections and rows from a real
     # runtime stopped at a breakpoint, Go to Node raising the reveal.
     test_hc_watch_ui.cpp
+    # The Task Board window, driven the same way: cards from a real board in a
+    # real project, links dropped onto them, chips that select and jump.
+    test_taskboard_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -706,6 +709,10 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
+    # The Task Board window, for test_taskboard_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. It reads TaskBoard, EditorCommands and the
+    # thumbnail cache, all already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -777,6 +784,8 @@ set_source_files_properties(
     test_undo_history_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     test_hc_watch_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
+    test_taskboard_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
