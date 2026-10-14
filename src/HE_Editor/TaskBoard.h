@@ -43,6 +43,7 @@
 //     one thing dropped — counted in LoadResult::dropped.)
 //   * A file that does not parse (merge-conflict markers, a truncated write) is
 //     never overwritten: saveTaskBoard() refuses until a human has fixed it.
+//     Nor is one that changed under the open board (a pull): that is a reload.
 //
 // ── Versions ──────────────────────────────────────────────────────────────────
 // `version` is the layout's version, 1 today. A file without the key is read
@@ -245,6 +246,16 @@ private:
 	int                      m_fileVersion = kVersion;
 	std::string              m_extraJson;      // unknown top-level keys
 	std::vector<std::string> m_unreadableTasks;   // non-object entries of "tasks", verbatim
+
+	// What the file held when this board last read or wrote it: its bytes, or
+	// "no file" (also for a board that never touched the disk). saveTaskBoard()
+	// compares the disk against this to notice a pull that landed in between.
+	bool        m_diskHadFile = false;
+	std::string m_diskBytes;
+
+	friend LoadResult loadTaskBoard(const std::filesystem::path& projectRoot, TaskBoard& out);
+	friend bool saveTaskBoard(const std::filesystem::path& projectRoot, TaskBoard& board,
+	                          std::string* error);
 };
 
 // ── The file ─────────────────────────────────────────────────────────────────
@@ -256,10 +267,16 @@ TaskBoard::LoadResult loadTaskBoard(const std::filesystem::path& projectRoot, Ta
 
 // Temp + rename (never a half-written file). Writes nothing for an empty board
 // when there is no file yet — opening the panel must not add a file to every
-// project. Refuses (false, `error` says why) when the file on disk exists but
-// does not parse: that is a merge conflict or a damaged file somebody has to
-// look at, and saving over it would destroy the only copy of their tasks.
-bool saveTaskBoard(const std::filesystem::path& projectRoot, const TaskBoard& board,
+// project. Refuses (false, `error` says why, the file untouched):
+//   * when the file on disk does not parse — a merge conflict or a damaged
+//     file somebody has to look at; saving over it would destroy the only copy
+//     of their tasks;
+//   * when the file changed since this board loaded or saved it — a git pull,
+//     a checkout, a teammate's edit synced in. Writing then would silently drop
+//     whatever arrived; the caller reloads (and re-applies its edit) instead.
+//     A board that never loaded counts as having seen "no file".
+// On success the board remembers what it wrote.
+bool saveTaskBoard(const std::filesystem::path& projectRoot, TaskBoard& board,
                    std::string* error = nullptr);
 
 } // namespace HE

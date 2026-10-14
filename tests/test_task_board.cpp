@@ -512,12 +512,69 @@ TEST_CASE("TaskBoard: a damaged or conflicted file is refused and never saved ov
 		CHECK(readBytes(file) == bad);
 	}
 
-	// Once a human has fixed it, saving works again.
+	// Once a human has fixed it (here: removed it) and the board reloaded,
+	// saving works again. Without the reload the board still remembers the
+	// conflicted file, and a file that vanished is a change on disk too.
 	fs::remove(file);
+	CHECK_FALSE(saveTaskBoard(p.root, b, &err));
+	REQUIRE(loadTaskBoard(p.root, b).ok);
+	b.add("Something new", "Ada", 1);
 	CHECK(saveTaskBoard(p.root, b, &err));
 	TaskBoard back;
 	REQUIRE(loadTaskBoard(p.root, back).ok);
 	CHECK(back.tasks.size() == 1);
+}
+
+TEST_CASE("TaskBoard: a pull that lands while the board is open is not saved over")
+{
+	TempProject p;
+	const fs::path file = taskBoardPath(p.root);
+	{
+		TaskBoard seed;
+		seed.add("A: already there", "Ada", 1);
+		REQUIRE(saveTaskBoard(p.root, seed));
+	}
+
+	TaskBoard mine;
+	REQUIRE(loadTaskBoard(p.root, mine).ok);
+
+	// The pull: a teammate's commit rewrites the file under the open board.
+	{
+		TaskBoard theirs;
+		REQUIRE(loadTaskBoard(p.root, theirs).ok);
+		theirs.add("B: from the pull", "Ben", 2);
+		REQUIRE(saveTaskBoard(p.root, theirs));
+	}
+	const std::string pulled = readBytes(file);
+
+	mine.add("C: mine", "Cleo", 3);
+	std::string err;
+	CHECK_FALSE(saveTaskBoard(p.root, mine, &err));
+	CHECK(err.find("changed on disk") != std::string::npos);
+	CHECK(readBytes(file) == pulled);   // B is still there
+
+	// Reload, redo the edit, save: all three.
+	REQUIRE(loadTaskBoard(p.root, mine).ok);
+	mine.add("C: mine", "Cleo", 3);
+	REQUIRE(saveTaskBoard(p.root, mine, &err));
+	TaskBoard back;
+	REQUIRE(loadTaskBoard(p.root, back).ok);
+	REQUIRE(back.tasks.size() == 3);
+	CHECK(back.tasks[1].title == "B: from the pull");
+
+	// Saving twice in a row is fine — the board remembers its own write.
+	mine.add("D: mine too", "Cleo", 4);
+	CHECK(saveTaskBoard(p.root, mine, &err));
+
+	// A board that never loaded has seen "no file": it may not replace one.
+	TaskBoard fresh;
+	fresh.add("E: from nowhere", "Dora", 5);
+	CHECK_FALSE(saveTaskBoard(p.root, fresh, &err));
+
+	// A file deleted under the board (a checkout without it) is a change too.
+	fs::remove(file);
+	CHECK_FALSE(saveTaskBoard(p.root, mine, &err));
+	CHECK_FALSE(fs::exists(file));
 }
 
 TEST_CASE("TaskBoard: no file is an empty board, and an empty board writes no file")

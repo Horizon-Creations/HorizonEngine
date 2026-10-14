@@ -805,7 +805,7 @@ TaskBoard::LoadResult loadTaskBoard(const std::filesystem::path& projectRoot, Ta
 	std::error_code ec;
 	if (!std::filesystem::exists(path, ec))
 	{
-		out = TaskBoard{};
+		out = TaskBoard{};   // remembers "no file"
 		TaskBoard::LoadResult r;
 		r.ok      = true;
 		r.version = TaskBoard::kVersion;
@@ -822,6 +822,8 @@ TaskBoard::LoadResult loadTaskBoard(const std::filesystem::path& projectRoot, Ta
 		return r;
 	}
 	TaskBoard::LoadResult r = out.fromJson(text);
+	out.m_diskHadFile = true;
+	out.m_diskBytes   = std::move(text);
 	if (!r.ok)
 		HE_LOG_WARN(Editor, "Task board: '%s' not loaded — %s. It is left untouched.",
 		            path.string().c_str(), r.error.c_str());
@@ -831,7 +833,7 @@ TaskBoard::LoadResult loadTaskBoard(const std::filesystem::path& projectRoot, Ta
 	return r;
 }
 
-bool saveTaskBoard(const std::filesystem::path& projectRoot, const TaskBoard& board,
+bool saveTaskBoard(const std::filesystem::path& projectRoot, TaskBoard& board,
                    std::string* error)
 {
 	const std::filesystem::path path = taskBoardPath(projectRoot);
@@ -842,17 +844,24 @@ bool saveTaskBoard(const std::filesystem::path& projectRoot, const TaskBoard& bo
 
 	std::error_code ec;
 	const bool exists = std::filesystem::exists(path, ec);
-	if (!exists && board.empty())
+	if (!exists && board.empty() && !board.m_diskHadFile)
 		return true;   // no tasks, and no file to say so in
 
 	const std::string text = board.toJson();
+	std::string onDisk;
+	if (exists && !readFile(path, onDisk))
+		return fail("cannot read " + path.string());
+
+	if (exists && onDisk == text)
+	{
+		// Nothing to write — leave the file and its mtime alone. (Also how a
+		// board catches up with a pull that brought exactly its own content.)
+		board.m_diskHadFile = true;
+		board.m_diskBytes   = text;
+		return true;
+	}
 	if (exists)
 	{
-		std::string onDisk;
-		if (!readFile(path, onDisk))
-			return fail("cannot read " + path.string());
-		if (onDisk == text)
-			return true;   // nothing changed — leave the file and its mtime alone
 		TaskBoard probe;
 		const TaskBoard::LoadResult r = probe.fromJson(onDisk);
 		if (!r.ok)
@@ -861,6 +870,14 @@ bool saveTaskBoard(const std::filesystem::path& projectRoot, const TaskBoard& bo
 			            path.string().c_str(), r.error.c_str());
 			return fail(r.error + " — fix or remove " + path.string() + " first");
 		}
+	}
+	// The file is not what this board last saw: something else wrote (or
+	// removed) it in between. Saving now would erase that without a word.
+	if (exists != board.m_diskHadFile || (exists && onDisk != board.m_diskBytes))
+	{
+		HE_LOG_WARN(Editor, "Task board: '%s' changed on disk since it was loaded — not saved",
+		            path.string().c_str());
+		return fail(path.string() + " changed on disk since the board was loaded — reload it first");
 	}
 
 	std::filesystem::create_directories(path.parent_path(), ec);
@@ -890,6 +907,8 @@ bool saveTaskBoard(const std::filesystem::path& projectRoot, const TaskBoard& bo
 		             path.string().c_str(), ec.message().c_str());
 		return fail("could not replace " + path.string() + " (" + ec.message() + ")");
 	}
+	board.m_diskHadFile = true;
+	board.m_diskBytes   = text;
 	return true;
 }
 
