@@ -56,4 +56,52 @@ Picture...`, `Change Picture...`, `Remove Picture`, `Use Collaboration Profile`,
 
 ## Handoff
 
-(filled in at the end of the step, below)
+- **Topic / step:** 202, step 1 of 6 (team profiles: server, protocol, editor UI).
+- **Branch / commit:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
+  @ 421f51a8 + face fix (pushed; contains topic 201's branch @ 538cc513). Server:
+  CollabSession `claude/he-net-relay-server` @ b4a47a5 (pushed, CI green:
+  https://github.com/Horizon-Creations/CollabSession/actions/runs/38548406552). **Not
+  deployed**: the rented host still runs an older build (no tokens, no profiles); against
+  it the editor just shows "no profiles yet" (`profilesSupported()` false).
+- **Done:** "Step 1" above. Code: `TeamClient.h` (TeamColor, TeamMember profile fields,
+  ops 16-19, `kAvatarFetchesInFlight`), `TeamClient.cpp` (`setProfile`, `mergeProfiles`,
+  `fetchAvatars`, GetAvatar branch at the top of `applyReply`), `TeamController.cpp`
+  ("Your profile" at the end; colour flush in `update()`), `TeamView.cpp` (`face()`,
+  `drawColourRow()`, `drawProfile()`, picture dialog), `FakeTeamServer.h` (ops 16-19,
+  `setProfile()`, `noProfiles`, `writeBmp()`).
+- **Verified (Mac, Release, `out/build/release`, full build of he_tests + HorizonEditor
+  rc 0):** server `team_store_test` all passed, `team_test.py` 24/24 (new: test_profiles,
+  test_profiles_survive_a_restart), `relay_test.py` 25/25. Engine: `test_net_team` 20/20
+  (1068 assertions) and `test_team_ui` 5/5 (345), both again with
+  `HE_TEST_TEAM_SERVER=127.0.0.1:47812` (local collab_server b4a47a5): 20/20 (1151) and
+  5/5 (365); server log shows "set its picture (64 px)", "set its colour", "removed its
+  picture". Regressions: test_collab_controller 74/74, test_mcp_tools_collab 7/7,
+  test_editor_help 19/19, test_mcp_tools_settings 20/20, test_net_relay 27/27.
+  `editor_help_audit.py --check` 1172/1172. Screenshot looked at:
+  `team-panel-profile.bmp` (HE_UI_DUMP_DIR), profile section + faces in the roster.
+- **Not verified:** the real editor window by hand (the SDL picture dialog in TeamView
+  passes no parent window); Windows/Linux only through CI run
+  https://github.com/Horizon-Creations/HorizonEngine/actions/runs/38558101088 (still
+  running at hand-off); the rented host (not deployed).
+- **Decisions:** separate ops instead of extending LIST_MEMBERS (old clients/servers keep
+  working; unknown op = bad-request, unknown event = skipped). Pictures as raw 64 px
+  RGBA8 (the collab avatar format, `CollabController::resampleSquareRgba`), stored as
+  files beside teams.txt, colour in teams.txt (format 3 only while a colour is set). The
+  team profile is its own server-side copy; "Use Collaboration Profile" copies the collab
+  identity on request, nothing is uploaded on its own. Colour picks are debounced (400 ms).
+  Faces drawn with ImDrawList rectangles (TeamView has no renderer).
+- **Suggested, not taken:** upload the collab identity automatically when a team account
+  has no profile yet; rounded clipping of the picture corners in `face()` (square pixels
+  stick out of the rounded frame slightly).
+- **Traps:** the fake server answered unknown ops with ok + empty body, which a client
+  reads as a broken reply: every new op must be added to `FakeTeamServer.h` or all team
+  tests drop their connection. The server's `members()` test helper asserts no trailing
+  bytes, a reason not to append to existing replies. Deploying a format-3 teams.txt makes
+  rollback to an older server impossible until all colours are None.
+- **Next steps:** 1. Step 2: own status icon left of the bell — `TeamController::self()`
+  + `ownColor()` give face and colour; signed-out/failed = red X opening a sign-in modal
+  (reuse `TeamView` sign-in fields; `resume()` already does the automatic login).
+  2. Step 3/4: HUD next to `CollabPresenceBar` (footer) — online members = `members()`
+  with `online && !in session`; pictures via `CollabPresenceBar`'s `avatarTexture()` cache
+  keyed by member + `avatarId`; Invite = `TeamController::invite()`. 3. Deploy b4a47a5
+  (the human: `deploy/deploy.sh`), then rerun the two live cases against the host.
