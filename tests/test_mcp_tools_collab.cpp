@@ -1,7 +1,9 @@
 #include "doctest.h"
+#include "FakeTeamServer.h"
 
 #include "McpToolRegistry.h"
 #include "../src/HE_Editor/CollabController.h"
+#include "../src/HE_Editor/TeamController.h"
 
 #include <HorizonScene/HorizonWorld.h>
 
@@ -247,4 +249,166 @@ TEST_CASE("collab tools: host and join by session id through a real relay (HE_TE
 	CHECK(rosterHas(host.call("collab_status").content, "Guest B"));
 	guest.call("collab_leave");
 	host.call("collab_leave");
+}
+
+// ─── The team server as tools ────────────────────────────────────────────────
+// What scripts/he_team_two_editors.py drives in two editor processes against
+// the real team server, here against FakeTeamServer: two TeamControllers, each
+// behind its own registry, signed in as different members.
+namespace {
+
+struct TeamSide
+{
+	CollabController collab;
+	TeamController   team{ collab };
+	HorizonWorld     world;
+	McpToolRegistry  registry;
+
+	explicit TeamSide(bool control)
+	{
+		collab.setWorld(&world);
+		collab.setProjectIdentity("mcp-team-test-project", "MCP Team Test");
+		McpCollabHooks hooks;
+		hooks.projectOpen    = [] { return true; };
+		hooks.displayName    = [] { return std::string("Stored Identity"); };
+		hooks.controlAllowed = control;
+		HE::Ed::registerTeamTools(registry, team, std::move(hooks));
+	}
+
+	ToolResult call(const char* name, const json& args = json::object())
+	{
+		const auto* t = registry.find(name);
+		REQUIRE(t != nullptr);
+		return t->handler(args);
+	}
+};
+
+template <typename Fn>
+bool pumpTeamUntil(FakeTeamServer& server, std::vector<TeamSide*> sides, Fn done)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	std::uint64_t now = 1;
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		server.pump();
+		for (TeamSide* s : sides)
+		{
+			s->collab.update(now);
+			s->team.update(now);
+		}
+		if (done()) return true;
+		now += 16;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	return done();
+}
+
+const json* memberIn(const json& status, const std::string& name)
+{
+	for (const auto& m : status["members"])
+		if (m.value("name", std::string()) == name) return &m;
+	return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("team tools: without the run's permission only team_status exists")
+{
+	TeamSide s(false);
+	REQUIRE(s.registry.find("team_status") != nullptr);
+	CHECK_FALSE(s.registry.find("team_status")->mutates);
+	for (const char* name : { "team_sign_in", "team_sign_out", "team_add_member", "team_host",
+	                          "team_set_open", "team_invite", "team_join", "team_decline" })
+		CHECK(s.registry.find(name) == nullptr);
+
+	const ToolResult r = s.call("team_status");
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["status"] == "signed_out");
+	CHECK(r.content["members"].empty());
+	CHECK(r.content["sessions"].empty());
+}
+
+TEST_CASE("team tools: two members sign in, see each other, host and invite")
+{
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.ignoreStrangers = true;   // team_host's relay HELLO goes to the same address
+	const std::string addr = "127.0.0.1:" + std::to_string(server.t->boundPort());
+
+	TeamSide anna(true);
+	TeamSide bob(true);
+	for (const char* name : { "team_sign_in", "team_add_member", "team_host", "team_invite",
+	                          "team_join", "team_decline", "team_set_open", "team_sign_out" })
+		CHECK(anna.registry.find(name)->mutates);
+
+	// Refusals a client can act on, before anything is signed in.
+	ToolResult r = anna.call("team_host");
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "host_failed");
+	CHECK(r.errorMessage.find("Sign in") != std::string::npos);
+	r = anna.call("team_sign_in", json{ { "server", addr }, { "team", "stu dio" },
+	                                    { "member", "Anna" }, { "password", "x" } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "sign_in_failed");
+
+	r = anna.call("team_sign_in", json{ { "server", addr }, { "team", "studio" },
+	                                    { "member", "Anna" }, { "password", "correct-horse" } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["status"] == "connecting");
+	REQUIRE_FALSE(bob.call("team_sign_in", json{ { "server", addr }, { "team", "studio" },
+	                                            { "member", "Bob" },
+	                                            { "password", "correct-horse" } }).isError);
+
+	// Presence both ways, read through the tool.
+	REQUIRE(pumpTeamUntil(server, { &anna, &bob }, [&] {
+		const json a = anna.call("team_status").content;
+		const json b = bob.call("team_status").content;
+		const json* bobInA = memberIn(a, "Bob");
+		const json* annaInB = memberIn(b, "Anna");
+		return a["status"] == "signed_in" && b["status"] == "signed_in" && bobInA &&
+		       annaInB && (*bobInA)["online"] == true && (*annaInB)["online"] == true;
+	}));
+	json a = anna.call("team_status").content;
+	CHECK(a["team"] == "studio");
+	CHECK(a["member"] == "Anna");
+	CHECK(a["isAdmin"] == true);
+	CHECK((*memberIn(a, "Anna"))["you"] == true);
+	CHECK(bob.call("team_status").content["isAdmin"] == false);
+
+	// Invite before hosting is refused with the reason.
+	r = anna.call("team_invite", json{ { "member", "Bob" } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "invite_failed");
+	CHECK(r.errorMessage.find("Host a session first") != std::string::npos);
+
+	// Add a member: the roster grows once the server has it.
+	REQUIRE_FALSE(anna.call("team_add_member", json{ { "name", "Dana" },
+	                                                { "password", "dana-pw" } }).isError);
+	REQUIRE(pumpTeamUntil(server, { &anna, &bob }, [&] {
+		return memberIn(anna.call("team_status").content, "Dana") != nullptr;
+	}));
+
+	// Host invitation-only, invite Bob: Bob's editor lists the session as invited.
+	r = anna.call("team_host", json{ { "open", false } });
+	REQUIRE_FALSE(r.isError);
+	REQUIRE(pumpTeamUntil(server, { &anna, &bob }, [&] {
+		return !anna.call("team_status").content["hostedSession"].get<std::string>().empty();
+	}));
+	a = anna.call("team_status").content;
+	const std::string sid = a["hostedSession"].get<std::string>();
+	CHECK(a["hostedSessionOpen"] == false);
+	CHECK(a["sessionRunning"] == true);
+	REQUIRE_FALSE(anna.call("team_invite", json{ { "member", "Bob" } }).isError);
+	REQUIRE(pumpTeamUntil(server, { &anna, &bob }, [&] {
+		// Held in a local: a range-for over call(...).content[...] would walk a
+		// destroyed temporary (C++20 does not extend it through operator[]).
+		const json b = bob.call("team_status").content;
+		for (const auto& s : b["sessions"])
+			if (s["session"] == sid && s["invited"] == true && s["host"] == "Anna") return true;
+		return false;
+	}));
+
+	CHECK(anna.call("team_sign_out").content["status"] == "signed_out");
+	anna.collab.leave();
+	bob.call("team_sign_out");
 }

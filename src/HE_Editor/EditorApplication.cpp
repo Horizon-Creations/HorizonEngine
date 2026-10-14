@@ -10451,6 +10451,8 @@ void EditorApplication::setupMcpTools()
 	collab.displayName = [] { return CollabController::localIdentity().name; };
 	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
 		collab.controlAllowed = env[0] == '1';
+	// The team server is the way into a team session; same gate, same hooks.
+	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
 	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
