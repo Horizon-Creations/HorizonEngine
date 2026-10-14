@@ -35,8 +35,10 @@ item **deltas** while this editor holds the asset lock, and the 1 s **whole-file
    the canvas to it and seeded its collab mirror from it. The 1.5 s hot-reload poll fixed the
    ContentManager a moment later but never reloaded the tab again, so an open tab could keep an
    old graph for good. If that editor took the lock later, its first save wrote the old graph out
-   for everyone. **Cross-cutting:** HorizonCode classes, widgets, particle and animator tabs read
-   through the same `loadAsset` path (step 4 verified that path by reading only).
+   for everyone. Confirmed at ContentManager level by the new test. **Cross-cutting:**
+   HorizonCode classes, widgets, particle and animator tabs read through the same `loadAsset`
+   path (step 4 verified it by reading only); `unloadAsset` handles all of their SlotMaps, so the
+   fix covers them too (build-checked, not run).
 2. **The receiver never regenerated.** A delta batch patched `State::graph`, and `afterApply` only
    set `previewDirty`. The live `MaterialAsset` (what the scene and the preview draw) stayed on
    the old shader until the file arrived. The same applied to instances of that master and to the
@@ -60,7 +62,9 @@ item **deltas** while this editor holds the asset lock, and the 1 s **whole-file
   `MaterialEditorPanel::forgetFunctionGraph(path)` (new). This also helps git pulls.
 * `MaterialEditorPanel.cpp`: `applyToMaterial` split into `regenerateMaterial` (no dirty mark) and
   the dirtying wrapper. The delta callback sets `State::peerEdited`; the next `render()`
-  regenerates the live asset, re-derives its instances and resets the undo floor. Reloads
+  regenerates the live asset, re-derives its instances and resets the undo floor. It does so
+  before `render()` fetches its `MaterialAsset*`, because regenerating may load a function graph
+  and a load may move SlotMap storage. Reloads
   (`reloadFromDisk`, `reloadByContentPath`) drop the undo history and the function's cache entry.
   Instance tabs return no delta binding; `parentSwitches` is cleared before refill.
 * Test: `test_contentmanager.cpp` "a peer's file over a loaded material needs unload + load" pins
@@ -88,13 +92,21 @@ item **deltas** while this editor holds the asset lock, and the 1 s **whole-file
 **Done:** inventory (§1-2), fixes for §2.1-2.5 (§3). Files: EditorApplication.cpp
 (`applyAssetBytes`, hot-reload poll), EditorApplication.h (`m_reloadedByPeer`),
 MaterialEditorPanel.cpp/.h, tests/test_contentmanager.cpp.
-**Verified:** see the step's result post (he_tests build + listed test files, HorizonEditor build).
+**Verified:** `he_tests` (45 steps) and `HorizonEditor` (76 + 3 steps) build, rc 0, out/build/release.
+Green: test_contentmanager (86 cases, incl. the new one, 15 assertions), test_collab_docsync (24),
+test_collab_controller, test_net_collab, test_collab_undo, test_editor_commands,
+test_mcp_tools_collab. Full he_tests minus test_material_graph: 5124/5125. The one red
+(test_hpak.cpp:1186 scanContentDirectory 5 == 2) depends on the environment: it passes with
+`HOME=$(mktemp -d)`, and this branch touches neither ContentManager nor test_hpak.
 **Not verified:** no live two-editor session. Neither `EditorApplication.cpp` nor
 `MaterialEditorPanel.cpp` is in he_tests; the editor-side changes are build-checked only.
 **Decisions:** no new `CollabDocSync::Kind`, no protocol bump; explicit unload + load on arrival
 instead of waiting for the mtime poll (the hot-reload test has to push mtime 2 s forward for
 same-second saves); undo floor reset on peer edits (the scene's "their edit is not on our stack"
 rule).
+**Pitfalls:** `m_reloadedByPeer` is drained by the hot-reload poll, which only runs with a project
+and a renderer; a renderer-less receiver would keep queuing ids. Never use a `MaterialAsset*`
+fetched before a `regenerateMaterial`/`loadAsset` in the same frame.
 **Next steps:**
 1. Step 6: lock-denied fork (§4) for materials and every panel that writes its live asset; apply
    the undo-floor reset to the HorizonCode / particle / animator / widget panels (same shape).

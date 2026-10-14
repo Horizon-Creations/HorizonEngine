@@ -2179,6 +2179,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 {
 	State& st = stateFor(assetPath, ctx);
 
+	// A peer's batch landed since the last frame. Before `mat` / `fnAsset` below are
+	// fetched, not after: regenerating can load a function graph this editor has not
+	// seen yet (a FunctionCall the peer just added), and a load may move the asset
+	// the pointers would point into. The local edit path regenerates at the end of
+	// the frame, after their last use.
+	if (st.peerEdited)
+	{
+		st.peerEdited = false;
+		const bool hasAsset = ctx.contentManager && (st.isFunction
+			? ctx.contentManager->getMaterialFunction(st.materialId) != nullptr
+			: ctx.contentManager->getMaterial(st.materialId) != nullptr);
+		if (hasAsset && !st.isInstance)
+		{
+			regenerateMaterial(st, ctx);
+			dropUndoHistory(st);
+			pushUndo(st);
+		}
+		st.previewDirty = true;
+	}
+
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
 	ImGui::Begin("##MaterialGraphTab", nullptr,
@@ -2191,18 +2211,6 @@ void render(AppContext& ctx, const std::string& assetPath,
 	MaterialFunctionAsset* fnAsset = (st.isFunction && ctx.contentManager)
 		? ctx.contentManager->getMaterialFunctionMutable(st.materialId) : nullptr;
 	const bool assetOk = mat || fnAsset;
-
-	if (st.peerEdited)
-	{
-		st.peerEdited = false;
-		if (assetOk && !st.isInstance)
-		{
-			regenerateMaterial(st, ctx);
-			dropUndoHistory(st);
-			pushUndo(st);
-		}
-		st.previewDirty = true;
-	}
 
 	// ── Toolbar ───────────────────────────────────────────────────────────────
 	// Was a text run followed by five controls placed with hand-tuned offsets
