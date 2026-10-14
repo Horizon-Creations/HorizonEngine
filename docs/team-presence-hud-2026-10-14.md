@@ -237,7 +237,13 @@ without ImGui there). `HE_DUMP_LIVE` and the MCP screenshot tools picture the sc
 - **Verified (Mac, Release, `out/build/release`):** HorizonEditor -j8 rc 0; two hidden real
   editors + local server: PASS, every check above, pictures looked at. No editor or server
   left running.
-- **Tests:** TESTS_PLACEHOLDER
+- **Tests:** he_tests -j8 rc 0; `test_team_ui` 10/10 (672 assertions), `test_net_team` 20/20 (1068);
+  full run without test_material_graph 5112/5117 cases, 1289587/1289602 assertions. The 5
+  red cases are all `test_heproj_registration.cpp` (Linux XDG assets not found): this branch
+  lacks release/0.7.0's ae9cf6ed (find `scripts/linux_assets` by walking up; ccache makes
+  `__FILE__` relative), so they go green on merge, not caused here. `editor_help_audit.py
+  --check` 1173/1173. CI https://github.com/Horizon-Creations/HorizonEngine/actions/runs/38589034072
+  started at hand-off.
 - **Not verified:** the tour witness (`HE_DUMP_TUTORIALUI`) after the move was not rerun
   (same code, now in EditorUiShot.cpp); Windows/Linux only via CI; the session menu.
 - **Decisions:** UI capture by trigger file in the hidden editor, never a visible window;
