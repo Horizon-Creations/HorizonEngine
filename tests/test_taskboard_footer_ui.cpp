@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -579,4 +580,47 @@ TEST_CASE("task board footer ui: Open Task Board and a task's title ask for the 
 	CHECK_FALSE(TaskBoardFooter::isOpen());
 	// Nothing was ticked on the way.
 	CHECK(taskOf(ctx, ids.c)->status == HE::TaskStatus::Open);
+}
+
+TEST_CASE("task board footer ui: an untick puts back a status word this build does not know")
+{
+	Harness harness;
+	Project proj("he_taskboard_footer_ui_word");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	g_footer  = true;
+	g_footerW = float(W);
+
+	// A teammate on a newer editor set a status this one has no name for.
+	const char* kId = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
+	{
+		std::filesystem::create_directories(HE::taskBoardPath(proj.root()).parent_path());
+		std::ofstream f(HE::taskBoardPath(proj.root()), std::ios::binary);
+		f << R"J({ "version": 1, "tasks": [ { "id": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5", "title": "Under review", "status": "review" } ] })J";
+	}
+	HE::UUID id;
+	REQUIRE(HE::uuidFromHex(kId, id));
+	settle(ctx);
+	REQUIRE(taskOf(ctx, id) != nullptr);
+	REQUIRE(taskOf(ctx, id)->status == HE::TaskStatus::Other);
+
+	TaskBoardFooter::Rect w, tick;
+	REQUIRE(TaskBoardFooter::widgetRect(w));
+	clickAt(ctx, centre(w));
+	settle(ctx);
+	REQUIRE(TaskBoardFooter::tickRect(id, tick));
+	clickAt(ctx, centre(tick));
+	CHECK(taskOf(ctx, id)->status == HE::TaskStatus::Done);
+	REQUIRE(TaskBoardFooter::tickRect(id, tick));
+	clickAt(ctx, centre(tick));
+
+	CHECK(taskOf(ctx, id)->status == HE::TaskStatus::Other);
+	CHECK(taskOf(ctx, id)->statusOther == std::string("review"));
+	// On disk too — read back by a fresh board, not found by text (the history
+	// entry the untick wrote says "review" as well).
+	HE::TaskBoard disk;
+	REQUIRE(HE::loadTaskBoard(proj.root(), disk).ok);
+	REQUIRE(disk.find(id) != nullptr);
+	CHECK(disk.find(id)->status == HE::TaskStatus::Other);
+	CHECK(disk.find(id)->statusOther == std::string("review"));
 }
