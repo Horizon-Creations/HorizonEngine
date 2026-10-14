@@ -52,7 +52,13 @@ delete is one keypress; the row (with the holder's face and name) is its confirm
   lock-denied fork (materials doc section 4), undo-floor reset for HC/particle/animator/widget
   panels, landscape stroke undo (terrain doc section 4), human structural gestures on
   `CollabUndo`. All still open.
-* Sweep writes on a **client** to graphs nobody holds: `saveAsset` → `publishAsset` requests
+* No protocol bump although an asset-op `path` can now mean an entity: all 0.7.0 builds ship
+  together, and a bump means a `CollabSession.h` edit (~35 min rebuild). An older build of the
+  same protocol would see an `entity:` row as a file and its apply would find nothing on disk.
+  The queen can overrule this with a bump to 16.
+* The holder gets no notice of its own when an approved delete takes its open asset tab; only
+  the host's row warns beforehand.
+* Sweep writes on a **client** to graphs nobody holds (and graphs handed over by "Ask for it"): `saveAsset` → `publishAsset` requests
   the lock and does not re-send after the grant (same as the MCP case in the materials doc).
   Lost-update territory, step 7.
 
@@ -67,8 +73,14 @@ delete is one keypress; the row (with the holder's face and name) is its confirm
 (Revert to Default), `HcRenameDialog.cpp` + `EditorHelp.cpp` ("Ask for it"). Tests:
 `test_collab_controller.cpp` "Entity op keys…" and "Collab: deleting or renaming an entity a
 peer holds goes to the host" (3 subcases).
-**Verified / not verified:** see the step's result post (build + tests run there).
-No live two-editor run. `EditorApplication.cpp`, `CollabPanel.cpp`, `HcRenameDialog.cpp`,
+**Verified:** out/build/release: `he_tests` (56 steps) and `HorizonEditor` (81 steps) build, rc 0.
+New cases 10/10 green in a loop. Green: test_collab_controller 81 cases (one earlier run had a
+`pumpUntil` flake outside the new cases; 4 reruns green), test_net_collab 113, test_collab_undo 9,
+test_editor_commands 13, test_outliner_ui 9, test_collab_docsync 24, test_editor_help 19,
+test_mcp_tools_collab 7. Full he_tests minus test_material_graph: 5126/5127; the one red is
+test_hpak.cpp:1186 under the real HOME (54/54 with `HOME=$(mktemp -d)`, lesson 321).
+`editor_help_audit.py --check`: 1167/1167.
+**Not verified:** no live two-editor run. `EditorApplication.cpp`, `CollabPanel.cpp`, `HcRenameDialog.cpp`,
 `ContentBrowserPanel.cpp` are not in he_tests: build-checked only.
 **Decisions:** reuse the asset-op channel with a key prefix, no protocol bump; ask only on
 conflict; host's own entity ask goes through its in-tray; HC sweep conflict = edit, so the
