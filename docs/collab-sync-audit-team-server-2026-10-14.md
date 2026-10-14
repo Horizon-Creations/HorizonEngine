@@ -16,7 +16,7 @@ lands, it fills the upload slot instead of inventing its own.
 | Hand-over | `EditorApplication.cpp:736` `onSessionSettled` → `GitController::handOverToTeamServer` | The step 8 hook (host: save anywhere in the session, or 5 s idle) passes the settled keys (asset rel paths, `::Scene::`). With `git` mode: dropped |
 | Upload slot | `GitController::setTeamServerUpload(fn(keys) → bool)` | Topic 199's `TeamSyncService` fills it. Until then the keys wait in `teamServerPending()` (deduplicated, oldest first). `update()` re-offers them every frame; `true` = taken, recorded as `teamServerLastHandedMs/Count` |
 | Notice | `SourceControlPanel.cpp:1476` `drawTeamServerNotice`, drawn at `:1578` | At the top in `teamServer` mode: team/project, "merges, commits, backs up to GitHub, nothing to commit here", the session line (host: waiting N / handed N s ago / "you host this session"; client: "the host hands everyone's saves over"). Plus a warning while the slot is empty ("cannot reach the team server yet... switch back to git in ProjectSettings.json"). Missing git or no repo: notice only, no install or `git init` offer. The guest notice is not repeated |
-| Preferences | `EditorSettingsPanel.cpp:1173` | Source Control page explains instead of offering repo setup |
+| Preferences | `EditorSettingsPanel.cpp:1155` | Source Control page explains instead of offering repo setup (before the missing-git line) |
 
 ## 2. Decisions
 
@@ -63,7 +63,7 @@ lands, it fills the upload slot instead of inventing its own.
 - **Files:** `ProjectSettings.h:407`, `ProjectSettings.cpp` (==, toJson, fromJson);
   `GitController.h:206-250`, `GitController.cpp:145`, `:314`, `:448-487`;
   `EditorApplication.cpp:736`, `:4745`; `SourceControlPanel.cpp:1476`, `:1578`, `:1656`;
-  `EditorSettingsPanel.cpp:1173`; tests `test_project_settings.cpp:642-718`,
+  `EditorSettingsPanel.cpp:1155`; tests `test_project_settings.cpp:642-718`,
   `test_git_roundtrip.cpp:1747-1846`.
 - **For step 10 (audit):** under `teamServer`, everything that writes git is off by the gate.
   Still running and worth a decision there: auto-fetch (read-only, would fetch an `origin` the

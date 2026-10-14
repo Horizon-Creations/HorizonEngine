@@ -1149,6 +1149,18 @@ void drawRepositorySection(AppContext& ctx)
 			GitCloneDialog::requestOpen();
 		return;
 	}
+	// The setup below would be refused anyway (GitController::mayModify), so say
+	// why instead of offering buttons that do nothing. Before the missing-git
+	// line: with the server keeping the history, git is nothing to install.
+	if (git->blockedByTeamServer())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+		ImGui::TextWrapped("The team server keeps this project's history "
+		                   "(Config/ProjectSettings.json, sourceControl), so the editor "
+		                   "sets up no repository of its own here.");
+		ImGui::PopStyleColor();
+		return;
+	}
 	if (ctx.gitProbe && !ctx.gitProbe->gitFound)
 	{
 		// The install instructions are the section directly above this one, so
@@ -1165,17 +1177,6 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::TextWrapped("You are a guest in a collaboration session. The host "
 		                   "manages source control for this project — your changes "
 		                   "reach the others through the session.");
-		ImGui::PopStyleColor();
-		return;
-	}
-	// The setup below would be refused anyway (GitController::mayModify), so say
-	// why instead of offering buttons that do nothing.
-	if (git->blockedByTeamServer())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-		ImGui::TextWrapped("The team server keeps this project's history "
-		                   "(Config/ProjectSettings.json, sourceControl), so the editor "
-		                   "sets up no repository of its own here.");
 		ImGui::PopStyleColor();
 		return;
 	}
