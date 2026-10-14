@@ -4411,17 +4411,64 @@ namespace
 	  "count as an attack. A client past the limit has its extra calls dropped "
 	  "and the overage weighed against it, exactly like a flood of input.",
 	  "", "collaboration#gameplay" },
+	// ── Settings sorting: project graphics, input, viewport quality ──────────
+	{ "Project Graphics/This project sets its own graphics", "This project sets its own graphics",
+	  "Off, the exported build ships the graphics of whoever exports it (their "
+	  "Preferences) and every editor previews the project with its own values — "
+	  "the way every project has worked so far. On, the rows on this page are the "
+	  "project's answer: they are written into Config/ProjectSettings.json, go "
+	  "into the exported build's config.json and are what the viewport previews "
+	  "with, unless the user chose their own values under Preferences ▸ Viewport "
+	  "Quality.\n\n"
+	  "Switching on starts from the values the editor shows right now, so nothing "
+	  "jumps. Switching off leaves the project's values in the file, unused.",
+	  "", "export#overview" },
+	{ "Input/This project sets its own deadzones", "This project sets its own deadzones",
+	  "Off, the game uses the deadzones of the machine it runs on: your "
+	  "Preferences in the editor, the defaults in an exported build. On, play mode "
+	  "and the exported game both use the stick and trigger deadzones below, so "
+	  "what you tuned is what ships. Switching on starts from your current values.",
+	  "", "" },
+	{ "Input/Stick Deadzone", "Stick Deadzone",
+	  "How far a stick must be pushed before the game sees it move. Below this "
+	  "the stick reads exactly zero; above it the value is re-scaled so full tilt "
+	  "still reaches 1. Raise it for worn sticks; lower it for finer low-speed "
+	  "control.",
+	  "", "" },
+	{ "Input/Trigger Deadzone", "Trigger Deadzone",
+	  "How far a trigger must be pulled before the game sees it. Below this it "
+	  "reads zero; the rest of the travel is re-scaled to 0–1.",
+	  "", "" },
+	{ "Viewport Quality/Same as the project", "Same as the project",
+	  "The viewport previews with the values of the open project's graphics "
+	  "pages when the project sets its own, so what you see is what it ships. A "
+	  "project that sets none is previewed with your own values. The rows on the "
+	  "page are locked while this is on and a project's values are showing.",
+	  "", "" },
+	{ "Viewport Quality/My own values", "My own values",
+	  "The viewport previews with the values on this page even when the project "
+	  "sets its own — for a machine that cannot carry the project's bloom and "
+	  "global illumination. Only the preview changes: exporting still writes the "
+	  "project's values, and play mode follows the project.",
+	  "", "" },
+	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
+	  "Opens the Project Settings page of the repository: initialising it, the "
+	  "remote, GitHub setup and large files. The repository belongs to the "
+	  "project, so those controls travel with it and no longer sit here; git on "
+	  "this machine and the signed-in account stay on this page.",
+	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
-	  "On, the packaged build boots with whatever this editor's Preferences and "
-	  "Export dialog hold at export time — the way every export has worked, and "
+	  "On, the packaged build boots with the window and backend this editor's "
+	  "Export dialog holds at export time — the way every export has worked, and "
 	  "what a project that never opened this page keeps doing. Off, the window "
 	  "and backend below are the project's answer, on every machine it is "
 	  "exported from.\n\n"
 	  "Saved to Config/ProjectSettings.json. With this off, the Export dialog "
 	  "shows the project's window and backend instead of its own rows and writes "
-	  "them into the build's config.json. Bloom, ambient occlusion and the other "
-	  "graphics settings still come from this editor's Preferences either way.",
+	  "them into the build's config.json. How the game looks (anti-aliasing, "
+	  "bloom, ambient occlusion, GI) is the project's on the Quality, "
+	  "Post-Processing and Reflections & GI pages.",
 	  "", "export#overview" },
 	{ "Render Defaults/Width", "Width",
 	  "The window's width in pixels when the game starts windowed. Ignored in "
@@ -8815,12 +8862,12 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Preferences page that owns the setup: initialising the "
+	  "Opens the Project Settings page that owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },
-	{ "Source Control Panel/Set up in Preferences…", "Set up in Preferences",
-	  "Opens the Preferences page where a project folder is turned into a git "
+	{ "Source Control Panel/Set up in Project Settings…", "Set up in Project Settings",
+	  "Opens the Project Settings page where a project folder is turned into a git "
 	  "repository and a remote is added. Until it is one, this window has nothing "
 	  "to show.",
 	  "", "editor#preferences" },

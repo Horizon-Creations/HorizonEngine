@@ -201,6 +201,19 @@ struct EditorConfig
 	// Play mode always has them (the component's own switch is the one to use there).
 	bool  WeatherSoundInEditor = true;
 
+	// Which graphics values the editor's viewport previews with, when the open
+	// project sets its own (ProjectSettings graphics.enabled): 0 = the project's
+	// (the default — what you see is what ships), 1 = this user's own values, for
+	// a machine that struggles with the project's bloom and GI. Never changes
+	// what an export writes. Persisted ("PreviewQualityMode").
+	int   PreviewQualityMode = 0;
+	// Runtime only, never saved: the graphics fields of this struct currently
+	// hold the PROJECT's values and not the user's (EditorApplication::
+	// syncGraphicsSource sets it every frame). The settings rows read it to lock
+	// themselves — an edit would be overwritten the next frame — and the config
+	// writer reads it to put the user's own values back before saving.
+	bool  GraphicsFromProject = false;
+
 	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
 	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
 	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.

@@ -1,6 +1,7 @@
 #include "SourceControlPanel.h"
 #include "EditorApplication.h"    // AppContext
-#include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
+#include "EditorSettingsPanel.h"
+#include "ProjectSettingsPanel.h"  // repo/remote setup lives on the Project Settings tab
 #include "EditorToolbar.h"     // shared toolbar look (Scene bar uses the same)
 #include "EditorTheme.h"       // brand palette (emphasis text)
 #include "EditorHelp.h"        // "Source Control Panel/<label>" scope for the tooltips
@@ -1274,7 +1275,7 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	ImGui::Spacing();
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Open source-control settings…"))
-		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
+		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
 }
 
 void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
@@ -1536,10 +1537,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		else
 		{
 			ImGui::TextWrapped("Repository setup (init, remote, GitHub sign-in) lives "
-			                   "in Preferences \xe2\x96\xb8 Source Control.");
+			                   "in Project Settings \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
-			if (EditorWidgets::button("Set up in Preferences…", ImVec2(240.0f, 0.0f)))
-				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
+			if (EditorWidgets::button("Set up in Project Settings…", ImVec2(240.0f, 0.0f)))
+				ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
 		}
 
 		// Errors are not printed here: GitController posts them to the notifications

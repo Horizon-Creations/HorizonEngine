@@ -1,4 +1,5 @@
 #include "EditorApplication.h"
+#include "EditorGraphics.h"   // the project's copy of the graphics fields
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
@@ -1405,6 +1406,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
+	m_editorConfig.PreviewQualityMode          = globalstate.getCustomConfigInt("PreviewQualityMode", m_editorConfig.PreviewQualityMode);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -3179,6 +3181,10 @@ void EditorApplication::OnRender(float dt)
 			m_reloadTabsAfterPoll.clear();
 		}
 	}
+
+	// Which graphics values the renderer gets this frame: the project's or the
+	// user's own. Before anything below reads them.
+	syncGraphicsSource();
 
 	// Push post-process (engine prefs) + the scene's environment (World entity).
 	if (renderer())
@@ -11705,7 +11711,9 @@ void EditorApplication::setPlayMode(bool play)
 		// the preview must not take the editor fullscreen.
 		{
 			HE::api::settings::Host host;
-			host.stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			host.stickDeadzone = playStickDeadzone();
+			input().stickDeadzone   = playStickDeadzone();
+			input().triggerDeadzone = playTriggerDeadzone();
 			host.vsync         = true;
 			host.fullscreen    = false;
 			host.applyStickDeadzone = [this](float dz) { input().stickDeadzone = dz; };
@@ -11882,7 +11890,8 @@ void EditorApplication::setPlayMode(bool play)
 		if (HE::api::settings::installed())
 		{
 			HE::api::settings::uninstall();
-			input().stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
+			input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 			if (m_audioEngine.isInitialized())
 				m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
 		}
@@ -12059,6 +12068,41 @@ std::string EditorApplication::gameInstancePath()
 	if (p.empty()) return {};
 	if (std::filesystem::is_regular_file(p)) p = p.parent_path();
 	return (p / "GameInstance.hcode").string();
+}
+
+void EditorApplication::syncGraphicsSource()
+{
+	const HE::ProjectGraphics* project =
+		m_projectLoaded ? &m_projectManager.currentProject().settings.graphics : nullptr;
+	const bool follow = project && project->enabled && m_editorConfig.PreviewQualityMode == 0;
+	if (follow)
+	{
+		if (!m_graphicsFromProject)
+		{
+			// First frame on the project's values: set the user's aside.
+			EditorGraphics::copyFields(m_editorConfig, m_userGraphics);
+			m_graphicsFromProject = true;
+		}
+		EditorGraphics::apply(*project, m_editorConfig);
+	}
+	else if (m_graphicsFromProject)
+	{
+		EditorGraphics::copyFields(m_userGraphics, m_editorConfig);
+		m_graphicsFromProject = false;
+	}
+	m_editorConfig.GraphicsFromProject = follow;
+}
+
+float EditorApplication::playStickDeadzone()
+{
+	const HE::ProjectInputSettings& in = m_projectManager.currentProject().settings.input;
+	return m_projectLoaded && in.enabled ? in.stickDeadzone : m_editorConfig.GamepadStickDeadzone;
+}
+
+float EditorApplication::playTriggerDeadzone()
+{
+	const HE::ProjectInputSettings& in = m_projectManager.currentProject().settings.input;
+	return m_projectLoaded && in.enabled ? in.triggerDeadzone : m_editorConfig.GamepadTriggerDeadzone;
 }
 
 IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
@@ -13149,6 +13193,16 @@ void EditorApplication::writeEditorConfig()
 #ifdef HE_IMGUI_ENABLED
 	globalstate.setCustomConfigEntry(ShortcutsPage::kConfigKey, EditorShortcuts::encode());
 #endif
+	// The graphics fields below are the USER's own. While a project's values are on
+	// screen they are in m_editorConfig and the user's are set aside — put back
+	// first, or the next editor start would boot with the last project's bloom.
+	if (m_graphicsFromProject)
+	{
+		EditorGraphics::copyFields(m_userGraphics, m_editorConfig);
+		m_graphicsFromProject = false;
+		m_editorConfig.GraphicsFromProject = false;
+	}
+	globalstate.setCustomConfigEntry("PreviewQualityMode",         m_editorConfig.PreviewQualityMode);
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;

@@ -40,6 +40,7 @@ add_executable(he_tests
     # run through sessions (header-only, PlayErrorReveal.h).
     test_play_error_reveal.cpp
     test_editor_dock_state.cpp
+    test_editor_graphics.cpp
     test_scene_autosave.cpp
     # The asset tabs' autosave: interval, the per-tick prune that makes a save
     # remove its copy, pending at the next start, Restore's backup, and the
@@ -741,6 +742,8 @@ add_executable(he_tests
     # "Is this panel docked?" — ImGui-only by construction (see the header),
     # so the DockIsActive-vs-DockNode invariant it rests on can be asserted.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorDockState.cpp
+    # The project's copy of the config's graphics fields (HE_PROJECT_GRAPHICS_FIELDS).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorGraphics.cpp
     # The node canvas + ImGui's CORE only (no backend, no GPU): ImGui runs
     # headless given a context and a display size, which is what lets
     # test_graph_editor_keys.cpp actually press the graph shortcuts. The editor

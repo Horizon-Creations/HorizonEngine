@@ -311,6 +311,7 @@ add_executable(HorizonEditor WIN32
 	ReportIssueDialog.cpp
 	SelfUpdateDialog.cpp
 	EditorDockState.cpp
+	EditorGraphics.cpp
 	GitController.cpp
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
