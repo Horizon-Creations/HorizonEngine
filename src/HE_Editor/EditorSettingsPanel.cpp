@@ -19,7 +19,7 @@
 #include <SourceControl/GitHubTokenStore.h>  // kHost: which remote the sign-in covers
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
-#include <Net/RelayTransport.h>          // Collaboration > Relay Server: the field's parse check
+#include "TeamView.h"                    // Team: the team server and the sign-in
 #include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
 #include <Types/Enums.h>
@@ -534,7 +534,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "edit-mode viewport, not only in Play.");
 	});
 
-	row("landiscovery", "Collaboration", [&]{
+	row("landiscovery", "Team", [&]{
 		EditorWidgets::checkbox("Find Sessions on the Local Network", &cfg.CollabLanDiscovery);
 		hint("Hosts announce a session on the local network and guests see it in "
 		     "a list, so nobody has to exchange an address or a session ID. This "
@@ -544,7 +544,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "visible on.");
 	});
 
-	row("collabsynclarge", "Collaboration", [&]{
+	row("collabsynclarge", "Team", [&]{
 		// Locked while a session is live, and this is the reason: everyone in the
 		// session joined under THIS value — a guest is asked about it before the
 		// join and is refused if it disagrees. Flipping it afterwards would leave
@@ -579,7 +579,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			     "holding different files. Leave the session to change it.");
 	});
 
-	row("collabmaxasset", "Collaboration", [&]{
+	row("collabmaxasset", "Team", [&]{
 		// NOT locked during a session, unlike the checkbox above it. That one is
 		// a promise made to the other peers at the join; this is a bound on what
 		// this machine will read, hold and hand out, and a bound you cannot
@@ -621,28 +621,9 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "same silence.");
 	});
 
-	row("collabrelay", "Collaboration", [&]{
-		Row::inputText("Relay Server (host:port)##collabrelay", &cfg.CollabRelayAddress);
-		// Said right under the field, while it is being typed: a malformed
-		// address is otherwise only discovered when hosting refuses to start.
-		if (!cfg.CollabRelayAddress.empty())
-		{
-			HE::Net::RelayAddress parsed;
-			std::string why;
-			if (!HE::Net::parseRelayAddress(cfg.CollabRelayAddress, parsed, &why))
-				ImGui::TextColored(HE::Ed::Theme::Warn, "Not usable: %s", why.c_str());
-		}
-		hint("Leave empty to connect directly, peer to peer — the default, and "
-		     "exactly how sessions worked before. With a relay server set, this "
-		     "editor never connects to another one directly and never opens a "
-		     "port: hosting registers the session on the relay, and guests join "
-		     "it there by session ID and join code. That is what to use when the "
-		     "host cannot forward a port. Everybody in a session has to use the "
-		     "same relay. The relay only passes bytes along; the session stays "
-		     "encrypted end to end with the join code. Port 7777 if none is "
-		     "given; IPv6 addresses go in brackets, [2001:db8::1]:7777. Takes "
-		     "effect for the next session you host or join.");
-	});
+	// (The "Relay Server" row that ended this group is the Team Server field at
+	// the top of the Team page now — TeamView::drawSettings. Same config value:
+	// the team server is the relay.)
 
 	// ── Remote Control (the MCP bridge) ──────────────────────────────────────
 	// The human switch the security model was missing. Everything else about the
@@ -2116,7 +2097,7 @@ constexpr NavItem kGeneralItems[] = {
 constexpr NavItem kEditorItems[] = {
 	{ Page::Panels,        "Panels" },
 	{ Page::Shortcuts,     "Shortcuts" },
-	{ Page::CollabGeneral, "Collaboration" },
+	{ Page::Team,          "Team" },
 	{ Page::RemoteControl, "Remote Control" },
 	{ Page::Repository,    "Source Control" },
 	{ Page::Status,        "Tool Status" },
@@ -2155,7 +2136,7 @@ const char* catalogCategory(Page p)
 	case Page::PostProcessing:     return "Post-Processing";
 	case Page::GlobalIllumination: return "Global Illumination";
 	case Page::Effects:            return "Effects";
-	case Page::CollabGeneral:      return "Collaboration";
+	case Page::Team:               return "Team";
 	case Page::RemoteControl:      return "Remote Control";
 	default:                       return nullptr;
 	}
@@ -2240,6 +2221,20 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	ImGui::BeginChild("##prefbody", ImVec2(0.0f, -footerH));
 	if (category)
 	{
+		// The Team page leads with the team server and the sign-in, which are
+		// not catalog settings (nothing to pin, a password in a field); the
+		// session settings below them are.
+		if (s_page == Page::Team && ctx.team)
+		{
+			EditorWidgets::WrapText wrap;
+			TeamView::drawSettings(*ctx.team,
+			                       { &ctx.editorConfig.CollabRelayAddress,
+			                         &ctx.editorConfig.TeamName,
+			                         &ctx.editorConfig.TeamMember },
+			                       TeamView::editorForm());
+			ImGui::Spacing();
+			ImGui::SeparatorText("Sessions");
+		}
 		EditorWidgets::hint("Press the star (\xe2\x98\x86) next to a setting to keep it in the Quick Settings "
 		                    "panel next to the viewport.");
 		ImGui::Spacing();
@@ -2315,8 +2310,11 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			// the session config carries as its own default (Config::maxAssetBytes,
 			// which is the asset ceiling now — the join snapshot keeps its own).
 			cfg.CollabMaxAssetMB  = 64;
-			// Peer-to-peer. A session already running stays on the relay it
-			// started with; the setting is read at the next host or join.
+			// Peer-to-peer, no team server. A session already running stays on
+			// the relay it started with, and a signed-in team connection on the
+			// server it signed in with (the page shows that one, not this field);
+			// the setting is read at the next host, join or sign-in. Team and
+			// member names are not settings but who you are, and stay.
 			cfg.CollabRelayAddress.clear();
 			// Remote control goes back OFF, unconditionally and whatever it is
 			// doing right now. Every other setting here resets to "what a fresh

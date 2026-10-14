@@ -446,6 +446,7 @@ void install()
 		heAddToggle(window, @"Performance Profiler",  C::ToggleProfiler,      false);
 		heAddToggle(window, @"Environment",           C::ToggleEnvironment,   false);
 		heAddToggle(window, @"Collaboration",         C::ToggleCollab,        false);
+		heAddToggle(window, @"Team",                  C::ToggleTeam,          false);
 		heAddToggle(window, @"Source Control",        C::ToggleSourceControl, true);
 		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);

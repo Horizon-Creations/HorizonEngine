@@ -899,8 +899,8 @@ bool CollabController::joinSession(const std::string& host, std::uint16_t port,
 	{
 		m_error  = "A relay server is set (" + relay.host + ":" + std::to_string(relay.port) +
 		           "), so sessions are joined by session ID and join code, never by "
-		           "address. Join by session ID, or clear the relay server under "
-		           "Preferences > Collaboration to connect to " + host + " directly.";
+		           "address. Join by session ID, or clear the team server under "
+		           "Preferences > Team to connect to " + host + " directly.";
 		m_status = Status::Failed;
 		return false;
 	}
@@ -2016,7 +2016,7 @@ bool CollabController::relayForNewSession(HE::Net::RelayAddress& relay, bool& us
 		// Not a fallback to direct: somebody set a relay because direct does
 		// not work for them, or because they do not want it.
 		m_error  = "The relay server address \"" + text + "\" cannot be used (" + why +
-		           "). Fix it under Preferences > Collaboration, or clear it to connect "
+		           "). Fix the team server under Preferences > Team, or clear it to connect "
 		           "directly.";
 		m_status = Status::Failed;
 		return false;
@@ -2995,7 +2995,7 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 		         "\"" + name + "\" was not sent to the others.",
 		         "It is " + std::to_string(mb) + " MB and this machine will not send "
 		             "more than " + std::to_string(limit) + " MB in one file. Raise "
-		             "\"Largest asset to transfer\" in Preferences » Editor » Collaboration, or "
+		             "\"Largest asset to transfer\" in Preferences » Editor » Team, or "
 		             "leave this one to source control — the others still have the "
 		             "older file.",
 		         relPath);
@@ -3122,7 +3122,7 @@ void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,
 	             std::to_string(limit) + " MB in one file — their limit is lower than "
 	             "yours, which is why nothing on this machine reported a problem. " +
 	             left + " Ask them to raise \"Largest asset to transfer\" in "
-	             "Preferences » Editor » Collaboration and save it again, or put this file "
+	             "Preferences » Editor » Team and save it again, or put this file "
 	             "through source control.",
 	         relPath);
 }

@@ -91,6 +91,10 @@ public:
 	// team. `open`: members may join without an invitation. False (with
 	// lastError()) when not signed in or a collab session is already running.
 	bool hostSession(bool open);
+	// Whether a collab session (team or not) is running on the controller next
+	// door — Host and Join are pointless then — and whether it is `session`.
+	bool sessionRunning() const;
+	bool inSession(const std::string& session) const;
 	// The session this editor announced, or empty.
 	const std::string& hostedSession() const { return m_hosted; }
 	bool               hostedSessionOpen() const { return m_hostedOpen; }

@@ -266,6 +266,13 @@ TeamClient::ReplyFn TeamController::reportFailure(std::string what)
 
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
+bool TeamController::sessionRunning() const { return m_collab.active(); }
+
+bool TeamController::inSession(const std::string& session) const
+{
+	return !session.empty() && m_collab.active() && m_collab.sessionId() == session;
+}
+
 bool TeamController::hostSession(bool open)
 {
 	if (!requireSignedIn("host a session")) return false;

@@ -45,6 +45,7 @@
 #include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // Window > Collaboration (host / join a live session)
+#include "TeamView.h"               // Window > Team (members, presence, invitations)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
@@ -98,6 +99,7 @@
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <mutex>       // the play log is read under its mutex (PlayErrorReveal)
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -226,6 +228,34 @@ static bool s_showEnvironment = false;
 
 // Toggled by Window > Collaboration; drives the live-session panel.
 static bool s_showCollab = false;
+// Toggled by Window > Team; drives the team window (members, presence,
+// invitations — TeamView).
+static bool s_showTeam = false;
+
+// Window > Team. The body is TeamView's (shared with Preferences ▸ Team and
+// drawn headless by tests/test_team_ui.cpp); this is only the window around it.
+static void drawTeamWindow(AppContext& ctx, bool& open)
+{
+	if (!ctx.team) return;
+	// A new invitation opens the window, once per invitation: Join and Decline
+	// are in here, and a notification that says "invited" with nothing to press
+	// would leave the guest looking for the window. Closing it again sticks.
+	static std::set<std::string> s_invitesSeen;
+	for (const auto& s : ctx.team->sessions())
+		if (s.invited && s_invitesSeen.insert(s.session).second) open = true;
+	if (!open) return;
+	ImGui::SetNextWindowSize(ImVec2(420, 520), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Team", &open)) { ImGui::End(); return; }
+	{
+		EditorWidgets::WrapText wrap;   // released before End()
+		TeamView::drawPanel(*ctx.team,
+		                    { &ctx.editorConfig.CollabRelayAddress,
+		                      &ctx.editorConfig.TeamName,
+		                      &ctx.editorConfig.TeamMember },
+		                    TeamView::editorForm());
+	}
+	ImGui::End();
+}
 // Toggled by Window > Source Control; drives the repository status panel.
 static bool s_showSourceControl = false;
 // Toggled by Window > Console (and Ctrl/Cmd+`); drives the log window.
@@ -264,6 +294,7 @@ static bool docsPanelOpener(const char* window)
 		{ "Performance Profiler", &s_showProfiler      },
 		{ "Environment",          &s_showEnvironment   },
 		{ "Collaboration",        &s_showCollab        },
+		{ "Team",                 &s_showTeam          },
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
@@ -316,6 +347,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Performance Profiler", "PanelOpenProfiler",      &s_showProfiler      },
 	{ "Environment",          "PanelOpenEnvironment",   &s_showEnvironment   },
 	{ "Collaboration",        "PanelOpenCollaboration", &s_showCollab        },
+	{ "Team",                 "PanelOpenTeam",          &s_showTeam          },
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
@@ -1827,6 +1859,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleProfiler,      s_showProfiler);
 		MacMenuBar::setToggleState(MC::ToggleEnvironment,   s_showEnvironment);
 		MacMenuBar::setToggleState(MC::ToggleCollab,        s_showCollab);
+		MacMenuBar::setToggleState(MC::ToggleTeam,          s_showTeam);
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
@@ -1988,6 +2021,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleProfiler:  togglePanelWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: togglePanelWindow(s_showEnvironment, "Environment"); break;
 			case MC::ToggleCollab:      togglePanelWindow(s_showCollab, "Collaboration");    break;
+			case MC::ToggleTeam:        togglePanelWindow(s_showTeam, "Team");               break;
 			case MC::ToggleSourceControl:
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
@@ -2370,6 +2404,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showEnvironment, "Environment");
         if (EditorWidgets::menuItem("Collaboration", nullptr, s_showCollab))
             togglePanelWindow(s_showCollab, "Collaboration");
+        if (EditorWidgets::menuItem("Team", nullptr, s_showTeam))
+            togglePanelWindow(s_showTeam, "Team");
         if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
         if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
@@ -4175,6 +4211,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
+    drawTeamWindow(ctx, s_showTeam);
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
 	// Here for the reason this whole function exists, and it earns it more than
 	// most: output is watched from INSIDE a script or a graph tab, and left

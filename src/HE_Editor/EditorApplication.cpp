@@ -1305,6 +1305,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
 	m_editorConfig.CollabRelayAddress           = globalstate.getCustomConfigString("CollabRelayAddress", m_editorConfig.CollabRelayAddress);
+	m_editorConfig.TeamName                     = globalstate.getCustomConfigString("TeamName", m_editorConfig.TeamName);
+	m_editorConfig.TeamMember                   = globalstate.getCustomConfigString("TeamMember", m_editorConfig.TeamMember);
 	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
@@ -13147,7 +13149,9 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
 	globalstate.setCustomConfigEntry("CollabRelayAddress",         m_editorConfig.CollabRelayAddress);
-	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
+	globalstate.setCustomConfigEntry("TeamName",                   m_editorConfig.TeamName);
+	globalstate.setCustomConfigEntry("TeamMember",                 m_editorConfig.TeamMember);
+	globalstate.setCustomConfigEntry("McpServerEnabled",          m_editorConfig.McpServerEnabled);
 	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);

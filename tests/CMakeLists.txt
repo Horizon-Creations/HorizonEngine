@@ -331,6 +331,10 @@ add_executable(he_tests
     # The team server client (topic 197): a fake team server in-process, and
     # the real collab_server when HE_TEST_TEAM_SERVER names one.
     test_net_team.cpp
+    # The Team window and Preferences ▸ Team (TeamView), drawn headless over a
+    # TeamController signed in to the same fake team server; HE_UI_DUMP_DIR
+    # writes the screenshots.
+    test_team_ui.cpp
     # The gameplay transport over real localhost UDP sockets, with an injected
     # clock and the transport's own drop hook for loss under the reliability.
     test_net_udp.cpp
@@ -639,6 +643,9 @@ add_executable(he_tests
     # The GitHub sign-in's drawing half (code, countdown, buttons), for the
     # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
+    # The Team window's and Preferences ▸ Team's drawing (TeamView), over the
+    # TeamController above, for test_team_ui.cpp. ImGui plus EditorWidgets.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamView.cpp
     # The console's buffer, sink and drawing — everything except the window and
     # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
     # EditorWidgets, so the ui shots can draw the real panel.
@@ -1402,7 +1409,7 @@ endif()
 # run at the same instant makes a failure depend on the scheduler, which is the
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
-set(_he_net_tests test_net_tcp test_net_relay test_net_team test_net_udp test_net_secure test_net_discovery test_net_collab
+set(_he_net_tests test_net_tcp test_net_relay test_net_team test_team_ui test_net_udp test_net_secure test_net_discovery test_net_collab
                   test_net_directory test_collab_controller test_net_game_session
                   test_mcp_tools_collab)
 foreach(_t IN LISTS _he_net_tests)

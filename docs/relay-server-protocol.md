@@ -25,8 +25,9 @@ per-peer send loop for every transport that does not fan out.
   default port 7777. `HE_NET_RELAY=<addr>` overrides every setting,
   `HE_NET_RELAY=off` forces peer-to-peer (`effectiveRelayAddress`). The test
   runner unsets it.
-- **Collaboration** (editor): Preferences > Collaboration > *Relay Server
-  (host:port)*, stored as `CollabRelayAddress` in the editor config. With an
+- **Collaboration** (editor): Preferences > Team > *Team Server
+  (host:port)* (was Collaboration > Relay Server before topic 197; the team
+  server is the relay), stored as `CollabRelayAddress` in the editor config. With an
   address, hosting mints the session id first, registers it on the relay and
   skips port mapping, directory and LAN beacon; guests join by session id +
   join code (a join by address is refused with an explanation). A relay

@@ -252,19 +252,19 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Independent of Success Feedback; clip auditions and the "
 	                    "project's audio are not affected."));
 
-	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
-	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",
+	// ── Editor ▸ Team (the session settings) ────────────────────────────────
+	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Team",
 	                    "landiscovery", &EditorConfig::CollabLanDiscovery,
 	                    "Announce a hosted session on the local network, and listen "
 	                    "for other people's."));
 	t.push_back(boolRow("collab.syncLargeAssets", "Sync Large Assets",
-	                    "Collaboration", "collabsynclarge",
+	                    "Team", "collabsynclarge",
 	                    &EditorConfig::CollabSyncLargeAssets,
 	                    "Also send meshes, textures, audio and fonts over the "
 	                    "session instead of leaving them to source control. The "
 	                    "HOST's decision for the session; it cannot be changed "
 	                    "while one runs."));
-	t.push_back(intRow("collab.maxAssetMB", "Max Asset Size (MB)", "Collaboration",
+	t.push_back(intRow("collab.maxAssetMB", "Max Asset Size (MB)", "Team",
 	                   "collabmaxasset", &EditorConfig::CollabMaxAssetMB, 1, 4096,
 	                   "The biggest single asset this editor will send or accept "
 	                   "over a session. A transfer is held whole in memory on both "

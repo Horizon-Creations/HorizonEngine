@@ -92,47 +92,69 @@ does not police relay pairing, host = connection, events never go to the causing
   the still-running session again. Notices (invitations, joining, declined, refusals) via
   `pollNotice()` and the editor NotificationStore.
 - **Editor:** `EditorApplication::m_team`, pumped right after `m_collab.update`, signed out
-  at shutdown, `AppContext::team` for the panel. No settings page, no panel, no config
-  fields yet (step 11).
+  at shutdown, `AppContext::team` for the panel (UI: step 11 below).
+
+## Editor UI (step 11)
+
+Screenshots (headless, `tests/test_team_ui.cpp` with `HE_UI_DUMP_DIR`):
+`docs/images/team-ui-2026-10-14/`. Fake team server: `team-page-signed-out.png`,
+`team-page-signed-in.png`, `team-page-refused.png`, `team-panel-signed-in.png`,
+`team-panel-hosting.png`. Real `collab_server` (CollabSession e3f4649, local), two editors:
+`team-live-anna-hosting.png`, `team-live-bob-invited.png`, `team-live-bob-joined.png`.
+The page shots are TeamView's body only (heading + body), not the Preferences rail.
+
+- **`TeamView`** (`src/HE_Editor/TeamView.{h,cpp}`): the drawing half, over `TeamController`
+  and three config strings, never `AppContext` (so he_tests draws it). `drawSettings` =
+  Preferences ▸ Team body; `drawPanel` = Window ▸ Team body (signed out: the same sign-in
+  form). Help scope "Team" (entries in `EditorHelp.cpp`, ref group "Team"). The session id
+  is never displayed (it is the key, see joinCodeForSession). `setProbe()` is a test seam:
+  each control's rect by label + row, so tests click "Invite" next to Bob.
+- **Preferences:** page `Page::Team` replaces `CollabGeneral` ("Collaboration"). Top:
+  Team Server field + Team/Member/Password + Sign In / Create Team / Sign Out + status;
+  below, under "Sessions", the three catalog rows (category renamed "Collaboration" →
+  "Team", help keys `Preferences/Team/...`). The Relay Server row is gone: **the Team
+  Server field writes the same `EditorConfig::CollabRelayAddress`** (config key unchanged,
+  so an existing relay address carries over and Collaboration-window sessions keep using
+  it as relay). New config `TeamName`, `TeamMember`; never the password (wiped from the
+  form the moment Sign In is pressed). Fields lock while a connection exists.
+- **Window ▸ Team** (`EditorUI.cpp` `drawTeamWindow`, macOS menu `ToggleTeam`, persisted as
+  `PanelOpenTeam`): status + Sign Out; members table (dot = online, ring = offline;
+  Invite enabled only while hosting and for online members; admins get Remove → Confirm
+  Remove); Sessions (Anyone in the Team May Join + Host Session, or "You are hosting" with
+  the open toggle; the others' sessions with Join when open/invited, Decline when
+  invited); Add Member (admins); Your Password (collapsed); Recent notices. A new
+  invitation opens the window once.
+- `tests/FakeTeamServer.h` (moved out of test_net_team.cpp) now applies ADD/REMOVE/INVITE/
+  DECLINE, reports open|invited|hosting flags, and can ignore relay connections
+  (`ignoreStrangers`).
 
 ## Handoff
 
-- **Topic / step:** 197, step 10 (plan step 3, HE_Net team subsystem)
-- **Branch / commit:** `claude/team-server-teams-mitglieder-anwesenheit` (pushed; commit in
-  the Hive result post). Server unchanged: CollabSession e3f4649.
-- **Done:** "Engine side (step 10)" above.
-- **Files touched:** `src/HE_Net/{include/Net/TeamClient.h,src/TeamClient.cpp,CMakeLists.txt}`,
-  `src/HE_Editor/TeamController.{h,cpp}` (+ editor CMakeLists), `src/HE_Editor/CollabController.{h,cpp}`
-  (team entry points, `relayForNewSession` override, `beginLink` peer ids, `LastJoin`),
-  `src/HE_Editor/EditorApplication.{h,cpp}` (m_team, AppContext::team),
-  `tests/test_net_team.cpp`, `tests/CMakeLists.txt` (source list, `he_net` resource lock).
-- **Verified (Mac, Release, worktree build `out/build/release`):** `he_tests
-  --source-file=*test_net_team.cpp` 8/8 cases, 268 assertions, 8 runs in a row, with
-  `HE_TEST_TEAM_SERVER=127.0.0.1:47791` pointing at a local `collab_server` built from
-  e3f4649 (`--data-dir` in /tmp). The live case drives three real TeamController +
-  CollabController pairs: create team, add members, presence both ways, invitation-only
-  refusal, invite → decline → invite → join (scene arrives), open session joined by a
-  never-invited member, CLOSE on leave, offline on sign-out; the server log shows each
-  step and the relay pairing as peer `Bob`/`Cleo`. Regressions green: test_net_relay (27,
-  also with HE_TEST_RELAY on the same server), test_collab_controller (74), test_net_collab
-  (111), test_mcp_tools_collab (5), test_net_tcp (12). `HorizonEditor` and `he_tests` build
-  green (rc 0) on the final state, after a `touch` of `TeamClient.h`.
-- **Not verified:** against the rented host (step 5 not deployed); the editor GUI (no UI yet);
-  Windows/Linux only through CI.
-- **Decisions taken:** join code derived from the session id (above) instead of a server
-  change; member name as the joiner's relay peer id (protocol recommendation); a second
-  editor of the same member joining the same session gets the relay's id-taken (known,
-  not handled); a refused announcement leaves the collab session; no config fields until
-  the Team page exists.
-- **Suggested, not taken:** host-side gate matching INCOMING peer ids against `joining`
-  events (would make invitation-only binding on the relay too); keychain storage for the
-  password so a restart signs in again.
-- **Traps:** `ReplyFn` callbacks run inside `TeamClient::update()`: they must not destroy
-  the client (TeamController never resets `m_client` from one). A fake server must skip
-  frames queued behind a refused login. The server keeps an invitation after JOIN (a
-  re-join logs "(invited)"), so the open-session path needs a never-invited member.
-- **Next steps:** 1. Step 11: Preferences "Team" page (server address, team, member; replaces
-  the Collaboration relay field) and a Team panel on `AppContext::team` (members with
-  online dots, sessions, Invite/Join/Decline, admin add/remove), with EditorHelp entries.
-  2. Deploy the server (`deploy/deploy.sh horizon@212.227.140.164 7777`). 3. E2E with two
-  editors against the host; rerun `test_net_team` with `HE_TEST_TEAM_SERVER` pointed there.
+- **Topic / step:** 197, step 11 (Team page + Team panel, screenshots).
+- **Branch / commit:** `claude/team-server-teams-mitglieder-anwesenheit` (commit in the Hive
+  result post). Server unchanged: CollabSession e3f4649, still not deployed.
+- **Done:** "Editor UI (step 11)" above. `TeamController` gained `sessionRunning()` and
+  `inSession(id)`; "Preferences > Collaboration" texts in CollabController/CollabPanel now
+  say Team; `editor_help_audit.py` scans `TeamView.cpp` (collab 81/81).
+- **Verified (Mac, Release, `out/build/release`):** `he_tests --source-file=*test_team_ui.cpp`
+  3/3 cases, 221 assertions, 3 runs in a row with `HE_TEST_TEAM_SERVER=127.0.0.1:47792`
+  (local collab_server, server log shows invite → "joins (invited)" → relay paired), and
+  201 without it (live case skipped). Regressions green: test_net_team 8/8 (268, live too),
+  test_editor_help 19/19, test_mcp_tools_settings 20/20, test_quick_settings_favorites,
+  test_collab_controller 74/74, test_editor_dock_state, test_docs_library, test_ui_shot.
+  `editor_help_audit.py --check` rc 0. All 8 PNGs looked at.
+- **Not verified:** the real editor window by hand (Preferences rail, docking, the macOS
+  menu item) — only the TeamView body is drawn headless; Windows/Linux only via CI; the
+  rented host (step 5 not deployed).
+- **Decisions:** one address for team server and relay (reuses `CollabRelayAddress`);
+  sign-in lives on both surfaces (one `TeamView::editorForm()`); Restore Defaults clears
+  the server field but keeps team/member names; a signed-in connection keeps its server.
+- **Suggested, not taken:** keychain for the password (sign in again after restart);
+  showing "invited" next to a member you invited (the server does not report it back).
+- **Traps:** a member row vanishing (Remove) moves every control below it up: wait for the
+  roster in UI tests before clicking the next field. The fake must not REQUIRE on relay
+  HELLOs when a test presses Host/Join (`ignoreStrangers`).
+- **Next steps:** 1. Deploy the server (`deploy/deploy.sh horizon@212.227.140.164 7777`,
+  step 5). 2. E2E with two real editors against the host (step 6): Preferences ▸ Team →
+  `212.227.140.164:7777`, Create Team / Add Member / Sign In, Window ▸ Team → Host,
+  Invite, Join; rerun test_team_ui and test_net_team with `HE_TEST_TEAM_SERVER` there.

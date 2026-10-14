@@ -70,7 +70,16 @@ struct EditorConfig
 	// only OUTGOING connections to that server, which pairs host and guests by
 	// session id and forwards their (still end-to-end encrypted) bytes. For
 	// when the host cannot open a port. docs/relay-server-protocol.md.
+	//
+	// Since topic 197 this is the TEAM server's address too (Preferences ▸
+	// Team): the team server is the relay, so one field. Kept under its old
+	// name and config key so an address entered as a relay carries over.
 	std::string CollabRelayAddress;
+	// The team and member last signed in with (Preferences ▸ Team). Never the
+	// password: that stays in memory (TeamController) and is asked for again
+	// after a restart.
+	std::string TeamName;
+	std::string TeamMember;
 
 	// The MCP bridge: let an external client (a Claude instance, through the
 	// stdio shim) drive this editor — read what is open, and from a later step
