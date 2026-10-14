@@ -183,7 +183,10 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && multiplayer.discoverDirectory == o.multiplayer.discoverDirectory
         && multiplayer.portMapping == o.multiplayer.portMapping
         && multiplayer.relayAddress == o.multiplayer.relayAddress
-        && multiplayer.rpcPerSecond == o.multiplayer.rpcPerSecond;
+        && multiplayer.rpcPerSecond == o.multiplayer.rpcPerSecond
+        && sourceControl.mode == o.sourceControl.mode
+        && sourceControl.team == o.sourceControl.team
+        && sourceControl.project == o.sourceControl.project;
 }
 
 void ProjectSettings::clamp()
@@ -364,6 +367,13 @@ void ProjectSettings::toJson(json& out) const
         // reached at all, not how it is found.
         { "relayAddress", multiplayer.relayAddress },
     };
+
+    // The shape the team-server design §6.1 names.
+    out["sourceControl"] = {
+        { "mode",    sourceControl.teamServer() ? "teamServer" : "git" },
+        { "team",    sourceControl.team },
+        { "project", sourceControl.project },
+    };
 }
 
 void ProjectSettings::fromJson(const json& in)
@@ -471,6 +481,17 @@ void ProjectSettings::fromJson(const json& in)
         readBool(di, "portMapping", multiplayer.portMapping);
         readNumber(m, "rpcPerSecond", multiplayer.rpcPerSecond);
         readString(m, "relayAddress", multiplayer.relayAddress);
+    }
+    {
+        const json& sc = section(in, "sourceControl");
+        // An unknown mode is "git": a newer editor's mode this one does not know
+        // must not switch direct source control off.
+        std::string mode;
+        readString(sc, "mode", mode);
+        sourceControl.mode = mode == "teamServer" ? ProjectSourceControlSettings::Mode::TeamServer
+                                                  : ProjectSourceControlSettings::Mode::Git;
+        readString(sc, "team",    sourceControl.team);
+        readString(sc, "project", sourceControl.project);
     }
 
     clamp();

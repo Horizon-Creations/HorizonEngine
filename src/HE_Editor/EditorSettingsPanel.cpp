@@ -1168,6 +1168,17 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::PopStyleColor();
 		return;
 	}
+	// The setup below would be refused anyway (GitController::mayModify), so say
+	// why instead of offering buttons that do nothing.
+	if (git->blockedByTeamServer())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+		ImGui::TextWrapped("The team server keeps this project's history "
+		                   "(Config/ProjectSettings.json, sourceControl), so the editor "
+		                   "sets up no repository of its own here.");
+		ImGui::PopStyleColor();
+		return;
+	}
 
 	const HE::Sc::RepoStatus& st = git->status();
 

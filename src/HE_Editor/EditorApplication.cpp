@@ -730,6 +730,15 @@ void EditorApplication::OnInit()
 	m_collab.setSettlePersist([this](const std::string& key, HE::Ed::CollabSettle::Reason) {
 		return key == HE::Ed::CollabSettle::kSceneKey ? persistSessionScene() : true;
 	});
+	// ...and once it is there, it is what the team server commits when the
+	// project hands its history to the server (sourceControl.mode =
+	// "teamServer"); GitController drops it otherwise.
+	m_collab.onSessionSettled([this](const std::vector<HE::Ed::CollabSettle::Settled>& settled) {
+		std::vector<std::string> keys;
+		keys.reserve(settled.size());
+		for (const auto& s : settled) keys.push_back(s.key);
+		m_git.handOverToTeamServer(keys, m_collab.lastSettledMs());
+	});
 
 	m_collab.onAssetLockDenied([this](const std::string& relPath) {
 		// Someone else won the lock race by a round trip. Their state is the
@@ -4727,6 +4736,14 @@ void EditorApplication::OnRender(float dt)
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
 		// Read when a session starts, so pushing it mid-session moves nothing.
 		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
+		// Pushed before the collab pump, which is where the session's state
+		// settles and is handed over: the project's choice of who keeps its
+		// history (Config/ProjectSettings.json, read with the project) then
+		// applies to this frame's hand-over.
+		{
+			const auto& sc = m_projectManager.currentProject().settings.sourceControl;
+			m_git.setTeamServer(sc.teamServer(), sc.team, sc.project);
+		}
 		m_collab.update(nowMs);
 		// After the collab pump, so a session that just ended is withdrawn from
 		// the team in the same frame, and a join the team server answered starts
