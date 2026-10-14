@@ -73,11 +73,14 @@ namespace EditorDockState
 	//  * the first call after a context (and its ini) exists notes each node's
 	//    selected tab, as the ini restored it;
 	//  * while the editor starts up it re-selects that tab whenever new tabs have
-	//    joined the node and it is not the selected one. The user's own click on
-	//    a tab (a change with no tab having joined) ends the hold for that node,
-	//    so nothing here ever fights a person; so do a node that has been steady
-	//    for a few seconds and a tab that never turns up (a panel that was closed
-	//    when the editor was shut down).
+	//    joined a node and it is not the selected one. It lets go at the first
+	//    click once there are tabs to click on — from then on a panel opening is
+	//    most likely a person's doing — and a tab that never turns up (a panel
+	//    that was closed when the editor was shut down) only costs the wait, which
+	//    is capped. A panel that is merely slow to join (an audio engine that takes
+	//    seconds, a project that is still loading) is still the startup's.
+	//    A selection that changes long after the last join, without a click, is a
+	//    panel revealed by a shortcut or a script and is left alone.
 	// Cheap enough for every frame: it walks the dock nodes (a dozen) and returns
 	// early once nothing is held. No-op without an ImGui context.
 	void holdSavedTabs();

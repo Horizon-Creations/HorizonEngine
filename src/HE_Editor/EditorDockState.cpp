@@ -46,11 +46,12 @@ struct HeldTab
 std::vector<HeldTab> s_held;
 ImGuiContext*        s_heldFor     = nullptr;   // the context s_held was taken from
 int                  s_lastFrame   = 0;         // its frame count when last looked at
+bool                 s_barSeen     = false;     // a held node has had a tab bar to click on
 int                  s_heldFrames  = 0;         // frames with a tab bar to look at, since then
-// How long the hold lasts at most, and how long a node must stay as it is to
-// count as settled: a panel that appears 20 s in is a person opening it.
-constexpr int kHoldMaxFrames   = 60 * 45;
-constexpr int kHoldSteadyFrames = 60 * 4;
+// How long the hold lasts at most (in frames that had a tab bar to look at). The
+// real end is the first click: a panel that joins before anybody has touched the
+// editor is the startup's doing, one that joins after is most likely a person's.
+constexpr int kHoldMaxFrames = 60 * 90;
 // How soon after a tab joined a changed selection still counts as the arrival's doing:
 // the focus a new window takes lands a frame or two after it appears.
 constexpr int kHoldSettleFrames = 12;
@@ -78,6 +79,7 @@ void holdSavedTabs()
 		// SelectedTabId is exactly what the file said.
 		s_heldFor    = g;
 		s_heldFrames = 0;
+		s_barSeen    = false;
 		s_held.clear();
 		for (int n = 0; n < g->DockContext.Nodes.Data.Size; ++n)
 		{
@@ -88,6 +90,19 @@ void holdSavedTabs()
 		return;
 	}
 	if (s_held.empty()) return;
+
+	// The first click once there was anything to click on is a person at the
+	// controls: panels opening from then on are theirs to choose (and a panel
+	// that has been slow to join — an audio engine that takes seconds to come up,
+	// a project that is still loading — must not be mistaken for that). The click
+	// that picks a project in the hub comes before any tab bar exists, so it
+	// does not count; nor does one before the first frame with tabs.
+	if (s_barSeen && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+	                  ImGui::IsMouseClicked(ImGuiMouseButton_Right)))
+	{
+		s_held.clear();
+		return;
+	}
 
 	bool anyBar = false;
 	for (size_t i = 0; i < s_held.size();)
@@ -103,27 +118,13 @@ void holdSavedTabs()
 		h.lastTabCount = tabs;
 		h.steadyFrames = joined ? 0 : h.steadyFrames + 1;
 
-		// A click anywhere in the node is a person choosing: let go for good.
-		// (Not a click elsewhere — the one that picks a project in the hub comes
-		// long before any panel exists.)
-		bool done = false;
-		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-		{
-			const ImVec2 mouse = g->IO.MousePos;
-			if (mouse.x >= node->Pos.x && mouse.x < node->Pos.x + node->Size.x &&
-			    mouse.y >= node->Pos.y && mouse.y < node->Pos.y + node->Size.y)
-				done = true;
-		}
-
 		const bool here     = ImGui::TabBarFindTabByID(bar, h.tabId) != nullptr;
 		const bool selected = node->SelectedTabId == h.tabId;
-		if (done || !here)
+		bool done = false;
+		if (!here || selected)
 		{
-			// Not arrived yet (the time limit above ends the wait), or let go.
-		}
-		else if (selected)
-		{
-			if (h.steadyFrames > kHoldSteadyFrames) done = true;
+			// Not arrived yet (the click or the time limit ends the wait), or all as
+			// it should be.
 		}
 		else if (h.steadyFrames <= kHoldSettleFrames)
 		{
@@ -143,13 +144,14 @@ void holdSavedTabs()
 		}
 		else
 		{
-			// Changed long after anything joined, with no click in the node: a
-			// panel was revealed (the footer, a menu). Not ours to undo.
+			// Changed long after anything joined, with no click: a panel was revealed
+			// (a shortcut, a script). Not ours to undo.
 			done = true;
 		}
 		if (done) s_held.erase(s_held.begin() + static_cast<std::ptrdiff_t>(i));
 		else      ++i;
 	}
+	if (anyBar) s_barSeen = true;
 	// The clock only runs while there are tabs to look at: the project hub can
 	// sit on screen for as long as somebody takes to pick a project, with no
 	// panel submitted at all.

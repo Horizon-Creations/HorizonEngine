@@ -438,6 +438,37 @@ TEST_CASE("Saved tabs: a panel revealed long after startup keeps the tab it was 
 	CHECK(visibleTab() == "C");
 }
 
+TEST_CASE("Saved tabs: a panel that joins very late, before anyone has clicked, still does not take the tab")
+{
+	// An audio engine that comes up after seconds, a project that is still
+	// loading: the panel is the startup's, however long it takes.
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 0, 900 };   // C: fifteen seconds in
+	t.runFor(1000, true);
+	CHECK(visibleTab() == "B");
+}
+
+TEST_CASE("Saved tabs: after the first click a panel that joins is the person's choice")
+{
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 0, 120 };
+	t.runFor(60, true);
+	REQUIRE(visibleTab() == "B");
+	// A click on the page, not on a tab.
+	ImGui::GetIO().AddMousePosEvent(600.0f, 400.0f);
+	t.runFor(2, true);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+	t.runFor(2, true);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+	t.runFor(120, true);
+	// C opened afterwards, and imgui's rule for a new tab applies.
+	CHECK(visibleTab() == "C");
+}
+
 TEST_CASE("Saved tabs: no ini, no layout, nothing is held")
 {
 	ImGuiCtx ctx;
