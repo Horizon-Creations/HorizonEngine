@@ -95,6 +95,10 @@ closes them.
 - **Traps:** CollabSession.h edit rebuilt only 75 he_tests steps here, not ~410. `cp` back of a
   backed-up .cpp updates mtime, so ninja rebuilds it (good for a negative control).
   `onParticipantJoined/Left` had no caller before; the controller now owns both slots.
+  Pre-existing, not changed: `publishAsset` on the HOST grants itself the lock and keeps it, so
+  a host-side MCP save or rename sweep still locks the asset for everyone (the give-back only
+  runs on the client's deferred path). `catchUpJoiner` reads every touched file synchronously
+  in the join handler (like the snapshot): a long session may hitch the host at each join.
 - **Next steps:** 1. Step 8: hook `EditorUI::saveAsset` / idle detection, start from
   `CollabController::m_sessionTouched`. 2. Step 11 live run: drop Bob's network (not a kick),
   edit a material + GameInstance on Anna, press Rejoin, check both arrive; late join with Cara.
