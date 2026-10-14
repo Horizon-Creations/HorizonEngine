@@ -56,4 +56,33 @@ namespace EditorDockState
 	// Must run before any docked window's Begin in the same frame. No-op
 	// without an ImGui context.
 	void keepMainDockspaceAlive();
+
+	// ── Which tab was open ───────────────────────────────────────────────────
+	// imgui.ini already stores, per dock node, the tab that was selected — and
+	// imgui throws it away again on the way in. A node's tab bar is rebuilt as
+	// its windows appear, and every tab that shows up AFTER the first frame is
+	// selected on arrival (ImGuiTabBarFlags_AutoSelectNewTabs: a window you just
+	// opened should be the one you see). In the editor panels appear on
+	// different frames — after the project has loaded, behind View-menu flags,
+	// once a lazily built panel has something to show — so a restart landed on
+	// whichever panel happened to be submitted last: the Console where the
+	// Content Browser had been, Details where the Outliner was.
+	//
+	// holdSavedTabs() puts the remembered tab back. Called once per frame, before
+	// the dockspace is submitted:
+	//  * the first call after a context (and its ini) exists notes each node's
+	//    selected tab, as the ini restored it;
+	//  * while the editor starts up it re-selects that tab whenever new tabs have
+	//    joined the node and it is not the selected one. The user's own click on
+	//    a tab (a change with no tab having joined) ends the hold for that node,
+	//    so nothing here ever fights a person; so do a node that has been steady
+	//    for a few seconds and a tab that never turns up (a panel that was closed
+	//    when the editor was shut down).
+	// Cheap enough for every frame: it walks the dock nodes (a dozen) and returns
+	// early once nothing is held. No-op without an ImGui context.
+	void holdSavedTabs();
+
+	// Forget what is held — a layout that was just rebuilt (Window > Reset
+	// Layout) has no tab worth restoring from the file that was replaced.
+	void forgetSavedTabs();
 }

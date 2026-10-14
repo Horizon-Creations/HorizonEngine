@@ -587,6 +587,11 @@ void EditorUI::render(AppContext& ctx, float dt)
 #ifdef HE_IMGUI_ENABLED
     if (!ctx.imguiReady) return;
 
+    // The tab each dock node had open when the editor was last closed: imgui
+    // restores it from imgui.ini and then lets every panel that shows up later
+    // take the selection, so this puts it back (EditorDockState.h).
+    EditorDockState::holdSavedTabs();
+
     // Refresh the frame-cached pointer-grammar answer for ctx-less call sites
     // (the shared GraphEditor canvas asks via EditorInput::trackpadActive()).
     EditorInput::trackpadPointer(ctx);
@@ -4144,6 +4149,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (s_resetLayoutRequested || ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
         {
             BuildDefaultDockLayout(dockspaceId, ImGui::GetContentRegionAvail());
+            EditorDockState::forgetSavedTabs();   // the layout the tabs belonged to is gone
             s_resetLayoutRequested = false;
             s_sceneTabBarHandled   = false;   // fresh layout → hide the viewport's tab bar again
             // Persist immediately so the layout survives an early exit and becomes
