@@ -169,3 +169,16 @@ The page shots are TeamView's body only (heading + body), not the Preferences ra
   `~/collab-relay/bin/VERSION` = e3f4649 and `--data-dir` in the unit's ExecStart, then rerun
   both live cases (relay must stay 2/2, team must pass). Every live team run leaves a
   `he-test-N` team on the server (the protocol has no delete-team).
+- **Step 16 (verify the human's deploy), 2026-10-14: deployed and live-green.** Read-only
+  ssh: `~/collab-relay/bin/VERSION` = e3f4649 (built 05:38 UTC, `build-e3f4649`,
+  `src-e3f4649` next to the old f61c9f1 dirs), user service `collab-relay` active since
+  05:38:26 UTC, ExecStart `collab_server 7777 --data-dir /home/horizon/collab-relay/data`,
+  startup log "team store .../teams.txt: 0 teams", PBKDF2 20000 iterations 7.9 ms per login.
+  Live against `212.227.140.164:7777` from the Mac (`out/build/release`, up to date with
+  HEAD): test_net_relay real collab_server 2/2 (79), test_net_team 8/8 (268) with
+  `HE_TEST_TEAM_SERVER`, test_team_ui 3/3 (221) with it. The server journal proves the live
+  cases hit the host: team he-test-598852236 created, Bob logged in, invite, decline,
+  re-invite, "joins (invited)", relay "paired host -> Bob"; session set open, Cleo "joins
+  (open)", paired; then the two-editor UI case (team uishot902353) invite → join → paired.
+  Left on the server: teams he-test-598852236 and uishot902353 (no delete-team).
+  Not verified: two real editor windows by hand against the host (step 6).
