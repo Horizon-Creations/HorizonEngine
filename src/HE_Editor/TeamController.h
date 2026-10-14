@@ -154,6 +154,9 @@ public:
 	// The rule on its own, against a given list of participant names.
 	static std::vector<const HE::Net::TeamMember*> onlineOutside(
 		const std::vector<HE::Net::TeamMember>& members, const std::vector<std::string>& inSession);
+	// The name comparison that rule uses (any case), for whoever has to find
+	// a member among the session's participants again (TeamView's slide).
+	static bool sameMemberName(const std::string& a, const std::string& b);
 
 	// ── Members (admins) ──
 	bool addMember(const std::string& name, const std::string& password, bool admin);

@@ -3432,6 +3432,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f));
 			TeamView::drawFooterOnline(*ctx.team, presenceW > 0.0f);
 		}
+		// Someone who just joined slides from the stack to their face in the
+		// session's cluster. Outside the block above: the stack may be gone by
+		// now (the last one online joined). Drawn over both clusters, takes
+		// no width, so the chain above does not count it.
+		if (ctx.team) TeamView::drawFooterJoins(*ctx.team, CollabPresenceBar::FooterFaces());
 
 		// EngineContent SFTP download queue — right-aligned, left of the presence
 		// clusters. Deliberately part of the RIGHT group rather than growing

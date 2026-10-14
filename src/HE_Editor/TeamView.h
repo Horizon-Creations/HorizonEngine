@@ -15,7 +15,8 @@
 //   the footer, right of the bell  your own status: your face, or a red X that
 //                                  opens a sign-in modal (topic 202)
 //   the footer, left of the        who else in the team is online and not in
-//   session's faces                the session (topic 202)
+//   session's faces                the session, and the slide across to the
+//                                  session's faces when one joins (topic 202)
 //
 // Takes a TeamController and the three config strings, never AppContext — which
 // is what lets tests/test_team_ui.cpp draw the real thing headless against a
@@ -133,6 +134,34 @@ namespace TeamView
 	// unless drawFooterOnline ran this frame. True when its Open Team Window
 	// was pressed: the caller opens Window ▸ Team.
 	bool drawFooterOnlineMenu(TeamController& team);
+
+	// ── The footer: joining the session (topic 202) ──
+	// A member who leaves the stack because they joined the session does not
+	// just vanish from one cluster and pop up in the other: their face slides
+	// from where it stood in the stack (or from the "+N", if it was not shown)
+	// to their place among the session's faces, turning from the team's square
+	// into the session's round face on the way, and the session cluster leaves
+	// that face out until the slide has landed. Keyed by name, like the rule
+	// that moved them. Joining only: someone who leaves the session reappears
+	// in the stack at once.
+	//
+	// Where the session's faces are is CollabPresenceBar's to know; the editor
+	// hands them over, which keeps this file free of AppContext (see the top).
+	struct SessionFace
+	{
+		std::string name;    // the participant's, matched to a member in any case
+		float       x = 0, y = 0, size = 0;
+	};
+	inline constexpr float kJoinSlideSeconds = 0.4f;
+	// True while `name`'s face is still on its way. The session cluster asks
+	// before it draws a face, skips it while true, and still reports where it
+	// would be: that is where the slide lands.
+	bool footerJoining(const TeamController& team, const std::string& name);
+	// The sliding faces. Call inside the footer window after both clusters,
+	// every frame, also when the stack itself is empty: the last one online
+	// may have just joined. A slide whose member has no face in
+	// `sessionFaces` (behind the session's "+N") is dropped, not drawn.
+	void drawFooterJoins(const TeamController& team, const std::vector<SessionFace>& sessionFaces);
 
 	// ── Test seam ──
 	// Where each control was drawn in the last frame, by label and the row it

@@ -20,11 +20,13 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct AppContext;
 class IRenderer;
 
 namespace HE::Net { struct Participant; }
+namespace TeamView { struct SessionFace; }
 
 namespace CollabPresenceBar
 {
@@ -36,6 +38,12 @@ namespace CollabPresenceBar
 	// The avatar cluster. Call from inside the footer window, at the position
 	// FooterWidth() was used to compute. Draws nothing when there is no session.
 	void DrawFooter(AppContext& ctx);
+
+	// Where DrawFooter put each face this frame (the shown ones, not the "+N"),
+	// by participant name: the target of the team stack's joining slide
+	// (TeamView::drawFooterJoins). A face DrawFooter left out because it is
+	// still sliding in is listed too, at the place it is sliding to.
+	const std::vector<TeamView::SessionFace>& FooterFaces();
 
 	// The hover menu and the ban confirmation. Call from the editor's overlay
 	// pass, after every panel, so nothing can cover it.

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -96,6 +97,13 @@ namespace
 		std::vector<TeamView::ProbedItem> items;
 		// drawFooterStatus said "open the Team window" since this was last reset.
 		bool openTeamWindow = false;
+		// A stand-in for the session's cluster (CollabPresenceBar, which the
+		// tests compile without ImGui), drawn when a test points this at a
+		// controller in a session: grey 16 px circles 3 px apart, left of the
+		// status, leaving out a face that is still sliding in and reporting
+		// where each one is, as DrawFooter does. "##sessionFace" per drawn one.
+		CollabController* session = nullptr;
+		std::vector<TeamView::SessionFace> sessionFaces;
 
 		TeamView::Settings settings() { return { &server, &teamName, &member }; }
 
@@ -118,13 +126,36 @@ namespace
 			const float statusX = float(w) - TeamView::footerStatusWidth() - 8.0f - 60.0f;
 			ImGui::SameLine(statusX);
 			if (TeamView::drawFooterStatus(team, settings(), form)) openTeamWindow = true;
+			float left = statusX;
+			sessionFaces.clear();
+			if (session && session->inSession() && !session->participants().empty())
+			{
+				const auto& roster   = session->participants();
+				const float sessionW = float(roster.size()) * 19.0f - 3.0f;
+				left -= 16.0f + sessionW;
+				ImGui::SameLine(left);
+				const ImVec2 origin = ImGui::GetCursorScreenPos();
+				ImGui::Dummy(ImVec2(sessionW, 16.0f));
+				for (std::size_t i = 0; i < roster.size(); ++i)
+				{
+					const ImVec2 at(origin.x + float(i) * 19.0f, origin.y);
+					sessionFaces.push_back({ roster[i].name, at.x, at.y, 16.0f });
+					if (TeamView::footerJoining(team, roster[i].name)) continue;
+					ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(at.x + 8.0f, at.y + 8.0f), 8.0f,
+					                                            IM_COL32(200, 200, 200, 255));
+					items.push_back({ "##sessionFace", roster[i].name, at.x, at.y, at.x + 16.0f, at.y + 16.0f, false });
+				}
+			}
 			// Who else is online, left of it with the editor's 16 px gap (the
-			// bell and the session's own faces between them are EditorUI's).
+			// bell, and the session's own faces unless the stand-in is on,
+			// between them are EditorUI's).
 			if (const float onlineW = TeamView::footerOnlineWidth(team); onlineW > 0.0f)
 			{
-				ImGui::SameLine(statusX - 16.0f - onlineW);
+				ImGui::SameLine(left - 16.0f - onlineW);
 				TeamView::drawFooterOnline(team, team.sessionRunning());
 			}
+			// The joining slide, after both clusters, as EditorUI.cpp draws it.
+			TeamView::drawFooterJoins(team, sessionFaces);
 			ImGui::End();
 			// The overlay pass, after the footer window, as EditorUI.cpp runs it.
 			if (TeamView::drawFooterOnlineMenu(team)) openTeamWindow = true;
@@ -954,6 +985,128 @@ TEST_CASE("Team UI: the online faces stack; hovering lists every one with Invite
 	footer();
 	CHECK(ui.find("##teamOnline") == nullptr);
 	CHECK(ui.find("Invite", "Bob") == nullptr);
+}
+
+TEST_CASE("Team UI: joining the session slides the face from the stack onto the session's (topic 202)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.roster     = { "Anna", "Bob", "Cleo" };
+	server.alsoOnline = { "Bob", "Cleo" };
+	server.setProfile("Bob", 40, 110, 240);    // blue, no picture
+
+	HorizonWorld     world, bobWorld, cleoWorld;
+	CollabController collab, bobCollab, cleoCollab;   // Anna's editor, Bob's and Cleo's
+	collab.setWorld(&world);
+	bobCollab.setWorld(&bobWorld);
+	cleoCollab.setWorld(&cleoWorld);
+	TeamController team(collab);
+	Ui ui{ team };
+	ui.session  = &collab;
+	ui.server   = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	ui.teamName = "studio";
+	ui.member   = "anna";
+
+	std::uint64_t now = 1;
+	auto pump = [&] {
+		server.pump();
+		collab.update(now);
+		bobCollab.update(now);
+		cleoCollab.update(now);
+		team.update(now);
+		now += 16;
+	};
+	auto footer      = [&] { ui.frame(Surface::Footer, pump); };
+	auto face        = [&](const char* who) { return ui.find("##teamOnlineFace", who); };
+	auto ghost       = [&](const char* who) { return ui.find("##teamJoining", who); };
+	auto sessionFace = [&](const char* who) { return ui.find("##sessionFace", who); };
+	auto shotNow     = [&](const char* name) {
+		he_ui::Image img;
+		ui.frame(Surface::Footer, pump, false, &img);
+		REQUIRE(img.valid());
+		dump(img, name);
+		return img;
+	};
+
+	ImGui::GetIO().AddMousePosEvent(2.0f, 2.0f);
+	REQUIRE(team.signIn(ui.server, ui.teamName, ui.member, "correct-horse"));
+	REQUIRE(frameUntil(footer, [&] { return team.signedIn() && face("Bob") && face("Cleo"); }));
+
+	// Anna hosts: her face in the session's cluster, Bob and Cleo in the stack.
+	REQUIRE(collab.startHosting(0, "Anna"));
+	REQUIRE(frameUntil(footer, [&] { return sessionFace("Anna") != nullptr; }));
+	footer();
+	REQUIRE(face("Bob"));
+	const TeamView::ProbedItem bobFrom = *face("Bob");
+	CHECK(ghost("Bob") == nullptr);
+
+	// Bob joins. On the frame the session first lists him he has left the
+	// stack, and his face starts out from where it stood there; the session's
+	// own face for him is left out while it travels.
+	REQUIRE(bobCollab.joinSession("127.0.0.1", collab.port(), collab.joinCode(), "Bob"));
+	REQUIRE(frameUntil(footer, [&] { return collab.participants().size() == 2; }));
+	CHECK(face("Bob") == nullptr);
+	REQUIRE(ghost("Bob"));
+	CHECK(ghost("Bob")->x0 == doctest::Approx(bobFrom.x0));
+	CHECK(ghost("Bob")->y0 == doctest::Approx(bobFrom.y0));
+	CHECK(sessionFace("Bob") == nullptr);
+	CHECK(sessionFace("Anna") != nullptr);
+	CHECK(TeamView::footerJoining(team, "bob"));   // any case, like the rule
+	const auto target = std::find_if(ui.sessionFaces.begin(), ui.sessionFaces.end(),
+	                                 [](const TeamView::SessionFace& f) { return f.name == "Bob"; });
+	REQUIRE(target != ui.sessionFaces.end());
+	const TeamView::SessionFace bobTo = *target;
+	CHECK(bobTo.x > bobFrom.x0);   // the session is right of the stack
+
+	// Partway (frame 6 of 24): between the two, in his colour.
+	for (int i = 0; i < 5; ++i) footer();
+	{
+		const he_ui::Image img = shotNow("team-footer-joining.bmp");
+		REQUIRE(ghost("Bob"));
+		CHECK(ghost("Bob")->x0 > bobFrom.x0 + 1.0f);
+		CHECK(ghost("Bob")->x0 < bobTo.x - 1.0f);
+		CHECK(pixelsIn(img, *ghost("Bob"), isBlue) > 10);
+		CHECK(sessionFace("Bob") == nullptr);
+	}
+
+	// Still on its way at frame 22, all but there; gone by frame 26, and the
+	// session shows Bob in the place the slide ended.
+	for (int i = 6; i < 22; ++i) footer();
+	REQUIRE(ghost("Bob"));
+	CHECK(std::abs(ghost("Bob")->x0 - bobTo.x) <= 1.0f);
+	CHECK(sessionFace("Bob") == nullptr);
+	for (int i = 22; i < 26; ++i) footer();
+	CHECK(ghost("Bob") == nullptr);
+	CHECK_FALSE(TeamView::footerJoining(team, "Bob"));
+	REQUIRE(sessionFace("Bob"));
+	CHECK(sessionFace("Bob")->x0 == doctest::Approx(bobTo.x));
+	shotNow("team-footer-joined.bmp");
+
+	// Cleo joins (as "cleo") and leaves again: back in the stack, and nothing
+	// of her left sliding, whether or not the slide had landed.
+	REQUIRE(cleoCollab.joinSession("127.0.0.1", collab.port(), collab.joinCode(), "cleo"));
+	REQUIRE(frameUntil(footer, [&] { return collab.participants().size() == 3; }));
+	CHECK(ghost("Cleo") != nullptr);
+	cleoCollab.leave();
+	REQUIRE(frameUntil(footer, [&] { return face("Cleo") != nullptr; }));
+	CHECK(ghost("Cleo") == nullptr);
+	CHECK_FALSE(TeamView::footerJoining(team, "Cleo"));
+
+	// A slide with nowhere to land (no session cluster) is dropped, not drawn.
+	ui.session = nullptr;
+	bobCollab.leave();
+	REQUIRE(frameUntil(footer, [&] { return face("Bob") != nullptr; }));
+	REQUIRE(bobCollab.joinSession("127.0.0.1", collab.port(), collab.joinCode(), "Bob"));
+	REQUIRE(frameUntil(footer, [&] { return collab.participants().size() == 2; }));
+	CHECK(ghost("Bob") == nullptr);
+	CHECK_FALSE(TeamView::footerJoining(team, "Bob"));
+
+	bobCollab.leave();
+	collab.leave();
+	team.signOut();
+	footer();
+	CHECK(ui.find("##teamJoining") == nullptr);
 }
 
 TEST_CASE("Team UI: two editors through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")

@@ -117,8 +117,10 @@ void drawAdmin(TeamController& team, Form& form);
 void drawProfile(TeamController& team, Form& form);
 void drawOwnPassword(TeamController& team, Form& form);
 bool connectionUp(TeamController::Status s);
+// `roundness`: corner radius as a share of the size; 0.5 is a circle (the
+// joining slide turns a team face into a session face on the way).
 void faceAt(ImDrawList* dl, ImVec2 p, const HE::Net::TeamMember* m, HE::Net::TeamColor colour,
-            const std::string& name, float size);
+            const std::string& name, float size, float roundness = 0.2f);
 void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::string& name, float size);
 void drawSignInModal(TeamController& team, const Settings& settings, Form& form);
 
@@ -316,6 +318,85 @@ bool   s_onlineMenuOpen = false;
 // session.
 std::string           s_invitedFor;
 std::set<std::string> s_invited;
+
+// ── The joining slide's state ──
+// Where each member stood in the stack: this frame's, written by
+// drawFooterOnline, and last frame's, which is what a slide starts from (by
+// the time anyone can tell that Bob joined, the stack has already been laid
+// out without him). Members behind the "+N" stand where the "+N" is.
+struct StackFace
+{
+	std::string name;
+	ImVec2      at;
+	float       size = 0.0f;
+};
+std::vector<StackFace> s_stackNow;
+std::vector<StackFace> s_stackLast;
+// The faces on their way. Name, start and time only: the member and the
+// target are looked up again every frame (members() pointers last one
+// update(), and the session's cluster moves when someone else joins too).
+struct JoinSlide
+{
+	std::string name;
+	ImVec2      from;
+	float       fromSize = 0.0f;
+	double      start    = 0.0;
+};
+std::vector<JoinSlide> s_slides;
+int                    s_joinFrame = -1;
+
+const HE::Net::TeamMember* memberNamed(const TeamController& team, const std::string& name)
+{
+	for (const HE::Net::TeamMember& m : team.members())
+		if (m.name == name) return &m;
+	return nullptr;
+}
+
+// Once per frame, from whichever of the footer's calls comes first: the
+// session cluster asks footerJoining() before the stack is drawn, and must
+// already get the answer for this frame, or the face it should leave out is
+// drawn once at its target before the slide starts.
+void stepJoins(const TeamController& team)
+{
+	const int frame = ImGui::GetFrameCount();
+	if (frame == s_joinFrame) return;
+	s_joinFrame = frame;
+	// Last frame's stack is complete now; this frame's is yet to be drawn.
+	s_stackLast = std::move(s_stackNow);
+	s_stackNow.clear();
+	if (!team.signedIn())
+	{
+		s_slides.clear();
+		s_stackLast.clear();
+		return;
+	}
+
+	const std::vector<const HE::Net::TeamMember*> online = team.onlineOutsideSession();
+	auto inStack = [&](const std::string& name) {
+		return std::any_of(online.begin(), online.end(),
+		                   [&](const HE::Net::TeamMember* m) { return m->name == name; });
+	};
+	// Still online, not you, and no longer outside the session: by the rule
+	// that fills the stack, that is "in the session". Gone offline is not.
+	auto joined = [&](const std::string& name) {
+		const HE::Net::TeamMember* m = memberNamed(team, name);
+		return m && m->online && !m->you && !inStack(name);
+	};
+
+	const double now = ImGui::GetTime();
+	s_slides.erase(std::remove_if(s_slides.begin(), s_slides.end(),
+	                              [&](const JoinSlide& s) {
+		                              return now - s.start >= kJoinSlideSeconds || !joined(s.name);
+	                              }),
+	               s_slides.end());
+	for (const StackFace& f : s_stackLast)
+	{
+		if (!joined(f.name)) continue;
+		const bool sliding = std::any_of(s_slides.begin(), s_slides.end(),
+		                                 [&](const JoinSlide& s) { return s.name == f.name; });
+		if (!sliding) s_slides.push_back({ f.name, f.at, f.size, now });
+	}
+}
 } // namespace
 
 float footerOnlineWidth(const TeamController& team)
@@ -326,6 +407,7 @@ float footerOnlineWidth(const TeamController& team)
 void drawFooterOnline(TeamController& team, bool sessionBeside)
 {
 	s_onlineDrawn = false;
+	stepJoins(team);
 	const std::vector<const HE::Net::TeamMember*> online = team.onlineOutsideSession();
 	const OnlineLayout l = onlineLayout(online.size());
 	if (l.shown == 0) return;
@@ -367,12 +449,15 @@ void drawFooterOnline(TeamController& team, bool sessionBeside)
 		dl->AddCircleFilled(c, r + 1.0f, IM_COL32(0, 0, 0, 170));
 		dl->AddCircleFilled(c, r, Theme::u32(Theme::Ok));
 		probeRect("##teamOnlineFace", m.name, p, ImVec2(p.x + l.face, p.y + l.face));
+		s_stackNow.push_back({ m.name, p, l.face });
 	}
 	if (l.extra > 0)
 	{
 		dl->AddText(ImVec2(origin.x + l.width - l.extraW + 4.0f,
 		                   origin.y + (l.face - ImGui::GetTextLineHeight()) * 0.5f),
 		            ImGui::GetColorU32(ImGuiCol_TextDisabled), l.extraLabel);
+		for (std::size_t i = static_cast<std::size_t>(l.shown); i < online.size(); ++i)
+			s_stackNow.push_back({ online[i]->name, ImVec2(origin.x + l.width - l.extraW, origin.y), l.face });
 	}
 
 	// The rule between "online in the team" and "in this session", in the
@@ -512,6 +597,59 @@ bool drawFooterOnlineMenu(TeamController& team)
 	return openTeamWindow;
 }
 
+bool footerJoining(const TeamController& team, const std::string& name)
+{
+	stepJoins(team);
+	return std::any_of(s_slides.begin(), s_slides.end(), [&](const JoinSlide& s) {
+		return TeamController::sameMemberName(s.name, name);
+	});
+}
+
+void drawFooterJoins(const TeamController& team, const std::vector<SessionFace>& sessionFaces)
+{
+	stepJoins(team);
+	if (s_slides.empty()) return;
+
+	const double now = ImGui::GetTime();
+	ImDrawList*  dl  = ImGui::GetWindowDrawList();
+	for (auto it = s_slides.begin(); it != s_slides.end();)
+	{
+		const auto to = std::find_if(sessionFaces.begin(), sessionFaces.end(), [&](const SessionFace& f) {
+			return TeamController::sameMemberName(f.name, it->name);
+		});
+		const HE::Net::TeamMember* m = memberNamed(team, it->name);
+		if (to == sessionFaces.end() || !m)
+		{
+			// Behind the session's "+N", or no session cluster at all: there
+			// is no face to land on, and the cluster shows them as it would
+			// have anyway.
+			it = s_slides.erase(it);
+			continue;
+		}
+
+		// Ease-out: off quickly, settling into place.
+		const float t = std::clamp(static_cast<float>((now - it->start) / kJoinSlideSeconds), 0.0f, 1.0f);
+		const float e = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+		auto lerp = [e](float a, float b) { return a + (b - a) * e; };
+		const float  size = lerp(it->fromSize, to->size);
+		const ImVec2 p(std::round(lerp(it->from.x, to->x)), std::round(lerp(it->from.y, to->y)));
+
+		// The team's square rounds into the session's circle, and the green
+		// "online" dot goes: where it lands, they are not online somewhere,
+		// they are here.
+		faceAt(dl, p, m, m->color, m->name, size, lerp(0.2f, 0.5f));
+		const float  r = std::max(2.5f, size * 0.17f);
+		const ImVec2 c(p.x + size - r * 0.8f, p.y + size - r * 0.8f);
+		const float  a = 1.0f - e;
+		dl->AddCircleFilled(c, r + 1.0f, IM_COL32(0, 0, 0, static_cast<int>(170 * a)));
+		ImVec4 ok = Theme::Ok;
+		ok.w *= a;
+		dl->AddCircleFilled(c, r, Theme::u32(ok));
+		probeRect("##teamJoining", m->name, p, ImVec2(p.x + size, p.y + size));
+		++it;
+	}
+}
+
 namespace
 {
 
@@ -550,11 +688,11 @@ ImU32 colourU32(HE::Net::TeamColor c)
 // rectangles rather than a texture: this file has no renderer (see TeamView.h),
 // and a face is a few hundred rectangles at most.
 void faceAt(ImDrawList* dl, ImVec2 p, const HE::Net::TeamMember* m, HE::Net::TeamColor colour,
-            const std::string& name, float size)
+            const std::string& name, float size, float roundness)
 {
 	const ImVec2 q(p.x + size, p.y + size);
 	const ImU32  frame    = colourU32(colour);
-	const float  rounding = size * 0.2f;
+	const float  rounding = size * roundness;
 
 	if (m && m->avatarSize > 0 && m->avatarRgba.size() == std::size_t(m->avatarSize) * m->avatarSize * 4)
 	{

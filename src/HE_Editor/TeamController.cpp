@@ -719,6 +719,11 @@ std::vector<const HE::Net::TeamMember*> TeamController::onlineOutside(
 	return out;
 }
 
+bool TeamController::sameMemberName(const std::string& a, const std::string& b)
+{
+	return sameName(a, b);
+}
+
 // ─── Members ─────────────────────────────────────────────────────────────────
 
 bool TeamController::addMember(const std::string& name, const std::string& password, bool admin)
