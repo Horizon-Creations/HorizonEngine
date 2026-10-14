@@ -1,7 +1,7 @@
 # Team login across restarts: session tokens (topic 201)
 
 Goal: the editor stays signed in to the team server after a restart without the
-password on disk. Approach (the topic's recommended one): the team server issues a
+password on disk. Approach (the one the topic recommends): the team server issues a
 long-lived **session token**; the editor keeps the token, not the password, and the
 server can revoke it. Builds on the team server of topic 197
 (`docs/team-server-protocol-2026-10-13.md`).
@@ -46,8 +46,8 @@ to start on a format-2 file, so a rollback needs all tokens revoked first.
 ## Handoff
 
 - **Topic / step:** 201, step 1 (session token protocol in the team server).
-- **Branch / commit:** server CollabSession `claude/he-net-relay-server` @ 363f889
-  (pushed, no PR). HorizonEngine: only this doc on
+- **Branch / commit:** server CollabSession `claude/he-net-relay-server` @ 363f889, README
+  note 4044869 (pushed, no PR). HorizonEngine: only this doc on
   `claude/team-login-persistieren-editor-bleibt-ber-neustarts-hinweg-a`.
 - **Done:** `src/TeamStore.{h,cpp}`: `Token` in `Member`, `IssueToken`, `TokenLogin`,
   `RevokeToken`, `RevokeAllTokens`, `TokenHash`, `SetClock` (tests), format 2.
@@ -64,9 +64,10 @@ to start on a format-2 file, so a rollback needs all tokens revoked first.
   `TestTokenPersistence`; 4 broken token records in `TestBrokenFilesAreRefused`).
   Mutation check: with the "token login may not issue" guard and the password-change
   drop removed, 2 of the new tests failed (20/22). Then restored.
-- **Not verified:** CollabSession CI run
-  https://github.com/Horizon-Creations/CollabSession/actions/runs/38537985553 was
-  queued at handoff (the Hive does not watch that repo). **Not deployed:** the host
+- **CI:** CollabSession run
+  https://github.com/Horizon-Creations/CollabSession/actions/runs/38537985553 green for
+  363f889 (the Hive does not watch that repo). 4044869 after it only adds a README note.
+  **Not deployed:** the host
   212.227.140.164 still runs e3f4649. A worker may not run `deploy/deploy.sh` (the
   classifier blocks it), so the human runs it before step 3's live check.
 - **Decisions:** explicit ISSUE_TOKEN request instead of a token in the `logged-in`

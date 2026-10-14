@@ -1,5 +1,8 @@
 # Team server: data model, login protocol (topic 197, server side)
 
+> Session tokens (stay signed in across restarts, topic 201): see
+> `docs/team-login-persist-2026-10-14.md`.
+
 Status (2026-10-13): **both server steps done**: teams, members (name + PBKDF2
 password hash) and a login protocol (step 8), then presence, team sessions,
 invitations and the per-session join setting (step 9) live in the relay server
