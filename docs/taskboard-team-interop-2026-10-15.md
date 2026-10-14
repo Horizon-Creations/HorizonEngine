@@ -99,8 +99,10 @@ session must not run it.
    queue fed from `handleEvent` (event 9 must NOT go to the generic notice text).
 3. `src/HE_Editor/TaskBoardTeamLink.{h,cpp}`: `TaskTeamLink` over TeamController:
    `connected()` = `signedIn() && noticesSupported()`, `self()` = `member()`,
-   `members()` from `members()` (name, online), `send()` = `notifyMember` (a
-   not-online reply is harmless: the bridge only sends to members shown online),
+   `members()` from `members()` (name, online; empty between login and the
+   LIST_MEMBERS reply, which the bridge reads as "not known yet" and holds the
+   outbox, never as "everybody left"), `send()` = `notifyMember` (a not-online
+   reply is harmless: the bridge only sends to members shown online),
    `poll()` = `pollTaskNotice()`.
 4. `EditorApplication`: own a `TaskBoardTeam` and the link next to `m_team`,
    `setNotifications(&m_notifications)`, `TaskBoardPanel::setTeam(&bridge)` at

@@ -377,7 +377,13 @@ TEST_CASE("task board team: without a signed-in link the board is local and noth
 	anna.link.signedIn = false;
 	frame(20'000);
 	CHECK(anna.bridge.pending() == 1);
+	// Back, but the roster is not in yet: that is not "Bob left the team".
 	anna.link.signedIn = true;
+	anna.link.rosterIn = false;
+	frame(16);
+	CHECK(anna.bridge.pending() == 1);
+	CHECK(anna.link.sent.empty());
+	anna.link.rosterIn = true;
 	frame(16);
 	frame(server.latencyMs);
 	CHECK(bob.bellTexts() == std::vector<std::string>{ "Anna commented on “Crates”" });

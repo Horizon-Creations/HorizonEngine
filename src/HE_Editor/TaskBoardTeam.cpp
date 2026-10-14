@@ -233,7 +233,9 @@ void TaskBoardTeam::update(std::uint64_t nowMs)
 			for (char& c : key) c = (char)std::tolower((unsigned char)c);
 			online[key] = m.online;
 		}
-		for (auto it = m_outbox.begin(); it != m_outbox.end();)
+		// Just signed in, the roster not in yet: nobody has "left the team",
+		// it is only not known who is here. Wait for it.
+		for (auto it = m_outbox.begin(); !online.empty() && it != m_outbox.end();)
 		{
 			std::string key = it->to;
 			for (char& c : key) c = (char)std::tolower((unsigned char)c);

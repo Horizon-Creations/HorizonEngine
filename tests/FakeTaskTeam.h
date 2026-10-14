@@ -58,6 +58,9 @@ public:
 		FakeTaskTeam& team;
 		std::string   member;
 		bool          signedIn = true;
+		// False: signed in, but the roster has not arrived yet (TeamClient
+		// between "logged-in" and the LIST_MEMBERS reply).
+		bool          rosterIn = true;
 		std::deque<Incoming> inbox;
 		int           received = 0;
 		// What send() was asked, in order (to, payload).
@@ -68,7 +71,7 @@ public:
 		std::vector<HE::TaskTeamMember> members() const override
 		{
 			std::vector<HE::TaskTeamMember> out;
-			if (!signedIn) return out;
+			if (!signedIn || !rosterIn) return out;
 			for (const auto& m : team.m_members) out.push_back({ m.name, team.online(m.name) });
 			return out;
 		}
