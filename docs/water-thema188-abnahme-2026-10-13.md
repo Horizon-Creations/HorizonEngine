@@ -60,7 +60,7 @@ Bild ist dann nur die Wand zu sehen. *(Stand 13.10. Seit Schritt 4 steht dort ei
 
 ## Schritt 4: Böschung statt Wand (14.10.2026)
 
-Geprüft auf dem MacBook Air (Metal, Release-Build des Zweigs, Stand a35abc85). NN-WS03 war offline, deshalb
+Geprüft auf dem MacBook Air (Metal, Release-Build des Zweigs, Stand a35abc85 plus Distanzfeld, siehe unten). NN-WS03 war offline, deshalb
 **D3D11, D3D12 und Vulkan sind für diesen Schritt noch nicht geprüft.** Die Geometrie entsteht auf der CPU; die
 Logzahlen waren in Schritt 3 auf allen drei Backends identisch, das ersetzt die Abnahme auf Hardware aber nicht.
 
@@ -74,7 +74,12 @@ Logzahlen waren in Schritt 3 auf allen drei Backends identisch, das ersetzt die 
   alten Gelände, und dahinter bewegt sich nichts.
 - Die Zielhöhe hängt nur vom Ufer ab. Ein gehaltener Dab gräbt die Böschung nicht tiefer (Test).
 - Wo die Uferlinie vom Ufer-Clip kommt, wandert sie nach außen, wenn die Böschung den Eckpunkt absenkt. Deshalb
-  wird die Böschung bis zu 8-mal neu geformt, bis sich nichts mehr um mehr als 1 mm bewegt.
+  wird die Böschung bis zu 3-mal neu geformt (vorzeitig fertig, wenn sich nichts mehr um mehr als 1 mm bewegt).
+  Mit nur einem Durchlauf stand der erste Vertex neben dem Wasser 0,83 m hoch statt 0,56 m. Mit 8 Durchläufen
+  waren die Uferwände in allen Testfällen gleich wie mit 3, bei fast dreifacher Zeit.
+- Den Abstand zum Ufer liefert ein Feld der nächsten Segmente: exakt neben jedem Segment, dann in zwei Durchgängen
+  über die 8 Nachbarn weitergereicht. Die erste Fassung suchte je Vertex in den Zellen ringsum und brauchte auf
+  einem feinen Gitter 798 ms je Dab.
 
 `HE_DUMP_WATERBRUSH=pit`, gleiche Szene wie oben, Metal:
 
@@ -97,7 +102,19 @@ Negativkontrolle, nie committen: in `WaterBrush.cpp` (`dab`) `shapeBank(...)` du
 Tests (`test_water_brush.cpp`): In allen Pinsel-Fällen bergauf ist die Uferwand 0,55 bis 0,58 m (vorher bis 4 m),
 die steilste Stufe 0,84 bis 1,2 m je Meter, und es bleiben 0 trockene Grubenvertices. Flaches Gelände unter dem
 Pegel bekommt keine Böschung. Neu ist der Test für einen gehaltenen Dab: Nach dem 10. Dab bewegt sich neben dem
-Wasser nichts mehr. 536 Wasser-, Terrain-, See- und Sculpt-Fälle sind grün (Release, macOS).
+Wasser nichts mehr. Die volle Suite `he_tests` (Release, macOS) lief auf a35abc85 grün: 5098 Fälle, 0 Fehler. Nach
+dem Umbau auf das Distanzfeld liefen 568 Wasser-, Terrain-, See-, Sculpt- und Hilfe-Fälle erneut grün.
+
+**Kosten je Dab** (Release, M-Mac unter Fremdlast, Pinsel-Pacing des Editors, 97 Dabs bergauf, Mittel / schlimmster):
+
+| Raster | mit Böschung | ohne Böschung (Negativkontrolle) |
+|---|---|---|
+| Editor-Standard: 1 km, 1025², 256 Wasserzellen | 1,2 ms / 2,0 ms | 0,28 ms / 0,36 ms |
+| 128 m, 129², 32 Wasserzellen (Zeugen-Rig) | 0,8 ms / 1,9 ms | 0,23 ms / 0,28 ms |
+| 128 m, 1025², 256 Wasserzellen (12,5 cm je Vertex, Stresstest) | 48 ms / 72 ms | 6,6 ms / 8,0 ms |
+
+Im Stresstest kostet die Böschung also eine sichtbare Ruckelzeit je Frame, solange gemalt wird. Gemessen mit
+einem nicht committeten Zeitmess-Testfall. Debug und Windows sind nicht gemessen.
 
 ## Lake-Werkzeug: Das Bett geht mit
 

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace HE::water::brush
@@ -108,7 +109,7 @@ namespace
     // it lowers from: a dab repeated at one spot changes nothing more.
     constexpr float kBankSlope = 0.5f;    // rise per metre at the waterline
     constexpr float kBankLip   = 0.01f;   // metres above the shore clipping's limit
-    constexpr int   kBankPasses = 8;      // see the shore clipping's crossing below
+    constexpr int   kBankPasses = 3;      // see the shore clipping's crossing below
     constexpr float kBankTolerance = 0.001f;   // metres a pass must lower a vertex by to count
 
     // Returns the vertices lowered.
@@ -150,10 +151,13 @@ namespace
         // out, the ground stood too high), the edge sits where the ground's depth
         // under the water crosses zero along a lattice edge — and lowering the
         // bank's corner moves that crossing outward. Measured against the shore
-        // before it moved, the bank stands too high, so it is shaped again from
-        // the new shore until nothing moves by more than kBankTolerance (the
-        // crossing settles within a few passes; the sheet only ever grows, so no
-        // pass can uncover the pit).
+        // before it moved, the bank stands too high (one pass left the first
+        // vertex off the water 0.83 m up instead of 0.56), so it is shaped again
+        // from the new shore, up to kBankPasses times or until nothing moves by
+        // more than kBankTolerance. The crossing settles geometrically; passes
+        // past the third moved the shore's wall by less than a centimetre in the
+        // tests and cost a third of the dab each. The sheet only ever grows, so
+        // no pass can uncover the pit.
         for (int pass = 0; pass < kBankPasses; ++pass)
         {
             Lattice lattice;
@@ -175,46 +179,86 @@ namespace
                         shore.end());
             if (shore.empty()) break;
 
-            // Each segment lies within one lattice cell: bucket them by it, so a vertex
-            // only looks at the cells its search radius touches.
-            const int bw = lattice.w - 1, bh = lattice.h - 1;
-            auto bucketOf = [&](double px, double pz, int& bi, int& bj)
+            // bank(d) < h only for d below radiusFor(h − foot) (bank(d) = h solved
+            // for d), never past `reach`. The highest ground near the dab says how
+            // far from the shore anything can move at all.
+            auto radiusFor = [&](double above) { return above * reach / (kBankSlope * reach + above); };
+            float highest = 0.0f;
+            for (int zi = z0; zi <= z1; ++zi)
+                for (int xi = x0; xi <= x1; ++xi)
+                    highest = std::max(highest, tc.sculptHeights[static_cast<size_t>(zi) * res + xi] - foot);
+            if (!(highest > 0.0f)) break;
+            const double band = radiusFor(highest) + std::max(stepX, stepZ);
+            glm::dvec2 lo(1e30), hi(-1e30);
+            for (const ShoreSegment& s : shore) { lo = glm::min(lo, glm::min(s.a, s.b)); hi = glm::max(hi, glm::max(s.a, s.b)); }
+            const int fx0 = std::max(x0, static_cast<int>(std::floor((lo.x - band + halfX) / stepX)));
+            const int fx1 = std::min(x1, static_cast<int>(std::ceil((hi.x + band + halfX) / stepX)));
+            const int fz0 = std::max(z0, static_cast<int>(std::floor((lo.y - band + halfZ) / stepZ)));
+            const int fz1 = std::min(z1, static_cast<int>(std::ceil((hi.y + band + halfZ) / stepZ)));
+            if (fx0 > fx1 || fz0 > fz1) break;
+
+            // The distance to the shore at every vertex of that box, as a closest-
+            // segment field: exact next to each segment, then handed on through
+            // two sweeps over the 8 neighbours, each vertex measuring itself
+            // against the segment its neighbour found (O(vertices) per pass, where
+            // a search per vertex cost hundreds of segment tests on a fine grid).
+            const int fw = fx1 - fx0 + 1, fh = fz1 - fz0 + 1;
+            std::vector<int32_t> nearest(static_cast<size_t>(fw) * fh, -1);
+            std::vector<double>  best(static_cast<size_t>(fw) * fh, std::numeric_limits<double>::infinity());
+            auto at = [&](int i, int j) { return static_cast<size_t>(j) * fw + i; };
+            auto point = [&](int i, int j)
             {
-                bi = std::clamp(static_cast<int>(std::floor((px - lattice.originX) / lattice.cellW)) - lattice.x0, 0, bw - 1);
-                bj = std::clamp(static_cast<int>(std::floor((pz - lattice.originZ) / lattice.cellH)) - lattice.z0, 0, bh - 1);
+                return glm::dvec2(-halfX + static_cast<double>(fx0 + i) * stepX, -halfZ + static_cast<double>(fz0 + j) * stepZ);
             };
-            std::vector<std::vector<uint32_t>> buckets(static_cast<size_t>(bw) * bh);
-            for (uint32_t s = 0; s < shore.size(); ++s)
+            auto offer = [&](int i, int j, int32_t s)
             {
-                int bi, bj;
-                bucketOf((shore[s].a.x + shore[s].b.x) * 0.5, (shore[s].a.y + shore[s].b.y) * 0.5, bi, bj);
-                buckets[static_cast<size_t>(bj) * bw + bi].push_back(s);
+                if (s < 0) return;
+                const double d = distance(point(i, j), shore[static_cast<size_t>(s)]);
+                const size_t k = at(i, j);
+                if (d < best[k]) { best[k] = d; nearest[k] = s; }
+            };
+            for (int32_t s = 0; s < static_cast<int32_t>(shore.size()); ++s)
+            {
+                const glm::dvec2 a = glm::min(shore[s].a, shore[s].b), b = glm::max(shore[s].a, shore[s].b);
+                const int i0 = std::max(0, static_cast<int>(std::floor((a.x + halfX) / stepX)) - 1 - fx0);
+                const int i1 = std::min(fw - 1, static_cast<int>(std::ceil((b.x + halfX) / stepX)) + 1 - fx0);
+                const int j0 = std::max(0, static_cast<int>(std::floor((a.y + halfZ) / stepZ)) - 1 - fz0);
+                const int j1 = std::min(fh - 1, static_cast<int>(std::ceil((b.y + halfZ) / stepZ)) + 1 - fz0);
+                for (int j = j0; j <= j1; ++j)
+                    for (int i = i0; i <= i1; ++i) offer(i, j, s);
+            }
+            auto from = [&](int i, int j, int ni, int nj)
+            {
+                if (ni >= 0 && ni < fw && nj >= 0 && nj < fh) offer(i, j, nearest[at(ni, nj)]);
+            };
+            for (int j = 0; j < fh; ++j)
+            {
+                for (int i = 0; i < fw; ++i)
+                { from(i, j, i - 1, j); from(i, j, i - 1, j - 1); from(i, j, i, j - 1); from(i, j, i + 1, j - 1); }
+                for (int i = fw - 1; i >= 0; --i) from(i, j, i + 1, j);
+            }
+            for (int j = fh - 1; j >= 0; --j)
+            {
+                for (int i = fw - 1; i >= 0; --i)
+                { from(i, j, i + 1, j); from(i, j, i + 1, j + 1); from(i, j, i, j + 1); from(i, j, i - 1, j + 1); }
+                for (int i = 0; i < fw; ++i) from(i, j, i - 1, j);
             }
 
             bool moved = false;
-            for (int zi = z0; zi <= z1; ++zi)
-                for (int xi = x0; xi <= x1; ++xi)
+            for (int j = 0; j < fh; ++j)
+                for (int i = 0; i < fw; ++i)
                 {
-                    float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
+                    const size_t k = at(i, j);
+                    if (nearest[k] < 0) continue;
+                    float& h = tc.sculptHeights[static_cast<size_t>(fz0 + j) * res + (fx0 + i)];
                     const float above = h - foot;
                     if (!(above > 0.0f)) continue;
-                    const double px = -halfX + static_cast<double>(xi) * stepX;
-                    const double pz = -halfZ + static_cast<double>(zi) * stepZ;
-                    if (insideSheet(lattice, px, pz)) continue;     // under the water: the dig's, not the bank's
-                    // bank(d) < h only for d below this (bank(d) = h solved for d).
-                    const double radius = static_cast<double>(above) * reach / (kBankSlope * reach + above);
-                    int bi0, bj0, bi1, bj1;
-                    bucketOf(px - radius, pz - radius, bi0, bj0);
-                    bucketOf(px + radius, pz + radius, bi1, bj1);
-                    double d = radius;
-                    const glm::dvec2 p(px, pz);
-                    for (int bj = bj0; bj <= bj1; ++bj)
-                        for (int bi = bi0; bi <= bi1; ++bi)
-                            for (const uint32_t s : buckets[static_cast<size_t>(bj) * bw + bi])
-                                d = std::min(d, distance(p, shore[s]));
-                    if (!(d < radius)) continue;
+                    const double d = best[k];
+                    if (!(d < radiusFor(above))) continue;
                     const float bank = foot + kBankSlope * static_cast<float>(d / (1.0 - d / reach));
                     if (!(bank < h - kBankTolerance)) continue;
+                    const glm::dvec2 p = point(i, j);
+                    if (insideSheet(lattice, p.x, p.y)) continue;   // under the water: the dig's, not the bank's
                     h = bank;
                     moved = true;
                 }
