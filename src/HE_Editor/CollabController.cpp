@@ -12,6 +12,7 @@
 #include <Net/SessionDirectory.h>
 #include <Net/Socket.h>
 #include <Net/TcpTransport.h>
+#include <Net/TeamClient.h>        // team sessions derive their join code
 #include <Platform/PathSafety.h>   // a create's path must stay in the project
 
 #include <algorithm>
@@ -223,7 +224,8 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 
 	// Machine-generated, never user-chosen: an observer who captures a handshake
 	// could brute-force a weak passphrase offline.
-	m_joinCode = SecureTransport::generateJoinSecret();
+	m_joinCode = m_teamHostPending ? HE::Net::TeamClient::joinCodeForSession(m_sessionId)
+	                               : SecureTransport::generateJoinSecret();
 
 	SecureTransport::Config sec;
 	sec.joinSecret       = m_joinCode;
@@ -839,6 +841,47 @@ bool CollabController::joinBySessionId(const std::string& sessionId,
 	return true;
 }
 
+// ─── Team sessions ───────────────────────────────────────────────────────────
+
+bool CollabController::startTeamHosting(const HE::Net::RelayAddress& relay,
+                                        const std::string& displayName)
+{
+	// startHosting() is the one hosting path; the pending flag only steers its
+	// relay choice and its join code, and is gone again when it returns.
+	m_teamRelay       = relay;
+	m_teamHostPending = true;
+	const bool ok     = startHosting(0, displayName);
+	m_teamHostPending = false;
+	if (ok) m_teamSession = true;   // after: startHosting's teardown() clears it
+	return ok;
+}
+
+bool CollabController::joinTeamSession(const HE::Net::RelayAddress& relay,
+                                       const std::string& sessionId,
+                                       const std::string& hostPeer,
+                                       const std::string& selfPeer,
+                                       const std::string& displayName)
+{
+	teardown();
+	m_error.clear();
+
+	using HE::Net::RelayTransport;
+	if (!RelayTransport::isValidId(sessionId) || !RelayTransport::isValidId(hostPeer) ||
+	    (!selfPeer.empty() && !RelayTransport::isValidId(selfPeer)))
+	{
+		m_error  = "The team server named a session this editor cannot dial.";
+		m_status = Status::Failed;
+		return false;
+	}
+	m_sessionId     = sessionId;
+	m_viaRelay      = true;
+	m_teamSession   = true;
+	m_relayHostPeer = hostPeer;
+	m_relaySelfPeer = selfPeer;
+	return beginLink(relay.host, relay.port, HE::Net::TeamClient::joinCodeForSession(sessionId),
+	                 displayName);
+}
+
 bool CollabController::joinSession(const std::string& host, std::uint16_t port,
                                    const std::string& joinCode,
                                    const std::string& displayName)
@@ -856,8 +899,8 @@ bool CollabController::joinSession(const std::string& host, std::uint16_t port,
 	{
 		m_error  = "A relay server is set (" + relay.host + ":" + std::to_string(relay.port) +
 		           "), so sessions are joined by session ID and join code, never by "
-		           "address. Join by session ID, or clear the relay server under "
-		           "Preferences > Collaboration to connect to " + host + " directly.";
+		           "address. Join by session ID, or clear the team server under "
+		           "Preferences > Team to connect to " + host + " directly.";
 		m_status = Status::Failed;
 		return false;
 	}
@@ -883,7 +926,10 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	std::unique_ptr<HE::Net::ITransport> link;
 	if (m_viaRelay)
 	{
-		auto r = HE::Net::RelayTransport::connect(HE::Net::RelayAddress{ host, port }, m_sessionId);
+		const std::string target = m_relayHostPeer.empty()
+			? std::string(HE::Net::RelayTransport::kHostPeerId) : m_relayHostPeer;
+		auto r = HE::Net::RelayTransport::connect(HE::Net::RelayAddress{ host, port }, m_sessionId,
+		                                          target, m_relaySelfPeer);
 		m_relayLink = r.get();
 		link        = std::move(r);
 	}
@@ -948,6 +994,9 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_lastJoin.joinCode    = joinCode;
 	m_lastJoin.displayName = displayName;
 	m_lastJoin.sessionId   = m_viaRelay ? m_sessionId : std::string();
+	m_lastJoin.team        = m_teamSession;
+	m_lastJoin.hostPeer    = m_relayHostPeer;
+	m_lastJoin.selfPeer    = m_relaySelfPeer;
 	m_lastJoin.valid       = true;
 
 	m_joinCode      = joinCode;
@@ -1654,6 +1703,9 @@ void CollabController::teardown()
 	m_secure.reset();
 	m_relayLink = nullptr;   // lived inside m_secure
 	m_viaRelay  = false;
+	m_teamSession = false;
+	m_relayHostPeer.clear();
+	m_relaySelfPeer.clear();
 
 	m_isHost        = false;
 	// Starting or leaving a session is the one moment the last one's ejection
@@ -1948,6 +2000,13 @@ void CollabController::setSyncLargeAssets(bool on)
 bool CollabController::relayForNewSession(HE::Net::RelayAddress& relay, bool& use)
 {
 	use = false;
+	// A team session goes where it was announced, never where the setting says.
+	if (m_teamHostPending)
+	{
+		relay = m_teamRelay;
+		use   = true;
+		return true;
+	}
 	const std::string text = HE::Net::effectiveRelayAddress(m_relayAddress);
 	if (text.empty()) return true;   // peer-to-peer, as before the relay existed
 
@@ -1957,7 +2016,7 @@ bool CollabController::relayForNewSession(HE::Net::RelayAddress& relay, bool& us
 		// Not a fallback to direct: somebody set a relay because direct does
 		// not work for them, or because they do not want it.
 		m_error  = "The relay server address \"" + text + "\" cannot be used (" + why +
-		           "). Fix it under Preferences > Collaboration, or clear it to connect "
+		           "). Fix the team server under Preferences > Team, or clear it to connect "
 		           "directly.";
 		m_status = Status::Failed;
 		return false;
@@ -1977,8 +2036,11 @@ bool CollabController::updateRelayStatus()
 		// The listener is retried in the background, so this line is all a host
 		// sees of a relay that is down — and the reason guests get no-such-peer.
 		std::string s = m_relayLink->listening()
-			? "Hosting through the relay server " + where + ". Share the session ID "
-			  "and the join code; nobody needs a port forward."
+			? (m_teamSession
+				? "Hosting through the team server " + where + ". Invite members from "
+				  "the team, or let them join if the session is open."
+				: "Hosting through the relay server " + where + ". Share the session ID "
+				  "and the join code; nobody needs a port forward.")
 			: "The relay server " + where + " has not taken the session yet" +
 			  (why.empty() ? std::string() : " (" + why + ")") +
 			  " — retrying. Guests cannot join until it does.";
@@ -2044,6 +2106,15 @@ bool CollabController::retryJoinWithLargeAssets()
 	const std::string   name = m_lastJoin.displayName;
 	// A relay join is dialled again the way it was made, by session id: the
 	// relay's address alone does not say which session.
+	if (m_lastJoin.team)
+	{
+		const std::string sid      = m_lastJoin.sessionId;
+		const std::string hostPeer = m_lastJoin.hostPeer;
+		const std::string selfPeer = m_lastJoin.selfPeer;
+		Logger::Log(Logger::LogLevel::Info,
+		            "Collab: agreeing to large-asset sync and joining the team session again");
+		return joinTeamSession(HE::Net::RelayAddress{ host, port }, sid, hostPeer, selfPeer, name);
+	}
 	if (!m_lastJoin.sessionId.empty())
 	{
 		const std::string sid = m_lastJoin.sessionId;
@@ -2924,7 +2995,7 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 		         "\"" + name + "\" was not sent to the others.",
 		         "It is " + std::to_string(mb) + " MB and this machine will not send "
 		             "more than " + std::to_string(limit) + " MB in one file. Raise "
-		             "\"Largest asset to transfer\" in Preferences » Editor » Collaboration, or "
+		             "\"Largest asset to transfer\" in Preferences » Editor » Team, or "
 		             "leave this one to source control — the others still have the "
 		             "older file.",
 		         relPath);
@@ -3051,7 +3122,7 @@ void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,
 	             std::to_string(limit) + " MB in one file — their limit is lower than "
 	             "yours, which is why nothing on this machine reported a problem. " +
 	             left + " Ask them to raise \"Largest asset to transfer\" in "
-	             "Preferences » Editor » Collaboration and save it again, or put this file "
+	             "Preferences » Editor » Team and save it again, or put this file "
 	             "through source control.",
 	         relPath);
 }

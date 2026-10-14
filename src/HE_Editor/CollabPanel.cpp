@@ -523,7 +523,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		DrawIdentity(ctx, true);
 
 		// Discovery is one switch for both halves — announcing when you host,
-		// listening when you do not — and it lives in Preferences > Collaboration
+		// listening when you do not — and it lives in Preferences > Team
 		// ("Find Sessions on the Local Network"). It used to be repeated here as
 		// a checkbox, which only duplicated the setting; this window just reads it.
 		const bool lanOn = ctx.editorConfig.CollabLanDiscovery;
@@ -789,7 +789,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		}
 
 		// Join by ID — the way in when discovery finds nothing, and the only one
-		// through a relay server (set in Preferences > Collaboration). Two
+		// through a relay server (the team server, set in Preferences > Team). Two
 		// full-width fields with the button under them; the names are hints inside
 		// the fields rather than labels beside them, for the width.
 		ImGui::Spacing();

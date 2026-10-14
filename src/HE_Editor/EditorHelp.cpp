@@ -2044,6 +2044,11 @@ namespace
 	  "Host or join a live editing session — several people in one scene, with "
 	  "locks so two of you cannot edit the same thing.",
 	  "", "collaboration#overview" },
+	{ "Window/Team", "",
+	  "Your team on the team server: who is in it and who is online, the "
+	  "sessions they host, and Invite, Join or Decline. Admins add and remove "
+	  "members here.",
+	  "", "collaboration" },
 	{ "Window/Source Control", "",
 	  "The repository: what changed, what to commit, what the others have "
 	  "pushed. Large assets included.",
@@ -3704,11 +3709,11 @@ namespace
 	  "viewport as well as in Play. Turn it off when a rain loop is in the way; the "
 	  "Weather component's own Weather Sounds switch is the one that counts in Play.",
 	  "", "rendering#weather" },
-	{ "Preferences/Collaboration/Find Sessions on the Local Network", "",
+	{ "Preferences/Team/Find Sessions on the Local Network", "",
 	  "Announce and discover collaboration sessions on this network, so joining "
 	  "needs no address. Off, a session is still reachable by its id and code.",
 	  "", "collaboration#discovery" },
-	{ "Preferences/Collaboration/Sync Large Assets (Meshes, Textures, Audio)", "",
+	{ "Preferences/Team/Sync Large Assets (Meshes, Textures, Audio)", "",
 	  "Send the big files to peers as well as the small ones. Off, everybody needs "
 	  "their own copy of the meshes and textures — but joining is instant.",
 	  "", "collaboration#bigassets" },
@@ -3738,15 +3743,10 @@ namespace
 	  "was installed while this editor was already running — the search happens "
 	  "when the page opens, and nothing notices an install on its own.",
 	  "", "collaboration#remote-control" },
-	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
+	{ "Preferences/Team/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
 	  "", "collaboration#bigassets" },
-	{ "Preferences/Collaboration/Relay Server (host:port)", "",
-	  "Empty: connect directly, peer to peer. With an address, hosting and joining "
-	  "only make outgoing connections to that relay server, and guests join by "
-	  "session ID and join code. Everyone in a session needs the same relay.",
-	  "", "collaboration" },
 	{ "Preferences/Viewport/Camera Speed", "",
 	  "How fast the editor's fly camera moves, in units per second. The viewport "
 	  "toolbar's speed field is the same value.",
@@ -8646,6 +8646,92 @@ namespace
 	  "It retries nothing: the attempt it is reporting has already ended.",
 	  "", "collaboration#starting" },
 
+	// ── The team (Preferences ▸ Team and Window ▸ Team, TeamView.cpp) ────────
+	{ "Team/Team Server (host:port)", "",
+	  "The team server: it keeps the team's members and passwords, shows who is "
+	  "online and is where team sessions are announced. It is also the relay those "
+	  "sessions run on, and the one sessions from the Collaboration window use. "
+	  "Empty means peer to peer and no team. Port 7777 if none is given.",
+	  "", "collaboration" },
+	{ "Team/Team", "",
+	  "The team's name on the server: 1-64 letters, digits, - or _. Everyone in "
+	  "the team signs in with the same one.",
+	  "", "collaboration" },
+	{ "Team/Member", "",
+	  "Your name in the team, as an admin created it (or as you created the team "
+	  "with). Upper and lower case do not matter.",
+	  "", "collaboration" },
+	{ "Team/Password", "",
+	  "Your team password. It is kept in memory for reconnecting and never "
+	  "written to disk, so after a restart you type it again.",
+	  "", "collaboration" },
+	{ "Team/Sign In", "",
+	  "Signs in to the team server. Signed in, the others see you as online and "
+	  "can invite you; the connection is kept and comes back on its own after a "
+	  "dropped network.",
+	  "", "collaboration" },
+	{ "Team/Create Team", "",
+	  "Creates a new team on the server with you as its first admin, and signs "
+	  "you in. Refused when the name is taken.",
+	  "", "collaboration" },
+	{ "Team/Sign Out", "",
+	  "Closes the connection to the team server: the others see you go offline "
+	  "and a session you announced disappears from their list. A collaboration "
+	  "session that is running carries on.",
+	  "", "collaboration" },
+	{ "Team/Invite", "",
+	  "Invites this member to the session you are hosting. Their editor shows the "
+	  "invitation and they join with one press. Only online members can be "
+	  "invited.",
+	  "", "collaboration" },
+	{ "Team/Remove", "",
+	  "Removes this member from the team (admins only). Asks once more first.",
+	  "", "collaboration" },
+	{ "Team/Confirm Remove", "",
+	  "Removes the member for good: their editors are signed out and their name "
+	  "and password are gone from the server.",
+	  "", "collaboration" },
+	{ "Team/Anyone in the Team May Join", "",
+	  "On: every member sees the session and can join it without an invitation. "
+	  "Off: only the members you invite can join. Can be changed while hosting.",
+	  "", "collaboration" },
+	{ "Team/Host Session", "",
+	  "Starts a collaboration session through the team server and announces it "
+	  "to the team. Nobody needs an address or a join code: the session is found "
+	  "by its announcement.",
+	  "", "collaboration" },
+	{ "Team/Join", "",
+	  "Joins this member's session: through an invitation, or because the host "
+	  "opened it to the whole team. The project is synced the way any "
+	  "collaboration join syncs it.",
+	  "", "collaboration" },
+	{ "Team/Decline", "",
+	  "Turns the invitation down; the host is told.",
+	  "", "collaboration" },
+	{ "Team/New Member", "",
+	  "The name the new member signs in with (admins only).",
+	  "", "collaboration" },
+	{ "Team/Their Password", "",
+	  "The new member's first password. Tell it to them yourself; they can change "
+	  "it once signed in.",
+	  "", "collaboration" },
+	{ "Team/Admin", "",
+	  "Admins can add and remove members. A team always keeps at least one.",
+	  "", "collaboration" },
+	{ "Team/Add Member", "",
+	  "Adds the member to the team on the server. They can sign in right away.",
+	  "", "collaboration" },
+	{ "Team/Current Password", "",
+	  "Your password as it is now — the server checks it before changing it.",
+	  "", "collaboration" },
+	{ "Team/New Password", "",
+	  "The password you will sign in with from now on.",
+	  "", "collaboration" },
+	{ "Team/Change Password", "",
+	  "Changes your team password on the server. This editor keeps its "
+	  "connection; your other editors use the new one at their next sign-in.",
+	  "", "collaboration" },
+
 	{ "Session Participants/Block", "",
 	  "Removes this person from the session and refuses them if they try to "
 	  "rejoin. It asks first. The block lasts as long as this session — it does "
@@ -8972,6 +9058,10 @@ namespace
 	  "Host or join a live editing session: several people in one scene, with "
 	  "locks so two of you cannot edit the same thing at once.",
 	  "", "collaboration#overview" },
+	{ "panel.team", "Team",
+	  "Your team on the team server: members and who is online, the sessions "
+	  "they host, invitations. Signing in is in Preferences ▸ Team or right here.",
+	  "", "collaboration" },
 	{ "panel.source-control", "Source Control",
 	  "Git for the whole project, large assets included: what has changed, what to "
 	  "commit, and what the rest of the team has pushed.",
@@ -9105,7 +9195,7 @@ namespace
 		{ "Preferences/Post-Processing/",     "editor-settings", "Settings Reference", "Post-Processing" },
 		{ "Preferences/Global Illumination/", "editor-settings", "Settings Reference", "Global Illumination" },
 		{ "Preferences/Effects/",             "editor-settings", "Settings Reference", "Effects" },
-		{ "Preferences/Collaboration/",       "editor-settings", "Settings Reference", "Collaboration" },
+		{ "Preferences/Team/",                "editor-settings", "Settings Reference", "Team" },
 		// Above the bare "Preferences/" fallback like the rest — without its own
 		// rule these three would land under the "Preferences" heading instead of
 		// their own, which is the silent kind of wrong: the entry exists, F1
@@ -9214,6 +9304,7 @@ namespace
 		{ "collab.",   "editor-collab",    "Collaboration & Source Control", "Collaboration" },
 		{ "sc.",                    "editor-collab", "Collaboration & Source Control", "Source control" },
 		{ "Collaboration Session/", "editor-collab", "Collaboration & Source Control", "Collaboration window" },
+		{ "Team/",                  "editor-collab", "Collaboration & Source Control", "Team" },
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },

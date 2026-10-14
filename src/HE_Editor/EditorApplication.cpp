@@ -484,6 +484,7 @@ void EditorApplication::OnInit()
 	// before the session ended — goes to the one editor-wide channel rather than
 	// into a log line nobody has open. Set before any callback below can fire.
 	m_collab.setNotifications(&m_notifications);
+	m_team.setNotifications(&m_notifications);
 
 	// The same channel, reachable from everywhere else: worker threads, download
 	// callbacks and static panel helpers post through HE::Ed::notify() because
@@ -1304,6 +1305,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
 	m_editorConfig.CollabRelayAddress           = globalstate.getCustomConfigString("CollabRelayAddress", m_editorConfig.CollabRelayAddress);
+	m_editorConfig.TeamName                     = globalstate.getCustomConfigString("TeamName", m_editorConfig.TeamName);
+	m_editorConfig.TeamMember                   = globalstate.getCustomConfigString("TeamMember", m_editorConfig.TeamMember);
 	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
@@ -4544,6 +4547,10 @@ void EditorApplication::OnRender(float dt)
 		// Read when a session starts, so pushing it mid-session moves nothing.
 		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
 		m_collab.update(nowMs);
+		// After the collab pump, so a session that just ended is withdrawn from
+		// the team in the same frame, and a join the team server answered starts
+		// on a controller that has already settled this frame's state.
+		m_team.update(nowMs);
 
 		// ── The MCP bridge ────────────────────────────────────────────────
 		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
@@ -10447,6 +10454,8 @@ void EditorApplication::setupMcpTools()
 	collab.displayName = [] { return CollabController::localIdentity().name; };
 	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
 		collab.controlAllowed = env[0] == '1';
+	// The team server is the way into a team session; same gate, same hooks.
+	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
 	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
@@ -11343,6 +11352,7 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.team                = &m_team,
 		.mcp                 = &m_mcp,
 		.mcpCameras          = &m_mcpCameras,
 		.notifications       = &m_notifications,
@@ -12886,6 +12896,7 @@ void EditorApplication::OnShutdown()
 	// — a forward requested without a lease stays in the router until someone
 	// deletes it by hand. Ahead of everything else here because it is the only
 	// item in this function that outlives the process if it is skipped.
+	m_team.signOut();   // ends our announcements; the server would notice in a minute anyway
 	m_collab.shutdown();
 
 	// Shut the gate (stops the pads) while the sink still points at a live
@@ -13145,7 +13156,9 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
 	globalstate.setCustomConfigEntry("CollabRelayAddress",         m_editorConfig.CollabRelayAddress);
-	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
+	globalstate.setCustomConfigEntry("TeamName",                   m_editorConfig.TeamName);
+	globalstate.setCustomConfigEntry("TeamMember",                 m_editorConfig.TeamMember);
+	globalstate.setCustomConfigEntry("McpServerEnabled",          m_editorConfig.McpServerEnabled);
 	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);

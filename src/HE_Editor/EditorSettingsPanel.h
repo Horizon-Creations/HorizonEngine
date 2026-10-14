@@ -31,12 +31,14 @@ namespace EditorSettingsPanel
 		// (git install status and the repository share one page), and the status
 		// of the outside tools the editor needs.
 		// RemoteControl is the MCP bridge: letting an external client drive this
-		// editor. It sits next to Collaboration because it is the same kind of
+		// editor. It sits next to Team because it is the same kind of
 		// question — who else may change this scene — and apart from it because
 		// the answer is a different one: a collaborator is a person who was
 		// invited, a remote client is a program on this machine.
 		// Shortcuts is the keyboard: every editor-wide chord, rebindable.
-		Panels, Shortcuts, CollabGeneral, RemoteControl, Repository, Status,
+		// Team replaced the Collaboration page (topic 197): the team server and
+		// the sign-in on top, the session settings that page held below them.
+		Panels, Shortcuts, Team, RemoteControl, Repository, Status,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
 		// (The pages that edit the PROJECT — Application, Permissions, Fonts,
