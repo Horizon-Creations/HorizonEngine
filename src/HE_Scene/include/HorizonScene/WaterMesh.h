@@ -155,6 +155,16 @@ namespace HE::water
     // or drops a loop smaller than a fiftieth of a cell. False off the lattice.
     bool insideSheet(const Lattice& lattice, double x, double z, double iso = kContourIso);
 
+    // The shoreline as marching squares cuts it, raw: one segment per piece of
+    // contour in each lattice cell (two in a saddle), by the same cell rule as
+    // extractContours and insideSheet, with no closing, merging or simplifying.
+    // So a lattice built over only part of a body still gives every piece of shore
+    // inside it (extractContours drops a contour the lattice's edge cuts open).
+    // Each segment lies within its own cell. What the water brush's bank measures
+    // its distance to the water from (Thema 188 Schritt 4).
+    struct ShoreSegment { glm::dvec2 a, b; };
+    std::vector<ShoreSegment> shoreSegments(const Lattice& lattice, double iso = kContourIso);
+
     // An outer boundary with the islands inside it.
     struct Polygon
     {

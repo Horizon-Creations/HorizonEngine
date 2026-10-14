@@ -7493,7 +7493,9 @@ void EditorApplication::dumpFrameHeadless()
 	//           and a water cell four vertices wide (the editor's own proportions).
 	//           The log line counts the vertices the stroke lowered that no
 	//           triangle of the sheet covers — the mesh buildSurface makes, the one
-	//           WaterSurface draws, not the point test the dig itself asks.
+	//           WaterSurface draws, not the point test the dig itself asks. Those
+	//           still at or above the water's reach are the bank (Schritt 4), a line
+	//           of their own with the wall left at the shore and the steepest step.
 	// HE_DUMP_WATERLEVEL (default: ground + 0.3, i.e. unset) can pin a fixed
 	// level instead. Camera: CAMY=375 CAMZ=48 PITCH=-60, the WATERLAKE framing.
 	if (const char* wb = std::getenv("HE_DUMP_WATERBRUSH"); wb && *wb && m_editorWorld)
@@ -7587,8 +7589,12 @@ void EditorApplication::dumpFrameHeadless()
 			};
 			const uint32_t res = ltc2.resolution;
 			const float step = ltc2.sizeX / static_cast<float>(res - 1);
-			uint32_t dug = 0, dugDry = 0, wetUndug = 0;
-			float dryDepth = 0.0f, deepest = 0.0f;
+			// Schritt 4: a lowered vertex off the sheet that still stands at or above
+			// the water's reach (level + the shore clipping's overshoot) is the bank,
+			// dry land, not a pit; counted apart.
+			const float reachY = strokeLevel + (ltc2.water.clipToGround ? ltc2.water.shoreOvershoot : 0.0f);
+			uint32_t dug = 0, dugDry = 0, wetUndug = 0, bank = 0;
+			float dryDepth = 0.0f, deepest = 0.0f, bankLowest = 1e9f;
 			float dryMinX = 1e9f, dryMaxX = -1e9f;
 			glm::vec2 dugMin(1e9f), dugMax(-1e9f), sheetMin(1e9f), sheetMax(-1e9f);
 			for (size_t k = 0; k + 2 < sv.size(); k += 3)
@@ -7608,9 +7614,40 @@ void EditorApplication::dumpFrameHeadless()
 					deepest = std::max(deepest, lowered);
 					dugMin = glm::min(dugMin, glm::vec2(x, z)); dugMax = glm::max(dugMax, glm::vec2(x, z));
 					if (covered(x, z, 0.005f)) continue;
+					if (ltc2.sculptHeights[i] >= reachY)
+					{
+						++bank;
+						bankLowest = std::min(bankLowest, ltc2.sculptHeights[i] - strokeLevel);
+						continue;
+					}
 					++dugDry;
 					dryDepth = std::max(dryDepth, lowered);
 					dryMinX = std::min(dryMinX, x); dryMaxX = std::max(dryMaxX, x);
+				}
+			// The wall where the pit ends: how far the first vertex off the sheet
+			// (a 4-neighbour of one under it) stands above the level, at most, and
+			// the steepest step between two neighbours off the sheet, one lowered.
+			std::vector<uint8_t> under(static_cast<size_t>(res) * res, 0);
+			for (uint32_t zi = 0; zi < res; ++zi)
+				for (uint32_t xi = 0; xi < res; ++xi)
+					under[static_cast<size_t>(zi) * res + xi] =
+						covered(-ltc2.sizeX * 0.5f + static_cast<float>(xi) * step,
+						        -ltc2.sizeZ * 0.5f + static_cast<float>(zi) * step, 0.005f) ? 1 : 0;
+			float shoreRise = 0.0f, bankSteep = 0.0f;
+			for (uint32_t zi = 0; zi < res; ++zi)
+				for (uint32_t xi = 0; xi < res; ++xi)
+				{
+					const size_t i = static_cast<size_t>(zi) * res + xi;
+					if (under[i]) continue;
+					const size_t nb[4] = { xi > 0 ? i - 1 : i, xi + 1 < res ? i + 1 : i,
+					                       zi > 0 ? i - res : i, zi + 1 < res ? i + res : i };
+					for (const size_t n : nb)
+					{
+						if (n == i) continue;
+						if (under[n]) shoreRise = std::max(shoreRise, ltc2.sculptHeights[i] - strokeLevel);
+						else if (ltc2.sculptHeights[i] < groundBefore[i] || ltc2.sculptHeights[n] < groundBefore[n])
+							bankSteep = std::max(bankSteep, std::abs(ltc2.sculptHeights[i] - ltc2.sculptHeights[n]));
+					}
 				}
 			char pb[640];
 			std::snprintf(pb, sizeof pb, "; pit vs sheet: sheet built %d (%u triangles), %u vertices dug (deepest %.2f m), "
@@ -7620,6 +7657,11 @@ void EditorApplication::dumpFrameHeadless()
 			              dugDry ? dryMinX : 0.0f, dugDry ? dryMaxX : 0.0f, wetUndug,
 			              dugMin.x, dugMax.x, dugMin.y, dugMax.y, sheetMin.x, sheetMax.x, sheetMin.y, sheetMax.y);
 			pitNote = pb;
+			// A line of its own: HE_LOG cuts at ~512 characters, and the pit note is long already.
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH pit: bank %u vertices off the sheet above "
+			            "the water's reach (lowest %.2f m above the level), shore wall at most %.2f m above the level, "
+			            "steepest step off the water %.2f m per %.2f m",
+			            bank, bank ? bankLowest : 0.0f, shoreRise, bankSteep, step);
 			// Where the sheet reaches past the pit (downhill, the west end): ground
 			// the water covers without a dig, below the stroke's level by nature.
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH pit: ground at the sheet's west end (%.2f,0) "

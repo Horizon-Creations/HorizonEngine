@@ -54,6 +54,15 @@ struct TerrainComponent;
 // level at once (it would otherwise clip the very water that is to cover it).
 // The pit is therefore never larger than the water; the water can be larger than
 // the pit (shallow water over ground the weight left above the floor).
+// On rising ground that alone leaves a WALL where the pit ends: the ground next
+// to the water as high as it stood above the level, its top a staircase of
+// vertices against the shore of the coarser water cells. So the dig then shapes
+// a BANK (Schritt 4): ground outside the sheet is lowered to a slope that starts
+// just above the water's reach at the shoreline (level + the shore clipping's
+// overshoot, the exact contour, not the nearest vertex) and rises to meet the old
+// ground within the brush's radius + falloff of the shore, steepening as it goes.
+// Dry land, never below the water, so never a pit, and never raised; a function
+// of the shoreline alone, so repeating a dab adds nothing.
 //
 // PACING is the caller's: Params::amount is the share (0..1) one dab moves each
 // cell toward wet (or dry), the same number addCircle/removeCircle take as their
@@ -111,7 +120,8 @@ namespace HE::water::brush
     {
         bool     ok     = false;   // false: no stroke, or its body is gone (undo ran under it)
         uint32_t cells  = 0;       // water cells whose coverage or owner moved
-        uint32_t ground = 0;       // terrain vertices lowered (digging)
+        uint32_t ground = 0;       // terrain vertices lowered (digging), the bank's included
+        uint32_t bank   = 0;       // ... of them shaved into the bank, outside the water and above it
     };
     // One dab at terrain-local (x, z). Sets the water field's dirty rectangle and,
     // when it dug, the terrain's region-dirty rectangle (never TerrainComponent::dirty

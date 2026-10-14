@@ -455,8 +455,19 @@ namespace
     struct PitVsSheet
     {
         uint32_t dug = 0;            // vertices the stroke lowered
-        uint32_t dugDry = 0;         // ... that the sheet does not cover
+        uint32_t dugDry = 0;         // ... that the sheet does not cover, and below the water's reach (a pit)
         float    dryDepth = 0.0f;    // the deepest of those, metres below the old ground
+        // Schritt 4: lowered, not covered, but at or above where the shore clipping
+        // would put water on them (level + overshoot): the bank, dry land.
+        uint32_t bank = 0;
+        float    bankLowest = 1e30f; // metres above the level, the lowest bank vertex
+        // The wall where the pit ends: of every vertex the sheet does not cover
+        // next to one it does (4-neighbours), how far it stands above the level.
+        float    shoreRise = 0.0f;
+        glm::vec2 shoreRiseAt{ 0.0f };   // where
+        // The steepest the ground got off the water: the largest height step
+        // between two neighbouring vertices the sheet does not cover, one of them lowered.
+        float    bankSteep = 0.0f;
         uint32_t triangles = 0;
         // The other way round, reported, not required: water over ground the
         // stroke left where it was (shallow water at the rim, the level offset).
@@ -501,6 +512,10 @@ namespace
 
     PitVsSheet pitVsSheet(const TerrainComponent& tc, const std::vector<float>& before, uint16_t body)
     {
+        const water::Body* b = tc.water.findBody(body);
+        REQUIRE(b != nullptr);
+        const float level = b->level;
+        const float reach = level + (tc.water.clipToGround ? tc.water.shoreOvershoot : 0.0f);
         PitVsSheet r;
         const water::SurfaceMesh sheet = sheetOf(tc, body);
         r.triangles = sheet.triangles;
@@ -524,8 +539,43 @@ namespace
                 ++r.dug;
                 dugAt.push_back({ x, z });
                 if (covered(x, z)) continue;
+                if (tc.sculptHeights[i] >= reach)
+                {
+                    ++r.bank;
+                    r.bankLowest = std::min(r.bankLowest, tc.sculptHeights[i] - level);
+                    continue;
+                }
                 ++r.dugDry;
                 r.dryDepth = std::max(r.dryDepth, before[i] - tc.sculptHeights[i]);
+            }
+        // The shore's wall and the bank's steepness, over the vertex grid.
+        std::vector<uint8_t> under(static_cast<size_t>(res) * res, 0);
+        for (uint32_t zi = 0; zi < res; ++zi)
+            for (uint32_t xi = 0; xi < res; ++xi)
+                under[static_cast<size_t>(zi) * res + xi] =
+                    covered(-tc.sizeX * 0.5f + static_cast<float>(xi) * stepX, -tc.sizeZ * 0.5f + static_cast<float>(zi) * stepZ) ? 1 : 0;
+        for (uint32_t zi = 0; zi < res; ++zi)
+            for (uint32_t xi = 0; xi < res; ++xi)
+            {
+                const size_t i = static_cast<size_t>(zi) * res + xi;
+                if (under[i]) continue;
+                const size_t nb[4] = { xi > 0 ? i - 1 : i, xi + 1 < res ? i + 1 : i,
+                                       zi > 0 ? i - res : i, zi + 1 < res ? i + res : i };
+                for (const size_t n : nb)
+                {
+                    if (n == i) continue;
+                    if (under[n])
+                    {
+                        if (tc.sculptHeights[i] - level > r.shoreRise)
+                        {
+                            r.shoreRise = tc.sculptHeights[i] - level;
+                            r.shoreRiseAt = { -tc.sizeX * 0.5f + static_cast<float>(xi) * stepX,
+                                              -tc.sizeZ * 0.5f + static_cast<float>(zi) * stepZ };
+                        }
+                    }
+                    else if (tc.sculptHeights[i] < before[i] || tc.sculptHeights[n] < before[n])
+                        r.bankSteep = std::max(r.bankSteep, std::abs(tc.sculptHeights[i] - tc.sculptHeights[n]));
+                }
             }
         r.wetUndug = static_cast<uint32_t>(wetUndugAt.size());
         if (!dugAt.empty())
@@ -605,11 +655,24 @@ TEST_CASE("Water brush dig (Thema 188): the pit is never wider than the sheet â€
                 << r.dryDepth << " m), bed " << (deepest - floorY) << " m above the floor, "
                 << cutAboveLevel << " cut down from above the level, sheet " << r.triangles << " triangles; "
                 << r.wetUndug << " vertices under water but not dug, at most " << r.widestShelf
-                << " m from the pit");
+                << " m from the pit; bank " << r.bank << " vertices (lowest " << r.bankLowest
+                << " m above the level), shore wall " << r.shoreRise << " m at (" << r.shoreRiseAt.x << "," << r.shoreRiseAt.y << "), steepest step " << r.bankSteep << " m");
         CHECK(r.dugDry == 0u);
         CHECK(r.dug > 100u);   // a gentle brush paints (and digs) a narrower stroke, not none
         if (c.bed) CHECK(deepest <= floorY + 0.05f);   // paced: within a few cm of it, not on it
-        if (c.slopeX > 0.0f) CHECK(cutAboveLevel > 50u);
+        if (c.slopeX > 0.0f)
+        {
+            CHECK(cutAboveLevel > 50u);
+            // Schritt 4: no wall. Without the bank the ground next to the water
+            // stood up to 4 m above it here, the step from the pit's edge to it as
+            // high; now the first vertex off the water is within a metre of the
+            // shoreline, on a slope that starts at the water's reach.
+            CHECK(r.bank > 50u);
+            CHECK(r.shoreRise < 0.8f);
+            CHECK(r.bankSteep < 1.5f);
+        }
+        else
+            CHECK(r.bank == 0u);   // flat ground under the level: nothing stands above the water to shape
     }
 
     // A caller that hands the brush a negative falloff: the dig clamps it to 0 and
@@ -625,6 +688,67 @@ TEST_CASE("Water brush dig (Thema 188): the pit is never wider than the sheet â€
     const PitVsSheet r = pitVsSheet(tc, before, s.body);
     CHECK(r.dug > 100u);
     CHECK(r.dugDry == 0u);
+    CHECK(r.shoreRise < 0.8f);
+}
+
+TEST_CASE("Water brush dig (Thema 188 Schritt 4): the bank is a function of the shore â€” a dab held at one "
+          "spot on rising ground shapes it once, never digs it lower, and no step is left where it meets the "
+          "old ground")
+{
+    TerrainComponent tc = makeWideLand(10.0f, 0.08f);
+    const std::vector<float> before = tc.sculptHeights;
+    brush::Params p;
+    p.radius = 10.0f; p.falloff = 5.0f; p.amount = 1.0f;
+    p.levelFromGround = false; p.level = 10.0f;      // the ground crosses the level at x = 0
+    p.dig = true; p.digDepth = 1.0f;
+    brush::Stroke s;
+    brush::begin(s, tc, 20.0f, 0.0f, p);              // 1.6 m above the level under the brush, 2.8 m at its rim
+    REQUIRE(s.active);
+    std::vector<float> after10, after30;
+    uint32_t bankAtFirst = 0;
+    for (int i = 0; i < 30; ++i)
+    {
+        const brush::Dab d = brush::dab(s, tc, 20.0f, 0.0f, p);
+        if (i == 0) bankAtFirst = d.bank;
+        if (i == 9) after10 = tc.sculptHeights;
+    }
+    after30 = tc.sculptHeights;
+    const uint16_t body = s.body;
+    brush::end(s, tc);
+    CHECK(bankAtFirst > 50u);
+
+    // Off the water nothing moves after the dabs that shaped it: the bank does
+    // not creep outward or downward with every frame the button is held.
+    const water::SurfaceMesh sheet = sheetOf(tc, body);
+    const uint32_t res = tc.resolution;
+    uint32_t movedOffWater = 0;
+    for (uint32_t zi = 0; zi < res; ++zi)
+        for (uint32_t xi = 0; xi < res; ++xi)
+        {
+            const size_t i = static_cast<size_t>(zi) * res + xi;
+            if (after30[i] == after10[i]) continue;
+            if (!sheetCovers(sheet, -64.0f + static_cast<float>(xi), -64.0f + static_cast<float>(zi), 0.005f))
+                ++movedOffWater;
+        }
+    CHECK(movedOffWater == 0u);
+
+    const PitVsSheet r = pitVsSheet(tc, before, body);
+    MESSAGE("held dab: dug " << r.dug << ", dry " << r.dugDry << ", bank " << r.bank << " (lowest "
+            << r.bankLowest << " m above the level), shore wall " << r.shoreRise << " m, steepest " << r.bankSteep << " m");
+    CHECK(r.dugDry == 0u);
+    CHECK(r.bank > 50u);
+    CHECK(r.shoreRise < 0.8f);
+    CHECK(r.bankSteep < 1.5f);
+    // Never raised, and nothing beyond the circle plus one reach of bank moved.
+    for (uint32_t zi = 0; zi < res; ++zi)
+        for (uint32_t xi = 0; xi < res; ++xi)
+        {
+            const size_t i = static_cast<size_t>(zi) * res + xi;
+            CHECK(tc.sculptHeights[i] <= before[i]);
+            const float dx = -64.0f + static_cast<float>(xi) - 20.0f, dz = -64.0f + static_cast<float>(zi);
+            if (std::sqrt(dx * dx + dz * dz) > 2.0f * (p.radius + p.falloff) + 1.5f)
+                CHECK(tc.sculptHeights[i] == before[i]);
+        }
 }
 
 TEST_CASE("insideSheet (Thema 188): the point test the dig asks says what the mesh covers, saddles and shore "

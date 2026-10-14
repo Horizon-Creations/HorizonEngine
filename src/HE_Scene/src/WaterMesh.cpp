@@ -407,6 +407,32 @@ bool insideSheet(const Lattice& L, double x, double z, double iso)
     return piece.size() >= 3 && inOrOnRing(piece, p, eps);
 }
 
+std::vector<ShoreSegment> shoreSegments(const Lattice& L, double iso)
+{
+    std::vector<ShoreSegment> out;
+    if (L.w < 2 || L.h < 2 || L.v.size() != static_cast<size_t>(L.w) * L.h) return out;
+    for (int j = 0; j + 1 < L.h; ++j)
+        for (int i = 0; i + 1 < L.w; ++i)
+        {
+            const CellCut cut = cutCell(L, i, j, iso);
+            if (cut.crossings == 0) continue;
+            // The crossings in edge order and whether each leaves the water, as
+            // extractContours pairs them.
+            int  e[4];
+            bool exit[4];
+            int  n = 0;
+            for (int k = 0; k < 4; ++k)
+                if (cut.in[k] != cut.in[(k + 1) & 3]) { e[n] = k; exit[n] = cut.in[k]; ++n; }
+            if (n == 2)
+                out.push_back({ cut.cross[e[0]], cut.cross[e[1]] });
+            else if (n == 4)
+                for (int k = 0; k < 4; ++k)
+                    if (exit[k])
+                        out.push_back({ cut.cross[e[k]], cut.cross[e[cut.joined ? (k + 1) & 3 : (k + 3) & 3]] });
+        }
+    return out;
+}
+
 std::vector<Polygon> groupContours(const std::vector<Contour>& contours)
 {
     std::vector<Polygon> polys;

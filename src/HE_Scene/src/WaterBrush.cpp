@@ -90,6 +90,156 @@ namespace
                 if (cur(xi, zi) != old(xi, zi)) ++kept;
         return kept;
     }
+
+    // The bank (Thema 188 Schritt 4). keepUnderSheet leaves the ground next to the
+    // water where it was, so on rising ground the pit ends in a wall as high as
+    // the ground stood above the level (4 m at the end of a 50 m stroke up an 8 %
+    // slope), its top a staircase of 1 m vertices against a shore drawn through
+    // 4 m water cells. Ground outside the sheet that stands above
+    //     bank(d) = foot + kBankSlope · d / (1 − d / reach)
+    // is lowered to it, d = the distance to the shoreline (shoreSegments: the
+    // contour itself, not the nearest vertex under it, so the staircase is gone).
+    // foot = just above where the shore clipping would put the sheet onto the
+    // ground (level + overshoot): the bank never sinks below the water's reach, so
+    // it is dry land and never a pit, and the sheet never spreads onto it. At the
+    // waterline it rises kBankSlope per metre, steepening to vertical at `reach`,
+    // so a wall of any height meets the old ground without a step and nothing
+    // beyond `reach` moves. A target set by the shore, never a share of the height
+    // it lowers from: a dab repeated at one spot changes nothing more.
+    constexpr float kBankSlope = 0.5f;    // rise per metre at the waterline
+    constexpr float kBankLip   = 0.01f;   // metres above the shore clipping's limit
+    constexpr int   kBankPasses = 8;      // see the shore clipping's crossing below
+    constexpr float kBankTolerance = 0.001f;   // metres a pass must lower a vertex by to count
+
+    // Returns the vertices lowered.
+    uint32_t shapeBank(TerrainComponent& tc, uint16_t body, float level, float x, float z, float outer)
+    {
+        const int res = static_cast<int>(tc.resolution);
+        if (tc.sculptHeights.size() != static_cast<size_t>(res) * res || !tc.water.allocated()) return 0;
+        const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
+        const float stepX = tc.sizeX / static_cast<float>(res - 1);
+        const float stepZ = tc.sizeZ / static_cast<float>(res - 1);
+        const float reach = std::max(outer, 2.0f * std::max(stepX, stepZ));
+        const float foot  = level + (tc.water.clipToGround ? tc.water.shoreOvershoot : 0.0f) + kBankLip;
+
+        // The vertices within reach of the shore this dab can have moved, and a
+        // lattice a reach wider, so every piece of shore they can see is on it.
+        const float span = outer + reach;
+        const int x0 = std::max(0, static_cast<int>(std::floor((x - span + halfX) / stepX)));
+        const int x1 = std::min(res - 1, static_cast<int>(std::ceil((x + span + halfX) / stepX)));
+        const int z0 = std::max(0, static_cast<int>(std::floor((z - span + halfZ) / stepZ)));
+        const int z1 = std::min(res - 1, static_cast<int>(std::ceil((z + span + halfZ) / stepZ)));
+        if (x0 > x1 || z0 > z1) return 0;
+        const CellRect cells = cellRect(tc, x - span - reach, z - span - reach, x + span + reach, z + span + reach);
+        if (!cells.valid()) return 0;
+        auto distance = [](const glm::dvec2& p, const ShoreSegment& s)
+        {
+            const glm::dvec2 ab = s.b - s.a;
+            const double len2 = glm::dot(ab, ab);
+            const double t = len2 > 0.0 ? std::clamp(glm::dot(p - s.a, ab) / len2, 0.0, 1.0) : 0.0;
+            return glm::length(p - (s.a + ab * t));
+        };
+        const int w = x1 - x0 + 1;
+        std::vector<float> was;
+        was.reserve(static_cast<size_t>(w) * (z1 - z0 + 1));
+        for (int zi = z0; zi <= z1; ++zi)
+            for (int xi = x0; xi <= x1; ++xi)
+                was.push_back(tc.sculptHeights[static_cast<size_t>(zi) * res + xi]);
+
+        // Where the sheet's edge is the shore clipping (the cells are wet further
+        // out, the ground stood too high), the edge sits where the ground's depth
+        // under the water crosses zero along a lattice edge — and lowering the
+        // bank's corner moves that crossing outward. Measured against the shore
+        // before it moved, the bank stands too high, so it is shaped again from
+        // the new shore until nothing moves by more than kBankTolerance (the
+        // crossing settles within a few passes; the sheet only ever grows, so no
+        // pass can uncover the pit).
+        for (int pass = 0; pass < kBankPasses; ++pass)
+        {
+            Lattice lattice;
+            if (!buildLattice(tc, body, cells, lattice, ShoreClip{ tc.water.clipToGround, level, tc.water.shoreOvershoot }))
+                break;
+            // Only the shore within this dab's own circle: a wall can only have been
+            // left where this dab dug, and the shore of the rest of the body (a lake
+            // the stroke continues, its own banks) is not this dab's to reshape. Two
+            // water cells wider: a lattice corner averages the four cells around it,
+            // so the contour of the cells the circle painted runs up to a cell past
+            // it. Leaving pieces out only ever measures a vertex farther from the
+            // water, which keeps its bank higher, and a distance to a fixed set of
+            // segments is continuous, so it leaves no step either.
+            std::vector<ShoreSegment> shore = shoreSegments(lattice);
+            const glm::dvec2 centre(x, z);
+            const double shoreReach = outer + 2.0 * std::max(lattice.cellW, lattice.cellH);
+            shore.erase(std::remove_if(shore.begin(), shore.end(),
+                                       [&](const ShoreSegment& s) { return distance(centre, s) > shoreReach; }),
+                        shore.end());
+            if (shore.empty()) break;
+
+            // Each segment lies within one lattice cell: bucket them by it, so a vertex
+            // only looks at the cells its search radius touches.
+            const int bw = lattice.w - 1, bh = lattice.h - 1;
+            auto bucketOf = [&](double px, double pz, int& bi, int& bj)
+            {
+                bi = std::clamp(static_cast<int>(std::floor((px - lattice.originX) / lattice.cellW)) - lattice.x0, 0, bw - 1);
+                bj = std::clamp(static_cast<int>(std::floor((pz - lattice.originZ) / lattice.cellH)) - lattice.z0, 0, bh - 1);
+            };
+            std::vector<std::vector<uint32_t>> buckets(static_cast<size_t>(bw) * bh);
+            for (uint32_t s = 0; s < shore.size(); ++s)
+            {
+                int bi, bj;
+                bucketOf((shore[s].a.x + shore[s].b.x) * 0.5, (shore[s].a.y + shore[s].b.y) * 0.5, bi, bj);
+                buckets[static_cast<size_t>(bj) * bw + bi].push_back(s);
+            }
+
+            bool moved = false;
+            for (int zi = z0; zi <= z1; ++zi)
+                for (int xi = x0; xi <= x1; ++xi)
+                {
+                    float& h = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
+                    const float above = h - foot;
+                    if (!(above > 0.0f)) continue;
+                    const double px = -halfX + static_cast<double>(xi) * stepX;
+                    const double pz = -halfZ + static_cast<double>(zi) * stepZ;
+                    if (insideSheet(lattice, px, pz)) continue;     // under the water: the dig's, not the bank's
+                    // bank(d) < h only for d below this (bank(d) = h solved for d).
+                    const double radius = static_cast<double>(above) * reach / (kBankSlope * reach + above);
+                    int bi0, bj0, bi1, bj1;
+                    bucketOf(px - radius, pz - radius, bi0, bj0);
+                    bucketOf(px + radius, pz + radius, bi1, bj1);
+                    double d = radius;
+                    const glm::dvec2 p(px, pz);
+                    for (int bj = bj0; bj <= bj1; ++bj)
+                        for (int bi = bi0; bi <= bi1; ++bi)
+                            for (const uint32_t s : buckets[static_cast<size_t>(bj) * bw + bi])
+                                d = std::min(d, distance(p, shore[s]));
+                    if (!(d < radius)) continue;
+                    const float bank = foot + kBankSlope * static_cast<float>(d / (1.0 - d / reach));
+                    if (!(bank < h - kBankTolerance)) continue;
+                    h = bank;
+                    moved = true;
+                }
+            if (!moved) break;
+        }
+
+        uint32_t lowered = 0;
+        int cx0 = res, cx1 = -1, cz0 = res, cz1 = -1;
+        for (int zi = z0; zi <= z1; ++zi)
+            for (int xi = x0; xi <= x1; ++xi)
+            {
+                if (tc.sculptHeights[static_cast<size_t>(zi) * res + xi] == was[static_cast<size_t>(zi - z0) * w + (xi - x0)])
+                    continue;
+                ++lowered;
+                cx0 = std::min(cx0, xi); cx1 = std::max(cx1, xi);
+                cz0 = std::min(cz0, zi); cz1 = std::max(cz1, zi);
+            }
+        if (lowered > 0)
+            TerrainSculpt::markRegionDirty(tc,
+                                           -halfX + static_cast<float>(cx0) * stepX - stepX,
+                                           -halfZ + static_cast<float>(cz0) * stepZ - stepZ,
+                                           -halfX + static_cast<float>(cx1) * stepX + stepX,
+                                           -halfZ + static_cast<float>(cz1) * stepZ + stepZ);
+        return lowered;
+    }
 }
 
 Target targetAt(const TerrainComponent& tc, float x, float z, const Params& p)
@@ -165,7 +315,8 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         // eases from the level at half weight to the floor at full weight, and
         // ground above the level goes to it at once.
         // The reach lowerToFloor itself walks: it clamps both to ≥ 0 first.
-        const Region was = saveRegion(tc, x, z, std::max(0.0f, p.radius) + std::max(0.0f, p.falloff));
+        const float outer = std::max(0.0f, p.radius) + std::max(0.0f, p.falloff);
+        const Region was = saveRegion(tc, x, z, outer);
         const TerrainSculpt::Result g =
             TerrainSculpt::lowerToFloor(tc, x, z, p.radius, p.falloff, s.level - p.digDepth, p.amount, s.level);
         d.ok = d.ok || g.ok;
@@ -175,7 +326,11 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         // and ground lowered to the level next to the water is a shelf it never
         // covers. Every vertex this dab lowered that the body's own sheet does not
         // cover goes back to where it was: the pit is the water's shape, never more.
-        d.ground = g.changed > 0 ? keepUnderSheet(tc, s.body, s.level, was) : 0u;
+        const uint32_t kept = g.changed > 0 ? keepUnderSheet(tc, s.body, s.level, was) : 0u;
+        // Where that left a wall of ground above the water, it becomes a bank down
+        // to the waterline (Schritt 4), dry land that never reaches the water.
+        d.bank   = kept > 0 ? shapeBank(tc, s.body, s.level, x, z, outer) : 0u;
+        d.ground = kept + d.bank;
     }
     ++s.dabs;
     return d;
