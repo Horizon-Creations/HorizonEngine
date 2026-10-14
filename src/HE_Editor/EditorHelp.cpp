@@ -8662,13 +8662,15 @@ namespace
 	  "with). Upper and lower case do not matter.",
 	  "", "collaboration" },
 	{ "Team/Password", "",
-	  "Your team password. It is kept in memory for reconnecting and never "
-	  "written to disk, so after a restart you type it again.",
+	  "Your team password. It is never written to disk: once you are signed in, "
+	  "the team server hands this editor a session token instead, which is what "
+	  "signs you in again after a restart.",
 	  "", "collaboration" },
 	{ "Team/Sign In", "",
 	  "Signs in to the team server. Signed in, the others see you as online and "
 	  "can invite you; the connection is kept and comes back on its own after a "
-	  "dropped network.",
+	  "dropped network. You stay signed in across restarts until you sign out, "
+	  "change your password or are removed from the team.",
 	  "", "collaboration" },
 	{ "Team/Create Team", "",
 	  "Creates a new team on the server with you as its first admin, and signs "
@@ -8676,13 +8678,23 @@ namespace
 	  "", "collaboration" },
 	{ "Team/Sign Out", "",
 	  "Closes the connection to the team server: the others see you go offline "
-	  "and a session you announced disappears from their list. A collaboration "
-	  "session that is running carries on.",
+	  "and a session you announced disappears from their list. This computer "
+	  "forgets the saved sign-in and the server revokes it, so the next start "
+	  "asks for the password. A collaboration session that is running carries on.",
+	  "", "collaboration" },
+	{ "Team/Sign Out Everywhere", "",
+	  "Signs you out here and on every other computer that stays signed in as "
+	  "you: the server revokes all of your saved sign-ins, and those editors ask "
+	  "for the password again. For a computer you no longer have.",
 	  "", "collaboration" },
 	{ "Team/Invite", "",
 	  "Invites this member to the session you are hosting. Their editor shows the "
 	  "invitation and they join with one press. Only online members can be "
 	  "invited.",
+	  "", "collaboration" },
+	{ "Team/Open Team Window", "",
+	  "Opens Window > Team: the whole roster, sessions, and (for admins) adding "
+	  "and removing members. The footer's list only invites.",
 	  "", "collaboration" },
 	{ "Team/Remove", "",
 	  "Removes this member from the team (admins only). Asks once more first.",
@@ -8730,6 +8742,34 @@ namespace
 	{ "Team/Change Password", "",
 	  "Changes your team password on the server. This editor keeps its "
 	  "connection; your other editors use the new one at their next sign-in.",
+	  "", "collaboration" },
+	{ "Team/Choose Picture...", "",
+	  "Picks an image file (PNG, JPG, BMP, TGA, GIF) as your team picture. It is "
+	  "cropped to a square and scaled to 64 pixels here, then kept by the team "
+	  "server: every member sees it next to your name, on any computer you sign "
+	  "in from.",
+	  "", "collaboration" },
+	{ "Team/Change Picture...", "",
+	  "Picks another image file as your team picture. Cropped to a square and "
+	  "scaled to 64 pixels; the team sees the new one right away.",
+	  "", "collaboration" },
+	{ "Team/Remove Picture", "",
+	  "Removes your team picture from the server. The team sees your colour with "
+	  "your initial instead.",
+	  "", "collaboration" },
+	{ "Team/Use Collaboration Profile", "",
+	  "Copies the picture and colour you set in the Collaboration window to your "
+	  "team profile, so you look the same in a session and in the team. Without a "
+	  "picture there, the team picture is removed too.",
+	  "", "collaboration" },
+	{ "Team/None", "",
+	  "No colour of your own: the team shows you in grey, and in a session the "
+	  "host picks a free colour for you.",
+	  "", "collaboration" },
+	{ "Team/Custom", "",
+	  "Any colour, not just the presets. The team sees it shortly after you stop "
+	  "changing it. Two members may have the same colour; in a session the host "
+	  "gives one of them another if they collide.",
 	  "", "collaboration" },
 
 	{ "Session Participants/Block", "",
