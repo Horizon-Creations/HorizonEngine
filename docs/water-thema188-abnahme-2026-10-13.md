@@ -60,9 +60,9 @@ Bild ist dann nur die Wand zu sehen. *(Stand 13.10. Seit Schritt 4 steht dort ei
 
 ## Schritt 4: Böschung statt Wand (14.10.2026)
 
-Geprüft auf dem MacBook Air (Metal, Release-Build des Zweigs, Stand a35abc85 plus Distanzfeld, siehe unten). NN-WS03 war offline, deshalb
-**D3D11, D3D12 und Vulkan sind für diesen Schritt noch nicht geprüft.** Die Geometrie entsteht auf der CPU; die
-Logzahlen waren in Schritt 3 auf allen drei Backends identisch, das ersetzt die Abnahme auf Hardware aber nicht.
+Zuerst geprüft auf dem MacBook Air (Metal, Release-Build des Zweigs, Stand a35abc85 plus Distanzfeld, siehe unten).
+Danach auf NN-WS03 (RTX 4070, Debug-Build, Stand a5ee13a0) unter **D3D11, D3D12 und Vulkan**, siehe
+„Abnahme auf NN-WS03“ am Ende dieses Abschnitts. Die Zahlen sind auf allen vier Backends gleich.
 
 `WaterBrush::shapeBank` senkt nach dem Graben das Gelände außerhalb der Fläche, das höher steht als
 `foot + 0,5 · d / (1 − d / reach)`, auf diese Höhe:
@@ -115,6 +115,46 @@ dem Umbau auf das Distanzfeld liefen 568 Wasser-, Terrain-, See-, Sculpt- und Hi
 
 Im Stresstest kostet die Böschung also eine sichtbare Ruckelzeit je Frame, solange gemalt wird. Gemessen mit
 einem nicht committeten Zeitmess-Testfall. Debug und Windows sind nicht gemessen.
+
+### Abnahme auf NN-WS03: D3D11, D3D12, Vulkan (14.10.2026)
+
+Debug-Build von a5ee13a0, RTX 4070, `HE_GPU_DEBUG=1` (D3D12 mit Debug-Layer und DRED, Vulkan mit Validation).
+Gleiche Szene und Kamera wie auf Metal (`HE_DUMP_WATERBRUSH=pit`, Nahaufnahme oben), frisches APPDATA je Lauf.
+
+| | Backend | gegrabene Vertices | davon trocken | Böschung | Uferwand höchstens | steilste Stufe | `[ERROR]` |
+|---|---|---|---|---|---|---|---|
+| Fix | D3D11 | 1759 | **0** | 408 (tiefster 0,07 m über Pegel) | **0,58 m** | 1,12 m | 0 |
+| Fix | D3D12 | 1759 | **0** | 408 (0,07 m) | **0,58 m** | 1,12 m | 0 |
+| Fix | Vulkan | 1759 | **0** | 408 (0,07 m) | **0,58 m** | 1,12 m | 0 |
+| Negativkontrolle | D3D11 | 1337 | **0** | 0 | **4,10 m** | – | 0 |
+| Negativkontrolle | D3D12 | 1337 | **0** | 0 | **4,10 m** | – | 0 |
+| Negativkontrolle | Vulkan | 1337 | **0** | 0 | **4,10 m** | – | 0 |
+
+- Nach der Negativkontrolle wurde `WaterBrush.cpp` per `git checkout` zurückgesetzt und neu gebaut. Zwei weitere Läufe
+  auf Vulkan und einer auf D3D12 ergaben wieder 1759 / 0 / 408 / 0,58 m.
+- Die Bilder von D3D11 und D3D12 weichen von Vulkan im Mittel um 0,31 von 255 ab, kein Pixel um mehr als 24.
+- Anders als auf Metal ist das Bild **nicht immer bitgleich über zwei Läufe**. Von drei Vulkan-Läufen waren zwei
+  bitgleich. Der dritte wich um höchstens 8 von 255 ab, bei 0,16 % der Pixel und keinem über 24. Die Abweichung
+  lag in einem Band über Wasser und hinterem Ufer (y 122 bis 303). Auch mit ausgeblendetem Wasser
+  (`HE_DUMP_WATERHIDESHEET=1`) weichen zwei Läufe im selben Band leicht ab: unter Vulkan höchstens 4 von 255, unter
+  D3D12 höchstens 1 von 255. Zum Vergleich unterscheiden sich Fix und Negativkontrolle bei 12,4 % der Pixel, um
+  bis zu 132 von 255. Die Geometrie ist in jedem Lauf gleich: Alle Logzahlen stimmen überein. Die kleine
+  Abweichung entsteht beim Rendern; woher genau, ist nicht untersucht.
+- Im Bild der Negativkontrolle steht die 4-m-Wand mit gezacktem Nordrand. Im Bild des Fixes läuft die Böschung
+  glatt bis an die Wasserlinie, ohne Zacken.
+- Die einzige Debug-Layer-Meldung unter D3D12 ist der bekannte Performance-Hinweis zu `ClearRenderTargetView`
+  (Clear-Wert passt nicht zum Erzeugungswert). Sie ist eine Warnung, kein Fehler, und kam schon in Schritt 3.
+- Die Pinsel-, Wasser-, See-, Aushub- und Hilfe-Tests liefen im Debug-Build auf Windows grün: 274 Fälle. Die Pinsel-Fälle
+  bergauf messen dieselben Uferwände wie auf macOS (0,55 bis 0,58 m), und es bleiben 0 trockene Grubenvertices.
+- Die volle Suite `he_tests` (Debug, Windows) auf a5ee13a0: 5105 Fälle, davon 5104 grün, 11 übersprungen.
+  - Ausgenommen ist der Fall „PhysicsWorld: a full contact cache …“. Er stürzt im Debug-Build an einem
+    Jolt-Assert ab (SEH) und tat das schon auf der Basis (Schritt 1). Mit ihm bricht doctest bei Fall 3159 ab.
+  - Rot war einmal „inspector ui: the Replication section …“. Der Fall liest die echte Windows-Zwischenablage und
+    ist auf NN-WS03 unzuverlässig: Allein gestartet war er in 3 von 5 Läufen grün. Mit seiner ganzen Datei
+    gestartet waren alle 12 Fälle grün. Der Zweig ändert am Inspector nichts.
+
+![Fix unter D3D12: flache Böschung bis an die Wasserlinie](water-lake/thema188-bank-after-d3d12.png)
+![Negativkontrolle unter Vulkan: 4-m-Wand, oben gezackt](water-lake/thema188-bank-negctrl-vulkan.png)
 
 ## Lake-Werkzeug: Das Bett geht mit
 
