@@ -178,44 +178,72 @@ the session cluster grows by a face; both right-anchored in the chain). A pictur
 face keeps square cells while its frame rounds (cells are rectangles, ImGui cannot
 clip round); it lasts 0.4 s and the real round face replaces it.
 
-## Step 6 (stopped by the queen, WIP)
+## Step 6: the footer in real editors
 
-The footer has never been seen in a real editor: `HE_DUMP_LIVE` and the MCP screenshot
-tools render the scene only (`CaptureViewport` / `RenderSceneImage`), no ImGui. So:
+Steps 3-5 were only ever seen in the `test_team_ui` harness (CollabPresenceBar is compiled
+without ImGui there). `HE_DUMP_LIVE` and the MCP screenshot tools picture the scene only
+(`CaptureViewport` / `RenderSceneImage`), so the UI first needed its own capture:
 
-- `src/HE_Editor/EditorUiShot.{h,cpp}` (new): `HE::Ed::UiShot::captureDrawData(path)`, the
-  tutorial witness's CPU capture moved out of `TutorialPanel.cpp` (which now calls it), and
-  `liveAfterRender()`: `HE_DUMP_UI=<dir>` + `HE_DUMP_UI_TRIGGER=<file>`, trigger line
-  `<name> [frames] [x y]` → `<dir>/<name>-NNN.bmp` for `frames` frames, mouse at x y
-  (negative = away), trigger removed after the last. Called in `EditorUI.cpp` right after
-  `ImGui::Render()`. Added to `src/HE_Editor/CMakeLists.txt` beside the rasteriser.
-- `scripts/he_team_presence_shots.py` (new): local `collab_server`, hidden editors Anna (A)
-  and Bob (B), Cleo/Dan/Eli/Fay online over `team_test.py` sockets with their colours (Dan
-  a striped picture), shots online / menu (hover) / hosting / 45-frame join burst / joined
-  / left, colour boxes in the footer as checks.
-- `/tmp/collab-build/collab_server` rebuilt at b4a47a5 (the old binary predated profiles).
+- **`src/HE_Editor/EditorUiShot.{h,cpp}`** (new). `HE::Ed::UiShot::captureDrawData(path,
+  bandRows)` is the tutorial witness's CPU capture moved out of `TutorialPanel.cpp` (which
+  now calls it): a clone of this frame's draw data through `tests/ImGuiSoftwareRaster`.
+  `liveAfterRender()` (called in `EditorUI.cpp` right after `ImGui::Render()`):
+  `HE_DUMP_UI=<dir>` + `HE_DUMP_UI_TRIGGER=<file>`, trigger line
+  `<name> [frames] [x y] [band=N]` → `<dir>/<name>-NNN.bmp` for `frames` frames, the mouse
+  at x y for the burst (negative = away), only the bottom N rows with `band=`. The trigger
+  is removed after the last write. A whole 1600x900 frame costs ~0.7 s on a loaded Mac, which
+  swallowed the 0.4 s slide in one frame gap (first run); the 60-row footer band keeps up.
+- **`scripts/he_team_presence_shots.py`** (new): a local `collab_server` (b4a47a5, rebuilt in
+  `/tmp/collab-build`), hidden editors Anna (A, creates the team) and Bob (B), and Cleo, Dan,
+  Eli, Fay online over `team_test.py`'s raw sockets (from the CollabSession checkout) with a
+  colour each, Dan with a striped 64 px picture; Anna's and Bob's colours are set the same
+  way on a second connection. Checks are colour boxes in the footer pixels.
+
+**Result: `RESULT: PASS (0 failures)`** (`team-presence-hud-2026-10-14/run.log`). Pictures in
+`docs/team-presence-hud-2026-10-14/`:
+
+- `footer-a-online.png`: B, C, Dan's picture, E stacked + "+1" (Fay hidden), Anna's own blue
+  face right of the bell. `footer-b-online.png`: Bob's side, Anna in his stack.
+- `menu-no-session.png` / `menu-hosting.png`: the hover menu (mouse put on the stack) over
+  the docked Content Browser, one row per member incl. Fay, Invite disabled without a
+  session and enabled while A hosts, no Remove, `Open Team Window`.
+- `footer-a-hosting.png`: stack | rule | A's session face.
+- `slide-strip.png`: frames 12-18 of the join burst (2x). Bob's colour stays at x 1306 until
+  frame 12, then 1338, 1358, 1375, 1384, 1386 (ease-out), round on the way, over the rule and
+  A's face, then lands. `footer-a-joined.png`: C, D, E, F stacked, session A + B;
+  `footer-b-joined.png`: Anna gone from Bob's stack into his session cluster.
+- `footer-a-left.png`: Bob leaves the session → back in A's stack at once (no reverse slide).
+- **Green dot vs. the footer's edge** (open since step 3), measured in `a-online`: the footer
+  is rows 876-899 (24 px), the dots rows 886-893. Not clipped under the editor font.
+
+**Findings (not fixed, for the queen):**
+1. The slide changes colour where it lands: the ghost is Bob's **team** colour (purple), but
+   the session cluster draws participants with their **collab identity** colour (Bob's red
+   ring), and Anna's own team face (blue) and her session face (pink) differ as well.
+   They agree only after "use the collab profile" (`TeamController::useCollabProfile`).
+   Either the session faces of team members take the team profile, or the slide fades into
+   the target's colour.
+2. The other stack faces jump when one leaves (frame 13: C takes slot 1 at once). Known since
+   step 5.
+3. `CollabPresenceBar::drawMenuWindow` lacks `ImGuiHoveredFlags_AllowWhenBlockedByActiveItem`
+   (step 4's note), not exercised here: the session menu was not opened.
 
 ## Handoff
 
-- **Topic / step:** 202, step 6 of 6, **stopped by the queen before anything ran**.
-- **Branch:** this doc + WIP commit (EditorUiShot, script). Server b4a47a5 still not deployed.
-- **Verified:** nothing of step 6. The code is **not compiled** yet: the HorizonEditor
-  build (`out/build/release`, CMake re-ran, 1112 steps incl. assimp) reached ~900/1112
-  and was cut off by the 600 s limit; no compile error seen up to there (EditorUiShot.cpp
-  had not been reached). The script has never run.
-- **Not verified:** everything steps 3-5 left open (real editor: stack beside the real
-  session cluster, menu over docked panels, green dot vs. footer edge, the slide).
-- **Decisions:** UI capture by trigger file in the running editor rather than a visible
-  window; members without an editor come from raw sockets (no `team_set_color` MCP tool
-  needed); local server only (the rented host lacks ops 16-19).
-- **Traps:** no Pillow on this Mac (script reads BMP itself, converts with `sips`); the
-  build tree may rebuild far more than expected after a CMake re-run: start it with
-  `run_in_background` and poll, not a 600 s foreground call.
-- **Next steps:** 1. `ninja -C out/build/release -j8 HorizonEditor` to the end, fix
-  compile errors in EditorUiShot.cpp/TutorialPanel.cpp if any. 2. `python3 -B
-  scripts/he_team_presence_shots.py /tmp/presence-shots`, look at `shots/*.png`
-  (the hover point comes from Cleo's colour in a-online), attach the key ones to the
-  topic. 3. `he_tests --source-file='*test_team_ui.cpp'`, full he_tests (without
-  test_material_graph), `editor_help_audit.py --check`. 4. Write the step-6 report here.
-  Findings to pass on (not fixed): `CollabPresenceBar::drawMenuWindow` lacks
-  `AllowWhenBlockedByActiveItem`; the other faces jump when the stack loses one.
+- **Topic / step:** 202, step 6 of 6 (verification). Server CollabSession b4a47a5 still
+  **not deployed** (step 1); the rented host lacks ops 16-19, so profiles run locally only.
+- **Done:** "Step 6" above. Code: `EditorUiShot.{h,cpp}`, `TutorialPanel.cpp` (uses it),
+  `EditorUI.cpp` (hook), `src/HE_Editor/CMakeLists.txt`; `scripts/he_team_presence_shots.py`.
+- **Verified (Mac, Release, `out/build/release`):** HorizonEditor -j8 rc 0; two hidden real
+  editors + local server: PASS, every check above, pictures looked at. No editor or server
+  left running.
+- **Tests:** TESTS_PLACEHOLDER
+- **Not verified:** the tour witness (`HE_DUMP_TUTORIALUI`) after the move was not rerun
+  (same code, now in EditorUiShot.cpp); Windows/Linux only via CI; the session menu.
+- **Decisions:** UI capture by trigger file in the hidden editor, never a visible window;
+  members without an editor from raw sockets (no new MCP tool); footer band for bursts.
+- **Traps:** no Pillow on this Mac (the script reads BMPs itself, `sips` converts); a CMake
+  re-run in this tree rebuilt 1112 steps (start long builds in the background and poll);
+  full-frame UI shots are ~0.7 s each, so animations need `band=`.
+- **Next steps:** 1. Queen: decide finding 1 (team vs. collab colour of session faces).
+  2. Deploy b4a47a5 to the rented host (the human). 3. Optional: ease the stack's jump.

@@ -124,10 +124,12 @@ class Shots:
     def env(self):
         return {"HE_DUMP_UI": str(self.dir), "HE_DUMP_UI_TRIGGER": str(self.trigger)}
 
-    def arm(self, name, frames=1, mouse=None):
+    def arm(self, name, frames=1, mouse=None, band=0):
         line = "%s %d" % (name, frames)
         if mouse:
             line += " %d %d" % mouse
+        if band:
+            line += " band=%d" % band   # the footer only: a full frame costs ~0.7 s
         tmp = self.trigger.with_suffix(".tmp")
         tmp.write_text(line + "\n")
         tmp.rename(self.trigger)   # never a half-written line
@@ -354,7 +356,7 @@ def main():
 
         # ── 4. Bob joins: the burst ──────────────────────────────────────────
         before = find_color(ph, COLORS["Bob"])
-        shots_a.arm("a-join", 45)
+        shots_a.arm("a-join", 45, band=60)
         b.call("team_join", {"session": sid})
         frames = shots_a.wait("a-join", 45, timeout=120)
         joined, _ = wait_for("B joined", lambda: b.status().get("status") == "joined", TIMEOUT)

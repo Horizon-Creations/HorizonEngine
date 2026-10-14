@@ -69,12 +69,13 @@ namespace
 		std::string name;
 		int         total   = 0;   // frames asked for
 		int         written = 0;
+		int         band    = 0;   // bottom rows only (0 = the whole frame)
 		bool        armed   = false;
 	};
 }
 #endif
 
-bool captureDrawData(const std::string& path)
+bool captureDrawData(const std::string& path, int bandRows)
 {
 #ifdef HE_IMGUI_ENABLED
 	const ImDrawData* dd = ImGui::GetDrawData();
@@ -90,6 +91,14 @@ bool captureDrawData(const std::string& path)
 	copy.Valid            = true;
 	copy.DisplayPos       = dd->DisplayPos;
 	copy.DisplaySize      = dd->DisplaySize;
+	if (bandRows > 0 && static_cast<float>(bandRows) < copy.DisplaySize.y)
+	{
+		// The rasteriser works per covered pixel; a band of the footer is a
+		// fraction of the whole frame's fill, which is what lets a burst keep
+		// up with a 0.4 s animation.
+		copy.DisplayPos.y  += copy.DisplaySize.y - static_cast<float>(bandRows);
+		copy.DisplaySize.y  = static_cast<float>(bandRows);
+	}
 	copy.FramebufferScale = ImVec2(1.0f, 1.0f);   // one pixel per point is plenty
 	copy.Textures         = nullptr;              // no texture requests: not ours to answer
 	for (const ImDrawList* list : dd->CmdLists)
@@ -107,8 +116,8 @@ bool captureDrawData(const std::string& path)
 		copy.TotalIdxCount += c->IdxBuffer.Size;
 	}
 
-	const he_ui::Image img = he_ui::rasterize(&copy, static_cast<int>(dd->DisplaySize.x),
-	                                          static_cast<int>(dd->DisplaySize.y));
+	const he_ui::Image img = he_ui::rasterize(&copy, static_cast<int>(copy.DisplaySize.x),
+	                                          static_cast<int>(copy.DisplaySize.y));
 	const bool ok = img.valid() && he_ui::writeBmp(img, path);
 
 	for (ImDrawList* c : clones) IM_DELETE(c);
@@ -117,7 +126,7 @@ bool captureDrawData(const std::string& path)
 	he_ui::unregisterTexture(grey);
 	return ok;
 #else
-	(void)path;
+	(void)path; (void)bandRows;
 	return false;
 #endif
 }
@@ -142,8 +151,16 @@ void liveAfterRender()
 		float x = 0.0f, y = 0.0f;
 		if (!(words >> b.name)) b.name = "ui";
 		if (!(words >> b.total) || b.total < 1) b.total = 1;
-		if (words >> x >> y)
+		std::vector<float> numbers;
+		for (std::string w; words >> w;)
 		{
+			if (w.rfind("band=", 0) == 0) b.band = std::atoi(w.c_str() + 5);
+			else                          numbers.push_back(static_cast<float>(std::atof(w.c_str())));
+		}
+		if (numbers.size() >= 2)
+		{
+			x = numbers[0];
+			y = numbers[1];
 			// Queued for the next NewFrame, which is the burst's first frame. A
 			// negative position takes the mouse away again.
 			ImGuiIO& io = ImGui::GetIO();
@@ -160,7 +177,7 @@ void liveAfterRender()
 	char index[16];
 	std::snprintf(index, sizeof(index), "-%03d.bmp", s_burst.written);
 	const std::string path = std::string(s_dir) + "/" + s_burst.name + index;
-	const bool ok = captureDrawData(path);
+	const bool ok = captureDrawData(path, s_burst.band);
 	HE_LOG_INFO(Editor, "UI shot %s: frame %d, t=%.3f s%s", path.c_str(), ImGui::GetFrameCount(),
 	            ImGui::GetTime(), ok ? "" : " (capture FAILED)");
 	if (++s_burst.written >= s_burst.total)
