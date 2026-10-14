@@ -3318,3 +3318,141 @@ TEST_CASE("CollabController: the end of a quick drag is not lost to the rate lim
                       std::chrono::seconds(5)));
     CHECK(received == 2);
 }
+
+// ── Entities somebody is editing: the host decides, as for assets ────────────
+// (topic 198 step 6, CollabEntityOps.h)
+
+TEST_CASE("Entity op keys: a subject round-trips, a file path is not one")
+{
+    using namespace HE::Ed::CollabEntityOps;
+    const std::uint64_t subject = 0x1234abcd5678ef01ull & ~(1ull << 63);
+    const std::string key = keyFor(subject);
+    CHECK(isKey(key));
+    CHECK(subjectOf(key) == subject);
+    CHECK_FALSE(isKey("Content/Materials/Rock.hasset"));
+    CHECK(subjectOf("Content/Materials/Rock.hasset") == 0);
+    CHECK(subjectOf("entity:") == 0);
+    CHECK(subjectOf("entity:12zz") == 0);
+}
+
+TEST_CASE("Collab: deleting or renaming an entity a peer holds goes to the host")
+{
+    using Op = HE::Net::CollabSession::AssetOp;
+    HorizonWorld hostWorld;
+    const Entity crate = hostWorld.createEntity("Crate");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    // The wire id is uuid-derived, so both worlds name the crate by one subject.
+    const std::uint64_t subject =
+        host.subjectFor(static_cast<std::uint32_t>(entt::to_integral(crate)));
+    REQUIRE(subject != 0);
+    REQUIRE(pumpUntil(host, client, [&] { return client.entityForNetId(subject) != 0; }));
+
+    // Every entity op is seen as one; NONE may reach the asset handler, which
+    // reads its path as a file and would go looking for "entity:…" on disk.
+    struct Applied { Op op; std::uint64_t subject; std::string newName; };
+    std::vector<Applied> onHost, onClient;
+    int assetOpsSeen = 0;
+    host.onRemoteEntityOp([&](Op op, std::uint64_t s, const std::string& n) {
+        onHost.push_back({ op, s, n });
+    });
+    client.onRemoteEntityOp([&](Op op, std::uint64_t s, const std::string& n) {
+        onClient.push_back({ op, s, n });
+    });
+    host.onRemoteAssetOp([&](Op, const std::string&, const std::string&, bool) { ++assetOpsSeen; });
+    client.onRemoteAssetOp([&](Op, const std::string&, const std::string&, bool) { ++assetOpsSeen; });
+    // A resolver that knows no path at all: the occupied-name check in
+    // approveOne used to read an empty answer as "refuse", which would turn
+    // every entity rename into a silent no.
+    host.setLocalPathResolver([](const std::string&) { return std::string(); });
+
+    SUBCASE("a client asks, the row names the entity, approve applies everywhere")
+    {
+        host.followSelection(subject);   // Anna is editing the crate
+        REQUIRE(pumpUntil(host, client, [&] {
+            const HE::Net::LockInfo* l = client.lockFor(subject);
+            return l && l->owner == host.localParticipant();
+        }));
+
+        CHECK(client.requestEntityDelete(subject, "Crate"));
+        CHECK(client.pendingRequestsOfOurs() == 1);
+        REQUIRE(pumpUntil(host, client, [&] { return host.pendingAssetOps().size() == 1; }));
+
+        const auto& row = host.pendingAssetOps()[0];
+        CHECK(row.isEntity());
+        CHECK(row.op == Op::Delete);
+        CHECK(host.opDisplayName(row) == "Crate");
+        // The host holds it itself: that is no conflict to warn itself about.
+        CHECK(host.opHeldBy(row).empty());
+
+        host.approveAssetOp(0);
+        REQUIRE(pumpUntil(host, client, [&] {
+            return onHost.size() == 1 && onClient.size() == 1 &&
+                   client.pendingRequestsOfOurs() == 0;
+        }));
+        CHECK(onHost[0].op == Op::Delete);
+        CHECK(onHost[0].subject == subject);
+        CHECK(onClient[0].subject == subject);
+        CHECK(assetOpsSeen == 0);
+        CHECK(host.pendingAssetOps().empty());
+    }
+
+    SUBCASE("the host's own ask lands in its own in-tray, naming the holder")
+    {
+        client.followSelection(subject);   // Bob is editing the crate
+        REQUIRE(pumpUntil(host, client, [&] {
+            const HE::Net::LockInfo* l = host.lockFor(subject);
+            return l && l->owner == client.localParticipant();
+        }));
+
+        // Not applied on the spot, unlike the host's own asset delete: a single
+        // keypress has no confirmation in front of it, and this row is it.
+        CHECK(host.requestEntityRename(subject, "Crate", "Barrel"));
+        REQUIRE(host.pendingAssetOps().size() == 1);
+        CHECK(onHost.empty());
+
+        const auto& row = host.pendingAssetOps()[0];
+        CHECK(row.isEntity());
+        CHECK(row.op == Op::Rename);
+        CHECK(row.newPath == "Barrel");
+        CHECK(host.opHeldBy(row) == "Bob");
+
+        host.approveAssetOp(0);
+        REQUIRE(pumpUntil(host, client, [&] {
+            return onHost.size() == 1 && onClient.size() == 1;
+        }));
+        CHECK(onHost[0].op == Op::Rename);
+        CHECK(onHost[0].newName == "Barrel");
+        CHECK(onClient[0].newName == "Barrel");
+        CHECK(assetOpsSeen == 0);
+    }
+
+    SUBCASE("a denial reaches the asker and changes nothing")
+    {
+        host.followSelection(subject);
+        REQUIRE(pumpUntil(host, client, [&] {
+            const HE::Net::LockInfo* l = client.lockFor(subject);
+            return l && l->owner == host.localParticipant();
+        }));
+        CHECK(client.requestEntityRename(subject, "Crate", "Barrel"));
+        REQUIRE(pumpUntil(host, client, [&] { return host.pendingAssetOps().size() == 1; }));
+        host.denyAssetOp(0);
+        REQUIRE(pumpUntil(host, client, [&] { return client.pendingRequestsOfOurs() == 0; }));
+        CHECK(onHost.empty());
+        CHECK(onClient.empty());
+        // The footer line names the entity, not its key.
+        CHECK(client.assetNotice().find("Crate") != std::string::npos);
+    }
+}

@@ -14,6 +14,7 @@
 // Everything is poll-driven: update() must be called once per frame or nothing
 // happens at all.
 
+#include "CollabEntityOps.h"
 #include "NotificationStore.h"
 
 #include <Net/CollabSession.h>
@@ -675,7 +676,19 @@ public:
 		HE::Net::ParticipantId batchOwner = 0;
 		std::uint32_t          batchId    = 0;   // 0 = asked for on its own
 		bool inBatch() const { return batchId != 0; }
+		// An entity somebody else is editing, not a file (CollabEntityOps.h):
+		// `path` is its key and `newPath` the new NAME on a rename.
+		bool isEntity() const { return HE::Ed::CollabEntityOps::isKey(path); }
 	};
+	// What a row is about, as a person reads it: the file name, or the entity's
+	// name in our own world (its key when the entity is already gone here).
+	std::string opDisplayName(const PendingAssetOp& op);
+	// Who is editing it right now, if not us — "" when nobody. This is the
+	// CONFLICT the host is weighing: approving a delete throws that person's
+	// open work away, and the row has to say so before the click, not after.
+	// For an entity, the first holder anywhere in its subtree, because a delete
+	// takes the children with it.
+	std::string opHeldBy(const PendingAssetOp& op);
 	const std::vector<PendingAssetOp>& pendingAssetOps() const { return m_pendingOps; }
 	// Answer one. Approving applies it everywhere, including here; denying tells
 	// every requester and changes nothing. Both drop the row.
@@ -751,6 +764,29 @@ public:
 	{
 		return requestOrPerformAssetOp(
 			HE::Net::CollabSession::AssetOp::Create, relPath, {}, true);
+	}
+
+	// ── Entities somebody else is editing ────────────────────────────────────
+	// The same decision for an entity a peer holds (or one with a held entity
+	// under it): asked for, answered by the host in the same in-tray, applied on
+	// every machine at once. See CollabEntityOps.h. FALSE = no session; the
+	// caller then does what it always did.
+	//
+	// Unlike requestAssetDelete, the HOST asks too — into its own in-tray. An
+	// asset delete has a confirmation dialog in front of it, so the host's own
+	// one is applied straight away; an entity delete is a single keypress, and
+	// the in-tray row (with the holder's name on it) is the only place a host
+	// gets to see whose work it is about to remove.
+	bool requestEntityDelete(std::uint64_t subject, const std::string& name)
+	{
+		return requestEntityOp(HE::Net::CollabSession::AssetOp::Delete, subject,
+		                       name, {});
+	}
+	bool requestEntityRename(std::uint64_t subject, const std::string& name,
+	                         const std::string& newName)
+	{
+		return requestEntityOp(HE::Net::CollabSession::AssetOp::Rename, subject,
+		                       name, newName);
 	}
 
 	// ── One user action, one decision ────────────────────────────────────────
@@ -903,6 +939,15 @@ public:
 		                   const std::string& newPath, bool folder)> fn)
 	{
 		m_onRemoteAssetOp = std::move(fn);
+	}
+	// The entity counterpart: an approved delete or rename of an entity (see
+	// requestEntityDelete). Fires on every peer including the host, and NEVER
+	// reaches onRemoteAssetOp — that handler reads its path as a file.
+	void onRemoteEntityOp(
+		std::function<void(HE::Net::CollabSession::AssetOp, std::uint64_t subject,
+		                   const std::string& newName)> fn)
+	{
+		m_onRemoteEntityOp = std::move(fn);
 	}
 
 	// Session key → local absolute path, or empty if it resolves to nothing that
@@ -1141,8 +1186,21 @@ private:
 	struct OurOp { std::uint32_t requestId = 0;
 	               HE::Net::CollabSession::AssetOp op =
 	                   HE::Net::CollabSession::AssetOp::Delete;
-	               std::string path; };
+	               std::string path;
+	               // What the notices call it. Empty = the file name of `path`;
+	               // set for an entity, whose key means nothing to a person and
+	               // which may be gone by the time the answer arrives.
+	               std::string display;
+	               std::string name() const;
+	};
 	std::vector<OurOp>              m_ourPendingOps;
+	// The host's in-tray, filled by a peer's request or by the host's own entity
+	// ask (requestId 0: nobody to send a verdict to but ourselves).
+	void queueAssetOp(HE::Net::ParticipantId who, std::uint32_t requestId,
+	                  HE::Net::CollabSession::AssetOp op, const std::string& path,
+	                  const std::string& newPath, bool folder, std::uint32_t batch);
+	bool requestEntityOp(HE::Net::CollabSession::AssetOp op, std::uint64_t subject,
+	                     const std::string& name, const std::string& newName);
 	// Asks pointed at us because we hold the asset. Anyone can accumulate these,
 	// host or not.
 	std::vector<EditRequest>        m_editRequests;
@@ -1406,6 +1464,8 @@ private:
 	std::function<std::string(const std::string&)> m_localPathForKey;
 	std::function<void(HE::Net::CollabSession::AssetOp, const std::string&,
 	                   const std::string&, bool)> m_onRemoteAssetOp;
+	std::function<void(HE::Net::CollabSession::AssetOp, std::uint64_t,
+	                   const std::string&)> m_onRemoteEntityOp;
 	std::string   m_removalNotice;   // set when the host kicked or banned us
 
 	// Last transform we published, so an unmoved object sends nothing. Same

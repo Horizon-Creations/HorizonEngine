@@ -313,6 +313,12 @@ struct AppContext
 	std::function<void()> cutEntity;
 	std::function<void()> pasteEntity;
 	std::function<void()> deleteEntity;
+	// A rename typed into the Outliner or the Details name field, for an entity
+	// somebody else in the session is editing. True = it went to the host as a
+	// request and the caller must NOT rename locally (the name would hold here
+	// and nowhere else until the holder's next edit overwrote it). False = no
+	// conflict (or no session): rename as always. Unbound in tests = false.
+	std::function<bool(Entity, const std::string& newName)> askHostToRename;
 	// Is there anything to paste? Drives the Paste item's enabled state.
 	bool entityClipboardFull = false;
 
@@ -773,7 +779,11 @@ private:
 	// in. The rest are left alone and the user is told, once, by name — a delete
 	// the session refuses must not happen here either, or the entity is gone on
 	// this machine and alive on every other one.
-	std::vector<Entity> withoutPeerHeld(const std::vector<Entity>& targets, const char* verb);
+	// `askHost`: a refused DELETE becomes a request in the host's in-tray
+	// (CollabEntityOps.h) instead of a dead end — the same decision an asset
+	// delete gets. Off for removals nobody typed (an undo replaying a create).
+	std::vector<Entity> withoutPeerHeld(const std::vector<Entity>& targets, const char* verb,
+	                                    bool askHost = false);
 	// The selection roots that may be copied or removed: valid, not built-in
 	// (root, sun, moon), and not under another selected entity.
 	std::vector<Entity> editableSelectionRoots() const;

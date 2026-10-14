@@ -800,7 +800,14 @@ void EditorApplication::OnInit()
 		}
 		if (isDelete)
 		{
+			// A project override of an engine default (Content Browser "Revert to
+			// Default"): the resident copy is the override's, and it stays the
+			// asset until it is unloaded — the same unload the local revert does,
+			// so the default is what loads next on every machine.
+			const HE::UUID overrideId = contentManager().isEngineOverridePath(full)
+				? contentManager().idForPath(relPath) : HE::UUID{};
 			std::filesystem::remove(full, ec);
+			if (!ec && overrideId != HE::UUID{}) contentManager().unloadAsset(overrideId);
 			EditorAssetTypeCache::invalidate(full);
 			AssetThumbnailCache::invalidate(full);
 			// A C++ class is ONE item in the browser and two files on disk. The
@@ -890,6 +897,35 @@ void EditorApplication::OnInit()
 			enqueueRetargetOnDisk(relPath, newRelPath, folder);
 		}
 		m_contentRefreshPending = true;
+	});
+
+	// The host approved deleting or renaming an entity somebody was editing
+	// (CollabEntityOps.h). Fires on every peer including the host, and each one
+	// applies it to its own world — no structural message follows, because the
+	// session would refuse a destroy of an entity a peer still holds.
+	m_collab.onRemoteEntityOp([this](HE::Net::CollabSession::AssetOp op,
+	                                 std::uint64_t subject, const std::string& newName) {
+		if (!m_editorWorld) return;
+		const std::uint32_t h = m_collab.entityForNetId(subject);
+		const Entity e = static_cast<Entity>(static_cast<entt::id_type>(h));
+		auto& reg = m_editorWorld->registry();
+		if (h == 0 || !reg.valid(e) || m_editorWorld->isBuiltin(e)) return;
+		if (op == HE::Net::CollabSession::AssetOp::Delete)
+		{
+			// Exactly a peer's destroy (onRemoteDestroy): everyone does it at
+			// once, so nobody's diff may publish it again. The holder deselects
+			// with it, and followSelection hands its lock back on the next frame.
+			if (m_isPlaying && m_physicsWorld)
+				m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+			m_selection.remove(e);
+			forgetStructureOf(e);
+			m_editorWorld->destroyEntity(e);
+			m_editorWorld->markHierarchyDirty();
+			return;
+		}
+		// A rename: the holder's component blob carries the new name from here
+		// on, and every other machine already set the same one.
+		m_editorWorld->renameEntity(e, newName);
 	});
 
 	m_collab.onRemoteAsset([this](const std::string& relPath,
@@ -11161,7 +11197,7 @@ void EditorApplication::copySelectedEntity(bool cut)
 
 	if (!cut) return;
 	// The copy stands either way; only the removal half is refused.
-	const std::vector<Entity> removable = withoutPeerHeld(sources, "cut");
+	const std::vector<Entity> removable = withoutPeerHeld(sources, "cut", /*askHost=*/true);
 	if (removable.empty()) return;
 	m_selection.clear();
 	if (!m_isPlaying) m_undo.snapshotNow("Cut Entity"); // see duplicateSelectedEntity()
@@ -11229,7 +11265,7 @@ void EditorApplication::forgetStructureOf(Entity root)
 }
 
 std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>& targets,
-                                                      const char* verb)
+                                                      const char* verb, bool askHost)
 {
 	if (!m_collab.inSession() || !m_editorWorld) return targets;
 	auto& reg = m_editorWorld->registry();
@@ -11256,17 +11292,48 @@ std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>
 	};
 
 	std::vector<Entity> allowed;
+	std::vector<Entity> held;
 	std::string refusedName;
 	std::string refusedHolder;
 	int refused = 0;
 	for (const Entity e : targets)
 	{
 		if (!heldByPeer(e)) { allowed.push_back(e); continue; }
+		held.push_back(e);
 		if (++refused == 1)
 		{
 			refusedName   = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
 			                                             : std::string("An entity");
 			refusedHolder = holder;
+		}
+	}
+	// Not a dead end any more: the host decides, as it does for an asset somebody
+	// is working on, and its row names the holder. Nothing moves here until the
+	// approval comes back to every machine at once (onRemoteEntityOp). One batch
+	// for the lot, so one Delete keypress is one row in the host's in-tray.
+	if (refused > 0 && askHost)
+	{
+		const bool batch = held.size() > 1;
+		if (batch) m_collab.beginAssetOpBatch();
+		int asked = 0;
+		for (const Entity e : held)
+		{
+			const std::string name = reg.all_of<NameComponent>(e)
+				? reg.get<NameComponent>(e).name : std::string();
+			const std::uint64_t subject =
+				m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+			if (m_collab.requestEntityDelete(subject, name)) ++asked;
+		}
+		if (batch) m_collab.endAssetOpBatch();
+		if (asked == refused)
+		{
+			const std::string what = refused == 1
+				? "Asked the host to delete \"" + refusedName + "\""
+				: "Asked the host to delete " + std::to_string(refused) + " entities";
+			m_notifications.post(HE::Ed::NoteLevel::Info,
+				what + ": " + refusedHolder + " is editing it or something under it.",
+				"It stays until the host approves, then goes on every machine at once.");
+			return allowed;
 		}
 	}
 	if (refused > 0)
@@ -11292,7 +11359,7 @@ void EditorApplication::deleteSelectedEntity()
 		if (e != entt::null && m_editorWorld->registry().valid(e) &&
 		    !m_editorWorld->isBuiltin(e))
 			targets.push_back(e);
-	targets = withoutPeerHeld(targets, "deleted");
+	targets = withoutPeerHeld(targets, "deleted", /*askHost=*/true);
 	if (targets.empty()) return;
 
 	m_selection.clear();
@@ -11585,6 +11652,29 @@ AppContext EditorApplication::makeContext()
 		.cutEntity           = [this]{ copySelectedEntity(true);  },
 		.pasteEntity         = [this]{ pasteEntityClipboard();    },
 		.deleteEntity        = [this]{ deleteSelectedEntity();    },
+		.askHostToRename     = [this](Entity e, const std::string& newName) -> bool {
+			// Only the entity itself: a rename touches no child. Nobody else
+			// holding it is the ordinary case — the rename happens here and the
+			// component blob carries it, exactly as before.
+			// Not during play: the panels then show the play world, whose
+			// handles are not the session's entities.
+			if (!m_collab.inSession() || !m_editorWorld || m_isPlaying || newName.empty())
+				return false;
+			auto& reg = m_editorWorld->registry();
+			if (!reg.valid(e)) return false;
+			const std::uint64_t subject =
+				m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+			const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+			if (!lock || lock->owner == m_collab.localParticipant()) return false;
+			const std::string name = reg.all_of<NameComponent>(e)
+				? reg.get<NameComponent>(e).name : std::string();
+			if (!m_collab.requestEntityRename(subject, name, newName)) return false;
+			m_notifications.post(HE::Ed::NoteLevel::Info,
+				"Asked the host to rename \"" + name + "\" to \"" + newName + "\": " +
+					lock->ownerName + " is editing it.",
+				"The name changes on every machine at once when the host approves.");
+			return true;
+		},
 		.entityClipboardFull = !m_entityClipboard.empty(),
 		.revertPrefabOverride = [this](Entity root, const PrefabInstanceComponent::Override& o) {
 			return revertPrefabOverride(root, o);

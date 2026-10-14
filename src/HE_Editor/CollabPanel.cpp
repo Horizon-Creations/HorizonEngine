@@ -1056,18 +1056,22 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				const auto& op = ops[i];
 				ImGui::PushID(static_cast<int>(i));
 
-				const std::string name =
-					std::filesystem::path(op.path).filename().string();
+				const std::string name = collab->opDisplayName(op);
 				const bool isDelete =
 					op.op == HE::Net::CollabSession::AssetOp::Delete;
 				// "Delete folder" is a different decision from "Delete" and has
 				// to read like one: approving it removes everything underneath,
 				// with no trash and no undo. The row said neither until a review
-				// pointed out that the flag was carried and never shown.
+				// pointed out that the flag was carried and never shown. An
+				// entity says so too: it is a scene object, not a file.
 				ImGui::TextColored(isDelete ? HE::Ed::Theme::Bad
 				                            : HE::Ed::Theme::Warn,
-				                   isDelete ? (op.folder ? "Delete folder" : "Delete")
-				                            : (op.folder ? "Rename folder" : "Rename"));
+				                   isDelete ? (op.folder     ? "Delete folder"
+				                               : op.isEntity() ? "Delete entity"
+				                                               : "Delete")
+				                            : (op.folder     ? "Rename folder"
+				                               : op.isEntity() ? "Rename entity"
+				                                               : "Rename"));
 				ImGui::SameLine();
 				ImGui::TextUnformatted(name.c_str());
 				if (op.folder && isDelete)
@@ -1077,9 +1081,25 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				}
 				if (!isDelete && !op.newPath.empty())
 				{
+					// An entity's newPath IS the new name; a file's is a path.
 					ImGui::SameLine();
 					ImGui::TextDisabled("\xE2\x86\x92 %s",
-						std::filesystem::path(op.newPath).filename().string().c_str());
+						op.isEntity()
+							? op.newPath.c_str()
+							: std::filesystem::path(op.newPath).filename().string().c_str());
+				}
+				// The conflict itself. Somebody is in the middle of this right
+				// now, and approving takes it out from under them: a delete
+				// throws their open work away, a rename changes the thing they
+				// are looking at. Said on the row, before the click — the
+				// requester saw the same name when they were told to ask.
+				const std::string heldBy = collab->opHeldBy(op);
+				if (!heldBy.empty())
+				{
+					ImGui::TextColored(HE::Ed::Theme::Warn,
+						isDelete ? "    %s is editing it \xE2\x80\x94 their open changes go with it"
+						         : "    %s is editing it right now",
+						heldBy.c_str());
 				}
 				// The age, so a request that has been sitting there looks like it
 				// has, instead of looking freshly arrived every time you glance.
@@ -1151,19 +1171,23 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				// what is being agreed to, and "20 requests" says the least of
 				// the three.
 				bool allDelete = true, allRename = true;
+				bool allEntity = true, anyEntity = false;
 				for (const std::size_t k : group)
 				{
 					if (ops[k].op == HE::Net::CollabSession::AssetOp::Delete)
 						allRename = false;
 					else
 						allDelete = false;
+					if (ops[k].isEntity()) anyEntity = true;
+					else                   allEntity = false;
 				}
 				// Verb first, like the single rows above it, and never the bare
 				// count on its own: "20 requests" is the one phrasing that does
 				// not say what agreeing to it would do.
 				const std::string headline =
 					(allDelete ? "Delete " : allRename ? "Rename " : "Answer ") +
-					std::to_string(group.size()) + " assets";
+					std::to_string(group.size()) +
+					(allEntity ? " entities" : anyEntity ? " items" : " assets");
 
 				ImGui::PushID(static_cast<int>(2000 + i));
 				const bool open = ImGui::TreeNodeEx(

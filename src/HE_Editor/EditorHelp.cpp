@@ -8348,6 +8348,11 @@ namespace
 	  "Keeps the rename inside the graph you are editing. Everything listed goes "
 	  "on naming the old one, which for a call means it now names nothing.",
 	  "", "horizoncode#functions" },
+	{ "Rename Across Project/Ask for it", "Ask the person editing it",
+	  "Somebody else in the collaboration session is editing this graph, so the "
+	  "rename cannot be written into it. This asks them to hand it over; once they "
+	  "say yes it moves up to the list that will be renamed.",
+	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
 	  "Python, and through a Call Function (Ref) node on a reference to this "

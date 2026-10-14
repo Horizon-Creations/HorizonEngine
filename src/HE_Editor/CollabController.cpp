@@ -29,6 +29,8 @@
 #include <vector>
 
 #include <HorizonScene/Components/EntityIdComponent.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 
@@ -1257,64 +1259,7 @@ void CollabController::wireCallbacks()
 					m_collab->broadcastAssetOpApply(op, path, newPath, who, folder);
 				return;
 			}
-			// Folded into the existing row when the same asset is already
-			// waiting: three people wanting one file gone is one decision.
-			for (PendingAssetOp& p : m_pendingOps)
-			{
-				if (p.op == op && p.path == path && p.newPath == newPath)
-				{
-					// Asked twice — one row, but the NEWER request id. A verdict
-					// is addressed to a REQUEST, and the first one is no longer
-					// what the asker is waiting on: keeping it answered a
-					// request they had already replaced and left the live one
-					// hanging for good.
-					bool known = false;
-					for (auto& rq : p.requesters)
-					{
-						if (rq.id != who) continue;
-						rq.requestId = requestId;
-						known = true;
-						break;
-					}
-					if (!known) p.requesters.push_back({ who, requestId });
-					// A row asked for on its own, now also asked for as part of
-					// a selection, JOINS that selection. The alternative is a
-					// file that quietly drops out of the bundle it was selected
-					// in and is left sitting in the tray alone after the bundle
-					// has been answered — which reads as a bug in the delete,
-					// not as an artefact of who asked first. A row that already
-					// belongs to a batch keeps it: coalescing is per asset, and
-					// the first batch to name it owns it.
-					if (!p.inBatch() && batch != 0)
-					{
-						p.batchOwner = who;
-						p.batchId    = batch;
-					}
-					return;
-				}
-			}
-			// A queue nobody could ever work through is not a queue. Repeat
-			// asks for one asset already fold into the row above, so getting
-			// here this often means a peer is naming hundreds of DIFFERENT
-			// files — a runaway client rather than a person, and no host is
-			// going to answer that list anyway. Refused at the door, so what
-			// the host does see stays readable.
-			constexpr std::size_t kMaxPendingOps = 128;
-			if (m_pendingOps.size() >= kMaxPendingOps)
-			{
-				m_collab->sendAssetOpVerdict(who, requestId, false);
-				return;
-			}
-			PendingAssetOp p;
-			p.op      = op;
-			p.path    = path;
-			p.newPath = newPath;
-			p.folder  = folder;
-			p.requesters.push_back({ who, requestId });
-			p.firstAskedMs = m_lastUpdateMs;
-			p.batchOwner   = batch != 0 ? who : 0;
-			p.batchId      = batch;
-			m_pendingOps.push_back(std::move(p));
+			queueAssetOp(who, requestId, op, path, newPath, folder, batch);
 		});
 
 	// ── Somebody wants what WE are holding ──
@@ -1358,7 +1303,8 @@ void CollabController::wireCallbacks()
 			if (m_ourPendingOps[i].requestId != requestId) continue;
 			const auto        op   = m_ourPendingOps[i].op;
 			const std::string path = m_ourPendingOps[i].path;
-			const std::string name = std::filesystem::path(path).filename().string();
+			const std::string name = m_ourPendingOps[i].name();
+			const bool entity = HE::Ed::CollabEntityOps::isKey(path);
 			m_ourPendingOps.erase(m_ourPendingOps.begin() +
 			                      static_cast<std::ptrdiff_t>(i));
 
@@ -1393,10 +1339,11 @@ void CollabController::wireCallbacks()
 				// exactly the answer somebody comes back looking for after
 				// wondering why the file is still there. Warning, not Problem:
 				// nothing is out of step, the host simply said no.
+				// An entity key is no path a note could open, so it carries none.
 				postNote(HE::Ed::NoteLevel::Warning,
 				         std::string("The host did not approve ") +
 				             (del ? "deleting \"" : "renaming \"") + name + "\".",
-				         {}, path);
+				         {}, entity ? std::string() : path);
 			}
 			return;
 		}
@@ -1414,6 +1361,19 @@ void CollabController::wireCallbacks()
 			{
 				if (by == localParticipant()) return;   // we are the one who did it
 				noteRemoteReimport(by, path);
+				return;
+			}
+			// An entity somebody was editing, approved by the host. Never handed
+			// to the asset handler or to the disk check below: both read `path`
+			// as a file, and a delete would go looking for "entity:…" on disk.
+			if (HE::Ed::CollabEntityOps::isKey(path))
+			{
+				const std::uint64_t subject = HE::Ed::CollabEntityOps::subjectOf(path);
+				const bool known = op == HE::Net::CollabSession::AssetOp::Delete ||
+				                   (op == HE::Net::CollabSession::AssetOp::Rename &&
+				                    !newPath.empty());
+				if (subject != 0 && known && m_onRemoteEntityOp)
+					m_onRemoteEntityOp(op, subject, newPath);
 				return;
 			}
 			if (!m_onRemoteAssetOp) return;
@@ -1806,13 +1766,12 @@ void CollabController::teardown()
 		for (const OurOp& o : m_ourPendingOps)
 		{
 			postNote(HE::Ed::NoteLevel::Warning,
-			         "Nobody answered your request for \"" +
-			             std::filesystem::path(o.path).filename().string() +
+			         "Nobody answered your request for \"" + o.name() +
 			             "\" before the session ended.",
 			         o.op == HE::Net::CollabSession::AssetOp::Edit
 			             ? "It stayed with whoever was editing it."
 			             : "Nothing was changed.",
-			         o.path);
+			         HE::Ed::CollabEntityOps::isKey(o.path) ? std::string() : o.path);
 		}
 		m_ourPendingOps.clear();
 	}
@@ -3679,6 +3638,165 @@ void CollabController::noteRemoteNotesDropped(HE::Net::ParticipantId from)
 	         "back, that machine is still going.");
 }
 
+void CollabController::queueAssetOp(HE::Net::ParticipantId who, std::uint32_t requestId,
+                                    HE::Net::CollabSession::AssetOp op,
+                                    const std::string& path, const std::string& newPath,
+                                    bool folder, std::uint32_t batch)
+{
+	// Folded into the existing row when the same asset is already
+	// waiting: three people wanting one file gone is one decision.
+	for (PendingAssetOp& p : m_pendingOps)
+	{
+		if (p.op == op && p.path == path && p.newPath == newPath)
+		{
+			// Asked twice — one row, but the NEWER request id. A verdict
+			// is addressed to a REQUEST, and the first one is no longer
+			// what the asker is waiting on: keeping it answered a
+			// request they had already replaced and left the live one
+			// hanging for good.
+			bool known = false;
+			for (auto& rq : p.requesters)
+			{
+				if (rq.id != who) continue;
+				rq.requestId = requestId;
+				known = true;
+				break;
+			}
+			if (!known) p.requesters.push_back({ who, requestId });
+			// A row asked for on its own, now also asked for as part of
+			// a selection, JOINS that selection. The alternative is a
+			// file that quietly drops out of the bundle it was selected
+			// in and is left sitting in the tray alone after the bundle
+			// has been answered — which reads as a bug in the delete,
+			// not as an artefact of who asked first. A row that already
+			// belongs to a batch keeps it: coalescing is per asset, and
+			// the first batch to name it owns it.
+			if (!p.inBatch() && batch != 0)
+			{
+				p.batchOwner = who;
+				p.batchId    = batch;
+			}
+			return;
+		}
+	}
+	// A queue nobody could ever work through is not a queue. Repeat
+	// asks for one asset already fold into the row above, so getting
+	// here this often means a peer is naming hundreds of DIFFERENT
+	// files — a runaway client rather than a person, and no host is
+	// going to answer that list anyway. Refused at the door, so what
+	// the host does see stays readable.
+	constexpr std::size_t kMaxPendingOps = 128;
+	if (m_pendingOps.size() >= kMaxPendingOps)
+	{
+		m_collab->sendAssetOpVerdict(who, requestId, false);
+		return;
+	}
+	PendingAssetOp p;
+	p.op      = op;
+	p.path    = path;
+	p.newPath = newPath;
+	p.folder  = folder;
+	p.requesters.push_back({ who, requestId });
+	p.firstAskedMs = m_lastUpdateMs;
+	p.batchOwner   = batch != 0 ? who : 0;
+	p.batchId      = batch;
+	m_pendingOps.push_back(std::move(p));
+}
+
+bool CollabController::requestEntityOp(HE::Net::CollabSession::AssetOp op,
+                                       std::uint64_t subject, const std::string& name,
+                                       const std::string& newName)
+{
+	using Op = HE::Net::CollabSession::AssetOp;
+	if (!m_collab || !inSession() || subject == 0) return false;
+	if (op != Op::Delete && op != Op::Rename) return false;
+	if (op == Op::Rename && newName.empty()) return false;
+	const std::string key = HE::Ed::CollabEntityOps::keyFor(subject);
+	const std::string shown = name.empty() ? std::string("an entity") : name;
+
+	// The host's own ask goes into its own in-tray (see the header): the row is
+	// the confirmation an entity delete otherwise never has. Request id 0 — the
+	// verdict it produces is addressed to ourselves and matches nothing.
+	if (isHost())
+	{
+		queueAssetOp(localParticipant(), 0, op, key, newName, false, m_openBatch);
+		m_assetNotice = (op == Op::Delete ? "Delete \"" : "Rename \"") + shown +
+			"\" is waiting in your requests — somebody is editing it.";
+		return true;
+	}
+
+	const std::uint32_t id = m_collab->requestAssetOp(op, key, newName, false,
+	                                                  subject, m_openBatch);
+	if (id == 0) return false;
+	// Same replace-don't-append rule as requestOrPerformAssetOp: the host keeps
+	// the newest id per (asker, row), so a second entry would wait for ever.
+	bool replaced = false;
+	for (OurOp& o : m_ourPendingOps)
+	{
+		if (o.op != op || o.path != key) continue;
+		o.requestId = id;
+		o.display   = shown;
+		replaced = true;
+		break;
+	}
+	if (!replaced) m_ourPendingOps.push_back({ id, op, key, shown });
+	m_assetNotice = (op == Op::Delete ? "Asked the host to delete \""
+	                                  : "Asked the host to rename \"") + shown + "\".";
+	return true;
+}
+
+std::string CollabController::OurOp::name() const
+{
+	return display.empty() ? std::filesystem::path(path).filename().string() : display;
+}
+
+std::string CollabController::opDisplayName(const PendingAssetOp& op)
+{
+	if (!op.isEntity()) return std::filesystem::path(op.path).filename().string();
+	const std::uint64_t subject = HE::Ed::CollabEntityOps::subjectOf(op.path);
+	if (m_world && subject != 0)
+	{
+		const std::uint32_t h = entityForNetId(subject);
+		const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(h));
+		auto& reg = m_world->registry();
+		if (h != 0 && reg.valid(e))
+		{
+			if (const auto* nc = reg.try_get<NameComponent>(e)) return nc->name;
+			return "(unnamed entity)";
+		}
+	}
+	return op.path;
+}
+
+std::string CollabController::opHeldBy(const PendingAssetOp& op)
+{
+	if (!m_collab) return {};
+	const HE::Net::ParticipantId me = localParticipant();
+	if (!op.isEntity())
+	{
+		const HE::Net::LockInfo* l = assetLockInfo(op.path);
+		return l && l->owner != me ? l->ownerName : std::string();
+	}
+	const std::uint64_t subject = HE::Ed::CollabEntityOps::subjectOf(op.path);
+	if (!m_world || subject == 0) return {};
+	const std::uint32_t h = entityForNetId(subject);
+	auto& reg = m_world->registry();
+	std::vector<entt::entity> stack{ static_cast<entt::entity>(static_cast<entt::id_type>(h)) };
+	if (h == 0) return {};
+	while (!stack.empty())
+	{
+		const entt::entity e = stack.back();
+		stack.pop_back();
+		if (!reg.valid(e)) continue;
+		const HE::Net::LockInfo* l =
+			m_collab->lockFor(netIdFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+		if (l && l->owner != me) return l->ownerName;
+		if (const auto* hc = reg.try_get<HierarchyComponent>(e))
+			stack.insert(stack.end(), hc->children.begin(), hc->children.end());
+	}
+	return {};
+}
+
 bool CollabController::requestOrPerformAssetOp(
 	HE::Net::CollabSession::AssetOp op,
 	const std::string& relPath, const std::string& newRelPath, bool folder)
@@ -3803,8 +3921,10 @@ void CollabController::approveOne(const PendingAssetOp& op)
 	// Inside approveOne rather than at the button, so it also catches a rename
 	// that was approved as part of a bundle: a whole-selection yes must not be
 	// able to do what the same yes on one row refuses to.
+	// Not for an entity: its newPath is a NAME, which no disk has an opinion on,
+	// and resolving it as a path came back empty and refused every one of them.
 	if (op.op == HE::Net::CollabSession::AssetOp::Rename && m_localPathForKey &&
-	    !op.newPath.empty())
+	    !op.newPath.empty() && !op.isEntity())
 	{
 		const std::string from = m_localPathForKey(op.path);
 		const std::string to   = m_localPathForKey(op.newPath);
