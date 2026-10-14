@@ -701,6 +701,10 @@ void EditorApplication::OnInit()
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
+			// A save the user (or an MCP client) asked for is the moment the host
+			// keeps the session's state (CollabSettle.h); the session's own
+			// once-a-second autosave of a held tab is only traffic.
+			if (!m_collabAutosaveWrite) m_collab.noteLocalSave(relPath);
 			// An application's preview shows the saved assets, so a save is the
 			// signal to rebuild it. Only for the kinds that change what the
 			// preview DOES — a texture or a font swaps itself in through the
@@ -719,6 +723,13 @@ void EditorApplication::OnInit()
 			default: break;
 			}
 		});
+
+	// Host: a settling document's state goes to this disk. Only the scene is not
+	// there yet; every asset key was written as its file arrived (or, for the
+	// GameInstance graph, on every applied delta).
+	m_collab.setSettlePersist([this](const std::string& key, HE::Ed::CollabSettle::Reason) {
+		return key == HE::Ed::CollabSettle::kSceneKey ? persistSessionScene() : true;
+	});
 
 	m_collab.onAssetLockDenied([this](const std::string& relPath) {
 		// Someone else won the lock race by a round trip. Their state is the
@@ -9768,7 +9779,10 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;
-		if (!EditorUI::saveAsset(ctx, tab.assetPath)) continue;
+		m_collabAutosaveWrite = true;
+		const bool wrote = EditorUI::saveAsset(ctx, tab.assetPath);
+		m_collabAutosaveWrite = false;
+		if (!wrote) continue;
 		last = nowMs;
 		// Content assets publish themselves through ContentManager::saveAsset's
 		// hook. A C++ class does not go anywhere near the ContentManager — it is
@@ -12962,10 +12976,32 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 		m_autosave.clear();
 		captureSceneThumbnail(path);
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
+		// In a session the host keeps the scene for everyone: a client's save
+		// tells it to write its own copy (persistSessionScene). The host's own
+		// settle write is not a new save.
+		if (!m_settleWritingScene) m_collab.noteLocalSave(HE::Ed::CollabSettle::kSceneKey);
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
 	return false;
+}
+
+// The real scene file, not a recovery copy: the host's disk is the session's
+// state (a joiner is caught up from it, source control and the team server read
+// it), and a copy under Saved/ is something neither of them ever sees. This is
+// what "the host saves for everyone" means for the scene; assets are on the
+// host's disk already, written as their files arrive.
+bool EditorApplication::persistSessionScene()
+{
+	// Play swaps the world, the dump path quits after one frame; an unnamed
+	// scene has no file to write and asking where would be a dialog nobody
+	// opened. All of them stay pending and are tried again.
+	if (!m_editorWorld || m_isPlaying || !m_dumpPath.empty()) return false;
+	if (m_currentScenePath.empty()) return false;
+	m_settleWritingScene = true;
+	const bool ok = saveSceneToPath(m_currentScenePath);
+	m_settleWritingScene = false;
+	return ok;
 }
 
 // The solo autosave's tick. What it writes is a recovery copy in Saved/Autosave,

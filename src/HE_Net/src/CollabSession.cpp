@@ -83,6 +83,9 @@ constexpr MessageId kMsgAssetRefused       = kFirstUserMessage + 38;  // host �
 // others' (CollabSession.h, "Landscape patches").
 constexpr MessageId kMsgTerrainUpdate      = kFirstUserMessage + 39;  // client → host
 constexpr MessageId kMsgTerrainRelay       = kFirstUserMessage + 40;  // host → all clients
+// "I saved this document" (sendDocSaved). Host only: nobody else keeps the
+// session's state, so nobody else has anything to do with it.
+constexpr MessageId kMsgDocSaved           = kFirstUserMessage + 41;  // client → host
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -200,6 +203,9 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgAssetRefusedReport, [this](ConnectionId conn, BitReader& r) {
             handleAssetRefusedReport(conn, r);
+        });
+        m_net->on(kMsgDocSaved, [this](ConnectionId conn, BitReader& r) {
+            handleDocSaved(conn, r);
         });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
@@ -1511,6 +1517,30 @@ void CollabSession::handleLockQuery(ConnectionId conn, BitReader& r) {
     w.writeUInt32(lock ? lock->owner : kInvalidParticipant);
     w.writeString(lock ? lock->ownerName : std::string());
     m_net->send(conn, kMsgLockQueryResult, w);
+}
+
+// ─── "I saved this" ──────────────────────────────────────────────────────────
+
+bool CollabSession::sendDocSaved(const std::string& key) {
+    if (!m_net || !m_joined || key.empty()) return false;
+    // The host is the one being told, so its own save needs no frame.
+    if (m_role == NetRole::Host) {
+        if (m_onDocSaved) m_onDocSaved(m_localId, key);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+    BitWriter w;
+    w.writeString(key);
+    m_net->send(m_net->connections().front(), kMsgDocSaved, w);
+    return true;
+}
+
+void CollabSession::handleDocSaved(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;   // not admitted (yet)
+    std::string key;
+    if (!r.readString(key) || key.empty()) return;
+    if (m_onDocSaved) m_onDocSaved(sender, key);
 }
 
 void CollabSession::handleLockQueryResult(BitReader& r) {

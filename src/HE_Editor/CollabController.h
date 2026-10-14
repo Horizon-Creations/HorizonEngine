@@ -15,6 +15,7 @@
 // happens at all.
 
 #include "CollabEntityOps.h"
+#include "CollabSettle.h"
 #include "NotificationStore.h"
 
 #include <Net/CollabSession.h>
@@ -613,6 +614,27 @@ public:
 	// final. No-op outside a session, for an excluded type, or while a remote
 	// create is being applied.
 	void publishAssetCreate(const std::string& relativePath, const std::string& fullPath);
+
+	// ── Save and idle: the session's state is kept (CollabSettle.h) ─────────
+	// The user (or an MCP client) explicitly saved `key` here: an asset key, or
+	// CollabSettle::kSceneKey for the scene. NOT for the session's own
+	// whole-file autosave, which is traffic, not a save. A client tells the
+	// host; the host notes it for itself. No-op outside a session.
+	void noteLocalSave(const std::string& key);
+	// Host: writes what is not on the host's disk yet for a settling key (the
+	// scene) and answers whether it is now. False keeps the key pending.
+	void setSettlePersist(HE::Ed::CollabSettle::Persist fn) { m_settlePersist = std::move(fn); }
+	// Host: these keys' session state is now on the host's disk, because
+	// somebody saved them or nobody has touched them for CollabSettle::kIdleMs.
+	// The attach point for the team server's upload (topic 199): with the
+	// mediator on, this is where a commit is requested.
+	void onSessionSettled(std::function<void(const std::vector<HE::Ed::CollabSettle::Settled>&)> fn)
+	{
+		m_onSessionSettled = std::move(fn);
+	}
+	bool          settlePending(const std::string& key) const { return m_settle.isPending(key); }
+	std::uint64_t lastSettledMs() const    { return m_lastSettledMs; }
+	std::size_t   lastSettledCount() const { return m_lastSettledCount; }
 
 	// ── Writing a new asset through ContentManager::saveAsset ────────────────
 	// Hold one of these across the save when the file being written is NEW and
@@ -1508,6 +1530,15 @@ private:
 	};
 	std::vector<SessionOp> m_sessionOps;
 	void noteSessionTouched(const std::string& relativePath);
+	// Host: the session changed the scene (an entity channel, ours or a peer's).
+	void noteSceneTouched();
+	// Host: settle what is due and tell the listeners.
+	void updateSettle(std::uint64_t nowMs);
+	HE::Ed::CollabSettle         m_settle;
+	HE::Ed::CollabSettle::Persist m_settlePersist;
+	std::function<void(const std::vector<HE::Ed::CollabSettle::Settled>&)> m_onSessionSettled;
+	std::uint64_t                m_lastSettledMs    = 0;
+	std::size_t                  m_lastSettledCount = 0;
 	void noteSessionOp(HE::Net::ParticipantId by, HE::Net::CollabSession::AssetOp op,
 	                   const std::string& path, const std::string& newPath, bool folder);
 	void catchUpJoiner(HE::Net::ParticipantId who);

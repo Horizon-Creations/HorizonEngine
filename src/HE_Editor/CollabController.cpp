@@ -1132,12 +1132,14 @@ void CollabController::wireCallbacks()
 
 	m_collab->onComponents([this](HE::Net::ParticipantId,
 	                              const HE::Net::CollabSession::ComponentUpdate& u) {
+		noteSceneTouched();
 		const std::uint32_t local = entityForNetId(u.netId);
 		if (local != 0 && m_onRemoteComponents) m_onRemoteComponents(local, u.blob);
 	});
 
 	m_collab->onTerrainPatch([this](HE::Net::ParticipantId,
 	                                const HE::Net::CollabSession::TerrainPatch& p, bool own) {
+		noteSceneTouched();
 		if (!m_onRemoteTerrainPatch) return;
 		// The echo of our own needs no entity: it only acknowledges a sequence number.
 		m_onRemoteTerrainPatch(own ? 0u : entityForNetId(p.netId), p, own);
@@ -1146,6 +1148,7 @@ void CollabController::wireCallbacks()
 	m_collab->onStructural([this](HE::Net::ParticipantId,
 	                              const HE::Net::CollabSession::StructuralChange& c) {
 		using Kind = HE::Net::CollabSession::StructuralChange::Kind;
+		noteSceneTouched();
 		switch (c.kind)
 		{
 		case Kind::Created:
@@ -1389,6 +1392,7 @@ void CollabController::wireCallbacks()
 				                    !newPath.empty());
 				if (subject != 0 && known && m_onRemoteEntityOp)
 					m_onRemoteEntityOp(op, subject, newPath);
+				noteSceneTouched();
 				return;
 			}
 			noteSessionOp(by, op, path, newPath, folder);
@@ -1440,10 +1444,18 @@ void CollabController::wireCallbacks()
 		a.ownerName = ownerName;
 	});
 
+	// Somebody saved (a client's notice, or our own save answered inline). Only
+	// the host gets these; see noteLocalSave.
+	m_collab->onDocSaved([this](HE::Net::ParticipantId, const std::string& key) {
+		if (!m_isHost || HE::Ed::CollabEntityOps::isKey(key)) return;
+		m_settle.noteSaved(key, m_lastUpdateMs);
+	});
+
 	m_collab->onTransform([this](HE::Net::ParticipantId,
 	                             const HE::Net::CollabSession::TransformDelta& d) {
 		// Subjects are uuid-derived, never raw handles — resolve here so the
 		// editor callback keeps receiving something it can hand to the registry.
+		noteSceneTouched();
 		const std::uint32_t local = entityForNetId(d.subject);
 		if (local != 0 && m_onRemoteTransform)
 			m_onRemoteTransform(local, d.position, d.rotation, d.scale);
@@ -1763,6 +1775,10 @@ void CollabController::teardown()
 	m_sessionTouched.clear();
 	m_sessionOps.clear();
 	m_publishOnGrant.clear();
+	// What had not settled yet goes with the session. The host is then editing
+	// alone, and its next save is a save like any other (topic 199's normal
+	// trigger, which uploads everything that differs).
+	m_settle.reset();
 	// Locks whose grant we were still waiting on to release. There is no session
 	// left to release them into, and the host has dropped everything we held the
 	// moment we disconnected — keeping these would only mean the next session's
@@ -1960,6 +1976,8 @@ void CollabController::update(std::uint64_t nowMs)
 	// stopped, so nothing else will carry it out).
 	if (m_hasPendingTransform && nowMs - m_lastTransformSendMs >= 33)
 		flushPendingTransform(nowMs);
+
+	updateSettle(nowMs);
 
 	if (m_relayLink && !updateRelayStatus()) return;   // false: the join failed and is gone
 
@@ -2559,6 +2577,7 @@ bool CollabController::sendTransformNow(std::uint64_t subject, const float v[9],
 	for (int i = 0; i < 3; ++i) d.scale[i]    = v[6 + i];
 
 	if (!m_collab->sendTransform(d)) return false;
+	noteSceneTouched();
 	m_lastTransformSubject = subject;
 	std::memcpy(m_lastTransform, v, sizeof(m_lastTransform));
 	m_hasLastTransform    = true;
@@ -2604,6 +2623,7 @@ void CollabController::publishComponents(std::uint32_t entityHandle,
 	if (m_collab->sendComponents(u))
 	{
 		m_lastComponentHashes[entityHandle] = hash;
+		noteSceneTouched();
 	}
 }
 
@@ -2622,7 +2642,9 @@ bool CollabController::publishTerrainPatch(std::uint32_t entityHandle,
 	if (!m_collab || !inSession()) return false;
 	patch.netId = netIdFor(entityHandle);
 	if (patch.netId == 0) return false;
-	return m_collab->sendTerrainPatch(patch);
+	if (!m_collab->sendTerrainPatch(patch)) return false;
+	noteSceneTouched();
+	return true;
 }
 
 // ─── Structural replication ──────────────────────────────────────────────────
@@ -2721,7 +2743,9 @@ bool CollabController::publishCreate(std::uint32_t entityHandle,
 	c.netId     = netIdFor(entityHandle);
 	c.parentNet = parentHandle ? netIdFor(parentHandle) : 0;
 	c.blob      = blob;
-	return m_collab->sendStructural(c);
+	if (!m_collab->sendStructural(c)) return false;
+	noteSceneTouched();
+	return true;
 }
 
 bool CollabController::publishDestroy(std::uint32_t entityHandle)
@@ -2741,7 +2765,7 @@ bool CollabController::publishDestroy(std::uint32_t entityHandle)
 	c.kind  = HE::Net::CollabSession::StructuralChange::Kind::Destroyed;
 	c.netId = netId;
 	const bool ok = m_collab->sendStructural(c);
-	if (ok) forgetNetId(netId);
+	if (ok) { forgetNetId(netId); noteSceneTouched(); }
 	return ok;
 }
 
@@ -2760,7 +2784,9 @@ bool CollabController::publishReparent(std::uint32_t entityHandle,
 		c.blob.resize(9 * sizeof(float));
 		std::memcpy(c.blob.data(), localTransform9, c.blob.size());
 	}
-	return m_collab->sendStructural(c);
+	if (!m_collab->sendStructural(c)) return false;
+	noteSceneTouched();
+	return true;
 }
 
 // ─── Authored-asset sync ─────────────────────────────────────────────────────
@@ -4397,9 +4423,50 @@ void CollabController::noteSessionTouched(const std::string& relativePath)
 	// Only the host replays, so only the host has to remember.
 	if (!m_isHost || relativePath.empty()) return;
 	if (HE::Ed::CollabEntityOps::isKey(relativePath)) return;
+	m_settle.noteChanged(relativePath, m_lastUpdateMs);
 	if (std::find(m_sessionTouched.begin(), m_sessionTouched.end(), relativePath) ==
 	    m_sessionTouched.end())
 		m_sessionTouched.push_back(relativePath);
+}
+
+// ─── Save and idle: when the session's state is kept ─────────────────────────
+// See CollabSettle.h. The host tracks every document the session changes and
+// settles it on a save anywhere in the session or once it goes quiet; the
+// persist step writes what is not on the host's disk yet, then the listeners
+// hear about it.
+
+void CollabController::noteSceneTouched()
+{
+	if (!m_isHost) return;
+	m_settle.noteChanged(HE::Ed::CollabSettle::kSceneKey, m_lastUpdateMs);
+}
+
+void CollabController::noteLocalSave(const std::string& key)
+{
+	if (!m_collab || !inSession() || key.empty()) return;
+	// A peer's file being written here is their save arriving, not ours: the
+	// host hears of it from them (and a client must not echo it back).
+	if (m_applyingRemoteAsset) return;
+	// The host answers itself inline; a client tells the host.
+	m_collab->sendDocSaved(key);
+}
+
+void CollabController::updateSettle(std::uint64_t nowMs)
+{
+	if (!m_isHost || !inSession()) return;
+	std::vector<HE::Ed::CollabSettle::Settled> settled = m_settle.update(nowMs, m_settlePersist);
+	if (settled.empty()) return;
+	m_lastSettledMs    = nowMs;
+	m_lastSettledCount = settled.size();
+	std::string names;
+	for (const auto& s : settled)
+	{
+		if (!names.empty()) names += ", ";
+		names += s.key;
+		names += s.reason == HE::Ed::CollabSettle::Reason::Saved ? " (saved)" : " (idle)";
+	}
+	HE_LOG_INFO(Editor, "Collab: session state kept: %s", names.c_str());
+	if (m_onSessionSettled) m_onSessionSettled(settled);
 }
 
 void CollabController::noteSessionOp(HE::Net::ParticipantId by,
@@ -4411,6 +4478,9 @@ void CollabController::noteSessionOp(HE::Net::ParticipantId by,
 	if (!m_isHost) return;
 	if (op != Op::Delete && op != Op::Rename && op != Op::Create) return;
 	m_sessionOps.push_back({ op, path, newPath, by, folder });
+	// A delete or a rename is a change to the project's state like a save is.
+	m_settle.noteChanged(path, m_lastUpdateMs);
+	if (op == Op::Rename) m_settle.noteChanged(newPath, m_lastUpdateMs);
 
 	// The touched set follows the op, so the files sent afterwards are named the
 	// way the session names them now. A folder op covers everything under it.

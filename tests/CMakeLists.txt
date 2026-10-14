@@ -351,6 +351,7 @@ add_executable(he_tests
     test_net_lanbeacon.cpp
     test_net_collab.cpp
     test_collab_controller.cpp
+    test_collab_settle.cpp
     test_collab_undo.cpp
     test_terrain_sync.cpp
     test_editor_commands.cpp

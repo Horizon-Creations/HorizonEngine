@@ -3748,3 +3748,105 @@ TEST_CASE("Lock grant: a client's save that had to wait for the lock goes out wh
     s.host.leave();
     he_test::removeQuiet(file);
 }
+
+TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step")
+{
+    // Topic 198 step 8. The host keeps the session's state for everyone; it is
+    // told when anybody saves and notices on its own when nobody is working on
+    // a document anymore. Before, a client's Ctrl+S on the scene wrote the
+    // client's own disk and the host never heard of it. pumpUntil restarts its
+    // clock at 0 each call, so this test keeps its own.
+    using HE::Ed::CollabSettle;
+    HorizonWorld annaWorld, bobWorld;
+    const auto crate = annaWorld.createEntity("Crate");
+    CollabController anna, bob;
+    anna.setWorld(&annaWorld);
+    REQUIRE(anna.startHosting(0, "Anna"));
+    bob.setWorld(&bobWorld);
+    bob.onWorldReplaced([&bob] { bob.seedNetIds(); });
+    REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
+
+    std::uint64_t clock = 0;
+    const auto tickUntil = [&](auto done, std::uint64_t maxSimMs) {
+        const std::uint64_t end = clock + maxSimMs;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (clock < end && std::chrono::steady_clock::now() < deadline) {
+            anna.update(clock);
+            bob.update(clock);
+            if (done()) return true;
+            clock += 50;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return static_cast<bool>(done());
+    };
+    REQUIRE(tickUntil([&] { return bob.status() == CollabController::Status::Joined; }, 600000));
+
+    std::vector<CollabSettle::Settled> kept, keptOnBob;
+    std::vector<std::string> persisted;
+    bool sceneWritable = true;
+    anna.setSettlePersist([&](const std::string& key, CollabSettle::Reason) {
+        if (key == CollabSettle::kSceneKey && !sceneWritable) return false;
+        persisted.push_back(key);
+        return true;
+    });
+    anna.onSessionSettled([&](const std::vector<CollabSettle::Settled>& s) {
+        kept.insert(kept.end(), s.begin(), s.end());
+    });
+    bob.setSettlePersist([&](const std::string&, CollabSettle::Reason) { return true; });
+    bob.onSessionSettled([&](const std::vector<CollabSettle::Settled>& s) {
+        keptOnBob.insert(keptOnBob.end(), s.begin(), s.end());
+    });
+    const auto keptAs = [&](const std::string& key, CollabSettle::Reason r) {
+        return std::count_if(kept.begin(), kept.end(), [&](const CollabSettle::Settled& s) {
+            return s.key == key && s.reason == r;
+        });
+    };
+
+    SUBCASE("a client's save is the host's save")
+    {
+        bob.noteLocalSave(CollabSettle::kSceneKey);
+        REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 5000));
+        REQUIRE(tickUntil([&] { return keptAs(CollabSettle::kSceneKey, CollabSettle::Reason::Saved) == 1; },
+                          3 * CollabSettle::kSaveBatchMs));
+        CHECK(std::count(persisted.begin(), persisted.end(), CollabSettle::kSceneKey) == 1);
+    }
+
+    SUBCASE("a scene nobody touches anymore is kept once, and not while it cannot be written")
+    {
+        const std::uint64_t subject =
+            anna.subjectFor(static_cast<std::uint32_t>(entt::to_integral(crate)));
+        REQUIRE(tickUntil([&] { return bob.entityForNetId(subject) != 0; }, 600000));
+        bob.followSelection(subject);
+        REQUIRE(tickUntil([&] {
+            const HE::Net::LockInfo* l = anna.lockFor(subject);
+            return l && l->owner == bob.localParticipant();
+        }, 600000));
+
+        // Bob drags the crate. Anna applies it, so the scene is the session's
+        // change to keep. Bob keeps the crate selected (and locked) afterwards:
+        // a held lock is not somebody working.
+        sceneWritable = false;
+        const float r[3] = { 0, 0, 0 }, sc[3] = { 1, 1, 1 };
+        for (int i = 0; i < 5; ++i) {
+            const float p[3] = { static_cast<float>(i), 0, 0 };
+            bob.publishTransform(subject, p, r, sc, clock);
+            anna.update(clock); bob.update(clock);
+            clock += 50;
+        }
+        REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 5000));
+        // Quiet long enough, but Anna is in Play: nothing is reported as kept.
+        CHECK_FALSE(tickUntil([&] { return !kept.empty(); }, CollabSettle::kIdleMs + 1000));
+        CHECK(anna.settlePending(CollabSettle::kSceneKey));
+
+        sceneWritable = true;
+        REQUIRE(tickUntil([&] { return keptAs(CollabSettle::kSceneKey, CollabSettle::Reason::Idle) == 1; }, 1000));
+        // Once: nothing changed since.
+        CHECK_FALSE(tickUntil([&] { return kept.size() > 1; }, 2 * CollabSettle::kIdleMs));
+        CHECK(bob.lockFor(subject) != nullptr);
+    }
+
+    // The host keeps state for everyone; a client never does.
+    CHECK(keptOnBob.empty());
+    bob.leave();
+    anna.leave();
+}

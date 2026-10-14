@@ -122,7 +122,10 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // v14 peer skips an item kind it does not know, so a Custom Event declared in the
 // Level Script would exist on one machine only. Same rule as v13: a change that
 // leaves one side silently behind is a bump.
-inline constexpr std::uint16_t kCollabProtocolVersion = 15;
+// v16: a client tells the host that it SAVED a document (sendDocSaved), so the
+// host persists the session's state at that moment. A v15 host drops the frame,
+// and the client's save would stay on the client's disk without anybody told.
+inline constexpr std::uint16_t kCollabProtocolVersion = 16;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -863,7 +866,24 @@ public:
         m_onLockQuery = std::move(fn);
     }
 
-    // ── Moderation (host only) ───────────────────────────────────────────────
+    // ── "I saved this" ───────────────────────────────────────────────────────
+    // A save is the moment somebody says "this state is the one to keep", and in
+    // a session only the HOST keeps state for everyone: its disk is what a joiner
+    // is caught up from and what source control (or the team server) sees. A
+    // client's save used to stay on the client's own disk with nobody else told.
+    // `key` is the document: an asset key as on the asset frames, or the
+    // editor's scene key. The bytes themselves travel on their usual channels;
+    // this only says that a save happened. On the host it is answered inline
+    // (it is the one being told), so both roles have one code path. Returns
+    // false when there is nobody to tell.
+    bool sendDocSaved(const std::string& key);
+
+    // Host only: somebody (the host itself included) saved `key`.
+    void onDocSaved(std::function<void(ParticipantId from, const std::string& key)> fn) {
+        m_onDocSaved = std::move(fn);
+    }
+
+    // ── Moderation (host only)───────────────────────────────────────────────
     // The host owns the participant registry, so it is also the only side that
     // can take someone out of it. Both calls are no-ops on a client and for the
     // host's own id — there is nobody above the host to appeal to, and equally
@@ -1038,6 +1058,7 @@ private:
     // Lock query
     void handleLockQuery(ConnectionId conn, BitReader& r);         // host
     void handleLockQueryResult(BitReader& r);                      // client
+    void handleDocSaved(ConnectionId conn, BitReader& r);          // host
 
     // Assets
     void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
@@ -1150,6 +1171,7 @@ private:
                        const std::vector<DocDelta>&, std::uint32_t)> m_onDocDeltas;
     std::function<void(std::uint64_t, bool, ParticipantId, const std::string&)>
                                                                 m_onLockQuery;
+    std::function<void(ParticipantId, const std::string&)>     m_onDocSaved;
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
     std::function<void(ParticipantId, const TerrainPatch&, bool)> m_onTerrainPatch;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;

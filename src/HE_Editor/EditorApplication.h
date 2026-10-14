@@ -1108,6 +1108,13 @@ private:
 	// tools are the caller that HAS to know, because the client on the other end
 	// cannot see either.
 	bool saveSceneToPath(const std::string& path);
+	// Host, in a session: the scene settled (somebody saved it, or nobody has
+	// touched it for a while), so the host writes it to its own scene file.
+	// False when it cannot now (Play, no file yet, a disk conflict pending);
+	// the key then stays pending (CollabSettle.h).
+	bool persistSessionScene();
+	bool m_settleWritingScene  = false;   // persistSessionScene's write is not a new save
+	bool m_collabAutosaveWrite = false;   // the session's 1 s autosave is not a save either
 	// Hand the current viewport image to the thumbnail cache as this scene's
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.
