@@ -135,7 +135,8 @@ Gleiche Szene und Kamera wie auf Metal (`HE_DUMP_WATERBRUSH=pit`, Nahaufnahme ob
 - Die Bilder von D3D11 und D3D12 weichen von Vulkan im Mittel um 0,31 von 255 ab, kein Pixel um mehr als 24.
 - Anders als auf Metal ist das Bild **nicht immer bitgleich über zwei Läufe**. Von drei Vulkan-Läufen waren zwei
   bitgleich. Der dritte wich um höchstens 8 von 255 ab, bei 0,16 % der Pixel und keinem über 24. Die Abweichung
-  lag in einem Band über Wasser und hinterem Ufer (y 122 bis 303). Auch mit ausgeblendetem Wasser
+  lag in einem Band über Wasser und hinterem Ufer (y 122 bis 303). Zwei D3D12-Läufe wichen um höchstens 4 von
+255 ab, in einem schmalen Streifen bei y 312 bis 319. Auch mit ausgeblendetem Wasser
   (`HE_DUMP_WATERHIDESHEET=1`) weichen zwei Läufe im selben Band leicht ab: unter Vulkan höchstens 4 von 255, unter
   D3D12 höchstens 1 von 255. Zum Vergleich unterscheiden sich Fix und Negativkontrolle bei 12,4 % der Pixel, um
   bis zu 132 von 255. Die Geometrie ist in jedem Lauf gleich: Alle Logzahlen stimmen überein. Die kleine
@@ -150,7 +151,7 @@ Gleiche Szene und Kamera wie auf Metal (`HE_DUMP_WATERBRUSH=pit`, Nahaufnahme ob
   - Ausgenommen ist der Fall „PhysicsWorld: a full contact cache …“. Er stürzt im Debug-Build an einem
     Jolt-Assert ab (SEH) und tat das schon auf der Basis (Schritt 1). Mit ihm bricht doctest bei Fall 3159 ab.
   - Rot war einmal „inspector ui: the Replication section …“. Der Fall liest die echte Windows-Zwischenablage und
-    ist auf NN-WS03 unzuverlässig: Allein gestartet war er in 3 von 5 Läufen grün. Mit seiner ganzen Datei
+    ist auf NN-WS03 unzuverlässig: Allein gestartet war er in 3 von 6 Läufen grün. Mit seiner ganzen Datei
     gestartet waren alle 12 Fälle grün. Der Zweig ändert am Inspector nichts.
 
 ![Fix unter D3D12: flache Böschung bis an die Wasserlinie](water-lake/thema188-bank-after-d3d12.png)
