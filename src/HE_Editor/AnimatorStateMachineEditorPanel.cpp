@@ -35,8 +35,10 @@ struct State
 	HE::UUID    assetId;
 	HE::AnimatorStateMachineGraph graph;
 	bool        dirty = false;
-	// Last state the peers have seen — see CollabDocSync.
+	// Last state the peers have seen — see CollabDocSync. One per document: the
+	// sync graph below is the asset's second one (Scope::LogicGraph).
 	CollabDocSync::DocMirror collabMirror;
+	CollabDocSync::DocMirror collabSyncMirror;
 
 	GraphEditor::State geState;
 
@@ -116,6 +118,10 @@ CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
 	CollabDocSync::DocBindings out;
 	out.push_back({ CollabDocSync::Scope::Primary,
 	                CollabDocSync::forAnimatorGraph(st->graph), &st->collabMirror });
+	// The sync graph rode only on the whole-file autosave before, which re-reads
+	// the peer's tab (canvas state gone) a second after every edit.
+	out.push_back({ CollabDocSync::Scope::LogicGraph,
+	                CollabDocSync::forHorizonCodeGraph(st->syncGraph), &st->collabSyncMirror });
 	return out;
 }
 
@@ -191,6 +197,7 @@ bool reloadFromDisk(const std::string& assetPath)
 	// it would make the first diff after the reload report the difference
 	// between the peer's file and our old graph as OUR edit.
 	st->collabMirror = {};
+	st->collabSyncMirror = {};
 	return true;
 }
 
@@ -230,6 +237,7 @@ bool reloadByContentPath(const std::string& contentPath)
 	st->loaded = false;
 	st->dirty  = false;
 	st->collabMirror = {};
+	st->collabSyncMirror = {};
 	return true;
 }
 

@@ -2113,6 +2113,91 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     }
 return true;
 }
+
+// The class's declared events. Name-keyed like everything else: renaming one
+// rewrites the nodes, never the meaning of what is already on disk.
+nlohmann::json eventDeclToJsonObj(const EventDecl& e)
+{
+    nlohmann::json o = { { "name", e.name } };
+    if (e.hasArg)
+    {
+        o["hasArg"] = true;
+        o["argType"] = (int)e.argType;
+        if (!e.typeName.empty()) o["typeName"] = e.typeName;
+    }
+    return o;
+}
+
+bool eventDeclFromJsonObj(const nlohmann::json& e, EventDecl& d)
+{
+    if (!e.is_object()) return false;
+    d.name = e.value("name", std::string());
+    if (d.name.empty()) return false;
+    d.hasArg  = e.value("hasArg", false);
+    d.argType = (PinType)e.value("argType", (int)P::Float);
+    d.typeName = e.value("typeName", std::string());
+    return true;
+}
+
+nlohmann::json commentToJsonObj(const GraphComment& c)
+{
+    nlohmann::json o = { { "id", c.id }, { "text", c.text },
+                         { "pos", { c.x, c.y } }, { "size", { c.w, c.h } } };
+    if (c.subgraph) o["subgraph"] = c.subgraph;
+    return o;
+}
+
+// The id is read as written, 0 included; giving an id-less box a fresh one is
+// the document's business (it owns nextId), see fromJson.
+bool commentFromJsonObj(const nlohmann::json& e, GraphComment& c)
+{
+    if (!e.is_object()) return false;
+    c.id   = e.value("id", 0);
+    c.text = e.value("text", std::string());
+    if (const auto p = e.find("pos"); p != e.end() && p->is_array() && p->size() >= 2)
+    { c.x = (*p)[0].get<float>(); c.y = (*p)[1].get<float>(); }
+    if (const auto sz = e.find("size"); sz != e.end() && sz->is_array() && sz->size() >= 2)
+    { c.w = (*sz)[0].get<float>(); c.h = (*sz)[1].get<float>(); }
+    c.subgraph = e.value("subgraph", 0);
+    return true;
+}
+
+// The struct is a content-relative path inside HCGR, which
+// AssetRefs::retargetBlob already rewrites when the struct asset moves.
+nlohmann::json extractToJsonObj(const ExtractSpec& x)
+{
+    nlohmann::json jm = nlohmann::json::array();
+    for (const ExtractMapEntry& m : x.map)
+        jm.push_back({ { "member", m.member }, { "var", m.var } });
+    return { { "struct", x.structPath }, { "map", std::move(jm) } };
+}
+
+// An entry without a member or a variable names nothing and is dropped; one
+// member mapped twice keeps the first (the table has one row per member). A
+// member saved under a name the struct has since renamed (formerNames) is read
+// back under its live name when the definition is registered — at run time
+// findField resolves it anyway.
+void extractFromJsonObj(const nlohmann::json& ex, ExtractSpec& out)
+{
+    out = {};
+    if (!ex.is_object()) return;
+    out.structPath = ex.value("struct", std::string());
+    if (out.structPath.empty()) return;
+    HE::StructDef def;
+    const bool haveDef = HE::TypeRegistry::instance().getStruct(out.structPath, def);
+    for (const auto& e : ex.value("map", nlohmann::json::array()))
+    {
+        if (!e.is_object()) continue;
+        ExtractMapEntry m;
+        m.member = e.value("member", std::string());
+        m.var    = e.value("var", std::string());
+        if (m.member.empty() || m.var.empty()) continue;
+        if (haveDef)
+            if (const HE::StructField* f = def.findField(m.member)) m.member = f->name;
+        if (out.entryFor(m.member)) continue;
+        out.map.push_back(std::move(m));
+    }
+}
 } // namespace
 
 // ── Document JSON — assembled from the item writers above ───────────────────
@@ -2134,22 +2219,10 @@ std::string toJson(const Graph& g)
     for (const Variable& v : g.variables) jv.push_back(variableToJsonObj(v));
     j["variables"] = std::move(jv);
 
-    // The class's declared events. Name-keyed like everything else: renaming one
-    // rewrites the nodes, never the meaning of what is already on disk.
     if (!g.events.empty())
     {
         nlohmann::json je = nlohmann::json::array();
-        for (const EventDecl& e : g.events)
-        {
-            nlohmann::json o = { { "name", e.name } };
-            if (e.hasArg)
-            {
-                o["hasArg"] = true;
-                o["argType"] = (int)e.argType;
-                if (!e.typeName.empty()) o["typeName"] = e.typeName;
-            }
-            je.push_back(std::move(o));
-        }
+        for (const EventDecl& e : g.events) je.push_back(eventDeclToJsonObj(e));
         j["events"] = std::move(je);
     }
     // Comment boxes: written only when there are any, so a graph without them
@@ -2157,26 +2230,13 @@ std::string toJson(const Graph& g)
     if (!g.comments.empty())
     {
         nlohmann::json jc = nlohmann::json::array();
-        for (const GraphComment& c : g.comments)
-        {
-            nlohmann::json o = { { "id", c.id }, { "text", c.text },
-                                 { "pos", { c.x, c.y } }, { "size", { c.w, c.h } } };
-            if (c.subgraph) o["subgraph"] = c.subgraph;
-            jc.push_back(std::move(o));
-        }
+        for (const GraphComment& c : g.comments) jc.push_back(commentToJsonObj(c));
         j["comments"] = std::move(jc);
     }
     // Extract on Destruct: only when a struct is set, so a class that extracts
-    // nothing keeps the bytes it had before the feature existed. The struct is
-    // a content-relative path inside HCGR, which AssetRefs::retargetBlob
-    // already rewrites when the struct asset moves.
+    // nothing keeps the bytes it had before the feature existed.
     if (!g.extract.empty())
-    {
-        nlohmann::json jm = nlohmann::json::array();
-        for (const ExtractMapEntry& m : g.extract.map)
-            jm.push_back({ { "member", m.member }, { "var", m.var } });
-        j["extract"] = { { "struct", g.extract.structPath }, { "map", std::move(jm) } };
-    }
+        j["extract"] = extractToJsonObj(g.extract);
     return j.dump(2);
 }
 
@@ -2227,13 +2287,8 @@ bool fromJson(const std::string& json, Graph& out)
     }
     for (const auto& e : j.value("events", nlohmann::json::array()))
     {
-        if (!e.is_object()) continue;
         EventDecl d;
-        d.name = e.value("name", std::string());
-        if (d.name.empty()) continue;
-        d.hasArg  = e.value("hasArg", false);
-        d.argType = (PinType)e.value("argType", (int)P::Float);
-        d.typeName = e.value("typeName", std::string());
+        if (!eventDeclFromJsonObj(e, d)) continue;
         // A custom event saved before the engine took its name over (a project
         // that had its own "PreConstruct") now fires by itself. Not renamed:
         // whoever chose that name almost always wanted exactly this, but they
@@ -2245,15 +2300,8 @@ bool fromJson(const std::string& json, Graph& out)
     }
     for (const auto& e : j.value("comments", nlohmann::json::array()))
     {
-        if (!e.is_object()) continue;
         GraphComment c;
-        c.id   = e.value("id", 0);
-        c.text = e.value("text", std::string());
-        if (const auto p = e.find("pos"); p != e.end() && p->is_array() && p->size() >= 2)
-        { c.x = (*p)[0].get<float>(); c.y = (*p)[1].get<float>(); }
-        if (const auto sz = e.find("size"); sz != e.end() && sz->is_array() && sz->size() >= 2)
-        { c.w = (*sz)[0].get<float>(); c.h = (*sz)[1].get<float>(); }
-        c.subgraph = e.value("subgraph", 0);
+        if (!commentFromJsonObj(e, c)) continue;
         // A box needs an id the editor can address it by; one written without
         // (a hand-edited file) gets a fresh one rather than 0, which nodes
         // never carry either.
@@ -2261,32 +2309,9 @@ bool fromJson(const std::string& json, Graph& out)
         HE::graph::bumpNextId(g.nextId, c.id);
         g.comments.push_back(std::move(c));
     }
-    // Extract on Destruct. An entry without a member or a variable names
-    // nothing and is dropped; one member mapped twice keeps the first (the
-    // table has one row per member). A member saved under a name the struct
-    // has since renamed (formerNames) is read back under its live name when
-    // the definition is registered — at run time findField resolves it anyway.
-    if (const auto ex = j.find("extract"); ex != j.end() && ex->is_object())
-    {
-        g.extract.structPath = ex->value("struct", std::string());
-        if (!g.extract.structPath.empty())
-        {
-            HE::StructDef def;
-            const bool haveDef = HE::TypeRegistry::instance().getStruct(g.extract.structPath, def);
-            for (const auto& e : ex->value("map", nlohmann::json::array()))
-            {
-                if (!e.is_object()) continue;
-                ExtractMapEntry m;
-                m.member = e.value("member", std::string());
-                m.var    = e.value("var", std::string());
-                if (m.member.empty() || m.var.empty()) continue;
-                if (haveDef)
-                    if (const HE::StructField* f = def.findField(m.member)) m.member = f->name;
-                if (g.extract.entryFor(m.member)) continue;
-                g.extract.map.push_back(std::move(m));
-            }
-        }
-    }
+    // Extract on Destruct.
+    if (const auto ex = j.find("extract"); ex != j.end())
+        extractFromJsonObj(*ex, g.extract);
     // A graph that EMITS its own "OnDestroyed" now shares the name with the
     // engine's: every instance bound to it also hears the engine's on death.
     // Not renamed, like the PreConstruct case above — the author should hear it.
@@ -2525,6 +2550,44 @@ bool variableFromJson(const std::string& json, Variable& out)
     Variable v;
     if (!variableFromJsonObj(j, v)) return false;
     out = std::move(v);
+    return true;
+}
+
+std::string eventDeclToJson(const EventDecl& e)     { return eventDeclToJsonObj(e).dump(); }
+std::string commentToJson(const GraphComment& c)    { return commentToJsonObj(c).dump(); }
+std::string extractToJson(const ExtractSpec& x)
+{
+    // The empty spec has a form of its own so it can be sent as a value.
+    return x.empty() ? std::string("{}") : extractToJsonObj(x).dump();
+}
+
+bool eventDeclFromJson(const std::string& json, EventDecl& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    EventDecl d;
+    if (!eventDeclFromJsonObj(j, d)) return false;
+    out = std::move(d);
+    return true;
+}
+
+bool commentFromJson(const std::string& json, GraphComment& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    GraphComment c;
+    // An item without an id cannot be addressed; the document form tolerates
+    // one (fromJson numbers it), a single item cannot.
+    if (!commentFromJsonObj(j, c) || c.id <= 0) return false;
+    out = std::move(c);
+    return true;
+}
+
+bool extractFromJson(const std::string& json, ExtractSpec& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    extractFromJsonObj(j, out);
     return true;
 }
 

@@ -329,6 +329,20 @@ public:
                 for (const HC::Variable& v : m_g.variables)
                     fn(hashOf(v.name), HC::variableToJson(v));
                 break;
+            case Kind::Event:
+                // Declared events are name-keyed for the same reason variables
+                // are: Event, Emit and Bind nodes name them.
+                for (const HC::EventDecl& e : m_g.events)
+                    fn(hashOf(e.name), HC::eventDeclToJson(e));
+                break;
+            case Kind::Comment:
+                for (const HC::GraphComment& c : m_g.comments)
+                    fn(c.id, HC::commentToJson(c));
+                break;
+            case Kind::Setting:
+                // Always present, so setting and clearing it are both a replace.
+                fn(kSettingExtract, HC::extractToJson(m_g.extract));
+                break;
             default: break;
         }
     }
@@ -363,6 +377,27 @@ public:
                 else m_g.variables.push_back(std::move(v));
                 return true;
             }
+            case Kind::Event:
+            {
+                HC::EventDecl e;
+                if (!HC::eventDeclFromJson(json, e)) return false;
+                if (HC::EventDecl* existing = m_g.findEvent(e.name)) *existing = std::move(e);
+                else m_g.events.push_back(std::move(e));
+                return true;
+            }
+            case Kind::Comment:
+            {
+                HC::GraphComment c;
+                if (!HC::commentFromJson(json, c)) return false;
+                // Comment ids come out of the same counter as node ids.
+                bumpNextId(m_g.nextId, c.id);
+                if (HC::GraphComment* existing = findComment(c.id)) *existing = std::move(c);
+                else m_g.comments.push_back(std::move(c));
+                return true;
+            }
+            case Kind::Setting:
+                if (id != kSettingExtract) return false;   // a setting from a newer peer
+                return HC::extractFromJson(json, m_g.extract);
             default: return false;
         }
     }
@@ -393,7 +428,23 @@ public:
                 m_g.variables.erase(it);
                 return true;
             }
-            default: return false;
+            case Kind::Event:
+            {
+                const auto it = std::find_if(m_g.events.begin(), m_g.events.end(),
+                    [id](const HC::EventDecl& e) { return hashOf(e.name) == id; });
+                if (it == m_g.events.end()) return false;
+                m_g.events.erase(it);
+                return true;
+            }
+            case Kind::Comment:
+            {
+                const auto it = std::find_if(m_g.comments.begin(), m_g.comments.end(),
+                    [id](const HC::GraphComment& c) { return c.id == id; });
+                if (it == m_g.comments.end()) return false;
+                m_g.comments.erase(it);
+                return true;
+            }
+            default: return false;   // a Setting is replaced, never removed
         }
     }
 
@@ -405,6 +456,12 @@ public:
         if (kind == Kind::Variable)
             return applyOrder(m_g.variables, ids, [](const HC::Variable& v) {
                 return hashOf(v.name); });
+        if (kind == Kind::Event)
+            return applyOrder(m_g.events, ids, [](const HC::EventDecl& e) {
+                return hashOf(e.name); });
+        if (kind == Kind::Comment)
+            return applyOrder(m_g.comments, ids, [](const HC::GraphComment& c) {
+                return static_cast<std::int64_t>(c.id); });
         return false;
     }
 
@@ -422,6 +479,12 @@ private:
     static bool linkFromJson(const std::string& json, HC::Link& out)
     {
         return parseFourInts(json, out.srcNode, out.srcPin, out.dstNode, out.dstPin);
+    }
+    HC::GraphComment* findComment(int id)
+    {
+        for (HC::GraphComment& c : m_g.comments)
+            if (c.id == id) return &c;
+        return nullptr;
     }
     std::vector<HC::Link>::iterator findLink(const HC::Link& l)
     {

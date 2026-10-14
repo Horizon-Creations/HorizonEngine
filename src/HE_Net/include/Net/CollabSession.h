@@ -117,7 +117,12 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // there is no mixed-version session for the frame to be dropped in.)
 // v14: landscape patches (sendTerrainPatch). A v13 peer would drop every one, so
 // two people would shape two different landscapes and never be told.
-inline constexpr std::uint16_t kCollabProtocolVersion = 14;
+// v15: HorizonCode graphs send declared events, comment boxes and the Extract
+// spec as document deltas (two new item kinds). The frame set is unchanged, but a
+// v14 peer skips an item kind it does not know, so a Custom Event declared in the
+// Level Script would exist on one machine only. Same rule as v13: a change that
+// leaves one side silently behind is a bump.
+inline constexpr std::uint16_t kCollabProtocolVersion = 15;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
