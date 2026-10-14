@@ -116,6 +116,10 @@ def main():
         b.call("collab_leave")
         a.call("collab_leave")
         wait_for("both idle", lambda: collab_is(a, "idle") and collab_is(b, "idle"), TIMEOUT)
+        # TeamController notices the ended session on its next update and sends
+        # CLOSE_SESSION; the next team_host must not race that.
+        wait_for("announcements closed", lambda: not team(a).get("hostedSession")
+                 and not team(b).get("hostedSession"), TIMEOUT)
 
     a = b = None
     try:
@@ -238,8 +242,7 @@ def main():
                                                     else None)(b.status()), TIMEOUT)
         expect(st_b and roster_names(st_b) == ["Anna", "Bob"],
                "B's roster names Anna and Bob: %s" % (st_b and roster_names(st_b)))
-        a.call("collab_leave")
-        b.call("collab_leave")
+        leave_both(a, b)
 
         # ── 7. Sign out → offline on the other side ──────────────────────────
         b.call("team_sign_out")

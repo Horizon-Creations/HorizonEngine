@@ -182,3 +182,34 @@ The page shots are TeamView's body only (heading + body), not the Preferences ra
   (open)", paired; then the two-editor UI case (team uishot902353) invite → join → paired.
   Left on the server: teams he-test-598852236 and uishot902353 (no delete-team).
   Not verified: two real editor windows by hand against the host (step 6).
+- **Step 6 (end-to-end acceptance), 2026-10-14: two editor processes, PASS.**
+  - *Added:* team MCP tools in `src/HE_Editor/McpToolsCollab.cpp` (`registerTeamTools`,
+    declared in `McpToolRegistry.h`, registered next to the collab tools in
+    `EditorApplication.cpp`). `team_status` is always there; `team_sign_in` (`create`),
+    `team_sign_out`, `team_add_member`, `team_host` (`open`), `team_set_open`, `team_invite`,
+    `team_join` and `team_decline` only with `HE_MCP_COLLAB_CONTROL=1`. They call the same
+    TeamController methods as the Team page/panel. Unit test: `test_mcp_tools_collab.cpp`
+    "team tools: …" against FakeTeamServer.
+  - *Run:* `scripts/he_team_two_editors.py OUTDIR [--server host:port]` starts two deployed
+    Release editors (own HOME, project copy, hidden window, `HE_COLLAB_OFFLINE=1`; up in
+    10 s) against `212.227.140.164:7777`. 31/31 checks, about 1 min. A creates team
+    `e2e-1791962743` as Anna, adds Bob, and B signs in as Bob. Each sees the other online
+    (Anna admin). A hosts invitation-only: B's uninvited join is refused (`not-allowed`
+    in B's log). Then A invites, B joins (`joined`, roster Anna+Bob, snapshot marker, live
+    entity). B declines a second invitation. B joins an open session without an
+    invitation. B (not an admin) hosts and invites Anna, and A joins. After B signs out,
+    A sees Bob offline.
+  - *Witness:* the host's journal for that team, read-only over ssh:
+    `created … added member Bob`, `Bob logged in`, `invited Bob`, `joins (invited)`,
+    `paired`, `declined`, `opened … (open to the team)`, `joins (open)`, `paired`,
+    `Bob … opened`, `invited Anna`, `Anna joins (invited)`, `paired`. Editors were stopped
+    afterwards (`pgrep -x HorizonEditor` empty).
+  - *Build/tests (Mac, Release, `out/build/release`):* all targets rc 0. `he_tests`
+    without test_material_graph: 5078/5078 cases, 1,287,999 assertions (114 skipped = live
+    cases without env), plus test_material_graph alone 102/102 (11307). Live against the host:
+    relay 2/2 (79), test_net_team 8/8 (268), test_team_ui 3/3 (221),
+    test_mcp_tools_collab 7/7. `editor_help_audit.py --check` rc 0.
+  - *Left on the server:* teams e2e-1791962743, he-test-351180101 and uishot622389.
+  - *Not verified:* a person clicking the Team panel in two visible editor windows. The
+    run drives the controller below the panel, which test_team_ui covers headless.
+    Windows/Linux only via CI.
