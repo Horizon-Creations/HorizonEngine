@@ -34,6 +34,13 @@ using nlohmann::json;
 
 namespace {
 
+// One fake clock for every pump in this file. TeamClient and CollabController
+// age requests and heartbeats with unsigned `now - sentMs`: a pump that starts
+// its own clock at 0 again would make a request sent at the end of the previous
+// pump look 2^64 ms old, and TeamClient would drop the connection as "stopped
+// answering" on the first tick (macOS CI, step 17 of topic 197).
+std::uint64_t g_fakeNowMs = 1;
+
 struct Side
 {
 	CollabController collab;
@@ -66,13 +73,12 @@ template <typename Fn>
 bool pumpUntil(Side& a, Side& b, Fn done)
 {
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-	std::uint64_t now = 0;
 	while (std::chrono::steady_clock::now() < deadline)
 	{
-		a.collab.update(now);
-		b.collab.update(now);
+		a.collab.update(g_fakeNowMs);
+		b.collab.update(g_fakeNowMs);
 		if (done()) return true;
-		now += 16;
+		g_fakeNowMs += 16;
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 	return done();
@@ -287,17 +293,16 @@ template <typename Fn>
 bool pumpTeamUntil(FakeTeamServer& server, std::vector<TeamSide*> sides, Fn done)
 {
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-	std::uint64_t now = 1;
 	while (std::chrono::steady_clock::now() < deadline)
 	{
 		server.pump();
 		for (TeamSide* s : sides)
 		{
-			s->collab.update(now);
-			s->team.update(now);
+			s->collab.update(g_fakeNowMs);
+			s->team.update(g_fakeNowMs);
 		}
 		if (done()) return true;
-		now += 16;
+		g_fakeNowMs += 16;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	return done();
@@ -398,7 +403,10 @@ TEST_CASE("team tools: two members sign in, see each other, host and invite")
 	const std::string sid = a["hostedSession"].get<std::string>();
 	CHECK(a["hostedSessionOpen"] == false);
 	CHECK(a["sessionRunning"] == true);
-	REQUIRE_FALSE(anna.call("team_invite", json{ { "member", "Bob" } }).isError);
+	CHECK(a["status"] == "signed_in");
+	r = anna.call("team_invite", json{ { "member", "Bob" } });
+	INFO(r.errorCode, " ", r.errorMessage);
+	REQUIRE_FALSE(r.isError);
 	REQUIRE(pumpTeamUntil(server, { &anna, &bob }, [&] {
 		// Held in a local: a range-for over call(...).content[...] would walk a
 		// destroyed temporary (C++20 does not extend it through operator[]).
@@ -407,6 +415,9 @@ TEST_CASE("team tools: two members sign in, see each other, host and invite")
 			if (s["session"] == sid && s["invited"] == true && s["host"] == "Anna") return true;
 		return false;
 	}));
+	// Fake time stays far below the heartbeat interval, so a ping means the
+	// clock went backwards somewhere and the clients aged their requests wrong.
+	CHECK(server.pings == 0);
 
 	CHECK(anna.call("team_sign_out").content["status"] == "signed_out");
 	anna.collab.leave();
