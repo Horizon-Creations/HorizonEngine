@@ -954,6 +954,9 @@ private:
 	// Mirrors for the two editor-owned documents (panels keep their own).
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
+	// Those two, edited while their tab is closed (an MCP client's hc_ tools):
+	// the tab loop never sees them, so updateAssetCollabSync sends them from here.
+	std::unordered_set<std::string> m_collabUntabbedEdits;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
 	// The recovery snapshot of the open scene, written on a timer whether or
 	// not a collaboration session is running (the whole-file autosave above

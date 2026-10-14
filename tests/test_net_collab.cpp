@@ -804,6 +804,39 @@ TEST_CASE("CollabSession: releasing frees the subject for someone else")
     CHECK(p->host->ownsLock(kSubject));
 }
 
+TEST_CASE("CollabSession: a client's release is final at once, not one round trip later")
+{
+    // Topic 198 step 11, found in the three-editor run: until the host's echo the
+    // client's table still said "mine", so a save in that window went out under a
+    // lock the host had already freed and was refused there without a word.
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 56;
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+    REQUIRE(p->client->ownsLock(kSubject));
+
+    int released = 0;
+    p->client->onLockChanged([&](const LockInfo& l, bool acquired) {
+        if (!acquired && l.subject == kSubject && l.owner == p->client->localId()) ++released;
+    });
+    p->client->releaseLock(kSubject);
+    CHECK_FALSE(p->client->ownsLock(kSubject));   // no pump: the window is closed
+    CHECK(p->client->lockFor(kSubject) == nullptr);
+    CHECK(released == 1);
+
+    // Asking again right away is a fresh claim the host answers after the release.
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(6);
+    CHECK(p->client->ownsLock(kSubject));
+    const LockInfo* onHost = p->host->lockFor(kSubject);
+    REQUIRE(onHost != nullptr);
+    CHECK(onHost->owner == p->client->localId());
+    CHECK(released == 1);   // the host's echo of the release found nothing left to drop
+}
+
 TEST_CASE("CollabSession: a participant cannot release a lock it does not hold")
 {
     auto p = makePair();

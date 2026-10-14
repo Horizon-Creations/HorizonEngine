@@ -9809,6 +9809,30 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 			m_collab.publishAsset(key, tab.assetPath);
 	}
 
+	// The Level Script or the Game Instance graph, edited with its tab closed —
+	// an MCP client's hc_ tools, which mark it in hc.endEdit. Nothing above walks
+	// a closed tab, so before this the edit stayed on this machine. The same
+	// claim as for an open tab, held only until the diff is out: once nothing
+	// differs from the mirror any more the key drops out of openRel and the loop
+	// below gives the lock back, after the deltas on the same connection.
+	for (auto it = m_collabUntabbedEdits.begin(); it != m_collabUntabbedEdits.end(); )
+	{
+		const std::string key = *it;
+		if (!m_collab.inSession() || openRel.count(key)) { it = m_collabUntabbedEdits.erase(it); continue; }
+		publishDocDeltas(key, key);
+		bool edited = false;
+		for (const CollabDocSync::DocBinding& d : collabDocsForTab(key))
+			if (d.adapter && d.mirror && CollabDocSync::hasLocalChanges(*d.adapter, *d.mirror))
+				edited = true;
+		if (!edited) { it = m_collabUntabbedEdits.erase(it); continue; }
+		// As for a tab: the host's "may I edit" first (idempotent), then the
+		// claim, which waits for that answer. A client's grant is a round trip away.
+		m_collab.beginAssetEditSession(key);
+		m_collab.beginAssetEdit(key);
+		openRel.insert(key);
+		++it;
+	}
+
 	// Locks whose tab is gone are released — holding an asset nobody here is
 	// even looking at anymore would block everyone else for no reason.
 	const std::vector<std::string> held = m_collab.heldAssetLocks();
@@ -10034,9 +10058,25 @@ void EditorApplication::setupMcpTools()
 		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
 		// DocEdit command that step's plan describes and this step does not build.
 		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow("MCP: Level Script");
+
+		// In a session the edit has to reach the peers with no tab open, and
+		// the mirror is what tells an edit of ours from what they have. Seeded
+		// now, before the mutation, it holds the state they share; seeded
+		// after, it would hold the edit and the diff would find nothing.
+		const std::string tabKey = key == HE::Ed::kMcpDocLevelScript  ? LevelScriptPanel::kTabPath
+		                         : key == HE::Ed::kMcpDocGameInstance ? GameInstancePanel::kTabPath
+		                                                              : std::string();
+		if (!tabKey.empty()) publishDocDeltas(tabKey, tabKey);
 	};
 
 	hc.endEdit = [this](const std::string& key) {
+		if (m_collab.inSession())
+		{
+			if (key == HE::Ed::kMcpDocLevelScript)
+				m_collabUntabbedEdits.insert(LevelScriptPanel::kTabPath);
+			else if (key == HE::Ed::kMcpDocGameInstance)
+				m_collabUntabbedEdits.insert(GameInstancePanel::kTabPath);
+		}
 		if (key == HE::Ed::kMcpDocGameInstance)
 		{
 			// Exactly what the Game Instance tab does after a human's edit

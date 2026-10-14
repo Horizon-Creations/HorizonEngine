@@ -3749,6 +3749,35 @@ TEST_CASE("Lock grant: a client's save that had to wait for the lock goes out wh
     he_test::removeQuiet(file);
 }
 
+TEST_CASE("Lock grant: the next save right after the claim went back still reaches the host")
+{
+    // Topic 198 step 11 (three-editor run): an MCP material_create then
+    // material_set_param on a client. The grant sent the first file and handed
+    // the lock straight back; the second save, milliseconds later, still saw the
+    // lock as ours, went out, and the host refused it ("does not hold lock").
+    // The client's edit was lost and the host's next save overwrote it.
+    Session s;
+    REQUIRE(openSession(s));
+
+    std::vector<std::uint8_t> got;
+    s.host.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>& b) { got = b; });
+
+    const std::string key  = "Content/Materials/Fern.hasset";
+    const fs::path    file = writeHAsset("he_collab_grant_fern.hasset",
+                                         HE::AssetType::Material, "fern-v1");
+    s.client.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return contains(got, "fern-v1"); }));
+
+    writeHAsset("he_collab_grant_fern.hasset", HE::AssetType::Material, "fern-v2");
+    s.client.publishAsset(key, file.string());
+    CHECK(pumpUntil(s.host, s.client, [&] { return contains(got, "fern-v2"); }));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !s.host.assetLockedByOther(key); }));
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
 TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step")
 {
     // Topic 198 step 8. The host keeps the session's state for everyone; it is

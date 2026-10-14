@@ -2586,6 +2586,19 @@ void CollabSession::releaseLock(std::uint64_t subject) {
     BitWriter w;
     w.writeUInt64(subject);
     m_net->send(m_net->connections().front(), kMsgLockRelease, w);
+
+    // Ours no more from this moment, not from the host's echo a round trip
+    // later. Until the echo the table said "mine", so a save in that window
+    // went out under a lock the host had already freed, was refused there
+    // ("does not hold lock") and was lost without a word to anyone: the
+    // controller gives a lock back right after a grant-send, and an MCP edit
+    // two milliseconds later fell into exactly that gap. Dropped here, the next
+    // save asks again and goes with the grant. The echo then finds nothing.
+    const LockInfo* existing = lockFor(subject);
+    if (!existing || existing->owner != m_localId) return;   // the host's word stands
+    const LockInfo copy = *existing;
+    dropLock(subject);
+    if (m_onLockChanged) m_onLockChanged(copy, false);
 }
 
 // ── Host side ──
