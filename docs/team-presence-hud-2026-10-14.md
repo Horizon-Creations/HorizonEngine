@@ -70,37 +70,65 @@ closes itself once signed in. Hover tooltip per state. In `EditorUI.cpp:3373-339
 slot sits between FPS and the bell; `teamSlot` (width + 10 px) is subtracted in every block
 to its left. Test: `test_team_ui.cpp:571`.
 
+## Step 3: who else in the team is online, beside the session's faces
+
+`TeamController::onlineOutsideSession()` (`TeamController.h:153`, `.cpp:699`): members
+with `online && !you`, minus every member a participant of the running collab session
+(`m_collab.inSession()`, team session or not) is named after, case-insensitive
+(`sameName`). Empty while not signed in. The rule alone is `onlineOutside(members,
+names)`, static. Name matching works because a team session's participants carry their
+member name (`hostSession`/`join` pass `member()` as display name; `applyLocalIdentity`
+sets picture/colour/key, not the name).
+
+`TeamView::footerOnlineWidth(team)` / `drawFooterOnline(team, sessionBeside)`
+(`TeamView.h:109-123`, `TeamView.cpp:262-356`): one `##teamOnline` hit box, up to 4
+faces + "+N" (layout shared by width and draw, like `CollabPresenceBar::layoutFor`), face
+= `footerStatusWidth()` square via `faceAt`, each with a green `Theme::Ok` dot in the
+corner; a 1 px `TextDim` rule in the middle of the 16 px gap to its right while
+`sessionBeside`. Hover: tooltip with the names ("not in this session" when one runs);
+click returns true, EditorUI opens Window ▸ Team. Each face is probed as
+`##teamOnlineFace` with the member as row (step 4's Invite test can target them).
+`EditorUI.cpp:3420-3433`: the slot sits directly left of `CollabPresenceBar` (online
+left, in-session right, so step 5's slide runs towards the bell); `onlineW` + its 16 px
+gap is subtracted in the sync, activity and MCP blocks.
+
+Tests (`test_team_ui.cpp:688`, `:708`): the rule (you, offline, any-case match, a
+non-member guest); the footer signed out (no slot), signed in (Bob blue + Cleo with green
+dot, not Anna, not offline Dana, left of the status), click → Team window, a real
+loopback collab session (`startHosting` + a second `CollabController` joining as "Bob")
+takes Bob out, his leaving brings him back, everyone in the session (Cleo joins as
+"cleo") drops the slot to width 0, sign-out too. Screenshots `team-footer-online`,
+`-online-bob-in-session`.
+
 ## Handoff
 
-- **Topic / step:** 202, step 2 of 6 (own status icon + sign-in modal).
-- **Branch / commit:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
-  @ 5a5caae1 (+ this doc). Server CollabSession b4a47a5 is still **not deployed** (step 1).
-- **Done:** "Step 2" above.
-- **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor built -j8, rc 0):**
-  `test_team_ui` 6/6 (433 assertions; new case: X is red in pixels, modal opens, wrong
-  password refused and shown, Enter signs in, modal closes, face is blue in pixels with no
-  red, face click asks for the Team window, Cancel, empty team asks for team+server and
-  keeps the rows while typing). Screenshots looked at: `team-footer-signed-out`,
-  `-modal-refused`, `-signed-in`, `-modal-ask-team` (HE_UI_DUMP_DIR). `test_net_team` 20/20,
-  `test_editor_help` 19/19, `test_collab_controller` 74/74, `test_mcp_tools_collab` 7/7,
-  `editor_help_audit.py --check` 1172/1172. Hidden `HorizonEditor` 120 frames with a scratch
-  HE_CONFIG_DIR: clean exit, 0 errors (a smoke run; whether the footer was on screen
-  without a project is not shown by the log). Full he_tests without test_material_graph:
-  5113/5113 cases, 1289325 assertions, rc 0.
-- **Not verified:** the real editor window by hand (footer placement next to the real bell,
-  the modal over docked panels); Windows/Linux only through CI.
-- **Decisions:** placement *right* of the bell as the board says (step 1's handoff said
-  left). Connecting = amber X, Reconnecting = red X (its modal can retry at once with the
-  password). The modal lives in TeamView (no AppContext) so tests draw it; server/team rows
-  decided once at open (else they vanish with the first letter). Esc is not wired to
-  Cancel (ImGui modals ignore it; not tested, so not claimed).
-- **Suggested, not taken:** a dim grey X (or none) when no team server is configured at
-  all: every editor without a team now shows a red X in the footer.
-- **Traps:** the footer chain in EditorUI is hand-maintained: a new slot must be
-  subtracted in every block to its left. `face()` calls Dummy; in a fixed slot use
-  `faceAt`. In tests the footer surface clears `items` itself (drawSettings/drawPanel
-  clear the probe, drawFooterStatus does not).
-- **Next steps:** 1. Step 3/4: presence HUD next to `CollabPresenceBar` — online members
-  = `members()` with `online && !in session`; faces via `faceAt` or `CollabPresenceBar`'s
-  texture cache keyed by member + `avatarId`; Invite = `TeamController::invite()`.
-  2. Deploy b4a47a5 (the human, `deploy/deploy.sh`), then the live cases against the host.
+- **Topic / step:** 202, step 3 of 6 (online team members in the footer corner).
+- **Branch:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
+  (step-3 commit + this doc). Server CollabSession b4a47a5 still **not deployed** (step 1).
+- **Done:** "Step 3" above.
+- **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor -j8, rc 0):**
+  `test_team_ui` 8/8 (497 assertions), screenshots looked at (crop of the footer: B blue
+  and C grey squares with green dots left of Anna's face; with Bob in session only C, and
+  the rule). `test_net_team` 20/20, `test_collab_controller` 74/74, `test_editor_help`
+  19/19, `test_mcp_tools_collab` 7/7, `editor_help_audit.py --check` 1172/1172 (`##`
+  labels need no entry). Hidden `HorizonEditor` 120 frames, scratch HE_CONFIG_DIR: clean
+  exit, 0 errors (smoke only). Full he_tests without test_material_graph: 5115/5115
+  cases, 1289388 assertions, rc 0.
+- **Not verified:** the real editor window by hand (the cluster next to the real
+  CollabPresenceBar and bell, the rule between them: the test harness draws only status +
+  online cluster, so its rule stands next to your own face); Windows/Linux only via CI.
+- **Decisions:** the cluster shows whenever signed in, with or without a session (the
+  board: online members who are not in the session). Name match without a
+  `teamSession()` gate: a plain session with a participant of a member's name counts as
+  "in the session" (needed for the loopback test, harmless otherwise). Separation =
+  square faces + green dot vs. the session's ring circles, plus the rule. Same 4 + "+N"
+  cap as the session cluster. Click opens the Team window (like your own face).
+- **Traps:** `onlineOutsideSession()` returns pointers into `members()`: use them in the
+  same frame only. The test footer has no bell/session cluster; `sessionBeside` there is
+  `team.sessionRunning()`.
+- **Next steps:** 1. Step 4: replace the side-by-side faces in `drawFooterOnline` with an
+  overlapped stack, hover reveal (a popup like `CollabPresenceBar::DrawOverlay`, drawn
+  from the overlay pass) listing each member with Invite (`TeamController::invite`, only
+  while hosting, like the Team window), never Remove; the layout helper `onlineLayout` is
+  the one place to change the width. 2. Step 5: the slide, keyed by member name between
+  this cluster and `CollabPresenceBar`. 3. Deploy b4a47a5 (the human).
