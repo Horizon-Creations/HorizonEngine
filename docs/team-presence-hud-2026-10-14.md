@@ -100,35 +100,65 @@ takes Bob out, his leaving brings him back, everyone in the session (Cleo joins 
 "cleo") drops the slot to width 0, sign-out too. Screenshots `team-footer-online`,
 `-online-bob-in-session`.
 
+## Step 4: the stack and its menu
+
+`TeamView::drawFooterOnline` (`TeamView.cpp:326`, now `void`) overlaps the faces: each
+next face starts `round(face * 0.6)` px after the last (`onlineLayout`, `:286`, still the
+one width source: `face + (shown-1)*step + "+N"`). Drawn right to left, so the leftmost
+is on top and every face keeps its dot side in view; the seam is a 2 px dark ring
+(`IM_COL32(0,0,0,170)`, the dot's halo colour) clipped to where it falls on the face
+underneath, so the footer's background colour is never needed (the reason
+`CollabPresenceBar` does not overlap). Same 4 + "+N" cap. A click pins the menu.
+
+The menu: `drawFooterOnlineMenu(team)` (`TeamView.h:135`, `.cpp:483`), called from
+`EditorUI.cpp:4316` right after `CollabPresenceBar::DrawOverlay`, built the same way
+(statics written by the footer half, `s_onlineDrawn` consumed by the menu each frame;
+hover keeps it open, click pins, a click elsewhere unpins). `drawOnlineMenuWindow`
+(`:394`), 260 px, right edge on the stack, bottom on its top: a header ("N online in the
+team[, not in this session]"), one row per member, **all** of them (face, name clipped
+short of the button, dim "invited" after a press from here, kept per hosted session),
+`Invite` (`probe("Invite", name)`, enabled while `hostedSession()` is set, tooltip says
+why not), and `Open Team Window` (returns true → EditorUI opens Window ▸ Team). No
+Remove: that stays in the Team window behind its second press. Help:
+`Team/Open Team Window` (new); `Team/Invite` existed.
+
+Found on the way: on the frame a button in the menu is held down it is ImGui's active
+item, and `IsWindowHovered` without `AllowWhenBlockedByActiveItem` reads false: the menu
+closed under the press and Invite never fired. `CollabPresenceBar::drawMenuWindow` uses
+the same flags without it (its Remove/Block buttons, unpinned): not changed here, not
+tested.
+
+Test `test_team_ui.cpp:822`: 6 online (Anna admin): 4 faces overlapping in roster order,
+Bob fully his blue on top, no menu unhovered; hover → 6 Invites, all disabled, 0
+Remove/Confirm Remove, menu above the stack; mouse onto the menu keeps it, away closes;
+`team.hostSession` → Invite Eli enabled, click → op 10 at the fake, Eli invited, menu
+still open; click on the stack pins, a click elsewhere unpins; sign-out removes both.
+Step-3 test: click now pins, `Open Team Window` asks for the window. Screenshots
+`team-footer-online-stack`, `-menu`, `-menu-hosting`.
+
 ## Handoff
 
-- **Topic / step:** 202, step 3 of 6 (online team members in the footer corner).
+- **Topic / step:** 202, step 4 of 6 (stacked online faces, hover menu with Invite).
 - **Branch:** `claude/team-anwesenheit-im-editor-hud-online-mitglieder-neben-colla`
-  (step-3 commit + this doc). Server CollabSession b4a47a5 still **not deployed** (step 1).
-- **Done:** "Step 3" above.
+  (code 02768795 + this doc). Server CollabSession b4a47a5 still **not deployed** (step 1).
+- **Done:** "Step 4" above.
 - **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor -j8, rc 0):**
-  `test_team_ui` 8/8 (497 assertions), screenshots looked at (crop of the footer: B blue
-  and C grey squares with green dots left of Anna's face; with Bob in session only C, and
-  the rule). `test_net_team` 20/20, `test_collab_controller` 74/74, `test_editor_help`
-  19/19, `test_mcp_tools_collab` 7/7, `editor_help_audit.py --check` 1172/1172 (`##`
-  labels need no entry). Hidden `HorizonEditor` 120 frames, scratch HE_CONFIG_DIR: clean
-  exit, 0 errors (smoke only). Full he_tests without test_material_graph: 5115/5115
-  cases, 1289388 assertions, rc 0.
-- **Not verified:** the real editor window by hand (the cluster next to the real
-  CollabPresenceBar and bell, the rule between them: the test harness draws only status +
-  online cluster, so its rule stands next to your own face); Windows/Linux only via CI.
-- **Decisions:** the cluster shows whenever signed in, with or without a session (the
-  board: online members who are not in the session). Name match without a
-  `teamSession()` gate: a plain session with a participant of a member's name counts as
-  "in the session" (needed for the loopback test, harmless otherwise). Separation =
-  square faces + green dot vs. the session's ring circles, plus the rule. Same 4 + "+N"
-  cap as the session cluster. Click opens the Team window (like your own face).
-- **Traps:** `onlineOutsideSession()` returns pointers into `members()`: use them in the
-  same frame only. The test footer has no bell/session cluster; `sessionBeside` there is
-  `team.sessionRunning()`.
-- **Next steps:** 1. Step 4: replace the side-by-side faces in `drawFooterOnline` with an
-  overlapped stack, hover reveal (a popup like `CollabPresenceBar::DrawOverlay`, drawn
-  from the overlay pass) listing each member with Invite (`TeamController::invite`, only
-  while hosting, like the Team window), never Remove; the layout helper `onlineLayout` is
-  the one place to change the width. 2. Step 5: the slide, keyed by member name between
-  this cluster and `CollabPresenceBar`. 3. Deploy b4a47a5 (the human).
+  `test_team_ui` 9/9 (600 assertions); screenshots looked at (stack: B blue on top, three
+  grey faces under it with dark seams, four green dots, "+2", rule, Anna; menu: six rows,
+  greyed Invite unhosted, "invited" after Eli's press). `editor_help_audit.py --check`
+  1173/1173. Hidden `HorizonEditor` 120 frames, scratch HE_CONFIG_DIR: clean exit, 0
+  errors (smoke only). Full he_tests without test_material_graph: 5116/5116
+  cases, 1289521 assertions, rc 0.
+- **Not verified:** the real editor by hand (menu over docked panels, beside the real
+  session cluster and its menu; both menus pinned at once is possible and untested);
+  Windows/Linux only via CI.
+- **Decisions:** click pins the menu (as the session's cluster does) instead of opening
+  the Team window; the window is one button away in the menu. The menu lists everyone
+  online-outside, no cap or scroll (teams are small). Invite rule = the Team window's.
+- **Traps:** a button in an overlay menu needs `AllowWhenBlockedByActiveItem` in the
+  hover test that keeps the menu open. Test harness `Ui::footer()` calls the menu after
+  the footer's `End()` with the probe still set, like EditorUI's overlay pass.
+- **Next steps:** 1. Step 5: the slide, keyed by member name, from this stack to
+  `CollabPresenceBar` (onlineLayout gives the face positions). 2. Probably give
+  `CollabPresenceBar::drawMenuWindow` the same hover flag (check its Remove/Block
+  unpinned). 3. Deploy b4a47a5 (the human).
