@@ -213,3 +213,14 @@ The page shots are TeamView's body only (heading + body), not the Preferences ra
   - *Not verified:* a person clicking the Team panel in two visible editor windows. The
     run drives the controller below the panel, which test_team_ui covers headless.
     Windows/Linux only via CI.
+- **Step 17 (macOS CI red on `team_invite`), 2026-10-14: test bug, fixed in 4ec5a08d.**
+  `pumpTeamUntil` in `tests/test_mcp_tools_collab.cpp` restarted its fake clock at 1 on
+  every call, while TeamClient ages requests with unsigned `now - sentMs`
+  (`TeamClient.cpp:189`). `team_host`'s OPEN_SESSION, sent at the previous pump's last
+  `now`, looked 2^64 ms old on the next pump's first tick. If the reply was not in that
+  tick yet (the slower CI runner), the client failed with "stopped answering", and
+  `invite` was refused at `requireSignedIn`. Both pump helpers now share one forward-only
+  `g_fakeNowMs`. Product code is unchanged, because the editor passes a monotonic clock.
+  *Witness:* the new `CHECK(server.pings == 0)` was 1 on all 3 local runs before the fix,
+  because every clock restart also wrapped the ping age. After the fix: 10/10 green,
+  test_net_team 8/8, test_team_ui 3/3. CI run 38532991080 was still running at handoff.
