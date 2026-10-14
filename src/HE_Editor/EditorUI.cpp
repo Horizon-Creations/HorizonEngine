@@ -3421,7 +3421,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// session's faces (topic 202): rounded squares with a green dot, and a
 		// rule between the two clusters, so "online somewhere" never reads as
 		// "here with you". Joining moves a face from this cluster to that one.
-		// Signed in it is there with or without a session.
+		// Signed in it is there with or without a session. Stacked; its menu
+		// (every member, Invite) is drawn from the overlay pass below.
 		const float onlineW = ctx.team ? TeamView::footerOnlineWidth(*ctx.team) : 0.0f;
 		if (onlineW > 0.0f)
 		{
@@ -3429,8 +3430,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f));
-			if (TeamView::drawFooterOnline(*ctx.team, presenceW > 0.0f))
-				revealFloatingWindow(s_showTeam, "Team");
+			TeamView::drawFooterOnline(*ctx.team, presenceW > 0.0f);
 		}
 
 		// EngineContent SFTP download queue — right-aligned, left of the presence
@@ -4310,9 +4310,11 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	updatePanelVisibility(ctx);
 
     // Last of all, so the menus that hang off the footer clusters cannot end up
-    // underneath a docked panel or a floating tool window. Both of these draw
-    // nothing unless their own footer half ran this frame.
+    // underneath a docked panel or a floating tool window. Each of these draws
+    // nothing unless its own footer half ran this frame.
     CollabPresenceBar::DrawOverlay(ctx);
+    if (ctx.team && TeamView::drawFooterOnlineMenu(*ctx.team))
+        revealFloatingWindow(s_showTeam, "Team");
     NotificationBar::DrawOverlay(ctx);
 
     TutorialPanel::UiFlags tutFlags;

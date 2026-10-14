@@ -6,6 +6,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <set>
 
 #if __has_include(<imgui.h>)
 #include "EditorHelp.h"      // "Team/<label>" for every control below
@@ -118,6 +119,7 @@ void drawOwnPassword(TeamController& team, Form& form);
 bool connectionUp(TeamController::Status s);
 void faceAt(ImDrawList* dl, ImVec2 p, const HE::Net::TeamMember* m, HE::Net::TeamColor colour,
             const std::string& name, float size);
+void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::string& name, float size);
 void drawSignInModal(TeamController& team, const Settings& settings, Form& form);
 
 constexpr const char* kSignInModal = "Team Sign-In###teamSignIn";
@@ -263,7 +265,11 @@ namespace
 // Enough faces to see at a glance who is around, then a count: the same cap
 // as the session's cluster, so the two together cannot run into the counters.
 constexpr int   kOnlineShown = 4;
-constexpr float kOnlineGap   = 3.0f;
+// How much of a face the next one leaves showing. Stacked, unlike the
+// session's faces (CollabPresenceBar.cpp has why those are not): the seam
+// here is a dark halo rather than a plug of the footer's colour, so it does
+// not care what colour the footer is.
+constexpr float kOnlineStep  = 0.6f;
 
 // Split out so footerOnlineWidth() and drawFooterOnline() cannot disagree.
 struct OnlineLayout
@@ -271,6 +277,7 @@ struct OnlineLayout
 	int   shown  = 0;
 	int   extra  = 0;
 	float face   = 0.0f;
+	float step   = 0.0f;   // left edge to left edge, whole pixels
 	float width  = 0.0f;
 	float extraW = 0.0f;
 	char  extraLabel[16] = {};
@@ -281,6 +288,7 @@ OnlineLayout onlineLayout(std::size_t online)
 	OnlineLayout l;
 	if (online == 0) return l;
 	l.face  = footerStatusWidth();
+	l.step  = std::round(l.face * kOnlineStep);
 	l.shown = std::min<int>(kOnlineShown, static_cast<int>(online));
 	l.extra = static_cast<int>(online) - l.shown;
 	if (l.extra > 0)
@@ -288,9 +296,26 @@ OnlineLayout onlineLayout(std::size_t online)
 		std::snprintf(l.extraLabel, sizeof(l.extraLabel), "+%d", l.extra);
 		l.extraW = ImGui::CalcTextSize(l.extraLabel).x + 4.0f;
 	}
-	l.width = l.shown * l.face + (l.shown - 1) * kOnlineGap + l.extraW;
+	l.width = l.face + (l.shown - 1) * l.step + l.extraW;
 	return l;
 }
+
+// ── The menu's state ──
+// Written by drawFooterOnline, read by drawFooterOnlineMenu later in the same
+// frame (see TeamView.h for why the two are apart).
+ImVec2 s_onlineMin { 0.0f, 0.0f };
+ImVec2 s_onlineMax { 0.0f, 0.0f };
+bool   s_onlineHovered = false;
+bool   s_onlineDrawn   = false;
+// A click pins the menu, so its buttons can be reached without keeping the
+// mouse in a corridor all the way there.
+bool   s_onlinePinned   = false;
+bool   s_onlineMenuOpen = false;
+// Whom this editor invited from the menu, for the session it hosts then: the
+// row says "invited" so a press visibly did something. Forgotten with the
+// session.
+std::string           s_invitedFor;
+std::set<std::string> s_invited;
 } // namespace
 
 float footerOnlineWidth(const TeamController& team)
@@ -298,24 +323,41 @@ float footerOnlineWidth(const TeamController& team)
 	return onlineLayout(team.onlineOutsideSession().size()).width;
 }
 
-bool drawFooterOnline(TeamController& team, bool sessionBeside)
+void drawFooterOnline(TeamController& team, bool sessionBeside)
 {
+	s_onlineDrawn = false;
 	const std::vector<const HE::Net::TeamMember*> online = team.onlineOutsideSession();
 	const OnlineLayout l = onlineLayout(online.size());
-	if (l.shown == 0) return false;
+	if (l.shown == 0) return;
 
-	// One hit box for the whole cluster, as for the session's faces.
+	// One hit box for the whole cluster, as for the session's faces: the menu
+	// belongs to the group, not to whichever face the mouse lands on.
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
 	ImGui::InvisibleButton("##teamOnline", ImVec2(l.width, l.face));
 	probe("##teamOnline");
-	const bool clicked = ImGui::IsItemClicked();
-	const bool hovered = ImGui::IsItemHovered();
+	if (ImGui::IsItemClicked()) s_onlinePinned = !s_onlinePinned;
+	s_onlineHovered = ImGui::IsItemHovered();
+	s_onlineMin     = origin;
+	s_onlineMax     = ImVec2(origin.x + l.width, origin.y + l.face);
+	s_onlineDrawn   = true;
 
+	// Right to left, so the leftmost face is on top and every face keeps its
+	// right-hand side, the one with the dot, in view.
 	ImDrawList* dl = ImGui::GetWindowDrawList();
-	for (int i = 0; i < l.shown; ++i)
+	for (int i = l.shown - 1; i >= 0; --i)
 	{
 		const HE::Net::TeamMember& m = *online[static_cast<std::size_t>(i)];
-		const ImVec2 p(origin.x + i * (l.face + kOnlineGap), origin.y);
+		const ImVec2 p(origin.x + i * l.step, origin.y);
+		// The seam to the face underneath: dark, like the dot's ring below,
+		// and only where it falls on that face, so the stack's outer edge
+		// stays the faces' own.
+		if (i + 1 < l.shown)
+		{
+			dl->PushClipRect(ImVec2(p.x + l.step, p.y), ImVec2(p.x + l.face + 2.0f, p.y + l.face), true);
+			dl->AddRect(ImVec2(p.x - 1.0f, p.y - 1.0f), ImVec2(p.x + l.face + 1.0f, p.y + l.face + 1.0f),
+			            IM_COL32(0, 0, 0, 170), l.face * 0.2f + 1.0f, 0, 2.0f);
+			dl->PopClipRect();
+		}
 		faceAt(dl, p, &m, m.color, m.name, l.face);
 		// The green dot in the corner says "online", and is the mark the
 		// session's faces never carry: those people are not online somewhere,
@@ -342,17 +384,132 @@ bool drawFooterOnline(TeamController& team, bool sessionBeside)
 		            Theme::u32(Theme::TextDim), 1.0f);
 	}
 
-	if (hovered)
+}
+
+namespace
+{
+// The menu itself: everyone the stack stands for, one row each. Returns
+// whether the mouse is inside it, which is what keeps it open on the way from
+// the stack to a button.
+bool drawOnlineMenuWindow(TeamController& team, bool& openTeamWindow)
+{
+	const std::vector<const HE::Net::TeamMember*> online = team.onlineOutsideSession();
+	const std::string& hosted = team.hostedSession();
+	if (hosted != s_invitedFor)
 	{
-		std::string names;
-		for (const HE::Net::TeamMember* m : online)
-			names += (names.empty() ? "" : ", ") + m->name;
-		ImGui::SetTooltip(team.sessionRunning()
-		                      ? "Online in the team, not in this session: %s\nClick to open the Team window."
-		                      : "Online in the team: %s\nClick to open the Team window.",
-		                  names.c_str());
+		s_invitedFor = hosted;
+		s_invited.clear();
 	}
-	return clicked;
+
+	// Sitting right on top of the stack, no gap, right edges together like
+	// the session's menu (CollabPresenceBar::DrawOverlay), so the mouse can
+	// cross from one to the other without leaving both.
+	constexpr float kWidth = 260.0f;
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	const float x = std::max(vp->WorkPos.x + 4.0f,
+	                         std::min(s_onlineMax.x - kWidth, vp->WorkPos.x + vp->WorkSize.x - kWidth - 4.0f));
+	ImGui::SetNextWindowPos(ImVec2(x, s_onlineMin.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+	ImGui::SetNextWindowSize(ImVec2(kWidth, 0.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowViewport(vp->ID);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+
+	bool hovered = false;
+	if (ImGui::Begin("##teamOnlineMenu", nullptr,
+	                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+	                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+	                 ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing |
+	                 ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		// AllowWhenBlockedByActiveItem: while a button here is held down it is
+		// the active item, and without the flag the window reads as not
+		// hovered on exactly that frame, so the menu closed under the press
+		// and Invite never fired.
+		hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup |
+		                                 ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+		                                 ImGuiHoveredFlags_ChildWindows);
+		ImGui::TextDisabled(team.sessionRunning() ? "%zu online in the team, not in this session"
+		                                          : "%zu online in the team",
+		                    online.size());
+		ImGui::Separator();
+
+		// Invite only: the same rule as the Team window's, which is where
+		// Remove stays (behind its second press). Everyone listed here is
+		// online, so hosting is the whole condition.
+		const bool  hosting = !hosted.empty();
+		const float rowH    = ImGui::GetFrameHeight();
+		const float inviteW = ImGui::CalcTextSize("Invite").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+		for (const HE::Net::TeamMember* m : online)
+		{
+			ImGui::PushID(m->name.c_str());
+			face(m, m->color, m->name, rowH);
+			ImGui::SameLine();
+			// The name is clipped short of the button rather than wrapped, so
+			// every row is one row tall.
+			const float  buttonX = ImGui::GetWindowContentRegionMax().x - inviteW;
+			const ImVec2 at      = ImGui::GetCursorScreenPos();
+			const float  clipX   = ImGui::GetWindowPos().x + buttonX - 6.0f;
+			ImGui::PushClipRect(at, ImVec2(clipX, at.y + rowH), true);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(m->name.c_str());
+			if (s_invited.count(m->name))
+			{
+				ImGui::SameLine();
+				ImGui::TextDisabled("invited");
+			}
+			ImGui::PopClipRect();
+			ImGui::SameLine(buttonX);
+			ImGui::BeginDisabled(!hosting);
+			if (EditorWidgets::smallButton("Invite") && team.invite(m->name)) s_invited.insert(m->name);
+			probe("Invite", m->name);
+			if (!hosting && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s", team.sessionRunning()
+				                            ? "Invitations come from the editor hosting a team session; "
+				                              "this one is not."
+				                            : "Host a session first (Window > Team).");
+			ImGui::EndDisabled();
+			ImGui::PopID();
+		}
+
+		ImGui::Separator();
+		if (EditorWidgets::smallButton("Open Team Window")) openTeamWindow = true;
+		probe("Open Team Window");
+	}
+	ImGui::End();
+	ImGui::PopStyleVar();
+	return hovered;
+}
+} // namespace
+
+bool drawFooterOnlineMenu(TeamController& team)
+{
+	HE::Ed::Help::Scope helpScope("Team");
+	// Consumed here: a frame whose footer left the stack out (nobody to show,
+	// signed out) must not open the menu from last frame's leftovers.
+	const bool drawn = s_onlineDrawn;
+	s_onlineDrawn = false;
+	if (!drawn)
+	{
+		s_onlineMenuOpen = false;
+		s_onlinePinned   = false;
+		s_onlineHovered  = false;
+		return false;
+	}
+
+	if (s_onlineHovered) s_onlineMenuOpen = true;
+	bool menuHovered    = false;
+	bool openTeamWindow = false;
+	if (s_onlineMenuOpen || s_onlinePinned) menuHovered = drawOnlineMenuWindow(team, openTeamWindow);
+
+	if (!s_onlineHovered && !menuHovered && !s_onlinePinned) s_onlineMenuOpen = false;
+	// A click anywhere else unpins, the way a menu behaves everywhere else;
+	// so does leaving for the Team window.
+	if ((s_onlinePinned && !s_onlineHovered && !menuHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
+	    openTeamWindow)
+	{
+		s_onlinePinned   = false;
+		s_onlineMenuOpen = false;
+	}
+	return openTeamWindow;
 }
 
 namespace

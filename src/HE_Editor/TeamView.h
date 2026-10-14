@@ -114,13 +114,25 @@ namespace TeamView
 	// two while both are there. Joining the session moves a member from this
 	// cluster to that one.
 	//
+	// The faces overlap in a stack, to keep the footer short; resting the mouse
+	// on it opens a menu that lists every one of them on its own row with an
+	// Invite (while hosting a team session). Not Remove: taking someone out of
+	// the team is the Team window's, behind its confirmation, never a footer's.
+	//
+	// Split in two like CollabPresenceBar, for the same reason: the cluster is
+	// drawn inside the footer window, the menu over everything else from the
+	// editor's overlay pass.
+	//
 	// footerOnlineWidth is 0 when there is nobody to show (not signed in, or
 	// everyone online is in the session) and the footer leaves the slot out.
 	float footerOnlineWidth(const TeamController& team);
 	// `sessionBeside`: the session cluster is drawn right of this one, so the
-	// rule between them is drawn. True when the cluster was clicked: the
-	// caller opens Window ▸ Team.
-	bool drawFooterOnline(TeamController& team, bool sessionBeside);
+	// rule between them is drawn. A click pins the menu open.
+	void drawFooterOnline(TeamController& team, bool sessionBeside);
+	// The menu. Call from the overlay pass, after every panel; draws nothing
+	// unless drawFooterOnline ran this frame. True when its Open Team Window
+	// was pressed: the caller opens Window ▸ Team.
+	bool drawFooterOnlineMenu(TeamController& team);
 
 	// ── Test seam ──
 	// Where each control was drawn in the last frame, by label and the row it

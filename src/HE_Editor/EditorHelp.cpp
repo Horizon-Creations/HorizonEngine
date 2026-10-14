@@ -8692,6 +8692,10 @@ namespace
 	  "invitation and they join with one press. Only online members can be "
 	  "invited.",
 	  "", "collaboration" },
+	{ "Team/Open Team Window", "",
+	  "Opens Window > Team: the whole roster, sessions, and (for admins) adding "
+	  "and removing members. The footer's list only invites.",
+	  "", "collaboration" },
 	{ "Team/Remove", "",
 	  "Removes this member from the team (admins only). Asks once more first.",
 	  "", "collaboration" },

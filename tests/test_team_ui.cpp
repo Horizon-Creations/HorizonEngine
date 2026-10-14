@@ -123,10 +123,12 @@ namespace
 			if (const float onlineW = TeamView::footerOnlineWidth(team); onlineW > 0.0f)
 			{
 				ImGui::SameLine(statusX - 16.0f - onlineW);
-				if (TeamView::drawFooterOnline(team, team.sessionRunning())) openTeamWindow = true;
+				TeamView::drawFooterOnline(team, team.sessionRunning());
 			}
-			TeamView::setProbe(nullptr);
 			ImGui::End();
+			// The overlay pass, after the footer window, as EditorUI.cpp runs it.
+			if (TeamView::drawFooterOnlineMenu(team)) openTeamWindow = true;
+			TeamView::setProbe(nullptr);
 		}
 
 		// One frame of `surface` filling the display. `pump` runs before it
@@ -756,7 +758,7 @@ TEST_CASE("Team UI: the footer shows who else is online; joining the session tak
 	REQUIRE(ui.find("##teamStatus"));
 	CHECK(ui.find("##teamOnline")->x1 <= ui.find("##teamStatus")->x0 - 16.0f);
 	CHECK(ui.find("##teamOnline")->y0 >= float(kPageH) - kFooterH);
-	CHECK(face("Bob")->x1 <= face("Cleo")->x0);   // roster order
+	CHECK(face("Bob")->x0 < face("Cleo")->x0);    // roster order
 	{
 		const he_ui::Image img = shot("team-footer-online.bmp");
 		CHECK(pixelsIn(img, *face("Bob"), isBlue) > 20);
@@ -766,10 +768,14 @@ TEST_CASE("Team UI: the footer shows who else is online; joining the session tak
 		}) > 3);
 	}
 
-	// A click asks for the Team window, like your own face.
+	// A click pins the menu (step 4); its Open Team Window asks for the window.
 	REQUIRE(ui.click(Surface::Footer, pump, "##teamOnline"));
+	REQUIRE(ui.click(Surface::Footer, pump, "Open Team Window"));
 	CHECK(ui.openTeamWindow);
 	ui.openTeamWindow = false;
+	away();
+	footer();
+	CHECK(ui.find("Open Team Window") == nullptr);
 
 	// Anna hosts, Bob joins: he is in the session now, so he leaves the online
 	// cluster (the session's own faces show him) and Cleo stays.
@@ -811,6 +817,143 @@ TEST_CASE("Team UI: the footer shows who else is online; joining the session tak
 	team.signOut();
 	footer();
 	CHECK(ui.find("##teamOnline") == nullptr);
+}
+
+TEST_CASE("Team UI: the online faces stack; hovering lists every one with Invite, never Remove (topic 202)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.roster          = { "Anna", "Bob", "Cleo", "Dana", "Eli", "Fay", "Gus" };
+	server.alsoOnline      = { "Bob", "Cleo", "Dana", "Eli", "Fay", "Gus" };
+	server.ignoreStrangers = true;   // Host Session's relay link lands here too
+	server.setProfile("Bob", 40, 110, 240);
+
+	CollabController collab;
+	TeamController   team(collab);
+	Ui ui{ team };
+	ui.server   = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	ui.teamName = "studio";
+	ui.member   = "Anna";   // an admin: the Team window would offer her Remove
+
+	std::uint64_t now = 1;
+	auto pump   = [&] { server.pump(); collab.update(now); team.update(now); now += 16; };
+	auto footer = [&] { ui.frame(Surface::Footer, pump); };
+	auto away   = [&] { ImGui::GetIO().AddMousePosEvent(2.0f, 2.0f); };
+	auto face   = [&](const char* who) { return ui.find("##teamOnlineFace", who); };
+	auto hover  = [&] {
+		const TeamView::ProbedItem* c = ui.find("##teamOnline");
+		REQUIRE(c);
+		ImGui::GetIO().AddMousePosEvent((c->x0 + c->x1) * 0.5f, (c->y0 + c->y1) * 0.5f);
+		footer();
+		footer();
+	};
+	const char* everyone[] = { "Bob", "Cleo", "Dana", "Eli", "Fay", "Gus" };
+
+	away();
+	REQUIRE(team.signIn(ui.server, ui.teamName, ui.member, "correct-horse"));
+	REQUIRE(frameUntil(footer, [&] { return team.signedIn() && team.members().size() == 7 && face("Bob"); }));
+	footer();
+
+	// The stack: four faces, overlapping in roster order, the rest a count.
+	CHECK(ui.count("##teamOnlineFace") == 4);
+	REQUIRE(face("Eli"));
+	CHECK(face("Fay") == nullptr);
+	const float faceW = face("Bob")->x1 - face("Bob")->x0;
+	CHECK(face("Bob")->x0 < face("Cleo")->x0);
+	CHECK(face("Bob")->x1 > face("Cleo")->x0);
+	CHECK(face("Eli")->x1 - face("Bob")->x0 < 3.0f * faceW);
+	// No menu while the mouse is elsewhere.
+	CHECK(ui.find("Invite", "Bob") == nullptr);
+	{
+		he_ui::Image img;
+		ui.frame(Surface::Footer, pump, false, &img);
+		REQUIRE(img.valid());
+		dump(img, "team-footer-online-stack.bmp");
+		// Bob is on top: his whole face is his blue, not cut by Cleo's.
+		CHECK(pixelsIn(img, *face("Bob"), isBlue) > int(faceW * faceW * 0.4f));
+	}
+
+	// Hovering opens the menu above the stack: all six on their own row, each
+	// with an Invite (greyed, nothing hosted), and no Remove anywhere.
+	hover();
+	for (const char* who : everyone)
+	{
+		INFO(who);
+		REQUIRE(ui.find("Invite", who));
+		CHECK(ui.find("Invite", who)->disabled);
+	}
+	CHECK(ui.count("Invite") == 6);
+	CHECK(ui.find("Invite", "Anna") == nullptr);
+	CHECK(ui.count("Remove") == 0);
+	CHECK(ui.count("Confirm Remove") == 0);
+	REQUIRE(ui.find("Open Team Window"));
+	CHECK(ui.find("Invite", "Gus")->y1 <= ui.find("##teamOnline")->y0);
+	{
+		he_ui::Image img;
+		ui.frame(Surface::Footer, pump, false, &img);
+		REQUIRE(img.valid());
+		dump(img, "team-footer-online-menu.bmp");
+	}
+
+	// Onto the menu: it stays. Away from both: it closes.
+	{
+		const TeamView::ProbedItem* gus = ui.find("Invite", "Gus");
+		ImGui::GetIO().AddMousePosEvent(gus->x0 - 40.0f, (gus->y0 + gus->y1) * 0.5f);
+		footer();
+		footer();
+		CHECK(ui.find("Invite", "Gus") != nullptr);
+	}
+	away();
+	footer();
+	footer();
+	CHECK(ui.find("Invite", "Bob") == nullptr);
+
+	// Host a team session: now the menu's Invite reaches the server (op 10).
+	REQUIRE(team.hostSession(false));
+	REQUIRE(frameUntil(footer, [&] { return sawOp(server, 6) && !team.hostedSession().empty(); }));
+	footer();
+	REQUIRE(ui.find("##teamOnline"));   // Anna alone in the session: everyone else still here
+	hover();
+	REQUIRE(ui.find("Invite", "Eli"));
+	CHECK_FALSE(ui.find("Invite", "Eli")->disabled);
+	REQUIRE(ui.click(Surface::Footer, pump, "Invite", "Eli"));
+	REQUIRE(frameUntil(footer, [&] { return sawOp(server, 10); }));
+	// The menu stayed open under the press (the button held down is the
+	// active item; the menu must still count as hovered then).
+	CHECK(ui.find("Invite", "Eli") != nullptr);
+	bool invitedEli = false;
+	for (const auto& s : server.sessions)
+		if (s.id == team.hostedSession()) invitedEli = s.invited.count("Eli") > 0;
+	CHECK(invitedEli);
+	{
+		he_ui::Image img;
+		ui.frame(Surface::Footer, pump, false, &img);
+		dump(img, "team-footer-online-menu-hosting.bmp");
+	}
+
+	// A click on the stack pins the menu: it stays with the mouse gone, and a
+	// click anywhere else lets it go.
+	away();
+	footer();
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamOnline"));
+	away();
+	footer();
+	footer();
+	CHECK(ui.find("Invite", "Bob") != nullptr);
+	ui.frame(Surface::Footer, pump, true);
+	ui.frame(Surface::Footer, pump, false);
+	footer();
+	CHECK(ui.find("Invite", "Bob") == nullptr);
+
+	// Signed out, stack and menu are gone, pinned or not.
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamOnline"));
+	collab.leave();
+	team.signOut();
+	footer();
+	footer();
+	CHECK(ui.find("##teamOnline") == nullptr);
+	CHECK(ui.find("Invite", "Bob") == nullptr);
 }
 
 TEST_CASE("Team UI: two editors through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")
