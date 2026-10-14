@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include "../src/HE_Editor/CollabController.h"
 #include "../src/HE_Editor/TerrainSync.h"
 
 #include <HorizonScene/FoliagePaint.h>
@@ -12,8 +13,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <deque>
 #include <memory>
+#include <thread>
 #include <vector>
 
 // Landscape sync over a collab session (TerrainSync.h). The machines below are
@@ -386,4 +389,82 @@ TEST_CASE("Landscape sync: the component blob leaves the grids out, and the rece
 	REQUIRE(TerrainSync::replaceKeepingGrids(peer->world, peer->terrain, full));
 	CHECK(peer->tc().sculptHeights == heights);
 	CHECK(peer->tc().dirty);
+}
+
+// ── Through two real CollabControllers ──────────────────────────────────────
+// The editor's own bridge over actual TCP: the snapshot hands the landscape over,
+// the wire id comes from its uuid on both sides, and the client's echo comes
+// back from a real host. Wired the way EditorApplication wires it.
+TEST_CASE("Landscape sync: a client's stroke reaches the host through the real session")
+{
+	auto hostM = makeMachine(0);
+	CollabController host;
+	host.setWorld(&hostM->world);
+	REQUIRE(host.startHosting(0, "Anna"));
+
+	HorizonWorld clientWorld;
+	CollabController client;
+	client.setWorld(&clientWorld);
+	TerrainSync clientSync;
+	client.onWorldReplaced([&] { client.seedNetIds(); clientSync.reset(); });
+
+	const auto wire = [](CollabController& c, HorizonWorld& w, TerrainSync& s) {
+		c.onRemoteTerrainPatch([&c, &w, &s](std::uint32_t handle, const Patch& p, bool own) {
+			if (own) { s.acknowledge(p.seq); return; }
+			if (handle != 0)
+				s.applyRemote(w, static_cast<Entity>(static_cast<entt::id_type>(handle)), p);
+			(void)c;
+		});
+	};
+	wire(host, hostM->world, hostM->sync);
+	wire(client, clientWorld, clientSync);
+
+	std::uint64_t now = 1000;
+	const auto pump = [&](auto done) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			host.update(now);
+			client.update(now);
+			if (done()) return true;
+			now += 16;
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return done();
+	};
+	const auto collect = [&](CollabController& c, HorizonWorld& w, TerrainSync& s, bool isHost) {
+		s.setExpectEcho(!isHost);
+		s.collect(w, now, [&](Entity e, const Patch& p) {
+			return c.publishTerrainPatch(static_cast<std::uint32_t>(entt::to_integral(e)), p);
+		});
+	};
+
+	REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+	REQUIRE(pump([&] { return client.status() == CollabController::Status::Joined; }));
+
+	auto view = clientWorld.registry().view<TerrainComponent>();
+	REQUIRE_FALSE(view.empty());
+	const Entity clientTerrain = view.front();
+	auto& ctc = clientWorld.registry().get<TerrainComponent>(clientTerrain);
+	REQUIRE(ctc.sculptHeights == hostM->tc().sculptHeights);   // the snapshot
+
+	collect(client, clientWorld, clientSync, false);   // first sight: nothing sent
+	collect(host, hostM->world, hostM->sync, true);
+	CHECK(clientSync.pendingCount() == 0);
+
+	now += 100;
+	TerrainSculpt::apply(ctc, -12.0f, 6.0f, TerrainSculpt::Op::Raise, 4.0f, 2.0f, 3.0f);
+	collect(client, clientWorld, clientSync, false);
+	CHECK(clientSync.pendingCount() == 1);
+
+	REQUIRE(pump([&] {
+		return hostM->tc().sculptHeights == ctc.sculptHeights && clientSync.pendingCount() == 0;
+	}));
+	CHECK(hostM->tc().regionDirty);
+
+	// And back the other way: the host paints, the client gets it as a peer's.
+	now += 100;
+	TerrainSculpt::apply(hostM->tc(), 20.0f, -20.0f, TerrainSculpt::Op::Lower, 3.0f, 1.0f, 2.0f);
+	collect(host, hostM->world, hostM->sync, true);
+	REQUIRE(pump([&] { return hostM->tc().sculptHeights == ctc.sculptHeights; }));
 }

@@ -49,7 +49,7 @@ newer region edits and revert them; (b) the cost is per frame, not per change.
 | Component blob | `serializeWithoutGrids`, `replaceKeepingGrids`; `EditorApplication.cpp` per-frame selection publish, `h.publishComponents`, CollabUndo components handler, `onRemoteComponents` | grids set aside (swap, no copy) while serializing; the receiver keeps its grids/runtime. Fixes the 8 MB/frame blob and the "stale whole blob reverts newer patches" race. `rememberComponents` stops a holder from echoing a peer's settings. |
 | Editor wiring | `EditorApplication.cpp` after `updateAssetCollabSync`; `onRemoteTerrainPatch`; `onWorldReplaced` | collect every frame in a session; reset on entering/leaving a session and on snapshot. |
 
-Tests: `tests/test_terrain_sync.cpp` (8 cases: rect size, first stroke whole, paint + page 2 + foliage mask, three-way concurrent sculpt converges, settings keep grids/chunks, malformed/mismatched patches change nothing, pacing loses nothing, grid-free blob both ways) and two wire cases at the end of `tests/test_net_collab.cpp` (echo to sender, no lock needed, empty clear patch, oversize/no-id refused).
+Tests: `tests/test_terrain_sync.cpp` (9 cases: rect size, first stroke whole, paint + page 2 + foliage mask, three-way concurrent sculpt converges, settings keep grids/chunks, malformed/mismatched patches change nothing, pacing loses nothing, grid-free blob both ways, and a client↔host round trip through two real `CollabController`s over TCP) and two wire cases at the end of `tests/test_net_collab.cpp` (echo to sender, no lock needed, empty clear patch, oversize/no-id refused). Negative control: with the re-apply of unconfirmed patches disabled, the three-way case fails on both clients.
 
 ## 4. Not done here (decisions and limits)
 
@@ -58,3 +58,17 @@ Tests: `tests/test_terrain_sync.cpp` (8 cases: rect size, first stroke whole, pa
 * **Viewport picking AABB** of a remotely sculpted landscape is not invalidated (the local brush does it through the viewport's cache); the same gap exists for every remote component edit.
 * **Receiver re-derivations** (TerrainSystem's 2ⁿ+1 resample, a lazy `ensureHeights`) can look like a local edit to the receiver's own diff and be sent once more. It converges (same data, last in host order), it only costs one grid of bandwidth.
 * Not run in a live two-editor session.
+
+## Handoff
+
+- **Topic / step:** 198, step 3 of 11 (landscape sculpting sync)
+- **Branch / commit:** `claude/audit-vollst-ndige-bestandsaufnahme-was-ber-live-collab-sitz` @ see `git log` (inventory e9a32bb3, code e8dc4b25, tests/doc after it; pushed at the end of the step)
+- **Done:** sculpt, Mountain, heightmap import, layer paint (both pages), Fill Layer, foliage mask, water and the Landscape-panel settings of a landscape now reach every peer during a session, whichever tool made them and whether or not the landscape is selected. Two people can shape one landscape at once and end with the same ground.
+- **Files touched:** `src/HE_Editor/TerrainSync.{h,cpp}` (new: diff, patches, apply, reconciliation, grid-free blob helpers); `src/HE_Net/src/CollabSession.cpp:1305-1350` + `CollabSession.h` "Landscape patches" (wire, v14); `CollabController.cpp` `publishTerrainPatch`/`rememberComponents`/`onTerrainPatch` bridge; `EditorApplication.cpp:567` (receiver), `:4708` (per-frame collect), `onWorldReplaced` (reset), selection publish / `h.publishComponents` / CollabUndo components handler / `onRemoteComponents` (grid-free blobs).
+- **Verified:** `he_tests` and `HorizonEditor` build (Release, `out/build/release`). `he_tests --source-file=*test_terrain_sync.cpp` 9/9, `*test_net_collab.cpp` 113/113, `*test_collab_controller.cpp` 79/79, `test_collab_undo`, `test_editor_commands`, `test_mcp_tools_terrain`, `test_terrain`, `test_terrain_heightmap`, `test_foliage` green. Negative control (re-apply disabled) makes the three-way case fail. Full ctest: see the step's result post.
+- **Not verified:** a live two-editor session with real strokes (`scripts/he_collab_two_editors.py` was not run); Windows/Linux (CI).
+- **Decisions taken:** no lock on landscape data, host order + echo + re-apply instead (a lock would let only one person touch the one landscape a scene has); diff instead of tool hooks (MCP, undo, import replicate for free); grids never in the component blob on any collab path; protocol bump to 14 (join compares versions for equality).
+- **Decisions suggested, not taken:** session undo for strokes (section 4, for step 6).
+- **Pending:** stroke undo in a session; viewport picking AABB after a remote sculpt; FoliageComponent/TerrainComponent removal via the settings channel.
+- **Traps:** pacing is per grid and per byte: a whole 1 MB weightmap buys 256 ms before that grid is looked at again (the first test failure here was exactly that). `TerrainComponent.h` was deliberately not touched (it is included everywhere); the grids are set aside by swapping, not copied. Editing `EditorApplication.h`/`CollabController.h` rebuilds ~75 editor files.
+- **Next steps:** 1. Step 4 (HorizonCode graph sync). 2. Step 6: landscape stroke undo per the proposal in section 4. 3. Step 11: two editors, sculpt the same spot from both, compare `sculptHeights` (or a saved scene) byte for byte.
