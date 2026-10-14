@@ -1,7 +1,7 @@
 # Collab sync audit, step 4: HorizonCode graphs (2026-10-14)
 
-Topic 198 step 4. Inventory read from the code (not run live), plus a WIP implementation
-that was **stopped before it was compiled** (deadline). See Handoff.
+Topic 198 step 4. Inventory read from the code (not run live), and the implementation of the
+gaps it found (commits d1c7b20c, 29d58a22). Built and tested locally; no live two-editor run.
 
 ## 1. How a HorizonCode graph travels today
 
@@ -56,35 +56,42 @@ for the two editor-owned keys when it is true and we do not hold the lock yet; t
 in the mirror and `publishDocDeltas` (alwaysDiff) sends it once the grant lands. Covered by
 the adapter-level test only (`EditorApplication` is not in he_tests); no live two-editor run.
 
-## 4. WIP implementation (uncompiled)
+## 4. Implementation
 
 * `HorizonCode.h/.cpp`: public `eventDeclToJson/FromJson`, `commentToJson/FromJson`,
   `extractToJson/FromJson` (empty spec = `"{}"`); `toJson`/`fromJson` now built on the same
-  object helpers.
-* `CollabDocSync.h`: `Kind::Event`, `Kind::Setting` appended; `kSettingExtract = 1`.
+  object helpers, so the item form and the file form cannot drift.
+* `CollabDocSync.h`: `Kind::Event`, `Kind::Setting` appended; `kSettingExtract = 1`;
+  `hasLocalChanges` (section 3).
 * `CollabDocSync.cpp` `HcAdapter`: enumerate/upsert/remove/reorder for Event (name hash),
   Comment (id, `bumpNextId`), Setting (Extract, replace only).
 * Animator panel: second binding `Scope::LogicGraph` → `syncGraph` with `collabSyncMirror`,
   reset in `reloadFromDisk` and `reloadByContentPath`.
+* EditorApplication.cpp `updateAssetCollabSync`: lock claim for the two editor-owned graphs.
 * `kCollabProtocolVersion` 14 → 15 (a v14 peer would skip the new kinds silently).
-* tests/test_collab_docsync.cpp: 6 new cases (events, comments + nextId, extract set/clear,
-  function + local + value edits, variable rename, animator two-document isolation).
+* tests/test_collab_docsync.cpp: 7 new cases (events, comments + nextId, extract set/clear,
+  function + local + value edits, variable rename, animator two-document isolation,
+  hasLocalChanges).
 
 ## Handoff
 
-**Done:** inventory above; WIP code for gaps in section 2 + animator binding, committed on the branch.
-**Not verified:** nothing compiled or run. The he_tests build (out/build/release, 422 steps after
-the header edits) was stopped at 8/422 when the queen's stop arrived.
-**Decisions:** reuse `HcAdapter` + existing delta wire rather than a new path; Extract as an
-always-present singleton (replace only); protocol bump to 15.
-**Pitfalls:** `HorizonCode.h` and `CollabSession.h` rebuild ~420 targets. `CollabDocSync::Kind`
-values are wire bytes: append only. Animator panel and the editor-owned graphs are not in he_tests.
-**Next steps, in order:**
-1. `cmake --build out/build/release --target he_tests -j 6`, then
-   `he_tests --source-file=*test_collab_docsync.cpp`; fix whatever fails.
-2. Build `HorizonEditor` (after he_tests, not in parallel).
-3. Fix section 3 (lock claim for Level Script / Game Instance), with a test.
-4. Then full he_tests run, push, CI.
-Open for later steps: `HcRenameSweep` writes other assets via `saveAsset` without checking
-their locks (step 6); lock-deny on the editor-owned graphs leaves the loser's edit as a fork
-(`onAssetLockDenied` reloads from disk, which those two keys don't have; step 6/7).
+**Done:** inventory (sections 1-3); gaps of section 2, the animator binding and the section-3 lock
+claim implemented. Commits d1c7b20c, 29d58a22.
+**Verified:** `he_tests` and `HorizonEditor` build (out/build/release). Green: test_collab_docsync
+(24 cases), all `test_horizoncode*` (215), test_collab_controller (79), test_collab_undo,
+test_mcp_hc, test_mcp_tools_collab, test_editor_commands, test_terrain_sync, test_net_collab,
+test_net_lanbeacon. Full he_tests (minus material_graph): see the step's result post.
+**Not verified:** no live two-editor session; the animator panel binding and the Level Script /
+Game Instance claim are covered only at adapter level (neither file is in he_tests).
+**Decisions:** reuse `HcAdapter` + the existing delta wire, not a new path; Extract as an
+always-present singleton (replace only); protocol bump to 15; editor-owned graphs claim on
+"document differs from mirror" instead of getting a dirty flag.
+**Pitfalls:** `HorizonCode.h` and `CollabSession.h` rebuild ~410 targets (~35 min at -j8, load 3).
+`CollabDocSync::Kind` values are wire bytes: append only.
+**Next steps / open for later steps:**
+1. Step 6: `HcRenameSweep` writes other assets via `saveAsset` without checking their locks;
+   lock-deny on the editor-owned graphs leaves the loser's edit as a fork (`onAssetLockDenied`
+   reloads from disk, which those two keys don't have).
+2. Step 7: check late join / reconnect for the Level Script and Game Instance graph. During a
+   session deltas are their only channel; whether the join snapshot carries them was not checked.
+3. Step 11: a live two-editor run that edits each HC host.
