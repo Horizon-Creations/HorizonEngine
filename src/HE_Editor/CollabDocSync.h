@@ -131,6 +131,13 @@ void seed(const IDocAdapter& doc, DocMirror& mirror, Scope scope);
 void diffInto(const IDocAdapter& doc, DocMirror& mirror, Scope scope,
               std::vector<HE::Net::CollabSession::DocDelta>& out);
 
+// Would diffInto emit anything? Read-only: the mirror is left as it is, so the
+// edit is still there to send once we may. For a document that has no dirty
+// flag to tell "the user changed something" (the Level Script, the Game
+// Instance graph), this is that flag. An unseeded mirror has nothing to compare
+// against and answers false.
+bool hasLocalChanges(const IDocAdapter& doc, const DocMirror& mirror);
+
 // Apply a peer's batch. Only deltas whose scope matches are considered, so one
 // call per document of a multi-document asset. Returns true when anything was
 // applied (the caller repaints / marks dirty). Updates the mirror, which is what

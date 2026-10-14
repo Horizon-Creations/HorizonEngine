@@ -748,3 +748,25 @@ TEST_CASE("DocSync: an animator's sync graph and its state machine are separate 
     CHECK(peerMachine.states.size() == 1);
     CHECK(HC::toJson(peerSync) == HC::toJson(sync));
 }
+
+TEST_CASE("DocSync: hasLocalChanges sees an edit without consuming it")
+{
+    // The Level Script and Game Instance have no dirty flag; this is what tells
+    // the editor to claim their lock. It must not swallow the edit: the diff
+    // that runs once the grant lands still has to send it.
+    HC::Graph g;
+    auto doc = DS::forHorizonCodeGraph(g);
+    DS::DocMirror mirror;
+    CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));   // unseeded: no baseline
+    DS::seed(*doc, mirror, DS::Scope::Primary);
+    CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));
+
+    HC::EventDecl ev; ev.name = "OnLevelReady";
+    g.events.push_back(ev);
+    CHECK(DS::hasLocalChanges(*doc, mirror));
+    CHECK(DS::hasLocalChanges(*doc, mirror));         // asking twice changes nothing
+
+    const std::vector<Delta> ds = diff(*doc, mirror);
+    CHECK(countOf(ds, DS::Kind::Event, kUpsert) == 1);
+    CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));
+}

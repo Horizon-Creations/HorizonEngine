@@ -199,6 +199,25 @@ void diffInto(const IDocAdapter& doc, DocMirror& mirror, Scope scope,
     }
 }
 
+bool hasLocalChanges(const IDocAdapter& doc, const DocMirror& mirror)
+{
+    if (!mirror.seeded) return false;
+    for (int k = 0; k < kKindCount; ++k)
+    {
+        const auto current = capture(doc, static_cast<Kind>(k));
+        // Same set in the same order with the same payloads = nothing to send;
+        // any other difference (added, removed, edited, reordered) is an edit.
+        if (current.size() != mirror.order[k].size()) return true;
+        for (std::size_t i = 0; i < current.size(); ++i)
+        {
+            if (current[i].first != mirror.order[k][i]) return true;
+            const auto it = mirror.items[k].find(current[i].first);
+            if (it == mirror.items[k].end() || it->second != current[i].second) return true;
+        }
+    }
+    return false;
+}
+
 bool applyDeltas(IDocAdapter& doc, DocMirror& mirror, Scope scope,
                  const std::vector<Delta>& batch)
 {

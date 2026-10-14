@@ -40,7 +40,7 @@ Hosts of an HC graph and how each one is bound:
 Severity: for class / widget assets the missing items arrived about 1 s later through the autosave
 (with a tab reload). For the **Level Script and Game Instance** they never arrived.
 
-## 3. Bigger finding (not fixed): editor-owned graphs never claim the lock
+## 3. Bigger finding (fixed in the resumed run): editor-owned graphs never claimed the lock
 
 `beginAssetEdit` has exactly one caller (EditorApplication.cpp:9669) and it is gated on
 `EditorUI::tabHasUnsavedEdits`, which is false for `LevelScriptPanel::kTabPath` and
@@ -50,10 +50,11 @@ those tabs never requests the lock, `ownsAssetLock` stays false and `publishDocD
 (MCP edits only check `lockedByOther`, ~9961). Read-only banners do work for those keys
 (EditorUI.cpp ~3887). Verified by reading only.
 
-Proposed fix: add `CollabDocSync::hasLocalChanges(doc, mirror)` (compare capture to mirror,
-no mutation) and, in `updateAssetCollabSync`, for the two editor-owned keys call
-`m_collab.beginAssetEdit(key)` when that returns true. The diff then sends once the grant lands.
-Needs a test in test_collab_controller that a Level Script edit by a non-holder goes out.
+Fix: `CollabDocSync::hasLocalChanges(doc, mirror)` (compares the document with the mirror,
+read-only) is the missing dirty flag. `updateAssetCollabSync` calls `m_collab.beginAssetEdit(key)`
+for the two editor-owned keys when it is true and we do not hold the lock yet; the edit stays
+in the mirror and `publishDocDeltas` (alwaysDiff) sends it once the grant lands. Covered by
+the adapter-level test only (`EditorApplication` is not in he_tests); no live two-editor run.
 
 ## 4. WIP implementation (uncompiled)
 

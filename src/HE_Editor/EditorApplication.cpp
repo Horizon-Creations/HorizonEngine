@@ -9665,6 +9665,23 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 
 		publishDocDeltas(tab.assetPath, key);
 
+		// The Level Script and the Game Instance graph have no panel dirty flag,
+		// so the claim below never fired for them: their edits were made, never
+		// locked and therefore never sent (docs/collab-sync-audit-horizoncode-
+		// 2026-10-14.md section 3). For them "edited" is "the document differs
+		// from what the peers have seen". The diff waits in the mirror until the
+		// grant lands, and publishDocDeltas sends it then.
+		if (key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath)
+		{
+			if (!m_collab.inSession() || m_collab.ownsAssetLock(key)) continue;
+			bool edited = false;
+			for (const CollabDocSync::DocBinding& d : collabDocsForTab(tab.assetPath))
+				if (d.adapter && d.mirror && CollabDocSync::hasLocalChanges(*d.adapter, *d.mirror))
+					edited = true;
+			if (edited) m_collab.beginAssetEdit(key);
+			continue;   // no whole file to autosave: the scene / commitGameInstance own that
+		}
+
 		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
 		if (!m_collab.beginAssetEdit(key))
 			continue;   // held by someone else, or the host has not answered yet
