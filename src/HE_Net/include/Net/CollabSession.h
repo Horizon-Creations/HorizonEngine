@@ -115,7 +115,9 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // and dropped rather than fatal — but that only means a stray frame between two
 // builds of the SAME version is harmless. It is not a licence to skip a bump:
 // there is no mixed-version session for the frame to be dropped in.)
-inline constexpr std::uint16_t kCollabProtocolVersion = 13;
+// v14: landscape patches (sendTerrainPatch). A v13 peer would drop every one, so
+// two people would shape two different landscapes and never be told.
+inline constexpr std::uint16_t kCollabProtocolVersion = 14;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -466,6 +468,35 @@ public:
 
     void onComponents(std::function<void(ParticipantId, const ComponentUpdate&)> fn) {
         m_onComponents = std::move(fn);
+    }
+
+    // ── Landscape patches ──
+    // A rectangle of one of a landscape's grids (heights, layer weights, the
+    // foliage mask) or its settings, as raw bytes. The bytes mean nothing here:
+    // HorizonNet carries them, the editor (TerrainSync) knows the fields. A
+    // landscape is too big for the component blob (megabytes of base64 per
+    // frame) and too shared for its lock: two people shape one landscape.
+    //
+    // So there is no lock on this channel. Order is what keeps everyone equal
+    // instead: the host applies patches in the order they reach it and relays
+    // every one to EVERYBODY, its sender included. The echo is the sender's
+    // acknowledgement — until it comes back, the sender re-applies its own
+    // patch over anything a peer's patch overwrote in the meantime, so all
+    // machines end with the host's order (TerrainSync.h).
+    struct TerrainPatch {
+        std::uint64_t             netId = 0;
+        std::uint32_t             seq   = 0;   // the sender's own counter, for its echo
+        std::uint8_t              field = 0;   // TerrainSync::Field
+        std::uint32_t             res   = 0;   // side length of the grid the rect is in
+        std::uint32_t             x0 = 0, z0 = 0, w = 0, h = 0;
+        std::vector<std::uint8_t> bytes;
+    };
+
+    bool sendTerrainPatch(const TerrainPatch& patch);
+
+    // `own` is true for the echo of a patch this participant sent itself.
+    void onTerrainPatch(std::function<void(ParticipantId, const TerrainPatch&, bool own)> fn) {
+        m_onTerrainPatch = std::move(fn);
     }
 
     // ── Structural changes ──
@@ -966,6 +997,10 @@ private:
     void handleComponentsUpdate(ConnectionId conn, BitReader& r);  // host
     void handleComponentsRelay(BitReader& r);                      // client
 
+    // Landscape patches
+    void handleTerrainUpdate(ConnectionId conn, BitReader& r);     // host
+    void handleTerrainRelay(BitReader& r);                         // client
+
     // Structural
     void handleStructuralUpdate(ConnectionId conn, BitReader& r);  // host
     void handleStructuralRelay(BitReader& r);                      // client
@@ -1098,6 +1133,7 @@ private:
     std::function<void(std::uint64_t, bool, ParticipantId, const std::string&)>
                                                                 m_onLockQuery;
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
+    std::function<void(ParticipantId, const TerrainPatch&, bool)> m_onTerrainPatch;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
     std::function<void(ParticipantId, const std::string&, std::uint32_t)>

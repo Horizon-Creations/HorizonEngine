@@ -11,6 +11,7 @@
 #include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "TerrainSync.h"     // landscape grids and settings over the session
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "AssetAutosave.h"   // the same for dirty asset tabs
 #include "NotificationStore.h"
@@ -879,6 +880,10 @@ private:
 	void updateMcpLocks(std::uint64_t nowMs);
 	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
+	// Landscape edits: diffed each frame like the entity set below, so every
+	// tool that shapes, paints or plants a landscape replicates (TerrainSync.h).
+	HE::Ed::TerrainSync m_terrainSync;
+	bool                m_terrainSyncLive = false;   // in a session last frame
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;

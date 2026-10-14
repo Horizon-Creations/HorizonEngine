@@ -125,6 +125,15 @@ bool collabOffline()
 	return off;
 }
 
+// FNV-1a over a component blob: what publishComponents compares to decide
+// whether the held entity changed since it last went out.
+std::uint64_t componentBlobHash(const std::vector<std::uint8_t>& blob)
+{
+	std::uint64_t hash = 1469598103934665603ull;
+	for (const std::uint8_t b : blob) { hash ^= b; hash *= 1099511628211ull; }
+	return hash;
+}
+
 } // namespace
 
 // ─── Scene ↔ session state ───────────────────────────────────────────────────
@@ -1109,6 +1118,13 @@ void CollabController::wireCallbacks()
 	                              const HE::Net::CollabSession::ComponentUpdate& u) {
 		const std::uint32_t local = entityForNetId(u.netId);
 		if (local != 0 && m_onRemoteComponents) m_onRemoteComponents(local, u.blob);
+	});
+
+	m_collab->onTerrainPatch([this](HE::Net::ParticipantId,
+	                                const HE::Net::CollabSession::TerrainPatch& p, bool own) {
+		if (!m_onRemoteTerrainPatch) return;
+		// The echo of our own needs no entity: it only acknowledges a sequence number.
+		m_onRemoteTerrainPatch(own ? 0u : entityForNetId(p.netId), p, own);
 	});
 
 	m_collab->onStructural([this](HE::Net::ParticipantId,
@@ -2539,8 +2555,7 @@ void CollabController::publishComponents(std::uint32_t entityHandle,
 	// merely looking at an entity rather than editing it. Keyed per entity —
 	// with a single shared slot, alternating between two selected entities read
 	// as a change on every switch and re-sent both every time.
-	std::uint64_t hash = 1469598103934665603ull;
-	for (const std::uint8_t b : blob) { hash ^= b; hash *= 1099511628211ull; }
+	const std::uint64_t hash = componentBlobHash(blob);
 
 	const auto it = m_lastComponentHashes.find(entityHandle);
 	if (it != m_lastComponentHashes.end() && it->second == hash) return;
@@ -2552,6 +2567,24 @@ void CollabController::publishComponents(std::uint32_t entityHandle,
 	{
 		m_lastComponentHashes[entityHandle] = hash;
 	}
+}
+
+void CollabController::rememberComponents(std::uint32_t entityHandle,
+                                          const std::vector<std::uint8_t>& blob)
+{
+	if (blob.empty()) return;
+	m_lastComponentHashes[entityHandle] = componentBlobHash(blob);
+}
+
+// ─── Landscape patches ───────────────────────────────────────────────────────
+
+bool CollabController::publishTerrainPatch(std::uint32_t entityHandle,
+                                           HE::Net::CollabSession::TerrainPatch patch)
+{
+	if (!m_collab || !inSession()) return false;
+	patch.netId = netIdFor(entityHandle);
+	if (patch.netId == 0) return false;
+	return m_collab->sendTerrainPatch(patch);
 }
 
 // ─── Structural replication ──────────────────────────────────────────────────

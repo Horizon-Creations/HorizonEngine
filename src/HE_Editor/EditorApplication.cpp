@@ -550,15 +550,32 @@ void EditorApplication::OnInit()
 		if (!m_editorWorld) return;
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
-		SceneSerializer serializer;
 		// Replace, not update: every blob on this wire is a whole entity's state
 		// (serializeEntityComponents at the sender, from every build that ever
-		// sent one), so a component it lacks was removed over there.
-		serializer.replaceEntityComponents(*m_editorWorld, e, blob);
+		// sent one), so a component it lacks was removed over there. A
+		// landscape's grids are the exception: they travel as patches
+		// (TerrainSync), so the blob has none and ours stay.
+		HE::Ed::TerrainSync::replaceKeepingGrids(*m_editorWorld, e, blob);
 		// Mark the transform dirty so the renderer rebuilds its matrix; other
 		// components are read fresh each frame.
 		if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
 			tc->dirty = true;
+	});
+
+	// A peer shaped, painted or planted a landscape, or our own patch came back
+	// from the host (TerrainSync.h: the echo is what orders ours against theirs).
+	m_collab.onRemoteTerrainPatch([this](std::uint32_t handle,
+	                                     const HE::Net::CollabSession::TerrainPatch& p,
+	                                     bool own) {
+		if (own) { m_terrainSync.acknowledge(p.seq); return; }
+		if (!m_editorWorld || handle == 0) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_terrainSync.applyRemote(*m_editorWorld, e, p)) return;
+		// Settings change the component blob of an entity we may be holding;
+		// it is theirs, so it must not go back out as our edit.
+		if ((p.field & ~HE::Ed::TerrainSync::kWholeGrid) == HE::Ed::TerrainSync::Settings)
+			m_collab.rememberComponents(handle,
+			                            HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
 	});
 
 	m_collab.onRemoteDestroy([this](std::uint32_t handle) {
@@ -667,14 +684,14 @@ void EditorApplication::OnInit()
 		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& bytes) {
 			const Entity e = entityOf(subject);
 			if (e == entt::null) return;
-			SceneSerializer serializer;
 			// Both sides of a Components entry are whole states (EditorCommands
 			// records them so), so the undo can take a component away again.
-			serializer.replaceEntityComponents(*m_editorWorld, e, bytes);
+			// A landscape's grids in it come back here too; TerrainSync sends them.
+			HE::Ed::TerrainSync::replaceKeepingGrids(*m_editorWorld, e, bytes);
 			if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
 				tc->dirty = true;
 			m_collab.publishComponents(static_cast<std::uint32_t>(entt::to_integral(e)),
-			                           serializer.serializeEntityComponents(*m_editorWorld, e));
+			                           HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
 		});
 
 	// ── Authored-asset sync ──────────────────────────────────────────────────
@@ -922,6 +939,9 @@ void EditorApplication::OnInit()
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
 		m_levelScriptMirror = {};
+		// Same for the landscapes: the next collect takes them as the snapshot
+		// left them, and nothing we sent into the old world is waited for.
+		m_terrainSync.reset();
 		if (m_editorWorld)
 		{
 			m_collab.setWorld(m_editorWorld.get());
@@ -4674,6 +4694,24 @@ void EditorApplication::OnRender(float dt)
 		if (m_collab.inSession()) syncStructuralChanges();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
+		// Landscapes, after the structural diff so a landscape created this frame
+		// went out whole first. Entering or leaving a session starts the mirrors
+		// over: what was edited before it is in the snapshot the peers got.
+		if (m_collab.inSession() != m_terrainSyncLive)
+		{
+			m_terrainSync.reset();
+			m_terrainSyncLive = m_collab.inSession();
+		}
+		if (m_terrainSyncLive && m_editorWorld)
+		{
+			m_terrainSync.setExpectEcho(!m_collab.isHost());
+			m_terrainSync.collect(*m_editorWorld, nowMs,
+				[this](Entity e, const HE::Ed::TerrainSync::Patch& p) {
+					return m_collab.publishTerrainPatch(
+						static_cast<std::uint32_t>(entt::to_integral(e)), p);
+				});
+		}
+
 		// Claim the selected entity, so everyone else sees it is being worked on
 		// before they click it themselves. The PRIMARY only: a lock is one
 		// subject, and the entity the gizmo moves is the one a peer must not
@@ -4733,10 +4771,11 @@ void EditorApplication::OnRender(float dt)
 				// light, collider, script, name… Serializing one entity is cheap,
 				// and publishComponents hashes the result so an entity that is
 				// merely selected rather than edited sends nothing.
+				// A landscape's grids stay out (megabytes of base64 per frame);
+				// TerrainSync sends them as patches, whoever holds the entity.
 				{
-					SceneSerializer serializer;
 					const std::vector<std::uint8_t> comps =
-						serializer.serializeEntityComponents(*m_editorWorld, selected);
+						HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, selected);
 					if (!comps.empty())
 					{
 						m_collab.publishComponents(
@@ -10580,7 +10619,15 @@ void EditorApplication::setupEditorCommands()
 	};
 	h.publishComponents = [this](std::uint32_t handle,
 	                             const std::vector<std::uint8_t>& blob) {
-		m_collab.publishComponents(handle, blob);
+		// The whole state, but a landscape without its grids: TerrainSync sends
+		// what the command changed in them, as patches.
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (m_editorWorld && m_editorWorld->registry().valid(e) &&
+		    m_editorWorld->registry().any_of<TerrainComponent, FoliageComponent>(e))
+			m_collab.publishComponents(handle,
+			                           HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
+		else
+			m_collab.publishComponents(handle, blob);
 	};
 	h.preloadAssetRefs = [this] {
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());

@@ -494,6 +494,27 @@ public:
 		m_onRemoteComponents = std::move(fn);
 	}
 
+	// Our copy of an entity's components was just changed by a peer (a
+	// landscape's settings arrive outside the lock, TerrainSync): remember its
+	// new state as already sent, so holding the entity does not send it
+	// straight back as our own edit.
+	void rememberComponents(std::uint32_t entityHandle,
+	                        const std::vector<std::uint8_t>& blob);
+
+	// ── Landscape patches ──
+	// A rectangle of a landscape's grids or its settings (TerrainSync). No lock:
+	// the host orders them and echoes each to its sender (CollabSession.h).
+	// Fills in the wire id; false = not in a session, or the entity has none.
+	bool publishTerrainPatch(std::uint32_t entityHandle,
+	                         HE::Net::CollabSession::TerrainPatch patch);
+
+	// A peer's patch (`own` false; `handle` 0 if the entity is unknown here) or
+	// the echo of one of ours (`own` true).
+	using TerrainPatchFn = std::function<void(std::uint32_t handle,
+	                                          const HE::Net::CollabSession::TerrainPatch&,
+	                                          bool own)>;
+	void onRemoteTerrainPatch(TerrainPatchFn fn) { m_onRemoteTerrainPatch = std::move(fn); }
+
 	// ── Structural replication ──
 	// Peers assign ECS handles independently, so a raw handle names different
 	// entities on different machines. Everything network-facing therefore uses a
@@ -1496,6 +1517,7 @@ private:
 	// Last blob hash sent per entity, so switching selection back and forth
 	// does not read as an edit.
 	std::unordered_map<std::uint32_t, std::uint64_t> m_lastComponentHashes;
+	TerrainPatchFn                                    m_onRemoteTerrainPatch;
 	std::function<void(std::uint32_t)>                m_onRemoteDestroy;
 	std::function<void(std::uint32_t, std::uint32_t, const float*)> m_onRemoteReparent;
 	// Set while applying a received asset, so writing it to disk does not bounce

@@ -78,6 +78,11 @@ constexpr MessageId kMsgAssetEditAnswer   = kFirstUserMessage + 36;  // holder �
 // nothing it could be made out of.
 constexpr MessageId kMsgAssetRefusedReport = kFirstUserMessage + 37;  // refuser → host
 constexpr MessageId kMsgAssetRefused       = kFirstUserMessage + 38;  // host → the sender
+// Landscape patches (TerrainPatch). The relay goes to every client INCLUDING the
+// sender: its copy is the acknowledgement that orders its own edits against the
+// others' (CollabSession.h, "Landscape patches").
+constexpr MessageId kMsgTerrainUpdate      = kFirstUserMessage + 39;  // client → host
+constexpr MessageId kMsgTerrainRelay       = kFirstUserMessage + 40;  // host → all clients
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -178,6 +183,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgComponentsUpdate, [this](ConnectionId conn, BitReader& r) {
             handleComponentsUpdate(conn, r);
         });
+        m_net->on(kMsgTerrainUpdate, [this](ConnectionId conn, BitReader& r) {
+            handleTerrainUpdate(conn, r);
+        });
         m_net->on(kMsgDocDeltasUpdate, [this](ConnectionId conn, BitReader& r) {
             handleDocDeltasUpdate(conn, r);
         });
@@ -232,6 +240,9 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgComponentsRelay, [this](ConnectionId, BitReader& r) {
             handleComponentsRelay(r);
+        });
+        m_net->on(kMsgTerrainRelay, [this](ConnectionId, BitReader& r) {
+            handleTerrainRelay(r);
         });
         m_net->on(kMsgDocDeltasRelay, [this](ConnectionId, BitReader& r) {
             handleDocDeltasRelay(r);
@@ -1258,6 +1269,85 @@ void CollabSession::handleComponentsRelay(BitReader& r) {
     ComponentUpdate u;
     if (!readComponentBody(r, u.netId, u.blob, m_cfg.maxSnapshotBytes)) return;
     if (m_onComponents) m_onComponents(sender, u);
+}
+
+// ─── Landscape patches ───────────────────────────────────────────────────────
+
+namespace {
+void writeTerrainBody(BitWriter& w, const CollabSession::TerrainPatch& p) {
+    w.writeUInt64(p.netId);
+    w.writeUInt32(p.seq);
+    w.writeByte(p.field);
+    w.writeUInt32(p.res);
+    w.writeUInt32(p.x0);
+    w.writeUInt32(p.z0);
+    w.writeUInt32(p.w);
+    w.writeUInt32(p.h);
+    w.writeUInt32(static_cast<std::uint32_t>(p.bytes.size()));
+    if (!p.bytes.empty()) w.writeBytes(p.bytes.data(), p.bytes.size());
+}
+
+bool readTerrainBody(BitReader& r, CollabSession::TerrainPatch& p, std::uint32_t maxBytes) {
+    std::uint32_t len = 0;
+    if (!r.readUInt64(p.netId) || !r.readUInt32(p.seq) || !r.readByte(p.field) ||
+        !r.readUInt32(p.res) || !r.readUInt32(p.x0) || !r.readUInt32(p.z0) ||
+        !r.readUInt32(p.w) || !r.readUInt32(p.h) || !r.readUInt32(len)) {
+        return false;
+    }
+    // An empty patch is legal: res 0 says "this grid is gone" (a cleared sculpt).
+    if (len > maxBytes) return false;   // never allocate on trust
+    p.bytes.resize(len);
+    if (len > 0 && !r.readBytes(p.bytes.data(), len)) return false;
+    return !r.overflowed();
+}
+} // namespace
+
+bool CollabSession::sendTerrainPatch(const TerrainPatch& patch) {
+    if (!m_net || !m_joined || patch.netId == 0) return false;
+    if (patch.bytes.size() > m_cfg.maxSnapshotBytes) return false;
+
+    if (m_role == NetRole::Host) {
+        // The host's own edit is already in its world, so its place in the
+        // order is now: everything it relays after this lands on top of it.
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writeTerrainBody(w, patch);
+        m_net->broadcast(kMsgTerrainRelay, w);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+
+    BitWriter w;
+    writeTerrainBody(w, patch);   // no id — host stamps it
+    m_net->send(m_net->connections().front(), kMsgTerrainUpdate, w);
+    return true;
+}
+
+void CollabSession::handleTerrainUpdate(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    TerrainPatch p;
+    if (!readTerrainBody(r, p, m_cfg.maxSnapshotBytes)) return;
+
+    // Apply here first, relay after: whatever the host's own editor sends from
+    // inside this callback (its pending edits) then goes out BEFORE this patch,
+    // which is the order the host's world now has them in.
+    if (m_onTerrainPatch) m_onTerrainPatch(sender, p, false);
+
+    BitWriter w;
+    w.writeUInt32(sender);
+    writeTerrainBody(w, p);
+    m_net->broadcast(kMsgTerrainRelay, w);   // the sender too: its echo
+}
+
+void CollabSession::handleTerrainRelay(BitReader& r) {
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+
+    TerrainPatch p;
+    if (!readTerrainBody(r, p, m_cfg.maxSnapshotBytes)) return;
+    if (m_onTerrainPatch) m_onTerrainPatch(sender, p, sender == m_localId);
 }
 
 // ─── Document deltas ─────────────────────────────────────────────────────────

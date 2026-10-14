@@ -3428,3 +3428,96 @@ TEST_CASE("LanBeacon: the browser carries the flag through to the row the panel 
     CHECK(b.sessions()[0].syncsLargeAssets);
     CHECK(b.sessions()[0].address == "192.168.1.61");
 }
+
+// ── Landscape patches ────────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: a landscape patch reaches the host, and comes back to its sender as its echo")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    // No lock on this channel: a host holding the landscape does not stop it.
+    constexpr std::uint64_t kLandscape = 0xABCDull;
+    REQUIRE(p->host->requestLock(kLandscape));
+    p->pump(4);
+
+    std::vector<CollabSession::TerrainPatch> hostGot;
+    std::vector<std::pair<CollabSession::TerrainPatch, bool>> clientGot;
+    p->host->onTerrainPatch([&](ParticipantId, const CollabSession::TerrainPatch& t, bool own) {
+        CHECK_FALSE(own);   // the host never hears its own
+        hostGot.push_back(t);
+    });
+    p->client->onTerrainPatch([&](ParticipantId, const CollabSession::TerrainPatch& t, bool own) {
+        clientGot.push_back({ t, own });
+    });
+
+    CollabSession::TerrainPatch t;
+    t.netId = kLandscape;
+    t.seq   = 7;
+    t.field = 1 | 0x80;
+    t.res   = 65;
+    t.x0 = 3; t.z0 = 4; t.w = 5; t.h = 2;
+    t.bytes = makeBlob(5 * 2 * 4);
+    REQUIRE(p->client->sendTerrainPatch(t));
+    p->pump(4);
+
+    REQUIRE(hostGot.size() == 1);
+    CHECK(hostGot[0].netId == kLandscape);
+    CHECK(hostGot[0].field == t.field);
+    CHECK(hostGot[0].res == 65);
+    CHECK(hostGot[0].x0 == 3);
+    CHECK(hostGot[0].z0 == 4);
+    CHECK(hostGot[0].w == 5);
+    CHECK(hostGot[0].h == 2);
+    CHECK(hostGot[0].bytes == t.bytes);
+    REQUIRE(clientGot.size() == 1);
+    CHECK(clientGot[0].second);              // its own, back from the host
+    CHECK(clientGot[0].first.seq == 7);
+
+    // The host's own goes to the client as a peer's.
+    CollabSession::TerrainPatch h = t;
+    h.seq = 1;
+    REQUIRE(p->host->sendTerrainPatch(h));
+    p->pump(4);
+    REQUIRE(clientGot.size() == 2);
+    CHECK_FALSE(clientGot[1].second);
+    CHECK(clientGot[1].first.bytes == h.bytes);
+    CHECK(hostGot.size() == 1);
+}
+
+TEST_CASE("CollabSession: a cleared grid is a patch with no bytes, and an oversize one is not sent")
+{
+    CollabSession::Config small;
+    small.maxSnapshotBytes = 1024;
+    auto p = makePair("Anna", "Bob", small, small);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    int arrived = 0;
+    bool emptyArrived = false;
+    p->host->onTerrainPatch([&](ParticipantId, const CollabSession::TerrainPatch& t, bool) {
+        ++arrived;
+        emptyArrived = emptyArrived || t.bytes.empty();
+    });
+
+    CollabSession::TerrainPatch clear;
+    clear.netId = 5;
+    clear.field = 1 | 0x80;   // res 0, no rectangle, no bytes
+    REQUIRE(p->client->sendTerrainPatch(clear));
+
+    CollabSession::TerrainPatch big;
+    big.netId = 5;
+    big.bytes = makeBlob(2048);
+    CHECK_FALSE(p->client->sendTerrainPatch(big));
+
+    CollabSession::TerrainPatch noId;
+    noId.bytes = makeBlob(16);
+    CHECK_FALSE(p->client->sendTerrainPatch(noId));
+
+    p->pump(4);
+    CHECK(arrived == 1);
+    CHECK(emptyArrived);
+}
