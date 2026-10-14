@@ -4899,6 +4899,32 @@ std::string spacedTypeName(const char* n)
 
 // A 24 px-ish pictogram of the component, centred on `c`. Plain strokes, so it
 // takes the tile's colour and needs no texture.
+// How big the palette's tiles are, against a 1080-point-tall screen. The tiles
+// were fixed sizes in the points the UI is laid out in, so on a screen with more
+// points (a 1440p or 4K monitor at 100 %) they were a smaller part of it — and on
+// a Retina laptop and a 27" monitor the same palette looked like two different
+// panels. Scaled with the height of the monitor the editor is on, in those same
+// points, they take the same share of it everywhere. Never below 1: a laptop
+// keeps the size it has. Without a monitor list (headless) the window's height
+// stands in for the monitor's.
+float paletteScreenScale()
+{
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	if (!vp) return 1.0f;
+	float height = vp->Size.y;
+	const ImVec2 centre(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
+	for (const ImGuiPlatformMonitor& m : ImGui::GetPlatformIO().Monitors)
+		if (centre.x >= m.MainPos.x && centre.x < m.MainPos.x + m.MainSize.x &&
+		    centre.y >= m.MainPos.y && centre.y < m.MainPos.y + m.MainSize.y)
+		{
+			height = m.MainSize.y;
+			break;
+		}
+	// In steps of a twentieth, so a window dragged between monitors of nearly the
+	// same size does not shuffle the tiles.
+	return std::clamp(std::round(height / 1080.0f * 20.0f) / 20.0f, 1.0f, 2.5f);
+}
+
 void paletteGlyph(ImDrawList* dl, const ImVec2& c, float size, UIWidgetType t, ImU32 col)
 {
 	const float h  = size * 0.5f;
@@ -7203,6 +7229,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 			// A plain click adds (centered on the canvas or under the selected
 			// panel); dragging the tile onto the canvas/hierarchy places it there.
+			const float tileScale = paletteScreenScale();
 			const auto tile = [&](UIWidgetType t, const ImVec2& size) -> bool
 			{
 				ImGui::PushID(static_cast<int>(t));
@@ -7212,18 +7239,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 				ImDrawList* dl  = ImGui::GetWindowDrawList();
 				dl->AddRectFilled(p0, p1, hot ? IM_COL32(60, 60, 68, 255) : IM_COL32(38, 38, 43, 255), 5.0f);
 				dl->AddRect(p0, p1, IM_COL32(255, 255, 255, hot ? 55 : 22), 5.0f);
-				const float gs = 22.0f;
-				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 6.0f + gs * 0.5f), gs, t,
+				const float gs = 28.0f * tileScale;
+				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 8.0f * tileScale + gs * 0.5f), gs, t,
 				             hot ? IM_COL32(240, 240, 245, 255) : IM_COL32(190, 192, 202, 255));
 				// The label: on one line when it fits, else broken at its space
 				// ("Horizontal" / "Box"), and only then shortened — never cut
-				// mid-letter. A notch smaller than body text: the tiles are narrow
-				// on purpose.
+				// mid-letter. A notch smaller than body text, and growing with the
+				// tile on a larger screen.
 				ImFont* font   = ImGui::GetFont();
-				const float fs = ImGui::GetFontSize() * 0.82f;
+				const float fs = ImGui::GetFontSize() * 0.86f * tileScale;
 				const auto widthOf = [&](const std::string& t)
 				{ return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x; };
-				const float maxW = size.x - 4.0f;
+				const float maxW = size.x - 4.0f * tileScale;
 				const auto fitLine = [&](std::string line)
 				{
 					while (line.size() > 3 && widthOf(line) > maxW)
@@ -7244,7 +7271,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					lines.push_back(fitLine(full.substr(sp + 1)));
 				}
 				const float lineH = fs + 1.0f;
-				float ty = p1.y - lineH * lines.size() - 3.0f;
+				float ty = p1.y - lineH * lines.size() - 4.0f * tileScale;
 				for (const std::string& ln : lines)
 				{
 					dl->AddText(font, fs, ImVec2((p0.x + p1.x - widthOf(ln)) * 0.5f, ty),
@@ -7301,10 +7328,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// The tiles share the column's width equally. (The pane's own padding
 			// and scrollbar are already out of this number: the child is measured
 			// from inside.) The column count is the most that keep a tile at
-			// least kMinW wide; when the pane is too
+			// least kMinW wide (62 points on a 1080-point-tall screen — wide enough
+			// for "Vertical" and "Horizontal" whole, the longest words — and more on a bigger one); when the pane is too
 			// narrow for that many, there is one column fewer and every tile is
 			// correspondingly larger.
-			constexpr float kMinW = 42.0f, kTileH = 56.0f;
+			const float kMinW = 62.0f * tileScale, kTileH = 78.0f * tileScale;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
 			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (kMinW + spacing)));
