@@ -397,9 +397,9 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 				Patch p;
 				p.field = Settings;
 				p.bytes = std::move(blob);
-				emit(e, p, send);
+				// Not sent (the link is down): it is still a change, next time.
+				if (emit(e, p, send)) m.settingsHash = hash;
 			}
-			m.settingsHash = hash;
 		}
 
 		for (std::uint8_t f = Heights; f <= FoliageMask; ++f)
@@ -419,13 +419,16 @@ void TerrainSync::collectGrid(entt::registry& reg, Entity e, Mirror& m, Field f,
 	std::size_t sent = 0;
 
 	// Rows [z0, z0+h) × columns [x0, x0+w) of the live grid, in bands of at most
-	// kMaxPatchBytes; the first band of a whole grid says so.
+	// kMaxPatchBytes; the first band of a whole grid says so. False if any band
+	// did not go out: the mirror then stays behind and the rect goes again next
+	// time (a band that did arrive twice is harmless, it carries the same bytes).
 	const auto sendRect = [&](std::uint32_t x0, std::uint32_t z0, std::uint32_t w,
 	                          std::uint32_t h, bool whole) {
 		const std::size_t rowBytes = static_cast<std::size_t>(w) * elem;
 		const std::uint32_t band = static_cast<std::uint32_t>(
 			std::max<std::size_t>(1, kMaxPatchBytes / rowBytes));
-		for (std::uint32_t z = z0; z < z0 + h; z += band)
+		bool all = true;
+		for (std::uint32_t z = z0; z < z0 + h && all; z += band)
 		{
 			Patch p;
 			p.field = static_cast<std::uint8_t>(f | (whole && z == z0 ? kWholeGrid : 0));
@@ -438,25 +441,30 @@ void TerrainSync::collectGrid(entt::registry& reg, Entity e, Mirror& m, Field f,
 				std::memcpy(p.bytes.data() + r * rowBytes, v.data + src, rowBytes);
 			}
 			sent += p.bytes.size();
-			emit(e, p, send);
+			all = emit(e, p, send);
 		}
+		return all;
 	};
 
 	if (v.bytes != mg.size() || v.res != m.res[f])
 	{
 		// A grid that appeared, vanished or changed its side goes whole.
+		bool ok = true;
 		if (v.bytes == 0)
 		{
 			Patch p;
 			p.field = static_cast<std::uint8_t>(f | kWholeGrid);   // res 0: cleared
-			emit(e, p, send);
+			ok = emit(e, p, send);
 		}
 		else
 		{
-			sendRect(0, 0, v.res, v.res, /*whole=*/true);
+			ok = sendRect(0, 0, v.res, v.res, /*whole=*/true);
 		}
-		mg.assign(v.data, v.data + v.bytes);
-		m.res[f] = v.res;
+		if (ok)
+		{
+			mg.assign(v.data, v.data + v.bytes);
+			m.res[f] = v.res;
+		}
 	}
 	else if (v.bytes > 0 && std::memcmp(v.data, mg.data(), v.bytes) != 0)
 	{
@@ -482,11 +490,13 @@ void TerrainSync::collectGrid(entt::registry& reg, Entity e, Mirror& m, Field f,
 		const std::uint32_t x0 = static_cast<std::uint32_t>(b0 / elem);
 		const std::uint32_t x1 = static_cast<std::uint32_t>(b1 / elem);
 		const std::uint32_t w = x1 - x0 + 1, h = z1 - z0 + 1;
-		sendRect(x0, z0, w, h, /*whole=*/false);
-		for (std::uint32_t z = z0; z <= z1; ++z)
+		if (sendRect(x0, z0, w, h, /*whole=*/false))
 		{
-			const std::size_t off = (static_cast<std::size_t>(z) * v.res + x0) * elem;
-			std::memcpy(mg.data() + off, v.data + off, static_cast<std::size_t>(w) * elem);
+			for (std::uint32_t z = z0; z <= z1; ++z)
+			{
+				const std::size_t off = (static_cast<std::size_t>(z) * v.res + x0) * elem;
+				std::memcpy(mg.data() + off, v.data + off, static_cast<std::size_t>(w) * elem);
+			}
 		}
 	}
 

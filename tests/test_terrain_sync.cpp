@@ -391,6 +391,31 @@ TEST_CASE("Landscape sync: the component blob leaves the grids out, and the rece
 	CHECK(peer->tc().dirty);
 }
 
+TEST_CASE("Landscape sync: what could not be sent goes again, it is not taken as delivered")
+{
+	auto m = makeMachine(1);
+	TerrainSync sync;
+	sync.setExpectEcho(true);
+	std::uint64_t now = 1000;
+	sync.collect(m->world, now, [](Entity, const Patch&) { return true; });   // first sight
+
+	TerrainSculpt::apply(m->tc(), 3.0f, 3.0f, TerrainSculpt::Op::Raise, 3.0f, 1.0f, 1.0f);
+	m->tc().water.shoreOvershoot = 0.5f;   // a settings change as well
+	int refused = 0;
+	now += 300;
+	sync.collect(m->world, now, [&](Entity, const Patch&) { ++refused; return false; });
+	CHECK(refused == 2);                   // settings + heights tried
+	CHECK(sync.pendingCount() == 0);       // nothing waits for an echo that cannot come
+
+	std::vector<Patch> sent;
+	now += 300;
+	sync.collect(m->world, now, [&](Entity, const Patch& p) { sent.push_back(p); return true; });
+	REQUIRE(sent.size() == 2);
+	CHECK(sent[0].field == TerrainSync::Settings);
+	CHECK(sent[1].field == TerrainSync::Heights);
+	CHECK(sync.pendingCount() == 2);
+}
+
 // ── Through two real CollabControllers ──────────────────────────────────────
 // The editor's own bridge over actual TCP: the snapshot hands the landscape over,
 // the wire id comes from its uuid on both sides, and the client's echo comes
