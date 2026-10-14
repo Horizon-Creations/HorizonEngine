@@ -11,12 +11,15 @@
 #include "EditorTheme.h"
 
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/AssetRefScan.h>   // assetUuidOfFile: a dropped asset's id, without loading it
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/NameComponent.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -398,11 +401,18 @@ namespace
 
 	// The project-relative spelling a link stores; empty for a path outside
 	// the project (an engine scene has no place on a project's board).
+	// fs::relative, not lexically_relative: it goes through the file system,
+	// so a scene path from a file dialog with another drive-letter case or the
+	// other slash still lands inside the project root it is inside of — the
+	// same rule ContentManager::toContentRelativePath uses.
 	std::string projectRelative(const std::string& root, const std::string& abs)
 	{
-		const fs::path rel = fs::path(abs).lexically_normal().lexically_relative(fs::path(root).lexically_normal());
+		if (root.empty() || abs.empty()) return {};
+		std::error_code ec;
+		const fs::path rel = fs::relative(fs::path(abs), fs::path(root), ec);
+		if (ec) return {};
 		const std::string s = rel.generic_string();
-		if (s.empty() || s.rfind("..", 0) == 0) return {};
+		if (s.empty() || s == "." || s.rfind("..", 0) == 0) return {};
 		return s;
 	}
 
@@ -525,12 +535,24 @@ namespace
 	// the Content Browser (its absolute path), an entity from the World
 	// Outliner (its handle in the open world, turned into its UUID here: the
 	// handle means nothing after a reload). Returns whether a link was added.
-	bool acceptLinkDrop(AppContext& ctx, const HE::UUID& taskId)
+	//
+	// Another task's card dropped here (`moveTo` given) takes this card's
+	// status: in the column view that is "into this lane", wherever in the lane
+	// it lands — a busy lane has no empty space left below its cards.
+	bool acceptLinkDrop(AppContext& ctx, const HE::UUID& taskId, const TaskStatus* moveTo = nullptr)
 	{
 		if (!ImGui::BeginDragDropTarget()) return false;
 		bool added = false;
 		std::vector<TaskLink> links;
-		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
+		if (const ImGuiPayload* p = moveTo ? ImGui::AcceptDragDropPayload("HE_TASK") : nullptr)
+		{
+			HE::UUID moved;
+			std::memcpy(&moved, p->Data, sizeof(HE::UUID));
+			const TaskStatus s = *moveTo;
+			if (moved != taskId)
+				post([moved, s](TaskBoard& b) { return b.setStatus(moved, s, author(), HE::taskNowMs()); });
+		}
+		else if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 		{
 			const std::string abs(static_cast<const char*>(p->Data));
 			const fs::path path(abs);
@@ -543,11 +565,16 @@ namespace
 			}
 			else if (ctx.contentManager)
 			{
-				// Addressed by UUID, so a rename or a move keeps the link. An asset
-				// nothing has loaded yet has no UUID here until it is read once.
+				// Addressed by UUID, so a rename or a move keeps the link. One
+				// nothing has loaded yet: its header says (no load). Only when the
+				// manager then still cannot name its file — created after the last
+				// content scan — is it loaded, which registers it; the chip would
+				// otherwise show it as missing.
 				const std::string rel = ctx.contentManager->toContentRelativePath(abs);
 				HE::UUID id = rel.empty() ? HE::UUID{} : ctx.contentManager->idForPath(rel);
-				if (id == HE::UUID{} && !rel.empty()) id = ctx.contentManager->loadAsset(rel);
+				if (id == HE::UUID{} && !rel.empty()) id = HE::AssetRefs::assetUuidOfFile(abs);
+				if (!rel.empty() && (id == HE::UUID{} || ctx.contentManager->pathForId(id).empty()))
+					id = ctx.contentManager->loadAsset(rel);
 				if (id != HE::UUID{}) links.push_back(TaskLink::asset(id, path.stem().string()));
 			}
 		}
@@ -746,7 +773,8 @@ namespace
 			ImGui::TextUnformatted(t.title.c_str());
 			ImGui::EndDragDropSource();
 		}
-		acceptLinkDrop(ctx, id);
+		const TaskStatus lane = kColumns[columnOf(t)];
+		acceptLinkDrop(ctx, id, &lane);
 		if (ImGui::BeginPopupContextItem("##cardMenu"))
 		{
 			s_selected = id;

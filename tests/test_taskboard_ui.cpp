@@ -17,7 +17,9 @@
 #include <imgui.h>
 #include <imgui_internal.h>   // GetHoveredID / FindWindowByName
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -479,6 +481,29 @@ TEST_CASE("task board ui: drops link an asset, a scene and an entity; chips jump
 		CHECK(std::filesystem::equivalent(j.target, scene));
 	}
 
+	// A teammate pulls the board and opens the project in a fresh editor: the
+	// asset was never loaded there, only indexed by the content scan the editor
+	// runs on project open. The chip still finds it, and still jumps to it.
+	{
+		ContentManager fresh(content.string());
+		REQUIRE(fresh.scanContentDirectory() > 0);
+		REQUIRE_FALSE(fresh.isLoaded(assetId));
+		ctx.contentManager = &fresh;
+		TaskBoardPanel::reset();
+		TaskBoardPanel::setAuthor("Tester");
+		for (int i = 0; i < 3; ++i) frame(ctx, false, nullptr, &src);
+		const HE::Task* pulled = TaskBoardPanel::board(ctx)->find(taskId);
+		REQUIRE(pulled != nullptr);
+		REQUIRE(pulled->links.size() == 3);
+		CHECK_FALSE(pulled->links[0].orphaned);
+		REQUIRE(TaskBoardPanel::chipRect(taskId, 0, chip));
+		clickAt(ctx, centre(chip), &src);
+		const TaskBoardPanel::Jump j = TaskBoardPanel::takeJump();
+		CHECK(j.kind == TaskBoardPanel::Jump::Kind::Asset);
+		CHECK(std::filesystem::equivalent(j.target, content / "Notes.hasset"));
+		ctx.contentManager = &cm;
+	}
+
 	// The same entity dropped twice is one link, not two.
 	REQUIRE(TaskBoardPanel::cardRect(taskId, card));
 	dragTo(ctx, src.entityAt, centre(card), &src);
@@ -532,6 +557,16 @@ TEST_CASE("task board ui: a card dragged to another lane changes its status")
 	CHECK(b->find(a)->status == HE::TaskStatus::Done);
 	CHECK(b->find(a)->updates.back().kind == HE::TaskUpdateKind::Status);
 	CHECK(b->find(a)->updates.back().author == "Tester");
+	CHECK(b->find(c)->status == HE::TaskStatus::InProgress);
+
+	// Dropped onto a card of a busy lane instead of the space below: into
+	// that lane all the same.
+	REQUIRE(TaskBoardPanel::cardRect(c, rc));
+	REQUIRE(TaskBoardPanel::cardRect(a, ra));
+	dragTo(ctx, centre(rc), centre(ra));
+	CHECK(b->find(c)->status == HE::TaskStatus::Done);
+	REQUIRE(TaskBoardPanel::cardRect(c, rc));
+	dragTo(ctx, centre(rc), ImVec2(kBoardX + 8.0f + laneW * 1.5f, ra.y1 + 60.0f));
 	CHECK(b->find(c)->status == HE::TaskStatus::InProgress);
 
 	he_ui::Image img;
