@@ -111,5 +111,103 @@ session must not run it.
 4. `EditorApplication`: own a `TaskBoardTeam` and the link next to `m_team`,
    `setNotifications(&m_notifications)`, `TaskBoardPanel::setTeam(&bridge)` at
    start, `setTeam(nullptr)` before shutdown. The panel already pumps it.
-5. Two-editor acceptance (step 5): Anna assigns Bob in a real editor; Bob's bell
-   says "Anna assigned you …"; `scripts/he_team_two_editors.py` is the harness.
+5. Two-editor acceptance with two editor PROCESSES: Anna assigns Bob through
+   `task_assign` in one editor, Bob's `task_notices` and bell in the other say
+   "Anna assigned you …". Template: `scripts/he_taskboard_live.py` (one editor,
+   the `Editor` helper of `he_rewards_live.py`) plus `he_collab_two_editors.py`
+   (two at once); both editors need the same team server and two members.
+   Step 5 did this in-process only (below), because there was no transport.
+
+## MCP tools (step 5)
+
+`src/HE_Editor/McpToolsTaskBoard.cpp`, registered in
+`EditorApplication::setupMcpTools` (hooks in `McpToolRegistry.h`,
+`McpTaskBoardHooks`). Every hook goes to the panel: `TaskBoardPanel::board/edit/
+lastError/author/team`, so the tools use the same single copy and writer as
+the panel, the footer and the team bridge.
+
+| Tool | Mutates | What |
+|---|---|---|
+| `task_list` | no | Tasks (filters `status`, `assignee`, `includeDone`, `history`), `author`, `openCount`/`openMine`, `team` {connected, self, members+online, pending} |
+| `task_create` | yes | `title` (+ `description`, `priority`, `status`), recorded under `author` |
+| `task_update` | yes | `id` + `status` and/or `comment`; the same status again posts only the comment |
+| `task_assign` | yes | `id` + `assignees` (replaces; empty unassigns). Only with a signed-in team (`no_team` otherwise, as the panel has no field), only roster names (`unknown_member`), written in the roster's spelling |
+| `task_notices` | no | `TaskBoardTeam::recent()`: text (the bell's sentence), kind, from, project, task, title, status, comment, assignees |
+
+Refusals: `no_project`, `invalid_payload`, `not_found`, `no_team`,
+`unknown_member`, `save_failed` (the edit is kept in memory, as in the panel).
+
+## Handoff
+
+- **Topic / step:** 203, step 5 of 5 (MCP tools, two-editor acceptance, verification)
+- **Branch / commit:** `claude/aufgabenboard-todo-team-interop` @ 70b67400 + the
+  commit adding this section and `scripts/he_taskboard_live.py` (pushed: yes)
+- **Done:** five MCP tools for the task board (above). The two-editor acceptance
+  runs in-process, through the tools: Anna's editor is the real
+  `TaskBoardPanel` over a project on disk; Bob's is a second board plus bridge
+  in its own folder, connected over `tests/FakeTaskTeam.h`. Anna's `task_assign`
+  reaches Bob's `task_notices` and bell as "Anna assigned you “Retexture the
+  crates”", once. Bob's board only gets the task with the pull. Bob's
+  `task_update` reaches Anna as "Bob set … to In Progress" with the comment.
+- **Files touched:** `src/HE_Editor/McpToolsTaskBoard.cpp` (the tools),
+  `src/HE_Editor/McpToolRegistry.h` (`McpTaskBoardHooks`),
+  `src/HE_Editor/EditorApplication.cpp` (`setupMcpTools`, hooks onto the panel),
+  `tests/test_mcp_tools_taskboard.cpp` (3 cases),
+  `tests/CMakeLists.txt` (source, and the HE_IMGUI_ENABLED property list),
+  `scripts/he_taskboard_live.py` (live editor run),
+  `docs/mcp-editor-integration-plan.md` (tool table row).
+- **Verified (macOS, Release, out/build/release):**
+  - `cmake --build . -j8 --target he_tests` and `--target HorizonEditor`:
+    both rc 0.
+  - `ctest -j6`: 254/254 passed, 2 skipped (`runtime_size_app_*`), including
+    `test_mcp_tools_taskboard`, `test_task_board`, `test_taskboard_team`,
+    `test_taskboard_ui`, `test_taskboard_footer_ui`, `editor_help_audit` and
+    `he_mcp_shim`.
+  - The full `he_tests` in ONE process: 4510/4510 cases, 621344 assertions, so
+    the panel's process state does not leak across files.
+  - `scripts/editor_help_audit.py --check`: TOTAL 1130/1130, rc 0.
+  - `scripts/he_taskboard_live.py /tmp/he203_live`: `RESULT: PASS (0
+    failures)` against the deployed hidden editor. The tools are registered;
+    create/update land in `Config/TaskBoard.json` under the OS user name;
+    `task_assign` refuses `no_team`; `task_notices` reports not connected; a
+    task written into the file by hand (a pull) appears in `task_list` and
+    survives the next `task_create`.
+- **Not verified:**
+  - A two-PROCESS editor run with a real team server: there is no transport on
+    this branch (TeamController/TeamClient are only on release/0.7.0), so in the
+    real editor `TaskBoardPanel::team()` is null and `task_assign` /
+    `task_notices` are only exercised in he_tests.
+  - The server side (op 20 NOTIFY / event 9 NOTICE in CollabSession) and its
+    deploy (the human's `deploy/deploy.sh`).
+  - Windows/Linux builds: left to CI.
+  - The panel's chips and the footer list clicked by hand in a real editor
+    (step 2/3 open points).
+- **Decisions taken:**
+  - `task_assign` refuses without a team, matching the panel (queen, request 89:
+    in-process acceptance, step marked done with this scope).
+  - Tools take the panel's board through hooks, never a second `TaskBoard` +
+    `saveTaskBoard`.
+  - `task_create` and `task_update` stay usable on a local board.
+- **Decisions suggested, not taken:** a `task_link` tool (link an asset/scene/
+  entity by id) for a fully scripted "linked" acceptance; it needs a
+  ContentManager hook.
+- **Pending:** the "Engine follow-up" list above (1–4) once release/0.7.0 is
+  merged into this branch, then item 5 with two processes.
+- **Traps:**
+  - `AppContext` has a different layout with and without `HE_IMGUI_ENABLED`
+    (`EditorTab`/`tabs`). A test that builds one for `TaskBoardPanel` must be in
+    tests/CMakeLists.txt's HE_IMGUI_ENABLED property list, or it does not compile
+    (`no member named 'EditorTab'`).
+  - The panel's board, team and clock are process state: a test that sets them
+    resets all three in a guard's destructor (`setTeam(nullptr)`,
+    `setTeamClock({})`, `reset()`).
+  - Without `DrawTaskBoardWindow` nothing pumps Anna's bridge; call
+    `TaskBoardPanel::pumpTeam()` yourself, once before the first edit, so
+    `author()` is the member name.
+- **Next steps:**
+  1. Merge release/0.7.0 into this branch.
+  2. Engine follow-up 1–4 above (TeamClient op 20/event 9, TeamController,
+     `TaskBoardTeamLink`, EditorApplication wiring).
+  3. Two editor processes plus the team server: extend `he_taskboard_live.py` to
+     two editors signed in as two members, then `task_assign` on A and poll
+     `task_notices` on B.
