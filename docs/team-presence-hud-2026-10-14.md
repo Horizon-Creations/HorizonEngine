@@ -85,7 +85,8 @@ to its left. Test: `test_team_ui.cpp:571`.
   `test_editor_help` 19/19, `test_collab_controller` 74/74, `test_mcp_tools_collab` 7/7,
   `editor_help_audit.py --check` 1172/1172. Hidden `HorizonEditor` 120 frames with a scratch
   HE_CONFIG_DIR: clean exit, 0 errors (a smoke run; whether the footer was on screen
-  without a project is not shown by the log). Full he_tests: see the result post.
+  without a project is not shown by the log). Full he_tests without test_material_graph:
+  5113/5113 cases, 1289325 assertions, rc 0.
 - **Not verified:** the real editor window by hand (footer placement next to the real bell,
   the modal over docked panels); Windows/Linux only through CI.
 - **Decisions:** placement *right* of the bell as the board says (step 1's handoff said
