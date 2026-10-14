@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 
 #if __has_include(<imgui.h>)
@@ -238,10 +239,12 @@ void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::st
 				const int sx = (x * src + src / 2) / cells;
 				const int sy = (y * src + src / 2) / cells;
 				const std::uint8_t* px = &m->avatarRgba[(std::size_t(sy) * src + sx) * 4];
-				const ImVec2 a(p.x + x * cell, p.y + y * cell);
-				// Half a pixel of overlap, or the seams show as a grid.
-				dl->AddRectFilled(a, ImVec2(a.x + cell + 0.5f, a.y + cell + 0.5f),
-				                  IM_COL32(px[0], px[1], px[2], px[3]));
+				// Edges on whole pixels, shared by neighbours: no gaps between
+				// cells, and no overlap that doubles a translucent pixel's alpha
+				// into a visible grid.
+				const ImVec2 a(std::floor(p.x + x * cell), std::floor(p.y + y * cell));
+				const ImVec2 b(std::floor(p.x + (x + 1) * cell), std::floor(p.y + (y + 1) * cell));
+				dl->AddRectFilled(a, b, IM_COL32(px[0], px[1], px[2], px[3]));
 			}
 	}
 	else
