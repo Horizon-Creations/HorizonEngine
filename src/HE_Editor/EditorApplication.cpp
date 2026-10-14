@@ -566,8 +566,7 @@ void EditorApplication::OnInit()
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
 		m_selection.remove(e);
-		m_structureKnown.erase(e);
-		m_structureParent.erase(e);
+		forgetStructureOf(e);
 		m_editorWorld->destroyEntity(e);
 	});
 
@@ -10602,11 +10601,7 @@ void EditorApplication::setupEditorCommands()
 		// delete it would be the opposite of what is wanted — the peers would
 		// never hear that the client removed anything. deleteSelectedEntity, the
 		// human's path, does not erase either.
-		if (origin == HE::Ed::Origin::Remote)
-		{
-			m_structureKnown.erase(e);
-			m_structureParent.erase(e);
-		}
+		if (origin == HE::Ed::Origin::Remote) forgetStructureOf(e);
 	};
 	m_commands.setHooks(std::move(h));
 }
@@ -10870,6 +10865,10 @@ void EditorApplication::syncStructuralChanges()
 			const Entity back = reg.valid(m.from) ? m.from : worldRoot;
 			m_editorWorld->reparentEntity(m.entity, back);
 			m_editorWorld->markHierarchyDirty();
+			// Recorded where it actually ended up: a revert that could not land on
+			// the recorded parent (gone, or refused) would otherwise be reported,
+			// reverted and announced again on every frame.
+			m_structureParent[m.entity] = HE::Ed::structParentOf(reg, m.entity);
 			const std::string name =
 				reg.all_of<NameComponent>(m.entity) ? reg.get<NameComponent>(m.entity).name
 				                                    : std::string("The entity");
@@ -11103,6 +11102,27 @@ void EditorApplication::pasteEntityClipboard()
 	m_selection.setMany(pasted);
 	m_selection.setAnchor(pasted.front());
 	m_editorWorld->markHierarchyDirty();
+}
+
+void EditorApplication::forgetStructureOf(Entity root)
+{
+	// The whole subtree, not just the root: a peer's destroy took the children
+	// with it there too, and leaving them known would make the next diff publish
+	// one destroy per descendant back at everybody (receivers ignore them, but a
+	// big prefab deleted by one peer cost a message per entity from every other).
+	if (!m_editorWorld) return;
+	auto& reg = m_editorWorld->registry();
+	std::vector<Entity> stack{ root };
+	while (!stack.empty())
+	{
+		const Entity e = stack.back();
+		stack.pop_back();
+		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
+		if (!reg.valid(e)) continue;
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			stack.insert(stack.end(), h->children.begin(), h->children.end());
+	}
 }
 
 std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>& targets,

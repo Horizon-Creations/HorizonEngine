@@ -895,6 +895,8 @@ private:
 	// Known entities that are gone but whose destroy the session refused, and for
 	// how many frames: the same retry rule as m_structureUnsendable.
 	std::unordered_map<Entity, int> m_structureUndeletable;
+	// A peer's destroy: drop the whole subtree from both records (echo protection).
+	void forgetStructureOf(Entity root);
 	void syncStructuralChanges();
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the

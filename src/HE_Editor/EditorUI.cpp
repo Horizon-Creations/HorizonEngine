@@ -1238,7 +1238,9 @@ static bool activeTabUsesWorldUndo(const AppContext& ctx)
 // were reverted (docs/collab-sync-audit-entities-2026-10-14.md, gap 4.1).
 static bool sessionUndoActive(const AppContext& ctx)
 {
-	return ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
+	// Not during play: the controls stay quiet then, as they do outside a
+	// session (makeContext withholds the snapshot stack while playing).
+	return !ctx.isPlaying && ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
 }
 static bool canUndoNow(const AppContext& ctx)
 {

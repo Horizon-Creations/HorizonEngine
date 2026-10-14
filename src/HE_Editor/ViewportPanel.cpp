@@ -565,10 +565,45 @@ void showAll(AppContext& ctx)
 // Group and Ungroup rewrite the local transform of what they move (the world
 // pose is kept, the local is what changes), so those are the edited entities
 // — the roots going in, the children coming out.
+// In a collab session: does another participant hold a lock anywhere in these
+// subtrees? Group and Ungroup re-parent every entity they touch, and Ungroup
+// destroys the group after moving its children out. A moved entity somebody
+// else holds is put back by the structural diff (it cannot be re-parented under
+// their feet), and put back under a group that is gone, it would stay on this
+// machine while the group's destroy takes it away on theirs. So the whole
+// gesture is refused up front, as Delete is (withoutPeerHeld), and said so.
+static bool refusedForPeerLocks(AppContext& ctx, const std::vector<Entity>& roots,
+                                const char* what)
+{
+	if (!ctx.collab || !ctx.collab->inSession() || !ctx.world) return false;
+	auto& reg = ctx.world->registry();
+	const auto me = ctx.collab->localParticipant();
+	std::string holder;
+	std::vector<Entity> stack(roots.begin(), roots.end());
+	while (!stack.empty() && holder.empty())
+	{
+		const Entity e = stack.back();
+		stack.pop_back();
+		if (!reg.valid(e)) continue;
+		const HE::Net::LockInfo* lock = ctx.collab->lockFor(
+			ctx.collab->subjectFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+		if (lock && lock->owner != me) { holder = lock->ownerName; break; }
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			stack.insert(stack.end(), h->children.begin(), h->children.end());
+	}
+	if (holder.empty()) return false;
+	if (ctx.notifications)
+		ctx.notifications->post(HE::Ed::NoteLevel::Warning,
+			std::string(what) + " did nothing: " + holder + " is editing part of the selection.",
+			"Try again once they have deselected it.");
+	return true;
+}
+
 void groupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
+	if (refusedForPeerLocks(ctx, roots, "Group")) return;
 	snapshot(ctx, "Group Selected");
 	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
 		noteEdited(ctx, roots);
@@ -576,6 +611,7 @@ void groupSelected(AppContext& ctx)
 void ungroupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
+	if (refusedForPeerLocks(ctx, ctx.selection.roots(ctx.world->registry()), "Ungroup")) return;
 	snapshot(ctx, "Ungroup Selected");
 	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
 }
