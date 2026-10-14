@@ -68,6 +68,21 @@ describes handle keys and `participantId<<32|counter`; that section is outdated.
    and never mark a refused destroy as sent.
 6. Trailing transform: flush the last value on lock release / deselect (step 7 overlaps).
 
+## 5. Step 2: what was done about each gap
+
+No wire format changed. Every new behaviour is optional for an older peer.
+
+| Gap | Fix | Where | Test |
+|---|---|---|---|
+| 4.1 session undo | Footer, Ctrl+Z, native menu and Edit menu share one door (`undoNow`/`canUndoNow`): `CollabUndo` in a session. `ctx.undo` has a session backstop. `CollabUndo::setStructuralHandlers` was **never called**, so create/destroy/reparent/components entries popped and did nothing. Now wired as plain world edits that the diff publishes. | `EditorUI.cpp:1239`, `EditorApplication.cpp:644` | none for the routing (no UI harness drives the footer); syntax check + reading |
+| 4.2 reparent | Diff, not hooks: parent per known entity (`m_structureParent`), `reparentedSince`, published after the creates with the new local transform in the message blob (old peers ignore it). Peer-held → put back + notice; parent not announced yet → wait. Echo protection in `onRemoteReparent`. Wire ids get cached when a parent is first recorded (`publishDestroy` could not name a never-selected child of a mid-session subtree). | `StructuralSync.h:104`, `EditorApplication.cpp:574, 10832`, `CollabController.cpp:2677` | `test_collab_controller` "a move in the hierarchy…", "a re-parent reaches the peer…" |
+| (found) Group | A new group's create carried the entities it adopted, so they were duplicated on peers. `DetachKnownDescendants` keeps them out of the blob; the reparent pass moves the originals. | `StructuralSync.h:129`, `EditorApplication.cpp:10761` | "a new group does not carry the entities it adopted" |
+| 4.3 group gizmo | In a session the gizmo takes only the primary + members whose lock we hold (inspector rule). Multi-move in a session is therefore primary-only until there is a multi-lock model. | `ViewportPanel.cpp:1505` | none (panel) |
+| 4.4 Remove Component | Receiver applies collab blobs with the new `SceneSerializer::replaceEntityComponents`. It removes known components the blob lacks, except a terrain's generated mesh. `applyEntityComponents` stays update-only (multi-edit and spline patches). Every blob on this wire was always a full `serializeEntityComponents`, so no marker was needed. MCP `SetComponents` publishes the full entity, not the patch, and records full after-state. | `SceneSerializer.cpp:2774, 3483`, `EditorCommands.cpp` applyComponents | "a whole-state component write…", `test_editor_commands` "A component write publishes the whole entity…" |
+| 4.5 peer-held delete | Delete/Cut (`withoutPeerHeld`) and `EditorCommands` destroy walk the **subtree** (the host only checks the named root) and refuse with a notice. The diff no longer forgets a refused destroy: it retries for 60 frames, then logs. | `EditorApplication.cpp:11108`, `EditorCommands.cpp:205` | `test_editor_commands` "A destroy is refused while someone else holds an entity under it" |
+| 4.5 peer-held edit | **Not done**: the inspector still only warns. Step 6 (host asks) owns it. | | |
+| 4.6 trailing transform | The rate-limited value is kept as pending and flushed by `update()` after 33 ms, before `followSelection` releases the lock, and before another subject's send. | `CollabController.cpp:2515` | "the end of a quick drag is not lost…" |
+
 ## Handoff
 
 - **Topic / step:** 198, step 1 of 11 (entity sync inventory)
