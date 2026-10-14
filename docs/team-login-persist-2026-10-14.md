@@ -123,7 +123,7 @@ to start on a format-2 file, so a rollback needs all tokens revoked first.
   check against the host (restart keeps the login, remove-member/password change kick
   the token login).
 
-## Handoff
+## Step 2 handoff
 
 - **Topic / step:** 201, step 2 (editor uses the token). Branch
   `claude/team-login-persistieren-editor-bleibt-ber-neustarts-hinweg-a`.
@@ -162,3 +162,65 @@ to start on a format-2 file, so a rollback needs all tokens revoked first.
   --test-case=*session tokens through a real*` (leaves a `he-tok-N` team), then two
   real editor starts against the host (sign in, quit, start: signed in without password;
   remove member / Sign Out Everywhere from another editor kicks it). 3. CI result.
+
+## Verification (step 3)
+
+Code under test: 0ab82713 (`out/build/release`, rebuilt -j8, ninja: no work to do).
+Server: collab_server 363f889 built from `~/VSCode/EngineCollab/CollabSession`
+(`/tmp/collab-build`), run on 127.0.0.1:17991 with a scratch `--data-dir`.
+
+- **he_tests (fake server):** `test_net_team` 15/15 (749 assertions), `test_team_ui` 3/3,
+  `test_mcp_tools_collab` 7/7; `editor_help_audit.py --check` clean.
+- **he_tests against the real server:** `HE_TEST_TEAM_SERVER=127.0.0.1:17991 he_tests
+  --source-file=*test_net_team.cpp --test-case=*real collab_server*` 2/2 (65 assertions). Server
+  log: token issued, token login, removed member's token connection "refused (bad-login):
+  removed from the team by Anna", password change revokes + reissues, old token refused,
+  Sign Out revokes, revoked token refused.
+- **Real editor, five starts of one profile:** `scripts/he_team_token_restart.py OUTDIR
+  --server 127.0.0.1:17991 --server-log <log>` → `RESULT: PASS` (35 checks). The profile's
+  config.json carries CollabRelayAddress/TeamName/TeamMember as the Preferences fields
+  would; `team_sign_in` (MCP, = the Sign In button's `TeamController::signIn`) is the only
+  way the password goes in. Proven:
+  1. password sign-in → `team-session.txt` 0600, password neither in it nor in config.json;
+     SIGTERM quit (rc 0) keeps the file and the three config fields;
+  2. **restart: signed in with no password** (0.1 s; editor "with the saved session",
+     server "logged in with a session token"); Sign Out deletes the file, server "revoked a
+     session token";
+  3. negative control: without the file the next start stays `signed_out`;
+  4. **live revocation:** a raw socket logs in as the same member with the password and sends
+     REVOKE_ALL_TOKENS ("1 revoked") → the running editor goes `failed` with "The saved
+     sign-in is no longer valid (session tokens revoked). Sign in with your password.",
+     file deleted;
+  5. **removed while the editor was off:** next start is refused, `failed`, file deleted,
+     the token offered exactly once (no retry loop).
+- **Not verified:** the host 212.227.140.164 still runs e3f4649 (`~/collab-relay/bin/VERSION`
+  over ssh, 14.10. 09:50 UTC), so nothing here ran against it; the human has to run
+  `deploy/deploy.sh` first (no allow rule for workers). Windows/Linux only through CI. The
+  start-up notice (`notice(…, true)`) is not reachable through MCP; only its text in
+  `team_status.error` is checked. Clicking the Team UI by hand.
+- **Note:** MCP `team_sign_in` does not write the three config fields (only the Preferences /
+  Window ▸ Team fields do), so an editor signed in only through MCP has a token file but does
+  not resume after a restart. Harmless for people; the script seeds the config instead.
+
+## Handoff
+
+- **Topic / step:** 201, step 3 (verification). Branch
+  `claude/team-login-persistieren-editor-bleibt-ber-neustarts-hinweg-a`.
+- **Done:** "Verification (step 3)" above; new `scripts/he_team_token_restart.py` (one profile,
+  five starts, a raw-socket second device; `--server-log` adds the server-side witnesses).
+  No engine code changed in this step.
+- **Verified:** everything listed above, on the Mac, against a local collab_server 363f889.
+- **Not verified:** the rented host (still e3f4649), Windows, Linux (CI run 38545119057 for
+  0ab82713 was still running when this was written).
+- **Decisions:** verified locally instead of waiting for a deploy (queen's answer to
+  request 82). The raw-socket "other device" lives in the script (stdlib, ~50 lines) rather
+  than importing CollabSession's `tests/team_test.py` across repositories.
+- **Pitfalls:** the editor's stdout is block-buffered into the log file: assert on editor log
+  lines only after the quit. `mc.Editor` cannot restart a profile (it rewrites config.json
+  and copies the project again); the script's `Profile` deletes the stale
+  `mcp-endpoint.json` before each start.
+- **Next steps:** 1. Human runs `~/VSCode/EngineCollab/CollabSession/deploy/deploy.sh
+  horizon@212.227.140.164 7777`. 2. Then `scripts/he_team_token_restart.py OUT --server
+  212.227.140.164:7777` (no `--server-log`; leaves a `tok-N` team) and
+  `HE_TEST_TEAM_SERVER=212.227.140.164:7777 he_tests --source-file=*test_net_team.cpp
+  --test-case=*real collab_server*`. 3. CI green → the queen merges into release/0.7.0.
