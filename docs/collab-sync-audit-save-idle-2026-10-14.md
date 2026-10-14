@@ -65,6 +65,14 @@ builds the moment ("kept") and the attach point. It does not build the upload.
 * A client's Ctrl+S still also writes the client's own scene path (unchanged; possibly the wrong
   file, see section 2). Not fixed here.
 * C++ class saves do not pass through the ContentManager hook, so they settle only as Idle.
+* The host's own Ctrl+S on the scene writes it twice: once for the save, and once more 1 s later
+  when the Saved batch settles and `persistSessionScene` runs. That is waste, not a loop
+  (`m_settleWritingScene`). Do not skip the write on `m_undo.revision() == m_savedRevision`:
+  peer edits do not necessarily bump the undo revision.
+* Checked: the GameInstance graph (`saveGameInstanceGraph`, raw `ofstream`) and the Material
+  Editor (`saveAsset` only from its explicit `saveToDisk`) do not turn edit traffic into Saved.
+  Any other new writer through `ContentManager::saveAsset` in a session now counts as a save
+  unless `m_collabAutosaveWrite` is set around it.
 * `saveSceneToPath` runs `syncPrefabInstances("save")`. If that mutates the world on every call,
   the host would re-save every 5 s. Not observed and not tested live.
 
@@ -75,6 +83,7 @@ builds the moment ("kept") and the attach point. It does not build the upload.
 - **Done:** host-side save/idle settle with a persist step and the `onSessionSettled` hook; client saves reach the host (v16).
 - **Files:** `src/HE_Editor/CollabSettle.h`; `CollabController.cpp:1449` onDocSaved, `:1980` updateSettle call, `:4438-4470` noteSceneTouched/noteLocalSave/updateSettle, `:4426`/`:4482` change notes, `:1781` reset; `CollabController.h` public block after `publishAssetCreate`; `EditorApplication.cpp:707` save hook, `:730` persist, `:9782` autosave flag, `:12982` scene notice, `:12994` persistSessionScene; `CollabSession.{h,cpp}` sendDocSaved/handleDocSaved, v16.
 - **Verified:** out/build/release `he_tests` + `HorizonEditor` build rc 0. `test_collab_settle.cpp` 7 cases/26 assertions; `test_collab_controller.cpp:3752` (real host+client on loopback) green. Negative controls: without the host's `onDocSaved` handling, and without `noteSceneTouched` on a received transform, the case fails at :3808 / :3836. Full he_tests minus material_graph (`HOME=$(mktemp -d)`): 5140/5140. `editor_help_audit.py --check` 1168/1168.
+- **CI:** https://github.com/Horizon-Creations/HorizonEngine/actions/runs/38631279496 started at handoff. The step-7 run 38625018474 was red on Windows only: `test_collab_controller.cpp:3691` `REQUIRE(annaFile.string() == disk.path(brick))` (step 7's catch-up test, most likely a path separator). Not touched here, so expect it again.
 - **Not verified:** no live two-editor run. `persistSessionScene` and the save hook flags are build-checked only (EditorApplication.cpp is not in he_tests). The relay path was not exercised.
 - **Decisions taken:** section 4.
 - **For step 9:** wire `m_collab.onSessionSettled(...)` in `EditorApplication` (single slot, currently unused; the controller logs). With 199's `mode = "teamServer"`, request the upload there (debounce is already done). Show the notice in `SourceControlPanel`; `lastSettledMs()` / `lastSettledCount()` / `settlePending(key)` are there for a status line.
