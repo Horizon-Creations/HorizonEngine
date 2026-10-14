@@ -151,7 +151,8 @@ Step-3 test: click now pins, `Open Team Window` asks for the window. Screenshots
   cases, 1289521 assertions, rc 0.
 - **Not verified:** the real editor by hand (menu over docked panels, beside the real
   session cluster and its menu; both menus pinned at once is possible and untested);
-  Windows/Linux only via CI.
+  the green dots still touch the footer's bottom edge in the crop (step 3's ~1.5 px
+  overhang; look at it under the editor's body font in step 6); Windows/Linux only via CI.
 - **Decisions:** click pins the menu (as the session's cluster does) instead of opening
   the Team window; the window is one button away in the menu. The menu lists everyone
   online-outside, no cap or scroll (teams are small). Invite rule = the Team window's.
