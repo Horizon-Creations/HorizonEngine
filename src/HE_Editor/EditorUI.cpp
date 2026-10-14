@@ -3368,10 +3368,30 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// its right, plus a 16px gap for each neighbour that is actually there.
 		// The chain is hand-maintained: inserting a widget here means editing
 		// EVERY block to its left as well, or the two overlap silently. Right to
-		// left the order is: FPS, notification bell, presence, download queue,
-		// session activity.
+		// left the order is: FPS, your team status, notification bell, presence,
+		// download queue, session activity.
 
-		// The notification bell, immediately left of the counters. It sits at the
+		// Your team status, between the counters and the bell (topic 202): your
+		// face while signed in to the team server, a red X otherwise, which opens
+		// the sign-in modal (TeamView::drawFooterStatus). Always there, like the
+		// bell, so "am I signed in" is answered in the same corner every time.
+		// teamSlot is its width plus the gap to the bell, subtracted by every
+		// block to its left.
+		const float teamW    = ctx.team ? TeamView::footerStatusWidth() : 0.0f;
+		const float teamSlot = teamW > 0.0f ? teamW + 10.0f : 0.0f;
+		if (teamW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+			if (TeamView::drawFooterStatus(*ctx.team,
+			                               { &ctx.editorConfig.CollabRelayAddress,
+			                                 &ctx.editorConfig.TeamName,
+			                                 &ctx.editorConfig.TeamMember },
+			                               TeamView::editorForm()))
+				revealFloatingWindow(s_showTeam, "Team");
+		}
+
+		// The notification bell, left of the counters and your team status. It sits at the
 		// right-hand end of the group rather than the left because it is the only
 		// item here that is not transient — presence, the download queue and the
 		// activity line all come and go, so a bell placed left of them would move
@@ -3381,7 +3401,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float bellW = NotificationBar::FooterWidth(ctx);
 		if (bellW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
 			NotificationBar::DrawFooter(ctx);
 		}
@@ -3391,7 +3411,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float presenceW = CollabPresenceBar::FooterWidth(ctx);
 		if (presenceW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f));
 			CollabPresenceBar::DrawFooter(ctx);
@@ -3406,7 +3426,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float syncW = EngineContentSyncBar::FooterWidth(ctx);
 		if (syncW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - syncW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f));
@@ -3426,7 +3446,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float actW = CollabActivityBar::FooterWidth(ctx);
 		if (actW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - syncW - actW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)
@@ -3447,7 +3467,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// inserting anywhere else means editing everything to its left as well.
 		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW - mcpW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - syncW - actW - mcpW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)

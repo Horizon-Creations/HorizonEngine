@@ -81,7 +81,10 @@ namespace
 			he_ui::writeBmp(img, std::string(dir) + "/" + name);
 	}
 
-	enum class Surface { Page, Panel };
+	// Footer: the editor's 24 px bar along the bottom of a Page-sized display,
+	// holding only the team status (EditorUI.cpp draws the rest of it).
+	enum class Surface { Page, Panel, Footer };
+	constexpr float kFooterH = 24.0f;
 
 	// One editor's worth of UI: the config strings, the form, and what the
 	// last frame drew where.
@@ -91,8 +94,32 @@ namespace
 		std::string      server, teamName, member;
 		TeamView::Form   form;
 		std::vector<TeamView::ProbedItem> items;
+		// drawFooterStatus said "open the Team window" since this was last reset.
+		bool openTeamWindow = false;
 
 		TeamView::Settings settings() { return { &server, &teamName, &member }; }
+
+		// The footer the way EditorUI.cpp opens it (24 px, 8/4 padding, no
+		// focus, no nav), the status right-aligned with the FPS gap beside it.
+		void footer(int w, int h)
+		{
+			items.clear();
+			ImGui::SetNextWindowPos(ImVec2(0.0f, float(h) - kFooterH));
+			ImGui::SetNextWindowSize(ImVec2(float(w), kFooterH));
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
+			ImGui::Begin("##EditorFooter", nullptr,
+			             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+			             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+			             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
+			             ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDecoration);
+			ImGui::PopStyleVar();
+			TeamView::setProbe(&items);
+			ImGui::TextUnformatted("Ready");
+			ImGui::SameLine(float(w) - TeamView::footerStatusWidth() - 8.0f - 60.0f);
+			if (TeamView::drawFooterStatus(team, settings(), form)) openTeamWindow = true;
+			TeamView::setProbe(nullptr);
+			ImGui::End();
+		}
 
 		// One frame of `surface` filling the display. `pump` runs before it
 		// (network and controllers), the way the editor's frame loop does.
@@ -100,12 +127,20 @@ namespace
 		void frame(Surface surface, Pump&& pump, bool mouseDown = false, he_ui::Image* shot = nullptr)
 		{
 			pump();
-			const int w = surface == Surface::Page ? kPageW : kPanelW;
-			const int h = surface == Surface::Page ? kPageH : kPanelH;
+			const int w = surface == Surface::Panel ? kPanelW : kPageW;
+			const int h = surface == Surface::Panel ? kPanelH : kPageH;
 			ImGuiIO& io = ImGui::GetIO();
 			io.DisplaySize = ImVec2(float(w), float(h));
 			io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
 			ImGui::NewFrame();
+			if (surface == Surface::Footer)
+			{
+				footer(w, h);
+				EditorWidgets::drawQueuedHelp();
+				ImGui::Render();
+				if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), w, h);
+				return;
+			}
 			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
 			ImGui::SetNextWindowSize(ImVec2(float(w), float(h)));
 			TeamView::setProbe(&items);
@@ -201,6 +236,25 @@ namespace
 	{
 		return std::find(s.ops.begin(), s.ops.end(), op) != s.ops.end();
 	}
+
+	// Pixels inside a probed control's rect that `match` says yes to.
+	template <typename Match>
+	int pixelsIn(const he_ui::Image& img, const TeamView::ProbedItem& it, Match&& match)
+	{
+		int n = 0;
+		for (int y = int(it.y0); y < int(it.y1); ++y)
+			for (int x = int(it.x0); x < int(it.x1); ++x)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (match(r, g, b)) ++n;
+			}
+		return n;
+	}
+	// Theme::Bad (242, 117, 102), the X's red, and a blue that is nothing but
+	// the face's colour in the case below.
+	bool isRed(std::uint8_t r, std::uint8_t g, std::uint8_t b) { return r > 180 && g < 150 && b < 140 && r > g + 60; }
+	bool isBlue(std::uint8_t r, std::uint8_t g, std::uint8_t b) { return b > 180 && r < 90 && g < 150; }
 }
 
 TEST_CASE("Team UI: the Preferences page signs in with what was typed and keeps no password")
@@ -512,6 +566,115 @@ TEST_CASE("Team UI: against a server without profiles the section says so (topic
 	CHECK(ui.count("##swatch") == 0);
 	REQUIRE(ui.find("Host Session"));   // the rest of the window as before
 	team.signOut();
+}
+
+TEST_CASE("Team UI: the footer status — a red X opens the sign-in modal, signed in it is your face (topic 202)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.setProfile("Anna", 40, 110, 240);   // blue, no picture: the face is a blue square
+	CollabController collab;
+	TeamController   team(collab);
+	Ui ui{ team };
+	ui.server   = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	ui.teamName = "studio";
+	ui.member   = "anna";
+
+	std::uint64_t now = 1;
+	auto pump   = [&] { server.pump(); collab.update(now); team.update(now); now += 16; };
+	auto footer = [&] { ui.frame(Surface::Footer, pump); };
+	auto away   = [&] { ImGui::GetIO().AddMousePosEvent(2.0f, 2.0f); };
+	auto shot   = [&](const char* name) {
+		he_ui::Image img;
+		away();
+		footer();
+		ui.frame(Surface::Footer, pump, false, &img);
+		REQUIRE(img.valid());
+		dump(img, name);
+		return img;
+	};
+	auto modalOpen = [&] { return ui.find("Password##teampassword") != nullptr; };
+
+	// Signed out: the X, red, in the footer, and no modal until it is pressed.
+	away();
+	footer();
+	footer();
+	REQUIRE(ui.find("##teamStatus"));
+	CHECK(ui.find("##teamStatus")->y0 >= float(kPageH) - kFooterH);
+	CHECK_FALSE(modalOpen());
+	{
+		const he_ui::Image img = shot("team-footer-signed-out.bmp");
+		CHECK(pixelsIn(img, *ui.find("##teamStatus"), isRed) > 10);
+	}
+
+	// Pressed: the modal, with name and password; server and team are set, so
+	// they are not asked again.
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamStatus"));
+	REQUIRE(modalOpen());
+	CHECK(ui.find("Member##teammember"));
+	CHECK(ui.find("Team##teamname") == nullptr);
+	REQUIRE(ui.find("Sign In"));
+	CHECK(ui.find("Sign In")->disabled);
+	CHECK_FALSE(ui.openTeamWindow);
+
+	// A wrong password: refused, the modal stays and says so, the X stays.
+	REQUIRE(ui.type(Surface::Footer, pump, "Password##teampassword", "wrong-horse"));
+	CHECK_FALSE(ui.find("Sign In")->disabled);
+	REQUIRE(ui.click(Surface::Footer, pump, "Sign In"));
+	CHECK(ui.form.password.empty());
+	REQUIRE(frameUntil(footer, [&] { return team.status() == TeamController::Status::Failed; }));
+	CHECK(server.logins == 1);
+	CHECK_FALSE(team.lastError().empty());
+	footer();
+	CHECK(modalOpen());
+	shot("team-footer-modal-refused.bmp");
+
+	// The right one, confirmed with Enter: signed in, the modal closes itself
+	// and the X becomes Anna's face in her colour.
+	REQUIRE(ui.type(Surface::Footer, pump, "Password##teampassword", "correct-horse"));
+	ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, true);
+	footer();
+	ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, false);
+	footer();
+	CHECK(ui.form.password.empty());
+	REQUIRE(frameUntil(footer, [&] { return team.signedIn() && team.self() && !team.ownColor().unset(); }));
+	CHECK(server.logins == 2);
+	footer();
+	CHECK_FALSE(modalOpen());
+	{
+		const he_ui::Image img = shot("team-footer-signed-in.bmp");
+		CHECK(pixelsIn(img, *ui.find("##teamStatus"), isBlue) > 20);
+		CHECK(pixelsIn(img, *ui.find("##teamStatus"), isRed) == 0);
+	}
+
+	// The face asks for the Team window, and opens no modal.
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamStatus"));
+	CHECK(ui.openTeamWindow);
+	CHECK_FALSE(modalOpen());
+
+	// Signed out again: the X is back, and Cancel closes the modal without
+	// trying anything.
+	team.signOut();
+	ui.openTeamWindow = false;
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamStatus"));
+	REQUIRE(modalOpen());
+	REQUIRE(ui.click(Surface::Footer, pump, "Cancel"));
+	CHECK_FALSE(modalOpen());
+	CHECK(server.logins == 2);
+	CHECK_FALSE(ui.openTeamWindow);
+
+	// No team configured yet: the modal asks for it (and the server) too, and
+	// keeps asking while it is typed.
+	ui.teamName.clear();
+	REQUIRE(ui.click(Surface::Footer, pump, "##teamStatus"));
+	REQUIRE(modalOpen());
+	REQUIRE(ui.find("Team##teamname"));
+	CHECK(ui.find("Team Server (host:port)##teamserver"));
+	REQUIRE(ui.type(Surface::Footer, pump, "Team##teamname", "studio"));
+	CHECK(ui.teamName == "studio");
+	CHECK(ui.find("Team##teamname"));
+	shot("team-footer-modal-ask-team.bmp");
 }
 
 TEST_CASE("Team UI: two editors through a real collab_server (HE_TEST_TEAM_SERVER=host:port)")

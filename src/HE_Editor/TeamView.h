@@ -12,6 +12,8 @@
 //                                  members
 //   both, signed in                your profile: the colour and picture the team
 //                                  sees next to your name (topic 202)
+//   the footer, right of the bell  your own status: your face, or a red X that
+//                                  opens a sign-in modal (topic 202)
 //
 // Takes a TeamController and the three config strings, never AppContext — which
 // is what lets tests/test_team_ui.cpp draw the real thing headless against a
@@ -88,6 +90,19 @@ namespace TeamView
 	// Window ▸ Team, the body (the caller owns Begin/End). Signed out it shows
 	// the same sign-in block, so a team can be created from here.
 	void drawPanel(TeamController& team, const Settings& settings, Form& form);
+
+	// ── The footer: your own status, right of the bell (topic 202) ──
+	// Signed in it is your face (picture, or colour and initial); otherwise a
+	// red X (amber while a sign-in is under way) that opens the Team Sign-In
+	// modal: name and password, Sign In tries again. The modal is drawn by
+	// drawFooterStatus itself, in whatever window the footer is, and closes
+	// once the sign-in is through.
+	//
+	// One text line tall, like the bell (NotificationBar.cpp has why): the
+	// footer right-aligns against footerStatusWidth(), so the two must agree.
+	float footerStatusWidth();
+	// True when your face was clicked: the caller opens Window ▸ Team.
+	bool drawFooterStatus(TeamController& team, const Settings& settings, Form& form);
 
 	// ── Test seam ──
 	// Where each control was drawn in the last frame, by label and the row it

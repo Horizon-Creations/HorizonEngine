@@ -107,6 +107,12 @@ void drawSessions(TeamController& team, Form& form);
 void drawAdmin(TeamController& team, Form& form);
 void drawProfile(TeamController& team, Form& form);
 void drawOwnPassword(TeamController& team, Form& form);
+bool connectionUp(TeamController::Status s);
+void faceAt(ImDrawList* dl, ImVec2 p, const HE::Net::TeamMember* m, HE::Net::TeamColor colour,
+            const std::string& name, float size);
+void drawSignInModal(TeamController& team, const Settings& settings, Form& form);
+
+constexpr const char* kSignInModal = "Team Sign-In###teamSignIn";
 
 } // namespace
 
@@ -180,6 +186,70 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 	drawRecent(form);
 }
 
+float footerStatusWidth()
+{
+	return ImGui::GetTextLineHeight();
+}
+
+bool drawFooterStatus(TeamController& team, const Settings& settings, Form& form)
+{
+	HE::Ed::Help::Scope helpScope("Team");
+	const TeamController::Status s    = team.status();
+	const float                  size = footerStatusWidth();
+
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton("##teamStatus", ImVec2(size, size));
+	probe("##teamStatus");
+	const bool clicked = ImGui::IsItemClicked();
+	const bool hovered = ImGui::IsItemHovered();
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	if (s == TeamController::Status::SignedIn)
+	{
+		faceAt(dl, p, team.self(), team.ownColor(), team.member(), size);
+	}
+	else
+	{
+		// Two strokes, not a glyph, for the bell's reason (NotificationBar.cpp):
+		// the font is not guaranteed to carry one. Amber while a sign-in is
+		// under way: nothing to fix yet, but not signed in either.
+		const ImU32 col   = Theme::u32(s == TeamController::Status::Connecting ? Theme::Warn : Theme::Bad);
+		const float inset = std::floor(size * 0.22f);
+		const float thick = std::max(1.5f, size * 0.13f);
+		dl->AddLine(ImVec2(p.x + inset, p.y + inset), ImVec2(p.x + size - inset, p.y + size - inset), col, thick);
+		dl->AddLine(ImVec2(p.x + size - inset, p.y + inset), ImVec2(p.x + inset, p.y + size - inset), col, thick);
+	}
+
+	if (hovered && !ImGui::IsPopupOpen(kSignInModal))
+	{
+		switch (s)
+		{
+		case TeamController::Status::SignedIn:
+			ImGui::SetTooltip("Signed in to the team %s as %s. Click to open the Team window.",
+			                  team.team().c_str(), team.member().c_str());
+			break;
+		case TeamController::Status::Connecting:
+			ImGui::SetTooltip("Signing in to the team server\xe2\x80\xa6");
+			break;
+		case TeamController::Status::Reconnecting:
+			ImGui::SetTooltip("The connection to the team server dropped; retrying on its own. "
+			                  "Click to sign in again now.");
+			break;
+		case TeamController::Status::Failed:
+			ImGui::SetTooltip("Not signed in to a team: %s\nClick to sign in.", team.lastError().c_str());
+			break;
+		default:
+			ImGui::SetTooltip("Not signed in to a team. Click to sign in.");
+			break;
+		}
+	}
+
+	if (clicked && s != TeamController::Status::SignedIn)
+		ImGui::OpenPopup(kSignInModal);
+	drawSignInModal(team, settings, form);
+	return clicked && s == TeamController::Status::SignedIn;
+}
+
 namespace
 {
 
@@ -217,11 +287,10 @@ ImU32 colourU32(HE::Net::TeamColor c)
 // initial on it, framed in their colour either way. Drawn from the pixels with
 // rectangles rather than a texture: this file has no renderer (see TeamView.h),
 // and a face is a few hundred rectangles at most.
-void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::string& name, float size)
+void faceAt(ImDrawList* dl, ImVec2 p, const HE::Net::TeamMember* m, HE::Net::TeamColor colour,
+            const std::string& name, float size)
 {
-	const ImVec2 p  = ImGui::GetCursorScreenPos();
 	const ImVec2 q(p.x + size, p.y + size);
-	ImDrawList*  dl = ImGui::GetWindowDrawList();
 	const ImU32  frame    = colourU32(colour);
 	const float  rounding = size * 0.2f;
 
@@ -264,6 +333,12 @@ void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::st
 		}
 	}
 	dl->AddRect(p, q, frame, rounding, 0, std::max(1.5f, size * 0.06f));
+}
+
+// The same, as a layout item at the cursor.
+void face(const HE::Net::TeamMember* m, HE::Net::TeamColor colour, const std::string& name, float size)
+{
+	faceAt(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), m, colour, name, size);
 	ImGui::Dummy(ImVec2(size, size));
 }
 
@@ -378,6 +453,88 @@ void drawSignIn(TeamController& team, const Settings& settings, Form& form)
 	}
 	ImGui::Spacing();
 	drawStatus(team);
+}
+
+// The footer's sign-in, opened from the X right of the bell: name and password,
+// and Sign In tries again — after a refused password, a saved sign-in the
+// server no longer takes, or a connection that will not come back. Server and
+// team belong to Preferences ▸ Team; they are asked here too only when one was
+// empty as the modal opened (decided once, or the rows would vanish with the
+// first letter typed), since without them there is nothing to try.
+void drawSignInModal(TeamController& team, const Settings& settings, Form& form)
+{
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+	                        ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	// Fixed width, height fitted: wrapped text and an auto-sized width would
+	// chase each other.
+	ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 26.0f, 0.0f), ImGuiCond_Always);
+	if (!ImGui::BeginPopupModal(kSignInModal, nullptr, ImGuiWindowFlags_NoSavedSettings)) return;
+
+	const TeamController::Status s = team.status();
+	// Through: nothing left to ask. The face takes the X's place.
+	if (s == TeamController::Status::SignedIn)
+	{
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		return;
+	}
+	const bool connecting = s == TeamController::Status::Connecting;
+
+	static bool s_askWhere = false;
+	if (ImGui::IsWindowAppearing())
+		s_askWhere = settings.server->empty() || settings.team->empty();
+	if (s_askWhere)
+	{
+		drawServerField(team, settings);
+		ImGui::BeginDisabled(connectionUp(s));
+		EditorWidgets::Row::inputText("Team##teamname", settings.team);
+		probe("Team##teamname");
+		ImGui::EndDisabled();
+	}
+	else
+	{
+		EditorWidgets::hint("Team %s on %s (Preferences \xc2\xbb Team).", settings.team->c_str(),
+		                    settings.server->c_str());
+	}
+
+	ImGui::BeginDisabled(connecting);
+	EditorWidgets::Row::inputText("Member##teammember", settings.member);
+	probe("Member##teammember");
+	if (ImGui::IsWindowAppearing() && !settings.member->empty()) ImGui::SetKeyboardFocusHere();
+	const bool enter = EditorWidgets::Row::inputText("Password##teampassword", &form.password,
+	                                                 ImGuiInputTextFlags_Password |
+	                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+	probe("Password##teampassword");
+	ImGui::EndDisabled();
+
+	ImGui::Spacing();
+	drawStatus(team);
+	ImGui::Spacing();
+
+	const bool ready = !connecting && !settings.server->empty() && !settings.team->empty() &&
+	                   !settings.member->empty() && !form.password.empty();
+	ImGui::BeginDisabled(!ready);
+	const bool in = EditorWidgets::primaryButton("Sign In");
+	probe("Sign In");
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	const bool cancel = EditorWidgets::button("Cancel");
+	probe("Cancel");
+
+	// The modal stays open on the attempt: a refusal is read right here, and
+	// success closes it (above).
+	if (in || (enter && ready))
+	{
+		team.signIn(*settings.server, *settings.team, *settings.member, form.password);
+		form.wipeSecrets();
+	}
+	if (cancel)
+	{
+		form.wipeSecrets();
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
 }
 
 // ── Signed in: the team ──────────────────────────────────────────────────────
