@@ -306,6 +306,7 @@ add_executable(he_tests
     test_mcp_tools_batch.cpp
     test_mcp_tools_screenshot.cpp
     test_mcp_tools_collab.cpp
+    test_mcp_tools_taskboard.cpp
     test_mcp_camera_gizmos.cpp
     test_viewport_overlays.cpp
     test_texture_colour_space.cpp
@@ -506,6 +507,9 @@ add_executable(he_tests
     # same host → join → roster path the two-editor script drives, minus the
     # processes.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsCollab.cpp
+    # The task tools, with the Task Board panel's real board behind one editor
+    # and a second editor's bridge on the fake team (test_mcp_tools_taskboard.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTaskBoard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -796,6 +800,9 @@ set_source_files_properties(
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
     test_taskboard_ui.cpp
+    # Builds an AppContext for TaskBoardPanel::board/edit: its layout must be
+    # the one the panel was compiled with.
+    test_mcp_tools_taskboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     test_taskboard_footer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp

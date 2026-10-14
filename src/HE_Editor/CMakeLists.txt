@@ -217,6 +217,9 @@ add_executable(HorizonEditor WIN32
 	# The collaboration session as tools: its status always, hosting and joining
 	# only for a run started with HE_MCP_COLLAB_CONTROL=1 (the two-editor run).
 	McpToolsCollab.cpp
+	# The task board as tools: list, create, update, assign (team only) and the
+	# team's notices, all through the Task Board panel's one writer.
+	McpToolsTaskBoard.cpp
 	# The clients' cameras in the viewport: a frustum with the connection number
 	# (debug lines) and a tag over the frame (ImGui), the presence marker's split.
 	McpCameraGizmos.cpp
