@@ -1355,6 +1355,13 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Bad);
 		ImGui::TextWrapped("%s", collab->lastError().c_str());
 		ImGui::PopStyleColor();
+		// A dropped link is the one failure worth offering a way straight back
+		// into: the host catches a rejoiner up on everything it missed.
+		if (collab->canRejoin())
+		{
+			if (EditorWidgets::primaryButton("Rejoin")) collab->rejoinLastSession();
+			ImGui::SameLine();
+		}
 		if (EditorWidgets::button("Dismiss")) collab->leave();
 	}
 

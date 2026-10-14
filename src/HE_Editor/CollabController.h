@@ -259,6 +259,15 @@ public:
 	// persisted) by the caller first — this controller does not own the config
 	// file. False when there is nothing remembered to retry.
 	bool retryJoinWithLargeAssets();
+	// ── The link dropped ──
+	// A client whose connection to the host died is out of the session (Failed,
+	// "The connection to the host was lost"). Rejoining dials the same session
+	// the same way it was joined, and the host catches the joiner up: the scene
+	// snapshot plus every file the session changed (see catchUpJoiner). Whatever
+	// this machine changed while it was cut off is replaced by the session's
+	// state — the session is host-authoritative, and there is no merge.
+	bool canRejoin() const;
+	bool rejoinLastSession();
 	// What the browser currently hears. Empty while disabled, and empty for the
 	// first couple of seconds after enabling — hosts speak on a timer.
 	const std::vector<HE::Net::LanBeacon::Browser::Session>& lanSessions() const;
@@ -1425,8 +1434,16 @@ private:
 		std::string   hostPeer;
 		std::string   selfPeer;
 		bool          valid = false;
+		// The host banned us from it: rejoining is refused by construction, so
+		// it is not offered.
+		bool          banned = false;
+		// The join completed. Rejoin is offered for a session that was lost,
+		// not for one that never let us in.
+		bool          joined = false;
 	};
 	LastJoin      m_lastJoin;
+	// Dial m_lastJoin again exactly as it was dialled. `why` prefixes the log line.
+	bool redialLastJoin(const std::string& why);
 
 	// ── LAN discovery ──
 	// The announcer only exists while hosting; the browser runs whenever
@@ -1447,20 +1464,62 @@ private:
 
 	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
 	std::string   m_assetNotice;
-	// One counter per document, used from both sides. As holder we increment it
-	// on every publish — deltas and whole files alike, since they describe the
-	// same document and have to be ordered against each other. As receiver we
-	// remember the highest we have applied and refuse anything at or below it.
-	//
-	// One map, not two: when a lock changes hands the new holder has been
-	// RECEIVING all along, so its number is already at least the old holder's
-	// and its first publish continues the sequence instead of restarting it —
-	// which would make every peer discard the new holder's work as stale.
+	// Our own counter per document. Incremented on every publish — deltas and
+	// whole files alike, since they describe the same document and have to be
+	// ordered against each other.
 	std::unordered_map<std::string, std::uint32_t> m_docRevision;
-	// True when this frame is newer than everything applied for that document,
-	// and records it. False means drop it — which is the ordinary fate of a
-	// whole file that arrived behind newer deltas.
-	bool acceptRevision(const std::string& relativePath, std::uint32_t revision);
+	// The highest revision applied per (ORIGINATOR, document), and anything at
+	// or below it is refused. Per originator, not per document: this used to be
+	// one map shared with the counter above, on the reasoning that a new holder
+	// has been receiving all along and so continues the sequence. A participant
+	// who JOINED after the document was edited has received nothing — it starts
+	// at 1, and every peer that had seen 50 dropped its work without a word
+	// (a late joiner, or anybody whose editor restarted and rejoined). The
+	// ordering the counter exists for is between one holder's two channels;
+	// between holders the host's relay order already is the order, because the
+	// host only forwards the lock holder's frames and the lock changes hands
+	// on that same ordered link. Keyed by revisionKey().
+	std::unordered_map<std::string, std::uint32_t> m_seenRevision;
+	static std::string revisionKey(HE::Net::ParticipantId from, const std::string& path);
+	// True when this frame is newer than everything applied from that sender for
+	// that document, and records it. False means drop it — which is the ordinary
+	// fate of a whole file that arrived behind the same holder's newer deltas.
+	bool acceptRevision(HE::Net::ParticipantId from, const std::string& relativePath,
+	                    std::uint32_t revision);
+	// A participant left: its ids are never reused in this session, so its rows
+	// are dead weight.
+	void forgetRevisionsFrom(HE::Net::ParticipantId from);
+
+	// ── Host: what a joiner has to be told on arrival ──
+	// The snapshot is the scene. Everything else the session changed travels on
+	// asset frames, and a participant who was not connected when they went out
+	// never got them — a late joiner, or one whose link dropped and who rejoined.
+	// The host keeps the set of files the session touched (saved, created,
+	// edited through deltas) and the ops it applied (delete, rename, folder
+	// create), and replays both to every joiner: ops first, in order, then the
+	// current bytes of every touched file still on disk.
+	std::vector<std::string> m_sessionTouched;   // keys, first touch order, unique
+	struct SessionOp {
+		HE::Net::CollabSession::AssetOp op;
+		std::string                     path;
+		std::string                     newPath;
+		HE::Net::ParticipantId          by = 0;
+		bool                            folder = false;
+	};
+	std::vector<SessionOp> m_sessionOps;
+	void noteSessionTouched(const std::string& relativePath);
+	void noteSessionOp(HE::Net::ParticipantId by, HE::Net::CollabSession::AssetOp op,
+	                   const std::string& path, const std::string& newPath, bool folder);
+	void catchUpJoiner(HE::Net::ParticipantId who);
+
+	// ── A save that had to wait for its lock ──
+	// publishAsset on a CLIENT that holds no lock asks for one and returns: the
+	// grant is a round trip away. Nothing used to send the save once it came, so
+	// a one-shot write (an MCP save, a rename sweep, a reimport of an authored
+	// asset) stayed on this machine until someone saved that file again. Keyed by
+	// lock subject: {key, absolute path}; published from the grant, then the lock
+	// goes back unless a tab here holds it.
+	std::unordered_map<std::uint64_t, std::pair<std::string, std::string>> m_publishOnGrant;
 	std::function<std::string(const std::string&)> m_localPathForKey;
 	std::function<void(HE::Net::CollabSession::AssetOp, const std::string&,
 	                   const std::string&, bool)> m_onRemoteAssetOp;

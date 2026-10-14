@@ -8650,6 +8650,13 @@ namespace
 	  "Clears the failure above and puts the panel back to the host-or-join form. "
 	  "It retries nothing: the attempt it is reporting has already ended.",
 	  "", "collaboration#starting" },
+	{ "Collaboration Session/Rejoin", "",
+	  "Shown when the connection to the host dropped. Joins the same session again, "
+	  "the same way you joined it the first time. The host then sends you the scene "
+	  "and every file the session changed while you were away, so nothing you missed "
+	  "stays missing. Changes you made here while you were disconnected are replaced "
+	  "by the session's state.",
+	  "", "collaboration#starting" },
 
 	// ── The team (Preferences ▸ Team and Window ▸ Team, TeamView.cpp) ────────
 	{ "Team/Team Server (host:port)", "",

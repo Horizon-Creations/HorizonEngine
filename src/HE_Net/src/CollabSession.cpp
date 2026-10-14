@@ -2006,6 +2006,49 @@ void CollabSession::broadcastAssetOpApply(AssetOp op, const std::string& path,
     if (m_onOpApply) m_onOpApply(by, op, path, newPath, folder);
 }
 
+// ─── Catching up a joiner ────────────────────────────────────────────────────
+
+namespace {
+ConnectionId connectionOf(const std::vector<std::pair<ConnectionId, ParticipantId>>& map,
+                          ParticipantId who) {
+    for (const auto& [c, pid] : map)
+        if (pid == who) return c;
+    return kInvalidConnection;
+}
+} // namespace
+
+bool CollabSession::sendAssetTo(ParticipantId to, const AssetUpdate& a) {
+    if (!m_net || m_role != NetRole::Host) return false;
+    const ConnectionId conn = connectionOf(m_connToParticipant, to);
+    if (conn == kInvalidConnection) return false;
+    // The joiner's own ceiling still applies on its side (handleAssetRelay), and
+    // refuses with a notice; ours decides what we are willing to put on the wire.
+    if (a.bytes.size() > m_cfg.maxAssetBytes) {
+        HE_LOG_WARN(Net, "Collab: not catching participant %u up on \"%s\": %s exceeds the "
+                         "%s transfer limit", static_cast<unsigned>(to), a.path.c_str(),
+                    detail::logBytes(a.bytes.size()).c_str(),
+                    detail::logBytes(m_cfg.maxAssetBytes).c_str());
+        return false;
+    }
+    sendAssetChunks(conn, m_localId, a);
+    return true;
+}
+
+void CollabSession::sendAssetOpApplyTo(ParticipantId to, AssetOp op, const std::string& path,
+                                       const std::string& newPath, ParticipantId by,
+                                       bool folder) {
+    if (!m_net || m_role != NetRole::Host) return;
+    const ConnectionId conn = connectionOf(m_connToParticipant, to);
+    if (conn == kInvalidConnection) return;
+    BitWriter w;
+    w.writeUInt32(by);
+    w.writeByte(static_cast<std::uint8_t>(op));
+    w.writeString(path);
+    w.writeString(newPath);
+    w.writeByte(folder ? 1 : 0);
+    m_net->send(conn, kMsgAssetOpApply, w);
+}
+
 void CollabSession::handleAssetOpVerdict(BitReader& r) {
     std::uint32_t id = 0;
     std::uint8_t  approved = 0;

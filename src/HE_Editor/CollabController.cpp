@@ -1010,6 +1010,8 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_lastJoin.hostPeer    = m_relayHostPeer;
 	m_lastJoin.selfPeer    = m_relaySelfPeer;
 	m_lastJoin.valid       = true;
+	m_lastJoin.banned      = false;
+	m_lastJoin.joined      = false;
 
 	m_joinCode      = joinCode;
 	m_localAddress  = host;
@@ -1050,7 +1052,18 @@ void CollabController::applyLocalIdentity(HE::Net::CollabSession::Config& cfg)
 
 void CollabController::wireCallbacks()
 {
+	// ── Somebody arrived: tell them what the snapshot does not ──
+	// Fires on the host after the joiner's snapshot, lock table and presence
+	// went out, so everything sent from here lands behind them on the same link.
+	m_collab->onParticipantJoined([this](const HE::Net::Participant& p) {
+		if (m_isHost) catchUpJoiner(p.id);
+	});
+	m_collab->onParticipantLeft([this](HE::Net::ParticipantId id) {
+		forgetRevisionsFrom(id);
+	});
+
 	m_collab->onRemoved([this](HE::Net::RemovalReason why) {
+		if (why == HE::Net::RemovalReason::Banned) m_lastJoin.banned = true;
 		// The link drops right after this. Without the notice the user sees a
 		// bare "connection lost" and has no way to tell being thrown out from
 		// the host's wifi giving up.
@@ -1065,6 +1078,7 @@ void CollabController::wireCallbacks()
 
 	m_collab->onJoined([this](HE::Net::ParticipantId id) {
 		m_status = Status::Joined;
+		m_lastJoin.joined = true;
 		Logger::Log(Logger::LogLevel::Info,
 		            ("Collab: joined as participant " + std::to_string(id)).c_str());
 	});
@@ -1176,7 +1190,7 @@ void CollabController::wireCallbacks()
 		// for; applying it then would undo them. A create is exempt: it is the
 		// document's first version, so there is nothing it could be older than.
 		if (a.intent != HE::Net::CollabSession::AssetIntent::Create &&
-		    !acceptRevision(a.path, a.revision))
+		    !acceptRevision(who, a.path, a.revision))
 		{
 			return;
 		}
@@ -1194,6 +1208,7 @@ void CollabController::wireCallbacks()
 		m_applyingRemoteAsset = true;
 		m_onRemoteAsset(a.path, a.bytes);
 		m_applyingRemoteAsset = false;
+		noteSessionTouched(a.path);
 		// A create is news; a save is not. Collected rather than announced one
 		// by one — Save All is one action and would otherwise be a burst.
 		if (a.intent == HE::Net::CollabSession::AssetIntent::Create)
@@ -1376,6 +1391,7 @@ void CollabController::wireCallbacks()
 					m_onRemoteEntityOp(op, subject, newPath);
 				return;
 			}
+			noteSessionOp(by, op, path, newPath, folder);
 			if (!m_onRemoteAssetOp) return;
 			// Same guard as an arriving save: applying this touches the content
 			// tree, and the notification would otherwise come straight back.
@@ -1395,11 +1411,12 @@ void CollabController::wireCallbacks()
 			verifyAppliedAssetOp(op, path, newPath, by);
 		});
 
-	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
+	m_collab->onDocDeltas([this](HE::Net::ParticipantId from, std::uint64_t,
 	                             const std::string& path,
 	                             const std::vector<HE::Net::CollabSession::DocDelta>& batch,
 	                             std::uint32_t revision) {
-		if (!acceptRevision(path, revision)) return;
+		if (!acceptRevision(from, path, revision)) return;
+		noteSessionTouched(path);
 		// Straight through to the editor, which routes by path to whichever panel
 		// holds that asset. Deliberately NOT written to disk: the point of a delta
 		// is that the receiving panel patches the document it is already showing,
@@ -1448,6 +1465,36 @@ void CollabController::wireCallbacks()
 		// it. This is the one place that sees the transition from both sides.
 		if (!acquired) return;
 
+		// ── A save that was waiting for this grant ──
+		// Sent now, before anything below can hand the lock straight back (a
+		// background write queued its release the moment it finished writing —
+		// releasing first would put the lock back without the bytes ever going).
+		if (l.owner == m_collab->localId())
+		{
+			const auto waiting = m_publishOnGrant.find(l.subject);
+			if (waiting != m_publishOnGrant.end())
+			{
+				const std::string rel  = waiting->second.first;
+				const std::string full = waiting->second.second;
+				m_publishOnGrant.erase(waiting);
+				publishAsset(rel, full);
+				// Nobody here asked to KEEP it: the claim existed only to send this
+				// file. Holding on would leave the asset read-only for everyone else
+				// for the rest of the session, behind a claim no tab stands behind.
+				const bool tabWants =
+					std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), rel) !=
+					m_heldAssetLocks.end();
+				const bool releaseQueued =
+					std::find(m_pendingLockReleases.begin(), m_pendingLockReleases.end(),
+					          rel) != m_pendingLockReleases.end();
+				if (!tabWants && !releaseQueued)
+				{
+					m_collab->releaseLock(l.subject);
+					return;
+				}
+			}
+		}
+
 		// ── A grant nobody wants any more ──
 		// The lock we asked for during a background write, given back before the
 		// answer arrived (see releaseAssetLock). It is ours now, and it is ours
@@ -1495,6 +1542,9 @@ void CollabController::wireCallbacks()
 	});
 
 	m_collab->onLockDenied([this](std::uint64_t subject, LockDenyReason reason) {
+		// A save waiting on this claim stays local: somebody else holds the
+		// asset, and their copy is what the session has. The notices below say so.
+		m_publishOnGrant.erase(subject);
 		// ── The background write that lost its race ──
 		// A claim we had already given back, refused: the only way to be in
 		// m_pendingLockReleases is to have asked for this lock and stopped
@@ -1704,6 +1754,15 @@ void CollabController::teardown()
 	m_netIds.clear();
 	m_lastComponentHashes.clear();
 	m_heldAssetLocks.clear();
+	// Revisions are numbered per session: participant ids are minted afresh by
+	// the next host, so a row kept here would judge a stranger by what somebody
+	// else sent last time. Same for what the session touched and what was
+	// waiting for a grant — the next session starts from its own snapshot.
+	m_docRevision.clear();
+	m_seenRevision.clear();
+	m_sessionTouched.clear();
+	m_sessionOps.clear();
+	m_publishOnGrant.clear();
 	// Locks whose grant we were still waiting on to release. There is no session
 	// left to release them into, and the host has dropped everything we held the
 	// moment we disconnected — keeping these would only mean the next session's
@@ -2082,7 +2141,27 @@ bool CollabController::retryJoinWithLargeAssets()
 	// that forgot still gets a join that works rather than an infinite loop.
 	m_syncLargeAssets   = true;
 	m_largeAssetsPrompt = false;
+	return redialLastJoin("agreeing to large-asset sync and ");
+}
 
+bool CollabController::canRejoin() const
+{
+	// Only after a session was actually lost: a refused join has its own answer
+	// (the large-asset prompt, or a reason that rejoining would only repeat),
+	// and a ban is refused by the host before anything else is looked at.
+	return m_lastJoin.valid && !m_lastJoin.banned && !m_isHost &&
+	       m_status == Status::Failed && m_lastJoin.joined;
+}
+
+bool CollabController::rejoinLastSession()
+{
+	if (!canRejoin()) return false;
+	return redialLastJoin("");
+}
+
+bool CollabController::redialLastJoin(const std::string& why)
+{
+	if (!m_lastJoin.valid) return false;
 	// COPIES, taken before joinSession() calls teardown(). teardown clears the
 	// controller's session state, and m_lastJoin lives on the controller — the
 	// arguments would be read out of a struct that had just been reset.
@@ -2098,18 +2177,18 @@ bool CollabController::retryJoinWithLargeAssets()
 		const std::string hostPeer = m_lastJoin.hostPeer;
 		const std::string selfPeer = m_lastJoin.selfPeer;
 		Logger::Log(Logger::LogLevel::Info,
-		            "Collab: agreeing to large-asset sync and joining the team session again");
+		            ("Collab: " + why + "joining the team session again").c_str());
 		return joinTeamSession(HE::Net::RelayAddress{ host, port }, sid, hostPeer, selfPeer, name);
 	}
 	if (!m_lastJoin.sessionId.empty())
 	{
 		const std::string sid = m_lastJoin.sessionId;
 		Logger::Log(Logger::LogLevel::Info,
-		            "Collab: agreeing to large-asset sync and joining through the relay again");
+		            ("Collab: " + why + "joining through the relay again").c_str());
 		return joinBySessionId(sid, code, name);
 	}
 	Logger::Log(Logger::LogLevel::Info,
-	            ("Collab: agreeing to large-asset sync and dialling " + host + ":" +
+	            ("Collab: " + why + "dialling " + host + ":" +
 	             std::to_string(port) + " again").c_str());
 	return joinSession(host, port, code, name);
 }
@@ -2834,17 +2913,35 @@ void CollabController::forgetAssetEditSession(const std::string& relativePath)
 	m_assetSubjectPaths.erase(assetSubject(relativePath));
 }
 
-bool CollabController::acceptRevision(const std::string& relativePath,
+std::string CollabController::revisionKey(HE::Net::ParticipantId from,
+                                         const std::string& path)
+{
+	return std::to_string(from) + '\n' + path;
+}
+
+void CollabController::forgetRevisionsFrom(HE::Net::ParticipantId from)
+{
+	const std::string prefix = std::to_string(from) + '\n';
+	for (auto it = m_seenRevision.begin(); it != m_seenRevision.end();)
+	{
+		if (it->first.rfind(prefix, 0) == 0) it = m_seenRevision.erase(it);
+		else ++it;
+	}
+}
+
+bool CollabController::acceptRevision(HE::Net::ParticipantId from,
+                                      const std::string& relativePath,
                                       std::uint32_t revision)
 {
 	if (relativePath.empty()) return false;
 
-	// Revision 0 means "unversioned" — a create, or a frame from a peer that
-	// does not number them. Applied, but it never lowers what we have seen: a
-	// zero must not be able to reopen the door for older frames behind it.
+	// Revision 0 means "unversioned" — a create, a host catching a joiner up, or
+	// a frame from a peer that does not number them. Applied, but it never
+	// lowers what we have seen: a zero must not be able to reopen the door for
+	// older frames behind it.
 	if (revision == 0) return true;
 
-	std::uint32_t& seen = m_docRevision[relativePath];
+	std::uint32_t& seen = m_seenRevision[revisionKey(from, relativePath)];
 	if (revision <= seen)
 	{
 		// Not an error, and deliberately not a warning: with two channels for
@@ -2863,7 +2960,10 @@ bool CollabController::publishDocDeltas(
 	if (!m_collab || !inSession() || batch.empty()) return false;
 	// One step per publish, whichever channel it goes out on.
 	const std::uint32_t rev = ++m_docRevision[relativePath];
-	return m_collab->sendDocDeltas(assetSubject(relativePath), relativePath, batch, rev);
+	if (!m_collab->sendDocDeltas(assetSubject(relativePath), relativePath, batch, rev))
+		return false;
+	noteSessionTouched(relativePath);
+	return true;
 }
 
 std::string CollabController::projectRelativeAssetPath(const std::string& absolutePath,
@@ -2982,7 +3082,14 @@ void CollabController::publishAsset(const std::string& relativePath,
 	{
 		if (m_collab->lockFor(subject)) return;   // someone else owns it — refuse
 		m_collab->requestLock(subject);
-		if (!m_collab->ownsLock(subject)) return; // a client must await the grant
+		if (!m_collab->ownsLock(subject))
+		{
+			// A client must await the grant — and the grant has to SEND it, or a
+			// save nobody repeats (MCP, a rename sweep, a background write) never
+			// leaves this machine. The path is re-read then, so the newest bytes go.
+			m_publishOnGrant[subject] = { relativePath, fullPath };
+			return;
+		}
 	}
 
 	// The same counter the deltas use. A whole file is simply a coarser
@@ -2996,7 +3103,11 @@ void CollabController::publishAsset(const std::string& relativePath,
 	up.intent   = HE::Net::CollabSession::AssetIntent::Update;
 	up.revision = ++m_docRevision[relativePath];
 	const std::size_t size = up.bytes.size();
-	if (m_collab->sendAsset(up)) return;
+	if (m_collab->sendAsset(up))
+	{
+		noteSessionTouched(relativePath);
+		return;
+	}
 
 	// It did not go. Two things can cause that here — we hold the lock, which
 	// was checked above — and only one of them is worth a notice: the size
@@ -4269,6 +4380,114 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 	// pending and an entry left behind would only wait for a verdict that is
 	// never sent.
 	if (isHost()) m_pendingCreates.erase(rel);
+	noteSessionTouched(rel);
+}
+
+// ─── Catching up a joiner ────────────────────────────────────────────────────
+// What makes "every client gets every change" hold for somebody who was not
+// connected when a change went out. During a session the link is TCP — direct or
+// through the relay — so nothing between two connected editors is lost or
+// reordered, and the host only relays what the lock holder sends. What a link
+// cannot cover is the time before it existed: a late joiner, or a client whose
+// link dropped and who rejoined. The snapshot covers the scene (level script and
+// landscape grids included); this covers the files.
+
+void CollabController::noteSessionTouched(const std::string& relativePath)
+{
+	// Only the host replays, so only the host has to remember.
+	if (!m_isHost || relativePath.empty()) return;
+	if (HE::Ed::CollabEntityOps::isKey(relativePath)) return;
+	if (std::find(m_sessionTouched.begin(), m_sessionTouched.end(), relativePath) ==
+	    m_sessionTouched.end())
+		m_sessionTouched.push_back(relativePath);
+}
+
+void CollabController::noteSessionOp(HE::Net::ParticipantId by,
+                                     HE::Net::CollabSession::AssetOp op,
+                                     const std::string& path, const std::string& newPath,
+                                     bool folder)
+{
+	using Op = HE::Net::CollabSession::AssetOp;
+	if (!m_isHost) return;
+	if (op != Op::Delete && op != Op::Rename && op != Op::Create) return;
+	m_sessionOps.push_back({ op, path, newPath, by, folder });
+
+	// The touched set follows the op, so the files sent afterwards are named the
+	// way the session names them now. A folder op covers everything under it.
+	const auto under = [&](const std::string& key) {
+		if (key == path) return true;
+		return folder && key.size() > path.size() && key.rfind(path, 0) == 0 &&
+		       key[path.size()] == '/';
+	};
+	if (op == Op::Delete)
+	{
+		m_sessionTouched.erase(std::remove_if(m_sessionTouched.begin(),
+		                                      m_sessionTouched.end(), under),
+		                       m_sessionTouched.end());
+	}
+	else if (op == Op::Rename && !newPath.empty())
+	{
+		for (std::string& key : m_sessionTouched)
+			if (under(key)) key = newPath + key.substr(path.size());
+	}
+}
+
+void CollabController::catchUpJoiner(HE::Net::ParticipantId who)
+{
+	using Op = HE::Net::CollabSession::AssetOp;
+	if (!m_collab || !m_isHost) return;
+
+	const auto existsHere = [&](const std::string& key) {
+		if (!m_localPathForKey) return false;
+		const std::string full = m_localPathForKey(key);
+		std::error_code ec;
+		return !full.empty() && std::filesystem::exists(full, ec);
+	};
+
+	// ── Ops first, in the order they happened ──
+	// A delete or rename is replayed only while its source is still gone here:
+	// a name the session later used again (Rock deleted, a new Rock created)
+	// must not be deleted on the joiner by the first op. The new one arrives
+	// below as a file. Replaying an op the joiner already applied finds nothing
+	// to do — that is a rejoiner who saw it before its link dropped.
+	std::size_t ops = 0;
+	for (const SessionOp& o : m_sessionOps)
+	{
+		if ((o.op == Op::Delete || o.op == Op::Rename) && existsHere(o.path)) continue;
+		m_collab->sendAssetOpApplyTo(who, o.op, o.path, o.newPath, o.by, o.folder);
+		++ops;
+	}
+
+	// ── Then the current bytes of every file the session touched ──
+	// Read off the disk now, not cached when they arrived: the disk is what the
+	// later saves and deltas were applied to. Revision 0 — "unversioned": the
+	// joiner applies it, and it does not raise the floor the holder's own
+	// numbered frames are judged against afterwards.
+	std::size_t files = 0;
+	for (const std::string& key : m_sessionTouched)
+	{
+		if (!m_localPathForKey) break;
+		const std::string full = m_localPathForKey(key);
+		if (full.empty()) continue;   // the level script: it rode in the snapshot
+		std::ifstream f(full, std::ios::binary);
+		if (!f) continue;             // created and since removed outside the session
+		std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+		                                 std::istreambuf_iterator<char>());
+		if (bytes.empty()) continue;
+		HE::Net::CollabSession::AssetUpdate up;
+		up.subject  = assetSubject(key);
+		up.path     = key;
+		up.bytes    = std::move(bytes);
+		up.intent   = HE::Net::CollabSession::AssetIntent::Update;
+		up.revision = 0;
+		if (m_collab->sendAssetTo(who, up)) ++files;
+	}
+
+	if (ops || files)
+		Logger::Log(Logger::LogLevel::Info,
+		            ("Collab: caught participant " + std::to_string(who) + " up on " +
+		             std::to_string(ops) + " op(s) and " + std::to_string(files) +
+		             " file(s) the session changed before it arrived").c_str());
 }
 
 // ─── Locks ───────────────────────────────────────────────────────────────────

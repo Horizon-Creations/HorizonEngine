@@ -737,6 +737,19 @@ public:
                                const std::string& newPath, ParticipantId by,
                                bool folder = false);
 
+    // ── Catching up a joiner ──
+    // The snapshot carries the scene and nothing else. Whatever the session did
+    // to files before somebody arrived — saves, deletes, renames — is sent to
+    // that one participant after its snapshot, over the same frames everyone
+    // else received them on: the link is ordered, so these land after
+    // SnapshotEnd and before anything live that follows. Host only, and neither
+    // touches the lock table: the host is restating what already happened, not
+    // publishing an edit of its own. Stamped with the host's id. False when the
+    // participant is gone or the file is over the transfer ceiling.
+    bool sendAssetTo(ParticipantId to, const AssetUpdate& a);
+    void sendAssetOpApplyTo(ParticipantId to, AssetOp op, const std::string& path,
+                            const std::string& newPath, ParticipantId by, bool folder);
+
     // Client: the answer to something we asked for.
     void onAssetOpVerdict(
         std::function<void(std::uint32_t requestId, bool approved)> fn) {

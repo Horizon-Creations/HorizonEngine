@@ -930,6 +930,30 @@ void EditorApplication::OnInit()
 
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
+		// The GameInstance graph travels as deltas while everyone is connected;
+		// its whole file only comes from the host catching a joiner up. It is a
+		// project file the editor holds in memory, not a ContentManager asset, so
+		// it is re-read into the graph, the app runtime and the preview here, and
+		// the mirror starts over from it — left seeded from the stale graph, the
+		// difference would read as our own edit and go straight back out.
+		if (relPath == GameInstancePanel::kTabPath)
+		{
+			const std::string full = collabLocalPath(relPath);
+			if (full.empty()) return;
+			{
+				std::ofstream out(full, std::ios::binary | std::ios::trunc);
+				if (!out) return;
+				out.write(reinterpret_cast<const char*>(bytes.data()),
+				          static_cast<std::streamsize>(bytes.size()));
+				if (!out) return;
+			}
+			loadGameInstanceGraph();
+			m_gameInstanceMirror = {};
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
+			Logger::Log(Logger::LogLevel::Info, "Collab: applied the session's GameInstance graph");
+			return;
+		}
 		applyAssetBytes(relPath, bytes);
 		// An open editor tab keeps showing its in-memory state — tell whichever
 		// panel holds this asset to re-read the file, so the peer's edit is
