@@ -15,7 +15,7 @@
 // Same framing and header as the relay ([u32 BE length] "HERL" | 1 | type), on
 // its own TCP connection whose first frame is TEAM_LOGIN instead of HELLO:
 //
-//   client ── TEAM_LOGIN(op, team, member, password) ──▶ server
+//   client ── TEAM_LOGIN(op, team, member, password) ──▶ server   (op 3: a session token)
 //   server ── STATUS logged-in | refusal + close ──────▶ client
 //   client ── TEAM_REQUEST(id, op, …) ─────────────────▶ server   (any number)
 //   server ── TEAM_REPLY(id, result, text, …) ─────────▶ client   (one per request)
@@ -26,8 +26,15 @@
 // is the answer". The server closes a connection that is silent for 60 s, so
 // update() sends a PING every kPingIntervalMs.
 //
+// Session tokens (topic 201, docs/team-login-persist-2026-10-14.md): a
+// connection that logged in with the password asks ISSUE_TOKEN for a long-lived
+// token, and a later connect() with LoginOp::Token presents it instead of the
+// password. A token that is wrong, revoked or expired is a plain bad-login,
+// indistinguishable from a wrong password; the server also pushes bad-login to
+// a live token connection when the token is revoked under it.
+//
 // Poll-driven like every transport here: update() once per frame, nothing
-// blocks, no threads. Passwords never reach a log, and session ids only
+// blocks, no threads. Passwords and tokens never reach a log, and session ids only
 // abbreviated — for a team session the id is the key to the session (see
 // joinCodeForSession).
 
@@ -70,7 +77,8 @@ public:
     enum class FrameType : std::uint8_t {
         Status = 2, TeamLogin = 6, TeamRequest = 7, TeamReply = 8, TeamEvent = 9,
     };
-    enum class LoginOp : std::uint8_t { Login = 1, CreateTeam = 2 };
+    // Token: the session token goes where the password would.
+    enum class LoginOp : std::uint8_t { Login = 1, CreateTeam = 2, Token = 3 };
     enum class StatusCode : std::uint8_t {
         LoggedIn = 4, BadHello = 16, BadVersion = 17, Timeout = 20, Full = 21,
         BadLogin = 23, TeamExists = 24, Invalid = 25, ServerError = 26,
@@ -79,12 +87,13 @@ public:
         ListMembers = 1, AddMember = 2, RemoveMember = 3, SetPassword = 4, Ping = 5,
         OpenSession = 6, CloseSession = 7, SetSessionOpen = 8, ListSessions = 9,
         Invite = 10, Decline = 11, Join = 12,
+        IssueToken = 13, RevokeToken = 14, RevokeAllTokens = 15,
     };
     enum class Result : std::uint8_t {
         Ok = 0, BadRequest = 1, InvalidName = 2, InvalidPassword = 3, MemberExists = 4,
         NoSuchMember = 5, WrongPassword = 6, NotAdmin = 7, LastAdmin = 8, Full = 9,
         ServerError = 10, NotOnline = 11, NoSuchSession = 12, NotHost = 13,
-        NotAllowed = 14, SessionExists = 15, NotInvited = 16,
+        NotAllowed = 14, SessionExists = 15, NotInvited = 16, NoSuchToken = 17,
         // Never on the wire: the connection went away before the reply came.
         ConnectionLost = 255,
     };
@@ -116,6 +125,9 @@ public:
         std::string   text;                 // the server's reason, may be empty
         // JOIN only: what the relay CONNECT needs.
         std::string   session, host, peer;
+        // ISSUE_TOKEN only: the new session token (64 hex characters). A
+        // secret: the receiver keeps it out of logs and wipes its copies.
+        std::string   token;
         bool ok() const { return result == Result::Ok; }
     };
     using ReplyFn = std::function<void(const Reply&)>;
@@ -130,7 +142,8 @@ public:
     };
 
     // Starts connecting and logs in (or creates the team, whose first admin
-    // `member` then is) as soon as the TCP link is up. Null only when the
+    // `member` then is; or, with LoginOp::Token, presents the session token
+    // passed as `password`) as soon as the TCP link is up. Null only when the
     // names cannot be valid or the OS refuses the connect on the spot; a
     // server that is down shows up as State::Closed from update().
     static std::unique_ptr<TeamClient> connect(const RelayAddress& server,
@@ -156,6 +169,9 @@ public:
     // or close() was called) and a sentence for the UI.
     std::uint8_t       closeCode() const { return m_closeCode; }
     const std::string& lastError() const { return m_lastError; }
+    // The server's own text with that STATUS ("session token revoked",
+    // "password changed", …), which lastError() leaves out for bad-login.
+    const std::string& closeText() const { return m_closeText; }
     // True when logging in again with the same name and password is pointless
     // (bad-login, invalid, team-exists): a reconnect loop must stop there.
     bool               loginRefused() const;
@@ -198,6 +214,13 @@ public:
                          ReplyFn done = {});
     std::uint32_t decline(const std::string& session, ReplyFn done = {});
     std::uint32_t join(const std::string& session, ReplyFn done = {});
+    // Session tokens. issueToken() is refused (NotAllowed) on a connection that
+    // logged in with a token, unless it has changed the password since.
+    std::uint32_t issueToken(ReplyFn done = {});
+    std::uint32_t revokeToken(const std::string& token, ReplyFn done = {});
+    std::uint32_t revokeAllTokens(ReplyFn done = {});
+    // Which credential this connection presented.
+    LoginOp       loginOp() const { return m_loginOp; }
 
     // ── Helpers ──
     // The SecureTransport join secret of a team session, derived from its
@@ -248,10 +271,12 @@ private:
     RelayAddress                  m_server;
     std::string                   m_team, m_member;
     std::vector<std::uint8_t>     m_loginFrame;   // holds the password until sent
+    LoginOp                       m_loginOp = LoginOp::Login;
 
     State         m_state     = State::Connecting;
     std::uint8_t  m_closeCode = 0;
     std::string   m_lastError;
+    std::string   m_closeText;
     std::uint64_t m_nowMs     = 0;
     std::uint64_t m_startMs   = 0;   // connect began (login deadline)
     std::uint64_t m_lastSentMs = 0;

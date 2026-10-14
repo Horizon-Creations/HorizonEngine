@@ -106,10 +106,11 @@ void drawSettings(TeamController& team, const Settings& settings, Form& form)
 	                    "a team. Port 7777 if none is given; IPv6 addresses go in brackets.");
 	ImGui::Spacing();
 	drawSignIn(team, settings, form);
-	EditorWidgets::hint("The password is kept in memory for reconnecting and never written to "
-	                    "disk; after a restart you type it again. Create Team makes a new team "
-	                    "on the server with you as its first admin. Members, presence and "
-	                    "invitations are in Window \xc2\xbb Team.");
+	EditorWidgets::hint("The password is never written to disk. Signed in, this computer keeps "
+	                    "a session token from the team server and signs in with it after a "
+	                    "restart, until you sign out. Create Team makes a new team on the server "
+	                    "with you as its first admin. Members, presence and invitations are in "
+	                    "Window \xc2\xbb Team.");
 	drawRecent(form);
 }
 
@@ -133,9 +134,17 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 	drawStatus(team);
 	const bool out = EditorWidgets::smallButton("Sign Out");
 	probe("Sign Out");
-	if (out)
+	bool everywhere = false;
+	if (team.signedIn())
 	{
-		team.signOut();
+		ImGui::SameLine();
+		everywhere = EditorWidgets::smallButton("Sign Out Everywhere");
+		probe("Sign Out Everywhere");
+	}
+	if (out || everywhere)
+	{
+		if (everywhere) team.signOutEverywhere();
+		else            team.signOut();
 		form.wipeSecrets();
 		return;
 	}

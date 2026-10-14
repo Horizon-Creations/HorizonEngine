@@ -1307,7 +1307,13 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabRelayAddress           = globalstate.getCustomConfigString("CollabRelayAddress", m_editorConfig.CollabRelayAddress);
 	m_editorConfig.TeamName                     = globalstate.getCustomConfigString("TeamName", m_editorConfig.TeamName);
 	m_editorConfig.TeamMember                   = globalstate.getCustomConfigString("TeamMember", m_editorConfig.TeamMember);
-	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
+	// The team sign-in survives a restart as a session token beside config.json
+	// (owner-only, never the password; topic 201). With one stored for exactly
+	// this server, team and member the editor signs in again on its own; a
+	// scratch HE_CONFIG_DIR of an automated run has none, so it stays offline.
+	m_team.setTokenFile(GlobalState::configFilePath().parent_path() / "team-session.txt");
+	m_team.resume(m_editorConfig.CollabRelayAddress, m_editorConfig.TeamName, m_editorConfig.TeamMember);
+	m_editorConfig.McpServerEnabled           = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
 	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
@@ -12896,7 +12902,9 @@ void EditorApplication::OnShutdown()
 	// — a forward requested without a lease stays in the router until someone
 	// deletes it by hand. Ahead of everything else here because it is the only
 	// item in this function that outlives the process if it is skipped.
-	m_team.signOut();   // ends our announcements; the server would notice in a minute anyway
+	// Ends our announcements (the server would notice in a minute anyway). Not
+	// signOut(): quitting keeps the saved sign-in for the next start.
+	m_team.disconnect();
 	m_collab.shutdown();
 
 	// Shut the gate (stops the pads) while the sink still points at a live

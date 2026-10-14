@@ -76,8 +76,9 @@ struct EditorConfig
 	// name and config key so an address entered as a relay carries over.
 	std::string CollabRelayAddress;
 	// The team and member last signed in with (Preferences ▸ Team). Never the
-	// password: that stays in memory (TeamController) and is asked for again
-	// after a restart.
+	// password: that stays in memory (TeamController). What survives a restart
+	// is a session token from the team server, in team-session.txt beside
+	// config.json and not in here (TeamController::setTokenFile, topic 201).
 	std::string TeamName;
 	std::string TeamMember;
 

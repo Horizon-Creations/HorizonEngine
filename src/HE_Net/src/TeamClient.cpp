@@ -116,9 +116,11 @@ std::unique_ptr<TeamClient> TeamClient::connect(const RelayAddress& server,
     c->m_team       = team;
     c->m_member     = member;
     c->m_loginFrame = encodeLogin(op, team, member, password);
-    HE_LOG_INFO(Net, "Team: %s team '%s' as '%s' at %s:%u",
+    c->m_loginOp    = op;
+    HE_LOG_INFO(Net, "Team: %s team '%s' as '%s' at %s:%u%s",
                 op == LoginOp::CreateTeam ? "creating" : "logging in to", team.c_str(),
-                member.c_str(), server.host.c_str(), static_cast<unsigned>(server.port));
+                member.c_str(), server.host.c_str(), static_cast<unsigned>(server.port),
+                op == LoginOp::Token ? " with a session token" : "");
     return c;
 }
 
@@ -291,6 +293,7 @@ void TeamClient::onStatus(std::uint8_t code, const std::string& text) {
         return;
     }
     // Every other status ends the connection (the server closes after it).
+    m_closeText = text;
     fail(code, describeStatus(code, text));
 }
 
@@ -370,6 +373,9 @@ void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t 
         case Op::Join:
             if (!r.str(reply.session) || !r.str(reply.host) || !r.str(reply.peer)) break;
             listSessions();   // the invitation, if there was one, is used up
+            return;
+        case Op::IssueToken:
+            if (!r.str(reply.token) || reply.token.empty()) break;
             return;
         case Op::AddMember:
         case Op::RemoveMember:
@@ -587,6 +593,22 @@ std::uint32_t TeamClient::join(const std::string& session, ReplyFn done) {
     return request(Op::Join, std::move(f), std::move(done));
 }
 
+std::uint32_t TeamClient::issueToken(ReplyFn done) {
+    return request(Op::IssueToken, {}, std::move(done));
+}
+
+std::uint32_t TeamClient::revokeToken(const std::string& token, ReplyFn done) {
+    std::vector<std::uint8_t> f;
+    putStr8(f, token);
+    const std::uint32_t id = request(Op::RevokeToken, f, std::move(done));
+    std::fill(f.begin(), f.end(), std::uint8_t(0));
+    return id;
+}
+
+std::uint32_t TeamClient::revokeAllTokens(ReplyFn done) {
+    return request(Op::RevokeAllTokens, {}, std::move(done));
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 std::string TeamClient::joinCodeForSession(const std::string& sessionId) {
@@ -654,7 +676,7 @@ const char* TeamClient::resultName(std::uint8_t result) {
         "ok", "bad-request", "invalid-name", "invalid-password", "member-exists",
         "no-such-member", "wrong-password", "not-admin", "last-admin", "full",
         "server-error", "not-online", "no-such-session", "not-host", "not-allowed",
-        "session-exists", "not-invited",
+        "session-exists", "not-invited", "no-such-token",
     };
     if (result < sizeof(kNames) / sizeof(kNames[0])) return kNames[result];
     if (result == std::uint8_t(Result::ConnectionLost)) return "connection-lost";
@@ -696,6 +718,7 @@ std::string TeamClient::describeResult(Result result, const std::string& text) {
         case Result::NotAllowed:      return "That session is invitation-only.";
         case Result::SessionExists:   return "That session id is already in use.";
         case Result::NotInvited:      return "There is no invitation to decline.";
+        case Result::NoSuchToken:     return "That sign-in was already revoked.";
         case Result::ConnectionLost:  return text.empty() ? std::string("The connection to the team server was lost.") : text;
         default:
             return withReason(std::string("The team server refused: ") +

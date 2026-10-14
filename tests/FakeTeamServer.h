@@ -58,6 +58,7 @@ struct FakeTeamServer {
     struct Conn {
         bool        loggedIn = false;
         std::string member;
+        std::string token;      // the session token it logged in with (op 3), else empty
     };
     struct Session {
         std::string id, host, peer;
@@ -74,6 +75,12 @@ struct FakeTeamServer {
     std::set<std::string>         alsoOnline;     // members "online" on other connections
     std::set<ConnectionId>        refused;        // closed after a refusal; ignore the rest
     std::vector<std::uint8_t>     ops;            // every request op, in arrival order
+    // Session tokens (topic 201): token → member. Kept as given, the real
+    // server keeps only a SHA-256.
+    std::map<std::string, std::string> tokens;
+    std::vector<std::uint8_t>     loginOps;       // the op of every TEAM_LOGIN
+    bool noTokens    = false;   // a server from before tokens: op 13 is bad-request
+    int  issued      = 0;
     int  logins      = 0;
     int  pings       = 0;
     bool silent      = false;   // read requests, answer nothing
@@ -138,6 +145,23 @@ struct FakeTeamServer {
         for (auto& [c, _] : conns) t->disconnect(c);
         conns.clear();
     }
+    // What the server does to live token connections when their token goes
+    // (remove member, SET_PASSWORD elsewhere, Sign Out Everywhere): bad-login
+    // with the reason, then close. Forgets the tokens of `member`.
+    void revokeTokensOf(const std::string& member, const std::string& why = "session tokens revoked") {
+        for (auto it = tokens.begin(); it != tokens.end();)
+            it = sameName(it->second, member) ? tokens.erase(it) : std::next(it);
+        std::vector<ConnectionId> kick;
+        for (auto& [c, conn] : conns)
+            if (conn.loggedIn && !conn.token.empty() && sameName(conn.member, member)) kick.push_back(c);
+        for (ConnectionId c : kick) {
+            status(c, 23, why);
+            t->update();
+            t->disconnect(c);
+            conns.erase(c);
+            refused.insert(c);
+        }
+    }
 
     void pump() {
         t->update();
@@ -163,14 +187,17 @@ struct FakeTeamServer {
         if (!conn.loggedIn) {
             REQUIRE(f[5] == 6);                       // TEAM_LOGIN first
             const std::uint8_t op = f[pos++];
-            CHECK((op == 1 || op == 2));
+            CHECK((op == 1 || op == 2 || (op == 3 && !noTokens)));
             const std::string team     = readStr(f, pos);
             const std::string member   = readStr(f, pos);
             const std::string password = readStr(f, pos);
             CHECK(pos == f.size());
             CHECK(team == "studio");
             ++logins;
-            if (password != "correct-horse") {
+            loginOps.push_back(op);
+            const bool good = op == 3 ? (tokens.count(password) && sameName(tokens[password], member))
+                                      : password == "correct-horse";
+            if (!good) {
                 status(c, 23, "bad login");
                 t->update();
                 t->disconnect(c);
@@ -180,6 +207,7 @@ struct FakeTeamServer {
             }
             conn.loggedIn = true;
             conn.member   = member;
+            if (op == 3) conn.token = password;
             status(c, 4);
             return;
         }
@@ -279,6 +307,45 @@ struct FakeTeamServer {
                         return;
                     }
                 reply(c, id, 12);
+                return;
+            }
+            case 4: {   // SET_PASSWORD: revokes the member's tokens, drops the other token logins
+                const std::string oldPw = readStr(f, pos);
+                readStr(f, pos);
+                if (oldPw != "correct-horse") { reply(c, id, 6); return; }
+                const std::string self = conn.member;
+                conn.token.clear();   // proven the password: may issue now
+                revokeTokensOf(self, "password changed");
+                reply(c, id, 0);
+                return;
+            }
+            case 13: {  // ISSUE_TOKEN: not on a token login
+                if (noTokens) { reply(c, id, 1); return; }
+                if (!conn.token.empty()) { reply(c, id, 14); return; }
+                static const char kHex[] = "0123456789abcdef";
+                std::string token;
+                ++issued;
+                for (int i = 0; i < 64; ++i)
+                    token.push_back(kHex[(static_cast<unsigned>(i) * 7u + static_cast<unsigned>(issued) * 13u) & 15u]);
+                tokens[token] = conn.member;
+                std::vector<std::uint8_t> body;
+                str8(body, token);
+                reply(c, id, 0, body);
+                return;
+            }
+            case 14: {  // REVOKE_TOKEN (own only)
+                const std::string token = readStr(f, pos);
+                auto it = tokens.find(token);
+                if (it == tokens.end() || !sameName(it->second, conn.member)) { reply(c, id, 17); return; }
+                tokens.erase(it);
+                reply(c, id, 0);
+                return;
+            }
+            case 15: {  // REVOKE_ALL_TOKENS: other token logins of ours are kicked
+                const std::string self = conn.member;
+                conn.token.clear();   // the connection that asks stays open
+                revokeTokensOf(self);
+                reply(c, id, 0);
                 return;
             }
             default:

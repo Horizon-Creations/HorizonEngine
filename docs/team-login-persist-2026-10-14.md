@@ -43,7 +43,43 @@ records (SHA-256 of the 32 raw bytes, never the token). The file says `heteams 2
 a token exists and stays `heteams 1` while none does. A server from before tokens refuses
 to start on a format-2 file, so a rollback needs all tokens revoked first.
 
-## Handoff
+## Editor side (step 2)
+
+- **`HE::Net::TeamClient`** (`src/HE_Net/include/Net/TeamClient.h`): `LoginOp::Token` (3, the
+  token goes in the password field), `Op::IssueToken/RevokeToken/RevokeAllTokens` (13-15),
+  `Result::NoSuchToken` (17), `Reply::token`, `issueToken()`, `revokeToken()`,
+  `revokeAllTokens()`, `loginOp()`, and `closeText()` (the server's text with a closing
+  STATUS, e.g. "session token revoked", which `lastError()` drops for bad-login).
+- **Where the token lives:** `team-session.txt` beside `config.json`
+  (`GlobalState::configFilePath().parent_path()`), set in `EditorApplication::OnInit` via
+  `TeamController::setTokenFile`. Five lines (`heteamtoken 1`, host, port, team, member,
+  token), one sign-in only. Written to `.tmp` with `open(…, 0600)` + `fchmod` + `fsync`,
+  then renamed (the McpBridge endpoint-file pattern); on Windows the per-user profile
+  directory protects it, like `config.json`. Never the password, never `EditorConfig`.
+  A scratch `HE_CONFIG_DIR` has no token, so automated runs stay offline.
+- **`TeamController`:** after a password login (op 1/2) it sends ISSUE_TOKEN; on success
+  the token goes to the file, **and the password is wiped from memory**: reconnects use the
+  token from then on. `resume(server, team, member)` at start signs in with the stored token
+  if it is for exactly that server (host+port), team and member (names case-insensitive).
+  A server that is down at start keeps retrying (the token stays). A refused token (at start
+  or pushed to a live connection) is deleted, status Failed, the message reads "The saved
+  sign-in is no longer valid (…). Sign in with your password." with the server's reason only
+  for a live revocation (a refused login's generic "wrong team, member or password" would
+  mislead). Only the token *this* controller used is deleted, so a second editor of the
+  same member on the same machine cannot erase a newer one.
+- **Two ways out:** `signOut()` (Sign Out button, MCP `team_sign_out`) deletes the file and
+  sends REVOKE_TOKEN on a connection that lives on in `m_leaving` until the reply (at most
+  `kRevokeGraceMs` = 5 s; `TcpTransport::disconnect` drops queued bytes, so closing at once
+  would lose the frame). `disconnect()` (quit, destructor, a new Sign In) keeps the token.
+  `signOutEverywhere()` (new "Sign Out Everywhere" button in Window ▸ Team) sends
+  REVOKE_ALL_TOKENS the same way.
+- **Password change:** SET_PASSWORD revokes all tokens, including ours; the controller
+  deletes the stored one and asks for a new token on the same connection (allowed after
+  SET_PASSWORD, also on a token login).
+- **Old server** (the deployed e3f4649 answers op 13 with bad-request): nothing is stored, the
+  password stays in memory for the reconnect, exactly as in topic 197.
+
+## Step 1 handoff
 
 - **Topic / step:** 201, step 1 (session token protocol in the team server).
 - **Branch / commit:** server CollabSession `claude/he-net-relay-server` @ 363f889, README
@@ -86,3 +122,43 @@ to start on a format-2 file, so a rollback needs all tokens revoked first.
   with ops 13-15 and login op 3. 2. The human deploys 363f889. 3. Step 3: live
   check against the host (restart keeps the login, remove-member/password change kick
   the token login).
+
+## Handoff
+
+- **Topic / step:** 201, step 2 (editor uses the token). Branch
+  `claude/team-login-persistieren-editor-bleibt-ber-neustarts-hinweg-a`.
+- **Done:** see "Editor side (step 2)" above. Code: `TeamClient.{h,cpp}` (ops, `closeText`),
+  `TeamController.cpp:104` (`writeSignIn`), `:209` `resume`, `:307` `signOut`/
+  `signOutEverywhere`/`leaveRevoking`, `:410` refused-token path, `:499` `requestToken`;
+  `EditorApplication.cpp:1315` (`setTokenFile` + `resume`), `:12907` (`disconnect` on quit);
+  `TeamView.cpp` (hint, "Sign Out Everywhere"), `EditorHelp.cpp` (Team/Password, Sign In,
+  Sign Out, Sign Out Everywhere), `EditorConfig.h` comment. Fake server: login op 3,
+  ops 4/13/14/15, `revokeTokensOf()`, `noTokens`, `loginOps`.
+- **Verified (Mac, Release, `out/build/release`, he_tests + HorizonEditor built -j8, rc 0):**
+  `he_tests --source-file=*test_net_team.cpp` 15/15 (746 assertions; 6 new cases at
+  `tests/test_net_team.cpp:323-560`), `*test_team_ui.cpp` 3/3, `*test_mcp_tools_collab.cpp`
+  7/7, `editor_help_audit.py --check` clean. **Against a real collab_server 363f889** run
+  locally (`/tmp/collab-build/collab_server 17977 --data-dir …`):
+  `HE_TEST_TEAM_SERVER=127.0.0.1:17977 he_tests … --test-case=*real collab_server*` 2/2
+  (65 assertions); the server log shows issue, token login, the removed member's token
+  connection refused, password change → revoke + new token, old token refused, revoke on
+  Sign Out, revoked token refused. **Real editor:** config dir with
+  CollabRelayAddress/TeamName/TeamMember + a token minted over the wire, hidden
+  `HorizonEditor` (HE_EXIT_AFTER_FRAMES=600): log "signing in … with the saved session",
+  server "logged in with a session token", token file still there (0600) after quit.
+- **Not verified:** Windows (file without mode bits, `std::filesystem::rename` over an
+  existing file) and Linux: only via CI. Against the host: 363f889 is **not deployed**
+  (e3f4649 there answers op 13 with bad-request → the editor silently keeps the password in
+  memory, covered by the `noTokens` test). Clicking through the UI by hand.
+- **Decisions:** 0600 file beside config.json instead of the OS keychain: no prompt from
+  macOS for an ad-hoc-signed editor after every rebuild (would also block headless runs), no
+  three platform APIs, testable; the token is revocable and useless without the server,
+  unlike the password. One sign-in per file. The old token is not revoked when a new
+  password sign-in replaces it (LRU cap of 16 + 90 days cover it; a revoke could kick a
+  second editor of the same member on the same machine). Status "Reconnecting" also shows
+  while a resume waits for a server that is down.
+- **Next steps:** 1. Human deploys CollabSession 363f889 (`deploy/deploy.sh`). 2. Step 3:
+  `HE_TEST_TEAM_SERVER=212.227.140.164:7777 he_tests --source-file=*test_net_team.cpp
+  --test-case=*session tokens through a real*` (leaves a `he-tok-N` team), then two
+  real editor starts against the host (sign in, quit, start: signed in without password;
+  remove member / Sign Out Everywhere from another editor kicks it). 3. CI result.

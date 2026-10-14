@@ -8662,13 +8662,15 @@ namespace
 	  "with). Upper and lower case do not matter.",
 	  "", "collaboration" },
 	{ "Team/Password", "",
-	  "Your team password. It is kept in memory for reconnecting and never "
-	  "written to disk, so after a restart you type it again.",
+	  "Your team password. It is never written to disk: once you are signed in, "
+	  "the team server hands this editor a session token instead, which is what "
+	  "signs you in again after a restart.",
 	  "", "collaboration" },
 	{ "Team/Sign In", "",
 	  "Signs in to the team server. Signed in, the others see you as online and "
 	  "can invite you; the connection is kept and comes back on its own after a "
-	  "dropped network.",
+	  "dropped network. You stay signed in across restarts until you sign out, "
+	  "change your password or are removed from the team.",
 	  "", "collaboration" },
 	{ "Team/Create Team", "",
 	  "Creates a new team on the server with you as its first admin, and signs "
@@ -8676,8 +8678,14 @@ namespace
 	  "", "collaboration" },
 	{ "Team/Sign Out", "",
 	  "Closes the connection to the team server: the others see you go offline "
-	  "and a session you announced disappears from their list. A collaboration "
-	  "session that is running carries on.",
+	  "and a session you announced disappears from their list. This computer "
+	  "forgets the saved sign-in and the server revokes it, so the next start "
+	  "asks for the password. A collaboration session that is running carries on.",
+	  "", "collaboration" },
+	{ "Team/Sign Out Everywhere", "",
+	  "Signs you out here and on every other computer that stays signed in as "
+	  "you: the server revokes all of your saved sign-ins, and those editors ask "
+	  "for the password again. For a computer you no longer have.",
 	  "", "collaboration" },
 	{ "Team/Invite", "",
 	  "Invites this member to the session you are hosting. Their editor shows the "
