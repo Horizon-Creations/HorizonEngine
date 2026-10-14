@@ -974,13 +974,33 @@ void drawMembers(TeamController& team, Form& form)
 
 			ImGui::TableSetColumnIndex(2);
 			ImGui::AlignTextToFramePadding();
+			// A name and its "you, admin" tag are one line, never a paragraph. The
+			// panel's wrap guard wraps at the edge of the CELL here, and the cell
+			// is whatever the buttons column leaves (an armed "Confirm Remove" is
+			// the widest it gets): the tag then broke letter by letter into a tall
+			// column of single characters and the row grew to several times its
+			// height. Unwrapped, and the tag shortens to what fits whole — "you,
+			// admin", then "you" or "admin", then nothing — never half a word.
+			ImGui::PushTextWrapPos(-1.0f);
 			ImGui::TextColored(m.online ? Theme::Text : Theme::TextDim, "%s", m.name.c_str());
 			if (m.you || m.admin)
 			{
-				ImGui::SameLine();
-				ImGui::TextDisabled("%s%s%s", m.you ? "you" : "", (m.you && m.admin) ? ", " : "",
-				                    m.admin ? "admin" : "");
+				const char* const tags[] = {
+					(m.you && m.admin) ? "you, admin" : nullptr,
+					m.you ? "you" : "admin",
+				};
+				// What is left of the cell after the name and the gap before the tag.
+				const float room = ImGui::GetContentRegionAvail().x -
+				                   ImGui::CalcTextSize(m.name.c_str()).x - ImGui::GetStyle().ItemSpacing.x;
+				for (const char* tag : tags)
+					if (tag && ImGui::CalcTextSize(tag).x <= room)
+					{
+						ImGui::SameLine();
+						ImGui::TextDisabled("%s", tag);
+						break;
+					}
 			}
+			ImGui::PopTextWrapPos();
 
 			ImGui::TableSetColumnIndex(3);
 			if (!m.you)

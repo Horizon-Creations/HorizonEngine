@@ -94,6 +94,8 @@ namespace
 		TeamController&  team;
 		std::string      server, teamName, member;
 		TeamView::Form   form;
+		// The Panel surface's width; a test can narrow it.
+		int              panelW = kPanelW;
 		std::vector<TeamView::ProbedItem> items;
 		// drawFooterStatus said "open the Team window" since this was last reset.
 		bool openTeamWindow = false;
@@ -168,7 +170,7 @@ namespace
 		void frame(Surface surface, Pump&& pump, bool mouseDown = false, he_ui::Image* shot = nullptr)
 		{
 			pump();
-			const int w = surface == Surface::Panel ? kPanelW : kPageW;
+			const int w = surface == Surface::Panel ? panelW : kPageW;
 			const int h = surface == Surface::Panel ? kPanelH : kPageH;
 			ImGuiIO& io = ImGui::GetIO();
 			io.DisplaySize = ImVec2(float(w), float(h));
@@ -501,6 +503,55 @@ TEST_CASE("Team UI: the window shows members, presence and sessions, and its but
 	}
 
 	team.signOut();
+}
+
+TEST_CASE("Team UI: in a narrow window the \"you, admin\" tag stays on the name's line (the row keeps its height)")
+{
+	Harness h;
+	FakeTeamServer server;
+	REQUIRE(server.t);
+	server.roster = { "Bob", "Anna", "Dana" };   // Anna: you and the admin, in the middle
+	server.alsoOnline = { "Bob", "Dana" };
+	server.ignoreStrangers = true;
+
+	CollabController collab;
+	TeamController   team(collab);
+	Ui ui{ team };
+	ui.server   = "127.0.0.1:" + std::to_string(server.t->boundPort());
+	ui.teamName = "studio";
+	ui.member   = "Anna";
+	ui.panelW   = 330;   // the buttons column leaves the name column less than the tag needs
+
+	std::uint64_t now = 1;
+	auto pump  = [&] { server.pump(); collab.update(now); team.update(now); now += 16; };
+	auto panel = [&] { ui.frame(Surface::Panel, pump); };
+	ImGui::GetIO().AddMousePosEvent(float(ui.panelW) - 2.0f, float(kPanelH) - 2.0f);
+	panel();
+	REQUIRE(team.signIn(ui.server, ui.teamName, ui.member, "correct-horse"));
+	REQUIRE(frameUntil(panel, [&] { return team.signedIn() && team.members().size() == 3; }));
+	panel();
+	panel();
+
+	// Bob's Remove armed: "Confirm Remove" is the widest thing the buttons column
+	// ever holds, and what it takes the name column is what it loses.
+	REQUIRE(ui.click(Surface::Panel, pump, "Remove", "Bob"));
+	REQUIRE(ui.find("Confirm Remove", "Bob"));
+	panel();
+	panel();
+
+	// Bob and Dana have an Invite, Anna does not: the two rows around hers are
+	// exactly two rows apart. Wrapped, her row was several lines tall.
+	REQUIRE(ui.find("Invite", "Bob"));
+	REQUIRE(ui.find("Invite", "Dana"));
+	const float frameH = ImGui::GetFrameHeight();
+	const float rowH   = frameH + ImGui::GetStyle().CellPadding.y * 2.0f;
+	const float apart  = ui.find("Invite", "Dana")->y0 - ui.find("Invite", "Bob")->y0;
+	CHECK(apart == doctest::Approx(2.0f * rowH).epsilon(0.02));
+	{
+		he_ui::Image img;
+		ui.frame(Surface::Panel, pump, false, &img);
+		dump(img, "team-panel-narrow.bmp");
+	}
 }
 
 TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Picture (topic 202)")
