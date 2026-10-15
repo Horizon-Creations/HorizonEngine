@@ -9,6 +9,7 @@
 #include "GitController.h"
 #include "CollabController.h"     // who hosts the session, for the team-server notice
 #include "GitMissingDialog.h"      // the install remedy, when git is missing
+#include "TeamSyncView.h"          // the team-sync view, in team-server mode
 #include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
 #include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
 
@@ -1579,12 +1580,12 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	if (git->blockedByTeamServer())
 	{
 		drawTeamServerNotice(ctx, *git);
-		if (git->gitMissing() || (ctx.gitProbe && !ctx.gitProbe->gitFound) || !git->isRepo())
-		{
-			ImGui::End();
-			return;
-		}
-		ImGui::Spacing();
+		// The local .git is dormant in this mode (it froze at the switch): its
+		// changes, history, branches and fetch would all describe a history
+		// nobody writes any more, so the team's view replaces them.
+		if (ctx.teamSync) TeamSyncView::draw(*ctx.teamSync);
+		ImGui::End();
+		return;
 	}
 
 	// Before "not a repository": without git there is no telling, and a project

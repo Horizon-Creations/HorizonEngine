@@ -478,7 +478,7 @@ void TeamSyncService::fetchLost(const Lost& lost)
 	m_impl->cv.notify_all();
 }
 
-std::vector<std::string> TeamSyncService::pump(bool mayWrite)
+std::vector<std::string> TeamSyncService::pump(bool mayWrite, const KeepLocalFn& keepLocal)
 {
 	std::vector<std::string> written;
 	if (!m_impl) return written;
@@ -537,7 +537,7 @@ std::vector<std::string> TeamSyncService::pump(bool mayWrite)
 			bool ok = false;
 			// The decision was made on `expect`: a save since then wins, and
 			// the server merges it at the next upload.
-			if (!full.empty() && shaOfFile(full) == in.expect)
+			if (!full.empty() && !(keepLocal && keepLocal(in.path)) && shaOfFile(full) == in.expect)
 			{
 				std::error_code ec;
 				ok = in.remove ? (fs::remove(full, ec), !ec) : writeFileAtomic(full, in.bytes);

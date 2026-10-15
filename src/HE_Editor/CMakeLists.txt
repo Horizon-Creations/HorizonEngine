@@ -345,6 +345,8 @@ add_executable(HorizonEditor WIN32
 	CollabUndo.cpp
 	TerrainSync.cpp
 	TeamController.cpp
+	TeamSyncController.cpp
+	TeamSyncView.cpp
 	TeamView.cpp
 	EngineContentSyncBar.cpp
 	McpStatusBar.cpp

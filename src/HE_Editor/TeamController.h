@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -140,6 +141,18 @@ public:
 	bool join(const std::string& session);
 	bool decline(const std::string& session);
 
+	// ── Source control through the team server (topic 199) ──
+	// TeamSyncController's half of the team connection: a ticket for one sync
+	// connection to `project` (Reply::ticket; `done` runs from update()), and
+	// every sc-head event (a save moved a team project's head). False when not
+	// signed in right now.
+	bool requestScTicket(const std::string& project, HE::Net::TeamClient::ReplyFn done);
+	using ScHeadFn = std::function<void(const std::string& project, std::uint64_t rev,
+	                                    const std::string& member)>;
+	void setOnScHead(ScHeadFn fn) { m_onScHead = std::move(fn); }
+	// Where the team connection goes (the sync connection goes there too).
+	const HE::Net::RelayAddress& serverAddress() const { return m_server; }
+
 	// ── Presence (topic 202) ──
 	// The members the footer shows on the "online" side: signed in somewhere,
 	// not you, and not a participant of the collab session running next door
@@ -237,6 +250,7 @@ private:
 	CollabController&            m_collab;
 	HE::Ed::NotificationStore*   m_notes = nullptr;
 	std::unique_ptr<HE::Net::TeamClient> m_client;
+	ScHeadFn                     m_onScHead;
 
 	Status                m_status = Status::SignedOut;
 	std::string           m_error;

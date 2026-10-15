@@ -351,7 +351,11 @@ void GitController::update(std::uint64_t nowMs)
 	//
 	// Checked before the status poll, since a fetch queues its own refresh and
 	// doing both would be one whole-tree walk too many.
-	if (autoFetch && autoFetchMinutes > 0 && m_service.isRepo() &&
+	//
+	// Not with the team server keeping the history: the local .git is dormant
+	// then, nobody pushes to its origin, and an expired token for it would
+	// still raise a notification every interval.
+	if (autoFetch && autoFetchMinutes > 0 && !m_teamServer && m_service.isRepo() &&
 	    !m_service.remoteUrl().empty())
 	{
 		// Floored rather than trusted. The preference offers sane values, but it

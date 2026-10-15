@@ -555,6 +555,9 @@ void TeamController::handleEvent(const TeamClient::Event& ev)
 	case TeamClient::EventKind::Declined:
 		if (ev.session == m_hosted) notice(ev.member + " declined the invitation.", false);
 		break;
+	case TeamClient::EventKind::ScHead:
+		if (m_onScHead) m_onScHead(ev.project, ev.rev, ev.member);
+		break;
 	default:
 		// Presence, roster and session changes are already in the lists.
 		break;
@@ -647,6 +650,13 @@ bool TeamController::setSessionOpen(bool open)
 	m_hostedOpen = open;
 	m_client->setSessionOpen(m_hosted, open, reportFailure("Could not change who may join"));
 	return true;
+}
+
+bool TeamController::requestScTicket(const std::string& project, HE::Net::TeamClient::ReplyFn done)
+{
+	// Quietly false while the link is down: the sync service asks again.
+	if (!m_client || !m_client->loggedIn()) return false;
+	return m_client->scTicket(project, std::move(done)) != 0;
 }
 
 bool TeamController::invite(const std::string& member)

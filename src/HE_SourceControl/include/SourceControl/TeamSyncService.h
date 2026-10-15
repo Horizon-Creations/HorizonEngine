@@ -172,7 +172,13 @@ public:
 	// Delivers events, runs the ticket source when asked and writes incoming
 	// files when `mayWrite` (false during Play: they wait). Returns the
 	// project-relative paths written or removed this call, for reloads.
-	std::vector<std::string> pump(bool mayWrite = true);
+	//
+	// `keepLocal(path)` true = do not write that one: the editor holds unsaved
+	// edits for it (a dirty scene, a dirty asset tab). Its base then stays the
+	// old one, so the next save is merged on the server against what it was
+	// edited from, instead of silently replacing the version written here.
+	using KeepLocalFn = std::function<bool(const std::string& path)>;
+	std::vector<std::string> pump(bool mayWrite = true, const KeepLocalFn& keepLocal = {});
 
 	Status status() const;
 	// Our last upload's per-file results (newest sync only).
