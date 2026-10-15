@@ -93,6 +93,7 @@ private:
 	int   m_frames = 0;
 	float m_elapsed = 0.0f;
 	bool  m_primed  = false;   // the first frame after showing refreshes at once
+	bool  m_loggedFirst = false;   // the first refresh of this showing has been logged
 };
 
 } // namespace HE
