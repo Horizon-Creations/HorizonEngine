@@ -502,6 +502,47 @@ team-mode gate in `GitController` exist only there.
   settled state); Sync Now; `sc-head`; team reconnect. A failed connection retries after 5 s, doubling up to 60 s.
 * Auto-fetch is off in team mode (audit 3.11).
 
+## 15. Step 5: deployment and acceptance (2026-10-15)
+
+* **Host:** 212.227.140.164:7777 runs CollabSession `b3e2faf` (283f875 + deploy only), deployed by the
+  human with `deploy/deploy.sh` (the auto-mode classifier refuses it, and any remote write, from a bee).
+  Source control is on (`git 2.39.5`); `git-lfs 3.8.0` sits in `~/.local/bin` (the account has no sudo),
+  and the unit sets `Environment=PATH` so the service's git finds it. `deploy.sh` does both on its own now
+  (pinned release, sha256 checked; with sudo it uses apt).
+* **Transport (#1326):** the deploy went out on plain TCP, i.e. option (c) for 0.7.0. Login and every
+  project file travel unencrypted. Nothing in the UI says so yet.
+* **`scripts/he_team_sync_acceptance.py`:** two deployed editors (Anna, admin; Bob), changes and saves
+  through their own MCP tools, the server read through the script's own sync connection (HEAD, LOG
+  trailers, GET, BACKUP_*), so it runs on loopback or against `--server HOST:PORT`. It creates a team
+  `he-e2e-199-NNNNNN`; the protocol cannot delete a team, so on the host they stay.
+  `scripts/he_team_sync_backup.py` drives the backup of such a team (BACKUP_SET, 60 MiB `.png`, 120 MiB
+  `.bin`, status) on the protocol alone.
+
+| # (section 10) | Loopback | Host | What was seen |
+|---|---|---|---|
+| 1 different entities | PASS | PASS | r4 `merged Content/StartupScene.hescene against r3`, both editors show both, once each |
+| 2 children of one parent | PASS | PASS | r6 `merged`, both children under the shared parent in both editors |
+| 3 same field | PASS | PASS | r8 Bob `merged-arrival … (1 fields) lost=horizon-conflicts:r8/…`, x = 7 in both editors |
+| 4 same `.hasset` | PASS | PASS | r10 Bob `replaced … lost=horizon-conflicts:r10/…`, one file on both disks |
+| 5 delete vs change | PASS | PASS | r12 Anna `delete-dropped … changed in r11 by Bob`, material back on both disks |
+| 6 backup | PASS (local bare repo) | PASS (GitHub) | state ok, pushed_rev 13; a clone of the scratch repo has `main` with 13 commits (8 Anna, 5 Bob, author per member, `Horizon-*` trailers) and `horizon-conflicts` with `r8/` + `r10/` and their `MERGE.txt` |
+| 7 LFS / too large | PASS | PASS | 60 MiB `.png` → `.gitattributes` LFS line (r13); on GitHub `git lfs ls-files` lists it and `git lfs fsck` is OK (62 914 568 bytes checked out); 120 MiB `.bin` refused `too-large` naming the file (editor log on loopback, COMMIT reply on the host) |
+| 8 git mode unchanged | ctest | – | the source-control tests of the full run (289/290; the red one is `test_hpak`, red on this Mac with any binary, green on CI) |
+
+* **GitHub hop:** the classifier refuses `gh repo create`, BACKUP_SET to GitHub and deploy-key
+  registration from a bee, so the human ran them (repo `Horizon-Creations/he-backup-e2e-199`, private,
+  scratch); the first try at the key failed 422 on a copy-paste (`he_team_sync_backup.py key` prints the
+  key alone now). Before the key was there the state was `failing: large files: batch request: …
+  Permission denied (publickey)`, which also shows git-lfs running on the host; the backoff retry pushed
+  without anyone touching the server. Not tried on GitHub: `diverged` (step 3 tested it on a local bare
+  repo only).
+* **Fixed on the way (`a178cdba`):** a save made while the first-sync question was open re-ran the first
+  sync (a whole MANIFEST) every 500 ms until the question was answered: the worker's wait wakes for
+  retries, and `doSync` ignored the open question. Found as a 1-in-8 flake of `test_team_sync`'s "busy
+  server" case; the test now waits past the wake-up and fails deterministically without the fix.
+* The deployed editor (`out/deploy/Editor`) used for the runs predates `a178cdba`; the fix touches only
+  the open first-sync question, which the acceptance does not hit.
+
 ## Handoff
 
 - **Topic / step:** 199, step 1 (design, docs only). Branch
@@ -645,4 +686,33 @@ team-mode gate in `GitController` exist only there.
   section 10 against the host. `he_team_sync_two_editors.py` starts its own loopback server; for the
   host it needs a `--server HOST:PORT` mode (team and project are created by its protocol lines).
   2. A follow-up step for the open list above, backup UI first (admins need it to finish setup).
+
+## Handoff (step 5)
+
+- **Topic / step:** 199, step 5 (deploy + acceptance). HE branch: `3cabd75c` (acceptance script),
+  `0fd4fda4` + `a9861685` (backup helper), `a178cdba` (first-sync fix), this doc section 15. CollabSession
+  `claude/he-net-relay-server` `b3e2faf` (deploy.sh: git-lfs without sudo, PATH in the unit), pushed.
+- **Verified:** section 15's table. Host runs `b3e2faf` (`~/collab-relay/bin/VERSION`), git-lfs 3.8.0 in
+  the unit's PATH. `scripts/he_team_sync_acceptance.py OUT --server 212.227.140.164:7777` PASS (cases 1-5,
+  two deployed editors); same script on loopback PASS incl. `--backup-url <bare> --lfs`. GitHub backup of
+  team `he-e2e-199-59332` checked on a clone (13 commits, `horizon-conflicts`, `git lfs fsck` OK).
+  he_tests: `test_team_sync*` 10× green after the fix, real-server case green on loopback; ctest
+  289/290 `-E test_material_graph` (`test_hpak` local-only, see lesson 346).
+- **Not verified:** `diverged` against GitHub; an editor-side toast for the loser of case 3/4 (the LOG
+  trailers say who lost; the toast is unit-tested only); the deployed editor predates `a178cdba`;
+  Windows/Linux for `a178cdba` (CI started at the end of this step, see the result post).
+- **Left on the host / GitHub:** teams `he-e2e-199-59332` (with backup) and the loopback-only ones are
+  not there; `he-e2e-199-59332` cannot be deleted through the protocol (no op). The scratch repo
+  `Horizon-Creations/he-backup-e2e-199` still exists: delete it (`gh repo delete`, needs the
+  `delete_repo` scope), then turn that project's backup off or it goes `failing`.
+- **Decisions:** plaintext transport for 0.7.0 (#1326 option c, the human deployed); git-lfs from the
+  pinned release, not apt (no sudo); acceptance witnessed through the protocol (LOG trailers) instead of
+  the server log, so the same script runs against the host.
+- **Pitfalls:** the classifier refuses from a bee: `deploy.sh`, any ssh write to the host, `gh repo
+  create`, BACKUP_SET to GitHub, deploy-key registration. Read-only ssh and read-only protocol calls go
+  through. A socket timeout bounds a whole `sendall`: 120 MiB over a home uplink needs minutes. A
+  material's template BaseColor is 0.8: setting 0.8 is no change and no save.
+- **Next steps:** 1. Delete the scratch repo (human). 2. UI note that the team connection is
+  unencrypted (#1326 (c)), or a step for (a)/(b). 3. The open list of step 4 (backup UI first, then the
+  ProjectSettings lost-update gap). 4. A `DELETE_TEAM` or admin cleanup so E2E teams don't pile up.
 
