@@ -1,5 +1,9 @@
 # Team server as source-control mediator: design (topic 199, step 1)
 
+Status (2026-10-15): **server side built** (step 2, CollabSession `claude/he-net-relay-server`
+829f224..f76dfff); where it differs from this plan, section 12 wins. Backup (step 3), editor
+(step 4) and deployment (step 5) are open.
+
 Status (2026-10-13): **design only**, nothing implemented. This is the plan that steps 2-5
 of topic 199 build. It sits on top of the team server from topic 197 (CollabSession repo
 `Horizon-Creations/CollabSession`, branch `claude/he-net-relay-server` @ `a555f14`; its
@@ -369,6 +373,56 @@ login, `TEAM_REQUEST`, receiving `TEAM_EVENT`) and the editor's per-user team se
 * How the content manager and open asset tabs react to files replaced under them (step 4).
 * Graph files stay whole-file: two people on one material lose one version to the branch.
 
+## 12. As built in step 2 (2026-10-15)
+
+Server code in CollabSession (`src/ScMerge`, `ScStore`, `ScGit`, `Process`, `Worker`, sync part of
+`RelayServer`), protocol in its `src/Protocol.h` (top comment) and README section
+"Quellcodeverwaltung (Team-Projekte)", which is the reference step 4 implements against.
+
+**Numbers (final):** team op **20 `SC_TICKET`** (`project str8`; reply body 16 raw bytes), team
+result **18 `no-such-project`**, team event kind **9 `sc-head`** (`project str8 | rev u64 |
+member str8`, to every team connection of the team, the saver's own included), status **5
+`sc-ready`**, **27 `no-project`** (28, 29 still reserved), frame types 10-13 as in 4.2.
+
+**Differences from sections 4-5:**
+* Creating a project: an admin gets a ticket and an `sc-ready` (text `no project yet`) for a
+  project that does not exist; on that connection only `CREATE_PROJECT` works (others answer
+  `no-project`). Non-admins get `no-such-project` already at the ticket.
+* Results 0-9 as in 4.2, plus **10 no-project, 11 project-exists, 12 hash-mismatch** (PUT whose
+  bytes do not match sha256/size). server-error text is generic; details go to the server log.
+* Stream order (4.2 left it open): request first, then its SC_DATA (offsets from 0, last=1, an
+  empty stream is one empty last frame); replies strictly in request order, a reply's SC_DATA
+  before its SC_REPLY; pipelining allowed. A frame breaking this closes the connection.
+* Reply bodies: MANIFEST `rev u64` (resolves 0 = head), GET `size u64`, COMMIT `rev u64 |
+  changed u8`. A COMMIT that changes nothing (all `same`/`delete-dropped`) makes **no** revision.
+  COMMIT outcome line: `outcome \t path \t sha256|- \t detail` (detail = the trailer tail, e.g.
+  `against r4 by Alex (1 fields) lost=horizon-conflicts:r5/Scenes/Main.hescene`). A server-made
+  change (LFS line in `.gitattributes`) comes as an extra line for `.gitattributes`.
+* LOG stream: `R \t rev \t member \t unix-time \t subject` per revision, then `M \t <Horizon-Merge
+  value>` per file; `count` capped at 1000.
+* Scene repair (5.3): a dangling or cyclic `parent` goes to **the root** (the record with
+  `parent: null`, head's), not to null: the loader maps every parentless record onto the one
+  root (`SceneSerializer.cpp` `applySceneJson`, "#root-by-parent"), so null would merge an entity
+  into the root. A cycle is cut at the entity whose merged parent is not head's (the arrival's
+  edge). Entity records without `parent`/`children` keys keep them absent.
+* An unknown per-file base (never stored) merges like add/add. Classes: `.gitignore` and
+  `.gitattributes` are text; an unknown extension whose head content parses as a JSON object is json.
+* `blobs.txt` (append-only, sha256 -> git oid / LFS pointer oid) is what GET of old or overruled
+  content and MANIFEST of old revisions use; git oids are SHA-1, the protocol speaks SHA-256.
+* LFS (step 2 writes it without the `git-lfs` binary): uploads >= 50 MiB live in
+  `lfs/objects/`, media go into the tree as pointers with a `filter=lfs` line per path;
+  non-media 50-100 MiB become plain blobs, >= 100 MiB `too-large`. Overruled LFS files sit on
+  `horizon-conflicts` as pointers **without** `.gitattributes` lines on that branch (step 3).
+* Limits: PUT <= 4 GiB, a HAVE/COMMIT stream <= 64 MiB, 64 queued requests per connection
+  before reading pauses, 256 worker jobs before `busy`, 8 live tickets per member. No idle
+  timeout on sync connections (TCP keepalive). Removing a member closes its sync connections and
+  drops its tickets; a password change or token revocation does **not** (not in the design).
+
+**Editor rules for step 4 that follow from this:** fetch (GET) every file whose outcome sha256
+differs from what was uploaded; take `rev` from the COMMIT reply only when `changed = 1`, else
+keep HEAD's; after `sc-head` from someone else, MANIFEST + GET; keep the per-file base = the
+sha256 last received or accepted, never the local file's hash after an unsynced edit.
+
 ## Handoff
 
 - **Topic / step:** 199, step 1 (design, docs only). Branch
@@ -391,3 +445,36 @@ login, `TEAM_REQUEST`, receiving `TEAM_EVENT`) and the editor's per-user team se
   `src/ScMerge.{h,cpp}` (5.1-5.5, unit-tested without the network), the worker + self-pipe,
   frames 10-13 in `Protocol`, `tests/sc_test.py`. Start with the merge module: it is pure.
   2. Step 3: backup worker (7). 3. Step 4: needs 197's HE_Net team client first.
+
+## Handoff (step 2)
+
+- **Topic / step:** 199, step 2 (server). Code in CollabSession `claude/he-net-relay-server`:
+  829f224 merge rules, 84a4956 store, fc874d9 sync connection + worker, 17c30c0 e2e test + GET
+  fix, f76dfff README (pushed). HE side: this doc, section 12.
+- **Done:** `ScMerge` (5.1-5.5), `ScStore` (bare repo per project, plumbing only, `blobs.txt`,
+  `horizon-conflicts` + `MERGE.txt`, LFS pointers, index rebuild after a crash), `Worker` (one
+  thread, self-pipe), sync connection in `RelayServer` (`HandleScTicket`, `HandleScHello`,
+  `ParseSyncFrames`, `StartScRequest`, `PumpSync`), `--sc-git`, README section.
+- **Verified (macOS, /tmp/collab-build):** ctest 6/6 (`team_store`, `sc_merge`, `sc_store`,
+  `relay_protocol`, `team_protocol`, `sc_protocol` 8/8), same 6/6 in a Debug ASan+UBSan build.
+  `sc_test.py` drives the real binary: tickets, create, HAVE/PUT/COMMIT/GET/MANIFEST/LOG with
+  3 MiB, hash mismatch, pipelining, two members merging one scene + script (acceptance 1-3 of
+  section 10 in protocol terms; 4-5 in `sc_store_test`), member removal, broken frames, restart.
+- **Not verified:** Linux CI of this push (run 38699623280 was in progress when this was
+  written); the host's git version (needs `read-tree --empty`, `merge-file --diff3 -L`;
+  `GIT_CONFIG_GLOBAL` needs 2.32, older git falls back to `HOME=<project dir>`); entity order
+  stability across editor load/save (risk 11); anything against the deployed server (not
+  redeployed: step 5).
+- **Decisions:** see section 12 (root repair, admin-only create on the sync connection, results
+  10-12, no revision for a no-op save, stream order, limits). nlohmann v3.11.3 vendored under
+  `third_party/` as a SYSTEM include (CI builds with `-Werror`).
+- **Pitfalls:** a GET stream must `Flush` after each chunk (fixed in 17c30c0: if the socket takes
+  the whole chunk nothing is pending and no writable event comes back). team_test.py's
+  `EVENT_FIELDS` now knows kind 9 (`q` = u64) and `R_NO_SUCH_PROJECT`; Blair's presence event
+  arrives on Alex's team socket before any `sc-head` (`sc_head()` in sc_test.py skips it).
+  The deployed host has no git yet: the server then logs a warning and keeps source control off.
+- **Next steps:** 1. Step 3: backup worker on the same `Worker` (BACKUP_SET/STATUS ops 9/10 are
+  parsed and answer `bad-request` now; `ssh-keygen`, debounced `git push`, `git lfs push --all`;
+  check that it finds the pointer files on `horizon-conflicts` without `.gitattributes` lines).
+  2. Step 4: editor `TeamSyncService` against README "Quellcodeverwaltung" + section 12.
+  3. Step 5: `deploy.sh` must install `git` (+ `git-lfs`, `openssh-client` for step 3).
