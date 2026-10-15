@@ -2927,6 +2927,16 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				m_vsyncOn ? "GameApplication: VSync ON" : "GameApplication: VSync OFF");
 			return true;
 		}
+		// F10: the stats card — frame counters plus where the GPU's time goes. Same
+		// rule as V: a development build only, and not swallowed while a text field
+		// has the keyboard (that case returned above).
+		if (event.key.key == SDLK_F10)
+		{
+			const bool on = m_devStats.toggle(m_widgets, contentManager());
+			HE_LOG_INFO(Core, "%s",
+				on ? "GameApplication: stats card ON" : "GameApplication: stats card OFF");
+			return true;
+		}
 #endif
 		// Esc closes the topmost dialog, popup or menu FIRST, and only when
 		// there is none does it mean what it always meant here. The order is the
@@ -2970,6 +2980,21 @@ void GameApplication::OnRender(float deltaTime)
 	// so every renderer touch below goes through this one handle and its null check
 	// — the checks used to be applied to some calls and forgotten on others.
 	IRenderer* const r = renderer();
+
+#ifdef HE_GAME_DEV_HOTKEYS
+	// The stats card (F10): a bool test while hidden. Before the frame's UI is
+	// extracted, so the text it shows is the one drawn this frame.
+	if (m_devStats.visible())
+	{
+		static const char* const kBackendNames[] = { "OpenGL", "Vulkan", "D3D11", "D3D12", "Metal", "Software" };
+		const std::size_t b = static_cast<std::size_t>(m_backend);
+		int pw = 0, ph = 0;
+		if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+			SDL_GetWindowSizeInPixels(w, &pw, &ph);
+		m_devStats.update(m_widgets, r, deltaTime,
+		                  b < std::size(kBackendNames) ? kBackendNames[b] : "", pw, ph);
+	}
+#endif
 
 	// ── "Open with", delivered once ──────────────────────────────────────────
 	// Through the SAME door a drop uses, and deliberately so: an application that
@@ -3729,6 +3754,9 @@ void GameApplication::OnShutdown()
 	// Clear the app-level UI while the runtime it registered on is still alive
 	// (fires each widget's Destruct). It's a member destroyed before m_gameInstance
 	// anyway, but the destructor doesn't fire Destruct — do it explicitly.
+#ifdef HE_GAME_DEV_HOTKEYS
+	m_devStats.shutdown(m_widgets);
+#endif
 	m_widgets.clear();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).

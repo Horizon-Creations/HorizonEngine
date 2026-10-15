@@ -317,6 +317,14 @@ public:
 
     bool isAlive(int id) const;
     bool isVisible(int id) const;
+    // Sets one property of one element of a live widget from C++ — the route a
+    // graph's Set Property node takes, for engine code that owns a widget (the
+    // development stats tile, DevStatsTile.h). `prop` is any name getPropAny()
+    // knows ("Text", "Color", "Size", "Visible", …); a value of the wrong type for
+    // it is refused rather than coerced. False when the widget or element is gone
+    // or the value does not fit. Marks the picture dirty on success.
+    bool setElementProp(int widgetId, int elemId, const std::string& prop,
+                        const HE::UIPropValue& value);
     int  zOrder(int id) const;
     size_t count() const { return m_instances.size(); }
     // Ids of every live widget, in creation order. The editor's outliner shows
