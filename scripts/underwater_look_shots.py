@@ -30,6 +30,9 @@ VIEWS = {
     # from 5 m deep (floor 294.4), where the fog must cover the rim and the mirror beyond it.
     "zenith":  (0.0, 300.0, 20.0, 180.0,  85.0),
     "deep_up": (0.0, 297.0, 10.0, 180.0,  50.0),
+    # Thema 205 step 4: the framing of the human's reference photo (sandy shallows, light net on the floor):
+    # 0.7 m under the surface, looking 50 degrees down at a floor about 2.7 m deep.
+    "reference": (0.0, 301.3, 35.0, 180.0, -50.0),
 }
 
 
