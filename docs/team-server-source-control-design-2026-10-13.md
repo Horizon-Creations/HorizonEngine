@@ -701,8 +701,8 @@ team-mode gate in `GitController` exist only there.
 - **Not verified:** `diverged` against GitHub; an editor-side toast for the loser of case 3/4 (the LOG
   trailers say who lost; the toast is unit-tested only); the deployed editor predates `a178cdba`;
   Windows/Linux for `a178cdba` (CI started at the end of this step, see the result post).
-- **Left on the host / GitHub:** teams `he-e2e-199-59332` (with backup) and the loopback-only ones are
-  not there; `he-e2e-199-59332` cannot be deleted through the protocol (no op). The scratch repo
+- **Left on the host / GitHub:** team `he-e2e-199-59332` (Anna, Bob, project `game`, backup on) stays
+  on the host: the protocol has no op to delete a team. The scratch repo
   `Horizon-Creations/he-backup-e2e-199` still exists: delete it (`gh repo delete`, needs the
   `delete_repo` scope), then turn that project's backup off or it goes `failing`.
 - **Decisions:** plaintext transport for 0.7.0 (#1326 option c, the human deployed); git-lfs from the
