@@ -1076,6 +1076,12 @@ bool TeamSyncService::Impl::reconcile(bool adopt)
 		firstSync = false;
 		HE_SC_INFO("Team sync: first sync done at r%llu", static_cast<unsigned long long>(rev));
 	}
+	else if (firstSync)
+	{
+		HE_SC_INFO("Team sync: first sync at r%llu: %zu file(s) differ from the team's, waiting for a "
+		           "decision (first: %s)", static_cast<unsigned long long>(headRev), differs.size(),
+		           differs.front().c_str());
+	}
 	saveState();
 
 	// What is waiting to go up, for the status line.

@@ -11528,12 +11528,19 @@ void EditorApplication::applyTeamSyncFile(const std::string& projectRelPath)
 	const std::filesystem::path full = std::filesystem::path(root) / projectRelPath;
 	HE_LOG_INFO(Editor, "Team sync: %s came from the team server", projectRelPath.c_str());
 
-	// The open scene is not reloaded behind the user's back: SceneDiskWatch
-	// sees the content change on its next poll and asks (or reloads a clean one).
-	// (A dirty scene or a dirty tab never gets here: teamSyncKeepsLocal.)
+	// The open scene: a dirty one never gets here (setKeepLocal above keeps
+	// the server's version off the disk until the save merges it), so this one
+	// is clean and a teammate's save is simply shown, as the design says
+	// (section 6.3), without SceneDiskWatch's Reload / Keep question: there is
+	// nothing of the user's to keep.
 	if (!m_currentScenePath.empty() &&
 	    std::filesystem::path(m_currentScenePath).lexically_normal() == full.lexically_normal())
+	{
+		const std::string scene = m_currentScenePath;   // openScene rewrites it
+		openScene(scene);
+		SceneDiskWatch::remember(scene);
 		return;
+	}
 	std::error_code ec;
 	const std::filesystem::path contentRoot(contentManager().contentRoot());
 	const std::filesystem::path rel = std::filesystem::relative(full, contentRoot, ec);
