@@ -621,7 +621,10 @@ team-mode gate in `GitController` exist only there.
 - **Not verified:** Windows/Linux (CI started with the push), the rented host (step 5), files ≥ 50 MiB
   (LFS) through the editor, scan time on a large project (hashing is cached by size/mtime; every save
   scans the tree), a real collab session with team sync (pause/hold are unit-tested in the service only),
-  reload of an open non-scene asset tab in a real editor.
+  reload of an open non-scene asset tab in a real editor. The editor's real keep-local rule
+  (`m_undo.revision() != m_savedRevision`, `EditorUI::tabHasUnsavedEdits(generic path)`) ran only
+  in the live script's clean case; the dirty case is tested with a fake predicate, and how a tab's
+  key is spelled on Windows is unknown.
 - **Decisions:** worker writes nothing into the project (main thread does, with the keep-local rule);
   the whole git view is replaced in team mode (the local `.git` is dormant); clean scene reloads without
   asking; a ticket refusal is not retried until the next trigger; `Team Sync/` help scope.
@@ -629,6 +632,11 @@ team-mode gate in `GitController` exist only there.
   rev mapping, 3.3 contributors, 3.4 revert / restore to rev N and "Use My Version", 3.6 pause, 3.7
   Content Browser badges from the team state (still from the dormant `.git`), 3.9 switching git ↔ team
   as one action, tool-setup rows and the COMMITTED reward in team mode, a note for the next sync.
+  **Lost-update gap:** `Config/ProjectSettings.json` and the `.heproj` live in memory and are never
+  "dirty" to the keep-local rule. A teammate's change to them is written to disk (base moves), the
+  running editor keeps its old copy, and its next settings save goes up as `applied`: the teammate's
+  change is gone, with no copy on `horizon-conflicts`. Fix: reload the project settings when the
+  sync writes either file, or keep-local both until the user saves them.
 - **Pitfalls:** TeamClient with an injected clock starting at 0 times out at once (`0 - 1` unsigned);
   start at 1. The editor's stdout log is block-buffered while it runs: witness a live run by files the
   editor writes (the state file), not by its log. A new help scope needs an area rule in `EditorHelp.cpp`
