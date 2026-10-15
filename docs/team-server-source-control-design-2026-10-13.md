@@ -460,8 +460,8 @@ sha256 last received or accepted, never the local file's hash after an unsynced 
   `sc_test.py` drives the real binary: tickets, create, HAVE/PUT/COMMIT/GET/MANIFEST/LOG with
   3 MiB, hash mismatch, pipelining, two members merging one scene + script (acceptance 1-3 of
   section 10 in protocol terms; 4-5 in `sc_store_test`), member removal, broken frames, restart.
-- **Not verified:** Linux CI of this push (run 38699623280 was in progress when this was
-  written); the host's git version (needs `read-tree --empty`, `merge-file --diff3 -L`;
+- **CI:** CollabSession run 38699623280 green (linux-epoll `-Werror`, linux ASan/UBSan, macos).
+- **Not verified:** the host's git version (needs `read-tree --empty`, `merge-file --diff3 -L`;
   `GIT_CONFIG_GLOBAL` needs 2.32, older git falls back to `HOME=<project dir>`); entity order
   stability across editor load/save (risk 11); anything against the deployed server (not
   redeployed: step 5).
@@ -472,7 +472,8 @@ sha256 last received or accepted, never the local file's hash after an unsynced 
   the whole chunk nothing is pending and no writable event comes back). team_test.py's
   `EVENT_FIELDS` now knows kind 9 (`q` = u64) and `R_NO_SUCH_PROJECT`; Blair's presence event
   arrives on Alex's team socket before any `sc-head` (`sc_head()` in sc_test.py skips it).
-  The deployed host has no git yet: the server then logs a warning and keeps source control off.
+  Whether the deployed host has git is unchecked; without it the server logs a WARNING and
+  keeps source control off.
 - **Next steps:** 1. Step 3: backup worker on the same `Worker` (BACKUP_SET/STATUS ops 9/10 are
   parsed and answer `bad-request` now; `ssh-keygen`, debounced `git push`, `git lfs push --all`;
   check that it finds the pointer files on `horizon-conflicts` without `.gitattributes` lines).
