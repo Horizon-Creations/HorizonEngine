@@ -225,6 +225,18 @@ enum class MatNodeType : uint8_t
     // Fragment stage only: a World Position Offset body gets zeros, since the rings
     // are a normal-and-foam effect on a flat surface.
     WaterRipple,
+
+    // ── v17: the sun (Thema 205, Schritt 3) ──
+    // The scene's dominant directional light as a material input, read from the
+    // lighting prefix every backend already fills (heLight.sunDir.xyz / sunColor.rgb:
+    // RenderWorld::dominantDirectionalLight, so it dims at night and under cloud the
+    // way the shadows do). heLitP lights a surface from the sun on its own; this is
+    // for light it cannot see — the engine water's underside, where the sun shines
+    // THROUGH the surface toward a camera below it.
+    //   outputs: Direction (unit world vec3 TOWARD the sun), Color (radiance, colour
+    //            times intensity)
+    // A zero-filled block (UI pass) gives zeros; both stages declare the prefix.
+    Sun,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

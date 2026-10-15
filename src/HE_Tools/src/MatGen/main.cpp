@@ -480,6 +480,115 @@ Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin dr
     return g;
 }
 
+// ── The underside (Thema 205, Schritt 3) ─────────────────────────────────────
+// Seen from below, a water surface is not the top with its normal turned over.
+// Light crosses it from the dense side, so Snell's law closes everything past
+// ~48.6° from the vertical: inside that cone (Snell's window) the sky shows
+// through, outside it the surface is a perfect mirror of the water below (total
+// internal reflection). The waves tilt the normal under every pixel, so the
+// window's rim crinkles and the sun, seen through it, breaks into moving sparks.
+//
+// What the renderer gives this branch: the scene BEHIND the surface is already in
+// the target (the sky, the bank), so "see-through" is low opacity, not a colour
+// of its own; the underwater fog post pass then covers the surface by its
+// distance from the camera (it cuts the view ray at the surface plane), which is
+// what makes the near surface clear and the far one blue. heLitP cannot light it
+// — from below the sun is behind the normal — so the underside switches heLitP
+// off (black base, Specular 0, Roughness 1: its sky Fresnel term goes to zero)
+// and carries everything in Emissive, with the Sun node for the light coming
+// through. The material still reads no scene colour, so what lies above is not
+// bent: the refraction shows as the crinkled rim, the sparks and the net.
+//
+// The blend is SrcAlpha / OneMinusSrcAlpha. Light added where the surface is
+// clear would arrive times that small alpha, so Emissive is divided by it (alpha
+// has a floor of 0.04: the half-float target holds the quotient easily). No
+// knob: every HeParams slot is taken. The net reuses the top side's caustic
+// fields (Caustics x = strength, w = fade distance, so 0 turns both off).
+struct Under
+{
+    int below = 0;     // 1 where the camera is under the surface's plane side, else 0
+    Pin alpha;         // opacity
+    Pin emissive;      // the whole underside colour, already divided by alpha
+};
+
+Under undersideTerms(Mb& m, Pin geoN, Pin view, Pin waveN, Pin pan1, Pin pan2, Pin invC, Pin nearFade, Pin causStrength,
+                     Pin shallow, Pin deep, float col, float row)
+{
+    constexpr float kEta = 1.333f;     // water → air
+    const float c0 = col, r0 = row;
+
+    // Which side: the MESH normal against the view, not the wave normal (a steep
+    // wave must not flip a pixel to the other look).
+    const int below = m.op(T::Less, m.op(T::DotProduct, geoN, view, c0, r0), m.k(0.0f, c0, r0 + 0.5f), c0 + 1, r0);
+
+    // The view ray going up, and its cosine against the wave normal on the water side.
+    const int up   = m.op(T::Multiply, view, m.k(-1.0f, c0, r0 + 1.5f), c0 + 1, r0 + 1);
+    const int cosI = m.un(T::Saturate, m.op(T::DotProduct, waveN, up, c0 + 2, r0 + 1), c0 + 3, r0 + 1);
+    // cos of the angle in AIR: k = 1 - eta^2 (1 - cos_i^2), negative = total
+    // internal reflection. Clamped before the root so the root never sees a
+    // negative number; the epsilon keeps every backend's pow away from pow(0, y).
+    const int sin2 = m.un(T::OneMinus, m.op(T::Multiply, cosI, cosI, c0 + 4, r0 + 1), c0 + 5, r0 + 1);
+    const int kSn  = m.op(T::Subtract, m.k(1.0f, c0 + 5, r0 + 2),
+                          m.op(T::Multiply, sin2, m.k(kEta * kEta, c0 + 5, r0 + 2.5f), c0 + 6, r0 + 2), c0 + 7, r0 + 1);
+    const int cosT = m.op(T::Power, m.op(T::Add, m.un(T::Saturate, kSn, c0 + 8, r0 + 1), m.k(1e-6f, c0 + 8, r0 + 2), c0 + 9, r0 + 1),
+                          m.k(0.5f, c0 + 9, r0 + 2), c0 + 10, r0 + 1);
+    // Schlick on the air-side cosine: 0.02 looking straight up, 1 at the rim and
+    // past it, continuous across (cosT runs to 0 at the rim), so the rim is as
+    // sharp as the waves make it and no sharper.
+    const int fr   = m.op(T::Add, m.k(0.02f, c0 + 11, r0 + 2),
+                          m.op(T::Multiply, m.k(0.98f, c0 + 11, r0 + 3),
+                               m.op(T::Power, m.un(T::OneMinus, cosT, c0 + 11, r0 + 1), m.k(5.0f, c0 + 11, r0 + 1.5f), c0 + 12, r0 + 1),
+                               c0 + 13, r0 + 2), c0 + 14, r0 + 1);
+    const int trans = m.un(T::OneMinus, fr, c0 + 15, r0 + 1);
+
+    // The ray on the air side (GLSL refract with N facing the incoming ray):
+    // t = (cos_t - eta cos_i) N + eta * up. Only read where trans > 0, where it is unit.
+    const int tN = m.op(T::Multiply, waveN,
+                        m.op(T::Subtract, cosT, m.op(T::Multiply, cosI, m.k(kEta, c0 + 2, r0 + 3.5f), c0 + 3, r0 + 3), c0 + 4, r0 + 3),
+                        c0 + 5, r0 + 3);
+    const int tDir = m.op(T::Add, tN, m.op(T::Multiply, up, m.k(kEta, c0 + 2, r0 + 4.5f), c0 + 3, r0 + 4), c0 + 6, r0 + 3);
+    const int sun  = m.node(T::Sun, c0, r0 + 6);
+    const int toSun = m.un(T::Saturate, m.op(T::DotProduct, tDir, Pin{ sun, 0 }, c0 + 7, r0 + 4), c0 + 8, r0 + 4);
+    // The sun through the surface: tight sparks where a facet bends the ray onto the
+    // disc, a broad glow around it (the bright patch of the window toward the sun).
+    const int spark = m.op(T::Multiply, m.op(T::Power, toSun, m.k(250.0f, c0 + 8, r0 + 5), c0 + 9, r0 + 4),
+                           m.k(6.0f, c0 + 9, r0 + 5), c0 + 10, r0 + 4);
+    const int glow  = m.op(T::Multiply, m.op(T::Power, toSun, m.k(6.0f, c0 + 8, r0 + 6), c0 + 9, r0 + 6),
+                           m.k(0.35f, c0 + 9, r0 + 7), c0 + 10, r0 + 6);
+    // The net: the top side's two drifting fields, read 2.5x finer (the top's 2 m
+    // cells gave a few long lines, not a net) and cut thinner. Brighter toward the
+    // sun, a little everywhere the window lets light in.
+    const int fine  = m.op(T::Multiply, invC, m.k(2.5f, c0 + 6, r0 + 9.5f), c0 + 7, r0 + 9);
+    const int uf1   = m.fbm(pan1, fine, c0 + 8, r0 + 9.5f);
+    const int uf2   = m.fbm(pan2, m.op(T::Multiply, fine, m.k(1.37f, c0 + 7, r0 + 10.5f), c0 + 8, r0 + 10.5f), c0 + 9, r0 + 10);
+    const int gap   = m.un(T::Absolute, m.op(T::Subtract, uf1, uf2, c0 + 10, r0 + 9.5f), c0 + 11, r0 + 9.5f);
+    const int netL  = m.op(T::Power, m.un(T::Saturate, m.un(T::OneMinus, m.op(T::Multiply, gap, m.k(14.0f, c0 + 8, r0 + 8.5f), c0 + 9, r0 + 8),
+                                                            c0 + 10, r0 + 8), c0 + 11, r0 + 8),
+                          m.k(3.0f, c0 + 11, r0 + 8.5f), c0 + 12, r0 + 8);
+    const int net   = m.op(T::Multiply,
+                           m.op(T::Multiply, m.op(T::Multiply, netL, nearFade, c0 + 13, r0 + 8),
+                                m.op(T::Multiply, causStrength, m.k(3.0f, c0 + 13, r0 + 7.5f), c0 + 14, r0 + 7.5f), c0 + 14, r0 + 8),
+                           m.op(T::Add, m.k(0.6f, c0 + 13, r0 + 9), m.op(T::Multiply, glow, m.k(3.0f, c0 + 12, r0 + 9.5f), c0 + 13, r0 + 9.5f), c0 + 14, r0 + 9),
+                           c0 + 15, r0 + 8);
+    const int light = m.op(T::Multiply, m.op(T::Multiply, Pin{ sun, 1 }, trans, c0 + 15, r0 + 5),
+                           m.sum({ spark, glow, net }, c0 + 14, r0 + 5), c0 + 16, r0 + 5);
+
+    // Past the rim the surface mirrors the water below. Just past it the mirrored
+    // ray points steeply down, at the lit floor, so it is brighter; toward grazing
+    // it runs level into the water body. The wave normal moves that line, which is
+    // what gives the mirror its texture. The floor's net shows in it, dimmer.
+    const int mirror0 = m.op3(T::Lerp, shallow, deep, m.k(0.3f, c0 + 13, r0 + 11), c0 + 14, r0 + 11);
+    const int steep   = m.op3(T::Smoothstep, m.k(0.1f, c0 + 12, r0 + 12), m.k(0.66f, c0 + 12, r0 + 12.5f), cosI, c0 + 13, r0 + 12);
+    const int mirrorB = m.op3(T::Lerp, m.k(0.7f, c0 + 13, r0 + 13), m.k(1.8f, c0 + 13, r0 + 13.5f), steep, c0 + 14, r0 + 12);
+    const int mirNet  = m.op(T::Multiply, m.op(T::Multiply, Pin{ sun, 1 }, net, c0 + 14, r0 + 14), m.k(0.5f, c0 + 14, r0 + 14.5f), c0 + 15, r0 + 14);
+    const int mirror  = m.op(T::Add, m.op(T::Multiply, mirror0, mirrorB, c0 + 15, r0 + 12), mirNet, c0 + 16, r0 + 12);
+    const int alpha  = m.op(T::Add, m.op(T::Multiply, fr, m.k(0.96f, c0 + 15, r0 + 2.5f), c0 + 16, r0 + 2), m.k(0.04f, c0 + 16, r0 + 3), c0 + 17, r0 + 2);
+    const int emis   = m.op(T::Divide, m.op(T::Add, m.op(T::Multiply, mirror, fr, c0 + 16, r0 + 11), light, c0 + 17, r0 + 6),
+                            alpha, c0 + 18, r0 + 4);
+    m.comment("Underside: Snell's window, total internal reflection, the sun through the surface", c0, r0, 19, 12);
+    return { below, Pin{ alpha }, Pin{ emis } };
+}
+
 // ── Water ────────────────────────────────────────────────────────────────────
 // Lit, Translucent, Surface. The renderer's lighting (heLitP) does the sky
 // reflection, the sun glint and the screen-space reflection from the wave
@@ -785,16 +894,31 @@ Mb waterMaterial()
     const int specO  = m.op(T::Multiply, spec, refl, 41, 0);
     const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAmt, 45, 2);
 
-    const int out = m.node(T::Output, 48, 4);
+    const Under under = undersideTerms(m, geoN, view, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
+
+    // Every output picks the top or the underside. If is mix(top, under, 0 or 1),
+    // so from above it is the old expression exactly — as long as nothing on the
+    // underside can turn into NaN or Inf, which undersideTerms keeps to.
+    const int below  = under.below;
+    const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
+    const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
+    const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
+    const int alphaO = m.op3(T::If, below, under.alpha, alpha, 77, 3);
+    const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
+    const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
+    m.comment("Top or underside", 76, 0, 2, 6);
+
+    const int out = m.node(T::Output, 79, 2);
     MatGraphNode& o = *m.g.findNode(out);
     o.p[0] = 1.0f;                                                  // lit
     o.p[1] = static_cast<float>(MatBlendMode::Translucent);
     o.p[3] = static_cast<float>(MatDomain::Surface);
-    m.link(base,   out, kMatOutputBaseColorPin);
-    m.link(specO,  out, kMatOutputSpecularPin);
-    m.link(roughO, out, kMatOutputRoughnessPin);
-    m.link(alpha,  out, kMatOutputOpacityPin);
-    m.link(waveN,  out, kMatOutputNormalPin);
+    m.link(baseO,   out, kMatOutputBaseColorPin);
+    m.link(specO2,  out, kMatOutputSpecularPin);
+    m.link(roughO2, out, kMatOutputRoughnessPin);
+    m.link(emisO,   out, kMatOutputEmissivePin);
+    m.link(alphaO,  out, kMatOutputOpacityPin);
+    m.link(normO,   out, kMatOutputNormalPin);
     return m;
 }
 

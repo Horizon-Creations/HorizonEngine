@@ -26,6 +26,10 @@ VIEWS = {
     # Thema 205 step 2: from above the 8 m deep middle out toward the shore, floor 7 m -> 2 m deep in frame.
     # With the fog off this is the witness for the depth fade (faint over the deep middle, full in the shallows).
     "deep_to_shore": (0.0, 301.0, 4.0, 180.0, -22.0),
+    # Thema 205 step 3 (the underside): straight up from 2 m, the whole Snell's window in frame; and up
+    # from 5 m deep (floor 294.4), where the fog must cover the rim and the mirror beyond it.
+    "zenith":  (0.0, 300.0, 20.0, 180.0,  85.0),
+    "deep_up": (0.0, 297.0, 10.0, 180.0,  50.0),
 }
 
 
