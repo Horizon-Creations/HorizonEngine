@@ -8404,6 +8404,11 @@ namespace
 	  "Keeps the rename inside the graph you are editing. Everything listed goes "
 	  "on naming the old one, which for a call means it now names nothing.",
 	  "", "horizoncode#functions" },
+	{ "Rename Across Project/Ask for it", "Ask the person editing it",
+	  "Somebody else in the collaboration session is editing this graph, so the "
+	  "rename cannot be written into it. This asks them to hand it over; once they "
+	  "say yes it moves up to the list that will be renamed.",
+	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
 	  "Python, and through a Call Function (Ref) node on a reference to this "
@@ -8700,6 +8705,13 @@ namespace
 	{ "Collaboration Session/Dismiss", "",
 	  "Clears the failure above and puts the panel back to the host-or-join form. "
 	  "It retries nothing: the attempt it is reporting has already ended.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Rejoin", "",
+	  "Shown when the connection to the host dropped. Joins the same session again, "
+	  "the same way you joined it the first time. The host then sends you the scene "
+	  "and every file the session changed while you were away, so nothing you missed "
+	  "stays missing. Changes you made here while you were disconnected are replaced "
+	  "by the session's state.",
 	  "", "collaboration#starting" },
 
 	// ── The team (Preferences ▸ Team and Window ▸ Team, TeamView.cpp) ────────
@@ -9316,7 +9328,10 @@ namespace
 		// the editor, one section per page so the reference is split the way
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
-		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
+		{ "Project Graphics/", "editor-settings", "Settings Reference", "Project: graphics" },
+		{ "Input/",            "editor-settings", "Settings Reference", "Project: input" },
+		{ "Viewport Quality/", "editor-settings", "Settings Reference", "Viewport" },
+		{ "Anti-Cheat/",      "editor-settings", "Settings Reference", "Project: anti-cheat" },
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },

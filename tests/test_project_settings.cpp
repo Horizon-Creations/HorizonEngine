@@ -637,6 +637,86 @@ TEST_CASE("ProjectMultiplayerSettings: a project keeps its session numbers acros
 	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"multiplayer\"") != std::string::npos);
 }
 
+// ── Source control (topic 198 step 9, the team-server design §6.1) ─────────
+
+TEST_CASE("ProjectSourceControlSettings: every project before it is git, and stays fileless")
+{
+	// No "sourceControl" key: every ProjectSettings.json on disk today. It must
+	// read as direct git, or opening an old project would switch its commits off.
+	const json j = json::parse(R"({ "version": 1, "physics": { "fixedHz": 30 } })");
+	HE::ProjectSettings s;
+	s.fromJson(j);
+	CHECK(s.sourceControl.mode == HE::ProjectSourceControlSettings::Mode::Git);
+	CHECK_FALSE(s.sourceControl.teamServer());
+	CHECK(s.sourceControl.team.empty());
+
+	// The default is part of isDefault(): a project that never touched its
+	// settings still writes no file.
+	CHECK(HE::ProjectSettings{}.isDefault());
+	HE::ProjectSettings t;
+	t.sourceControl.mode = HE::ProjectSourceControlSettings::Mode::TeamServer;
+	CHECK_FALSE(t.isDefault());
+}
+
+TEST_CASE("ProjectSourceControlSettings: toJson writes the design's shape and fromJson reads it back")
+{
+	HE::ProjectSettings a;
+	a.sourceControl.mode    = HE::ProjectSourceControlSettings::Mode::TeamServer;
+	a.sourceControl.team    = "Harbour Crew";
+	a.sourceControl.project = "sky-harbour";
+	json j;
+	a.toJson(j);
+	CHECK(j["sourceControl"]["mode"] == "teamServer");
+	CHECK(j["sourceControl"]["team"] == "Harbour Crew");
+	CHECK(j["sourceControl"]["project"] == "sky-harbour");
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+	CHECK(b.sourceControl.teamServer());
+
+	// The default writes "git" explicitly, like every other value in the file.
+	json d;
+	HE::ProjectSettings{}.toJson(d);
+	CHECK(d["sourceControl"]["mode"] == "git");
+
+	// A different team or project is a different setting.
+	HE::ProjectSettings c = a;
+	c.sourceControl.project = "other";
+	CHECK(a != c);
+}
+
+TEST_CASE("ProjectSourceControlSettings: an unknown mode is git, not the team server")
+{
+	// A newer editor's mode, or a typo, must never be what turns direct git off.
+	const json j = json::parse(R"({ "version": 1,
+		"sourceControl": { "mode": "TeamServer", "team": "t", "project": "p" } })");
+	HE::ProjectSettings s;
+	s.fromJson(j);
+	CHECK(s.sourceControl.mode == HE::ProjectSourceControlSettings::Mode::Git);
+	CHECK(s.sourceControl.team == "t");
+
+	const json w = json::parse(R"({ "version": 1, "sourceControl": { "mode": 3 } })");
+	HE::ProjectSettings n;
+	n.fromJson(w);
+	CHECK_FALSE(n.sourceControl.teamServer());
+}
+
+TEST_CASE("ProjectSourceControlSettings: the team-server choice survives a real save and load")
+{
+	TempRoot tmp("sourcecontrol");
+	HE::ProjectSettings a;
+	a.sourceControl.mode    = HE::ProjectSourceControlSettings::Mode::TeamServer;
+	a.sourceControl.team    = "crew";
+	a.sourceControl.project = "game";
+	REQUIRE(HE::saveProjectSettings(tmp.root, a));
+
+	HE::ProjectSettings b;
+	REQUIRE(HE::loadProjectSettings(tmp.root, b));
+	CHECK(a == b);
+	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"teamServer\"") != std::string::npos);
+}
+
 // ── Graphics and Input ───────────────────────────────────────────────────────
 // The graphics half of a build's config.json used to be the exporting editor's
 // own preferences; the project can now own it. Off by default — which IS the old

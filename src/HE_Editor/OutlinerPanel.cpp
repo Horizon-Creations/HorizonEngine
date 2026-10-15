@@ -1622,7 +1622,10 @@ void render(AppContext& ctx)
                         s_renameEntity = entt::null;
                     else if (enter || away)
                     {
-                        if (!s_renameBuf.empty() && s_renameBuf != node.name)
+                        // Somebody else editing it: the host is asked instead,
+                        // and the name changes everywhere at once on a yes.
+                        if (!s_renameBuf.empty() && s_renameBuf != node.name &&
+                            !(ctx.askHostToRename && ctx.askHostToRename(node.entity, s_renameBuf)))
                         {
                             if (ctx.undoSys) ctx.undoSys->snapshotNow("Rename Entity");
                             ctx.world->renameEntity(node.entity, s_renameBuf);

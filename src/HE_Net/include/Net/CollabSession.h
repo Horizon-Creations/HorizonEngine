@@ -115,7 +115,17 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // and dropped rather than fatal — but that only means a stray frame between two
 // builds of the SAME version is harmless. It is not a licence to skip a bump:
 // there is no mixed-version session for the frame to be dropped in.)
-inline constexpr std::uint16_t kCollabProtocolVersion = 13;
+// v14: landscape patches (sendTerrainPatch). A v13 peer would drop every one, so
+// two people would shape two different landscapes and never be told.
+// v15: HorizonCode graphs send declared events, comment boxes and the Extract
+// spec as document deltas (two new item kinds). The frame set is unchanged, but a
+// v14 peer skips an item kind it does not know, so a Custom Event declared in the
+// Level Script would exist on one machine only. Same rule as v13: a change that
+// leaves one side silently behind is a bump.
+// v16: a client tells the host that it SAVED a document (sendDocSaved), so the
+// host persists the session's state at that moment. A v15 host drops the frame,
+// and the client's save would stay on the client's disk without anybody told.
+inline constexpr std::uint16_t kCollabProtocolVersion = 16;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -468,6 +478,35 @@ public:
         m_onComponents = std::move(fn);
     }
 
+    // ── Landscape patches ──
+    // A rectangle of one of a landscape's grids (heights, layer weights, the
+    // foliage mask) or its settings, as raw bytes. The bytes mean nothing here:
+    // HorizonNet carries them, the editor (TerrainSync) knows the fields. A
+    // landscape is too big for the component blob (megabytes of base64 per
+    // frame) and too shared for its lock: two people shape one landscape.
+    //
+    // So there is no lock on this channel. Order is what keeps everyone equal
+    // instead: the host applies patches in the order they reach it and relays
+    // every one to EVERYBODY, its sender included. The echo is the sender's
+    // acknowledgement — until it comes back, the sender re-applies its own
+    // patch over anything a peer's patch overwrote in the meantime, so all
+    // machines end with the host's order (TerrainSync.h).
+    struct TerrainPatch {
+        std::uint64_t             netId = 0;
+        std::uint32_t             seq   = 0;   // the sender's own counter, for its echo
+        std::uint8_t              field = 0;   // TerrainSync::Field
+        std::uint32_t             res   = 0;   // side length of the grid the rect is in
+        std::uint32_t             x0 = 0, z0 = 0, w = 0, h = 0;
+        std::vector<std::uint8_t> bytes;
+    };
+
+    bool sendTerrainPatch(const TerrainPatch& patch);
+
+    // `own` is true for the echo of a patch this participant sent itself.
+    void onTerrainPatch(std::function<void(ParticipantId, const TerrainPatch&, bool own)> fn) {
+        m_onTerrainPatch = std::move(fn);
+    }
+
     // ── Structural changes ──
     // Creating, destroying and reparenting entities. The subject is a *network
     // id*, not a raw ECS handle: peers assign handles independently, so a raw
@@ -701,6 +740,19 @@ public:
                                const std::string& newPath, ParticipantId by,
                                bool folder = false);
 
+    // ── Catching up a joiner ──
+    // The snapshot carries the scene and nothing else. Whatever the session did
+    // to files before somebody arrived — saves, deletes, renames — is sent to
+    // that one participant after its snapshot, over the same frames everyone
+    // else received them on: the link is ordered, so these land after
+    // SnapshotEnd and before anything live that follows. Host only, and neither
+    // touches the lock table: the host is restating what already happened, not
+    // publishing an edit of its own. Stamped with the host's id. False when the
+    // participant is gone or the file is over the transfer ceiling.
+    bool sendAssetTo(ParticipantId to, const AssetUpdate& a);
+    void sendAssetOpApplyTo(ParticipantId to, AssetOp op, const std::string& path,
+                            const std::string& newPath, ParticipantId by, bool folder);
+
     // Client: the answer to something we asked for.
     void onAssetOpVerdict(
         std::function<void(std::uint32_t requestId, bool approved)> fn) {
@@ -814,7 +866,24 @@ public:
         m_onLockQuery = std::move(fn);
     }
 
-    // ── Moderation (host only) ───────────────────────────────────────────────
+    // ── "I saved this" ───────────────────────────────────────────────────────
+    // A save is the moment somebody says "this state is the one to keep", and in
+    // a session only the HOST keeps state for everyone: its disk is what a joiner
+    // is caught up from and what source control (or the team server) sees. A
+    // client's save used to stay on the client's own disk with nobody else told.
+    // `key` is the document: an asset key as on the asset frames, or the
+    // editor's scene key. The bytes themselves travel on their usual channels;
+    // this only says that a save happened. On the host it is answered inline
+    // (it is the one being told), so both roles have one code path. Returns
+    // false when there is nobody to tell.
+    bool sendDocSaved(const std::string& key);
+
+    // Host only: somebody (the host itself included) saved `key`.
+    void onDocSaved(std::function<void(ParticipantId from, const std::string& key)> fn) {
+        m_onDocSaved = std::move(fn);
+    }
+
+    // ── Moderation (host only)───────────────────────────────────────────────
     // The host owns the participant registry, so it is also the only side that
     // can take someone out of it. Both calls are no-ops on a client and for the
     // host's own id — there is nobody above the host to appeal to, and equally
@@ -966,6 +1035,10 @@ private:
     void handleComponentsUpdate(ConnectionId conn, BitReader& r);  // host
     void handleComponentsRelay(BitReader& r);                      // client
 
+    // Landscape patches
+    void handleTerrainUpdate(ConnectionId conn, BitReader& r);     // host
+    void handleTerrainRelay(BitReader& r);                         // client
+
     // Structural
     void handleStructuralUpdate(ConnectionId conn, BitReader& r);  // host
     void handleStructuralRelay(BitReader& r);                      // client
@@ -985,6 +1058,7 @@ private:
     // Lock query
     void handleLockQuery(ConnectionId conn, BitReader& r);         // host
     void handleLockQueryResult(BitReader& r);                      // client
+    void handleDocSaved(ConnectionId conn, BitReader& r);          // host
 
     // Assets
     void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
@@ -1097,7 +1171,9 @@ private:
                        const std::vector<DocDelta>&, std::uint32_t)> m_onDocDeltas;
     std::function<void(std::uint64_t, bool, ParticipantId, const std::string&)>
                                                                 m_onLockQuery;
+    std::function<void(ParticipantId, const std::string&)>     m_onDocSaved;
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
+    std::function<void(ParticipantId, const TerrainPatch&, bool)> m_onTerrainPatch;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
     std::function<void(ParticipantId, const std::string&, std::uint32_t)>

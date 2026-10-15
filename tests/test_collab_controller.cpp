@@ -18,9 +18,11 @@
 
 #include "TestFsUtil.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <thread>
 
@@ -3120,4 +3122,766 @@ TEST_CASE("Structural sync: local-only entities are never recorded as published"
     HE::Ed::markSubtreeKnown(reg, land, [&](Entity e) { return e == chunk; }, known);
     CHECK(known.count(land)  == 1);
     CHECK(known.count(chunk) == 0);
+}
+
+// ─── Topic 198 step 2: the entity-sync gaps ──────────────────────────────────
+
+TEST_CASE("Structural sync: a move in the hierarchy is reported once, a fresh entity never")
+{
+    HorizonWorld world;
+    const Entity a = world.createEntity("A");
+    const Entity b = world.createEntity("B");
+    auto& reg = world.registry();
+
+    HE::Ed::StructEntitySet known{ world.rootEntity(), a, b };
+    HE::Ed::StructParentMap parents;
+    // First sight records, and reports nothing: B's create (or the snapshot)
+    // already told the peers where it is.
+    HE::Ed::recordMissingParents(reg, known, parents);
+    CHECK(HE::Ed::reparentedSince(reg, known, parents).empty());
+
+    REQUIRE(world.reparentEntity(b, a));
+    const auto moved = HE::Ed::reparentedSince(reg, known, parents);
+    REQUIRE(moved.size() == 1);
+    CHECK((moved[0].entity == b));
+    CHECK((moved[0].from == world.rootEntity()));
+    CHECK((moved[0].to == a));
+
+    // Pure: until the caller records the send, it keeps coming up (a reparent
+    // the connection did not take is retried, not forgotten).
+    CHECK(HE::Ed::reparentedSince(reg, known, parents).size() == 1);
+    parents[b] = a;
+    CHECK(HE::Ed::reparentedSince(reg, known, parents).empty());
+}
+
+TEST_CASE("Structural sync: a new group does not carry the entities it adopted")
+{
+    // Group makes a fresh entity and moves existing ones under it in one frame.
+    // Inside the group's create the adopted entities would arrive a second time
+    // on every peer (same uuids, preserved), next to the originals.
+    HorizonWorld world;
+    const Entity crate = world.createEntity("Crate");
+    const Entity lamp  = world.createEntity("Lamp");
+    auto& reg = world.registry();
+    HE::Ed::StructEntitySet known{ world.rootEntity(), crate, lamp };
+
+    const Entity group = world.createEntity("Group");
+    const Entity label = world.createEntity("Label");   // genuinely new, under the group
+    REQUIRE(world.reparentEntity(crate, group));
+    REQUIRE(world.reparentEntity(lamp,  group));
+    REQUIRE(world.reparentEntity(label, group));
+    const auto childrenBefore = reg.get<HierarchyComponent>(group).children;
+
+    std::vector<std::uint8_t> blob;
+    {
+        HE::Ed::DetachKnownDescendants adopted(reg, group, known);
+        CHECK(adopted.detached().size() == 2);
+        SceneSerializer ser;
+        blob = ser.serializeSubtree(world, group);
+    }
+    // Put back exactly, order included.
+    CHECK(reg.get<HierarchyComponent>(group).children == childrenBefore);
+    CHECK((HE::Ed::structParentOf(reg, crate) == group));
+
+    HorizonWorld peer;
+    const std::size_t before = countEntities(peer);
+    SceneSerializer ser;
+    REQUIRE((ser.instantiatePrefab(peer, blob, entt::null, /*preserveIds=*/true) != entt::null));
+    // Group + Label only.
+    CHECK(countEntities(peer) == before + 2);
+}
+
+TEST_CASE("CollabController: a re-parent reaches the peer with the new local transform")
+{
+    HorizonWorld hostWorld;
+    const Entity parent = hostWorld.createEntity("Parent");
+    const Entity child  = hostWorld.createEntity("Child");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    std::uint32_t gotEntity = 0, gotParent = 0;
+    bool gotTransform = false;
+    float gotX = 0.0f;
+    client.onRemoteReparent([&](std::uint32_t e, std::uint32_t p, const float* t) {
+        gotEntity = e;
+        gotParent = p;
+        gotTransform = t != nullptr;
+        if (t) gotX = t[0];
+    });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    REQUIRE(hostWorld.reparentEntity(child, parent));
+    const float t[9] = { 7.0f, 0, 0, 0, 0, 0, 1, 1, 1 };
+    REQUIRE(host.publishReparent(static_cast<std::uint32_t>(entt::to_integral(child)),
+                                 static_cast<std::uint32_t>(entt::to_integral(parent)), t));
+    REQUIRE(pumpUntil(host, client, [&] { return gotEntity != 0; }));
+
+    auto& creg = clientWorld.registry();
+    const auto ce = static_cast<Entity>(static_cast<entt::id_type>(gotEntity));
+    const auto cp = static_cast<Entity>(static_cast<entt::id_type>(gotParent));
+    REQUIRE(creg.valid(ce));
+    REQUIRE(creg.valid(cp));
+    CHECK(creg.get<NameComponent>(ce).name == "Child");
+    CHECK(creg.get<NameComponent>(cp).name == "Parent");
+    CHECK(gotTransform);
+    CHECK(gotX == doctest::Approx(7.0f));
+}
+
+TEST_CASE("SceneSerializer: a whole-state component write takes removed components away")
+{
+    HorizonWorld world;
+    const Entity src = world.createEntity("Lamp");
+    const Entity dst = world.createEntity("Lamp");
+    auto& reg = world.registry();
+    reg.emplace<TransformComponent>(src);
+    reg.emplace<TransformComponent>(dst);
+    reg.emplace<LightComponent>(dst);   // removed on the sender, still here
+
+    SceneSerializer ser;
+    const auto blob = ser.serializeEntityComponents(world, src);
+
+    SUBCASE("update leaves what the blob lacks alone (multi-edit patches rely on it)")
+    {
+        REQUIRE(ser.applyEntityComponents(world, dst, blob));
+        CHECK(reg.all_of<LightComponent>(dst));
+    }
+    SUBCASE("replace removes it")
+    {
+        REQUIRE(ser.replaceEntityComponents(world, dst, blob));
+        CHECK_FALSE(reg.all_of<LightComponent>(dst));
+        CHECK(reg.all_of<TransformComponent>(dst));
+    }
+    SUBCASE("a terrain keeps its generated mesh, which its state never lists")
+    {
+        reg.emplace<TerrainComponent>(dst);
+        reg.emplace<MeshComponent>(dst);
+        const auto own = ser.serializeEntityComponents(world, dst);
+        REQUIRE(ser.replaceEntityComponents(world, dst, own));
+        CHECK(reg.all_of<MeshComponent>(dst));
+        CHECK(reg.all_of<TerrainComponent>(dst));
+    }
+}
+
+TEST_CASE("CollabController: the end of a quick drag is not lost to the rate limit")
+{
+    HorizonWorld hostWorld;
+    const Entity target = hostWorld.createEntity("Target");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    float lastX = -1.0f;
+    int received = 0;
+    client.onRemoteTransform([&](std::uint64_t, const float pos[3], const float[3], const float[3]) {
+        lastX = pos[0];
+        ++received;
+    });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::uint64_t subject =
+        host.subjectFor(static_cast<std::uint32_t>(entt::to_integral(target)));
+    host.followSelection(subject);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsLock(subject); }));
+
+    const float r[3] = { 0, 0, 0 }, s[3] = { 1, 1, 1 };
+    const float p1[3] = { 1.0f, 0, 0 }, p2[3] = { 2.0f, 0, 0 };
+    // On pumpUntil's clock, which starts at 0 again: the held-back value may
+    // only leave once 33 ms of it have passed, not by accident of the numbers.
+    host.publishTransform(subject, p1, r, s, 0);    // goes out
+    host.publishTransform(subject, p2, r, s, 10);   // inside the 33 ms window
+
+    SUBCASE("deselecting right away still sends it, before the lock goes")
+    {
+        host.followSelection(0);
+    }
+    SUBCASE("and so does simply letting time pass")
+    {
+    }
+    REQUIRE(pumpUntil(host, client, [&] { return lastX == doctest::Approx(2.0f); },
+                      std::chrono::seconds(5)));
+    CHECK(received == 2);
+}
+
+// ── Entities somebody is editing: the host decides, as for assets ────────────
+// (topic 198 step 6, CollabEntityOps.h)
+
+TEST_CASE("Entity op keys: a subject round-trips, a file path is not one")
+{
+    using namespace HE::Ed::CollabEntityOps;
+    const std::uint64_t subject = 0x1234abcd5678ef01ull & ~(1ull << 63);
+    const std::string key = keyFor(subject);
+    CHECK(isKey(key));
+    CHECK(subjectOf(key) == subject);
+    CHECK_FALSE(isKey("Content/Materials/Rock.hasset"));
+    CHECK(subjectOf("Content/Materials/Rock.hasset") == 0);
+    CHECK(subjectOf("entity:") == 0);
+    CHECK(subjectOf("entity:12zz") == 0);
+}
+
+TEST_CASE("Collab: deleting or renaming an entity a peer holds goes to the host")
+{
+    using Op = HE::Net::CollabSession::AssetOp;
+    HorizonWorld hostWorld;
+    const Entity crate = hostWorld.createEntity("Crate");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    // The wire id is uuid-derived, so both worlds name the crate by one subject.
+    const std::uint64_t subject =
+        host.subjectFor(static_cast<std::uint32_t>(entt::to_integral(crate)));
+    REQUIRE(subject != 0);
+    REQUIRE(pumpUntil(host, client, [&] { return client.entityForNetId(subject) != 0; }));
+
+    // Every entity op is seen as one; NONE may reach the asset handler, which
+    // reads its path as a file and would go looking for "entity:…" on disk.
+    struct Applied { Op op; std::uint64_t subject; std::string newName; };
+    std::vector<Applied> onHost, onClient;
+    int assetOpsSeen = 0;
+    host.onRemoteEntityOp([&](Op op, std::uint64_t s, const std::string& n) {
+        onHost.push_back({ op, s, n });
+    });
+    client.onRemoteEntityOp([&](Op op, std::uint64_t s, const std::string& n) {
+        onClient.push_back({ op, s, n });
+    });
+    host.onRemoteAssetOp([&](Op, const std::string&, const std::string&, bool) { ++assetOpsSeen; });
+    client.onRemoteAssetOp([&](Op, const std::string&, const std::string&, bool) { ++assetOpsSeen; });
+    // A resolver that knows no path at all: the occupied-name check in
+    // approveOne used to read an empty answer as "refuse", which would turn
+    // every entity rename into a silent no.
+    host.setLocalPathResolver([](const std::string&) { return std::string(); });
+
+    SUBCASE("a client asks, the row names the entity, approve applies everywhere")
+    {
+        host.followSelection(subject);   // Anna is editing the crate
+        REQUIRE(pumpUntil(host, client, [&] {
+            const HE::Net::LockInfo* l = client.lockFor(subject);
+            return l && l->owner == host.localParticipant();
+        }));
+
+        CHECK(client.requestEntityDelete(subject, "Crate"));
+        CHECK(client.pendingRequestsOfOurs() == 1);
+        REQUIRE(pumpUntil(host, client, [&] { return host.pendingAssetOps().size() == 1; }));
+
+        const auto& row = host.pendingAssetOps()[0];
+        CHECK(row.isEntity());
+        CHECK(row.op == Op::Delete);
+        CHECK(host.opDisplayName(row) == "Crate");
+        // The host holds it itself: that is no conflict to warn itself about.
+        CHECK(host.opHeldBy(row).empty());
+
+        host.approveAssetOp(0);
+        REQUIRE(pumpUntil(host, client, [&] {
+            return onHost.size() == 1 && onClient.size() == 1 &&
+                   client.pendingRequestsOfOurs() == 0;
+        }));
+        CHECK(onHost[0].op == Op::Delete);
+        CHECK(onHost[0].subject == subject);
+        CHECK(onClient[0].subject == subject);
+        CHECK(assetOpsSeen == 0);
+        CHECK(host.pendingAssetOps().empty());
+    }
+
+    SUBCASE("the host's own ask lands in its own in-tray, naming the holder")
+    {
+        client.followSelection(subject);   // Bob is editing the crate
+        REQUIRE(pumpUntil(host, client, [&] {
+            const HE::Net::LockInfo* l = host.lockFor(subject);
+            return l && l->owner == client.localParticipant();
+        }));
+
+        // Not applied on the spot, unlike the host's own asset delete: a single
+        // keypress has no confirmation in front of it, and this row is it.
+        CHECK(host.requestEntityRename(subject, "Crate", "Barrel"));
+        REQUIRE(host.pendingAssetOps().size() == 1);
+        CHECK(onHost.empty());
+
+        const auto& row = host.pendingAssetOps()[0];
+        CHECK(row.isEntity());
+        CHECK(row.op == Op::Rename);
+        CHECK(row.newPath == "Barrel");
+        CHECK(host.opHeldBy(row) == "Bob");
+
+        host.approveAssetOp(0);
+        REQUIRE(pumpUntil(host, client, [&] {
+            return onHost.size() == 1 && onClient.size() == 1;
+        }));
+        CHECK(onHost[0].op == Op::Rename);
+        CHECK(onHost[0].newName == "Barrel");
+        CHECK(onClient[0].newName == "Barrel");
+        CHECK(assetOpsSeen == 0);
+    }
+
+    SUBCASE("a denial reaches the asker and changes nothing")
+    {
+        host.followSelection(subject);
+        REQUIRE(pumpUntil(host, client, [&] {
+            const HE::Net::LockInfo* l = client.lockFor(subject);
+            return l && l->owner == host.localParticipant();
+        }));
+        CHECK(client.requestEntityRename(subject, "Crate", "Barrel"));
+        REQUIRE(pumpUntil(host, client, [&] { return host.pendingAssetOps().size() == 1; }));
+        host.denyAssetOp(0);
+        REQUIRE(pumpUntil(host, client, [&] { return client.pendingRequestsOfOurs() == 0; }));
+        CHECK(onHost.empty());
+        CHECK(onClient.empty());
+        // The footer line names the entity, not its key.
+        CHECK(client.assetNotice().find("Crate") != std::string::npos);
+    }
+}
+
+// ─── Every client gets every change (topic 198 step 7) ───────────────────────
+// While two editors are connected the link is ordered and reliable, so nothing
+// between them is lost. These cover the cases a live link cannot: somebody who
+// was not connected when a change went out.
+
+namespace {
+
+std::vector<std::uint8_t> readAll(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return { std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>() };
+}
+
+void writeAll(const fs::path& p, const std::vector<std::uint8_t>& bytes) {
+    fs::create_directories(p.parent_path());
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+}
+
+bool contains(const std::vector<std::uint8_t>& bytes, const std::string& needle) {
+    return std::string(bytes.begin(), bytes.end()).find(needle) != std::string::npos;
+}
+
+// The host's project on disk, the way the editor wires it: a resolver from
+// session key to file, and remote saves and deletes landing in that tree. The
+// catch-up reads what is there, so a test host needs a real one.
+struct HostDisk {
+    fs::path root;
+    explicit HostDisk(const std::string& name)
+        : root(fs::temp_directory_path() / name) {
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        fs::create_directories(root);
+    }
+    ~HostDisk() { he_test::removeAllQuiet(root); }
+    std::string path(const std::string& key) const {
+        if (key == "::GameInstance::") return (root / "GameInstance.hcode").string();
+        if (key == "::LevelScript::") return {};
+        return (root / key).string();
+    }
+    void wire(CollabController& host) {
+        host.setLocalPathResolver([this](const std::string& k) { return path(k); });
+        host.onRemoteAsset([this](const std::string& k, const std::vector<std::uint8_t>& b) {
+            writeAll(path(k), b);
+        });
+        host.onRemoteAssetOp([this](HE::Net::CollabSession::AssetOp op, const std::string& p,
+                                    const std::string&, bool) {
+            std::error_code ec;
+            if (op == HE::Net::CollabSession::AssetOp::Delete) fs::remove(path(p), ec);
+        });
+    }
+};
+
+} // namespace
+
+TEST_CASE("Revisions: somebody who joined late is not judged by numbers it never saw")
+{
+    // The lost update this step found. Anna edits Door to revision 3 while Bob
+    // watches; Cara arrives later, takes Door and publishes her first edit as
+    // revision 1. The receive filter used to be one counter per DOCUMENT, so
+    // Anna and Bob, at 3, dropped Cara's 1 as stale — every edit she made to
+    // Door, without a word, until her own counter climbed past theirs. A
+    // restarted editor that rejoins is the same case.
+    HorizonWorld annaWorld, bobWorld, caraWorld;
+    annaWorld.createEntity("Cube");
+    CollabController anna, bob, cara;
+    anna.setWorld(&annaWorld);
+    REQUIRE(anna.startHosting(0, "Anna"));
+    bob.setWorld(&bobWorld);
+    bob.onWorldReplaced([&bob] { bob.seedNetIds(); });
+    REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(anna, bob, [&] { return bob.status() == CollabController::Status::Joined; }));
+
+    const std::string door = "Content/Graphs/Door.hasset";
+    std::vector<std::int64_t> annaGot, bobGot;
+    anna.onRemoteDocDeltas([&](const std::string&,
+                               const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        for (const auto& d : b) annaGot.push_back(d.itemId);
+    });
+    bob.onRemoteDocDeltas([&](const std::string&,
+                              const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        for (const auto& d : b) bobGot.push_back(d.itemId);
+    });
+
+    auto batchFor = [](std::int64_t id) {
+        HE::Net::CollabSession::DocDelta d;
+        d.kind = 0; d.op = 0; d.itemId = id;
+        d.json = "{\"id\":" + std::to_string(id) + "}";
+        return std::vector<HE::Net::CollabSession::DocDelta>{ d };
+    };
+
+    anna.requestAssetLock(door);
+    REQUIRE(anna.ownsAssetLock(door));
+    for (std::int64_t id = 1; id <= 3; ++id) REQUIRE(anna.publishDocDeltas(door, batchFor(id)));
+    REQUIRE(pumpUntil(anna, bob, [&] { return bobGot.size() == 3; }));
+    anna.releaseAssetLock(door);
+
+    cara.setWorld(&caraWorld);
+    cara.onWorldReplaced([&cara] { cara.seedNetIds(); });
+    REQUIRE(cara.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Cara"));
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] {
+        return cara.status() == CollabController::Status::Joined &&
+               !cara.assetLockedByOther(door);
+    }));
+
+    cara.requestAssetLock(door);
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] { return cara.ownsAssetLock(door); }));
+    REQUIRE(cara.publishDocDeltas(door, batchFor(42)));
+
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] {
+        return std::count(annaGot.begin(), annaGot.end(), 42) == 1 &&
+               std::count(bobGot.begin(), bobGot.end(), 42) == 1;
+    }));
+
+    cara.leave();
+    bob.leave();
+    anna.leave();
+}
+
+TEST_CASE("Catch-up: a late joiner gets the files and ops the session changed before it came")
+{
+    // The snapshot is the scene. A material Bob saved, an asset Anna deleted and
+    // the GameInstance graph (deltas only while everyone is connected) all went
+    // out before Cara was there to receive them, and nothing used to resend them.
+    HostDisk disk("he_collab_catchup_late");
+    HorizonWorld annaWorld, bobWorld, caraWorld;
+    annaWorld.createEntity("Cube");
+    CollabController anna, bob, cara;
+    anna.setWorld(&annaWorld);
+    disk.wire(anna);
+    // The editor writes the GameInstance graph to its file whenever a peer's
+    // deltas land (saveGameInstanceGraph); this stands in for it.
+    anna.onRemoteDocDeltas([&](const std::string& k,
+                               const std::vector<HE::Net::CollabSession::DocDelta>&) {
+        if (k == "::GameInstance::") {
+            const std::string gi = "{\"gi\":\"v2\"}";
+            writeAll(disk.path(k), std::vector<std::uint8_t>(gi.begin(), gi.end()));
+        }
+    });
+    REQUIRE(anna.startHosting(0, "Anna"));
+    bob.setWorld(&bobWorld);
+    bob.onWorldReplaced([&bob] { bob.seedNetIds(); });
+    REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(anna, bob, [&] { return bob.status() == CollabController::Status::Joined; }));
+
+    // Bob saves a material.
+    const std::string slate = "Content/Materials/Slate.hasset";
+    const fs::path bobFile = writeHAsset("he_collab_catchup_slate.hasset",
+                                         HE::AssetType::Material, "slate-v2");
+    bob.requestAssetLock(slate);
+    REQUIRE(pumpUntil(anna, bob, [&] { return bob.ownsAssetLock(slate); }));
+    bob.publishAsset(slate, bobFile.string());
+    REQUIRE(pumpUntil(anna, bob, [&] { return fs::exists(disk.path(slate)); }));
+
+    // Bob edits the GameInstance graph.
+    HE::Net::CollabSession::DocDelta d;
+    d.kind = 0; d.op = 0; d.itemId = 7; d.json = "{\"id\":7}";
+    bob.requestAssetLock("::GameInstance::");
+    REQUIRE(pumpUntil(anna, bob, [&] { return bob.ownsAssetLock("::GameInstance::"); }));
+    REQUIRE(bob.publishDocDeltas("::GameInstance::", { d }));
+    REQUIRE(pumpUntil(anna, bob, [&] { return fs::exists(disk.path("::GameInstance::")); }));
+
+    // Anna deletes an asset the project had before the session started.
+    const std::string old = "Content/Materials/Old.hasset";
+    writeAll(disk.path(old), { 1, 2, 3 });
+    REQUIRE(anna.requestAssetDelete(old));
+    REQUIRE_FALSE(fs::exists(disk.path(old)));
+
+    // Cara arrives.
+    std::map<std::string, std::vector<std::uint8_t>> caraFiles;
+    std::vector<std::string> caraDeletes;
+    cara.onRemoteAsset([&](const std::string& k, const std::vector<std::uint8_t>& b) {
+        caraFiles[k] = b;
+    });
+    cara.onRemoteAssetOp([&](HE::Net::CollabSession::AssetOp op, const std::string& p,
+                             const std::string&, bool) {
+        if (op == HE::Net::CollabSession::AssetOp::Delete) caraDeletes.push_back(p);
+    });
+    cara.setWorld(&caraWorld);
+    cara.onWorldReplaced([&cara] { cara.seedNetIds(); });
+    REQUIRE(cara.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Cara"));
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] {
+        return cara.status() == CollabController::Status::Joined &&
+               caraFiles.size() == 2 && caraDeletes.size() == 1;
+    }));
+    CHECK(contains(caraFiles[slate], "slate-v2"));
+    CHECK(contains(caraFiles["::GameInstance::"], "v2"));
+    CHECK(caraDeletes[0] == old);
+    // Bob had all of it already; the catch-up is for the joiner only.
+    std::size_t bobExtra = 0;
+    bob.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) { ++bobExtra; });
+    pumpUntil3(anna, bob, cara, [] { return false; }, std::chrono::milliseconds(200));
+    CHECK(bobExtra == 0);
+
+    cara.leave();
+    bob.leave();
+    anna.leave();
+    he_test::removeQuiet(bobFile);
+}
+
+TEST_CASE("Catch-up: a client whose link dropped rejoins and gets what it missed")
+{
+    HostDisk disk("he_collab_catchup_rejoin");
+    HorizonWorld annaWorld, bobWorld;
+    annaWorld.createEntity("Cube");
+    CollabController anna, bob;
+    anna.setWorld(&annaWorld);
+    disk.wire(anna);
+    REQUIRE(anna.startHosting(0, "Anna"));
+    bob.setWorld(&bobWorld);
+    bob.onWorldReplaced([&bob] { bob.seedNetIds(); });
+    REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(anna, bob, [&] { return bob.status() == CollabController::Status::Joined; }));
+    // Nothing to rejoin while the session is up.
+    CHECK_FALSE(bob.canRejoin());
+
+    // The link goes. A kick is the one disconnect the test can cause on cue; it
+    // leaves Bob exactly where a dead network does: Failed, session gone.
+    REQUIRE(anna.kickParticipant(bob.localParticipant()));
+    REQUIRE(pumpUntil(anna, bob, [&] {
+        return bob.status() == CollabController::Status::Failed && anna.participants().size() == 1;
+    }));
+    CHECK(bob.canRejoin());
+
+    // Anna keeps working while Bob is gone.
+    const std::string brick = "Content/Materials/Brick.hasset";
+    fs::create_directories(fs::path(disk.path(brick)).parent_path());
+    const fs::path annaFile = writeHAsset("he_collab_catchup_rejoin/Content/Materials/Brick.hasset",
+                                          HE::AssetType::Material, "brick-while-away");
+    // The same file, not the same string: on Windows one side carries '/'
+    // from the relative name and the other '\'.
+    REQUIRE(fs::equivalent(annaFile, fs::path(disk.path(brick))));
+    anna.publishAsset(brick, annaFile.string());
+
+    std::vector<std::uint8_t> got;
+    bob.onRemoteAsset([&](const std::string& k, const std::vector<std::uint8_t>& b) {
+        if (k == brick) got = b;
+    });
+    REQUIRE(bob.rejoinLastSession());
+    REQUIRE(pumpUntil(anna, bob, [&] {
+        return bob.status() == CollabController::Status::Joined && !got.empty();
+    }));
+    CHECK(contains(got, "brick-while-away"));
+    CHECK_FALSE(bob.canRejoin());
+
+    bob.leave();
+    anna.leave();
+}
+
+TEST_CASE("Rejoin: not offered after a ban")
+{
+    Session s;
+    REQUIRE(openSession(s));
+    REQUIRE(s.host.banParticipant(s.client.localParticipant()));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.client.status() == CollabController::Status::Failed &&
+               s.host.participants().size() == 1;
+    }));
+    CHECK_FALSE(s.client.canRejoin());
+    CHECK_FALSE(s.client.rejoinLastSession());
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Lock grant: a client's save that had to wait for the lock goes out when it lands")
+{
+    // publishAsset on a client with no lock asks for one and returns. Nothing
+    // used to send the save once the grant came, so a one-shot write (an MCP
+    // save, a rename sweep) stayed on that machine until somebody saved again.
+    Session s;
+    REQUIRE(openSession(s));
+
+    std::vector<std::uint8_t> got;
+    s.host.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>& b) { got = b; });
+
+    const std::string key  = "Content/Materials/Moss.hasset";
+    const fs::path    file = writeHAsset("he_collab_grant_moss.hasset",
+                                         HE::AssetType::Material, "moss-v2");
+    REQUIRE_FALSE(s.client.ownsAssetLock(key));
+    s.client.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !got.empty(); }));
+    CHECK(contains(got, "moss-v2"));
+    // And the claim that existed only to send it goes back: nobody here has
+    // the asset open, so holding it would lock everyone else out of it.
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !s.host.assetLockedByOther(key); }));
+    CHECK_FALSE(s.client.ownsAssetLock(key));
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Lock grant: the next save right after the claim went back still reaches the host")
+{
+    // Topic 198 step 11 (three-editor run): an MCP material_create then
+    // material_set_param on a client. The grant sent the first file and handed
+    // the lock straight back; the second save, milliseconds later, still saw the
+    // lock as ours, went out, and the host refused it ("does not hold lock").
+    // The client's edit was lost and the host's next save overwrote it.
+    Session s;
+    REQUIRE(openSession(s));
+
+    std::vector<std::uint8_t> got;
+    s.host.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>& b) { got = b; });
+
+    const std::string key  = "Content/Materials/Fern.hasset";
+    const fs::path    file = writeHAsset("he_collab_grant_fern.hasset",
+                                         HE::AssetType::Material, "fern-v1");
+    s.client.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return contains(got, "fern-v1"); }));
+
+    writeHAsset("he_collab_grant_fern.hasset", HE::AssetType::Material, "fern-v2");
+    s.client.publishAsset(key, file.string());
+    CHECK(pumpUntil(s.host, s.client, [&] { return contains(got, "fern-v2"); }));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !s.host.assetLockedByOther(key); }));
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step")
+{
+    // Topic 198 step 8. The host keeps the session's state for everyone; it is
+    // told when anybody saves and notices on its own when nobody is working on
+    // a document anymore. Before, a client's Ctrl+S on the scene wrote the
+    // client's own disk and the host never heard of it. pumpUntil restarts its
+    // clock at 0 each call, so this test keeps its own.
+    using HE::Ed::CollabSettle;
+    HorizonWorld annaWorld, bobWorld;
+    const auto crate = annaWorld.createEntity("Crate");
+    CollabController anna, bob;
+    anna.setWorld(&annaWorld);
+    REQUIRE(anna.startHosting(0, "Anna"));
+    bob.setWorld(&bobWorld);
+    bob.onWorldReplaced([&bob] { bob.seedNetIds(); });
+    REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
+
+    std::uint64_t clock = 0;
+    const auto tickUntil = [&](auto done, std::uint64_t maxSimMs) {
+        const std::uint64_t end = clock + maxSimMs;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (clock < end && std::chrono::steady_clock::now() < deadline) {
+            anna.update(clock);
+            bob.update(clock);
+            if (done()) return true;
+            clock += 50;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return static_cast<bool>(done());
+    };
+    REQUIRE(tickUntil([&] { return bob.status() == CollabController::Status::Joined; }, 600000));
+
+    std::vector<CollabSettle::Settled> kept, keptOnBob;
+    std::vector<std::string> persisted;
+    bool sceneWritable = true;
+    anna.setSettlePersist([&](const std::string& key, CollabSettle::Reason) {
+        if (key == CollabSettle::kSceneKey && !sceneWritable) return false;
+        persisted.push_back(key);
+        return true;
+    });
+    anna.onSessionSettled([&](const std::vector<CollabSettle::Settled>& s) {
+        kept.insert(kept.end(), s.begin(), s.end());
+    });
+    bob.setSettlePersist([&](const std::string&, CollabSettle::Reason) { return true; });
+    bob.onSessionSettled([&](const std::vector<CollabSettle::Settled>& s) {
+        keptOnBob.insert(keptOnBob.end(), s.begin(), s.end());
+    });
+    const auto keptAs = [&](const std::string& key, CollabSettle::Reason r) {
+        return std::count_if(kept.begin(), kept.end(), [&](const CollabSettle::Settled& s) {
+            return s.key == key && s.reason == r;
+        });
+    };
+
+    SUBCASE("a client's save is the host's save")
+    {
+        bob.noteLocalSave(CollabSettle::kSceneKey);
+        REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 5000));
+        REQUIRE(tickUntil([&] { return keptAs(CollabSettle::kSceneKey, CollabSettle::Reason::Saved) == 1; },
+                          3 * CollabSettle::kSaveBatchMs));
+        CHECK(std::count(persisted.begin(), persisted.end(), CollabSettle::kSceneKey) == 1);
+    }
+
+    SUBCASE("a scene nobody touches anymore is kept once, and not while it cannot be written")
+    {
+        const std::uint64_t subject =
+            anna.subjectFor(static_cast<std::uint32_t>(entt::to_integral(crate)));
+        REQUIRE(tickUntil([&] { return bob.entityForNetId(subject) != 0; }, 600000));
+        bob.followSelection(subject);
+        REQUIRE(tickUntil([&] {
+            const HE::Net::LockInfo* l = anna.lockFor(subject);
+            return l && l->owner == bob.localParticipant();
+        }, 600000));
+
+        // Bob drags the crate. Anna applies it, so the scene is the session's
+        // change to keep. Bob keeps the crate selected (and locked) afterwards:
+        // a held lock is not somebody working.
+        sceneWritable = false;
+        const float r[3] = { 0, 0, 0 }, sc[3] = { 1, 1, 1 };
+        for (int i = 0; i < 5; ++i) {
+            const float p[3] = { static_cast<float>(i), 0, 0 };
+            bob.publishTransform(subject, p, r, sc, clock);
+            anna.update(clock); bob.update(clock);
+            clock += 50;
+        }
+        // Bounded by tickUntil's wall clock like the waits above, not by 100
+        // ticks: a slow CI runner delivered the transforms later than that (red
+        // on macOS CI). Safe to wait long: the scene cannot be written, so the
+        // key stays pending however far the clock runs.
+        REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 600000));
+        // Quiet long enough, but Anna is in Play: nothing is reported as kept.
+        CHECK_FALSE(tickUntil([&] { return !kept.empty(); }, CollabSettle::kIdleMs + 1000));
+        CHECK(anna.settlePending(CollabSettle::kSceneKey));
+
+        sceneWritable = true;
+        REQUIRE(tickUntil([&] { return keptAs(CollabSettle::kSceneKey, CollabSettle::Reason::Idle) == 1; }, 1000));
+        // Once: nothing changed since.
+        CHECK_FALSE(tickUntil([&] { return kept.size() > 1; }, 2 * CollabSettle::kIdleMs));
+        CHECK(bob.lockFor(subject) != nullptr);
+    }
+
+    // The host keeps state for everyone; a client never does.
+    CHECK(keptOnBob.empty());
+    bob.leave();
+    anna.leave();
 }

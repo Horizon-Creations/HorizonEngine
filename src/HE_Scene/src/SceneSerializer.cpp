@@ -2818,6 +2818,22 @@ namespace
 #undef HE_RESET_FOR_KEY
 		return false;
 	}
+
+	// Take away every component the entity carries whose key `comps` lacks —
+	// the half of a whole-state write that applyComponents (an update) never
+	// does. The one key the save path leaves out on purpose is honoured here
+	// too: a terrain's MeshComponent is generated, serializeComponents skips it,
+	// and its absence from a terrain's state means nothing.
+	void removeComponentsAbsentFrom(entt::registry& registry, Entity entity, const json& comps)
+	{
+		const bool terrain = registry.all_of<TerrainComponent>(entity);
+#define HE_REMOVE_ABSENT(k, T) \
+		if (registry.all_of<T>(entity) && !comps.contains(k) && \
+		    !(terrain && std::string_view(k) == "mesh")) \
+			registry.remove<T>(entity);
+		HE_SCENE_COMPONENT_KEYS(HE_REMOVE_ABSENT)
+#undef HE_REMOVE_ABSENT
+	}
 #undef HE_SCENE_COMPONENT_KEYS
 
 	// ── Prefab propagation ───────────────────────────────────────────────────
@@ -3511,6 +3527,24 @@ bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
     // Reuses the same restore path as scene loading, so every component type is
     // covered by construction — a new component that loads from a scene file
     // replicates without any extra work here.
+    applyComponents(registry, entity, comps);
+    if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
+        registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });
+    return true;
+}
+
+bool SceneSerializer::replaceEntityComponents(HorizonWorld& world, Entity entity,
+                                              const std::vector<uint8_t>& data)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(entity) || data.empty()) return false;
+
+    const json comps = json::from_cbor(data, /*strict=*/true, /*allow_exceptions=*/false);
+    if (comps.is_discarded() || !comps.is_object()) return false;
+
+    // Removal first, so a key that is both gone and re-added cannot be undone
+    // by the order of the two halves.
+    removeComponentsAbsentFrom(registry, entity, comps);
     applyComponents(registry, entity, comps);
     if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
         registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });

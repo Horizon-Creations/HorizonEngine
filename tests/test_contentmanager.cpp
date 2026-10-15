@@ -1164,6 +1164,64 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 	CHECK(cm.pollHotReload().empty());
 }
 
+// What a collaboration peer's whole-file update relies on (EditorApplication::
+// applyAssetBytes, docs/collab-sync-audit-materials-2026-10-14.md). The file is
+// written under a LOADED asset: loadAsset alone keeps answering with the old copy,
+// which is what an open tab re-read and then kept. Unload + load replaces it under
+// the same UUID, and the master's instances follow only once they are re-derived.
+TEST_CASE("ContentManager: a peer's file over a loaded material needs unload + load")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset master;
+	master.type = HE::AssetType::Material;
+	master.name = "Master";
+	master.path = "mats/master.hasset";
+	master.customShaderFragGlsl = "// v1";
+	REQUIRE(cm.saveAsset(master));
+	MaterialAsset inst;
+	inst.type = HE::AssetType::Material;
+	inst.name = "Inst";
+	inst.path = "mats/inst.hasset";
+	inst.parentMaterialPath = "mats/master.hasset";
+	REQUIRE(cm.saveAsset(inst));
+
+	const HE::UUID masterId = cm.loadAsset("mats/master.hasset");
+	const HE::UUID instId   = cm.loadAsset("mats/inst.hasset");
+	REQUIRE_FALSE(masterId == HE::UUID{});
+	REQUIRE_FALSE(instId == HE::UUID{});
+	cm.syncMaterialInstance(instId);
+	REQUIRE(cm.getMaterial(instId)->customShaderFragGlsl == "// v1");
+
+	// The peer's save, written by another editor into the same file.
+	{
+		ContentManager peer(dir.path.string());
+		const HE::UUID pid = peer.loadAsset("mats/master.hasset");
+		REQUIRE(pid == masterId);
+		MaterialAsset edited = *peer.getMaterial(pid);
+		edited.customShaderFragGlsl = "// v2";
+		REQUIRE(peer.saveAsset(edited));
+	}
+
+	// The trap: the path is loaded, so this is a lookup and nothing is read.
+	CHECK(cm.loadAsset("mats/master.hasset") == masterId);
+	CHECK(cm.getMaterial(masterId)->customShaderFragGlsl == "// v1");
+
+	// What applyAssetBytes does now.
+	REQUIRE(cm.isLoaded(std::string("mats/master.hasset")));
+	CHECK(cm.unloadAsset(cm.idForPath("mats/master.hasset")));
+	const HE::UUID reloaded = cm.loadAsset("mats/master.hasset");
+	CHECK(reloaded == masterId);                          // every reference stays valid
+	CHECK(cm.getMaterial(masterId)->customShaderFragGlsl == "// v2");
+
+	// The instance still carries the derived copy of the old parent until the
+	// hot-reload follow-up re-derives it.
+	CHECK(cm.getMaterial(instId)->customShaderFragGlsl == "// v1");
+	cm.syncMaterialInstancesOf(cm.getMaterial(masterId)->path);
+	CHECK(cm.getMaterial(instId)->customShaderFragGlsl == "// v2");
+}
+
 // Regression: pollHotReload() unloads before reloading, so an asset type that
 // unloadAsset() did not know stayed pinned at its old contents forever. Proven
 // end-to-end here on the particle graph (same hole as InputAction /

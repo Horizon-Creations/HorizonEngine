@@ -552,12 +552,32 @@ void EditorApplication::OnInit()
 		if (!m_editorWorld) return;
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
-		SceneSerializer serializer;
-		serializer.applyEntityComponents(*m_editorWorld, e, blob);
+		// Replace, not update: every blob on this wire is a whole entity's state
+		// (serializeEntityComponents at the sender, from every build that ever
+		// sent one), so a component it lacks was removed over there. A
+		// landscape's grids are the exception: they travel as patches
+		// (TerrainSync), so the blob has none and ours stay.
+		HE::Ed::TerrainSync::replaceKeepingGrids(*m_editorWorld, e, blob);
 		// Mark the transform dirty so the renderer rebuilds its matrix; other
 		// components are read fresh each frame.
 		if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
 			tc->dirty = true;
+	});
+
+	// A peer shaped, painted or planted a landscape, or our own patch came back
+	// from the host (TerrainSync.h: the echo is what orders ours against theirs).
+	m_collab.onRemoteTerrainPatch([this](std::uint32_t handle,
+	                                     const HE::Net::CollabSession::TerrainPatch& p,
+	                                     bool own) {
+		if (own) { m_terrainSync.acknowledge(p.seq); return; }
+		if (!m_editorWorld || handle == 0) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_terrainSync.applyRemote(*m_editorWorld, e, p)) return;
+		// Settings change the component blob of an entity we may be holding;
+		// it is theirs, so it must not go back out as our edit.
+		if ((p.field & ~HE::Ed::TerrainSync::kWholeGrid) == HE::Ed::TerrainSync::Settings)
+			m_collab.rememberComponents(handle,
+			                            HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
 	});
 
 	m_collab.onRemoteDestroy([this](std::uint32_t handle) {
@@ -565,18 +585,35 @@ void EditorApplication::OnInit()
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
 		m_selection.remove(e);
-		m_structureKnown.erase(e);
+		forgetStructureOf(e);
 		m_editorWorld->destroyEntity(e);
 	});
 
-	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle) {
+	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle,
+	                                 const float* t) {
 		if (!m_editorWorld) return;
+		auto& reg = m_editorWorld->registry();
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
-		if (!m_editorWorld->registry().valid(e)) return;
+		if (!reg.valid(e)) return;
 		const Entity parent = parentHandle
 			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
 			: m_editorWorld->rootEntity();
 		m_editorWorld->reparentEntity(e, parent);
+		// Echo protection, the counterpart of the m_structureKnown.erase in
+		// onRemoteDestroy: the diff compares against this record, and without it
+		// the next pass would publish the peer's move straight back at them.
+		m_structureParent[e] = HE::Ed::structParentOf(reg, e);
+		// The sender's local transform under the new parent (Group keeps the
+		// world pose, so it changed); without it the entity would jump.
+		if (t)
+			if (auto* tc = reg.try_get<TransformComponent>(e))
+			{
+				tc->position = glm::vec3(t[0], t[1], t[2]);
+				tc->rotation = glm::vec3(t[3], t[4], t[5]);
+				tc->scale    = glm::vec3(t[6], t[7], t[8]);
+				tc->dirty    = true;
+			}
+		m_editorWorld->markHierarchyDirty();
 	});
 
 	// ── Per-user undo/redo for the session ───────────────────────────────────
@@ -611,6 +648,54 @@ void EditorApplication::OnInit()
 		},
 		[this](std::uint64_t subject) { return m_collab.ownsLock(subject); });
 
+	// The structural half (MCP commands record these through CollabUndoSink).
+	// Never set before, so a session Ctrl+Z on such an entry popped it and did
+	// nothing. Each one is a plain world edit: the structural diff publishes a
+	// create, destroy or re-parent the same way it publishes the user's own,
+	// which is what makes an undo "just another change" for the peers.
+	const auto entityOf = [this](std::uint64_t subject) -> Entity {
+		const std::uint32_t h = subject ? m_collab.entityForNetId(subject) : 0;
+		const Entity e = h ? static_cast<Entity>(static_cast<entt::id_type>(h)) : entt::null;
+		return (m_editorWorld && e != entt::null && m_editorWorld->registry().valid(e))
+			? e : entt::null;
+	};
+	m_collabUndo.setStructuralHandlers(
+		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& subtree,
+		                 std::uint64_t parentSubject) {
+			if (!m_editorWorld || entityOf(subject) != entt::null) return;   // already back
+			SceneSerializer serializer;
+			// preserveIds: it returns under the identity the peers name it by.
+			serializer.instantiatePrefab(*m_editorWorld, subtree, entityOf(parentSubject),
+			                             /*preserveIds=*/true);
+			m_editorWorld->markHierarchyDirty();
+		},
+		[this, entityOf](std::uint64_t subject) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			if (withoutPeerHeld({ e }, "removed by undo").empty()) return;
+			m_selection.remove(e);
+			m_editorWorld->destroyEntity(e);
+		},
+		[this, entityOf](std::uint64_t subject, std::uint64_t parentSubject) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			const Entity p = entityOf(parentSubject);
+			m_editorWorld->reparentEntity(e, p != entt::null ? p : m_editorWorld->rootEntity());
+			m_editorWorld->markHierarchyDirty();
+		},
+		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& bytes) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			// Both sides of a Components entry are whole states (EditorCommands
+			// records them so), so the undo can take a component away again.
+			// A landscape's grids in it come back here too; TerrainSync sends them.
+			HE::Ed::TerrainSync::replaceKeepingGrids(*m_editorWorld, e, bytes);
+			if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
+				tc->dirty = true;
+			m_collab.publishComponents(static_cast<std::uint32_t>(entt::to_integral(e)),
+			                           HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
+		});
+
 	// ── Authored-asset sync ──────────────────────────────────────────────────
 	// Every asset type funnels through ContentManager::saveAsset, so one hook
 	// covers HorizonCode graphs, materials, UI widgets, particle and animator
@@ -618,6 +703,10 @@ void EditorApplication::OnInit()
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
+			// A save the user (or an MCP client) asked for is the moment the host
+			// keeps the session's state (CollabSettle.h); the session's own
+			// once-a-second autosave of a held tab is only traffic.
+			if (!m_collabAutosaveWrite) m_collab.noteLocalSave(relPath);
 			// An application's preview shows the saved assets, so a save is the
 			// signal to rebuild it. Only for the kinds that change what the
 			// preview DOES — a texture or a font swaps itself in through the
@@ -636,6 +725,22 @@ void EditorApplication::OnInit()
 			default: break;
 			}
 		});
+
+	// Host: a settling document's state goes to this disk. Only the scene is not
+	// there yet; every asset key was written as its file arrived (or, for the
+	// GameInstance graph, on every applied delta).
+	m_collab.setSettlePersist([this](const std::string& key, HE::Ed::CollabSettle::Reason) {
+		return key == HE::Ed::CollabSettle::kSceneKey ? persistSessionScene() : true;
+	});
+	// ...and once it is there, it is what the team server commits when the
+	// project hands its history to the server (sourceControl.mode =
+	// "teamServer"); GitController drops it otherwise.
+	m_collab.onSessionSettled([this](const std::vector<HE::Ed::CollabSettle::Settled>& settled) {
+		std::vector<std::string> keys;
+		keys.reserve(settled.size());
+		for (const auto& s : settled) keys.push_back(s.key);
+		m_git.handOverToTeamServer(keys, m_collab.lastSettledMs());
+	});
 
 	m_collab.onAssetLockDenied([this](const std::string& relPath) {
 		// Someone else won the lock race by a round trip. Their state is the
@@ -717,7 +822,14 @@ void EditorApplication::OnInit()
 		}
 		if (isDelete)
 		{
+			// A project override of an engine default (Content Browser "Revert to
+			// Default"): the resident copy is the override's, and it stays the
+			// asset until it is unloaded — the same unload the local revert does,
+			// so the default is what loads next on every machine.
+			const HE::UUID overrideId = contentManager().isEngineOverridePath(full)
+				? contentManager().idForPath(relPath) : HE::UUID{};
 			std::filesystem::remove(full, ec);
+			if (!ec && overrideId != HE::UUID{}) contentManager().unloadAsset(overrideId);
 			EditorAssetTypeCache::invalidate(full);
 			AssetThumbnailCache::invalidate(full);
 			// A C++ class is ONE item in the browser and two files on disk. The
@@ -809,8 +921,61 @@ void EditorApplication::OnInit()
 		m_contentRefreshPending = true;
 	});
 
+	// The host approved deleting or renaming an entity somebody was editing
+	// (CollabEntityOps.h). Fires on every peer including the host, and each one
+	// applies it to its own world — no structural message follows, because the
+	// session would refuse a destroy of an entity a peer still holds.
+	m_collab.onRemoteEntityOp([this](HE::Net::CollabSession::AssetOp op,
+	                                 std::uint64_t subject, const std::string& newName) {
+		if (!m_editorWorld) return;
+		const std::uint32_t h = m_collab.entityForNetId(subject);
+		const Entity e = static_cast<Entity>(static_cast<entt::id_type>(h));
+		auto& reg = m_editorWorld->registry();
+		if (h == 0 || !reg.valid(e) || m_editorWorld->isBuiltin(e)) return;
+		if (op == HE::Net::CollabSession::AssetOp::Delete)
+		{
+			// Exactly a peer's destroy (onRemoteDestroy): everyone does it at
+			// once, so nobody's diff may publish it again. The holder deselects
+			// with it, and followSelection hands its lock back on the next frame.
+			if (m_isPlaying && m_physicsWorld)
+				m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+			m_selection.remove(e);
+			forgetStructureOf(e);
+			m_editorWorld->destroyEntity(e);
+			m_editorWorld->markHierarchyDirty();
+			return;
+		}
+		// A rename: the holder's component blob carries the new name from here
+		// on, and every other machine already set the same one.
+		m_editorWorld->renameEntity(e, newName);
+	});
+
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
+		// The GameInstance graph travels as deltas while everyone is connected;
+		// its whole file only comes from the host catching a joiner up. It is a
+		// project file the editor holds in memory, not a ContentManager asset, so
+		// it is re-read into the graph, the app runtime and the preview here, and
+		// the mirror starts over from it — left seeded from the stale graph, the
+		// difference would read as our own edit and go straight back out.
+		if (relPath == GameInstancePanel::kTabPath)
+		{
+			const std::string full = collabLocalPath(relPath);
+			if (full.empty()) return;
+			{
+				std::ofstream out(full, std::ios::binary | std::ios::trunc);
+				if (!out) return;
+				out.write(reinterpret_cast<const char*>(bytes.data()),
+				          static_cast<std::streamsize>(bytes.size()));
+				if (!out) return;
+			}
+			loadGameInstanceGraph();
+			m_gameInstanceMirror = {};
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
+			Logger::Log(Logger::LogLevel::Info, "Collab: applied the session's GameInstance graph");
+			return;
+		}
 		applyAssetBytes(relPath, bytes);
 		// An open editor tab keeps showing its in-memory state — tell whichever
 		// panel holds this asset to re-read the file, so the peer's edit is
@@ -848,10 +1013,17 @@ void EditorApplication::OnInit()
 		// seedNetIds) and marks the current entity set as known to the
 		// structural diff, so nothing gets re-announced as freshly created.
 		m_structureKnown.clear();
+		// Rebuilt lazily by the next diff (recordMissingParents) from the world
+		// the snapshot left, which is exactly the parentage the peers share.
+		m_structureParent.clear();
+		m_structureUndeletable.clear();
 		// The level script came with the new scene, so the mirror describes a
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
 		m_levelScriptMirror = {};
+		// Same for the landscapes: the next collect takes them as the snapshot
+		// left them, and nothing we sent into the old world is waited for.
+		m_terrainSync.reset();
 		if (m_editorWorld)
 		{
 			m_collab.setWorld(m_editorWorld.get());
@@ -3114,6 +3286,10 @@ void EditorApplication::OnRender(float dt)
 		{
 			m_hotReloadTimer = 0.0f;
 			auto changed = contentManager().pollHotReload();
+			// A peer's file was re-read the moment it arrived (applyAssetBytes);
+			// what follows is the part of a reload it still needs.
+			changed.insert(changed.end(), m_reloadedByPeer.begin(), m_reloadedByPeer.end());
+			m_reloadedByPeer.clear();
 			// One recompile per MODULE, not per entity running it: a script on
 			// twenty entities is one module, and reloading it twenty times only
 			// costs twenty compiles of the same source.
@@ -3135,6 +3311,20 @@ void EditorApplication::OnRender(float dt)
 					break;
 				case HE::AssetType::Material:
 					renderer()->InvalidateMaterial(id);
+					// An instance carries a derived copy of its parent's shader and
+					// parameter block. The Material Editor re-derives them on every
+					// edit it makes; a master that changed on disk (a collaborator's
+					// edit, a pull) has to do the same, or its instances keep
+					// rendering the old graph.
+					if (const MaterialAsset* m = contentManager().getMaterial(id))
+						if (m->parentMaterialPath.empty())
+							contentManager().syncMaterialInstancesOf(m->path);
+					break;
+				case HE::AssetType::MaterialFunction:
+					// The Material Editor caches function graphs for codegen and for
+					// the pins of FunctionCall nodes; only its own save cleared them.
+					if (const MaterialFunctionAsset* fn = contentManager().getMaterialFunction(id))
+						MaterialEditorPanel::forgetFunctionGraph(fn->path);
 					break;
 				case HE::AssetType::Texture:
 					// Texture GPU caches are keyed by material UUID, not texture UUID.
@@ -4559,6 +4749,14 @@ void EditorApplication::OnRender(float dt)
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
 		// Read when a session starts, so pushing it mid-session moves nothing.
 		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
+		// Pushed before the collab pump, which is where the session's state
+		// settles and is handed over: the project's choice of who keeps its
+		// history (Config/ProjectSettings.json, read with the project) then
+		// applies to this frame's hand-over.
+		{
+			const auto& sc = m_projectManager.currentProject().settings.sourceControl;
+			m_git.setTeamServer(sc.teamServer(), sc.team, sc.project);
+		}
 		m_collab.update(nowMs);
 		// After the collab pump, so a session that just ended is withdrawn from
 		// the team in the same frame, and a join the team server answered starts
@@ -4614,6 +4812,27 @@ void EditorApplication::OnRender(float dt)
 
 		if (m_collab.inSession()) syncStructuralChanges();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
+
+		// Landscapes, after the structural diff so a landscape created this frame
+		// went out whole first. Entering or leaving a session starts the mirrors
+		// over: what was edited before it is in the snapshot the peers got.
+		if (m_collab.inSession() != m_terrainSyncLive)
+		{
+			m_terrainSync.reset();
+			m_terrainSyncLive = m_collab.inSession();
+			// Same for a closed-tab HC edit still waiting to go out: the next
+			// session's peers get it with the snapshot, not as a claim of ours.
+			m_collabUntabbedEdits.clear();
+		}
+		if (m_terrainSyncLive && m_editorWorld)
+		{
+			m_terrainSync.setExpectEcho(!m_collab.isHost());
+			m_terrainSync.collect(*m_editorWorld, nowMs,
+				[this](Entity e, const HE::Ed::TerrainSync::Patch& p) {
+					return m_collab.publishTerrainPatch(
+						static_cast<std::uint32_t>(entt::to_integral(e)), p);
+				});
+		}
 
 		// Claim the selected entity, so everyone else sees it is being worked on
 		// before they click it themselves. The PRIMARY only: a lock is one
@@ -4674,10 +4893,11 @@ void EditorApplication::OnRender(float dt)
 				// light, collider, script, name… Serializing one entity is cheap,
 				// and publishComponents hashes the result so an entity that is
 				// merely selected rather than edited sends nothing.
+				// A landscape's grids stay out (megabytes of base64 per frame);
+				// TerrainSync sends them as patches, whoever holds the entity.
 				{
-					SceneSerializer serializer;
 					const std::vector<std::uint8_t> comps =
-						serializer.serializeEntityComponents(*m_editorWorld, selected);
+						HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, selected);
 					if (!comps.empty())
 					{
 						m_collab.publishComponents(
@@ -9849,6 +10069,23 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 
 		publishDocDeltas(tab.assetPath, key);
 
+		// The Level Script and the Game Instance graph have no panel dirty flag,
+		// so the claim below never fired for them: their edits were made, never
+		// locked and therefore never sent (docs/collab-sync-audit-horizoncode-
+		// 2026-10-14.md section 3). For them "edited" is "the document differs
+		// from what the peers have seen". The diff waits in the mirror until the
+		// grant lands, and publishDocDeltas sends it then.
+		if (key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath)
+		{
+			if (!m_collab.inSession() || m_collab.ownsAssetLock(key)) continue;
+			bool edited = false;
+			for (const CollabDocSync::DocBinding& d : collabDocsForTab(tab.assetPath))
+				if (d.adapter && d.mirror && CollabDocSync::hasLocalChanges(*d.adapter, *d.mirror))
+					edited = true;
+			if (edited) m_collab.beginAssetEdit(key);
+			continue;   // no whole file to autosave: the scene / commitGameInstance own that
+		}
+
 		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
 		if (!m_collab.beginAssetEdit(key))
 			continue;   // held by someone else, or the host has not answered yet
@@ -9857,7 +10094,10 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;
-		if (!EditorUI::saveAsset(ctx, tab.assetPath)) continue;
+		m_collabAutosaveWrite = true;
+		const bool wrote = EditorUI::saveAsset(ctx, tab.assetPath);
+		m_collabAutosaveWrite = false;
+		if (!wrote) continue;
 		last = nowMs;
 		// Content assets publish themselves through ContentManager::saveAsset's
 		// hook. A C++ class does not go anywhere near the ContentManager — it is
@@ -9865,6 +10105,30 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// item structure to send deltas for either: it is a text buffer.)
 		if (key.rfind(kSourceKeyPrefix, 0) == 0)
 			m_collab.publishAsset(key, tab.assetPath);
+	}
+
+	// The Level Script or the Game Instance graph, edited with its tab closed —
+	// an MCP client's hc_ tools, which mark it in hc.endEdit. Nothing above walks
+	// a closed tab, so before this the edit stayed on this machine. The same
+	// claim as for an open tab, held only until the diff is out: once nothing
+	// differs from the mirror any more the key drops out of openRel and the loop
+	// below gives the lock back, after the deltas on the same connection.
+	for (auto it = m_collabUntabbedEdits.begin(); it != m_collabUntabbedEdits.end(); )
+	{
+		const std::string key = *it;
+		if (!m_collab.inSession() || openRel.count(key)) { it = m_collabUntabbedEdits.erase(it); continue; }
+		publishDocDeltas(key, key);
+		bool edited = false;
+		for (const CollabDocSync::DocBinding& d : collabDocsForTab(key))
+			if (d.adapter && d.mirror && CollabDocSync::hasLocalChanges(*d.adapter, *d.mirror))
+				edited = true;
+		if (!edited) { it = m_collabUntabbedEdits.erase(it); continue; }
+		// As for a tab: the host's "may I edit" first (idempotent), then the
+		// claim, which waits for that answer. A client's grant is a round trip away.
+		m_collab.beginAssetEditSession(key);
+		m_collab.beginAssetEdit(key);
+		openRel.insert(key);
+		++it;
 	}
 
 	// Locks whose tab is gone are released — holding an asset nobody here is
@@ -10092,9 +10356,25 @@ void EditorApplication::setupMcpTools()
 		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
 		// DocEdit command that step's plan describes and this step does not build.
 		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow("MCP: Level Script");
+
+		// In a session the edit has to reach the peers with no tab open, and
+		// the mirror is what tells an edit of ours from what they have. Seeded
+		// now, before the mutation, it holds the state they share; seeded
+		// after, it would hold the edit and the diff would find nothing.
+		const std::string tabKey = key == HE::Ed::kMcpDocLevelScript  ? LevelScriptPanel::kTabPath
+		                         : key == HE::Ed::kMcpDocGameInstance ? GameInstancePanel::kTabPath
+		                                                              : std::string();
+		if (!tabKey.empty()) publishDocDeltas(tabKey, tabKey);
 	};
 
 	hc.endEdit = [this](const std::string& key) {
+		if (m_collab.inSession())
+		{
+			if (key == HE::Ed::kMcpDocLevelScript)
+				m_collabUntabbedEdits.insert(LevelScriptPanel::kTabPath);
+			else if (key == HE::Ed::kMcpDocGameInstance)
+				m_collabUntabbedEdits.insert(GameInstancePanel::kTabPath);
+		}
 		if (key == HE::Ed::kMcpDocGameInstance)
 		{
 			// Exactly what the Game Instance tab does after a human's edit
@@ -10803,7 +11083,15 @@ void EditorApplication::setupEditorCommands()
 	};
 	h.publishComponents = [this](std::uint32_t handle,
 	                             const std::vector<std::uint8_t>& blob) {
-		m_collab.publishComponents(handle, blob);
+		// The whole state, but a landscape without its grids: TerrainSync sends
+		// what the command changed in them, as patches.
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (m_editorWorld && m_editorWorld->registry().valid(e) &&
+		    m_editorWorld->registry().any_of<TerrainComponent, FoliageComponent>(e))
+			m_collab.publishComponents(handle,
+			                           HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
+		else
+			m_collab.publishComponents(handle, blob);
 	};
 	h.preloadAssetRefs = [this] {
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
@@ -10824,7 +11112,7 @@ void EditorApplication::setupEditorCommands()
 		// delete it would be the opposite of what is wanted — the peers would
 		// never hear that the client removed anything. deleteSelectedEntity, the
 		// human's path, does not erase either.
-		if (origin == HE::Ed::Origin::Remote) m_structureKnown.erase(e);
+		if (origin == HE::Ed::Origin::Remote) forgetStructureOf(e);
 	};
 	m_commands.setHooks(std::move(h));
 }
@@ -10971,7 +11259,14 @@ void EditorApplication::syncStructuralChanges()
 	for (const Entity e : HE::Ed::newSubtreeRoots(reg, current, m_structureKnown))
 	{
 		SceneSerializer serializer;
-		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
+		std::vector<std::uint8_t> blob;
+		{
+			// Entities the peers already have that were moved under this new
+			// subtree (Group) stay out of its blob — see DetachKnownDescendants.
+			// The re-parent pass below moves the originals instead.
+			HE::Ed::DetachKnownDescendants adopted(reg, e, m_structureKnown);
+			blob = serializer.serializeSubtree(*m_editorWorld, e);
+		}
 		bool sent = true;
 		if (!blob.empty() && inSession)
 		{
@@ -11040,6 +11335,77 @@ void EditorApplication::syncStructuralChanges()
 		HE::Ed::markSubtreeKnown(reg, e, localOnlyFn, m_structureKnown);
 	}
 
+	// ── Re-parented ──
+	// After the creates, so a move under a group made this frame finds the group
+	// already announced (one TCP stream: the peer reads the create first).
+	//
+	// A known entity gets its parent recorded the first time it is seen here, and
+	// its wire id cached with it: publishDestroy only looks ids up, it cannot read
+	// them from an entity that is already gone, and the children of a subtree that
+	// arrived or was created mid-session were never asked for theirs — deleting
+	// one before anybody had selected it sent nothing at all.
+	for (const Entity e : m_structureKnown)
+		if (reg.valid(e) && !m_structureParent.count(e))
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+	HE::Ed::recordMissingParents(reg, m_structureKnown, m_structureParent);
+
+	const Entity worldRoot = m_editorWorld->rootEntity();
+	const auto wireHandle = [&](Entity p) -> std::uint32_t {
+		// The world root is "no parent" on the wire: every peer has its own root
+		// entity and maps 0 onto it (onRemoteReparent).
+		return (p == entt::null || p == worldRoot)
+			? 0u : static_cast<std::uint32_t>(entt::to_integral(p));
+	};
+	for (const HE::Ed::StructReparent& m :
+	     HE::Ed::reparentedSince(reg, m_structureKnown, m_structureParent))
+	{
+		// A parent whose create has not gone out yet (refused, retrying) would
+		// resolve to nothing on the far side, and the receiver would read that as
+		// "the world root". Wait for it; the record stays, so this comes up again.
+		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
+			continue;
+
+		const std::uint64_t subject =
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(m.entity)));
+		const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+		if (lock && lock->owner != m_collab.localParticipant())
+		{
+			// Someone else is editing it: the host would refuse the move, and a
+			// move that only happened here is the silent divergence this pass
+			// exists to end. Put it back and say so.
+			const Entity back = reg.valid(m.from) ? m.from : worldRoot;
+			m_editorWorld->reparentEntity(m.entity, back);
+			m_editorWorld->markHierarchyDirty();
+			// Recorded where it actually ended up: a revert that could not land on
+			// the recorded parent (gone, or refused) would otherwise be reported,
+			// reverted and announced again on every frame.
+			m_structureParent[m.entity] = HE::Ed::structParentOf(reg, m.entity);
+			const std::string name =
+				reg.all_of<NameComponent>(m.entity) ? reg.get<NameComponent>(m.entity).name
+				                                    : std::string("The entity");
+			m_notifications.post(HE::Ed::NoteLevel::Warning,
+				"\"" + name + "\" was not moved: " + lock->ownerName + " is editing it.",
+				"It stays where it was. Try again once they have deselected it.");
+			continue;
+		}
+
+		const float* t9 = nullptr;
+		float t[9];
+		if (const auto* tc = reg.try_get<TransformComponent>(m.entity))
+		{
+			const float v[9] = { tc->position.x, tc->position.y, tc->position.z,
+			                     tc->rotation.x, tc->rotation.y, tc->rotation.z,
+			                     tc->scale.x,    tc->scale.y,    tc->scale.z };
+			std::memcpy(t, v, sizeof(t));
+			t9 = t;
+		}
+		// False here is a connection that is momentarily gone (the lock case was
+		// answered above): leave the record, the next pass sends it again.
+		if (m_collab.publishReparent(static_cast<std::uint32_t>(entt::to_integral(m.entity)),
+		                             wireHandle(m.to), t9))
+			m_structureParent[m.entity] = m.to;
+	}
+
 	// ── Destroyed ──
 	// Collected first: erasing from the set while iterating it would invalidate
 	// the iterator.
@@ -11050,8 +11416,22 @@ void EditorApplication::syncStructuralChanges()
 	}
 	for (const Entity e : gone)
 	{
-		m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e)));
+		// A destroy that did not go out is not one the peers know about. This
+		// used to erase the entry either way, so a refused destroy left the
+		// entity alive everywhere but here. The delete paths now refuse a
+		// peer-held subtree up front (withoutPeerHeld, EditorCommands), so what
+		// is left is a connection gap: retry for a second's worth of frames,
+		// the same rule as an unsendable create, then stop.
+		if (!m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e))))
+		{
+			constexpr int kSendRetryFrames = 60;
+			if (++m_structureUndeletable[e] < kSendRetryFrames) continue;
+			HE_LOG_WARN(Editor, "Collab: a deletion could not be sent to the others; "
+			                    "the entity may still exist on their machines");
+		}
+		m_structureUndeletable.erase(e);
 		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
 	}
 }
 
@@ -11079,8 +11459,29 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 	}
 	// Only content assets are registered with the ContentManager; a raw source
 	// file has nothing to reload there. The open tab is refreshed by the caller.
-	if (relativePath.rfind(kSourceKeyPrefix, 0) != 0)
-		contentManager().loadAsset(relativePath);
+	if (relativePath.rfind(kSourceKeyPrefix, 0) == 0) return;
+
+	// loadAsset is a no-op for a path that is already loaded, and every asset a
+	// tab shows IS loaded: the tab reload the caller does next would re-read the
+	// copy from before the peer's edit, seed its collab mirror from it, and keep
+	// showing that once the hot-reload poll caught up, because nothing reloads
+	// the tab a second time. So the copy is replaced here, the way the poll
+	// replaces one (same UUID, every reference stays valid), and not left to the
+	// poll noticing a newer mtime.
+	ContentManager& cm = contentManager();
+	if (cm.isLoaded(relativePath))
+	{
+		const HE::UUID old = cm.idForPath(relativePath);
+		cm.unloadAsset(old);
+		const HE::UUID id = cm.loadAsset(relativePath);
+		if (!(id == HE::UUID{}))
+		{
+			m_reloadedByPeer.push_back(id);
+			m_hotReloadTimer = 1.5f;   // the poll's follow-up, on the next frame
+		}
+		return;
+	}
+	cm.loadAsset(relativePath);
 }
 
 // ─── Duplicate / cut / copy / paste / delete ──────────────────────────────────
@@ -11188,9 +11589,12 @@ void EditorApplication::copySelectedEntity(bool cut)
 	m_entityClipboard = std::move(blobs);
 
 	if (!cut) return;
+	// The copy stands either way; only the removal half is refused.
+	const std::vector<Entity> removable = withoutPeerHeld(sources, "cut", /*askHost=*/true);
+	if (removable.empty()) return;
 	m_selection.clear();
 	if (!m_isPlaying) m_undo.snapshotNow("Cut Entity"); // see duplicateSelectedEntity()
-	for (Entity src : sources)
+	for (Entity src : removable)
 	{
 		// Re-checked rather than trusted: the roots are disjoint subtrees, but
 		// entt reuses handles and a stale one could name something else.
@@ -11232,6 +11636,112 @@ void EditorApplication::pasteEntityClipboard()
 	m_editorWorld->markHierarchyDirty();
 }
 
+void EditorApplication::forgetStructureOf(Entity root)
+{
+	// The whole subtree, not just the root: a peer's destroy took the children
+	// with it there too, and leaving them known would make the next diff publish
+	// one destroy per descendant back at everybody (receivers ignore them, but a
+	// big prefab deleted by one peer cost a message per entity from every other).
+	if (!m_editorWorld) return;
+	auto& reg = m_editorWorld->registry();
+	std::vector<Entity> stack{ root };
+	while (!stack.empty())
+	{
+		const Entity e = stack.back();
+		stack.pop_back();
+		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
+		if (!reg.valid(e)) continue;
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			stack.insert(stack.end(), h->children.begin(), h->children.end());
+	}
+}
+
+std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>& targets,
+                                                      const char* verb, bool askHost)
+{
+	if (!m_collab.inSession() || !m_editorWorld) return targets;
+	auto& reg = m_editorWorld->registry();
+	const HE::Net::ParticipantId me = m_collab.localParticipant();
+
+	// The whole subtree: a destroy takes the children with it, and the host only
+	// checks the lock of the entity the message names — a child somebody was
+	// editing used to die with an unheld parent.
+	std::string holder;
+	std::function<bool(Entity)> heldByPeer = [&](Entity e) -> bool {
+		if (!reg.valid(e)) return false;
+		const std::uint64_t subject =
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+		if (const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+		    lock && lock->owner != me)
+		{
+			holder = lock->ownerName;
+			return true;
+		}
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			for (const Entity c : h->children)
+				if (heldByPeer(c)) return true;
+		return false;
+	};
+
+	std::vector<Entity> allowed;
+	std::vector<Entity> held;
+	std::string refusedName;
+	std::string refusedHolder;
+	int refused = 0;
+	for (const Entity e : targets)
+	{
+		if (!heldByPeer(e)) { allowed.push_back(e); continue; }
+		held.push_back(e);
+		if (++refused == 1)
+		{
+			refusedName   = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
+			                                             : std::string("An entity");
+			refusedHolder = holder;
+		}
+	}
+	// Not a dead end any more: the host decides, as it does for an asset somebody
+	// is working on, and its row names the holder. Nothing moves here until the
+	// approval comes back to every machine at once (onRemoteEntityOp). One batch
+	// for the lot, so one Delete keypress is one row in the host's in-tray.
+	if (refused > 0 && askHost)
+	{
+		const bool batch = held.size() > 1;
+		if (batch) m_collab.beginAssetOpBatch();
+		int asked = 0;
+		for (const Entity e : held)
+		{
+			const std::string name = reg.all_of<NameComponent>(e)
+				? reg.get<NameComponent>(e).name : std::string();
+			const std::uint64_t subject =
+				m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+			if (m_collab.requestEntityDelete(subject, name)) ++asked;
+		}
+		if (batch) m_collab.endAssetOpBatch();
+		if (asked == refused)
+		{
+			const std::string what = refused == 1
+				? "Asked the host to delete \"" + refusedName + "\""
+				: "Asked the host to delete " + std::to_string(refused) + " entities";
+			m_notifications.post(HE::Ed::NoteLevel::Info,
+				what + ": " + refusedHolder + " is editing it or something under it.",
+				"It stays until the host approves, then goes on every machine at once.");
+			return allowed;
+		}
+	}
+	if (refused > 0)
+	{
+		const std::string what = refused == 1
+			? "\"" + refusedName + "\" was not " + verb
+			: std::to_string(refused) + " entities were not " + verb;
+		m_notifications.post(HE::Ed::NoteLevel::Warning,
+			what + ": " + refusedHolder + " is editing it or something under it.",
+			"Nothing was removed for them on any machine. Try again once they have "
+			"deselected it.");
+	}
+	return allowed;
+}
+
 void EditorApplication::deleteSelectedEntity()
 {
 	if (!m_editorWorld) return;
@@ -11242,6 +11752,7 @@ void EditorApplication::deleteSelectedEntity()
 		if (e != entt::null && m_editorWorld->registry().valid(e) &&
 		    !m_editorWorld->isBuiltin(e))
 			targets.push_back(e);
+	targets = withoutPeerHeld(targets, "deleted", /*askHost=*/true);
 	if (targets.empty()) return;
 
 	m_selection.clear();
@@ -11515,12 +12026,18 @@ AppContext EditorApplication::makeContext()
 		// EditorUI, fed by a "why" string or callback on AppContext. Both live
 		// outside this file, which is why there is no message here rather than an
 		// unreachable one.
+		// In a session the snapshot stack must never restore: it would bring the
+		// whole world back under new handles and revert everyone else's work
+		// (EditorUI routes its controls to collabUndo; this is the backstop for
+		// any caller that reaches the callback directly).
 		.undo                = [this]{
 			if (m_isPlaying) return;
+			if (m_collab.inSession()) { m_collabUndo.undo(); return; }
 			if (m_undo.undo()) m_selection.clear();
 		},
 		.redo                = [this]{
 			if (m_isPlaying) return;
+			if (m_collab.inSession()) { m_collabUndo.redo(); return; }
 			if (m_undo.redo()) m_selection.clear();
 		},
 		.duplicateEntity     = [this]{ duplicateSelectedEntity(); },
@@ -11528,6 +12045,29 @@ AppContext EditorApplication::makeContext()
 		.cutEntity           = [this]{ copySelectedEntity(true);  },
 		.pasteEntity         = [this]{ pasteEntityClipboard();    },
 		.deleteEntity        = [this]{ deleteSelectedEntity();    },
+		.askHostToRename     = [this](Entity e, const std::string& newName) -> bool {
+			// Only the entity itself: a rename touches no child. Nobody else
+			// holding it is the ordinary case — the rename happens here and the
+			// component blob carries it, exactly as before.
+			// Not during play: the panels then show the play world, whose
+			// handles are not the session's entities.
+			if (!m_collab.inSession() || !m_editorWorld || m_isPlaying || newName.empty())
+				return false;
+			auto& reg = m_editorWorld->registry();
+			if (!reg.valid(e)) return false;
+			const std::uint64_t subject =
+				m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+			const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+			if (!lock || lock->owner == m_collab.localParticipant()) return false;
+			const std::string name = reg.all_of<NameComponent>(e)
+				? reg.get<NameComponent>(e).name : std::string();
+			if (!m_collab.requestEntityRename(subject, name, newName)) return false;
+			m_notifications.post(HE::Ed::NoteLevel::Info,
+				"Asked the host to rename \"" + name + "\" to \"" + newName + "\": " +
+					lock->ownerName + " is editing it.",
+				"The name changes on every machine at once when the host approves.");
+			return true;
+		},
 		.entityClipboardFull = !m_entityClipboard.empty(),
 		.revertPrefabOverride = [this](Entity root, const PrefabInstanceComponent::Override& o) {
 			return revertPrefabOverride(root, o);
@@ -12829,10 +13369,32 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 		m_autosave.clear();
 		captureSceneThumbnail(path);
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
+		// In a session the host keeps the scene for everyone: a client's save
+		// tells it to write its own copy (persistSessionScene). The host's own
+		// settle write is not a new save.
+		if (!m_settleWritingScene) m_collab.noteLocalSave(HE::Ed::CollabSettle::kSceneKey);
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
 	return false;
+}
+
+// The real scene file, not a recovery copy: the host's disk is the session's
+// state (a joiner is caught up from it, source control and the team server read
+// it), and a copy under Saved/ is something neither of them ever sees. This is
+// what "the host saves for everyone" means for the scene; assets are on the
+// host's disk already, written as their files arrive.
+bool EditorApplication::persistSessionScene()
+{
+	// Play swaps the world, the dump path quits after one frame; an unnamed
+	// scene has no file to write and asking where would be a dialog nobody
+	// opened. All of them stay pending and are tried again.
+	if (!m_editorWorld || m_isPlaying || !m_dumpPath.empty()) return false;
+	if (m_currentScenePath.empty()) return false;
+	m_settleWritingScene = true;
+	const bool ok = saveSceneToPath(m_currentScenePath);
+	m_settleWritingScene = false;
+	return ok;
 }
 
 // The solo autosave's tick. What it writes is a recovery copy in Saved/Autosave,

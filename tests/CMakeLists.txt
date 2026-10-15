@@ -352,7 +352,9 @@ add_executable(he_tests
     test_net_lanbeacon.cpp
     test_net_collab.cpp
     test_collab_controller.cpp
+    test_collab_settle.cpp
     test_collab_undo.cpp
+    test_terrain_sync.cpp
     test_editor_commands.cpp
     test_mcp_bridge.cpp
     test_mcp_lock_book.cpp
@@ -603,6 +605,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatch.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
+    # Landscape grids over a session (test_terrain_sync.cpp): diff, patch, the
+    # host-ordered reconciliation. Scene + HorizonNet only, no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainSync.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
     # The Input Mapping panel's model: the decoded asset, its JSON codec and the

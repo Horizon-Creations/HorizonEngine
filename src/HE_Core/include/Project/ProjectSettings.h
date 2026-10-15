@@ -477,18 +477,43 @@ struct HE_API ProjectMultiplayerSettings
     static constexpr int   kMaxRpcPerSecond      = 10000;
 };
 
+// ─── Source control ───────────────────────────────────────────────────────────
+// Who keeps this project's history (docs/team-server-source-control-design-
+// 2026-10-13.md §6.1). "git" is the editor talking to a repository directly,
+// which is what every project did before the team server existed and stays the
+// default. "teamServer" hands that job to the team's server: it takes every
+// member's saves, merges them and commits, and the editor no longer commits or
+// pushes to a local .git itself.
+//
+// A project setting and not a preference because the whole team has to flip
+// together: this file is synced, so one change reaches everybody. The server's
+// address and the member's login are per user (the team settings), never here.
+struct HE_API ProjectSourceControlSettings
+{
+    enum class Mode : std::uint8_t { Git, TeamServer };
+
+    Mode mode = Mode::Git;
+    // The team and the project on its server, as the team admin named them when
+    // the project was created there. Only read with mode == TeamServer.
+    std::string team;
+    std::string project;
+
+    bool teamServer() const { return mode == Mode::TeamServer; }
+};
+
 struct HE_API ProjectSettings
 {
     static constexpr int kVersion = 1;
 
-    ProjectGameSettings        game;
-    ProjectShadowSettings      shadows;
-    ProjectPhysicsSettings     physics;
-    ProjectRenderDefaults      renderDefaults;
-    ProjectGraphics            graphics;
-    ProjectInputSettings       input;
-    ProjectAntiCheatSettings   antiCheat;
-    ProjectMultiplayerSettings multiplayer;
+    ProjectGameSettings          game;
+    ProjectShadowSettings        shadows;
+    ProjectPhysicsSettings       physics;
+    ProjectRenderDefaults        renderDefaults;
+    ProjectGraphics              graphics;
+    ProjectInputSettings         input;
+    ProjectAntiCheatSettings     antiCheat;
+    ProjectMultiplayerSettings   multiplayer;
+    ProjectSourceControlSettings sourceControl;
 
     // True when nothing differs from a fresh construction. The saver uses it to
     // leave a project that never touched its settings WITHOUT a file, so an old
