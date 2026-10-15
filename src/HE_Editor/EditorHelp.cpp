@@ -9328,7 +9328,10 @@ namespace
 		// the editor, one section per page so the reference is split the way
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
-		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
+		{ "Project Graphics/", "editor-settings", "Settings Reference", "Project: graphics" },
+		{ "Input/",            "editor-settings", "Settings Reference", "Project: input" },
+		{ "Viewport Quality/", "editor-settings", "Settings Reference", "Viewport" },
+		{ "Anti-Cheat/",      "editor-settings", "Settings Reference", "Project: anti-cheat" },
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
