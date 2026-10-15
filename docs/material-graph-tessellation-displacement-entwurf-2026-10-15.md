@@ -1,9 +1,9 @@
 # Material-Graph: Tessellation/Displacement als Pin am Output-Knoten — Entwurf
 
 Thema 207, Schritt 1 von 4 (nur Doku, kein Code). Ziel: ein `Displacement`-Pin am
-Output-Knoten des Material-Graphen, der auf D3D11, D3D12 und Vulkan per GPU-Tessellation
-neue Geometrie erzeugt und entlang der Normale verschiebt; GL, Metal und der
-Software-Renderer bekommen einen sauberen Fallback ohne Pin-Wirkung.
+Output-Knoten des Material-Graphen, der auf D3D11, D3D12, Vulkan und (seit der Entscheidung
+in Abschnitt 6) OpenGL per GPU-Tessellation neue Geometrie erzeugt und entlang der Normale
+verschiebt; Metal und der Software-Renderer bekommen einen sauberen Fallback ohne Pin-Wirkung.
 
 Kennzeichnung: **[geprüft]** = im Code/Quelltext nachgelesen mit Zeilenangabe,
 **[nicht geprüft]** = Annahme oder Spezifikationswissen, auf diesem Gerät nicht ausgeführt.
@@ -250,14 +250,14 @@ WPO+Displacement = eigenes Folgethema.
 **Ohne Unterstützung verhält sich das Material exakt so, als wäre Pin 9 unverbunden:** gleicher
 Pipeline-Schlüssel, gleicher Shadertext, kein Magenta, kein ausgelassener Draw. Gilt für:
 
-1. GL, Metal, Software (Plan-Umfang, siehe Tabelle).
+1. Metal, Software (siehe Tabelle); GL-Kontext ohne Tessellation (unter 4.0).
 2. Vulkan-Gerät ohne `tessellationShader`.
 3. HS/DS-Compile- oder PSO-Fehler → einmal loggen, Pipeline ohne Tessellation.
 4. Paket ohne `tessControl/tessEval` und ohne shaderc.
 5. D3D11/D3D12 auf Feature Level unter 11_0 (Hull/Domain sind ein 11_0-Feature).
 6. Draw-Pfade mit eigenem Vertexshader (Instanced, Skinned, siehe 4.1).
 
-Der Editor zeigt am Pin einen Hinweis „wirkt nur auf D3D11, D3D12, Vulkan". Bounds dürfen
+Der Editor zeigt am Pin einen Hinweis „wirkt nur auf D3D11, D3D12, Vulkan, OpenGL". Bounds dürfen
 auch im Fallback aufgebläht bleiben (konservativ, billig).
 
 | Backend | API kann Tessellation | Toolchain | Plan |
@@ -265,7 +265,7 @@ auch im Fallback aufgebläht bleiben (konservativ, billig).
 | D3D11 | ja, FL 11_0 / SM 5.0 | FXC hs/ds_5_0 ja; SPIRV-Cross-HLSL nein → Schalen | **unterstützt** |
 | D3D12 | ja | wie D3D11 | **unterstützt** |
 | Vulkan | ja, optionales Feature `tessellationShader` (Desktop fast überall; lavapipe, MoltenVK) [nicht geprüft] | glslang tesc/tese direkt | **unterstützt** |
-| OpenGL | ja, Core seit 4.0; macOS meldet 4.1 [nicht geprüft auf diesem Gerät] | SPIRV-Cross-GLSL kann beide Stufen | Fallback (Plan) |
+| OpenGL | ja, Core seit 4.0; macOS meldet 4.1 [nicht geprüft auf diesem Gerät] | SPIRV-Cross-GLSL kann beide Stufen | **unterstützt** (Entscheidung Abschnitt 6) |
 | Metal | ja (Post-Tessellation-Vertex + Faktor-Puffer per Compute) | SPIRV-Cross-MSL kann beide Stufen | Fallback (Plan) |
 | Software | nein | — | Fallback |
 
@@ -284,7 +284,12 @@ sehen** — Schritt 3 („Vorschau der Verformung") hängt damit an Windows.
 - **D** Nur die Material-Editor-Vorschau verschiebt per Vertex (WPO-artig) auf dem dichten
   Vorschau-Mesh: weicht vom Spielbild ab, widerspricht „ohne Pin-Wirkung".
 
-**Empfehlung: B** für 0.7.0, C als Folgethema. Ohne Antwort gilt A (Plan wie geschrieben).
+**Entschieden (Queen, Anfrage #100, 15.10.): B.** GL wird viertes unterstütztes Backend für
+0.7.0 (SPIRV-Cross-GLSL410 tesc/tese, `glPatchParameteri(GL_PATCH_VERTICES, 3)`, Draw mit
+`GL_PATCHES`, Programm mit vier Stufen; Uniform-Blöcke/Sampler, die der DS liest, binden per
+Name wie heute). Damit zeigen headless GL-Dumps die Verformung auf dem Mac. Metal (C) ist als
+separates Folgethema vorgemerkt, nicht jetzt. Ob macOS-GL 4.1 Tessellation tatsächlich ausführt,
+ist der erste Test in Schritt 2 [nicht geprüft].
 
 ## 7. Prüfplan für Schritt 2–4
 
@@ -308,7 +313,8 @@ sehen** — Schritt 3 („Vorschau der Verformung") hängt damit an Windows.
 - **Verified:** alle [geprüft]-Stellen per grep/Lesen im Worktree und im gefetchten SPIRV-Cross (`cmake-build-dmg26/_deps/spirv_cross-src`); Zeilen oben.
 - **Not verified:** kein Build, kein Shader kompiliert; WPO+Texture-Fehler nur gelesen; Entry-Rename-Mechanismus nur gelesen; Vulkan/GL/MoltenVK-Fähigkeiten aus Spezifikationswissen.
 - **Decisions taken:** Float statt Vec3; Einstellungen am Knoten (Collab); Klemme auf maxDisplacement; Clip-Position der Kontrollpunkte interpolieren + nur den Offset per Transpose-Trick (wie WPO, Höhe 0 = bitgleich); Schlüssel nur auf tessellierenden Backends falten; Instanced/Skinned = Fallback; Schatten/GI ohne Displacement (wie WPO); ein Domain-Assembler mit zwei Prologen.
-- **Decisions suggested, not taken:** GL als vierter Backend (Abschnitt 6, Option B); Displacement-Normale gegen Naht-Risse; Bildschirmraum-Faktor; material-bewusster Schattenpass.
+- **Decision by the queen (#100):** GL is the fourth supported backend (Option B); Metal is a separate follow-up topic.
+- **Decisions suggested, not taken:** Displacement-Normale gegen Naht-Risse; Bildschirmraum-Faktor; material-bewusster Schattenpass.
 - **Pending:** Schritt 2 Codegen + Backends, Schritt 3 Editor-UI, Schritt 4 Abnahme.
 - **Traps:** SPIRV-Cross-HLSL wirft für tesc/tese; WPO-Vertex hat keine Texturen; D3D11 bindet pro Stufe; D3D12-Root-Parameter mit `VISIBILITY_VERTEX`; Vulkan-Feature nicht aktiviert; negatives Displacement → Schatten/GI-Artefakte.
-- **Next steps:** 1. `MaterialGraph.h/.cpp`: Pin 9, `MatTessSettings`, `"tess"`-JSON, Scope „ds", `displacementBody` + Tests. 2. `ShaderCompiler.h/.cpp`: Stages TessControl/TessEval, HLSL-Entry-Rename. 3. `MaterialShaderLibrary`: `assembleDomain` (zwei Prologe), `tessControl/tessEval`, Hash-Faltung. 4. Asset-Tail + Variant-Felder. 5. Vulkan, dann D3D11, dann D3D12 verdrahten (4.4).
+- **Next steps:** 1. `MaterialGraph.h/.cpp`: Pin 9, `MatTessSettings`, `"tess"`-JSON, Scope „ds", `displacementBody` + Tests. 2. `ShaderCompiler.h/.cpp`: Stages TessControl/TessEval, HLSL-Entry-Rename. 3. `MaterialShaderLibrary`: `assembleDomain` (zwei Prologe), `tessControl/tessEval`, Hash-Faltung. 4. Asset-Tail + Variant-Felder. 5. GL zuerst (auf dem Mac prüfbar: headless Dump, Pixel-A/B Höhe 0 gegen unverbunden), dann Vulkan, D3D11, D3D12 verdrahten (4.4).
