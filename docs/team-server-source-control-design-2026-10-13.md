@@ -519,7 +519,8 @@ States: 1 pending, 2 ok, 3 failing (retried), 4 diverged (stopped). `time` = las
 ## Handoff (step 3)
 
 - **Topic / step:** 199, step 3 (GitHub backup). Code: CollabSession `claude/he-net-relay-server`
-  `b6aaa00` (pushed). HE side: this doc, section 13.
+  `b6aaa00` + `283f875` (git-lfs only when a pointer exists; second flush round) (pushed). HE side:
+  this doc, section 13.
 - **Done:** `ScBackup` (key, URL/branch rules, porcelain parsing, push + LFS push, `backup.txt`),
   BACKUP_SET/STATUS in `RelayServer::StartScRequest` → `HandleBackupSet`/`BackupStatusBody`,
   scheduler `CheckBackups` on the 250 ms tick, `FlushBackups` after `Run`'s loop, second `Worker`
@@ -535,8 +536,16 @@ States: 1 pending, 2 ok, 3 failing (retried), 4 diverged (stopped). `time` = las
   `Permission denied (publickey)` in state failing (so the ssh line works and no agent key leaks).
 - **Not verified:** a successful push to a real GitHub repo with a registered deploy key, and
   **git-lfs over a deploy key** (git-lfs-authenticate/HTTPS batch, risk 11); the host (git, git-lfs,
-  openssh-client not installed by `deploy.sh` yet); Linux CI for `b6aaa00`: run 38702817031
-  (https://github.com/Horizon-Creations/CollabSession/actions/runs/38702817031), see the result post.
+  openssh-client not installed by `deploy.sh` yet). CI: `b6aaa00` green (run 38702817031: linux,
+  linux ASan/UBSan, macos); `283f875` run 38703502112 was still running at handoff.
+- **Caveat:** github.com host keys are compiled in with no override. If GitHub rotates one (as in
+  2023), every backup goes `failing: Host key verification failed` until a rebuild; a
+  `--sc-known-hosts PATH` flag is the cheap escape hatch if that ever matters.
+- **Real-GitHub recipe (step 5, acceptance 6/7):** scratch private repo (`gh repo create`), BACKUP_SET
+  → pubkey, `gh api -X POST repos/O/R/keys -f title=horizon-backup -f key="$PUB" -F read_only=false`,
+  save once (plus a ≥ 50 MiB `.png` for LFS), wait for state ok, check `gh api repos/O/R/branches/main`
+  and `git lfs ls-files` + `git lfs fsck` on a clone, delete the repo. Not done here: creating repos
+  in the org is outward-facing and was not asked for.
 - **Decisions:** second worker thread; state in `backup.txt`; LFS before refs; explicit-oid atomic
   push; key per repository; url empty = off; BACKUP_STATUS readable by every member and carries
   url/branch/pubkey; local paths only behind the test flag; first push after the normal quiet time
