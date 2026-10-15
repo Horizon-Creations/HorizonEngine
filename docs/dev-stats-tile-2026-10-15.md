@@ -7,6 +7,17 @@ frame counters the editor's viewport overlay has (FPS, GPU ms, draws, triangles,
 sorted by cost (`~` marks an approximate sub-encoder interval). F10 again hides it. Shipping builds
 (Release / MinSizeRel) do not compile the key in.
 
+## "F10 does nothing" — what the log says (`HorizonEngine.log` next to the exe)
+
+Startup, always one of:
+- `GameApplication: development hotkeys compiled in (V = VSync, F10 = stats card)`
+- `GameApplication: development hotkeys NOT compiled in (…)` — this build has no F10. The keys exist only in Debug/RelWithDebInfo, **or** when configured with `-DHE_GAME_DEV_HOTKEYS=ON` (any configuration). A game **exported** from a Release editor build uses the Release runtime and therefore never has them. The banner's `Build :` line is the ENGINE's configuration, not HorizonGame's.
+
+On F10: `GameApplication: stats card ON` / `OFF` / `could not be created (see the DevStatsTile line above)`; then
+`DevStatsTile: widget N built`, `DevStatsTile: first refresh written (N lines, widget N visible=1)` once per showing,
+or `DevStatsTile: could not write the card (text=…, size=…, widget … alive=…)` / `…widget could not be created` (preceded by WidgetManager's own "asset not found" / "invalid widget tree" line).
+No `stats card` line at all on F10 = the key never reached `OnEvent` (build without the keys, or a text field has the keyboard).
+
 ## How it works
 
 - `Diagnostics/DevStatsTile.{h,cpp}` (HE_Core): `formatDevStats()` is a pure function (the text),

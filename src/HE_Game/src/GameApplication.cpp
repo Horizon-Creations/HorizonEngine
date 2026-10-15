@@ -591,6 +591,15 @@ std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 
 void GameApplication::OnInit()
 {
+	// Said once, in the log, whichever way: "the key does nothing" is most often "this
+	// build does not have the key", and the build configuration in the startup banner
+	// is the ENGINE's, not this executable's.
+#ifdef HE_GAME_DEV_HOTKEYS
+	HE_LOG_INFO(Core, "%s", "GameApplication: development hotkeys compiled in (V = VSync, F10 = stats card)");
+#else
+	HE_LOG_INFO(Core, "%s", "GameApplication: development hotkeys NOT compiled in (build with "
+	                        "Debug/RelWithDebInfo or -DHE_GAME_DEV_HOTKEYS=ON for V and F10)");
+#endif
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
 
 	// Rumble reaches the pads through Input, which the script API cannot see.
@@ -2934,7 +2943,10 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		{
 			const bool on = m_devStats.toggle(m_widgets, contentManager());
 			HE_LOG_INFO(Core, "%s",
-				on ? "GameApplication: stats card ON" : "GameApplication: stats card OFF");
+				on ? "GameApplication: stats card ON"
+				   : m_devStats.visible() || m_devStats.widgetId() != 0
+				         ? "GameApplication: stats card OFF"
+				         : "GameApplication: stats card could not be created (see the DevStatsTile line above)");
 			return true;
 		}
 #endif

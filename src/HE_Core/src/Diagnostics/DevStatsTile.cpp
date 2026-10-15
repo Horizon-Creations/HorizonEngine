@@ -1,6 +1,7 @@
 #include "Diagnostics/DevStatsTile.h"
 
 #include "ContentManager/ContentManager.h"
+#include "Diagnostics/Log.h"
 #include "Diagnostics/EngineProfiler.h"
 #include "UIWidget/UIWidgetTree.h"
 #include "UIWidget/WidgetManager.h"
@@ -103,6 +104,14 @@ std::vector<std::string> formatDevStats(const DevStatsInput& in, bool extended, 
 
 bool DevStatsTile::toggle(WidgetManager& widgets, ContentManager& content)
 {
+	// A widget that was destroyed under us (a window closed, a manager cleared) is
+	// built again instead of being shown by an id that now means nothing.
+	if (m_widget != 0 && !widgets.isAlive(m_widget))
+	{
+		HE_LOG_WARN(Core, "%s", "DevStatsTile: its widget is gone; building it again");
+		m_widget = m_panel = m_text = 0;
+		m_visible = false;
+	}
 	if (!m_visible && m_widget == 0)
 	{
 		// ── Built once, in code ──────────────────────────────────────────────
@@ -147,8 +156,14 @@ bool DevStatsTile::toggle(WidgetManager& widgets, ContentManager& content)
 		m_widget = widgets.createWidget(content, kAssetPath);
 		m_panel  = card;
 		m_text   = text;
-		if (m_widget == 0) return false;          // could not be built: stays hidden
+		if (m_widget == 0)
+		{
+			// createWidget logs why (asset not found / invalid tree) just before this.
+			HE_LOG_ERROR(Core, "%s", "DevStatsTile: the stats widget could not be created");
+			return false;                          // stays hidden
+		}
 		widgets.setZOrder(m_widget, 10000);        // over the game's own UI
+		HE_LOG_INFO(Core, "DevStatsTile: widget %d built", m_widget);
 	}
 	setVisible(widgets, !m_visible);
 	return m_visible;
@@ -166,6 +181,7 @@ void DevStatsTile::setVisible(WidgetManager& widgets, bool on)
 	// the tile is gone so a hidden tile costs nothing.
 	EngineProfiler::instance().setLiveEnabled(on);
 	m_primed = false;
+	m_loggedFirst = false;
 	m_sinceRefresh = m_sinceCapture = 0.0f;
 	m_frames = 0;
 	m_elapsed = 0.0f;
@@ -216,10 +232,22 @@ void DevStatsTile::update(WidgetManager& widgets, IRenderer* renderer, float dt,
 		if (i > 0) text += '\n';
 		text += lines[i];
 	}
-	widgets.setElementProp(m_widget, m_text, "Text", UIPropValue::ofString(std::move(text)));
+	const bool wroteText = widgets.setElementProp(m_widget, m_text, "Text", UIPropValue::ofString(std::move(text)));
 	// The card follows the text: its height is the lines it holds.
-	widgets.setElementProp(m_widget, m_panel, "Size",
+	const bool wroteSize = widgets.setElementProp(m_widget, m_panel, "Size",
 	                       UIPropValue::ofVec2({ kTileWidth, kPad * 2.0f + kLineH * static_cast<float>(lines.size()) }));
+	// Said once per showing, so the log tells "shown and written" from "shown but nothing
+	// reached the widget" (the two look identical on screen: no card).
+	if (!m_loggedFirst)
+	{
+		m_loggedFirst = true;
+		if (wroteText && wroteSize)
+			HE_LOG_INFO(Core, "DevStatsTile: first refresh written (%zu lines, widget %d visible=%d)",
+			            lines.size(), m_widget, widgets.isVisible(m_widget) ? 1 : 0);
+		else
+			HE_LOG_ERROR(Core, "DevStatsTile: could not write the card (text=%d, size=%d, widget %d alive=%d)",
+			             wroteText ? 1 : 0, wroteSize ? 1 : 0, m_widget, widgets.isAlive(m_widget) ? 1 : 0);
+	}
 }
 
 void DevStatsTile::shutdown(WidgetManager& widgets)
