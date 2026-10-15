@@ -72,6 +72,10 @@ def main():
     obs = acc.Observer(HOST, PORT, team, "game", "Anna", "anna-password")
     if cmd == "set":
         print(obs.backup_set(sys.argv[3]))
+    elif cmd == "key":
+        # Only the key, one line, for: gh api … -f key="$(… key TEAM)"
+        print(obs.backup_status().get("pubkey", ""))
+        return
     elif cmd == "big":
         upload(obs, "Content/E2E_Big.png", b"\x89PNG\r\n\x1a\n" + os.urandom(60 * 1024 * 1024))
     elif cmd == "huge":

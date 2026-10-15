@@ -149,7 +149,15 @@ class Observer:
         (n,) = struct.unpack(">H", body[9:11])
         err = body[11:11 + n].decode(errors="replace")
         (t,) = struct.unpack(">Q", body[11 + n:19 + n])
-        return {"pushed_rev": pushed, "state": BACKUP_STATES.get(state, state), "error": err, "time": t}
+        rest = body[19 + n:]
+        (un,) = struct.unpack(">H", rest[:2])
+        url = rest[2:2 + un].decode()
+        bn = rest[2 + un]
+        branch = rest[3 + un:3 + un + bn].decode()
+        (kn,) = struct.unpack(">H", rest[3 + un + bn:5 + un + bn])
+        pubkey = rest[5 + un + bn:5 + un + bn + kn].decode()
+        return {"pushed_rev": pushed, "state": BACKUP_STATES.get(state, state), "error": err, "time": t,
+                "url": url, "branch": branch, "pubkey": pubkey}
 
 
 def sha_file(p):
