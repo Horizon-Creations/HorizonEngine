@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -462,15 +463,20 @@ TEST_CASE("Team sync: a busy server and a first sync that differs")
     }));
     CHECK(bob2.st().firstSyncDiffers == std::vector<std::string>{ "Content/door.txt" });
     CHECK(bob2.file("Config/settings.json") == "{}\n");   // only on the server: taken
-    // A save while the question is open uploads nothing yet...
-    const int commits = sc.commits;
+    // A save while the question is open uploads nothing yet, and asks the server
+    // nothing either: past the worker's 500 ms wake-up, which once re-ran the first
+    // sync (a whole MANIFEST) twice a second until the question was answered.
+    const int         commits = sc.commits;
+    const std::size_t ops     = sc.ops.size();
     bob2.sync.requestSync();
-    for (int i = 0; i < 50; ++i) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+    while (std::chrono::steady_clock::now() < until) {
         pumpSync(&server, { &anna, &bob, &bob2 }, [] { return true; });
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     CHECK(bob2.st().phase == TeamSyncService::Phase::Waiting);
     CHECK(sc.commits == commits);
+    CHECK(std::count(sc.ops.begin() + ops, sc.ops.end(), std::uint8_t{ 2 }) == 0);   // no MANIFEST
 
     // ...and goes up once the team's version has replaced the differing file.
     bob2.sync.resolveFirstSync(false);

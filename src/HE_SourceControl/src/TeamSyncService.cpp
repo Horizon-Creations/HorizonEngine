@@ -644,7 +644,11 @@ void TeamSyncService::Impl::run()
 			}
 			doCreate    = wantCreate;
 			doReconcile = wantReconcile;
-			doSync      = wantSync;
+			// The wait above also ends every 500 ms without work (retries need
+			// that), so the open-question rule is applied here again: without
+			// it a pending save re-ran the first sync (a whole MANIFEST) twice
+			// a second until the question was answered.
+			doSync      = wantSync && status.firstSyncDiffers.empty();
 			resolve     = resolveFirst;
 			adopt       = adoptTeam;
 			todo        = fetches;
