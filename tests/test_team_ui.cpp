@@ -637,7 +637,7 @@ TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Pic
 	{
 		const auto rows = notes.store.snapshot();
 		REQUIRE(rows.size() == 1);
-		CHECK(rows[0].title == "That picture cannot be used");
+		CHECK(rows[0].text == "That picture cannot be used");
 		CHECK(rows[0].detail.find("could not be read as an image") != std::string::npos);
 	}
 	CHECK(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(17)) == uploads);
