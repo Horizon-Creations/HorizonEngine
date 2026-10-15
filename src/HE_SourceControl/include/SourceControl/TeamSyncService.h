@@ -197,7 +197,8 @@ public:
 	// ── Pieces with no thread, public for tests ──
 	// .gitignore-style rules: "dir/" (any level), "a/b/" (anchored), "*.log",
 	// "name". No negation. Always ignored: .git/, Saved/ (state lives there).
-	struct IgnoreRules
+	// HE_SC_API of its own: MSVC does not export a nested class with its outer one.
+	struct HE_SC_API IgnoreRules
 	{
 		struct Rule { std::string glob; bool dirOnly = false; bool anchored = false; };
 		std::vector<Rule> rules;
