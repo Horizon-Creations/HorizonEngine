@@ -3,8 +3,8 @@
 Stand 10.10.2026, macOS (Metal und OpenGL), Debug-Build. Schritt 3 lieferte das gemeinsame Wassermodell
 (`HE::water::Field`), Schritt 4/5 die Fläche samt Ufer-Beschneidung, Schritt 6 den Aushub unter einem Polygon,
 Schritt 7 den Wasser-Pinsel. Dieser Schritt ist das zweite Werkzeug, das in dasselbe Modell schreibt: eine
-**geschlossene Spline wird ein See**. Punkte verschieben formt nur das Wasser um, der Aushub ist eine eigene,
-ausdrückliche Aktion, und was der Pinsel an einem See hinzugefügt oder weggenommen hat, bleibt beim Umformen
+**geschlossene Spline wird ein See**. Punkte verschieben formt das Wasser um und nimmt seit Thema 188 Schritt 2 das
+gegrabene Bett mit (Nachtrag am Ende), und was der Pinsel an einem See hinzugefügt oder weggenommen hat, bleibt beim Umformen
 erhalten.
 
 Code: `src/HE_Scene/include/HorizonScene/WaterLake.h` + `src/HE_Scene/src/WaterLake.cpp` (Kern, ohne ImGui;
@@ -25,8 +25,9 @@ Code: `src/HE_Scene/include/HorizonScene/WaterLake.h` + `src/HE_Scene/src/WaterL
    Ground* und *Shore Overshoot* (Beschneidung). **Create Lake** gräbt das Bett und legt das Wasser darüber,
    in **einem** Undo-Schritt.
 3. **Umformen.** Punkte ziehen, einfügen oder löschen, auch den ganzen Spline-Entity bewegen oder das Landscape
-   verschieben: das Wasser folgt noch im selben Frame (`syncSplines`), der Boden bleibt, wie er ist. **Dig Again**
-   gräbt das Bett unter der *aktuellen* Kontur neu, nur auf Knopfdruck, ein Undo-Schritt (und keiner, wenn nichts
+   verschieben: das Wasser folgt noch im selben Frame (`syncSplines`), und ein See, der sein Bett selbst gegraben hat,
+   nimmt es mit (seit Thema 188 Schritt 2, siehe Nachtrag). **Dig Again** gräbt das Bett unter der *aktuellen*
+   Kontur neu, ein Undo-Schritt (und keiner, wenn nichts
    tiefer wurde). Der Wasserspiegel ist ein eigener Regler (ein Undo-Schritt je Zug).
 4. **Mit dem Pinsel erweitern.** Ein Strich, der auf dem See beginnt, setzt diesen See fort (Schritt 7). Was er
    außerhalb der Kontur malt oder mit dem Radierer aus ihr herausschneidet, ist der *Pinsel-Anteil* und bleibt
@@ -86,7 +87,8 @@ innen beginnt und innen endet, ist für die Regel unsichtbar. Das ist gewollt, e
 
 ![Dieselbe Szene, Punkte verschoben: Kontur gewandert, Rinne und Insel bleiben](water-lake/metal-reshaped.png)
 
-Das zweite Bild zeigt auch, was „nur das Wasser“ heißt: Wo die Kontur zurückgezogen wurde, bleibt die alte Grube
+Das zweite Bild zeigt den Stand von Thema 174, „nur das Wasser“ (seit Thema 188 Schritt 2 nur noch für einen See ohne
+eigenes Bett): Wo die Kontur zurückgezogen wurde, bleibt die alte Grube
 als trockene Mulde (dunkler Rand); wo sie vorgezogen wurde, liegt das Wasser flach auf ungegrabenem Boden, ohne Tiefe.
 **Dig Again** gräbt beides nach, wenn man es will.
 
@@ -95,7 +97,7 @@ als trockene Mulde (dunkler Rand); wo sie vorgezogen wurde, liegt das Wasser fla
 | Aktion | Wasser | Boden | Undo |
 |---|---|---|---|
 | Create Lake | ja | ja (`excavatePolygon`, Floor-Modus, nur Absenken) | 1 Schritt |
-| Punkt ziehen / einfügen / löschen, Spline oder Landscape bewegen | ja, automatisch (`syncSplines`) | nein | der Schritt der Spline-Bearbeitung |
+| Punkt ziehen / einfügen / löschen, Spline oder Landscape bewegen | ja, automatisch (`syncSplines`) | ja, wenn der See sein Bett gegraben hat (`Body::digsBed`): altes Bett angehoben, neues gegraben, jeden Frame des Ziehens | der Schritt der Spline-Bearbeitung |
 | Dig Again | nein | ja, unter der aktuellen Kontur | 1 Schritt, keiner ohne Änderung |
 | Wasserspiegel | ja (`setLevel`) | nein | 1 Schritt je Zug |
 | Remove Lake | ja | nein | 1 Schritt |
@@ -252,3 +254,46 @@ ein erneutes Create Lake oder Dig Again senkt nur weiter ab, es hebt den alten F
 Seen brauchen Undo (solange die Historie reicht) oder von Hand nachsculpten (Raise/Flatten). Derselbe Mechanismus,
 anderer Code, traf auch den Wasser-Pinsel (`TerrainSculpt::lowerToFloor`) — siehe `docs/water-brush-2026-10-09.md`,
 Nachtrag Schritt 13 (dort war die Außen-/Innen-Geometrie von Anfang an gekoppelt, kein zweiter Durchgang nötig).
+
+## Nachtrag Thema 188 Schritt 2 (12.10.2026): Das Bett folgt dem gezogenen Punkt
+
+Rückmeldung des Menschen: Beim Lake-Werkzeug zieht ein verschobener Spline-Punkt nur die Wasserfläche mit, der
+Aushub bleibt auf der alten Form stehen. **Ursache:** Das war bis hierher Vertrag (`WaterLake.h`, „Moving a spline
+point: the WATER only“). `syncSplines` grub nur dann neu, wenn sich die *Transform* des Spline-Entitys änderte
+(Schritt 14), und der Bodenpatch, mit dem das alte Bett angehoben wird, war reine Laufzeit: Nach einem Undo, dem
+Ende von Play oder einem Laden war er weg, auch das Verschieben des ganzen Sees grub dann nicht mehr mit.
+
+**Jetzt:** Ändert sich die Kontur im Raum des Landscapes (Punkt ziehen, einfügen, löschen, Entity oder Landscape
+bewegen) und hat der See sein Bett selbst gegraben (`Body::digsBed`, gesetzt von Create Lake mit Dig Bed und von
+Dig Again), hebt `syncSplines` in **jedem Frame des Ziehens** das alte Bett an (`groundPatch` abziehen, additiv, ein
+Nachsculpten bleibt) und gräbt mit Tiefe und Böschung des letzten Aushubs ein neues unter der neuen Kontur. Das Flag
+statt „Patch nicht leer“: Ein Neu-Graben, das nichts bewegt (Kontur kurz über tieferem Boden oder neben dem
+Terrain), lässt einen leeren Patch zurück und darf das Folgen nicht beenden. Dig Again **mischt** seinen Patch in den
+des Sees, eine spätere Bewegung hebt also beide Aushübe an. Ein See ohne eigenes Bett (Create Lake ohne Dig Bed,
+umgewandelter Teich, Szene von vor Thema 188) formt weiter nur das Wasser um; ein Dig Again macht ihn zum folgenden.
+
+**Leistung beim Ziehen:** Gelesen wird nur das Rechteck, das altes Bett und neuer Aushub erreichen
+(`TerrainSculpt::excavateReach`, derselbe Code, den `excavatePolygon` läuft), nicht das ganze Höhengitter; für den
+Chunk-Neubau markiert wird nur, wo die Höhe sich *netto* geändert hat. Gemessen im Debug-Build, 1025² Vertices,
+See mit 100 m Durchmesser, ein Punkt um 0,25 m je Frame: **1,23 ms je Sync** (schlimmster 1,54 ms), Dirty-Rechteck
+höchstens **27 × 70 m** statt der ~110 × 110 m des ganzen Sees (`test_water_lake.cpp`, „re-digs only around that
+point“). `syncSplines` läuft jetzt **vor** der Chunk-Schleife in `updateTerrains`, damit der neue Boden im selben
+Aufruf gebaut und an die Ufer-Beschneidung übergeben wird, nicht einen Frame später.
+
+**Gespeichert:** `digsBed`, Tiefe, Böschung und Patch stehen am Körper unter `lakeBed` (nur bei grabenden Seen,
+alle anderen Szenen bleiben byte-gleich); `sanitize` verwirft einen Patch, der nicht ins Höhengitter passt
+(`patchFits`), und das Anheben prüft ihn selbst noch einmal.
+
+Zeuge `HE_DUMP_LAKEEDIT=reshaped` (jetzt mit Bodenhöhen in der Logzeile), Vulkan und D3D11 gleich:
+
+| | Boden unter dem herausgezogenen Lappen (27, −12) | in der hineingedrückten Bucht (4, 16) |
+|---|---|---|
+| vorher (Neu-Graben abgeschaltet) | 0,00 → 0,00 m (Wasser auf ungegrabenem Boden) | −0,65 → −0,65 m (trockene Grube) |
+| nachher | 0,00 → −2,44 m | −0,65 → 0,00 m |
+
+![Vorher: am Südufer bleibt die alte Grube als dunkler, trockener Streifen](water-lake/thema188-redig-before-vulkan.png)
+![Nachher (Vulkan): das Bett ist mitgewandert, das Ufer schließt bündig](water-lake/thema188-redig-after-vulkan.png)
+![Nachher (D3D11)](water-lake/thema188-redig-after-d3d11.png)
+
+Offen: Das In-Editor-Handbuch (`he-docs.json`, Abschnitt `editor#landscape-mode`, Quelle im Website-Repo) sagt noch
+„dragging a point only reshapes the water“; es wird aus dem Website-Checkout neu gebaut, der auf NN-WS03 fehlt.

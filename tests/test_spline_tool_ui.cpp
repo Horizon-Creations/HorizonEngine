@@ -741,38 +741,33 @@ TEST_CASE("spline ui: the Lake section makes a lake of a closed spline in one un
 	// followed: this is what the next world tick does, and it moves nothing.
 	CHECK(L::syncSplines(r.world) == 0u);
 
-	// ── The points move: the water follows by itself, the ground stays ──
+	// ── The points move: the water follows by itself, and so does the bed ──
+	// (Thema 188 Schritt 2: the lake dug its bed, so the bed goes where the
+	// outline goes — on the frame the points move, not on a button.)
 	{
 		const std::vector<float> dug = lakeui::landOf(r).sculptHeights;
 		auto& pts = reg.get<SplineComponent>(lakeui::theSpline(r));
 		for (glm::vec3& p : pts.controlPoints) p.x += 12.0f;
 		CHECK(L::syncSplines(r.world) == 1u);               // what the world tick does every frame
-		CHECK(lakeui::landOf(r).sculptHeights == dug);
-		CHECK(HE::water::bodyAt(lakeui::landOf(r), 12.0f, 0.0f) != HE::water::kNoBody);
-		CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(10.0f));   // not dug there
+		const TerrainComponent& t = lakeui::landOf(r);
+		CHECK(t.sculptHeights != dug);
+		CHECK(HE::water::bodyAt(t, 12.0f, 0.0f) != HE::water::kNoBody);
+		CHECK(terrainHeightAt(t, 12.0f, 0.0f) == doctest::Approx(8.0f).epsilon(0.01));   // the bed came along
+		CHECK(terrainHeightAt(t, 0.0f, 0.0f) == doctest::Approx(10.0f));    // the old one is filled back in
+		// x = 20 is only ~2 m inside the new outline (radius ~10 centred on x = 12) —
+		// within the default 4 m INWARD bank (Thema 174 Schritt 13), so it eases
+		// toward the floor (8) rather than reaching it outright.
+		CHECK(terrainHeightAt(t, 20.0f, 0.0f) > 8.0f);
+		CHECK(terrainHeightAt(t, 20.0f, 0.0f) < 10.0f);
 	}
-	// ... and Dig Again is what digs under the new place: one step.
+	// ... so Dig Again under the new place finds the bed already there: nothing
+	// moves, and no undo step that would appear to do nothing.
 	for (int i = 0; i < 3; ++i) lakeui::frame(r, false);
 	const size_t depth1 = r.undo.undoDepth();
 	REQUIRE(lakeui::locate(r, "Dig Again", x, y));
 	lakeui::click(r, x, y);
 	r.frame();
-	CHECK(r.undo.undoDepth() == depth1 + 1);
-	CHECK(r.undo.undoLabel() == "Dig Lake");
-	// x = 20 is only ~2 m inside the new outline (radius ~10 centred on x = 12) —
-	// within the default 4 m INWARD bank (Thema 174 Schritt 13), so it eases
-	// toward the floor (8) rather than reaching it outright, like the water's own
-	// level (10) at the outline and the floor deep inside.
-	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) > 8.0f);
-	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) < 10.0f);
-	REQUIRE(r.undo.undo());                                 // the dig alone: the water stays where the points put it
-	r.ctx.selection.clear();
-	r.frame();
-	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) == doctest::Approx(10.0f));
-	CHECK(HE::water::bodyAt(lakeui::landOf(r), 12.0f, 0.0f) != HE::water::kNoBody);
-	REQUIRE(r.undo.redo());
-	r.ctx.selection.clear();
-	r.frame();
+	CHECK(r.undo.undoDepth() == depth1);
 	CHECK(L::syncSplines(r.world) == 0u);
 
 	// ── Remove Lake: the water goes, the spline and the bed stay, one step ──
@@ -784,7 +779,7 @@ TEST_CASE("spline ui: the Lake section makes a lake of a closed spline in one un
 	CHECK(r.undo.undoDepth() == depth2 + 1);
 	CHECK(lakeui::landOf(r).water.bodies.empty());
 	CHECK(reg.all_of<SplineComponent>(lakeui::theSpline(r)));
-	// Remove Lake keeps the bed: still the same shore slope as right after Dig Again.
+	// Remove Lake keeps the bed: still the same shore slope as after the move.
 	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) > 8.0f);
 	CHECK(terrainHeightAt(lakeui::landOf(r), 20.0f, 0.0f) < 10.0f);
 }

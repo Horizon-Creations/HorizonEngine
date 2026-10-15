@@ -468,6 +468,16 @@ namespace TerrainSystem
                 reg.emplace_or_replace<MaterialComponent>(ce, src);
         }
 
+        // ── The lakes follow their splines ───────────────────────────────────
+        // BEFORE the chunks: a point that moved since the last call reshapes the
+        // water it belongs to and, for a lake that digs its own bed, moves the bed
+        // (WaterLake.h). That dig marks the region dirty, and the chunk loop right
+        // below rebuilds those chunks and hands the same rect to the water's shore
+        // clipping on this very frame — after the loop it would be one frame
+        // behind, and the sheet would be clipped against the old ground for it.
+        // The surface pass after the chunks builds the new sheet.
+        HE::water::lake::syncSplines(world);
+
         for (entt::entity te : terrains)
         {
             auto& tc = reg.get<TerrainComponent>(te);
@@ -636,11 +646,7 @@ namespace TerrainSystem
         // must not regenerate chunks) and still needs its surface. In this function
         // rather than in the world tick so that every direct updateTerrains of the
         // editor — and the headless dump, which renders before any tick — gets it.
-        //
-        // First, the lakes follow their splines: a point that moved since the last
-        // call reshapes the water it belongs to (never the ground), and the surface
-        // pass right below then builds the new sheet in the same frame.
-        HE::water::lake::syncSplines(world);
+        // The lakes were brought in line with their splines before the chunks.
         WaterSurface::update(world, cm, renderer);
 
         // ── The collider catches up when the edit stops ──────────────────────

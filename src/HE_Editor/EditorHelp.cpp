@@ -1790,15 +1790,17 @@ namespace
 	{ "Spline Tool/Create Lake", "",
 	  "Turns the closed outline into a lake: digs the bed (with Dig Bed on) and "
 	  "lays the water over it, at the level set above, in one undo step. From "
-	  "then on the points reshape the water only; the ground is dug again only "
-	  "when you press Dig Again. Water you paint with the Water brush on this "
-	  "lake stays when the points move.",
+	  "then on, moving a point (or the whole spline) reshapes the water and, "
+	  "if the bed was dug, moves the bed with it while you drag: the old bed is "
+	  "filled back in and a new one dug under the new outline. Water you paint "
+	  "with the Water brush on this lake stays when the points move.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Dig Again", "",
 	  "Digs the bed again under the lake's current outline, to Depth below "
-	  "its water level with the Bank slope. Moving points never digs by "
-	  "itself, so after reshaping the lake this is how the new shape gets its "
-	  "bed. It only lowers; one undo step.",
+	  "its water level with the Bank slope. It only lowers; one undo step. "
+	  "From then on the bed follows the points with this Depth and Bank — "
+	  "which is also how a lake made without Dig Bed, or one from an older "
+	  "scene, starts taking its bed along when its points move.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Remove Lake", "",
 	  "Takes the lake's water away and cuts its link to the spline. The spline "
@@ -4411,17 +4413,64 @@ namespace
 	  "count as an attack. A client past the limit has its extra calls dropped "
 	  "and the overage weighed against it, exactly like a flood of input.",
 	  "", "collaboration#gameplay" },
+	// ── Settings sorting: project graphics, input, viewport quality ──────────
+	{ "Project Graphics/This project sets its own graphics", "This project sets its own graphics",
+	  "Off, the exported build ships the graphics of whoever exports it (their "
+	  "Preferences) and every editor previews the project with its own values — "
+	  "the way every project has worked so far. On, the rows on this page are the "
+	  "project's answer: they are written into Config/ProjectSettings.json, go "
+	  "into the exported build's config.json and are what the viewport previews "
+	  "with, unless the user chose their own values under Preferences ▸ Viewport "
+	  "Quality.\n\n"
+	  "Switching on starts from the values the editor shows right now, so nothing "
+	  "jumps. Switching off leaves the project's values in the file, unused.",
+	  "", "export#overview" },
+	{ "Input/This project sets its own deadzones", "This project sets its own deadzones",
+	  "Off, the game uses the deadzones of the machine it runs on: your "
+	  "Preferences in the editor, the defaults in an exported build. On, play mode "
+	  "and the exported game both use the stick and trigger deadzones below, so "
+	  "what you tuned is what ships. Switching on starts from your current values.",
+	  "", "" },
+	{ "Input/Stick Deadzone", "Stick Deadzone",
+	  "How far a stick must be pushed before the game sees it move. Below this "
+	  "the stick reads exactly zero; above it the value is re-scaled so full tilt "
+	  "still reaches 1. Raise it for worn sticks; lower it for finer low-speed "
+	  "control.",
+	  "", "" },
+	{ "Input/Trigger Deadzone", "Trigger Deadzone",
+	  "How far a trigger must be pulled before the game sees it. Below this it "
+	  "reads zero; the rest of the travel is re-scaled to 0–1.",
+	  "", "" },
+	{ "Viewport Quality/Same as the project", "Same as the project",
+	  "The viewport previews with the values of the open project's graphics "
+	  "pages when the project sets its own, so what you see is what it ships. A "
+	  "project that sets none is previewed with your own values. The rows on the "
+	  "page are locked while this is on and a project's values are showing.",
+	  "", "" },
+	{ "Viewport Quality/My own values", "My own values",
+	  "The viewport previews with the values on this page even when the project "
+	  "sets its own — for a machine that cannot carry the project's bloom and "
+	  "global illumination. Only the preview changes: exporting still writes the "
+	  "project's values, and play mode follows the project.",
+	  "", "" },
+	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
+	  "Opens the Project Settings page of the repository: initialising it, the "
+	  "remote, GitHub setup and large files. The repository belongs to the "
+	  "project, so those controls travel with it and no longer sit here; git on "
+	  "this machine and the signed-in account stay on this page.",
+	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
-	  "On, the packaged build boots with whatever this editor's Preferences and "
-	  "Export dialog hold at export time — the way every export has worked, and "
+	  "On, the packaged build boots with the window and backend this editor's "
+	  "Export dialog holds at export time — the way every export has worked, and "
 	  "what a project that never opened this page keeps doing. Off, the window "
 	  "and backend below are the project's answer, on every machine it is "
 	  "exported from.\n\n"
 	  "Saved to Config/ProjectSettings.json. With this off, the Export dialog "
 	  "shows the project's window and backend instead of its own rows and writes "
-	  "them into the build's config.json. Bloom, ambient occlusion and the other "
-	  "graphics settings still come from this editor's Preferences either way.",
+	  "them into the build's config.json. How the game looks (anti-aliasing, "
+	  "bloom, ambient occlusion, GI) is the project's on the Quality, "
+	  "Post-Processing and Reflections & GI pages.",
 	  "", "export#overview" },
 	{ "Render Defaults/Width", "Width",
 	  "The window's width in pixels when the game starts windowed. Ignored in "
@@ -7103,6 +7152,13 @@ namespace
 	{ "Landscape/Dig Bed##water", "Dig Bed",
 	  "Also digs while you paint: the ground under the brush is lowered to a "
 	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It digs only where the water is, so the pit never reaches past it: "
+	  "ground at the edge of a stroke stays as it is until the water has "
+	  "spread there, and ground above the water level is cut down to it "
+	  "the moment the water covers it. "
+	  "Where that leaves ground standing above the water (painting uphill), "
+	  "it is shaved into a dry bank that slopes down to the waterline, "
+	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
 	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
@@ -8674,13 +8730,15 @@ namespace
 	  "with). Upper and lower case do not matter.",
 	  "", "collaboration" },
 	{ "Team/Password", "",
-	  "Your team password. It is kept in memory for reconnecting and never "
-	  "written to disk, so after a restart you type it again.",
+	  "Your team password. It is never written to disk: once you are signed in, "
+	  "the team server hands this editor a session token instead, which is what "
+	  "signs you in again after a restart.",
 	  "", "collaboration" },
 	{ "Team/Sign In", "",
 	  "Signs in to the team server. Signed in, the others see you as online and "
 	  "can invite you; the connection is kept and comes back on its own after a "
-	  "dropped network.",
+	  "dropped network. You stay signed in across restarts until you sign out, "
+	  "change your password or are removed from the team.",
 	  "", "collaboration" },
 	{ "Team/Create Team", "",
 	  "Creates a new team on the server with you as its first admin, and signs "
@@ -8688,13 +8746,23 @@ namespace
 	  "", "collaboration" },
 	{ "Team/Sign Out", "",
 	  "Closes the connection to the team server: the others see you go offline "
-	  "and a session you announced disappears from their list. A collaboration "
-	  "session that is running carries on.",
+	  "and a session you announced disappears from their list. This computer "
+	  "forgets the saved sign-in and the server revokes it, so the next start "
+	  "asks for the password. A collaboration session that is running carries on.",
+	  "", "collaboration" },
+	{ "Team/Sign Out Everywhere", "",
+	  "Signs you out here and on every other computer that stays signed in as "
+	  "you: the server revokes all of your saved sign-ins, and those editors ask "
+	  "for the password again. For a computer you no longer have.",
 	  "", "collaboration" },
 	{ "Team/Invite", "",
 	  "Invites this member to the session you are hosting. Their editor shows the "
 	  "invitation and they join with one press. Only online members can be "
 	  "invited.",
+	  "", "collaboration" },
+	{ "Team/Open Team Window", "",
+	  "Opens Window > Team: the whole roster, sessions, and (for admins) adding "
+	  "and removing members. The footer's list only invites.",
 	  "", "collaboration" },
 	{ "Team/Remove", "",
 	  "Removes this member from the team (admins only). Asks once more first.",
@@ -8743,6 +8811,34 @@ namespace
 	  "Changes your team password on the server. This editor keeps its "
 	  "connection; your other editors use the new one at their next sign-in.",
 	  "", "collaboration" },
+	{ "Team/Choose Picture...", "",
+	  "Picks an image file (PNG, JPG, BMP, TGA, GIF) as your team picture. It is "
+	  "cropped to a square and scaled to 64 pixels here, then kept by the team "
+	  "server: every member sees it next to your name, on any computer you sign "
+	  "in from.",
+	  "", "collaboration" },
+	{ "Team/Change Picture...", "",
+	  "Picks another image file as your team picture. Cropped to a square and "
+	  "scaled to 64 pixels; the team sees the new one right away.",
+	  "", "collaboration" },
+	{ "Team/Remove Picture", "",
+	  "Removes your team picture from the server. The team sees your colour with "
+	  "your initial instead.",
+	  "", "collaboration" },
+	{ "Team/Use Collaboration Profile", "",
+	  "Copies the picture and colour you set in the Collaboration window to your "
+	  "team profile, so you look the same in a session and in the team. Without a "
+	  "picture there, the team picture is removed too.",
+	  "", "collaboration" },
+	{ "Team/None", "",
+	  "No colour of your own: the team shows you in grey, and in a session the "
+	  "host picks a free colour for you.",
+	  "", "collaboration" },
+	{ "Team/Custom", "",
+	  "Any colour, not just the presets. The team sees it shortly after you stop "
+	  "changing it. Two members may have the same colour; in a session the host "
+	  "gives one of them another if they collide.",
+	  "", "collaboration" },
 
 	{ "Session Participants/Block", "",
 	  "Removes this person from the session and refuses them if they try to "
@@ -8787,12 +8883,12 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Preferences page that owns the setup: initialising the "
+	  "Opens the Project Settings page that owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },
-	{ "Source Control Panel/Set up in Preferences…", "Set up in Preferences",
-	  "Opens the Preferences page where a project folder is turned into a git "
+	{ "Source Control Panel/Set up in Project Settings…", "Set up in Project Settings",
+	  "Opens the Project Settings page where a project folder is turned into a git "
 	  "repository and a remote is added. Until it is one, this window has nothing "
 	  "to show.",
 	  "", "editor#preferences" },

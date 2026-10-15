@@ -60,6 +60,82 @@ namespace
         const float dx = px - (a.x + t * abx), dz = pz - (a.y + t * abz);
         return dx * dx + dz * dz;
     }
+
+    // What excavatePolygon checks before it touches anything, and the vertex rect
+    // it walks: shared with excavateReach, so a caller that snapshots "what the
+    // dig may move" snapshots exactly the rect the dig reads (WaterLake.cpp).
+    struct Reach
+    {
+        bool  valid = false;      // arguments usable (excavatePolygon's ok)
+        bool  any   = false;      // and the polygon with its bank reaches the terrain
+        glm::vec2 lo{ 0.0f }, hi{ 0.0f };
+        float reach = 0.0f;
+        int   x0 = 0, z0 = 0, x1 = -1, z1 = -1;
+    };
+
+    Reach reachOf(const TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
+                  const ExcavateParams& params)
+    {
+        Reach out;
+        if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return out;
+        if (polygon.size() < 3 || !std::isfinite(params.amount) || !std::isfinite(params.falloff) ||
+            !std::isfinite(params.bankIn) || !std::isfinite(params.edgeHeight)) return out;
+
+        glm::vec2 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
+        double area2 = 0.0;
+        for (size_t i = 0; i < polygon.size(); ++i)
+        {
+            const glm::vec2& p = polygon[i];
+            const glm::vec2& q = polygon[(i + 1) % polygon.size()];
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) ||
+                std::fabs(p.x) > kMaxCoord || std::fabs(p.y) > kMaxCoord) return out;
+            lo = glm::min(lo, p); hi = glm::max(hi, p);
+            area2 += static_cast<double>(p.x) * q.y - static_cast<double>(q.x) * p.y;
+        }
+        if (std::fabs(area2) <= 1e-12) return out;   // a line or a point: nothing to dig
+        out.lo = lo; out.hi = hi;
+        out.valid = true;
+
+        // The rect needs a grid; before ensureHeights there may be none yet.
+        const uint32_t res = tc.resolution;
+        if (res < 2) return out;
+        const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
+        const float stepX = tc.sizeX / static_cast<float>(res - 1);
+        const float stepZ = tc.sizeZ / static_cast<float>(res - 1);
+
+        // A vertex this close to the outline is on it: weight 1, whatever rounding
+        // says about a slanted edge. A fraction of a grid cell, far below anything a
+        // caller means by "outside".
+        const float onEdge = 1e-4f * std::min(stepX, stepZ);
+        out.reach = std::max({ std::max(0.0f, params.falloff), std::max(0.0f, params.bankIn), onEdge });
+
+        // A polygon wholly off the terrain (bank included) is a legal request that
+        // moves nothing.
+        if (hi.x + out.reach < -halfX || lo.x - out.reach > halfX ||
+            hi.y + out.reach < -halfZ || lo.y - out.reach > halfZ)
+            return out;
+
+        auto gridIndex = [res](float q, bool up)
+        {
+            return static_cast<int>(std::clamp(up ? std::ceil(q) : std::floor(q),
+                                               0.0f, static_cast<float>(res - 1)));
+        };
+        out.x0 = gridIndex((lo.x - out.reach + halfX) / stepX, false);
+        out.x1 = gridIndex((hi.x + out.reach + halfX) / stepX, true);
+        out.z0 = gridIndex((lo.y - out.reach + halfZ) / stepZ, false);
+        out.z1 = gridIndex((hi.y + out.reach + halfZ) / stepZ, true);
+        out.any = true;
+        return out;
+    }
+}
+
+bool excavateReach(const TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
+                   const ExcavateParams& params, int& x0, int& z0, int& x1, int& z1)
+{
+    const Reach r = reachOf(tc, polygon, params);
+    if (!r.any) return false;
+    x0 = r.x0; z0 = r.z0; x1 = r.x1; z1 = r.z1;
+    return true;
 }
 
 const char* opName(Op op)
@@ -295,10 +371,17 @@ Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
             }
             else
             {
-                // How far the old, uncapped dig would have gone.
-                const float oldBlended = (was > floorY && f > 0.0f)
-                                        ? ((f >= 1.0f) ? floorY : was + f * (floorY - was))
-                                        : was;
+                // Ground above the water goes down to its level at once, not paced
+                // (Thema 188): a vertex half way down is still above the sheet, the
+                // shore clipping takes the water off it, and dug ground with no water
+                // over it is exactly the crater this cap exists to prevent. Whether
+                // the water reaches it at all is the caller's to check (the water
+                // brush puts back every vertex its sheet does not cover).
+                const float top = std::min(was, wetLevel);
+                // How far the old, uncapped dig would have gone, from there.
+                const float oldBlended = (top > floorY && f > 0.0f)
+                                        ? ((f >= 1.0f) ? floorY : top + f * (floorY - top))
+                                        : top;
                 // The raw ceiling for THIS dab: below half weight, the circle's own
                 // paint (the identical weight, WaterField::addCircle) would not have
                 // turned this ground wet from a single dab, so the target is the
@@ -316,8 +399,8 @@ Result lowerToFloor(TerrainComponent& tc, float localX, float localZ,
                                                      : wetLevel + (w - 0.5f) / 0.5f * (floorY - wetLevel);
                 // Whichever digs less wins (max: digging lowers) — never past where
                 // this dab's own paint already wets it — then never past the
-                // original height (min: an excavation never raises).
-                h = std::min(was, std::max(oldBlended, capTarget));
+                // level-capped height (min: an excavation never raises).
+                h = std::min(top, std::max(oldBlended, capTarget));
             }
             if (h != was)
             {
@@ -345,22 +428,8 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
                        const ExcavateParams& params)
 {
     Result r;
-    if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return r;
-    if (polygon.size() < 3 || !std::isfinite(params.amount) || !std::isfinite(params.falloff) ||
-        !std::isfinite(params.bankIn) || !std::isfinite(params.edgeHeight)) return r;
-
-    glm::vec2 lo(std::numeric_limits<float>::max()), hi(std::numeric_limits<float>::lowest());
-    double area2 = 0.0;
-    for (size_t i = 0; i < polygon.size(); ++i)
-    {
-        const glm::vec2& p = polygon[i];
-        const glm::vec2& q = polygon[(i + 1) % polygon.size()];
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) ||
-            std::fabs(p.x) > kMaxCoord || std::fabs(p.y) > kMaxCoord) return r;
-        lo = glm::min(lo, p); hi = glm::max(hi, p);
-        area2 += static_cast<double>(p.x) * q.y - static_cast<double>(q.x) * p.y;
-    }
-    if (std::fabs(area2) <= 1e-12) return r;   // a line or a point: nothing to dig
+    // Arguments first, before ensureHeights: a refused call bakes nothing.
+    if (!reachOf(tc, polygon, params).valid) return r;
 
     const float falloff = std::max(0.0f, params.falloff);
     const float bankIn  = std::max(0.0f, params.bankIn);
@@ -370,25 +439,22 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
     const uint32_t res = tc.resolution;
     if (tc.sculptHeights.size() != static_cast<size_t>(res) * res) return r;
 
+    // Again, on the grid ensureHeights may just have snapped to 2ⁿ+1.
+    const Reach rr = reachOf(tc, polygon, params);
+    if (!rr.valid) return r;
+    const glm::vec2 lo = rr.lo, hi = rr.hi;
+    const float reach = rr.reach;
+
     const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
     const float stepX = tc.sizeX / static_cast<float>(res - 1);
     const float stepZ = tc.sizeZ / static_cast<float>(res - 1);
-
-    // A vertex this close to the outline is on it: weight 1, whatever rounding
-    // says about a slanted edge. A fraction of a grid cell, far below anything a
-    // caller means by "outside".
-    const float onEdge  = 1e-4f * std::min(stepX, stepZ);
-    const float reach   = std::max({ falloff, bankIn, onEdge });
+    const float onEdge  = 1e-4f * std::min(stepX, stepZ);   // as reachOf: on the outline
 
     r.ok = true;   // legal request; a polygon entirely off the terrain simply changes nothing
 
-    // A polygon wholly off the terrain (bank included) is a legal request that
-    // moves nothing.
     const float centerX = 0.5f * (lo.x + hi.x), centerZ = 0.5f * (lo.y + hi.y);
     r.centerHeight = terrainHeightAt(tc, centerX, centerZ);
-    if (hi.x + reach < -halfX || lo.x - reach > halfX ||
-        hi.y + reach < -halfZ || lo.y - reach > halfZ)
-        return r;
+    if (!rr.any) return r;   // wholly off the terrain, bank included
 
     // Grid index of a terrain-local coordinate, rounded down or up and clamped to
     // the grid in float first: a huge bank must not overflow the cast.
@@ -398,12 +464,9 @@ Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polyg
                                            0.0f, static_cast<float>(res - 1)));
     };
 
-    // Vertex rect the polygon and its bank can reach. Everything outside it has
-    // weight 0, so a small lake on a big landscape never walks the whole grid.
-    const int x0 = gridIndex((lo.x - reach + halfX) / stepX, false);
-    const int x1 = gridIndex((hi.x + reach + halfX) / stepX, true);
-    const int z0 = gridIndex((lo.y - reach + halfZ) / stepZ, false);
-    const int z1 = gridIndex((hi.y + reach + halfZ) / stepZ, true);
+    // Vertex rect the polygon and its bank can reach (reachOf). Everything outside
+    // it has weight 0, so a small lake on a big landscape never walks the whole grid.
+    const int x0 = rr.x0, x1 = rr.x1, z0 = rr.z0, z1 = rr.z1;
 
     const int W = x1 - x0 + 1, H = z1 - z0 + 1;
     const size_t cells = static_cast<size_t>(W) * H;

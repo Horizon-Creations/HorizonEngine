@@ -114,7 +114,7 @@ namespace
         entt::registry& reg() { return world.registry(); }
 
         void apply(entt::entity te, uint16_t bodyId, entt::entity existing,
-                   Surface& s, uint64_t paramsKey, WaterSurface::Stats& stats)
+                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats)
         {
             auto& r = reg();
             HE::UUID meshId{};
@@ -279,7 +279,7 @@ namespace
                     }
                 }
 
-                Surface s;
+                SurfaceMesh s;
                 if (!buildSurface(tc, lattice, ext, body.level, opt, s)) continue;
                 if (s.empty())                          // wet cells but no area worth a polygon
                 {

@@ -56,6 +56,24 @@ bool nearlyEqual(float a, float b)
     return std::fabs(a - b) <= 1e-6f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
 }
 
+// The graphics list's per-type work, picked by overload so one macro row does it
+// for a bool, an int and a float alike.
+bool fieldEqual(bool a, bool b)   { return a == b; }
+bool fieldEqual(int a, int b)     { return a == b; }
+bool fieldEqual(float a, float b) { return nearlyEqual(a, b); }
+void readField(const json& j, const char* key, bool& v)  { readBool(j, key, v); }
+void readField(const json& j, const char* key, int& v)   { readNumber(j, key, v); }
+void readField(const json& j, const char* key, float& v) { readNumber(j, key, v); }
+void clampFieldFor(bool&, double, double, bool) {}
+void clampFieldFor(int& v, double lo, double hi, int)
+{
+    v = static_cast<int>(std::clamp(static_cast<double>(v), lo, hi));
+}
+void clampFieldFor(float& v, double lo, double hi, float fallback)
+{
+    v = std::isfinite(v) ? static_cast<float>(std::clamp(static_cast<double>(v), lo, hi)) : fallback;
+}
+
 // The three spellings the runtime accepts, and only those: anything else in
 // the file would become "Windowed" in the game with no error anywhere, so it
 // is corrected HERE, where somebody can still see it.
@@ -131,6 +149,18 @@ bool ProjectSettings::isDefault() const
     return *this == ProjectSettings{};
 }
 
+namespace
+{
+bool graphicsEqual(const ProjectGraphics& a, const ProjectGraphics& b)
+{
+    if (a.enabled != b.enabled) return false;
+#define HE_X(T, name, def, editorName, lo, hi) if (!fieldEqual(a.name, b.name)) return false;
+    HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+    return true;
+}
+} // namespace
+
 bool ProjectSettings::operator==(const ProjectSettings& o) const
 {
     return game.title == o.game.title
@@ -157,6 +187,10 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && renderDefaults.windowMode == o.renderDefaults.windowMode
         && renderDefaults.vsync == o.renderDefaults.vsync
         && renderDefaults.backend == o.renderDefaults.backend
+        && graphicsEqual(graphics, o.graphics)
+        && input.enabled == o.input.enabled
+        && nearlyEqual(input.stickDeadzone, o.input.stickDeadzone)
+        && nearlyEqual(input.triggerDeadzone, o.input.triggerDeadzone)
         && antiCheat.enabled == o.antiCheat.enabled
         && antiCheat.integrityCheck == o.antiCheat.integrityCheck
         && nearlyEqual(antiCheat.tolerance, o.antiCheat.tolerance)
@@ -225,6 +259,18 @@ void ProjectSettings::clamp()
     if (std::find(std::begin(kWindowModes), std::end(kWindowModes), r.windowMode)
         == std::end(kWindowModes))
         r.windowMode = ProjectRenderDefaults{}.windowMode;
+
+    {
+        ProjectGraphics& g = graphics;
+        const ProjectGraphics defaults;
+#define HE_X(T, name, def, editorName, lo, hi) clampFieldFor(g.name, lo, hi, defaults.name);
+        HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+        auto dz = [](float v, float fallback)
+        { return std::isfinite(v) ? std::clamp(v, 0.0f, ProjectInputSettings::kMaxDeadzone) : fallback; };
+        input.stickDeadzone   = dz(input.stickDeadzone,   ProjectInputSettings{}.stickDeadzone);
+        input.triggerDeadzone = dz(input.triggerDeadzone, ProjectInputSettings{}.triggerDeadzone);
+    }
 
     using AC = ProjectAntiCheatSettings;
     auto& a = antiCheat;
@@ -314,6 +360,18 @@ void ProjectSettings::toJson(json& out) const
         { "budgetMs", physics.budgetMs },
         { "eventsPerPoll", physics.eventsPerPoll },
     };
+
+    {
+        json g = json::object();
+        g["enabled"] = graphics.enabled;
+#define HE_X(T, name, def, editorName, lo, hi) g[#name] = graphics.name;
+        HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+        out["graphics"] = std::move(g);
+    }
+    out["input"] = { { "enabled",         input.enabled },
+                     { "stickDeadzone",   input.stickDeadzone },
+                     { "triggerDeadzone", input.triggerDeadzone } };
 
     out["renderDefaults"] = {
         { "useEditorSettings", renderDefaults.useEditorSettings },
@@ -425,6 +483,17 @@ void ProjectSettings::fromJson(const json& in)
         readString(r, "windowMode",        renderDefaults.windowMode);
         readBool  (r, "vsync",             renderDefaults.vsync);
         readString(r, "backend",           renderDefaults.backend);
+    }
+    {
+        const json& g = section(in, "graphics");
+        readBool(g, "enabled", graphics.enabled);
+#define HE_X(T, name, def, editorName, lo, hi) readField(g, #name, graphics.name);
+        HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+        const json& i = section(in, "input");
+        readBool  (i, "enabled",         input.enabled);
+        readNumber(i, "stickDeadzone",   input.stickDeadzone);
+        readNumber(i, "triggerDeadzone", input.triggerDeadzone);
     }
     {
         const json& a = section(in, "anticheat");

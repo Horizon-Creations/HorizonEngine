@@ -615,6 +615,12 @@ private:
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
+	// The user's own graphics values, set aside while the open project's are the
+	// ones in m_editorConfig (syncGraphicsSource). What the config file gets, and
+	// what comes back when the project closes or the preview is switched to
+	// "my own values".
+	EditorConfig m_userGraphics;
+	bool         m_graphicsFromProject = false;
 
 	// App-wide HorizonCode host: owns the runtime the editor world runs on and
 	// the GameInstance script. m_gameInstanceGraph is the authored source (edited
@@ -643,6 +649,14 @@ private:
 	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
 	// any trailing field may be left off.
 	IRenderer::ShadowSettings projectShadowSettings();
+	// Which graphics values m_editorConfig holds this frame: the open project's
+	// (graphics.enabled, preview mode "same as the project") or the user's own.
+	// Every frame, before the renderer is handed them.
+	void syncGraphicsSource();
+	// The gamepad deadzones the game in the editor runs with: the project's when
+	// it sets them (input.enabled), the editor's own otherwise.
+	float playStickDeadzone();
+	float playTriggerDeadzone();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when

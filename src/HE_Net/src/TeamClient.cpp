@@ -85,6 +85,12 @@ bool sameName(const std::string& a, const std::string& b) {
     return true;
 }
 
+// The key a member's profile is kept under (the server folds the same way).
+std::string foldName(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 std::string withReason(std::string sentence, const std::string& serverText) {
     if (!serverText.empty()) sentence += " (" + serverText + ")";
     return sentence;
@@ -116,9 +122,11 @@ std::unique_ptr<TeamClient> TeamClient::connect(const RelayAddress& server,
     c->m_team       = team;
     c->m_member     = member;
     c->m_loginFrame = encodeLogin(op, team, member, password);
-    HE_LOG_INFO(Net, "Team: %s team '%s' as '%s' at %s:%u",
+    c->m_loginOp    = op;
+    HE_LOG_INFO(Net, "Team: %s team '%s' as '%s' at %s:%u%s",
                 op == LoginOp::CreateTeam ? "creating" : "logging in to", team.c_str(),
-                member.c_str(), server.host.c_str(), static_cast<unsigned>(server.port));
+                member.c_str(), server.host.c_str(), static_cast<unsigned>(server.port),
+                op == LoginOp::Token ? " with a session token" : "");
     return c;
 }
 
@@ -224,9 +232,15 @@ void TeamClient::fail(std::uint8_t code, std::string why) {
         if (p.done) m_ready.emplace_back(std::move(p.done), std::move(r));
     }
     m_pending.clear();
+    m_avatarQueue.clear();
+    m_avatarFetches = 0;
+    for (auto& [key, p] : m_profiles) {
+        (void)key;
+        p.queued = false;
+    }
 
     // Without the connection nothing in the lists is current: our sessions
-    // ended with it, and presence is unknown. Names stay for display.
+    // ended with it, and presence is unknown. Names (and pictures) stay for display.
     for (TeamMember& m : m_members) m.online = false;
     m_sessions.clear();
     changed();
@@ -287,10 +301,12 @@ void TeamClient::onStatus(std::uint8_t code, const std::string& text) {
         HE_LOG_INFO(Net, "Team: logged in to '%s' as '%s'", m_team.c_str(), m_member.c_str());
         listMembers();
         listSessions();
+        listProfiles();
         changed();
         return;
     }
     // Every other status ends the connection (the server closes after it).
+    m_closeText = text;
     fail(code, describeStatus(code, text));
 }
 
@@ -313,10 +329,11 @@ void TeamClient::onReply(const std::uint8_t* p, std::size_t n) {
     reply.op      = it->second.op;
     reply.result  = static_cast<Result>(result);
     reply.text    = std::move(text);
-    ReplyFn done  = std::move(it->second.done);
+    Pending pending = std::move(it->second);
+    ReplyFn done    = std::move(pending.done);
     m_pending.erase(it);
 
-    applyReply(reply, p + r.pos, n - r.pos);
+    applyReply(reply, p + r.pos, n - r.pos, pending);
     if (m_state == State::Closed) return;   // a malformed body
     if (!reply.ok() && reply.op != Op::Ping)
         HE_LOG_INFO(Net, "Team: request %u refused — %s", static_cast<unsigned>(id),
@@ -324,8 +341,51 @@ void TeamClient::onReply(const std::uint8_t* p, std::size_t n) {
     if (done) m_ready.emplace_back(std::move(done), std::move(reply));
 }
 
-void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t n) {
-    if (!reply.ok()) return;
+void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t n,
+                            const Pending& pending) {
+    if (reply.op == Op::GetAvatar) {
+        // Whatever the answer, this fetch is over: make room for the next.
+        if (m_avatarFetches > 0) --m_avatarFetches;
+        auto pit = m_profiles.find(pending.member);
+        if (pit != m_profiles.end()) pit->second.queued = false;
+        if (reply.ok()) {
+            Reader r{ body, n };
+            std::uint8_t size = 0;
+            const bool ok = r.u8(size) && size <= kMaxAvatarSize &&
+                            n - r.pos == std::size_t(size) * size * 4;
+            if (!ok) {
+                fail(0, "The team server sent a reply this editor cannot read.");
+                return;
+            }
+            if (pit != m_profiles.end()) {
+                Profile& prof = pit->second;
+                if (pending.avatarId == prof.avatarId) {
+                    prof.avatarSize = size;
+                    prof.avatarRgba.assign(body + r.pos, body + n);
+                    prof.pixelsId   = prof.avatarId;
+                    mergeProfiles();
+                    changed();
+                } else if (prof.avatarId != 0 && !prof.queued) {
+                    // The picture changed while this one was on its way.
+                    prof.queued = true;
+                    m_avatarQueue.push_back(pending.member);
+                }
+            }
+        }
+        fetchAvatars();
+        return;
+    }
+    if (!reply.ok()) {
+        // A server from before profiles does not know the op. Not an error:
+        // members simply have no colour or picture there.
+        if (reply.op == Op::ListProfiles && reply.result == Result::BadRequest) {
+            if (m_profilesSupported)
+                HE_LOG_INFO(Net, "Team: the server has no member profiles (colour, picture)");
+            m_profilesSupported = false;
+            changed();
+        }
+        return;
+    }
     Reader r{ body, n };
     switch (reply.op) {
         case Op::ListMembers: {
@@ -345,9 +405,35 @@ void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t 
             }
             if (list.size() != count) break;
             m_members = std::move(list);
+            mergeProfiles();
             changed();
             return;
         }
+        case Op::ListProfiles: {
+            std::uint16_t count = 0;
+            if (!r.u16(count)) break;
+            std::uint16_t i = 0;
+            for (; i < count; ++i) {
+                std::string   name;
+                TeamColor     color;
+                std::uint32_t avatarId = 0;
+                if (!r.str(name) || !r.u8(color.r) || !r.u8(color.g) || !r.u8(color.b) ||
+                    !r.u32(avatarId))
+                    break;
+                setProfile(name, color, avatarId);
+            }
+            if (i != count) break;
+            m_profilesSupported = true;
+            mergeProfiles();
+            fetchAvatars();
+            changed();
+            return;
+        }
+        case Op::SetColor:
+        case Op::SetAvatar:
+            // Our own change comes back as no event; the list is the server's view.
+            listProfiles();
+            return;
         case Op::ListSessions: {
             std::uint16_t count = 0;
             if (!r.u16(count)) break;
@@ -370,6 +456,9 @@ void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t 
         case Op::Join:
             if (!r.str(reply.session) || !r.str(reply.host) || !r.str(reply.peer)) break;
             listSessions();   // the invitation, if there was one, is used up
+            return;
+        case Op::IssueToken:
+            if (!r.str(reply.token) || reply.token.empty()) break;
             return;
         case Op::AddMember:
         case Op::RemoveMember:
@@ -460,6 +549,15 @@ void TeamClient::onEvent(const std::uint8_t* p, std::size_t n) {
         case EventKind::Declined:
             ok = r.str(ev.session) && r.str(ev.member);
             break;
+        case EventKind::Profile:
+            ok = r.str(ev.member) && r.u8(ev.color.r) && r.u8(ev.color.g) && r.u8(ev.color.b) &&
+                 r.u32(ev.avatarId);
+            if (!ok) break;
+            setProfile(ev.member, ev.color, ev.avatarId);
+            mergeProfiles();
+            fetchAvatars();
+            changed();
+            break;
         default:
             // A newer server's event: skip it rather than drop the connection.
             HE_LOG_DEBUG(Net, "Team: unknown event kind %u ignored", static_cast<unsigned>(kind));
@@ -470,6 +568,80 @@ void TeamClient::onEvent(const std::uint8_t* p, std::size_t n) {
         return;
     }
     m_events.push_back(std::move(ev));
+}
+
+// ─── Profiles ────────────────────────────────────────────────────────────────
+
+void TeamClient::setProfile(const std::string& name, TeamColor color, std::uint32_t avatarId) {
+    const std::string key = foldName(name);
+    Profile& p = m_profiles[key];
+    p.color    = color;
+    p.avatarId = avatarId;
+    if (avatarId == 0) {
+        p.avatarRgba.clear();
+        p.avatarSize = 0;
+        p.pixelsId   = 0;
+    } else if (avatarId != p.pixelsId && !p.queued) {
+        p.queued = true;
+        m_avatarQueue.push_back(key);
+    }
+}
+
+void TeamClient::mergeProfiles() {
+    for (TeamMember& m : m_members) {
+        auto it = m_profiles.find(foldName(m.name));
+        if (it == m_profiles.end()) continue;
+        const Profile& p = it->second;
+        m.color    = p.color;
+        m.avatarId = p.avatarId;
+        // Until a new picture arrives the old one stays up, rather than the
+        // initial flashing in between.
+        if (m.avatarSize != p.avatarSize || m.avatarRgba != p.avatarRgba) {
+            m.avatarSize = p.avatarSize;
+            m.avatarRgba = p.avatarRgba;
+        }
+    }
+}
+
+void TeamClient::fetchAvatars() {
+    while (m_state == State::LoggedIn && m_avatarFetches < kAvatarFetchesInFlight &&
+           !m_avatarQueue.empty()) {
+        const std::string key = std::move(m_avatarQueue.front());
+        m_avatarQueue.pop_front();
+        auto it = m_profiles.find(key);
+        if (it == m_profiles.end()) continue;
+        Profile& p = it->second;
+        if (p.avatarId == 0 || p.avatarId == p.pixelsId) {
+            p.queued = false;
+            continue;
+        }
+        std::vector<std::uint8_t> fields;
+        putStr8(fields, key);
+        const std::uint32_t id = request(Op::GetAvatar, std::move(fields), {});
+        if (id == 0) return;
+        Pending& pending = m_pending[id];
+        pending.member   = key;
+        pending.avatarId = p.avatarId;
+        ++m_avatarFetches;
+    }
+}
+
+std::uint32_t TeamClient::setColor(TeamColor color, ReplyFn done) {
+    return request(Op::SetColor, { color.r, color.g, color.b }, std::move(done));
+}
+
+std::uint32_t TeamClient::setAvatar(std::uint16_t size, const std::vector<std::uint8_t>& rgba,
+                                    ReplyFn done) {
+    if (size > kMaxAvatarSize || rgba.size() != std::size_t(size) * size * 4) return 0;
+    std::vector<std::uint8_t> fields;
+    fields.reserve(1 + rgba.size());
+    fields.push_back(static_cast<std::uint8_t>(size));
+    fields.insert(fields.end(), rgba.begin(), rgba.end());
+    return request(Op::SetAvatar, std::move(fields), std::move(done));
+}
+
+std::uint32_t TeamClient::listProfiles(ReplyFn done) {
+    return request(Op::ListProfiles, {}, std::move(done));
 }
 
 bool TeamClient::pollEvent(Event& out) {
@@ -587,6 +759,22 @@ std::uint32_t TeamClient::join(const std::string& session, ReplyFn done) {
     return request(Op::Join, std::move(f), std::move(done));
 }
 
+std::uint32_t TeamClient::issueToken(ReplyFn done) {
+    return request(Op::IssueToken, {}, std::move(done));
+}
+
+std::uint32_t TeamClient::revokeToken(const std::string& token, ReplyFn done) {
+    std::vector<std::uint8_t> f;
+    putStr8(f, token);
+    const std::uint32_t id = request(Op::RevokeToken, f, std::move(done));
+    std::fill(f.begin(), f.end(), std::uint8_t(0));
+    return id;
+}
+
+std::uint32_t TeamClient::revokeAllTokens(ReplyFn done) {
+    return request(Op::RevokeAllTokens, {}, std::move(done));
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 std::string TeamClient::joinCodeForSession(const std::string& sessionId) {
@@ -654,7 +842,7 @@ const char* TeamClient::resultName(std::uint8_t result) {
         "ok", "bad-request", "invalid-name", "invalid-password", "member-exists",
         "no-such-member", "wrong-password", "not-admin", "last-admin", "full",
         "server-error", "not-online", "no-such-session", "not-host", "not-allowed",
-        "session-exists", "not-invited",
+        "session-exists", "not-invited", "no-such-token",
     };
     if (result < sizeof(kNames) / sizeof(kNames[0])) return kNames[result];
     if (result == std::uint8_t(Result::ConnectionLost)) return "connection-lost";
@@ -696,6 +884,7 @@ std::string TeamClient::describeResult(Result result, const std::string& text) {
         case Result::NotAllowed:      return "That session is invitation-only.";
         case Result::SessionExists:   return "That session id is already in use.";
         case Result::NotInvited:      return "There is no invitation to decline.";
+        case Result::NoSuchToken:     return "That sign-in was already revoked.";
         case Result::ConnectionLost:  return text.empty() ? std::string("The connection to the team server was lost.") : text;
         default:
             return withReason(std::string("The team server refused: ") +

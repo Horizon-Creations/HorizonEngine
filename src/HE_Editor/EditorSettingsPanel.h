@@ -2,11 +2,12 @@
 #include <imgui.h>
 
 struct AppContext;
+struct EditorConfig;
 
 // ── Preferences tab + engine-settings catalog ────────────────────────────────
 // The Preferences UI is a full editor tab (Edit ▸ Preferences, Ctrl+,): a
-// category navigation on the left (General / Editor / Rendering, each with
-// sub-pages) and the selected page's settings on the right. It replaced the
+// category navigation on the left (Editor / Preview / Accounts & Connections /
+// Tools, each with pages) and the selected page's settings on the right. It replaced the
 // old modal popup. Everything here follows the EDITOR from project to project;
 // what belongs to the project is on the Project Settings tab
 // (ProjectSettingsPanel).
@@ -19,31 +20,36 @@ struct AppContext;
 // World entity.)
 namespace EditorSettingsPanel
 {
-	enum class SettingsMode { Preferences, QuickSettings };
+	// Project: the same rows on a page of the Project Settings tab, bound to a
+	// config the caller hands in (DrawOptions::config) — no pin gutter, no
+	// category headings, never locked.
+	enum class SettingsMode { Preferences, QuickSettings, Project };
 
-	// Sub-pages of the Preferences tab (the left-hand navigation buttons).
+	// Sub-pages of the Preferences tab (the left-hand navigation buttons). Four
+	// groups, in the order the rail lists them; everything here is about THIS
+	// editor and THIS user — what travels with a project lives on the Project
+	// Settings tab (ProjectSettingsPanel.h).
 	enum class Page
 	{
-		// General
-		Appearance, Viewport, ContentBrowser, Autosave, Feedback,
-		// Editor — everything the editor itself does that is not the renderer:
-		// the graph editor's look, the collaboration session, the repository
-		// (git install status and the repository share one page), and the status
-		// of the outside tools the editor needs.
-		// RemoteControl is the MCP bridge: letting an external client drive this
-		// editor. It sits next to Team because it is the same kind of
-		// question — who else may change this scene — and apart from it because
-		// the answer is a different one: a collaborator is a person who was
-		// invited, a remote client is a program on this machine.
+		// Editor — how the editor behaves and looks.
+		// Panels is the graph editors' and the widget designer's own switches;
 		// Shortcuts is the keyboard: every editor-wide chord, rebindable.
-		// Team replaced the Collaboration page (topic 197): the team server and
-		// the sign-in on top, the session settings that page held below them.
-		Panels, Shortcuts, Team, RemoteControl, Repository, Status,
-		// Rendering
-		Display, PostProcessing, GlobalIllumination, Effects,
-		// (The pages that edit the PROJECT — Application, Permissions, Fonts,
-		// Collision Layers — used to sit here for want of a project settings
-		// surface. They are on the Project Settings tab now: ProjectSettingsPanel.)
+		Appearance, Viewport, ContentBrowser, Autosave, Panels, Shortcuts, Feedback,
+		// Preview — what the viewport is drawn with on this machine. EditorRenderer
+		// is the editor's own backend and frame pacing; ViewportQuality is the
+		// user's own graphics values — what a project that sets none previews
+		// with, and an override for one that does (a machine that cannot carry
+		// the project's bloom and GI).
+		EditorRenderer, ViewportQuality,
+		// Accounts & Connections — who you are and what the editor talks to.
+		// SourceControl is git on this machine and the GitHub account (the
+		// repository of a PROJECT is on its Project Settings tab). Team is the
+		// team server and the session settings. RemoteControl is the MCP bridge:
+		// a program on this machine driving this editor, which is a different
+		// question from a collaborator, who is a person who was invited.
+		SourceControl, Team, RemoteControl,
+		// Tools — the status of the outside tools the editor needs.
+		Status,
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
@@ -71,6 +77,26 @@ namespace EditorSettingsPanel
 	// draws everything (Quick Settings).
 	void DrawEngineSettings(AppContext& ctx, SettingsMode mode,
 	                        const char* categoryFilter = nullptr);
+
+	// The general form. A page shows the rows of one category (`category`), or
+	// exactly the rows named in `rows` whatever their category (the pages are not
+	// the catalogue's categories any more: Viewport Quality draws rows from three
+	// of them). `config` is the config the widgets edit — the editor's own by
+	// default, a scratch copy on the Project Settings pages, which write it back
+	// into the project's block afterwards.
+	struct DrawOptions
+	{
+		const char*        category = nullptr;
+		const char* const* rows     = nullptr;
+		int                rowCount = 0;
+		EditorConfig*      config   = nullptr;
+	};
+	void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& options);
+
+	// The repository half of source control (init, remote, GitHub setup, large
+	// files): the repository belongs to the PROJECT, so it is drawn on the Project
+	// Settings tab's Source Control page and no longer on a Preferences page.
+	void DrawRepositorySection(AppContext& ctx);
 
 	// Fill the given tab rect with the Preferences tab (nav + content).
 	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);
