@@ -1143,6 +1143,7 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.mainSceneName = ctx.sceneFile;
     std::memset(cfg.projectUuidBytes, 0, 16);
     cfg.enableModSupport = settings.enableModSupport;
+    cfg.devTools         = settings.devTools;
     cfg.encrypted = settings.encrypt;
     cfg.horizonCodeCompiled = ctx.hcGenShipped;
     cfg.defaultSaveTemplate = settings.defaultSaveTemplate;

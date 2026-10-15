@@ -69,6 +69,7 @@ static std::string s_exportOutputDir;
 static bool   s_exportCompress    = true;
 static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
+static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
@@ -409,6 +410,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportCompress     = p.compress;
 	s_exportEncrypt      = p.encrypt;
 	s_exportModSupport   = p.enableModSupport;
+	s_exportDevTools     = p.devTools;
 	s_exportStartupScene = p.startupScene;
 	s_exportIncremental  = p.incremental;
 	s_exportAppBundle    = p.appBundle;
@@ -454,6 +456,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.compress         = s_exportCompress;
 	p.encrypt          = s_exportEncrypt;
 	p.enableModSupport = s_exportModSupport;
+	p.devTools         = s_exportDevTools;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
 	p.incremental      = s_exportIncremental;
@@ -967,6 +970,16 @@ void render(AppContext& ctx)
             }
             else
                 s_exportModSupport = false;
+            // The development hotkeys are a game's too (V, F10); an application has
+            // no frame to put a stats card on and is not tuned from the keyboard.
+            if (!exportingApp)
+            {
+                EditorWidgets::checkbox("Development hotkeys",   &s_exportDevTools);
+                if (s_exportDevTools)
+                    ImGui::TextDisabled("F10 shows the stats card with per-pass GPU times, V toggles VSync. Leave off for the build players get.");
+            }
+            else
+                s_exportDevTools = false;
             // The "(?)" marker and its tooltip are gone from the next three: the
             // sentence is the help entry now, the whole checkbox is the hover
             // target instead of a two-character mark beside it, and F1 opens it.
@@ -1526,6 +1539,8 @@ void startExport(AppContext& ctx)
                     // builds a world and draws on events, advancedShaderEffects
                     // whether material graphs can appear at all.
                     es.appProject            = ctx.projectManager->currentProject().appProject;
+                    // The hotkeys are a game's: an application never ships them.
+                    es.devTools              = s_exportDevTools && !es.appProject;
                     es.advancedShaderEffects = ctx.projectManager->currentProject().advancedShaderEffects;
                     es.allowFiles     = ctx.projectManager->currentProject().allowFiles;
                     es.allowProcesses = ctx.projectManager->currentProject().allowProcesses;
