@@ -81,7 +81,7 @@ std::uint64_t NotificationStore::post(NoteSpec spec)
 			++last.count;
 			last.whenMs = now;
 			last.seen   = false;     // it happened again: worth seeing again
-			armPopup(last, spec.popup, spec.timeoutMs, now);
+			armPopup(last, spec.popup && m_popupsEnabled, spec.timeoutMs, now);
 			return last.id;
 		}
 	}
@@ -104,7 +104,7 @@ std::uint64_t NotificationStore::post(NoteSpec spec)
 	n.key       = std::move(spec.key);
 	n.actions   = std::move(spec.actions);
 	n.whenMs    = now;
-	armPopup(n, spec.popup, spec.timeoutMs, now);
+	armPopup(n, spec.popup && m_popupsEnabled, spec.timeoutMs, now);
 	const std::uint64_t id = n.id;
 	m_entries.push_back(std::move(n));
 
@@ -124,6 +124,27 @@ std::uint64_t NotificationStore::post(NoteSpec spec)
 		m_entries.erase(victim);
 	}
 	return id;
+}
+
+void NotificationStore::setPopupsEnabled(bool enabled)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (m_popupsEnabled == enabled) return;
+	m_popupsEnabled = enabled;
+	if (enabled) return;
+	// Taking the switch away takes the popups away too — a modal that cannot be
+	// switched off would defeat the point — but not the rows, and not "read".
+	for (Notification& e : m_entries)
+	{
+		e.toastUntilMs = 0;
+		e.modalPending = false;
+	}
+}
+
+bool NotificationStore::popupsEnabled() const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_popupsEnabled;
 }
 
 void NotificationStore::resolve(const std::string& key)

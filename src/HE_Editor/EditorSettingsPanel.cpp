@@ -1065,6 +1065,19 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		     "computer.");
 	});
 
+	row("notifications", "Feedback", [&]{
+		// Read by the store every frame (EditorApplication pushes it), so a change
+		// is live. The bell and its list are always there; this only decides
+		// whether a notification may also interrupt.
+		EditorWidgets::checkbox("Show Notification Popups", &cfg.NotificationPopups);
+		hint("Important notifications appear as a small card in the bottom-right "
+		     "corner for a few seconds, and critical ones as a dialog that waits to "
+		     "be acknowledged. Turn this off and everything goes to the notification "
+		     "centre (the bell in the footer) only: it still rings and counts, but "
+		     "nothing opens over your work. Buttons such as Join or Retry are then "
+		     "on the rows in the centre.");
+	});
+
 	if (mode == SettingsMode::QuickSettings && shown == 0)
 		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press the star (\xe2\x98\x86) "
 		     "next to the settings you want here.");
@@ -2418,6 +2431,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsSoundProblem       = true;
 			cfg.RewardsSoundDragDrop      = true;
 			cfg.RewardsProblemPulse       = true;
+			cfg.NotificationPopups        = true;
 			cfg.RewardsShowProgress  = true;
 			cfg.RewardsCounterTick   = true;
 			cfg.RewardsStreakTooltip = true;

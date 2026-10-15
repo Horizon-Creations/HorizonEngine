@@ -170,6 +170,11 @@ std::vector<SettingDesc> buildCatalog()
 	                    "footer bell, and the node a HorizonCode compile failed "
 	                    "on pulses once. Never a blink. Needs Success Feedback "
 	                    "on."));
+	t.push_back(boolRow("notifications.popups", "Show Notification Popups", "Feedback",
+	                    "notifications", &EditorConfig::NotificationPopups,
+	                    "Show important notifications as a card in the bottom-right "
+	                    "corner and critical ones as a dialog. Off: everything goes "
+	                    "to the notification centre (the footer bell) only."));
 	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
 	                    &EditorConfig::RewardsReducedMotion,
 	                    { "Follow System", "Off" },

@@ -136,6 +136,14 @@ public:
 	// button joins has ended". Safe from any thread; a no-op for an unknown key.
 	void resolve(const std::string& key);
 
+	// The user's switch for popups (Preferences ▸ Feedback ▸ Show Notification
+	// Popups). Off: every notification goes to the centre only, whatever its tier —
+	// no toast, no modal — and the popups that are up right now are taken down (the
+	// rows stay, unread). On again: only notifications posted from then on pop up;
+	// what arrived meanwhile does not all appear at once. Safe from any thread.
+	void setPopupsEnabled(bool enabled);
+	bool popupsEnabled() const;
+
 	// A copy, taken under the lock, for the frame to draw. Copying rather than
 	// exposing the vector is what keeps the lock off the ImGui call path.
 	std::vector<Notification> snapshot() const;
@@ -204,6 +212,7 @@ private:
 	static void settle(Notification& n);
 
 	mutable std::mutex        m_mutex;
+	bool                      m_popupsEnabled = true;   // guarded by m_mutex
 	std::vector<Notification> m_entries;
 	std::uint64_t             m_nextId = 1;
 

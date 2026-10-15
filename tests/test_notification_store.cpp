@@ -495,3 +495,42 @@ TEST_CASE("notify() returns the id, and resolveNotification reaches the installe
 	REQUIRE(rows.size() == 1);
 	CHECK(rows[0].handled);
 }
+
+TEST_CASE("switching popups off sends everything to the centre and takes down what is up")
+{
+	NotificationStore store;
+	store.post(spec(NoteLevel::Important, "up already"));
+	store.post(spec(NoteLevel::Critical, "dialog already"));
+	CHECK(store.popupsEnabled());
+
+	store.setPopupsEnabled(false);
+	CHECK_FALSE(store.popupsEnabled());
+	// What was up is gone from the screen, not from the centre, and still unread.
+	CHECK(store.liveToasts(NotificationStore::nowMs()).empty());
+	Notification m;
+	CHECK_FALSE(store.nextModal(m));
+	CHECK(store.snapshot().size() == 2);
+	CHECK(store.unseenCount() == 2);
+
+	// New ones, whatever their tier, are centre-only — but buttons still work there.
+	NoteSpec asks = spec(NoteLevel::Important, "invite");
+	asks.actions.push_back({ "Join", {}, true });
+	const std::uint64_t id = store.post(asks);
+	store.post(spec(NoteLevel::Critical, "boom"));
+	// A repeat of a plain row re-arms nothing either.
+	store.post(NoteLevel::Important, "again");
+	store.post(NoteLevel::Important, "again");
+	CHECK(store.liveToasts(NotificationStore::nowMs()).empty());
+	CHECK_FALSE(store.nextModal(m));
+	CHECK(store.runAction(id, 0));
+
+	// On again: only what is posted from now on pops up.
+	store.setPopupsEnabled(true);
+	CHECK(store.liveToasts(NotificationStore::nowMs()).empty());
+	CHECK_FALSE(store.nextModal(m));
+	store.post(spec(NoteLevel::Important, "fresh"));
+	store.post(spec(NoteLevel::Critical, "fresh dialog"));
+	CHECK(store.liveToasts(NotificationStore::nowMs()).size() == 1);
+	CHECK(store.nextModal(m));
+	CHECK(m.text == "fresh dialog");
+}

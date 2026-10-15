@@ -875,6 +875,9 @@ add_executable(he_tests
     # problem ring (V8) from a real NotificationStore (already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
+    # The Build window and its footer cluster, for test_build_footer_ui.cpp: hide a
+    # running build, the progress in the footer, the notification when it ends.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/BuildProgressDialog.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -955,6 +958,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
     test_editor_rewards.cpp
     test_notification_popups_ui.cpp
+    test_build_footer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp

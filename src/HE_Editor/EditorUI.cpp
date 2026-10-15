@@ -3592,7 +3592,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// every widget to its right plus 16px per neighbour that is actually
 		// there. Being at the left end is what keeps the edit to one block —
 		// inserting anywhere else means editing everything to its left as well.
-		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
+		const float mcpW = McpStatusBar::FooterWidth(ctx);
+		if (mcpW > 0.0f)
 		{
 			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
@@ -3602,6 +3603,23 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			                - (syncW > 0.0f ? 16.0f : 0.0f)
 			                - (actW > 0.0f ? 16.0f : 0.0f));
 			McpStatusBar::DrawFooter(ctx);
+		}
+
+		// A build whose window was put away (Hide in the Build window): its progress,
+		// and a click brings the window back. Left-most of the group, like the block
+		// above, so adding it meant editing nothing to its right. Draws nothing unless
+		// a run is going on with the window hidden.
+		if (const float buildW = BuildProgressDialog::FooterWidth(ctx); buildW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW - buildW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f)
+			                - (syncW > 0.0f ? 16.0f : 0.0f)
+			                - (actW > 0.0f ? 16.0f : 0.0f)
+			                - (mcpW > 0.0f ? 16.0f : 0.0f));
+			BuildProgressDialog::DrawFooter(ctx);
 		}
 
 		// Middle — status

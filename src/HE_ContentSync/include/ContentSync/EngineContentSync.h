@@ -34,6 +34,26 @@ enum class DownloadTrigger : std::uint8_t
 	Passive,    // a scene/asset reference resolved it automatically
 };
 
+// Something the sync could not do, as it happens. The library has no way to talk
+// to a user, and a failure on a worker thread used to end in a log warning and a
+// callback that most callers ignore — so a download that never arrived, or a
+// catalogue that could not be kept for offline use, was invisible. The Editor
+// installs a listener (setFailureListener) and turns these into notifications.
+enum class SyncFailureKind : std::uint8_t
+{
+	Manifest,       // fetching or parsing manifest.json failed (callers also get the bool)
+	ManifestCache,  // the catalogue could not be written next to the downloads
+	Download,       // one file did not arrive
+};
+
+struct SyncFailure
+{
+	SyncFailureKind kind = SyncFailureKind::Download;
+	std::string     relativePath;   // Download: the file; otherwise empty
+	std::string     reason;         // scrubbed of credentials, may be empty
+	DownloadTrigger trigger = DownloadTrigger::Passive;   // Download only
+};
+
 // Snapshot for UI polling (the Editor footer). Safe to call every frame — it is
 // a mutex-guarded copy of a handful of small fields, not a walk of the queue.
 struct DownloadQueueStatus
@@ -142,7 +162,16 @@ public:
 
 	DownloadQueueStatus status() const;
 
+	// Called for every SyncFailure, on whichever thread hit it (a worker, or the
+	// caller of refreshManifest*), with NO lock held — the listener may call back
+	// into this class. Replaces any earlier listener; an empty function removes it.
+	// Must be cheap and must not block: it runs on the download worker.
+	using FailureListener = std::function<void(const SyncFailure&)>;
+	void setFailureListener(FailureListener listener);
+
 private:
+	void reportFailure(const SyncFailure& failure);
+
 	EngineContentSync()                                     = default;
 	EngineContentSync(const EngineContentSync&)              = delete;
 	EngineContentSync& operator=(const EngineContentSync&)   = delete;
@@ -172,6 +201,8 @@ private:
 	// path (see refreshManifestWith). Never taken while holding m_manifestMutex.
 	std::mutex             m_refreshMutex;
 
+	mutable std::mutex     m_listenerMutex;
+	FailureListener        m_failureListener;     // guarded by m_listenerMutex
 	mutable std::mutex     m_manifestMutex;
 	EngineContentManifest  m_manifest;
 	// True once the server answered this session. Guards loadCachedManifest()

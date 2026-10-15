@@ -181,7 +181,15 @@ void render(AppContext& ctx)
 		{
 			Build::log(2, message);
 			Build::finish(false, message.empty() ? "Build failed" : message);
-			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Game logic build failed", message);
+			// "Show Build" opens the window with the compiler output — the sentence
+			// here is only the last line of it.
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Important;
+			note.title  = "Game logic build failed";
+			note.text   = message.empty() ? std::string("The build failed.") : message;
+			note.key    = "build.finished";
+			note.actions.push_back({ "Show Build", [] { BuildProgressDialog::requestOpen(); }, true });
+			HE::Ed::notify(std::move(note));
 			return;
 		}
 

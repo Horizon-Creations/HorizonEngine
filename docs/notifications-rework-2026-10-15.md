@@ -39,10 +39,17 @@ key never merge.
 - **Content Browser**: create/delete/rename/revert/import/reimport/C++-class failures were log-only; now an Important toast with the reason and path.
 - **MCP bridge**: start failures raise an Important.
 
+## Follow-up (same day): Build window, sync errors, popup switch
+
+- **Build window can be hidden** (`BuildProgressDialog.cpp`): "Hide" (while running) puts the window away and the run continues. A footer cluster (label, bar, percent; `FooterWidth`/`DrawFooter`, left-most of the right group in `EditorUI.cpp`) shows progress; a click brings the window back (`requestOpen`). A run that ends while the window was not up raises an Important "Export finished/failed" with Show Build (+ Start Game when runnable) via `announceFinish`; a run that ends in front of the user raises nothing. Game-logic builds keep the panel's own notification (the failure one now has "Show Build").
+  **Trap:** the modal used to be the editor's lock on `Content/` while an export packs. Hidden, the project is editable during the run — edits made then may or may not be in the output. Decide whether to block mutations while `BuildProgressDialog::hidden()`.
+- **EngineContent sync failures** (`EngineContentSync::setFailureListener`, `SyncFailure`): the library reports manifest / cache / download failures; the editor listener (`onContentSyncFailure` in `EditorApplication.cpp`) posts ONE aggregated, keyed notification for passive downloads ("N EngineContent files could not be downloaded") and one for a catalogue that cannot be cached. Manifest and explicit-download failures are skipped there because their callers already say what they mean. The three catalogue notifications (server unreachable / unreadable / refresh failed) got a **Try again** button (`refreshEngineContentManifest`) and resolve when it works. The per-file passive notify in `EditorApplication.cpp` was removed (the listener covers it).
+- **Popup switch**: Preferences ▸ Feedback ▸ "Show Notification Popups" (`EditorConfig::NotificationPopups`, saved as `NotificationPopups`, catalog row `notifications.popups`, help entry, reset-to-defaults). Pushed every frame into `NotificationStore::setPopupsEnabled`: off = every notification is centre-only whatever its tier, popups that are up come down (rows stay unread), buttons stay usable on the centre rows. Turning it on again does not replay what arrived meanwhile.
+
 ## Not done (candidates, from the gap survey; all verified by reading in the survey, none changed)
 
-1. Export / game-logic build: result lives only inside the Build modal (`BuildProgressDialog`); nothing if it is closed (`ExportDialogPanel.cpp:1484,1497,1974`). `GameLogicBuildPanel.cpp:184` duplicates the Build modal.
-2. EngineContent sync failures are `HE_LOG_WARN` only inside `HE_ContentSync` (`EngineContentSync.cpp:108,124,141,200,291`); `:124` means working on a stale manifest silently. Needs a callback or error struct from the library, which cannot see the store.
+1. ~~Export build result only in the modal~~ done in the follow-up above.
+2. ~~EngineContent sync failures log-only~~ done in the follow-up above; a "Retry" for passive downloads is still missing (the registration callback has already answered `false`).
 3. Git: classify errors (auth / git missing → Critical, push rejected → Important with "Open Source Control"), pull-with-conflicts has no notification (`SourceControlPanel.cpp:1447-1460`), `GitService.cpp:432` LFS install failure is log-only.
 4. Team sync: `TeamSyncService.cpp:744,960` log-only.
 5. "Open Collaboration" / "Open Preferences" buttons need a hook from `EditorApplication` to the UI's `revealFloatingWindow` (static in `EditorUI.cpp`); the large-assets refusal has no button for that reason (the panel's own dialog answers it).

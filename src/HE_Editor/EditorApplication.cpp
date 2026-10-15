@@ -62,6 +62,9 @@
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
+#ifdef HE_HAVE_LIBSSH2
+static void installContentSyncFailureListener();   // defined with the SFTP probe below
+#endif
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -526,6 +529,11 @@ void EditorApplication::OnInit()
 	// the user instead of scrolling past in a file they do not have open. It
 	// throttles itself — see NotificationStore::attachToEngineLog.
 	m_notifications.attachToEngineLog();
+#ifdef HE_HAVE_LIBSSH2
+	// And the EngineContent sync's own failures, which the library can only report
+	// to a listener — see installContentSyncFailureListener.
+	installContentSyncFailureListener();
+#endif
 
 	// The other reading of the same stream, and the complement of the bell: every
 	// record at every level, unthrottled, in a window (ConsolePanel.h). Attached
@@ -1536,6 +1544,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsSoundProblem          = globalstate.getCustomConfigBool("RewardsSoundProblem", m_editorConfig.RewardsSoundProblem);
 	m_editorConfig.RewardsSoundDragDrop         = globalstate.getCustomConfigBool("RewardsSoundDragDrop", m_editorConfig.RewardsSoundDragDrop);
 	m_editorConfig.RewardsProblemPulse          = globalstate.getCustomConfigBool("RewardsProblemPulse", m_editorConfig.RewardsProblemPulse);
+	m_editorConfig.NotificationPopups           = globalstate.getCustomConfigBool("NotificationPopups", m_editorConfig.NotificationPopups);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	m_editorConfig.RewardsCounterTick           = globalstate.getCustomConfigBool("RewardsCounterTick", m_editorConfig.RewardsCounterTick);
 	m_editorConfig.RewardsStreakTooltip         = globalstate.getCustomConfigBool("RewardsStreakTooltip", m_editorConfig.RewardsStreakTooltip);
@@ -2395,6 +2404,87 @@ void EditorApplication::startGitProbe()
 }
 
 #ifdef HE_HAVE_LIBSSH2
+// ── EngineContent sync failures → notifications ──────────────────────────────
+// The library (HE_ContentSync) cannot talk to a user, and a worker thread that
+// fails ends in a log warning and a callback most callers ignore. Its listener is
+// installed once; it runs on whichever thread hit the failure, so everything here
+// goes through the thread-safe notify().
+//
+// Three of the four kinds are reported elsewhere, with the context only a caller
+// has, and are deliberately skipped here:
+//   • Manifest — the startup probe and the post-publish refresh say what the failure
+//     MEANS (offline, no cached catalogue, stale Content Browser).
+//   • Download, Explicit — the Content Browser says which click it was for.
+// What is left is what had no voice: files a scene pulled in by itself (Passive),
+// of which a project can need dozens — so they are one notification with a count,
+// not one toast per file — and the catalogue that could not be kept for offline use.
+static void onContentSyncFailure(const HE::Cs::SyncFailure& f)
+{
+	using HE::Cs::SyncFailureKind;
+	switch (f.kind)
+	{
+	case SyncFailureKind::Manifest:
+		return;
+
+	case SyncFailureKind::ManifestCache:
+	{
+		static std::atomic<bool> s_told{false};
+		if (s_told.exchange(true)) return;   // once per session: it will fail the same way again
+		HE::Ed::NoteSpec note;
+		note.level  = HE::Ed::NoteLevel::Important;
+		note.title  = "EngineContent";
+		note.text   = "The EngineContent catalogue could not be saved for offline use.";
+		note.detail = f.reason + " Without the cached copy, EngineContent will not appear "
+		              "when the server cannot be reached.";
+		note.key    = "contentsync.cache";
+		HE::Ed::notify(std::move(note));
+		return;
+	}
+
+	case SyncFailureKind::Download:
+	{
+		if (f.trigger == HE::Cs::DownloadTrigger::Explicit) return;
+		// A burst is one notification: a scene that references forty missing files
+		// produces forty of these within a second. The window restarts a minute
+		// after it opened, so a later, unrelated failure is a fresh entry.
+		static std::mutex     s_mutex;
+		static int            s_count = 0;
+		static std::uint64_t  s_windowStartMs = 0;
+		const std::uint64_t   now = HE::Ed::NotificationStore::nowMs();
+
+		HE::Ed::NoteSpec note;
+		note.level = HE::Ed::NoteLevel::Important;
+		note.title = "EngineContent download failed";
+		note.key   = "contentsync.download";
+		{
+			std::lock_guard<std::mutex> lock(s_mutex);
+			if (s_count == 0 || now - s_windowStartMs > 60'000) { s_count = 0; s_windowStartMs = now; }
+			++s_count;
+			if (s_count == 1)
+			{
+				note.text      = "\"" + std::filesystem::path(f.relativePath).filename().string() +
+				                 "\" could not be downloaded.";
+				note.assetPath = f.relativePath;
+			}
+			else
+			{
+				note.text = std::to_string(s_count) + " EngineContent files could not be downloaded.";
+			}
+		}
+		note.detail = "A scene references EngineContent that the server did not hand over" +
+		              (f.reason.empty() ? std::string(".") : ": " + f.reason + ".") +
+		              " It stays missing until a later attempt succeeds.";
+		HE::Ed::notify(std::move(note));
+		return;
+	}
+	}
+}
+
+static void installContentSyncFailureListener()
+{
+	HE::Cs::EngineContentSync::instance().setFailureListener(&onContentSyncFailure);
+}
+
 // The manifest's {path, uuid} pairs, reshaped into the network-agnostic DTO
 // GlobalState::refreshEngineFolder() accepts — see RemoteEngineAsset's comment
 // in DiagnosticsStructs.h for why HE_Core cannot take the manifest type itself.
@@ -2453,10 +2543,11 @@ void EditorApplication::startSftpProbe()
 		// user to ignore the bell before it has ever carried anything real.
 		if (probe.configured && !probe.reachable)
 		{
-			HE::Ed::notify(
-				haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical,
-				"The EngineContent server could not be reached.",
-				(probe.detail.empty()
+			HE::Ed::NoteSpec note;
+			note.level = haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
+			note.title = "EngineContent server unreachable";
+			note.text  = "The EngineContent server could not be reached.";
+			note.detail = (probe.detail.empty()
 					? std::string("The connection was refused or timed out.")
 					: probe.detail)
 				+ (haveManifest
@@ -2464,7 +2555,11 @@ void EditorApplication::startSftpProbe()
 					  "assets already downloaded still work, anything else cannot be "
 					  "fetched until the server is back."
 					: "  No catalogue is available, so no EngineContent can be browsed "
-					  "or downloaded this session."));
+					  "or downloaded this session.");
+			note.key = "contentsync.server";
+			// Runs on the main thread; the editor outlives the store that holds it.
+			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
+			HE::Ed::notify(std::move(note));
 		}
 		else if (probe.configured && !haveManifest)
 		{
@@ -2472,13 +2567,17 @@ void EditorApplication::startSftpProbe()
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
 			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
-			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
-				"The EngineContent catalogue could not be read.",
-				std::string("The server accepted the login, but reading its manifest failed")
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Critical;
+			note.title  = "EngineContent catalogue unreadable";
+			note.text   = "The EngineContent catalogue could not be read.";
+			note.detail = std::string("The server accepted the login, but reading its manifest failed")
 				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
 				+ "  There is no cached copy on this machine, so EngineContent will not "
-				  "appear in the Content Browser this session. Restarting the editor "
-				  "tries again.");
+				  "appear in the Content Browser until this works.";
+			note.key = "contentsync.server";
+			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
+			HE::Ed::notify(std::move(note));
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())
@@ -2517,14 +2616,22 @@ void EditorApplication::refreshEngineContentManifest()
 			// no longer matches the server — assets the publish removed still
 			// listed, ones it added still missing — with nothing on screen saying
 			// so until the next restart quietly fixes it.
-			HE::Ed::notify(HE::Ed::NoteLevel::Important,
-				"The EngineContent catalogue could not be refreshed.",
-				"The change reached the server, but re-reading its manifest failed. "
-				"What the Content Browser shows under Engine is from before that "
-				"change until the connection recovers or the editor is restarted.");
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Important;
+			note.title  = "EngineContent catalogue out of date";
+			note.text   = "The EngineContent catalogue could not be refreshed.";
+			note.detail = "The change reached the server, but re-reading its manifest failed. "
+			              "What the Content Browser shows under Engine is from before that "
+			              "change until the connection recovers.";
+			note.key = "contentsync.server";
+			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
+			HE::Ed::notify(std::move(note));
 			return;
 		}
 
+		// The "Try again" of an earlier failure worked, or the refresh simply did:
+		// whatever that notification said is no longer true.
+		HE::Ed::resolveNotification("contentsync.server");
 		gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
 		gs->refreshEngineFolder(engineContentPath, projectContentRoot);
 		m_sftpManifestReady.store(true, std::memory_order_release);
@@ -3269,23 +3376,11 @@ void EditorApplication::OnRender(float dt)
 				{
 					HE::Cs::EngineContentSync::instance().enqueueDownload(
 						remotePath, uuid, HE::Cs::DownloadTrigger::Passive,
-						[done, remotePath, enginePath](bool success)
+						[done](bool success)
 						{
-							// The PASSIVE route: a scene referenced this asset and
-							// the download was arranged on its behalf, so a failure
-							// reaches the user as a mesh that renders as nothing or
-							// a material that falls back to grey — with nothing
-							// anywhere naming the file. Saying which one did not
-							// arrive is the whole difference between "the scene
-							// looks wrong" and a fact somebody can act on.
-							if (!success)
-								HE::Ed::notify(HE::Ed::NoteLevel::Important,
-									"\"" + std::filesystem::path(remotePath).filename().string()
-										+ "\" could not be downloaded.",
-									"A scene references this EngineContent asset, but it could "
-									"not be fetched from the server. It stays missing until a "
-									"later attempt succeeds.",
-									enginePath);
+							// The PASSIVE route's failure is reported by the sync's failure
+							// listener (onContentSyncFailure), as one notification with a
+							// count however many files a scene pulled in.
 							done(success);
 						});
 				});
@@ -4769,6 +4864,9 @@ void EditorApplication::OnRender(float dt)
 		// what keeps the peers from ending up under two different rules.
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
+		// Same every-frame push (the call is a no-op unless the value changed): the
+		// switch in Preferences is live, and turning it off takes the open popups down.
+		m_notifications.setPopupsEnabled(m_editorConfig.NotificationPopups);
 		// Read when a session starts, so pushing it mid-session moves nothing.
 		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
 		// Pushed before the collab pump, which is where the session's state
@@ -14045,6 +14143,9 @@ void EditorApplication::OnShutdown()
 	// a write through a dangling pointer. Deliberately AFTER the joins above, so
 	// everything those threads still had to say made it in.
 	m_notifications.detachFromEngineLog();
+#ifdef HE_HAVE_LIBSSH2
+	HE::Cs::EngineContentSync::instance().setFailureListener({});
+#endif
 	HE::Ed::setGlobalNotifications(nullptr);
 	// Same rule, same reason, same moment: after the joins, so a worker's last
 	// words still land, and before the ImGui teardown below.
@@ -14236,6 +14337,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsSoundProblem",        m_editorConfig.RewardsSoundProblem);
 	globalstate.setCustomConfigEntry("RewardsSoundDragDrop",       m_editorConfig.RewardsSoundDragDrop);
 	globalstate.setCustomConfigEntry("RewardsProblemPulse",        m_editorConfig.RewardsProblemPulse);
+	globalstate.setCustomConfigEntry("NotificationPopups",         m_editorConfig.NotificationPopups);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("RewardsCounterTick",         m_editorConfig.RewardsCounterTick);
 	globalstate.setCustomConfigEntry("RewardsStreakTooltip",       m_editorConfig.RewardsStreakTooltip);

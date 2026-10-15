@@ -4047,6 +4047,14 @@ namespace
 	  "frame; dragging a node around stays silent. Same volume and mute as the "
 	  "other feedback sounds. Preview plays all five in a row.",
 	  "", "horizoncode#graphs" },
+	{ "Preferences/Feedback/Show Notification Popups", "",
+	  "On (the default): an important notification shows as a small card in the "
+	  "bottom-right corner for a few seconds without taking the keyboard, and a "
+	  "critical one as a dialog you have to acknowledge. Off: none of that — every "
+	  "notification goes to the notification centre only (the bell in the footer, "
+	  "which still counts and rings). Buttons like Join or Retry are then on the "
+	  "rows in the centre. Popups that are up when you switch this off close at once.",
+	  "", "editor#notifications" },
 	{ "Preferences/Feedback/Problem Pulse", "",
 	  "When a new problem arrives in the notifications, one thin ring widens "
 	  "around the footer bell and fades within about half a second; with "
@@ -7627,6 +7635,11 @@ namespace
 	  "an export that succeeded and shipped a runtime this machine can run: an "
 	  "export aimed at another platform, or one that shipped no game runtime at "
 	  "all, leaves it greyed out.",
+	  "", "export#shipped-files" },
+	{ "Build Window/Hide", "",
+	  "Puts this window away while the build keeps running. The footer shows its "
+	  "progress; click that to bring the window back. When the build ends with the "
+	  "window away, a notification says how it went.",
 	  "", "export#shipped-files" },
 	{ "Build Window/Build Again", "",
 	  "Runs the same export once more with the settings the last run used, "

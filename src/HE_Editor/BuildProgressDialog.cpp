@@ -2,11 +2,13 @@
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"          // "Build Window/<label>" scope for its buttons
 #include "EditorWidgets.h"       // primaryButton, pinDialogToEditorWindow
+#include "NotificationStore.h"    // a build that ends while its window is put away says so
 #include <Diagnostics/Logger.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 #include <SDL3/SDL_process.h>
 
@@ -67,6 +69,7 @@ std::vector<HcFallbackReport::Notice> s_hcInterpreted;
 // ── UI-thread-only state ────────────────────────────────────────────────────
 bool   s_openRequest = false;
 bool   s_visible     = false;  // drew this frame (see isOpen)
+bool   s_hidden      = false;  // the user put a RUNNING build away (see hidden())
 int    s_selected    = -1;     // -1 = follow the running step
 bool   s_userPicked  = false;  // …until the user clicks one
 Action s_action      = Action::None;
@@ -137,6 +140,7 @@ void begin(const std::vector<std::string>& stepNames, Kind kind)
 	}
 	s_selected   = -1;
 	s_userPicked = false;
+	s_hidden     = false;   // a new run is shown; the window opens for it
 }
 
 void stepBegin(int index)
@@ -288,7 +292,31 @@ Outcome outcome()
 	return Outcome{ s_runSerial, s_finished, s_success };
 }
 
-void requestOpen() { s_openRequest = true; }
+void requestOpen() { s_openRequest = true; s_hidden = false; }
+
+bool hidden() { return s_hidden && Build::running(); }
+
+float overallProgress(const std::vector<StepView>& steps, bool* indeterminate)
+{
+	if (indeterminate) *indeterminate = false;
+	if (steps.empty()) return 0.0f;
+	float sum = 0.0f;
+	bool  running = false, runningIndeterminate = false;
+	for (const StepView& st : steps)
+	{
+		if (st.state == Done || st.state == Failed) sum += 1.0f;
+		else if (st.state == Running)
+		{
+			running = true;
+			if (st.indeterminate) runningIndeterminate = true;
+			else sum += std::clamp(st.progress, 0.0f, 1.0f);
+		}
+	}
+	// Only "unknown" when it is the running step that does not know: a run that is
+	// 3 steps in of 4 still says 75 % whatever the last one is doing.
+	if (indeterminate) *indeterminate = running && runningIndeterminate && sum <= 0.0f;
+	return std::clamp(sum / static_cast<float>(steps.size()), 0.0f, 1.0f);
+}
 
 bool isOpen() { return s_visible; }
 
@@ -429,12 +457,180 @@ void launchGame(const std::filesystem::path& exe)
 		HE_LOG_INFO(Editor, "Build: started %s", path.c_str());
 }
 
+
+// ── A run that ended with nobody watching ───────────────────────────────────
+// Polled every frame from render(). `watched` is whether the window was up on the
+// previous frame, i.e. whether the user saw the result land. A game-logic build
+// is left to GameLogicBuildPanel, which posts its own.
+unsigned long long s_announcedRun = 0;
+
+void announceFinish(bool watched)
+{
+	const Outcome o = outcome();
+	if (!o.finished || o.run == s_announcedRun) return;
+	s_announcedRun = o.run;
+	if (watched) return;
+
+	const Snapshot snap = snapshot();
+	if (snap.kind != Kind::Export) return;
+
+	// The model's message carries "Error: " / "OK: " for the result line; the title
+	// already says which.
+	std::string text = snap.message;
+	for (const char* prefix : { "Error: ", "OK: " })
+		if (text.rfind(prefix, 0) == 0) { text.erase(0, std::string(prefix).size()); break; }
+	if (text.empty()) text = o.success ? "The export finished." : "The export failed.";
+
+	HE::Ed::NoteSpec note;
+	note.level = HE::Ed::NoteLevel::Important;
+	note.title = o.success ? "Export finished" : "Export failed";
+	note.text  = text;
+	note.key   = "build.finished";
+	const bool canLaunch = o.success && snap.runnableHere && !snap.executable.empty();
+	if (canLaunch)
+	{
+		const std::filesystem::path exe = snap.executable;
+		note.actions.push_back({ "Start Game", [exe] { launchGame(exe); }, true });
+	}
+	note.actions.push_back({ "Show Build", [] { requestOpen(); }, !canLaunch });
+	HE::Ed::notify(std::move(note));
+}
+
+// ── The footer cluster of a hidden run ──────────────────────────────────────
+// One read of the model per ImGui frame, shared by FooterWidth and DrawFooter: a
+// worker moving the step between the two calls would change the label's width after
+// the footer had already right-aligned against the old one.
+struct Brief
+{
+	int         frame = -1;
+	float       fraction = 0.0f;
+	bool        indeterminate = false;
+	std::string label;
+};
+Brief s_brief;
+
+constexpr float kFooterBarW = 90.0f;
+constexpr float kFooterBarH = 10.0f;
+constexpr float kFooterGap  = 6.0f;
+constexpr std::size_t kFooterLabelChars = 26;
+
+const Brief& brief()
+{
+	const int frame = ImGui::GetFrameCount();
+	if (s_brief.frame == frame) return s_brief;
+	s_brief.frame = frame;
+
+	std::vector<StepView> steps;
+	std::string           stepName;
+	Kind                  kind;
+	{
+		std::lock_guard<std::mutex> lk(s_mutex);
+		kind = s_kind;
+		for (std::size_t i = 0; i < s_steps.size(); ++i)
+		{
+			const Step& st = s_steps[i];
+			steps.push_back(StepView{ "", st.state, st.progress, st.indeterminate, "" });
+			if (static_cast<int>(i) == s_current) stepName = st.name;
+		}
+	}
+	s_brief.fraction = overallProgress(steps, &s_brief.indeterminate);
+	std::string label = kind == Kind::Export ? "Export" : "Build";
+	if (!stepName.empty()) label += ": " + stepName;
+	if (label.size() > kFooterLabelChars) label = label.substr(0, kFooterLabelChars - 1) + "\xE2\x80\xA6";
+	s_brief.label = std::move(label);
+	return s_brief;
+}
+
+std::string percentText(const Brief& b)
+{
+	if (b.indeterminate) return "\xE2\x80\xA6";
+	char buf[16];
+	std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(b.fraction * 100.0f + 0.5f));
+	return buf;
+}
+
 } // namespace
 #endif // HE_IMGUI_ENABLED
+
+float FooterWidth([[maybe_unused]] AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (!hidden()) return 0.0f;
+	const Brief& b = brief();
+	// Same item sequence as DrawFooter: label, gap, bar, gap, percent. The percent
+	// is measured at its widest so the cluster does not breathe as it counts up.
+	return ImGui::CalcTextSize(b.label.c_str()).x + kFooterGap + kFooterBarW + kFooterGap +
+	       ImGui::CalcTextSize("100%").x;
+#else
+	return 0.0f;
+#endif
+}
+
+void DrawFooter([[maybe_unused]] AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (!hidden()) return;
+	const Brief& b = brief();
+
+	// Painted by hand, in a slot one text line tall, for the reason the download
+	// queue's bar is (EngineContentSyncBar.cpp): a framed ProgressBar does not fit
+	// the 24 px footer and drags the baseline of everything after it.
+	const ImVec2 clusterMin = ImGui::GetCursorScreenPos();
+	ImGui::TextUnformatted(b.label.c_str());
+	ImGui::SameLine(0.0f, kFooterGap);
+
+	const float  lineH   = ImGui::GetTextLineHeight();
+	const ImVec2 slotPos = ImGui::GetCursorScreenPos();
+	ImGui::Dummy(ImVec2(kFooterBarW, lineH));
+	const float  top = slotPos.y + (lineH - kFooterBarH) * 0.5f;
+	const ImVec2 p0(slotPos.x, top);
+	const ImVec2 p1(slotPos.x + kFooterBarW, top + kFooterBarH);
+	const float  radius = kFooterBarH * 0.5f;
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_FrameBg), radius);
+	const ImU32 fill = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+	if (!b.indeterminate)
+	{
+		const float w = kFooterBarW * b.fraction;
+		if (w > 0.0f)
+			dl->AddRectFilled(p0, ImVec2(p0.x + w, p1.y), fill, std::min(radius, w * 0.5f));
+	}
+	else
+	{
+		constexpr float kSegW = 0.3f, kPeriod = 1.6f;
+		const float t  = static_cast<float>(std::fmod(ImGui::GetTime(), kPeriod)) / kPeriod;
+		const float x0 = p0.x + (kFooterBarW * (1.0f + kSegW)) * t - kFooterBarW * kSegW;
+		const float l = std::max(x0, p0.x), r = std::min(x0 + kFooterBarW * kSegW, p1.x);
+		if (r > l) dl->AddRectFilled(ImVec2(l, p0.y), ImVec2(r, p1.y), fill, std::min(radius, (r - l) * 0.5f));
+	}
+	ImGui::SameLine(0.0f, kFooterGap);
+	ImGui::TextDisabled("%s", percentText(b).c_str());
+
+	// The whole cluster is the button: a click brings the window back. Hover-tested
+	// against the painted rectangle plus IsWindowHovered, as the download queue is,
+	// so a floating panel lying over the footer does not steal or double the hint.
+	const ImVec2 clusterMax = ImGui::GetItemRectMax();
+	if (ImGui::IsWindowHovered() &&
+	    ImGui::IsMouseHoveringRect(ImVec2(clusterMin.x - kFooterGap, clusterMin.y), clusterMax))
+	{
+		ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+		if (ImGui::BeginTooltip())
+		{
+			ImGui::TextUnformatted("The build is still running. Click to show its window.");
+			ImGui::EndTooltip();
+		}
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) requestOpen();
+	}
+#endif
+}
 
 void render([[maybe_unused]] AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+	// Whether the window was up on the last frame, before it is reset below: a run
+	// that ends under the user's eyes needs no notification.
+	announceFinish(s_visible);
 	s_visible = false;   // set again below if the popup draws this frame
 	if (s_openRequest)
 	{
@@ -446,7 +642,7 @@ void render([[maybe_unused]] AppContext& ctx)
 	// same reason the export dialog held one: nothing may mutate Content/ under
 	// the packer's reads. Another same-level popup force-closes it, so it is
 	// re-opened once that one is gone.
-	if (Build::running()
+	if (Build::running() && !s_hidden
 	    && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
 		ImGui::OpenPopup("Build##progress");
 
@@ -683,9 +879,20 @@ void render([[maybe_unused]] AppContext& ctx)
 	ImGui::EndDisabled();
 
 	ImGui::SameLine();
-	ImGui::BeginDisabled(running);
-	if (ImGui::Button("Close", ImVec2(90.0f, 0.0f))) ImGui::CloseCurrentPopup();
-	ImGui::EndDisabled();
+	if (running)
+	{
+		// The run goes on without the window: the footer shows its progress, a click
+		// there brings it back, and the end of the run raises a notification.
+		if (EditorWidgets::button("Hide", ImVec2(90.0f, 0.0f)))
+		{
+			s_hidden = true;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+	else if (ImGui::Button("Close", ImVec2(90.0f, 0.0f)))
+	{
+		ImGui::CloseCurrentPopup();
+	}
 
 	ImGui::EndPopup();
 #endif
