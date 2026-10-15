@@ -94,6 +94,12 @@ add_executable(he_tests
     # The Watch window, driven the same way: sections and rows from a real
     # runtime stopped at a breakpoint, Go to Node raising the reveal.
     test_hc_watch_ui.cpp
+    # The Task Board window, driven the same way: cards from a real board in a
+    # real project, links dropped onto them, chips that select and jump.
+    test_taskboard_ui.cpp
+    # The board's footer widget in a stand-in footer: one line tall in every
+    # state, kept out of the middle, and its list ticks tasks off on disk.
+    test_taskboard_footer_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -219,6 +225,10 @@ add_executable(he_tests
     test_project_exporter.cpp
     test_export_profiles.cpp
     test_project_settings.cpp
+    test_task_board.cpp
+    # Assigning, posting updates and notices between two editors over a fake
+    # team link, on one fake clock.
+    test_taskboard_team.cpp
     test_export_backend.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
@@ -296,6 +306,7 @@ add_executable(he_tests
     test_mcp_tools_batch.cpp
     test_mcp_tools_screenshot.cpp
     test_mcp_tools_collab.cpp
+    test_mcp_tools_taskboard.cpp
     test_mcp_camera_gizmos.cpp
     test_viewport_overlays.cpp
     test_texture_colour_space.cpp
@@ -496,6 +507,9 @@ add_executable(he_tests
     # same host → join → roster path the two-editor script drives, minus the
     # processes.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsCollab.cpp
+    # The task tools, with the Task Board panel's real board behind one editor
+    # and a second editor's bridge on the fake team (test_mcp_tools_taskboard.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTaskBoard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -508,6 +522,10 @@ add_executable(he_tests
     # apply a delete), so the tests cannot link without it — and asserting what
     # lands in it is how those posts are covered at all.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
+    # The task board's data and its project file (test_task_board.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
+    # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExecTrace.cpp
     # The stopped run as watch rows (test_hc_watch.cpp) — ImGui-free like the trace.
@@ -703,6 +721,12 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
+    # The Task Board window, for test_taskboard_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. It reads TaskBoard, EditorCommands and the
+    # thumbnail cache, all already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
+    # And its footer widget, for test_taskboard_footer_ui.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -774,6 +798,13 @@ set_source_files_properties(
     test_undo_history_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     test_hc_watch_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
+    test_taskboard_ui.cpp
+    # Builds an AppContext for TaskBoardPanel::board/edit: its layout must be
+    # the one the panel was compiled with.
+    test_mcp_tools_taskboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
+    test_taskboard_footer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp

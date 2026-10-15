@@ -72,6 +72,8 @@
 #include "AudioMixerPanel.h"             // Window > Audio Mixer window
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
+#include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
+#include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "EditorRewards.h"               // the footer's "Saved"/"Build succeeded" moments
@@ -230,6 +232,8 @@ static bool s_showUndoHistory = false;
 // Toggled by Window > Watch; drives the window that shows what a HorizonCode run
 // stopped at a breakpoint is holding. Also raised by a stop itself (below).
 static bool s_showWatch = false;
+// Toggled by Window > Task Board; drives the project's to-do list.
+static bool s_showTaskBoard = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -262,6 +266,7 @@ static bool docsPanelOpener(const char* window)
 		{ "Audio Mixer",          &s_showAudioMixer    },
 		{ "Undo History",         &s_showUndoHistory   },
 		{ "Watch",                &s_showWatch         },
+		{ "Task Board",           &s_showTaskBoard     },
 		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
 		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
 		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
@@ -314,6 +319,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
 	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
+	{ "Task Board",           "PanelOpenTaskBoard",     &s_showTaskBoard     },
 	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
@@ -1552,6 +1558,35 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// docked into the scene tab and is not drawn on any other, so the scene tab
 	// has to come forward before the panel can navigate to the asset.
 	if (ContentBrowserPanel::takeRevealTabSwitch()) openViewportTab();
+	// A Task Board chip clicked last frame (TaskBoardPanel.h, "Jumps"). Every
+	// target lives on the scene tab — the Content Browser, the Outliner, the
+	// scene itself, a docked panel — so that comes forward first.
+	if (const TaskBoardPanel::Jump jump = TaskBoardPanel::takeJump();
+	    jump.kind != TaskBoardPanel::Jump::Kind::None)
+	{
+		using K = TaskBoardPanel::Jump::Kind;
+		openViewportTab();
+		switch (jump.kind)
+		{
+		case K::Asset:  ContentBrowserPanel::revealAsset(jump.target); break;
+		case K::Scene:
+			// The open scene is already there; any other goes through the
+			// unsaved-changes prompt like File ▸ Open Scene. An entity jump that
+			// needed its scene selects the entity once it is loaded.
+			if (!EditorTabs::sameAsset(ctx.currentScenePath, jump.target, ctx.contentManager))
+				requestGuarded(GuardedAction::OpenScenePath, jump.target);
+			break;
+		case K::Entity:
+			// Already selected by the panel; show where. The latch, because the
+			// Outliner may not exist until the scene tab has drawn once.
+			ImGui::SetWindowFocus("World Outliner");
+			s_revealTitle       = "World Outliner";
+			s_revealFocusFrames = 2;
+			break;
+		case K::Panel:  docsPanelOpener(jump.target.c_str()); break;
+		case K::None:   break;
+		}
+	}
 	// View-menu panel toggle. Ticking one on has to make it VISIBLE, and where
 	// that is depends on how the user keeps it: a FLOATING panel draws over
 	// whichever tab is open, so it is only pulled to the front (it may already
@@ -1715,6 +1750,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
+		MacMenuBar::setToggleState(MC::ToggleTaskBoard,     s_showTaskBoard);
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
@@ -1876,6 +1912,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
+			case MC::ToggleTaskBoard: togglePanelWindow(s_showTaskBoard, "Task Board");      break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
 			case MC::ToggleScene3:
@@ -2254,6 +2291,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showUndoHistory, "Undo History");
         if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
             togglePanelWindow(s_showWatch, "Watch");
+        if (EditorWidgets::menuItem("Task Board", nullptr, s_showTaskBoard))
+            togglePanelWindow(s_showTaskBoard, "Task Board");
         // The extra scene panes and the level's own graph: game things, like
         // the grid — an application has no level to look at from above. The
         // Game Instance is the one graph an app really does own, and stays.
@@ -3176,6 +3215,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (SourceControlPanel::DrawFooterStatus(ctx))
 			revealFloatingWindow(s_showSourceControl, "Source Control");
 
+		// The task board, next to it — the other thing down here about the
+		// project rather than the editor. Its list opens from the overlay pass;
+		// its width stops short of the centred status line (TaskBoardFooter.h).
+		ImGui::SameLine(0.0f, 14.0f);
+		TaskBoardFooter::DrawFooter(ctx, TaskBoardFooter::budget(ImGui::GetCursorPosX(), ImGui::GetWindowWidth()));
+
 		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 		// The resolution is the actual viewport framebuffer size the scene renders at.
 		std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
@@ -4042,6 +4087,10 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 		s_wasHcPaused = paused;
 	}
 	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
+	// The task board: a task is read and ticked off from wherever the work is,
+	// which is as often a graph tab as the scene. Drawn even while closed — a
+	// chip that had to open a scene selects its entity once the scene is in.
+	TaskBoardPanel::DrawTaskBoardWindow(ctx, s_showTaskBoard);
 	// The console, for the first error of a play session — the same gesture as
 	// the Watch window above, for the same reason: the console is closed by
 	// default, the bell in the footer is ambient by its own description and the
@@ -4084,6 +4133,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     // nothing unless their own footer half ran this frame.
     CollabPresenceBar::DrawOverlay(ctx);
     NotificationBar::DrawOverlay(ctx);
+    if (TaskBoardFooter::DrawOverlay(ctx)) revealFloatingWindow(s_showTaskBoard, "Task Board");
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;
