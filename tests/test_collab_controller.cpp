@@ -1337,7 +1337,7 @@ TEST_CASE("Reimport: refused while somebody else is holding the asset")
     CHECK(s.host.ownsAssetLock(asset));
 
     const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     // Naming the holder is what makes it actionable: the fix is to go and ask
     // Anna, not to click the menu item again.
     CHECK(n.text.find("Anna") != std::string::npos);
@@ -1476,7 +1476,7 @@ TEST_CASE("Collab: a denied request and an unanswered one both reach the user")
     REQUIRE(pumpUntil(s.host, s.client, [&] { return !notes.snapshot().empty(); }));
 
     const HE::Ed::Notification denied = findNote(notes, "Doomed.hasset");
-    CHECK(denied.level == HE::Ed::NoteLevel::Warning);
+    CHECK(denied.level == HE::Ed::NoteLevel::Important);
     CHECK(denied.text.find("did not approve") != std::string::npos);
 
     // And the other silence: an ask that was never answered at all. The session
@@ -1491,14 +1491,14 @@ TEST_CASE("Collab: a denied request and an unanswered one both reach the user")
 
     s.client.leave();
     const HE::Ed::Notification stranded = findNote(notes, "Forgotten.hasset");
-    CHECK(stranded.level == HE::Ed::NoteLevel::Warning);
+    CHECK(stranded.level == HE::Ed::NoteLevel::Important);
     CHECK(stranded.text.find("Nobody answered") != std::string::npos);
 
     // The host had a decision in front of it that it never made, and its queue
     // has just emptied itself — said once, with a count.
     s.host.leave();
     const HE::Ed::Notification unmade = findNote(hostNotes, "still waiting");
-    CHECK(unmade.level == HE::Ed::NoteLevel::Warning);
+    CHECK(unmade.level == HE::Ed::NoteLevel::Important);
 }
 
 TEST_CASE("Collab: a delete that did not happen here stops being silent")
@@ -1529,7 +1529,7 @@ TEST_CASE("Collab: a delete that did not happen here stops being silent")
     REQUIRE(pumpUntil(s.host, s.client, [&] { return !notes.snapshot().empty(); }));
 
     const HE::Ed::Notification n = findNote(notes, "Stubborn.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("still here") != std::string::npos);
     // The row points at something the user can actually open.
     CHECK(n.assetPath == file.string());
@@ -2336,7 +2336,7 @@ TEST_CASE("Transfer ceiling: a file over this machine's limit is not sent, and t
 
     CHECK_FALSE(bytesArrived);
     const HE::Ed::Notification n = findNote(hostNotes, "Marble.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("was not sent") != std::string::npos);
     // The three things a reader needs and cannot work out: how big it was, what
     // the limit is, and where that limit is changed. Without the last one this is
@@ -2384,7 +2384,7 @@ TEST_CASE("Transfer ceiling: the receiving machine refuses a file its sender was
     // and the notice has to say so, or the reader assumes a partial one landed.
     CHECK_FALSE(bytesArrived);
     const HE::Ed::Notification n = findNote(clientNotes, "Granite.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("Anna") != std::string::npos);          // who sent it
     CHECK(n.text.find("refused") != std::string::npos);
     CHECK(n.detail.find("their limit is higher") != std::string::npos);
@@ -2430,7 +2430,7 @@ TEST_CASE("Transfer ceiling: the sender is told when the far end would not take 
 
     CHECK_FALSE(bytesArrived);
     const HE::Ed::Notification n = findNote(clientNotes, "Basalt.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("Anna") != std::string::npos);           // who refused it
     CHECK(n.text.find("could not accept") != std::string::npos);
     CHECK(n.detail.find("2 MB") != std::string::npos);          // how big it was
@@ -2507,7 +2507,7 @@ TEST_CASE("Transfer ceiling: a third editor's refusal is carried back through th
     CHECK(caraGot == 0);
 
     const HE::Ed::Notification n = findNote(bobNotes, "Slate.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     // Named, and named correctly: the refusal came from Cara and was merely
     // carried by Anna. A message that blamed the messenger would send Bob to ask
     // the wrong person to change a setting.
@@ -2523,7 +2523,7 @@ TEST_CASE("Transfer ceiling: a third editor's refusal is carried back through th
     // Cara still gets her own side of it: her machine refused a file, and that is
     // a different sentence with a different fix from the one Bob is reading.
     const HE::Ed::Notification c = findNote(caraNotes, "Slate.hasset");
-    CHECK(c.level == HE::Ed::NoteLevel::Problem);
+    CHECK(c.level == HE::Ed::NoteLevel::Important);
     CHECK(c.text.find("refused") != std::string::npos);
 
     // And exactly one notice each: a refusal that could be refused in turn, or
@@ -2575,7 +2575,7 @@ TEST_CASE("Transfer ceiling: a refused CREATE is settled by the refusal, not lef
     REQUIRE(pumpUntil(s.host, s.client, [&] { return !clientNotes.snapshot().empty(); }));
 
     const HE::Ed::Notification n = findNote(clientNotes, "Fresh.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     // A create, so the clause about what they are left holding is the other one:
     // there is no older version over there to fall back on.
     CHECK(n.detail.find("does not exist at all") != std::string::npos);
@@ -2687,7 +2687,7 @@ TEST_CASE("Transfer ceiling: a PEER's refusal is not a verdict, so a pending cre
     CHECK(s.client.debugHasPendingCreate(key));
 
     // Told about it, though — the notification is the honest half and stays.
-    CHECK(findNote(clientNotes, "Peer.hasset").level == HE::Ed::NoteLevel::Problem);
+    CHECK(findNote(clientNotes, "Peer.hasset").level == HE::Ed::NoteLevel::Important);
 
     s.client.leave();
     s.host.leave();
@@ -2879,7 +2879,7 @@ TEST_CASE("Reimport: a claim that lost the race says so instead of diverging qui
     // A Problem, because two copies of that file may now differ and nothing else
     // in the editor will ever mention it — and it names who took it, because the
     // only way out is to go and ask them.
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("Anna") != std::string::npos);
     CHECK(n.text.find("reimported") != std::string::npos);
 
@@ -2956,7 +2956,7 @@ TEST_CASE("Notifications: one peer's flood is capped and summarised, another's i
     // summary becomes the flood it replaced.
     CHECK(summaryRows == 1);
     const HE::Ed::Notification summary = findNote(notes, "more messages than");
-    CHECK(summary.level == HE::Ed::NoteLevel::Warning);
+    CHECK(summary.level == HE::Ed::NoteLevel::Important);
     CHECK(summary.text.find("Anna") != std::string::npos);
 
     // Somebody else, in the same breath. The budget is per bucket for exactly
@@ -3031,7 +3031,7 @@ TEST_CASE("Notifications: what the user did themselves is never rate-limited")
     // it counted every single one. A throttled message would have stopped
     // counting at the budget.
     const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.count == tries);
     // And no summary row, because nothing was dropped. The needle has to be the
     // one the limiter actually writes: this said "was not shown", which was the
@@ -3888,4 +3888,76 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
     CHECK(keptOnBob.empty());
     bob.leave();
     anna.leave();
+}
+
+// ─── A failed session is a dialog, not a line of red text ────────────────────
+// The Collaboration window prints lastError() in small red text — in a window that
+// is closed exactly when a dropped link matters. A failure now also arrives as a
+// Critical notification (a modal), once, with the way forward on it, and is
+// withdrawn when the failure is over.
+
+TEST_CASE("Collab failure: a refused join is one Critical notification with Try again")
+{
+    CollabController host;   // deliberately no world set: it refuses every join
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    HE::Ed::NotificationStore notes;
+    client.setNotifications(&notes);
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Failed;
+    }));
+    // The announcement is made by the next frame's update(), whichever code set
+    // the failure.
+    client.update(1'000'000);
+    client.update(1'000'016);
+
+    HE::Ed::Notification n;
+    REQUIRE(notes.nextModal(n));
+    CHECK(n.level == HE::Ed::NoteLevel::Critical);
+    CHECK(n.title == "Could not join the session");
+    CHECK(n.text == client.lastError());
+    REQUIRE(n.actions.size() == 1);
+    CHECK(n.actions[0].label == "Try again");
+    CHECK(n.actions[0].primary);
+    // Once per failure: more frames do not stack more dialogs.
+    client.update(1'000'032);
+    CHECK(notes.snapshot().size() == 1);
+
+    // Dismissing it (Leave) ends the failure, and the buttons go with it.
+    client.leave();
+    client.update(1'000'048);
+    CHECK_FALSE(notes.nextModal(n));
+    const auto rows = notes.snapshot();
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].handled);
+    CHECK(rows[0].actions.empty());
+
+    host.leave();
+}
+
+TEST_CASE("Collab failure: the large-assets question is announced without a retry button")
+{
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/true));
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.largeAssetsPrompt(); }));
+    s.client.update(2'000'000);
+
+    HE::Ed::Notification n;
+    REQUIRE(notes.nextModal(n));
+    // Retrying with the same answer would be refused identically; the panel's own
+    // dialog is the answer to this one.
+    CHECK(n.actions.empty());
+    CHECK(n.text.find("considerably more data") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
 }

@@ -77,7 +77,7 @@ void commitSettings(AppContext& ctx, ProjectData& p, const char* what)
 {
 	p.settings.clamp();
 	if (!ctx.projectManager->saveProjectSettings())
-		HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+		HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 		               std::string("Could not save the project's ") + what,
 		               HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
 }
@@ -154,7 +154,7 @@ void drawPermissionsPage(AppContext& ctx)
 		if (!ctx.projectManager->saveProject(p.path))
 			// Problem, not Warning: the panel now says one thing and the file
 			// another, and it stays that way until somebody acts.
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's permissions", p.path);
 	}
 }
@@ -314,7 +314,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	if (commit)
 	{
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's collision layers", p.path);
 		// And into the running simulation, so a matrix edited during play takes
 		// effect where it can be seen. PhysicsWorld copies the matrix into the
@@ -494,7 +494,7 @@ void drawApplicationPage(AppContext& ctx)
 		// Straight to disk, as on the other project pages: a value that is in the
 		// panel and not in the file is the state somebody loses an evening to.
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's application settings", p.path);
 	}
 }
@@ -584,7 +584,7 @@ void drawFontsPage(AppContext& ctx)
 		// Straight to disk, like the permissions page: a setting that is on in
 		// the panel and off in the file is the state somebody spends an evening on.
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's font settings", p.path);
 	}
 
@@ -705,7 +705,7 @@ void drawGeneralPage(AppContext& ctx)
 				{
 					p.startupScene = (fs::path(root) / "Content" / s).string();
 					if (!ctx.projectManager->saveProject(p.path))
-						HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+						HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 						               "Could not save the project's startup scene", p.path);
 				}
 				if (selected) ImGui::SetItemDefaultFocus();

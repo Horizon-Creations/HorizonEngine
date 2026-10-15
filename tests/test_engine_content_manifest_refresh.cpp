@@ -327,3 +327,32 @@ TEST_CASE("EngineContent manifest: a file held open for a moment by someone else
 #endif
 	}
 }
+
+// A failed fetch reaches the failure listener (the editor turns it into a
+// notification) — the library itself has no way to tell a user. The listener is
+// installed for the case and removed again, whatever happens.
+TEST_CASE("EngineContent sync: a failed manifest fetch is reported to the failure listener")
+{
+	if (!cacheDirIsIsolated()) return;
+
+	struct Listener
+	{
+		std::mutex                                 m;
+		std::vector<HE::Cs::SyncFailure>           seen;
+		Listener()
+		{
+			HE::Cs::EngineContentSync::instance().setFailureListener(
+				[this](const HE::Cs::SyncFailure& f) { std::lock_guard<std::mutex> l(m); seen.push_back(f); });
+		}
+		~Listener() { HE::Cs::EngineContentSync::instance().setFailureListener({}); }
+	} listener;
+
+	const bool ok = HE::Cs::EngineContentSync::instance().refreshManifestWith(
+		[](const std::string&) { HE::Cs::SftpResult r; r.ok = false; r.error = "connection refused"; return r; });
+	CHECK_FALSE(ok);
+
+	std::lock_guard<std::mutex> l(listener.m);
+	REQUIRE(listener.seen.size() == 1);
+	CHECK(listener.seen[0].kind == HE::Cs::SyncFailureKind::Manifest);
+	CHECK(listener.seen[0].reason.find("connection refused") != std::string::npos);
+}

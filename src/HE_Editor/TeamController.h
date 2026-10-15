@@ -242,6 +242,16 @@ private:
 	void leaveRevoking(bool all, const std::string& token);
 	void handleEvent(const HE::Net::TeamClient::Event& ev);
 	void notice(std::string text, bool error);
+	// The same with the notification spelled out: its tier, title, buttons and key.
+	// `note.text` is filled from `text`.
+	void notice(std::string text, bool error, HE::Ed::NoteSpec note);
+	static std::string inviteKey(const std::string& session);
+	void withdrawInvite(const std::string& session);
+	// Join from a notification button; a refusal becomes a notice instead of only
+	// m_error, which no toast shows.
+	void acceptInvite(const std::string& session);
+	static HE::Ed::NoteSpec signInFailed();
+	HE::Ed::NoteSpec joinFailed(const std::string& session);
 	bool requireSignedIn(const char* what);
 	// A reply callback that turns a refusal into a notice. Captures no `this`
 	// beyond the controller's lifetime: the client it is handed to is owned here.
@@ -249,6 +259,7 @@ private:
 
 	CollabController&            m_collab;
 	HE::Ed::NotificationStore*   m_notes = nullptr;
+	bool                         m_lostNoticed = false;   // "Lost the connection" is up
 	std::unique_ptr<HE::Net::TeamClient> m_client;
 	ScHeadFn                     m_onScHead;
 

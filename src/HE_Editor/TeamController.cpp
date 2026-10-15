@@ -175,18 +175,21 @@ bool TeamController::begin(const std::string& server, const std::string& team,
 		m_error  = server.empty() ? std::string("Enter the team server's address first.")
 		                          : "The team server address \"" + server + "\" cannot be used (" + why + ").";
 		m_status = Status::Failed;
+		notice(m_error, true);
 		return false;
 	}
 	if (!RelayTransport::isValidId(team) || !RelayTransport::isValidId(member))
 	{
 		m_error  = "Team and member names are 1-64 letters, digits, - or _.";
 		m_status = Status::Failed;
+		notice(m_error, true);
 		return false;
 	}
 	if (password.empty() || password.size() > 255)
 	{
 		m_error  = password.empty() ? "Enter a password." : "That password is too long (255 bytes at most).";
 		m_status = Status::Failed;
+		notice(m_error, true);
 		return false;
 	}
 
@@ -285,6 +288,7 @@ bool TeamController::connectNow()
 	{
 		m_error = "Could not open a connection to the team server at " + m_server.host + ":" +
 		          std::to_string(m_server.port) + ".";
+		notice(m_error, true);
 		return false;
 	}
 	return true;
@@ -430,7 +434,7 @@ void TeamController::update(std::uint64_t nowMs)
 				// At start nobody has the Team window open, and the editor was
 				// expected to be signed in: say so where it is seen. (A live
 				// connection gets its notice below.)
-				if (!m_wasLoggedIn) notice(m_error, true);
+				if (!m_wasLoggedIn) notice(m_error, true, signInFailed());
 				Logger::Log(Logger::LogLevel::Info,
 				            ("Team: the saved session was refused" + (why.empty() ? std::string() : " — " + why)).c_str());
 			}
@@ -445,13 +449,22 @@ void TeamController::update(std::uint64_t nowMs)
 				wipe(m_secret);
 				m_op = TeamClient::LoginOp::Login;
 				m_hosted.clear();
-				if (m_wasLoggedIn) notice(m_error, true);
+				if (m_wasLoggedIn) notice(m_error, true, signInFailed());
 				m_wasLoggedIn = false;
 			}
 			else
 			{
 				if (m_status == Status::SignedIn)
-					notice("Lost the connection to the team server; reconnecting.", true);
+				{
+					// One notification for the whole outage, withdrawn by onLoggedIn()
+					// when it is over: a flapping link must not stack toasts.
+					HE::Ed::NoteSpec note;
+					note.level = HE::Ed::NoteLevel::Important;
+					note.title = "Team server";
+					note.key   = "team.connection";
+					m_lostNoticed = true;
+					notice("Lost the connection to the team server; reconnecting.", true, std::move(note));
+				}
 				m_status    = Status::Reconnecting;
 				m_retryAtMs = nowMs + m_backoffMs;
 				m_backoffMs = std::min(m_backoffMs * 2, kRetryMaxMs);
@@ -487,6 +500,12 @@ void TeamController::onLoggedIn()
 	m_error.clear();
 	m_wasLoggedIn = true;
 	m_backoffMs   = kRetryMinMs;
+	if (m_lostNoticed)
+	{
+		m_lostNoticed = false;
+		if (m_notes) m_notes->resolve("team.connection");
+		notice("Reconnected to the team server.", false);
+	}
 	Logger::Log(Logger::LogLevel::Info,
 	            ("Team: signed in to '" + m_team + "' as '" + m_member + "'" +
 	             (usingToken() ? " with the saved session" : "")).c_str());
@@ -547,7 +566,27 @@ void TeamController::handleEvent(const TeamClient::Event& ev)
 	switch (ev.kind)
 	{
 	case TeamClient::EventKind::Invited:
-		notice(ev.host + " invited you to a collaboration session.", false);
+	{
+		// The invitation is a question, so it is a notification that can be
+		// answered where it appears: Join / Ignore on the toast in the corner (and
+		// on its row in the notification centre). Keyed by session, so a re-sent
+		// invitation replaces the old one instead of stacking.
+		const std::string session = ev.session;
+		HE::Ed::NoteSpec note;
+		note.level = HE::Ed::NoteLevel::Important;
+		note.title = "Collaboration invitation";
+		note.key   = inviteKey(session);
+		// Captures only the session id and `this` — the controller lives as long as
+		// the editor, and the store (also an editor member) only runs these inside a
+		// frame. A session that ends before the click is withdrawn by SessionClosed.
+		note.actions.push_back({ "Join", [this, session] { acceptInvite(session); }, true });
+		note.actions.push_back({ "Ignore", [this, session] { decline(session); }, false });
+		notice(ev.host + " invited you to a collaboration session.", false, std::move(note));
+		break;
+	}
+	case TeamClient::EventKind::SessionClosed:
+		// Nothing left to join: the invitation's buttons would only lead to an error.
+		withdrawInvite(ev.session);
 		break;
 	case TeamClient::EventKind::Joining:
 		if (ev.session == m_hosted) notice(ev.member + " is joining your session.", false);
@@ -564,10 +603,45 @@ void TeamController::handleEvent(const TeamClient::Event& ev)
 	}
 }
 
+std::string TeamController::inviteKey(const std::string& session)
+{
+	return "team.invite." + session;
+}
+
+void TeamController::withdrawInvite(const std::string& session)
+{
+	if (m_notes && !session.empty()) m_notes->resolve(inviteKey(session));
+}
+
+HE::Ed::NoteSpec TeamController::signInFailed()
+{
+	HE::Ed::NoteSpec note;
+	note.level = HE::Ed::NoteLevel::Critical;
+	note.title = "Team sign-in failed";
+	return note;
+}
+
+void TeamController::acceptInvite(const std::string& session)
+{
+	// join() says why it refused (not signed in, a session already running) as a
+	// notice of its own, so a click on the toast always gets an answer.
+	join(session);
+}
+
 void TeamController::notice(std::string text, bool error)
 {
+	HE::Ed::NoteSpec note;
+	note.level = error ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info;
+	notice(std::move(text), error, std::move(note));
+}
+
+void TeamController::notice(std::string text, bool error, HE::Ed::NoteSpec note)
+{
 	if (m_notes)
-		m_notes->post(error ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Info, text);
+	{
+		note.text = text;
+		m_notes->post(std::move(note));
+	}
 	if (m_notices.size() >= kMaxNotices) m_notices.pop_front();
 	m_notices.push_back(Notice{ std::move(text), error });
 }
@@ -584,6 +658,7 @@ bool TeamController::requireSignedIn(const char* what)
 {
 	if (m_client && m_client->loggedIn()) return true;
 	m_error = std::string("Sign in to the team server to ") + what + ".";
+	notice(m_error, true);
 	return false;
 }
 
@@ -612,11 +687,15 @@ bool TeamController::hostSession(bool open)
 	if (m_collab.active())
 	{
 		m_error = "A collaboration session is already running; leave it first.";
+		notice(m_error, true);
 		return false;
 	}
 	if (!m_collab.startTeamHosting(m_server, member()))
 	{
 		m_error = m_collab.lastError();
+		// The collaboration controller announces its own failure (a dialog); only a
+		// refusal that did not make it fail has no other voice.
+		if (m_collab.status() != CollabController::Status::Failed) notice(m_error, true);
 		return false;
 	}
 	m_hosted     = m_collab.sessionId();
@@ -627,8 +706,11 @@ bool TeamController::hostSession(bool open)
 	                      [this, sid](const TeamClient::Reply& r) {
 		// Lost before the answer: the reconnect announces it again.
 		if (r.ok() || r.result == TeamClient::Result::ConnectionLost) return;
+		HE::Ed::NoteSpec note;
+		note.level = HE::Ed::NoteLevel::Critical;
+		note.title = "Could not host the session";
 		notice("The team server did not take the session: " +
-		           TeamClient::describeResult(r.result, r.text), true);
+		           TeamClient::describeResult(r.result, r.text), true, std::move(note));
 		// A team session nobody in the team can find is no use to anyone.
 		if (m_hosted == sid)
 		{
@@ -645,6 +727,7 @@ bool TeamController::setSessionOpen(bool open)
 	if (m_hosted.empty())
 	{
 		m_error = "This editor is not hosting a team session.";
+		notice(m_error, true);
 		return false;
 	}
 	m_hostedOpen = open;
@@ -665,6 +748,7 @@ bool TeamController::invite(const std::string& member)
 	if (m_hosted.empty())
 	{
 		m_error = "Host a session first, then invite.";
+		notice(m_error, true);
 		return false;
 	}
 	m_client->invite(m_hosted, member, reportFailure("Could not invite " + member));
@@ -677,28 +761,43 @@ bool TeamController::join(const std::string& session)
 	if (m_collab.active())
 	{
 		m_error = "A collaboration session is already running; leave it first.";
+		notice(m_error, true);
 		return false;
 	}
 	m_joining = session;
-	m_client->join(session, [this](const TeamClient::Reply& r) {
+	withdrawInvite(session);   // answered, here or on the toast
+	m_client->join(session, [this, session](const TeamClient::Reply& r) {
 		m_joining.clear();
 		if (r.result == TeamClient::Result::ConnectionLost) return;
 		if (!r.ok())
 		{
-			notice("Could not join: " + TeamClient::describeResult(r.result, r.text), true);
+			notice("Could not join: " + TeamClient::describeResult(r.result, r.text), true,
+			       joinFailed(session));
 			return;
 		}
 		// Our member name as the relay peer id, as the protocol recommends:
 		// the host can then match the connection to the "joining" it was told.
 		const std::string self = member();
 		if (!m_collab.joinTeamSession(m_server, r.session, r.peer, self, self))
-			notice("Could not join: " + m_collab.lastError(), true);
+			notice("Could not join: " + m_collab.lastError(), true, joinFailed(session));
 	});
 	return true;
 }
 
+HE::Ed::NoteSpec TeamController::joinFailed(const std::string& session)
+{
+	// The thing the user just asked for did not happen, so it is a dialog, with the
+	// obvious next step on it.
+	HE::Ed::NoteSpec note;
+	note.level = HE::Ed::NoteLevel::Critical;
+	note.title = "Could not join the session";
+	note.actions.push_back({ "Try again", [this, session] { acceptInvite(session); }, true });
+	return note;
+}
+
 bool TeamController::decline(const std::string& session)
 {
+	withdrawInvite(session);
 	if (!requireSignedIn("decline")) return false;
 	m_client->decline(session, reportFailure("Could not decline"));
 	return true;
@@ -845,6 +944,7 @@ bool TeamController::setAvatar(std::uint16_t size, const std::vector<std::uint8_
 	if (size > TeamClient::kMaxAvatarSize || rgba.size() != std::size_t(size) * size * 4)
 	{
 		m_error = "The picture is not a square of at most 64 pixels.";
+		notice(m_error, true);
 		return false;
 	}
 	m_client->setAvatar(size, rgba, reportFailure("Could not change your picture"));

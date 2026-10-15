@@ -1236,7 +1236,7 @@ void renderPanel(AppContext& ctx)
                 else
                 {
                     HE_LOG_WARN(Editor, "Heightmap for the new landscape failed: %s", hres.error.c_str());
-                    HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                    HE::Ed::notify(HE::Ed::NoteLevel::Important,
                                    "The heightmap could not be applied - the landscape was created without it.",
                                    hres.error);
                 }
@@ -2295,17 +2295,18 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 
 	ImGui::TextDisabled("Black = 0 m, white = Height Scale (%.1f m).", tc->heightScale);
 	ImGui::TextDisabled("Replaces the sculpt; paint and foliage stay.");
-	// A failure is a notification (the footer bell rings), not red text in the panel; the
-	// line here is only the outcome of an import that worked.
+	// Failure and success are both notifications now, not a line under the buttons that
+	// stays until the next click. Said once per result.
 	static std::string s_hmReported;
 	if (s_hmStatus.empty()) s_hmReported.clear();
-	if (!s_hmStatus.empty() && s_hmStatusError && s_hmStatus != s_hmReported)
+	if (!s_hmStatus.empty() && s_hmStatus != s_hmReported)
 	{
 		s_hmReported = s_hmStatus;
-		HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Heightmap import failed.", s_hmStatus);
+		if (s_hmStatusError)
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Heightmap import failed.", s_hmStatus);
+		else
+			HE::Ed::notify(HE::Ed::NoteLevel::Info, "Heightmap applied", s_hmStatus);
 	}
-	if (!s_hmStatus.empty() && !s_hmStatusError)
-		ImGui::TextWrapped("%s", s_hmStatus.c_str());
 	ImGui::PopID();
 #else
 	(void)ctx; (void)terrain;

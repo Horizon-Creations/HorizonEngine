@@ -1,4 +1,5 @@
 #include "GitHubSignInView.h"
+#include "NotificationStore.h"   // the reason a sign-in failed is a notification
 
 #include <cstdio>
 
@@ -24,13 +25,6 @@ std::string formatCountdown(int seconds)
 namespace {
 
 namespace Theme = HE::Ed::Theme;
-
-void errorText(const std::string& s)
-{
-	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-	ImGui::TextWrapped("%s", s.c_str());
-	ImGui::PopStyleColor();
-}
 
 // The code, large, in a framed box across the width — the one thing on screen
 // the user has to read off and type somewhere else, so it gets the space.
@@ -133,7 +127,15 @@ Action drawBody(const View& v, const Fonts& fonts)
 		                 ? "The code expired before it was entered."
 		                 : "Signing in to GitHub did not work.";
 		ImGui::TextWrapped("%s", what);
-		if (!v.error.empty()) errorText(v.error);
+		// The reason is a notification, said once per distinct error; the phase line
+		// above is the dialog's own answer and the buttons below are what to do next.
+		static std::string s_reported;
+		if (v.error.empty()) s_reported.clear();
+		else if (v.error != s_reported)
+		{
+			s_reported = v.error;
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "GitHub sign-in problem", v.error);
+		}
 		ImGui::Spacing();
 		// Two literal labels rather than one variable, so the help audit sees both.
 		const bool again = v.phase == Phase::Expired

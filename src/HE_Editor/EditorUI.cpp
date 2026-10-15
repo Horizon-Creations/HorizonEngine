@@ -1,4 +1,5 @@
 #include "EditorUI.h"
+#include "NotificationStore.h"   // failures are notifications
 #include "EditorTheme.h"   // brand palette (the editor tab strip)
 #include <algorithm>
 #include <cstdint>
@@ -50,6 +51,7 @@
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
+#include "NotificationPopups.h"    // its loud end: toasts bottom-right and the critical modal
 #include "PlayErrorReveal.h"        // the first error of a play session opens the console
 #include "SourceControlPanel.h"     // Window > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
@@ -1297,7 +1299,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
 	// A project failed to open (openProjectAt); the "##EditorOpenError" modal
 	// is opened where it is drawn, on the frame after.
-	static bool s_openProjectErrorPopup = false;
 
 	// ── Unsaved-changes guard state ─────────────────────────────────────────
 	// A destructive action requested while the scene is dirty is stashed here and
@@ -1392,12 +1393,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	};
 	// Reward moment (EditorRewards.h): Saved — a successful synchronous save of
 	// a scene that HAD unsaved edits (the Save-As path fires in its handler).
-	auto doSaveScene = [&]()
+	// False only when a synchronous write failed (the Save-As dialog being in
+	// flight is not a failure): the guarded Save below must not carry on to quit or
+	// switch project on top of a scene that did not reach the disk.
+	auto doSaveScene = [&]() -> bool
 	{
-		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return; }
+		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return true; }
 		const bool wasDirty = ctx.sceneDirty;
-		if (writeScene() && wasDirty)
+		const bool ok = writeScene();
+		if (ok && wasDirty)
 			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
+		return ok;
 	};
 	// ── Save (Ctrl/Cmd+S): the tab you are LOOKING AT ──────────────────────
 	// Saving the scene from inside a material graph is the wrong document: the
@@ -2826,9 +2832,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
             if (!s_guardSaveError.empty())
             {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_guardSaveError.c_str());
-                ImGui::TextDisabled("Nothing was closed or discarded.");
+                // Said as a notification (once: the slot is emptied), not as red text in
+                // the dialog that the next click has to scroll past.
+                HE::Ed::NoteSpec note;
+                note.level  = HE::Ed::NoteLevel::Important;
+                note.title  = "Not saved";
+                note.text   = s_guardSaveError;
+                note.detail = "Nothing was closed or discarded.";
+                note.key    = "guard.save";
+                HE::Ed::notify(std::move(note));
+                s_guardSaveError.clear();
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
@@ -2864,20 +2877,31 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                         if (!dirtyTabs.empty())
                             HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
                         const bool hadPath = !ctx.currentScenePath.empty();
+                        bool sceneSaved = true;
                         if (ctx.sceneDirty)
-                            doSaveScene(); // synchronous if a path exists, else async Save-As
-                        if (!ctx.sceneDirty || hadPath)
+                            sceneSaved = doSaveScene(); // synchronous if a path exists, else async Save-As
+                        if (!sceneSaved)
                         {
-                            runGuardedAction(action, arg);
-                            s_guardAction = GuardedAction::None;
+                            // Quitting or switching now would throw the unsaved scene away
+                            // behind a dialog that said it was being saved. Stay here; the
+                            // failure itself is a notification (saveSceneToPath).
+                            s_guardSaveError = "The scene could not be saved.";
                         }
                         else
                         {
-                            // Save-As dialog is in flight; the file-result handler runs
-                            // the action once a path has been chosen and written.
-                            s_guardSaveThenAct = true;
+                            if (!ctx.sceneDirty || hadPath)
+                            {
+                                runGuardedAction(action, arg);
+                                s_guardAction = GuardedAction::None;
+                            }
+                            else
+                            {
+                                // Save-As dialog is in flight; the file-result handler runs
+                                // the action once a path has been chosen and written.
+                                s_guardSaveThenAct = true;
+                            }
+                            ImGui::CloseCurrentPopup();
                         }
-                        ImGui::CloseCurrentPopup();
                     }
                 }
                 ImGui::SameLine();
@@ -3074,44 +3098,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
 
-    if (s_openProjectErrorPopup)
-    {
-        s_openProjectErrorPopup = false;
-        ImGui::OpenPopup("##EditorOpenError");
-    }
-    if (!ctx.hubOpenError.empty())
-    {
-        EditorWidgets::pinDialogToEditorWindow();
-        if (ImGui::BeginPopupModal("##EditorOpenError", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
-        {
-            // hubOpenError is whatever went wrong opening a project, and it
-            // normally names the file it failed on — an absolute path. Two things
-            // follow. It has to wrap, or the dialog is one line as wide as the path
-            // and the sentence ends off-screen. And the column has to be absolute:
-            // this popup sizes itself to its content, so wrapping at its own right
-            // edge is a feedback loop — every frame it fits the wrapped text and
-            // every frame the text wraps tighter, down to ImGui's minimum.
-            //
-            // The guard lives in its own scope because EndPopup() below hands
-            // ImGui's current window back to whatever is under this popup — here
-            // the implicit debug window — and popping the wrap position after that
-            // pops a stack that was never pushed.
-            {
-                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 30.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-                ImGui::TextUnformatted(ctx.hubOpenError.c_str());
-                ImGui::PopStyleColor();
-                ImGui::Spacing();
-                if (EditorWidgets::primaryButton("OK", ImVec2(120, 0)))
-                {
-                    ctx.hubOpenError.clear();
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndPopup();
-        }
-    }
+    // (A modal for ctx.hubOpenError used to be drawn here. Nothing ever asked for it to
+    // open, and the error is a notification now: see ProjectHubPanel's Open page.)
 
     // ── New Project Popup ─────────────────────────────────────────────────────
     {
@@ -3303,7 +3291,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     }
                     else
                     {
-                        ctx.hubCreateError = "Failed to create project. Check path/permissions.";
+                        HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
+                               "Check that the folder exists and is writable.");
                     }
                 }
             }
@@ -3575,7 +3564,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// every widget to its right plus 16px per neighbour that is actually
 		// there. Being at the left end is what keeps the edit to one block —
 		// inserting anywhere else means editing everything to its left as well.
-		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
+		const float mcpW = McpStatusBar::FooterWidth(ctx);
+		if (mcpW > 0.0f)
 		{
 			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
@@ -3585,6 +3575,23 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			                - (syncW > 0.0f ? 16.0f : 0.0f)
 			                - (actW > 0.0f ? 16.0f : 0.0f));
 			McpStatusBar::DrawFooter(ctx);
+		}
+
+		// A build whose window was put away (Hide in the Build window): its progress,
+		// and a click brings the window back. Left-most of the group, like the block
+		// above, so adding it meant editing nothing to its right. Draws nothing unless
+		// a run is going on with the window hidden.
+		if (const float buildW = BuildProgressDialog::FooterWidth(ctx); buildW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW - buildW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f)
+			                - (syncW > 0.0f ? 16.0f : 0.0f)
+			                - (actW > 0.0f ? 16.0f : 0.0f)
+			                - (mcpW > 0.0f ? 16.0f : 0.0f));
+			BuildProgressDialog::DrawFooter(ctx);
 		}
 
 		// Middle — status
@@ -4413,6 +4420,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     if (ctx.team && TeamView::drawFooterOnlineMenu(*ctx.team))
         revealFloatingWindow(s_showTeam, "Team");
     NotificationBar::DrawOverlay(ctx);
+    NotificationPopups::DrawOverlay(ctx);   // last: toasts above the panels, the modal above all
     if (TaskBoardFooter::DrawOverlay(ctx)) revealFloatingWindow(s_showTaskBoard, "Task Board");
 
     TutorialPanel::UiFlags tutFlags;

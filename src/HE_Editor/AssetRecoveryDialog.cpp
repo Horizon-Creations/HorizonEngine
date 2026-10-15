@@ -1,4 +1,5 @@
 #include "AssetRecoveryDialog.h"
+#include "NotificationStore.h"   // a failed restore is a notification
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"          // the "Asset Recovery" scope for the buttons
 #include "EditorWidgets.h"       // pinDialogToEditorWindow, the button verbs, WrapText
@@ -175,8 +176,16 @@ void Draw(AppContext& ctx)
 		EditorWidgets::WrapText wrap(wrapWidth);
 		if (!s_error.empty())
 		{
-			ImGui::Spacing();
-			ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "%s", s_error.c_str());
+			// A notification, said once; the row that could not be restored is still in
+			// the list below, which is the state the buttons act on.
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Important;
+			note.title  = "Could not restore";
+			note.text   = s_error;
+			note.detail = "The autosaved copy was kept.";
+			note.key    = "recovery.asset";
+			HE::Ed::notify(std::move(note));
+			s_error.clear();
 		}
 		ImGui::Spacing();
 		ImGui::TextWrapped(

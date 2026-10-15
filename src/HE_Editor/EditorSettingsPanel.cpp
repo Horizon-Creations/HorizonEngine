@@ -842,9 +842,16 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		else if (s_claudeJob)
 		{
 			const Setup::Outcome& r = s_claudeJob->outcome;
-			ImGui::TextColored(r.ok ? HE::Ed::Theme::Ok
-			                        : HE::Ed::Theme::Bad,
-			                   "%s", r.message.c_str());
+			// The result of pressing Register is a notification, said once per run; the
+			// transcript below stays for the failure one line cannot explain.
+			static const void* s_claudeReported = nullptr;
+			if (s_claudeReported != static_cast<const void*>(s_claudeJob.get()))
+			{
+				s_claudeReported = static_cast<const void*>(s_claudeJob.get());
+				HE::Ed::notify(r.ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+				               r.ok ? "Registered with Claude" : "Could not register with Claude",
+				               r.message);
+			}
 			// The transcript, collapsed. It is here for the failure that the one
 			// line above cannot explain — a CLI version that words its refusal
 			// differently, an npm shim that dies before it prints anything — and
@@ -1065,6 +1072,19 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		     "computer.");
 	});
 
+	row("notifications", "Feedback", [&]{
+		// Read by the store every frame (EditorApplication pushes it), so a change
+		// is live. The bell and its list are always there; this only decides
+		// whether a notification may also interrupt.
+		EditorWidgets::checkbox("Show Notification Popups", &cfg.NotificationPopups);
+		hint("Important notifications appear as a small card in the bottom-right "
+		     "corner for a few seconds, and critical ones as a dialog that waits to "
+		     "be acknowledged. Turn this off and everything goes to the notification "
+		     "centre (the bell in the footer) only: it still rings and counts, but "
+		     "nothing opens over your work. Buttons such as Join or Retry are then "
+		     "on the rows in the centre.");
+	});
+
 	if (mode == SettingsMode::QuickSettings && shown == 0)
 		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press the star (\xe2\x98\x86) "
 		     "next to the settings you want here.");
@@ -1151,13 +1171,8 @@ bool s_idSeeded      = false;
 
 void drawGitMessages(GitController* git)
 {
-	// Errors are posted to the notifications by GitController (the footer bell); what
-	// is printed here is only the outcome of the last thing that worked.
-	if (git->lastError().empty() && !git->lastInfo().empty())
-	{
-		ImGui::Spacing();
-		ImGui::TextColored(HE::Ed::Theme::Ok, "%s", git->lastInfo().c_str());
-	}
+	// Errors and the outcome of the last operation are both posted to the
+	// notifications by GitController; only the busy state is drawn here.
 	if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
@@ -2024,7 +2039,7 @@ void drawStatusPage(AppContext& ctx)
 		{
 			gs.setCustomConfigEntry(HeprojRegistration::kSettingKey, on);
 			if (!gs.writeConfig())
-				HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+				HE::Ed::notify(HE::Ed::NoteLevel::Important,
 				               "Could not save the file type setting",
 				               "The choice applies now, but this session's config file could "
 				               "not be written \xe2\x80\x94 the next launch will use the old one.");
@@ -2086,7 +2101,7 @@ void drawPanelsPage()
 		// the look it just rejected. Which only holds if the write lands, so a
 		// failure is said out loud instead of being discovered next launch.
 		if (!gs.writeConfig())
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			               "Could not save the variable display setting",
 			               "The choice applies now, but this session's config file could "
 			               "not be written — the next launch will show the old look.");
@@ -2128,7 +2143,7 @@ void drawPanelsPage()
 		// Same reasoning as the variable display above: a look picked once is
 		// written now, and a failed write is said out loud.
 		if (!gs.writeConfig())
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			               "Could not save the Pre Construct setting",
 			               "The choice applies now, but this session's config file could "
 			               "not be written \xe2\x80\x94 the next launch will use the old one.");
@@ -2418,6 +2433,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsSoundProblem       = true;
 			cfg.RewardsSoundDragDrop      = true;
 			cfg.RewardsProblemPulse       = true;
+			cfg.NotificationPopups        = true;
 			cfg.RewardsShowProgress  = true;
 			cfg.RewardsCounterTick   = true;
 			cfg.RewardsStreakTooltip = true;

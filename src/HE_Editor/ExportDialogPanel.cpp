@@ -891,14 +891,14 @@ void render(AppContext& ctx)
                     settings |= AppMetadataRows::drawSplashRows(ctx, proj, /*compact=*/true);
 
                     if (heproj && !ctx.projectManager->saveProject(proj.path))
-                        HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                        HE::Ed::notify(HE::Ed::NoteLevel::Critical,
                                        "Could not save the project's application settings",
                                        proj.path);
                     if (settings)
                     {
                         proj.settings.clamp();
                         if (!ctx.projectManager->saveProjectSettings())
-                            HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                            HE::Ed::notify(HE::Ed::NoteLevel::Critical,
                                            "Could not save the project's splash settings",
                                            HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
                     }

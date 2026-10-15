@@ -1,4 +1,5 @@
 #include "ProfilerPanel.h"
+#include "NotificationStore.h"   // a dump that does not load is a notification
 #include "EditorApplication.h"           // AppContext
 #include "StreamingDebugView.h"          // the Streaming tab
 #include <Diagnostics/EngineProfiler.h>
@@ -940,7 +941,12 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             ImGui::SameLine();
             ImGui::TextDisabled("View a dump from a previous run in these tabs.");
             if (!g_ui.loadError.empty())
-                ImGui::TextColored(ImVec4(0.86f, 0.32f, 0.28f, 1.0f), "%s", g_ui.loadError.c_str());
+            {
+                // Said once as a notification (the slot is emptied), not as red text
+                // under the Load button.
+                HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not load the profile dump", g_ui.loadError);
+                g_ui.loadError.clear();
+            }
 
             DrawHitches(prof);
             ImGui::EndTabItem();

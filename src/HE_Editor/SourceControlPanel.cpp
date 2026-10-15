@@ -1666,16 +1666,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		                   "others through the session.");
 		ImGui::PopStyleColor();
 	}
-	// Errors go to the notifications (GitController::reportNewError), not to red text
-	// in here; what stays is the plain outcome of the last thing that worked.
-	if (git->lastError().empty() && !git->lastInfo().empty())
-	{
-		// The one line here that was not already wrapped, and it is a whole
-		// sentence from git ("Fetched: 3 new commits on origin/main") in a panel
-		// docked at 420 px.
-		EditorWidgets::WrapText wrap;
-		ImGui::TextDisabled("%s", git->lastInfo().c_str());
-	}
+	// Neither errors nor the outcome of the last operation are printed here: both go
+	// to the notifications (GitController::reportNewError / reportNewInfo), where
+	// they are kept in the centre instead of sitting in a docked panel until the
+	// next operation replaces them.
 
 	// ── Tabs ─────────────────────────────────────────────────────────────────
 	// Changes, History and Branches each get the whole height instead of sharing it:

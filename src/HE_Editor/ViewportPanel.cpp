@@ -593,7 +593,7 @@ static bool refusedForPeerLocks(AppContext& ctx, const std::vector<Entity>& root
 	}
 	if (holder.empty()) return false;
 	if (ctx.notifications)
-		ctx.notifications->post(HE::Ed::NoteLevel::Warning,
+		ctx.notifications->post(HE::Ed::NoteLevel::Important,
 			std::string(what) + " did nothing: " + holder + " is editing part of the selection.",
 			"Try again once they have deselected it.");
 	return true;
