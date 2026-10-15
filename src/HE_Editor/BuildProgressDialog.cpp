@@ -456,11 +456,51 @@ void launchGame(const std::filesystem::path& exe)
 	const std::string path = exe.string();
 	const char* argv[] = { path.c_str(), nullptr };
 	if (s_launched) { SDL_DestroyProcess(s_launched); s_launched = nullptr; }
-	s_launched = SDL_CreateProcess(argv, false);
+
+	// Not SDL_CreateProcess(argv, false): that one makes the child INHERIT the
+	// editor's standard handles, and on Windows SDL does it by duplicating
+	// GetStdHandle(STD_INPUT/OUTPUT/ERROR_HANDLE). The editor is a GUI-subsystem
+	// program with no console, so those handles are NULL/invalid and the call fails
+	// with "DuplicateHandle(): Das Handle ist ungültig" before the game is even looked
+	// for — which reads as "the editor cannot find the exe" when the file is right there.
+	// The game gets no stdio there (it has no console either); elsewhere the terminal
+	// the editor was started from keeps receiving its log, as before.
+	SDL_PropertiesID props = SDL_CreateProperties();
+	SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, const_cast<char**>(argv));
+#ifdef _WIN32
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDIN_NUMBER,  SDL_PROCESS_STDIO_NULL);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_NULL);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_NULL);
+	// A GUI program started from a GUI program: no console window flashing up.
+	SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_BACKGROUND_BOOLEAN, true);
+#else
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDIN_NUMBER,  SDL_PROCESS_STDIO_INHERITED);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_INHERITED);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_INHERITED);
+#endif
+	s_launched = SDL_CreateProcessWithProperties(props);
+	SDL_DestroyProperties(props);
+
 	if (!s_launched)
-		HE_LOG_ERROR(Editor, "Build: could not start %s (%s)", path.c_str(), SDL_GetError());
+	{
+		const std::string why = SDL_GetError();
+		HE_LOG_ERROR(Editor, "Build: could not start %s (%s)", path.c_str(), why.c_str());
+		// The user pressed Start Game (or its toast button) and is owed an answer on
+		// screen, not only a line in the log.
+		HE::Ed::NoteSpec note;
+		note.level     = HE::Ed::NoteLevel::Important;
+		note.title     = "Could not start the game";
+		note.text      = "\"" + exe.filename().string() + "\" did not start.";
+		note.detail    = why;
+		note.assetPath = path;
+		note.key       = "build.launch";
+		HE::Ed::notify(std::move(note));
+	}
 	else
+	{
 		HE_LOG_INFO(Editor, "Build: started %s", path.c_str());
+		HE::Ed::resolveNotification("build.launch");
+	}
 }
 
 
