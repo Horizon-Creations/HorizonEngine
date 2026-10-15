@@ -88,9 +88,9 @@ def team_request(sock, rid, op, fields=b""):
         return result, body[6 + tlen:]
 
 
-def set_up_server(port):
+def set_up_server(port, host="127.0.0.1"):
     """Team TEAM with admin Anna and member Bob, project PROJECT (empty)."""
-    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    s = socket.create_connection((host, port), timeout=10)
     s.sendall(frame(6, bytes([2]) + str8(TEAM) + str8("Anna") + str8("anna-password")))
     ftype, body = recv_frame(s)
     if ftype != 2 or body[0] != 4:
@@ -101,7 +101,7 @@ def set_up_server(port):
     result, ticket = team_request(s, 2, 20, str8(PROJECT))
     if result != 0 or len(ticket) != 16:
         raise RuntimeError("sc ticket refused: %d" % result)
-    c = socket.create_connection(("127.0.0.1", port), timeout=10)
+    c = socket.create_connection((host, port), timeout=10)
     c.sendall(frame(10, str8(TEAM) + str8("Anna") + str8(PROJECT) + ticket))
     ftype, body = recv_frame(c)
     if ftype != 2 or body[0] != 5:
