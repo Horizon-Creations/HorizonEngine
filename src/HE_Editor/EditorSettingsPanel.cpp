@@ -842,9 +842,16 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		else if (s_claudeJob)
 		{
 			const Setup::Outcome& r = s_claudeJob->outcome;
-			ImGui::TextColored(r.ok ? HE::Ed::Theme::Ok
-			                        : HE::Ed::Theme::Bad,
-			                   "%s", r.message.c_str());
+			// The result of pressing Register is a notification, said once per run; the
+			// transcript below stays for the failure one line cannot explain.
+			static const void* s_claudeReported = nullptr;
+			if (s_claudeReported != static_cast<const void*>(s_claudeJob.get()))
+			{
+				s_claudeReported = static_cast<const void*>(s_claudeJob.get());
+				HE::Ed::notify(r.ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+				               r.ok ? "Registered with Claude" : "Could not register with Claude",
+				               r.message);
+			}
 			// The transcript, collapsed. It is here for the failure that the one
 			// line above cannot explain — a CLI version that words its refusal
 			// differently, an npm shim that dies before it prints anything — and
@@ -1164,13 +1171,8 @@ bool s_idSeeded      = false;
 
 void drawGitMessages(GitController* git)
 {
-	// Errors are posted to the notifications by GitController (the footer bell); what
-	// is printed here is only the outcome of the last thing that worked.
-	if (git->lastError().empty() && !git->lastInfo().empty())
-	{
-		ImGui::Spacing();
-		ImGui::TextColored(HE::Ed::Theme::Ok, "%s", git->lastInfo().c_str());
-	}
+	// Errors and the outcome of the last operation are both posted to the
+	// notifications by GitController; only the busy state is drawn here.
 	if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 

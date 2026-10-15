@@ -1,4 +1,5 @@
 #include "StreamingDebugView.h"
+#include "NotificationStore.h"   // what a split or merge said is a notification
 #include "EditorApplication.h"   // AppContext, ProjectManager, EditorCamera
 #include "EditorUndo.h"
 #include "CollabController.h"    // no split or merge inside a session
@@ -385,6 +386,18 @@ void drawScene(AppContext& ctx)
 	ImGui::TextDisabled("%s", t.path.c_str());
 }
 
+
+// What a split or merge said is a notification, said once (the slot is emptied):
+// "Not split: stop playing first" is a refusal, the rest is a result.
+static void postStreamingMessage(std::string& message)
+{
+	if (message.empty()) return;
+	const bool refused = message.rfind("Not ", 0) == 0;
+	HE::Ed::notify(refused ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
+	               "Streaming cells", message);
+	message.clear();
+}
+
 void drawCells(AppContext& ctx)
 {
 	ImGui::SeparatorText("Streaming cells");
@@ -415,7 +428,7 @@ void drawCells(AppContext& ctx)
 		ImGui::BeginDisabled(!editable);
 		if (EditorWidgets::button("Split into Streaming Cells")) splitOpenScene(ctx, s_options, s_message);
 		ImGui::EndDisabled();
-		if (!s_message.empty()) ImGui::TextUnformatted(s_message.c_str());
+		postStreamingMessage(s_message);
 		return;
 	}
 	uint64_t inCells = 0;
@@ -431,7 +444,7 @@ void drawCells(AppContext& ctx)
 	ImGui::BeginDisabled(!editable);
 	if (EditorWidgets::button("Merge Cells into the Scene")) mergeOpenScene(ctx, s_message);
 	ImGui::EndDisabled();
-	if (!s_message.empty()) ImGui::TextUnformatted(s_message.c_str());
+	postStreamingMessage(s_message);
 
 	if (!ctx.editorCamera) return;
 	const glm::dvec3 eye = glm::dvec3(ctx.editorCamera->position()) + ctx.world->origin();

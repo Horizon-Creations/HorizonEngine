@@ -1,4 +1,5 @@
 #include "ProjectHubPanel.h"
+#include "NotificationStore.h"   // the reason a project did not open is a notification
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
 #include "EditorWidgets.h"
 #include "ProjectPreflight.h"           // engine-content check in front of every open
@@ -412,7 +413,10 @@ void render(AppContext& ctx)
             }
             else
             {
-                ctx.hubCreateError = "Failed to create project. Check path/permissions.";
+                // An outcome, not a mistake in a field: a notification (the two checks
+                // above stay inline, they point at the field to fix).
+                HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
+                               "Check that the folder exists and is writable.");
             }
         }
     }
@@ -585,11 +589,14 @@ void render(AppContext& ctx)
 
         if (!ctx.hubOpenError.empty())
         {
-            ImGui::SetCursorPosX(padding);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-            ImGui::TextWrapped("%s", ctx.hubOpenError.c_str());
-            ImGui::PopStyleColor();
-            ImGui::Spacing();
+            // Whatever went wrong opening a project is a dialog, said once (the slot is
+            // emptied): the hub shows the form, not a red sentence that outlives it.
+            HE::Ed::NoteSpec note;
+            note.level = HE::Ed::NoteLevel::Critical;
+            note.title = "Could not open the project";
+            note.text  = ctx.hubOpenError;
+            HE::Ed::notify(std::move(note));
+            ctx.hubOpenError.clear();
         }
     }
 

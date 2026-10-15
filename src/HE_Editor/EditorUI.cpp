@@ -1,4 +1,5 @@
 #include "EditorUI.h"
+#include "NotificationStore.h"   // failures are notifications
 #include "EditorTheme.h"   // brand palette (the editor tab strip)
 #include <algorithm>
 #include <cstdint>
@@ -1298,7 +1299,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
 	// A project failed to open (openProjectAt); the "##EditorOpenError" modal
 	// is opened where it is drawn, on the frame after.
-	static bool s_openProjectErrorPopup = false;
 
 	// ── Unsaved-changes guard state ─────────────────────────────────────────
 	// A destructive action requested while the scene is dirty is stashed here and
@@ -2832,9 +2832,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
             if (!s_guardSaveError.empty())
             {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_guardSaveError.c_str());
-                ImGui::TextDisabled("Nothing was closed or discarded.");
+                // Said as a notification (once: the slot is emptied), not as red text in
+                // the dialog that the next click has to scroll past.
+                HE::Ed::NoteSpec note;
+                note.level  = HE::Ed::NoteLevel::Important;
+                note.title  = "Not saved";
+                note.text   = s_guardSaveError;
+                note.detail = "Nothing was closed or discarded.";
+                note.key    = "guard.save";
+                HE::Ed::notify(std::move(note));
+                s_guardSaveError.clear();
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
@@ -3091,44 +3098,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
 
-    if (s_openProjectErrorPopup)
-    {
-        s_openProjectErrorPopup = false;
-        ImGui::OpenPopup("##EditorOpenError");
-    }
-    if (!ctx.hubOpenError.empty())
-    {
-        EditorWidgets::pinDialogToEditorWindow();
-        if (ImGui::BeginPopupModal("##EditorOpenError", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
-        {
-            // hubOpenError is whatever went wrong opening a project, and it
-            // normally names the file it failed on — an absolute path. Two things
-            // follow. It has to wrap, or the dialog is one line as wide as the path
-            // and the sentence ends off-screen. And the column has to be absolute:
-            // this popup sizes itself to its content, so wrapping at its own right
-            // edge is a feedback loop — every frame it fits the wrapped text and
-            // every frame the text wraps tighter, down to ImGui's minimum.
-            //
-            // The guard lives in its own scope because EndPopup() below hands
-            // ImGui's current window back to whatever is under this popup — here
-            // the implicit debug window — and popping the wrap position after that
-            // pops a stack that was never pushed.
-            {
-                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 30.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-                ImGui::TextUnformatted(ctx.hubOpenError.c_str());
-                ImGui::PopStyleColor();
-                ImGui::Spacing();
-                if (EditorWidgets::primaryButton("OK", ImVec2(120, 0)))
-                {
-                    ctx.hubOpenError.clear();
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndPopup();
-        }
-    }
+    // (A modal for ctx.hubOpenError used to be drawn here. Nothing ever asked for it to
+    // open, and the error is a notification now: see ProjectHubPanel's Open page.)
 
     // ── New Project Popup ─────────────────────────────────────────────────────
     {
@@ -3320,7 +3291,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     }
                     else
                     {
-                        ctx.hubCreateError = "Failed to create project. Check path/permissions.";
+                        HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
+                               "Check that the folder exists and is writable.");
                     }
                 }
             }

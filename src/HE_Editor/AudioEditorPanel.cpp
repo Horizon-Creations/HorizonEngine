@@ -1030,8 +1030,13 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			EditorWidgets::helpForLabel("Bake Curve into Extract");
 		}
 		if (!st.extractStatus.empty())
-			ImGui::TextColored(st.extractFailed ? ImVec4(1.0f, 0.6f, 0.4f, 1.0f) : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
-			                   "%s", st.extractStatus.c_str());
+		{
+			// The result of Extract is a notification, said once, not a line under the
+			// checkbox that stays until the next click.
+			HE::Ed::notify(st.extractFailed ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
+			               st.extractFailed ? "Nothing extracted" : "Extracted", st.extractStatus);
+			st.extractStatus.clear();
+		}
 
 		ImGui::SeparatorText("Volume curve");
 		if (editable && !editable->edit.envelope.empty())
