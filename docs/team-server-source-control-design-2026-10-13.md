@@ -1,8 +1,8 @@
 # Team server as source-control mediator: design (topic 199, step 1)
 
 Status (2026-10-15): **server side built** (step 2, CollabSession `claude/he-net-relay-server`
-829f224..f76dfff); where it differs from this plan, section 12 wins. Backup (step 3), editor
-(step 4) and deployment (step 5) are open.
+829f224..f76dfff) **and the GitHub backup** (step 3, `b6aaa00`); where they differ from this plan,
+sections 12 and 13 win. Editor (step 4) and deployment (step 5) are open.
 
 Status (2026-10-13): **design only**, nothing implemented. This is the plan that steps 2-5
 of topic 199 build. It sits on top of the team server from topic 197 (CollabSession repo
@@ -423,6 +423,42 @@ differs from what was uploaded; take `rev` from the COMMIT reply only when `chan
 keep HEAD's; after `sc-head` from someone else, MANIFEST + GET; keep the per-file base = the
 sha256 last received or accepted, never the local file's hash after an unsynced edit.
 
+## 13. As built in step 3: GitHub backup (2026-10-15)
+
+CollabSession `b6aaa00`: `src/ScBackup.{h,cpp}` (key, rules, push), scheduling in `RelayServer.cpp`
+(`HandleBackupSet`, `BackupStatusBody`, `MarkBackupDirty`, `CheckBackups`, `StartBackupPush`,
+`FlushBackups`), README section "GitHub-Backup" (the reference for step 4).
+
+**Wire (final):** BACKUP_SET `url str16 | branch str8` (admins; **url empty = backup off**, branch
+empty = `main`) → body `pubkey str16`. BACKUP_STATUS (any member) → `pushed_rev u64 | state u8 |
+last_error str16 | time u64 | url str16 | branch str8 | pubkey str16` (the last three added to 4.2,
+so the editor can show the target and re-show the key); `backup-not-set` (8) without a backup.
+States: 1 pending, 2 ok, 3 failing (retried), 4 diverged (stopped). `time` = last push attempt.
+
+**Differences from section 7:**
+* State lives in `backup.txt` (not `project.txt`), written only by the backup worker.
+* Pushes run on a **second worker thread**: a minutes-long LFS upload must not block saves. git's
+  atomic refs/objects make the concurrent read safe; the backup never touches `ScStore`.
+* Push = `git push --porcelain --atomic <url> <mainOid>:refs/heads/<branch>
+  [<conflictsOid>:refs/heads/horizon-conflicts]` (explicit oids: `pushed_rev` is exactly what landed
+  even if `main` moves meanwhile). LFS goes **first** (`git lfs push --all`, refs never point at
+  missing content), via a `repo.git/lfs -> ../lfs` symlink (`-c lfs.storage=` would also redirect a
+  local test remote's storage, so the probe "uploaded" nothing). git-lfs finds pointers by content,
+  so overruled LFS files on `horizon-conflicts` go up without `.gitattributes` lines (verified locally).
+* `non-fast-forward` / `fetch first` → diverged; any other refusal or error → failing, retry after
+  delay×2ⁿ, capped at 10 min. A new BACKUP_SET resets it.
+* Key: kept when only the branch changes, **new when the repository changes** (GitHub refuses one
+  deploy key on two repositories). URLs: only github.com (git@, ssh://, https:// → git@ form); local
+  paths only with `--sc-backup-allow-local` (tests), else an admin could push into any repo on the host.
+* ssh: `-F /dev/null`, only the deploy key (`IdentitiesOnly`, `IdentityAgent=none`, `SSH_*` of the
+  environment dropped), `BatchMode`, `StrictHostKeyChecking=yes` against github.com's three published
+  host keys compiled in (fingerprints checked against docs.github.com on 2026-10-15), 20 s connect
+  timeout. `Proc::Run` got a timeout (push 10 min) and a cancel flag; the child runs in its own process
+  group so ssh under git dies with it.
+* Schedule: dirty on each COMMIT that changed something; push after `--sc-backup-delay` (30 s) quiet,
+  at most `--sc-backup-max-delay` (300 s) behind; immediately at start for every project with a
+  backup; on stop one more push, waited for at most 30 s, then cancelled (runs again at next start).
+
 ## Handoff
 
 - **Topic / step:** 199, step 1 (design, docs only). Branch
@@ -479,3 +515,39 @@ sha256 last received or accepted, never the local file's hash after an unsynced 
   check that it finds the pointer files on `horizon-conflicts` without `.gitattributes` lines).
   2. Step 4: editor `TeamSyncService` against README "Quellcodeverwaltung" + section 12.
   3. Step 5: `deploy.sh` must install `git` (+ `git-lfs`, `openssh-client` for step 3).
+
+## Handoff (step 3)
+
+- **Topic / step:** 199, step 3 (GitHub backup). Code: CollabSession `claude/he-net-relay-server`
+  `b6aaa00` (pushed). HE side: this doc, section 13.
+- **Done:** `ScBackup` (key, URL/branch rules, porcelain parsing, push + LFS push, `backup.txt`),
+  BACKUP_SET/STATUS in `RelayServer::StartScRequest` → `HandleBackupSet`/`BackupStatusBody`,
+  scheduler `CheckBackups` on the 250 ms tick, `FlushBackups` after `Run`'s loop, second `Worker`
+  `m_backupWorker`, flags `--sc-backup-delay`, `--sc-backup-max-delay`, `--sc-backup-allow-local`,
+  `Proc::Options::timeout`/`cancel`, README section "GitHub-Backup" + state table.
+- **Verified (macOS, /tmp/collab-build Release `-Werror`, and /tmp/collab-asan ASan+UBSan):** ctest
+  7/7 both (`sc_backup` new, `sc_protocol` 10/10 incl. `test_github_backup`,
+  `test_backup_on_stop_and_after_a_crash`). Against local bare repos: both branches pushed, LFS
+  object present in the remote's `lfs/objects` (not just the pointer), no second push without
+  changes, foreign commit → diverged and remote untouched, new branch resumes with the same key,
+  new repo → new key, unreachable → failing + backoff, flush on SIGTERM, push at start after SIGKILL.
+  Real github.com over ssh with an unregistered key: pinned host keys accepted, answer
+  `Permission denied (publickey)` in state failing (so the ssh line works and no agent key leaks).
+- **Not verified:** a successful push to a real GitHub repo with a registered deploy key, and
+  **git-lfs over a deploy key** (git-lfs-authenticate/HTTPS batch, risk 11); the host (git, git-lfs,
+  openssh-client not installed by `deploy.sh` yet); Linux CI for `b6aaa00`: run 38702817031
+  (https://github.com/Horizon-Creations/CollabSession/actions/runs/38702817031), see the result post.
+- **Decisions:** second worker thread; state in `backup.txt`; LFS before refs; explicit-oid atomic
+  push; key per repository; url empty = off; BACKUP_STATUS readable by every member and carries
+  url/branch/pubkey; local paths only behind the test flag; first push after the normal quiet time
+  (the editor registers the key right after the reply).
+- **Pitfalls:** `-c lfs.storage=<dir>` leaks into git-lfs's view of a local remote (both sides use
+  that storage, "Uploading 100%" while nothing moved) → symlink instead. A nested struct with member
+  initialisers can't be a default argument inside its class (clang) → `ScGit::Run`/`Ok` overloads.
+  New fields in `ScGit::Call` would break every `{{…}, {}, "", ""}` under `-Wmissing-field-initializers`
+  → separate `ScGit::Extra`.
+- **Next steps:** 1. Step 4 (editor): `TeamSyncService` per README; backup UI = BACKUP_SET with
+  the admin's GitHub token registering the returned key (`POST /repos/{o}/{r}/keys`, `read_only:
+  false`, next to `GitHubApi::createRepo`), BACKUP_STATUS shown with state/error/pushed_rev.
+  2. Step 5: `deploy.sh` installs `git git-lfs openssh-client`; systemd `TimeoutStopSec` ≥ 40 s
+  (flush waits 30 s; default 90 s is fine); acceptance 6 + 7 of section 10 against real GitHub.
