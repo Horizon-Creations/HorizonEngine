@@ -1,4 +1,5 @@
 #include "AudioEditorPanel.h"
+#include <Platform/ProjectWriteGate.h>
 #include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorToolbar.h"        // shared toolbar strip
 #include "EditorApplication.h"    // AppContext
@@ -432,7 +433,8 @@ bool saveState(AppContext& ctx, State& st)
 	// bytes in the same chunk — so the edit chunk is the only thing that changes.
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Audio clip not saved",
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Audio clip not saved",
 		               "The file could not be written. Check that it is not read-only and the disk has room.");
 		return false;
 	}

@@ -208,6 +208,12 @@ namespace BuildProgressDialog
 	// Whether a run is going on with its window put away.
 	bool hidden();
 
+	// An EXPORT is running (a game-logic build reads Source/, not the project's
+	// content, so it does not count). This is what the project write gate asks
+	// (Platform/ProjectWriteGate.h): while it is true, saves, imports and file
+	// operations under the project are refused. Safe from any thread.
+	bool exportRunning();
+
 	// How far the whole run is, 0..1: finished steps count whole, the running one
 	// by its own progress. `indeterminate` (optional) is set while the running step
 	// has no length yet and nothing else says how far the run is — the footer then

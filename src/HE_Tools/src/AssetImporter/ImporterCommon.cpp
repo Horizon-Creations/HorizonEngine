@@ -1,4 +1,5 @@
 #include "ImporterCommon.h"
+#include <Platform/ProjectWriteGate.h>
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -708,6 +709,9 @@ bool importSource(const std::filesystem::path& sourcePath,
                   const OutputTargets&         outputs,
                   const ImportOptions&         options)
 {
+	// The project's files are being read by an export (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("import a file")) return false;
+
 	switch (classifySource(sourcePath))
 	{
 	case SourceKind::Mesh:
@@ -757,6 +761,8 @@ bool importSource(const std::filesystem::path& sourcePath,
 bool reimport(const std::filesystem::path& assetFile,
               const std::filesystem::path& contentRoot)
 {
+	if (HE::ProjectWriteGate::refuse("reimport an asset")) return false;
+
 	const std::string source = sourceFileOf(assetFile);
 	if (source.empty())
 	{

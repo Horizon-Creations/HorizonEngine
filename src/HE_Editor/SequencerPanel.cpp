@@ -1,4 +1,5 @@
 #include "SequencerPanel.h"
+#include <Platform/ProjectWriteGate.h>
 #include "NotificationStore.h"      // a save that fails has to say so
 #include "SequencerTimeline.h"     // the strip: tracks, ruler, scrubbing, keys, curves
 #include "EditorApplication.h"     // AppContext
@@ -86,7 +87,8 @@ bool saveState(PanelState& st, AppContext& ctx)
 	}
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;

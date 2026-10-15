@@ -55,6 +55,7 @@
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
+#include <Platform/ProjectWriteGate.h>   // the export lock: refuse a save while a pack is reading the files
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
 #include <Platform/Process.h>       // git config for the identity fix
 #include <Diagnostics/Log.h>
@@ -65,6 +66,7 @@
 #ifdef HE_HAVE_LIBSSH2
 static void installContentSyncFailureListener();   // defined with the SFTP probe below
 #endif
+static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handler, below
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -529,6 +531,10 @@ void EditorApplication::OnInit()
 	// the user instead of scrolling past in a file they do not have open. It
 	// throttles itself — see NotificationStore::attachToEngineLog.
 	m_notifications.attachToEngineLog();
+	// The project's files are read by an export for as long as it runs: saves,
+	// imports and file operations are refused meanwhile (ProjectWriteGate.h).
+	HE::ProjectWriteGate::install(&BuildProgressDialog::exportRunning, &onProjectWriteRefused);
+
 #ifdef HE_HAVE_LIBSSH2
 	// And the EngineContent sync's own failures, which the library can only report
 	// to a listener — see installContentSyncFailureListener.
@@ -2404,6 +2410,30 @@ void EditorApplication::startGitProbe()
 }
 
 #ifdef HE_HAVE_LIBSSH2
+// ── A write the export lock turned away ─────────────────────────────────────
+// Called by whoever tried to change a file while an export runs (ProjectWriteGate),
+// possibly many times in a row — an autosave-style retry loop, a batch import — and
+// from any thread. One notification, re-armed at most every ten seconds, so the
+// reason is on screen when the user pressed Save and not a toast per attempt.
+static void onProjectWriteRefused(const char* what)
+{
+	static std::atomic<std::uint64_t> s_lastMs{ 0 };
+	const std::uint64_t now  = HE::Ed::NotificationStore::nowMs();
+	std::uint64_t       last = s_lastMs.load(std::memory_order_relaxed);
+	if (last != 0 && now - last < 10'000) return;
+	if (!s_lastMs.compare_exchange_strong(last, now)) return;
+
+	HE::Ed::NoteSpec note;
+	note.level  = HE::Ed::NoteLevel::Important;
+	note.title  = "Export in progress";
+	note.text   = "The project is locked until the export finishes — it is reading its files right now.";
+	note.detail = std::string("You tried to ") + (what ? what : "change a file") +
+	              ". Your edits stay open in the editor and can be saved afterwards.";
+	note.key    = "export.lock";
+	note.actions.push_back({ "Show Build", [] { BuildProgressDialog::requestOpen(); }, true });
+	HE::Ed::notify(std::move(note));
+}
+
 // ── EngineContent sync failures → notifications ──────────────────────────────
 // The library (HE_ContentSync) cannot talk to a user, and a worker thread that
 // fails ends in a log warning and a callback most callers ignore. Its listener is
@@ -13554,6 +13584,11 @@ bool EditorApplication::pushToPrefab(Entity root)
 bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
+
+	// An export is reading the project (ProjectWriteGate.h). Refused BEFORE the
+	// serialisation, and without the "Could not save" dialog below: nothing is wrong,
+	// the save simply has to wait, and the gate has already said so.
+	if (HE::ProjectWriteGate::refuse("save the scene")) return false;
 
 	// The file must not lag the assets it was built from — see the header.
 	// Before the write, so the sync's result IS what lands on disk; the world

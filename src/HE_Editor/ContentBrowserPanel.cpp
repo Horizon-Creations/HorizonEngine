@@ -1,4 +1,5 @@
 #include "ContentBrowserPanel.h"
+#include <Platform/ProjectWriteGate.h>   // refuse file operations while an export reads the project
 #include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorTheme.h"     // brand palette (selected tiles, labels)
 #include <algorithm>
@@ -580,6 +581,10 @@ static void collectEngineSources(const std::vector<std::string>& paths,
 // nothing". A toast with the reason says what to look at.
 static void notifyFileFailure(std::string text, const std::string& reason, std::string path = {})
 {
+	// An export that is reading the project turned the operation away and said so
+	// (ProjectWriteGate.h); "could not delete X" on top of that would be a second,
+	// less useful toast for the same refusal.
+	if (HE::ProjectWriteGate::locked()) return;
 	HE::Ed::NoteSpec note;
 	note.level     = HE::Ed::NoteLevel::Important;
 	note.text      = std::move(text);
@@ -598,6 +603,7 @@ static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sou
 {
 	namespace fs = std::filesystem;
 	if (!ctx.contentManager || sources.empty()) return;
+	if (HE::ProjectWriteGate::refuse("import files")) return;
 	const fs::path contentRoot(ctx.contentManager->contentRoot());
 	const HE::Ed::Rewards::DirSnapshot before =
 		HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / targetRel).string());
@@ -2428,7 +2434,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (moveIsAllowed && !requested)
 			{
 				ec.clear();
-				std::filesystem::rename(src, dst, ec);
+				// Read as "failed, try again later", which is what an export in progress is.
+				if (HE::ProjectWriteGate::refuse("move a file"))
+					ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+				else
+					std::filesystem::rename(src, dst, ec);
 				if (!ec)
 				{
 					// Everything that pointed at the old path — other assets' stored
@@ -2471,6 +2481,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// not offer it — the code was not reachable from there.
 		auto createFolderIn = [&](const std::string& targetFolder)
 		{
+			if (HE::ProjectWriteGate::refuse("create a folder")) return;
 			std::string base = targetFolder + "/NewFolder";
 			std::string dir  = base;
 			int counter = 1;
@@ -2764,6 +2775,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// deletion are separate things — the menu item now only asks.
 		auto deleteAssetNow = [&](const std::string& assetAbs, bool isSourceClass)
 		{
+			if (HE::ProjectWriteGate::refuse("delete an asset")) return;
 			std::error_code ec;
 			std::filesystem::remove(assetAbs, ec);
 			if (ec)
@@ -2948,6 +2960,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// away, one holding assets only gets here after the confirmation dialog.
 		auto deleteFolderNow = [&](const std::string& folderAbs)
 		{
+			if (HE::ProjectWriteGate::refuse("delete a folder")) return;
 			std::error_code ec;
 			std::filesystem::remove_all(folderAbs, ec);
 			if (ec)
@@ -3058,7 +3071,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				{
 					s_ctxMenuItem.clear();
 				}
-				else if (!relPath.empty())
+				else if (!relPath.empty() && !HE::ProjectWriteGate::refuse("revert an asset"))
 				{
 					const HE::UUID id = ctx.contentManager->loadAsset(relPath); // current (override) id
 					std::error_code ec;
@@ -3793,7 +3806,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// first would leave us out of step until the answer, and out
 					// of step for good if the answer is no.
 					std::error_code ec;
-					if (!requested) std::filesystem::rename(oldPath, newPath, ec);
+					if (!requested)
+					{
+						if (HE::ProjectWriteGate::refuse("rename a file"))
+							ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+						else
+							std::filesystem::rename(oldPath, newPath, ec);
+					}
 					// A rename that FAILS used to close the dialog and say nothing —
 					// no message, no log line — so a name the filesystem refuses
 					// (permissions, a lock, a case-only change on a case-insensitive
@@ -4280,7 +4299,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						continue;   // asked for; the host's answer moves it everywhere
 
 					std::error_code ec;
-					std::filesystem::rename(oldAbs, newAbs, ec);
+					if (HE::ProjectWriteGate::refuse("rename a file"))
+						ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+					else
+						std::filesystem::rename(oldAbs, newAbs, ec);
 					if (ec)
 					{
 						HE_LOG_ERROR(Editor, "%s",

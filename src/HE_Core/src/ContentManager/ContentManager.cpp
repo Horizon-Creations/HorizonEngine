@@ -1,4 +1,5 @@
 #include "ContentManager/ContentManager.h"
+#include <Platform/ProjectWriteGate.h>
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
@@ -2288,6 +2289,13 @@ bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPa
 
 bool ContentManager::saveAsset(RuntimeAsset& asset)
 {
+	// An export is reading the project's files (ProjectWriteGate.h). The edit stays
+	// in memory — the asset is still dirty and saves once the export is over.
+	if (HE::ProjectWriteGate::refuse("save this asset"))
+	{
+		HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
+		return false;
+	}
 	const std::string fullPath = resolveSavePath(asset.path);
 	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
 	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())

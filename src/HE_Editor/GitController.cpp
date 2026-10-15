@@ -1,4 +1,5 @@
 #include "GitController.h"
+#include <Platform/ProjectWriteGate.h>
 #include "NotificationStore.h"   // errors go to the footer bell
 #include "CollabController.h"
 
@@ -186,6 +187,8 @@ void GitController::requestUnstage(std::vector<std::string> paths)
 void GitController::requestDiscard(std::vector<std::string> paths)
 {
 	if (!mayModify() || paths.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("discard changes")) return;
 	m_service.requestDiscard(std::move(paths));
 }
 
@@ -203,18 +206,24 @@ void GitController::requestCommitStaged(const std::string& message, bool push, b
 void GitController::requestResolveConflict(const std::string& path, bool keepMine)
 {
 	if (!mayModify() || path.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("resolve a conflict")) return;
 	m_service.requestResolveConflict(path, keepMine);
 }
 
 void GitController::requestSwitchBranch(const std::string& name, bool stashFirst)
 {
 	if (!mayModify() || name.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("switch branches")) return;
 	m_service.requestSwitchBranch(name, stashFirst);
 }
 
 void GitController::requestStashPop()
 {
 	if (!mayModify()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("restore stashed changes")) return;
 	m_service.requestStashPop();
 }
 
@@ -226,6 +235,8 @@ void GitController::requestCommitFiles(const std::string& commit)
 void GitController::requestRestoreTo(const std::string& commit, const std::string& shortOid)
 {
 	if (!mayModify() || commit.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("restore an earlier version")) return;
 	m_service.requestRestoreTo(commit, shortOid);
 }
 
@@ -263,6 +274,8 @@ void GitController::requestPush()
 void GitController::requestPull()
 {
 	if (!mayModify()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("pull changes")) return;
 	m_service.requestPull();
 }
 

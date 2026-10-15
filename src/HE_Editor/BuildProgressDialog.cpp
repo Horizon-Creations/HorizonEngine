@@ -296,6 +296,12 @@ void requestOpen() { s_openRequest = true; s_hidden = false; }
 
 bool hidden() { return s_hidden && Build::running(); }
 
+bool exportRunning()
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	return s_running && s_kind == Kind::Export;
+}
+
 float overallProgress(const std::vector<StepView>& steps, bool* indeterminate)
 {
 	if (indeterminate) *indeterminate = false;

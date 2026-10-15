@@ -1,4 +1,5 @@
 #include "BoneMaskPanel.h"
+#include <Platform/ProjectWriteGate.h>
 #include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorApplication.h"     // AppContext
 #include "EditorAssetTypeCache.h"  // shared, invalidatable path → AssetType sniff
@@ -52,7 +53,8 @@ bool saveState(PanelState& st, AppContext& ctx)
 	a->json = HE::boneMaskToJson(st.mask);
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;

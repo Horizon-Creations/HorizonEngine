@@ -47,6 +47,9 @@ namespace
 		}
 		~Harness()
 		{
+			// A failed REQUIRE must not leave an export "running": the lock is global
+			// and every later test in this binary saves files.
+			if (BPD::Build::running()) BPD::Build::finish(false, "Error: test cleanup");
 			setGlobalNotifications(nullptr);
 			ImGui::DestroyContext();
 		}
@@ -335,4 +338,26 @@ TEST_CASE("Build footer: a run that ends in front of the user is not announced")
 	frames(bits, 4);
 	CHECK(countByTitle(h.store, "Export finished") == 0);
 	CHECK(h.store.snapshot().empty());
+}
+
+TEST_CASE("Build lock: only a running EXPORT locks the project")
+{
+	Harness h;
+	ContextBits bits;
+	CHECK_FALSE(BPD::exportRunning());
+
+	// A game-logic build reads Source/, not the project's content.
+	BPD::Build::begin({ "Compile", "Reload" }, BPD::Kind::GameLogic);
+	CHECK_FALSE(BPD::exportRunning());
+	BPD::Build::finish(true, "OK");
+
+	startRun(bits);                       // an export
+	CHECK(BPD::exportRunning());
+	REQUIRE(pressHide(bits));             // hiding the window does not lift the lock
+	frames(bits, 2);
+	CHECK(BPD::exportRunning());
+
+	BPD::Build::finish(true, "OK: done");
+	CHECK_FALSE(BPD::exportRunning());    // and the end of the run does
+	frames(bits, 3);
 }

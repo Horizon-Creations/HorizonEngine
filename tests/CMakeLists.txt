@@ -959,6 +959,7 @@ set_source_files_properties(
     test_editor_rewards.cpp
     test_notification_popups_ui.cpp
     test_build_footer_ui.cpp
+    test_project_write_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp

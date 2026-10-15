@@ -1,4 +1,5 @@
 #include "CinematicPanel.h"
+#include <Platform/ProjectWriteGate.h>
 #include "NotificationStore.h"      // a save that fails has to say so
 #include "CinematicPreview.h"      // the write-look-restore bracket
 #include "CinematicTimeline.h"     // the strip and the editing rules
@@ -86,7 +87,8 @@ bool saveState(PanelState& st, AppContext& ctx)
 	if (!a) { HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "This sequence is no longer loaded."); return false; }
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;
