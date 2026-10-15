@@ -3852,6 +3852,10 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
             const HE::Net::LockInfo* l = anna.lockFor(subject);
             return l && l->owner == bob.localParticipant();
         }, 600000));
+        // Anna seeing the lock is not Bob knowing he holds it: publishTransform
+        // drops every send until his own table has the grant, and the five sends
+        // below are not retried (red on macOS CI, where the grant arrived later).
+        REQUIRE(tickUntil([&] { return bob.ownsLock(subject); }, 600000));
 
         // Bob drags the crate. Anna applies it, so the scene is the session's
         // change to keep. Bob keeps the crate selected (and locked) afterwards:
