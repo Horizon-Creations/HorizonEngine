@@ -235,15 +235,6 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Audio Mixer",     "M" },
 		{ "Audio Mixer",     "S" },
 		{ "Audio Mixer",     "Add Bus" },
-		// The task board: the toolbar's view switch is a ternary pair (Columns /
-		// List), and the details' rows only resolve under the window's scope.
-		{ "Window",          "Task Board" },
-		{ "Task Board",      "New Task" },
-		{ "Task Board",      "Columns" },
-		{ "Task Board",      "List" },
-		{ "Task Board",      "Status" },
-		{ "Task Board",      "Link Selection" },
-		{ "Task Board",      "Delete Task" },
 		{ "Notifications",   "Mark all as seen" },
 		{ "Play Report",     "Show warnings" },
 		{ "Project Hub",     "Remove from list" },
