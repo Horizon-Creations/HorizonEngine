@@ -1,5 +1,6 @@
 #pragma once
 #include <Application/Application.h>
+#include <Diagnostics/DevStatsTile.h>
 #include <Hpak/ProjectConfig.h>
 #include <Project/ProjectSettings.h>   // Config/ProjectSettings.json, shipped beside project.hcfg
 #include <Scripting/ScriptEngine.h>
@@ -178,6 +179,13 @@ private:
     // switches. Each world borrows it via setWidgetManager. Declared after
     // m_gameInstance so it is destroyed BEFORE the runtime it references.
     WidgetManager m_widgets;
+
+#ifdef HE_GAME_DEV_HOTKEYS
+    // F10: the stats card with the extended GPU numbers (Diagnostics/DevStatsTile.h).
+    // Development builds only, like the V key — the type is not even compiled into a
+    // shipping game, and it sits after m_widgets so it is destroyed before it.
+    HE::DevStatsTile m_devStats;
+#endif
 
     // C++ GameLogic services (HorizonGameServices.h): the tables + their binding
     // must outlive the loaded library, so they live here. Filled + injected
