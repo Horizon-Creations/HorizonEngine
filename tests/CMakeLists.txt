@@ -340,6 +340,10 @@ add_executable(he_tests
     # TeamController signed in to the same fake team server; HE_UI_DUMP_DIR
     # writes the screenshots.
     test_team_ui.cpp
+    # Saving through the team server (topic 199): HE::Net::ScClient and
+    # HE::Sc::TeamSyncService against a fake sync server on the fake team
+    # server's port, and the real collab_server when HE_TEST_TEAM_SERVER names one.
+    test_team_sync.cpp
     # The gameplay transport over real localhost UDP sockets, with an injected
     # clock and the transport's own drop hook for loss under the reliability.
     test_net_udp.cpp
@@ -1427,7 +1431,7 @@ endif()
 # run at the same instant makes a failure depend on the scheduler, which is the
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
-set(_he_net_tests test_net_tcp test_net_relay test_net_team test_team_ui test_net_udp test_net_secure test_net_discovery test_net_collab
+set(_he_net_tests test_net_tcp test_net_relay test_net_team test_team_ui test_team_sync test_net_udp test_net_secure test_net_discovery test_net_collab
                   test_net_directory test_collab_controller test_net_game_session
                   test_mcp_tools_collab)
 foreach(_t IN LISTS _he_net_tests)
