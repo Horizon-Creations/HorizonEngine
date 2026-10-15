@@ -7500,6 +7500,13 @@ namespace
 	  "same UUID replaces the original and a new UUID is added, the packed "
 	  "startup scene included.",
 	  "", "export#mods" },
+	{ "Export/Development hotkeys", "",
+	  "The exported game answers two keys meant for testing: F10 shows a card in "
+	  "the top-right corner with frame times and the GPU time of each render "
+	  "pass, and V toggles VSync. The Development profile has it on, Shipping off "
+	  "- leave it off for the build players get. Works with any runtime, release "
+	  "builds included. The log says what the game did with the key.",
+	  "", "export#mods" },
 	{ "Export/Incremental packing", "",
 	  "Reuses the stored bytes of unchanged assets from the previous export at "
 	  "the same output directory instead of compressing them again, matched by a "

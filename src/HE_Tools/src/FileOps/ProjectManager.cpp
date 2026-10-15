@@ -618,6 +618,7 @@ std::vector<ExportProfile> defaultExportProfiles()
 	dev.compress         = false;  // fast iteration: store, no crypto
 	dev.encrypt          = false;
 	dev.enableModSupport = true;
+	dev.devTools         = true;
 
 	ExportProfile ship;
 	ship.name             = "Shipping";
@@ -661,6 +662,7 @@ static json profileToJson(const ExportProfile& p)
 	j["compress"]         = p.compress;
 	j["encrypt"]          = p.encrypt;
 	j["enableModSupport"] = p.enableModSupport;
+	j["devTools"]         = p.devTools;
 	j["startupScene"]     = p.startupScene;
 	j["outputDir"]        = p.outputDir;
 	j["excludePatterns"]  = p.excludePatterns;
@@ -682,6 +684,7 @@ static ExportProfile profileFromJson(const json& j)
 	p.compress         = jsonBool(j, "compress", true);
 	p.encrypt          = jsonBool(j, "encrypt", false);
 	p.enableModSupport = jsonBool(j, "enableModSupport", false);
+	p.devTools         = jsonBool(j, "devTools", p.name == "Development");
 	p.startupScene     = jsonString(j, "startupScene");
 	p.outputDir        = jsonString(j, "outputDir");
 	p.incremental      = jsonBool(j, "incremental", true);

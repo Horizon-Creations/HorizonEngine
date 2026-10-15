@@ -180,12 +180,12 @@ private:
     // m_gameInstance so it is destroyed BEFORE the runtime it references.
     WidgetManager m_widgets;
 
-#ifdef HE_GAME_DEV_HOTKEYS
     // F10: the stats card with the extended GPU numbers (Diagnostics/DevStatsTile.h).
-    // Development builds only, like the V key — the type is not even compiled into a
-    // shipping game, and it sits after m_widgets so it is destroyed before it.
+    // Only answers while m_devHotkeys is set - a development build, or an export
+    // profile that asked for it - and it sits after m_widgets so it is destroyed
+    // before it. Costs nothing while hidden.
     HE::DevStatsTile m_devStats;
-#endif
+    bool             m_devHotkeys = false;   // V and F10; set in OnInit
 
     // C++ GameLogic services (HorizonGameServices.h): the tables + their binding
     // must outlive the loaded library, so they live here. Filled + injected

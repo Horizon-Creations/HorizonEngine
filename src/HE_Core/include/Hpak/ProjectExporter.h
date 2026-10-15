@@ -40,6 +40,9 @@ struct HE_API ExportSettings {
     // mounts every .hpak there as an overlay on the base pak (same UUID replaces,
     // new UUID adds — including the packed startup scene).
     bool    enableModSupport = false;
+    // Ship the development hotkeys (V, F10 stats card) in the game: the Development
+    // export profile sets it, Shipping does not. See ProjectConfig::devTools.
+    bool    devTools = false;
     uint8_t key[32]  = {};
     // When non-empty, all files in this directory (the game runtime binaries:
     // executable + dylibs/DLLs) are copied into outputDir so the export is

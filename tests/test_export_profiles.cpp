@@ -174,6 +174,76 @@ TEST_CASE("ProjectManager: manifest without profiles loads seeded defaults")
     he_test::removeAllQuiet(dir);
 }
 
+// The development hotkeys (V, F10 stats card) ride along with the export: the
+// Development profile asks for them, Shipping does not, and a profile saved before
+// the key existed is read by its name so existing projects get them on Development.
+TEST_CASE("Export profile: the development hotkeys follow the Development profile")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_devtools";
+    he_test::removeAllQuiet(dir);
+    fs::create_directories(dir);
+
+    SUBCASE("seeded defaults")
+    {
+        const auto profiles = defaultExportProfiles();
+        REQUIRE(profiles.size() == 2);
+        CHECK(profiles[0].devTools);
+        CHECK_FALSE(profiles[1].devTools);
+    }
+
+    SUBCASE("a manifest from before the key existed")
+    {
+        {
+            std::ofstream out(dir / "Old.heproj");
+            out << R"({"name":"Old","version":"1.0","preset":0,"exportProfiles":[
+                {"name":"Development","compress":false,"encrypt":false,"enableModSupport":true},
+                {"name":"Shipping","compress":true,"encrypt":true},
+                {"name":"Demo","compress":true}]})";
+        }
+        ProjectManager pm;
+        REQUIRE(pm.loadProject((dir / "Old.heproj").string()));
+        const auto& ps = pm.currentProject().exportProfiles;
+        REQUIRE(ps.size() == 3);
+        CHECK(ps[0].devTools);
+        CHECK_FALSE(ps[1].devTools);
+        CHECK_FALSE(ps[2].devTools);
+    }
+
+    SUBCASE("an explicit choice survives a save")
+    {
+        ProjectManager pm;
+        REQUIRE(pm.createNewProject((dir / "P").string(), "P", ProjectPreset::Empty));
+        const std::string heproj = pm.currentProject().path;
+        pm.currentProject().exportProfiles[0].devTools = false;   // switched off on Development
+        pm.currentProject().exportProfiles[1].devTools = true;    // switched on on Shipping
+        REQUIRE(pm.saveProject(heproj));
+        ProjectManager again;
+        REQUIRE(again.loadProject(heproj));
+        CHECK_FALSE(again.currentProject().exportProfiles[0].devTools);
+        CHECK(again.currentProject().exportProfiles[1].devTools);
+    }
+
+    SUBCASE("project.hcfg carries it, and an older one reads as off")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "G";
+        cfg.hpakFilename = "G.hpak";
+        cfg.devTools     = true;
+        REQUIRE(ProjectConfigLoader::save(dir, cfg));
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(dir, loaded));
+        CHECK(loaded.devTools);
+
+        cfg.devTools = false;
+        REQUIRE(ProjectConfigLoader::save(dir, cfg));
+        ProjectConfig off;
+        off.devTools = true;
+        REQUIRE(ProjectConfigLoader::load(dir, off));
+        CHECK_FALSE(off.devTools);
+    }
+    he_test::removeAllQuiet(dir);
+}
+
 // The collision matrix travels in the .heproj, and it travels SPARSELY: a
 // project that never edited it keeps a manifest with no such key at all, and a
 // missing key has to read back as "everything collides" — which is how every
