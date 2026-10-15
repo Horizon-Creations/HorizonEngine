@@ -23,6 +23,9 @@ VIEWS = {
     "floor":   (0.0, 300.0, 28.0, 180.0, -20.0),   # the Thema 185 acceptance framing (floor 4.9 m below)
     "shore":   (0.0, 301.0, 36.0, 180.0, -12.0),   # 1 m deep, toward the shore: floor 2.8 m -> 0 m
     "dry_shallow": (0.0, 305.0, 30.0, 180.0, -40.0),  # 3 m above the surface, looking down into the shallows
+    # Thema 205 step 2: from above the 8 m deep middle out toward the shore, floor 7 m -> 2 m deep in frame.
+    # With the fog off this is the witness for the depth fade (faint over the deep middle, full in the shallows).
+    "deep_to_shore": (0.0, 301.0, 4.0, 180.0, -22.0),
 }
 
 

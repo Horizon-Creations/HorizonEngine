@@ -897,9 +897,9 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
 
             // Underwater caustics (Thema 185 Schritt 3), drawn FIRST in this same pass so the
-            // fog below swallows the net with distance: LIGHT added onto m_hdrView by the
-            // fog's own blend state (the shader's alpha is 0, so ONE / ONE_MINUS_SRC_ALPHA is
-            // a plain add). Two draws to one attachment in one subpass blend in primitive
+            // fog below swallows the net with distance: light redistributed on m_hdrView by the
+            // fog's own blend state (ONE / ONE_MINUS_SRC_ALPHA: dst' = rgb + dst * (1 - a), the
+            // cells' darkening in a, Thema 205). Two draws to one attachment in one subpass blend in primitive
             // order, so nothing sits between them; the depth is already flipped to
             // SHADER_READ_ONLY for the fog and the caustics read the very same set. Runs only
             // with the net switched on (the extractor's waterline fade-in makes
@@ -4983,8 +4983,8 @@ void VulkanRenderer::createPostFXPipelines()
             vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterFogPipe) == VK_SUCCESS;
 
         // Underwater caustics (Thema 185 Schritt 3): the fog's render pass, descriptor set
-        // layout and every fixed-function state above (incl. the blend — the shader outputs
-        // alpha 0, so ONE / ONE_MINUS_SRC_ALPHA is a plain add of its light), only the
+        // layout and every fixed-function state above (incl. the blend — ONE / ONE_MINUS_SRC_ALPHA
+        // gives dst' = rgb + dst * (1 - a): the lines' light, the cells' darkening), only the
         // fragment shader and the push-constant range differ: 128 bytes = mat4 + 4×vec4, see
         // the .frag. That is why it has its own pipeline layout and sits in this block (it
         // needs m_underwaterFogRP, which exists only here).

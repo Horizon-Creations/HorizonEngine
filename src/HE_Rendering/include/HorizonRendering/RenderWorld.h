@@ -50,7 +50,7 @@ struct UnderwaterCameraData {
     float causticsIntensity = 0.0f;
     float causticsScale     = 1.0f;
     float causticsSpeed     = 1.0f;
-    float causticsDepth     = 14.0f;
+    float causticsDepth     = 10.0f;   // depth where the net is gone (water::kDefaultCausticsDepth)
 };
 
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so
