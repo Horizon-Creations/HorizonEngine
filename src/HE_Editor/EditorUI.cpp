@@ -50,6 +50,7 @@
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
+#include "NotificationPopups.h"    // its loud end: toasts bottom-right and the critical modal
 #include "PlayErrorReveal.h"        // the first error of a play session opens the console
 #include "SourceControlPanel.h"     // Window > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
@@ -1392,12 +1393,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	};
 	// Reward moment (EditorRewards.h): Saved — a successful synchronous save of
 	// a scene that HAD unsaved edits (the Save-As path fires in its handler).
-	auto doSaveScene = [&]()
+	// False only when a synchronous write failed (the Save-As dialog being in
+	// flight is not a failure): the guarded Save below must not carry on to quit or
+	// switch project on top of a scene that did not reach the disk.
+	auto doSaveScene = [&]() -> bool
 	{
-		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return; }
+		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return true; }
 		const bool wasDirty = ctx.sceneDirty;
-		if (writeScene() && wasDirty)
+		const bool ok = writeScene();
+		if (ok && wasDirty)
 			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
+		return ok;
 	};
 	// ── Save (Ctrl/Cmd+S): the tab you are LOOKING AT ──────────────────────
 	// Saving the scene from inside a material graph is the wrong document: the
@@ -2864,20 +2870,31 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                         if (!dirtyTabs.empty())
                             HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
                         const bool hadPath = !ctx.currentScenePath.empty();
+                        bool sceneSaved = true;
                         if (ctx.sceneDirty)
-                            doSaveScene(); // synchronous if a path exists, else async Save-As
-                        if (!ctx.sceneDirty || hadPath)
+                            sceneSaved = doSaveScene(); // synchronous if a path exists, else async Save-As
+                        if (!sceneSaved)
                         {
-                            runGuardedAction(action, arg);
-                            s_guardAction = GuardedAction::None;
+                            // Quitting or switching now would throw the unsaved scene away
+                            // behind a dialog that said it was being saved. Stay here; the
+                            // failure itself is a notification (saveSceneToPath).
+                            s_guardSaveError = "The scene could not be saved.";
                         }
                         else
                         {
-                            // Save-As dialog is in flight; the file-result handler runs
-                            // the action once a path has been chosen and written.
-                            s_guardSaveThenAct = true;
+                            if (!ctx.sceneDirty || hadPath)
+                            {
+                                runGuardedAction(action, arg);
+                                s_guardAction = GuardedAction::None;
+                            }
+                            else
+                            {
+                                // Save-As dialog is in flight; the file-result handler runs
+                                // the action once a path has been chosen and written.
+                                s_guardSaveThenAct = true;
+                            }
+                            ImGui::CloseCurrentPopup();
                         }
-                        ImGui::CloseCurrentPopup();
                     }
                 }
                 ImGui::SameLine();
@@ -4413,6 +4430,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     if (ctx.team && TeamView::drawFooterOnlineMenu(*ctx.team))
         revealFloatingWindow(s_showTeam, "Team");
     NotificationBar::DrawOverlay(ctx);
+    NotificationPopups::DrawOverlay(ctx);   // last: toasts above the panels, the modal above all
     if (TaskBoardFooter::DrawOverlay(ctx)) revealFloatingWindow(s_showTaskBoard, "Task Board");
 
     TutorialPanel::UiFlags tutFlags;

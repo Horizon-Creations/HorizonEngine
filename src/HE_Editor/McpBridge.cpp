@@ -1,4 +1,5 @@
 #include "McpBridge.h"
+#include "NotificationStore.h"
 
 #include <Diagnostics/Logger.h>
 #include <Hpak/Aes256Gcm.h>   // Hpak::randomBytes for the auth token
@@ -125,6 +126,10 @@ bool McpBridge::start()
 		HE_LOG_ERROR(Editor, "MCP: could not open the local listener on port %u — "
 		                     "external clients will not be able to connect",
 		             static_cast<unsigned>(m_requestedPort));
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Remote Control could not start",
+		               "The local listener could not be opened (port " +
+		               std::to_string(static_cast<unsigned>(m_requestedPort)) +
+		               " may be in use), so external tools cannot connect to the editor.");
 		return false;
 	}
 	// Below the transport default, so an over-long prefix is refused before
@@ -142,6 +147,9 @@ bool McpBridge::start()
 		HE_LOG_ERROR(Editor, "MCP: could not write the endpoint file %s — "
 		                     "shutting the listener down again",
 		             m_endpointFile.string().c_str());
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Remote Control could not start",
+		               "The endpoint file " + m_endpointFile.string() + " could not be written, so "
+		               "external tools would have no way to find the editor.");
 		m_transport.reset();
 		m_token.clear();
 		return false;

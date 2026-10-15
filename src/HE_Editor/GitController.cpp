@@ -288,7 +288,30 @@ void GitController::reportNewError()
 	// First line as the sentence, everything as the detail.
 	std::string first = err.substr(0, err.find('\n'));
 	if (first.size() > 160) first = first.substr(0, 157) + "...";
-	HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Source control: " + first, err);
+	// Keyed, so a second failure replaces the first instead of stacking a toast per
+	// attempt; nothing here is the user's last word, so it is a toast, not a dialog.
+	HE::Ed::NoteSpec note;
+	note.level  = HE::Ed::NoteLevel::Important;
+	note.title  = "Source control";
+	note.text   = first;
+	note.detail = err == first ? std::string() : err;
+	note.key    = "git.error";
+	HE::Ed::notify(std::move(note));
+}
+
+// The other half of the same contract: "Fetched: 3 new commits" and "Pushed" used to
+// be dim text inside the Source Control panel, which is exactly where nobody is
+// looking while the push runs in the background. Info — the centre keeps it, nothing
+// pops up for something that worked.
+void GitController::reportNewInfo()
+{
+	const std::string& info = m_service.lastInfo();
+	if (info.empty()) { m_notifiedInfo.clear(); return; }
+	if (info == m_notifiedInfo) return;
+	m_notifiedInfo = info;
+	HE::Ed::notify(HE::Ed::NoteLevel::Info, "Source control: " + info);
+	// The failure it follows (if any) is over.
+	HE::Ed::resolveNotification("git.error");
 }
 
 void GitController::update(std::uint64_t nowMs)
@@ -302,6 +325,7 @@ void GitController::update(std::uint64_t nowMs)
 	const bool serviceIdle = !m_service.busy();
 	m_service.pump();
 	reportNewError();
+	reportNewInfo();
 	if (const int f = m_syncWatch.poll(serviceIdle, m_service.lastError(), m_service.lastInfo()))
 		m_syncMoment |= f;
 	// The clone and the repository list run before any project is open, so

@@ -251,7 +251,9 @@ private:
 	void flushTeamServerPending(std::uint64_t nowMs);
 	// Posts a notification when the service reports an error it has not reported yet.
 	void reportNewError();
+	void reportNewInfo();
 	std::string m_notifiedError;
+	std::string m_notifiedInfo;
 
 	// Absolute → repository-relative with forward slashes, or empty when outside.
 	std::string toRepoRelative(const std::string& absolutePath) const;

@@ -2024,7 +2024,7 @@ void drawStatusPage(AppContext& ctx)
 		{
 			gs.setCustomConfigEntry(HeprojRegistration::kSettingKey, on);
 			if (!gs.writeConfig())
-				HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+				HE::Ed::notify(HE::Ed::NoteLevel::Important,
 				               "Could not save the file type setting",
 				               "The choice applies now, but this session's config file could "
 				               "not be written \xe2\x80\x94 the next launch will use the old one.");
@@ -2086,7 +2086,7 @@ void drawPanelsPage()
 		// the look it just rejected. Which only holds if the write lands, so a
 		// failure is said out loud instead of being discovered next launch.
 		if (!gs.writeConfig())
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			               "Could not save the variable display setting",
 			               "The choice applies now, but this session's config file could "
 			               "not be written — the next launch will show the old look.");
@@ -2128,7 +2128,7 @@ void drawPanelsPage()
 		// Same reasoning as the variable display above: a look picked once is
 		// written now, and a failed write is said out loud.
 		if (!gs.writeConfig())
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			               "Could not save the Pre Construct setting",
 			               "The choice applies now, but this session's config file could "
 			               "not be written \xe2\x80\x94 the next launch will use the old one.");

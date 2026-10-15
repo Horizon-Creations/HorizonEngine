@@ -2454,7 +2454,7 @@ void EditorApplication::startSftpProbe()
 		if (probe.configured && !probe.reachable)
 		{
 			HE::Ed::notify(
-				haveManifest ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Problem,
+				haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical,
 				"The EngineContent server could not be reached.",
 				(probe.detail.empty()
 					? std::string("The connection was refused or timed out.")
@@ -2472,7 +2472,7 @@ void EditorApplication::startSftpProbe()
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
 			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 				"The EngineContent catalogue could not be read.",
 				std::string("The server accepted the login, but reading its manifest failed")
 				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
@@ -2517,7 +2517,7 @@ void EditorApplication::refreshEngineContentManifest()
 			// no longer matches the server — assets the publish removed still
 			// listed, ones it added still missing — with nothing on screen saying
 			// so until the next restart quietly fixes it.
-			HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 				"The EngineContent catalogue could not be refreshed.",
 				"The change reached the server, but re-reading its manifest failed. "
 				"What the Content Browser shows under Engine is from before that "
@@ -3279,7 +3279,7 @@ void EditorApplication::OnRender(float dt)
 							// arrive is the whole difference between "the scene
 							// looks wrong" and a fact somebody can act on.
 							if (!success)
-								HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+								HE::Ed::notify(HE::Ed::NoteLevel::Important,
 									"\"" + std::filesystem::path(remotePath).filename().string()
 										+ "\" could not be downloaded.",
 									"A scene references this EngineContent asset, but it could "
@@ -11371,7 +11371,7 @@ void EditorApplication::syncStructuralChanges()
 			const std::string name =
 				reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
 				                             : std::string("An entity");
-			m_notifications.post(HE::Ed::NoteLevel::Problem,
+			m_notifications.post(HE::Ed::NoteLevel::Critical,
 				"\"" + name + "\" could not be sent to the others.",
 				"It is too large for one message, or the connection dropped while it was "
 				"being created. It exists on this machine only, and nothing will retry. "
@@ -11437,7 +11437,7 @@ void EditorApplication::syncStructuralChanges()
 			const std::string name =
 				reg.all_of<NameComponent>(m.entity) ? reg.get<NameComponent>(m.entity).name
 				                                    : std::string("The entity");
-			m_notifications.post(HE::Ed::NoteLevel::Warning,
+			m_notifications.post(HE::Ed::NoteLevel::Important,
 				"\"" + name + "\" was not moved: " + lock->ownerName + " is editing it.",
 				"It stays where it was. Try again once they have deselected it.");
 			continue;
@@ -11833,7 +11833,7 @@ std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>
 		const std::string what = refused == 1
 			? "\"" + refusedName + "\" was not " + verb
 			: std::to_string(refused) + " entities were not " + verb;
-		m_notifications.post(HE::Ed::NoteLevel::Warning,
+		m_notifications.post(HE::Ed::NoteLevel::Important,
 			what + ": " + refusedHolder + " is editing it or something under it.",
 			"Nothing was removed for them on any machine. Try again once they have "
 			"deselected it.");
@@ -12855,8 +12855,20 @@ void EditorApplication::setPlayMode(bool play)
 		setPlayMouseCaptured(false); // release the mouse when leaving play mode
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
+		{
 			HE_LOG_ERROR(Editor, "%s",
 				"EditorApplication: play-mode restore failed — world may be empty");
+			// The edit scene is what the user is about to keep working in; an empty
+			// viewport with no word about it reads as "Play deleted my scene".
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Critical;
+			note.title  = "The scene could not be restored after Play";
+			note.text   = "The editor could not bring back the scene it had before Play, so "
+			              "the viewport may be empty or incomplete.";
+			note.detail = "Do not save over the scene file. Use Undo, or reopen the scene from "
+			              "disk to get back to your last saved version.";
+			m_notifications.post(std::move(note));
+		}
 		m_selection.clear();
 		m_editorWorld->markHierarchyDirty();
 		m_isPlaying = false;
@@ -12978,7 +12990,7 @@ void EditorApplication::restartAppPreview(bool keepState)
 	// emptied itself" is exactly the kind of thing somebody spends an hour on.
 	// Only when there WAS something to lose.
 	if (keepState && landed == 0 && !snapshot.elements.empty())
-		HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+		HE::Ed::notify(HE::Ed::NoteLevel::Important,
 		               "Live preview: none of what it was holding fitted the new layout",
 		               "Text, scroll positions and selections are back to what the assets "
 		               "were authored with. Elements that were deleted or retyped cannot "
@@ -13474,9 +13486,28 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 		// settle write is not a new save.
 		if (!m_settleWritingScene) m_collab.noteLocalSave(HE::Ed::CollabSettle::kSceneKey);
 		m_teamSync.noteSaved();
+		// A failure the user was told about is over.
+		m_notifications.resolve("scene.save");
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
+
+	// The log line above reaches the bell as a developer-style sentence; the user
+	// pressed Save and is owed an answer. A dialog, because their work is only in
+	// memory now — except for the host's own settle write inside a session, which
+	// is retried on its own and would otherwise reopen this every attempt.
+	HE::Ed::NoteSpec note;
+	note.level     = m_settleWritingScene ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
+	note.title     = "Could not save the scene";
+	note.text      = "\"" + std::filesystem::path(path).filename().string() +
+	                 "\" was not written. Your changes are still open in the editor.";
+	note.detail    = "Check that the folder exists, is writable and the disk is not full.";
+	note.assetPath = path;
+	note.key       = "scene.save";
+	// The controller and the editor die together, and the store only runs this from
+	// inside a frame.
+	note.actions.push_back({ "Retry", [this, path] { saveSceneToPath(path); }, true });
+	m_notifications.post(std::move(note));
 	return false;
 }
 
@@ -13700,6 +13731,18 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		m_currentScenePath.clear();
 		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to open scene from " + path).c_str());
+		// The world was cleared above and nothing replaced it, so the editor now shows
+		// an empty scene. Silence here reads as "the scene is empty".
+		HE::Ed::NoteSpec note;
+		note.level     = HE::Ed::NoteLevel::Critical;
+		note.title     = "Could not open the scene";
+		note.text      = "\"" + std::filesystem::path(path).filename().string() +
+		                 "\" could not be loaded, so the editor is showing an empty scene.";
+		note.detail    = "The file is unchanged. It may be damaged, from a newer version of the "
+		                 "editor, or have merge-conflict markers left in it.";
+		note.assetPath = path;
+		note.key       = "scene.open";
+		m_notifications.post(std::move(note));
 	}
 
 	m_selection.clear();

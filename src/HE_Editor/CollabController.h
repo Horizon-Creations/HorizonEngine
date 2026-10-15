@@ -1205,6 +1205,8 @@ private:
 	void noteRemoteReimport(HE::Net::ParticipantId by, const std::string& relPath);
 
 	HE::Ed::NotificationStore*      m_notes = nullptr;
+	// The current Failed status has been put in front of the user (announceFailure).
+	bool                            m_failureAnnounced = false;
 	std::vector<CreatedAssetNotice> m_createdNotices;
 	std::vector<PendingAssetOp>     m_pendingOps;     // host only
 	// The batch ids WE mint, and the one currently open. Per-controller, so two
@@ -1281,6 +1283,8 @@ private:
 	// session and wants the UI back now). Safe to call when nothing was taken.
 	void releaseNetworkResources(bool blocking);
 	void wireCallbacks();
+	// Tells the user, once, that the session failed (see the definition).
+	void announceFailure();
 	// Copy the persisted name/picture/client key into a session config. Called
 	// on every host and join, so the identity the user just edited is the one
 	// that goes on the wire.

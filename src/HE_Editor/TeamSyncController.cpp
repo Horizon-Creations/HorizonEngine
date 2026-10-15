@@ -157,7 +157,7 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 	bool        error = false;
 	while (m_sync.pollNotice(text, error))
 		if (m_notes)
-			m_notes->post(error ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Info, "Team sync: " + text);
+			m_notes->post(error ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info, "Team sync: " + text);
 
 	std::filesystem::path opened;
 	while (m_sync.takeOpened(opened))

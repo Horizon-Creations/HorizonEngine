@@ -2,6 +2,7 @@
 #include <Diagnostics/Log.h>   // the engine-wide error channel this can attach to
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -17,31 +18,104 @@
 // never answered about — went nowhere at all.
 //
 // This is that channel: a bounded list of things worth telling the user, posted
-// from ANY thread, drawn by the footer bell and its flyout.
+// from ANY thread. It has three tiers, and the tier decides how loud the editor
+// is about it (NoteLevel below); every tier is also kept in the notification
+// centre (the footer bell and its flyout, NotificationBar.h), so a popup that
+// was missed is never lost.
 //
 // It is deliberately NOT a log. A log answers "what happened"; this answers
 // "what still needs you". Entries are few, they are written in sentences, and
-// the ones that need an action carry the path that action applies to.
+// the ones that need an answer carry buttons for it (NoteAction).
+//
+// Everything about WHEN a popup is due — a toast's lifetime, the order the modals
+// queue in, what a click on a button does to the entry — lives here and not in
+// the ImGui code, so it is testable without a frame (NotificationPopups.cpp only
+// draws what this decides).
 
 namespace HE::Ed
 {
 
 enum class NoteLevel : std::uint8_t
 {
-	Info = 0,     // it worked, and somebody other than you should know
-	Warning = 1,  // it did not fully work, and nothing is lost
-	Problem = 2,  // something is out of step and will stay that way until someone acts
+	// Worth knowing, nothing to do. Notification centre only: no popup, no sound.
+	// A teammate joined, an upload finished, a setting was applied.
+	Info = 0,
+	// Did not fully work, or wants an answer soon, but the user is not blocked.
+	// A toast in the bottom-right corner that takes no focus and disappears on its
+	// own (the centre keeps it). A collaboration invite, a push that was rejected.
+	Important = 1,
+	// The thing the user was just doing did not happen, or work is at risk. A
+	// modal dialog: it must be acknowledged. Reserve it — a dialog per hiccup
+	// teaches people to click it away unread.
+	Critical = 2,
+};
+
+// A button on a toast, a modal or a centre row.
+//
+// `run` is called on the MAIN thread, from the frame that draws the button, even
+// when the notification itself was posted from a worker. It may capture by value
+// only things that outlive the notification (a session id, a path) — never a
+// pointer to something a panel can close; resolve() the notification instead when
+// the thing it points at goes away.
+struct NoteAction
+{
+	std::string           label;
+	std::function<void()> run;        // may be empty: the button then only dismisses
+	// The accent-filled "do it" button. At most one per notification; if none is
+	// marked, none is highlighted.
+	bool                  primary   = false;
+	// false: the click runs `run` but leaves the notification up (a "Copy details"
+	// on a modal). Default true: acting on it is answering it.
+	bool                  dismisses = true;
+};
+
+// What a caller hands to post(). A struct rather than a growing parameter list:
+// notifications now carry a title, actions, a key, a lifetime, and the next
+// thing someone wants will not fit in a fifth positional argument either.
+struct NoteSpec
+{
+	NoteLevel   level = NoteLevel::Info;
+	std::string title;       // optional short heading ("Could not join session")
+	std::string text;        // one sentence, already phrased for a human
+	std::string detail;      // optional second line: the reason, an error string
+	std::string assetPath;   // optional: what it is about, absolute where possible
+	// Non-empty: this notification is "the" one for that key. Posting again replaces
+	// the earlier one (an invitation re-sent, a status that moved on), and
+	// resolve(key) withdraws it. Empty: identical consecutive posts collapse.
+	std::string key;
+	std::vector<NoteAction> actions;
+	// Toast lifetime. 0: the default for the tier (see k_toastMs / k_toastActionMs).
+	std::uint32_t timeoutMs = 0;
+	// false: skip the toast/modal and go to the centre only, whatever the level.
+	// For tiers that matter to the bell's colour but would be noise as a popup
+	// (the engine log bridge).
+	bool popup = true;
 };
 
 struct Notification
 {
+	std::uint64_t id = 0;       // unique for the life of the store, never reused
 	NoteLevel     level = NoteLevel::Info;
-	std::string   text;        // one sentence, already phrased for a human
-	std::string   detail;      // optional second line: the reason, an error string
-	std::string   assetPath;   // optional: what it is about, absolute where possible
+	std::string   title;
+	std::string   text;
+	std::string   detail;
+	std::string   assetPath;
+	std::string   key;
+	std::vector<NoteAction> actions;
 	std::uint64_t whenMs = 0;  // steady clock at post time — NOT ImGui::GetTime()
 	int           count  = 1;  // consecutive identical posts collapse into one row
 	bool          seen   = false;
+
+	// Set once an action was taken or resolve() withdrew it: the buttons are gone,
+	// the row stays as a record. handledBy is the label that was clicked ("" for a
+	// withdrawal), so the centre can say "Join" rather than a bare tick.
+	bool          handled = false;
+	std::string   handledBy;
+
+	// ── Popup state, owned by the store ──
+	std::uint32_t timeoutMs    = 0;   // the toast's full lifetime, for its progress strip
+	std::uint64_t toastUntilMs = 0;   // 0: no toast (never had one, dismissed, or over)
+	bool          modalPending = false;
 };
 
 // Posting is thread-safe; everything else is main-thread only, because it is
@@ -49,11 +123,18 @@ struct Notification
 class NotificationStore
 {
 public:
-	// Safe from any thread. Identical consecutive posts (same level and text)
-	// increment the last entry's count instead of adding a row — a worker that
-	// fails on four hundred files must not produce four hundred rows.
-	void post(NoteLevel level, std::string text, std::string detail = {},
-	          std::string assetPath = {});
+	// Safe from any thread. Returns the new entry's id (0 for an empty text).
+	std::uint64_t post(NoteSpec spec);
+
+	// The short form most call sites want: a sentence, a reason, a path.
+	std::uint64_t post(NoteLevel level, std::string text, std::string detail = {},
+	                   std::string assetPath = {});
+
+	// Withdraws the notification posted under `key`: its buttons go, its toast
+	// closes, its modal is dismissed, and the row stays in the centre as a record.
+	// For "the invitation was answered somewhere else" and "the session this
+	// button joins has ended". Safe from any thread; a no-op for an unknown key.
+	void resolve(const std::string& key);
 
 	// A copy, taken under the lock, for the frame to draw. Copying rather than
 	// exposing the vector is what keeps the lock off the ImGui call path.
@@ -67,11 +148,32 @@ public:
 	// against the same one that recorded it.
 	static std::uint64_t nowMs();
 
+	// ── What the popups draw ─────────────────────────────────────────────────
+	// Toasts that are still on the clock, oldest first.
+	std::vector<Notification> liveToasts(std::uint64_t nowMs) const;
+	// The next modal to show: the OLDEST one still pending, so a burst is read in
+	// the order it happened. False when none is waiting.
+	bool nextModal(Notification& out) const;
+	// The mouse is over a toast: it stays at least `graceMs` longer from now. Asked
+	// every frame it is hovered, so it expires `graceMs` after the pointer leaves.
+	void holdToast(std::uint64_t id, std::uint64_t nowMs, std::uint32_t graceMs = k_holdMs);
+	// The toast's own close button. The row stays in the centre, unread.
+	void dismissToast(std::uint64_t id);
+	// A modal's dismiss. Marks the row read — it was put in front of the user.
+	void acknowledge(std::uint64_t id);
+	// Runs action `index` of entry `id` on the calling (main) thread and settles
+	// the entry unless the action opted out (NoteAction::dismisses). False when the
+	// entry is gone, was already handled, or has no such action. The callback runs
+	// with NO lock held, so it may post, resolve or clear.
+	bool runAction(std::uint64_t id, std::size_t index);
+
 	// ── The engine-wide error channel ────────────────────────────────────────
-	// Forwards every HE_LOG_ERROR record into this store as a Problem, so a
-	// failure nobody thought to wire up by hand still reaches the user instead of
-	// dying in a log file nobody has open. Errors only — Warning is where routine
-	// "did not fully work" lives, and there are hundreds of those per session.
+	// Forwards every HE_LOG_ERROR record into this store as an Important entry
+	// WITHOUT a popup, so a failure nobody thought to wire up by hand still reaches
+	// the user (the bell turns amber, the entry is in the centre) instead of dying
+	// in a log file nobody has open. Errors only — Warning is where routine "did
+	// not fully work" lives, and there are hundreds of those per session. A
+	// Critical log record is the exception and does get its modal.
 	//
 	// Deliberately NOT a log window: identical messages inside a cooldown are
 	// dropped rather than counted, and a burst is capped, because the failures
@@ -85,6 +187,12 @@ public:
 	void attachToEngineLog();
 	void detachFromEngineLog();
 
+	// A toast with buttons waits longer than one without: an invitation read at
+	// the speed of a toast is an invitation missed.
+	static constexpr std::uint32_t k_toastMs       = 8'000;
+	static constexpr std::uint32_t k_toastActionMs = 20'000;
+	static constexpr std::uint32_t k_holdMs        = 4'000;
+
 private:
 	// The sink half of attachToEngineLog. A static member rather than a lambda:
 	// HE::Log::addSink takes a plain function pointer plus a user pointer, and a
@@ -92,12 +200,16 @@ private:
 	static void logSink(const HE::Log::Record& record, void* user);
 	void        onLogError(const HE::Log::Record& record);
 
+	// Closes the popups of `n` and marks it read; the caller holds m_mutex.
+	static void settle(Notification& n);
+
 	mutable std::mutex        m_mutex;
 	std::vector<Notification> m_entries;
-	std::size_t               m_unseen = 0;
+	std::uint64_t             m_nextId = 1;
 
 	// Bounded on purpose: this is a surface, not storage. The oldest SEEN entry
-	// goes first so an unread problem is never pushed out by a run of chatter.
+	// goes first so an unread problem is never pushed out by a run of chatter, and
+	// an entry whose buttons can still be pressed is never pushed out at all.
 	static constexpr std::size_t k_maxEntries = 200;
 
 	// ── Bridge state ─────────────────────────────────────────────────────────
@@ -132,9 +244,12 @@ private:
 // them. It is a no-op when no store is installed (headless, tests, the runtime
 // game), so a call site never has to ask whether it is running in the editor.
 //
-// Same thread-safety as post(): safe from anywhere.
+// Same thread-safety as post(): safe from anywhere. They return the entry's id,
+// or 0 when there is no store.
 void setGlobalNotifications(NotificationStore* store);
-void notify(NoteLevel level, std::string text, std::string detail = {},
-            std::string assetPath = {});
+std::uint64_t notify(NoteSpec spec);
+std::uint64_t notify(NoteLevel level, std::string text, std::string detail = {},
+                     std::string assetPath = {});
+void resolveNotification(const std::string& key);
 
 } // namespace HE::Ed

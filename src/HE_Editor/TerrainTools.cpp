@@ -1236,7 +1236,7 @@ void renderPanel(AppContext& ctx)
                 else
                 {
                     HE_LOG_WARN(Editor, "Heightmap for the new landscape failed: %s", hres.error.c_str());
-                    HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                    HE::Ed::notify(HE::Ed::NoteLevel::Important,
                                    "The heightmap could not be applied - the landscape was created without it.",
                                    hres.error);
                 }
@@ -2302,7 +2302,7 @@ void drawHeightmapBlock(AppContext& ctx, Entity terrain)
 	if (!s_hmStatus.empty() && s_hmStatusError && s_hmStatus != s_hmReported)
 	{
 		s_hmReported = s_hmStatus;
-		HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Heightmap import failed.", s_hmStatus);
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Heightmap import failed.", s_hmStatus);
 	}
 	if (!s_hmStatus.empty() && !s_hmStatusError)
 		ImGui::TextWrapped("%s", s_hmStatus.c_str());

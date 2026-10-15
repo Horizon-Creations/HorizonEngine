@@ -19,49 +19,124 @@ std::uint64_t NotificationStore::nowMs()
 		duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-void NotificationStore::post(NoteLevel level, std::string text, std::string detail,
-                             std::string assetPath)
+namespace
 {
-	if (text.empty()) return;
+	// Puts the popups of a freshly posted (or re-posted) entry on the clock. A
+	// tier decides which popup it gets: Info none, Important a toast, Critical a
+	// modal — `popup == false` is the caller opting out of all of it.
+	void armPopup(Notification& n, bool popup, std::uint32_t timeoutMs, std::uint64_t now)
+	{
+		if (!popup) return;
+		if (n.level == NoteLevel::Critical)
+		{
+			n.modalPending = true;
+		}
+		else if (n.level == NoteLevel::Important)
+		{
+			n.timeoutMs = timeoutMs != 0 ? timeoutMs
+			            : n.actions.empty() ? NotificationStore::k_toastMs
+			                                : NotificationStore::k_toastActionMs;
+			n.toastUntilMs = now + n.timeoutMs;
+		}
+	}
+}
 
+void NotificationStore::settle(Notification& n)
+{
+	n.toastUntilMs = 0;
+	n.modalPending = false;
+	n.seen         = true;
+}
+
+std::uint64_t NotificationStore::post(NoteLevel level, std::string text, std::string detail,
+                                      std::string assetPath)
+{
+	NoteSpec spec;
+	spec.level     = level;
+	spec.text      = std::move(text);
+	spec.detail    = std::move(detail);
+	spec.assetPath = std::move(assetPath);
+	return post(std::move(spec));
+}
+
+std::uint64_t NotificationStore::post(NoteSpec spec)
+{
+	if (spec.text.empty()) return 0;
+
+	const std::uint64_t now = nowMs();
 	std::lock_guard<std::mutex> lock(m_mutex);
 
 	// Collapse a repeat of the row that is already at the end. A worker that
 	// fails the same way on four hundred files says so once, with a count —
 	// four hundred rows is not a notification, it is a denial of service against
-	// the person reading it.
-	if (!m_entries.empty())
+	// the person reading it. Rows with buttons or a key are never merged: each is
+	// an answerable thing in its own right, and a merged one would keep the old
+	// callback.
+	if (spec.key.empty() && spec.actions.empty() && !m_entries.empty())
 	{
 		Notification& last = m_entries.back();
-		if (last.level == level && last.text == text)
+		if (last.key.empty() && last.actions.empty() &&
+		    last.level == spec.level && last.text == spec.text)
 		{
 			++last.count;
-			last.whenMs = nowMs();
-			if (!last.seen) return;      // already counted as unread
-			last.seen = false;           // it happened again: worth seeing again
-			++m_unseen;
-			return;
+			last.whenMs = now;
+			last.seen   = false;     // it happened again: worth seeing again
+			armPopup(last, spec.popup, spec.timeoutMs, now);
+			return last.id;
 		}
 	}
 
+	// "The" notification for a key: the earlier one is replaced, not joined by a
+	// second row that disagrees with it.
+	if (!spec.key.empty())
+	{
+		m_entries.erase(std::remove_if(m_entries.begin(), m_entries.end(),
+			[&spec](const Notification& e){ return e.key == spec.key; }), m_entries.end());
+	}
+
 	Notification n;
-	n.level     = level;
-	n.text      = std::move(text);
-	n.detail    = std::move(detail);
-	n.assetPath = std::move(assetPath);
-	n.whenMs    = nowMs();
+	n.id        = m_nextId++;
+	n.level     = spec.level;
+	n.title     = std::move(spec.title);
+	n.text      = std::move(spec.text);
+	n.detail    = std::move(spec.detail);
+	n.assetPath = std::move(spec.assetPath);
+	n.key       = std::move(spec.key);
+	n.actions   = std::move(spec.actions);
+	n.whenMs    = now;
+	armPopup(n, spec.popup, spec.timeoutMs, now);
+	const std::uint64_t id = n.id;
 	m_entries.push_back(std::move(n));
-	++m_unseen;
 
 	if (m_entries.size() > k_maxEntries)
 	{
 		// Drop the oldest SEEN entry rather than simply the oldest: an unread
-		// problem must not be pushed out by a run of routine chatter behind it.
-		auto victim = std::find_if(m_entries.begin(), m_entries.end(),
-			[](const Notification& e){ return e.seen; });
-		if (victim == m_entries.end()) victim = m_entries.begin();
-		if (!victim->seen && m_unseen > 0) --m_unseen;
+		// problem must not be pushed out by a run of routine chatter behind it. An
+		// entry whose buttons still work, or whose modal has not been shown, goes
+		// last of all — losing it silently is worse than losing a log line.
+		auto evictable = [](const Notification& e){ return !e.modalPending && e.actions.empty(); };
+		const auto last = m_entries.end() - 1;   // the one just posted is never the victim
+		auto victim = std::find_if(m_entries.begin(), last,
+			[&](const Notification& e){ return e.seen && evictable(e); });
+		if (victim == last)
+			victim = std::find_if(m_entries.begin(), last, evictable);
+		if (victim == last) victim = m_entries.begin();
 		m_entries.erase(victim);
+	}
+	return id;
+}
+
+void NotificationStore::resolve(const std::string& key)
+{
+	if (key.empty()) return;
+	std::lock_guard<std::mutex> lock(m_mutex);
+	for (Notification& e : m_entries)
+	{
+		if (e.key != key || e.handled) continue;
+		e.handled = true;
+		e.handledBy.clear();
+		e.actions.clear();   // the captures go with them
+		settle(e);
 	}
 }
 
@@ -74,21 +149,93 @@ std::vector<Notification> NotificationStore::snapshot() const
 std::size_t NotificationStore::unseenCount() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return m_unseen;
+	return static_cast<std::size_t>(std::count_if(m_entries.begin(), m_entries.end(),
+		[](const Notification& e){ return !e.seen; }));
 }
 
 void NotificationStore::markAllSeen()
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	for (Notification& e : m_entries) e.seen = true;
-	m_unseen = 0;
 }
 
 void NotificationStore::clear()
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_entries.clear();
-	m_unseen = 0;
+}
+
+// ─── What the popups draw ────────────────────────────────────────────────────
+
+std::vector<Notification> NotificationStore::liveToasts(std::uint64_t now) const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	std::vector<Notification> out;
+	for (const Notification& e : m_entries)
+		if (e.toastUntilMs > now) out.push_back(e);
+	return out;
+}
+
+bool NotificationStore::nextModal(Notification& out) const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	for (const Notification& e : m_entries)
+	{
+		if (!e.modalPending) continue;
+		out = e;
+		return true;
+	}
+	return false;
+}
+
+void NotificationStore::holdToast(std::uint64_t id, std::uint64_t now, std::uint32_t graceMs)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	for (Notification& e : m_entries)
+	{
+		if (e.id != id) continue;
+		// A toast that already ran out is not revived by a pointer that happens to
+		// be over where it was.
+		if (e.toastUntilMs > now) e.toastUntilMs = std::max(e.toastUntilMs, now + graceMs);
+		return;
+	}
+}
+
+void NotificationStore::dismissToast(std::uint64_t id)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	for (Notification& e : m_entries)
+		if (e.id == id) { e.toastUntilMs = 0; return; }
+}
+
+void NotificationStore::acknowledge(std::uint64_t id)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	for (Notification& e : m_entries)
+		if (e.id == id) { settle(e); return; }
+}
+
+bool NotificationStore::runAction(std::uint64_t id, std::size_t index)
+{
+	std::function<void()> fn;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		auto it = std::find_if(m_entries.begin(), m_entries.end(),
+			[id](const Notification& e){ return e.id == id; });
+		if (it == m_entries.end() || it->handled || index >= it->actions.size()) return false;
+
+		fn = it->actions[index].run;
+		if (it->actions[index].dismisses)
+		{
+			it->handled   = true;
+			it->handledBy = it->actions[index].label;
+			it->actions.clear();
+			settle(*it);
+		}
+	}
+	// Outside the lock: the action is allowed to post, resolve or clear.
+	if (fn) fn();
+	return true;
 }
 
 // ─── The engine-wide error channel ───────────────────────────────────────────
@@ -198,7 +345,17 @@ void NotificationStore::onLogError(const HE::Log::Record& record)
 
 	// m_bridgeMutex is NOT held here: post() takes m_mutex, and the two are only
 	// ever taken in this order, never nested.
-	post(NoteLevel::Problem, std::move(text), std::move(detail));
+	NoteSpec spec;
+	// An Error is "something failed somewhere": it colours the bell and sits in the
+	// centre, but a popup per log line would bury the editor — the call sites that
+	// know the user is waiting on the outcome post their own. A Critical record is
+	// strictly worse and is the one the log bridge lets through to a modal.
+	spec.level  = record.level >= HE::Log::Level::Critical ? NoteLevel::Critical
+	                                                       : NoteLevel::Important;
+	spec.popup  = spec.level == NoteLevel::Critical;
+	spec.text   = std::move(text);
+	spec.detail = std::move(detail);
+	post(std::move(spec));
 }
 
 // ─── Posting from anywhere ───────────────────────────────────────────────────
@@ -217,12 +374,25 @@ void setGlobalNotifications(NotificationStore* store)
 	s_globalStore.store(store, std::memory_order_release);
 }
 
-void notify(NoteLevel level, std::string text, std::string detail,
-            std::string assetPath)
+std::uint64_t notify(NoteSpec spec)
 {
 	NotificationStore* store = s_globalStore.load(std::memory_order_acquire);
-	if (!store) return;   // headless, tests, the runtime game: nowhere to show it
-	store->post(level, std::move(text), std::move(detail), std::move(assetPath));
+	if (!store) return 0;   // headless, tests, the runtime game: nowhere to show it
+	return store->post(std::move(spec));
+}
+
+std::uint64_t notify(NoteLevel level, std::string text, std::string detail,
+                     std::string assetPath)
+{
+	NotificationStore* store = s_globalStore.load(std::memory_order_acquire);
+	if (!store) return 0;
+	return store->post(level, std::move(text), std::move(detail), std::move(assetPath));
+}
+
+void resolveNotification(const std::string& key)
+{
+	if (NotificationStore* store = s_globalStore.load(std::memory_order_acquire))
+		store->resolve(key);
 }
 
 } // namespace HE::Ed

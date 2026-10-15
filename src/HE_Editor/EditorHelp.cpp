@@ -3070,6 +3070,18 @@ namespace
 	  "Clears the bell without discarding the entries — they stay readable in "
 	  "the list.",
 	  "", "editor#notifications" },
+	{ "Notifications/Dismiss", "",
+	  "Closes this message without choosing any of its buttons. It stays in the "
+	  "notification centre (the bell in the footer), marked as read.",
+	  "", "editor#notifications" },
+	{ "Notifications/OK", "",
+	  "Closes this message. It stays in the notification centre (the bell in "
+	  "the footer), marked as read.",
+	  "", "editor#notifications" },
+	{ "Notifications/x", "",
+	  "Closes this popup now instead of waiting for it to fade. It stays in the "
+	  "notification centre (the bell in the footer), still unread.",
+	  "", "editor#notifications" },
 	{ "Notifications/Clear", "",
 	  "Discards every notification. Anything that still needs doing is not "
 	  "undone by this — only the reminder is gone.",
