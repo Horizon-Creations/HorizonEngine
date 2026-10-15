@@ -1790,15 +1790,17 @@ namespace
 	{ "Spline Tool/Create Lake", "",
 	  "Turns the closed outline into a lake: digs the bed (with Dig Bed on) and "
 	  "lays the water over it, at the level set above, in one undo step. From "
-	  "then on the points reshape the water only; the ground is dug again only "
-	  "when you press Dig Again. Water you paint with the Water brush on this "
-	  "lake stays when the points move.",
+	  "then on, moving a point (or the whole spline) reshapes the water and, "
+	  "if the bed was dug, moves the bed with it while you drag: the old bed is "
+	  "filled back in and a new one dug under the new outline. Water you paint "
+	  "with the Water brush on this lake stays when the points move.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Dig Again", "",
 	  "Digs the bed again under the lake's current outline, to Depth below "
-	  "its water level with the Bank slope. Moving points never digs by "
-	  "itself, so after reshaping the lake this is how the new shape gets its "
-	  "bed. It only lowers; one undo step.",
+	  "its water level with the Bank slope. It only lowers; one undo step. "
+	  "From then on the bed follows the points with this Depth and Bank — "
+	  "which is also how a lake made without Dig Bed, or one from an older "
+	  "scene, starts taking its bed along when its points move.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Remove Lake", "",
 	  "Takes the lake's water away and cuts its link to the spline. The spline "
@@ -7150,6 +7152,13 @@ namespace
 	{ "Landscape/Dig Bed##water", "Dig Bed",
 	  "Also digs while you paint: the ground under the brush is lowered to a "
 	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It digs only where the water is, so the pit never reaches past it: "
+	  "ground at the edge of a stroke stays as it is until the water has "
+	  "spread there, and ground above the water level is cut down to it "
+	  "the moment the water covers it. "
+	  "Where that leaves ground standing above the water (painting uphill), "
+	  "it is shaved into a dry bank that slopes down to the waterline, "
+	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
 	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
 	  "The eraser never digs. One undo step takes the water and the pit back "

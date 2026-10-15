@@ -17,6 +17,7 @@
 #include <HorizonScene/Components/WaterSurfaceComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -720,14 +721,17 @@ TEST_CASE("Water lake entity: create refuses what it cannot make and changes not
     CHECK(noWater(rig.tc()));
 }
 
-TEST_CASE("Water lake sync: moving a spline point reshapes the water, never the ground, and only once")
+// A lake that never dug its bed (Create Lake with Dig Bed off) only ever reshapes:
+// there is no bed of its own to take along.
+TEST_CASE("Water lake sync: moving a spline point of a lake that never dug reshapes the water, never the ground, and only once")
 {
     Rig rig;
     const Entity sp = rig.addSpline(rect(-10, -10, 10, 10), 10.0f);
-    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f, 2.0f, true)).ok);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f)).ok);
     const std::vector<float> dug = rig.tc().sculptHeights;
     rig.tc().regionDirty = false;
     const uint16_t id = lake::linkOf(rig.world, sp).body;
+    CHECK_FALSE(rig.tc().water.findBody(id)->digsBed);
 
     CHECK(lake::syncSplines(rig.world) == 0u);                   // nothing moved since create
     CHECK(lake::syncSplines(rig.world) == 0u);
@@ -743,12 +747,151 @@ TEST_CASE("Water lake sync: moving a spline point reshapes the water, never the 
     CHECK(lake::syncSplines(rig.world) == 0u);                   // same fingerprint: nothing to do
 }
 
-// Thema 174 Schritt 14: unlike a point edit, moving the lake's own ENTITY (what
-// the viewport gizmo does, or a reparent) is "the lake as a whole" and takes its
-// dug bed with it — see WaterLake.h, "WHAT EDITS TOUCH WHAT". Was, before this
-// schritt, indistinguishable from a point edit (both just reshaped the water),
-// which is the dry-ring-at-the-old-spot / cliff-at-the-new-one bug a human
-// report would read as "the lake tool digs too deep" all over again.
+// ── Thema 188 Schritt 2: the bed follows a dragged point ────────────────────
+// Before, a point edit reshaped only the water: the bed stayed where it was dug,
+// a dry pit where the outline had been pulled in, water lying flat on undug
+// ground where it had been pushed out. Now a lake that dug its own bed lifts it
+// and digs a fresh one under the new outline on every frame of the drag.
+
+namespace
+{
+    // Round lake for the drag tests: sixteen points, so dragging one of them
+    // changes the outline only between its neighbours, and the far side is a
+    // witness that must not move. A narrow bank keeps "deep inside" close by.
+    lake::Params dugRound()
+    {
+        lake::Params p = flat(10.5f, 2.0f, true);   // floor 8.5 on ground at 10
+        p.bank = 1.0f;
+        return p;
+    }
+
+    // Moves control point `i` to (x, z) in `frames` equal steps, one sync per
+    // step, the way the world tick sees a drag.
+    void dragPoint(Rig& rig, Entity sp, size_t i, float x, float z, int frames)
+    {
+        const glm::vec3 from = rig.points(sp).controlPoints[i];
+        for (int f = 1; f <= frames; ++f)
+        {
+            const float t = static_cast<float>(f) / static_cast<float>(frames);
+            rig.points(sp).controlPoints[i].x = from.x + t * (x - from.x);
+            rig.points(sp).controlPoints[i].z = from.z + t * (z - from.z);
+            REQUIRE(lake::syncSplines(rig.world) == 1u);
+        }
+    }
+
+    float worstDiff(const std::vector<float>& a, const std::vector<float>& b)
+    {
+        float worst = 0.0f;
+        for (size_t i = 0; i < a.size() && i < b.size(); ++i) worst = std::max(worst, std::fabs(a[i] - b[i]));
+        return a.size() == b.size() ? worst : std::numeric_limits<float>::infinity();
+    }
+}
+
+TEST_CASE("Water lake sync: dragging a point of a dug lake moves the bed with it, on every frame of the drag")
+{
+    Rig rig;
+    const std::vector<float> ground0 = rig.tc().sculptHeights;
+    const Entity sp = rig.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, dugRound()).ok);
+    const uint16_t id = lake::linkOf(rig.world, sp).body;
+    REQUIRE(rig.tc().water.findBody(id)->digsBed);
+    const std::vector<float> dug = rig.tc().sculptHeights;
+    REQUIRE(lake::syncSplines(rig.world) == 0u);                  // nothing moved since create
+    CHECK(sculptAt(rig.tc(), 14.0f, 0.0f) == 10.0f);              // outside: untouched
+    CHECK(sculptAt(rig.tc(), -7.0f, 0.0f) == doctest::Approx(8.5f));
+    const float westBank = sculptAt(rig.tc(), -9.0f, 0.0f);
+
+    // Point 0 sits at (10, 0). Drag it 8 m east, a metre a frame.
+    for (int f = 1; f <= 8; ++f)
+    {
+        rig.points(sp).controlPoints[0].x = 10.0f + static_cast<float>(f);
+        rig.tc().regionDirty = false;
+        CHECK(lake::syncSplines(rig.world) == 1u);
+        CHECK(rig.tc().regionDirty);                              // the chunks under the moved bank rebuild
+        CHECK_FALSE(rig.tc().dirty);                              // and only those
+        // The dirty rect is where the ground changed, on the dragged side: the
+        // west half of the lake did not move.
+        CHECK(rig.tc().dirtyMinX > -1.0f);
+    }
+    CHECK(wetAt(rig.tc(), 16.5f, 0.5f));                          // the water reaches the dragged point
+    CHECK(sculptAt(rig.tc(), 14.0f, 0.0f) < 9.0f);                // and so does the bed, under it
+    CHECK(sculptAt(rig.tc(), 14.0f, 0.0f) >= 8.5f);
+    CHECK(sculptAt(rig.tc(), -7.0f, 0.0f) == doctest::Approx(8.5f));     // the far side keeps its bed
+    CHECK(sculptAt(rig.tc(), -9.0f, 0.0f) == doctest::Approx(westBank)); // and its bank
+
+    // Away from both outlines and their banks the ground never moved, bit for bit.
+    for (int zi = 0; zi < 65; ++zi)
+        for (int xi = 0; xi < 65; ++xi)
+        {
+            const float x = static_cast<float>(xi) - 32.0f, z = static_cast<float>(zi) - 32.0f;
+            const bool far = std::abs(z) > 13.0f || x < -13.0f || x > 21.0f;
+            if (!far) continue;
+            const size_t i = static_cast<size_t>(zi) * 65 + xi;
+            CHECK(rig.tc().sculptHeights[i] == ground0[i]);
+        }
+
+    // Back to where it was: the ground is the ground right after Create Lake.
+    dragPoint(rig, sp, 0, 10.0f, 0.0f, 8);
+    CHECK(worstDiff(rig.tc().sculptHeights, dug) < 1e-4f);
+}
+
+TEST_CASE("Water lake sync: pulling a point of a dug lake in fills the bed back in where only the old outline was")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, dugRound()).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+    CHECK(sculptAt(rig.tc(), 7.0f, 0.0f) == doctest::Approx(8.5f));     // deep inside the old outline
+
+    dragPoint(rig, sp, 0, 4.0f, 0.0f, 6);                         // point 0 pulled in to (4, 0)
+    CHECK_FALSE(wetAt(rig.tc(), 7.5f, 0.5f));                     // the water left
+    CHECK(sculptAt(rig.tc(), 7.0f, 0.0f) == doctest::Approx(10.0f));    // and no dry pit stays behind
+    CHECK(sculptAt(rig.tc(), -7.0f, 0.0f) == doctest::Approx(8.5f));    // the rest of the bed stays
+}
+
+// Every frame of a drag lifts the bed and digs it again: the subtraction must
+// not drift. Sixty small steps end where one big step does.
+TEST_CASE("Water lake sync: a drag in sixty small steps leaves the ground one big step leaves")
+{
+    Rig a, b;
+    const Entity sa = a.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    const Entity sb = b.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(a.world, a.terrain, sa, dugRound()).ok);
+    REQUIRE(lake::create(b.world, b.terrain, sb, dugRound()).ok);
+    REQUIRE(lake::syncSplines(a.world) == 0u);
+    REQUIRE(lake::syncSplines(b.world) == 0u);
+
+    dragPoint(a, sa, 0, 16.0f, 3.0f, 1);
+    dragPoint(b, sb, 0, 16.0f, 3.0f, 60);
+    CHECK(worstDiff(a.tc().sculptHeights, b.tc().sculptHeights) < 1e-4f);
+    // The water too (not sameContent: the two lakes have different splines).
+    CHECK(a.tc().water.coverage == b.tc().water.coverage);
+    CHECK(a.tc().water.bodies[0].polygon == b.tc().water.bodies[0].polygon);
+}
+
+// Dig Again merges its patch into the lake's: a later move lifts BOTH digs, so
+// the first bed does not stay behind as a hole under the deeper second one.
+TEST_CASE("Water lake sync: after Dig Again a move lifts everything the lake dug")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(rect(-10, -10, 10, 10), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, flat(10.5f, 2.0f, true)).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+    REQUIRE(lake::dig(rig.world, sp, 4.0f, 4.0f).changed > 0u);  // deeper: floor 6.5
+    CHECK(sculptAt(rig.tc(), 0.0f, 0.0f) == doctest::Approx(6.5f));
+
+    rig.world.registry().get<TransformComponent>(sp).position.z += 30.0f;
+    CHECK(lake::syncSplines(rig.world) == 1u);
+    CHECK(sculptAt(rig.tc(), 0.0f, 0.0f) == doctest::Approx(10.0f));   // both beds lifted
+    CHECK(sculptAt(rig.tc(), 0.0f, 25.0f) == doctest::Approx(6.5f));   // the new one at the last dig's depth
+}
+
+// Thema 174 Schritt 14: moving the lake's own ENTITY (what the viewport gizmo
+// does, or a reparent) is "the lake as a whole" and takes its dug bed with it,
+// the same way a dragged point does (Thema 188 Schritt 2) — see WaterLake.h,
+// "WHAT EDITS TOUCH WHAT". Before Schritt 14 it only reshaped the water, the
+// dry-ring-at-the-old-spot / cliff-at-the-new-one bug a human report would read
+// as "the lake tool digs too deep" all over again.
 TEST_CASE("Water lake sync: moving the whole spline entity moves the water AND the ground it dug")
 {
     Rig rig;
@@ -953,6 +1096,95 @@ TEST_CASE("Water lake in the world: a moved spline point has its new sheet by th
     CHECK(hi > hiBefore + 5.0f);                                  // the sheet reaches the dragged edge
 }
 
+// The sync runs BEFORE the chunk loop (Thema 188 Schritt 2): the bed a dragged
+// point moved is rebuilt into the chunks, and handed to the shore clipping, by the
+// end of the same call — not one frame later with the sheet clipped against the
+// old ground for that frame.
+TEST_CASE("Water lake in the world: a dragged point of a dug lake has its new ground rebuilt in the same updateTerrains")
+{
+    Rig rig;
+    ContentManager cm{ "." };
+    const Entity sp = rig.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    rig.tc().dirty = true;
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, dugRound()).ok);
+    TerrainSystem::updateTerrains(rig.world, cm);
+    REQUIRE_FALSE(rig.tc().dirty);
+    REQUIRE_FALSE(rig.tc().regionDirty);
+    const std::vector<float> dug = rig.tc().sculptHeights;
+
+    rig.points(sp).controlPoints[0].x = 17.0f;
+    TerrainSystem::updateTerrains(rig.world, cm);
+    CHECK_FALSE(sameBits(rig.tc().sculptHeights, dug));           // the bed moved
+    CHECK_FALSE(rig.tc().regionDirty);                            // and its chunks were rebuilt in this call
+    CHECK_FALSE(rig.tc().dirty);                                  // as a region, not a whole regeneration
+    CHECK(terrainHeightAt(rig.tc(), 14.0f, 0.0f) < 9.0f);
+}
+
+// liftPatch checks the patch itself: even one that never went through sanitize
+// (a caller that wrote it by hand) is not applied outside the grid.
+TEST_CASE("Water lake sync: a bed patch that does not fit the grid is never applied")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, dugRound()).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+    water::GroundPatch& p = rig.tc().water.bodies[0].groundPatch;
+    REQUIRE_FALSE(p.empty());
+    p.x0 = 60;                                                    // w > 5: past the east edge
+    REQUIRE_FALSE(water::patchFits(p, rig.tc().resolution));
+
+    dragPoint(rig, sp, 0, 14.0f, 0.0f, 2);
+    CHECK(rig.tc().sculptHeights.size() == 65u * 65u);
+    CHECK(sculptAt(rig.tc(), 12.0f, 0.0f) < 9.0f);                // still digs under the new outline
+    CHECK(rig.tc().water.bodies[0].digsBed);
+}
+
+// The cost of the drag: one point of a 100 m lake on the largest landscape
+// (1025² vertices) moved a quarter metre a frame. Each sync reads only the rect
+// the old bed and the new dig reach — not the 1025² grid — and marks for the
+// chunk rebuild only the vertices whose height ended up different, around the
+// dragged point; the far side of the lake is not rebuilt. The time is printed
+// (Debug and Release differ by an order of magnitude), the locality is asserted.
+TEST_CASE("Water lake sync: dragging one point of a big dug lake re-digs only around that point")
+{
+    TerrainComponent big;
+    big.sizeX = big.sizeZ = 1024.0f;
+    big.resolution = 1025;
+    big.dirty = false;
+    big.water.res = 256;
+    big.sculptHeights.assign(1025u * 1025u, 10.0f);
+    Rig rig(glm::vec3(0.0f), std::move(big));
+    const Entity sp = rig.addSpline(ring(0.0f, 0.0f, 50.0f), 10.0f);
+    lake::Params p = flat(10.5f, 2.0f, true);                     // the default 4 m bank
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, p).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+
+    constexpr int kFrames = 40;
+    double total = 0.0, worst = 0.0;
+    float dirtyW = 0.0f, dirtyH = 0.0f, dirtyMinX = 1e9f;
+    for (int f = 1; f <= kFrames; ++f)
+    {
+        rig.points(sp).controlPoints[0].x = 50.0f + 0.25f * static_cast<float>(f);
+        rig.tc().regionDirty = false;
+        const auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(lake::syncSplines(rig.world) == 1u);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        total += ms; worst = std::max(worst, ms);
+        REQUIRE(rig.tc().regionDirty);
+        dirtyW = std::max(dirtyW, rig.tc().dirtyMaxX - rig.tc().dirtyMinX);
+        dirtyH = std::max(dirtyH, rig.tc().dirtyMaxZ - rig.tc().dirtyMinZ);
+        dirtyMinX = std::min(dirtyMinX, rig.tc().dirtyMinX);
+    }
+    MESSAGE("lake drag on 1025^2, 100 m lake, one point: " << total / kFrames << " ms per sync on average, "
+            << worst << " ms worst; dirty rect at most " << dirtyW << " x " << dirtyH << " m");
+    // The lake with its bank spans about 110 × 110 m. Point 0 moves the outline
+    // between its neighbours two away (±45°): x from ~31 m on, z within ±40 m.
+    CHECK(dirtyMinX > 20.0f);
+    CHECK(dirtyW < 40.0f);
+    CHECK(dirtyH < 90.0f);
+    CHECK_FALSE(rig.tc().dirty);
+}
+
 // ── Undo and the file ────────────────────────────────────────────────────────
 
 namespace
@@ -1026,6 +1258,94 @@ TEST_CASE("Water lake undo: undoing a reshape puts the water back and the sync d
     CHECK(water::sameContent(rig.land().water, original));
 }
 
+// The bed's patch is saved with the body, so it rides the undo snapshot: after an
+// undo (or anything else that reloads the world — the end of Play, a scene load)
+// the lake still knows what it dug and keeps taking the bed along.
+TEST_CASE("Water lake undo: undoing a drag of a dug lake gives back ground and water, and the bed still follows after it")
+{
+    UndoRig rig;
+    rig.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.theTerrain(), rig.theSpline(), dugRound()).ok);
+    REQUIRE(lake::syncSplines(rig.world) == 0u);
+    const std::vector<float> dug = rig.land().sculptHeights;
+    const water::Field original = rig.land().water;
+
+    rig.undo.snapshotNow("Move Spline Point");                    // what the drag's mouse-down takes
+    rig.world.registry().get<SplineComponent>(rig.theSpline()).controlPoints[0].x = 17.0f;
+    REQUIRE(lake::syncSplines(rig.world) == 1u);
+    const std::vector<float> dragged = rig.land().sculptHeights;
+    REQUIRE_FALSE(sameBits(dragged, dug));
+
+    REQUIRE(rig.undo.undo());
+    CHECK(sameBits(rig.land().sculptHeights, dug));
+    CHECK(water::sameContent(rig.land().water, original));
+    CHECK(lake::syncSplines(rig.world) == 0u);                    // first look after the reload: nothing moves
+    CHECK(sameBits(rig.land().sculptHeights, dug));
+    const water::Body& back = rig.land().water.bodies[0];
+    CHECK(back.digsBed);
+    CHECK(back.dugDepth == 2.0f);
+    CHECK(back.dugBank == 1.0f);
+    CHECK_FALSE(back.groundPatch.empty());
+
+    // The same drag again, after the undo: the bed comes along as it did before.
+    rig.world.registry().get<SplineComponent>(rig.theSpline()).controlPoints[0].x = 17.0f;
+    REQUIRE(lake::syncSplines(rig.world) == 1u);
+    CHECK(worstDiff(rig.land().sculptHeights, dragged) < 1e-4f);
+}
+
+TEST_CASE("Water lake file: a dug lake saves its bed, and dragging a point after the load still lifts the old one")
+{
+    Rig rig;
+    const Entity sp = rig.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(rig.world, rig.terrain, sp, dugRound()).ok);
+    const water::Body saved = rig.tc().water.bodies[0];
+    REQUIRE(saved.digsBed);
+    REQUIRE_FALSE(saved.groundPatch.empty());
+
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(rig.world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto tview = loaded.registry().view<TerrainComponent>();
+    REQUIRE(tview.size() == 1u);
+    TerrainComponent& ltc = loaded.registry().get<TerrainComponent>(*tview.begin());
+    REQUIRE(ltc.water.bodies.size() == 1);
+    const water::Body& lb = ltc.water.bodies[0];
+    CHECK(lb.digsBed);
+    CHECK(lb.dugDepth == saved.dugDepth);
+    CHECK(lb.dugBank == saved.dugBank);
+    CHECK(lb.groundPatch.res == saved.groundPatch.res);
+    CHECK(lb.groundPatch.x0 == saved.groundPatch.x0);
+    CHECK(lb.groundPatch.z0 == saved.groundPatch.z0);
+    CHECK(lb.groundPatch.w == saved.groundPatch.w);
+    CHECK(lb.groundPatch.h == saved.groundPatch.h);
+    CHECK(sameBits(lb.groundPatch.delta, saved.groundPatch.delta));
+
+    auto sview = loaded.registry().view<SplineComponent>();
+    REQUIRE(sview.size() == 1u);
+    const Entity ls = *sview.begin();
+    CHECK(lake::syncSplines(loaded) == 0u);
+    loaded.registry().get<SplineComponent>(ls).controlPoints[8].x = -4.0f;   // the west point pulled in
+    CHECK(lake::syncSplines(loaded) == 1u);
+    CHECK(sculptAt(ltc, -7.0f, 0.0f) == doctest::Approx(10.0f));             // its bed filled back in
+    CHECK(sculptAt(ltc, 7.0f, 0.0f) == doctest::Approx(8.5f));               // the east bed stays
+
+    // A lake that never dug saves no bed at all: scenes from before stay byte for byte.
+    Rig plain;
+    const Entity ps = plain.addSpline(ring(0.0f, 0.0f, 10.0f), 10.0f);
+    REQUIRE(lake::create(plain.world, plain.terrain, ps, flat(10.5f)).ok);
+    std::vector<uint8_t> plainBlob;
+    REQUIRE(ser.saveToMemory(plain.world, plainBlob));
+    HorizonWorld plainLoaded;
+    REQUIRE(ser.loadFromMemory(plainLoaded, plainBlob));
+    auto pv = plainLoaded.registry().view<TerrainComponent>();
+    REQUIRE(pv.size() == 1u);
+    const water::Body& pb = plainLoaded.registry().get<TerrainComponent>(*pv.begin()).water.bodies[0];
+    CHECK_FALSE(pb.digsBed);
+    CHECK(pb.groundPatch.empty());
+}
+
 TEST_CASE("Water lake file: a lake saves and loads with its outline, its link and its brush share, and still reshapes")
 {
     Rig rig;
@@ -1090,4 +1410,51 @@ TEST_CASE("Water lake file: a damaged outline in a scene is dropped, not trusted
     tc2.water.findBody(brushBody)->polygon = rect(0, 0, 1, 1);
     water::sanitize(tc2);
     CHECK(tc2.water.findBody(brushBody)->polygon.empty());
+}
+
+// The bed's patch is applied to the height grid when the outline next moves: a
+// patch from a damaged or hand-merged scene that does not fit the grid would
+// write outside it. sanitize drops it (the lake keeps digging, it only cannot
+// lift what it no longer knows), and drops the digging with a depth or bank that
+// is not a number.
+TEST_CASE("Water lake file: a damaged bed in a scene is dropped, not trusted")
+{
+    auto dugLake = []()
+    {
+        TerrainComponent tc = makeLand();
+        const uint16_t id = lake::create(tc, HE::UUID::generate(), rect(-10, -10, 10, 10), 10.5f);
+        REQUIRE(lake::dig(tc, id, 2.0f, 1.0f).changed > 0u);
+        REQUIRE(tc.water.findBody(id)->digsBed);
+        REQUIRE(water::patchFits(tc.water.findBody(id)->groundPatch, tc.resolution));
+        return tc;
+    };
+    using Damage = void (*)(water::GroundPatch&);
+    const Damage damages[] = {
+        [](water::GroundPatch& p) { p.x0 = 60; },                     // reaches past the east edge
+        [](water::GroundPatch& p) { p.z0 = -1; },
+        [](water::GroundPatch& p) { p.w += 1; },                      // w·h no longer the delta count
+        [](water::GroundPatch& p) { p.delta.pop_back(); },
+        [](water::GroundPatch& p) { p.delta[0] = std::nanf(""); },
+        [](water::GroundPatch& p) { p.res = 129; },                   // measured on another grid
+    };
+    for (Damage d : damages)
+    {
+        TerrainComponent tc = dugLake();
+        d(tc.water.bodies[0].groundPatch);
+        water::sanitize(tc);
+        CHECK(tc.water.bodies[0].groundPatch.empty());
+        CHECK(tc.water.bodies[0].digsBed);
+    }
+
+    TerrainComponent bad = dugLake();
+    bad.water.bodies[0].dugBank = std::nanf("");
+    water::sanitize(bad);
+    CHECK_FALSE(bad.water.bodies[0].digsBed);
+    CHECK(bad.water.bodies[0].groundPatch.empty());
+
+    TerrainComponent fine = dugLake();
+    const water::GroundPatch kept = fine.water.bodies[0].groundPatch;
+    water::sanitize(fine);
+    CHECK(fine.water.bodies[0].digsBed);
+    CHECK(sameBits(fine.water.bodies[0].groundPatch.delta, kept.delta));
 }

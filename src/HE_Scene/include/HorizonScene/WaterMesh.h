@@ -52,7 +52,7 @@ struct TerrainComponent;
 //
 // SPACE. Contours are terrain-local XZ like every public WaterField function, in
 // double so a long straight shore stays collinear to the last bit. The mesh is in
-// the space of the entity that carries it: vertices relative to `Surface::center`
+// the space of the entity that carries it: vertices relative to `SurfaceMesh::center`
 // (the middle of the body's box), y = 0, so the entity sits at (center.x, level,
 // center.y) under the terrain.
 namespace HE::water
@@ -146,6 +146,25 @@ namespace HE::water
     // a lattice contour, invisible on a shore that is not a rectangle.
     std::vector<Contour> extractContours(const Lattice& lattice, double iso = kContourIso);
 
+    // Whether terrain-local (x, z) is on the water side of the contours
+    // extractContours draws through the lattice cell it lies in — the sheet's own
+    // rule, cell by cell (coverage at `iso` and, clipped, the ground), with a point
+    // on the outline counting as inside. What the water brush's dig asks before it
+    // lowers a vertex (Thema 188), so the pit never reaches past the water. Differs
+    // from the finished mesh only where the mesh simplifies (a thousandth of a cell)
+    // or drops a loop smaller than a fiftieth of a cell. False off the lattice.
+    bool insideSheet(const Lattice& lattice, double x, double z, double iso = kContourIso);
+
+    // The shoreline as marching squares cuts it, raw: one segment per piece of
+    // contour in each lattice cell (two in a saddle), by the same cell rule as
+    // extractContours and insideSheet, with no closing, merging or simplifying.
+    // So a lattice built over only part of a body still gives every piece of shore
+    // inside it (extractContours drops a contour the lattice's edge cuts open).
+    // Each segment lies within its own cell. What the water brush's bank measures
+    // its distance to the water from (Thema 188 Schritt 4).
+    struct ShoreSegment { glm::dvec2 a, b; };
+    std::vector<ShoreSegment> shoreSegments(const Lattice& lattice, double iso = kContourIso);
+
     // An outer boundary with the islands inside it.
     struct Polygon
     {
@@ -170,7 +189,13 @@ namespace HE::water
         ShoreClip clipFor(float level) const { return { clipToGround, level, shoreOvershoot }; }
     };
 
-    struct Surface
+    // Not `Surface`: that is WaterQuery.h's answer for a point, in the same
+    // namespace. Two different classes of one name are an ODR violation the
+    // linker does not report — it keeps ONE of the implicit constructors and
+    // destructors for the whole DLL, so in a Debug build (nothing inlined) a
+    // query's small Surface on the stack was built and destroyed as this mesh
+    // ("Run-Time Check Failure #2 - Stack around the variable 's' was corrupted").
+    struct SurfaceMesh
     {
         StaticMeshAsset mesh;                // SoA, normal +Y everywhere, y = 0
         glm::vec2 center{ 0.0f, 0.0f };      // terrain-local XZ the vertices are relative to
@@ -190,8 +215,8 @@ namespace HE::water
     // Lattice → contours → polygons → triangles → mesh. `surface.empty()` when the
     // body has no wet area (even though the call succeeded). False for an unknown
     // body or a field without a grid.
-    bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOptions& opt, Surface& out);
+    bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOptions& opt, SurfaceMesh& out);
     // The same from a lattice the caller already has (and the box and level it came with).
     bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const CellRect& cells,
-                      float level, const SurfaceOptions& opt, Surface& out);
+                      float level, const SurfaceOptions& opt, SurfaceMesh& out);
 }

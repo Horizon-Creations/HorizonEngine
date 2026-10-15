@@ -938,7 +938,44 @@ TEST_CASE("terrain_lake create without a level takes the lowest ground, and 'dig
 	CHECK(f.terrain(e).sculptHeights == before);
 }
 
-TEST_CASE("terrain_lake reshape follows the spline's points and never digs; dig and level are their own actions")
+// Thema 188 Schritt 2: a lake whose bed the tool dug keeps it — 'reshape' goes
+// through lake::follow like the editor's own sync, so the bed comes along with the
+// outline, and the edited copy the gateway applies carries the bed's record
+// (digsBed, depth, bank, patch) through the scene serializer.
+TEST_CASE("terrain_lake reshape of a lake it dug takes the bed along, in one undo step")
+{
+	Fixture f;
+	const Entity e = makeLakeTerrain(f);
+	const Entity sp = makeLakeSpline(f, 190.0f, -50.0f, 12.0f);
+	REQUIRE(!f.call("terrain_lake", json{ { "uuid", f.uuid(e) }, { "spline", f.uuid(sp) },
+	                                      { "level", 1.0 }, { "depth", 3.0 }, { "bank", 2.0 } }).isError);
+	{
+		const HE::water::Body& b = f.terrain(e).water.bodies[0];
+		CHECK(b.digsBed);
+		CHECK(b.dugDepth == 3.0f);
+		CHECK(b.dugBank == 2.0f);
+		CHECK_FALSE(b.groundPatch.empty());
+	}
+	CHECK(groundAt(f, e, 190.0f, -50.0f) == doctest::Approx(-2.0f));             // surface 1 − bed 3
+	const std::vector<float> dug = f.terrain(e).sculptHeights;
+	const std::string id = f.uuid(e);
+
+	f.world.registry().get<TransformComponent>(sp).position.x += 30.0f;
+	const std::size_t depth = f.snapshotUndo.undoDepth();
+	const ToolResult r = f.call("terrain_lake", json{ { "uuid", id }, { "spline", f.uuid(sp) }, { "action", "reshape" } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r) << " " << r.content.dump());
+	CHECK(r.content["changed"] == true);
+	CHECK(groundAt(f, e, 220.0f, -50.0f) == doctest::Approx(-2.0f));             // the bed under the new place
+	CHECK(groundAt(f, e, 190.0f, -50.0f) == doctest::Approx(0.0f));              // the old one filled back in
+	CHECK(f.snapshotUndo.undoDepth() == depth + 1);
+
+	REQUIRE(f.snapshotUndo.undo());
+	const Entity back = HE::Ed::entityByUuid(f.world, id);
+	REQUIRE((back != entt::null));
+	CHECK(f.terrain(back).sculptHeights == dug);
+}
+
+TEST_CASE("terrain_lake reshape follows the spline's points and does not dig a lake made without a bed; dig and level are their own actions")
 {
 	Fixture f;
 	const Entity e = makeLakeTerrain(f);
