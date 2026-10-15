@@ -115,7 +115,10 @@ im Speicher ein kleines Struct an `MatGraphNode` (nur am Output bedeutsam):
   oder Bake fehlgeschlagen → zur Laufzeit cross-kompilieren, ohne shaderc → Pipeline ohne
   Tessellation (Fallback 5).
 - **Pipeline-Schlüssel:** `displacementBody` und die Tess-Werte werden in `resolveShaders`
-  und `resolveGBufferShaders` genauso in `hashOut` gefaltet wie `vertBody`.
+  und `resolveGBufferShaders` in `hashOut` gefaltet wie `vertBody` — **aber nur, wenn das
+  aufrufende Backend tatsächlich tesselliert** (die beiden Funktionen bekommen dafür einen
+  Schalter vom Backend). Auf Fallback-Backends bleibt der Schlüssel der des unverbundenen
+  Pins (Abschnitt 5), sonst entstünde pro Displacement-Material eine doppelte Pipeline.
 
 ## 3. Shaderstufen
 
@@ -142,17 +145,22 @@ Kanonisch, für beide Wege identisch:
 // Prolog: baryzentrisch interpolieren, Varyings ZUERST schreiben (WPO-Präzedenz)
 vWorldPos = interp(cp.vWorldPos); vNormal = normalize(interp(cp.vNormal));
 vUV = interp(cp.vUV); vColor = interp(cp.vColor);
+vec4 heClip = interp(cp.gl_Position);           // exakt: mvp ist linear, Interpolation vor der Division
 <displacementBody>                              // → float heDisp
 heDisp = clamp(heDisp, -maxDisp, maxDisp);      // Bounds-Vertrag
 vWorldPos += vNormal * heDisp;
-vec3 objPos = transpose(mat3(u.model)) * (vWorldPos - u.model[3].xyz)
-            / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);
-gl_Position = u.mvp * vec4(objPos, 1.0);
+vec3 heObjDisp = (transpose(mat3(u.model)) * (vNormal * heDisp))
+               / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);
+gl_Position = heClip + u.mvp * vec4(heObjDisp, 0.0);
 ```
 
-Kein neues viewProj, keine Extra-Varyings; dieselbe Einschränkung wie WPO (starr + uniform
-skaliert). Assembliert von **einer** Funktion mit zwei Prologen (wie `assembleVertex` mit
-`VertexInput`):
+Der Transpose-Trick wirkt **nur auf den Offset**, genau wie bei WPO (`:122-124`): Bei
+`heDisp == 0` ist das Ergebnis bitgleich zum Draw ohne Tessellation, auch bei nicht-uniformer
+Skalierung — der Fallback-Vertrag aus 5 hält also auch auf den unterstützten Backends. Kein
+neues viewProj, keine Extra-Varyings, VS unverändert (der DS braucht `SV_Position`/`gl_Position`
+der Kontrollpunkte, die der HS durchreicht); nur der Offset hat dieselbe Einschränkung wie WPO
+(starr + uniform skaliert). Assembliert von **einer** Funktion mit zwei Prologen (wie
+`assembleVertex` mit `VertexInput`):
 
 - **Vulkan:** echter `tese`-Shader (`layout(triangles, fractional_odd_spacing, <winding>) in;`,
   Interpolation über `gl_TessCoord`), glslang → SPIR-V direkt. `tesc` ebenfalls kanonisch.
@@ -191,9 +199,17 @@ skaliert). Assembliert von **einer** Funktion mit zwei Prologen (wie `assembleVe
 
 | Pass | Displacement | Grund |
 |---|---|---|
-| Forward opak / clustered, transluzent, G-Buffer | ja | teilen die Vertex-Auswahl über `resolveShaders`/`resolveGBufferShaders` |
+| Forward opak / clustered, G-Buffer | ja | teilen die Vertex-Auswahl über `resolveShaders`/`resolveGBufferShaders` (D3D11 `:5318`/`:7009`, D3D12 `:4406`/`:10974`, Vulkan `:7669`/`:8254`) |
+| Transluzent | ja, falls derselbe Weg [nicht geprüft] | Hive-Lektion „OpenGL forward Translucent": GL-Translucent weicht vom opaken Zweig ab; Schritt 2 prüft den Pipeline-Bau |
+| Instanced (Foliage, `scene_instanced.vert`, Vulkan `:75`, `:2487`) und Skinned | **nein → Fallback** | eigene Vertexshader, erreichen die fünf `customVertex`-Stellen nie (Thema 182 wird fragen) |
 | CSM, Local-Shadow-Atlas | **nein** (wie WPO heute) | fest eingebaute Depth-only-VS |
 | GI-BVH/TLAS | **nein** | sieht das Basis-Mesh |
+
+**Normale:** `vNormal` im Fragment ist die **unverschobene** interpolierte Normale. Der
+Normal-Pin des Materials muss die zur Höhe passende Normal Map tragen, sonst wirkt die
+Verformung im Licht flach (kein Bug, sondern so entworfen; Schritt-3-Vorschau entsprechend
+beschriften). Später möglich: Normale im DS per finiten Differenzen aus zwei weiteren
+Auswertungen des Bodys.
 
 Folge: Schatten und GI sehen die flache Fläche. Positives Displacement (Fläche hebt sich)
 ist unkritisch; **negatives** legt die sichtbare Fläche unter den Schattenwerfer und unter
@@ -238,6 +254,8 @@ Pipeline-Schlüssel, gleicher Shadertext, kein Magenta, kein ausgelassener Draw.
 2. Vulkan-Gerät ohne `tessellationShader`.
 3. HS/DS-Compile- oder PSO-Fehler → einmal loggen, Pipeline ohne Tessellation.
 4. Paket ohne `tessControl/tessEval` und ohne shaderc.
+5. D3D11/D3D12 auf Feature Level unter 11_0 (Hull/Domain sind ein 11_0-Feature).
+6. Draw-Pfade mit eigenem Vertexshader (Instanced, Skinned, siehe 4.1).
 
 Der Editor zeigt am Pin einen Hinweis „wirkt nur auf D3D11, D3D12, Vulkan". Bounds dürfen
 auch im Fallback aufgebläht bleiben (konservativ, billig).
@@ -284,12 +302,12 @@ sehen** — Schritt 3 („Vorschau der Verformung") hängt damit an Windows.
 ## Handoff
 
 - **Topic / step:** 207, Schritt 1 von 4 (Entwurf, nur Doku)
-- **Branch / commit:** `claude/material-graph-shader-tessellation-displacement-als-pin-am-o` (siehe Commit dieser Datei)
+- **Branch / commit:** `claude/material-graph-shader-tessellation-displacement-als-pin-am-o` @ f235d3da (Entwurf) + Korrekturcommit direkt danach (`git log -- docs/material-graph-tessellation-displacement-entwurf-2026-10-15.md`), gepusht
 - **Done:** Entwurf für Pin 9 „Displacement" (Float, Meter entlang Normale), Tess-Einstellungen als `"tess"` am Output-Knoten, Stufenaufbau VS→HS→DS→FS, D3D-Weg über HLSL-Schalen + SPIRV-Cross-Kernel, Fallback = Pin unverbunden.
 - **Files touched:** nur diese Datei.
 - **Verified:** alle [geprüft]-Stellen per grep/Lesen im Worktree und im gefetchten SPIRV-Cross (`cmake-build-dmg26/_deps/spirv_cross-src`); Zeilen oben.
 - **Not verified:** kein Build, kein Shader kompiliert; WPO+Texture-Fehler nur gelesen; Entry-Rename-Mechanismus nur gelesen; Vulkan/GL/MoltenVK-Fähigkeiten aus Spezifikationswissen.
-- **Decisions taken:** Float statt Vec3; Einstellungen am Knoten (Collab); Klemme auf maxDisplacement; Objektraum per Transpose-Trick statt viewProj; Schatten/GI ohne Displacement (wie WPO); ein Domain-Assembler mit zwei Prologen.
+- **Decisions taken:** Float statt Vec3; Einstellungen am Knoten (Collab); Klemme auf maxDisplacement; Clip-Position der Kontrollpunkte interpolieren + nur den Offset per Transpose-Trick (wie WPO, Höhe 0 = bitgleich); Schlüssel nur auf tessellierenden Backends falten; Instanced/Skinned = Fallback; Schatten/GI ohne Displacement (wie WPO); ein Domain-Assembler mit zwei Prologen.
 - **Decisions suggested, not taken:** GL als vierter Backend (Abschnitt 6, Option B); Displacement-Normale gegen Naht-Risse; Bildschirmraum-Faktor; material-bewusster Schattenpass.
 - **Pending:** Schritt 2 Codegen + Backends, Schritt 3 Editor-UI, Schritt 4 Abnahme.
 - **Traps:** SPIRV-Cross-HLSL wirft für tesc/tese; WPO-Vertex hat keine Texturen; D3D11 bindet pro Stufe; D3D12-Root-Parameter mit `VISIBILITY_VERTEX`; Vulkan-Feature nicht aktiviert; negatives Displacement → Schatten/GI-Artefakte.
