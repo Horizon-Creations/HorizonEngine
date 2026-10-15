@@ -14,6 +14,8 @@
 // Everything is poll-driven: update() must be called once per frame or nothing
 // happens at all.
 
+#include "CollabEntityOps.h"
+#include "CollabSettle.h"
 #include "NotificationStore.h"
 
 #include <Net/CollabSession.h>
@@ -221,6 +223,25 @@ public:
 	// True while the running session goes through a relay.
 	bool viaRelay() const { return m_viaRelay; }
 
+	// ── Team sessions (topic 197) ────────────────────────────────────────────
+	// A session set up from the team server (TeamController): always through
+	// `relay`, which is the team server itself, whatever relayAddress() says —
+	// the session was announced there, so that is where the members look for
+	// it. The join code is not handed out but derived from the session id on
+	// both sides (HE::Net::TeamClient::joinCodeForSession), because the team
+	// server's JOIN answer carries only session, host and peer.
+	//
+	// Hosting mints the session id and listens as RelayTransport::kHostPeerId;
+	// the caller announces it afterwards with OPEN_SESSION. Joining dials
+	// `hostPeer` in `sessionId` as `selfPeer` (the member name, so the host can
+	// tell who is connecting; empty = a random id).
+	bool startTeamHosting(const HE::Net::RelayAddress& relay, const std::string& displayName);
+	bool joinTeamSession(const HE::Net::RelayAddress& relay, const std::string& sessionId,
+	                     const std::string& hostPeer, const std::string& selfPeer,
+	                     const std::string& displayName);
+	// The running (or connecting) session was set up through the team server.
+	bool teamSession() const { return m_teamSession; }
+
 	// The one answer to "does an asset of this kind travel". Everything that
 	// used to ask isSyncableAssetType asks this instead: the static predicate is
 	// still the type rule, and this is that rule OR the session's decision to
@@ -239,6 +260,15 @@ public:
 	// persisted) by the caller first — this controller does not own the config
 	// file. False when there is nothing remembered to retry.
 	bool retryJoinWithLargeAssets();
+	// ── The link dropped ──
+	// A client whose connection to the host died is out of the session (Failed,
+	// "The connection to the host was lost"). Rejoining dials the same session
+	// the same way it was joined, and the host catches the joiner up: the scene
+	// snapshot plus every file the session changed (see catchUpJoiner). Whatever
+	// this machine changed while it was cut off is replaced by the session's
+	// state — the session is host-authoritative, and there is no merge.
+	bool canRejoin() const;
+	bool rejoinLastSession();
 	// What the browser currently hears. Empty while disabled, and empty for the
 	// first couple of seconds after enabling — hosts speak on a timer.
 	const std::vector<HE::Net::LanBeacon::Browser::Session>& lanSessions() const;
@@ -475,6 +505,27 @@ public:
 		m_onRemoteComponents = std::move(fn);
 	}
 
+	// Our copy of an entity's components was just changed by a peer (a
+	// landscape's settings arrive outside the lock, TerrainSync): remember its
+	// new state as already sent, so holding the entity does not send it
+	// straight back as our own edit.
+	void rememberComponents(std::uint32_t entityHandle,
+	                        const std::vector<std::uint8_t>& blob);
+
+	// ── Landscape patches ──
+	// A rectangle of a landscape's grids or its settings (TerrainSync). No lock:
+	// the host orders them and echoes each to its sender (CollabSession.h).
+	// Fills in the wire id; false = not in a session, or the entity has none.
+	bool publishTerrainPatch(std::uint32_t entityHandle,
+	                         HE::Net::CollabSession::TerrainPatch patch);
+
+	// A peer's patch (`own` false; `handle` 0 if the entity is unknown here) or
+	// the echo of one of ours (`own` true).
+	using TerrainPatchFn = std::function<void(std::uint32_t handle,
+	                                          const HE::Net::CollabSession::TerrainPatch&,
+	                                          bool own)>;
+	void onRemoteTerrainPatch(TerrainPatchFn fn) { m_onRemoteTerrainPatch = std::move(fn); }
+
 	// ── Structural replication ──
 	// Peers assign ECS handles independently, so a raw handle names different
 	// entities on different machines. Everything network-facing therefore uses a
@@ -502,7 +553,13 @@ public:
 	bool publishCreate(std::uint32_t entityHandle, std::uint32_t parentHandle,
 	                   const std::vector<std::uint8_t>& blob);
 	bool publishDestroy(std::uint32_t entityHandle);
-	bool publishReparent(std::uint32_t entityHandle, std::uint32_t newParentHandle);
+	// A reparent keeps the entity's LOCAL transform, which is relative to a
+	// different parent afterwards — so a caller that re-posed it (Group keeps the
+	// world pose) passes the new local transform (pos3, rotEuler3, scale3) along.
+	// It rides in the structural message's blob, which every build reads and
+	// ignores for a reparent, so the wire is unchanged for older peers.
+	bool publishReparent(std::uint32_t entityHandle, std::uint32_t newParentHandle,
+	                     const float* localTransform9 = nullptr);
 
 	// Remote structural changes, translated back into local handles. The editor
 	// performs the actual ECS work — CollabController never touches the registry.
@@ -516,7 +573,9 @@ public:
 	{
 		m_onRemoteDestroy = std::move(fn);
 	}
-	void onRemoteReparent(std::function<void(std::uint32_t, std::uint32_t)> fn)
+	//   onRemoteReparent(handle, parentHandle (0 = world root), transform9 or
+	//   nullptr when the sender sent none)
+	void onRemoteReparent(std::function<void(std::uint32_t, std::uint32_t, const float*)> fn)
 	{
 		m_onRemoteReparent = std::move(fn);
 	}
@@ -555,6 +614,27 @@ public:
 	// final. No-op outside a session, for an excluded type, or while a remote
 	// create is being applied.
 	void publishAssetCreate(const std::string& relativePath, const std::string& fullPath);
+
+	// ── Save and idle: the session's state is kept (CollabSettle.h) ─────────
+	// The user (or an MCP client) explicitly saved `key` here: an asset key, or
+	// CollabSettle::kSceneKey for the scene. NOT for the session's own
+	// whole-file autosave, which is traffic, not a save. A client tells the
+	// host; the host notes it for itself. No-op outside a session.
+	void noteLocalSave(const std::string& key);
+	// Host: writes what is not on the host's disk yet for a settling key (the
+	// scene) and answers whether it is now. False keeps the key pending.
+	void setSettlePersist(HE::Ed::CollabSettle::Persist fn) { m_settlePersist = std::move(fn); }
+	// Host: these keys' session state is now on the host's disk, because
+	// somebody saved them or nobody has touched them for CollabSettle::kIdleMs.
+	// The attach point for the team server's upload (topic 199): with the
+	// mediator on, this is where a commit is requested.
+	void onSessionSettled(std::function<void(const std::vector<HE::Ed::CollabSettle::Settled>&)> fn)
+	{
+		m_onSessionSettled = std::move(fn);
+	}
+	bool          settlePending(const std::string& key) const { return m_settle.isPending(key); }
+	std::uint64_t lastSettledMs() const    { return m_lastSettledMs; }
+	std::size_t   lastSettledCount() const { return m_lastSettledCount; }
 
 	// ── Writing a new asset through ContentManager::saveAsset ────────────────
 	// Hold one of these across the save when the file being written is NEW and
@@ -627,7 +707,19 @@ public:
 		HE::Net::ParticipantId batchOwner = 0;
 		std::uint32_t          batchId    = 0;   // 0 = asked for on its own
 		bool inBatch() const { return batchId != 0; }
+		// An entity somebody else is editing, not a file (CollabEntityOps.h):
+		// `path` is its key and `newPath` the new NAME on a rename.
+		bool isEntity() const { return HE::Ed::CollabEntityOps::isKey(path); }
 	};
+	// What a row is about, as a person reads it: the file name, or the entity's
+	// name in our own world (its key when the entity is already gone here).
+	std::string opDisplayName(const PendingAssetOp& op);
+	// Who is editing it right now, if not us — "" when nobody. This is the
+	// CONFLICT the host is weighing: approving a delete throws that person's
+	// open work away, and the row has to say so before the click, not after.
+	// For an entity, the first holder anywhere in its subtree, because a delete
+	// takes the children with it.
+	std::string opHeldBy(const PendingAssetOp& op);
 	const std::vector<PendingAssetOp>& pendingAssetOps() const { return m_pendingOps; }
 	// Answer one. Approving applies it everywhere, including here; denying tells
 	// every requester and changes nothing. Both drop the row.
@@ -703,6 +795,29 @@ public:
 	{
 		return requestOrPerformAssetOp(
 			HE::Net::CollabSession::AssetOp::Create, relPath, {}, true);
+	}
+
+	// ── Entities somebody else is editing ────────────────────────────────────
+	// The same decision for an entity a peer holds (or one with a held entity
+	// under it): asked for, answered by the host in the same in-tray, applied on
+	// every machine at once. See CollabEntityOps.h. FALSE = no session; the
+	// caller then does what it always did.
+	//
+	// Unlike requestAssetDelete, the HOST asks too — into its own in-tray. An
+	// asset delete has a confirmation dialog in front of it, so the host's own
+	// one is applied straight away; an entity delete is a single keypress, and
+	// the in-tray row (with the holder's name on it) is the only place a host
+	// gets to see whose work it is about to remove.
+	bool requestEntityDelete(std::uint64_t subject, const std::string& name)
+	{
+		return requestEntityOp(HE::Net::CollabSession::AssetOp::Delete, subject,
+		                       name, {});
+	}
+	bool requestEntityRename(std::uint64_t subject, const std::string& name,
+	                         const std::string& newName)
+	{
+		return requestEntityOp(HE::Net::CollabSession::AssetOp::Rename, subject,
+		                       name, newName);
 	}
 
 	// ── One user action, one decision ────────────────────────────────────────
@@ -855,6 +970,15 @@ public:
 		                   const std::string& newPath, bool folder)> fn)
 	{
 		m_onRemoteAssetOp = std::move(fn);
+	}
+	// The entity counterpart: an approved delete or rename of an entity (see
+	// requestEntityDelete). Fires on every peer including the host, and NEVER
+	// reaches onRemoteAssetOp — that handler reads its path as a file.
+	void onRemoteEntityOp(
+		std::function<void(HE::Net::CollabSession::AssetOp, std::uint64_t subject,
+		                   const std::string& newName)> fn)
+	{
+		m_onRemoteEntityOp = std::move(fn);
 	}
 
 	// Session key → local absolute path, or empty if it resolves to nothing that
@@ -1093,8 +1217,21 @@ private:
 	struct OurOp { std::uint32_t requestId = 0;
 	               HE::Net::CollabSession::AssetOp op =
 	                   HE::Net::CollabSession::AssetOp::Delete;
-	               std::string path; };
+	               std::string path;
+	               // What the notices call it. Empty = the file name of `path`;
+	               // set for an entity, whose key means nothing to a person and
+	               // which may be gone by the time the answer arrives.
+	               std::string display;
+	               std::string name() const;
+	};
 	std::vector<OurOp>              m_ourPendingOps;
+	// The host's in-tray, filled by a peer's request or by the host's own entity
+	// ask (requestId 0: nobody to send a verdict to but ourselves).
+	void queueAssetOp(HE::Net::ParticipantId who, std::uint32_t requestId,
+	                  HE::Net::CollabSession::AssetOp op, const std::string& path,
+	                  const std::string& newPath, bool folder, std::uint32_t batch);
+	bool requestEntityOp(HE::Net::CollabSession::AssetOp op, std::uint64_t subject,
+	                     const std::string& name, const std::string& newName);
 	// Asks pointed at us because we hold the asset. Anyone can accumulate these,
 	// host or not.
 	std::vector<EditRequest>        m_editRequests;
@@ -1292,6 +1429,15 @@ private:
 	// The relay link inside m_secure, non-owning, for its listening() and its
 	// refusal reasons. nullptr whenever m_viaRelay is false.
 	HE::Net::RelayTransport* m_relayLink = nullptr;
+	// Team sessions. The override is set only for the duration of the
+	// startTeamHosting call (relayForNewSession prefers it to m_relayAddress);
+	// the peers and the flag live as long as the session and are cleared by
+	// teardown().
+	bool                  m_teamSession = false;
+	bool                  m_teamHostPending = false;
+	HE::Net::RelayAddress m_teamRelay;
+	std::string           m_relayHostPeer;   // empty = RelayTransport::kHostPeerId
+	std::string           m_relaySelfPeer;   // empty = a random client id
 	// A host turned us away because we had not agreed. Held until the panel has
 	// asked the user, because it is a question and not a failure.
 	bool          m_largeAssetsPrompt = false;
@@ -1305,9 +1451,21 @@ private:
 		std::string   sessionId;   // what a relay join dials instead of host:port
 		std::string   joinCode;
 		std::string   displayName;
+		// A team join: host:port is the team server, and these are the peers.
+		bool          team = false;
+		std::string   hostPeer;
+		std::string   selfPeer;
 		bool          valid = false;
+		// The host banned us from it: rejoining is refused by construction, so
+		// it is not offered.
+		bool          banned = false;
+		// The join completed. Rejoin is offered for a session that was lost,
+		// not for one that never let us in.
+		bool          joined = false;
 	};
 	LastJoin      m_lastJoin;
+	// Dial m_lastJoin again exactly as it was dialled. `why` prefixes the log line.
+	bool redialLastJoin(const std::string& why);
 
 	// ── LAN discovery ──
 	// The announcer only exists while hosting; the browser runs whenever
@@ -1328,23 +1486,76 @@ private:
 
 	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
 	std::string   m_assetNotice;
-	// One counter per document, used from both sides. As holder we increment it
-	// on every publish — deltas and whole files alike, since they describe the
-	// same document and have to be ordered against each other. As receiver we
-	// remember the highest we have applied and refuse anything at or below it.
-	//
-	// One map, not two: when a lock changes hands the new holder has been
-	// RECEIVING all along, so its number is already at least the old holder's
-	// and its first publish continues the sequence instead of restarting it —
-	// which would make every peer discard the new holder's work as stale.
+	// Our own counter per document. Incremented on every publish — deltas and
+	// whole files alike, since they describe the same document and have to be
+	// ordered against each other.
 	std::unordered_map<std::string, std::uint32_t> m_docRevision;
-	// True when this frame is newer than everything applied for that document,
-	// and records it. False means drop it — which is the ordinary fate of a
-	// whole file that arrived behind newer deltas.
-	bool acceptRevision(const std::string& relativePath, std::uint32_t revision);
+	// The highest revision applied per (ORIGINATOR, document), and anything at
+	// or below it is refused. Per originator, not per document: this used to be
+	// one map shared with the counter above, on the reasoning that a new holder
+	// has been receiving all along and so continues the sequence. A participant
+	// who JOINED after the document was edited has received nothing — it starts
+	// at 1, and every peer that had seen 50 dropped its work without a word
+	// (a late joiner, or anybody whose editor restarted and rejoined). The
+	// ordering the counter exists for is between one holder's two channels;
+	// between holders the host's relay order already is the order, because the
+	// host only forwards the lock holder's frames and the lock changes hands
+	// on that same ordered link. Keyed by revisionKey().
+	std::unordered_map<std::string, std::uint32_t> m_seenRevision;
+	static std::string revisionKey(HE::Net::ParticipantId from, const std::string& path);
+	// True when this frame is newer than everything applied from that sender for
+	// that document, and records it. False means drop it — which is the ordinary
+	// fate of a whole file that arrived behind the same holder's newer deltas.
+	bool acceptRevision(HE::Net::ParticipantId from, const std::string& relativePath,
+	                    std::uint32_t revision);
+	// A participant left: its ids are never reused in this session, so its rows
+	// are dead weight.
+	void forgetRevisionsFrom(HE::Net::ParticipantId from);
+
+	// ── Host: what a joiner has to be told on arrival ──
+	// The snapshot is the scene. Everything else the session changed travels on
+	// asset frames, and a participant who was not connected when they went out
+	// never got them — a late joiner, or one whose link dropped and who rejoined.
+	// The host keeps the set of files the session touched (saved, created,
+	// edited through deltas) and the ops it applied (delete, rename, folder
+	// create), and replays both to every joiner: ops first, in order, then the
+	// current bytes of every touched file still on disk.
+	std::vector<std::string> m_sessionTouched;   // keys, first touch order, unique
+	struct SessionOp {
+		HE::Net::CollabSession::AssetOp op;
+		std::string                     path;
+		std::string                     newPath;
+		HE::Net::ParticipantId          by = 0;
+		bool                            folder = false;
+	};
+	std::vector<SessionOp> m_sessionOps;
+	void noteSessionTouched(const std::string& relativePath);
+	// Host: the session changed the scene (an entity channel, ours or a peer's).
+	void noteSceneTouched();
+	// Host: settle what is due and tell the listeners.
+	void updateSettle(std::uint64_t nowMs);
+	HE::Ed::CollabSettle         m_settle;
+	HE::Ed::CollabSettle::Persist m_settlePersist;
+	std::function<void(const std::vector<HE::Ed::CollabSettle::Settled>&)> m_onSessionSettled;
+	std::uint64_t                m_lastSettledMs    = 0;
+	std::size_t                  m_lastSettledCount = 0;
+	void noteSessionOp(HE::Net::ParticipantId by, HE::Net::CollabSession::AssetOp op,
+	                   const std::string& path, const std::string& newPath, bool folder);
+	void catchUpJoiner(HE::Net::ParticipantId who);
+
+	// ── A save that had to wait for its lock ──
+	// publishAsset on a CLIENT that holds no lock asks for one and returns: the
+	// grant is a round trip away. Nothing used to send the save once it came, so
+	// a one-shot write (an MCP save, a rename sweep, a reimport of an authored
+	// asset) stayed on this machine until someone saved that file again. Keyed by
+	// lock subject: {key, absolute path}; published from the grant, then the lock
+	// goes back unless a tab here holds it.
+	std::unordered_map<std::uint64_t, std::pair<std::string, std::string>> m_publishOnGrant;
 	std::function<std::string(const std::string&)> m_localPathForKey;
 	std::function<void(HE::Net::CollabSession::AssetOp, const std::string&,
 	                   const std::string&, bool)> m_onRemoteAssetOp;
+	std::function<void(HE::Net::CollabSession::AssetOp, std::uint64_t,
+	                   const std::string&)> m_onRemoteEntityOp;
 	std::string   m_removalNotice;   // set when the host kicked or banned us
 
 	// Last transform we published, so an unmoved object sends nothing. Same
@@ -1353,6 +1564,16 @@ private:
 	float         m_lastTransform[9] {};   // pos3 + rotEuler3 + scale3
 	bool          m_hasLastTransform = false;
 	std::uint64_t m_lastTransformSendMs = 0;
+	// The newest value the rate limit held back. Without it the END of a quick
+	// drag was lost for good: the last frames fall inside the 33 ms window, the
+	// user lets go and deselects, and the peers keep the object a few frames
+	// short of where it was put. Sent by update() once the window has passed,
+	// and before the lock goes (followSelection), whichever comes first.
+	std::uint64_t m_pendingTransformSubject = 0;
+	float         m_pendingTransform[9] {};
+	bool          m_hasPendingTransform = false;
+	bool sendTransformNow(std::uint64_t subject, const float v[9], std::uint64_t nowMs);
+	void flushPendingTransform(std::uint64_t nowMs);
 
 	std::function<void(std::uint64_t, const float[3], const float[3], const float[3])>
 		m_onRemoteTransform;
@@ -1446,8 +1667,9 @@ private:
 	// Last blob hash sent per entity, so switching selection back and forth
 	// does not read as an edit.
 	std::unordered_map<std::uint32_t, std::uint64_t> m_lastComponentHashes;
+	TerrainPatchFn                                    m_onRemoteTerrainPatch;
 	std::function<void(std::uint32_t)>                m_onRemoteDestroy;
-	std::function<void(std::uint32_t, std::uint32_t)> m_onRemoteReparent;
+	std::function<void(std::uint32_t, std::uint32_t, const float*)> m_onRemoteReparent;
 	// Set while applying a received asset, so writing it to disk does not bounce
 	// straight back out as our own change.
 	bool m_applyingRemoteAsset = false;

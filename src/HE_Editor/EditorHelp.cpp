@@ -1790,15 +1790,17 @@ namespace
 	{ "Spline Tool/Create Lake", "",
 	  "Turns the closed outline into a lake: digs the bed (with Dig Bed on) and "
 	  "lays the water over it, at the level set above, in one undo step. From "
-	  "then on the points reshape the water only; the ground is dug again only "
-	  "when you press Dig Again. Water you paint with the Water brush on this "
-	  "lake stays when the points move.",
+	  "then on, moving a point (or the whole spline) reshapes the water and, "
+	  "if the bed was dug, moves the bed with it while you drag: the old bed is "
+	  "filled back in and a new one dug under the new outline. Water you paint "
+	  "with the Water brush on this lake stays when the points move.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Dig Again", "",
 	  "Digs the bed again under the lake's current outline, to Depth below "
-	  "its water level with the Bank slope. Moving points never digs by "
-	  "itself, so after reshaping the lake this is how the new shape gets its "
-	  "bed. It only lowers; one undo step.",
+	  "its water level with the Bank slope. It only lowers; one undo step. "
+	  "From then on the bed follows the points with this Depth and Bank — "
+	  "which is also how a lake made without Dig Bed, or one from an older "
+	  "scene, starts taking its bed along when its points move.",
 	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Remove Lake", "",
 	  "Takes the lake's water away and cuts its link to the spline. The spline "
@@ -2044,6 +2046,11 @@ namespace
 	  "Host or join a live editing session — several people in one scene, with "
 	  "locks so two of you cannot edit the same thing.",
 	  "", "collaboration#overview" },
+	{ "Window/Team", "",
+	  "Your team on the team server: who is in it and who is online, the "
+	  "sessions they host, and Invite, Join or Decline. Admins add and remove "
+	  "members here.",
+	  "", "collaboration" },
 	{ "Window/Source Control", "",
 	  "The repository: what changed, what to commit, what the others have "
 	  "pushed. Large assets included.",
@@ -3704,11 +3711,11 @@ namespace
 	  "viewport as well as in Play. Turn it off when a rain loop is in the way; the "
 	  "Weather component's own Weather Sounds switch is the one that counts in Play.",
 	  "", "rendering#weather" },
-	{ "Preferences/Collaboration/Find Sessions on the Local Network", "",
+	{ "Preferences/Team/Find Sessions on the Local Network", "",
 	  "Announce and discover collaboration sessions on this network, so joining "
 	  "needs no address. Off, a session is still reachable by its id and code.",
 	  "", "collaboration#discovery" },
-	{ "Preferences/Collaboration/Sync Large Assets (Meshes, Textures, Audio)", "",
+	{ "Preferences/Team/Sync Large Assets (Meshes, Textures, Audio)", "",
 	  "Send the big files to peers as well as the small ones. Off, everybody needs "
 	  "their own copy of the meshes and textures — but joining is instant.",
 	  "", "collaboration#bigassets" },
@@ -3738,15 +3745,10 @@ namespace
 	  "was installed while this editor was already running — the search happens "
 	  "when the page opens, and nothing notices an install on its own.",
 	  "", "collaboration#remote-control" },
-	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
+	{ "Preferences/Team/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
 	  "", "collaboration#bigassets" },
-	{ "Preferences/Collaboration/Relay Server (host:port)", "",
-	  "Empty: connect directly, peer to peer. With an address, hosting and joining "
-	  "only make outgoing connections to that relay server, and guests join by "
-	  "session ID and join code. Everyone in a session needs the same relay.",
-	  "", "collaboration" },
 	{ "Preferences/Viewport/Camera Speed", "",
 	  "How fast the editor's fly camera moves, in units per second. The viewport "
 	  "toolbar's speed field is the same value.",
@@ -4411,17 +4413,64 @@ namespace
 	  "count as an attack. A client past the limit has its extra calls dropped "
 	  "and the overage weighed against it, exactly like a flood of input.",
 	  "", "collaboration#gameplay" },
+	// ── Settings sorting: project graphics, input, viewport quality ──────────
+	{ "Project Graphics/This project sets its own graphics", "This project sets its own graphics",
+	  "Off, the exported build ships the graphics of whoever exports it (their "
+	  "Preferences) and every editor previews the project with its own values — "
+	  "the way every project has worked so far. On, the rows on this page are the "
+	  "project's answer: they are written into Config/ProjectSettings.json, go "
+	  "into the exported build's config.json and are what the viewport previews "
+	  "with, unless the user chose their own values under Preferences ▸ Viewport "
+	  "Quality.\n\n"
+	  "Switching on starts from the values the editor shows right now, so nothing "
+	  "jumps. Switching off leaves the project's values in the file, unused.",
+	  "", "export#overview" },
+	{ "Input/This project sets its own deadzones", "This project sets its own deadzones",
+	  "Off, the game uses the deadzones of the machine it runs on: your "
+	  "Preferences in the editor, the defaults in an exported build. On, play mode "
+	  "and the exported game both use the stick and trigger deadzones below, so "
+	  "what you tuned is what ships. Switching on starts from your current values.",
+	  "", "" },
+	{ "Input/Stick Deadzone", "Stick Deadzone",
+	  "How far a stick must be pushed before the game sees it move. Below this "
+	  "the stick reads exactly zero; above it the value is re-scaled so full tilt "
+	  "still reaches 1. Raise it for worn sticks; lower it for finer low-speed "
+	  "control.",
+	  "", "" },
+	{ "Input/Trigger Deadzone", "Trigger Deadzone",
+	  "How far a trigger must be pulled before the game sees it. Below this it "
+	  "reads zero; the rest of the travel is re-scaled to 0–1.",
+	  "", "" },
+	{ "Viewport Quality/Same as the project", "Same as the project",
+	  "The viewport previews with the values of the open project's graphics "
+	  "pages when the project sets its own, so what you see is what it ships. A "
+	  "project that sets none is previewed with your own values. The rows on the "
+	  "page are locked while this is on and a project's values are showing.",
+	  "", "" },
+	{ "Viewport Quality/My own values", "My own values",
+	  "The viewport previews with the values on this page even when the project "
+	  "sets its own — for a machine that cannot carry the project's bloom and "
+	  "global illumination. Only the preview changes: exporting still writes the "
+	  "project's values, and play mode follows the project.",
+	  "", "" },
+	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
+	  "Opens the Project Settings page of the repository: initialising it, the "
+	  "remote, GitHub setup and large files. The repository belongs to the "
+	  "project, so those controls travel with it and no longer sit here; git on "
+	  "this machine and the signed-in account stay on this page.",
+	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
-	  "On, the packaged build boots with whatever this editor's Preferences and "
-	  "Export dialog hold at export time — the way every export has worked, and "
+	  "On, the packaged build boots with the window and backend this editor's "
+	  "Export dialog holds at export time — the way every export has worked, and "
 	  "what a project that never opened this page keeps doing. Off, the window "
 	  "and backend below are the project's answer, on every machine it is "
 	  "exported from.\n\n"
 	  "Saved to Config/ProjectSettings.json. With this off, the Export dialog "
 	  "shows the project's window and backend instead of its own rows and writes "
-	  "them into the build's config.json. Bloom, ambient occlusion and the other "
-	  "graphics settings still come from this editor's Preferences either way.",
+	  "them into the build's config.json. How the game looks (anti-aliasing, "
+	  "bloom, ambient occlusion, GI) is the project's on the Quality, "
+	  "Post-Processing and Reflections & GI pages.",
 	  "", "export#overview" },
 	{ "Render Defaults/Width", "Width",
 	  "The window's width in pixels when the game starts windowed. Ignored in "
@@ -7103,6 +7152,13 @@ namespace
 	{ "Landscape/Dig Bed##water", "Dig Bed",
 	  "Also digs while you paint: the ground under the brush is lowered to a "
 	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It digs only where the water is, so the pit never reaches past it: "
+	  "ground at the edge of a stroke stays as it is until the water has "
+	  "spread there, and ground above the water level is cut down to it "
+	  "the moment the water covers it. "
+	  "Where that leaves ground standing above the water (painting uphill), "
+	  "it is shaved into a dry bank that slopes down to the waterline, "
+	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
 	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
@@ -8348,6 +8404,11 @@ namespace
 	  "Keeps the rename inside the graph you are editing. Everything listed goes "
 	  "on naming the old one, which for a call means it now names nothing.",
 	  "", "horizoncode#functions" },
+	{ "Rename Across Project/Ask for it", "Ask the person editing it",
+	  "Somebody else in the collaboration session is editing this graph, so the "
+	  "rename cannot be written into it. This asks them to hand it over; once they "
+	  "say yes it moves up to the list that will be renamed.",
+	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
 	  "Python, and through a Call Function (Ref) node on a reference to this "
@@ -8645,6 +8706,139 @@ namespace
 	  "Clears the failure above and puts the panel back to the host-or-join form. "
 	  "It retries nothing: the attempt it is reporting has already ended.",
 	  "", "collaboration#starting" },
+	{ "Collaboration Session/Rejoin", "",
+	  "Shown when the connection to the host dropped. Joins the same session again, "
+	  "the same way you joined it the first time. The host then sends you the scene "
+	  "and every file the session changed while you were away, so nothing you missed "
+	  "stays missing. Changes you made here while you were disconnected are replaced "
+	  "by the session's state.",
+	  "", "collaboration#starting" },
+
+	// ── The team (Preferences ▸ Team and Window ▸ Team, TeamView.cpp) ────────
+	{ "Team/Team Server (host:port)", "",
+	  "The team server: it keeps the team's members and passwords, shows who is "
+	  "online and is where team sessions are announced. It is also the relay those "
+	  "sessions run on, and the one sessions from the Collaboration window use. "
+	  "Empty means peer to peer and no team. Port 7777 if none is given.",
+	  "", "collaboration" },
+	{ "Team/Team", "",
+	  "The team's name on the server: 1-64 letters, digits, - or _. Everyone in "
+	  "the team signs in with the same one.",
+	  "", "collaboration" },
+	{ "Team/Member", "",
+	  "Your name in the team, as an admin created it (or as you created the team "
+	  "with). Upper and lower case do not matter.",
+	  "", "collaboration" },
+	{ "Team/Password", "",
+	  "Your team password. It is never written to disk: once you are signed in, "
+	  "the team server hands this editor a session token instead, which is what "
+	  "signs you in again after a restart.",
+	  "", "collaboration" },
+	{ "Team/Sign In", "",
+	  "Signs in to the team server. Signed in, the others see you as online and "
+	  "can invite you; the connection is kept and comes back on its own after a "
+	  "dropped network. You stay signed in across restarts until you sign out, "
+	  "change your password or are removed from the team.",
+	  "", "collaboration" },
+	{ "Team/Create Team", "",
+	  "Creates a new team on the server with you as its first admin, and signs "
+	  "you in. Refused when the name is taken.",
+	  "", "collaboration" },
+	{ "Team/Sign Out", "",
+	  "Closes the connection to the team server: the others see you go offline "
+	  "and a session you announced disappears from their list. This computer "
+	  "forgets the saved sign-in and the server revokes it, so the next start "
+	  "asks for the password. A collaboration session that is running carries on.",
+	  "", "collaboration" },
+	{ "Team/Sign Out Everywhere", "",
+	  "Signs you out here and on every other computer that stays signed in as "
+	  "you: the server revokes all of your saved sign-ins, and those editors ask "
+	  "for the password again. For a computer you no longer have.",
+	  "", "collaboration" },
+	{ "Team/Invite", "",
+	  "Invites this member to the session you are hosting. Their editor shows the "
+	  "invitation and they join with one press. Only online members can be "
+	  "invited.",
+	  "", "collaboration" },
+	{ "Team/Open Team Window", "",
+	  "Opens Window > Team: the whole roster, sessions, and (for admins) adding "
+	  "and removing members. The footer's list only invites.",
+	  "", "collaboration" },
+	{ "Team/Remove", "",
+	  "Removes this member from the team (admins only). Asks once more first.",
+	  "", "collaboration" },
+	{ "Team/Confirm Remove", "",
+	  "Removes the member for good: their editors are signed out and their name "
+	  "and password are gone from the server.",
+	  "", "collaboration" },
+	{ "Team/Anyone in the Team May Join", "",
+	  "On: every member sees the session and can join it without an invitation. "
+	  "Off: only the members you invite can join. Can be changed while hosting.",
+	  "", "collaboration" },
+	{ "Team/Host Session", "",
+	  "Starts a collaboration session through the team server and announces it "
+	  "to the team. Nobody needs an address or a join code: the session is found "
+	  "by its announcement.",
+	  "", "collaboration" },
+	{ "Team/Join", "",
+	  "Joins this member's session: through an invitation, or because the host "
+	  "opened it to the whole team. The project is synced the way any "
+	  "collaboration join syncs it.",
+	  "", "collaboration" },
+	{ "Team/Decline", "",
+	  "Turns the invitation down; the host is told.",
+	  "", "collaboration" },
+	{ "Team/New Member", "",
+	  "The name the new member signs in with (admins only).",
+	  "", "collaboration" },
+	{ "Team/Their Password", "",
+	  "The new member's first password. Tell it to them yourself; they can change "
+	  "it once signed in.",
+	  "", "collaboration" },
+	{ "Team/Admin", "",
+	  "Admins can add and remove members. A team always keeps at least one.",
+	  "", "collaboration" },
+	{ "Team/Add Member", "",
+	  "Adds the member to the team on the server. They can sign in right away.",
+	  "", "collaboration" },
+	{ "Team/Current Password", "",
+	  "Your password as it is now — the server checks it before changing it.",
+	  "", "collaboration" },
+	{ "Team/New Password", "",
+	  "The password you will sign in with from now on.",
+	  "", "collaboration" },
+	{ "Team/Change Password", "",
+	  "Changes your team password on the server. This editor keeps its "
+	  "connection; your other editors use the new one at their next sign-in.",
+	  "", "collaboration" },
+	{ "Team/Choose Picture...", "",
+	  "Picks an image file (PNG, JPG, BMP, TGA, GIF) as your team picture. It is "
+	  "cropped to a square and scaled to 64 pixels here, then kept by the team "
+	  "server: every member sees it next to your name, on any computer you sign "
+	  "in from.",
+	  "", "collaboration" },
+	{ "Team/Change Picture...", "",
+	  "Picks another image file as your team picture. Cropped to a square and "
+	  "scaled to 64 pixels; the team sees the new one right away.",
+	  "", "collaboration" },
+	{ "Team/Remove Picture", "",
+	  "Removes your team picture from the server. The team sees your colour with "
+	  "your initial instead.",
+	  "", "collaboration" },
+	{ "Team/Use Collaboration Profile", "",
+	  "Copies the picture and colour you set in the Collaboration window to your "
+	  "team profile, so you look the same in a session and in the team. Without a "
+	  "picture there, the team picture is removed too.",
+	  "", "collaboration" },
+	{ "Team/None", "",
+	  "No colour of your own: the team shows you in grey, and in a session the "
+	  "host picks a free colour for you.",
+	  "", "collaboration" },
+	{ "Team/Custom", "",
+	  "Any colour, not just the presets. The team sees it shortly after you stop "
+	  "changing it. Two members may have the same colour; in a session the host "
+	  "gives one of them another if they collide.",
+	  "", "collaboration" },
 
 	{ "Session Participants/Block", "",
 	  "Removes this person from the session and refuses them if they try to "
@@ -8689,12 +8883,12 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Preferences page that owns the setup: initialising the "
+	  "Opens the Project Settings page that owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },
-	{ "Source Control Panel/Set up in Preferences…", "Set up in Preferences",
-	  "Opens the Preferences page where a project folder is turned into a git "
+	{ "Source Control Panel/Set up in Project Settings…", "Set up in Project Settings",
+	  "Opens the Project Settings page where a project folder is turned into a git "
 	  "repository and a remote is added. Until it is one, this window has nothing "
 	  "to show.",
 	  "", "editor#preferences" },
@@ -8972,6 +9166,10 @@ namespace
 	  "Host or join a live editing session: several people in one scene, with "
 	  "locks so two of you cannot edit the same thing at once.",
 	  "", "collaboration#overview" },
+	{ "panel.team", "Team",
+	  "Your team on the team server: members and who is online, the sessions "
+	  "they host, invitations. Signing in is in Preferences ▸ Team or right here.",
+	  "", "collaboration" },
 	{ "panel.source-control", "Source Control",
 	  "Git for the whole project, large assets included: what has changed, what to "
 	  "commit, and what the rest of the team has pushed.",
@@ -9105,7 +9303,7 @@ namespace
 		{ "Preferences/Post-Processing/",     "editor-settings", "Settings Reference", "Post-Processing" },
 		{ "Preferences/Global Illumination/", "editor-settings", "Settings Reference", "Global Illumination" },
 		{ "Preferences/Effects/",             "editor-settings", "Settings Reference", "Effects" },
-		{ "Preferences/Collaboration/",       "editor-settings", "Settings Reference", "Collaboration" },
+		{ "Preferences/Team/",                "editor-settings", "Settings Reference", "Team" },
 		// Above the bare "Preferences/" fallback like the rest — without its own
 		// rule these three would land under the "Preferences" heading instead of
 		// their own, which is the silent kind of wrong: the entry exists, F1
@@ -9130,7 +9328,10 @@ namespace
 		// the editor, one section per page so the reference is split the way
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
-		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
+		{ "Project Graphics/", "editor-settings", "Settings Reference", "Project: graphics" },
+		{ "Input/",            "editor-settings", "Settings Reference", "Project: input" },
+		{ "Viewport Quality/", "editor-settings", "Settings Reference", "Viewport" },
+		{ "Anti-Cheat/",      "editor-settings", "Settings Reference", "Project: anti-cheat" },
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
@@ -9214,6 +9415,7 @@ namespace
 		{ "collab.",   "editor-collab",    "Collaboration & Source Control", "Collaboration" },
 		{ "sc.",                    "editor-collab", "Collaboration & Source Control", "Source control" },
 		{ "Collaboration Session/", "editor-collab", "Collaboration & Source Control", "Collaboration window" },
+		{ "Team/",                  "editor-collab", "Collaboration & Source Control", "Team" },
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },

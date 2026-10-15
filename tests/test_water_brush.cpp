@@ -2,6 +2,7 @@
 #include "EditorUndo.h"
 #include <HorizonScene/WaterBrush.h>
 #include <HorizonScene/WaterField.h>
+#include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/WaterSurface.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainMeshGenerator.h>
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace water = HE::water;
@@ -441,6 +443,374 @@ TEST_CASE("Water brush dig: after a stroke, nothing is dug below the water's lev
         }
     CHECK(dug > 0u);              // the stroke actually dug something
     CHECK(dugButDry == 0u);       // and none of it is dry
+}
+
+namespace
+{
+    // Thema 188: the pit a digging stroke leaves against the sheet the water mesh
+    // actually builds from it (water::buildSurface with the field's own shore
+    // clipping, the mesh WaterSurface draws). A terrain vertex the stroke lowered
+    // that no triangle of the sheet covers is ground dug away with no water over it
+    // — the dry crater at the rim.
+    struct PitVsSheet
+    {
+        uint32_t dug = 0;            // vertices the stroke lowered
+        uint32_t dugDry = 0;         // ... that the sheet does not cover, and below the water's reach (a pit)
+        float    dryDepth = 0.0f;    // the deepest of those, metres below the old ground
+        // Schritt 4: lowered, not covered, but at or above where the shore clipping
+        // would put water on them (level + overshoot): the bank, dry land.
+        uint32_t bank = 0;
+        float    bankLowest = 1e30f; // metres above the level, the lowest bank vertex
+        // The wall where the pit ends: of every vertex the sheet does not cover
+        // next to one it does (4-neighbours), how far it stands above the level.
+        float    shoreRise = 0.0f;
+        glm::vec2 shoreRiseAt{ 0.0f };   // where
+        // The steepest the ground got off the water: the largest height step
+        // between two neighbouring vertices the sheet does not cover, one of them lowered.
+        float    bankSteep = 0.0f;
+        uint32_t triangles = 0;
+        // The other way round, reported, not required: water over ground the
+        // stroke left where it was (shallow water at the rim, the level offset).
+        uint32_t wetUndug = 0;
+        float    widestShelf = 0.0f; // metres from such a vertex to the nearest lowered one, at most
+    };
+
+    // The sheet the field's own settings build for `body`, the mesh WaterSurface draws.
+    water::SurfaceMesh sheetOf(const TerrainComponent& tc, uint16_t body)
+    {
+        water::SurfaceOptions opt;
+        opt.clipToGround   = tc.water.clipToGround;
+        opt.shoreOvershoot = tc.water.shoreOvershoot;
+        water::SurfaceMesh sheet;
+        REQUIRE(water::buildSurface(tc, body, opt, sheet));
+        return sheet;
+    }
+
+    // Whether a triangle of the sheet covers terrain-local (x, z), the outline
+    // counting as covered within `tol` metres.
+    bool sheetCovers(const water::SurfaceMesh& sheet, float x, float z, float tol)
+    {
+        const std::vector<float>&    v  = sheet.mesh.vertices;
+        const std::vector<uint32_t>& ix = sheet.mesh.indices;
+        const float px = x - sheet.center.x, pz = z - sheet.center.y;
+        // Signed distance of the point from an edge's line.
+        auto side = [&](float x0, float z0, float x1, float z1)
+        {
+            const float len = std::sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
+            return len > 0.0f ? ((x1 - x0) * (pz - z0) - (z1 - z0) * (px - x0)) / len : 0.0f;
+        };
+        for (size_t t = 0; t + 2 < ix.size(); t += 3)
+        {
+            const float ax = v[ix[t] * 3], az = v[ix[t] * 3 + 2];
+            const float bx = v[ix[t + 1] * 3], bz = v[ix[t + 1] * 3 + 2];
+            const float cx = v[ix[t + 2] * 3], cz = v[ix[t + 2] * 3 + 2];
+            const float d1 = side(ax, az, bx, bz), d2 = side(bx, bz, cx, cz), d3 = side(cx, cz, ax, az);
+            if ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) return true;
+        }
+        return false;
+    }
+
+    PitVsSheet pitVsSheet(const TerrainComponent& tc, const std::vector<float>& before, uint16_t body)
+    {
+        const water::Body* b = tc.water.findBody(body);
+        REQUIRE(b != nullptr);
+        const float level = b->level;
+        const float reach = level + (tc.water.clipToGround ? tc.water.shoreOvershoot : 0.0f);
+        PitVsSheet r;
+        const water::SurfaceMesh sheet = sheetOf(tc, body);
+        r.triangles = sheet.triangles;
+        // On the outline counts as under it, within what the mesh's own
+        // simplification moves it (a thousandth of a cell, 4 mm here).
+        auto covered = [&](float x, float z) { return sheetCovers(sheet, x, z, 0.005f); };
+        const uint32_t res = tc.resolution;
+        const float stepX = tc.sizeX / static_cast<float>(res - 1), stepZ = tc.sizeZ / static_cast<float>(res - 1);
+        std::vector<glm::vec2> dugAt, wetUndugAt;
+        for (uint32_t zi = 0; zi < res; ++zi)
+            for (uint32_t xi = 0; xi < res; ++xi)
+            {
+                const size_t i = static_cast<size_t>(zi) * res + xi;
+                const float x = -tc.sizeX * 0.5f + static_cast<float>(xi) * stepX;
+                const float z = -tc.sizeZ * 0.5f + static_cast<float>(zi) * stepZ;
+                if (!(tc.sculptHeights[i] < before[i]))
+                {
+                    if (sheetCovers(sheet, x, z, 0.0f)) wetUndugAt.push_back({ x, z });
+                    continue;
+                }
+                ++r.dug;
+                dugAt.push_back({ x, z });
+                if (covered(x, z)) continue;
+                if (tc.sculptHeights[i] >= reach)
+                {
+                    ++r.bank;
+                    r.bankLowest = std::min(r.bankLowest, tc.sculptHeights[i] - level);
+                    continue;
+                }
+                ++r.dugDry;
+                r.dryDepth = std::max(r.dryDepth, before[i] - tc.sculptHeights[i]);
+            }
+        // The shore's wall and the bank's steepness, over the vertex grid.
+        std::vector<uint8_t> under(static_cast<size_t>(res) * res, 0);
+        for (uint32_t zi = 0; zi < res; ++zi)
+            for (uint32_t xi = 0; xi < res; ++xi)
+                under[static_cast<size_t>(zi) * res + xi] =
+                    covered(-tc.sizeX * 0.5f + static_cast<float>(xi) * stepX, -tc.sizeZ * 0.5f + static_cast<float>(zi) * stepZ) ? 1 : 0;
+        for (uint32_t zi = 0; zi < res; ++zi)
+            for (uint32_t xi = 0; xi < res; ++xi)
+            {
+                const size_t i = static_cast<size_t>(zi) * res + xi;
+                if (under[i]) continue;
+                const size_t nb[4] = { xi > 0 ? i - 1 : i, xi + 1 < res ? i + 1 : i,
+                                       zi > 0 ? i - res : i, zi + 1 < res ? i + res : i };
+                for (const size_t n : nb)
+                {
+                    if (n == i) continue;
+                    if (under[n])
+                    {
+                        if (tc.sculptHeights[i] - level > r.shoreRise)
+                        {
+                            r.shoreRise = tc.sculptHeights[i] - level;
+                            r.shoreRiseAt = { -tc.sizeX * 0.5f + static_cast<float>(xi) * stepX,
+                                              -tc.sizeZ * 0.5f + static_cast<float>(zi) * stepZ };
+                        }
+                    }
+                    else if (tc.sculptHeights[i] < before[i] || tc.sculptHeights[n] < before[n])
+                        r.bankSteep = std::max(r.bankSteep, std::abs(tc.sculptHeights[i] - tc.sculptHeights[n]));
+                }
+            }
+        r.wetUndug = static_cast<uint32_t>(wetUndugAt.size());
+        if (!dugAt.empty())
+            for (const glm::vec2& w : wetUndugAt)
+            {
+                float best = 1e30f;
+                for (const glm::vec2& d : dugAt) best = std::min(best, glm::dot(w - d, w - d));
+                r.widestShelf = std::max(r.widestShelf, std::sqrt(best));
+            }
+        return r;
+    }
+
+    // A landscape at the proportions of the editor's default (a vertex every
+    // metre, a water cell four vertices wide: 1 km at 1025 and 256), small enough
+    // for a test.
+    TerrainComponent makeWideLand(float heightAt0, float slopeX)
+    {
+        TerrainComponent tc;
+        tc.sizeX = tc.sizeZ = 128.0f;
+        tc.resolution = 129;
+        tc.dirty = false;
+        tc.water.res = 32;
+        tc.sculptHeights.resize(129u * 129u);
+        for (uint32_t z = 0; z < 129; ++z)
+            for (uint32_t x = 0; x < 129; ++x)
+                tc.sculptHeights[static_cast<size_t>(z) * 129 + x] =
+                    heightAt0 + slopeX * (-64.0f + static_cast<float>(x));
+        return tc;
+    }
+}
+
+TEST_CASE("Water brush dig (Thema 188): the pit is never wider than the sheet — every lowered vertex is under "
+          "the water the mesh builds, at the editor's own pacing, on flat and rising ground, fast and slow")
+{
+    // bed: the stroke dwells long enough on its middle line to reach the floor there.
+    struct Case { const char* name; float slopeX; float amount; float step; bool bed; };
+    // amount = Brush Strength · dt, the Landscape tool's pacing (TerrainTools.cpp):
+    // the default strength 5 at 60 and 144 fps, a gentle 0.5 at 60 fps, and one
+    // full-strength dab per step (the witness's and the older tests' pacing).
+    const Case cases[] = {
+        { "flat, strength 5 @ 60 fps, slow drag",   0.0f,  5.0f / 60.0f,  0.25f, true  },
+        { "flat, strength 5 @ 60 fps, fast drag",   0.0f,  5.0f / 60.0f,  1.5f,  false },
+        { "flat, strength 5 @ 144 fps",             0.0f,  5.0f / 144.0f, 0.5f,  false },
+        { "flat, strength 0.5 @ 60 fps",            0.0f,  0.5f / 60.0f,  0.25f, false },
+        { "uphill, strength 5 @ 60 fps",            0.08f, 5.0f / 60.0f,  0.5f,  true  },
+        { "uphill, strength 0.5 @ 60 fps",          0.08f, 0.5f / 60.0f,  0.25f, false },
+        { "flat, full-strength dabs",               0.0f,  1.0f,          4.0f,  true  },
+        { "uphill, full-strength dabs",             0.08f, 1.0f,          4.0f,  true  },
+    };
+    for (const Case& c : cases)
+    {
+        CAPTURE(std::string(c.name));
+        TerrainComponent tc = makeWideLand(10.0f, c.slopeX);
+        const std::vector<float> before = tc.sculptHeights;
+        brush::Params p;
+        p.radius = 10.0f; p.falloff = 5.0f;              // the editor's defaults
+        p.amount = c.amount;
+        p.levelFromGround = true; p.levelOffset = 0.3f;
+        p.dig = true; p.digDepth = 1.0f;
+        const int steps = static_cast<int>(std::lround(48.0f / c.step));
+        const brush::Stroke s = drag(tc, { -30.0f, 0.0f }, { 18.0f, 0.0f }, p, steps);
+        REQUIRE(s.body != water::kNoBody);
+        const PitVsSheet r = pitVsSheet(tc, before, s.body);
+
+        // Not by digging less: the stroke digs, reaches its bed where it dwelt,
+        // and on rising ground still cuts what stood above the water's level.
+        const float floorY = s.level - p.digDepth;
+        float deepest = 1e9f;
+        uint32_t cutAboveLevel = 0;
+        for (size_t i = 0; i < before.size(); ++i)
+        {
+            if (!(tc.sculptHeights[i] < before[i])) continue;
+            deepest = std::min(deepest, tc.sculptHeights[i]);
+            if (before[i] > s.level) ++cutAboveLevel;
+        }
+        MESSAGE(std::string(c.name) << ": dug " << r.dug << " vertices, " << r.dugDry << " of them dry (deepest "
+                << r.dryDepth << " m), bed " << (deepest - floorY) << " m above the floor, "
+                << cutAboveLevel << " cut down from above the level, sheet " << r.triangles << " triangles; "
+                << r.wetUndug << " vertices under water but not dug, at most " << r.widestShelf
+                << " m from the pit; bank " << r.bank << " vertices (lowest " << r.bankLowest
+                << " m above the level), shore wall " << r.shoreRise << " m at (" << r.shoreRiseAt.x << "," << r.shoreRiseAt.y << "), steepest step " << r.bankSteep << " m");
+        CHECK(r.dugDry == 0u);
+        CHECK(r.dug > 100u);   // a gentle brush paints (and digs) a narrower stroke, not none
+        if (c.bed) CHECK(deepest <= floorY + 0.05f);   // paced: within a few cm of it, not on it
+        if (c.slopeX > 0.0f)
+        {
+            CHECK(cutAboveLevel > 50u);
+            // Schritt 4: no wall. Without the bank the ground next to the water
+            // stood up to 4 m above it here, the step from the pit's edge to it as
+            // high; now the first vertex off the water is within a metre of the
+            // shoreline, on a slope that starts at the water's reach.
+            CHECK(r.bank > 50u);
+            CHECK(r.shoreRise < 0.8f);
+            CHECK(r.bankSteep < 1.5f);
+        }
+        else
+            CHECK(r.bank == 0u);   // flat ground under the level: nothing stands above the water to shape
+    }
+
+    // A caller that hands the brush a negative falloff: the dig clamps it to 0 and
+    // walks the radius, and so must the check after it.
+    TerrainComponent tc = makeWideLand(10.0f, 0.08f);
+    const std::vector<float> before = tc.sculptHeights;
+    brush::Params p;
+    p.radius = 10.0f; p.falloff = -5.0f; p.amount = 1.0f;
+    p.levelFromGround = true; p.levelOffset = 0.3f;
+    p.dig = true; p.digDepth = 1.0f;
+    const brush::Stroke s = drag(tc, { -30.0f, 0.0f }, { 18.0f, 0.0f }, p, 12);
+    REQUIRE(s.body != water::kNoBody);
+    const PitVsSheet r = pitVsSheet(tc, before, s.body);
+    CHECK(r.dug > 100u);
+    CHECK(r.dugDry == 0u);
+    CHECK(r.shoreRise < 0.8f);
+}
+
+TEST_CASE("Water brush dig (Thema 188 Schritt 4): the bank is a function of the shore — a dab held at one "
+          "spot on rising ground shapes it once, never digs it lower, and no step is left where it meets the "
+          "old ground")
+{
+    TerrainComponent tc = makeWideLand(10.0f, 0.08f);
+    const std::vector<float> before = tc.sculptHeights;
+    brush::Params p;
+    p.radius = 10.0f; p.falloff = 5.0f; p.amount = 1.0f;
+    p.levelFromGround = false; p.level = 10.0f;      // the ground crosses the level at x = 0
+    p.dig = true; p.digDepth = 1.0f;
+    brush::Stroke s;
+    brush::begin(s, tc, 20.0f, 0.0f, p);              // 1.6 m above the level under the brush, 2.8 m at its rim
+    REQUIRE(s.active);
+    std::vector<float> after10, after30;
+    uint32_t bankAtFirst = 0;
+    for (int i = 0; i < 30; ++i)
+    {
+        const brush::Dab d = brush::dab(s, tc, 20.0f, 0.0f, p);
+        if (i == 0) bankAtFirst = d.bank;
+        if (i == 9) after10 = tc.sculptHeights;
+    }
+    after30 = tc.sculptHeights;
+    const uint16_t body = s.body;
+    brush::end(s, tc);
+    CHECK(bankAtFirst > 50u);
+
+    // Off the water nothing moves after the dabs that shaped it: the bank does
+    // not creep outward or downward with every frame the button is held.
+    const water::SurfaceMesh sheet = sheetOf(tc, body);
+    const uint32_t res = tc.resolution;
+    uint32_t movedOffWater = 0;
+    for (uint32_t zi = 0; zi < res; ++zi)
+        for (uint32_t xi = 0; xi < res; ++xi)
+        {
+            const size_t i = static_cast<size_t>(zi) * res + xi;
+            if (after30[i] == after10[i]) continue;
+            if (!sheetCovers(sheet, -64.0f + static_cast<float>(xi), -64.0f + static_cast<float>(zi), 0.005f))
+                ++movedOffWater;
+        }
+    CHECK(movedOffWater == 0u);
+
+    const PitVsSheet r = pitVsSheet(tc, before, body);
+    MESSAGE("held dab: dug " << r.dug << ", dry " << r.dugDry << ", bank " << r.bank << " (lowest "
+            << r.bankLowest << " m above the level), shore wall " << r.shoreRise << " m, steepest " << r.bankSteep << " m");
+    CHECK(r.dugDry == 0u);
+    CHECK(r.bank > 50u);
+    CHECK(r.shoreRise < 0.8f);
+    CHECK(r.bankSteep < 1.5f);
+    // Never raised, and nothing beyond the circle plus one reach of bank moved.
+    for (uint32_t zi = 0; zi < res; ++zi)
+        for (uint32_t xi = 0; xi < res; ++xi)
+        {
+            const size_t i = static_cast<size_t>(zi) * res + xi;
+            CHECK(tc.sculptHeights[i] <= before[i]);
+            const float dx = -64.0f + static_cast<float>(xi) - 20.0f, dz = -64.0f + static_cast<float>(zi);
+            if (std::sqrt(dx * dx + dz * dz) > 2.0f * (p.radius + p.falloff) + 1.5f)
+                CHECK(tc.sculptHeights[i] == before[i]);
+        }
+}
+
+TEST_CASE("insideSheet (Thema 188): the point test the dig asks says what the mesh covers, saddles and shore "
+          "clipping included, up to the outline")
+{
+    // Hills and hollows under a fixed level, so the shore clipping cuts the sheet
+    // on every side, and paced strokes, so the coverage is ragged at the rim.
+    TerrainComponent tc = makeLand(10.0f);
+    for (uint32_t z = 0; z < 65; ++z)
+        for (uint32_t x = 0; x < 65; ++x)
+            tc.sculptHeights[static_cast<size_t>(z) * 65 + x] =
+                10.0f + 1.5f * std::sin(static_cast<float>(x) / 4.0f) * std::cos(static_cast<float>(z) / 3.0f);
+    brush::Params p = params();
+    p.levelFromGround = false; p.level = 10.4f;
+    p.amount = 0.15f; p.radius = 5.0f; p.falloff = 4.0f;
+    brush::Stroke s;
+    brush::begin(s, tc, -20.0f, -14.0f, p);
+    const uint16_t body = s.body;
+    for (int i = 0; i <= 120; ++i)
+    {
+        const float t = static_cast<float>(i) / 120.0f;
+        brush::dab(s, tc, -20.0f + 40.0f * t, -14.0f + 24.0f * t + 6.0f * std::sin(t * 9.0f), p);
+    }
+    brush::end(s, tc);
+    REQUIRE(tc.water.findBody(body));
+
+    const water::SurfaceMesh sheet = sheetOf(tc, body);
+    water::Lattice lattice;
+    REQUIRE(water::buildLattice(tc, body, water::bodyCells(tc, body), lattice,
+                                { tc.water.clipToGround, p.level, tc.water.shoreOvershoot }));
+    std::vector<water::Contour> outline = water::extractContours(lattice);
+    auto nearOutline = [&](float x, float z)
+    {
+        const glm::dvec2 q(x, z);
+        for (const water::Contour& c : outline)
+            for (size_t i = 0, j = c.points.size() - 1; i < c.points.size(); j = i++)
+            {
+                const glm::dvec2 a = c.points[j], ab = c.points[i] - a;
+                const double t = std::clamp(glm::dot(q - a, ab) / std::max(1e-12, glm::dot(ab, ab)), 0.0, 1.0);
+                if (glm::length(q - (a + ab * t)) <= 0.01) return true;
+            }
+        return false;
+    };
+
+    uint32_t in = 0, out = 0, disagree = 0;
+    for (float z = -31.9f; z < 32.0f; z += 0.37f)
+        for (float x = -31.9f; x < 32.0f; x += 0.37f)
+        {
+            const bool asked = water::insideSheet(lattice, x, z);
+            const bool drawn = sheetCovers(sheet, x, z, 0.0f);
+            (asked ? in : out)++;
+            if (asked != drawn && !nearOutline(x, z))
+            {
+                ++disagree;
+                MESSAGE("insideSheet " << asked << " but the mesh " << drawn << " at (" << x << ", " << z << ")");
+            }
+        }
+    CHECK(disagree == 0u);
+    CHECK(in > 500u);                       // a sheet with some area, and land around it
+    CHECK(out > 500u);
+    CHECK(outline.size() >= 2u);            // the hills cut it into more than one shore
+    CHECK_FALSE(water::insideSheet(lattice, 1.0e6, 0.0));
 }
 
 TEST_CASE("Water brush dig: a dab repeated at one spot converges on the bed instead of digging without end")

@@ -1016,8 +1016,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::InputText("##entity_name", buf, sizeof(buf),
 			                     ImGuiInputTextFlags_EnterReturnsTrue))
 			{
-				if (undo) undo->snapshotNow("Rename Entity");
-				world.renameEntity(entity, buf);
+				// Held by somebody else in the session: a request to the host,
+				// not a local name that only this machine would ever show. Only
+				// for the scene's world: a prefab editor's handles name other
+				// entities, and its world is nobody's to lock.
+				if (!(ctx.askHostToRename && &world == ctx.world && buf[0] != '\0' &&
+				      name->name != buf &&
+				      ctx.askHostToRename(entity, buf)))
+				{
+					if (undo) undo->snapshotNow("Rename Entity");
+					world.renameEntity(entity, buf);
+				}
 			}
 			// Off because of something above it: the box here is ticked, and
 			// the entity is still not in the game — say which is the case.

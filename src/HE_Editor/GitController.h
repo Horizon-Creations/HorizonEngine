@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -214,7 +215,40 @@ public:
 	// session — which the panel says out loud instead of just hiding buttons.
 	bool blockedByCollabSession() const;
 
+	// ── The team server keeps the history (Config/ProjectSettings.json) ──────
+	// With sourceControl.mode = "teamServer" the team's server takes every
+	// member's saves, merges and commits them, and backs them up to GitHub
+	// (docs/team-server-source-control-design-2026-10-13.md). A commit or pull
+	// from here would then be a second history beside the server's, so the
+	// editor writes nothing to a local .git: mayModify() is false, the panel
+	// says why. Reading status stays allowed. EditorApplication passes the
+	// project's setting every frame; closeProject() turns it off.
+	void setTeamServer(bool on, const std::string& team, const std::string& project);
+	bool blockedByTeamServer() const { return m_teamServer; }
+	const std::string& teamServerTeam() const    { return m_teamServerTeam; }
+	const std::string& teamServerProject() const { return m_teamServerProject; }
+
+	// The attach point for the server's upload. On the HOST of a live session
+	// the session's state settles on every save and once nobody works on a
+	// document any more (CollabSettle.h); EditorApplication hands those keys
+	// over here (CollabSettle keys: asset paths, CollabSettle::kSceneKey). With
+	// the team server off this is a no-op. With it on the keys collect until the
+	// upload takes them: true from the upload = taken. The team-sync service
+	// (topic 199) fills the slot; until it does the keys wait, and the panel
+	// says that nothing reaches the server from this build.
+	using TeamUpload = std::function<bool(const std::vector<std::string>& keys)>;
+	void setTeamServerUpload(TeamUpload upload);
+	void handOverToTeamServer(const std::vector<std::string>& keys, std::uint64_t nowMs);
+	bool hasTeamServerUpload() const { return static_cast<bool>(m_teamUpload); }
+	// Waiting for the upload, oldest first, each key once.
+	const std::vector<std::string>& teamServerPending() const { return m_teamPending; }
+	// The last hand-over the upload took: when (nowMs as passed in) and how many
+	// keys. 0 / 0 = none yet.
+	std::uint64_t teamServerLastHandedMs() const    { return m_teamLastHandedMs; }
+	std::size_t   teamServerLastHandedCount() const { return m_teamLastHandedCount; }
+
 private:
+	void flushTeamServerPending(std::uint64_t nowMs);
 	// Posts a notification when the service reports an error it has not reported yet.
 	void reportNewError();
 	std::string m_notifiedError;
@@ -252,6 +286,14 @@ private:
 	std::string                         m_repoListError;
 
 	const CollabController* m_collab = nullptr;
+
+	bool                     m_teamServer = false;
+	std::string              m_teamServerTeam;
+	std::string              m_teamServerProject;
+	TeamUpload               m_teamUpload;
+	std::vector<std::string> m_teamPending;
+	std::uint64_t            m_teamLastHandedMs    = 0;
+	std::size_t              m_teamLastHandedCount = 0;
 	// Project-path spelling of the repo root when the two are the same directory
 	// through a symlink; empty otherwise. See toRepoRelative.
 	std::string   m_rootAlias;

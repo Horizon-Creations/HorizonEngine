@@ -40,6 +40,7 @@ add_executable(he_tests
     # run through sessions (header-only, PlayErrorReveal.h).
     test_play_error_reveal.cpp
     test_editor_dock_state.cpp
+    test_editor_graphics.cpp
     test_scene_autosave.cpp
     # The asset tabs' autosave: interval, the per-tick prune that makes a save
     # remove its copy, pending at the next start, Restore's backup, and the
@@ -332,6 +333,13 @@ add_executable(he_tests
     # The same links through a relay server (topic 193): a fake relay in-process,
     # and the real collab_server when HE_TEST_RELAY names one.
     test_net_relay.cpp
+    # The team server client (topic 197): a fake team server in-process, and
+    # the real collab_server when HE_TEST_TEAM_SERVER names one.
+    test_net_team.cpp
+    # The Team window and Preferences ▸ Team (TeamView), drawn headless over a
+    # TeamController signed in to the same fake team server; HE_UI_DUMP_DIR
+    # writes the screenshots.
+    test_team_ui.cpp
     # The gameplay transport over real localhost UDP sockets, with an injected
     # clock and the transport's own drop hook for loss under the reliability.
     test_net_udp.cpp
@@ -344,7 +352,9 @@ add_executable(he_tests
     test_net_lanbeacon.cpp
     test_net_collab.cpp
     test_collab_controller.cpp
+    test_collab_settle.cpp
     test_collab_undo.cpp
+    test_terrain_sync.cpp
     test_editor_commands.cpp
     test_mcp_bridge.cpp
     test_mcp_lock_book.cpp
@@ -582,6 +592,9 @@ add_executable(he_tests
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp
+    # The team subsystem over it (test_net_team.cpp): team server login and the
+    # team sessions it sets up on a real CollabController.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamController.cpp
     # CollabController posts to it (a refused request, a peer that could not
     # apply a delete), so the tests cannot link without it — and asserting what
     # lands in it is how those posts are covered at all.
@@ -592,6 +605,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatch.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
+    # Landscape grids over a session (test_terrain_sync.cpp): diff, patch, the
+    # host-ordered reconciliation. Scene + HorizonNet only, no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainSync.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
     # The Input Mapping panel's model: the decoded asset, its JSON codec and the
@@ -637,6 +653,9 @@ add_executable(he_tests
     # The GitHub sign-in's drawing half (code, countdown, buttons), for the
     # ui shots. ImGui plus EditorWidgets; the state half needs the editor.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitHubSignInView.cpp
+    # The Team window's and Preferences ▸ Team's drawing (TeamView), over the
+    # TeamController above, for test_team_ui.cpp. ImGui plus EditorWidgets.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamView.cpp
     # The console's buffer, sink and drawing — everything except the window and
     # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
     # EditorWidgets, so the ui shots can draw the real panel.
@@ -728,6 +747,8 @@ add_executable(he_tests
     # "Is this panel docked?" — ImGui-only by construction (see the header),
     # so the DockIsActive-vs-DockNode invariant it rests on can be asserted.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorDockState.cpp
+    # The project's copy of the config's graphics fields (HE_PROJECT_GRAPHICS_FIELDS).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorGraphics.cpp
     # The node canvas + ImGui's CORE only (no backend, no GPU): ImGui runs
     # headless given a context and a display size, which is what lets
     # test_graph_editor_keys.cpp actually press the graph shortcuts. The editor
@@ -1406,7 +1427,7 @@ endif()
 # run at the same instant makes a failure depend on the scheduler, which is the
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
-set(_he_net_tests test_net_tcp test_net_relay test_net_udp test_net_secure test_net_discovery test_net_collab
+set(_he_net_tests test_net_tcp test_net_relay test_net_team test_team_ui test_net_udp test_net_secure test_net_discovery test_net_collab
                   test_net_directory test_collab_controller test_net_game_session
                   test_mcp_tools_collab)
 foreach(_t IN LISTS _he_net_tests)

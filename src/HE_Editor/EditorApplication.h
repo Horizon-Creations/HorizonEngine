@@ -8,8 +8,10 @@
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "TerrainSync.h"     // landscape grids and settings over the session
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "AssetAutosave.h"   // the same for dirty asset tabs
 #include "NotificationStore.h"
@@ -311,6 +313,12 @@ struct AppContext
 	std::function<void()> cutEntity;
 	std::function<void()> pasteEntity;
 	std::function<void()> deleteEntity;
+	// A rename typed into the Outliner or the Details name field, for an entity
+	// somebody else in the session is editing. True = it went to the host as a
+	// request and the caller must NOT rename locally (the name would hold here
+	// and nowhere else until the holder's next edit overwrote it). False = no
+	// conflict (or no session): rename as always. Unbound in tests = false.
+	std::function<bool(Entity, const std::string& newName)> askHostToRename;
 	// Is there anything to paste? Drives the Paste item's enabled state.
 	bool entityClipboardFull = false;
 
@@ -522,6 +530,9 @@ struct AppContext
 	// Live collaboration session (see CollabController). Null until the editor
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
+	// The team server connection (see TeamController): login, presence, and
+	// the team sessions it sets up on `collab`. Null in tests.
+	TeamController* team = nullptr;
 
 	// The MCP bridge, for the two places that have to show what it is actually
 	// doing: the Remote Control page in Preferences and the footer chip. READ
@@ -604,6 +615,12 @@ private:
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
+	// The user's own graphics values, set aside while the open project's are the
+	// ones in m_editorConfig (syncGraphicsSource). What the config file gets, and
+	// what comes back when the project closes or the preview is switched to
+	// "my own values".
+	EditorConfig m_userGraphics;
+	bool         m_graphicsFromProject = false;
 
 	// App-wide HorizonCode host: owns the runtime the editor world runs on and
 	// the GameInstance script. m_gameInstanceGraph is the authored source (edited
@@ -632,6 +649,14 @@ private:
 	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
 	// any trailing field may be left off.
 	IRenderer::ShadowSettings projectShadowSettings();
+	// Which graphics values m_editorConfig holds this frame: the open project's
+	// (graphics.enabled, preview mode "same as the project") or the user's own.
+	// Every frame, before the renderer is handed them.
+	void syncGraphicsSource();
+	// The gamepad deadzones the game in the editor runs with: the project's when
+	// it sets them (input.enabled), the editor's own otherwise.
+	float playStickDeadzone();
+	float playTriggerDeadzone();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
@@ -764,6 +789,15 @@ private:
 	void copySelectedEntity(bool cut);
 	void pasteEntityClipboard();
 	void deleteSelectedEntity();
+	// In a session: the targets whose subtree no other participant holds a lock
+	// in. The rest are left alone and the user is told, once, by name — a delete
+	// the session refuses must not happen here either, or the entity is gone on
+	// this machine and alive on every other one.
+	// `askHost`: a refused DELETE becomes a request in the host's in-tray
+	// (CollabEntityOps.h) instead of a dead end — the same decision an asset
+	// delete gets. Off for removals nobody typed (an undo replaying a create).
+	std::vector<Entity> withoutPeerHeld(const std::vector<Entity>& targets, const char* verb,
+	                                    bool askHost = false);
 	// The selection roots that may be copied or removed: valid, not built-in
 	// (root, sun, moon), and not under another selected entity.
 	std::vector<Entity> editableSelectionRoots() const;
@@ -776,6 +810,9 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	// The team server: sign-in, presence, invitations. Sets team sessions up on
+	// m_collab, so it is declared after it. Pumped right after it.
+	TeamController   m_team{ m_collab };
 	// Editor-wide "something happened" channel — see NotificationStore.h. Owned
 	// here and handed to the UI through AppContext, the same shape m_collab and
 	// m_git use, except that this one is written from worker threads too and
@@ -867,6 +904,10 @@ private:
 	void updateMcpLocks(std::uint64_t nowMs);
 	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
+	// Landscape edits: diffed each frame like the entity set below, so every
+	// tool that shapes, paints or plants a landscape replicates (TerrainSync.h).
+	HE::Ed::TerrainSync m_terrainSync;
+	bool                m_terrainSyncLive = false;   // in a session last frame
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
@@ -877,6 +918,14 @@ private:
 	// nothing said. Entries leave on the first success or when the retries run
 	// out; see syncStructuralChanges for why there is a limit at all.
 	std::unordered_map<Entity, int> m_structureUnsendable;
+	// The parent each known entity had when the diff last looked (StructuralSync.h
+	// reparentedSince), so a move in the hierarchy is published like a create.
+	std::unordered_map<Entity, Entity> m_structureParent;
+	// Known entities that are gone but whose destroy the session refused, and for
+	// how many frames: the same retry rule as m_structureUnsendable.
+	std::unordered_map<Entity, int> m_structureUndeletable;
+	// A peer's destroy: drop the whole subtree from both records (echo protection).
+	void forgetStructureOf(Entity root);
 	void syncStructuralChanges();
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the
@@ -919,6 +968,9 @@ private:
 	// Mirrors for the two editor-owned documents (panels keep their own).
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
+	// Those two, edited while their tab is closed (an MCP client's hc_ tools):
+	// the tab loop never sees them, so updateAssetCollabSync sends them from here.
+	std::unordered_set<std::string> m_collabUntabbedEdits;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
 	// The recovery snapshot of the open scene, written on a timer whether or
 	// not a collaboration session is running (the whole-file autosave above
@@ -949,6 +1001,11 @@ private:
 	// the tabs are told to reload AFTER that poll, which the restore forces to
 	// run on the next frame — otherwise a tab would re-read the stale copy.
 	std::vector<std::string> m_reloadTabsAfterPoll;
+	// Assets a collaboration peer's file just replaced. applyAssetBytes re-reads
+	// them on the spot, so the tab reload right after it sees the new bytes; the
+	// per-type follow-up a hot reload gets (renderer caches, material instances,
+	// prefab placements) runs on the next poll, which the arrival forces.
+	std::vector<HE::UUID> m_reloadedByPeer;
 	// Set by the quit the UI hands us (AppContext::quit), which only fires once
 	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
 	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
@@ -1068,6 +1125,13 @@ private:
 	// tools are the caller that HAS to know, because the client on the other end
 	// cannot see either.
 	bool saveSceneToPath(const std::string& path);
+	// Host, in a session: the scene settled (somebody saved it, or nobody has
+	// touched it for a while), so the host writes it to its own scene file.
+	// False when it cannot now (Play, no file yet, a disk conflict pending);
+	// the key then stays pending (CollabSettle.h).
+	bool persistSessionScene();
+	bool m_settleWritingScene  = false;   // persistSessionScene's write is not a new save
+	bool m_collabAutosaveWrite = false;   // the session's 1 s autosave is not a save either
 	// Hand the current viewport image to the thumbnail cache as this scene's
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.

@@ -488,9 +488,19 @@ TEST_CASE("HeprojRegistration (Windows): no icon next to the editor means no reg
 
 namespace
 {
-	// The real templates the package ships: the test moves with them.
+	// The real templates the package ships: the test moves with them. Found from
+	// the directory this TU was compiled from and from the CWD, walking up — a
+	// compiler cache with a base dir (ccache) makes __FILE__ relative to the
+	// build dir, and the test then runs from somewhere else.
 	fs::path linuxAssets()
 	{
+		std::error_code ec;
+		fs::path self(__FILE__);
+		if (!self.is_absolute()) self = (fs::current_path(ec) / self).lexically_normal();
+		for (fs::path seed : {self.parent_path(), fs::current_path(ec)})
+			for (int up = 0; up < 8 && !seed.empty(); ++up, seed = seed.parent_path())
+				if (fs::exists(seed / "scripts" / "linux_assets" / "horizon-editor.xml", ec))
+					return seed / "scripts" / "linux_assets";
 		return fs::path(__FILE__).parent_path().parent_path() / "scripts" / "linux_assets";
 	}
 

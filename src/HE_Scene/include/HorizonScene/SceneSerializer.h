@@ -135,6 +135,13 @@ public:
     std::vector<uint8_t> serializeEntityComponents(const HorizonWorld& world, Entity entity);
     bool applyEntityComponents(HorizonWorld& world, Entity entity,
                                const std::vector<uint8_t>& data);
+    // The replacement: `data` is the entity's WHOLE component state (what
+    // serializeEntityComponents produces), so every component the entity carries
+    // and `data` lacks is removed as well. What live collaboration applies — a
+    // Remove Component on one machine reached nobody else while the receiver
+    // only updated. Never for a partial patch: that would strip the rest.
+    bool replaceEntityComponents(HorizonWorld& world, Entity entity,
+                                 const std::vector<uint8_t>& data);
 
     // Is this a component key the loader restores? Anything else in a scene is
     // data being dropped, and loading warns about it.

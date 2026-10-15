@@ -908,6 +908,16 @@ bool decodeCells(Field& f, const uint8_t* data, size_t size)
     return true;
 }
 
+bool patchFits(const GroundPatch& p, uint32_t res)
+{
+    if (p.empty() || p.res != res || res == 0) return false;
+    if (p.x0 < 0 || p.z0 < 0 || p.w <= 0 || p.h <= 0) return false;
+    if (static_cast<int64_t>(p.x0) + p.w > res || static_cast<int64_t>(p.z0) + p.h > res) return false;
+    if (p.delta.size() != static_cast<size_t>(p.w) * static_cast<size_t>(p.h)) return false;
+    for (float d : p.delta) if (!finite(d)) return false;
+    return true;
+}
+
 void sanitize(TerrainComponent& tc)
 {
     Field& f = tc.water;
@@ -932,6 +942,19 @@ void sanitize(TerrainComponent& tc)
         bool bad = !nb.fromSpline() || nb.polygon.size() > kMaxPolygonPoints;
         for (const glm::vec2& p : nb.polygon) bad = bad || !finite(p.x) || !finite(p.y);
         if (bad) nb.polygon.clear();
+        // The lake's own bed: only for a lake, with a depth and a bank that are
+        // numbers, and a patch that fits the landscape's height grid — a damaged
+        // patch would write outside it when the outline next moves. A bad patch
+        // alone is dropped (the lake keeps digging, it just cannot lift the old
+        // bed); a bad rest ends the digging.
+        if (!nb.fromSpline() || !finite(nb.dugDepth) || !finite(nb.dugBank) ||
+            nb.dugDepth < 0.0f || nb.dugBank < 0.0f)
+        {
+            nb.digsBed = false;
+            nb.dugDepth = nb.dugBank = 0.0f;
+        }
+        if (!nb.digsBed || (!nb.groundPatch.empty() && !patchFits(nb.groundPatch, tc.resolution)))
+            nb.groundPatch = GroundPatch{};
         nb.syncKey = 0;
         nb.physics = clampPhysics(nb.physics);
         nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);

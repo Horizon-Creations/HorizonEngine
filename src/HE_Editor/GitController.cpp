@@ -142,6 +142,7 @@ void GitController::closeProject()
 	// the old lastInfo, which must not answer for it.
 	m_syncWatch  = {};
 	m_syncMoment = 0;
+	setTeamServer(false, {}, {});
 }
 
 void GitController::requestRefresh()
@@ -309,6 +310,8 @@ void GitController::update(std::uint64_t nowMs)
 	m_cloneService.pump();
 	if (cloneIdle) m_cloneBusy = false;
 	collectRepoList();
+	// Keys handed over before the team server's upload was there go now.
+	flushTeamServerPending(nowMs);
 
 	// One filesystem probe per status refresh, never per tile: when the repo
 	// root and the project root are the same directory under two spellings
@@ -444,5 +447,41 @@ bool GitController::blockedByCollabSession() const
 
 bool GitController::mayModify() const
 {
-	return !blockedByCollabSession();
+	return !blockedByCollabSession() && !blockedByTeamServer();
+}
+
+void GitController::setTeamServer(bool on, const std::string& team, const std::string& project)
+{
+	m_teamServer        = on;
+	m_teamServerTeam    = on ? team : std::string();
+	m_teamServerProject = on ? project : std::string();
+	// Keys waiting for a server this project no longer uses would be uploaded
+	// to it the moment an upload appears.
+	if (!on) m_teamPending.clear();
+}
+
+void GitController::setTeamServerUpload(TeamUpload upload)
+{
+	m_teamUpload = std::move(upload);
+}
+
+void GitController::handOverToTeamServer(const std::vector<std::string>& keys, std::uint64_t nowMs)
+{
+	if (!m_teamServer) return;
+	for (const std::string& key : keys)
+	{
+		if (key.empty()) continue;
+		if (std::find(m_teamPending.begin(), m_teamPending.end(), key) == m_teamPending.end())
+			m_teamPending.push_back(key);
+	}
+	flushTeamServerPending(nowMs);
+}
+
+void GitController::flushTeamServerPending(std::uint64_t nowMs)
+{
+	if (!m_teamServer || !m_teamUpload || m_teamPending.empty()) return;
+	if (!m_teamUpload(m_teamPending)) return;
+	m_teamLastHandedMs    = nowMs;
+	m_teamLastHandedCount = m_teamPending.size();
+	m_teamPending.clear();
 }

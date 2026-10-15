@@ -4,6 +4,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <string>
 #include <vector>
 
 // ── "Is this panel docked into the layout?" ──────────────────────────────────
@@ -293,4 +294,195 @@ TEST_CASE("Docking is answered without a live ImGui context")
 	// into a destroyed context would turn quitting the editor into a crash.
 	CHECK(ImGui::GetCurrentContext() == nullptr);
 	CHECK_FALSE(EditorDockState::isDockedInLayout("Source Control"));
+}
+
+// ── "Which tab was open" ─────────────────────────────────────────────────────
+// imgui.ini remembers each dock node's selected tab, and imgui forgets it again
+// the moment a panel joins the node after the first frame (new tabs are
+// selected on arrival). The editor's panels join on different frames, so a
+// restart used to land on whichever came last. holdSavedTabs() puts the
+// remembered one back; these cases drive it through a real ini round trip.
+namespace {
+
+// A host + dockspace with three panels in ONE node, A, B and C (a node with
+// three tabs). Each panel is submitted from the frame given for it.
+struct TabbedFrames
+{
+	int aFrom = 0, bFrom = 0, cFrom = 0;
+	int frame = 0;
+	void run(bool hold)
+	{
+		if (hold) EditorDockState::holdSavedTabs();
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(1280.0f, 720.0f));
+		ImGui::Begin(EditorDockState::kHostWindowName, nullptr, ImGuiWindowFlags_NoSavedSettings);
+		const ImGuiID id = EditorDockState::mainDockspaceId();
+		if (!ImGui::DockBuilderGetNode(id))
+		{
+			ImGui::DockBuilderAddNode(id, ImGuiDockNodeFlags_DockSpace);
+			ImGui::DockBuilderSetNodeSize(id, ImVec2(1280.0f, 720.0f));
+			ImGui::DockBuilderDockWindow("A", id);
+			ImGui::DockBuilderDockWindow("B", id);
+			ImGui::DockBuilderDockWindow("C", id);
+			ImGui::DockBuilderFinish(id);
+		}
+		ImGui::DockSpace(id);
+		ImGui::End();
+		if (frame >= aFrom) { ImGui::Begin("A"); ImGui::End(); }
+		if (frame >= bFrom) { ImGui::Begin("B"); ImGui::End(); }
+		if (frame >= cFrom) { ImGui::Begin("C"); ImGui::End(); }
+		ImGui::Render();
+		++frame;
+	}
+	void runFor(int n, bool hold) { for (int i = 0; i < n; ++i) run(hold); }
+};
+
+// The tab on screen in that node: the window whose tab is visible.
+std::string visibleTab()
+{
+	for (const char* name : { "A", "B", "C" })
+		if (const ImGuiWindow* w = ImGui::FindWindowByName(name); w && w->DockTabIsVisible && w->Active)
+			return name;
+	return "";
+}
+
+// A session that ended with B open: the ini text it left behind.
+std::string iniWithBOpen()
+{
+	ImGuiCtx ctx;
+	TabbedFrames t;
+	t.runFor(4, false);
+	ImGui::SetWindowFocus("B");
+	t.runFor(4, false);
+	REQUIRE(visibleTab() == "B");
+	return ImGui::SaveIniSettingsToMemory();
+}
+
+} // namespace
+
+TEST_CASE("Saved tabs: the tab that was open comes back when the panels join on different frames")
+{
+	const std::string ini = iniWithBOpen();
+	struct { const char* what; int a, b, c; } cases[] = {
+		{ "all in the first frame",       0,  0,  0 },
+		{ "A first, B and C later",       0, 10, 10 },
+		{ "A and C first, B much later",  0, 25,  0 },
+		{ "B before C, both late",        0,  8, 14 },
+	};
+	for (const auto& c : cases)
+	{
+		CAPTURE(c.what);
+		ImGuiCtx ctx;
+		ImGui::LoadIniSettingsFromMemory(ini.c_str());
+		TabbedFrames t{ c.a, c.b, c.c };
+		t.runFor(60, /*hold=*/true);
+		CHECK(visibleTab() == "B");
+	}
+}
+
+TEST_CASE("Saved tabs: without the hold imgui lands on a late arrival (why the hold exists)")
+{
+	// The control for the case above: if a newer imgui stops selecting new tabs
+	// on arrival, this fails and the hold can go.
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 10, 10 };
+	t.runFor(60, /*hold=*/false);
+	CHECK(visibleTab() != "B");
+}
+
+TEST_CASE("Saved tabs: a tab the user clicks is never taken back")
+{
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 6, 6 };
+	t.runFor(30, true);
+	REQUIRE(visibleTab() == "B");
+
+	// The person clicks A's tab, with the mouse: its place comes from the tab bar.
+	const ImGuiWindow* a = ImGui::FindWindowByName("A");
+	REQUIRE(a != nullptr);
+	REQUIRE(a->DockNode != nullptr);
+	REQUIRE(a->DockNode->TabBar != nullptr);
+	const ImGuiTabBar* bar = a->DockNode->TabBar;
+	const ImGuiTabItem* tab = ImGui::TabBarFindTabByID(const_cast<ImGuiTabBar*>(bar), a->TabId);
+	REQUIRE(tab != nullptr);
+	const ImVec2 at(bar->BarRect.Min.x + tab->Offset + tab->Width * 0.5f,
+	                (bar->BarRect.Min.y + bar->BarRect.Max.y) * 0.5f);
+	ImGui::GetIO().AddMousePosEvent(at.x, at.y);
+	t.runFor(2, true);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+	t.runFor(2, true);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+	t.runFor(40, true);
+	CHECK(visibleTab() == "A");
+	// And it stays: the hold has let go.
+	t.runFor(600, true);
+	CHECK(visibleTab() == "A");
+}
+
+TEST_CASE("Saved tabs: a panel revealed long after startup keeps the tab it was revealed on")
+{
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 0, 0 };
+	t.runFor(60, true);
+	REQUIRE(visibleTab() == "B");
+	// Window > ..., a footer button: focus a docked panel without any click in its node.
+	ImGui::SetWindowFocus("C");
+	t.runFor(400, true);
+	CHECK(visibleTab() == "C");
+}
+
+TEST_CASE("Saved tabs: a panel that joins very late, before anyone has clicked, still does not take the tab")
+{
+	// An audio engine that comes up after seconds, a project that is still
+	// loading: the panel is the startup's, however long it takes.
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 0, 900 };   // C: fifteen seconds in
+	t.runFor(1000, true);
+	CHECK(visibleTab() == "B");
+}
+
+TEST_CASE("Saved tabs: after the first click a panel that joins is the person's choice")
+{
+	const std::string ini = iniWithBOpen();
+	ImGuiCtx ctx;
+	ImGui::LoadIniSettingsFromMemory(ini.c_str());
+	TabbedFrames t{ 0, 0, 120 };
+	t.runFor(60, true);
+	REQUIRE(visibleTab() == "B");
+	// A click on the page, not on a tab.
+	ImGui::GetIO().AddMousePosEvent(600.0f, 400.0f);
+	t.runFor(2, true);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+	t.runFor(2, true);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+	t.runFor(120, true);
+	// C opened afterwards, and imgui's rule for a new tab applies.
+	CHECK(visibleTab() == "C");
+}
+
+TEST_CASE("Saved tabs: no ini, no layout, nothing is held")
+{
+	ImGuiCtx ctx;
+	TabbedFrames t{ 0, 5, 5 };
+	t.runFor(30, true);
+	// imgui's own rule applies: the last panel to arrive is the one on screen.
+	CHECK(visibleTab() == "C");
+	// Forgetting is harmless with nothing held, and with no context at all.
+	EditorDockState::forgetSavedTabs();
+}
+
+TEST_CASE("Saved tabs: answered without a live ImGui context")
+{
+	REQUIRE(ImGui::GetCurrentContext() == nullptr);
+	EditorDockState::holdSavedTabs();
+	EditorDockState::forgetSavedTabs();
 }

@@ -70,7 +70,17 @@ struct EditorConfig
 	// only OUTGOING connections to that server, which pairs host and guests by
 	// session id and forwards their (still end-to-end encrypted) bytes. For
 	// when the host cannot open a port. docs/relay-server-protocol.md.
+	//
+	// Since topic 197 this is the TEAM server's address too (Preferences ▸
+	// Team): the team server is the relay, so one field. Kept under its old
+	// name and config key so an address entered as a relay carries over.
 	std::string CollabRelayAddress;
+	// The team and member last signed in with (Preferences ▸ Team). Never the
+	// password: that stays in memory (TeamController). What survives a restart
+	// is a session token from the team server, in team-session.txt beside
+	// config.json and not in here (TeamController::setTokenFile, topic 201).
+	std::string TeamName;
+	std::string TeamMember;
 
 	// The MCP bridge: let an external client (a Claude instance, through the
 	// stdio shim) drive this editor — read what is open, and from a later step
@@ -190,6 +200,19 @@ struct EditorConfig
 	// hearing it is how you tune it. Off for the days a rain loop is in the way.
 	// Play mode always has them (the component's own switch is the one to use there).
 	bool  WeatherSoundInEditor = true;
+
+	// Which graphics values the editor's viewport previews with, when the open
+	// project sets its own (ProjectSettings graphics.enabled): 0 = the project's
+	// (the default — what you see is what ships), 1 = this user's own values, for
+	// a machine that struggles with the project's bloom and GI. Never changes
+	// what an export writes. Persisted ("PreviewQualityMode").
+	int   PreviewQualityMode = 0;
+	// Runtime only, never saved: the graphics fields of this struct currently
+	// hold the PROJECT's values and not the user's (EditorApplication::
+	// syncGraphicsSource sets it every frame). The settings rows read it to lock
+	// themselves — an edit would be overwritten the next frame — and the config
+	// writer reads it to put the user's own values back before saving.
+	bool  GraphicsFromProject = false;
 
 	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
 	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,

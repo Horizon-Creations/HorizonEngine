@@ -651,6 +651,15 @@ void GameApplication::OnInit()
 	// Config/ProjectSettings.json beside it is already in m_projectSettings: the
 	// constructor read it with the hcfg peek, because the window title in it is
 	// needed before OnInit (applyShippedConfig).
+	// The gamepad deadzones the project set (Project Settings > Input). Without
+	// them the game keeps Input's own defaults, as every build has. Set before the
+	// player's settings menu reads them back (api::settings::Host below), so the
+	// menu starts from what the game really uses.
+	if (m_projectSettings.input.enabled)
+	{
+		input().stickDeadzone   = m_projectSettings.input.stickDeadzone;
+		input().triggerDeadzone = m_projectSettings.input.triggerDeadzone;
+	}
 	// Application build (docs/he-apps-plan.md A1): everything below that belongs
 	// to a GAME is skipped. Latched into a member because half a dozen places
 	// downstream ask, and reaching into m_config at each of them invites one of

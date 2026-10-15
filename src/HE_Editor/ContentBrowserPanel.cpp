@@ -3030,7 +3030,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			    EditorWidgets::menuItem("Revert to Default"))
 			{
 				const std::string relPath = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
-				if (!relPath.empty())
+				// An override is a project file like any other, and reverting
+				// deletes it. In a session that is the host's call — the same
+				// one every other delete gets — or this machine falls back to
+				// the default while every peer keeps the override.
+				const std::string key = relPath.empty() ? std::string()
+				                                        : collabKeyFor(ctx, s_ctxMenuItem);
+				if (!key.empty() && ctx.collab && ctx.collab->requestAssetDelete(key))
+				{
+					s_ctxMenuItem.clear();
+				}
+				else if (!relPath.empty())
 				{
 					const HE::UUID id = ctx.contentManager->loadAsset(relPath); // current (override) id
 					std::error_code ec;

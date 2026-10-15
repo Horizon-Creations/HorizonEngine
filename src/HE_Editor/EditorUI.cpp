@@ -40,11 +40,13 @@
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
+#include "EditorUiShot.h"                // HE_DUMP_UI trigger shots of the running UI
 #include "ProfilerPanel.h"               // Window > Performance Profiler window
 #include "ConsolePanel.h"                // Window > Console — every HE_LOG record, all levels
 #include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // Window > Collaboration (host / join a live session)
+#include "TeamView.h"               // Window > Team (members, presence, invitations)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
@@ -97,6 +99,7 @@
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <mutex>       // the play log is read under its mutex (PlayErrorReveal)
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -225,6 +228,34 @@ static bool s_showEnvironment = false;
 
 // Toggled by Window > Collaboration; drives the live-session panel.
 static bool s_showCollab = false;
+// Toggled by Window > Team; drives the team window (members, presence,
+// invitations — TeamView).
+static bool s_showTeam = false;
+
+// Window > Team. The body is TeamView's (shared with Preferences ▸ Team and
+// drawn headless by tests/test_team_ui.cpp); this is only the window around it.
+static void drawTeamWindow(AppContext& ctx, bool& open)
+{
+	if (!ctx.team) return;
+	// A new invitation opens the window, once per invitation: Join and Decline
+	// are in here, and a notification that says "invited" with nothing to press
+	// would leave the guest looking for the window. Closing it again sticks.
+	static std::set<std::string> s_invitesSeen;
+	for (const auto& s : ctx.team->sessions())
+		if (s.invited && s_invitesSeen.insert(s.session).second) open = true;
+	if (!open) return;
+	ImGui::SetNextWindowSize(ImVec2(420, 520), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Team", &open)) { ImGui::End(); return; }
+	{
+		EditorWidgets::WrapText wrap;   // released before End()
+		TeamView::drawPanel(*ctx.team,
+		                    { &ctx.editorConfig.CollabRelayAddress,
+		                      &ctx.editorConfig.TeamName,
+		                      &ctx.editorConfig.TeamMember },
+		                    TeamView::editorForm());
+	}
+	ImGui::End();
+}
 // Toggled by Window > Source Control; drives the repository status panel.
 static bool s_showSourceControl = false;
 // Toggled by Window > Console (and Ctrl/Cmd+`); drives the log window.
@@ -263,6 +294,7 @@ static bool docsPanelOpener(const char* window)
 		{ "Performance Profiler", &s_showProfiler      },
 		{ "Environment",          &s_showEnvironment   },
 		{ "Collaboration",        &s_showCollab        },
+		{ "Team",                 &s_showTeam          },
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
@@ -315,6 +347,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Performance Profiler", "PanelOpenProfiler",      &s_showProfiler      },
 	{ "Environment",          "PanelOpenEnvironment",   &s_showEnvironment   },
 	{ "Collaboration",        "PanelOpenCollaboration", &s_showCollab        },
+	{ "Team",                 "PanelOpenTeam",          &s_showTeam          },
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
@@ -553,6 +586,11 @@ void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
     if (!ctx.imguiReady) return;
+
+    // The tab each dock node had open when the editor was last closed: imgui
+    // restores it from imgui.ini and then lets every panel that shows up later
+    // take the selection, so this puts it back (EditorDockState.h).
+    EditorDockState::holdSavedTabs();
 
     // Refresh the frame-cached pointer-grammar answer for ctx-less call sites
     // (the shared GraphEditor canvas asks via EditorInput::trackpadActive()).
@@ -890,6 +928,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     // HE_DUMP_TUTORIALUI only: the tour card's placement, pictured from this
     // frame's draw data (a no-op without the variable).
     TutorialPanel::witnessAfterRender();
+    // HE_DUMP_UI only: this frame's whole UI on a trigger file, for drivers that
+    // need to SEE the footer, a menu or a panel of a hidden editor.
+    HE::Ed::UiShot::liveAfterRender();
 
     // ── Multi-viewport / platform windows ─────────────────────────────────────
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -1194,6 +1235,43 @@ static bool activeTabUsesWorldUndo(const AppContext& ctx)
 	return path.empty()
 	    || path == LevelScriptPanel::kTabPath
 	    || ParticleGraphEditorPanel::isParticleAsset(path);
+}
+
+// The one door onto "the" undo history for every control that has one: the
+// footer buttons, the Ctrl+Z chord, the native menu command and the Edit menu.
+// In a session it is CollabUndo (your own changes, as republished inverses);
+// outside one it is the snapshot stack. The Edit menu used to be the only one
+// that knew about the session, so Ctrl+Z in a session restored a whole-world
+// snapshot: every entity came back under a new handle, the structural diff
+// published a destroy and a create for all of them, and peers' concurrent edits
+// were reverted (docs/collab-sync-audit-entities-2026-10-14.md, gap 4.1).
+static bool sessionUndoActive(const AppContext& ctx)
+{
+	// Not during play: the controls stay quiet then, as they do outside a
+	// session (makeContext withholds the snapshot stack while playing).
+	return !ctx.isPlaying && ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
+}
+static bool canUndoNow(const AppContext& ctx)
+{
+	if (sessionUndoActive(ctx)) return ctx.collabUndo->canUndo();
+	return ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo;
+}
+static bool canRedoNow(const AppContext& ctx)
+{
+	if (sessionUndoActive(ctx)) return ctx.collabUndo->canRedo();
+	return ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo;
+}
+static void undoNow(AppContext& ctx)
+{
+	if (!canUndoNow(ctx)) return;
+	if (sessionUndoActive(ctx)) ctx.collabUndo->undo();
+	else                        ctx.undo();
+}
+static void redoNow(AppContext& ctx)
+{
+	if (!canRedoNow(ctx)) return;
+	if (sessionUndoActive(ctx)) ctx.collabUndo->redo();
+	else                        ctx.redo();
 }
 #endif
 
@@ -1824,6 +1902,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleProfiler,      s_showProfiler);
 		MacMenuBar::setToggleState(MC::ToggleEnvironment,   s_showEnvironment);
 		MacMenuBar::setToggleState(MC::ToggleCollab,        s_showCollab);
+		MacMenuBar::setToggleState(MC::ToggleTeam,          s_showTeam);
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
@@ -1902,12 +1981,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
-			case MC::Undo:
-				if (ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo) ctx.undo();
-				break;
-			case MC::Redo:
-				if (ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo) ctx.redo();
-				break;
+			case MC::Undo:      undoNow(ctx); break;
+			case MC::Redo:      redoNow(ctx); break;
 			case MC::Cut:       if (canEditEntity()  && ctx.cutEntity)       ctx.cutEntity();       break;
 			case MC::Copy:      if (canEditEntity()  && ctx.copyEntity)      ctx.copyEntity();      break;
 			case MC::Paste:     if (canPasteEntity() && ctx.pasteEntity)     ctx.pasteEntity();     break;
@@ -1985,6 +2060,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleProfiler:  togglePanelWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: togglePanelWindow(s_showEnvironment, "Environment"); break;
 			case MC::ToggleCollab:      togglePanelWindow(s_showCollab, "Collaboration");    break;
+			case MC::ToggleTeam:        togglePanelWindow(s_showTeam, "Team");               break;
 			case MC::ToggleSourceControl:
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
@@ -2367,6 +2443,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showEnvironment, "Environment");
         if (EditorWidgets::menuItem("Collaboration", nullptr, s_showCollab))
             togglePanelWindow(s_showCollab, "Collaboration");
+        if (EditorWidgets::menuItem("Team", nullptr, s_showTeam))
+            togglePanelWindow(s_showTeam, "Team");
         if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
         if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
@@ -3267,8 +3345,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.20f));
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 0.0f));
 
-			const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
-			const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
+			const bool canUndo = canUndoNow(ctx);
+			const bool canRedo = canRedoNow(ctx);
 
 			ImGui::BeginDisabled(!canUndo);
 			bool doUndo;
@@ -3301,8 +3379,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
 			}
 
-			if (doUndo && canUndo && ctx.undo) ctx.undo();
-			if (doRedo && canRedo && ctx.redo) ctx.redo();
+			if (doUndo) undoNow(ctx);
+			if (doRedo) redoNow(ctx);
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
@@ -3332,10 +3410,30 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// its right, plus a 16px gap for each neighbour that is actually there.
 		// The chain is hand-maintained: inserting a widget here means editing
 		// EVERY block to its left as well, or the two overlap silently. Right to
-		// left the order is: FPS, notification bell, presence, download queue,
-		// session activity.
+		// left the order is: FPS, your team status, notification bell, presence,
+		// online team members, download queue, session activity, MCP.
 
-		// The notification bell, immediately left of the counters. It sits at the
+		// Your team status, between the counters and the bell (topic 202): your
+		// face while signed in to the team server, a red X otherwise, which opens
+		// the sign-in modal (TeamView::drawFooterStatus). Always there, like the
+		// bell, so "am I signed in" is answered in the same corner every time.
+		// teamSlot is its width plus the gap to the bell, subtracted by every
+		// block to its left.
+		const float teamW    = ctx.team ? TeamView::footerStatusWidth() : 0.0f;
+		const float teamSlot = teamW > 0.0f ? teamW + 10.0f : 0.0f;
+		if (teamW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+			if (TeamView::drawFooterStatus(*ctx.team,
+			                               { &ctx.editorConfig.CollabRelayAddress,
+			                                 &ctx.editorConfig.TeamName,
+			                                 &ctx.editorConfig.TeamMember },
+			                               TeamView::editorForm()))
+				revealFloatingWindow(s_showTeam, "Team");
+		}
+
+		// The notification bell, left of the counters and your team status. It sits at the
 		// right-hand end of the group rather than the left because it is the only
 		// item here that is not transient — presence, the download queue and the
 		// activity line all come and go, so a bell placed left of them would move
@@ -3345,7 +3443,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float bellW = NotificationBar::FooterWidth(ctx);
 		if (bellW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
 			NotificationBar::DrawFooter(ctx);
 		}
@@ -3355,14 +3453,35 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float presenceW = CollabPresenceBar::FooterWidth(ctx);
 		if (presenceW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f));
 			CollabPresenceBar::DrawFooter(ctx);
 		}
 
+		// Who else in the team is online and NOT in the session, left of the
+		// session's faces (topic 202): rounded squares with a green dot, and a
+		// rule between the two clusters, so "online somewhere" never reads as
+		// "here with you". Joining moves a face from this cluster to that one.
+		// Signed in it is there with or without a session. Stacked; its menu
+		// (every member, Invite) is drawn from the overlay pass below.
+		const float onlineW = ctx.team ? TeamView::footerOnlineWidth(*ctx.team) : 0.0f;
+		if (onlineW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
+			                - (presenceW > 0.0f ? 16.0f : 0.0f));
+			TeamView::drawFooterOnline(*ctx.team, presenceW > 0.0f);
+		}
+		// Someone who just joined slides from the stack to their face in the
+		// session's cluster. Outside the block above: the stack may be gone by
+		// now (the last one online joined). Drawn over both clusters, takes
+		// no width, so the chain above does not count it.
+		if (ctx.team) TeamView::drawFooterJoins(*ctx.team, CollabPresenceBar::FooterFaces());
+
 		// EngineContent SFTP download queue — right-aligned, left of the presence
-		// cluster. Deliberately part of the RIGHT group rather than growing
+		// clusters. Deliberately part of the RIGHT group rather than growing
 		// rightwards from source control on the left: the label is an asset
 		// filename of unbounded length, and a left-anchored item that grows runs
 		// straight through the centred "Ready" text below. Right-aligning bounds
@@ -3370,10 +3489,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float syncW = EngineContentSyncBar::FooterWidth(ctx);
 		if (syncW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
-			                - (presenceW > 0.0f ? 16.0f : 0.0f));
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f));
 			EngineContentSyncBar::DrawFooter(ctx);
 		}
 
@@ -3390,10 +3510,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		const float actW = CollabActivityBar::FooterWidth(ctx);
 		if (actW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f)
 			                - (syncW > 0.0f ? 16.0f : 0.0f));
 			if (CollabActivityBar::DrawFooter(ctx))
 				revealFloatingWindow(s_showCollab, "Collaboration");
@@ -3411,10 +3532,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// inserting anywhere else means editing everything to its left as well.
 		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW - mcpW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (onlineW > 0.0f ? 16.0f : 0.0f)
 			                - (syncW > 0.0f ? 16.0f : 0.0f)
 			                - (actW > 0.0f ? 16.0f : 0.0f));
 			McpStatusBar::DrawFooter(ctx);
@@ -4060,6 +4182,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (s_resetLayoutRequested || ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
         {
             BuildDefaultDockLayout(dockspaceId, ImGui::GetContentRegionAvail());
+            EditorDockState::forgetSavedTabs();   // the layout the tabs belonged to is gone
             s_resetLayoutRequested = false;
             s_sceneTabBarHandled   = false;   // fresh layout → hide the viewport's tab bar again
             // Persist immediately so the layout survives an early exit and becomes
@@ -4172,6 +4295,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
+    drawTeamWindow(ctx, s_showTeam);
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
 	// Here for the reason this whole function exists, and it earns it more than
 	// most: output is watched from INSIDE a script or a graph tab, and left
@@ -4234,9 +4358,11 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	updatePanelVisibility(ctx);
 
     // Last of all, so the menus that hang off the footer clusters cannot end up
-    // underneath a docked panel or a floating tool window. Both of these draw
-    // nothing unless their own footer half ran this frame.
+    // underneath a docked panel or a floating tool window. Each of these draws
+    // nothing unless its own footer half ran this frame.
     CollabPresenceBar::DrawOverlay(ctx);
+    if (ctx.team && TeamView::drawFooterOnlineMenu(*ctx.team))
+        revealFloatingWindow(s_showTeam, "Team");
     NotificationBar::DrawOverlay(ctx);
 
     TutorialPanel::UiFlags tutFlags;

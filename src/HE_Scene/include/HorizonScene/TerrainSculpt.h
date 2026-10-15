@@ -129,6 +129,14 @@ namespace TerrainSculpt
     // toward wet without any one of them alone reaching w ≥ 0.5 there stays capped
     // a little shallow rather than risk the dry ring the other way; that is a
     // shallower shore, never a moat.
+    // With wetLevel, ground ABOVE it goes to it at once, unpaced, before the blend
+    // toward the floor starts (Thema 188): paced, a vertex half way down would
+    // stand above the water, the shore clipping would take the sheet off it, and
+    // the dab would leave dug ground no water covers. The weight still decides
+    // how far below the level it may go. This shaves the whole circle, wet or not;
+    // the water brush therefore puts back every vertex its own sheet does not
+    // cover afterwards (WaterBrush.cpp), which is what makes the pit and the water
+    // one shape.
     //
     // Same contract as apply: terrain-local coordinates, ensureHeights first, the
     // region-dirty rect (vertices that moved, one grid step wider) and not `dirty`,
@@ -221,4 +229,15 @@ namespace TerrainSculpt
     // centre of the polygon's bounding box afterwards.
     Result excavatePolygon(TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
                            const ExcavateParams& params);
+
+    // The vertex rect (indices into the tc.resolution² grid, inclusive) that
+    // excavatePolygon with the same arguments walks: every vertex outside it keeps
+    // its bits. The same code excavatePolygon itself uses, so a caller that keeps
+    // the ground under a dig (WaterLake.cpp's ground patch, re-dug on every frame a
+    // lake's outline moves) can copy exactly this rect instead of the whole grid.
+    // Read on the grid as it is: call ensureHeights first (it may snap the
+    // resolution). False when the call would change nothing at all: refused
+    // arguments, or the polygon and its bank wholly off the terrain.
+    bool excavateReach(const TerrainComponent& tc, const std::vector<glm::vec2>& polygon,
+                       const ExcavateParams& params, int& x0, int& z0, int& x1, int& z1);
 }

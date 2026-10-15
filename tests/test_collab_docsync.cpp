@@ -512,3 +512,261 @@ TEST_CASE("DocSync: hostile item payloads are refused, not accumulated into UB")
     CHECK(DS::applyDeltas(*doc, mirror, DS::Scope::Primary, ds));
     CHECK(g.nextId > 3);
 }
+
+// ─── HorizonCode: everything a graph holds, not only nodes and links ─────────
+// Topic 198 step 4. The Level Script and the Game Instance graph have no file a
+// session re-sends, so for them a part of the graph the deltas do not carry is
+// a part that never reaches the peer at all.
+
+namespace {
+// A sends what changed since its mirror; B applies it. Returns the batch.
+std::vector<Delta> sendTo(DS::IDocAdapter& docA, DS::DocMirror& mirrorA,
+                          DS::IDocAdapter& docB, DS::DocMirror& mirrorB)
+{
+    const std::vector<Delta> ds = diff(docA, mirrorA);
+    if (!ds.empty()) DS::applyDeltas(docB, mirrorB, DS::Scope::Primary, ds);
+    return ds;
+}
+} // namespace
+
+TEST_CASE("DocSync: HorizonCode declared events are created, changed and deleted on the peer")
+{
+    HC::Graph a, b;
+    auto docA = DS::forHorizonCodeGraph(a);
+    auto docB = DS::forHorizonCodeGraph(b);
+    DS::DocMirror mirrorA, mirrorB;
+    diff(*docA, mirrorA);
+    DS::seed(*docB, mirrorB, DS::Scope::Primary);
+
+    // Create: a Custom Event declaration and the node that handles it.
+    HC::EventDecl ev; ev.name = "OnDoorOpened";
+    a.events.push_back(ev);
+    HC::Node handler; handler.type = HC::NodeType::Event; handler.s = "OnDoorOpened";
+    (void)a.addNode(handler);
+    std::vector<Delta> ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Event, kUpsert) == 1);
+    REQUIRE(b.findEvent("OnDoorOpened") != nullptr);
+    CHECK(HC::toJson(b) == HC::toJson(a));
+
+    // Change: the event gains an argument. One delta, the declaration only.
+    a.findEvent("OnDoorOpened")->hasArg  = true;
+    a.findEvent("OnDoorOpened")->argType = HC::PinType::Int;
+    ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    REQUIRE(ds.size() == 1);
+    CHECK(ds[0].kind == static_cast<std::uint8_t>(DS::Kind::Event));
+    CHECK(b.findEvent("OnDoorOpened")->hasArg);
+    CHECK(b.findEvent("OnDoorOpened")->argType == HC::PinType::Int);
+
+    // Delete.
+    a.events.clear();
+    ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Event, kRemove) == 1);
+    CHECK(b.events.empty());
+    CHECK(HC::toJson(b) == HC::toJson(a));
+    CHECK(diff(*docB, mirrorB).empty());   // nothing echoes back
+}
+
+TEST_CASE("DocSync: HorizonCode comment boxes round-trip and keep the id counter ahead")
+{
+    HC::Graph a, b;
+    auto docA = DS::forHorizonCodeGraph(a);
+    auto docB = DS::forHorizonCodeGraph(b);
+    DS::DocMirror mirrorA, mirrorB;
+    diff(*docA, mirrorA);
+    DS::seed(*docB, mirrorB, DS::Scope::Primary);
+
+    // Comment ids share the node counter, so A's box takes an id B has not
+    // handed out yet.
+    HC::GraphComment c; c.id = a.nextId++; c.text = "Door logic"; c.x = 10; c.y = 20;
+    c.subgraph = 0;
+    a.comments.push_back(c);
+    std::vector<Delta> ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Comment, kUpsert) == 1);
+    REQUIRE(b.comments.size() == 1);
+    CHECK(b.comments[0].text == "Door logic");
+    // B's next node must not reuse the box's id.
+    HC::Node n; n.type = HC::NodeType::Print;
+    CHECK(b.addNode(n) != c.id);
+
+    // Move + resize + retitle is one delta for the one box.
+    a.comments[0].x = 300; a.comments[0].w = 500; a.comments[0].text = "Door + light";
+    ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Comment, kUpsert) == 1);
+    CHECK(b.comments[0].x == doctest::Approx(300.0f));
+    CHECK(b.comments[0].w == doctest::Approx(500.0f));
+    CHECK(b.comments[0].text == "Door + light");
+
+    a.comments.clear();
+    ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Comment, kRemove) == 1);
+    CHECK(b.comments.empty());
+}
+
+TEST_CASE("DocSync: the HorizonCode Extract spec is set and cleared on the peer")
+{
+    HC::Graph a, b;
+    HC::Variable hp; hp.name = "health"; hp.type = HC::PinType::Float;
+    a.variables.push_back(hp);
+    b.variables.push_back(hp);
+    auto docA = DS::forHorizonCodeGraph(a);
+    auto docB = DS::forHorizonCodeGraph(b);
+    DS::DocMirror mirrorA, mirrorB;
+    diff(*docA, mirrorA);
+    DS::seed(*docB, mirrorB, DS::Scope::Primary);
+
+    a.extract.structPath = "Types/EnemyLoot.hasset";
+    a.extract.map.push_back({ "hp", "health" });
+    std::vector<Delta> ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    REQUIRE(ds.size() == 1);
+    CHECK(ds[0].kind == static_cast<std::uint8_t>(DS::Kind::Setting));
+    CHECK(ds[0].itemId == DS::kSettingExtract);
+    CHECK(b.extract.structPath == "Types/EnemyLoot.hasset");
+    REQUIRE(b.extract.map.size() == 1);
+    CHECK(b.extract.map[0].var == "health");
+    CHECK(HC::toJson(b) == HC::toJson(a));
+
+    // Clearing is a replace with the empty spec, not a removal.
+    a.extract = {};
+    ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Setting, kUpsert) == 1);
+    CHECK(b.extract.empty());
+    CHECK(HC::toJson(b) == HC::toJson(a));
+}
+
+TEST_CASE("DocSync: a new HorizonCode function with a local and a changed value reaches the peer")
+{
+    HC::Graph a, b;
+    auto docA = DS::forHorizonCodeGraph(a);
+    auto docB = DS::forHorizonCodeGraph(b);
+    DS::DocMirror mirrorA, mirrorB;
+    diff(*docA, mirrorA);
+    DS::seed(*docB, mirrorB, DS::Scope::Primary);
+
+    // A function is its FunctionEntry node; its body nodes and its locals name
+    // the entry's id as their sub-graph / scope.
+    HC::Node entry; entry.type = HC::NodeType::FunctionEntry; entry.s = "Heal";
+    entry.params.push_back({ "amount", HC::PinType::Float, false });
+    const int entryId = a.addNode(entry);
+    HC::Node ret; ret.type = HC::NodeType::FunctionReturn; ret.s = "Heal";
+    ret.subgraph = entryId;
+    const int retId = a.addNode(ret);
+    a.links.push_back({ entryId, 0, retId, 0 });
+    HC::Node k; k.type = HC::NodeType::ConstFloat; k.f[0] = 5.0f; k.subgraph = entryId;
+    const int kId = a.addNode(k);
+    HC::Variable local; local.name = "tmp"; local.type = HC::PinType::Float;
+    local.scope = entryId;
+    a.variables.push_back(local);
+    HC::syncFunctionSignatures(a);   // what the editor runs after every edit too
+
+    sendTo(*docA, mirrorA, *docB, mirrorB);
+    REQUIRE(b.findNode(entryId) != nullptr);
+    CHECK(b.findNode(retId)->subgraph == entryId);
+    REQUIRE(b.findVariable("tmp") != nullptr);
+    CHECK(b.findVariable("tmp")->scope == entryId);
+    CHECK(HC::toJson(b) == HC::toJson(a));
+
+    // A typed value is one node's delta.
+    a.findNode(kId)->f[0] = 12.5f;
+    std::vector<Delta> ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    REQUIRE(ds.size() == 1);
+    CHECK(ds[0].itemId == kId);
+    CHECK(b.findNode(kId)->f[0] == doctest::Approx(12.5f));
+
+    // A variable's default value and type change are one variable delta.
+    a.findVariable("tmp")->type = HC::PinType::Int;
+    a.findVariable("tmp")->f[0] = 3.0f;
+    ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    REQUIRE(ds.size() == 1);
+    CHECK(ds[0].kind == static_cast<std::uint8_t>(DS::Kind::Variable));
+    CHECK(b.findVariable("tmp")->type == HC::PinType::Int);
+    CHECK(HC::toJson(b) == HC::toJson(a));
+}
+
+TEST_CASE("DocSync: renaming a HorizonCode variable replaces it on the peer, nodes included")
+{
+    HC::Graph a;
+    HC::Variable v; v.name = "score"; v.type = HC::PinType::Int;
+    a.variables.push_back(v);
+    HC::Node get; get.type = HC::NodeType::GetVariable; get.s = "score";
+    get.propType = HC::PinType::Int;
+    const int getId = a.addNode(get);
+
+    HC::Graph b = a;
+    auto docA = DS::forHorizonCodeGraph(a);
+    auto docB = DS::forHorizonCodeGraph(b);
+    DS::DocMirror mirrorA, mirrorB;
+    diff(*docA, mirrorA);
+    DS::seed(*docB, mirrorB, DS::Scope::Primary);
+
+    // A variable's identity is its name, so a rename is remove + create, and the
+    // nodes that name it travel as node edits in the same batch.
+    a.variables[0].name = "points";
+    a.findNode(getId)->s = "points";
+    const std::vector<Delta> ds = sendTo(*docA, mirrorA, *docB, mirrorB);
+    CHECK(countOf(ds, DS::Kind::Variable, kRemove) == 1);
+    CHECK(countOf(ds, DS::Kind::Variable, kUpsert) == 1);
+    CHECK(countOf(ds, DS::Kind::Node, kUpsert) == 1);
+    CHECK(b.findVariable("score") == nullptr);
+    REQUIRE(b.findVariable("points") != nullptr);
+    CHECK(b.findNode(getId)->s == "points");
+    CHECK(HC::toJson(b) == HC::toJson(a));
+}
+
+TEST_CASE("DocSync: an animator's sync graph and its state machine are separate documents")
+{
+    // The animator asset holds a state machine (Primary) and a HorizonCode sync
+    // graph (LogicGraph), like a widget's tree and graph. State ids and node ids
+    // are both small integers, so a delta must land only in its own document.
+    HE::AnimatorStateMachineGraph machine;
+    HE::AnimationState idle; idle.id = 1; idle.name = "Idle";
+    machine.states = { idle };
+    HC::Graph sync;
+    HC::Node upd; upd.type = HC::NodeType::Event; upd.s = "Update";
+    (void)sync.addNode(upd);
+
+    HE::AnimatorStateMachineGraph peerMachine = machine;
+    HC::Graph peerSync = sync;
+    auto docM = DS::forAnimatorGraph(machine);
+    auto docS = DS::forHorizonCodeGraph(sync);
+    auto peerM = DS::forAnimatorGraph(peerMachine);
+    auto peerS = DS::forHorizonCodeGraph(peerSync);
+    DS::DocMirror mM, mS, pM, pS;
+    DS::seed(*docM, mM, DS::Scope::Primary);
+    DS::seed(*docS, mS, DS::Scope::LogicGraph);
+    DS::seed(*peerM, pM, DS::Scope::Primary);
+    DS::seed(*peerS, pS, DS::Scope::LogicGraph);
+
+    HC::Node pr; pr.type = HC::NodeType::Print; pr.x = 200.0f;
+    (void)sync.addNode(pr);
+    std::vector<Delta> batch;
+    DS::diffInto(*docM, mM, DS::Scope::Primary, batch);
+    DS::diffInto(*docS, mS, DS::Scope::LogicGraph, batch);
+    REQUIRE(batch.size() == 1);
+
+    CHECK_FALSE(DS::applyDeltas(*peerM, pM, DS::Scope::Primary, batch));
+    CHECK(DS::applyDeltas(*peerS, pS, DS::Scope::LogicGraph, batch));
+    CHECK(peerMachine.states.size() == 1);
+    CHECK(HC::toJson(peerSync) == HC::toJson(sync));
+}
+
+TEST_CASE("DocSync: hasLocalChanges sees an edit without consuming it")
+{
+    // The Level Script and Game Instance have no dirty flag; this is what tells
+    // the editor to claim their lock. It must not swallow the edit: the diff
+    // that runs once the grant lands still has to send it.
+    HC::Graph g;
+    auto doc = DS::forHorizonCodeGraph(g);
+    DS::DocMirror mirror;
+    CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));   // unseeded: no baseline
+    DS::seed(*doc, mirror, DS::Scope::Primary);
+    CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));
+
+    HC::EventDecl ev; ev.name = "OnLevelReady";
+    g.events.push_back(ev);
+    CHECK(DS::hasLocalChanges(*doc, mirror));
+    CHECK(DS::hasLocalChanges(*doc, mirror));         // asking twice changes nothing
+
+    const std::vector<Delta> ds = diff(*doc, mirror);
+    CHECK(countOf(ds, DS::Kind::Event, kUpsert) == 1);
+    CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));
+}

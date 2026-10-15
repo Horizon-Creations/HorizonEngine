@@ -648,6 +648,23 @@ namespace
 					if (b.fromSpline() && !b.polygon.empty())
 						bj["polygonB64"] = base64Encode(reinterpret_cast<const uint8_t*>(b.polygon.data()),
 						                                b.polygon.size() * sizeof(glm::vec2));
+					// The lake's own bed (Thema 188 Schritt 2): it digs, with what, and
+					// the ground its digs moved, so the bed keeps following the outline
+					// after an undo, a reload or the end of Play. Only for a lake that
+					// digs: every other body saves byte for byte as before.
+					if (b.fromSpline() && b.digsBed)
+					{
+						json lj = { { "depth", b.dugDepth }, { "bank", b.dugBank } };
+						const HE::water::GroundPatch& gp = b.groundPatch;
+						if (!gp.empty())
+						{
+							lj["res"] = gp.res;
+							lj["rect"] = { gp.x0, gp.z0, gp.w, gp.h };
+							lj["deltaB64"] = base64Encode(reinterpret_cast<const uint8_t*>(gp.delta.data()),
+							                              gp.delta.size() * sizeof(float));
+						}
+						bj["lakeBed"] = std::move(lj);
+					}
 					// What the water does to a body in it (Thema 179): only the settings
 					// that are not the default, and nothing at all while none is, so a
 					// body of water from before them saves byte for byte as it did.
@@ -1631,6 +1648,42 @@ namespace
 							{
 								b.polygon.resize(raw.size() / sizeof(glm::vec2));
 								if (!raw.empty()) std::memcpy(b.polygon.data(), raw.data(), raw.size());
+							}
+						}
+						// The lake's own bed. Every key is checked here for its type,
+						// sanitize() below for whether the patch fits the height grid.
+						if (bj.contains("lakeBed") && bj["lakeBed"].is_object())
+						{
+							const json& lj = bj["lakeBed"];
+							if (lj.contains("depth") && lj["depth"].is_number() &&
+							    lj.contains("bank") && lj["bank"].is_number())
+							{
+								b.digsBed  = true;
+								b.dugDepth = lj["depth"].get<float>();
+								b.dugBank  = lj["bank"].get<float>();
+							}
+							if (b.digsBed && lj.contains("res") && lj["res"].is_number_unsigned() &&
+							    lj.contains("rect") && lj["rect"].is_array() && lj["rect"].size() == 4 &&
+							    lj.contains("deltaB64") && lj["deltaB64"].is_string())
+							{
+								const json& r = lj["rect"];
+								bool ints = true;
+								for (const json& v : r) ints = ints && v.is_number_integer();
+								const std::vector<uint8_t> raw = base64Decode(lj["deltaB64"].get<std::string>());
+								if (ints && raw.size() % sizeof(float) == 0)
+								{
+									HE::water::GroundPatch& gp = b.groundPatch;
+									const auto clampInt = [](const json& v)
+									{
+										const long long x = v.get<long long>();
+										return static_cast<int>(std::clamp<long long>(x, -1, 1 << 20));
+									};
+									gp.res = static_cast<uint32_t>(std::min<uint64_t>(lj["res"].get<uint64_t>(), 1u << 20));
+									gp.x0 = clampInt(r[0]); gp.z0 = clampInt(r[1]);
+									gp.w  = clampInt(r[2]); gp.h  = clampInt(r[3]);
+									gp.delta.resize(raw.size() / sizeof(float));
+									if (!raw.empty()) std::memcpy(gp.delta.data(), raw.data(), raw.size());
+								}
 							}
 						}
 						// The physics of the water (Thema 179). Every key is optional and
@@ -2765,6 +2818,22 @@ namespace
 #undef HE_RESET_FOR_KEY
 		return false;
 	}
+
+	// Take away every component the entity carries whose key `comps` lacks —
+	// the half of a whole-state write that applyComponents (an update) never
+	// does. The one key the save path leaves out on purpose is honoured here
+	// too: a terrain's MeshComponent is generated, serializeComponents skips it,
+	// and its absence from a terrain's state means nothing.
+	void removeComponentsAbsentFrom(entt::registry& registry, Entity entity, const json& comps)
+	{
+		const bool terrain = registry.all_of<TerrainComponent>(entity);
+#define HE_REMOVE_ABSENT(k, T) \
+		if (registry.all_of<T>(entity) && !comps.contains(k) && \
+		    !(terrain && std::string_view(k) == "mesh")) \
+			registry.remove<T>(entity);
+		HE_SCENE_COMPONENT_KEYS(HE_REMOVE_ABSENT)
+#undef HE_REMOVE_ABSENT
+	}
 #undef HE_SCENE_COMPONENT_KEYS
 
 	// ── Prefab propagation ───────────────────────────────────────────────────
@@ -3458,6 +3527,24 @@ bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
     // Reuses the same restore path as scene loading, so every component type is
     // covered by construction — a new component that loads from a scene file
     // replicates without any extra work here.
+    applyComponents(registry, entity, comps);
+    if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
+        registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });
+    return true;
+}
+
+bool SceneSerializer::replaceEntityComponents(HorizonWorld& world, Entity entity,
+                                              const std::vector<uint8_t>& data)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(entity) || data.empty()) return false;
+
+    const json comps = json::from_cbor(data, /*strict=*/true, /*allow_exceptions=*/false);
+    if (comps.is_discarded() || !comps.is_object()) return false;
+
+    // Removal first, so a key that is both gone and re-added cannot be undone
+    // by the order of the two halves.
+    removeComponentsAbsentFrom(registry, entity, comps);
     applyComponents(registry, entity, comps);
     if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
         registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });

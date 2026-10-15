@@ -1,11 +1,13 @@
 #include "SourceControlPanel.h"
 #include "EditorApplication.h"    // AppContext
-#include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
+#include "EditorSettingsPanel.h"
+#include "ProjectSettingsPanel.h"  // repo/remote setup lives on the Project Settings tab
 #include "EditorToolbar.h"     // shared toolbar look (Scene bar uses the same)
 #include "EditorTheme.h"       // brand palette (emphasis text)
 #include "EditorHelp.h"        // "Source Control Panel/<label>" scope for the tooltips
 #include "EditorWidgets.h"     // primary/danger/cancel buttons
 #include "GitController.h"
+#include "CollabController.h"     // who hosts the session, for the team-server notice
 #include "GitMissingDialog.h"      // the install remedy, when git is missing
 #include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
 #include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
@@ -17,6 +19,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -1274,7 +1277,7 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	ImGui::Spacing();
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Open source-control settings…"))
-		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
+		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
 }
 
 void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
@@ -1465,6 +1468,72 @@ void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
 } // namespace
 #endif // HE_IMGUI_ENABLED
 
+#ifdef HE_IMGUI_ENABLED
+// The project hands its history to the team server (sourceControl.mode =
+// "teamServer"): said at the top, before anything git would have to say, so a
+// user who finds no Commit button learns why. In a live session the host is
+// the one whose saves reach the server; the line under the notice says where
+// the session's state stands.
+static void drawTeamServerNotice(AppContext& ctx, const GitController& git)
+{
+	EditorWidgets::WrapText wrap;
+	ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+	const std::string& team    = git.teamServerTeam();
+	const std::string& project = git.teamServerProject();
+	if (!team.empty() && !project.empty())
+		ImGui::TextWrapped("The team server keeps this project's history (team \"%s\", "
+		                   "project \"%s\").", team.c_str(), project.c_str());
+	else
+		ImGui::TextWrapped("The team server keeps this project's history.");
+	ImGui::PopStyleColor();
+	ImGui::TextWrapped("It merges every member's saves, commits them and backs them up "
+	                   "to GitHub, so there is nothing to commit, pull or push here.");
+
+	const CollabController* collab = ctx.collab;
+	if (collab && collab->inSession())
+	{
+		if (!collab->isHost())
+		{
+			ImGui::TextDisabled("In this session the host hands everyone's saves to the "
+			                    "team server.");
+		}
+		else if (!git.teamServerPending().empty())
+		{
+			ImGui::TextDisabled("Session state kept, waiting for the team server: %zu "
+			                    "document%s.", git.teamServerPending().size(),
+			                    git.teamServerPending().size() == 1 ? "" : "s");
+		}
+		else if (git.teamServerLastHandedMs() != 0)
+		{
+			const auto nowMs = static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count());
+			const std::uint64_t ago =
+				nowMs > git.teamServerLastHandedMs() ? (nowMs - git.teamServerLastHandedMs()) / 1000u : 0u;
+			ImGui::TextDisabled("Session state handed to the team server %llu s ago "
+			                    "(%zu document%s).", static_cast<unsigned long long>(ago),
+			                    git.teamServerLastHandedCount(),
+			                    git.teamServerLastHandedCount() == 1 ? "" : "s");
+		}
+		else
+		{
+			ImGui::TextDisabled("You host this session: its state goes to the team server "
+			                    "on every save and once nobody is working on it.");
+		}
+	}
+	// Honest about this build: the setting can be on before the upload exists.
+	if (!git.hasTeamServerUpload())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
+		ImGui::TextWrapped("This editor cannot reach the team server yet, so nothing is "
+		                   "uploaded from here. Direct git stays off for this project; "
+		                   "switch Source Control back to git in Config/ProjectSettings.json "
+		                   "to use it.");
+		ImGui::PopStyleColor();
+	}
+}
+#endif
+
 void DrawSourceControlWindow(AppContext& ctx, bool& open)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -1504,6 +1573,20 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 
 	const HE::Sc::RepoStatus& st = git->status();
 
+	// Before git's own state: with the team server keeping the history, a
+	// missing git or a missing repository is nothing to fix, and offering an
+	// install or a `git init` would send the user the wrong way.
+	if (git->blockedByTeamServer())
+	{
+		drawTeamServerNotice(ctx, *git);
+		if (git->gitMissing() || (ctx.gitProbe && !ctx.gitProbe->gitFound) || !git->isRepo())
+		{
+			ImGui::End();
+			return;
+		}
+		ImGui::Spacing();
+	}
+
 	// Before "not a repository": without git there is no telling, and a project
 	// that IS a repository would otherwise be offered a fresh `git init`.
 	if (git->gitMissing() || (ctx.gitProbe && !ctx.gitProbe->gitFound))
@@ -1536,10 +1619,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		else
 		{
 			ImGui::TextWrapped("Repository setup (init, remote, GitHub sign-in) lives "
-			                   "in Preferences \xe2\x96\xb8 Source Control.");
+			                   "in Project Settings \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
-			if (EditorWidgets::button("Set up in Preferences…", ImVec2(240.0f, 0.0f)))
-				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
+			if (EditorWidgets::button("Set up in Project Settings…", ImVec2(240.0f, 0.0f)))
+				ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
 		}
 
 		// Errors are not printed here: GitController posts them to the notifications
@@ -1570,7 +1653,8 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	// Errors and the guest notice sit directly under the bar and nowhere else.
 	// The old layout scattered status text between every section, so the panel
 	// grew and shrank as things happened and the change list moved with it.
-	if (git->blockedByCollabSession())
+	// The team-server notice above already says how a session's work travels.
+	if (git->blockedByCollabSession() && !git->blockedByTeamServer())
 	{
 		EditorWidgets::WrapText wrap;
 		// Explained rather than silently absent: a user who cannot find the

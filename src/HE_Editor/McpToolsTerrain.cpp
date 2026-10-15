@@ -1058,7 +1058,9 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 				if (!L::polygonOf(*r.world, sp, r.entity, poly))
 					return failFor(CmdError::InvalidPayload,
 					               "The spline is not a closed shape of at least three points right now.");
-				const HE::water::Result rs = L::reshape(work, body, poly);
+				// follow, not the bare reshape: a lake that digs its own bed takes it
+				// along, as the editor's own sync does (Thema 188 Schritt 2).
+				const HE::water::Result rs = L::follow(work, body, poly);
 				if (!rs.ok) return failFor(CmdError::InvalidPayload, "The outline lies outside the landscape.");
 				changed = rs.changed > 0 || work.water.findBody(body)->polygon != r.tc->water.findBody(body)->polygon;
 				result["cellsChanged"] = static_cast<int>(rs.changed);

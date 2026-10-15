@@ -1,3 +1,4 @@
+#include "EditorGraphics.h"
 #include "ExportDialogPanel.h"
 #include "ToolSetupDialog.h"         // the missing cmake/compiler notice and its "Set Up…" button
 #include <algorithm>
@@ -145,7 +146,13 @@ static std::string effectiveExportBackend(const AppContext& ctx)
 // question waiting to happen.
 static std::string buildGameConfigJson(const AppContext& ctx)
 {
-    const EditorConfig& cfg = ctx.editorConfig;
+    // The graphics half: the project's own word when it sets one, else the editor's
+    // live values. A copy, so the project's numbers never land in the editor's
+    // config (EditorGraphics.h).
+    EditorConfig cfg = ctx.editorConfig;
+    if (ctx.projectManager && !ctx.projectManager->currentProject().path.empty() &&
+        ctx.projectManager->currentProject().settings.graphics.enabled)
+        EditorGraphics::apply(ctx.projectManager->currentProject().settings.graphics, cfg);
     json entries = json::array();
     const auto put = [&entries](const char* key, const json& value)
     {
@@ -190,8 +197,8 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GIReflBlur",                cfg.GIReflBlur);
 
     // The window half: the project's Render Defaults when it claims them, else
-    // this dialog's rows. The graphics half above is the editor's either way —
-    // the page has no say on bloom or AA, and says so.
+    // this dialog's rows. The graphics half above is the project's own when its
+    // Rendering pages set one (graphics.enabled), the editor's live values otherwise.
     if (const HE::ProjectRenderDefaults* project = projectRenderDefaults(ctx))
     {
         put("GameWindowWidth",  project->windowWidth);

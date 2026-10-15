@@ -311,6 +311,7 @@ add_executable(HorizonEditor WIN32
 	ReportIssueDialog.cpp
 	SelfUpdateDialog.cpp
 	EditorDockState.cpp
+	EditorGraphics.cpp
 	GitController.cpp
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
@@ -342,6 +343,9 @@ add_executable(HorizonEditor WIN32
 	CollabPanel.cpp
 	CollabPresenceBar.cpp
 	CollabUndo.cpp
+	TerrainSync.cpp
+	TeamController.cpp
+	TeamView.cpp
 	EngineContentSyncBar.cpp
 	McpStatusBar.cpp
 	EngineContentPublishDialog.cpp
@@ -373,8 +377,10 @@ add_executable(HorizonEditor WIN32
 	Guides/GuidesShipping.cpp
 	PanelSpotlight.cpp
 	# The test harness's CPU rasteriser for ImGui draw data — the editor uses it
-	# for one thing, the HE_DUMP_TUTORIALUI witness (TutorialPanel.cpp), which
-	# pictures the tour card in the running editor. Plain C++ over imgui.h.
+	# for its witnesses (EditorUiShot.cpp): HE_DUMP_TUTORIALUI, which pictures
+	# the tour card in the running editor, and the HE_DUMP_UI trigger shots.
+	# Plain C++ over imgui.h.
+	EditorUiShot.cpp
 	${CMAKE_SOURCE_DIR}/tests/ImGuiSoftwareRaster.cpp
  "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "ProjectPreflight.h" "SceneDiskWatch.h" "SceneFileStamp.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "ConsoleView.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolSetupDialog.h" "ReportIssueDialog.h" "SelfUpdateDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
