@@ -1,4 +1,5 @@
 #include "AudioEditorPanel.h"
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorToolbar.h"        // shared toolbar strip
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
@@ -129,7 +130,6 @@ struct State
 	std::vector<std::string> undo;
 	int         undoPos    = -1;
 	bool        editsStale = false;   // reloadFromDisk: re-read the edit chunk next frame
-	std::string lastSaveError;
 
 	// Extract runs AFTER the tab's window has ended (render, at the bottom): the
 	// button only asks for it, so nothing that writes files runs while `clip` —
@@ -421,18 +421,19 @@ void commitEdit(State& st, const HE::AudioEdit& edit)
 
 bool saveState(AppContext& ctx, State& st)
 {
-	st.lastSaveError.clear();
 	AudioAsset* a = editableOf(ctx, st);
 	if (!a)
 	{
-		st.lastSaveError = "Not saved: this clip is no longer loaded.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Audio clip not saved",
+		               "This clip is no longer loaded, so there is nothing to write.");
 		return false;
 	}
 	// The samples go back into the file exactly as they were loaded — the same
 	// bytes in the same chunk — so the edit chunk is the only thing that changes.
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Audio clip not saved",
+		               "The file could not be written. Check that it is not read-only and the disk has room.");
 		return false;
 	}
 	st.dirty = false;
@@ -1078,9 +1079,6 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 		else
 			ImGui::TextDisabled("Only an imported asset can be assigned to a bus.");
-
-		if (!st.lastSaveError.empty())
-			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", st.lastSaveError.c_str());
 
 		ImGui::SeparatorText("Preview");
 		if (!audioReady)

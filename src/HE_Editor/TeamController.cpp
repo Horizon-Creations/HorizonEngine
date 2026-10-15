@@ -175,18 +175,21 @@ bool TeamController::begin(const std::string& server, const std::string& team,
 		m_error  = server.empty() ? std::string("Enter the team server's address first.")
 		                          : "The team server address \"" + server + "\" cannot be used (" + why + ").";
 		m_status = Status::Failed;
+		notice(m_error, true);
 		return false;
 	}
 	if (!RelayTransport::isValidId(team) || !RelayTransport::isValidId(member))
 	{
 		m_error  = "Team and member names are 1-64 letters, digits, - or _.";
 		m_status = Status::Failed;
+		notice(m_error, true);
 		return false;
 	}
 	if (password.empty() || password.size() > 255)
 	{
 		m_error  = password.empty() ? "Enter a password." : "That password is too long (255 bytes at most).";
 		m_status = Status::Failed;
+		notice(m_error, true);
 		return false;
 	}
 
@@ -285,6 +288,7 @@ bool TeamController::connectNow()
 	{
 		m_error = "Could not open a connection to the team server at " + m_server.host + ":" +
 		          std::to_string(m_server.port) + ".";
+		notice(m_error, true);
 		return false;
 	}
 	return true;
@@ -619,10 +623,9 @@ HE::Ed::NoteSpec TeamController::signInFailed()
 
 void TeamController::acceptInvite(const std::string& session)
 {
-	// join() reports "a session is already running" and "not signed in" through
-	// m_error, which only the Team window shows — from a toast button that would
-	// be a click with no answer.
-	if (!join(session)) notice(m_error, true);
+	// join() says why it refused (not signed in, a session already running) as a
+	// notice of its own, so a click on the toast always gets an answer.
+	join(session);
 }
 
 void TeamController::notice(std::string text, bool error)
@@ -655,6 +658,7 @@ bool TeamController::requireSignedIn(const char* what)
 {
 	if (m_client && m_client->loggedIn()) return true;
 	m_error = std::string("Sign in to the team server to ") + what + ".";
+	notice(m_error, true);
 	return false;
 }
 
@@ -683,11 +687,15 @@ bool TeamController::hostSession(bool open)
 	if (m_collab.active())
 	{
 		m_error = "A collaboration session is already running; leave it first.";
+		notice(m_error, true);
 		return false;
 	}
 	if (!m_collab.startTeamHosting(m_server, member()))
 	{
 		m_error = m_collab.lastError();
+		// The collaboration controller announces its own failure (a dialog); only a
+		// refusal that did not make it fail has no other voice.
+		if (m_collab.status() != CollabController::Status::Failed) notice(m_error, true);
 		return false;
 	}
 	m_hosted     = m_collab.sessionId();
@@ -719,6 +727,7 @@ bool TeamController::setSessionOpen(bool open)
 	if (m_hosted.empty())
 	{
 		m_error = "This editor is not hosting a team session.";
+		notice(m_error, true);
 		return false;
 	}
 	m_hostedOpen = open;
@@ -739,6 +748,7 @@ bool TeamController::invite(const std::string& member)
 	if (m_hosted.empty())
 	{
 		m_error = "Host a session first, then invite.";
+		notice(m_error, true);
 		return false;
 	}
 	m_client->invite(m_hosted, member, reportFailure("Could not invite " + member));
@@ -751,6 +761,7 @@ bool TeamController::join(const std::string& session)
 	if (m_collab.active())
 	{
 		m_error = "A collaboration session is already running; leave it first.";
+		notice(m_error, true);
 		return false;
 	}
 	m_joining = session;
@@ -933,6 +944,7 @@ bool TeamController::setAvatar(std::uint16_t size, const std::vector<std::uint8_
 	if (size > TeamClient::kMaxAvatarSize || rgba.size() != std::size_t(size) * size * 4)
 	{
 		m_error = "The picture is not a square of at most 64 pixels.";
+		notice(m_error, true);
 		return false;
 	}
 	m_client->setAvatar(size, rgba, reportFailure("Could not change your picture"));

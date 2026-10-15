@@ -1,4 +1,5 @@
 #include "CinematicPanel.h"
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "CinematicPreview.h"      // the write-look-restore bracket
 #include "CinematicTimeline.h"     // the strip and the editing rules
 #include "SequencerTimeline.h"     // targetName/targetGroup/defaultValue — one list of properties
@@ -66,7 +67,6 @@ struct PanelState
 	std::string scratch;
 	std::string scratchKey;
 
-	std::string lastSaveError;
 };
 AssetPanelState<PanelState> s_states;
 
@@ -82,12 +82,11 @@ SequenceAsset* seqOf(const PanelState& st, AppContext& ctx)
 bool saveState(PanelState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
-	st.lastSaveError.clear();
 	SequenceAsset* a = seqOf(st, ctx);
-	if (!a) { st.lastSaveError = "Not saved: this sequence is no longer loaded."; return false; }
+	if (!a) { HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "This sequence is no longer loaded."); return false; }
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;
@@ -864,12 +863,6 @@ void CinematicPanel::render(AppContext& ctx, const std::string& assetPath,
 		bar.readout(nullptr, "Cinematic Sequence", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, st.dirty && seq != nullptr)) saveState(st, ctx);
-	}
-	if (!st.lastSaveError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(220, 80, 80, 255));
-		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
-		ImGui::PopStyleColor();
 	}
 	if (!seq)
 	{
