@@ -1,8 +1,8 @@
 # Team server as source-control mediator: design (topic 199, step 1)
 
 Status (2026-10-15): **server side built** (step 2, CollabSession `claude/he-net-relay-server`
-829f224..f76dfff) **and the GitHub backup** (step 3, `b6aaa00`); where they differ from this plan,
-sections 12 and 13 win. Editor (step 4) and deployment (step 5) are open.
+829f224..f76dfff), **the GitHub backup** (step 3, `b6aaa00`) **and the editor** (step 4, section 14);
+where they differ from this plan, sections 12-14 win. Deployment (step 5) is open.
 
 Status (2026-10-13): **design only**, nothing implemented. This is the plan that steps 2-5
 of topic 199 build. It sits on top of the team server from topic 197 (CollabSession repo
@@ -459,6 +459,49 @@ States: 1 pending, 2 ok, 3 failing (retried), 4 diverged (stopped). `time` = las
   at most `--sc-backup-max-delay` (300 s) behind; immediately at start for every project with a
   backup; on stop one more push, waited for at most 30 s, then cancelled (runs again at next start).
 
+## 14. As built in step 4: the editor (2026-10-15)
+
+The topic branch merged `release/0.7.0` first (`6b9d95be`): topic 197's team client and topic 198's
+team-mode gate in `GitController` exist only there.
+
+| Piece | Where |
+|---|---|
+| Ticket, result, event | `Net/TeamClient.h`: op `ScTicket` 20 (`scTicket()`, `Reply::ticket`), result `NoSuchProject` 18, event `ScHead` 9 (`Event::project`, `rev`) |
+| Sync connection | `Net/ScClient.{h,cpp}`: hello, pipelined requests, SC_DATA ≤ 1 MiB both ways, strict reply order; timeout 120 s since the last frame in, plus 1 ms per 256 bytes of an outgoing stream |
+| Bases, upload, reconcile | `SourceControl/TeamSyncService.{h,cpp}` (worker thread, GitService pattern; no HE_Net types in the header) |
+| Editor glue | `TeamSyncController.{h,cpp}`; `TeamController::requestScTicket`/`setOnScHead`/`serverAddress`; `EditorApplication` (member, pump after `m_team.update`, save hooks, `applyTeamSyncFile`, keep-local rule) |
+| View | `TeamSyncView.{h,cpp}`, drawn by `SourceControlPanel` instead of the whole git view in team mode; help scope `Team Sync/` |
+
+**State file** `Saved/TeamSync/<team>-<project>.state` (lower case): `heteamsync 1`, `rev`, one
+`B path sha` per base, one `C path sha size mtime` per hash-cache entry. Scan = project tree minus
+`.git/`, `Saved/`, `RepoConfig::gitignoreText()` and the project's `.gitignore` (simple globs, no `!`).
+
+**Rules as built** (per path; m = head, l = local, b = base):
+* Reconcile (after every upload, on `sc-head`, on reconnect): `m == l` → base = m. `l == b` → the team's
+  version is written (or the file removed). Otherwise it is a local change and waits for the next upload.
+* Upload: everything with `l != b` in one COMMIT (`A`/`M`/`D`). Base afterwards = what went up, also when
+  the server's result differs, so the reconcile fetches the merge, and a save made in the meantime merges
+  against the right base next time. `delete-dropped` → base erased, so the reconcile restores the file.
+* Files from the server are written by `pump()` on the main thread, after re-hashing the local copy
+  (it must still be what the decision was made on), never during Play, and **never over a file the editor
+  holds unsaved edits for** (`setKeepLocal`: dirty scene, dirty asset tab). Writing it would move the base
+  to the teammate's version, and the next save would replace that version as `applied`, with no copy on
+  `horizon-conflicts`. Left alone, the save merges against what it was edited from.
+* **Deviation from 6.3:** the open scene is always clean when it arrives (see above), so it reloads
+  directly (`openScene` + `SceneDiskWatch::remember`), without the Reload / Keep question.
+* First sync (no state file, head rev > 0): equal files get their base, files only on the server are
+  written, files that differ are listed and nothing moves until "Take the Team's Versions" or "Keep Mine
+  and Merge" (audit 3.2, without the clone → rev mapping).
+* Live session: a client pauses (no upload, no reconcile) and on leaving takes the team's version of
+  every file that differs from its base (audit 3.1). The host uploads, but files from the server wait
+  until the session ends (audit 3.8, without forwarding them to the peers).
+* "Lost": a revision by somebody else with `merged-arrival` / `replaced … against rN by <me>` in its LOG
+  trailers. Open My Version = MANIFEST(rN) + GET into `Saved/TeamSync/Lost/r<rev>/<path>`, then the
+  folder is shown. A toast for each that happens while the editor runs.
+* Triggers: a save (scene, asset) → 1 s debounce; `GitController`'s team-server slot (a session host's
+  settled state); Sync Now; `sc-head`; team reconnect. A failed connection retries after 5 s, doubling up to 60 s.
+* Auto-fetch is off in team mode (audit 3.11).
+
 ## Handoff
 
 - **Topic / step:** 199, step 1 (design, docs only). Branch
@@ -560,3 +603,38 @@ States: 1 pending, 2 ok, 3 failing (retried), 4 diverged (stopped). `time` = las
   false`, next to `GitHubApi::createRepo`), BACKUP_STATUS shown with state/error/pushed_rev.
   2. Step 5: `deploy.sh` installs `git git-lfs openssh-client`; systemd `TimeoutStopSec` ≥ 40 s
   (flush waits 30 s; default 90 s is fine); acceptance 6 + 7 of section 10 against real GitHub.
+
+## Handoff (step 4)
+
+- **Topic / step:** 199, step 4 (editor). Branch `claude/team-server-als-source-control-mittelsmann-opt-in-auto-merge`:
+  `6b9d95be` (merge release/0.7.0), `622ecc6e` (TeamClient + ScClient + TeamSyncService + tests),
+  `a689f7fa` (editor glue + view), `8b1ae3cc` (scene reload, live script), `be86e5bd` (help area).
+- **Verified (macOS, Release, shared ccache):** ctest 290/290 with `-E test_material_graph` (as the
+  notes advise). `test_team_sync.cpp` 11 cases against FakeScServer (stable 3×, ~8 s); its real-server
+  case against `/tmp/collab-build/collab_server` (283f875) PASS: two members merge one scene by entity
+  (r3 `merged`), the same field → `merged-arrival … against r4 by Anna`, Anna gets her r4 version back;
+  server repo history and `horizon-conflicts:r5/` checked by hand. `test_team_sync_ui.cpp` 2 cases
+  (debounce, pull through TeamController, dirty tab not overwritten → its save recorded as `replaced`,
+  Open My Version, other team, first sync); screenshots in `docs/images/team-sync-2026-10-15/`.
+  `scripts/he_team_sync_two_editors.py` (two deployed editors, real server on loopback, saves via MCP
+  `scene_save`): PASS. `editor_help_audit.py --check` clean.
+- **Not verified:** Windows/Linux (CI started with the push), the rented host (step 5), files ≥ 50 MiB
+  (LFS) through the editor, scan time on a large project (hashing is cached by size/mtime; every save
+  scans the tree), a real collab session with team sync (pause/hold are unit-tested in the service only),
+  reload of an open non-scene asset tab in a real editor.
+- **Decisions:** worker writes nothing into the project (main thread does, with the keep-local rule);
+  the whole git view is replaced in team mode (the local `.git` is dormant); clean scene reloads without
+  asking; a ticket refusal is not retried until the next trigger; `Team Sync/` help scope.
+- **Open (audit 3.x / design):** backup UI (BACKUP_SET / STATUS, deploy key via `GitHubApi`), 3.2 clone →
+  rev mapping, 3.3 contributors, 3.4 revert / restore to rev N and "Use My Version", 3.6 pause, 3.7
+  Content Browser badges from the team state (still from the dormant `.git`), 3.9 switching git ↔ team
+  as one action, tool-setup rows and the COMMITTED reward in team mode, a note for the next sync.
+- **Pitfalls:** TeamClient with an injected clock starting at 0 times out at once (`0 - 1` unsigned);
+  start at 1. The editor's stdout log is block-buffered while it runs: witness a live run by files the
+  editor writes (the state file), not by its log. A new help scope needs an area rule in `EditorHelp.cpp`
+  (`test_editor_help`) and its file in `editor_help_audit.py`'s list.
+- **Next steps:** 1. Step 5: deploy the server (git, git-lfs, openssh-client), then acceptance 1-8 of
+  section 10 against the host. `he_team_sync_two_editors.py` starts its own loopback server; for the
+  host it needs a `--server HOST:PORT` mode (team and project are created by its protocol lines).
+  2. A follow-up step for the open list above, backup UI first (admins need it to finish setup).
+
