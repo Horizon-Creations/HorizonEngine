@@ -7,7 +7,7 @@ struct AppContext;
 // HE::Cs::publishEngineContentBlocking / rebuildManifestFromServerBlocking on a
 // worker thread and show the log live. Both share one dialog (only one can
 // meaningfully run at a time — they both write manifest.json). All state is
-// file-static in the .cpp, same arrangement as ToolchainDialog — this dialog
+// file-static in the .cpp, same arrangement as ToolSetupDialog — this dialog
 // opens itself once requested, no AppContext field needed to track "is it open".
 namespace EngineContentPublishDialog
 {

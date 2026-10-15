@@ -1,11 +1,12 @@
 #pragma once
 #include <glm/vec3.hpp>
 #include <string>
+#include <vector>
 
 class HorizonWorld;
 class DebugDrawBuffer;
 struct AppContext;
-namespace HE { struct CellManifest; struct CellSplitOptions; }
+namespace HE { struct CellManifest; struct CellSplitOptions; struct CellAnchor; }
 
 // ── World streaming, seen from the editor (Thema 153, Schritt 6) ─────────────
 // What the streaming machinery is doing right now, in one place: the job
@@ -26,6 +27,17 @@ namespace StreamingDebugView
 	// The cell squares within reach of `eye` (world space, the editor camera) and
 	// the two radii around it, as debug lines. Nothing for a scene without cells.
 	void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawBuffer& out);
+	// The same with preview anchors besides the camera (absolute positions): the game
+	// keeps a cell around while ANY anchor is near it, so each square is coloured by
+	// the nearest of them and each gets its own pair of radii, stretched by its
+	// radiusScale.
+	void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
+	                     const std::vector<HE::CellAnchor>& pins, DebugDrawBuffer& out);
+
+	// The preview anchors the Streaming tab keeps for the Scene window: what the game
+	// would hold if a script pinned a cell there (Thema 164), for the editor to look at
+	// before the script API exists. Not saved, not part of the scene.
+	std::vector<HE::CellAnchor>& previewPins();
 
 	// The open scene split into streaming cells (HE::splitWorldIntoCells): the
 	// cell files go to "<scene name>.cells" beside the scene file, the world

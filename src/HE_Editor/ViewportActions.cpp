@@ -152,7 +152,7 @@ std::vector<Entity> selectableEntities(HorizonWorld& world)
 		if (!reg.valid(e)) return;
 		if (e != world.rootEntity())
 		{
-			if (world.isBuiltin(e) || reg.all_of<TerrainChunkComponent>(e)) return;
+			if (world.isBuiltin(e) || HE::isTerrainGenerated(reg, e)) return;
 			out.push_back(e);
 		}
 		if (const auto* h = reg.try_get<HierarchyComponent>(e))

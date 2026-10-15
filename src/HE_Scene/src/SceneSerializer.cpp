@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
+#include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
@@ -383,6 +384,19 @@ namespace
 				{ "material",       uuidToJson(rope->materialAssetId) },
 			};
 		}
+		if (auto* spline = registry.try_get<SplineComponent>(entity))
+		{
+			// The whole component is authored data, so the whole component is
+			// written. "closed" is the flag as authored, not Curve::closed(): a
+			// two-point spline saved as closed must come back closed, so that
+			// adding the third point after a reload closes it.
+			json pts = json::array();
+			for (const glm::vec3& p : spline->controlPoints) pts.push_back(vec3ToJson(p));
+			comps["spline"] = {
+				{ "points", pts },
+				{ "closed", spline->closed },
+			};
+		}
 		if (auto* tr = registry.try_get<TrailComponent>(entity))
 		{
 			// The point ring buffer stays out for the same reason a particle pool
@@ -410,6 +424,10 @@ namespace
 				{ "is2D",        r->is2D },
 				{ "layer",       r->collisionLayer },
 			};
+			// Water (Thema 179): written only off their defaults, so a scene without
+			// any saves byte for byte as it did before the fields existed.
+			if (!r->affectedByWater) comps["rigidbody"]["affectedByWater"] = false;
+			if (r->density > 0.0f)   comps["rigidbody"]["density"] = r->density;
 		}
 		if (auto* col = registry.try_get<ColliderComponent>(entity))
 		{
@@ -533,10 +551,21 @@ namespace
 				{ "currentKind",        static_cast<int>(w->currentKind) },
 				{ "targetKind",         static_cast<int>(w->targetKind) },
 				{ "intensity",          w->intensity },
+				{ "puddleAmount",       w->puddleAmount },
+				{ "puddleSize",         w->puddleSize },
+				{ "snowCover",          w->snowCover },
+				{ "thunder",            w->thunder },
 				{ "transitionDuration", w->transitionDuration },
 				{ "autoCycle",          w->autoCycle },
 				{ "cycleSeconds",       w->cycleSeconds },
 				{ "thunderSound",       uuidToJson(w->thunderSound) },
+				{ "rainSound",          uuidToJson(w->rainSound) },
+				{ "windSound",          uuidToJson(w->windSound) },
+				{ "snowSound",          uuidToJson(w->snowSound) },
+				{ "stormSound",         uuidToJson(w->stormSound) },
+				{ "soundEnabled",       w->soundEnabled },
+				{ "soundVolume",        w->soundVolume },
+				{ "soundBus",           w->soundBus },
 				{ "maxRainParticles",   w->maxRainParticles },
 				{ "maxSnowParticles",   w->maxSnowParticles },
 				{ "groundLevel",        w->groundLevel },
@@ -598,6 +627,96 @@ namespace
 				tc["sculptHeightsB64"] = base64Encode(
 					reinterpret_cast<const uint8_t*>(t->sculptHeights.data()),
 					t->sculptHeights.size() * sizeof(float));
+			}
+			// Water (WaterField.h). Written once there is anything to save, so a
+			// landscape without water saves byte for byte as before. The cells go
+			// out run-length encoded: a dry grid with one lake is a few hundred
+			// bytes where the raw rasters would be a few hundred KB per snapshot.
+			if (!t->water.pristine())
+			{
+				const HE::water::Field& w = t->water;
+				tc["waterRes"]    = w.res;
+				tc["waterNextId"] = w.nextBodyId;
+				json bodies = json::array();
+				for (const HE::water::Body& b : w.bodies)
+				{
+					json bj = { { "id", b.id }, { "level", b.level } };
+					if (b.fromSpline()) bj["sourceSpline"] = uuidToJson(b.sourceSpline);
+					// The outline the lake was last laid from, as raw float pairs
+					// (x, z): the baseline the brush share is measured against when
+					// the lake is reshaped. Same encoding as sculptHeights.
+					if (b.fromSpline() && !b.polygon.empty())
+						bj["polygonB64"] = base64Encode(reinterpret_cast<const uint8_t*>(b.polygon.data()),
+						                                b.polygon.size() * sizeof(glm::vec2));
+					// The lake's own bed (Thema 188 Schritt 2): it digs, with what, and
+					// the ground its digs moved, so the bed keeps following the outline
+					// after an undo, a reload or the end of Play. Only for a lake that
+					// digs: every other body saves byte for byte as before.
+					if (b.fromSpline() && b.digsBed)
+					{
+						json lj = { { "depth", b.dugDepth }, { "bank", b.dugBank } };
+						const HE::water::GroundPatch& gp = b.groundPatch;
+						if (!gp.empty())
+						{
+							lj["res"] = gp.res;
+							lj["rect"] = { gp.x0, gp.z0, gp.w, gp.h };
+							lj["deltaB64"] = base64Encode(reinterpret_cast<const uint8_t*>(gp.delta.data()),
+							                              gp.delta.size() * sizeof(float));
+						}
+						bj["lakeBed"] = std::move(lj);
+					}
+					// What the water does to a body in it (Thema 179): only the settings
+					// that are not the default, and nothing at all while none is, so a
+					// body of water from before them saves byte for byte as it did.
+					if (b.physics != HE::water::BodyPhysics{})
+					{
+						const HE::water::BodyPhysics d;
+						json pj = json::object();
+						if (b.physics.enabled     != d.enabled)     pj["enabled"]     = b.physics.enabled;
+						if (b.physics.density     != d.density)     pj["density"]     = b.physics.density;
+						if (b.physics.linearDrag  != d.linearDrag)  pj["linearDrag"]  = b.physics.linearDrag;
+						if (b.physics.angularDrag != d.angularDrag) pj["angularDrag"] = b.physics.angularDrag;
+						if (b.physics.flow        != d.flow)        pj["flow"]        = { b.physics.flow.x, b.physics.flow.y };
+						if (b.physics.splash      != d.splash)      pj["splash"]      = b.physics.splash;
+						bj["physics"] = std::move(pj);
+					}
+					// What this body looks like from below its surface (Thema 185 Schritt
+					// 2): same "only the non-default settings" rule as physics above.
+					if (b.underwaterFog != HE::water::UnderwaterFogParams{})
+					{
+						const HE::water::UnderwaterFogParams d;
+						json fj = json::object();
+						if (b.underwaterFog.shallowColor != d.shallowColor)
+							fj["shallowColor"] = { b.underwaterFog.shallowColor.x, b.underwaterFog.shallowColor.y,
+							                       b.underwaterFog.shallowColor.z };
+						if (b.underwaterFog.deepColor != d.deepColor)
+							fj["deepColor"] = { b.underwaterFog.deepColor.x, b.underwaterFog.deepColor.y,
+							                    b.underwaterFog.deepColor.z };
+						if (b.underwaterFog.density != d.density) fj["density"] = b.underwaterFog.density;
+						if (b.underwaterFog.falloff != d.falloff) fj["falloff"] = b.underwaterFog.falloff;
+						bj["underwaterFog"] = std::move(fj);
+					}
+					// The refracted-light net from below (Thema 185 Schritt 3): same rule.
+					if (b.underwaterCaustics != HE::water::UnderwaterCausticsParams{})
+					{
+						const HE::water::UnderwaterCausticsParams d;
+						json cj = json::object();
+						if (b.underwaterCaustics.intensity != d.intensity) cj["intensity"] = b.underwaterCaustics.intensity;
+						if (b.underwaterCaustics.scale     != d.scale)     cj["scale"]     = b.underwaterCaustics.scale;
+						if (b.underwaterCaustics.speed     != d.speed)     cj["speed"]     = b.underwaterCaustics.speed;
+						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
+						bj["underwaterCaustics"] = std::move(cj);
+					}
+					bodies.push_back(std::move(bj));
+				}
+				tc["waterBodies"] = std::move(bodies);
+				// The shore clipping settings, only when they are not the default
+				// (a scene with water from before them reads back as clipped).
+				if (!w.clipToGround) tc["waterClip"] = false;
+				if (w.shoreOvershoot != HE::water::kDefaultShoreOvershoot) tc["waterShoreOvershoot"] = w.shoreOvershoot;
+				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
+				if (!cells.empty())
+					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
 			}
 			comps["terrain"] = tc;
 		}
@@ -924,11 +1043,12 @@ namespace
 		auto view = registry.view<NameComponent>();
 		for (auto entity : view)
 		{
-			// The built-in environment sun/moon lights and runtime terrain chunks are
-			// never serialised — both are recreated on load (ensureEnvironmentLights /
-			// TerrainSystem from the TerrainComponent), so the scene file stays clean.
+			// The built-in environment sun/moon lights and what a landscape generates
+			// for itself (terrain chunks, water surfaces) are never serialised — all
+			// are recreated on load (ensureEnvironmentLights / TerrainSystem from the
+			// TerrainComponent), so the scene file stays clean.
 			if (registry.all_of<EnvironmentLightComponent>(entity) ||
-			    registry.all_of<TerrainChunkComponent>(entity))
+			    HE::isTerrainGenerated(registry, entity))
 				continue;
 
 			json eJson;
@@ -959,7 +1079,7 @@ namespace
 				json children = json::array();
 				for (auto child : hier->children)
 					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
-					    !registry.all_of<TerrainChunkComponent>(child))          // + terrain chunks
+					    !HE::isTerrainGenerated(registry, child))                // + chunks, water
 						children.push_back(uuidToJson(entityUuid(registry, child)));
 				eJson["children"] = children;
 			}
@@ -980,6 +1100,11 @@ namespace
 		// Cell manifest of a split scene (HE::CellStreamer), verbatim.
 		if (const std::string& cells = world.cellManifestJson(); !cells.empty())
 			scene["cells"] = json::parse(cells, nullptr, /*allow_exceptions=*/false);
+		// And the head of a scene that is itself a streaming cell, for the same
+		// reason: the export loads every project scene into a world and saves it
+		// again, and what the world does not carry does not reach the pak.
+		if (const std::string& head = world.cellHeadJson(); !head.empty())
+			scene["streaming"] = json::parse(head, nullptr, /*allow_exceptions=*/false);
 
 		return scene;
 	}
@@ -1207,6 +1332,16 @@ namespace
 			rope.materialAssetId  = jsonToUuid(c.value("material", json()));
 			registry.emplace_or_replace<RopeComponent>(entity, rope);
 		}
+		if (comps.contains("spline"))
+		{
+			const json& c = comps["spline"];
+			SplineComponent spline;
+			if (auto pts = c.find("points"); pts != c.end() && pts->is_array())
+				for (const json& p : *pts)
+					spline.controlPoints.push_back(jsonToVec3(p, glm::vec3(0.0f)));
+			spline.closed = c.value("closed", spline.closed);
+			registry.emplace_or_replace<SplineComponent>(entity, spline);
+		}
 		if (comps.contains("trail"))
 		{
 			const json& c = comps["trail"];
@@ -1236,6 +1371,15 @@ namespace
 			// collision layers existed loads every body into Default (0) — which
 			// is the channel it effectively had.
 			r.collisionLayer = c.value("layer", r.collisionLayer);
+			// Water (Thema 179). Absent in every scene written before it: the defaults
+			// stand. A density that is not a number or is negative is "from the mass".
+			if (c.contains("affectedByWater") && c["affectedByWater"].is_boolean())
+				r.affectedByWater = c["affectedByWater"].get<bool>();
+			if (c.contains("density") && c["density"].is_number())
+			{
+				r.density = c["density"].get<float>();
+				if (!std::isfinite(r.density) || r.density < 0.0f) r.density = 0.0f;
+			}
 			registry.emplace_or_replace<RigidBodyComponent>(entity, r);
 		}
 		if (comps.contains("collider"))
@@ -1391,10 +1535,25 @@ namespace
 			w.targetKind         = static_cast<WeatherKind>(c.value("targetKind",  static_cast<int>(w.targetKind)));
 			w.prevTarget         = w.targetKind; // no spurious reclaim on load → authored env is respected
 			w.intensity          = c.value("intensity",          w.intensity);
+			w.puddleAmount       = std::clamp(c.value("puddleAmount", w.puddleAmount), 0.0f, 1.0f);
+			w.puddleSize         = std::clamp(c.value("puddleSize",   w.puddleSize),   0.5f, 100.0f);
+			w.snowCover          = std::clamp(c.value("snowCover",    w.snowCover),    0.0f, 1.0f);
+			// A scene saved before thunder was a value of its own has none: its lightning came from
+			// the preset ("Storm"), so a stored Storm keeps striking after the load.
+			w.thunder            = c.contains("thunder")
+				? std::clamp(c.value("thunder", w.thunder), 0.0f, 1.0f)
+				: (weatherPreset(w.targetKind).lightning ? std::clamp(w.intensity, 0.0f, 1.0f) : 0.0f);
 			w.transitionDuration = c.value("transitionDuration", w.transitionDuration);
 			w.autoCycle          = c.value("autoCycle",          w.autoCycle);
 			w.cycleSeconds       = c.value("cycleSeconds",       w.cycleSeconds);
 			if (c.contains("thunderSound")) w.thunderSound = jsonToUuid(c["thunderSound"]);
+			if (c.contains("rainSound"))    w.rainSound    = jsonToUuid(c["rainSound"]);
+			if (c.contains("windSound"))    w.windSound    = jsonToUuid(c["windSound"]);
+			if (c.contains("snowSound"))    w.snowSound    = jsonToUuid(c["snowSound"]);
+			if (c.contains("stormSound"))   w.stormSound   = jsonToUuid(c["stormSound"]);
+			w.soundEnabled = c.value("soundEnabled", w.soundEnabled);
+			w.soundVolume  = c.value("soundVolume",  w.soundVolume);
+			w.soundBus     = c.value("soundBus",     w.soundBus);
 			w.maxRainParticles = c.value("maxRainParticles", w.maxRainParticles);
 			w.maxSnowParticles = c.value("maxSnowParticles", w.maxSnowParticles);
 			w.groundLevel      = c.value("groundLevel",      w.groundLevel);
@@ -1453,6 +1612,139 @@ namespace
 			}
 			else if (c.contains("sculptHeights") && c["sculptHeights"].is_array())
 				t.sculptHeights = c["sculptHeights"].get<std::vector<float>>(); // legacy scenes
+			// Water. Every key is optional and every value is checked: a scene
+			// written before water existed has none of them, and one edited or
+			// merged by hand must not leave a grid the surface can index out of.
+			{
+				HE::water::Field& w = t.water;
+				w.res = c.value("waterRes", w.res);
+				w.nextBodyId = c.value("waterNextId", w.nextBodyId);
+				if (c.contains("waterClip") && c["waterClip"].is_boolean())
+					w.clipToGround = c["waterClip"].get<bool>();
+				if (c.contains("waterShoreOvershoot") && c["waterShoreOvershoot"].is_number())
+					w.shoreOvershoot = c["waterShoreOvershoot"].get<float>();   // sanitize() clamps it
+				if (c.contains("waterBodies") && c["waterBodies"].is_array())
+					for (const json& bj : c["waterBodies"])
+					{
+						if (!bj.is_object()) continue;
+						HE::water::Body b;
+						if (bj.contains("id") && bj["id"].is_number_integer())
+						{
+							const long long id = bj["id"].get<long long>();
+							b.id = (id > 0 && id <= 65535) ? static_cast<uint16_t>(id) : HE::water::kNoBody;
+						}
+						if (bj.contains("level") && bj["level"].is_number())
+							b.level = bj["level"].get<float>();
+						if (bj.contains("sourceSpline"))
+							b.sourceSpline = jsonToUuid(bj["sourceSpline"]);
+						if (bj.contains("polygonB64") && bj["polygonB64"].is_string())
+						{
+							// A length that is not whole float pairs, or too many of
+							// them, is a damaged field: no outline (sanitize does the
+							// same for non-finite points).
+							const std::vector<uint8_t> raw = base64Decode(bj["polygonB64"].get<std::string>());
+							if (raw.size() % sizeof(glm::vec2) == 0 &&
+							    raw.size() / sizeof(glm::vec2) <= HE::water::kMaxPolygonPoints)
+							{
+								b.polygon.resize(raw.size() / sizeof(glm::vec2));
+								if (!raw.empty()) std::memcpy(b.polygon.data(), raw.data(), raw.size());
+							}
+						}
+						// The lake's own bed. Every key is checked here for its type,
+						// sanitize() below for whether the patch fits the height grid.
+						if (bj.contains("lakeBed") && bj["lakeBed"].is_object())
+						{
+							const json& lj = bj["lakeBed"];
+							if (lj.contains("depth") && lj["depth"].is_number() &&
+							    lj.contains("bank") && lj["bank"].is_number())
+							{
+								b.digsBed  = true;
+								b.dugDepth = lj["depth"].get<float>();
+								b.dugBank  = lj["bank"].get<float>();
+							}
+							if (b.digsBed && lj.contains("res") && lj["res"].is_number_unsigned() &&
+							    lj.contains("rect") && lj["rect"].is_array() && lj["rect"].size() == 4 &&
+							    lj.contains("deltaB64") && lj["deltaB64"].is_string())
+							{
+								const json& r = lj["rect"];
+								bool ints = true;
+								for (const json& v : r) ints = ints && v.is_number_integer();
+								const std::vector<uint8_t> raw = base64Decode(lj["deltaB64"].get<std::string>());
+								if (ints && raw.size() % sizeof(float) == 0)
+								{
+									HE::water::GroundPatch& gp = b.groundPatch;
+									const auto clampInt = [](const json& v)
+									{
+										const long long x = v.get<long long>();
+										return static_cast<int>(std::clamp<long long>(x, -1, 1 << 20));
+									};
+									gp.res = static_cast<uint32_t>(std::min<uint64_t>(lj["res"].get<uint64_t>(), 1u << 20));
+									gp.x0 = clampInt(r[0]); gp.z0 = clampInt(r[1]);
+									gp.w  = clampInt(r[2]); gp.h  = clampInt(r[3]);
+									gp.delta.resize(raw.size() / sizeof(float));
+									if (!raw.empty()) std::memcpy(gp.delta.data(), raw.data(), raw.size());
+								}
+							}
+						}
+						// The physics of the water (Thema 179). Every key is optional and
+						// checked; sanitize() below holds the numbers to their bounds.
+						if (bj.contains("physics") && bj["physics"].is_object())
+						{
+							const json& pj = bj["physics"];
+							const auto number = [&pj](const char* key, float& into)
+							{
+								if (pj.contains(key) && pj[key].is_number()) into = pj[key].get<float>();
+							};
+							if (pj.contains("enabled") && pj["enabled"].is_boolean())
+								b.physics.enabled = pj["enabled"].get<bool>();
+							number("density",     b.physics.density);
+							number("linearDrag",  b.physics.linearDrag);
+							number("angularDrag", b.physics.angularDrag);
+							number("splash",      b.physics.splash);
+							if (pj.contains("flow") && pj["flow"].is_array() && pj["flow"].size() == 2 &&
+							    pj["flow"][0].is_number() && pj["flow"][1].is_number())
+								b.physics.flow = { pj["flow"][0].get<float>(), pj["flow"][1].get<float>() };
+						}
+						// What this body looks like from below its surface (Thema 185
+						// Schritt 2). Every key is optional; sanitize() below clamps it.
+						if (bj.contains("underwaterFog") && bj["underwaterFog"].is_object())
+						{
+							const json& fj = bj["underwaterFog"];
+							const auto color3 = [&fj](const char* key, glm::vec3& into)
+							{
+								if (fj.contains(key) && fj[key].is_array() && fj[key].size() == 3 &&
+								    fj[key][0].is_number() && fj[key][1].is_number() && fj[key][2].is_number())
+									into = { fj[key][0].get<float>(), fj[key][1].get<float>(), fj[key][2].get<float>() };
+							};
+							color3("shallowColor", b.underwaterFog.shallowColor);
+							color3("deepColor",    b.underwaterFog.deepColor);
+							if (fj.contains("density") && fj["density"].is_number())
+								b.underwaterFog.density = fj["density"].get<float>();
+							if (fj.contains("falloff") && fj["falloff"].is_number())
+								b.underwaterFog.falloff = fj["falloff"].get<float>();
+						}
+						// The refracted-light net from below (Thema 185 Schritt 3).
+						if (bj.contains("underwaterCaustics") && bj["underwaterCaustics"].is_object())
+						{
+							const json& cj = bj["underwaterCaustics"];
+							const auto num = [&cj](const char* key, float& into)
+							{
+								if (cj.contains(key) && cj[key].is_number()) into = cj[key].get<float>();
+							};
+							num("intensity", b.underwaterCaustics.intensity);
+							num("scale",     b.underwaterCaustics.scale);
+							num("speed",     b.underwaterCaustics.speed);
+							num("depth",     b.underwaterCaustics.depth);
+						}
+						w.bodies.push_back(b);
+					}
+				if (c.contains("waterCellsB64") && c["waterCellsB64"].is_string())
+				{
+					const std::vector<uint8_t> bytes = base64Decode(c["waterCellsB64"].get<std::string>());
+					HE::water::decodeCells(w, bytes.data(), bytes.size());   // a bad stream drops the cells, keeps the bodies
+				}
+				HE::water::sanitize(t);
+			}
 			t.dirty       = true; // always regenerate after load
 			registry.emplace_or_replace<TerrainComponent>(entity, t);
 		}
@@ -1991,6 +2283,8 @@ namespace
 			world.setLevelScriptJson(scene["levelScript"].dump());
 		if (const auto cells = scene.find("cells"); cells != scene.end() && cells->is_object())
 			world.setCellManifestJson(cells->dump());
+		if (const auto head = scene.find("streaming"); head != scene.end() && head->is_object())
+			world.setCellHeadJson(head->dump());
 
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
@@ -2053,6 +2347,7 @@ namespace
 
 		// ── Pass 2: rebuild parent/child links ────────────────────────────────
 		rebuildHierarchy(registry, scene, idMap);
+		world.noteStructureChanged();
 
 		// Legacy scenes stored Environment/Weather on the World root; move them onto
 		// dedicated Sky/Weather entities so the whole engine sees one uniform model.
@@ -2073,7 +2368,8 @@ namespace
 	// root, which is parented to world.rootEntity() by createEntity). The loaded
 	// scene's children are grafted under the existing world root without clearing it.
 	bool applyAdditiveJson(HorizonWorld& world, const json& scene,
-	                       std::vector<Entity>* outCreated = nullptr)
+	                       std::vector<Entity>* outCreated = nullptr,
+	                       const SceneSerializer::AdditiveOptions& options = {})
 	{
 		if (!scene.contains("entities")) return true;
 
@@ -2087,6 +2383,22 @@ namespace
 		// copy of the scene into a world that may already contain one, and
 		// restoring would give both copies the same identities. Each graft keeps
 		// the ids minted at creation, so it is a distinct instance.
+		//
+		// options.preserveIds is the exception, for a load that happens once per
+		// file — a streamed cell (HE::CellStreamer). Its entities are destroyed
+		// again when the camera moves on, and what refers to them by id (a prefab
+		// placement's bindings, a joint, a rig's target) has to find them again
+		// when it comes back. The double graft the default exists to prevent is
+		// still caught, by asking the world: an id it holds already is not taken
+		// over. That entity keeps the fresh id it was created with, which only
+		// costs the references to it. The records stay addressed by their stored
+		// key below either way, so the hierarchy is rebuilt as the file says.
+		size_t      collisions = 0;
+		std::string firstCollision;
+		// createEntity() lists every new entity at the END of the world root's
+		// children. Noted here so the stale entries can be taken out again below
+		// without searching the whole list: it can hold a hundred thousand.
+		const size_t rootChildrenBefore = registry.get<HierarchyComponent>(world.rootEntity()).children.size();
 		for (auto& eJson : scene["entities"])
 		{
 			const HE::UUID key  = entityKeyOf(eJson);
@@ -2095,6 +2407,17 @@ namespace
 			// createEntity() parents to world.rootEntity() automatically, which is
 			// exactly what the source scene's own root needs too.
 			Entity e = world.createEntity(name);
+
+			if (options.preserveIds && hasStoredUuid(eJson) && key != HE::UUID{})
+			{
+				if (world.findByEntityId(key) == entt::null)
+					world.setEntityId(e, key);
+				else
+				{
+					if (collisions == 0) firstCollision = name;
+					++collisions;
+				}
+			}
 
 			idMap[key] = e;
 			if (outCreated) outCreated->push_back(e);
@@ -2108,8 +2431,56 @@ namespace
 				registry.emplace_or_replace<EditorLockComponent>(e);
 		}
 
+		// One line for the whole load, not one per entity: a copied cell file
+		// collides on every record it has.
+		if (collisions > 0)
+		{
+			HE_LOG_WARN(Serialize,
+			            "Additive load: %zu of %zu entities (the first is '%s') already had their stored "
+			            "id in the world and got fresh ones — a second copy of the same scene or cell "
+			            "file. What refers to them by id will not find them.",
+			            collisions, scene["entities"].size(), firstCollision.c_str());
+			if (options.idCollisions) *options.idCollisions += collisions;
+		}
+
 		// Pass 2: rebuild hierarchy (only within the newly loaded entities)
 		rebuildHierarchy(registry, scene, idMap);
+
+		// createEntity() wrote BOTH sides of the root link for every record, and
+		// rebuildHierarchy re-points only `parent`: the world root is not one of the
+		// records, so it never cleans up its own children. Left alone, every entity of
+		// the load stayed listed under the root as well as under its real parent —
+		// walked twice by propagateTransforms (the later visit wins, and which one is
+		// later depends on the order of the records), and for a streamed cell, whose
+		// entities are destroyed again, a list of dead handles that grew with every
+		// load. applyPrefabJson drops them the same way (below, "stale"). The new
+		// entities are exactly the tail of the root's list, in the order they were
+		// made, so only the tail is looked at.
+		//
+		// What is left in the tail are the load's tops: entities whose record named
+		// no parent that is in the load. They stay under the root, or move under
+		// options.attachTo (a cell's later slices go under the cell's root).
+		auto& rootChildren = registry.get<HierarchyComponent>(world.rootEntity()).children;
+		const Entity attachTo = options.attachTo != entt::null && registry.valid(options.attachTo)
+		                        && registry.all_of<HierarchyComponent>(options.attachTo)
+		                        && options.attachTo != world.rootEntity()
+		                        ? options.attachTo : entt::null;
+		size_t kept = std::min(rootChildrenBefore, rootChildren.size());
+		for (size_t i = kept; i < rootChildren.size(); ++i)
+		{
+			const Entity e = rootChildren[i];
+			auto& h = registry.get<HierarchyComponent>(e);
+			if (h.parent != world.rootEntity()) continue;   // stale: re-parented by rebuildHierarchy
+			if (attachTo != entt::null)
+			{
+				h.parent = attachTo;
+				registry.get<HierarchyComponent>(attachTo).children.push_back(e);
+			}
+			else
+				rootChildren[kept++] = e;
+		}
+		rootChildren.resize(kept);
+		world.noteStructureChanged();
 
 		world.purgeOrphanedGeneratedEntities();
 		world.ensureEnvironmentLights();
@@ -2130,7 +2501,7 @@ namespace
 	bool isEngineGenerated(entt::registry& registry, Entity e)
 	{
 		return registry.all_of<EnvironmentLightComponent>(e) ||
-		       registry.all_of<TerrainChunkComponent>(e);
+		       HE::isTerrainGenerated(registry, e);
 	}
 
 	void collectSubtree(entt::registry& registry, Entity root,
@@ -2353,6 +2724,7 @@ namespace
 
 		Entity targetParent = (prefabParent != entt::null) ? prefabParent : world.rootEntity();
 		world.reparentEntity(prefabRoot, targetParent);
+		world.noteStructureChanged();   // rebuildHierarchy and the stale cleanup above rewired links
 		world.markHierarchyDirty();
 		return prefabRoot;
 	}
@@ -2381,6 +2753,7 @@ namespace
 	X("light",               LightComponent) \
 	X("decal",               DecalComponent) \
 	X("rope",                RopeComponent) \
+	X("spline",              SplineComponent) \
 	X("trail",               TrailComponent) \
 	X("rigidbody",           RigidBodyComponent) \
 	X("collider",            ColliderComponent) \
@@ -2444,6 +2817,22 @@ namespace
 		HE_SCENE_COMPONENT_KEYS(HE_RESET_FOR_KEY)
 #undef HE_RESET_FOR_KEY
 		return false;
+	}
+
+	// Take away every component the entity carries whose key `comps` lacks —
+	// the half of a whole-state write that applyComponents (an update) never
+	// does. The one key the save path leaves out on purpose is honoured here
+	// too: a terrain's MeshComponent is generated, serializeComponents skips it,
+	// and its absence from a terrain's state means nothing.
+	void removeComponentsAbsentFrom(entt::registry& registry, Entity entity, const json& comps)
+	{
+		const bool terrain = registry.all_of<TerrainComponent>(entity);
+#define HE_REMOVE_ABSENT(k, T) \
+		if (registry.all_of<T>(entity) && !comps.contains(k) && \
+		    !(terrain && std::string_view(k) == "mesh")) \
+			registry.remove<T>(entity);
+		HE_SCENE_COMPONENT_KEYS(HE_REMOVE_ABSENT)
+#undef HE_REMOVE_ABSENT
 	}
 #undef HE_SCENE_COMPONENT_KEYS
 
@@ -2642,7 +3031,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
-		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "terrain",
+		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline", "terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",
@@ -2778,6 +3167,162 @@ bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scen
 {
     if (!scene.is_object()) return false;
     return applyAdditiveJson(world, scene, outCreated);
+}
+
+bool SceneSerializer::loadAdditiveFromJson(HorizonWorld& world, const json& scene,
+                                           std::vector<Entity>* outCreated,
+                                           const AdditiveOptions& options)
+{
+    if (!scene.is_object()) return false;
+    return applyAdditiveJson(world, scene, outCreated, options);
+}
+
+std::vector<json> SceneSerializer::sliceForAdditiveLoad(json&& scene, size_t maxEntities)
+{
+    const auto whole = [&scene]()
+    {
+        std::vector<json> one;
+        one.push_back(std::move(scene));
+        return one;
+    };
+    const auto found = scene.is_object() ? scene.find("entities") : json::iterator{};
+    if (maxEntities == 0 || !scene.is_object() || found == scene.end() || !found->is_array()
+        || found->size() <= maxEntities)
+        return whole();
+    json&        records = *found;
+    const size_t n       = records.size();
+
+    // Every record by its key, and the one record without a parent: the cell's root.
+    // "Parent" is read the way the loader reads it (entityRefOf), so a record the
+    // loader would treat as parentless is the one found here.
+    std::unordered_map<HE::UUID, size_t> at;
+    at.reserve(n);
+    size_t rootAt = n;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const json& r = records[i];
+        if (!r.is_object()) return whole();
+        if (!at.emplace(entityKeyOf(r), i).second) return whole();   // two records, one identity: the loader reports it
+        HE::UUID parentKey;
+        const auto p = r.find("parent");
+        if (p != r.end() && entityRefOf(*p, parentKey)) continue;
+        if (rootAt != n) return whole();                             // two roots
+        rootAt = i;
+    }
+    if (rootAt == n) return whole();
+
+    // The subtrees under the root, in the order of its `children`, each in pre-order
+    // (a record before its descendants; the order among a record's own children is
+    // their `children` array, which the loader restores whatever order they are made
+    // in). Walked through `children` like rebuildHierarchy does, not through `parent`:
+    // what the loader would link is what is cut here.
+    std::vector<uint8_t> seen(n, 0);
+    seen[rootAt] = 1;
+    size_t reached = 1;
+    std::vector<std::vector<size_t>> tops;
+    const auto rootKids = records[rootAt].find("children");
+    if (rootKids == records[rootAt].end() || !rootKids->is_array()) return whole();
+    std::vector<size_t> stack;
+    for (const json& ref : *rootKids)
+    {
+        HE::UUID key;
+        if (!entityRefOf(ref, key)) continue;
+        const auto top = at.find(key);
+        if (top == at.end()) continue;                               // a link into nowhere: the loader skips it too
+        if (seen[top->second]) return whole();                       // listed twice
+        std::vector<size_t> subtree;
+        stack.assign(1, top->second);
+        while (!stack.empty())
+        {
+            const size_t i = stack.back();
+            stack.pop_back();
+            if (seen[i]) return whole();                             // a record with two parents, or a cycle
+            seen[i] = 1;
+            ++reached;
+            subtree.push_back(i);
+            const auto kids = records[i].find("children");
+            if (kids == records[i].end() || !kids->is_array()) continue;
+            // Pushed back to front, so the first child is popped first.
+            for (auto k = kids->end(); k != kids->begin();)
+            {
+                --k;
+                HE::UUID childKey;
+                if (!entityRefOf(*k, childKey)) continue;
+                const auto child = at.find(childKey);
+                if (child != at.end()) stack.push_back(child->second);
+            }
+        }
+        tops.push_back(std::move(subtree));
+    }
+    // A record the root does not reach would be left under the world root by the
+    // whole load; it cannot be reproduced in slices, so the cell is not cut.
+    if (reached != n) return whole();
+
+    // What is cut whole is a subtree, or a run of subtrees that refer to one another
+    // (the ref hull, Thema 164 step 3a): the splitter names those in the cell's
+    // "streaming" head ("clusters", lists of the ids of the subtrees' tops) and writes
+    // them side by side, so a cluster is a run of tops in `tops`. Cut in two slices it
+    // would have a frame in which a joint's partner, or the other half of a rope, is not
+    // in the world yet. A run is only ever formed from tops that stand next to each
+    // other, which keeps the order of the whole load. No head, no clusters: as before.
+    std::unordered_map<HE::UUID, size_t> clusterOf;
+    if (const auto head = scene.find("streaming"); head != scene.end() && head->is_object())
+        if (const auto lists = head->find("clusters"); lists != head->end() && lists->is_array())
+            for (size_t c = 0; c < lists->size(); ++c)
+            {
+                if (!(*lists)[c].is_array()) continue;
+                for (const json& ref : (*lists)[c])
+                {
+                    HE::UUID key;
+                    if (entityRefOf(ref, key)) clusterOf[key] = c;
+                }
+            }
+    if (!clusterOf.empty())
+    {
+        std::vector<std::vector<size_t>> together;
+        together.reserve(tops.size());
+        size_t previous = SIZE_MAX;
+        for (std::vector<size_t>& subtree : tops)
+        {
+            const auto in      = clusterOf.find(entityKeyOf(records[subtree.front()]));
+            const size_t group = in != clusterOf.end() ? in->second : SIZE_MAX;
+            if (group != SIZE_MAX && group == previous)
+                together.back().insert(together.back().end(), subtree.begin(), subtree.end());
+            else
+                together.push_back(std::move(subtree));
+            previous = group;
+        }
+        tops = std::move(together);
+    }
+
+    std::vector<json> slices;
+    slices.reserve(2 + n / maxEntities);
+    {
+        json first;
+        first["entities"] = json::array({ std::move(records[rootAt]) });
+        slices.push_back(std::move(first));
+    }
+    json   packed = json::array();
+    size_t inPack = 0;
+    const auto flush = [&]()
+    {
+        if (inPack == 0) return;
+        json slice;
+        slice["entities"] = std::move(packed);
+        slices.push_back(std::move(slice));
+        packed = json::array();
+        inPack = 0;
+    };
+    for (const std::vector<size_t>& subtree : tops)
+    {
+        // A subtree that does not fit what is packed so far starts the next slice;
+        // one that is larger than a slice by itself gets one to itself.
+        if (inPack > 0 && inPack + subtree.size() > maxEntities) flush();
+        for (const size_t i : subtree) packed.push_back(std::move(records[i]));
+        inPack += subtree.size();
+    }
+    flush();
+    return slices;
 }
 
 // ── JSON ──────────────────────────────────────────────────────────────────────
@@ -2982,6 +3527,24 @@ bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
     // Reuses the same restore path as scene loading, so every component type is
     // covered by construction — a new component that loads from a scene file
     // replicates without any extra work here.
+    applyComponents(registry, entity, comps);
+    if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
+        registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });
+    return true;
+}
+
+bool SceneSerializer::replaceEntityComponents(HorizonWorld& world, Entity entity,
+                                              const std::vector<uint8_t>& data)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(entity) || data.empty()) return false;
+
+    const json comps = json::from_cbor(data, /*strict=*/true, /*allow_exceptions=*/false);
+    if (comps.is_discarded() || !comps.is_object()) return false;
+
+    // Removal first, so a key that is both gone and re-added cannot be undone
+    // by the order of the two halves.
+    removeComponentsAbsentFrom(registry, entity, comps);
     applyComponents(registry, entity, comps);
     if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
         registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });

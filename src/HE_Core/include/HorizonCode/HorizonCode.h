@@ -939,6 +939,18 @@ HE_API std::string nodeToJson(const Node& n);
 HE_API bool        nodeFromJson(const std::string& json, Node& out);
 HE_API std::string variableToJson(const Variable& v);
 HE_API bool        variableFromJson(const std::string& json, Variable& out);
+// The same for a declared event, a comment box and the Extract spec. Without
+// them collaboration carried only nodes, links and variables, and the Level
+// Script and Game Instance graphs (which have no file the session re-sends) lost
+// every Custom Event declaration, comment box and Extract setting a peer made.
+// The Extract spec is one item per graph; "{}" is the empty spec, so clearing it
+// is an ordinary replace rather than a removal.
+HE_API std::string eventDeclToJson(const EventDecl& e);
+HE_API bool        eventDeclFromJson(const std::string& json, EventDecl& out);
+HE_API std::string commentToJson(const GraphComment& c);
+HE_API bool        commentFromJson(const std::string& json, GraphComment& out);
+HE_API std::string extractToJson(const ExtractSpec& x);
+HE_API bool        extractFromJson(const std::string& json, ExtractSpec& out);
 
 // Propagate every function's interface (params + results, owned by its
 // FunctionEntry) onto the matching FunctionCall / FunctionReturn nodes by name,

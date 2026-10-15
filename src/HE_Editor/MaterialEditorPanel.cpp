@@ -46,6 +46,12 @@ struct State
 	MaterialGraph graph;
 	// Last state the peers have seen — see CollabDocSync.
 	CollabDocSync::DocMirror collabMirror;
+	// A peer's delta batch patched `graph`. The generated shader, parameter block and
+	// texture list in the live MaterialAsset are derived from it and are what the
+	// scene and the preview draw, so the next render() regenerates them (without the
+	// dirty mark: the edit is the peer's to save). The batch lands outside render(),
+	// where there is no AppContext to regenerate with.
+	bool          peerEdited = false;
 	HE::UUID      materialId{};
 	bool          loaded  = false;
 	bool          dirty   = false;   // unsaved-to-disk graph edits
@@ -183,7 +189,11 @@ std::string estimateComplexity(const std::string& glsl)
 // Regenerate the shader from the graph and push it into the live MaterialAsset. The
 // renderers re-resolve the material's shader every frame (pipeline cached per source
 // hash), so the scene updates immediately; Save persists to disk.
-void applyToMaterial(State& st, AppContext& ctx)
+//
+// This half does NOT mark the tab dirty: a collaborator's edit runs through it too
+// (see State::peerEdited), and a "*" on a tab someone else holds would claim the
+// asset's lock and offer an unsaveable save at quit. applyToMaterial is the local edit.
+void regenerateMaterial(State& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return;
 	if (st.isFunction)
@@ -194,7 +204,6 @@ void applyToMaterial(State& st, AppContext& ctx)
 		{
 			fn->nodeGraphJson = HE::materialGraphToJson(st.graph);
 			s_fnGraphCache.erase(st.relPath);
-			st.dirty = true;
 		}
 		return;
 	}
@@ -230,7 +239,6 @@ void applyToMaterial(State& st, AppContext& ctx)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
-	st.dirty = true;
 	st.complexity = estimateComplexity(st.lastGlsl);
 	// Live master→variants propagation: re-derive every loaded instance of this material.
 	ctx.contentManager->syncMaterialInstancesOf(st.relPath);
@@ -243,6 +251,27 @@ void applyToMaterial(State& st, AppContext& ctx)
 	const auto& chk = s_checkLib.fragment(std::hash<std::string>{}(st.lastGlsl),
 	                                      st.lastGlsl, HE::MaterialShaderLibrary::Backend::Metal);
 	st.compileLog = chk.ok ? std::string() : chk.log;
+}
+
+void applyToMaterial(State& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return;
+	const bool hasAsset = st.isFunction
+		? ctx.contentManager->getMaterialFunction(st.materialId) != nullptr
+		: ctx.contentManager->getMaterial(st.materialId) != nullptr;
+	regenerateMaterial(st, ctx);
+	if (hasAsset) st.dirty = true;
+}
+
+// Someone else's edit is not on our undo stack (the same rule the scene's transforms
+// follow, docs/networking-layer-design.md). Left there, the snapshots from before it
+// stay reachable: Ctrl+Z restores one, and the first diff after this editor takes the
+// lock sends it out, reverting the peer's work for everyone. The current graph becomes
+// the floor instead; stateFor seeds it again after a reload.
+void dropUndoHistory(State& st)
+{
+	st.undo.clear();
+	st.undoPos = -1;
 }
 
 // Persist this tab's asset. The header's Save button AND the close/quit prompt's
@@ -441,6 +470,9 @@ State& stateFor(const std::string& path, AppContext& ctx)
 			// panel. Cache the parent's static switches for the switch section.
 			st.isInstance = true;
 			st.lastGlsl   = mat->customShaderFragGlsl;
+			// Cleared first: a reload (a collaborator's save) comes back through here
+			// with the State kept, and appending again doubled every switch row.
+			st.parentSwitches.clear();
 			const HE::UUID pid = ctx.contentManager->loadAsset(mat->parentMaterialPath);
 			if (const MaterialAsset* par = ctx.contentManager->getMaterial(pid))
 			{
@@ -770,6 +802,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		{
 			bool on = n.p[0] > 0.5f;
 			if (EditorWidgets::checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
+			break;
+		}
+		// ── v15: bombing cells — the seed picks the set of numbers; Cell and Blend are pins ──
+		case MatNodeType::BombCells:
+		{
+			int seed = static_cast<int>(std::lround(n.p[0]));
+			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[0] = static_cast<float>(seed);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
 			break;
 		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
@@ -1837,14 +1879,22 @@ CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
 {
 	State* st = s_states.find(assetPath);
 	if (!st || !st->loaded) return {};
+	// An instance has no graph: its overrides and switches are fields of the asset
+	// itself and travel with the whole-file autosave (about a second behind).
+	if (st->isInstance) return {};
 	CollabDocSync::DocBindings out;
 	// A peer's edit invalidates the preview render and the generated shader —
 	// both are derived from the graph and neither notices on its own.
 	out.push_back({ CollabDocSync::Scope::Primary,
 	                CollabDocSync::forMaterialGraph(st->graph,
-	                    [st]() { st->previewDirty = true; }),
+	                    [st]() { st->peerEdited = true; st->previewDirty = true; }),
 	                &st->collabMirror });
 	return out;
+}
+
+void forgetFunctionGraph(const std::string& contentPath)
+{
+	s_fnGraphCache.erase(contentPath);
 }
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
@@ -1864,6 +1914,10 @@ bool reloadFromDisk(const std::string& assetPath)
 	// it would make the first diff after the reload report the difference
 	// between the peer's file and our old graph as OUR edit.
 	st->collabMirror = {};
+	// The graph the undo stack was taken from is about to be replaced too.
+	dropUndoHistory(*st);
+	st->peerEdited = false;   // the file is newer than any batch
+	if (st->isFunction) s_fnGraphCache.erase(st->relPath);
 	return true;
 }
 
@@ -1906,6 +1960,9 @@ bool reloadByContentPath(const std::string& contentPath)
 	st->loaded = false;
 	st->dirty  = false;
 	st->collabMirror = {};
+	dropUndoHistory(*st);
+	st->peerEdited = false;
+	if (st->isFunction) s_fnGraphCache.erase(st->relPath);
 	return true;
 }
 
@@ -2121,6 +2178,26 @@ void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)
 {
 	State& st = stateFor(assetPath, ctx);
+
+	// A peer's batch landed since the last frame. Before `mat` / `fnAsset` below are
+	// fetched, not after: regenerating can load a function graph this editor has not
+	// seen yet (a FunctionCall the peer just added), and a load may move the asset
+	// the pointers would point into. The local edit path regenerates at the end of
+	// the frame, after their last use.
+	if (st.peerEdited)
+	{
+		st.peerEdited = false;
+		const bool hasAsset = ctx.contentManager && (st.isFunction
+			? ctx.contentManager->getMaterialFunction(st.materialId) != nullptr
+			: ctx.contentManager->getMaterial(st.materialId) != nullptr);
+		if (hasAsset && !st.isInstance)
+		{
+			regenerateMaterial(st, ctx);
+			dropUndoHistory(st);
+			pushUndo(st);
+		}
+		st.previewDirty = true;
+	}
 
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);

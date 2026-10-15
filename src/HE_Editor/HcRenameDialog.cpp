@@ -47,7 +47,12 @@ namespace
 	std::string blockedBecause(AppContext& ctx, const std::string& relPath)
 	{
 		if (ctx.collab && ctx.collab->assetLockedByOther(relPath))
-			return "locked by someone else in this session";
+		{
+			const HE::Net::LockInfo* l = ctx.collab->assetLockInfo(relPath);
+			return l && !l->ownerName.empty()
+				? l->ownerName + " is editing it in this session"
+				: std::string("locked by someone else in this session");
+		}
 		// Every panel that owns one of the graph kinds the sweep writes has to be
 		// asked. Its tab holds its own copy, so writing the file underneath it just
 		// means the copy wins at the next save — the rename would look like it took
@@ -58,8 +63,10 @@ namespace
 		return {};
 	}
 
+	// `askCtx` set: a row a collaborator is holding gets "Ask for it" — the same
+	// hand-over request an asset tab's banner sends, answered by the holder.
 	void drawList(const char* heading, const std::vector<const HcRenameSweep::Entry*>& rows,
-	              bool showCounts, ImU32 color)
+	              bool showCounts, ImU32 color, AppContext* askCtx = nullptr)
 	{
 		if (rows.empty()) return;
 		ImGui::Spacing();
@@ -70,17 +77,28 @@ namespace
 		{
 			const int n = showCounts ? (int)e->plan.rename.size() : (int)e->plan.unsure.size();
 			ImGui::BulletText("%s  (%d)", e->display.c_str(), n);
+			const bool rowHovered = ImGui::IsItemHovered();
 			if (!e->skipWhy.empty())
 			{
 				ImGui::SameLine();
 				ImGui::TextDisabled("— %s", e->skipWhy.c_str());
 			}
-			if (ImGui::IsItemHovered())
+			if (rowHovered)
 			{
 				ImGui::BeginTooltip();
 				const auto& hits = showCounts ? e->plan.rename : e->plan.unsure;
 				for (const HcRename::Hit& h : hits) ImGui::TextUnformatted(h.what.c_str());
 				ImGui::EndTooltip();
+			}
+			if (askCtx && askCtx->collab && askCtx->collab->assetLockedByOther(e->display))
+			{
+				ImGui::SameLine();
+				ImGui::PushID(e->display.c_str());
+				if (askCtx->collab->hasAskedToEdit(e->display))
+					ImGui::TextDisabled("(asked)");
+				else if (EditorWidgets::smallButton("Ask for it"))
+					askCtx->collab->requestAssetEdit(e->display);
+				ImGui::PopID();
 			}
 		}
 	}
@@ -138,6 +156,13 @@ void Draw(AppContext& ctx)
 	ImGui::TextWrapped("The %s \"%s\" is now called \"%s\". Other graphs in this project name it too.",
 	                   memberWord(s.target.member), s.target.oldName.c_str(), s.target.newName.c_str());
 
+	// Asked again every frame, not trusted from the scan: the dialog stands open
+	// while the session goes on. A collaborator can take one of these graphs in
+	// the meantime — writing it then would fork their copy — and a holder who
+	// says yes to "Ask for it" makes theirs writable. Both show up here.
+	for (HcRenameSweep::Entry& e : s.report.entries)
+		if (e.plan.touches()) e.skipWhy = blockedBecause(ctx, e.display);
+
 	std::vector<const HcRenameSweep::Entry*> write, skipped, unsure;
 	for (const HcRenameSweep::Entry& e : s.report.entries)
 	{
@@ -148,7 +173,7 @@ void Draw(AppContext& ctx)
 
 	ImGui::Separator();
 	drawList("Will be renamed", write, true, ImGui::GetColorU32(ImGuiCol_Text));
-	drawList("Skipped", skipped, true, IM_COL32(235, 180, 90, 255));
+	drawList("Skipped", skipped, true, IM_COL32(235, 180, 90, 255), &ctx);
 	drawList("Names it, but nothing says whose — check these by hand", unsure, false,
 	         IM_COL32(235, 120, 90, 255));
 

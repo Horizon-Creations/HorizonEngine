@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderSorter.h"
+#include "HorizonRendering/RenderConstants.h"
 #include <cstdint>
 #include <algorithm>
 #include <cstdlib>
@@ -90,14 +91,34 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 		if (filter == DepthFilter::ShadowCasters  && !obj.castsShadow)   continue;
 		if (filter == DepthFilter::AoContributors && !obj.contributesAO) continue;
 		if (obj.entityId == skipEntity) continue; // the light's own mesh
+
+		// What the object stands for: itself, or — a foliage cluster — every plant of
+		// its bucket. A depth-only pass has no per-instance state, so a cluster joins
+		// the run exactly as that many ordinary objects of the same mesh would.
+		uint32_t left = world.instanceCountOf(obj);
+		size_t   pos  = out.transforms.size();
+		world.appendInstances(obj, out.transforms);
+
 		// Extend the current run when the mesh matches; the sorter grouped by
-		// mesh id, so a change here means a genuinely new mesh.
+		// mesh id, so a change here means a genuinely new mesh. A run holds at most
+		// kMaxInstancesPerDraw: backends fall back to one draw per caster above
+		// their instance ring, so a longer run is cut into several instanced draws.
 		if (!out.batches.empty() && out.batches.back().meshAssetId == obj.meshAssetId)
-			++out.batches.back().count;
-		else
-			out.batches.push_back(DepthBatch{ obj.meshAssetId,
-			                                  static_cast<uint32_t>(out.transforms.size()), 1u });
-		out.transforms.push_back(obj.transform);
+		{
+			DepthBatch& b = out.batches.back();
+			const uint32_t room = b.count < HE::kMaxInstancesPerDraw ? HE::kMaxInstancesPerDraw - b.count : 0u;
+			const uint32_t take = left < room ? left : room;
+			b.count += take;
+			left    -= take;
+			pos     += take;
+		}
+		while (left > 0)
+		{
+			const uint32_t take = left < HE::kMaxInstancesPerDraw ? left : HE::kMaxInstancesPerDraw;
+			out.batches.push_back(DepthBatch{ obj.meshAssetId, static_cast<uint32_t>(pos), take });
+			pos  += take;
+			left -= take;
+		}
 	}
 }
 

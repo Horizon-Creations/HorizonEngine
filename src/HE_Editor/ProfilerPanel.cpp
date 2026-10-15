@@ -2,6 +2,7 @@
 #include "EditorApplication.h"           // AppContext
 #include "StreamingDebugView.h"          // the Streaming tab
 #include <Diagnostics/EngineProfiler.h>
+#include <HorizonScene/PhysicsWorld.h>   // PhysicsWorld::lastBudgetStats
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <atomic>
@@ -205,6 +206,50 @@ void CountersGrid(uint32_t draws, uint32_t tris, uint32_t visible, uint32_t tota
 	ImGui::EndTable();
 }
 
+// What the physics time budget spent in the latest step and what it put off
+// (Thema 178 step 3). Live only: a recorded capture carries none of it.
+void PhysicsBudgetGrid()
+{
+	const HE::PhysicsBudgetStats b = PhysicsWorld::lastBudgetStats();
+	if (b.steps == 0 && b.budgetMs <= 0.0 && b.characters == 0 && b.queries == 0)
+	{
+		ImGui::TextColored(HE::Ed::Theme::TextDim,
+		                   "No budget in force (Project Settings, Physics) or no physics step yet.");
+		return;
+	}
+	if (!ImGui::BeginTable("##physbudget", 4,
+	                       ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))
+		return;
+	auto num = [](const char* label, const char* fmt, double value) {
+		ImGui::TableNextColumn();
+		ImGui::TextColored(HE::Ed::Theme::TextDim, "%s", label);
+		ImGui::Text(fmt, value);
+	};
+	auto count = [](const char* label, uint64_t value) {
+		ImGui::TableNextColumn();
+		ImGui::TextColored(HE::Ed::Theme::TextDim, "%s", label);
+		ImGui::Text("%llu", static_cast<unsigned long long>(value));
+	};
+	ImGui::TableNextRow();
+	ImGui::TableNextColumn();
+	ImGui::TextColored(HE::Ed::Theme::TextDim, "budget / step");
+	if (b.budgetMs > 0.0) ImGui::Text("%.2f ms", b.budgetMs); else ImGui::TextUnformatted("off");
+	num("used", "%.3f ms", b.usedMs);
+	num("characters", "%.3f ms", b.charactersMs);
+	num("queries + bodies", "%.3f ms", b.queriesMs + b.bodiesMs);
+	ImGui::TableNextRow();
+	count("characters", b.characters);
+	count("stepped", b.charactersStepped);
+	count("put off", b.charactersDeferred);
+	count("longest wait (steps)", b.maxOwedSteps);
+	ImGui::TableNextRow();
+	count("queries", b.queries);
+	count("events queued", b.eventsBacklog);
+	count("steps over budget", b.overBudgetSteps);
+	count("characters put off (total)", b.deferredCharacterSteps);
+	ImGui::EndTable();
+}
+
 // ── Overview ────────────────────────────────────────────────────────────────
 void DrawOverview(EngineProfiler& prof)
 {
@@ -366,6 +411,13 @@ void DrawOverview(EngineProfiler& prof)
 	CountersGrid(draws, tris, visible, total,
 	             g_ui.viewingLoaded ? g_ui.loaded.frames[g_ui.loaded.frames.size() / 2].stats.scene
 	                                : prof.sceneCounters());
+
+	if (!g_ui.viewingLoaded)
+	{
+		ImGui::Spacing();
+		ImGui::TextColored(HE::Ed::Theme::TextHeading, "Physics budget");
+		PhysicsBudgetGrid();
+	}
 }
 
 // ── Timeline ────────────────────────────────────────────────────────────────

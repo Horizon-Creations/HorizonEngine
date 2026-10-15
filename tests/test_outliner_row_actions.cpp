@@ -320,3 +320,44 @@ TEST_CASE("HorizonWorld::sortChildrenByName sorts one level, case-insensitively,
 	// A leaf has nothing to sort.
 	CHECK_FALSE(world.sortChildrenByName(tie1));
 }
+
+// ── Dropping on the edge of a row ────────────────────────────────────────────
+TEST_CASE("HorizonWorld::placeNextTo puts an entity before or after a sibling, across parents too")
+{
+	HorizonWorld world;
+	// Under a group of its own: the World root also carries the built-in lights.
+	const Entity root = childOf(world, world.rootEntity(), "Top");
+	const Entity a = childOf(world, root, "A");
+	const Entity b = childOf(world, root, "B");
+	const Entity c = childOf(world, root, "C");
+	const Entity d = childOf(world, root, "D");
+	using V = std::vector<std::string>;
+
+	// Same parent, moving down: before D means between C and D…
+	CHECK(world.placeNextTo(a, d, false));
+	CHECK(childNames(world, root) == V{ "B", "C", "A", "D" });
+	// …after D means last.
+	CHECK(world.placeNextTo(b, d, true));
+	CHECK(childNames(world, root) == V{ "C", "A", "D", "B" });
+	// Moving up: before C is first, after C is second.
+	CHECK(world.placeNextTo(d, c, false));
+	CHECK(childNames(world, root) == V{ "D", "C", "A", "B" });
+	CHECK(world.placeNextTo(b, c, true));
+	CHECK(childNames(world, root) == V{ "D", "C", "B", "A" });
+
+	// Another parent: it is reparented and lands where the edge was.
+	const Entity box = childOf(world, root, "Box");
+	const Entity x = childOf(world, box, "x");
+	const Entity y = childOf(world, box, "y");
+	CHECK(world.placeNextTo(a, y, false));
+	CHECK(childNames(world, box) == V{ "x", "A", "y" });
+	CHECK(world.registry().get<HierarchyComponent>(a).parent == box);
+	CHECK(childNames(world, root) == V{ "D", "C", "B", "Box" });
+
+	// Refusals change nothing: next to itself, next to the root, into its own subtree.
+	CHECK_FALSE(world.placeNextTo(x, x, true));
+	CHECK_FALSE(world.placeNextTo(x, world.rootEntity(), true));
+	CHECK_FALSE(world.placeNextTo(world.rootEntity(), x, true));
+	CHECK_FALSE(world.placeNextTo(box, y, false));
+	CHECK(childNames(world, box) == V{ "x", "A", "y" });
+}

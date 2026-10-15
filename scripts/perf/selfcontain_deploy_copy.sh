@@ -12,11 +12,13 @@
 # Idempotent. Check at runtime with `lsof -p <pid> | grep libHorizonCore`.
 set -eu
 DIR=${1:A}
-for f in "$DIR/HorizonEditor" "$DIR"/*.dylib; do
+EXES=()
+for e in HorizonEditor HorizonGame; do [ -f "$DIR/$e" ] && EXES+=("$DIR/$e"); done   # a Game deploy has no HorizonEditor
+for f in "${EXES[@]}" "$DIR"/*.dylib; do
   for p in $(otool -l "$f" | awk '/LC_RPATH/{r=1} r&&/ path /{print $2; r=0}'); do
     install_name_tool -delete_rpath "$p" "$f" 2>/dev/null
   done
   install_name_tool -add_rpath @loader_path "$f" 2>/dev/null
   codesign -f -s - "$f" 2>/dev/null
 done
-echo "$DIR: $(otool -l "$DIR/HorizonEditor" | awk '/LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | tr '\n' ' ')"
+echo "$DIR: $(otool -l "${EXES[1]}" | awk '/LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | tr '\n' ' ')"

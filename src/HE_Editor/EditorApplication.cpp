@@ -1,11 +1,15 @@
 #include "EditorApplication.h"
+#include "EditorGraphics.h"   // the project's copy of the graphics fields
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
+#include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "EditorTabs.h"            // retarget / dedupe the open asset tabs
+#include "ProjectPreflight.h"      // engine-content check in front of the first project open
+#include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "HorizonCodeClassPanel.h" // the class tabs an MCP client may author
@@ -36,12 +40,18 @@
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
+#include "SplineTool.h"            // Spline mode: the tool's state for the overlay, the dump witness
+#include <HorizonScene/SplineCurve.h> // the witness aims its hover at a point on the curve
+#include <glm/gtc/matrix_transform.hpp> // perspective — the witness's mouse-to-ground view
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
 #include "EditorSystemMotion.h"    // …and the system query it follows
+#include "ProjectLaunchOpen.h"     // a .heproj double-clicked in the file manager
+#include "HeprojRegistration.h"    // …and the editor making .heproj its own at start
+#include "SelfUpdateDialog.h"      // …and dropping what older updates left beside the install
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -77,7 +87,12 @@
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
+#include <HorizonScene/WaterBrush.h>
+#include <HorizonScene/WaterLake.h>
+#include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
+#include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -109,6 +124,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
+#include <HorizonScene/WaterRipples.h>         // pushRipples + the HE_DUMP_WATERRIPPLE witness's RippleField
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
@@ -416,6 +432,51 @@ static const char* scriptLogTagFor(ProjectScriptLanguage lang)
 	}
 }
 
+static void registerProjectFileTypeAtStartup(GlobalState& gs);   // below, after Init
+
+// The project this start was asked to open, if any (ProjectLaunchOpen.h).
+// Windows and Linux hand it over as an argument; every argument that is not one
+// is said in the log and otherwise left alone. macOS sends an open event
+// instead, and at launch that event is usually already waiting in SDL's queue
+// by now (the splash pumps it) — so it is PEEKED here, not taken: it still
+// reaches OnEvent on the first frame, finds its project open and does nothing.
+// That way the first project load is the right one, instead of the last
+// session's project followed by a switch. `askedForProject` says a .heproj was
+// named but cannot be opened (moved, deleted): that is still a request, so the
+// caller shows the Hub with the reason rather than the last project.
+static std::string pickLaunchProject(const std::vector<std::string>& args,
+                                     bool& askedForProject)
+{
+	std::error_code ec;
+	const std::filesystem::path cwd = std::filesystem::current_path(ec);
+	ProjectLaunchOpen::LaunchPick pick = ProjectLaunchOpen::pickFromArguments(args, cwd);
+	askedForProject = !pick.project.empty();
+	for (const auto& [arg, why] : pick.rejected)
+	{
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' %s — not opened",
+		            arg.c_str(), ProjectLaunchOpen::describe(why));
+		if (why == ProjectLaunchOpen::PathError::NotFound ||
+		    why == ProjectLaunchOpen::PathError::NotAFile)
+			askedForProject = true;
+	}
+	for (const std::string& p : pick.ignored)
+		HE_LOG_WARN(Editor, "EditorApplication: launch argument '%s' not opened — the editor "
+		                    "opens one project at a time", p.c_str());
+	if (!pick.project.empty()) return pick.project;
+
+	SDL_PumpEvents();
+	SDL_Event evs[16];
+	const int n = SDL_PeepEvents(evs, 16, SDL_PEEKEVENT, SDL_EVENT_DROP_FILE, SDL_EVENT_DROP_FILE);
+	for (int i = 0; i < n; ++i)
+	{
+		if (evs[i].drop.windowID != 0 || !evs[i].drop.data) continue;
+		// Unopenable ones are not said here: OnEvent says it when it gets there.
+		const ProjectLaunchOpen::ParsedPath p = ProjectLaunchOpen::parse(evs[i].drop.data, cwd);
+		if (p.ok()) return p.path;
+	}
+	return {};
+}
+
 void EditorApplication::OnInit()
 {
 	// A received collaboration snapshot replaces the whole world. Selection and
@@ -426,6 +487,7 @@ void EditorApplication::OnInit()
 	// before the session ended — goes to the one editor-wide channel rather than
 	// into a log line nobody has open. Set before any callback below can fire.
 	m_collab.setNotifications(&m_notifications);
+	m_team.setNotifications(&m_notifications);
 
 	// The same channel, reachable from everywhere else: worker threads, download
 	// callbacks and static panel helpers post through HE::Ed::notify() because
@@ -491,12 +553,32 @@ void EditorApplication::OnInit()
 		if (!m_editorWorld) return;
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
-		SceneSerializer serializer;
-		serializer.applyEntityComponents(*m_editorWorld, e, blob);
+		// Replace, not update: every blob on this wire is a whole entity's state
+		// (serializeEntityComponents at the sender, from every build that ever
+		// sent one), so a component it lacks was removed over there. A
+		// landscape's grids are the exception: they travel as patches
+		// (TerrainSync), so the blob has none and ours stay.
+		HE::Ed::TerrainSync::replaceKeepingGrids(*m_editorWorld, e, blob);
 		// Mark the transform dirty so the renderer rebuilds its matrix; other
 		// components are read fresh each frame.
 		if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
 			tc->dirty = true;
+	});
+
+	// A peer shaped, painted or planted a landscape, or our own patch came back
+	// from the host (TerrainSync.h: the echo is what orders ours against theirs).
+	m_collab.onRemoteTerrainPatch([this](std::uint32_t handle,
+	                                     const HE::Net::CollabSession::TerrainPatch& p,
+	                                     bool own) {
+		if (own) { m_terrainSync.acknowledge(p.seq); return; }
+		if (!m_editorWorld || handle == 0) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_terrainSync.applyRemote(*m_editorWorld, e, p)) return;
+		// Settings change the component blob of an entity we may be holding;
+		// it is theirs, so it must not go back out as our edit.
+		if ((p.field & ~HE::Ed::TerrainSync::kWholeGrid) == HE::Ed::TerrainSync::Settings)
+			m_collab.rememberComponents(handle,
+			                            HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
 	});
 
 	m_collab.onRemoteDestroy([this](std::uint32_t handle) {
@@ -504,18 +586,35 @@ void EditorApplication::OnInit()
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
 		m_selection.remove(e);
-		m_structureKnown.erase(e);
+		forgetStructureOf(e);
 		m_editorWorld->destroyEntity(e);
 	});
 
-	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle) {
+	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle,
+	                                 const float* t) {
 		if (!m_editorWorld) return;
+		auto& reg = m_editorWorld->registry();
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
-		if (!m_editorWorld->registry().valid(e)) return;
+		if (!reg.valid(e)) return;
 		const Entity parent = parentHandle
 			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
 			: m_editorWorld->rootEntity();
 		m_editorWorld->reparentEntity(e, parent);
+		// Echo protection, the counterpart of the m_structureKnown.erase in
+		// onRemoteDestroy: the diff compares against this record, and without it
+		// the next pass would publish the peer's move straight back at them.
+		m_structureParent[e] = HE::Ed::structParentOf(reg, e);
+		// The sender's local transform under the new parent (Group keeps the
+		// world pose, so it changed); without it the entity would jump.
+		if (t)
+			if (auto* tc = reg.try_get<TransformComponent>(e))
+			{
+				tc->position = glm::vec3(t[0], t[1], t[2]);
+				tc->rotation = glm::vec3(t[3], t[4], t[5]);
+				tc->scale    = glm::vec3(t[6], t[7], t[8]);
+				tc->dirty    = true;
+			}
+		m_editorWorld->markHierarchyDirty();
 	});
 
 	// ── Per-user undo/redo for the session ───────────────────────────────────
@@ -550,6 +649,54 @@ void EditorApplication::OnInit()
 		},
 		[this](std::uint64_t subject) { return m_collab.ownsLock(subject); });
 
+	// The structural half (MCP commands record these through CollabUndoSink).
+	// Never set before, so a session Ctrl+Z on such an entry popped it and did
+	// nothing. Each one is a plain world edit: the structural diff publishes a
+	// create, destroy or re-parent the same way it publishes the user's own,
+	// which is what makes an undo "just another change" for the peers.
+	const auto entityOf = [this](std::uint64_t subject) -> Entity {
+		const std::uint32_t h = subject ? m_collab.entityForNetId(subject) : 0;
+		const Entity e = h ? static_cast<Entity>(static_cast<entt::id_type>(h)) : entt::null;
+		return (m_editorWorld && e != entt::null && m_editorWorld->registry().valid(e))
+			? e : entt::null;
+	};
+	m_collabUndo.setStructuralHandlers(
+		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& subtree,
+		                 std::uint64_t parentSubject) {
+			if (!m_editorWorld || entityOf(subject) != entt::null) return;   // already back
+			SceneSerializer serializer;
+			// preserveIds: it returns under the identity the peers name it by.
+			serializer.instantiatePrefab(*m_editorWorld, subtree, entityOf(parentSubject),
+			                             /*preserveIds=*/true);
+			m_editorWorld->markHierarchyDirty();
+		},
+		[this, entityOf](std::uint64_t subject) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			if (withoutPeerHeld({ e }, "removed by undo").empty()) return;
+			m_selection.remove(e);
+			m_editorWorld->destroyEntity(e);
+		},
+		[this, entityOf](std::uint64_t subject, std::uint64_t parentSubject) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			const Entity p = entityOf(parentSubject);
+			m_editorWorld->reparentEntity(e, p != entt::null ? p : m_editorWorld->rootEntity());
+			m_editorWorld->markHierarchyDirty();
+		},
+		[this, entityOf](std::uint64_t subject, const std::vector<std::uint8_t>& bytes) {
+			const Entity e = entityOf(subject);
+			if (e == entt::null) return;
+			// Both sides of a Components entry are whole states (EditorCommands
+			// records them so), so the undo can take a component away again.
+			// A landscape's grids in it come back here too; TerrainSync sends them.
+			HE::Ed::TerrainSync::replaceKeepingGrids(*m_editorWorld, e, bytes);
+			if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
+				tc->dirty = true;
+			m_collab.publishComponents(static_cast<std::uint32_t>(entt::to_integral(e)),
+			                           HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
+		});
+
 	// ── Authored-asset sync ──────────────────────────────────────────────────
 	// Every asset type funnels through ContentManager::saveAsset, so one hook
 	// covers HorizonCode graphs, materials, UI widgets, particle and animator
@@ -557,6 +704,10 @@ void EditorApplication::OnInit()
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
+			// A save the user (or an MCP client) asked for is the moment the host
+			// keeps the session's state (CollabSettle.h); the session's own
+			// once-a-second autosave of a held tab is only traffic.
+			if (!m_collabAutosaveWrite) m_collab.noteLocalSave(relPath);
 			// An application's preview shows the saved assets, so a save is the
 			// signal to rebuild it. Only for the kinds that change what the
 			// preview DOES — a texture or a font swaps itself in through the
@@ -575,6 +726,22 @@ void EditorApplication::OnInit()
 			default: break;
 			}
 		});
+
+	// Host: a settling document's state goes to this disk. Only the scene is not
+	// there yet; every asset key was written as its file arrived (or, for the
+	// GameInstance graph, on every applied delta).
+	m_collab.setSettlePersist([this](const std::string& key, HE::Ed::CollabSettle::Reason) {
+		return key == HE::Ed::CollabSettle::kSceneKey ? persistSessionScene() : true;
+	});
+	// ...and once it is there, it is what the team server commits when the
+	// project hands its history to the server (sourceControl.mode =
+	// "teamServer"); GitController drops it otherwise.
+	m_collab.onSessionSettled([this](const std::vector<HE::Ed::CollabSettle::Settled>& settled) {
+		std::vector<std::string> keys;
+		keys.reserve(settled.size());
+		for (const auto& s : settled) keys.push_back(s.key);
+		m_git.handOverToTeamServer(keys, m_collab.lastSettledMs());
+	});
 
 	m_collab.onAssetLockDenied([this](const std::string& relPath) {
 		// Someone else won the lock race by a round trip. Their state is the
@@ -656,7 +823,14 @@ void EditorApplication::OnInit()
 		}
 		if (isDelete)
 		{
+			// A project override of an engine default (Content Browser "Revert to
+			// Default"): the resident copy is the override's, and it stays the
+			// asset until it is unloaded — the same unload the local revert does,
+			// so the default is what loads next on every machine.
+			const HE::UUID overrideId = contentManager().isEngineOverridePath(full)
+				? contentManager().idForPath(relPath) : HE::UUID{};
 			std::filesystem::remove(full, ec);
+			if (!ec && overrideId != HE::UUID{}) contentManager().unloadAsset(overrideId);
 			EditorAssetTypeCache::invalidate(full);
 			AssetThumbnailCache::invalidate(full);
 			// A C++ class is ONE item in the browser and two files on disk. The
@@ -748,8 +922,61 @@ void EditorApplication::OnInit()
 		m_contentRefreshPending = true;
 	});
 
+	// The host approved deleting or renaming an entity somebody was editing
+	// (CollabEntityOps.h). Fires on every peer including the host, and each one
+	// applies it to its own world — no structural message follows, because the
+	// session would refuse a destroy of an entity a peer still holds.
+	m_collab.onRemoteEntityOp([this](HE::Net::CollabSession::AssetOp op,
+	                                 std::uint64_t subject, const std::string& newName) {
+		if (!m_editorWorld) return;
+		const std::uint32_t h = m_collab.entityForNetId(subject);
+		const Entity e = static_cast<Entity>(static_cast<entt::id_type>(h));
+		auto& reg = m_editorWorld->registry();
+		if (h == 0 || !reg.valid(e) || m_editorWorld->isBuiltin(e)) return;
+		if (op == HE::Net::CollabSession::AssetOp::Delete)
+		{
+			// Exactly a peer's destroy (onRemoteDestroy): everyone does it at
+			// once, so nobody's diff may publish it again. The holder deselects
+			// with it, and followSelection hands its lock back on the next frame.
+			if (m_isPlaying && m_physicsWorld)
+				m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+			m_selection.remove(e);
+			forgetStructureOf(e);
+			m_editorWorld->destroyEntity(e);
+			m_editorWorld->markHierarchyDirty();
+			return;
+		}
+		// A rename: the holder's component blob carries the new name from here
+		// on, and every other machine already set the same one.
+		m_editorWorld->renameEntity(e, newName);
+	});
+
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
+		// The GameInstance graph travels as deltas while everyone is connected;
+		// its whole file only comes from the host catching a joiner up. It is a
+		// project file the editor holds in memory, not a ContentManager asset, so
+		// it is re-read into the graph, the app runtime and the preview here, and
+		// the mirror starts over from it — left seeded from the stale graph, the
+		// difference would read as our own edit and go straight back out.
+		if (relPath == GameInstancePanel::kTabPath)
+		{
+			const std::string full = collabLocalPath(relPath);
+			if (full.empty()) return;
+			{
+				std::ofstream out(full, std::ios::binary | std::ios::trunc);
+				if (!out) return;
+				out.write(reinterpret_cast<const char*>(bytes.data()),
+				          static_cast<std::streamsize>(bytes.size()));
+				if (!out) return;
+			}
+			loadGameInstanceGraph();
+			m_gameInstanceMirror = {};
+			if (m_projectManager.currentProject().appProject)
+				m_appPreviewRestartPending = true;
+			Logger::Log(Logger::LogLevel::Info, "Collab: applied the session's GameInstance graph");
+			return;
+		}
 		applyAssetBytes(relPath, bytes);
 		// An open editor tab keeps showing its in-memory state — tell whichever
 		// panel holds this asset to re-read the file, so the peer's edit is
@@ -787,10 +1014,17 @@ void EditorApplication::OnInit()
 		// seedNetIds) and marks the current entity set as known to the
 		// structural diff, so nothing gets re-announced as freshly created.
 		m_structureKnown.clear();
+		// Rebuilt lazily by the next diff (recordMissingParents) from the world
+		// the snapshot left, which is exactly the parentage the peers share.
+		m_structureParent.clear();
+		m_structureUndeletable.clear();
 		// The level script came with the new scene, so the mirror describes a
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
 		m_levelScriptMirror = {};
+		// Same for the landscapes: the next collect takes them as the snapshot
+		// left them, and nothing we sent into the old world is waited for.
+		m_terrainSync.reset();
 		if (m_editorWorld)
 		{
 			m_collab.setWorld(m_editorWorld.get());
@@ -875,9 +1109,11 @@ void EditorApplication::OnInit()
 		// automatically, so HiDPI crispness comes from the high-pixel-density
 		// drawable — NOT from pre-scaling the size here (the old DisplayFramebuffer
 		// Scale/FontGlobalScale trick no longer maps to the new font system).
-		const float sizeBody       = 13.0f;
-		const float sizeSubheading = 16.0f;
-		const float sizeHeading    = 19.0f;
+		// 13/16/19 read as tiny on a 1440p/4K monitor even after raising the UI
+		// Font Scale; 16/19/23 is the default a fresh install should start from.
+		const float sizeBody       = 16.0f;
+		const float sizeSubheading = 19.0f;
+		const float sizeHeading    = 23.0f;
 
 		if (std::filesystem::exists(fontPath))
 		{
@@ -896,7 +1132,12 @@ void EditorApplication::OnInit()
 
 		// Monospace font for the script code editor — ImGui's built-in ProggyClean is
 		// monospace, so the columns/line-numbers align without shipping a new TTF.
-		m_fontMono = io.Fonts->AddFontDefault();
+		// Sized to match the body font; the bitmap default is only crisp at 13 px.
+		{
+			ImFontConfig monoCfg;
+			monoCfg.SizePixels = sizeBody;
+			m_fontMono = io.Fonts->AddFontDefaultVector(&monoCfg);
+		}
 
 		// No io.Fonts->Build() here — since ImGui 1.92 the renderer backends
 		// own the font atlas (ImGuiBackendFlags_RendererHasTextures) and build
@@ -1238,7 +1479,16 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabLanDiscovery           = globalstate.getCustomConfigBool("CollabLanDiscovery", m_editorConfig.CollabLanDiscovery);
 	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
-	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
+	m_editorConfig.CollabRelayAddress           = globalstate.getCustomConfigString("CollabRelayAddress", m_editorConfig.CollabRelayAddress);
+	m_editorConfig.TeamName                     = globalstate.getCustomConfigString("TeamName", m_editorConfig.TeamName);
+	m_editorConfig.TeamMember                   = globalstate.getCustomConfigString("TeamMember", m_editorConfig.TeamMember);
+	// The team sign-in survives a restart as a session token beside config.json
+	// (owner-only, never the password; topic 201). With one stored for exactly
+	// this server, team and member the editor signs in again on its own; a
+	// scratch HE_CONFIG_DIR of an automated run has none, so it stays offline.
+	m_team.setTokenFile(GlobalState::configFilePath().parent_path() / "team-session.txt");
+	m_team.resume(m_editorConfig.CollabRelayAddress, m_editorConfig.TeamName, m_editorConfig.TeamMember);
+	m_editorConfig.McpServerEnabled           = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
 	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
@@ -1329,6 +1579,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAA                  = globalstate.getCustomConfigBool("SpecularAA",          m_editorConfig.SpecularAA);
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
+	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
+	m_editorConfig.PreviewQualityMode          = globalstate.getCustomConfigInt("PreviewQualityMode", m_editorConfig.PreviewQualityMode);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -1936,13 +2188,45 @@ void EditorApplication::OnInit()
 		m_savedRevision = m_undo.revision();
 	});
 
+	// A project double-clicked in the file manager wins over the last one. Loaded
+	// the way the Project Hub loads a chosen file (ProjectHubPanel), because at
+	// this point the Hub is what is open. A failure does NOT fall back to the
+	// last project: the user asked for this one, and the Hub says why it did not
+	// open instead of quietly showing something else.
+	bool askedForProject = false;
+	const std::string launchProject = pickLaunchProject(launchArguments(), askedForProject);
+	if (askedForProject && launchProject.empty())
+		m_hubOpenError = "The project file passed at launch could not be found.";
+	else if (!launchProject.empty())
+	{
+		HE_LOG_INFO(Editor, "EditorApplication: opening %s (handed over at launch)",
+		            launchProject.c_str());
+		splashStatus("Opening " + std::filesystem::path(launchProject).stem().string(), 0.75f);
+		if (m_dumpPath.empty())
+		{
+			// The engine-content check (sign in, download, ask about what is missing) runs
+			// on the start screen before the project loads: the first frame hands it over.
+			ProjectPreflight::requestAtStartup(launchProject);
+		}
+		else if (m_projectManager.loadProject(launchProject))
+		{
+			m_globalState->addKnownProject(launchProject);
+			m_globalState->writeConfig();
+			m_projectLoaded         = true;
+			m_contentRefreshPending = true;
+		}
+		else
+			m_hubOpenError = "Failed to load project file.";
+	}
 	// If a project was previously opened, load it now (triggers the callback above)
-	if (!m_globalState->getLastProjectPath().empty())
+	else if (!m_globalState->getLastProjectPath().empty())
 	{
 		splashStatus("Opening " +
 		             std::filesystem::path(m_globalState->getLastProjectPath())
 		                 .stem().string(), 0.75f);
-		if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
+		if (m_dumpPath.empty())
+			ProjectPreflight::requestAtStartup(m_globalState->getLastProjectPath());
+		else if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
 		{
 			m_projectLoaded         = true;
 			m_contentRefreshPending = true;
@@ -1968,7 +2252,37 @@ void EditorApplication::OnInit()
 #ifdef HE_HAVE_LIBSSH2
 		startSftpProbe();
 #endif
+		// The previous install an update left beside this one is kept; older
+		// ones go now (a no-op in a build without the self-update).
+		SelfUpdateDialog::startHousekeeping();
 	}
+
+	// The editor makes .heproj open with itself (Windows registry, Linux XDG files;
+	// macOS has the Info.plist). Not in the headless runs: those are tests and
+	// screenshots, and must not repoint the file type of whoever runs them.
+	if (m_dumpPath.empty() && !HE::hiddenWindowRequested())
+		registerProjectFileTypeAtStartup(*m_globalState);
+}
+
+// HeprojRegistration.h: looks now (a few registry values or small files), writes on
+// a worker only when the registration is missing or points somewhere else. When
+// another application handles .heproj nothing is written, and the person hears
+// about it ONCE per application: the remembered name is read and written here, on
+// the main thread, because GlobalState is not for the worker.
+static void registerProjectFileTypeAtStartup(GlobalState& gs)
+{
+	const bool enabled = gs.getCustomConfigBool(HeprojRegistration::kSettingKey, true);
+	const HeprojRegistration::StartupReport report = HeprojRegistration::startAtStartup(enabled);
+	if (report.result.outcome != HeprojRegistration::Outcome::LeftAlone) return;
+
+	const std::string& owner = report.result.detail;
+	if (gs.getCustomConfigString(HeprojRegistration::kNoticeKey, "") == owner) return;
+	gs.setCustomConfigEntry(HeprojRegistration::kNoticeKey, owner);
+	HE::Ed::notify(HE::Ed::NoteLevel::Info,
+	               ".heproj project files open with " + owner + ", so the editor left the file type alone",
+	               "To open them with the Horizon Editor instead, use \"Open with\" in your file manager, "
+	               "or run the script in the editor's FileTypes folder. The check can be switched off under "
+	               "Edit > Preferences > Editor > Tool Status.");
 }
 
 void EditorApplication::startToolchainProbe()
@@ -2045,12 +2359,16 @@ void EditorApplication::pollClaudeProbe()
 
 void EditorApplication::startGitProbe()
 {
+	// A git install re-probes when it ends; a second probe now would write
+	// m_gitProbe at the same time.
+	if (m_gitInstallRunning.load(std::memory_order_acquire)) return;
 	if (m_gitThread.joinable()) m_gitThread.join();
 	m_gitChecked.store(false, std::memory_order_release);
 	m_gitThread = std::thread([this]
 	{
 		HE::Sc::GitProbe probe = HE::Sc::probeGit();
 		m_gitProbe = std::move(probe);
+		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
 		m_gitChecked.store(true, std::memory_order_release);
 	});
 }
@@ -2132,11 +2450,14 @@ void EditorApplication::startSftpProbe()
 			// Reached and authenticated, but the catalogue itself did not arrive —
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
+			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
 			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
 				"The EngineContent catalogue could not be read.",
-				"The server answered, but its manifest could not be fetched or parsed, "
-				"and there is no cached copy on this machine. EngineContent will not "
-				"appear in the Content Browser this session.");
+				std::string("The server accepted the login, but reading its manifest failed")
+				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
+				+ "  There is no cached copy on this machine, so EngineContent will not "
+				  "appear in the Content Browser this session. Restarting the editor "
+				  "tries again.");
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())
@@ -2222,7 +2543,7 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 		auto config = [](const char* key, const std::string& value)
 		{
 			HE::Proc::Options o;
-			o.exe       = "git";
+			o.exe       = HE::Sc::gitLaunchPath();
 			o.args      = { "config", "--global", key, value };
 			o.timeoutMs = 5000;
 			// A probe must never stop to ask something it cannot display.
@@ -2245,9 +2566,61 @@ void EditorApplication::applyGitIdentity(std::string name, std::string email)
 	});
 }
 
+// Install git through the route the last probe found (HE::Sc::runGitInstall), on a
+// worker. Only ever started by the user ("Install Git"), and never quiet: every
+// installer line lands in m_gitInstallLog, which the dialog shows live, and the
+// start and the verdict go to the engine log. Afterwards the probe runs again —
+// inline, like applyGitIdentity, since startGitProbe would join this thread — and
+// when git runs, the frame thread asks GitService for a refresh, which runs the
+// repository detection the project's open had to skip.
+void EditorApplication::startGitInstall(bool lfs)
+{
+	if (m_gitInstallRunning.load(std::memory_order_acquire)) return;
+	// The plan is part of the probe; without an answer there is nothing to run.
+	if (!m_gitChecked.load(std::memory_order_acquire)) return;
+	const HE::Sc::GitInstallPlan plan = m_gitProbe.install;
+
+	if (m_gitInstallThread.joinable()) m_gitInstallThread.join();
+	// A Recheck still in flight would write m_gitProbe at the same time as the
+	// re-probe below. It is bounded by the probe's own timeouts.
+	if (m_gitThread.joinable()) m_gitThread.join();
+	{
+		std::lock_guard<std::mutex> lk(m_gitInstallLogMutex);
+		m_gitInstallLog.clear();
+	}
+	m_gitInstallFinished.store(false, std::memory_order_release);
+	m_gitInstallOk.store(false, std::memory_order_release);
+	m_gitInstallCancel.store(false, std::memory_order_release);
+	m_gitInstallIsLfs.store(lfs, std::memory_order_release);
+	m_gitInstallRunning.store(true, std::memory_order_release);
+	m_gitInstallThread = std::thread([this, plan, lfs]
+	{
+		const auto onLine = [this](const std::string& line)
+		{
+			std::lock_guard<std::mutex> lk(m_gitInstallLogMutex);
+			m_gitInstallLog += line;
+			m_gitInstallLog += '\n';
+		};
+		const HE::Sc::GitInstallOutcome res =
+			HE::Sc::runGitInstall(plan, onLine, &m_gitInstallCancel,
+			                      lfs ? HE::Sc::GitInstallTarget::GitLfs
+			                          : HE::Sc::GitInstallTarget::Git);
+
+		m_gitChecked.store(false, std::memory_order_release);
+		HE::Sc::GitProbe probe = HE::Sc::probeGit();
+		m_gitProbe = std::move(probe);
+		m_gitChecked.store(true, std::memory_order_release);
+
+		m_gitInstallOk.store(lfs ? res.lfsRunnable : res.gitRunnable, std::memory_order_release);
+		if (m_gitProbe.gitFound) m_gitReopenRepo.store(true, std::memory_order_release);
+		m_gitInstallRunning.store(false, std::memory_order_release);
+		m_gitInstallFinished.store(true, std::memory_order_release);
+	});
+}
+
 // Kick off a best-effort auto-install of the missing toolchain pieces on a worker
 // thread (see HcCodegen::installToolchain). Installer output streams into m_installLog
-// (guarded by m_installLogMutex); the "Toolchain Missing" dialog shows it live and,
+// (guarded by m_installLogMutex); the tool setup dialog shows it live and,
 // on completion, re-runs the probe. No-op if an install is already running.
 void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 {
@@ -2914,6 +3287,10 @@ void EditorApplication::OnRender(float dt)
 		{
 			m_hotReloadTimer = 0.0f;
 			auto changed = contentManager().pollHotReload();
+			// A peer's file was re-read the moment it arrived (applyAssetBytes);
+			// what follows is the part of a reload it still needs.
+			changed.insert(changed.end(), m_reloadedByPeer.begin(), m_reloadedByPeer.end());
+			m_reloadedByPeer.clear();
 			// One recompile per MODULE, not per entity running it: a script on
 			// twenty entities is one module, and reloading it twenty times only
 			// costs twenty compiles of the same source.
@@ -2935,6 +3312,20 @@ void EditorApplication::OnRender(float dt)
 					break;
 				case HE::AssetType::Material:
 					renderer()->InvalidateMaterial(id);
+					// An instance carries a derived copy of its parent's shader and
+					// parameter block. The Material Editor re-derives them on every
+					// edit it makes; a master that changed on disk (a collaborator's
+					// edit, a pull) has to do the same, or its instances keep
+					// rendering the old graph.
+					if (const MaterialAsset* m = contentManager().getMaterial(id))
+						if (m->parentMaterialPath.empty())
+							contentManager().syncMaterialInstancesOf(m->path);
+					break;
+				case HE::AssetType::MaterialFunction:
+					// The Material Editor caches function graphs for codegen and for
+					// the pins of FunctionCall nodes; only its own save cleared them.
+					if (const MaterialFunctionAsset* fn = contentManager().getMaterialFunction(id))
+						MaterialEditorPanel::forgetFunctionGraph(fn->path);
 					break;
 				case HE::AssetType::Texture:
 					// Texture GPU caches are keyed by material UUID, not texture UUID.
@@ -2982,6 +3373,10 @@ void EditorApplication::OnRender(float dt)
 			m_reloadTabsAfterPoll.clear();
 		}
 	}
+
+	// Which graphics values the renderer gets this frame: the project's or the
+	// user's own. Before anything below reads them.
+	syncGraphicsSource();
 
 	// Push post-process (engine prefs) + the scene's environment (World entity).
 	if (renderer())
@@ -3409,17 +3804,19 @@ void EditorApplication::OnRender(float dt)
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
 		}
 
-		// Thunder: when a lightning strike fired this frame, play the configured sound
-		// (graceful no-op if no thunderSound asset is set on the WeatherComponent).
-		if (m_isPlaying && m_editorWorld)
+		// The weather's sound: rain/wind/snow/storm beds that follow the live weather,
+		// and thunder after each lightning strike. After the tick above, so a strike is
+		// heard the frame it happens. Edit mode too (the Preferences switch is the way
+		// to silence it there); in Play it goes quiet with the pause, like the weather
+		// itself stands still.
+		if (m_editorWorld)
 		{
-			for (auto [e, wx] : m_editorWorld->registry().view<WeatherComponent>().each())
-			{
-				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
-					if (const auto* a = contentManager().getAudio(wx.thunderSound))
-						m_audioEngine.play(*a);
-				break;
-			}
+			HE_PROFILE_SCOPE_N("WeatherAudio");
+			WeatherAudio::Frame frame;
+			frame.realDt  = dt;
+			frame.gameDt  = gameDt;
+			frame.audible = m_isPlaying ? !m_isPaused : m_editorConfig.WeatherSoundInEditor;
+			WeatherAudio::update(m_weatherAudio, *m_editorWorld, m_audioEngine, contentManager(), frame);
 		}
 
 		// Per-frame script update. `simulating`, not m_isPlaying: onUpdate runs once
@@ -3949,6 +4346,20 @@ void EditorApplication::OnRender(float dt)
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
+			// Splines: every one as a line, the selected ones with a handle on
+			// each control point, and in Spline mode the point being edited and
+			// the spot a click on the line would insert at. Authoring furniture,
+			// so not while the game runs, and in Spline mode whatever the Guides
+			// switch says: there the splines are the subject. Built in
+			// ViewportOverlays, the code the HE_DUMP_SPLINETEST witness draws with.
+			if ((show.guides || m_editorConfig.mode == EditorMode::Spline) && !m_isPlaying)
+				HE::Ed::ViewportOverlays::appendSplineGuides(
+					*m_editorWorld, m_selection,
+					m_editorConfig.mode == EditorMode::Spline
+						? SplineTool::guides(*m_editorWorld, m_selection)
+						: SplineEdit::GuideState{},
+					m_editorCamera.position(), dbg);
+
 			// NavMesh wireframe(s): baked polygons, per-component toggle — and
 			// the viewport's switch over all of them, for a scene with twenty.
 			if (show.navMesh)
@@ -4165,7 +4576,8 @@ void EditorApplication::OnRender(float dt)
 			// A split scene's streaming cells, coloured by what the game would do
 			// with each from this camera. Editor furniture too: not while playing.
 			if (show.streamingCells && !m_isPlaying && m_editorWorld)
-				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(), dbg);
+				StreamingDebugView::appendCellLines(*m_editorWorld, m_editorCamera.position(),
+				                                    StreamingDebugView::previewPins(), dbg);
 
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
@@ -4336,7 +4748,21 @@ void EditorApplication::OnRender(float dt)
 		// what keeps the peers from ending up under two different rules.
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
+		// Read when a session starts, so pushing it mid-session moves nothing.
+		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
+		// Pushed before the collab pump, which is where the session's state
+		// settles and is handed over: the project's choice of who keeps its
+		// history (Config/ProjectSettings.json, read with the project) then
+		// applies to this frame's hand-over.
+		{
+			const auto& sc = m_projectManager.currentProject().settings.sourceControl;
+			m_git.setTeamServer(sc.teamServer(), sc.team, sc.project);
+		}
 		m_collab.update(nowMs);
+		// After the collab pump, so a session that just ended is withdrawn from
+		// the team in the same frame, and a join the team server answered starts
+		// on a controller that has already settled this frame's state.
+		m_team.update(nowMs);
 
 		// ── The MCP bridge ────────────────────────────────────────────────
 		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
@@ -4373,6 +4799,11 @@ void EditorApplication::OnRender(float dt)
 		// check is finished by a handshake this pump is the one to see.
 		pollClaudeProbe();
 
+	// A probe just found git: refresh at once rather than at the next poll. If
+	// the project was opened without git, that refresh is what runs the skipped
+	// repository detection (GitService), so the panel picks up where it was.
+	if (m_gitReopenRepo.exchange(false, std::memory_order_acq_rel) && m_git.gitMissing())
+		m_git.requestRefresh();
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
 	// Reward moment (EditorRewards.h): COMMITTED — no AppContext here, so
@@ -4382,6 +4813,27 @@ void EditorApplication::OnRender(float dt)
 
 		if (m_collab.inSession()) syncStructuralChanges();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
+
+		// Landscapes, after the structural diff so a landscape created this frame
+		// went out whole first. Entering or leaving a session starts the mirrors
+		// over: what was edited before it is in the snapshot the peers got.
+		if (m_collab.inSession() != m_terrainSyncLive)
+		{
+			m_terrainSync.reset();
+			m_terrainSyncLive = m_collab.inSession();
+			// Same for a closed-tab HC edit still waiting to go out: the next
+			// session's peers get it with the snapshot, not as a claim of ours.
+			m_collabUntabbedEdits.clear();
+		}
+		if (m_terrainSyncLive && m_editorWorld)
+		{
+			m_terrainSync.setExpectEcho(!m_collab.isHost());
+			m_terrainSync.collect(*m_editorWorld, nowMs,
+				[this](Entity e, const HE::Ed::TerrainSync::Patch& p) {
+					return m_collab.publishTerrainPatch(
+						static_cast<std::uint32_t>(entt::to_integral(e)), p);
+				});
+		}
 
 		// Claim the selected entity, so everyone else sees it is being worked on
 		// before they click it themselves. The PRIMARY only: a lock is one
@@ -4442,10 +4894,11 @@ void EditorApplication::OnRender(float dt)
 				// light, collider, script, name… Serializing one entity is cheap,
 				// and publishComponents hashes the result so an entity that is
 				// merely selected rather than edited sends nothing.
+				// A landscape's grids stay out (megabytes of base64 per frame);
+				// TerrainSync sends them as patches, whoever holds the entity.
 				{
-					SceneSerializer serializer;
 					const std::vector<std::uint8_t> comps =
-						serializer.serializeEntityComponents(*m_editorWorld, selected);
+						HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, selected);
 					if (!comps.empty())
 					{
 						m_collab.publishComponents(
@@ -4902,7 +5355,9 @@ void EditorApplication::dumpFrameHeadless()
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
 		{
-			e->dayNightCycle  = true;
+			// HE_DUMP_DAYNIGHT=0 switches the cycle off (the sun keeps its fixed default
+			// direction, TOD does nothing): the day-night-off side of a shadow A/B.
+			e->dayNightCycle  = envF("HE_DUMP_DAYNIGHT", 1.0f) > 0.5f;
 			e->timeOfDay      = static_cast<float>(envF("HE_DUMP_TOD", 0.0f));        // 0 = midnight
 			e->cloudMode      = static_cast<int>(envF("HE_DUMP_CLOUDMODE", 1.0f));
 			e->cloudCoverage  = static_cast<float>(envF("HE_DUMP_COVERAGE", 0.5f));
@@ -5728,10 +6183,16 @@ void EditorApplication::dumpFrameHeadless()
 			                          "Engine/Materials/Water.hasset or Engine/Meshes/Plane.hasset");
 		else
 		{
+			// HE_DUMP_WATERSIZE=<metres>: side of the square (default 40). The swell
+			// is 14 m long, so a pattern that repeats every few wavelengths only
+			// shows on a plane several times that (Thema 152, Schritt 8).
+			float side = 40.0f;
+			if (const char* ws = std::getenv("HE_DUMP_WATERSIZE"); ws && *ws)
+				side = std::clamp(std::strtof(ws, nullptr), 1.0f, 4000.0f);
 			auto e = m_editorWorld->createEntity("WaterTest");
 			TransformComponent tc;
 			tc.position = glm::vec3(0.0f, 0.0f, -8.0f);
-			tc.scale    = glm::vec3(40.0f, 1.0f, 40.0f);
+			tc.scale    = glm::vec3(side, 1.0f, side);
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
 			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
@@ -5779,7 +6240,7 @@ void EditorApplication::dumpFrameHeadless()
 				auto fe = m_editorWorld->createEntity("WaterTestFloor");
 				TransformComponent ftc;
 				ftc.position = glm::vec3(0.0f, -1.5f, -8.0f);
-				ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+				ftc.scale    = glm::vec3(side, 0.2f, side);
 				reg.emplace<TransformComponent>(fe, ftc);
 				reg.emplace<MeshComponent>(fe, MeshComponent{ HE::kDefaultCubeMeshId });
 				reg.emplace<MaterialComponent>(fe,
@@ -5787,6 +6248,134 @@ void EditorApplication::dumpFrameHeadless()
 			}
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_WATERTEST engine water plane added");
 		}
+	}
+
+	// ── Water ring witness (HE_DUMP_WATERRIPPLE, Thema 179 Schritt 3): rings on the engine
+	// water (HE_DUMP_WATERTEST), without a physics run. "x,z,radius,strength,age[,kind];…"
+	// in world metres, 0..1 and seconds (kind 0 impact, 1 trail, 2 script, 3 exit; default 0),
+	// e.g. "0,-4,0.5,1,0.8;3,-6,0.3,0.6,0.2". "1" is one ring of a crate's size at 0.8 s. The rings
+	// go through the same RippleField::add and ::pack the physics uses, then the renderer's
+	// block stays exactly as written: nothing ages them (the dump advances no time), so the
+	// same string twice is the same image, and the age you ask for is the age you get. Unset
+	// is the control: no block is pushed, the image is the water as it was before rings.
+	if (const char* wr = std::getenv("HE_DUMP_WATERRIPPLE"); wr && *wr)
+	{
+		const std::string spec = std::string(wr) == "1" ? std::string("0,-4,0.5,1,0.8") : std::string(wr);
+		HE::water::RippleField field;
+		std::stringstream all(spec);
+		std::string item;
+		while (std::getline(all, item, ';'))
+		{
+			float v[6] = { 0.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.0f };
+			std::stringstream fields(item);
+			std::string f;
+			for (int k = 0; k < 6 && std::getline(fields, f, ','); ++k)
+				v[k] = std::strtof(f.c_str(), nullptr);
+			HE::water::Ripple r;
+			r.pos = glm::vec2(v[0], v[1]);
+			r.radius = v[2];
+			r.strength = v[3];
+			r.age = v[4];
+			r.kind = static_cast<int>(v[5]);
+			field.add(r);
+		}
+		field.pack(m_dumpRipples);
+		m_dumpRipplesOn = true;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERRIPPLE %d ring(s) from '%s'", field.count(), spec.c_str());
+	}
+
+	// ── Water drop witness (HE_DUMP_WATERDROP, Thema 179 Schritt 3): the whole chain on one
+	// image, no shortcut. A 128 m landscape at y = 300 with a lake 3 m deep, a one-metre crate
+	// of half the water's density that falls on it from 3 m up, a REAL PhysicsWorld stepped until
+	// the crate has landed and then HE_DUMP_WATERDROP seconds more (the age of the splash the
+	// frame shows; 0.8 is a good one), and the rings that world raised handed to the renderer the
+	// way the game hands them (RippleField::pack → IRenderer::SetWaterRipples). The crate lands at
+	// about (0, 303, -2): frame it with SKYTEST CAMY=305 CAMZ=6 PITCH=-18. HE_DUMP_WATERDROPRINGS=0
+	// leaves the rings out of the frame and keeps everything else (the A of the A/B: the same
+	// crate in the same water, no rings). The log line carries the numbers as a twin to the image.
+	// HE_DUMP_WATERDROPDENSITIES="300,600,900,1200,2500" (Thema 179 Schritt 6) drops one crate of each
+	// density, 2.5 m apart along x and centred on x = 0, instead of the one half-density crate: three
+	// float at different depths, the two heavier ones sink to the bed. The log then names each crate.
+	if (const char* wd = std::getenv("HE_DUMP_WATERDROP"); wd && *wd && m_editorWorld)
+	{
+		namespace water = HE::water;
+		auto& reg = m_editorWorld->registry();
+		const float after = std::clamp(static_cast<float>(std::atof(wd)), 0.0f, 6.0f);
+		auto land = m_editorWorld->createEntity("WaterDropLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);   // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution  = 65;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		const uint16_t lake = ltc.water.createBody(3.0f);
+		const bool lakeOk = water::addPolygon(ltc, lake, { { -60, -60 }, { 60, -60 }, { 60, 60 }, { -60, 60 } }).ok;
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sheet the crate floats on
+
+		std::vector<float> densities{ 500.0f };   // half the water's: it floats half out
+		if (const char* dl = std::getenv("HE_DUMP_WATERDROPDENSITIES"); dl && *dl)
+		{
+			densities.clear();
+			std::stringstream list(dl);
+			for (std::string item; std::getline(list, item, ',') && densities.size() < 8;)
+				if (const float d = static_cast<float>(std::atof(item.c_str())); d > 0.0f)
+					densities.push_back(d);
+			if (densities.empty()) densities.push_back(500.0f);
+		}
+		std::vector<Entity> crates;
+		for (size_t i = 0; i < densities.size(); ++i)
+		{
+			auto crate = m_editorWorld->createEntity("WaterDropCrate");
+			TransformComponent ctf;
+			ctf.position = glm::vec3(2.5f * (static_cast<float>(i) - 0.5f * static_cast<float>(densities.size() - 1)), 306.0f, -2.0f);
+			reg.emplace<TransformComponent>(crate, ctf);
+			reg.emplace<MeshComponent>(crate, MeshComponent{ HE::kDefaultCubeMeshId });
+			RigidBodyComponent crb;
+			crb.type    = RigidBodyType::Dynamic;
+			crb.mass    = densities[i];   // a metre cube: kg = kg/m3
+			crb.density = densities[i];
+			reg.emplace<RigidBodyComponent>(crate, crb);
+			ColliderComponent ccol;
+			ccol.shape       = ColliderShape::Box;
+			ccol.halfExtents = glm::vec3(0.5f);
+			reg.emplace<ColliderComponent>(crate, ccol);
+			crates.push_back(crate);
+		}
+
+		PhysicsWorld pw;
+		pw.initialize(*m_editorWorld);
+		pw.setThreadCount(1);
+		constexpr float dt = 1.0f / 60.0f;
+		int landedAt = -1, steps = 0;
+		for (int i = 1; i <= 900 && (landedAt < 0 || static_cast<float>(i - landedAt) * dt <= after + 0.5f * dt); ++i)
+		{
+			pw.step(*m_editorWorld, dt);
+			steps = i;
+			if (landedAt < 0 && pw.waterRipples().count() > 0)
+				landedAt = i;
+		}
+		const bool ringsOn = [] { const char* v = std::getenv("HE_DUMP_WATERDROPRINGS"); return !(v && std::atoi(v) == 0); }();
+		if (ringsOn)
+			pw.waterRipples().pack(m_dumpRipples);
+		m_dumpRipplesOn = true;   // the block as it is: nothing in the dump ages it further
+		const glm::vec3 at = reg.get<TransformComponent>(crates.front()).position;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERDROP lake %s, landed at step %d of %d, crate at (%.2f, %.2f, %.2f), "
+			"%d ring(s) on the water, rings %s, share under water %.2f",
+			lakeOk ? "ok" : "FAILED", landedAt, steps, at.x, at.y, at.z, pw.waterRipples().count(),
+			ringsOn ? "on" : "left out", pw.submergedFraction(static_cast<uint32_t>(crates.front())));
+		if (crates.size() > 1)
+			for (size_t i = 0; i < crates.size(); ++i)
+			{
+				const glm::vec3 p = reg.get<TransformComponent>(crates[i]).position;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERDROP crate %zu density %.0f at (%.2f, %.2f, %.2f), height over the bed %.2f m, "
+					"share under water %.2f", i, densities[i], p.x, p.y, p.z, p.y - 300.0f,
+					pw.submergedFraction(static_cast<uint32_t>(crates[i])));
+			}
 	}
 
 	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
@@ -6724,6 +7313,95 @@ void EditorApplication::dumpFrameHeadless()
 			tb, gen.textures.size(), gen.textureArrayMask, grids);
 	}
 
+	// ── Foliage witness (HE_DUMP_FOLIAGETEST=<N>, Thema 163 Schritt 2c) ─────────
+	// A flat landscape with ONE foliage layer of N instances of a built-in mesh,
+	// so the cost of scattered vegetation (extract, cull, sort, batch, draw) has
+	// a repeatable subject and the picture before/after a rendering change can
+	// be compared. The instances are scattered here, synchronously, and the time
+	// FoliageSystem took goes into the log together with the count it really
+	// placed (the density is derived from N and the area, so it is N).
+	//   HE_DUMP_FOLIAGESIZE=<m>        terrain side, default 400 m, centred on 0,0,0
+	//   HE_DUMP_FOLIAGEDIST=<m>        drawDistance, default 1e6 (every instance
+	//                                  is in range; a small value is the "only a
+	//                                  part is in range" case)
+	//   HE_DUMP_FOLIAGEMESH=cube|sphere  default cube
+	//   HE_DUMP_FOLIAGESCALE=<min>,<max> instance scale, default 0.5,1.0
+	//   HE_DUMP_FOLIAGESEED=<n>        scatter seed, default 42
+	// The camera is the dump's own (HE_DUMP_CAMX/CAMY/CAMZ/PITCH/YAW); a view
+	// over the middle of the field is CAMX=0 CAMY=40 CAMZ=-120 PITCH=-20.
+	if (const char* ft = std::getenv("HE_DUMP_FOLIAGETEST"); ft && *ft && m_editorWorld)
+	{
+		auto envF = [](const char* k, float d)
+		{ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+		const long  want = std::max(1L, std::atol(ft));
+		const float side = std::max(10.0f, envF("HE_DUMP_FOLIAGESIZE", 400.0f));
+		const bool  sphere = [] { const char* m = std::getenv("HE_DUMP_FOLIAGEMESH");
+		                          return m && std::string_view(m) == "sphere"; }();
+		float scaleMin = 0.5f, scaleMax = 1.0f;
+		if (const char* sc = std::getenv("HE_DUMP_FOLIAGESCALE"); sc && *sc)
+		{
+			const char* comma = std::strchr(sc, ',');
+			scaleMin = static_cast<float>(std::atof(sc));
+			scaleMax = comma ? static_cast<float>(std::atof(comma + 1)) : scaleMin;
+		}
+
+		auto& reg  = m_editorWorld->registry();
+		auto  land = m_editorWorld->createEntity("FoliageTestField");
+		reg.emplace<TransformComponent>(land, TransformComponent{});
+		TerrainComponent ftc;
+		ftc.sizeX = ftc.sizeZ = side;
+		ftc.resolution  = 129;
+		ftc.heightScale = 0.0f;    // flat: terrainHeightAt is 0 everywhere
+		ftc.seed        = 0;
+		ftc.dirty       = true;
+		reg.emplace<TerrainComponent>(land, ftc);
+		FoliageComponent fol;
+		fol.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
+		// +0.5: the scatter takes int(area * density), and float rounding must
+		// not cost the last instance.
+		fol.density      = (static_cast<float>(want) + 0.5f) / (side * side);
+		fol.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
+		fol.minScale     = scaleMin;
+		fol.maxScale     = scaleMax;
+		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
+		fol.dirty        = true;
+		// HE_DUMP_FOLIAGEMAT=graph: the layer carries a node-graph material (one flat
+		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
+		// instances the batch with its built-in program draws it grey; one that keeps
+		// the material draws it magenta, once per instance (Thema 163 Teil 2b, GL gate).
+		if (const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT"); fm && std::string_view(fm) == "graph")
+		{
+			MaterialAsset mat;
+			mat.type = HE::AssetType::Material;
+			mat.name = "FoliageGraphTest";
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.8f;
+			g.connect(col, 0, out, 0);
+			mat.nodeGraphJson = HE::materialGraphToJson(g);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderGBufGlsl = gen.glslGBuffer;
+			mat.customShaderVertGlsl = gen.vertexBody;
+			mat.blendMode            = gen.blendMode;
+			mat.domain               = gen.domain;
+			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
+		}
+		reg.emplace<FoliageComponent>(land, fol);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const auto t0 = std::chrono::steady_clock::now();
+		FoliageSystem::update(*m_editorWorld);
+		const double scatterMs = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+		const FoliageComponent& placedFol = reg.get<FoliageComponent>(land);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGETEST witness field added "
+			"(%zu instances placed of %ld asked, %s, %.0f m square, scale %.2f-%.2f, "
+			"drawDistance %.0f, scatter %.1f ms)",
+			placedFol.cachedInstances.size(), want, sphere ? "sphere" : "cube", side,
+			placedFol.minScale, placedFol.maxScale, placedFol.drawDistance, scatterMs);
+	}
+
 	// ── Auto landscape material witness (HE_DUMP_AUTOLAND, Thema 158 Schritt 5) ─
 	// A 128 m landscape at y=300 whose relief is ANALYTIC, so every column's
 	// expected layer is known: a flat plain (x < -24), a smoothstep ramp up to a
@@ -6910,6 +7588,806 @@ void EditorApplication::dumpFrameHeadless()
 				gl.autoSlope.x, gl.autoSlope.y, gl.autoSlope.z,
 				gl.autoSnow.x, gl.autoSnow.y, gl.autoSnow.z, gl.autoSlope.w);
 		}
+	}
+
+	// ── Water surface witness (HE_DUMP_WATERLAKE, Thema 174 Schritte 4 und 5): a
+	// 128 m landscape at y=300 and water drawn into its water field the way the lake
+	// tool will — polygons through HE::water::addPolygon — then updateTerrains, which
+	// builds the surface meshes and their entities. The shapes are the ones the mesh
+	// has to get right (all on flat ground at the water's level unless noted):
+	//   =l     an L (concave corner)
+	//   =star  a five-pointed star (five concave notches, off the grid)
+	//   =ring  a square lake with a square island and a pond on the island
+	//   =two   two lakes side by side, two bodies 0.8 m apart in level
+	//   =slope a lake over a BANK (Schritt 5): the ground rises to the east (0.12 m
+	//          per metre, a wobble across z) and the lake polygon runs on over the hill
+	//   =bowl  a lake drawn bigger than the hollow it lies in (round bank, Schritt 5)
+	//   =brush the same bank, with the water painted by brush dabs instead of a polygon
+	//   =none  the landscape and no water: the control for every other frame
+	// HE_DUMP_WATERLEVEL moves the surface above the ground (default 0.4 m, 2 m for
+	// the bank shapes). HE_DUMP_WATERCLIP=0 switches the shore clipping off (the A of
+	// the A/B; default on), HE_DUMP_WATEROVERSHOOT sets the margin in metres,
+	// HE_DUMP_WATERHIDEGROUND=1 hides the landscape's own chunks so the frame shows
+	// the sheets alone (from above the terrain hides every part of a sheet that is
+	// under it, which is exactly why the clipped and the unclipped picture look the
+	// same there). The log line carries the numbers as a twin to the image.
+	// Camera: CAMY=375 CAMZ=48 PITCH=-60.
+	if (const char* wl = std::getenv("HE_DUMP_WATERLAKE"); wl && *wl && m_editorWorld)
+	{
+		namespace water = HE::water;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(wl);
+		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush";
+		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
+		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);   // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 128.0f;
+		ltc.resolution  = 65;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 256;
+		if (bank)
+		{
+			// The ground, as a sculpted height field (terrain-local metres). 129 is
+			// 2^7+1, so TerrainSystem does not resample it.
+			const uint32_t hr = 129;
+			ltc.resolution = hr;
+			ltc.sculptHeights.assign(static_cast<size_t>(hr) * hr, 0.0f);
+			for (uint32_t zi = 0; zi < hr; ++zi)
+				for (uint32_t xi = 0; xi < hr; ++xi)
+				{
+					const float x = -64.0f + 128.0f * static_cast<float>(xi) / static_cast<float>(hr - 1);
+					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
+					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
+						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
+						               : 0.12f * x + 1.2f * std::sin(0.15f * z);
+				}
+		}
+		if (const char* c = std::getenv("HE_DUMP_WATERCLIP"); c && *c)
+			ltc.water.clipToGround = std::atoi(c) != 0;
+		if (const char* o = std::getenv("HE_DUMP_WATEROVERSHOOT"); o && *o)
+			ltc.water.shoreOvershoot = std::clamp(static_cast<float>(std::atof(o)), 0.0f, water::kMaxShoreOvershoot);
+
+		auto rect = [](float x0, float z0, float x1, float z1) {
+			return std::vector<glm::vec2>{ { x0, z0 }, { x1, z0 }, { x1, z1 }, { x0, z1 } };
+		};
+		bool ok = true;
+		if (mode == "l")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -44, -30 }, { 30, -30 }, { 30, -8 }, { -12, -8 }, { -12, 40 }, { -44, 40 } }).ok;
+		}
+		else if (mode == "star")
+		{
+			std::vector<glm::vec2> star;
+			for (int i = 0; i < 10; ++i)
+			{
+				const float a = 3.14159265f * static_cast<float>(i) / 5.0f - 1.5707963f;
+				const float rad = (i & 1) ? 19.0f : 46.0f;
+				star.emplace_back(2.3f + rad * std::cos(a), 3.1f + rad * std::sin(a));
+			}
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, star).ok;
+		}
+		else if (mode == "ring")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, rect(-48, -40, 48, 40)).ok
+			  && water::removePolygon(ltc, { { -22, -16 }, { 20, -22 }, { 26, 14 }, { -14, 20 } }).ok   // a slanted island
+			  && water::addPolygon(ltc, b, { { -6, -4 }, { 6, -4 }, { 8, 4 }, { -4, 6 } }).ok;           // a pond on it
+		}
+		else if (mode == "slope")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -60, -46 }, { 20, -52 }, { 58, -30 }, { 60, 44 }, { 6, 52 }, { -58, 40 } }).ok;
+		}
+		else if (mode == "bowl")
+		{
+			// The hollow's rim stands at r² = (level + 6) / 0.004, 45 m at level 2: inside the polygon.
+			const uint16_t b = ltc.water.createBody(level);
+			ok = water::addPolygon(ltc, b, { { -54, -50 }, { 50, -56 }, { 58, 40 }, { -48, 52 } }).ok;
+		}
+		else if (mode == "brush")
+		{
+			const uint16_t b = ltc.water.createBody(level);
+			ok = true;
+			for (int i = 0; i < 9; ++i)       // a trail of dabs across the bank, like a stroke
+			{
+				const float t = static_cast<float>(i) / 8.0f;
+				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
+			}
+		}
+		else if (mode == "two")
+		{
+			const uint16_t a = ltc.water.createBody(level);
+			const uint16_t c = ltc.water.createBody(level + 0.8f);
+			ok = water::addPolygon(ltc, a, { { -50, -36 }, { -8, -42 }, { -2, 10 }, { -44, 18 } }).ok
+			  && water::addPolygon(ltc, c, { { 8, -6 }, { 52, -14 }, { 56, 38 }, { 20, 44 }, { 12, 20 } }).ok;
+		}
+		// The underwater post pass's per-body knobs (Thema 185 Schritt 4), for the A/B and the
+		// depth series: HE_DUMP_UWFOG="density[,falloff]" and
+		// HE_DUMP_UWCAUSTICS="intensity[,scale[,speed[,depth]]]" are set on EVERY body of the
+		// witness through the same setters the Water tab uses (so the clamp applies). Unset =
+		// the bodies keep their defaults. Density 0 / intensity 0 switch that stage off.
+		// Camera under water: CAMY = surface (302 for bank shapes at the default level) - depth.
+		auto uwFloats = [](const char* name, float* out, int n) {
+			const char* v = std::getenv(name);
+			if (!v || !*v) return false;
+			char* end = nullptr;
+			for (int i = 0; i < n; ++i)
+			{
+				const float val = std::strtof(v, &end);
+				if (end == v) break;   // fewer numbers than knobs: the rest keep their defaults
+				out[i] = val;
+				v = end;
+				if (*v == ',') ++v;
+			}
+			return true;
+		};
+		{
+			water::UnderwaterFogParams fogOv{};
+			float f[2] = { fogOv.density, fogOv.falloff };
+			const bool haveFog = uwFloats("HE_DUMP_UWFOG", f, 2);
+			water::UnderwaterCausticsParams cauOv{};
+			float c[4] = { cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth };
+			const bool haveCau = uwFloats("HE_DUMP_UWCAUSTICS", c, 4);
+			if (haveFog) { fogOv.density = f[0]; fogOv.falloff = f[1]; }
+			if (haveCau) { cauOv.intensity = c[0]; cauOv.scale = c[1]; cauOv.speed = c[2]; cauOv.depth = c[3]; }
+			if (haveFog || haveCau)
+			{
+				for (const water::Body& body : std::vector<water::Body>(ltc.water.bodies))
+				{
+					if (haveFog) water::setUnderwaterFog(ltc, body.id, fogOv);
+					if (haveCau) water::setUnderwaterCaustics(ltc, body.id, cauOv);
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_UWFOG/UWCAUSTICS applied to %zu body(ies): "
+					"fog %s density %.3f falloff %.2f, caustics %s intensity %.2f scale %.2f speed %.2f depth %.1f",
+					ltc.water.bodies.size(), haveFog ? "set" : "default", fogOv.density, fogOv.falloff,
+					haveCau ? "set" : "default", cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth);
+			}
+		}
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		// The sheet alone: the landscape's chunks stay in the world (collision, the
+		// field) but are not drawn.
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The number that says what the picture cannot: how far the ground stands
+		// above the sheet's level at the sheet's own vertices (a clipped sheet has
+		// the overshoot at most), and the vertex span in x.
+		float worstOver = -1.0e30f, lo = 1.0e30f, hi = -1.0e30f;
+		uint32_t verts = 0;
+		for (auto [we, wsc, wtf] : reg.view<WaterSurfaceComponent, TransformComponent>().each())
+			if (const StaticMeshAsset* m = contentManager().getStaticMesh(wsc.meshId))
+				for (size_t i = 0; i + 2 < m->vertices.size(); i += 3, ++verts)
+				{
+					const float x = m->vertices[i] + wtf.position.x, z = m->vertices[i + 2] + wtf.position.z;
+					worstOver = std::max(worstOver, terrainHeightAt(reg.get<TerrainComponent>(land), x, z) - wsc.level);
+					lo = std::min(lo, x); hi = std::max(hi, x);
+				}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE witness landscape added "
+			"(mode %s, polygons %s, surfaces created %u, triangles %u, level %.2f, clip %d, overshoot %.2f, "
+			"vertices %u, x span %.2f..%.2f, ground over sheet at the vertices at most %.3f m)",
+			wl, ok ? "ok" : "FAILED", ws.created, ws.triangles, level,
+			ltc.water.clipToGround ? 1 : 0, ltc.water.shoreOvershoot, verts, lo, hi, worstOver);
+		// HE_DUMP_SAVESCENE=<file.hescene> writes the witness world out as it stands (landscape,
+		// water body with the HE_DUMP_UWFOG / HE_DUMP_UWCAUSTICS knobs, the sky the SKYTEST block
+		// configured) so the REAL editor loop can open it: a perf capture (scripts/he_perf_capture.py
+		// --scene) of the underwater stage needs a scene file, and the lake only ever existed as
+		// an env-var witness. Same call the editor's File > Save makes.
+		if (const char* sv = std::getenv("HE_DUMP_SAVESCENE"); sv && *sv)
+		{
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, sv, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_SAVESCENE %s -> %s", saved ? "wrote" : "FAILED to write", sv);
+		}
+	}
+
+	// ── Water brush witness (HE_DUMP_WATERBRUSH, Thema 174 Schritt 7): a flat
+	// 100 m landscape at y=300, painted the way the Landscape tool's Water mode
+	// paints it — a drag of several dabs through HE::water::brush (begin/dab/end),
+	// the same calls TerrainTools::sculptInViewport makes, not a shortcut through
+	// addCircle. Modes:
+	//   =paint  a straight drag, water at the ground's height plus the default
+	//           offset (no dig): the sheet floats a little above flat ground.
+	//   =dig    the same drag with Dig Bed on: a pit under the water, so the
+	//           sheet has a visible depth instead of a film on the surface.
+	//   =undo   paints, then takes the stroke back through EditorUndo (one
+	//           snapshot before, one undo after) — the A/B for "undo removes a
+	//           whole stroke": compare against =paint at the same settings.
+	//   =pit    (Thema 188 Schritt 3) the case the dry crater showed in: ground
+	//           rising 8 % to the east, the editor's pacing (amount = strength 5 ·
+	//           1/60 s, a dab every half metre) and its default brush (radius 10,
+	//           falloff 5), Dig Bed on, a 128 m landscape at a vertex per metre
+	//           and a water cell four vertices wide (the editor's own proportions).
+	//           The log line counts the vertices the stroke lowered that no
+	//           triangle of the sheet covers — the mesh buildSurface makes, the one
+	//           WaterSurface draws, not the point test the dig itself asks. Those
+	//           still at or above the water's reach are the bank (Schritt 4), a line
+	//           of their own with the wall left at the shore and the steepest step.
+	// HE_DUMP_WATERLEVEL (default: ground + 0.3, i.e. unset) can pin a fixed
+	// level instead. Camera: CAMY=375 CAMZ=48 PITCH=-60, the WATERLAKE framing.
+	if (const char* wb = std::getenv("HE_DUMP_WATERBRUSH"); wb && *wb && m_editorWorld)
+	{
+		namespace WB = HE::water::brush;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(wb);
+		const bool pit = mode == "pit";
+		auto land = m_editorWorld->createEntity("WaterBrushLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = pit ? 128.0f : 100.0f;
+		ltc.resolution  = 129;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = pit ? 32 : 128;
+		if (pit)
+		{
+			ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
+			for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+				for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+					ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
+						0.08f * (-64.0f + static_cast<float>(xi));
+		}
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat chunks first
+
+		m_undo.setWorld(m_editorWorld.get());
+		m_undo.clearHistory();
+		if (mode == "undo") m_undo.snapshotNow("Paint Water");   // the editor's protocol: snapshot, then the stroke
+
+		WB::Params p;
+		p.radius = 14.0f; p.falloff = 6.0f; p.amount = 1.0f;
+		p.levelFromGround = true; p.levelOffset = 0.3f;
+		if (const char* lv = std::getenv("HE_DUMP_WATERLEVEL"); lv && *lv)
+		{ p.levelFromGround = false; p.level = static_cast<float>(std::atof(lv)); }
+		p.dig = mode == "dig"; p.digDepth = 1.5f;
+		if (pit)
+		{
+			p.radius = 10.0f; p.falloff = 5.0f; p.amount = 5.0f / 60.0f;
+			p.dig = true; p.digDepth = 1.0f;
+		}
+
+		auto& ltc2 = reg.get<TerrainComponent>(land);
+		const std::vector<float> groundBefore = ltc2.sculptHeights;
+		const float x0 = pit ? -30.0f : -24.0f, x1 = pit ? 18.0f : 24.0f;
+		const int steps = pit ? 96 : 12;
+		WB::Stroke s;
+		WB::begin(s, ltc2, x0, 0.0f, p);
+		for (int i = 0; i <= steps; ++i)
+			WB::dab(s, ltc2, x0 + (x1 - x0) * static_cast<float>(i) / static_cast<float>(steps), 0.0f, p);
+		const bool created = s.created;
+		const float strokeLevel = s.level;
+		const uint32_t dabs = s.dabs;
+		const uint16_t strokeBody = s.body;
+		WB::end(s, ltc2);
+		const uint32_t wetAfterPaint = ltc2.water.wetCells();
+
+		std::string pitNote;
+		if (pit && strokeBody != HE::water::kNoBody && groundBefore.size() == ltc2.sculptHeights.size())
+		{
+			// The sheet as WaterSurface builds it (the field's own shore clipping).
+			HE::water::SurfaceOptions so;
+			so.clipToGround   = ltc2.water.clipToGround;
+			so.shoreOvershoot = ltc2.water.shoreOvershoot;
+			HE::water::SurfaceMesh sheet;
+			const bool built = HE::water::buildSurface(ltc2, strokeBody, so, sheet);
+			const std::vector<float>&    sv = sheet.mesh.vertices;
+			const std::vector<uint32_t>& si = sheet.mesh.indices;
+			// A point on a triangle or within `tol` of its edges counts as covered.
+			auto covered = [&](float x, float z, float tol)
+			{
+				const float px = x - sheet.center.x, pz = z - sheet.center.y;
+				auto side = [&](float ax, float az, float bx, float bz)
+				{
+					const float len = std::sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+					return len > 0.0f ? ((bx - ax) * (pz - az) - (bz - az) * (px - ax)) / len : 0.0f;
+				};
+				for (size_t t = 0; t + 2 < si.size(); t += 3)
+				{
+					const float ax = sv[si[t] * 3], az = sv[si[t] * 3 + 2];
+					const float bx = sv[si[t + 1] * 3], bz = sv[si[t + 1] * 3 + 2];
+					const float cx = sv[si[t + 2] * 3], cz = sv[si[t + 2] * 3 + 2];
+					const float d1 = side(ax, az, bx, bz), d2 = side(bx, bz, cx, cz), d3 = side(cx, cz, ax, az);
+					if ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) return true;
+				}
+				return false;
+			};
+			const uint32_t res = ltc2.resolution;
+			const float step = ltc2.sizeX / static_cast<float>(res - 1);
+			// Schritt 4: a lowered vertex off the sheet that still stands at or above
+			// the water's reach (level + the shore clipping's overshoot) is the bank,
+			// dry land, not a pit; counted apart.
+			const float reachY = strokeLevel + (ltc2.water.clipToGround ? ltc2.water.shoreOvershoot : 0.0f);
+			uint32_t dug = 0, dugDry = 0, wetUndug = 0, bank = 0;
+			float dryDepth = 0.0f, deepest = 0.0f, bankLowest = 1e9f;
+			float dryMinX = 1e9f, dryMaxX = -1e9f;
+			glm::vec2 dugMin(1e9f), dugMax(-1e9f), sheetMin(1e9f), sheetMax(-1e9f);
+			for (size_t k = 0; k + 2 < sv.size(); k += 3)
+			{
+				const glm::vec2 q(sv[k] + sheet.center.x, sv[k + 2] + sheet.center.y);
+				sheetMin = glm::min(sheetMin, q); sheetMax = glm::max(sheetMax, q);
+			}
+			for (uint32_t zi = 0; zi < res; ++zi)
+				for (uint32_t xi = 0; xi < res; ++xi)
+				{
+					const size_t i = static_cast<size_t>(zi) * res + xi;
+					const float x = -ltc2.sizeX * 0.5f + static_cast<float>(xi) * step;
+					const float z = -ltc2.sizeZ * 0.5f + static_cast<float>(zi) * step;
+					const float lowered = groundBefore[i] - ltc2.sculptHeights[i];
+					if (!(lowered > 0.0f)) { if (covered(x, z, 0.0f)) ++wetUndug; continue; }
+					++dug;
+					deepest = std::max(deepest, lowered);
+					dugMin = glm::min(dugMin, glm::vec2(x, z)); dugMax = glm::max(dugMax, glm::vec2(x, z));
+					if (covered(x, z, 0.005f)) continue;
+					if (ltc2.sculptHeights[i] >= reachY)
+					{
+						++bank;
+						bankLowest = std::min(bankLowest, ltc2.sculptHeights[i] - strokeLevel);
+						continue;
+					}
+					++dugDry;
+					dryDepth = std::max(dryDepth, lowered);
+					dryMinX = std::min(dryMinX, x); dryMaxX = std::max(dryMaxX, x);
+				}
+			// The wall where the pit ends: how far the first vertex off the sheet
+			// (a 4-neighbour of one under it) stands above the level, at most, and
+			// the steepest step between two neighbours off the sheet, one lowered.
+			std::vector<uint8_t> under(static_cast<size_t>(res) * res, 0);
+			for (uint32_t zi = 0; zi < res; ++zi)
+				for (uint32_t xi = 0; xi < res; ++xi)
+					under[static_cast<size_t>(zi) * res + xi] =
+						covered(-ltc2.sizeX * 0.5f + static_cast<float>(xi) * step,
+						        -ltc2.sizeZ * 0.5f + static_cast<float>(zi) * step, 0.005f) ? 1 : 0;
+			float shoreRise = 0.0f, bankSteep = 0.0f;
+			for (uint32_t zi = 0; zi < res; ++zi)
+				for (uint32_t xi = 0; xi < res; ++xi)
+				{
+					const size_t i = static_cast<size_t>(zi) * res + xi;
+					if (under[i]) continue;
+					const size_t nb[4] = { xi > 0 ? i - 1 : i, xi + 1 < res ? i + 1 : i,
+					                       zi > 0 ? i - res : i, zi + 1 < res ? i + res : i };
+					for (const size_t n : nb)
+					{
+						if (n == i) continue;
+						if (under[n]) shoreRise = std::max(shoreRise, ltc2.sculptHeights[i] - strokeLevel);
+						else if (ltc2.sculptHeights[i] < groundBefore[i] || ltc2.sculptHeights[n] < groundBefore[n])
+							bankSteep = std::max(bankSteep, std::abs(ltc2.sculptHeights[i] - ltc2.sculptHeights[n]));
+					}
+				}
+			char pb[640];
+			std::snprintf(pb, sizeof pb, "; pit vs sheet: sheet built %d (%u triangles), %u vertices dug (deepest %.2f m), "
+			              "%u of them dry (deepest dry %.2f m, x %.1f..%.1f), %u under water but not dug; "
+			              "dug vertices span x %.2f..%.2f z %.2f..%.2f, the sheet x %.2f..%.2f z %.2f..%.2f",
+			              built ? 1 : 0, sheet.triangles, dug, deepest, dugDry, dryDepth,
+			              dugDry ? dryMinX : 0.0f, dugDry ? dryMaxX : 0.0f, wetUndug,
+			              dugMin.x, dugMax.x, dugMin.y, dugMax.y, sheetMin.x, sheetMax.x, sheetMin.y, sheetMax.y);
+			pitNote = pb;
+			// A line of its own: HE_LOG cuts at ~512 characters, and the pit note is long already.
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH pit: bank %u vertices off the sheet above "
+			            "the water's reach (lowest %.2f m above the level), shore wall at most %.2f m above the level, "
+			            "steepest step off the water %.2f m per %.2f m",
+			            bank, bank ? bankLowest : 0.0f, shoreRise, bankSteep, step);
+			// Where the sheet reaches past the pit (downhill, the west end): ground
+			// the water covers without a dig, below the stroke's level by nature.
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH pit: ground at the sheet's west end (%.2f,0) "
+			            "%.2f m, at the pit's west end (%.2f,0) %.2f m, level %.2f m",
+			            sheetMin.x, terrainHeightAt(ltc2, sheetMin.x, 0.0f),
+			            dugMin.x, terrainHeightAt(ltc2, dugMin.x, 0.0f), strokeLevel);
+		}
+
+		bool undone = false;
+		if (mode == "undo")
+		{
+			undone = m_undo.undo();
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		}
+		else
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+
+		const TerrainComponent& afterTc = [&]() -> const TerrainComponent& {
+			// undo() replaces every entity; find the one landscape again.
+			auto view = reg.view<TerrainComponent>();
+			return reg.get<TerrainComponent>(*view.begin());
+		}();
+		const uint32_t wetNow = afterTc.water.wetCells();
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The other half of a pit-against-sheet picture: the ground alone, the
+		// pit with no water in it.
+		if (const char* hs = std::getenv("HE_DUMP_WATERHIDESHEET"); hs && std::atoi(hs) != 0)
+			for (auto [we, wsc, mc] : reg.view<WaterSurfaceComponent, MeshComponent>().each())
+				mc.visible = false;
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERBRUSH witness landscape added "
+			"(mode %s, created %d, level %.2f, dabs %u, wet cells after paint %u, surfaces created %u, "
+			"triangles %u, undone %d, wet cells now %u)%s",
+			wb, created ? 1 : 0, strokeLevel, dabs, wetAfterPaint, ws.created, ws.triangles,
+			mode == "undo" ? (undone ? 1 : 0) : -1, wetNow, pitNote.c_str());
+	}
+
+	// ── Lake witness (HE_DUMP_LAKEEDIT, Thema 174 Schritt 8): a lake drawn from a
+	// closed spline, widened with the water brush, reshaped by moving its points,
+	// or converted from a painted pond — every step through the code the editor
+	// runs (HE::water::lake::create, HE::water::brush begin/dab/end, the spline
+	// sync inside updateTerrains, lake::convertBody), not a shortcut through the
+	// model. A flat 100 m landscape at y=300, the spline's own lines and handles
+	// drawn on top by ViewportOverlays. Modes:
+	//   =drawn      the bean-shaped spline made a lake (bed 2.5 m, bank 6 m).
+	//   =extended   drawn, then a brush stroke dug out of the east shore (Dig Bed
+	//               on) and the eraser cut an island out of the middle.
+	//   =reshaped   extended, then two points pulled out and one pushed in: the
+	//               outline moved, the channel and the island did not, and the
+	//               lake's own bed followed the outline (Thema 188 Schritt 2; the
+	//               log line reads the ground under the lobe and in the bay).
+	//   =converted  a pond painted with the brush (dug), then "To Lake": the same
+	//               pond, now with a spline of its own to edit.
+	//   =undo       drawn, then Ctrl+Z through EditorUndo — the editor's own
+	//               protocol (snapshotNow("Create Lake") right before L::create,
+	//               the same order SplineTool's button uses): the lake must
+	//               disappear, the spline must stay.
+	//   =redo       undo, then Ctrl+Shift+Z: the lake must come back, same body.
+	//   =slope      drawn, but over a bank instead of flat ground (the WATERLAKE
+	//               witness's own bank heightfield, Thema 174 Schritt 13: both
+	//               sides of the outline meet at the water's own level, a gentle
+	//               shore, not the cliff a `falloff = 0` first attempt left here).
+	//   =drag       (Thema 188 Schritt 3) drawn, then the east tip (30,0) pulled
+	//               out to (42,0) a metre per frame, one updateTerrains per step —
+	//               the editor's frame during a point drag (the sync and the chunk
+	//               rebuild). One log line per step: the ground at (36,0) and
+	//               (41,0) and what the step cost.
+	//   =dragback   drag, then back to (30,0) the same way: the ground must end
+	//               where it started (the line says by how much it does not).
+	//   =play       drawn, then Play (setPlayMode), the tip pulled out to (40,0)
+	//               while playing and the world ticked as the play loop ticks it
+	//               (SceneSystems::tickWorld with the physics world): the ground
+	//               AND the collider under (36,0); then Stop (the snapshot restore)
+	//               and the same pull in edit mode — the bed restored with the
+	//               world must still follow.
+	// HE_DUMP_LAKERES (default 129) sets the landscape's resolution, for timing
+	// the drag on a denser grid.
+	// Camera as WATERBRUSH: CAMY=375 CAMZ=48 PITCH=-60. The log line carries the
+	// numbers as a twin to the picture.
+	if (const char* le = std::getenv("HE_DUMP_LAKEEDIT"); le && *le && m_editorWorld)
+	{
+		namespace L  = HE::water::lake;
+		namespace WB = HE::water::brush;
+		auto& reg = m_editorWorld->registry();
+		const std::string_view mode(le);
+		const bool extend  = mode == "extended" || mode == "reshaped";
+		const bool reshape = mode == "reshaped";
+		const bool undoIt  = mode == "undo" || mode == "redo";
+		const bool redoIt  = mode == "redo";
+		const bool dragIt  = mode == "drag" || mode == "dragback";
+		const bool playIt  = mode == "play";
+
+		const Entity land = m_editorWorld->createEntity("LakeLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f);
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 100.0f;
+		ltc.resolution  = 129;
+		if (const char* lr = std::getenv("HE_DUMP_LAKERES"); lr && std::atoi(lr) > 1)
+			ltc.resolution = static_cast<uint32_t>(std::atoi(lr));
+		// The editor's default rig is 1 km at 1025 with 256 water cells:
+		// HE_DUMP_LAKESIZE=1000 HE_DUMP_LAKERES=1025 HE_DUMP_LAKEWATERRES=256.
+		if (const char* ls = std::getenv("HE_DUMP_LAKESIZE"); ls && std::atof(ls) > 0.0)
+			ltc.sizeX = ltc.sizeZ = static_cast<float>(std::atof(ls));
+		if (const char* lw = std::getenv("HE_DUMP_LAKEWATERRES"); lw && std::atoi(lw) > 1)
+			ltc.water.res = static_cast<uint32_t>(std::atoi(lw));
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.water.res   = 128;
+		if (mode == "slope")
+		{
+			// The WATERLAKE witness's own bank heightfield (EditorApplication.cpp,
+			// HE_DUMP_WATERLAKE=slope), same shape, so the two witnesses agree.
+			ltc.sculptHeights.assign(static_cast<size_t>(ltc.resolution) * ltc.resolution, 0.0f);
+			for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+				for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+				{
+					const float x = -50.0f + 100.0f * static_cast<float>(xi) / static_cast<float>(ltc.resolution - 1);
+					const float z = -50.0f + 100.0f * static_cast<float>(zi) / static_cast<float>(ltc.resolution - 1);
+					ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] = 0.12f * x + 1.2f * std::sin(0.15f * z);
+				}
+		}
+		reg.emplace<TerrainComponent>(land, ltc);
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // bake the flat (or banked) chunks first
+		auto& tc = reg.get<TerrainComponent>(land);
+
+		// Terrain-local XZ outline of a bean, a spline of nine points at the
+		// landscape's world position (so local == world in x and z).
+		const glm::vec2 bean[] = { { -30, 0 }, { -22, -14 }, { -8, -18 }, { 8, -10 }, { 20, -12 },
+		                           { 30, 0 }, { 22, 14 }, { 4, 18 }, { -14, 14 } };
+		const Entity spline = m_editorWorld->createEntity("Shore");
+		reg.emplace<TransformComponent>(spline);
+		SplineComponent sc;
+		sc.closed = true;
+		for (const glm::vec2& p : bean) sc.controlPoints.emplace_back(p.x, 300.0f, p.y);
+
+		std::string note;
+		uint16_t body = HE::water::kNoBody;
+		Entity shown = spline;
+		if (mode == "converted")
+		{
+			// A pond painted with the brush, dug, then turned into a lake.
+			WB::Params p;
+			p.radius = 8.0f; p.falloff = 3.0f; p.amount = 1.0f;
+			p.levelFromGround = true; p.levelOffset = 0.0f;
+			p.dig = true; p.digDepth = 2.0f;
+			WB::Stroke s;
+			WB::begin(s, tc, -26.0f, -2.0f, p);
+			for (int i = 0; i <= 12; ++i)
+				WB::dab(s, tc, -26.0f + 52.0f * static_cast<float>(i) / 12.0f,
+				        -2.0f + 6.0f * std::sin(static_cast<float>(i) * 0.5f), p);
+			body = s.body;
+			WB::end(s, tc);
+			m_editorWorld->destroyEntity(spline);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			const uint32_t pondCells = tc.water.wetCells(body);
+			const L::Converted cv = L::convertBody(*m_editorWorld, land, body);
+			shown = cv.spline;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			char buf[200];
+			std::snprintf(buf, sizeof buf, "pond %u cells -> lake %u cells, %u spline points, error '%s'",
+			              pondCells, tc.water.wetCells(body), cv.points, cv.error.c_str());
+			note = buf;
+		}
+		else
+		{
+			reg.emplace<SplineComponent>(spline, sc);
+			L::Params lp;
+			lp.levelFromGround = true; lp.levelOffset = 0.0f;
+			lp.dig = true; lp.depth = 2.5f; lp.bank = 6.0f;
+			if (undoIt)
+			{
+				m_undo.setWorld(m_editorWorld.get());
+				m_undo.clearHistory();
+				m_undo.snapshotNow("Create Lake");   // SplineTool's button: snapshot, then L::create
+			}
+			const L::Created made = L::create(*m_editorWorld, land, spline, lp);
+			body = made.body;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			// The largest height step between adjacent terrain vertices, anywhere:
+			// the number a cliff at the outline would show up as, against the
+			// smooth background slope's own per-step change (a few tenths of a
+			// metre here). The twin to the picture for `=slope` (Thema 174 Schritt
+			// 13): a cliff at the bank reads as a clear outlier, a gentle one does
+			// not.
+			float worstStep = 0.0f;
+			{
+				const uint32_t res = tc.resolution;
+				for (uint32_t zi = 0; zi < res; ++zi)
+					for (uint32_t xi = 0; xi < res; ++xi)
+					{
+						const float here = tc.sculptHeights[static_cast<size_t>(zi) * res + xi];
+						if (xi + 1 < res)
+							worstStep = std::max(worstStep, std::fabs(tc.sculptHeights[static_cast<size_t>(zi) * res + xi + 1] - here));
+						if (zi + 1 < res)
+							worstStep = std::max(worstStep, std::fabs(tc.sculptHeights[static_cast<size_t>(zi + 1) * res + xi] - here));
+					}
+			}
+			char buf[200];
+			std::snprintf(buf, sizeof buf, "lake %s, level %.2f, %u cells, %u ground vertices dug%s%s, worst step %.3f m",
+			              made.ok ? "made" : "FAILED", made.level, made.cells, made.ground,
+			              made.error.empty() ? "" : ", error ", made.error.c_str(), worstStep);
+			note = buf;
+
+			if (extend)
+			{
+				// A channel out of the east shore, dug, and an island cut out of the middle.
+				WB::Params p;
+				p.radius = 3.5f; p.falloff = 1.5f; p.amount = 1.0f;
+				p.levelFromGround = true; p.levelOffset = 0.0f;
+				p.dig = true; p.digDepth = 2.0f;
+				WB::Stroke s;
+				WB::begin(s, tc, 26.0f, 0.0f, p);
+				const bool continued = !s.created;
+				for (int i = 0; i <= 10; ++i)
+					WB::dab(s, tc, 26.0f + 20.0f * static_cast<float>(i) / 10.0f,
+					        8.0f * static_cast<float>(i) / 10.0f, p);
+				WB::end(s, tc);
+				WB::Params e = p;
+				e.erase = true; e.dig = false; e.radius = 4.0f; e.falloff = 0.5f;
+				WB::begin(s, tc, -8.0f, 3.0f, e);
+				for (int i = 0; i < 3; ++i) WB::dab(s, tc, -8.0f, 3.0f, e);
+				WB::end(s, tc);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				char b2[160];
+				std::snprintf(b2, sizeof b2, "; brush continued the lake: %d, wet cells now %u",
+				              continued ? 1 : 0, tc.water.wetCells(body));
+				note += b2;
+			}
+			if (reshape)
+			{
+				// Pull the east lobe out and the south bay in: the spline moves, the
+				// brush share (channel, island) stays, and the lake's own bed moves
+				// with the outline (Thema 188 Schritt 2) — dug under the pulled-out
+				// lobe, filled back in where the bay was pushed in.
+				auto& pts = reg.get<SplineComponent>(spline).controlPoints;
+				pts[4].x += 8.0f; pts[4].z -= 6.0f;
+				pts[5].x += 8.0f;
+				pts[7].z -= 8.0f;
+				const uint32_t before = tc.water.wetCells(body);
+				const float lobeBefore = terrainHeightAt(tc, 27.0f, -12.0f), bayBefore = terrainHeightAt(tc, 4.0f, 16.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the sync inside it reshapes
+				const float chx = 40.0f, chz = 6.4f;   // far down the channel the brush dug
+				char b3[320];
+				std::snprintf(b3, sizeof b3, "; reshaped: %u -> %u cells, channel still wet: %d, island still dry: %d"
+				              ", ground under the pulled lobe (27,-12) %.2f -> %.2f m, in the pushed-in bay (4,16) %.2f -> %.2f m",
+				              before, tc.water.wetCells(body),
+				              HE::water::bodyAt(tc, chx, chz) == body ? 1 : 0,
+				              HE::water::bodyAt(tc, -8.0f, 3.0f) == HE::water::kNoBody ? 1 : 0,
+				              lobeBefore, terrainHeightAt(tc, 27.0f, -12.0f), bayBefore, terrainHeightAt(tc, 4.0f, 16.0f));
+				note += b3;
+			}
+			if (dragIt)
+			{
+				// The east tip (point 5, at (30,0)) dragged a metre per frame; each
+				// frame is what the editor's own frame does with a moved point — the
+				// spline sync and the chunk rebuild, both inside updateTerrains.
+				const std::vector<float> start = tc.sculptHeights;
+				double worstMs = 0.0, sumMs = 0.0;
+				int frames = 0;
+				auto frameAt = [&](float tipX)
+				{
+					reg.get<SplineComponent>(spline).controlPoints[5].x = tipX;
+					const auto t0 = std::chrono::steady_clock::now();
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+					worstMs = std::max(worstMs, ms); sumMs += ms; ++frames;
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LAKEEDIT drag: tip x %.0f -> ground (36,0) %.2f m, "
+					            "(41,0) %.2f m, %u wet cells, chunks rebuilt %s, frame %.2f ms",
+					            tipX, terrainHeightAt(tc, 36.0f, 0.0f), terrainHeightAt(tc, 41.0f, 0.0f),
+					            tc.water.wetCells(body), (tc.dirty || tc.regionDirty) ? "NO (still dirty)" : "yes", ms);
+				};
+				for (int i = 1; i <= 12; ++i) frameAt(30.0f + static_cast<float>(i));
+				if (mode == "dragback")
+					for (int i = 11; i >= 0; --i) frameAt(30.0f + static_cast<float>(i));
+				float worstDiff = 0.0f;
+				uint32_t differ = 0;
+				for (size_t i = 0; i < start.size() && i < tc.sculptHeights.size(); ++i)
+				{
+					const float d = std::fabs(tc.sculptHeights[i] - start[i]);
+					if (d > 0.0f) ++differ;
+					worstDiff = std::max(worstDiff, d);
+				}
+				char db[240];
+				std::snprintf(db, sizeof db, "; dragged %d frames (%u x %u vertices), frame %.2f ms mean, %.2f ms worst; "
+				              "against the ground before the drag: %u vertices differ, by %.4f m at most",
+				              frames, tc.resolution, tc.resolution, frames ? sumMs / frames : 0.0, worstMs, differ, worstDiff);
+				note += db;
+			}
+			if (playIt)
+			{
+				const float groundBefore = terrainHeightAt(tc, 36.0f, 0.0f);
+				setPlayMode(true);
+				const bool played = m_isPlaying && m_physicsWorld;
+				char pb[600];
+				int n = std::snprintf(pb, sizeof pb, "; play %s", played ? "started" : "did NOT start");
+				if (played)
+				{
+					// Down onto (36,0) from well above it: what the player would stand on.
+					auto colliderAt = [&](float x, float z)
+					{
+						const auto hit = m_physicsWorld->raycast(glm::vec3(x, 400.0f, z), glm::vec3(0.0f, -1.0f, 0.0f), 200.0f);
+						return hit.hit ? hit.point.y - 300.0f : 9999.0f;
+					};
+					auto tick = [&]
+					{
+						SceneSystems::tickWorld(*m_editorWorld, contentManager(), r, m_editorCamera.position(),
+						                        1.0f / 60.0f, m_physicsWorld.get(), false);
+					};
+					tick();   // a plain play frame first: nothing moved yet
+					const float colliderStart = colliderAt(36.0f, 0.0f);
+					reg.get<SplineComponent>(spline).controlPoints[5].x = 40.0f;
+					tick();   // the frame of the drag: water, bed and chunks follow; the collider is queued
+					const float groundPlay = terrainHeightAt(tc, 36.0f, 0.0f);
+					const float colliderDrag = colliderAt(36.0f, 0.0f);
+					tick();   // the next frame with the point at rest: the collider catches up
+					const float colliderRest = colliderAt(36.0f, 0.0f);
+					n += std::snprintf(pb + n, sizeof pb - n,
+					                   ", ground (36,0) %.2f -> %.2f m while playing, collider %.2f -> %.2f on the drag frame "
+					                   "-> %.2f the frame after",
+					                   groundBefore, groundPlay, colliderStart, colliderDrag, colliderRest);
+					setPlayMode(false);
+					// The restore replaced every entity: find the landscape and the spline again.
+					auto tv = reg.view<TerrainComponent>();
+					auto sv = reg.view<SplineComponent>();
+					if (tv.begin() != tv.end() && sv.begin() != sv.end())
+					{
+						const Entity land2 = *tv.begin();
+						const Entity spline2 = *sv.begin();
+						TerrainComponent& tc2 = reg.get<TerrainComponent>(land2);
+						TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the first edit-mode frame
+						const HE::water::Body* b2 = tc2.water.findBody(body);
+						const float groundStop = terrainHeightAt(tc2, 36.0f, 0.0f);
+						reg.get<SplineComponent>(spline2).controlPoints[5].x = 40.0f;
+						TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+						n += std::snprintf(pb + n, sizeof pb - n,
+						                   "; stopped %s: ground (36,0) %.2f m, lake digs %d, bed patch %s; "
+						                   "the same pull in edit mode -> %.2f m",
+						                   m_isPlaying ? "NOT" : "ok", groundStop, b2 && b2->digsBed ? 1 : 0,
+						                   b2 && !b2->groundPatch.empty() ? "kept" : "EMPTY",
+						                   terrainHeightAt(tc2, 36.0f, 0.0f));
+						shown = spline2;
+					}
+					else
+					{
+						n += std::snprintf(pb + n, sizeof pb - n, "; the restore lost the landscape or the spline");
+						shown = entt::null;
+					}
+				}
+				note += pb;
+			}
+			if (undoIt)
+			{
+				// m_undo.undo()/redo() restore a full snapshot, replacing every
+				// entity (same as the WATERBRUSH witness above) — land/spline/tc
+				// no longer name anything afterwards, find them again by component.
+				auto findTerrain = [&]() -> TerrainComponent& {
+					auto view = reg.view<TerrainComponent>();
+					return reg.get<TerrainComponent>(*view.begin());
+				};
+				auto findSpline = [&]() -> Entity {
+					auto view = reg.view<SplineComponent>();
+					return view.begin() != view.end() ? *view.begin() : entt::null;
+				};
+				const uint32_t beforeUndo = tc.water.wetCells(body);
+				const bool undone = m_undo.undo();
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				const uint32_t afterUndo = findTerrain().water.wetCells(body);
+				bool redone = false;
+				uint32_t afterRedo = afterUndo;
+				if (redoIt)
+				{
+					redone = m_undo.redo();
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					afterRedo = findTerrain().water.wetCells(body);
+				}
+				shown = findSpline();
+				char ub[200];
+				std::snprintf(ub, sizeof ub, "; undo %s: %u -> %u cells",
+				              undone ? "ok" : "FAILED", beforeUndo, afterUndo);
+				note += ub;
+				if (redoIt)
+				{
+					char rb[120];
+					std::snprintf(rb, sizeof rb, "; redo %s: -> %u cells",
+					              redone ? "ok" : "FAILED", afterRedo);
+					note += rb;
+				}
+			}
+		}
+		m_selection.clear();
+		if (shown != entt::null) m_selection.add(shown);
+		DebugDrawBuffer guides;
+		HE::Ed::ViewportOverlays::appendSplineGuides(*m_editorWorld, m_selection, SplineEdit::GuideState{},
+		                                             m_editorCamera.position(), guides);
+		r->SetDebugLines(guides.lines());
+		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
+			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The bed alone (Thema 188 Schritt 3): with the water drawn, a bed left
+		// behind under a moved outline looks exactly like one that followed.
+		if (const char* hs = std::getenv("HE_DUMP_WATERHIDESHEET"); hs && std::atoi(hs) != 0)
+			for (auto [we, wsc, mc] : reg.view<WaterSurfaceComponent, MeshComponent>().each())
+				mc.visible = false;
+		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LAKEEDIT witness (mode %s): %s | surfaces %u, triangles %u, guide lines %zu",
+		            le, note.c_str(), ws.terrains, ws.triangles, guides.lines().size());
 	}
 
 	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
@@ -7889,6 +9367,113 @@ void EditorApplication::dumpFrameHeadless()
 		r->SetDebugLines(lines.lines());
 	}
 
+	// ── Spline tool witness (HE_DUMP_SPLINETEST): a line drawn the way the tool
+	// draws it. Clicks at pixel positions of the 1280x720 picture go through
+	// SplineEdit::Tool::click with this frame's camera — the mouse-to-ground
+	// mapping, the undo steps and the lines all run the code of the viewport —
+	// onto a floor, and the result is drawn by ViewportOverlays. The value is a
+	// list of words: "closed" joins the last point to the first, "undo" takes
+	// the last two edits back through EditorUndo and lets the tool find its
+	// spline again, "redo" (with "undo") brings one back, "hover" puts the cursor
+	// on the line (the insert cross), "hoverpoint" on a handle (its box lights
+	// up). The log line carries the numbers to read without the picture.
+	if (const char* st = std::getenv("HE_DUMP_SPLINETEST"); st && *st && m_editorWorld)
+	{
+		const std::string words(st);
+		auto has = [&](const char* w) { return words.find(w) != std::string::npos; };
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 9.0f;
+
+		// The ground: a wide slab under the line, so the picture has a surface to
+		// read it against and the frame is not sky only.
+		const float floorTop = base.y - 1.9f;
+		auto floorE = m_editorWorld->createEntity("SplineFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(base.x, floorTop - 0.1f, base.z);
+		ftc.scale    = glm::vec3(40.0f, 0.2f, 40.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		m_undo.setWorld(m_editorWorld.get());
+		m_undo.clearHistory();
+		SplineEdit::Tool tool;
+		SplineEdit::View view;
+		{
+			const float aspect = 1280.0f / 720.0f;
+			view.viewProj = glm::perspective(glm::radians(m_editorCamera.fovDegrees()), aspect,
+			                                 m_editorCamera.nearPlane(), m_editorCamera.farPlane())
+			              * m_editorCamera.viewMatrix();
+			view.rectMin  = { 0.0f, 0.0f };
+			view.rectSize = { 1280.0f, 720.0f };
+		}
+		const SplineEdit::GroundProbe ground = [&](const glm::vec3& o, const glm::vec3& d, glm::vec3& out)
+		{
+			return SplineEdit::rayHitsPlaneY(o, d, floorTop, out);
+		};
+		// A bean of seven clicks, left to right then back.
+		const glm::vec2 clicks[] = { { 330, 520 }, { 470, 430 }, { 650, 400 }, { 830, 440 },
+		                             { 950, 530 }, { 800, 620 }, { 520, 630 } };
+		for (const glm::vec2& c : clicks)
+			tool.click(*m_editorWorld, m_selection, &m_undo, view, c, ground);
+		const size_t editsDone = m_undo.undoDepth();
+		if (has("closed"))
+			tool.toggleClosed(*m_editorWorld, m_selection, &m_undo);
+
+		auto splineNow = [&]() -> const SplineComponent* {
+			const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
+			return e != entt::null ? reg.try_get<SplineComponent>(e) : nullptr;
+		};
+		const size_t pointsBefore = splineNow() ? splineNow()->controlPoints.size() : 0;
+		if (has("undo"))
+		{
+			// What Ctrl+Z does in the editor: the history steps back, the
+			// selection is cleared, and the tool picks its spline up again.
+			for (int i = 0; i < 2; ++i)
+				if (m_undo.undo()) m_selection.clear();
+			tool.sync(*m_editorWorld, m_selection, m_undo.revision());
+			if (has("redo"))
+			{
+				if (m_undo.redo()) m_selection.clear();
+				tool.sync(*m_editorWorld, m_selection, m_undo.revision());
+			}
+		}
+		if (has("hover") || has("hoverpoint"))
+		{
+			// "hover": the mouse on the line between the third and fourth point
+			// (the insert cross). "hoverpoint": on the third handle itself (its
+			// box lights up). One hover state, so one of the two.
+			const SplineComponent* s = splineNow();
+			if (s && s->controlPoints.size() > 3)
+			{
+				const Entity e = tool.activeSpline(*m_editorWorld, m_selection);
+				const glm::mat4 model = HE::worldMatrixOf(*m_editorWorld, e);
+				const HE::spline::Curve curve(*s);
+				const glm::vec3 local = has("hoverpoint") ? s->controlPoints[2] : curve.position(2.5f);
+				glm::vec2 px;
+				if (SplineEdit::project(view, glm::vec3(model * glm::vec4(local, 1.0f)), px))
+					tool.hover(*m_editorWorld, m_selection, view, px);
+			}
+		}
+
+		DebugDrawBuffer lines;
+		HE::Ed::ViewportOverlays::appendSplineGuides(
+			*m_editorWorld, m_selection, tool.guides(*m_editorWorld, m_selection),
+			m_editorCamera.position(), lines);
+		const SplineComponent* s = splineNow();
+		char line[384];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_SPLINETEST clicks=%zu edits=%zu points %zu -> %zu closed=%d "
+			"selected point=%d lines=%zu undo depth=%zu redo depth=%zu",
+			sizeof(clicks) / sizeof(clicks[0]), editsDone, pointsBefore, s ? s->controlPoints.size() : 0u,
+			s && s->closed ? 1 : 0, tool.selectedPoint(), lines.lines().size(),
+			m_undo.undoDepth(), m_undo.redoDepth());
+		HE_LOG_INFO(Editor, "%s", line);
+		r->SetDebugLines(lines.lines());
+	}
+
 	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal
 	// features (GI-reflection glossy accumulation, probe convergence) need more
 	// frames to settle than the default — headless A/Bs raise this.
@@ -8072,6 +9657,57 @@ void EditorApplication::dumpFrameHeadless()
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
+
+	// HE_DUMP_GPUTIME="frames[,WxH]": the pass-cost witness for backends whose GPU timer
+	// has no per-pass rows (D3D11, D3D12 and Vulkan time the whole frame only). AFTER the
+	// capture, so the picture is the one the same knobs give without it: the viewport goes
+	// to WxH (default the dump's 1280x720), `frames` more frames are rendered from the same
+	// camera with the profiler's live GPU timing on (D3D11 and GL only time when asked;
+	// D3D12 and Vulkan always do), and the whole-frame GPU times are logged as
+	// median/mean/min/max. A pass's cost is the difference between two runs that differ
+	// only in that pass (Thema 185 Schritt 5: UWFOG=0 UWCAUSTICS=0 against the defaults).
+	// The first frames are dropped: every backend reads its timestamps a few frames late.
+	if (const char* gt = std::getenv("HE_DUMP_GPUTIME"); gt && *gt)
+	{
+		int frames = std::clamp(std::atoi(gt), 30, 5000);
+		uint32_t tw = 1280, th = 720;
+		if (const char* comma = std::strchr(gt, ','))
+			if (unsigned a = 0, b = 0; std::sscanf(comma + 1, "%ux%u", &a, &b) == 2 && a >= 64 && b >= 64)
+				tw = a, th = b;
+		r->SetViewportSize(tw, th);
+		EngineProfiler& prof = EngineProfiler::instance();
+		const bool liveBefore = prof.liveEnabled();
+		prof.setLiveEnabled(true);
+		std::vector<double> ms;
+		ms.reserve(static_cast<size_t>(frames));
+		const int skip = 16;
+		for (int i = 0; i < frames + skip; ++i)
+		{
+			r->Render();
+			const double g = r->GetFrameGpuStats().gpuFrameMs;
+			if (i >= skip && g > 0.0)
+				ms.push_back(g);
+		}
+		prof.setLiveEnabled(liveBefore);
+		r->SetViewportSize(1280, 720);
+		char line[256];
+		if (ms.empty())
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u — no GPU time from this backend", tw, th);
+		else
+		{
+			std::vector<double> s = ms;
+			std::sort(s.begin(), s.end());
+			double sum = 0.0;
+			for (double v : s) sum += v;
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u frames=%zu gpu ms median=%.4f mean=%.4f "
+				"min=%.4f p90=%.4f max=%.4f",
+				tw, th, s.size(), s[s.size() / 2], sum / double(s.size()), s.front(),
+				s[(s.size() * 9) / 10], s.back());
+		}
+		HE_LOG_INFO(Editor, "%s", line);
+	}
 
 	// Witness the MCP screenshot path (HE_DUMP_SCENEIMAGE=<file.png>): the same
 	// IRenderer::RenderSceneImage call scene_screenshot makes, from the dump
@@ -8434,6 +10070,23 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 
 		publishDocDeltas(tab.assetPath, key);
 
+		// The Level Script and the Game Instance graph have no panel dirty flag,
+		// so the claim below never fired for them: their edits were made, never
+		// locked and therefore never sent (docs/collab-sync-audit-horizoncode-
+		// 2026-10-14.md section 3). For them "edited" is "the document differs
+		// from what the peers have seen". The diff waits in the mirror until the
+		// grant lands, and publishDocDeltas sends it then.
+		if (key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath)
+		{
+			if (!m_collab.inSession() || m_collab.ownsAssetLock(key)) continue;
+			bool edited = false;
+			for (const CollabDocSync::DocBinding& d : collabDocsForTab(tab.assetPath))
+				if (d.adapter && d.mirror && CollabDocSync::hasLocalChanges(*d.adapter, *d.mirror))
+					edited = true;
+			if (edited) m_collab.beginAssetEdit(key);
+			continue;   // no whole file to autosave: the scene / commitGameInstance own that
+		}
+
 		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
 		if (!m_collab.beginAssetEdit(key))
 			continue;   // held by someone else, or the host has not answered yet
@@ -8442,7 +10095,10 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;
-		if (!EditorUI::saveAsset(ctx, tab.assetPath)) continue;
+		m_collabAutosaveWrite = true;
+		const bool wrote = EditorUI::saveAsset(ctx, tab.assetPath);
+		m_collabAutosaveWrite = false;
+		if (!wrote) continue;
 		last = nowMs;
 		// Content assets publish themselves through ContentManager::saveAsset's
 		// hook. A C++ class does not go anywhere near the ContentManager — it is
@@ -8450,6 +10106,30 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// item structure to send deltas for either: it is a text buffer.)
 		if (key.rfind(kSourceKeyPrefix, 0) == 0)
 			m_collab.publishAsset(key, tab.assetPath);
+	}
+
+	// The Level Script or the Game Instance graph, edited with its tab closed —
+	// an MCP client's hc_ tools, which mark it in hc.endEdit. Nothing above walks
+	// a closed tab, so before this the edit stayed on this machine. The same
+	// claim as for an open tab, held only until the diff is out: once nothing
+	// differs from the mirror any more the key drops out of openRel and the loop
+	// below gives the lock back, after the deltas on the same connection.
+	for (auto it = m_collabUntabbedEdits.begin(); it != m_collabUntabbedEdits.end(); )
+	{
+		const std::string key = *it;
+		if (!m_collab.inSession() || openRel.count(key)) { it = m_collabUntabbedEdits.erase(it); continue; }
+		publishDocDeltas(key, key);
+		bool edited = false;
+		for (const CollabDocSync::DocBinding& d : collabDocsForTab(key))
+			if (d.adapter && d.mirror && CollabDocSync::hasLocalChanges(*d.adapter, *d.mirror))
+				edited = true;
+		if (!edited) { it = m_collabUntabbedEdits.erase(it); continue; }
+		// As for a tab: the host's "may I edit" first (idempotent), then the
+		// claim, which waits for that answer. A client's grant is a round trip away.
+		m_collab.beginAssetEditSession(key);
+		m_collab.beginAssetEdit(key);
+		openRel.insert(key);
+		++it;
 	}
 
 	// Locks whose tab is gone are released — holding an asset nobody here is
@@ -8677,9 +10357,25 @@ void EditorApplication::setupMcpTools()
 		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
 		// DocEdit command that step's plan describes and this step does not build.
 		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow("MCP: Level Script");
+
+		// In a session the edit has to reach the peers with no tab open, and
+		// the mirror is what tells an edit of ours from what they have. Seeded
+		// now, before the mutation, it holds the state they share; seeded
+		// after, it would hold the edit and the diff would find nothing.
+		const std::string tabKey = key == HE::Ed::kMcpDocLevelScript  ? LevelScriptPanel::kTabPath
+		                         : key == HE::Ed::kMcpDocGameInstance ? GameInstancePanel::kTabPath
+		                                                              : std::string();
+		if (!tabKey.empty()) publishDocDeltas(tabKey, tabKey);
 	};
 
 	hc.endEdit = [this](const std::string& key) {
+		if (m_collab.inSession())
+		{
+			if (key == HE::Ed::kMcpDocLevelScript)
+				m_collabUntabbedEdits.insert(LevelScriptPanel::kTabPath);
+			else if (key == HE::Ed::kMcpDocGameInstance)
+				m_collabUntabbedEdits.insert(GameInstancePanel::kTabPath);
+		}
 		if (key == HE::Ed::kMcpDocGameInstance)
 		{
 			// Exactly what the Game Instance tab does after a human's edit
@@ -9334,6 +11030,8 @@ void EditorApplication::setupMcpTools()
 	collab.displayName = [] { return CollabController::localIdentity().name; };
 	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
 		collab.controlAllowed = env[0] == '1';
+	// The team server is the way into a team session; same gate, same hooks.
+	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
 	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
 
 	// The task board. Its one copy and its one writer are the panel's
@@ -9405,7 +11103,15 @@ void EditorApplication::setupEditorCommands()
 	};
 	h.publishComponents = [this](std::uint32_t handle,
 	                             const std::vector<std::uint8_t>& blob) {
-		m_collab.publishComponents(handle, blob);
+		// The whole state, but a landscape without its grids: TerrainSync sends
+		// what the command changed in them, as patches.
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (m_editorWorld && m_editorWorld->registry().valid(e) &&
+		    m_editorWorld->registry().any_of<TerrainComponent, FoliageComponent>(e))
+			m_collab.publishComponents(handle,
+			                           HE::Ed::TerrainSync::serializeWithoutGrids(*m_editorWorld, e));
+		else
+			m_collab.publishComponents(handle, blob);
 	};
 	h.preloadAssetRefs = [this] {
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
@@ -9426,7 +11132,7 @@ void EditorApplication::setupEditorCommands()
 		// delete it would be the opposite of what is wanted — the peers would
 		// never hear that the client removed anything. deleteSelectedEntity, the
 		// human's path, does not erase either.
-		if (origin == HE::Ed::Origin::Remote) m_structureKnown.erase(e);
+		if (origin == HE::Ed::Origin::Remote) forgetStructureOf(e);
 	};
 	m_commands.setHooks(std::move(h));
 }
@@ -9542,7 +11248,7 @@ void EditorApplication::syncStructuralChanges()
 	// peer, so the allocators are never in lockstep.
 	const auto isLocalOnly = [&reg](Entity e) {
 		return reg.all_of<EnvironmentLightComponent>(e) ||
-		       reg.all_of<TerrainChunkComponent>(e);
+		       HE::isTerrainGenerated(reg, e);
 	};
 
 	std::unordered_set<Entity> current;
@@ -9573,7 +11279,14 @@ void EditorApplication::syncStructuralChanges()
 	for (const Entity e : HE::Ed::newSubtreeRoots(reg, current, m_structureKnown))
 	{
 		SceneSerializer serializer;
-		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
+		std::vector<std::uint8_t> blob;
+		{
+			// Entities the peers already have that were moved under this new
+			// subtree (Group) stay out of its blob — see DetachKnownDescendants.
+			// The re-parent pass below moves the originals instead.
+			HE::Ed::DetachKnownDescendants adopted(reg, e, m_structureKnown);
+			blob = serializer.serializeSubtree(*m_editorWorld, e);
+		}
 		bool sent = true;
 		if (!blob.empty() && inSession)
 		{
@@ -9642,6 +11355,77 @@ void EditorApplication::syncStructuralChanges()
 		HE::Ed::markSubtreeKnown(reg, e, localOnlyFn, m_structureKnown);
 	}
 
+	// ── Re-parented ──
+	// After the creates, so a move under a group made this frame finds the group
+	// already announced (one TCP stream: the peer reads the create first).
+	//
+	// A known entity gets its parent recorded the first time it is seen here, and
+	// its wire id cached with it: publishDestroy only looks ids up, it cannot read
+	// them from an entity that is already gone, and the children of a subtree that
+	// arrived or was created mid-session were never asked for theirs — deleting
+	// one before anybody had selected it sent nothing at all.
+	for (const Entity e : m_structureKnown)
+		if (reg.valid(e) && !m_structureParent.count(e))
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+	HE::Ed::recordMissingParents(reg, m_structureKnown, m_structureParent);
+
+	const Entity worldRoot = m_editorWorld->rootEntity();
+	const auto wireHandle = [&](Entity p) -> std::uint32_t {
+		// The world root is "no parent" on the wire: every peer has its own root
+		// entity and maps 0 onto it (onRemoteReparent).
+		return (p == entt::null || p == worldRoot)
+			? 0u : static_cast<std::uint32_t>(entt::to_integral(p));
+	};
+	for (const HE::Ed::StructReparent& m :
+	     HE::Ed::reparentedSince(reg, m_structureKnown, m_structureParent))
+	{
+		// A parent whose create has not gone out yet (refused, retrying) would
+		// resolve to nothing on the far side, and the receiver would read that as
+		// "the world root". Wait for it; the record stays, so this comes up again.
+		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
+			continue;
+
+		const std::uint64_t subject =
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(m.entity)));
+		const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+		if (lock && lock->owner != m_collab.localParticipant())
+		{
+			// Someone else is editing it: the host would refuse the move, and a
+			// move that only happened here is the silent divergence this pass
+			// exists to end. Put it back and say so.
+			const Entity back = reg.valid(m.from) ? m.from : worldRoot;
+			m_editorWorld->reparentEntity(m.entity, back);
+			m_editorWorld->markHierarchyDirty();
+			// Recorded where it actually ended up: a revert that could not land on
+			// the recorded parent (gone, or refused) would otherwise be reported,
+			// reverted and announced again on every frame.
+			m_structureParent[m.entity] = HE::Ed::structParentOf(reg, m.entity);
+			const std::string name =
+				reg.all_of<NameComponent>(m.entity) ? reg.get<NameComponent>(m.entity).name
+				                                    : std::string("The entity");
+			m_notifications.post(HE::Ed::NoteLevel::Warning,
+				"\"" + name + "\" was not moved: " + lock->ownerName + " is editing it.",
+				"It stays where it was. Try again once they have deselected it.");
+			continue;
+		}
+
+		const float* t9 = nullptr;
+		float t[9];
+		if (const auto* tc = reg.try_get<TransformComponent>(m.entity))
+		{
+			const float v[9] = { tc->position.x, tc->position.y, tc->position.z,
+			                     tc->rotation.x, tc->rotation.y, tc->rotation.z,
+			                     tc->scale.x,    tc->scale.y,    tc->scale.z };
+			std::memcpy(t, v, sizeof(t));
+			t9 = t;
+		}
+		// False here is a connection that is momentarily gone (the lock case was
+		// answered above): leave the record, the next pass sends it again.
+		if (m_collab.publishReparent(static_cast<std::uint32_t>(entt::to_integral(m.entity)),
+		                             wireHandle(m.to), t9))
+			m_structureParent[m.entity] = m.to;
+	}
+
 	// ── Destroyed ──
 	// Collected first: erasing from the set while iterating it would invalidate
 	// the iterator.
@@ -9652,8 +11436,22 @@ void EditorApplication::syncStructuralChanges()
 	}
 	for (const Entity e : gone)
 	{
-		m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e)));
+		// A destroy that did not go out is not one the peers know about. This
+		// used to erase the entry either way, so a refused destroy left the
+		// entity alive everywhere but here. The delete paths now refuse a
+		// peer-held subtree up front (withoutPeerHeld, EditorCommands), so what
+		// is left is a connection gap: retry for a second's worth of frames,
+		// the same rule as an unsendable create, then stop.
+		if (!m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e))))
+		{
+			constexpr int kSendRetryFrames = 60;
+			if (++m_structureUndeletable[e] < kSendRetryFrames) continue;
+			HE_LOG_WARN(Editor, "Collab: a deletion could not be sent to the others; "
+			                    "the entity may still exist on their machines");
+		}
+		m_structureUndeletable.erase(e);
 		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
 	}
 }
 
@@ -9681,8 +11479,29 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 	}
 	// Only content assets are registered with the ContentManager; a raw source
 	// file has nothing to reload there. The open tab is refreshed by the caller.
-	if (relativePath.rfind(kSourceKeyPrefix, 0) != 0)
-		contentManager().loadAsset(relativePath);
+	if (relativePath.rfind(kSourceKeyPrefix, 0) == 0) return;
+
+	// loadAsset is a no-op for a path that is already loaded, and every asset a
+	// tab shows IS loaded: the tab reload the caller does next would re-read the
+	// copy from before the peer's edit, seed its collab mirror from it, and keep
+	// showing that once the hot-reload poll caught up, because nothing reloads
+	// the tab a second time. So the copy is replaced here, the way the poll
+	// replaces one (same UUID, every reference stays valid), and not left to the
+	// poll noticing a newer mtime.
+	ContentManager& cm = contentManager();
+	if (cm.isLoaded(relativePath))
+	{
+		const HE::UUID old = cm.idForPath(relativePath);
+		cm.unloadAsset(old);
+		const HE::UUID id = cm.loadAsset(relativePath);
+		if (!(id == HE::UUID{}))
+		{
+			m_reloadedByPeer.push_back(id);
+			m_hotReloadTimer = 1.5f;   // the poll's follow-up, on the next frame
+		}
+		return;
+	}
+	cm.loadAsset(relativePath);
 }
 
 // ─── Duplicate / cut / copy / paste / delete ──────────────────────────────────
@@ -9790,9 +11609,12 @@ void EditorApplication::copySelectedEntity(bool cut)
 	m_entityClipboard = std::move(blobs);
 
 	if (!cut) return;
+	// The copy stands either way; only the removal half is refused.
+	const std::vector<Entity> removable = withoutPeerHeld(sources, "cut", /*askHost=*/true);
+	if (removable.empty()) return;
 	m_selection.clear();
 	if (!m_isPlaying) m_undo.snapshotNow("Cut Entity"); // see duplicateSelectedEntity()
-	for (Entity src : sources)
+	for (Entity src : removable)
 	{
 		// Re-checked rather than trusted: the roots are disjoint subtrees, but
 		// entt reuses handles and a stale one could name something else.
@@ -9834,6 +11656,112 @@ void EditorApplication::pasteEntityClipboard()
 	m_editorWorld->markHierarchyDirty();
 }
 
+void EditorApplication::forgetStructureOf(Entity root)
+{
+	// The whole subtree, not just the root: a peer's destroy took the children
+	// with it there too, and leaving them known would make the next diff publish
+	// one destroy per descendant back at everybody (receivers ignore them, but a
+	// big prefab deleted by one peer cost a message per entity from every other).
+	if (!m_editorWorld) return;
+	auto& reg = m_editorWorld->registry();
+	std::vector<Entity> stack{ root };
+	while (!stack.empty())
+	{
+		const Entity e = stack.back();
+		stack.pop_back();
+		m_structureKnown.erase(e);
+		m_structureParent.erase(e);
+		if (!reg.valid(e)) continue;
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			stack.insert(stack.end(), h->children.begin(), h->children.end());
+	}
+}
+
+std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>& targets,
+                                                      const char* verb, bool askHost)
+{
+	if (!m_collab.inSession() || !m_editorWorld) return targets;
+	auto& reg = m_editorWorld->registry();
+	const HE::Net::ParticipantId me = m_collab.localParticipant();
+
+	// The whole subtree: a destroy takes the children with it, and the host only
+	// checks the lock of the entity the message names — a child somebody was
+	// editing used to die with an unheld parent.
+	std::string holder;
+	std::function<bool(Entity)> heldByPeer = [&](Entity e) -> bool {
+		if (!reg.valid(e)) return false;
+		const std::uint64_t subject =
+			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+		if (const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+		    lock && lock->owner != me)
+		{
+			holder = lock->ownerName;
+			return true;
+		}
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			for (const Entity c : h->children)
+				if (heldByPeer(c)) return true;
+		return false;
+	};
+
+	std::vector<Entity> allowed;
+	std::vector<Entity> held;
+	std::string refusedName;
+	std::string refusedHolder;
+	int refused = 0;
+	for (const Entity e : targets)
+	{
+		if (!heldByPeer(e)) { allowed.push_back(e); continue; }
+		held.push_back(e);
+		if (++refused == 1)
+		{
+			refusedName   = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
+			                                             : std::string("An entity");
+			refusedHolder = holder;
+		}
+	}
+	// Not a dead end any more: the host decides, as it does for an asset somebody
+	// is working on, and its row names the holder. Nothing moves here until the
+	// approval comes back to every machine at once (onRemoteEntityOp). One batch
+	// for the lot, so one Delete keypress is one row in the host's in-tray.
+	if (refused > 0 && askHost)
+	{
+		const bool batch = held.size() > 1;
+		if (batch) m_collab.beginAssetOpBatch();
+		int asked = 0;
+		for (const Entity e : held)
+		{
+			const std::string name = reg.all_of<NameComponent>(e)
+				? reg.get<NameComponent>(e).name : std::string();
+			const std::uint64_t subject =
+				m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+			if (m_collab.requestEntityDelete(subject, name)) ++asked;
+		}
+		if (batch) m_collab.endAssetOpBatch();
+		if (asked == refused)
+		{
+			const std::string what = refused == 1
+				? "Asked the host to delete \"" + refusedName + "\""
+				: "Asked the host to delete " + std::to_string(refused) + " entities";
+			m_notifications.post(HE::Ed::NoteLevel::Info,
+				what + ": " + refusedHolder + " is editing it or something under it.",
+				"It stays until the host approves, then goes on every machine at once.");
+			return allowed;
+		}
+	}
+	if (refused > 0)
+	{
+		const std::string what = refused == 1
+			? "\"" + refusedName + "\" was not " + verb
+			: std::to_string(refused) + " entities were not " + verb;
+		m_notifications.post(HE::Ed::NoteLevel::Warning,
+			what + ": " + refusedHolder + " is editing it or something under it.",
+			"Nothing was removed for them on any machine. Try again once they have "
+			"deselected it.");
+	}
+	return allowed;
+}
+
 void EditorApplication::deleteSelectedEntity()
 {
 	if (!m_editorWorld) return;
@@ -9844,6 +11772,7 @@ void EditorApplication::deleteSelectedEntity()
 		if (e != entt::null && m_editorWorld->registry().valid(e) &&
 		    !m_editorWorld->isBuiltin(e))
 			targets.push_back(e);
+	targets = withoutPeerHeld(targets, "deleted", /*askHost=*/true);
 	if (targets.empty()) return;
 
 	m_selection.clear();
@@ -9915,11 +11844,17 @@ AppContext EditorApplication::makeContext()
 				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		},
 		.applyPhysicsSettings = [this]{
-			// Gravity only: the fixed rate is read from the project on every
-			// step already. Outside play mode there is no world, and the next
-			// play start reads both from the project itself.
+			// Gravity and the thread count: the fixed rate is read from the
+			// project on every step already. Outside play mode there is no
+			// world, and the next play start reads all of it from the project
+			// itself.
 			if (m_physicsWorld)
-				m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+			{
+				const auto& physics = m_projectManager.currentProject().settings.physics;
+				m_physicsWorld->setGravity(physics.gravity);
+				m_physicsWorld->setThreadCount(physics.threads);
+				m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
+			}
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
@@ -10111,12 +12046,18 @@ AppContext EditorApplication::makeContext()
 		// EditorUI, fed by a "why" string or callback on AppContext. Both live
 		// outside this file, which is why there is no message here rather than an
 		// unreachable one.
+		// In a session the snapshot stack must never restore: it would bring the
+		// whole world back under new handles and revert everyone else's work
+		// (EditorUI routes its controls to collabUndo; this is the backstop for
+		// any caller that reaches the callback directly).
 		.undo                = [this]{
 			if (m_isPlaying) return;
+			if (m_collab.inSession()) { m_collabUndo.undo(); return; }
 			if (m_undo.undo()) m_selection.clear();
 		},
 		.redo                = [this]{
 			if (m_isPlaying) return;
+			if (m_collab.inSession()) { m_collabUndo.redo(); return; }
 			if (m_undo.redo()) m_selection.clear();
 		},
 		.duplicateEntity     = [this]{ duplicateSelectedEntity(); },
@@ -10124,6 +12065,29 @@ AppContext EditorApplication::makeContext()
 		.cutEntity           = [this]{ copySelectedEntity(true);  },
 		.pasteEntity         = [this]{ pasteEntityClipboard();    },
 		.deleteEntity        = [this]{ deleteSelectedEntity();    },
+		.askHostToRename     = [this](Entity e, const std::string& newName) -> bool {
+			// Only the entity itself: a rename touches no child. Nobody else
+			// holding it is the ordinary case — the rename happens here and the
+			// component blob carries it, exactly as before.
+			// Not during play: the panels then show the play world, whose
+			// handles are not the session's entities.
+			if (!m_collab.inSession() || !m_editorWorld || m_isPlaying || newName.empty())
+				return false;
+			auto& reg = m_editorWorld->registry();
+			if (!reg.valid(e)) return false;
+			const std::uint64_t subject =
+				m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+			const HE::Net::LockInfo* lock = m_collab.lockFor(subject);
+			if (!lock || lock->owner == m_collab.localParticipant()) return false;
+			const std::string name = reg.all_of<NameComponent>(e)
+				? reg.get<NameComponent>(e).name : std::string();
+			if (!m_collab.requestEntityRename(subject, name, newName)) return false;
+			m_notifications.post(HE::Ed::NoteLevel::Info,
+				"Asked the host to rename \"" + name + "\" to \"" + newName + "\": " +
+					lock->ownerName + " is editing it.",
+				"The name changes on every machine at once when the host approves.");
+			return true;
+		},
 		.entityClipboardFull = !m_entityClipboard.empty(),
 		.revertPrefabOverride = [this](Entity root, const PrefabInstanceComponent::Override& o) {
 			return revertPrefabOverride(root, o);
@@ -10162,7 +12126,15 @@ AppContext EditorApplication::makeContext()
 		.setGitIdentity      = [this](std::string n, std::string e)
 		                           { applyGitIdentity(std::move(n), std::move(e)); },
 		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
-		.routerProbe         = m_routerChecked.load(std::memory_order_acquire)
+		.startGitInstall     = [this]{ startGitInstall(); },
+		.startGitLfsInstall  = [this]{ startGitInstall(/*lfs=*/true); },
+		.cancelGitInstall    = [this]{ m_gitInstallCancel.store(true, std::memory_order_release); },
+		.gitInstallLog       = [this]{ std::lock_guard<std::mutex> lk(m_gitInstallLogMutex); return m_gitInstallLog; },
+		.gitInstalling       = m_gitInstallRunning.load(std::memory_order_acquire),
+		.gitInstallDone      = m_gitInstallFinished.load(std::memory_order_acquire),
+		.gitInstallOk        = m_gitInstallOk.load(std::memory_order_acquire),
+		.gitInstallIsLfs     = m_gitInstallIsLfs.load(std::memory_order_acquire),
+		.routerProbe        = m_routerChecked.load(std::memory_order_acquire)
 		                           ? &m_routerProbe : nullptr,
 		.recheckRouter       = [this]{ startRouterProbe(); },
 		// Plain reads, no atomics: m_claudeState is written only in
@@ -10235,6 +12207,7 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.team                = &m_team,
 		.mcp                 = &m_mcp,
 		.mcpCameras          = &m_mcpCameras,
 		.notifications       = &m_notifications,
@@ -10480,6 +12453,17 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_playReportOpen = false;
 		Logger::setSink(&hePlayLogSink, this);
+		// A scene split into streaming cells has the game load them around the camera
+		// (HE::CellStreamer, GameApplication::updateCellStreaming). Play runs in THIS
+		// world, which after a split holds only the base, and nothing in the editor
+		// streams cells (Thema 164, docs/entity-cell-streaming-plan-2026-10-10.md L7).
+		// Said here, after the sink is in, so the post-play report carries it and an
+		// apparently empty scene is explained.
+		if (!m_editorWorld->cellManifestJson().empty())
+			HE_LOG_WARN(Editor, "%s", "Play shows only the base of this scene: it is split into "
+			            "streaming cells, and the editor does not stream them while playing. Merge "
+			            "the cells back (Profiler > Streaming > Merge Cells into the Scene) to play "
+			            "all of it, or run the game build.");
 		// Edits made while playing are not undoable. Clearing here only opens the
 		// session with an empty history; what keeps it that way is makeContext
 		// withholding the undo system while m_isPlaying (so no panel records) and
@@ -10537,6 +12521,13 @@ void EditorApplication::setPlayMode(bool play)
 		// Same order as GameApplication::startPhysics, because a preview that
 		// falls differently from the build is not a preview.
 		m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+		// The project's thread count too (0 = automatic), for the same reason as
+		// the game: the preview should run the step the build will run.
+		m_physicsWorld->setThreadCount(m_projectManager.currentProject().settings.physics.threads);
+		{
+			const auto& physics = m_projectManager.currentProject().settings.physics;
+			m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
+		}
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -10563,7 +12554,9 @@ void EditorApplication::setPlayMode(bool play)
 		// the preview must not take the editor fullscreen.
 		{
 			HE::api::settings::Host host;
-			host.stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			host.stickDeadzone = playStickDeadzone();
+			input().stickDeadzone   = playStickDeadzone();
+			input().triggerDeadzone = playTriggerDeadzone();
 			host.vsync         = true;
 			host.fullscreen    = false;
 			host.applyStickDeadzone = [this](float dz) { input().stickDeadzone = dz; };
@@ -10740,7 +12733,8 @@ void EditorApplication::setPlayMode(bool play)
 		if (HE::api::settings::installed())
 		{
 			HE::api::settings::uninstall();
-			input().stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
+			input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 			if (m_audioEngine.isInitialized())
 				m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
 		}
@@ -10854,7 +12848,9 @@ void EditorApplication::setPlayMode(bool play)
 			m_widgetTextInputActive = false;
 		}
 
-		// Stop all audio when exiting play mode
+		// Stop all audio when exiting play mode — the weather's state first, so the
+		// beds start from silence again instead of reusing handles stopAll kills.
+		WeatherAudio::stop(m_weatherAudio, m_audioEngine);
 		m_audioEngine.stopAll();
 
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: returned to edit mode");
@@ -10915,6 +12911,41 @@ std::string EditorApplication::gameInstancePath()
 	if (p.empty()) return {};
 	if (std::filesystem::is_regular_file(p)) p = p.parent_path();
 	return (p / "GameInstance.hcode").string();
+}
+
+void EditorApplication::syncGraphicsSource()
+{
+	const HE::ProjectGraphics* project =
+		m_projectLoaded ? &m_projectManager.currentProject().settings.graphics : nullptr;
+	const bool follow = project && project->enabled && m_editorConfig.PreviewQualityMode == 0;
+	if (follow)
+	{
+		if (!m_graphicsFromProject)
+		{
+			// First frame on the project's values: set the user's aside.
+			EditorGraphics::copyFields(m_editorConfig, m_userGraphics);
+			m_graphicsFromProject = true;
+		}
+		EditorGraphics::apply(*project, m_editorConfig);
+	}
+	else if (m_graphicsFromProject)
+	{
+		EditorGraphics::copyFields(m_userGraphics, m_editorConfig);
+		m_graphicsFromProject = false;
+	}
+	m_editorConfig.GraphicsFromProject = follow;
+}
+
+float EditorApplication::playStickDeadzone()
+{
+	const HE::ProjectInputSettings& in = m_projectManager.currentProject().settings.input;
+	return m_projectLoaded && in.enabled ? in.stickDeadzone : m_editorConfig.GamepadStickDeadzone;
+}
+
+float EditorApplication::playTriggerDeadzone()
+{
+	const HE::ProjectInputSettings& in = m_projectManager.currentProject().settings.input;
+	return m_projectLoaded && in.enabled ? in.triggerDeadzone : m_editorConfig.GamepadTriggerDeadzone;
 }
 
 IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
@@ -11339,6 +13370,11 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	// changes with it, which is what a human sees after the save anyway. An
 	// edit committed in this very frame is marked first, or the sync would be
 	// what undoes it.
+	// The file changed on disk since this editor read or wrote it (a git pull): saving
+	// now would put the stale open scene over it. The reload question is raised and the
+	// save waits for the answer.
+	if (SceneDiskWatch::blocksSave(path)) return false;
+
 	recordPrefabEdits();
 	syncPrefabInstances("save");
 
@@ -11346,16 +13382,39 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);         // our own write, not somebody else's change
 		m_savedRevision    = m_undo.revision(); // scene is now clean
 		// The file now holds everything the snapshot held — and a leftover copy
 		// would be offered as "unsaved work" at the next start.
 		m_autosave.clear();
 		captureSceneThumbnail(path);
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
+		// In a session the host keeps the scene for everyone: a client's save
+		// tells it to write its own copy (persistSessionScene). The host's own
+		// settle write is not a new save.
+		if (!m_settleWritingScene) m_collab.noteLocalSave(HE::Ed::CollabSettle::kSceneKey);
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
 	return false;
+}
+
+// The real scene file, not a recovery copy: the host's disk is the session's
+// state (a joiner is caught up from it, source control and the team server read
+// it), and a copy under Saved/ is something neither of them ever sees. This is
+// what "the host saves for everyone" means for the scene; assets are on the
+// host's disk already, written as their files arrive.
+bool EditorApplication::persistSessionScene()
+{
+	// Play swaps the world, the dump path quits after one frame; an unnamed
+	// scene has no file to write and asking where would be a dialog nobody
+	// opened. All of them stay pending and are tried again.
+	if (!m_editorWorld || m_isPlaying || !m_dumpPath.empty()) return false;
+	if (m_currentScenePath.empty()) return false;
+	m_settleWritingScene = true;
+	const bool ok = saveSceneToPath(m_currentScenePath);
+	m_settleWritingScene = false;
+	return ok;
 }
 
 // The solo autosave's tick. What it writes is a recovery copy in Saved/Autosave,
@@ -11490,6 +13549,14 @@ void EditorApplication::captureSceneThumbnail(const std::string& scenePath)
 void EditorApplication::pushEnvironment(float dt)
 {
 	if (!renderer() || !m_editorWorld) return;
+	// The rings the water physics raised, for the water material: only while the game
+	// plays (a stopped editor steps no physics, so it has none), and from the witness
+	// block instead when the headless dump asked for rings (HE_DUMP_WATERRIPPLE, where no
+	// physics runs). Pushed every frame next to the environment, like the game does.
+	if (m_dumpRipplesOn)
+		renderer()->SetWaterRipples(m_dumpRipples);
+	else
+		HE::water::pushRipples(renderer(), m_isPlaying ? m_physicsWorld.get() : nullptr);
 	// The Sky (EnvironmentComponent) is a scene entity now, not a fixed root component.
 	// No Sky entity → tell the renderer to skip the sky pass (flat background).
 	const Entity envEntity = m_editorWorld->environmentEntity();
@@ -11540,6 +13607,7 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		SceneDiskWatch::remember(path);
 		// Before the asset preload: the sync may change which meshes and
 		// materials the placed prefabs reference.
 		syncPrefabInstances("open");
@@ -11736,12 +13804,16 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
 	// while hosting never presses "leave", and none of those clean themselves up
 	// — a forward requested without a lease stays in the router until someone
 	// deletes it by hand. Ahead of everything else here because it is the only
 	// item in this function that outlives the process if it is skipped.
+	// Ends our announcements (the server would notice in a minute anyway). Not
+	// signOut(): quitting keeps the saved sign-in for the next start.
+	m_team.disconnect();
 	m_collab.shutdown();
 
 	// Shut the gate (stops the pads) while the sink still points at a live
@@ -11802,6 +13874,9 @@ void EditorApplication::OnShutdown()
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	if (m_gitThread.joinable()) m_gitThread.join();
+	// The .heproj registration's writer (HeprojRegistration.h): a file-static thread
+	// like the publish worker below, bounded by the timeouts of the helpers it runs.
+	HeprojRegistration::shutdown();
 	// Bounded by the 30 s timeout on its single CLI run, so it cannot hang the
 	// quit — but it is a joinable std::thread like the others, and destroying one
 	// terminates the process.
@@ -11829,6 +13904,14 @@ void EditorApplication::OnShutdown()
 	// The auto-install worker can outlive the dialog (installs take minutes); join
 	// it too so we never destroy it joinable.
 	if (m_installThread.joinable()) m_installThread.join();
+	// Same for the git install. The cancel flag ends its wait for Apple's
+	// installer at once; a package manager that is already running cannot be
+	// interrupted and is waited for (bounded by runGitInstall's timeout).
+	if (m_gitInstallThread.joinable())
+	{
+		m_gitInstallCancel.store(true, std::memory_order_release);
+		m_gitInstallThread.join();
+	}
 
 	// Both ends of the notification channel, closed here rather than in the
 	// destructor: the log sink and the global pointer are process-wide, and the
@@ -11975,6 +14058,16 @@ void EditorApplication::writeEditorConfig()
 #ifdef HE_IMGUI_ENABLED
 	globalstate.setCustomConfigEntry(ShortcutsPage::kConfigKey, EditorShortcuts::encode());
 #endif
+	// The graphics fields below are the USER's own. While a project's values are on
+	// screen they are in m_editorConfig and the user's are set aside — put back
+	// first, or the next editor start would boot with the last project's bloom.
+	if (m_graphicsFromProject)
+	{
+		EditorGraphics::copyFields(m_userGraphics, m_editorConfig);
+		m_graphicsFromProject = false;
+		m_editorConfig.GraphicsFromProject = false;
+	}
+	globalstate.setCustomConfigEntry("PreviewQualityMode",         m_editorConfig.PreviewQualityMode);
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;
@@ -11989,7 +14082,10 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
-	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
+	globalstate.setCustomConfigEntry("CollabRelayAddress",         m_editorConfig.CollabRelayAddress);
+	globalstate.setCustomConfigEntry("TeamName",                   m_editorConfig.TeamName);
+	globalstate.setCustomConfigEntry("TeamMember",                 m_editorConfig.TeamMember);
+	globalstate.setCustomConfigEntry("McpServerEnabled",          m_editorConfig.McpServerEnabled);
 	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);
@@ -12040,6 +14136,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SpecularAA",                m_editorConfig.SpecularAA);
 	globalstate.setCustomConfigEntry("SpecularAAStrength",        m_editorConfig.SpecularAAStrength);
 	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
+	globalstate.setCustomConfigEntry("WeatherSoundInEditor",      m_editorConfig.WeatherSoundInEditor);
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
@@ -12157,6 +14254,32 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// Only a drop that landed IN the preview is answered here; one that
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
+		}
+	}
+
+	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────
+	// macOS opens a document by event, also in an editor that is already
+	// running, and SDL delivers it as a DROP_FILE with no window (windowID 0).
+	// A .heproj dropped onto the editor window outside the live preview (which
+	// answered above) means the same thing. Only posted here: the Hub or the
+	// editor takes it on the next frame through its own Open, the editor's with
+	// the unsaved-changes prompt. A window drop of any other file stays silent —
+	// it was aimed at the preview or at nothing; an OS open of one is logged.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data)
+	{
+		const bool fromSystem = event.drop.windowID == 0;
+		std::error_code ec;
+		const ProjectLaunchOpen::ParsedPath p =
+			ProjectLaunchOpen::parse(event.drop.data, std::filesystem::current_path(ec));
+		if (fromSystem || p.error != ProjectLaunchOpen::PathError::WrongExtension)
+		{
+			if (!p.ok())
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' %s — not opened",
+				            event.drop.data, ProjectLaunchOpen::describe(p.error));
+			else if (!ProjectLaunchOpen::post(p.path))
+				HE_LOG_WARN(Editor, "EditorApplication: '%s' not opened — another project is "
+				                    "already waiting to open, one at a time", p.path.c_str());
+			return true;
 		}
 	}
 

@@ -252,19 +252,19 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Independent of Success Feedback; clip auditions and the "
 	                    "project's audio are not affected."));
 
-	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
-	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",
+	// ── Editor ▸ Team (the session settings) ────────────────────────────────
+	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Team",
 	                    "landiscovery", &EditorConfig::CollabLanDiscovery,
 	                    "Announce a hosted session on the local network, and listen "
 	                    "for other people's."));
 	t.push_back(boolRow("collab.syncLargeAssets", "Sync Large Assets",
-	                    "Collaboration", "collabsynclarge",
+	                    "Team", "collabsynclarge",
 	                    &EditorConfig::CollabSyncLargeAssets,
 	                    "Also send meshes, textures, audio and fonts over the "
 	                    "session instead of leaving them to source control. The "
 	                    "HOST's decision for the session; it cannot be changed "
 	                    "while one runs."));
-	t.push_back(intRow("collab.maxAssetMB", "Max Asset Size (MB)", "Collaboration",
+	t.push_back(intRow("collab.maxAssetMB", "Max Asset Size (MB)", "Team",
 	                   "collabmaxasset", &EditorConfig::CollabMaxAssetMB, 1, 4096,
 	                   "The biggest single asset this editor will send or accept "
 	                   "over a session. A transfer is held whole in memory on both "
@@ -329,7 +329,7 @@ std::vector<SettingDesc> buildCatalog()
 	}
 	t.push_back(enumRow("display.renderPath", "Render Path", "Display", "renderpath",
 	                    &EditorConfig::RenderPath, { "Forward", "Deferred" },
-	                    "Deferred needs a backend that supports it (Metal, OpenGL); "
+	                    "Deferred needs the backend's G-buffer pipeline ready; "
 	                    "an unsupported choice falls back at push time."));
 
 	t.push_back(boolRow("display.occlusionCulling", "Occlusion Culling", "Display",
@@ -397,7 +397,8 @@ std::vector<SettingDesc> buildCatalog()
 	                     0.0, 128.0, "Longest streak in pixels at 720p."));
 	t.push_back(boolRow("postProcess.ssrEnabled", "Screen-Space Reflections",
 	                    "Post-Processing", "ssr", &EditorConfig::SSREnabled,
-	                    "Metal + the deferred render path; the backend gates it."));
+	                    "All five backends once their post-processing pipeline is ready; "
+	                    "the backend gates it."));
 	t.push_back(floatRow("postProcess.ssrIntensity", "SSR Intensity",
 	                     "Post-Processing", "ssr", &EditorConfig::SSRIntensity,
 	                     0.0, 2.0, ""));
@@ -448,6 +449,10 @@ std::vector<SettingDesc> buildCatalog()
 	                    "gpuparticles", &EditorConfig::GpuParticles,
 	                    "Simulate rain/snow on the GPU instead of the CPU pool. The "
 	                    "backend gates it."));
+	t.push_back(boolRow("effects.weatherSoundInEditor", "Weather Sounds in Edit Mode", "Effects",
+	                    "weathersound", &EditorConfig::WeatherSoundInEditor,
+	                    "Hear the scene's weather (rain, wind, snow, storm, thunder) in the "
+	                    "edit-mode viewport, not only in Play."));
 
 	return t;
 }

@@ -191,11 +191,8 @@ bool RpcRouter::emit(const std::vector<ConnectionId>& conns, std::uint32_t netId
 			return false;
 		}
 
-	for (const ConnectionId to : conns)
-	{
-		m_net->send(to, kMsgRpc, w, SendMode::ReliableOrdered);
-		++m_stats.sent;
-	}
+	m_net->sendTo(conns, kMsgRpc, w, SendMode::ReliableOrdered);
+	m_stats.sent += static_cast<std::uint32_t>(conns.size());
 	m_stats.bytesSent += static_cast<std::uint32_t>((w.bitCount() + 7) / 8) *
 	                     static_cast<std::uint32_t>(conns.size());
 	return true;

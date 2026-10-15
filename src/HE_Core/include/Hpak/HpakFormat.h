@@ -175,6 +175,19 @@ struct PackSettings {
     // compileShaderVariants above.
     std::function<std::vector<uint8_t>(const std::string& nodeGraphJson, uint32_t backends)>
         compileParticleShaderVariants;
+
+    // Called by HpakWriter::addDirectories once per asset that ENDS UP in the archive,
+    // after it has been stored: (addressed path, e.g. "Textures/Rock.hasset" or
+    // "Engine/Materials/Water.hasset"; true when the entry was carried over verbatim
+    // from the previous archive instead of being packed afresh). Excluded files and
+    // assets shadowed by an override never reach it — the list a caller builds from
+    // this IS the pak's asset list. Same thread as the pack call.
+    std::function<void(const std::string& relPath, bool reused)> onAsset;
+    // Called by HpakWriter::addDirectories for each HpakWriter::warnings() line, as
+    // it is found: a reference no root can satisfy, or a UUID collision that kept
+    // a file out. Both used to be silent, and a pak missing the landscape texture
+    // arrays looked exactly like a good one. Same thread as the pack call.
+    std::function<void(const std::string& message)> onWarning;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

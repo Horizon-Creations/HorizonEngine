@@ -1377,7 +1377,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			for (auto& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
 			if (e == ".mat")                                   return { I.material, {0.60f, 0.90f, 0.60f, 1.0f} };
 			if (e == ".obj" || e == ".fbx" || e == ".gltf"
-				|| e == ".glb" || e == ".dae")                 return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
+				|| e == ".glb" || e == ".dae" || e == ".blend")  return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
 			if (e == ".svg" || e == ".ai")                     return { I.model2d,  {0.80f, 0.70f, 1.00f, 1.0f} };
 			if (e == ".cs"  || e == ".lua" || e == ".py"
 				|| e == ".js")                                  return { I.script,   {0.90f, 0.90f, 0.50f, 1.0f} };
@@ -3030,7 +3030,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			    EditorWidgets::menuItem("Revert to Default"))
 			{
 				const std::string relPath = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
-				if (!relPath.empty())
+				// An override is a project file like any other, and reverting
+				// deletes it. In a session that is the host's call — the same
+				// one every other delete gets — or this machine falls back to
+				// the default while every peer keeps the override.
+				const std::string key = relPath.empty() ? std::string()
+				                                        : collabKeyFor(ctx, s_ctxMenuItem);
+				if (!key.empty() && ctx.collab && ctx.collab->requestAssetDelete(key))
+				{
+					s_ctxMenuItem.clear();
+				}
+				else if (!relPath.empty())
 				{
 					const HE::UUID id = ctx.contentManager->loadAsset(relPath); // current (override) id
 					std::error_code ec;

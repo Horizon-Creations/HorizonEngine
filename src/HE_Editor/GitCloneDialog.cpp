@@ -308,7 +308,7 @@ void Draw(AppContext& ctx)
 			// The remedy in place, the same one Preferences shows: raising the
 			// startup dialog instead does not work once its first probe has
 			// answered, and a second modal would have to replace this one anyway.
-			GitMissingDialog::drawGitInstallRemedy();
+			GitMissingDialog::drawGitInstallRemedy(ctx);
 			if (EditorWidgets::button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
 		}
 		else

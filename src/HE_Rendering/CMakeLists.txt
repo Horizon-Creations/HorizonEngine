@@ -132,11 +132,12 @@ if(HE_VULKAN_ENABLED)
         set(HE_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
         file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
         set(HE_VULKAN_SPV "")
-        foreach(stage scene.vert scene_instanced.vert scene.frag scene_shadow.vert
+        foreach(stage scene.vert scene_instanced.vert scene.frag gbuffer.frag scene_shadow.vert
                       scene_shadow_instanced.vert
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
                       postfx_smaa.frag postfx_aa_blit.frag
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
+                      postfx_underwaterfog.frag postfx_underwatercaustics.frag
                       taa_velocity.vert taa_velocity.frag taa_resolve.frag taa_sharpen.frag
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
@@ -298,6 +299,7 @@ endif()
 # ─── HorizonRendering DLL ──────────────────────────────────────────────────────
 add_library(HorizonRendering SHARED
     src/RenderExtractor.cpp
+    src/FoliageExtract.cpp
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
     src/OcclusionCuller.cpp

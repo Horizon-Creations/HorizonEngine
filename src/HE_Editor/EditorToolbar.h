@@ -72,6 +72,7 @@ inline constexpr ImU32 kWarn      = IM_COL32(230, 176,  86, 255);
 inline constexpr ImU32 kBad       = IM_COL32(222,  92,  92, 255);
 inline constexpr ImU32 kGoodWell  = IM_COL32( 96, 196, 124,  28);
 inline constexpr ImU32 kBadWell   = IM_COL32(222,  92,  92,  38);
+inline constexpr ImU32 kWarnWell  = IM_COL32(230, 176,  86,  30);
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
 inline constexpr float kWellRound = 7.0f;
@@ -281,7 +282,8 @@ void setSaveHook(SaveFn fn);
 bool requestSave();
 
 // The right-hand Save. True when pressed. `enabled` is the panel's answer to
-// "is there anything to write, and did the asset even load".
+// "did the asset even load" — it is also greyed out whenever the bar's asset has
+// no unsaved edits (assetHeader's `dirty`), so call assetHeader first.
 // `atLeft` puts the button in the next left-hand well (right after the asset
 // header's folder button) instead of at the right edge — for bars that keep the
 // right edge for a view switch.

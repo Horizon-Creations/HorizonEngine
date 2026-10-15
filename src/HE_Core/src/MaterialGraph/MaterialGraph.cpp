@@ -133,6 +133,10 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "Dist", F::Float, 0 } }, 0 },
         { MatNodeType::ScreenPos, "Screen Position", "Input",
           {}, { { "XY", F::Vec2, 0 } }, 0 },
+        { MatNodeType::Weather, "Weather", "Input",
+          {}, { { "Wetness", F::Float, 0 }, { "Snow Amount", F::Float, 0 },
+                { "Puddles", F::Float, 0 }, { "Snow Cover", F::Float, 0 },
+                { "Puddle Size", F::Float, 0 } }, 0 },
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         { MatNodeType::ElementSize, "Element Size", "UI",
@@ -245,6 +249,17 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "N", F::Vec3, 0 } }, 4 },
+
+        // ── v15: the hex grid as data, no texture — p[0] = Seed ──
+        { MatNodeType::BombCells, "Bombing Cells", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Cell", F::Float, 8.0f }, { "Blend", F::Float, kMatBombDefaultSharpness } },
+          { { "Weights", F::Vec3, 0 }, { "Random A", F::Vec3, 0 }, { "Random B", F::Vec3, 0 },
+            { "Random C", F::Vec3, 0 } }, 1 },
+
+        // ── v16: the rings on the water, read from the lighting block ──
+        { MatNodeType::WaterRipple, "Water Ripple", "Input",
+          { { "Position", F::Vec2, 0 } },
+          { { "Height", F::Float, 0 }, { "Slope", F::Vec2, 0 }, { "Foam", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -513,6 +528,8 @@ struct EmitCtx
     // key = scope + uv expression + grid params, value = the grid's variable
     // prefix. One layer's Albedo/Normal/Mask reads reuse ONE grid this way.
     bool usesBombGrid = false;
+    bool usesBombCells = false;                          // heBombCells (Bombing Cells, no texture)
+    bool usesWaterRipple = false;                        // heWaterRipple (Water Ripple, reads heLight)
     std::unordered_map<std::string, std::string> bombGrids;
     // Landscape layer blending: the fragment declares heLandscapeWeights and the
     // material advertises its layer names (order = weightmap channel order).
@@ -746,6 +763,14 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ScreenPos:
             decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+        case MatNodeType::Weather:
+            // heLight.weather: x wetness, y snow amount (the generic response), z puddles,
+            // w snow cover (set per scene in the Weather details panel).
+            decl = "vec4 " + v + " = clamp(heLight.weather, 0.0, 1.0);";
+            // Puddle Size is metres, not 0..1, and a zero-filled block (previews, UI) must not
+            // divide a noise scale by zero: the node hands out at least half a metre.
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w", "max(heLight.weather2.x, 0.5)" };
+            break;
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         // All of these read heUI, which is a uniform block in a UI material and a
@@ -941,6 +966,22 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             }
             break;
         }
+        case MatNodeType::BombCells:
+        {
+            // The same hex grid as the texture nodes, but the three taps come out as
+            // numbers: weights plus three random numbers per hex. Blend is a PIN (a
+            // material parameter can tune it); the seed is baked like the nodes' above.
+            const std::string uv   = uvInput(c, sc, n, 0);
+            const std::string cell = inputExpr(c, sc, n, 1, F::Float);
+            const std::string sharp = inputExpr(c, sc, n, 2, F::Float);
+            const long seedI = std::lround(std::clamp(n.p[0], -2.0e9f, 2.0e9f));
+            const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
+            c.usesBombCells = true;
+            decl = "vec3 " + v + "w, " + v + "a, " + v + "b, " + v + "c; heBombCells(" + uv + ", " + cell
+                 + ", " + sharp + ", " + seed + ", " + v + "w, " + v + "a, " + v + "b, " + v + "c);";
+            pinExpr = { v + "w", v + "a", v + "b", v + "c" };
+            break;
+        }
         default: return false;
     }
     return true;
@@ -1003,15 +1044,30 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // only SELECTED by the size test, so no implicit-derivative sample
             // sits in control flow.
             const bool page2 = names.size() > 4;
-            const std::string ts = v + "_ts", wu = v + "_wu";
+            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv";
+            // The weights are read through a SMOOTHED coordinate: the fractional texel
+            // position goes through smoothstep before the bilinear fetch, so the weight
+            // field is C1 across texel borders instead of piecewise linear. Plain
+            // bilinear over a coarse map turns a round brush stamp into a polygon —
+            // the diamond/octagon edge of a painted patch — and the creases of the
+            // linear ramps show as straight facets. At the texel centres and at 0.5 the
+            // result equals the plain fetch; only the shape between them changes. The
+            // coordinate is clamped to the page's texel centres, which is what the
+            // clamp sampler did to the plain uv anyway.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
                  + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
-                 + " float " + wu + " = clamp(vUV.x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
-                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, vUV);"
-                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", vUV.y), 0.0);"
+                 + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
+                 + " vec2 " + v + "_wt = vUV * " + wsz + " - 0.5;"
+                 + " vec2 " + v + "_wi = floor(" + v + "_wt);"
+                 + " vec2 " + v + "_wq = " + v + "_wt - " + v + "_wi;"
+                 + " vec2 " + wuv + " = clamp((" + v + "_wi + 0.5 + " + v + "_wq * " + v + "_wq * (3.0 - 2.0 * " + v + "_wq)) / " + wsz
+                 + ", 0.5 / " + wsz + ", 1.0 - 0.5 / " + wsz + ");"
+                 + " float " + wu + " = clamp(" + wuv + ".x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
+                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, " + wuv + ");"
+                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", " + wuv + ".y), 0.0);"
                  + " vec4 " + v + "_w = " + v + "_p2 ? " + v + "_wl : " + v + "_wf;";
             if (page2)
-                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, vUV.y), 0.0);"
+                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, " + wuv + ".y), 0.0);"
                       + " vec4 " + v + "_w2 = " + v + "_p2 ? " + v + "_wr : vec4(0.0);";
             decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
@@ -1330,6 +1386,37 @@ HE_MG_NOINLINE bool emitWindSwayNode(EmitCtx& c, const Scope& sc, const MatGraph
     return true;
 }
 
+// Water rings.
+HE_MG_NOINLINE bool emitWaterNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                  std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
+        case MatNodeType::WaterRipple:
+        {
+            // Same stage test as Wind Sway: the WPO body is emitted in scope "vs" (a
+            // function it calls inlines as "vs/<id>"). The vertex stage declares no ripple
+            // helper and the rings only lean a normal and whiten a crest, so it gets zeros.
+            const bool vertex = sc.key == "vs" || sc.key.rfind("vs/", 0) == 0;
+            if (vertex)
+                decl = "float " + v + "_h = 0.0; vec2 " + v + "_g = vec2(0.0); float " + v + "_f = 0.0;";
+            else
+            {
+                // Unconnected, the point is where the fragment is: the rings live in the world.
+                const std::string pos = hasInput(sc, n, 0) ? inputExpr(c, sc, n, 0, F::Vec2)
+                                                           : std::string("vWorldPos.xz");
+                c.usesWaterRipple = true;
+                decl = "float " + v + "_h; vec2 " + v + "_g; float " + v + "_f; heWaterRipple(" + pos + ", "
+                     + v + "_h, " + v + "_g, " + v + "_f);";
+            }
+            pinExpr = { v + "_h", v + "_g", v + "_f" };
+            break;
+        }
+        default: return false;
+    }
+    return true;
+}
+
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
@@ -1357,7 +1444,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         || emitPatternNode(c, sc, n, v, decl, pinExpr)
         || emitFlowNode(c, sc, n, v, decl, pinExpr)
         || emitUiNode(c, sc, n, v, decl, pinExpr)
-        || emitWindSwayNode(c, sc, n, v, decl, pinExpr));
+        || emitWindSwayNode(c, sc, n, v, decl, pinExpr)
+        || emitWaterNode(c, sc, n, v, decl, pinExpr));
 
     if (!decl.empty())
         c.body += "    " + decl + "\n";
@@ -1705,6 +1793,39 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
             "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
             "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
+    if (c.usesBombGrid || c.usesBombCells)
+        // The hash both bombing helpers draw their numbers from. A graph that uses
+        // only the texture nodes gets exactly the text it always had.
+        src +=
+            "uvec3 heBombHash(ivec2 cell, uint seed) {\n"
+            "    uvec3 v = uvec3(uvec2(cell), seed) * 1664525u + 1013904223u;\n"
+            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+            "    v ^= v >> 16u;\n"
+            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+            "    return v; }\n";
+    if (c.usesBombCells)
+        // Bombing Cells: the hex grid of heBombGrid below without the texture. The
+        // three hexes under the pixel come out in the SAME order as heBombGrid's
+        // taps (t0 ↔ w.x, ...), each with the three 24-bit numbers of its own
+        // heBombHash as [0,1) floats (exact, like the offsets there). `sharp`
+        // is clamped here, the pin may be wired to anything.
+        src +=
+            "void heBombCells(vec2 uv, float cell, float sharp, uint seed, out vec3 w, out vec3 ra,\n"
+            "                 out vec3 rb, out vec3 rc) {\n"
+            "    float size = max(cell, 0.001);\n"
+            "    vec2 st = uv / size;\n"
+            "    vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);\n"
+            "    vec2 bf = floor(sk); vec2 f = sk - bf; float fz = 1.0 - f.x - f.y;\n"
+            "    float s = step(0.0, -fz); float s2 = 2.0 * s - 1.0;\n"
+            "    ivec2 b = ivec2(bf); int si = int(s);\n"
+            "    uvec3 h0 = heBombHash(b + ivec2(si, si), seed);\n"
+            "    uvec3 h1 = heBombHash(b + ivec2(si, 1 - si), seed);\n"
+            "    uvec3 h2 = heBombHash(b + ivec2(1 - si, si), seed);\n"
+            "    ra = vec3(uvec3(h0.x >> 8u, h1.x >> 8u, h2.x >> 8u)) * (1.0 / 16777216.0);\n"
+            "    rb = vec3(uvec3(h0.y >> 8u, h1.y >> 8u, h2.y >> 8u)) * (1.0 / 16777216.0);\n"
+            "    rc = vec3(uvec3(h0.z >> 8u, h1.z >> 8u, h2.z >> 8u)) * (1.0 / 16777216.0);\n"
+            "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(clamp(sharp, 1.0, 32.0)));\n"
+            "    w /= w.x + w.y + w.z; }\n";
     if (c.usesBombGrid)
         // Texture bombing as hex tiling (Mikkelsen, JCGT 2022): skew the uv into a
         // triangle grid, the three corners of the triangle under the pixel are the
@@ -1717,12 +1838,6 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // `cell` = distance between neighbouring hex centres in uv units (texture
         // repeats); the paper's fixed uv * 2√3 is cell = 0.2887.
         src +=
-            "uvec3 heBombHash(ivec2 cell, uint seed) {\n"
-            "    uvec3 v = uvec3(uvec2(cell), seed) * 1664525u + 1013904223u;\n"
-            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
-            "    v ^= v >> 16u;\n"
-            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
-            "    return v; }\n"
             "void heBombTap(vec2 uv, float size, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r) {\n"
             "    uvec3 h = heBombHash(cell, seed);\n"
             "    vec2 off = vec2(h.xy >> 8u) * (1.0 / 16777216.0);\n"
@@ -1744,6 +1859,49 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    heBombTap(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
             "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
             "    w /= w.x + w.y + w.z; }\n";
+    if (c.usesWaterRipple)
+        // Water Ripple: the rings of heLight.waterRipples (A: xy centre, z start radius, w
+        // strength; B: x age; the head: y ring speed, z decay time). One ring is a wave packet
+        // riding its front, r0 + speed * age: a cosine of one wavelength (it grows with the
+        // splash, 0.3 to 1.2 m) under a gaussian that widens with age, fading with age
+        // (exp(-age / decay)) and with the spread of the ring (the energy of a circle is
+        // shared out over a longer rim). h is that height; g is its analytic gradient, so a
+        // normal that leans with g and the height agree. The factor 0.5 is the lean of a
+        // full-strength ring whatever its wavelength (the height is 0.5 / k). f is the
+        // packet's envelope at the crest, thin, for strong young rings only (the crown of a
+        // splash, gone within half a second). Nothing here reads a derivative or a texture,
+        // so the loop may leave early; with no ring (count 0) the loop never runs and the
+        // three results are 0.
+        src += R"HE(void heWaterRipple(vec2 p, out float h, out vec2 g, out float f) {
+    h = 0.0; g = vec2(0.0); f = 0.0;
+    int n = int(heLight.waterRipples.x + 0.5);
+    float speed = heLight.waterRipples.y;
+    float decay = max(heLight.waterRipples.z, 0.05);
+    for (int i = 0; i < 16; i++) {
+        if (i >= n) break;
+        vec4 ra = heLight.waterRippleA[i];
+        vec4 rb = heLight.waterRippleB[i];
+        vec2 dv = p - ra.xy;
+        float d = length(dv);
+        float r0 = max(ra.z, 0.05);
+        float lam = clamp(r0, 0.3, 1.2);
+        float k = 6.2831853 / lam;
+        float front = r0 + speed * rb.x;
+        float w = lam * (0.7 + 0.35 * rb.x);
+        float u = d - front;
+        float q = u / w;
+        float env = ra.w * exp(-rb.x / decay) * inversesqrt(max(front / r0, 1.0));
+        float pk = exp(-q * q);
+        float ph = k * u;
+        float sn = sin(ph);
+        float cs = cos(ph);
+        h += (0.5 / k) * env * pk * cs;
+        g += (0.5 * env * pk * (-sn - 2.0 * u / (w * w * k) * cs)) * dv / max(d, 0.001);
+        f += 0.7 * smoothstep(0.45, 1.0, env) * exp(-(u * u) / (0.1 * lam * lam));
+    }
+    f = clamp(f, 0.0, 1.0);
+}
+)HE";
     src += "void main() {\n" + c.body;
     // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
     if (blendMode == (int)MatBlendMode::Masked)

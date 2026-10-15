@@ -16,6 +16,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <Physics/WaterWaves.h>   // the wave trains the water physics shares with the material
 
 #include <chrono>
 #include <cstdint>
@@ -95,21 +96,22 @@ struct Scratch
 // change this list has to be shown.
 struct Knob { const char* name; MatParamKind kind; float v[4]; };
 const Knob kWaterKnobs[] = {
-	{ "ShallowColor", MatParamKind::Color, { 0.10f, 0.42f, 0.45f, 0.0f } },
-	{ "DeepColor",    MatParamKind::Color, { 0.01f, 0.07f, 0.12f, 0.0f } },
-	{ "Turbidity",    MatParamKind::Vec2,  { 0.35f, 3.0f, 0.0f, 0.0f } },
-	{ "WaveA",        MatParamKind::Vec4,  { 30.0f, 1.2f, 8.0f, 0.25f } },
-	{ "WaveB",        MatParamKind::Vec4,  { 310.0f, 0.8f, 3.5f, 0.18f } },
-	{ "WaveC",        MatParamKind::Vec4,  { 100.0f, 0.5f, 1.2f, 0.12f } },
+	{ "ShallowColor", MatParamKind::Color, { 0.045f, 0.20f, 0.22f, 0.0f } },
+	{ "DeepColor",    MatParamKind::Color, { 0.004f, 0.028f, 0.052f, 0.0f } },
+	{ "Turbidity",    MatParamKind::Vec2,  { 0.45f, 4.0f, 0.0f, 0.0f } },
+	{ "WaveA",        MatParamKind::Vec4,  { 20.0f, 1.0f, 14.0f, 0.07f } },
+	{ "WaveB",        MatParamKind::Vec4,  { 335.0f, 0.8f, 5.0f, 0.10f } },
+	{ "WaveC",        MatParamKind::Vec4,  { 70.0f, 0.5f, 1.6f, 0.09f } },
 	{ "FresnelPower", MatParamKind::Float, { 5.0f, 0.0f, 0.0f, 0.0f } },
 	{ "Reflection",   MatParamKind::Float, { 0.8f, 0.0f, 0.0f, 0.0f } },
-	{ "Roughness",    MatParamKind::Float, { 0.06f, 0.0f, 0.0f, 0.0f } },
+	{ "Roughness",    MatParamKind::Float, { 0.08f, 0.0f, 0.0f, 0.0f } },
 	{ "Specular",     MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
-	{ "Opacity",      MatParamKind::Float, { 0.55f, 0.0f, 0.0f, 0.0f } },
+	{ "Opacity",      MatParamKind::Float, { 0.5f, 0.0f, 0.0f, 0.0f } },
 	{ "Refraction",   MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
-	{ "FoamColor",    MatParamKind::Color, { 0.92f, 0.95f, 0.97f, 0.0f } },
-	{ "Foam",         MatParamKind::Vec4,  { 0.18f, 0.8f, 1.5f, 0.3f } },
-	{ "Caustics",     MatParamKind::Vec4,  { 0.35f, 2.5f, 0.25f, 25.0f } },
+	{ "FoamColor",    MatParamKind::Color, { 0.82f, 0.88f, 0.90f, 0.0f } },
+	{ "Foam",         MatParamKind::Vec4,  { 0.06f, 0.5f, 0.7f, 0.3f } },
+	{ "Caustics",     MatParamKind::Vec4,  { 0.2f, 2.0f, 0.2f, 18.0f } },
+	{ "Variation",    MatParamKind::Vec4,  { 3.5f, 1.0f, 22.0f, 2.5f } },
 };
 constexpr int kWaterKnobCount = static_cast<int>(sizeof(kWaterKnobs) / sizeof(kWaterKnobs[0]));
 
@@ -155,7 +157,7 @@ Baked readBaked(const fs::path& file)
 }
 } // namespace
 
-TEST_CASE("Engine water material: loads as a lit Translucent graph with all fifteen knobs")
+TEST_CASE("Engine water material: loads as a lit Translucent graph with all sixteen knobs")
 {
 	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
 	Scratch s("load");
@@ -211,6 +213,38 @@ TEST_CASE("Engine water material: loads as a lit Translucent graph with all fift
 		CHECK_MESSAGE(m->customShaderFragGlsl.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos,
 		              "slot ", i, " is never read");
 	CHECK(m->customShaderFragGlsl.find("heLight.sunDir.w") != std::string::npos);
+}
+
+TEST_CASE("Engine water material: its wave knobs ARE the trains the water physics follows")
+{
+	// Thema 179: one definition of the waves (Physics/WaterWaves.h). mat_gen builds the
+	// three Wave knobs from it and the water query (WaterQuery) evaluates it, so what is
+	// drawn and what a crate floats on cannot drift apart. kWaterKnobs above pins the
+	// shipped numbers; this pins that the header and the shipped asset agree.
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("wavesource");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	REQUIRE(m);
+
+	const struct { const char* name; HE::water::WaveTrain train; } knobs[] = {
+		{ "WaveA", HE::water::kWaveA }, { "WaveB", HE::water::kWaveB }, { "WaveC", HE::water::kWaveC },
+	};
+	for (const auto& k : knobs)
+	{
+		CAPTURE(std::string(k.name));
+		const int i = slotOf(*m, k.name);
+		REQUIRE(i >= 0);
+		CHECK(m->shaderParamData[i * 4 + 0] == k.train.directionDeg);
+		CHECK(m->shaderParamData[i * 4 + 1] == k.train.speed);
+		CHECK(m->shaderParamData[i * 4 + 2] == k.train.length);
+		CHECK(m->shaderParamData[i * 4 + 3] == k.train.steepness);
+	}
+	// The physics follows the two that carry the height: the swell and the second train.
+	REQUIRE(HE::water::kPhysicsWaveCount == 2);
+	CHECK(HE::water::kPhysicsWaves[0] == HE::water::kWaveA);
+	CHECK(HE::water::kPhysicsWaves[1] == HE::water::kWaveB);
 }
 
 // The Material Editor redraws its preview every frame for a shader that reads the
@@ -331,8 +365,8 @@ TEST_CASE("Engine water material: an edited value survives save and reload, the 
 	CHECK(m->shaderParamData[col * 4 + 2] == doctest::Approx(0.3f));
 	CHECK(m->shaderParamData[opa * 4 + 0] == doctest::Approx(0.75f));
 	// …and an untouched knob keeps its default.
-	CHECK(m->shaderParamData[deep * 4 + 0] == doctest::Approx(0.01f));
-	CHECK(m->shaderParamData[deep * 4 + 2] == doctest::Approx(0.12f));
+	CHECK(m->shaderParamData[deep * 4 + 0] == doctest::Approx(0.004f));
+	CHECK(m->shaderParamData[deep * 4 + 2] == doctest::Approx(0.052f));
 }
 
 TEST_CASE("Engine water material: the committed file carries a shader, not just the graph")
@@ -349,6 +383,12 @@ TEST_CASE("Engine water material: the committed file carries a shader, not just 
 	for (int i = 0; i < kWaterKnobCount; ++i)
 		CHECK(b.frag.find("heParams.v[" + std::to_string(i) + "]") != std::string::npos);
 	CHECK(b.frag.find("heLight.sunDir.w") != std::string::npos);
+	// The rings the water physics raises (Thema 179 Schritt 3): the shipped shader reads them.
+	// A Water.hasset that was not regenerated and copied after the node went in draws no ring
+	// and looks like a shader bug; this is where it shows up as what it is.
+	CHECK(b.frag.find("void heWaterRipple(") != std::string::npos);
+	CHECK(b.frag.find("heWaterRipple(vWorldPos.xz, ") != std::string::npos);
+	CHECK(b.frag.find("heLight.waterRippleA[i]") != std::string::npos);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
@@ -695,7 +735,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	const WaterSources w = loadWaterSources("ubo");
 	REQUIRE(w.ok);
 
-	SUBCASE("CPU: fifteen knobs pack into the 64-float block the renderers upload")
+	SUBCASE("CPU: sixteen knobs pack into the 64-float block the renderers upload")
 	{
 		REQUIRE(static_cast<int>(w.paramNames.size()) == kWaterKnobCount);
 		REQUIRE(w.paramTypes.size() == w.paramNames.size());

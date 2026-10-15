@@ -468,6 +468,116 @@ namespace
 	  "not the character's Max Speed, which belongs to input-driven movement; a "
 	  "negative value is taken as standing still." },
 
+	// ── Water ────────────────────────────────────────────────────────────────
+	{ "water.createLake",
+	  "Makes a lake of a closed Spline over a Landscape, the way the editor's Create "
+	  "Lake button does: water at Level (a world height), and with Dig a bed Depth "
+	  "metres below it that slopes back up to the old ground over Bank metres. Returns "
+	  "the lake's body number, or 0 when it could not be made: the entity is not a "
+	  "landscape, the spline is not closed with three points, it already is a lake, or "
+	  "it lies off the landscape. Afterwards the spline's points reshape the water by "
+	  "themselves; the ground is only dug again by Dig Lake." },
+	{ "water.createLakeAtGround",
+	  "The same as Create Lake, with the water level taken from the ground instead of "
+	  "typed: the lowest ground under the spline's outline, read before anything is "
+	  "dug, plus Above metres. Good for a lake that has to sit in a hollow whatever "
+	  "height the landscape stands at. Returns the body number, 0 when it failed." },
+	{ "water.reshapeLake",
+	  "Brings the water of a lake in line with its spline right now and returns how "
+	  "many water cells changed, or -1 when the spline is not a lake. The world does "
+	  "this by itself every frame, so call it only when you need the answer at once. "
+	  "Water painted onto the lake with the brush stays; the ground is never touched." },
+	{ "water.digLake",
+	  "Digs the lake's bed again under its current outline: Depth metres below the "
+	  "water level with a Bank slope. Moving the spline never digs, so this is what "
+	  "gives a reshaped lake its new bed. Returns how many ground points were lowered, "
+	  "or -1 when the spline is not a lake. The ground is only ever lowered." },
+	{ "water.setLakeLevel",
+	  "Moves the surface of a lake to a world height. The outline and the ground stay "
+	  "where they are, so a lake that is raised floods its banks and one that is "
+	  "lowered leaves a wider shore. False when the spline is not a lake." },
+	{ "water.removeLake",
+	  "Takes a lake's water away and cuts its link to the spline. The spline entity "
+	  "and the ground that was dug stay. False when the spline is not a lake." },
+	{ "water.convertToLake",
+	  "Turns a pond that was painted with the brush into a lake: creates a closed "
+	  "spline around its outline, a child of the Landscape, and gives the pond to it. "
+	  "The water keeps its level; its ragged edge becomes the smooth curve, an island "
+	  "is filled and a separate small piece stays as painted water. Returns the new "
+	  "spline, or 0 when the body is not a pond or too small to outline." },
+	{ "water.paint",
+	  "One full-strength dab of the water brush at a world point: on water it widens "
+	  "that body at its own level, on dry ground it starts a new pond a little above "
+	  "the ground. Returns how many water cells changed. Call it repeatedly along a "
+	  "path to paint a stream bed or a flood." },
+	{ "water.erase",
+	  "One dab of the eraser at a world point: water is taken out of every body under "
+	  "it, painted ponds and lakes alike. A lake keeps its body and its spline, a pond "
+	  "with no water left is gone. Returns how many water cells changed." },
+	{ "water.bodyAt",
+	  "The number of the body of water at a world point on a Landscape, 0 when the "
+	  "ground there is dry. Use it to ask whether a point is wet, or which of two "
+	  "lakes it is in." },
+	{ "water.levelAt",
+	  "Whether a world point on a Landscape is under water, and if so the world "
+	  "height of the surface there. Level is 0 when it is dry, so read Wet first." },
+	{ "water.lakeBody",
+	  "The body number of the lake a spline draws, 0 when the spline is not a lake. "
+	  "Pair it with Wet Cells to ask how big the lake is." },
+	{ "water.lakeSpline",
+	  "The spline a body of water was drawn from, 0 when the body is a painted pond "
+	  "or does not exist. The way back from Water Body At to something you can move." },
+	{ "water.wetCells",
+	  "How many cells of a Landscape's water grid are wet: those of one body, or of "
+	  "all water when Body is 0. A cell is Landscape size divided by the grid "
+	  "resolution on a side, so this is an area, not a count of lakes." },
+	{ "water.surfaceAt",
+	  "Whether there is water at a world point and how high its surface stands there, "
+	  "waves included: the height the water physics floats bodies on. Needs no "
+	  "Landscape, the highest surface wins where several overlap. Wet is false when "
+	  "the ground stands above the water or there is none, and Height is then 0, so "
+	  "read Wet first. While the game plays the waves move with the physics clock; "
+	  "outside play the surface stands at its level plus the waves at time zero." },
+	{ "water.depthAt",
+	  "How many metres of water lie over the ground at a world point, waves "
+	  "included; 0 when it is dry. The question a swimming or wading check asks: "
+	  "knee-deep, over the head, or a puddle." },
+	{ "water.flowAt",
+	  "The current at a world point in metres per second, in world axes: the "
+	  "landscape's turn is already in it. Zero where it is dry or the water stands "
+	  "still. A river sets it with the Flow fields of its body of water in the "
+	  "Landscape panel, or with Set Water Flow." },
+	{ "water.submerged",
+	  "How much of an entity's body is under water, from 0 to 1, as of the latest "
+	  "physics step: 0.5 is a crate that floats half out, 1 is a stone on the bed. 0 "
+	  "for an entity that is not in water or has no physics body. Read it to know "
+	  "whether something is afloat, wading or dry." },
+	{ "water.buoyancy",
+	  "How many times its own weight the water lifts an entity's body right now: 1 "
+	  "means it floats where it is, more than 1 means it rises, less than 1 means it "
+	  "sinks (a stone is about 0.4 however deep). It is the water's density over the "
+	  "body's, times the share under water. 0 for an entity that is not in water." },
+	{ "water.pollImmersion",
+	  "Every body that went into the water or came out of it since the last call, as "
+	  "four parallel arrays: index i of Entities is the body, Entered says which way "
+	  "(true = in), Speeds is how fast it went through the surface in metres per "
+	  "second (0 for an exit over the shore) and Positions is where its centre was. "
+	  "Reading empties the list, so read it in one place. A body that starts the "
+	  "scene in the water enters on the first step. Use it for splash sounds and "
+	  "effects; it does not need the rings, which are only the picture." },
+	{ "water.disturb",
+	  "Raises a ring on the water at a world point: a footstep, a shot, a thrown "
+	  "stone. Radius is the size it starts at in metres (0.05 to 6), Strength runs "
+	  "from 0 to 1. The ring travels with the current. It only draws the water "
+	  "material's ripple and moves no body, it shows while the game plays and on "
+	  "every surface that uses the engine water material." },
+	{ "water.setFlow",
+	  "Sets the current of one body of water, in world metres per second on X and "
+	  "Z (held to 50 either way); Terrain is the landscape and Body the number from "
+	  "Water Body At. A body floating in that water is pulled toward it. False when "
+	  "the entity is no landscape or the body does not exist. Density, damping and "
+	  "the on/off switch are set in the Landscape panel." },
+
 	// ── UI ───────────────────────────────────────────────────────────────────
 	{ "ui.getText",
 	  "The text of a UI Text element, by entity. Empty for an element that is not "

@@ -1,0 +1,44 @@
+== r1old-1000  load averages: 1.88 4.02 4.60  locked="CGSSessionScreenIsLocked"=Yes
+[r1old-1000] rc=0 wall=9s fps=29.603735682323375 cpu_p50=15.181790999999999 gpu_p50=6.075333338230848 modes={'whole-frame': 119} size=2840x1528
+   rc=0
+   [03:54:57.625] [ INFO] [Job        ] [Main    ] [f      2] ThreadPool starting with 10 worker(s)
+   [03:54:57.626] [ INFO] [Serialize  ] [Main    ] [f      2] SceneLoadTiming: entities=1078 parseMs=23.52 buildMs=11.71
+   [03:54:58.473] [ INFO] [Editor     ] [Main    ] [f      2] SceneOpenTiming: loadMs=35.71 prefabSyncMs=0.08 preloadMs=3.10 warmupMs=843.62 totalMs=882.51
+   [03:54:58.473] [ INFO] [Editor     ] [Main    ] [f      2] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [03:54:54.966] 
+wrote /tmp/ws_scenes/ref_10000_8000_0_0_0.hescene: 10168 entities (10000 meshes, 64 lights, 0 physics, 100 groups, 0 foliage instances), extent 8000.0 m, offset [0.0, 0.0, 0.0]
+== r1old-10000  load averages: 1.98 3.97 4.57  locked="CGSSessionScreenIsLocked"=Yes
+[r1old-10000] rc=0 wall=6s fps=40.516676051312466 cpu_p50=14.230666999999999 gpu_p50=6.270374986343086 modes={'whole-frame': 119} size=2840x1528
+   rc=0
+   [03:55:05.346] [ INFO] [Job        ] [Main    ] [f      2] ThreadPool starting with 10 worker(s)
+   [03:55:05.540] [ INFO] [Serialize  ] [Main    ] [f      2] SceneLoadTiming: entities=10168 parseMs=133.06 buildMs=86.78
+   [03:55:06.399] [ INFO] [Editor     ] [Main    ] [f      2] SceneOpenTiming: loadMs=219.99 prefabSyncMs=0.02 preloadMs=0.58 warmupMs=858.49 totalMs=1079.08
+   [03:55:06.399] [ INFO] [Editor     ] [Main    ] [f      2] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [03:55:02.812] 
+wrote /tmp/ws_scenes/ref_50000_8000_0_0_0.hescene: 50568 entities (50000 meshes, 64 lights, 0 physics, 500 groups, 0 foliage instances), extent 8000.0 m, offset [0.0, 0.0, 0.0]
+== r1old-50000  load averages: 2.78 4.10 4.62  locked="CGSSessionScreenIsLocked"=Yes
+[r1old-50000] rc=0 wall=13s fps=11.494983501644116 cpu_p50=70.545125 gpu_p50=11.005125008523464 modes={'whole-frame': 118} size=2840x1528
+   rc=0
+   [03:55:13.392] [ INFO] [Job        ] [Main    ] [f      3] ThreadPool starting with 10 worker(s)
+   [03:55:14.264] [ INFO] [Serialize  ] [Main    ] [f      3] SceneLoadTiming: entities=50568 parseMs=626.34 buildMs=408.53
+   [03:55:15.121] [ INFO] [Editor     ] [Main    ] [f      3] SceneOpenTiming: loadMs=1035.11 prefabSyncMs=0.03 preloadMs=1.79 warmupMs=855.09 totalMs=1892.02
+   [03:55:15.121] [ INFO] [Editor     ] [Main    ] [f      3] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [03:55:10.602] 
+wrote /tmp/ws_scenes/ref_100000_8000_0_0_0.hescene: 101068 entities (100000 meshes, 64 lights, 0 physics, 1000 groups, 0 foliage instances), extent 8000.0 m, offset [0.0, 0.0, 0.0]
+== r1old-100000  load averages: 2.80 3.94 4.52  locked="CGSSessionScreenIsLocked"=Yes
+[r1old-100000] rc=0 wall=24s fps=5.957763412971603 cpu_p50=140.327708 gpu_p50=15.0498750153929 modes={'whole-frame': 118} size=2840x1528
+   rc=0
+   [03:56:07.828] [ INFO] [Job        ] [Main    ] [f      3] ThreadPool starting with 10 worker(s)
+   [03:56:09.557] [ INFO] [Serialize  ] [Main    ] [f      3] SceneLoadTiming: entities=101068 parseMs=1190.13 buildMs=851.22
+   [03:56:10.429] [ INFO] [Editor     ] [Main    ] [f      3] SceneOpenTiming: loadMs=2041.61 prefabSyncMs=0.03 preloadMs=3.47 warmupMs=868.41 totalMs=2913.52
+   [03:56:10.429] [ INFO] [Editor     ] [Main    ] [f      3] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [03:56:04.861] 
+wrote /tmp/ws_scenes/ref_200000_8000_0_0_0.hescene: 202068 entities (200000 meshes, 64 lights, 0 physics, 2000 groups, 0 foliage instances), extent 8000.0 m, offset [0.0, 0.0, 0.0]
+== r1old-200000  load averages: 2.75 3.81 4.46  locked="CGSSessionScreenIsLocked"=Yes
+[r1old-200000] rc=0 wall=45s fps=2.960128708197202 cpu_p50=290.062125 gpu_p50=19.42799997050315 modes={'whole-frame': 118} size=2840x1528
+   rc=0
+   [03:56:40.355] [ INFO] [Job        ] [Main    ] [f      3] ThreadPool starting with 10 worker(s)
+   [03:56:43.794] [ INFO] [Serialize  ] [Main    ] [f      3] SceneLoadTiming: entities=202068 parseMs=2258.62 buildMs=1835.10
+   [03:56:44.703] [ INFO] [Editor     ] [Main    ] [f      3] SceneOpenTiming: loadMs=4093.97 prefabSyncMs=0.03 preloadMs=8.15 warmupMs=900.52 totalMs=5002.66
+   [03:56:44.703] [ INFO] [Editor     ] [Main    ] [f      3] EditorApplication: startup scene loaded from /private/tmp/he162_s5/proj/Test/Content/StartupScene.hescene
+   first log line at [03:56:37.022] 

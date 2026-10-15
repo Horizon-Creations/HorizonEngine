@@ -59,12 +59,18 @@ enum class SlotAction { None, Assigned, Cleared };
 // Both the assign and the clear take an undo snapshot BEFORE mutating: the slot
 // points a component at an asset, which is a scene edit. `undo = false` is for
 // slots that hold panel-local preview state (a scrub clip is not a scene edit).
+//
+// `helpKey`: the help entry that explains THIS slot (the Weather component's five
+// sounds each do something different). When it names an entry, that tooltip
+// replaces the generic "click to pick or drop" one — so the entry's text should say
+// how the slot is filled. Null, or a key with no entry, keeps the generic one.
 SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
                          HE::AssetType want, const char* idSuffix,
                          const char* emptyText  = "(none)",
                          const char* rejectNoun = nullptr,
                          bool        showClear  = false,
-                         bool        undo       = true);
+                         bool        undo       = true,
+                         const char* helpKey    = nullptr);
 
 // ── Confirm / cancel buttons ─────────────────────────────────────────────────
 // Every dialog answers the same question — "do it, or not?" — and until now the

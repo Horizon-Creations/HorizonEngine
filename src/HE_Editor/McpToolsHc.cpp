@@ -30,8 +30,11 @@
 //     an include and in comments.
 //
 // The second bullet holds where `publishDocDeltas` already runs: the level
-// script and the GameInstance graph are diffed every frame we hold their lock,
-// and a class asset is diffed once its tab reports unsaved edits, which is what
+// script and the GameInstance graph are diffed every frame we hold their lock
+// while their tab is open, and with it closed the editor's `endEdit` hook marks
+// them so its collab pass claims, sends and gives back on its own (before that,
+// an edit with the tab closed never left the machine). A class asset is diffed
+// once its tab reports unsaved edits, which is what
 // the `endEdit` hook marks. It does NOT hold for a class whose tab is CLOSED —
 // nothing walks it — which is why `documents` only ever offers the tabs the
 // editor holds.

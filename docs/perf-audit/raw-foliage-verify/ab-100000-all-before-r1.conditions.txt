@@ -1,0 +1,15 @@
+== ab-100000-all-before-r1  2026-10-10 20:21:39
+before:
+  uptime:      load averages: 11.68 10.50 8.74
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'AC Power'
+  busy procs:  52.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 52.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 52.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 51.5% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 
+after (rc=0):
+  uptime:      load averages: 11.58 10.64 8.89
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=43
+  power:       Now drawing from 'AC Power'
+  busy procs:  95.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 14.0% /Applications/CLion.app/Contents/MacOS/clion; 13.7% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 5.4% /usr/sbin/coreaudiod; 

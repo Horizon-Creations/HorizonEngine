@@ -4,6 +4,7 @@
 #include "OutlinerPanel.h"    // entityPresetTable — the Entity ▸ Create rows
 #include "ViewportPanel.h"    // showFlagFields — the View ▸ Show rows
 #include "EditorCamera.h"     // ViewPreset + presetName — the View ▸ Camera rows
+#include "SelfUpdateDialog.h"  // available() — Help ▸ Check for Updates only with libssh2
 #include <Renderer/IRenderer.h> // HE::ViewMode + viewModeName — the View ▸ View Mode rows
 
 #import <Cocoa/Cocoa.h>
@@ -360,6 +361,7 @@ void install()
 		heAddItem(build, @"Build and Reload Game Logic", C::BuildGameLogic, nil, 0, true);
 		[build addItem:[NSMenuItem separatorItem]];
 		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
+		heAddItem(build, @"Show Last Build Log", C::ShowBuildLog, nil, 0, true);
 	}
 
 	// ── View: how the Scene window draws ───────────────────────────────────
@@ -444,6 +446,7 @@ void install()
 		heAddToggle(window, @"Performance Profiler",  C::ToggleProfiler,      false);
 		heAddToggle(window, @"Environment",           C::ToggleEnvironment,   false);
 		heAddToggle(window, @"Collaboration",         C::ToggleCollab,        false);
+		heAddToggle(window, @"Team",                  C::ToggleTeam,          false);
 		heAddToggle(window, @"Source Control",        C::ToggleSourceControl, true);
 		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
@@ -488,6 +491,8 @@ void install()
 		heAddToggle(help, @"Interactive Tutorial", C::OpenTutorial, false);
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
+		if (SelfUpdateDialog::available())
+			heAddItem(help, @"Check for Updates…", C::CheckForUpdates, nil, 0, false);
 		NSApp.helpMenu = help;
 	}
 

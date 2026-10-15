@@ -133,7 +133,6 @@ struct State
 	// keystroke would be a rename of its own, and each would drag the graph's
 	// Play nodes along to a name nobody meant to type.
 	std::string clipRenameEdit;
-	float  timelineH = 210.0f;  // the strip's height, dragged by its top edge
 
 	// Which theme the canvas RESOLVES bound colours against (toolbar ▸ theme).
 	// View state as well, and deliberately not the running preview's setting: a
@@ -2779,6 +2778,97 @@ void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
 	if (committed) commitEdit(st, ctx);
 }
 
+// ── Panel sizes ──────────────────────────────────────────────────────────────
+// The designer's three side panels - hierarchy/palette on the left, details on the
+// right, the timeline under the canvas - are as wide (or high) as the user drags
+// them, in BOTH views, and the sizes outlive the widget and the session: how much
+// room the details panel wants is a property of the person and their monitor, not
+// of the widget that happens to be open.
+namespace PanelSize
+{
+	constexpr float kSplit    = 6.0f;      // the draggable gap between two panels
+	constexpr float kLeftDef  = 230.0f, kLeftMin  = 140.0f;
+	constexpr float kRightDef = 300.0f, kRightMin = 200.0f;
+	constexpr float kTimeDef  = 210.0f, kTimeMin  = 90.0f;
+	constexpr float kCanvasMin = 160.0f;   // what the canvas keeps however far a panel is dragged
+
+	float leftW = kLeftDef, rightW = kRightDef, timelineH = kTimeDef;
+	bool  loaded = false;
+
+	void load(AppContext& ctx)
+	{
+		if (loaded || !ctx.globalState) return;
+		loaded = true;
+		leftW     = ctx.globalState->getCustomConfigFloat("UIDesignerLeftW",     kLeftDef);
+		rightW    = ctx.globalState->getCustomConfigFloat("UIDesignerRightW",    kRightDef);
+		timelineH = ctx.globalState->getCustomConfigFloat("UIDesignerTimelineH", kTimeDef);
+	}
+
+	void save(AppContext& ctx)
+	{
+		if (!ctx.globalState) return;
+		ctx.globalState->setCustomConfigEntry("UIDesignerLeftW",     leftW);
+		ctx.globalState->setCustomConfigEntry("UIDesignerRightW",    rightW);
+		ctx.globalState->setCustomConfigEntry("UIDesignerTimelineH", timelineH);
+		ctx.globalState->writeConfig();
+	}
+
+	// A drag handle between two panels. `size` is the panel it belongs to; `sign` is
+	// which way dragging grows it (+1 = dragging right/down makes it bigger, -1 =
+	// the opposite). The handle is drawn as a thin line that brightens under the
+	// mouse; double-click puts the size back to `defaultSize`. Returns true on the
+	// frame the drag ended, which is when the caller persists the result.
+	bool handle(const char* id, bool vertical, float& size, float sign, float minSize,
+	            float maxSize, float defaultSize)
+	{
+		static float s_startSize = 0.0f;
+		const ImVec2 avail = ImGui::GetContentRegionAvail();
+		const ImVec2 dim   = vertical ? ImVec2(kSplit, avail.y) : ImVec2(avail.x, kSplit);
+		const ImVec2 p     = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton(id, dim);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+		const bool active  = ImGui::IsItemActive();
+		if (ImGui::IsItemActivated()) s_startSize = size;
+		bool released = false;
+		if (active)
+		{
+			const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+			size = std::clamp(s_startSize + sign * (vertical ? d.x : d.y), minSize,
+			                  std::max(minSize, maxSize));
+		}
+		if (ImGui::IsItemDeactivated()) released = true;
+		if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+		{
+			size = std::clamp(defaultSize, minSize, std::max(minSize, maxSize));
+			released = true;
+		}
+		if (hovered || active)
+		{
+			ImGui::SetMouseCursor(vertical ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
+			if (ImGui::BeginItemTooltip())
+			{
+				ImGui::TextUnformatted("Drag to resize, double-click to reset");
+				ImGui::EndTooltip();
+			}
+		}
+		const ImU32 col = ImGui::GetColorU32(active ? ImGuiCol_SeparatorActive
+		                                    : hovered ? ImGuiCol_SeparatorHovered
+		                                              : ImGuiCol_Separator);
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		if (vertical)
+		{
+			const float x = std::floor(p.x + kSplit * 0.5f);
+			dl->AddLine(ImVec2(x, p.y + 2.0f), ImVec2(x, p.y + dim.y - 2.0f), col, active || hovered ? 2.0f : 1.0f);
+		}
+		else
+		{
+			const float y = std::floor(p.y + kSplit * 0.5f);
+			dl->AddLine(ImVec2(p.x + 2.0f, y), ImVec2(p.x + dim.x - 2.0f, y), col, active || hovered ? 2.0f : 1.0f);
+		}
+		return released;
+	}
+}
+
 // ── The timeline (docs/he-apps-plan.md B8) ───────────────────────────────────
 // The strip under the canvas: the widget's clips, their tracks, their keys, and
 // a playhead you can drag. What the animation editor of every engine looks like,
@@ -4809,6 +4899,32 @@ std::string spacedTypeName(const char* n)
 
 // A 24 px-ish pictogram of the component, centred on `c`. Plain strokes, so it
 // takes the tile's colour and needs no texture.
+// How big the palette's tiles are, against a 1080-point-tall screen. The tiles
+// were fixed sizes in the points the UI is laid out in, so on a screen with more
+// points (a 1440p or 4K monitor at 100 %) they were a smaller part of it — and on
+// a Retina laptop and a 27" monitor the same palette looked like two different
+// panels. Scaled with the height of the monitor the editor is on, in those same
+// points, they take the same share of it everywhere. Never below 1: a laptop
+// keeps the size it has. Without a monitor list (headless) the window's height
+// stands in for the monitor's.
+float paletteScreenScale()
+{
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	if (!vp) return 1.0f;
+	float height = vp->Size.y;
+	const ImVec2 centre(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
+	for (const ImGuiPlatformMonitor& m : ImGui::GetPlatformIO().Monitors)
+		if (centre.x >= m.MainPos.x && centre.x < m.MainPos.x + m.MainSize.x &&
+		    centre.y >= m.MainPos.y && centre.y < m.MainPos.y + m.MainSize.y)
+		{
+			height = m.MainSize.y;
+			break;
+		}
+	// In steps of a twentieth, so a window dragged between monitors of nearly the
+	// same size does not shuffle the tiles.
+	return std::clamp(std::round(height / 1080.0f * 20.0f) / 20.0f, 1.0f, 2.5f);
+}
+
 void paletteGlyph(ImDrawList* dl, const ImVec2& c, float size, UIWidgetType t, ImU32 col)
 {
 	const float h  = size * 0.5f;
@@ -7060,8 +7176,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 	}
 
 	// ── Three-pane layout ─────────────────────────────────────────────────────
-	const float leftW  = 230.0f;
-	const float rightW = 300.0f;
+	// Sizes are the user's (PanelSize), clamped each frame to what the window can hold:
+	// a narrow window must never push the canvas below its minimum.
+	PanelSize::load(ctx);
+	const float totalW = ImGui::GetContentRegionAvail().x;
+	const float sideRoom = std::max(0.0f, totalW - PanelSize::kCanvasMin - 2.0f * PanelSize::kSplit - 2.0f);
+	float leftW  = std::clamp(PanelSize::leftW,  PanelSize::kLeftMin,  std::max(PanelSize::kLeftMin,  sideRoom - PanelSize::kRightMin));
+	float rightW = std::clamp(PanelSize::rightW, PanelSize::kRightMin, std::max(PanelSize::kRightMin, sideRoom - leftW));
+	bool  layoutChanged = false;
 
 	if (st.viewMode == 0)
 	{
@@ -7107,6 +7229,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 			// A plain click adds (centered on the canvas or under the selected
 			// panel); dragging the tile onto the canvas/hierarchy places it there.
+			const float tileScale = paletteScreenScale();
 			const auto tile = [&](UIWidgetType t, const ImVec2& size) -> bool
 			{
 				ImGui::PushID(static_cast<int>(t));
@@ -7116,18 +7239,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 				ImDrawList* dl  = ImGui::GetWindowDrawList();
 				dl->AddRectFilled(p0, p1, hot ? IM_COL32(60, 60, 68, 255) : IM_COL32(38, 38, 43, 255), 5.0f);
 				dl->AddRect(p0, p1, IM_COL32(255, 255, 255, hot ? 55 : 22), 5.0f);
-				const float gs = 22.0f;
-				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 6.0f + gs * 0.5f), gs, t,
+				const float gs = 28.0f * tileScale;
+				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 8.0f * tileScale + gs * 0.5f), gs, t,
 				             hot ? IM_COL32(240, 240, 245, 255) : IM_COL32(190, 192, 202, 255));
 				// The label: on one line when it fits, else broken at its space
 				// ("Horizontal" / "Box"), and only then shortened — never cut
-				// mid-letter. A notch smaller than body text: the tiles are narrow
-				// on purpose.
+				// mid-letter. A notch smaller than body text, and growing with the
+				// tile on a larger screen.
 				ImFont* font   = ImGui::GetFont();
-				const float fs = ImGui::GetFontSize() * 0.82f;
+				const float fs = ImGui::GetFontSize() * 0.86f * tileScale;
 				const auto widthOf = [&](const std::string& t)
 				{ return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x; };
-				const float maxW = size.x - 4.0f;
+				const float maxW = size.x - 4.0f * tileScale;
 				const auto fitLine = [&](std::string line)
 				{
 					while (line.size() > 3 && widthOf(line) > maxW)
@@ -7148,7 +7271,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					lines.push_back(fitLine(full.substr(sp + 1)));
 				}
 				const float lineH = fs + 1.0f;
-				float ty = p1.y - lineH * lines.size() - 3.0f;
+				float ty = p1.y - lineH * lines.size() - 4.0f * tileScale;
 				for (const std::string& ln : lines)
 				{
 					dl->AddText(font, fs, ImVec2((p0.x + p1.x - widthOf(ln)) * 0.5f, ty),
@@ -7205,10 +7328,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// The tiles share the column's width equally. (The pane's own padding
 			// and scrollbar are already out of this number: the child is measured
 			// from inside.) The column count is the most that keep a tile at
-			// least kMinW wide; when the pane is too
+			// least kMinW wide (62 points on a 1080-point-tall screen — wide enough
+			// for "Vertical" and "Horizontal" whole, the longest words — and more on a bigger one); when the pane is too
 			// narrow for that many, there is one column fewer and every tile is
 			// correspondingly larger.
-			constexpr float kMinW = 42.0f, kTileH = 56.0f;
+			const float kMinW = 62.0f * tileScale, kTileH = 78.0f * tileScale;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
 			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (kMinW + spacing)));
@@ -7377,27 +7501,49 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		ImGui::EndChild();
 
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, 0.0f);
+		if (PanelSize::handle("##uiw_split_left", true, PanelSize::leftW, +1.0f,
+		                      PanelSize::kLeftMin, sideRoom - rightW, PanelSize::kLeftDef))
+			layoutChanged = true;
+		leftW = PanelSize::leftW = std::clamp(PanelSize::leftW, PanelSize::kLeftMin,
+			std::max(PanelSize::kLeftMin, sideRoom - rightW));
+		ImGui::SameLine(0.0f, 0.0f);
 
 		// The middle column is the canvas with the TIMELINE under it, the way
 		// every animation editor is laid out: what you are looking at above,
 		// when it happens below.
-		const float midW = ImGui::GetContentRegionAvail().x - rightW
-		                 - ImGui::GetStyle().ItemSpacing.x;
-		const float timelineH = std::clamp(st.timelineH, 90.0f,
-			std::max(90.0f, ImGui::GetContentRegionAvail().y - 160.0f));
+		const float midW = std::max(PanelSize::kCanvasMin,
+			totalW - leftW - rightW - 2.0f * PanelSize::kSplit - 1.0f);
 		ImGui::BeginChild("##uiw_mid", ImVec2(midW, 0));
-		ImGui::BeginChild("##uiw_canvas",
-			ImVec2(0, ImGui::GetContentRegionAvail().y - timelineH
-			          - ImGui::GetStyle().ItemSpacing.y),
-			ImGuiChildFlags_Borders,
-			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-		drawCanvas(st, ctx, ImGui::GetContentRegionAvail());
-		ImGui::EndChild();
-		drawTimeline(st, ctx, timelineH);
+		{
+			const float spacingY = ImGui::GetStyle().ItemSpacing.y;
+			const float availY   = ImGui::GetContentRegionAvail().y;
+			const float maxTimeline = availY - PanelSize::kCanvasMin - PanelSize::kSplit - 2.0f * spacingY;
+			const float timelineH = std::clamp(PanelSize::timelineH, PanelSize::kTimeMin,
+				std::max(PanelSize::kTimeMin, maxTimeline));
+			ImGui::BeginChild("##uiw_canvas",
+				ImVec2(0, availY - timelineH - PanelSize::kSplit - 2.0f * spacingY),
+				ImGuiChildFlags_Borders,
+				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+			drawCanvas(st, ctx, ImGui::GetContentRegionAvail());
+			ImGui::EndChild();
+			// The timeline's top edge: dragging it UP makes the strip taller.
+			PanelSize::timelineH = timelineH;
+			if (PanelSize::handle("##uiw_split_timeline", false, PanelSize::timelineH, -1.0f,
+			                      PanelSize::kTimeMin, maxTimeline, PanelSize::kTimeDef))
+				layoutChanged = true;
+			drawTimeline(st, ctx, std::clamp(PanelSize::timelineH, PanelSize::kTimeMin,
+				std::max(PanelSize::kTimeMin, maxTimeline)));
+		}
 		ImGui::EndChild();
 
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, 0.0f);
+		if (PanelSize::handle("##uiw_split_right", true, PanelSize::rightW, -1.0f,
+		                      PanelSize::kRightMin, sideRoom - leftW, PanelSize::kRightDef))
+			layoutChanged = true;
+		rightW = PanelSize::rightW = std::clamp(PanelSize::rightW, PanelSize::kRightMin,
+			std::max(PanelSize::kRightMin, sideRoom - leftW));
+		ImGui::SameLine(0.0f, 0.0f);
 
 		ImGui::BeginChild("##uiw_details", ImVec2(rightW, 0), ImGuiChildFlags_Borders);
 		drawDetails(st, ctx);
@@ -7431,10 +7577,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		ImGui::EndChild();
 
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, 0.0f);
+		if (PanelSize::handle("##uiw_gsplit_left", true, PanelSize::leftW, +1.0f,
+		                      PanelSize::kLeftMin, sideRoom - rightW, PanelSize::kLeftDef))
+			layoutChanged = true;
+		leftW = PanelSize::leftW = std::clamp(PanelSize::leftW, PanelSize::kLeftMin,
+			std::max(PanelSize::kLeftMin, sideRoom - rightW));
+		ImGui::SameLine(0.0f, 0.0f);
 
 		ImGui::BeginChild("##uiw_gcanvas",
-			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
+			ImVec2(std::max(PanelSize::kCanvasMin,
+			                totalW - leftW - rightW - 2.0f * PanelSize::kSplit - 1.0f), 0),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		// The graph tabs (Event Graph + one per open function, each with its own
@@ -7537,7 +7690,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 		drawGraphCanvas(st, ctx, ImGui::GetContentRegionAvail());
 		ImGui::EndChild();
 
-		ImGui::SameLine();
+		ImGui::SameLine(0.0f, 0.0f);
+		if (PanelSize::handle("##uiw_gsplit_right", true, PanelSize::rightW, -1.0f,
+		                      PanelSize::kRightMin, sideRoom - leftW, PanelSize::kRightDef))
+			layoutChanged = true;
+		rightW = PanelSize::rightW = std::clamp(PanelSize::rightW, PanelSize::kRightMin,
+			std::max(PanelSize::kRightMin, sideRoom - leftW));
+		ImGui::SameLine(0.0f, 0.0f);
 
 		ImGui::BeginChild("##uiw_gdetails", ImVec2(rightW, 0), ImGuiChildFlags_Borders);
 		{
@@ -7551,6 +7710,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 		}
 		ImGui::EndChild();
 	}
+
+	if (layoutChanged) PanelSize::save(ctx);
 
 	// ── Application projects: save as you design ─────────────────────────────
 	// The live preview rebuilds itself when an asset is SAVED, so an unsaved

@@ -290,28 +290,39 @@ add_executable(HorizonEditor WIN32
 	TerrainTools.cpp
 	ViewportPanel.cpp
 	ViewportActions.cpp
+	# The spline tool: what a click, a Delete and a drag do to a SplineComponent
+	# (SplineEdit, no ImGui) and the viewport wiring that feeds it (SplineTool).
+	SplineEdit.cpp
+	SplineTool.cpp
 	ViewportToolbar.cpp
 	SecondaryViewportPanel.cpp
 	EditorToolbar.cpp
 	OutlinerPanel.cpp
 	ProjectHubPanel.cpp
+	ProjectPreflight.cpp
+	SceneDiskWatch.cpp
 	TutorialPanel.cpp
 	TutorialSteps.cpp
 	ProfilerPanel.cpp
 	ProfilerWidgets.cpp
 	StreamingDebugView.cpp
 	ConsolePanel.cpp
+	ConsoleView.cpp
 	EnvironmentPanel.cpp
 	EditorSettingsPanel.cpp
 	ProjectSettingsPanel.cpp
 	AppMetadataRows.cpp
-	ToolchainDialog.cpp
+	ToolSetupDialog.cpp
 	GitMissingDialog.cpp
 	GitCloneDialog.cpp
 	GitHubSignIn.cpp
 	GitHubSignInView.cpp
+	ProjectLaunchOpen.cpp
+	HeprojRegistration.cpp
 	ReportIssueDialog.cpp
+	SelfUpdateDialog.cpp
 	EditorDockState.cpp
+	EditorGraphics.cpp
 	GitController.cpp
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
@@ -343,6 +354,9 @@ add_executable(HorizonEditor WIN32
 	CollabPanel.cpp
 	CollabPresenceBar.cpp
 	CollabUndo.cpp
+	TerrainSync.cpp
+	TeamController.cpp
+	TeamView.cpp
 	EngineContentSyncBar.cpp
 	McpStatusBar.cpp
 	EngineContentPublishDialog.cpp
@@ -374,10 +388,12 @@ add_executable(HorizonEditor WIN32
 	Guides/GuidesShipping.cpp
 	PanelSpotlight.cpp
 	# The test harness's CPU rasteriser for ImGui draw data — the editor uses it
-	# for one thing, the HE_DUMP_TUTORIALUI witness (TutorialPanel.cpp), which
-	# pictures the tour card in the running editor. Plain C++ over imgui.h.
+	# for its witnesses (EditorUiShot.cpp): HE_DUMP_TUTORIALUI, which pictures
+	# the tour card in the running editor, and the HE_DUMP_UI trigger shots.
+	# Plain C++ over imgui.h.
+	EditorUiShot.cpp
 	${CMAKE_SOURCE_DIR}/tests/ImGuiSoftwareRaster.cpp
- "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolchainDialog.h" "ReportIssueDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "AudioEditorPanel.h" "AudioWaveformView.h" "AudioMixView.h" "TextureViewerPanel.h" "EditorInput.h" "ExportDialogPanel.h" "BuildProgressDialog.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "ViewportToolbar.h" "EditorToolbar.h" "OutlinerPanel.h" "ProjectHubPanel.h" "ProjectPreflight.h" "SceneDiskWatch.h" "SceneFileStamp.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "ConsolePanel.h" "ConsoleView.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ProjectSettingsPanel.h" "ToolSetupDialog.h" "ReportIssueDialog.h" "SelfUpdateDialog.h" "EditorDockState.h" "PlayReportPanel.h" "AudioMixerPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h
@@ -433,6 +449,27 @@ if(TARGET HorizonContentSync)
 	# in the editor so it still builds and runs without the feature.
 	target_link_libraries(HorizonEditor PRIVATE HorizonContentSync)
 	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2)
+endif()
+
+if(TARGET HorizonSelfUpdate)
+	# Editor self-update, a SEPARATE account from HorizonContentSync's (see
+	# src/HE_SelfUpdate, docs/editor-selfupdate-sftp-design.md). Same libssh2 gate.
+	target_link_libraries(HorizonEditor PRIVATE HorizonSelfUpdate)
+	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2 HE_HAVE_SELFUPDATE)
+	# Help ▸ Check for Updates: the session logic (ImGui-free, also in he_tests).
+	# SelfUpdateDialog.cpp is compiled either way and turns into stubs, and its
+	# menu row disappears, without HE_HAVE_SELFUPDATE.
+	target_sources(HorizonEditor PRIVATE EditorSelfUpdate.cpp EditorSelfUpdate.h)
+endif()
+if(TARGET HorizonUpdater)
+	# Not linked — Takeover.cpp copies this executable, standalone, to a temp
+	# directory and runs it from there — but it must be as current as the editor
+	# it ships beside. src/HE_SelfUpdate/CMakeLists.txt deploys HorizonUpdater
+	# via he_deploy_dll on its OWN post-build step (it is added before this
+	# directory, so it cannot depend on HorizonEditor from its own side); this is
+	# the other half, so `cmake --build . --target HorizonEditor` alone still
+	# rebuilds and redeploys it when its sources change.
+	add_dependencies(HorizonEditor HorizonUpdater)
 endif()
 
 if(HE_IMGUI_AVAILABLE)
@@ -628,6 +665,38 @@ if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
 		COMMENT "Deploying Vulkan SPIR-V shaders to the editor"
 		VERBATIM
 	)
+endif()
+
+# ── .heproj file type registration (Windows and Linux packages) ───────────────
+# A double-click on a project file only opens the editor once the OS has been told
+# that .heproj is the editor's. macOS says so in Info.plist (package_macos.sh).
+# Windows and Linux ship the editor as a ZIP / tarball with no installer, so there
+# is nothing to write registry keys or a .desktop file at install time; the
+# registration travels INSIDE the package as scripts the user runs once, from
+# <editor>/FileTypes/ (register_heproj.cmd, install_file_types.sh). They cannot be
+# data files a packager installs, because the one thing they must record, where the
+# editor is, is only known after the user has unpacked it.
+# check_heproj_registration.ps1 is a test aid and is deliberately not shipped.
+# macOS is left out: the .app carries its registration in the plist, and these
+# files would be dead weight inside it.
+if(WIN32)
+	set(HE_FILETYPES_DIR "${CMAKE_SOURCE_DIR}/scripts/windows_assets")
+	set(HE_FILETYPES_FILES register_heproj.cmd unregister_heproj.cmd register_heproj.ps1 heproj.ico)
+elseif(UNIX AND NOT APPLE)
+	set(HE_FILETYPES_DIR "${CMAKE_SOURCE_DIR}/scripts/linux_assets")
+	set(HE_FILETYPES_FILES install_file_types.sh horizon-editor.desktop horizon-editor.xml
+	                       application-x-heproj.png horizon-editor.png)
+endif()
+if(HE_FILETYPES_FILES)
+	# copy_if_different keeps the source's mode, which install_file_types.sh needs: it
+	# has to arrive executable in the tarball (tar preserves it, a ZIP never had it).
+	foreach(_ft ${HE_FILETYPES_FILES})
+		add_custom_command(TARGET HorizonEditor POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+				"${HE_FILETYPES_DIR}/${_ft}" "${DEPLOY_EDITOR}/FileTypes/${_ft}"
+			COMMENT "Deploying FileTypes/${_ft} (.heproj registration)"
+			VERBATIM)
+	endforeach()
 endif()
 
 # ── macOS DMG packaging ────────────────────────────────────────────────────────

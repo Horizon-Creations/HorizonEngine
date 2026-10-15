@@ -8,8 +8,10 @@
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "TerrainSync.h"     // landscape grids and settings over the session
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "AssetAutosave.h"   // the same for dirty asset tabs
 #include "NotificationStore.h"
@@ -19,6 +21,7 @@
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/AudioSystem.h>
+#include <HorizonScene/WeatherAudio.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotify.h>
@@ -32,6 +35,7 @@
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected in the preview (no kick)
 #include <HorizonScene/Net/NetGameSession.h>        // the multiplayer session (plan Â§5.6)
 #include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
+#include <SourceControl/GitInstall.h>
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/SftpProbe.h>
@@ -309,6 +313,12 @@ struct AppContext
 	std::function<void()> cutEntity;
 	std::function<void()> pasteEntity;
 	std::function<void()> deleteEntity;
+	// A rename typed into the Outliner or the Details name field, for an entity
+	// somebody else in the session is editing. True = it went to the host as a
+	// request and the caller must NOT rename locally (the name would hold here
+	// and nowhere else until the holder's next edit overwrote it). False = no
+	// conflict (or no session): rename as always. Unbound in tests = false.
+	std::function<bool(Entity, const std::string& newName)> askHostToRename;
 	// Is there anything to paste? Drives the Paste item's enabled state.
 	bool entityClipboardFull = false;
 
@@ -342,13 +352,13 @@ struct AppContext
 
 	// Startup toolchain probe (cmake + C++ compiler), run once on a background
 	// thread so a slow/missing toolchain never blocks editor init. Null until
-	// the probe finishes. The "Toolchain Missing" dialog (EditorUI) opens when
+	// the probe finishes. The tool setup dialog (ToolSetupDialog) opens when
 	// it's non-null and something's missing, unless suppressed in preferences.
 	const HE::hccg::ToolchainProbe* toolchainProbe = nullptr;
 	std::function<void()> recheckToolchain; // re-runs the probe (after the user installs something)
 
 	// Auto-install of the missing toolchain (see HcCodegen::installToolchain). The
-	// "Toolchain Missing" dialog calls startToolchainInstall(needCmake, needCompiler);
+	// tool setup dialog calls startToolchainInstall(needCmake, needCompiler);
 	// the install runs on a background thread and streams output, which the dialog
 	// shows live by polling toolchainInstallLog() each frame.
 	std::function<void(bool needCmake, bool needCompiler)> startToolchainInstall;
@@ -377,6 +387,25 @@ struct AppContext
 	// and the fix is one git config call, not an install.
 	std::function<void(std::string name, std::string email)> setGitIdentity;
 	bool gitIdentityApplying = false;
+
+	// Installing git when the probe found none (HE::Sc::runGitInstall), started
+	// only by the user pressing "Install Git". Same shape as the toolchain install
+	// above: a worker streams the installer's output, the dialog polls the log
+	// each frame, and the probe re-runs when it ends — and if git now runs, the
+	// project's repository is looked up again, so the panel picks up where it was.
+	std::function<void()> startGitInstall;
+	// The same for Git LFS (HE::Sc::GitInstallTarget::GitLfs): same worker, log and
+	// flags — only one install runs at a time — so gitInstallIsLfs says which of
+	// the two the log and the done/ok flags belong to.
+	std::function<void()> startGitLfsInstall;
+	// Stops waiting for Apple's installer (the only wait that can be stopped:
+	// a package manager that is already running cannot be interrupted).
+	std::function<void()> cancelGitInstall;
+	std::function<std::string()> gitInstallLog; // thread-safe snapshot of the streamed output
+	bool gitInstalling   = false; // an install is currently running
+	bool gitInstallDone  = false; // the last install finished (success or failure)
+	bool gitInstallOk    = false; // finished, and `git --version` (LFS: `git lfs version`) ran afterwards
+	bool gitInstallIsLfs = false; // the install that is running / last ran is Git LFS, not git
 
 	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
 	// same null-means-still-running convention as the two above. Read-only: it
@@ -501,6 +530,9 @@ struct AppContext
 	// Live collaboration session (see CollabController). Null until the editor
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
+	// The team server connection (see TeamController): login, presence, and
+	// the team sessions it sets up on `collab`. Null in tests.
+	TeamController* team = nullptr;
 
 	// The MCP bridge, for the two places that have to show what it is actually
 	// doing: the Remote Control page in Preferences and the footer chip. READ
@@ -583,6 +615,12 @@ private:
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
+	// The user's own graphics values, set aside while the open project's are the
+	// ones in m_editorConfig (syncGraphicsSource). What the config file gets, and
+	// what comes back when the project closes or the preview is switched to
+	// "my own values".
+	EditorConfig m_userGraphics;
+	bool         m_graphicsFromProject = false;
 
 	// App-wide HorizonCode host: owns the runtime the editor world runs on and
 	// the GameInstance script. m_gameInstanceGraph is the authored source (edited
@@ -611,6 +649,14 @@ private:
 	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
 	// any trailing field may be left off.
 	IRenderer::ShadowSettings projectShadowSettings();
+	// Which graphics values m_editorConfig holds this frame: the open project's
+	// (graphics.enabled, preview mode "same as the project") or the user's own.
+	// Every frame, before the renderer is handed them.
+	void syncGraphicsSource();
+	// The gamepad deadzones the game in the editor runs with: the project's when
+	// it sets them (input.enabled), the editor's own otherwise.
+	float playStickDeadzone();
+	float playTriggerDeadzone();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
@@ -701,12 +747,20 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
+	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
+	// builds the block itself and pushEnvironment hands it to the renderer instead of the
+	// physics world's. Off outside the dump.
+	WaterRippleBlock m_dumpRipples;
+	bool             m_dumpRipplesOn = false;
 	// The step is the PROJECT's (ProjectPhysicsSettings::fixedDt, read from
 	// currentProject().settings where the accumulator steps): the packaged game
 	// reads the same file, so it simulates at the rate the editor previewed at.
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;
+	// The voices of the scene's weather (rain/wind/snow/storm beds, thunder) and the
+	// ramps they are on — fed each frame after the weather tick, edit mode included.
+	WeatherAudio::State m_weatherAudio;
 	// The editor's UI tones (AppContext::uiAudioEngine) — never init()ed here;
 	// EditorRewards opens and closes it.
 	AudioEngine m_uiAudio;
@@ -735,6 +789,15 @@ private:
 	void copySelectedEntity(bool cut);
 	void pasteEntityClipboard();
 	void deleteSelectedEntity();
+	// In a session: the targets whose subtree no other participant holds a lock
+	// in. The rest are left alone and the user is told, once, by name — a delete
+	// the session refuses must not happen here either, or the entity is gone on
+	// this machine and alive on every other one.
+	// `askHost`: a refused DELETE becomes a request in the host's in-tray
+	// (CollabEntityOps.h) instead of a dead end — the same decision an asset
+	// delete gets. Off for removals nobody typed (an undo replaying a create).
+	std::vector<Entity> withoutPeerHeld(const std::vector<Entity>& targets, const char* verb,
+	                                    bool askHost = false);
 	// The selection roots that may be copied or removed: valid, not built-in
 	// (root, sun, moon), and not under another selected entity.
 	std::vector<Entity> editableSelectionRoots() const;
@@ -747,6 +810,9 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	// The team server: sign-in, presence, invitations. Sets team sessions up on
+	// m_collab, so it is declared after it. Pumped right after it.
+	TeamController   m_team{ m_collab };
 	// Editor-wide "something happened" channel — see NotificationStore.h. Owned
 	// here and handed to the UI through AppContext, the same shape m_collab and
 	// m_git use, except that this one is written from worker threads too and
@@ -838,6 +904,10 @@ private:
 	void updateMcpLocks(std::uint64_t nowMs);
 	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
+	// Landscape edits: diffed each frame like the entity set below, so every
+	// tool that shapes, paints or plants a landscape replicates (TerrainSync.h).
+	HE::Ed::TerrainSync m_terrainSync;
+	bool                m_terrainSyncLive = false;   // in a session last frame
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
@@ -848,6 +918,14 @@ private:
 	// nothing said. Entries leave on the first success or when the retries run
 	// out; see syncStructuralChanges for why there is a limit at all.
 	std::unordered_map<Entity, int> m_structureUnsendable;
+	// The parent each known entity had when the diff last looked (StructuralSync.h
+	// reparentedSince), so a move in the hierarchy is published like a create.
+	std::unordered_map<Entity, Entity> m_structureParent;
+	// Known entities that are gone but whose destroy the session refused, and for
+	// how many frames: the same retry rule as m_structureUnsendable.
+	std::unordered_map<Entity, int> m_structureUndeletable;
+	// A peer's destroy: drop the whole subtree from both records (echo protection).
+	void forgetStructureOf(Entity root);
 	void syncStructuralChanges();
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the
@@ -890,6 +968,9 @@ private:
 	// Mirrors for the two editor-owned documents (panels keep their own).
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
+	// Those two, edited while their tab is closed (an MCP client's hc_ tools):
+	// the tab loop never sees them, so updateAssetCollabSync sends them from here.
+	std::unordered_set<std::string> m_collabUntabbedEdits;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
 	// The recovery snapshot of the open scene, written on a timer whether or
 	// not a collaboration session is running (the whole-file autosave above
@@ -920,6 +1001,11 @@ private:
 	// the tabs are told to reload AFTER that poll, which the restore forces to
 	// run on the next frame — otherwise a tab would re-read the stale copy.
 	std::vector<std::string> m_reloadTabsAfterPoll;
+	// Assets a collaboration peer's file just replaced. applyAssetBytes re-reads
+	// them on the spot, so the tab reload right after it sees the new bytes; the
+	// per-type follow-up a hot reload gets (renderer caches, material instances,
+	// prefab placements) runs on the next poll, which the arrival forces.
+	std::vector<HE::UUID> m_reloadedByPeer;
 	// Set by the quit the UI hands us (AppContext::quit), which only fires once
 	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
 	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
@@ -1039,6 +1125,13 @@ private:
 	// tools are the caller that HAS to know, because the client on the other end
 	// cannot see either.
 	bool saveSceneToPath(const std::string& path);
+	// Host, in a session: the scene settled (somebody saved it, or nobody has
+	// touched it for a while), so the host writes it to its own scene file.
+	// False when it cannot now (Play, no file yet, a disk conflict pending);
+	// the key then stays pending (CollabSettle.h).
+	bool persistSessionScene();
+	bool m_settleWritingScene  = false;   // persistSessionScene's write is not a new save
+	bool m_collabAutosaveWrite = false;   // the session's 1 s autosave is not a save either
 	// Hand the current viewport image to the thumbnail cache as this scene's
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.
@@ -1142,6 +1235,22 @@ private:
 	std::thread       m_gitIdentityThread;
 	std::atomic<bool> m_gitIdentityApplying{false};
 	void applyGitIdentity(std::string name, std::string email);
+	// Installing git (see startGitInstall). Its own log and flags, not the
+	// toolchain install's: both can run at once and must not share a log.
+	std::thread       m_gitInstallThread;
+	std::atomic<bool> m_gitInstallRunning{false};
+	std::atomic<bool> m_gitInstallFinished{false};
+	std::atomic<bool> m_gitInstallOk{false};
+	std::atomic<bool> m_gitInstallIsLfs{false};   // what the run above is installing
+	std::atomic<bool> m_gitInstallCancel{false};
+	// Raised by any probe that found a runnable git (after Install Git, or a
+	// Recheck after installing by hand) and consumed on the frame thread, the
+	// only one that may re-open the project in m_git — which it does when the
+	// last open had no git to ask (GitController::gitMissing).
+	std::atomic<bool> m_gitReopenRepo{false};
+	std::mutex        m_gitInstallLogMutex;
+	std::string       m_gitInstallLog;
+	void startGitInstall(bool lfs = false);
 
 #ifdef HE_HAVE_LIBSSH2
 	// EngineContent SFTP reachability probe. Same lifecycle as the other

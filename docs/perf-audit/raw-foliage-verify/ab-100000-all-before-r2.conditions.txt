@@ -1,0 +1,15 @@
+== ab-100000-all-before-r2  2026-10-10 20:25:34
+before:
+  uptime:      load averages: 8.21 8.56 8.28
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'AC Power'
+  busy procs:  86.6% /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd; 73.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 72.9% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 72.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 
+after (rc=0):
+  uptime:      load averages: 7.88 8.45 8.25
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=47
+  power:       Now drawing from 'AC Power'
+  busy procs:  113.7% /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd; 90.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 90.3% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 18.8% gh; 

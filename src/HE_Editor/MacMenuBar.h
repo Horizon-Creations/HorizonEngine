@@ -71,6 +71,9 @@ namespace MacMenuBar
 		// built once and a project can be swapped underneath it, so the row
 		// stays live and the action says what it did (GameLogicBuildPanel).
 		BuildGameLogic,
+		// Build ▸ Show Last Build Log: reopens the Build window on the last run's
+		// rings and per-step logs. Always live — with no run yet it says so itself.
+		ShowBuildLog,
 		// ── View: how the Scene window draws. No Toggle Full Screen command
 		// on purpose: the View menu carries the NATIVE one (toggleFullScreen:
 		// on the responder chain, ⌃⌘F), and a second item on SDL's own
@@ -81,7 +84,7 @@ namespace MacMenuBar
 		SetViewMode, ToggleShowFlag, ShowAllOverlays, HideAllOverlays,
 		SetViewPreset, ToggleOrthographic,
 		// ── Window: everything that opens a panel or a tab ──
-		ToggleConsole, ToggleProfiler, ToggleEnvironment, ToggleCollab,
+		ToggleConsole, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleTeam,
 		ToggleSourceControl, ToggleAudioMixer, ToggleUndoHistory, ToggleWatch,
 		ToggleTaskBoard,
 		// Window ▸ Scene 2 / 3 / 4, the secondary scene viewports. Game-only
@@ -94,6 +97,9 @@ namespace MacMenuBar
 		ResetLayout,
 		// ── Help ──
 		OpenTutorial, ReportIssue,
+		// Help ▸ Check for Updates…: SelfUpdateDialog. Not project-scoped — the
+		// Hub can update the editor too.
+		CheckForUpdates,
 		// Help ▸ Documentation opens the manual INSIDE the editor (DocsPanel);
 		// DocumentationOnline is the website. Both exist because they answer
 		// different needs — one keeps you where you are, the other is

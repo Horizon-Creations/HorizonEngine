@@ -68,14 +68,44 @@ namespace
 		std::snprintf(s_displayName, sizeof(s_displayName), "%s", stored.c_str());
 	}
 
+	// "Label  value  [Copy]" on ONE line. The value used to sit on a line of its
+	// own under the label, which made the two things a guest needs (ID and code)
+	// take four lines plus a gap between them; the labels share a column so the
+	// values still line up.
 	void CopyableValue(const char* label, const std::string& value, const char* id)
 	{
-		ImGui::TextUnformatted(label);
+		ImGui::TextDisabled("%s", label);
+		ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		ImGui::TextUnformatted(value.c_str());
 		ImGui::PopStyleColor();
 		ImGui::SameLine();
-		if (ImGui::SmallButton(id)) ImGui::SetClipboardText(value.c_str());
+		if (EditorWidgets::smallButton(id)) ImGui::SetClipboardText(value.c_str());
+	}
+
+	// A status line: one coloured sentence, with the longer explanation in a
+	// tooltip rather than a paragraph under it. The panel is docked narrow and
+	// most of what it says here is "all fine" or "here is why not" — a verdict
+	// first, the reasoning on demand.
+	void StatusLine(const ImVec4& colour, const char* verdict, const char* detail = nullptr)
+	{
+		ImGui::TextColored(colour, "%s", verdict);
+		if (detail && ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s", detail);
+	}
+
+	// SameLine only when the next item still fits in the row. A row of swatches
+	// and buttons wraps to a second line on a narrow dock instead of running out
+	// of the window, which is what a bare SameLine did.
+	void SameLineIfFits(float nextWidth, float spacing = -1.0f)
+	{
+		const float sp = spacing < 0.0f ? ImGui::GetStyle().ItemSpacing.x : spacing;
+		// After an item the cursor is back at the start of the NEXT line, so the
+		// right edge is cursor + available, and the room left in this row is
+		// measured from where the last item ended.
+		const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+		if (ImGui::GetItemRectMax().x + sp + nextWidth <= right)
+			ImGui::SameLine(0.0f, sp);
 	}
 
 	// ── Does THAT session carry the big media? ───────────────────────────────
@@ -97,6 +127,27 @@ namespace
 		return s.syncsLargeAssets;
 	}
 
+	// What was actually handed out — which is the interesting number the
+	// moment somebody else already had the colour you asked for.
+	void ColorTakenNotice(AppContext& ctx)
+	{
+		if (!ctx.collab || !ctx.collab->inSession()) return;
+		const HE::Net::ParticipantColor mine = CollabController::localIdentity().color;
+		const auto localId = ctx.collab->localParticipant();
+		for (const HE::Net::Participant& p : ctx.collab->participants())
+		{
+			if (p.id != localId || p.color.unset()) continue;
+			const bool asWished = !mine.unset() && p.color.r == mine.r &&
+			                      p.color.g == mine.g && p.color.b == mine.b;
+			if (!asWished)
+			{
+				ImGui::TextDisabled("The colour you picked was taken — you were "
+				                    "given a free one for this session.");
+			}
+			break;
+		}
+	}
+
 	// ── Colour ───────────────────────────────────────────────────────────────
 	// The colour this user is drawn in throughout the session: viewport marker,
 	// selection highlight, lock badges, footer avatar. Presets first because they
@@ -114,16 +165,22 @@ namespace
 		HE::Ed::Help::Scope helpScope("Collaboration Session");
 		using HE::Net::ParticipantColor;
 
-		ImGui::Spacing();
-		ImGui::TextUnformatted("Colour");
+		// One row: the label, the eight presets, Auto and the free picker. It used
+		// to be a label line, a swatch line and a picker with a caption of its
+		// own — the same choice spread over three lines. Each item asks whether it
+		// still fits, so a narrow dock wraps the row instead of cutting it off.
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextDisabled("Colour");
 		ImGui::BeginDisabled(!editable);
 
 		const ParticipantColor mine = CollabController::localIdentity().color;
 
-		constexpr float kSwatch = 20.0f;
+		constexpr float kSwatch = 18.0f;
 		int index = 0;
 		for (const ParticipantColor& preset : HE::Net::kParticipantPalette)
 		{
+			if (index == 0) ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
+			else            SameLineIfFits(kSwatch, 3.0f);
 			ImGui::PushID(index++);
 			const ImVec4 col(preset.r / 255.0f, preset.g / 255.0f, preset.b / 255.0f, 1.0f);
 			const bool   chosen = !mine.unset() && mine.r == preset.r &&
@@ -141,13 +198,13 @@ namespace
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(4);
 			ImGui::PopID();
-			ImGui::SameLine(0.0f, 4.0f);
 		}
 
 		// "Automatic" is a real choice, not the absence of one: it means the host
 		// hands out whatever is free, which is the right answer for a user who
 		// does not care and the only answer that never collides.
 		const bool automatic = mine.unset();
+		SameLineIfFits(ImGui::CalcTextSize("Auto").x + ImGui::GetStyle().FramePadding.x * 2.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, automatic ? 2.0f : 0.0f);
 		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, automatic ? 1.0f : 0.0f));
 		if (EditorWidgets::button("Auto", ImVec2(0.0f, kSwatch)))
@@ -156,7 +213,7 @@ namespace
 		ImGui::PopStyleVar();
 
 		float custom[3] = { mine.r / 255.0f, mine.g / 255.0f, mine.b / 255.0f };
-		ImGui::SetNextItemWidth(160.0f);
+		SameLineIfFits(kSwatch);
 		if (ImGui::ColorEdit3("Custom", custom,
 		                      ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
 		{
@@ -170,29 +227,9 @@ namespace
 			CollabController::setLocalColor(picked);
 		}
 		EditorWidgets::helpForLabel("Custom");
-		ImGui::SameLine();
-		ImGui::TextDisabled("custom");
 
 		ImGui::EndDisabled();
-
-		// What was actually handed out — which is the interesting number the
-		// moment somebody else already had the colour you asked for.
-		if (ctx.collab && ctx.collab->inSession())
-		{
-			const auto localId = ctx.collab->localParticipant();
-			for (const HE::Net::Participant& p : ctx.collab->participants())
-			{
-				if (p.id != localId || p.color.unset()) continue;
-				const bool asWished = !mine.unset() && p.color.r == mine.r &&
-				                      p.color.g == mine.g && p.color.b == mine.b;
-				if (!asWished)
-				{
-					ImGui::TextDisabled("The colour you picked was taken — you were "
-					                    "given a free one for this session.");
-				}
-				break;
-			}
-		}
+		ColorTakenNotice(ctx);
 	}
 
 	// ── Identity editor ──────────────────────────────────────────────────────
@@ -209,24 +246,48 @@ namespace
 		HE::Ed::Help::Scope helpScope("Collaboration Session");
 		SyncDisplayNameFromIdentity();
 
+		// In a session the identity is fixed (it was read when the session started),
+		// so it shrinks to a single line: the roster below already shows the
+		// avatar and colour at full size, and a disabled form here would only
+		// repeat it.
+		if (!editable)
+		{
+			const float small = ImGui::GetFrameHeight();
+			CollabPresenceBar::DrawLocalAvatar(ctx, small);
+			ImGui::SameLine();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(s_displayName[0] ? s_displayName : "You");
+			ImGui::SameLine();
+			ImGui::TextDisabled("(changes apply at the next join)");
+			ColorTakenNotice(ctx);
+			if (!s_avatarError.empty())
+				ImGui::TextColored(HE::Ed::Theme::Bad, "%s", s_avatarError.c_str());
+			return;
+		}
+
 		ImGui::SeparatorText("You");
 
-		const float avatarSize = 56.0f;
+		// Two rows tall: the name on top, the picture buttons under it. The avatar
+		// is exactly that height, so the block reads as one unit instead of a
+		// 56 px portrait with a form hanging off it.
+		const float avatarSize = ImGui::GetFrameHeight() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
 		CollabPresenceBar::DrawLocalAvatar(ctx, avatarSize);
-		ImGui::SameLine(0.0f, 12.0f);
+		ImGui::SameLine();
 
 		ImGui::BeginGroup();
-		ImGui::BeginDisabled(!editable);
 
-		ImGui::SetNextItemWidth(200.0f);
-		ImGui::InputText("Display name", s_displayName, sizeof(s_displayName));
+		// The label is the hint inside the field, not text beside it: beside it the
+		// label took a third of a narrow dock and left the field cramped. The
+		// help entry is attached by name, since there is no visible label to find.
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##displayname", "Display name", s_displayName, sizeof(s_displayName));
 		// Written when the field is left, not on every keystroke: setLocalName
 		// rewrites config.json, and a name is a dozen characters.
 		if (ImGui::IsItemDeactivatedAfterEdit()) CollabController::setLocalName(s_displayName);
 		EditorWidgets::helpForLabel("Display name");
 
 		const bool hasPicture = CollabController::localIdentity().avatarSize > 0;
-		if (ImGui::Button(hasPicture ? "Change picture..." : "Choose picture..."))
+		if (EditorWidgets::button(hasPicture ? "Change picture..." : "Choose picture..."))
 		{
 			s_avatarError.clear();
 			SDL_DialogFileFilter filters[] = {
@@ -252,16 +313,13 @@ namespace
 			if (EditorWidgets::dangerSmallButton("Remove")) CollabController::clearLocalAvatar();
 		}
 
-		ImGui::EndDisabled();
 		ImGui::EndGroup();
 
-		DrawColorChoice(ctx, editable);
+		DrawColorChoice(ctx, true);
 
-		if (!editable)
-			ImGui::TextDisabled("Changes take effect the next time you join a session.");
 		if (!s_avatarError.empty())
 		{
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Bad);
 			ImGui::TextWrapped("%s", s_avatarError.c_str());
 			ImGui::PopStyleColor();
 		}
@@ -358,7 +416,7 @@ namespace
 			// setting exists at all. Coloured because it is the cost, not the
 			// description: somebody on a phone hotspot has to be able to see it
 			// without reading the paragraph above.
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 			ImGui::TextWrapped("It can use considerably more data than an ordinary "
 			                   "session. On a metered or slow connection, that is worth "
 			                   "thinking about before you agree.");
@@ -462,31 +520,47 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// panel's edge, and this panel is docked narrow by default.
 		EditorWidgets::WrapText wrap;
 
-		ImGui::TextWrapped("Work on the same scene together. The host opens a session "
-		                   "and shares its ID and join code; that is all a guest needs.");
-
 		DrawIdentity(ctx, true);
 
+		// Discovery is one switch for both halves — announcing when you host,
+		// listening when you do not — and it lives in Preferences > Team
+		// ("Find Sessions on the Local Network"). It used to be repeated here as
+		// a checkbox, which only duplicated the setting; this window just reads it.
+		const bool lanOn = ctx.editorConfig.CollabLanDiscovery;
+		if (!lanOn) s_lanPicked = 0;
+
+		ImGui::Spacing();
+		if (ImGui::BeginTabBar("##collabmode"))
+		{
 		// ── Host ──
-		ImGui::SeparatorText("Host a session");
-		ImGui::SetNextItemWidth(120);
-		ImGui::InputInt("Port", &s_hostPort);
+		if (ImGui::BeginTabItem("Host"))
+		{
+		// Port and the button share a row: the port is a detail of the one thing
+		// this tab does, not a form of its own.
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextDisabled("Port");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+		ImGui::InputInt("##hostport", &s_hostPort, 0, 0);
 		s_hostPort = std::clamp(s_hostPort, 0, 65535);
 		EditorWidgets::helpForLabel("Port");
+		ImGui::SameLine();
+		if (EditorWidgets::primaryButton("Open session"))
+			collab->startHosting(static_cast<std::uint16_t>(s_hostPort), s_displayName);
 		// The hand-rolled "(?)" that sat here carried a SetTooltip of its own,
 		// which would now be a second tooltip beside the field's. helpMarker
 		// draws the same mark from the same entry, so there is one sentence and
-		// one place to change it. It goes AFTER the lookup above: it submits an
-		// item of its own, and the lookup reads the last one.
+		// one place to change it.
+		ImGui::SameLine();
 		EditorWidgets::helpMarker("Collaboration Session/Port");
-
-		if (EditorWidgets::primaryButton("Open session", ImVec2(170, 0)))
-			collab->startHosting(static_cast<std::uint16_t>(s_hostPort), s_displayName);
 
 		// What the startup probe already found out about this network, said BEFORE
 		// the session is opened. Hosting used to be the only way to learn that the
 		// router does not forward ports — by which point the user had a live
 		// session nobody could reach and no idea why.
+		//
+		// A verdict on one line with the reasoning in its tooltip: four sentences of
+		// advice appeared here before the user had done anything at all.
 		if (!ctx.routerProbe)
 		{
 			ImGui::TextDisabled("Checking this network…");
@@ -494,126 +568,91 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		else
 		{
 			const HE::Net::RouterProbe& r = *ctx.routerProbe;
+			// The way out of the warnings below is said in their tooltips, next to
+			// the bad news, because "guests will not reach this machine" is exactly
+			// the moment someone needs to know that people in the same room still can.
 			if (r.localNetworkBlocked)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.45f, 1.0f));
-				ImGui::TextWrapped("This application may not talk to the local network, so the "
-				                   "router cannot be reached at all. On macOS, allow it under "
-				                   "Privacy & Security > Local Network.");
-				ImGui::PopStyleColor();
+				StatusLine(HE::Ed::Theme::Bad, "Local network access is blocked",
+					"This application may not talk to the local network, so the router "
+					"cannot be reached at all. On macOS, allow it under "
+					"Privacy & Security > Local Network.");
 			}
 			else if (r.portForwardingAvailable())
 			{
-				ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-					"Router forwards ports (%s).",
+				ImGui::TextColored(HE::Ed::Theme::Ok, "Router forwards ports (%s)",
 					r.upnpFound ? "UPnP" : "NAT-PMP");
 			}
 			else if (!r.globalIPv6.empty())
 			{
-				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+				StatusLine(HE::Ed::Theme::Warn, "No port forwarding; IPv6 guests can still connect",
 					"The router does not offer port forwarding, but this machine has a "
-					"global IPv6 address — guests on IPv6 can still reach it.");
+					"global IPv6 address, so guests on IPv6 can still reach it.");
 			}
 			else
 			{
-				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-				ImGui::TextWrapped("The router answered neither UPnP nor NAT-PMP — guests will "
-				                   "probably not reach this machine without a hand-made port "
-				                   "forward. Opening a session still works; see "
-				                   "Preferences > Editor > Tool Status.");
-				ImGui::PopStyleColor();
-			}
-			if (r.carrierNat)
-				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
-					"Your connection is behind carrier-grade NAT — port forwarding cannot "
-					"help here.");
-
-			// The way out of every warning above. Said HERE, next to the bad
-			// news, because "guests will not reach this machine" is exactly the
-			// moment someone needs to know that people in the same room still
-			// can.
-			if (!r.portForwardingAvailable() || r.carrierNat)
-			{
-				ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+				StatusLine(HE::Ed::Theme::Warn, "No port forwarding; remote guests may not connect",
+					"The router answered neither UPnP nor NAT-PMP, so guests will "
+					"probably not reach this machine without a hand-made port forward. "
+					"Opening a session still works; see Preferences > Editor > Tool Status. "
 					"Anyone on this network can still find and join the session.");
 			}
+			if (r.carrierNat)
+				StatusLine(HE::Ed::Theme::Warn, "Behind carrier-grade NAT",
+					"Your connection is behind carrier-grade NAT, so port forwarding "
+					"cannot help here. Anyone on this network can still find and join "
+					"the session.");
 		}
 
-		// One switch for both halves of discovery — announcing when you host,
-		// listening when you do not. It is one feature to the person using it.
+		// Whether anything is actually leaving this machine. Without it,
+		// "they cannot see me" is unanswerable from here: a refused send
+		// looks exactly like a send nobody happened to hear.
+		if (lanOn)
 		{
-			// The config is the one that is written, never the controller: the
-			// editor pushes it down every frame, so this both takes effect
-			// immediately and survives a restart.
-			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
-			// Its tooltip used to be written out below, after the whole status
-			// block — so IsItemHovered() there asked about the last LINE OF TEXT
-			// drawn, not about this checkbox, and the explanation appeared over
-			// "Announced 3 times." or over nothing at all. As an entry it hangs
-			// on the checkbox itself, which is what it was always about.
-			if (EditorWidgets::checkbox("Announce this session on the local network", &lanOn))
-				ctx.editorConfig.CollabLanDiscovery = lanOn;
-
-			// Whether anything is actually leaving this machine. Without it,
-			// "they cannot see me" is unanswerable from here: a refused send
-			// looks exactly like a send nobody happened to hear.
-			if (lanOn)
+			const auto st = collab->lanStats();
+			if (st.failed > 0 && st.sent == 0)
 			{
-				const auto st = collab->lanStats();
-				if (st.failed > 0 && st.sent == 0)
-				{
-					ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f),
-						"The system is refusing to send them (%u attempts).", st.failed);
-					ImGui::TextWrapped("On macOS this is the Local Network permission: "
-					                   "allow it under Privacy & Security > Local Network. "
-					                   "Otherwise it is a firewall.");
-				}
-				else if (st.sent > 0)
-				{
-					ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
-						"Announced %u time%s.", st.sent, st.sent == 1 ? "" : "s");
-					// The other direction, which says whether the two machines
-					// can hear each other at all — answerable now without
-					// giving up this session to go and look.
-					const std::size_t others = collab->lanSessions().size();
-					if (others > 0)
-						ImGui::TextDisabled("%zu other session%s audible from here.",
-						                    others, others == 1 ? "" : "s");
-					else if (st.heard > 0)
-						ImGui::TextDisabled("Announcements from this machine come "
-						                    "back to it, so the network carries them.");
-				}
+				StatusLine(HE::Ed::Theme::Bad, "The system is refusing to send announcements",
+					"On macOS this is the Local Network permission: allow it under "
+					"Privacy & Security > Local Network. Otherwise it is a firewall.");
 			}
+			else if (st.sent > 0)
+			{
+				// The other direction too, which says whether the two machines
+				// can hear each other at all — answerable now without giving up
+				// this session to go and look.
+				const std::size_t others = collab->lanSessions().size();
+				if (others > 0)
+					ImGui::TextDisabled("Announced %u time%s  ·  %zu other session%s audible",
+					                    st.sent, st.sent == 1 ? "" : "s",
+					                    others, others == 1 ? "" : "s");
+				else if (st.heard > 0)
+					ImGui::TextDisabled("Announced %u time%s  ·  the network carries them",
+					                    st.sent, st.sent == 1 ? "" : "s");
+				else
+					ImGui::TextDisabled("Announced %u time%s", st.sent, st.sent == 1 ? "" : "s");
+			}
+		}
+		ImGui::EndTabItem();
 		}
 
 		// ── Join ──
-		ImGui::SeparatorText("Join a session");
+		if (ImGui::BeginTabItem("Join"))
+		{
 
 		// ── Sessions on this network ──
 		// Above the manual fields on purpose: when it works it is the answer,
 		// and the session id exists for the case where it does not.
 		{
-			// Same switch as the host side's — one feature, one setting. Written
-			// to the config, which the editor pushes into the controller.
-			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
-			if (EditorWidgets::checkbox("Look for sessions on this network", &lanOn))
-			{
-				ctx.editorConfig.CollabLanDiscovery = lanOn;
-				// The list is gone either way; a selection into it is not worth
-				// carrying across the switch.
-				s_lanPicked = 0;
-			}
-
 			if (lanOn)
 			{
 				const auto& found = collab->lanSessions();
 				if (collab->lanBlocked())
 				{
-					ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f),
-						"This application may not use the local network.");
-					ImGui::TextWrapped("On macOS, allow it under Privacy & Security > "
-					                   "Local Network. Until then, sessions here cannot "
-					                   "be found — the session ID below still works.");
+					StatusLine(HE::Ed::Theme::Bad, "Local network access is blocked",
+						"This application may not use the local network. On macOS, allow "
+						"it under Privacy & Security > Local Network. Until then, sessions "
+						"here cannot be found — the session ID below still works.");
 				}
 				else if (found.empty())
 				{
@@ -628,11 +667,13 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 					const auto st = collab->lanStats();
 					if (st.heard == 0)
 					{
-						ImGui::TextDisabled(
+						char why[320];
+						std::snprintf(why, sizeof(why),
 							"Nothing at all has reached this machine on port %u. If someone "
 							"IS hosting nearby, this is a firewall or, on macOS, the Local "
 							"Network permission — not the session.",
 							unsigned(HE::Net::LanBeacon::kPort));
+						StatusLine(HE::Ed::Theme::Warn, "Nothing is reaching this machine", why);
 					}
 				}
 				else
@@ -680,15 +721,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						// session that is simply missing sends people to ask
 						// each other what is wrong.
 						if (!sameProtocol)
-						{
-							ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
-								"    different engine version — one of you needs to update");
-						}
+							StatusLine(HE::Ed::Theme::Warn, "    different engine version",
+								"One of you needs to update before this session can be joined.");
 						else if (!sameProject)
-						{
-							ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
-								"    a different project");
-						}
+							StatusLine(HE::Ed::Theme::Warn, "    a different project",
+								"This session is working on another project than the one "
+								"open here.");
 
 						// What this session will cost you, on the row, before the
 						// click. Only for the sessions that say so — a notice on
@@ -696,38 +734,21 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						// leave the big media to source control have nothing to
 						// warn about.
 						//
-						// A tinted block rather than another column: this window
-						// is narrow, and the sentence does not fit beside a
-						// project name and a head count.
+						// One amber line with the sentence in its tooltip: a tinted
+						// three-line block per row made a short list as tall as the
+						// whole panel.
 						if (joinable && SessionAnnouncesLargeAssets(s))
 						{
-							// The list's own amber, at an alpha that reads as a
-							// tint behind text rather than as a second selection
-							// highlight — a row already has one of those.
-							const ImVec4 amber(1.0f, 0.78f, 0.35f, 1.0f);
-							ImGui::PushStyleColor(ImGuiCol_ChildBg,
-							                      ImVec4(amber.x, amber.y, amber.z, 0.12f));
-							// AutoResizeY, because the text wraps: a fixed height
-							// clips the second line on a narrow window, which is
-							// exactly the window this panel is usually docked in.
-							ImGui::BeginChild("##bigassets", ImVec2(0, 0),
-							                  ImGuiChildFlags_AutoResizeY |
-							                  ImGuiChildFlags_AlwaysUseWindowPadding);
-							ImGui::PushStyleColor(ImGuiCol_Text, amber);
 							// The last clause is only true while the setting is
 							// off — that is when joining raises the question and
 							// turns it on. Saying it to someone who already has
 							// it on would promise a dialog that never comes.
-							ImGui::TextWrapped(
+							StatusLine(HE::Ed::Theme::Warn,
+								"    also transfers meshes, textures and audio",
 								ctx.editorConfig.CollabSyncLargeAssets
-									? "Also transfers meshes, textures and audio — this "
-									  "session can use considerably more data."
-									: "Also transfers meshes, textures and audio — this "
-									  "session can use considerably more data. Joining "
-									  "turns that on for you too.");
-							ImGui::PopStyleColor();
-							ImGui::EndChild();
-							ImGui::PopStyleColor();
+									? "This session can use considerably more data."
+									: "This session can use considerably more data. Joining "
+									  "turns large-asset sync on for you too.");
 						}
 						ImGui::PopID();
 					}
@@ -738,27 +759,28 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 					if (picked != found.end())
 					{
 						ImGui::Spacing();
-						ImGui::SetNextItemWidth(220);
-						ImGui::InputText("Join code##lan", s_lanJoinCode,
-						                 sizeof(s_lanJoinCode));
-						EditorWidgets::helpForLabel("Join code##lan");
+						// Field full width, button under it — the same shape as every
+						// other form in this window. The field's hint is the "ask the
+						// host" line that used to sit under them.
+						ImGui::SetNextItemWidth(-FLT_MIN);
+						ImGui::InputTextWithHint("##lancode", "Join code from the host",
+						                         s_lanJoinCode, sizeof(s_lanJoinCode));
+						EditorWidgets::helpForLabel("Join code");
 						ImGui::BeginDisabled(s_lanJoinCode[0] == '\0');
-						if (EditorWidgets::primaryButton("Join this session", ImVec2(190, 0)))
+						if (EditorWidgets::primaryButton("Join this session"))
 						{
 							s_joinRetryHint.clear();
 							collab->joinSession(picked->address, picked->port,
 							                    s_lanJoinCode, s_displayName);
 						}
 						ImGui::EndDisabled();
-						if (s_lanJoinCode[0] == '\0')
-							ImGui::TextDisabled("Ask the host for the join code.");
 					}
 					else if (s_lanPicked != 0)
 					{
 						// It expired or said goodbye while the code was being
 						// typed. The field and the button disappearing without
 						// a word looks like the editor ate the input.
-						ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+						ImGui::TextColored(HE::Ed::Theme::Warn,
 							"That session is no longer being announced.");
 						s_lanPicked = 0;
 					}
@@ -766,26 +788,39 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			}
 		}
 
+		// Join by ID — the way in when discovery finds nothing, and the only one
+		// through a relay server (the team server, set in Preferences > Team). Two
+		// full-width fields with the button under them; the names are hints inside
+		// the fields rather than labels beside them, for the width.
 		ImGui::Spacing();
-		ImGui::TextDisabled("Or join by ID:");
-		ImGui::InputText("Session ID", s_joinSessionId, sizeof(s_joinSessionId));
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##joinid", "Session ID", s_joinSessionId, sizeof(s_joinSessionId));
 		EditorWidgets::helpForLabel("Session ID");
-		ImGui::InputText("Join code",  s_joinCode,      sizeof(s_joinCode));
-		EditorWidgets::helpForLabel("Join code");
 
 		const bool canJoin = s_joinSessionId[0] != '\0' && s_joinCode[0] != '\0';
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##joincode", "Join code", s_joinCode, sizeof(s_joinCode));
+		EditorWidgets::helpForLabel("Join code");
 		ImGui::BeginDisabled(!canJoin);
-		if (EditorWidgets::primaryButton("Join", ImVec2(170, 0)))
+		if (EditorWidgets::primaryButton("Join"))
 		{
 			s_joinRetryHint.clear();
 			collab->joinBySessionId(s_joinSessionId, s_joinCode, s_displayName);
 		}
 		ImGui::EndDisabled();
-		if (!canJoin)
-			ImGui::TextDisabled("Both the session ID and the join code are required.");
+		// Why the button is grey, on the button — AllowWhenDisabled, since a
+		// tooltip that only exists on the enabled control would never be seen.
+		if (!canJoin && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Both the session ID and the join code are required.");
 		if (!s_joinRetryHint.empty())
-			ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s",
-			                   s_joinRetryHint.c_str());
+			ImGui::TextColored(HE::Ed::Theme::Ok, "%s", s_joinRetryHint.c_str());
+
+		// Joining REPLACES the open scene, which a button labelled "Join" does
+		// not convey — say so before it happens, not after.
+		ImGui::Spacing();
+		ImGui::TextColored(HE::Ed::Theme::Warn,
+			"Joining replaces your open scene with the host's. Save anything you "
+			"want to keep first.");
 
 		// What THIS editor has agreed to, said where a join is started rather
 		// than only in Preferences. It changes which sessions will have us —
@@ -793,17 +828,13 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// agreed — and being refused is a worse way to find that out.
 		if (ctx.editorConfig.CollabSyncLargeAssets)
 		{
-			ImGui::TextDisabled("Larger assets (meshes, textures, audio) are shared in "
-			                    "your sessions. This can use considerably more data.");
+			ImGui::TextDisabled("Large-asset sync is on: meshes, textures and audio are "
+			                    "shared, which can use considerably more data.");
 		}
-
-		// Joining REPLACES the open scene, which a button labelled "Join" does
-		// not convey — say so before it happens, not after.
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-		ImGui::TextWrapped("Joining replaces your open scene with the host's. "
-		                   "Save anything you want to keep first.");
-		ImGui::PopStyleColor();
+		ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
+		}
 	}
 	else if (collab->isHost())
 	{
@@ -817,11 +848,20 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// listener and looks just as much like the answer. They are different
 		// sockets on different protocols, and confusing them sends you looking
 		// for a bug in the wrong place.
-		ImGui::Text("Listening on %s:%u",
-		            collab->localAddress().empty() ? "this machine"
-		                                           : collab->localAddress().c_str(),
-		            unsigned(collab->port()));
-		if (ImGui::IsItemHovered())
+		if (collab->viaRelay())
+		{
+			// No port here: guests reach the session through the relay by its id.
+			ImGui::Text("Hosting through the relay server %s",
+			            HE::Net::effectiveRelayAddress(collab->relayAddress()).c_str());
+		}
+		else
+		{
+			ImGui::Text("Listening on %s:%u",
+			            collab->localAddress().empty() ? "this machine"
+			                                           : collab->localAddress().c_str(),
+			            unsigned(collab->port()));
+		}
+		if (!collab->viaRelay() && ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip(
 				"This is the session itself (TCP), and the port guests connect to.\n"
@@ -829,7 +869,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				"it only carries the \"a session exists here\" announcements.",
 				unsigned(HE::Net::LanBeacon::kPort));
 		}
-		ImGui::Spacing();
 
 		if (collab->directoryBusy())
 		{
@@ -839,7 +878,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		{
 			// These two are everything a guest needs.
 			CopyableValue("Session ID", collab->sessionId(), "Copy##sid");
-			ImGui::Spacing();
 			CopyableValue("Join code", collab->joinCode(), "Copy##code");
 			ImGui::TextDisabled("Share both with the people you want to invite.");
 		}
@@ -849,25 +887,21 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// do about it.
 		if (!collab->portMapStatus().empty())
 		{
-			ImGui::Spacing();
 			ImGui::PushStyleColor(ImGuiCol_Text,
-			                      collab->portMapped() ? ImVec4(0.6f, 0.85f, 0.6f, 1.0f)
-			                                           : ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+			                      collab->portMapped() ? HE::Ed::Theme::Ok : HE::Ed::Theme::Warn);
 			ImGui::TextWrapped("%s", collab->portMapStatus().c_str());
 			ImGui::PopStyleColor();
-			if (collab->portMapped())
-				ImGui::TextDisabled("The forward is removed again when you leave.");
+			if (collab->portMapped() && ImGui::IsItemHovered())
+				ImGui::SetTooltip("The forward is removed again when you leave.");
 		}
 
 		if (!collab->directoryStatus().empty())
 		{
-			ImGui::Spacing();
 			// Reachability decides whether anyone outside this network can get in,
 			// so an unreachable host is called out rather than left to fail as an
 			// unexplained timeout on the guest's side.
 			const bool bad = collab->reachabilityKnown() && !collab->reachable();
-			ImGui::PushStyleColor(ImGuiCol_Text, bad ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f)
-			                                         : ImVec4(0.6f, 0.85f, 0.6f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, bad ? HE::Ed::Theme::Warn : HE::Ed::Theme::Ok);
 			ImGui::TextWrapped("%s", collab->directoryStatus().c_str());
 			ImGui::PopStyleColor();
 		}
@@ -876,17 +910,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// is printed once here rather than appended to each, which had the panel
 		// repeating the same paragraph back to back.
 		if (!collab->connectivityAdvice().empty())
-		{
-			ImGui::Spacing();
 			ImGui::TextWrapped("%s", collab->connectivityAdvice().c_str());
-		}
 
-		ImGui::Spacing();
-		// Two different machines' addresses, so they are labelled as such. Showing
-		// the directory-observed address as "local" implied this machine sits on
-		// the internet, when on any NAT it is the router that does.
-		ImGui::TextDisabled("This machine: %s:%u", collab->localAddress().c_str(),
-		                    static_cast<unsigned>(collab->port()));
+		// Through a relay this machine has no port anybody dials; what guests
+		// need is the session ID and the code above, and the relay to be the same.
+		// (The address and port of a direct session are in the "Listening on" line
+		// at the top; they were repeated here as "This machine".)
 		if (!collab->publicAddress().empty())
 		{
 			// Whose address this is cannot be told from its family. "IPv6, so it
@@ -952,8 +981,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// not in the session they think they are.
 		if (const std::string fp = collab->sessionFingerprint(); !fp.empty())
 		{
-			ImGui::Spacing();
-			ImGui::Text("Session fingerprint: %s", fp.c_str());
+			ImGui::TextDisabled("Session fingerprint: %s", fp.c_str());
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Should read the same for everyone in the session.");
 		}
@@ -964,7 +992,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// shared" is reading the session and not its own preference.
 		if (collab->sessionSyncsLargeAssets())
 		{
-			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+			ImGui::TextColored(HE::Ed::Theme::Warn,
 				"This session also transfers larger assets (meshes, textures, audio).");
 			if (ImGui::IsItemHovered())
 			{
@@ -998,7 +1026,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				: std::to_string(ops.size()) + " requests";
 			ImGui::SeparatorText(title.c_str());
 			ImGui::TextDisabled("Nothing happens to these until you say so.");
-			ImGui::Spacing();
 
 			// Answered AFTER the loop: approving mutates the vector being drawn.
 			int approveIdx = -1, denyIdx = -1;
@@ -1029,30 +1056,50 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				const auto& op = ops[i];
 				ImGui::PushID(static_cast<int>(i));
 
-				const std::string name =
-					std::filesystem::path(op.path).filename().string();
+				const std::string name = collab->opDisplayName(op);
 				const bool isDelete =
 					op.op == HE::Net::CollabSession::AssetOp::Delete;
 				// "Delete folder" is a different decision from "Delete" and has
 				// to read like one: approving it removes everything underneath,
 				// with no trash and no undo. The row said neither until a review
-				// pointed out that the flag was carried and never shown.
-				ImGui::TextColored(isDelete ? ImVec4(1.00f, 0.55f, 0.45f, 1.0f)
-				                            : ImVec4(1.00f, 0.80f, 0.45f, 1.0f),
-				                   isDelete ? (op.folder ? "Delete folder" : "Delete")
-				                            : (op.folder ? "Rename folder" : "Rename"));
+				// pointed out that the flag was carried and never shown. An
+				// entity says so too: it is a scene object, not a file.
+				ImGui::TextColored(isDelete ? HE::Ed::Theme::Bad
+				                            : HE::Ed::Theme::Warn,
+				                   isDelete ? (op.folder     ? "Delete folder"
+				                               : op.isEntity() ? "Delete entity"
+				                                               : "Delete")
+				                            : (op.folder     ? "Rename folder"
+				                               : op.isEntity() ? "Rename entity"
+				                                               : "Rename"));
 				ImGui::SameLine();
 				ImGui::TextUnformatted(name.c_str());
 				if (op.folder && isDelete)
 				{
-					ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
+					ImGui::TextColored(HE::Ed::Theme::Bad,
 						"    and everything inside it");
 				}
 				if (!isDelete && !op.newPath.empty())
 				{
+					// An entity's newPath IS the new name; a file's is a path.
 					ImGui::SameLine();
 					ImGui::TextDisabled("\xE2\x86\x92 %s",
-						std::filesystem::path(op.newPath).filename().string().c_str());
+						op.isEntity()
+							? op.newPath.c_str()
+							: std::filesystem::path(op.newPath).filename().string().c_str());
+				}
+				// The conflict itself. Somebody is in the middle of this right
+				// now, and approving takes it out from under them: a delete
+				// throws their open work away, a rename changes the thing they
+				// are looking at. Said on the row, before the click — the
+				// requester saw the same name when they were told to ask.
+				const std::string heldBy = collab->opHeldBy(op);
+				if (!heldBy.empty())
+				{
+					ImGui::TextColored(HE::Ed::Theme::Warn,
+						isDelete ? "    %s is editing it \xE2\x80\x94 their open changes go with it"
+						         : "    %s is editing it right now",
+						heldBy.c_str());
 				}
 				// The age, so a request that has been sitting there looks like it
 				// has, instead of looking freshly arrived every time you glance.
@@ -1084,10 +1131,10 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				// The faces were all drawn with SameLine after them; close the row.
 				ImGui::NewLine();
 
-				if (EditorWidgets::primaryButton("Approve", ImVec2(110, 0)))
+				if (EditorWidgets::primaryButton("Approve"))
 					approveIdx = static_cast<int>(i);
 				ImGui::SameLine();
-				if (EditorWidgets::cancelButton("Deny", ImVec2(110, 0)))
+				if (EditorWidgets::cancelButton("Deny"))
 					denyIdx = static_cast<int>(i);
 
 				ImGui::PopID();
@@ -1124,19 +1171,23 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				// what is being agreed to, and "20 requests" says the least of
 				// the three.
 				bool allDelete = true, allRename = true;
+				bool allEntity = true, anyEntity = false;
 				for (const std::size_t k : group)
 				{
 					if (ops[k].op == HE::Net::CollabSession::AssetOp::Delete)
 						allRename = false;
 					else
 						allDelete = false;
+					if (ops[k].isEntity()) anyEntity = true;
+					else                   allEntity = false;
 				}
 				// Verb first, like the single rows above it, and never the bare
 				// count on its own: "20 requests" is the one phrasing that does
 				// not say what agreeing to it would do.
 				const std::string headline =
 					(allDelete ? "Delete " : allRename ? "Rename " : "Answer ") +
-					std::to_string(group.size()) + " assets";
+					std::to_string(group.size()) +
+					(allEntity ? " entities" : anyEntity ? " items" : " assets");
 
 				ImGui::PushID(static_cast<int>(2000 + i));
 				const bool open = ImGui::TreeNodeEx(
@@ -1159,14 +1210,14 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				// below would sit somewhere different depending on whether the
 				// bundle happens to be open — and they answer it either way.
 				ImGui::SameLine();
-				if (EditorWidgets::primaryButton("Approve all", ImVec2(110, 0)))
+				if (EditorWidgets::primaryButton("Approve all"))
 				{
 					batchOwner   = op.batchOwner;
 					batchId      = op.batchId;
 					batchApprove = true;
 				}
 				ImGui::SameLine();
-				if (EditorWidgets::cancelButton("Deny all", ImVec2(110, 0)))
+				if (EditorWidgets::cancelButton("Deny all"))
 				{
 					batchOwner   = op.batchOwner;
 					batchId      = op.batchId;
@@ -1212,7 +1263,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			ImGui::SeparatorText(reqTitle.c_str());
 			ImGui::TextDisabled("You are editing these. Nothing changes hands "
 			                    "unless you say so.");
-			ImGui::Spacing();
 
 			int allowIdx = -1, refuseIdx = -1;
 			for (std::size_t i = 0; i < reqs.size(); ++i)
@@ -1250,10 +1300,10 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 				// "Hand over", not "Approve": saying yes here gives the asset
 				// away, and the button should say what it does.
-				if (EditorWidgets::primaryButton("Hand over", ImVec2(110, 0)))
+				if (EditorWidgets::primaryButton("Hand over"))
 					allowIdx = static_cast<int>(i);
 				ImGui::SameLine();
-				if (EditorWidgets::cancelButton("Keep it", ImVec2(110, 0)))
+				if (EditorWidgets::cancelButton("Keep it"))
 					refuseIdx = static_cast<int>(i);
 
 				ImGui::PopID();
@@ -1281,7 +1331,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 		ImGui::Spacing();
 		ImGui::Separator();
-		if (EditorWidgets::button("Leave session", ImVec2(170, 0))) collab->leave();
+		if (EditorWidgets::button("Leave session")) collab->leave();
 	}
 
 	// Being thrown out looks exactly like the host's network dying unless it is
@@ -1291,7 +1341,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	{
 		EditorWidgets::WrapText wrap;
 		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 		ImGui::TextWrapped("%s", collab->removalNotice().c_str());
 		ImGui::PopStyleColor();
 		if (ImGui::Button("OK##removal")) collab->clearRemovalNotice();
@@ -1302,9 +1352,16 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	{
 		EditorWidgets::WrapText wrap;
 		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Bad);
 		ImGui::TextWrapped("%s", collab->lastError().c_str());
 		ImGui::PopStyleColor();
+		// A dropped link is the one failure worth offering a way straight back
+		// into: the host catches a rejoiner up on everything it missed.
+		if (collab->canRejoin())
+		{
+			if (EditorWidgets::primaryButton("Rejoin")) collab->rejoinLastSession();
+			ImGui::SameLine();
+		}
 		if (EditorWidgets::button("Dismiss")) collab->leave();
 	}
 

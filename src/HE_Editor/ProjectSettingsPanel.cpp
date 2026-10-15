@@ -4,12 +4,15 @@
 #include "EditorWidgets.h"               // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                  // "<page>/<label>" scopes for the tooltips
 #include "NotificationStore.h"           // a settings write that fails has to say so
+#include "EditorSettingsPanel.h"      // the engine-settings rows the graphics pages reuse
+#include "EditorGraphics.h"           // project graphics <-> EditorConfig
 #include "AppMetadataRows.h"             // icon file, icon preview, splash — shared with Export
 #include <Application/AppIcon.h>         // the generated app icon + its preview
 #include <Application/GameBackendRules.h> // the backend names a shipped build can name
 #include <Renderer/UIFont.h>             // icon names, the plate colour parser, font scripts
 #include <Physics/CollisionLayers.h>     // the project collision matrix
 #include <Project/ProjectSettings.h>     // Config/ProjectSettings.json
+#include <Net/RelayTransport.h>          // Multiplayer > Relay server: the field's parse check
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -734,11 +737,12 @@ void drawRenderDefaultsPage(AppContext& ctx)
 	bool commit = false;
 	if (EditorWidgets::checkbox("Use the editor's settings", &r.useEditorSettings))
 		commit = true;
-	hint("On, the packaged build boots with whatever this editor's Preferences "
-	                    "and Export dialog say — the way every export has worked so far.\n"
-	                    "Off, the rows below are the project's answer on every machine: the "
-	                    "Export dialog shows them and writes them into the build's config.json. "
-	                    "Bloom, AO and the other graphics settings stay the editor's either way.");
+	hint("On, the packaged build boots with the window and backend this editor's "
+	     "Export dialog says — the way every export has worked so far.\n"
+	     "Off, the rows below are the project's answer on every machine: the "
+	     "Export dialog shows them and writes them into the build's config.json. "
+	     "How the game looks (anti-aliasing, bloom, GI…) is on the Quality, "
+	     "Post-Processing and Reflections & GI pages.");
 	ImGui::Spacing();
 
 	ImGui::BeginDisabled(r.useEditorSettings);
@@ -786,6 +790,128 @@ void drawRenderDefaultsPage(AppContext& ctx)
 	ImGui::EndDisabled();
 
 	if (commit) commitSettings(ctx, p, "render defaults");
+}
+
+// ─── Project ▸ Source Control ────────────────────────────────────────────────
+// The project's repository. Git itself and the signed-in account are Preferences
+// ▸ Source Control (this machine); init, remote and large files are this
+// project's, so they are here.
+void drawSourceControlPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Source Control");
+	hint("The repository of the open project: whether it has one, where it pushes, "
+	     "and which files go through Git LFS. Git on this machine and the GitHub "
+	     "account are in Preferences \xe2\x96\xb8 Source Control.");
+	ImGui::Spacing();
+	if (!openProject(ctx)) return;
+	EditorSettingsPanel::DrawRepositorySection(ctx);
+}
+
+// ─── Rendering ▸ Quality / Post-Processing / Reflections & GI ───────────────
+// The project's graphics block over the editor's own rows: the widgets are the
+// ones Preferences draws, bound to a scratch copy of the config that starts as
+// the project's values; whatever the edit changed is captured back into the
+// block and written through when no control is being dragged any more.
+void drawGraphicsPage(AppContext& ctx, EditorGraphics::RowSet rows)
+{
+	HE::Ed::Help::Scope helpScope("Project Graphics");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	HE::ProjectGraphics& g = p.settings.graphics;
+
+	settingsFileHint(nullptr);
+
+	bool commit = false;
+	bool on = g.enabled;
+	if (EditorWidgets::checkbox("This project sets its own graphics", &on))
+	{
+		// Switching on starts from what the editor shows now, so nothing jumps.
+		if (on) EditorGraphics::capture(ctx.editorConfig, g);
+		g.enabled = on;
+		commit = true;
+	}
+	hint("Off, the exported build ships the graphics of whoever exports it, and the "
+	     "viewport previews with your own values (Preferences \xe2\x96\xb8 Viewport "
+	     "Quality) \xe2\x80\x94 the way every project worked so far.\n"
+	     "On, the rows below are the project's answer: they go into the build, and "
+	     "the viewport previews with them unless you chose to use your own values.");
+	ImGui::Spacing();
+
+	EditorConfig scratch = ctx.editorConfig;
+	if (g.enabled) EditorGraphics::apply(g, scratch);
+	const EditorConfig before = scratch;
+
+	ImGui::BeginDisabled(!g.enabled);
+	EditorSettingsPanel::DrawOptions o;
+	o.rows     = rows.keys;
+	o.rowCount = rows.count;
+	o.config   = &scratch;
+	EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Project, o);
+	ImGui::EndDisabled();
+
+	static bool s_dirty = false;
+	if (g.enabled && !EditorGraphics::same(before, scratch))
+	{
+		EditorGraphics::capture(scratch, g);
+		s_dirty = true;
+	}
+	// A drag changes the block every frame; the file is written once, when the
+	// hand lets go.
+	if (s_dirty && !ImGui::IsAnyItemActive())
+	{
+		s_dirty = false;
+		commit = true;
+	}
+	if (commit) commitSettings(ctx, p, "graphics settings");
+}
+
+void drawQualityPage(AppContext& ctx)         { drawGraphicsPage(ctx, EditorGraphics::qualityRows()); }
+void drawPostProcessingPage(AppContext& ctx)  { drawGraphicsPage(ctx, EditorGraphics::postProcessingRows()); }
+void drawReflectionsPage(AppContext& ctx)     { drawGraphicsPage(ctx, EditorGraphics::reflectionsAndGiRows()); }
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+// The gamepad deadzones the game uses. The editor has its own (Preferences ▸
+// Viewport); the project's apply to the game in play mode and in the export.
+void drawInputPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Input");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	HE::ProjectInputSettings& in = p.settings.input;
+
+	settingsFileHint(nullptr);
+
+	bool commit = false;
+	if (EditorWidgets::checkbox("This project sets its own deadzones", &in.enabled))
+	{
+		if (in.enabled)
+		{
+			in.stickDeadzone   = ctx.editorConfig.GamepadStickDeadzone;
+			in.triggerDeadzone = ctx.editorConfig.GamepadTriggerDeadzone;
+		}
+		commit = true;
+	}
+	hint("Off, the game uses the deadzones of the machine it runs on: your Preferences "
+	     "in the editor, the defaults in an exported build.\n"
+	     "On, play mode and the exported game both use the values below, so what "
+	     "you tuned is what ships.");
+	ImGui::Spacing();
+
+	ImGui::BeginDisabled(!in.enabled);
+	ImGui::SeparatorText("Gamepad");
+	Row::sliderFloat("Stick Deadzone##projstick", &in.stickDeadzone, 0.0f,
+	                 HE::ProjectInputSettings::kMaxDeadzone, "%.2f");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::sliderFloat("Trigger Deadzone##projtrigger", &in.triggerDeadzone, 0.0f,
+	                 HE::ProjectInputSettings::kMaxDeadzone, "%.2f");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("Radial deadzone: stick drift below this deflection reads as exactly zero, "
+	     "and intensity re-scales from the edge so full tilt still reaches 1.");
+	ImGui::EndDisabled();
+
+	if (commit) commitSettings(ctx, p, "input settings");
 }
 
 // ─── Rendering ▸ Shadows ─────────────────────────────────────────────────────
@@ -859,7 +985,34 @@ void drawSimulationPage(AppContext& ctx)
 	               HE::ProjectPhysicsSettings::kMinHz, HE::ProjectPhysicsSettings::kMaxHz, "%d Hz");
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
 	hint("How many simulation steps a second of game time is cut into, "
-	                    "whatever the frame rate. 60 is what every project has run at.");
+	                    "whatever the frame rate. 60 is what every project has run at. "
+	                    "Below about 40 Hz a step is longer than the physics engine likes "
+	                    "and is split into several collision steps automatically.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Threads");
+	Row::sliderInt("Physics threads##physthreads", &ph.threads,
+	               0, HE::ProjectPhysicsSettings::kMaxThreads, ph.threads == 0 ? "Auto" : "%d");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many threads work on one simulation step, the one that runs the game "
+	     "included. Auto leaves about half the cores to streaming, rendering and "
+	     "audio, with at most four Jolt workers. 1 simulates on the game thread "
+	     "alone. The result of the simulation is the same whatever the number; "
+	     "only the time a step takes changes. The environment variable "
+	     "HE_PHYSICS_THREADS overrides this.");
+	ImGui::Spacing();
+
+	ImGui::SeparatorText("Time budget");
+	Row::sliderFloat("Physics budget##physbudget", &ph.budgetMs, 0.0f, 16.0f,
+	                 ph.budgetMs <= 0.0f ? "Off" : "%.1f ms");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many milliseconds one simulation step may spend on the work around "
+	     "the physics engine: character updates, scene queries and the bodies of "
+	     "streamed cells. What does not fit waits for the next step; a crowd of "
+	     "characters is stepped over several steps, each with the time it missed. "
+	     "Off applies no limit. The first 32 characters are always stepped. "
+	     "Shown in the Performance Profiler. The environment variable "
+	     "HE_PHYSICS_BUDGET_MS overrides this.");
 	ImGui::Spacing();
 
 	ImGui::SeparatorText("Gravity");
@@ -1213,6 +1366,25 @@ void drawMultiplayerPage(AppContext& ctx)
 	hint("Automatic port forwarding (UPnP, NAT-PMP, PCP) so players outside the "
 	     "local network can reach the host. Stored, but nothing reads it yet — "
 	     "same later step as the directory above.");
+	// Edited as text, committed when the field is left — a half-typed address
+	// written to disk on every keystroke would be a file nobody meant.
+	Row::inputText("Relay server (host:port)##mprelay", &m.relayAddress);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	if (!m.relayAddress.empty())
+	{
+		HE::Net::RelayAddress parsed;
+		std::string why;
+		if (!HE::Net::parseRelayAddress(m.relayAddress, parsed, &why))
+			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Not usable: %s", why.c_str());
+	}
+	hint("Empty: the host opens a UDP port and players connect to it directly, "
+	     "as always. With a relay server, nobody opens a port: the host "
+	     "registers the session on the relay and players connect out to it, "
+	     "finding the session by the join code alone (the address and port of "
+	     "the Join dialog are then not used). The session then runs over TCP "
+	     "through the relay, so it is a little later under packet loss than "
+	     "direct UDP. Everyone needs the same relay. The relay only passes "
+	     "encrypted bytes along. Port 7777 if none is given.");
 	Row::dragInt("Max remote calls per second##mprpc", &m.rpcPerSecond, 1.0f,
 	             MP::kMinRpcPerSecond, MP::kMaxRpcPerSecond);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1256,17 +1428,22 @@ void drawAudioBusesPage(AppContext& ctx)
 struct NavItem  { Page page; const char* label; };
 struct NavGroup { const char* label; const NavItem* items; int count; };
 
-constexpr NavItem kGameItems[] = {
-	{ Page::General,     "General" },
-	{ Page::Application, "Application" },
-	{ Page::Permissions, "Permissions" },
-	{ Page::Fonts,       "Fonts" },
-	{ Page::AntiCheat,   "Anti-Cheat" },
-	{ Page::Multiplayer, "Multiplayer" },
+constexpr NavItem kProjectItems[] = {
+	{ Page::General,       "General" },
+	{ Page::Application,   "Application" },
+	{ Page::SourceControl, "Source Control" },
+	{ Page::Permissions,   "Permissions" },
+	{ Page::Fonts,         "Fonts" },
 };
 constexpr NavItem kRenderingItems[] = {
-	{ Page::RenderDefaults, "Defaults" },
+	{ Page::RenderDefaults, "Window & Backend" },
+	{ Page::Quality,        "Quality" },
+	{ Page::PostProcessing, "Post-Processing" },
+	{ Page::Reflections,    "Reflections & GI" },
 	{ Page::Shadows,        "Shadows" },
+};
+constexpr NavItem kInputItems[] = {
+	{ Page::Input, "Gamepad" },
 };
 constexpr NavItem kPhysicsItems[] = {
 	{ Page::Simulation,      "Simulation" },
@@ -1275,11 +1452,17 @@ constexpr NavItem kPhysicsItems[] = {
 constexpr NavItem kAudioItems[] = {
 	{ Page::AudioBuses, "Buses" },
 };
+constexpr NavItem kOnlineItems[] = {
+	{ Page::AntiCheat,   "Anti-Cheat" },
+	{ Page::Multiplayer, "Multiplayer" },
+};
 constexpr NavGroup kNavGroups[] = {
-	{ "Game",      kGameItems,      IM_ARRAYSIZE(kGameItems) },
+	{ "Project",   kProjectItems,   IM_ARRAYSIZE(kProjectItems) },
 	{ "Rendering", kRenderingItems, IM_ARRAYSIZE(kRenderingItems) },
+	{ "Input",     kInputItems,     IM_ARRAYSIZE(kInputItems) },
 	{ "Physics",   kPhysicsItems,   IM_ARRAYSIZE(kPhysicsItems) },
 	{ "Audio",     kAudioItems,     IM_ARRAYSIZE(kAudioItems) },
+	{ "Online",    kOnlineItems,    IM_ARRAYSIZE(kOnlineItems) },
 };
 
 const char* pageTitle(Page p)
@@ -1358,12 +1541,17 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	{
 	case Page::General:         drawGeneralPage(ctx);         break;
 	case Page::Application:     drawApplicationPage(ctx);     break;
+	case Page::SourceControl:   drawSourceControlPage(ctx);   break;
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
 	case Page::Fonts:           drawFontsPage(ctx);           break;
 	case Page::AntiCheat:       drawAntiCheatPage(ctx);       break;
 	case Page::Multiplayer:     drawMultiplayerPage(ctx);     break;
 	case Page::RenderDefaults:  drawRenderDefaultsPage(ctx);  break;
+	case Page::Quality:         drawQualityPage(ctx);         break;
+	case Page::PostProcessing:  drawPostProcessingPage(ctx);  break;
+	case Page::Reflections:     drawReflectionsPage(ctx);     break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
+	case Page::Input:           drawInputPage(ctx);           break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;
 	case Page::CollisionLayers: drawCollisionLayersPage(ctx); break;
 	case Page::AudioBuses:      drawAudioBusesPage(ctx);      break;

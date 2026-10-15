@@ -78,6 +78,14 @@ constexpr MessageId kMsgAssetEditAnswer   = kFirstUserMessage + 36;  // holder �
 // nothing it could be made out of.
 constexpr MessageId kMsgAssetRefusedReport = kFirstUserMessage + 37;  // refuser → host
 constexpr MessageId kMsgAssetRefused       = kFirstUserMessage + 38;  // host → the sender
+// Landscape patches (TerrainPatch). The relay goes to every client INCLUDING the
+// sender: its copy is the acknowledgement that orders its own edits against the
+// others' (CollabSession.h, "Landscape patches").
+constexpr MessageId kMsgTerrainUpdate      = kFirstUserMessage + 39;  // client → host
+constexpr MessageId kMsgTerrainRelay       = kFirstUserMessage + 40;  // host → all clients
+// "I saved this document" (sendDocSaved). Host only: nobody else keeps the
+// session's state, so nobody else has anything to do with it.
+constexpr MessageId kMsgDocSaved           = kFirstUserMessage + 41;  // client → host
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -178,6 +186,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgComponentsUpdate, [this](ConnectionId conn, BitReader& r) {
             handleComponentsUpdate(conn, r);
         });
+        m_net->on(kMsgTerrainUpdate, [this](ConnectionId conn, BitReader& r) {
+            handleTerrainUpdate(conn, r);
+        });
         m_net->on(kMsgDocDeltasUpdate, [this](ConnectionId conn, BitReader& r) {
             handleDocDeltasUpdate(conn, r);
         });
@@ -192,6 +203,9 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgAssetRefusedReport, [this](ConnectionId conn, BitReader& r) {
             handleAssetRefusedReport(conn, r);
+        });
+        m_net->on(kMsgDocSaved, [this](ConnectionId conn, BitReader& r) {
+            handleDocSaved(conn, r);
         });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
@@ -232,6 +246,9 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgComponentsRelay, [this](ConnectionId, BitReader& r) {
             handleComponentsRelay(r);
+        });
+        m_net->on(kMsgTerrainRelay, [this](ConnectionId, BitReader& r) {
+            handleTerrainRelay(r);
         });
         m_net->on(kMsgDocDeltasRelay, [this](ConnectionId, BitReader& r) {
             handleDocDeltasRelay(r);
@@ -569,9 +586,7 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     announce.writeString(name);
     writeAvatar(announce, joiner.avatar);
     writeColor(announce, joiner.color);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgParticipantJoined, announce);
-    }
+    m_net->broadcastExcept(conn, kMsgParticipantJoined, announce);
 
     HE_LOG_INFO(Net, "Collab: \"%s\" joined as participant %u (%zu in session)",
                 name.c_str(), static_cast<unsigned>(id), m_participants.size());
@@ -639,9 +654,7 @@ void CollabSession::retireParticipant(ParticipantId id, ConnectionId conn,
 
     BitWriter w;
     w.writeUInt32(id);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != except) m_net->send(other, kMsgParticipantLeft, w);
-    }
+    m_net->broadcastExcept(except, kMsgParticipantLeft, w);
 }
 
 // ─── Moderation ──────────────────────────────────────────────────────────────
@@ -1171,9 +1184,7 @@ void CollabSession::handlePresenceUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(id);
     writePresenceBody(w, state);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgPresenceRelay, w, SendMode::Unreliable);
-    }
+    m_net->broadcastExcept(conn, kMsgPresenceRelay, w, SendMode::Unreliable);
 }
 
 void CollabSession::handlePresenceRelay(BitReader& r) {
@@ -1253,9 +1264,7 @@ void CollabSession::handleComponentsUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(sender);
     writeComponentBody(w, u.netId, u.blob);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgComponentsRelay, w);
-    }
+    m_net->broadcastExcept(conn, kMsgComponentsRelay, w);
 }
 
 void CollabSession::handleComponentsRelay(BitReader& r) {
@@ -1266,6 +1275,85 @@ void CollabSession::handleComponentsRelay(BitReader& r) {
     ComponentUpdate u;
     if (!readComponentBody(r, u.netId, u.blob, m_cfg.maxSnapshotBytes)) return;
     if (m_onComponents) m_onComponents(sender, u);
+}
+
+// ─── Landscape patches ───────────────────────────────────────────────────────
+
+namespace {
+void writeTerrainBody(BitWriter& w, const CollabSession::TerrainPatch& p) {
+    w.writeUInt64(p.netId);
+    w.writeUInt32(p.seq);
+    w.writeByte(p.field);
+    w.writeUInt32(p.res);
+    w.writeUInt32(p.x0);
+    w.writeUInt32(p.z0);
+    w.writeUInt32(p.w);
+    w.writeUInt32(p.h);
+    w.writeUInt32(static_cast<std::uint32_t>(p.bytes.size()));
+    if (!p.bytes.empty()) w.writeBytes(p.bytes.data(), p.bytes.size());
+}
+
+bool readTerrainBody(BitReader& r, CollabSession::TerrainPatch& p, std::uint32_t maxBytes) {
+    std::uint32_t len = 0;
+    if (!r.readUInt64(p.netId) || !r.readUInt32(p.seq) || !r.readByte(p.field) ||
+        !r.readUInt32(p.res) || !r.readUInt32(p.x0) || !r.readUInt32(p.z0) ||
+        !r.readUInt32(p.w) || !r.readUInt32(p.h) || !r.readUInt32(len)) {
+        return false;
+    }
+    // An empty patch is legal: res 0 says "this grid is gone" (a cleared sculpt).
+    if (len > maxBytes) return false;   // never allocate on trust
+    p.bytes.resize(len);
+    if (len > 0 && !r.readBytes(p.bytes.data(), len)) return false;
+    return !r.overflowed();
+}
+} // namespace
+
+bool CollabSession::sendTerrainPatch(const TerrainPatch& patch) {
+    if (!m_net || !m_joined || patch.netId == 0) return false;
+    if (patch.bytes.size() > m_cfg.maxSnapshotBytes) return false;
+
+    if (m_role == NetRole::Host) {
+        // The host's own edit is already in its world, so its place in the
+        // order is now: everything it relays after this lands on top of it.
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writeTerrainBody(w, patch);
+        m_net->broadcast(kMsgTerrainRelay, w);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+
+    BitWriter w;
+    writeTerrainBody(w, patch);   // no id — host stamps it
+    m_net->send(m_net->connections().front(), kMsgTerrainUpdate, w);
+    return true;
+}
+
+void CollabSession::handleTerrainUpdate(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    TerrainPatch p;
+    if (!readTerrainBody(r, p, m_cfg.maxSnapshotBytes)) return;
+
+    // Apply here first, relay after: whatever the host's own editor sends from
+    // inside this callback (its pending edits) then goes out BEFORE this patch,
+    // which is the order the host's world now has them in.
+    if (m_onTerrainPatch) m_onTerrainPatch(sender, p, false);
+
+    BitWriter w;
+    w.writeUInt32(sender);
+    writeTerrainBody(w, p);
+    m_net->broadcast(kMsgTerrainRelay, w);   // the sender too: its echo
+}
+
+void CollabSession::handleTerrainRelay(BitReader& r) {
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+
+    TerrainPatch p;
+    if (!readTerrainBody(r, p, m_cfg.maxSnapshotBytes)) return;
+    if (m_onTerrainPatch) m_onTerrainPatch(sender, p, sender == m_localId);
 }
 
 // ─── Document deltas ─────────────────────────────────────────────────────────
@@ -1377,9 +1465,7 @@ void CollabSession::handleDocDeltasUpdate(ConnectionId conn, BitReader& r) {
     // here, not an author, and renumbering would make every peer's ordering
     // depend on which of them the host told first.
     writeDocDeltaBody(w, subject, path, batch, revision);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgDocDeltasRelay, w);
-    }
+    m_net->broadcastExcept(conn, kMsgDocDeltasRelay, w);
 }
 
 void CollabSession::handleDocDeltasRelay(BitReader& r) {
@@ -1431,6 +1517,30 @@ void CollabSession::handleLockQuery(ConnectionId conn, BitReader& r) {
     w.writeUInt32(lock ? lock->owner : kInvalidParticipant);
     w.writeString(lock ? lock->ownerName : std::string());
     m_net->send(conn, kMsgLockQueryResult, w);
+}
+
+// ─── "I saved this" ──────────────────────────────────────────────────────────
+
+bool CollabSession::sendDocSaved(const std::string& key) {
+    if (!m_net || !m_joined || key.empty()) return false;
+    // The host is the one being told, so its own save needs no frame.
+    if (m_role == NetRole::Host) {
+        if (m_onDocSaved) m_onDocSaved(m_localId, key);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+    BitWriter w;
+    w.writeString(key);
+    m_net->send(m_net->connections().front(), kMsgDocSaved, w);
+    return true;
+}
+
+void CollabSession::handleDocSaved(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;   // not admitted (yet)
+    std::string key;
+    if (!r.readString(key) || key.empty()) return;
+    if (m_onDocSaved) m_onDocSaved(sender, key);
 }
 
 void CollabSession::handleLockQueryResult(BitReader& r) {
@@ -1530,9 +1640,7 @@ void CollabSession::handleStructuralUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(sender);
     writeStructuralBody(w, c);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgStructuralRelay, w);
-    }
+    m_net->broadcastExcept(conn, kMsgStructuralRelay, w);
 }
 
 void CollabSession::handleStructuralRelay(BitReader& r) {
@@ -1922,11 +2030,53 @@ void CollabSession::broadcastAssetOpApply(AssetOp op, const std::string& path,
     w.writeString(path);
     w.writeString(newPath);
     w.writeByte(folder ? 1 : 0);
-    for (const ConnectionId c : m_net->connections())
-        m_net->send(c, kMsgAssetOpApply, w);
+    m_net->broadcast(kMsgAssetOpApply, w);
     // The host applies through the same callback as everyone else, so there is
     // one code path for "this happened" rather than two that must agree.
     if (m_onOpApply) m_onOpApply(by, op, path, newPath, folder);
+}
+
+// ─── Catching up a joiner ────────────────────────────────────────────────────
+
+namespace {
+ConnectionId connectionOf(const std::vector<std::pair<ConnectionId, ParticipantId>>& map,
+                          ParticipantId who) {
+    for (const auto& [c, pid] : map)
+        if (pid == who) return c;
+    return kInvalidConnection;
+}
+} // namespace
+
+bool CollabSession::sendAssetTo(ParticipantId to, const AssetUpdate& a) {
+    if (!m_net || m_role != NetRole::Host) return false;
+    const ConnectionId conn = connectionOf(m_connToParticipant, to);
+    if (conn == kInvalidConnection) return false;
+    // The joiner's own ceiling still applies on its side (handleAssetRelay), and
+    // refuses with a notice; ours decides what we are willing to put on the wire.
+    if (a.bytes.size() > m_cfg.maxAssetBytes) {
+        HE_LOG_WARN(Net, "Collab: not catching participant %u up on \"%s\": %s exceeds the "
+                         "%s transfer limit", static_cast<unsigned>(to), a.path.c_str(),
+                    detail::logBytes(a.bytes.size()).c_str(),
+                    detail::logBytes(m_cfg.maxAssetBytes).c_str());
+        return false;
+    }
+    sendAssetChunks(conn, m_localId, a);
+    return true;
+}
+
+void CollabSession::sendAssetOpApplyTo(ParticipantId to, AssetOp op, const std::string& path,
+                                       const std::string& newPath, ParticipantId by,
+                                       bool folder) {
+    if (!m_net || m_role != NetRole::Host) return;
+    const ConnectionId conn = connectionOf(m_connToParticipant, to);
+    if (conn == kInvalidConnection) return;
+    BitWriter w;
+    w.writeUInt32(by);
+    w.writeByte(static_cast<std::uint8_t>(op));
+    w.writeString(path);
+    w.writeString(newPath);
+    w.writeByte(folder ? 1 : 0);
+    m_net->send(conn, kMsgAssetOpApply, w);
 }
 
 void CollabSession::handleAssetOpVerdict(BitReader& r) {
@@ -2327,9 +2477,7 @@ void CollabSession::handleTransformUpdate(ConnectionId conn, BitReader& r) {
     BitWriter w;
     w.writeUInt32(sender);
     writeTransformBody(w, d);
-    for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgTransformRelay, w, SendMode::Unreliable);
-    }
+    m_net->broadcastExcept(conn, kMsgTransformRelay, w, SendMode::Unreliable);
 }
 
 void CollabSession::handleTransformRelay(BitReader& r) {
@@ -2438,6 +2586,19 @@ void CollabSession::releaseLock(std::uint64_t subject) {
     BitWriter w;
     w.writeUInt64(subject);
     m_net->send(m_net->connections().front(), kMsgLockRelease, w);
+
+    // Ours no more from this moment, not from the host's echo a round trip
+    // later. Until the echo the table said "mine", so a save in that window
+    // went out under a lock the host had already freed, was refused there
+    // ("does not hold lock") and was lost without a word to anyone: the
+    // controller gives a lock back right after a grant-send, and an MCP edit
+    // two milliseconds later fell into exactly that gap. Dropped here, the next
+    // save asks again and goes with the grant. The echo then finds nothing.
+    const LockInfo* existing = lockFor(subject);
+    if (!existing || existing->owner != m_localId) return;   // the host's word stands
+    const LockInfo copy = *existing;
+    dropLock(subject);
+    if (m_onLockChanged) m_onLockChanged(copy, false);
 }
 
 // ── Host side ──

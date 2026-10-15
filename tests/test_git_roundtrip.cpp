@@ -1740,3 +1740,108 @@ TEST_CASE("Live: a repository from the own GitHub account clones and opens as a 
 	git.finishClone();
 	he_test::removeAllQuiet(parent);
 }
+
+// Topic 198 step 9: with Config/ProjectSettings.json sourceControl.mode =
+// "teamServer" the server keeps the history. The editor writes nothing to git,
+// and a live session's settled state is handed to the server's upload.
+TEST_CASE("Team server: direct git is off, and settled session state waits for the upload")
+{
+	GitController git;
+	CHECK(git.mayModify());
+	CHECK_FALSE(git.blockedByTeamServer());
+
+	// Off: the hand-over is dropped, there is nothing to hand it to.
+	git.handOverToTeamServer({ "::Scene::" }, 100);
+	CHECK(git.teamServerPending().empty());
+
+	git.setTeamServer(true, "crew", "game");
+	CHECK(git.blockedByTeamServer());
+	CHECK_FALSE(git.mayModify());
+	CHECK(git.teamServerTeam() == "crew");
+	CHECK(git.teamServerProject() == "game");
+
+	// No upload yet (this build): the keys wait, each once, oldest first.
+	CHECK_FALSE(git.hasTeamServerUpload());
+	git.handOverToTeamServer({ "::Scene::", "Content/a.hmat" }, 200);
+	git.handOverToTeamServer({ "Content/a.hmat", "", "Content/b.hcode" }, 300);
+	REQUIRE(git.teamServerPending().size() == 3);
+	CHECK(git.teamServerPending()[0] == "::Scene::");
+	CHECK(git.teamServerPending()[2] == "Content/b.hcode");
+	CHECK(git.teamServerLastHandedMs() == 0);
+
+	// An upload that refuses keeps them; one that takes them empties the queue.
+	std::vector<std::vector<std::string>> uploads;
+	bool accept = false;
+	git.setTeamServerUpload([&](const std::vector<std::string>& keys) {
+		uploads.push_back(keys);
+		return accept;
+	});
+	git.update(400);
+	CHECK(uploads.size() == 1);
+	CHECK(git.teamServerPending().size() == 3);
+	accept = true;
+	git.update(500);   // keys handed over before the upload existed go on the next frame
+	REQUIRE(uploads.size() == 2);
+	CHECK(uploads[1].size() == 3);
+	CHECK(git.teamServerPending().empty());
+	CHECK(git.teamServerLastHandedMs() == 500);
+	CHECK(git.teamServerLastHandedCount() == 3);
+	git.update(600);
+	CHECK(uploads.size() == 2);   // nothing waiting, nothing sent
+
+	git.handOverToTeamServer({ "::Scene::" }, 700);
+	CHECK(uploads.size() == 3);
+	CHECK(git.teamServerLastHandedMs() == 700);
+
+	// Back to git: writing is allowed again, and nothing still queued for a
+	// server the project no longer uses goes out later.
+	accept = false;
+	git.handOverToTeamServer({ "Content/c.hmat" }, 800);
+	CHECK(git.teamServerPending().size() == 1);
+	git.setTeamServer(false, "crew", "game");
+	CHECK(git.mayModify());
+	CHECK(git.teamServerPending().empty());
+	CHECK(git.teamServerTeam().empty());
+
+	git.setTeamServer(true, "crew", "game");
+	git.closeProject();
+	CHECK_FALSE(git.blockedByTeamServer());
+}
+
+TEST_CASE("Team server: a commit asked for in team-server mode never reaches the repository")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	const fs::path repo = makeRepo("teamserver");
+	writeFile(repo / "a.txt", "one");
+	commitAll(repo, "first");
+	writeFile(repo / "a.txt", "two");
+
+	GitController git;
+	git.openProject(repo);
+	std::uint64_t now = 1;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (git.status().generation == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		git.update(now);
+		now += 100;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	REQUIRE(git.isRepo());
+
+	git.setTeamServer(true, "crew", "game");
+	git.requestCommitAll("must not happen", /*forcePush=*/true);
+	CHECK_FALSE(git.busyWithWork());
+	for (int i = 0; i < 20; ++i)
+	{
+		git.update(now);
+		now += 100;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	const GitResult count = GitCli::run(repo, { "rev-list", "--count", "HEAD" });
+	REQUIRE(count.ok);
+	CHECK(trimmed(count.out) == "1");
+	CHECK(readFile(repo / "a.txt") == "two");   // still a local change, not committed
+
+	git.closeProject();
+	he_test::removeQuiet(repo);
+}

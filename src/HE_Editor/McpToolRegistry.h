@@ -45,6 +45,7 @@ struct ProjectData;     // ProjectManager.h (HE_Tools)
 struct ExportProfile;   // ProjectManager.h (HE_Tools)
 struct EditorConfig;    // EditorConfig.h
 class CollabController; // CollabController.h (global namespace, like the editor's)
+class TeamController;   // TeamController.h (same)
 
 namespace HE::Ed
 {
@@ -1564,6 +1565,18 @@ struct McpTaskBoardHooks
 };
 
 void registerTaskBoardTools(McpToolRegistry& registry, McpTaskBoardHooks hooks);
+
+// ─── The team server ─────────────────────────────────────────────────────────
+// `team_status` reads what the Team panel shows (sign-in state, members with
+// presence, announced sessions) and is always there. The rest — sign in/out,
+// add a member, host, invite, join, decline, open — press the Team page's and
+// panel's buttons through the same TeamController calls, and are registered
+// only under `controlAllowed` (HE_MCP_COLLAB_CONTROL=1), for the same reason as
+// collab_host: they reach a server past this machine and put the open scene
+// into a session. What they exist for is scripts/he_team_two_editors.py: two
+// editor processes signed in as different members of one team.
+void registerTeamTools(McpToolRegistry& registry, ::TeamController& team,
+                       McpCollabHooks hooks);
 
 // ─── Several tool calls in one request ───────────────────────────────────────
 // `batch`: a list of {tool, args} pairs, each dispatched through this registry
