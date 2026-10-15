@@ -63,6 +63,21 @@ public:
 	// this?" cannot accidentally load it. That is what lets the scripting API
 	// unload or type-name an asset by the only handle a script has, its path.
 	HE::UUID idForPath(const std::string& relativePath) const;
+	// The other direction: the content-relative path ("Engine/…" for an engine
+	// default) an asset UUID is known under, or empty when nothing here knows it.
+	// The disk registry first (scanContentDirectory — every loose asset, loaded
+	// or not), then what was loaded or saved since that scan, which only the
+	// path index holds. Also a pure lookup; a linear scan over the loaded ones,
+	// so a caller asking every frame caches the answer. For the editor's
+	// task-board chips, which address an asset by UUID and jump to its file.
+	std::string pathForId(HE::UUID id) const
+	{
+		if (id == HE::UUID{}) return {};
+		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end()) return d->second;
+		for (const auto& [path, uuid] : m_pathToUUID)
+			if (uuid == id) return path;
+		return {};
+	}
 	bool saveAsset(RuntimeAsset& asset);
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a

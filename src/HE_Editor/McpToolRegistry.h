@@ -37,7 +37,7 @@
 
 class ContentManager;
 namespace HorizonCode { struct Graph; }
-namespace HE { struct UIWidgetTree; }
+namespace HE { struct UIWidgetTree; class TaskBoard; class TaskBoardTeam; }
 // The three types the build and settings hooks speak, all at global scope and
 // all behind headers this one refuses to pull in: ProjectManager.h drags HE_Tools
 // in, EditorConfig.h is the editor's own. A hook signature only needs the name.
@@ -1530,6 +1530,41 @@ struct McpCollabHooks
 
 void registerCollabTools(McpToolRegistry& registry, ::CollabController& collab,
                          McpCollabHooks hooks);
+
+// ─── The task board ──────────────────────────────────────────────────────────
+// `task_list` reads the project's to-do list (TaskBoard.h) as the Task Board
+// panel shows it, `task_notices` what the team told this editor (the panel's
+// From the Team list). `task_create`, `task_update` (status, comment) and
+// `task_assign` change it.
+//
+// Every change goes through `edit`, which in the editor is TaskBoardPanel::edit:
+// the board has exactly one copy and one writer of Config/TaskBoard.json per
+// editor, and that writer is also what hands the change to the team bridge.
+// A second TaskBoard saved from here would carry a different disk baseline
+// and refuse or overwrite the panel's saves. `edit` may run the function twice
+// (a save refused by a pull reloads and retries), so the tools address tasks
+// by id inside it, never by pointer.
+//
+// `task_assign` is the panel's Assigned To field: only while a team link is
+// signed in (`team()->connected()`), and only to members on its roster. With
+// no team the board is local and the tool refuses with `no_team`, as the panel
+// offers no field. Who hears about a change is the bridge's decision
+// (taskNoticeRecipients), not the tool's.
+struct McpTaskBoardHooks
+{
+	// The open project's board, or null with no project open.
+	std::function<HE::TaskBoard*()> board;
+	// Apply and save; false when nothing changed or the save was refused.
+	std::function<bool(const std::function<bool(HE::TaskBoard&)>& fn)> edit;
+	// Why the last save failed (TaskBoardPanel::lastError), for the refusal.
+	std::function<std::string()> lastError;
+	// The name edits are recorded under: the team member name while signed in.
+	std::function<std::string()> author;
+	// The team bridge, or null: the board is local.
+	std::function<HE::TaskBoardTeam*()> team;
+};
+
+void registerTaskBoardTools(McpToolRegistry& registry, McpTaskBoardHooks hooks);
 
 // ─── The team server ─────────────────────────────────────────────────────────
 // `team_status` reads what the Team panel shows (sign-in state, members with

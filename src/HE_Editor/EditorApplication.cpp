@@ -28,6 +28,7 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
+#include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
@@ -11032,6 +11033,25 @@ void EditorApplication::setupMcpTools()
 	// The team server is the way into a team session; same gate, same hooks.
 	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
 	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
+
+	// The task board. Its one copy and its one writer are the panel's
+	// (TaskBoardPanel.h, "Who owns the board"), so every hook goes there — a
+	// second board saved from here would fight the panel's saves. The bridge
+	// answers on the frame thread, outside the panel's draw loop, so edit()
+	// directly rather than through the panel's post-frame queue.
+	HE::Ed::McpTaskBoardHooks tasks;
+	tasks.board = [this] {
+		AppContext ctx = makeContext();
+		return TaskBoardPanel::board(ctx);
+	};
+	tasks.edit = [this](const std::function<bool(HE::TaskBoard&)>& fn) {
+		AppContext ctx = makeContext();
+		return TaskBoardPanel::edit(ctx, fn);
+	};
+	tasks.lastError = [] { return TaskBoardPanel::lastError(); };
+	tasks.author    = [] { return TaskBoardPanel::author(); };
+	tasks.team      = [] { return TaskBoardPanel::team(); };
+	HE::Ed::registerTaskBoardTools(m_mcp.registry(), std::move(tasks));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not

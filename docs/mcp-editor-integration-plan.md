@@ -2740,6 +2740,7 @@ Merge wartet.
 | `project_build`, `project_build_status`, `project_package` | 3 | `McpToolsBuild.cpp` | §18 | **Zweig**, `8df49958` |
 | `settings_get`, `settings_set` | 2 | `McpToolsSettings.cpp` | §18.5 ff. | **Zweig**, `8df49958` |
 | `collab_status` (+ `collab_host/join/leave` nur mit `HE_MCP_COLLAB_CONTROL=1`) | 1 + 3 | `McpToolsCollab.cpp` | §20 | **Zweig** `claude/collab-nat-pmp-two-instance-verify`, `d408f7ac` |
+| `task_list`, `task_create`, `task_update`, `task_assign`, `task_notices` (Aufgabenboard; `task_assign` nur mit angemeldetem Team) | 5 | `McpToolsTaskBoard.cpp` | `docs/taskboard-team-interop-2026-10-15.md`, „MCP tools“ | **Zweig** `claude/aufgabenboard-todo-team-interop` (Thema 203) |
 | `team_status` (+ `team_sign_in/sign_out/add_member/host/set_open/invite/join/decline` nur mit `HE_MCP_COLLAB_CONTROL=1`) | 1 + 8 | `McpToolsCollab.cpp` | `docs/team-server-protocol-2026-10-13.md` (Schritt 6), Lauf `scripts/he_team_two_editors.py` | **Zweig** `claude/team-server-teams-mitglieder-anwesenheit`, `050539fa` |
 
 Auf dem Zweig warten außerdem `bc54c7e5` (drei Editor-Tabs waren nur unter
