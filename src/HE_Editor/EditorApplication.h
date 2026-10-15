@@ -42,6 +42,7 @@
 #endif
 #include <Net/RouterProbe.h>
 #include "GitController.h"
+#include "TeamSyncController.h"
 #include "McpBridge.h"
 #include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
 #include "McpLockBook.h"         // external locks, per MCP client
@@ -431,6 +432,9 @@ struct AppContext
 	// Source-control state for the panel and the Content Browser badges. Null in
 	// builds without the module.
 	GitController* git = nullptr;
+	// Saving through the team server (sourceControl.mode = "teamServer"): the
+	// panel's team-sync view. Null in tests that build no editor.
+	TeamSyncController* teamSync = nullptr;
 
 	// Performance counters (mutable, updated each frame by UI)
 	float* frametimeHistory = nullptr;
@@ -666,6 +670,9 @@ private:
 	// is what makes both uniform across every asset kind.
 	void        applyAssetBytes(const std::string& relativePath,
 	                            const std::vector<std::uint8_t>& bytes);
+	// The team server wrote (or removed) `projectRelPath`: what is loaded or
+	// open re-reads it. The open scene is SceneDiskWatch's (it asks).
+	void        applyTeamSyncFile(const std::string& projectRelPath);
 	void        saveOpenTabs();
 	void        restoreOpenTabs();
 	std::string m_lastTabSig; // change detection for the auto-save
@@ -819,6 +826,9 @@ private:
 	// therefore carries its own mutex.
 	HE::Ed::NotificationStore m_notifications;
 	GitController    m_git;
+	// Saves through the team server when the project says so (topic 199).
+	// Over the three above, so declared after them; pumped after m_team.
+	TeamSyncController m_teamSync{ m_team, m_git, m_collab };
 	// The local MCP listener. Pumped once per frame from OnRender, next to the
 	// collaboration pump and for the same reason: both apply things that came
 	// off a socket, and both have to do it on the main thread between the world

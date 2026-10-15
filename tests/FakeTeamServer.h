@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -120,6 +121,12 @@ struct FakeTeamServer {
     std::uint32_t nextAvatarId = 0x100;
     int  avatarFetches = 0;     // GET_AVATAR requests answered
     bool noProfiles  = false;   // a server from before profiles: ops 16-19 are bad-request
+    // Source control (topic 199): the team's projects, and every SC_TICKET
+    // handed out (16 raw bytes → member, project), for FakeScServer to check.
+    std::set<std::string> scProjects = { "game" };
+    struct ScTicket { std::string member, project; };
+    std::map<std::string, ScTicket> scTickets;
+    bool noSourceControl = false;   // a server from before source control: op 20 is bad-request
     int  issued      = 0;
     int  logins      = 0;
     int  pings       = 0;
@@ -131,6 +138,10 @@ struct FakeTeamServer {
     // Sent right before the reply to the next LIST_MEMBERS: the client must
     // take it as an event, not as the reply it is waiting for.
     std::vector<std::vector<std::uint8_t>> eventsBeforeNextList;
+    // Sync connections on the same port, as on the real server (FakeScServer.h
+    // installs these): true from scFrame = the frame was a sync frame.
+    std::function<bool(ConnectionId, const std::vector<std::uint8_t>&)> scFrame;
+    std::function<void(ConnectionId)>                                   scGone;
 
     RelayAddress address() const { return RelayAddress{ "127.0.0.1", t->boundPort() }; }
 
@@ -190,6 +201,21 @@ struct FakeTeamServer {
         u32(f, p.id);
         return f;
     }
+    static std::vector<std::uint8_t> scHeadEvent(const std::string& project, std::uint64_t rev,
+                                                 const std::string& member) {
+        auto f = header(9);
+        f.push_back(9);
+        str8(f, project);
+        u32(f, std::uint32_t(rev >> 32));
+        u32(f, std::uint32_t(rev));
+        str8(f, member);
+        return f;
+    }
+    // To every logged-in connection (the real server: every team connection of the team).
+    void sendToAll(const std::vector<std::uint8_t>& f) {
+        for (auto& [c, conn] : conns)
+            if (conn.loggedIn) send(c, f);
+    }
     // Sets a member's profile from the test (as if set on another editor) and
     // tells every logged-in connection.
     void setProfile(const std::string& who, std::uint8_t r, std::uint8_t g, std::uint8_t b,
@@ -234,8 +260,13 @@ struct FakeTeamServer {
         NetEvent ev;
         while (t->poll(ev)) {
             if (ev.type == NetEventType::Connected) { conns[ev.conn]; continue; }
-            if (ev.type == NetEventType::Disconnected) { conns.erase(ev.conn); continue; }
+            if (ev.type == NetEventType::Disconnected) {
+                conns.erase(ev.conn);
+                if (scGone) scGone(ev.conn);
+                continue;
+            }
             if (refused.count(ev.conn)) continue;   // what the client sent behind its login
+            if (scFrame && scFrame(ev.conn, ev.data)) continue;
             frame(ev.conn, ev.data);
         }
     }
@@ -455,6 +486,18 @@ struct FakeTeamServer {
                 std::vector<std::uint8_t> body = { p.size };
                 body.insert(body.end(), p.rgba.begin(), p.rgba.end());
                 reply(c, id, 0, body);
+                return;
+            }
+            case 20: {  // SC_TICKET: an existing project, or an admin about to create one
+                if (noSourceControl) { reply(c, id, 1); return; }
+                const std::string project = readStr(f, pos);
+                if (!scProjects.count(project) && !admins.count(conn.member)) { reply(c, id, 18); return; }
+                std::string ticket(16, '\0');
+                const std::size_t n = scTickets.size() + 1;
+                for (std::size_t i = 0; i < ticket.size(); ++i)
+                    ticket[i] = static_cast<char>((i * 31u + n * 17u) & 0xFF);
+                scTickets[ticket] = ScTicket{ conn.member, project };
+                reply(c, id, 0, std::vector<std::uint8_t>(ticket.begin(), ticket.end()));
                 return;
             }
             default:

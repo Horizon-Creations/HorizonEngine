@@ -9027,6 +9027,35 @@ namespace
 	  "Commit and push in one step, commit everything even though some files are "
 	  "ticked, or fold what is staged into the last commit.",
 	  "", "" },
+	{ "Team Sync/Sync Now", "",
+	  "Sends every change in the project folder that the team server does not have "
+	  "yet, and fetches what the others saved. Every save in the editor does this "
+	  "by itself a second later; the button is for files changed outside the "
+	  "editor (a script edited in an IDE, a texture exported from a paint program).",
+	  "", "" },
+	{ "Team Sync/Take the Team's Versions", "",
+	  "This copy has never synced with the team server, and the files listed differ "
+	  "from the team's. Replaces each of them with the team's version. Your copies "
+	  "are not uploaded: pick this for an old copy of the project.",
+	  "", "" },
+	{ "Team Sync/Keep Mine and Merge", "",
+	  "Uploads the listed files as your changes. The server merges each with the "
+	  "team's version: scenes by entity and settings by key keep both sides where "
+	  "they differ in different places; where both changed the same thing, and for "
+	  "graphs and binary assets, your version wins and the team's is kept on the "
+	  "server's horizon-conflicts branch.",
+	  "", "" },
+	{ "Team Sync/Create Project on Team Server", "",
+	  "Team admins only. Creates this project on the team server and uploads the "
+	  "project folder as its first revision. From then on every member's saves go "
+	  "through the server, which merges them.",
+	  "", "" },
+	{ "Team Sync/Open My Version", "",
+	  "Somebody's later save won over yours for this file. Downloads your version "
+	  "from the team server into Saved/TeamSync/Lost/ and shows that folder; the "
+	  "project keeps the winning version. To bring yours back, copy it over the "
+	  "project's file and save.",
+	  "", "" },
 	{ "Source Control Panel/Commit & Push", "",
 	  "Commits (the ticked files, or everything when none is ticked) and pushes the "
 	  "branch to the remote straight away. If the push fails the commit stays; "
@@ -9525,6 +9554,8 @@ namespace
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The Source Control window when the team server keeps the history.
+		{ "Team Sync/",             "editor-collab", "Collaboration & Source Control", "Source control" },
 		// The reload question after a pull changed the open scene's file.
 		{ "Scene Changed/",         "editor-collab", "Collaboration & Source Control", "Scene changed on disk" },
 		// The bug reporter is neither collaboration nor source control: it

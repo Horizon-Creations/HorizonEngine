@@ -350,6 +350,14 @@ add_executable(he_tests
     # TeamController signed in to the same fake team server; HE_UI_DUMP_DIR
     # writes the screenshots.
     test_team_ui.cpp
+    # Saving through the team server (topic 199): HE::Net::ScClient and
+    # HE::Sc::TeamSyncService against a fake sync server on the fake team
+    # server's port, and the real collab_server when HE_TEST_TEAM_SERVER names one.
+    test_team_sync.cpp
+    # The editor's half of it (TeamSyncController over a real TeamController)
+    # and the Source Control window's team-sync view (TeamSyncView), headless;
+    # HE_UI_DUMP_DIR writes the screenshots.
+    test_team_sync_ui.cpp
     # The gameplay transport over real localhost UDP sockets, with an injected
     # clock and the transport's own drop hook for loss under the reliability.
     test_net_udp.cpp
@@ -609,6 +617,8 @@ add_executable(he_tests
     # The team subsystem over it (test_net_team.cpp): team server login and the
     # team sessions it sets up on a real CollabController.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamController.cpp
+    # Saving through the team server over that controller (test_team_sync_ui.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamSyncController.cpp
     # CollabController posts to it (a refused request, a peer that could not
     # apply a delete), so the tests cannot link without it — and asserting what
     # lands in it is how those posts are covered at all.
@@ -674,6 +684,8 @@ add_executable(he_tests
     # The Team window's and Preferences ▸ Team's drawing (TeamView), over the
     # TeamController above, for test_team_ui.cpp. ImGui plus EditorWidgets.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamView.cpp
+    # The Source Control window's team-sync view, for test_team_sync_ui.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TeamSyncView.cpp
     # The console's buffer, sink and drawing — everything except the window and
     # the lookups that need the editor (ConsolePanel.cpp). ImGui plus
     # EditorWidgets, so the ui shots can draw the real panel.
@@ -1458,7 +1470,7 @@ endif()
 # run at the same instant makes a failure depend on the scheduler, which is the
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
-set(_he_net_tests test_net_tcp test_net_relay test_net_team test_team_ui test_net_udp test_net_secure test_net_discovery test_net_collab
+set(_he_net_tests test_net_tcp test_net_relay test_net_team test_team_ui test_team_sync test_team_sync_ui test_net_udp test_net_secure test_net_discovery test_net_collab
                   test_net_directory test_collab_controller test_net_game_session
                   test_mcp_tools_collab)
 foreach(_t IN LISTS _he_net_tests)

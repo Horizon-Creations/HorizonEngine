@@ -488,6 +488,24 @@ void EditorApplication::OnInit()
 	// into a log line nobody has open. Set before any callback below can fire.
 	m_collab.setNotifications(&m_notifications);
 	m_team.setNotifications(&m_notifications);
+	m_teamSync.setNotifications(&m_notifications);
+	m_teamSync.setOpenFolder([](const std::filesystem::path& dir) {
+		const std::string url = "file://" + dir.generic_string();
+		SDL_OpenURL(url.c_str());
+	});
+	// A file the editor holds unsaved edits for is not overwritten from the
+	// team server: written, its base would move to the teammate's version and
+	// the next save would replace that version silently. Left alone, the save
+	// is merged on the server against what it was edited from.
+	m_teamSync.setKeepLocal([this](const std::string& projectRelPath) {
+		const std::string root = projectRoot();
+		if (root.empty()) return false;
+		const std::filesystem::path full = (std::filesystem::path(root) / projectRelPath).lexically_normal();
+		if (!m_currentScenePath.empty() && m_undo.revision() != m_savedRevision &&
+		    std::filesystem::path(m_currentScenePath).lexically_normal() == full)
+			return true;
+		return EditorUI::tabHasUnsavedEdits(full.generic_string());
+	});
 
 	// The same channel, reachable from everywhere else: worker threads, download
 	// callbacks and static panel helpers post through HE::Ed::notify() because
@@ -708,6 +726,9 @@ void EditorApplication::OnInit()
 			// keeps the session's state (CollabSettle.h); the session's own
 			// once-a-second autosave of a held tab is only traffic.
 			if (!m_collabAutosaveWrite) m_collab.noteLocalSave(relPath);
+			// With the team server keeping the history, a save is the moment to
+			// sync (debounced, so Save All is one revision).
+			if (!m_collabAutosaveWrite) m_teamSync.noteSaved();
 			// An application's preview shows the saved assets, so a save is the
 			// signal to rebuild it. Only for the kinds that change what the
 			// preview DOES — a texture or a font swaps itself in through the
@@ -4763,6 +4784,19 @@ void EditorApplication::OnRender(float dt)
 		// the team in the same frame, and a join the team server answered starts
 		// on a controller that has already settled this frame's state.
 		m_team.update(nowMs);
+		// After the team pump (its tickets and sc-head events land there) and
+		// the collab pump (the session role is this frame's). Files from the
+		// team server wait during Play.
+		{
+			const auto& sc = m_projectManager.currentProject().settings.sourceControl;
+			TeamSyncController::Project project;
+			project.root       = projectRoot();
+			project.teamServer = sc.teamServer();
+			project.team       = sc.team;
+			project.project    = sc.project;
+			for (const std::string& rel : m_teamSync.update(nowMs, project, m_isPlaying))
+				applyTeamSyncFile(rel);
+		}
 
 		// ── The MCP bridge ────────────────────────────────────────────────
 		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
@@ -11504,6 +11538,51 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 	cm.loadAsset(relativePath);
 }
 
+void EditorApplication::applyTeamSyncFile(const std::string& projectRelPath)
+{
+	// TeamSyncService has written the file already (on this thread, after
+	// checking the local copy was the one it decided on). What is left is the
+	// reload applyAssetBytes does after its own write, for content assets.
+	const std::string root = projectRoot();
+	if (root.empty()) return;
+	const std::filesystem::path full = std::filesystem::path(root) / projectRelPath;
+	HE_LOG_INFO(Editor, "Team sync: %s came from the team server", projectRelPath.c_str());
+
+	// The open scene: a dirty one never gets here (setKeepLocal above keeps
+	// the server's version off the disk until the save merges it), so this one
+	// is clean and a teammate's save is simply shown, as the design says
+	// (section 6.3), without SceneDiskWatch's Reload / Keep question: there is
+	// nothing of the user's to keep.
+	if (!m_currentScenePath.empty() &&
+	    std::filesystem::path(m_currentScenePath).lexically_normal() == full.lexically_normal())
+	{
+		const std::string scene = m_currentScenePath;   // openScene rewrites it
+		openScene(scene);
+		SceneDiskWatch::remember(scene);
+		return;
+	}
+	std::error_code ec;
+	const std::filesystem::path contentRoot(contentManager().contentRoot());
+	const std::filesystem::path rel = std::filesystem::relative(full, contentRoot, ec);
+	const std::string relText = rel.generic_string();
+	if (ec || relText.empty() || relText.rfind("..", 0) == 0) return;   // not under Content
+	if (!std::filesystem::exists(full, ec)) return;                      // removed: nothing to re-read
+
+	ContentManager& cm = contentManager();
+	if (cm.isLoaded(relText))
+	{
+		const HE::UUID old = cm.idForPath(relText);
+		cm.unloadAsset(old);
+		const HE::UUID id = cm.loadAsset(relText);
+		if (!(id == HE::UUID{}))
+		{
+			m_reloadedByPeer.push_back(id);
+			m_hotReloadTimer = 1.5f;
+		}
+	}
+	EditorUI::reloadAssetTabFromDisk(full.generic_string());
+}
+
 // ─── Duplicate / cut / copy / paste / delete ──────────────────────────────────
 // All five go through the prefab serializer rather than touching components:
 // serializeSubtree captures the entity AND everything parented under it, with
@@ -12144,6 +12223,7 @@ AppContext EditorApplication::makeContext()
 		.claudeProbing       = m_claudeState == 1,
 		.recheckClaude       = [this]{ startClaudeProbe(); },
 		.git                 = &m_git,
+		.teamSync            = &m_teamSync,
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
 		.fpsHistoryOffset    = m_fpsHistoryOffset,
@@ -13393,6 +13473,7 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 		// tells it to write its own copy (persistSessionScene). The host's own
 		// settle write is not a new save.
 		if (!m_settleWritingScene) m_collab.noteLocalSave(HE::Ed::CollabSettle::kSceneKey);
+		m_teamSync.noteSaved();
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());

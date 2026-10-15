@@ -114,18 +114,25 @@ public:
         Invite = 10, Decline = 11, Join = 12,
         IssueToken = 13, RevokeToken = 14, RevokeAllTokens = 15,
         SetColor = 16, SetAvatar = 17, ListProfiles = 18, GetAvatar = 19,
+        // Source control through the team server (topic 199): a ticket for one
+        // sync connection to `project` (HE::Net::ScClient).
+        ScTicket = 20,
     };
     enum class Result : std::uint8_t {
         Ok = 0, BadRequest = 1, InvalidName = 2, InvalidPassword = 3, MemberExists = 4,
         NoSuchMember = 5, WrongPassword = 6, NotAdmin = 7, LastAdmin = 8, Full = 9,
         ServerError = 10, NotOnline = 11, NoSuchSession = 12, NotHost = 13,
         NotAllowed = 14, SessionExists = 15, NotInvited = 16, NoSuchToken = 17,
+        NoSuchProject = 18,
         // Never on the wire: the connection went away before the reply came.
         ConnectionLost = 255,
     };
     enum class EventKind : std::uint8_t {
         Presence = 1, MembersChanged = 2, Session = 3, SessionClosed = 4,
         Invited = 5, Joining = 6, Declined = 7, Profile = 8,
+        // A save moved a team project's head (to every connection of the team,
+        // the saver's own included).
+        ScHead = 9,
     };
 
     // Largest picture side the server keeps (and the editor sends).
@@ -160,6 +167,9 @@ public:
         // ISSUE_TOKEN only: the new session token (64 hex characters). A
         // secret: the receiver keeps it out of logs and wipes its copies.
         std::string   token;
+        // SC_TICKET only: the kScTicketSize raw bytes for ScClient's hello.
+        // Single use, valid for a minute.
+        std::string   ticket;
         bool ok() const { return result == Result::Ok; }
     };
     using ReplyFn = std::function<void(const Reply&)>;
@@ -175,6 +185,9 @@ public:
         // is in members() once fetched).
         TeamColor     color;
         std::uint32_t avatarId = 0;
+        // ScHead: the project, its new revision; `member` saved it.
+        std::string   project;
+        std::uint64_t rev = 0;
     };
 
     // Starts connecting and logs in (or creates the team, whose first admin
@@ -255,6 +268,11 @@ public:
     std::uint32_t issueToken(ReplyFn done = {});
     std::uint32_t revokeToken(const std::string& token, ReplyFn done = {});
     std::uint32_t revokeAllTokens(ReplyFn done = {});
+    // A sync connection ticket for a team project (Reply::ticket). An admin
+    // gets one for a project that does not exist yet (to create it); others
+    // get NoSuchProject.
+    std::uint32_t scTicket(const std::string& project, ReplyFn done = {});
+    static constexpr std::size_t kScTicketSize = 16;
     // Which credential this connection presented.
     LoginOp       loginOp() const { return m_loginOp; }
     // Our own profile. setColor with an unset colour clears it; setAvatar
