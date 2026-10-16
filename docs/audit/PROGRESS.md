@@ -9,7 +9,7 @@
 - [x] 6 Python – fertig (`modul_python.md`)
 - [x] 7 Scene – fertig (`modul_scene.md`)
 - [x] 8 Rendering – fertig (`modul_rendering.md`)
-- [ ] 9 Tools – in Arbeit
-- [ ] 10 Game – in Arbeit
-- [ ] 11 Editor – offen
+- [x] 9 Tools – fertig (`modul_tools.md`)
+- [x] 10 Game – fertig (`modul_game.md`)
+- [ ] 11 Editor – in Arbeit (19 Slices)
 - [ ] Phase 2: `AUDIT.md` – offen
