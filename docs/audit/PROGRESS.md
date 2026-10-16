@@ -8,8 +8,8 @@
 - [x] 5 SelfUpdate – fertig (`modul_selfupdate.md`)
 - [x] 6 Python – fertig (`modul_python.md`)
 - [x] 7 Scene – fertig (`modul_scene.md`)
-- [ ] 8 Rendering – in Arbeit (10 Slices laufen)
-- [ ] 9 Tools – offen
-- [ ] 10 Game – offen
+- [x] 8 Rendering – fertig (`modul_rendering.md`)
+- [ ] 9 Tools – in Arbeit
+- [ ] 10 Game – in Arbeit
 - [ ] 11 Editor – offen
 - [ ] Phase 2: `AUDIT.md` – offen
