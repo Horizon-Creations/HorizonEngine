@@ -2,7 +2,7 @@
 
 - [x] Phase 0: Inventar (`00_INVENTAR.md`)
 - [x] 1 Core – fertig (`modul_core.md`, 157 Funde: 17 Hoch / 66 Mittel / 74 Niedrig)
-- [ ] 2 Net – in Arbeit (Slices laufen)
+- [x] 2 Net – fertig (`modul_net.md`)
 - [x] 3 SourceControl – fertig (`modul_sourcecontrol.md`)
 - [x] 4 ContentSync – fertig (`modul_contentsync.md`)
 - [x] 5 SelfUpdate – fertig (`modul_selfupdate.md`)

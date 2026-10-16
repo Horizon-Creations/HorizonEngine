@@ -167,7 +167,7 @@ return r.readBytes(blob.data(), len);
 - **Kategorie**: C
 - **Schweregrad**: Mittel
 - **Typ**: Vereinfachung (Leak)
-- **Ort**: `src/HE_Net/src/CollabSession.cpp:596-628` (`onPeerDisconnected`), `:633-658` (`retireParticipant`), `:1796-1812`, `:1961`-`:2198` (Assembly), `:961-967`
+- **Ort**: `src/HE_Net/src/CollabSession.cpp:596-628` (`onPeerDisconnected`), `:633-658` (`retireParticipant`), `:1796-1812`, `:2184-2198` (Assembly), `:961-967`
 - **Problem**: `m_assetAssembly` wird nur beim nächsten Begin desselben Peers, bei End oder nach erfolgreichem Create-Streit bereinigt. Bricht ein Peer mitten im Transfer ab oder wird gekickt, bleibt sein `AssetAssembly` samt `bytes.reserve(total)` (bis 64 MiB, siehe `:1804`) für die Lebensdauer der Session im Vektor, da `ConnectionId`s nicht wiederverwendet werden. Auf dem Client löscht der Disconnect-Zweig weder `m_assetAssembly` noch `m_snapshotBuf`/`m_snapshotActive`/`m_localId`; ein Abbruch mitten im Snapshot hält bis zu 64 MiB, bis ein neuer Join `handleSnapshotBegin` erreicht.
 - **Code-Auszug**:
 ```cpp
