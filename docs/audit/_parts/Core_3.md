@@ -433,14 +433,14 @@ bool enabled(Cat cat, Level level)
 - **Ort**: siehe Liste
 - **Problem**: 
   1. `HorizonCode.h:962-976`: zwei Doku-Blöcke (zu `syncTypeSignatures` und `inferUserTypeNames`) stehen verwaist vor `engineEvents`, die zugehörigen Deklarationen sind erst in Zeilen 1116 und 1162.
-  2. `HorizonCodeGenSupport.h:249` („variableDefaultValue :702“) und `676` („logs the fail like :1019“) verweisen auf Zeilennummern, die längst nicht mehr stimmen; `HorizonCode.cpp:2256` o. ä. ähnlich – solche Verweise verrotten.
+  2. `HorizonCodeGenSupport.h:249` („variableDefaultValue :702“) und `676` („logs the fail like :1019“) verweisen auf Zeilennummern, die längst nicht mehr stimmen; Zeilennummern in Kommentaren verrotten.
   3. `HcClassResolve.cpp:176`: `if (!json.empty()) fromJson(json, g);` ignoriert den Rückgabewert; ein defektes Asset wird still zur leeren Klasse (kein Log).
   4. `HcClassResolve.cpp:94-99`: pro abgeleitetem Entry-Knoten Schleife über alle Basis-Knoten + je Treffer `removeMember` mit vollen `erase/remove_if`-Pässen über `nodes` und `links` (O(E·(B+N+L))); `overridableMembers/inheritedVariables/inheritedFunctions` prüfen Duplikate per `any_of` über `out` (O(n²)). Nur Lade-/Editor-Zeit, Größen klein.
   5. `ProfilerCaptureFile.cpp:183-197`: `std::any_of` über alle `threads` pro `summary.threads`-Eintrag (O(T²), T klein).
   6. `ProfilerCaptureFile.cpp:226-228`, `HcCompiledLoader.cpp:20-22,28-31,41-44,51-52`, `HorizonCodeGenSupport.cpp:29-31,41-43`: Muster `HE_LOG_*(cat, "%s", (a + b + c).c_str())` baut die Meldung per String-Konkatenation, obwohl das Log-System printf-Formatierung hat (`"… %s …", x.c_str()`); funktional gleich, aber unnötige Temporaries. Nur an Fehlerpfaden → Lesbarkeit.
   7. `HorizonCode.h:4`: `#include <glm/glm.hpp>` (der gesamte glm-Kern) in einem Header, den jede generierte Klasse über `HorizonCodeGenSupport.h` einbindet; `Value` braucht nur `vec2/3/4` (`glm/vec2.hpp`, `vec3.hpp`, `vec4.hpp`) → kürzere Compile-Zeiten.
   8. `Profiler.h:46-49`: unter `TRACY_ENABLE` expandieren `HE_PROFILE_SCOPE()`/`_N`/`_DYN` zu zwei Anweisungen ohne Klammerung (`ZoneScoped; HE_PROF_SCOPE_IMPL(...)`) – in `if (x) HE_PROFILE_SCOPE();` ohne Klammern wirkt nur die erste. Und `HE_PROFILE_FRAME()` ist ohne Tracy leer, aber ohne Semikolon-Absicherung (`((void)0)`).
-  9. `GraphModel.h:36-39,58-71`: je zwei `findNodeById`-Überladungen für `vector<NodeT>` und `vector<unique_ptr<NodeT>>` (plus `nodeAddr`-Overloadsatz) – ein einziger Template mit `nodeAddr` deckt beides ab; die `unique_ptr`-Überladungen sind überflüssig, da der generische `std::vector<NodeT>`-Template mit `NodeT=std::unique_ptr<X>` ebenfalls via `nodeAddr` funktioniert (der Rückgabetyp wäre dann aber `unique_ptr<X>*`; daher nur umbauen, wenn der Rückgabetyp über `decltype(nodeAddr(*nodes.begin()))` bestimmt wird).
+  9. `GraphModel.h:36-71`: vier `findNodeById`-Überladungen (value/unique_ptr × const/non-const) plus vier `nodeAddr`-Überladungen; ließe sich mit einer einzigen Template-Funktion über `decltype(nodeAddr(*nodes.begin()))` als Rückgabetyp und `auto&&`-Parameter halbieren. Nur Vereinfachung, geringer Nutzen.
 - **Code-Auszug**:
 ```cpp
 if (!json.empty()) fromJson(json, g);   // Ergebnis ignoriert
