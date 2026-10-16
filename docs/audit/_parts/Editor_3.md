@@ -2,7 +2,7 @@
 
 ## Zusammenfassung
 
-Der Slice (19 Dateien, ca. 10 950 Zeilen) ist funktional sauber und sehr ausführlich kommentiert; die kleinen Logikklassen (`CollabSettle`, `CollabUndo`, `DeferredSlotFreeList`, `DocsLibrary`) sind ordentlich und getestet. Das Gewicht liegt bei zwei Panels: `ContentBrowserPanel.cpp` (5 062 Zeilen, davon `render()` ca. 4 400 Zeilen in einer Funktion) zeichnet Kacheln, Baum und Dialoge **ohne Clipping** und mit vielen Per-Frame-Allokationen und Dateisystemaufrufen. `DocsPanel` zeichnet jede Frame **alle** Sektionen einer Seite (der Node-Reference mit ca. 300 Sektionen) und führt die Volltextsuche jede Frame neu aus. Außerdem ein echter Defekt: `CppClassEditorPanel::reloadFromDisk` lädt nie neu. Insgesamt 20 Funde: 3 Hoch, 11 Mittel, 6 Niedrig. Alle Aufwandsangaben sind Schätzungen; es gab keine Messdaten.
+Der Slice (19 Dateien, ca. 10 950 Zeilen) ist funktional sauber und sehr ausführlich kommentiert; die kleinen Logikklassen (`CollabSettle`, `CollabUndo`, `DeferredSlotFreeList`, `DocsLibrary`) sind ordentlich und getestet. Das Gewicht liegt bei zwei Panels: `ContentBrowserPanel.cpp` (5 062 Zeilen, davon `render()` ca. 4 400 Zeilen in einer Funktion) zeichnet Kacheln, Baum und Dialoge **ohne Clipping** und mit vielen Per-Frame-Allokationen und Dateisystemaufrufen. `DocsPanel` zeichnet jede Frame **alle** Sektionen einer Seite (der Node-Reference mit ca. 300 Sektionen) und führt die Volltextsuche jede Frame neu aus. Außerdem ein echter Defekt: `CppClassEditorPanel::reloadFromDisk` lädt nie neu. Insgesamt 20 Funde: 3 Hoch, 8 Mittel, 9 Niedrig. Alle Aufwandsangaben sind Schätzungen; es gab keine Messdaten.
 
 ## Funde
 
