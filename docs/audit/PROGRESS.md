@@ -7,8 +7,8 @@
 - [x] 4 ContentSync – fertig (`modul_contentsync.md`)
 - [x] 5 SelfUpdate – fertig (`modul_selfupdate.md`)
 - [x] 6 Python – fertig (`modul_python.md`)
-- [ ] 7 Scene – in Arbeit (8 Slices laufen)
-- [ ] 8 Rendering – offen
+- [x] 7 Scene – fertig (`modul_scene.md`)
+- [ ] 8 Rendering – in Arbeit (10 Slices laufen)
 - [ ] 9 Tools – offen
 - [ ] 10 Game – offen
 - [ ] 11 Editor – offen
