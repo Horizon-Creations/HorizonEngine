@@ -1,0 +1,3 @@
+## slice 1 loc=1821 files=2 first=PyScriptBackend.cpp last=PyScriptBackend.h
+src/HE_Python/src/PyScriptBackend.cpp
+src/HE_Python/src/PyScriptBackend.h
