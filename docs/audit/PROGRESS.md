@@ -11,5 +11,5 @@
 - [x] 8 Rendering – fertig (`modul_rendering.md`)
 - [x] 9 Tools – fertig (`modul_tools.md`)
 - [x] 10 Game – fertig (`modul_game.md`)
-- [ ] 11 Editor – in Arbeit (19 Slices)
-- [ ] Phase 2: `AUDIT.md` – offen
+- [x] 11 Editor – fertig (`modul_editor.md`)
+- [ ] Phase 2: `AUDIT.md` – in Arbeit
