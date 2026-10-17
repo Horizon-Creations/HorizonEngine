@@ -1033,11 +1033,11 @@ Vulkan ändert sich stärker, weil sein D16 schon vorher der gröbere war (0,512
 ## Handoff
 
 - **Topic / step:** Thema 182, Schritt 6 (SSAO-Vorpass D16 → D32, Entscheidung 110); Schritte 1-5 in den Abschnitten 14-18, dieser in Abschnitt 19
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Commit nach `d31aa6a7` (siehe `git log`), gepusht
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, `653f343a` (+ dieser Doku-Nachtrag), gepusht
 - **Done:** Die SSAO-Vorpasstiefe ist auf D3D11, D3D12 und Vulkan D32; Foliage-Cluster gegen ordered ist dort jetzt pixelgleich (vorher 0,21/0,21/0,51 % des Bodens).
 - **Files touched:** die drei Backends (Stellen in 19), `tests/test_foliage_cluster.cpp` (neuer Guard am Ende), `scripts/perf/ssao_depth_ab.py` (neu),
   `docs/audit/modul_rendering.md` (Nachtrag: SSAO erledigt), dieser Abschnitt.
-- **Verified:** Tabellen in 19 (Bilder angesehen, Rauschboden je Fall); `he_tests --source-file=*test_foliage_cluster.cpp` 22/22 mit Negativkontrolle; voller `he_tests` (Ergebnis im Commit-Text).
+- **Verified:** Tabellen in 19 (Bilder angesehen, Rauschboden je Fall); `he_tests --source-file=*test_foliage_cluster.cpp` 22/22 mit Negativkontrolle; voller `he_tests` (Release, scratch `APPDATA`): 5422 Fälle, 5418 grün, 4 rot, 12 übersprungen; rot genau die vier bekannten (`test_inspector_ui` Zwischenablage ×2, `test_profiler` ×2, wie 17.2).
 - **Not verified:** Metal, GL (nicht berührt); GI an; exportiertes Spiel; CI-Lauf läuft noch beim Abschluss.
 - **Decisions taken:** GI-G-Buffer-Stellen nicht angefasst (Thema 204 hat sie, sonst Merge-Konflikt); Vulkan mit eigener Konstante statt `m_depthFormat`
   (beides D32_SFLOAT, aber der Vorpass soll nicht still mitwandern, wenn jemand die Haupttiefe ändert).
