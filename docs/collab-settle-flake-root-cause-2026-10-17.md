@@ -75,25 +75,50 @@ Even a 6x wall budget does not help. ctest gives each test its own TMPDIR
 (`tests/CMakeLists.txt` ~1350), so CI is not affected. For load tests of this kind, set
 `TMPDIR=<own dir>/` per copy.
 
+## Step 2: margin fix and verification
+
+Commit 5a8d5713 changes only the Settle case's `tickUntil` (`tests/test_collab_controller.cpp:3801-3815`) and two calls:
+
+- The comment at `:3875-3879` gives the real cause (no transform sent, the grant race), not "slow runner".
+- The wall cap goes from 10 s to 30 s for network waits (`:3807`).
+- New third parameter `wallCapped = true`. The two `CHECK_FALSE` quiet windows (`:3884`, `:3890`)
+  pass `false`: they run their full 120/200 sim ticks, because a truncated window would leave the
+  clock short of `kIdleMs` and fail the Idle `REQUIRE` at `:3888`.
+
+Local results, Release he_tests, every copy with its own TMPDIR, another bee active on the device:
+
+| Run | Result |
+|---|---|
+| 8 copies + 6 `yes` hogs | 8/8 green (90/90) |
+| 10 copies + 10 hogs (load 11) | 10/10 green |
+| 12 copies + 6 hogs | 12/12 green |
+| solo, sequential | 8/8 green |
+| freshly copied binary, first start | 3/3 green |
+| **first solo run right after linking** | **89/90, 1 case red, log not kept; case unknown** |
+| `ctest -R '^test_collab_controller$'` | Passed, 44 s |
+| full `ctest -j4` | 298/299 that ran (2 skipped); only test_hpak red (`:1186`, 6 == 2), Passed again with `HOME=<empty dir>` (known local issue) |
+
+So 41 of 42 runs were green. The one red run was never reproduced in 41 attempts (not even on a
+fresh binary's first start). The change only lengthens waits; it can make a `CHECK_FALSE` stricter,
+but it cannot cut a wait short. So the red case was most likely one of the known load flakes in other
+cases of this file (Hive lessons: the "Larger assets" re-dial `pumpUntil`, the `openSession` REQUIRE).
+Next time, keep every log from the first run on.
+
 ## Handoff
 
-- **Topic / step:** 208, step 1 of 2
-- **Branch / commit:** claude/flaky-test-test-collab-controller-settle-auf-macos-ci, this doc only (pushed: yes)
-- **Done:** Root cause of the Settle flake named and reproduced (lock-grant ordering race,
-  publishTransform drops). It is already fixed by 5ee30ca0, which is on release/0.7.0 and this branch.
-- **Files touched:** this doc. The test code is unchanged; the instrumentation was reverted.
-- **Verified:** CI tallies above (gh api, "Run tests" step of the macOS job); local repro
-  1-4 above; clean he_tests 90/90 plus ctest Passed.
-- **Not verified:** no new CI run (nothing in the code changed); not run on Linux or Windows locally.
-- **Decisions taken:** no fix in the test, because the cause is already closed and a
-  change would be only cosmetic.
-- **Decisions suggested, not taken (queen):** step 2 "Fix umsetzen" is moot for `:3871`.
-  Either close the topic, or shrink step 2 to: (a) correct the comment at `:3871-3874` (cause
-  = dropped sends, not a slow runner), (b) optionally make tickUntil's wall cap 30 s for the
-  margin above. Watching 3 more macOS CI runs (the topic text asks for it) is already
-  covered by the 31 green ones since 5ee30ca0.
-- **Traps:** a shared TMPDIR across parallel copies (see above); `rm -f $VAR/*` is blocked
-  by the harness check, so use a fresh directory per batch; `sleep_for(1ms)` ≈ 35 ms on this Mac.
-- **Next steps:** 1. The queen decides between closing and the mini step 2.
-  2. If step 2 goes ahead: comment at `tests/test_collab_controller.cpp:3871`, optionally
-  `:3803` wall cap, then `ctest -R '^test_collab_controller$'` plus one CI run.
+- **Topic / step:** 208, step 2 of 2
+- **Branch / commit:** claude/flaky-test-test-collab-controller-settle-auf-macos-ci, 5a8d5713 (test) + this doc (pushed: see the Hive post)
+- **Done:** comment corrected; wall cap 30 s on network waits; quiet windows sim-bounded only. Root-cause fix stays 5ee30ca0 (step 1).
+- **Files touched:** `tests/test_collab_controller.cpp` (Settle case only), this doc. Nothing in `src/`.
+- **Verified:** table above (local, macOS, Release).
+- **Not verified:** Linux/Windows locally; the one red solo run's case (log lost).
+- **CI:** one `workflow_dispatch` run on this branch (link in the Hive post). `ci.yml` has
+  `concurrency: cancel-in-progress` per branch, so three runs cannot be queued at once: each would
+  cancel the one before it. Runs 2 and 3 have to be started one after another, after the previous
+  run has finished. Besides that, step 1 counted 32 green macOS runs since 5ee30ca0.
+- **Decisions taken:** fix only the test, no change in CollabController/CollabSettle (the cause is closed).
+- **Traps:** `wait` without PIDs in a load script also waits for the `yes` hogs and hangs; wait on
+  the test PIDs only. test_hpak `:1186` red locally unless `HOME=<empty dir>`.
+- **Next steps:** 1. Queen: after the dispatched run goes green, start runs 2 and 3 one after
+   another (or accept the 32 earlier ones). 2. Merge into release/0.7.0.
+
