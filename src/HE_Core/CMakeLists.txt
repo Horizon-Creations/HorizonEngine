@@ -14,6 +14,7 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/Log.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/EngineProfiler.cpp
+	src/Diagnostics/DevStatsTile.cpp
 	src/Diagnostics/ProfilerCaptureFile.cpp
 	src/Diagnostics/CrashHandler.cpp
 	src/JobSystem/JobSystem.cpp
@@ -34,6 +35,7 @@ add_library(HorizonCore SHARED
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
+	src/MaterialGraph/WeatherMaterialFunctions.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp
@@ -61,6 +63,7 @@ add_library(HorizonCore SHARED
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp
+	src/ContentManager/EngineDependencies.cpp
 	src/ContentManager/TextureArrayBuild.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 

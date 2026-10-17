@@ -21,11 +21,11 @@
 #include <vector>
 
 // ── The Project Settings tab, driven headless ────────────────────────────────
-// The tab is a rail and nine pages over a real ProjectData. What can be
+// The tab is a rail and a dozen pages over a real ProjectData. What can be
 // checked without a person: that every page draws over a real project (and
 // that none of them writes a settings file merely by being LOOKED at — a
 // project that never touched its settings must not grow one), and that one
-// real edit — the first checkbox of Rendering ▸ Defaults — reaches
+// real edit — the first checkbox of Rendering ▸ Window & Backend — reaches
 // Config/ProjectSettings.json through the ProjectManager. With HE_UI_DUMP_DIR
 // set every page is written out as well (scripts/he_uishot.py turns them into
 // PNGs), which is how the layout was looked at.
@@ -222,8 +222,13 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 		{ P::Permissions,     "permissions" },
 		{ P::AntiCheat,       "anti-cheat" },
 		{ P::Multiplayer,     "multiplayer" },
+		{ P::SourceControl,   "source-control" },
 		{ P::RenderDefaults,  "render-defaults" },
+		{ P::Quality,         "quality" },
+		{ P::PostProcessing,  "post-processing" },
+		{ P::Reflections,     "reflections" },
 		{ P::Shadows,         "shadows" },
+		{ P::Input,           "input" },
 		{ P::Simulation,      "physics" },
 		{ P::CollisionLayers, "collision-layers" },
 		{ P::AudioBuses,      "audio-buses" },
@@ -360,6 +365,75 @@ TEST_CASE("project settings ui: the Anti-Cheat page draws its policy grid and a 
 	CHECK_FALSE(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
 	REQUIRE(pm.currentProject().settings.antiCheat.rules.size() == 1);
 	CHECK(pm.currentProject().settings.antiCheat.rules[0].name == "Damage");
+
+	he_test::removeAllQuiet(dir);
+}
+
+// The graphics pages are the Preferences rows over a scratch config: switching
+// the project's own graphics on captures what the editor shows into the block,
+// and an edit of a row below it lands in the file.
+TEST_CASE("project settings ui: Rendering > Quality - switching graphics on writes the block, and the config stays the user's")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_gfx";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	const auto settingsFile = HE::projectSettingsPath(pm.projectRoot());
+
+	ContextBits bits;
+	bits.config.BloomIntensity = 1.25f;        // the user's value, not the default
+	AppContext ctx = bits.make(pm);
+	showPage(ProjectSettingsPanel::Page::PostProcessing);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+
+	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 40.0f, float(H) - 40.0f);
+	REQUIRE_MESSAGE(!items.empty(), "no control found down the Post-Processing page");
+	REQUIRE_FALSE(pm.currentProject().settings.graphics.enabled);
+
+	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	const HE::ProjectGraphics& g = pm.currentProject().settings.graphics;
+	CHECK(g.enabled);
+	CHECK(g.bloomIntensity == doctest::Approx(1.25f));   // started from what the editor showed
+	REQUIRE(std::filesystem::exists(settingsFile));
+
+	ProjectManager again;
+	REQUIRE(again.loadProject(pm.currentProject().path));
+	CHECK(again.currentProject().settings.graphics.enabled);
+	CHECK(again.currentProject().settings.graphics.bloomIntensity == doctest::Approx(1.25f));
+
+	// The page edits a scratch copy: the editor's own config is untouched.
+	CHECK(bits.config.BloomIntensity == doctest::Approx(1.25f));
+
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("project settings ui: Input - switching the project's deadzones on starts from the editor's")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_input";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+
+	ContextBits bits;
+	bits.config.GamepadStickDeadzone = 0.3f;
+	AppContext ctx = bits.make(pm);
+	showPage(ProjectSettingsPanel::Page::Input);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+
+	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 40.0f, float(H) - 40.0f);
+	REQUIRE_MESSAGE(!items.empty(), "no control found down the Input page");
+	REQUIRE_FALSE(pm.currentProject().settings.input.enabled);
+
+	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	CHECK(pm.currentProject().settings.input.enabled);
+	CHECK(pm.currentProject().settings.input.stickDeadzone == doctest::Approx(0.3f));
+	CHECK(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
 
 	he_test::removeAllQuiet(dir);
 }

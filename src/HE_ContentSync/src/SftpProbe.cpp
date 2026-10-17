@@ -26,7 +26,7 @@ SftpProbeResult probeSftp()
 		return result;
 	}
 
-	const SftpResult conn = sftpTestConnection(endpoint);
+	const SftpResult conn = sftpWithConnectRetry([&] { return sftpTestConnection(endpoint); });
 	result.reachable = conn.ok;
 	result.detail    = conn.error;
 

@@ -393,7 +393,7 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 		audio.applyBusConfig(cfg);
 		listen();
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's audio buses", p.path);
 	}
 

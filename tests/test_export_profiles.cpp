@@ -13,6 +13,7 @@
 #include <UIWidget/UIWidgetTree.h>
 #include <HorizonCode/HorizonCode.h>
 #include <fstream>
+#include <map>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -22,6 +23,7 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
+#include <map>
 
 namespace fs = std::filesystem;
 
@@ -169,6 +171,76 @@ TEST_CASE("ProjectManager: manifest without profiles loads seeded defaults")
     REQUIRE(pm.loadProject((dir / "Old.heproj").string()));
     REQUIRE(pm.currentProject().exportProfiles.size() == 2);
     CHECK(pm.currentProject().activeExportProfile == "Development");
+    he_test::removeAllQuiet(dir);
+}
+
+// The development hotkeys (V, F10 stats card) ride along with the export: the
+// Development profile asks for them, Shipping does not, and a profile saved before
+// the key existed is read by its name so existing projects get them on Development.
+TEST_CASE("Export profile: the development hotkeys follow the Development profile")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_devtools";
+    he_test::removeAllQuiet(dir);
+    fs::create_directories(dir);
+
+    SUBCASE("seeded defaults")
+    {
+        const auto profiles = defaultExportProfiles();
+        REQUIRE(profiles.size() == 2);
+        CHECK(profiles[0].devTools);
+        CHECK_FALSE(profiles[1].devTools);
+    }
+
+    SUBCASE("a manifest from before the key existed")
+    {
+        {
+            std::ofstream out(dir / "Old.heproj");
+            out << R"({"name":"Old","version":"1.0","preset":0,"exportProfiles":[
+                {"name":"Development","compress":false,"encrypt":false,"enableModSupport":true},
+                {"name":"Shipping","compress":true,"encrypt":true},
+                {"name":"Demo","compress":true}]})";
+        }
+        ProjectManager pm;
+        REQUIRE(pm.loadProject((dir / "Old.heproj").string()));
+        const auto& ps = pm.currentProject().exportProfiles;
+        REQUIRE(ps.size() == 3);
+        CHECK(ps[0].devTools);
+        CHECK_FALSE(ps[1].devTools);
+        CHECK_FALSE(ps[2].devTools);
+    }
+
+    SUBCASE("an explicit choice survives a save")
+    {
+        ProjectManager pm;
+        REQUIRE(pm.createNewProject((dir / "P").string(), "P", ProjectPreset::Empty));
+        const std::string heproj = pm.currentProject().path;
+        pm.currentProject().exportProfiles[0].devTools = false;   // switched off on Development
+        pm.currentProject().exportProfiles[1].devTools = true;    // switched on on Shipping
+        REQUIRE(pm.saveProject(heproj));
+        ProjectManager again;
+        REQUIRE(again.loadProject(heproj));
+        CHECK_FALSE(again.currentProject().exportProfiles[0].devTools);
+        CHECK(again.currentProject().exportProfiles[1].devTools);
+    }
+
+    SUBCASE("project.hcfg carries it, and an older one reads as off")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "G";
+        cfg.hpakFilename = "G.hpak";
+        cfg.devTools     = true;
+        REQUIRE(ProjectConfigLoader::save(dir, cfg));
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(dir, loaded));
+        CHECK(loaded.devTools);
+
+        cfg.devTools = false;
+        REQUIRE(ProjectConfigLoader::save(dir, cfg));
+        ProjectConfig off;
+        off.devTools = true;
+        REQUIRE(ProjectConfigLoader::load(dir, off));
+        CHECK_FALSE(off.devTools);
+    }
     he_test::removeAllQuiet(dir);
 }
 
@@ -1934,4 +2006,92 @@ TEST_CASE("Application template ships a root widget and a GameInstance that crea
     }
 
     he_test::removeAllQuiet(dir);
+}
+
+// ─── Incremental pack: an unchanged asset skips the whole pipeline ───────────
+
+// A .hasset of `type` with META (id + path) and one extra chunk.
+static std::vector<uint8_t> hassetWithChunk(HE::AssetType type, HE::UUID id,
+                                            const std::string& relPath,
+                                            uint32_t chunkId, const std::vector<uint8_t>& chunk)
+{
+    std::vector<uint8_t> meta;
+    HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, fs::path(relPath).stem().string());
+    HAsset::Writer::appendString(meta, relPath);
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(chunkId, chunk.data(), chunk.size());
+    return w.toBytes(static_cast<uint16_t>(type));
+}
+
+TEST_CASE("ProjectExporter: an unchanged asset skips the pack pipeline, a changed reference does not")
+{
+    const auto dir = fs::temp_directory_path() / "he_incr_skip";
+    const auto out = fs::temp_directory_path() / "he_incr_skip_out";
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
+
+    const HE::UUID target{0x10, 0x10};
+    const std::string json = "{\"emitters\":[]}";
+    const std::vector<uint8_t> particleChunk(json.begin(), json.end());
+    // The scene lists "Target.hasset" as an object, so its baked SCNU depends on what
+    // that path resolves to; the particle system has no references at all.
+    std::vector<uint8_t> sceneChunk;
+    HAsset::Writer::appendVec(sceneChunk, std::vector<std::string>{ "Target.hasset" });
+
+    const auto writeAll = [&](HE::UUID targetId) {
+        writeBlob(dir / "Target.hasset", tinyHasset(targetId, "Target.hasset"));
+        writeBlob(dir / "Scene.hasset",
+                  hassetWithChunk(HE::AssetType::Scene, {0x20, 0x20}, "Scene.hasset",
+                                  HAsset::CHUNK_SCNE, sceneChunk));
+        writeBlob(dir / "Fx.hasset",
+                  hassetWithChunk(HE::AssetType::ParticleSystem, {0x30, 0x30}, "Fx.hasset",
+                                  HAsset::CHUNK_PTGR, particleChunk));
+    };
+
+    // The particle precompile hook runs INSIDE the pipeline, so how often it is called
+    // is how often the pipeline ran for that asset.
+    int fxCompiles = 0;
+    std::map<std::string, bool> reused;
+    const auto run = [&]() {
+        ExportSettings s;
+        s.compress = false;
+        s.incremental = true;
+        s.shaderBackends = 1u;
+        s.compileParticleShaderVariants =
+            [&](const std::string&, uint32_t) { ++fxCompiles; return std::vector<uint8_t>{ 1, 2, 3 }; };
+        reused.clear();
+        s.onAsset = [&](const std::string& rel, bool r) { reused[rel] = r; };
+        const auto res = ProjectExporter::exportProject(dir, "Incr", "", out, s);
+        REQUIRE(res.success);
+    };
+
+    writeAll(target);
+    run();
+    CHECK(fxCompiles == 1);
+    CHECK_FALSE(reused["Fx.hasset"]);
+    CHECK_FALSE(reused["Scene.hasset"]);
+
+    // Nothing touched: every asset is carried over and no pipeline ran.
+    fxCompiles = 0;
+    run();
+    CHECK(fxCompiles == 0);
+    CHECK(reused["Fx.hasset"]);
+    CHECK(reused["Scene.hasset"]);
+    CHECK(reused["Target.hasset"]);
+
+    // The scene's FILE is unchanged, but what "Target.hasset" resolves to is not — the
+    // baked SCNU must follow, so the scene is repacked while the particle system, which
+    // looks at nothing outside itself, is still skipped.
+    writeAll({0x11, 0x11});
+    fxCompiles = 0;
+    run();
+    CHECK(fxCompiles == 0);
+    CHECK(reused["Fx.hasset"]);
+    CHECK_FALSE(reused["Scene.hasset"]);
+    CHECK_FALSE(reused["Target.hasset"]);
+
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
 }

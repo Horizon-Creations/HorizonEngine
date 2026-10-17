@@ -28,7 +28,7 @@ static void persistShortcuts()
 	GlobalState& gs = GlobalState::getInstance();
 	gs.setCustomConfigEntry(kConfigKey, EditorShortcuts::encode());
 	if (!gs.writeConfig())
-		HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+		HE::Ed::notify(HE::Ed::NoteLevel::Important,
 		               "Could not save the shortcut",
 		               "The binding applies now, but this session's config file could "
 		               "not be written — the next launch will have the old key.");

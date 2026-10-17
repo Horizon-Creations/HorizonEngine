@@ -19,6 +19,7 @@ class EntityHost;
 class NetGameSession;
 class WidgetManager;
 namespace HE::AntiCheat { class AntiCheatHost; }
+namespace HE { class CellRuntime; }
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
 struct HePhysicsServices; //   "
@@ -321,6 +322,18 @@ namespace entity {
     bool saveState(Ctx&, Entity e);
     bool hasSavedState(Ctx&, Entity e);
     bool applySavedState(Ctx&, Entity e);
+    // The same state without the save: what saveState would write (JSON text),
+    // and the application of such a text, for an engine store that is not the
+    // active save — the cells' CellState (CellState.h), which keeps an unloaded
+    // cell's entities in memory. No play-mode or active-save gate and no log for
+    // an entity without an enabled SaveStateComponent: stateOf answers "" and
+    // applyState false, quietly, because a cell is full of such entities. Not
+    // script rows. `parts` picks what applyState touches: the world half
+    // (transform, visibility) can go on before an entity's body and its script
+    // exist, the script half (Save Game variables) needs the class instance.
+    enum : uint8_t { kStateWorld = 1, kStateScript = 2, kStateAll = 3 };
+    std::string stateOf(Ctx&, Entity e);
+    bool        applyState(Ctx&, Entity e, const std::string& text, uint8_t parts = kStateAll);
 }
 
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────
@@ -854,6 +867,141 @@ namespace nav {
     // here, forever"). It needs a Detour query of its own on NavigationSystem
     // (dtNavMeshQuery::findRandomPointAroundCircle) rather than a rearrangement
     // of these rows, so it is named as the next step instead of guessed at here.
+}
+
+// ── Water: lakes, ponds and the brush (Thema 174) ────────────────────────────
+// The scriptable face of the landscape's water (WaterField.h, WaterLake.h,
+// WaterBrush.h): the same model the editor's Lake panel and Water brush edit, so a
+// graph, a script or an MCP client makes and shapes exactly what a hand can.
+//
+// ENTITIES AND IDS. A landscape and a spline are entities (Int); a body of water is
+// the Int id the landscape's water field gives it (0 = none). A lake is a body whose
+// source is a closed spline, so the lake rows take the SPLINE: it is the one handle
+// an author already has.
+//
+// SPACE. x, z and level are WORLD, like the nav group and for the same reason: they
+// come from raycasts, markers and other entities' positions. The landscape's own
+// storage is terrain-local and the rows convert at the edge, through the landscape's
+// world matrix composed on the spot (HE::worldMatrixOf — never the stored one).
+//
+// WHAT RUNS WHEN. The rows change the model; the water SURFACE is built by the world
+// tick (TerrainSystem::updateTerrains), so a lake made in this frame has its sheet at
+// the next one. Moving a lake's spline reshapes its water by itself in that same
+// tick; `reshapeLake` is for a caller that wants it now and wants the number. Nothing
+// here digs except `createLake` with dig, `createLakeAtGround` with dig and `digLake`:
+// reshaping never touches the ground.
+//
+// UNDO. These rows write the world directly, like every exec row. In the editor they
+// are for play-in-editor (the world is restored when play stops); an external MCP
+// client reaches the undoable form through the `terrain_lake` tool, and the pure rows
+// (bodyAt, levelAt, lakeBody, lakeSpline, wetCells) are callable from MCP as they are.
+namespace water {
+    // A lake from a closed spline over a landscape: the water at `level` (world Y),
+    // and with `dig` a bed `depth` metres below it with a `bank` slope back to the
+    // old ground (all in metres). The body's id, or 0 with a log line saying why
+    // not (not a landscape, not a closed spline of three points, the spline already
+    // is a lake, the outline lies off the landscape).
+    int  createLake(Ctx&, Entity terrain, Entity spline, float level, bool dig, float depth, float bank);
+    // The same with the level taken from the lowest ground under the outline plus
+    // `above` metres (read before any digging).
+    int  createLakeAtGround(Ctx&, Entity terrain, Entity spline, float above, bool dig, float depth, float bank);
+    // Bring the water of the lake in line with its spline now. Cells that moved, or
+    // -1 when the spline is not a lake (or is not a closed shape at the moment).
+    // The brush share survives (WaterLake.h, "the merge rule").
+    int  reshapeLake(Ctx&, Entity spline);
+    // Dig the bed again under the lake's current outline. Terrain vertices lowered,
+    // or -1 when the spline is not a lake.
+    int  digLake(Ctx&, Entity spline, float depth, float bank);
+    // Move the lake's surface to a WORLD height. The shape and the ground stay.
+    bool setLakeLevel(Ctx&, Entity spline, float level);
+    // The lake's water and its link to the spline go; the spline and the ground stay.
+    bool removeLake(Ctx&, Entity spline);
+    // A painted pond (a body with no spline) becomes the lake of a new closed
+    // spline that is created for it, a child of the landscape. The spline entity,
+    // 0 when the body is not a pond or too small to outline.
+    Entity convertToLake(Ctx&, Entity terrain, int body);
+
+    // One full-strength dab of the brush at a WORLD point: on water it widens that
+    // body at its level, on dry ground it starts a new pond 0.3 m above the ground.
+    // Cells whose water changed.
+    int  paint(Ctx&, Entity terrain, float x, float z, float radius, float falloff);
+    // One dab of the eraser: water taken out of every body under it.
+    int  erase(Ctx&, Entity terrain, float x, float z, float radius, float falloff);
+
+    // Reading. Pure.
+    int   bodyAt(Ctx&, Entity terrain, float x, float z);                       // 0 = dry
+    bool  levelAt(Ctx&, Entity terrain, float x, float z, float& worldLevel);   // false = dry
+    int   lakeBody(Ctx&, Entity spline);                                        // 0 = not a lake
+    Entity lakeSpline(Ctx&, Entity terrain, int body);                          // 0 = a pond, or no such body
+    int   wetCells(Ctx&, Entity terrain, int body);                             // body 0 = all water
+
+    // ── What the water does to the things in it (Thema 179 step 5) ───────────
+    // The scriptable face of the water physics (WaterQuery.h, PhysicsWorld::applyWater):
+    // where the surface is, how deep, which way it flows, how far a body is under it and
+    // what lifts it, and the moment a body goes in or comes out. Unlike the rows above
+    // these take NO landscape: the caller has a position or a body, seldom the landscape,
+    // and the answer is the one the physics itself gets (the highest surface at that
+    // point wins when landscapes overlap). Everything is WORLD space, the current too.
+    //
+    // THE SURFACE IS THE PHYSICS' ONE: the level of the body of water plus the two waves
+    // the physics carries (Physics/WaterWaves.h — the heights and directions of the engine
+    // water material, not its phase), at the physics clock (PhysicsWorld::simTime). With no
+    // physics world in the Ctx, or an editor that is not playing, the clock stands at 0 and
+    // the surface at its level plus the waves at t = 0. The rings a body makes (RippleField)
+    // are display and are not in these numbers.
+    //
+    // PURE: surfaceAt, depthAt, flowAt, submerged, buoyancy only read. pollImmersion drains
+    // a queue (ask in one place), disturb and setFlow write.
+    //
+    // UNDO. Like every exec row these write the world directly: they are for play, where
+    // the world is restored when play stops. The undoable form of a body of water's
+    // settings is the Water tab of the Landscape panel.
+
+    // Is there water at (x, z), and how high is its surface there? False when it is dry
+    // (`height` untouched), because the ground stands above the water or there is no water.
+    bool      surfaceAt(Ctx&, float x, float z, float& height);
+    // Metres of water over the ground at (x, z), waves included; 0 when it is dry.
+    float     depthAt(Ctx&, float x, float z);
+    // The current at (x, z) in m/s, WORLD axes (the landscape's turn carried in); zero
+    // where it is dry or the water stands still.
+    glm::vec3 flowAt(Ctx&, float x, float z);
+    // The share (0..1) of the body's volume under water as of the latest physics step
+    // that served it; 0 for an entity that is not in water, has no body or does not exist.
+    // A body at rest keeps the share it came to rest with: a stone on the bed stays 1.
+    float     submerged(Ctx&, Entity e);
+    // How many times its own weight the water lifts the body right now (buoyancy factor
+    // times submerged share): 1 floats where it is, above 1 rises, below 1 sinks. 0 for
+    // an entity that is not in water.
+    float     buoyancy(Ctx&, Entity e);
+
+    // A body went into the water or came out of it, drained, in the order the physics saw
+    // them, as parallel lists in the registry row. `entered` is true when the share under
+    // water crossed 2 % upwards. `speed` is m/s through the surface relative to the
+    // current (down for an entry, up for an exit); an exit over the shore, or because the
+    // water dried up, has speed 0. `position` is the body's centre of mass. A body that
+    // starts the scene in the water enters at the first step. Needs a physics world and the
+    // water physics switched on; nobody draining it only costs the bound (256 events).
+    struct ImmersionEvent
+    {
+        Entity    entity{};
+        bool      entered = true;
+        float     speed   = 0.0f;
+        glm::vec3 position{ 0.0f };
+    };
+    std::vector<ImmersionEvent> pollImmersion(Ctx&);
+
+    // A ring on the water at (x, z): a footstep, a shot, a thrown stone. `radius` is the
+    // size it starts at (m, held to 0.05..6), `strength` 0..1. It travels with the current
+    // where the water has one. Display only — it moves no body — and it shows in play (the
+    // application packs the rings of the physics world every frame), on every surface
+    // that uses the engine water material, landscape water or not. Does nothing without a
+    // physics world, which owns the list.
+    void      disturb(Ctx&, float x, float z, float radius, float strength);
+    // The current of a body of water, in WORLD m/s on x and z (held to ±50 m/s per axis).
+    // `terrain` is the landscape and `body` the id of the water (water.bodyAt). False for
+    // an entity that is no landscape or a body that does not exist. The water's other
+    // settings (density, drags, splash, on/off) are authored in the editor.
+    bool      setFlow(Ctx&, Entity terrain, int body, float x, float z);
 }
 
 // ── Materials (node-graph param by name) ─────────────────────────────────────
@@ -1427,6 +1575,43 @@ namespace content {
     bool        unloadId(Ctx&, const HE::UUID& id);
     bool        isLoadedId(Ctx&, const HE::UUID& id);
     std::string typeNameId(Ctx&, const HE::UUID& id);
+}
+
+// ── Streaming (the scene's cells, HE::CellRuntime; Thema 183 step 3) ─────────
+// A scene split into cells loads them around the camera. What a script needs on
+// top: which cell a place is in and whether it is there (a cell is loaded once its
+// last slice is built), whether a whole area is ready to stand on (isSettled —
+// a teleport waits for it before it lets the player go, or the player falls
+// through a floor still being built), and a pin that keeps the cells around a
+// place loaded although no camera is there.
+//
+// Positions are world positions, as everywhere in this API (the world origin is
+// added here). The application installs its runtime for the session — the game
+// at start-up, the editor while it plays. Nothing installed, or a scene without
+// cells, is not an error: cellAt finds no cell, isLoaded is false, pin hands out
+// 0, and isSettled is TRUE, because there is nothing to wait for — a teleport
+// gate written for a split level must not hang in one that is not.
+namespace streaming {
+    struct Cell { int x = 0; int z = 0; bool exists = false; };
+    // The grid square `position` falls into; `exists` = the scene has a cell
+    // there (something was split out of that square).
+    Cell cellAt(Ctx&, const glm::vec3& position);
+    // That cell is built in full. False for a cell that is still loading, out, or
+    // not in the scene.
+    bool isLoaded(Ctx&, int x, int z);
+    // Every cell within `radius` m of `position` is built, its bodies with it (or
+    // has failed for good). True without cells.
+    bool isSettled(Ctx&, const glm::vec3& position, float radius);
+    // Keep the cells within `radius` m of `position` loaded (not positive: the
+    // scene's own load radius) until unpin, or the end of the session. A handle,
+    // 0 when nothing streams.
+    int  pin(Ctx&, const glm::vec3& position, float radius);
+    // False for a handle that is not pinned.
+    bool unpin(Ctx&, int handle);
+
+    // The application's runtime, for the session (null to take it away again).
+    void install(HE::CellRuntime* runtime);
+    HE::CellRuntime* installed();
 }
 
 // ── Audio (Ctx.audio — the app's AudioEngine; null → no-ops) ─────────────────

@@ -11,8 +11,10 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SplineCurve.h>
 #include <HorizonScene/TransformHierarchy.h>
 
 #include <algorithm>
@@ -246,6 +248,56 @@ namespace HE::Ed::ViewportOverlays
 				// purpose — PhysicsWorld logs it once where it matters, and
 				// a debug overlay is not the place to repeat that per frame.
 				break;
+			}
+		}
+	}
+	void appendSplineGuides(HorizonWorld& world, const EditorSelection& selection,
+	                        const SplineEdit::GuideState& tool, const glm::vec3& viewer,
+	                        DebugDrawBuffer& out)
+	{
+		auto& reg = world.registry();
+		for (auto [e, spline] : reg.view<SplineComponent>().each())
+		{
+			const bool selected = selection.contains(e);
+			const glm::mat4 model = HE::worldMatrixOf(world, e);
+			auto toWorld = [&](const glm::vec3& p) { return glm::vec3(model * glm::vec4(p, 1.0f)); };
+
+			// Sampled in the spline's own space and moved afterwards: moving the
+			// control points first would bend a centripetal curve under a
+			// non-uniform scale (SplineCurve.h).
+			const HE::spline::Curve curve(spline);
+			if (curve.spanCount() > 0)
+			{
+				const std::vector<glm::vec3> pts = curve.sample(SplineEdit::kSamplesPerSpan);
+				const glm::vec3 color = selected ? kSplineColor : kSplineDimColor;
+				for (size_t i = 1; i < pts.size(); ++i)
+					out.line(toWorld(pts[i - 1]), toWorld(pts[i]), color);
+			}
+
+			// A single point has no curve and nothing to look at but its handle,
+			// which is why the handles do not wait for a line.
+			if (!selected) continue;
+			const bool edited = (e == tool.active);
+			for (size_t i = 0; i < spline.controlPoints.size(); ++i)
+			{
+				const glm::vec3 w = toWorld(spline.controlPoints[i]);
+				const bool isSel   = edited && static_cast<int>(i) == tool.selectedPoint;
+				const bool isHover = edited && static_cast<int>(i) == tool.hoveredPoint;
+				glm::vec3 color = (i == 0) ? kSplineStartColor : kSplineHandleColor;
+				if (isHover) color = kSplineHoverColor;
+				if (isSel)   color = kSplineSelectedColor;
+				float h = std::max(glm::length(w - viewer) * kSplineHandleScale, kSplineHandleMin);
+				if (isSel || isHover) h *= kSplineHandleEmphasis;
+				out.aabb(w - glm::vec3(h), w + glm::vec3(h), color);
+			}
+
+			// Where a click on the curve would put a point: a small cross.
+			if (edited && tool.hasInsert)
+			{
+				const float h = std::max(glm::length(tool.insertWorld - viewer) * kSplineHandleScale,
+				                         kSplineHandleMin) * kSplineHandleEmphasis;
+				for (const glm::vec3& axis : { glm::vec3(1, 0, 0), glm::vec3(0, 1, 0), glm::vec3(0, 0, 1) })
+					out.line(tool.insertWorld - axis * h, tool.insertWorld + axis * h, kSplineHoverColor);
 			}
 		}
 	}

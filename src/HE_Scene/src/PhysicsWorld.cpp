@@ -4,7 +4,11 @@
 #include <thread>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <unordered_set>
+#if defined(__APPLE__)
+#include <pthread.h>   // pthread_setname_np: Jolt names its workers only on Windows and Linux
+#endif
 
 JPH_SUPPRESS_WARNINGS
 
@@ -50,6 +54,8 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/EntityActive.h"   // the "Active" switch: no body for what is off
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/WaterQuery.h"
+#include "HorizonScene/WaterRipples.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
@@ -61,6 +67,8 @@ JPH_SUPPRESS_WARNINGS
 #include "HorizonScene/Components/TerrainComponent.h"
 
 #include <glm/gtc/quaternion.hpp>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -281,40 +289,57 @@ public:
                   { return a.entityA != b.entityA ? a.entityA < b.entityA : a.entityB < b.entityB; });
     }
 
+    // How many events one poll hands out per list (0 = all of them). What does not
+    // fit stays at the FRONT of its queue and goes out first at the next poll, in the
+    // order it would have gone out in: nothing is dropped and nothing overtakes.
+    // Set between steps, read under the lock.
+    void setLimit(uint32_t perPoll)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_limit = perPoll;
+    }
+
+    // Events still queued behind a limit: the carried-over ones, which the next
+    // poll hands out first.
+    uint32_t backlog()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return static_cast<uint32_t>(m_enteredCarry + m_exitedCarry + m_enteredOverlapCarry + m_exitedOverlapCarry);
+    }
+
+    // Events held back by a limit, summed over polls.
+    uint64_t deferredTotal()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_deferredTotal;
+    }
+
+    // An exit is never handed out ahead of an enter that is still queued: the
+    // enter of the same contact can only be in front of it, and a script that sees
+    // "stopped touching" before "started touching" is the reorder this must not do.
+    // The cost is that exits wait for the enters, which is what a backlog is.
     std::vector<PhysicsWorld::CollisionEvent> pollEntered()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_entered);
-        sortEvents(result);
-        return result;
+        return take(m_entered, m_enteredCarry, false);
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollOverlapEntered()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_enteredOverlap);
-        sortEvents(result);
-        return result;
+        return take(m_enteredOverlap, m_enteredOverlapCarry, false);
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollOverlapExited()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_exitedOverlap);
-        sortEvents(result);
-        return result;
+        return take(m_exitedOverlap, m_exitedOverlapCarry, m_enteredOverlapCarry > 0);
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollExited()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<PhysicsWorld::CollisionEvent> result;
-        result.swap(m_exited);
-        sortEvents(result);
-        return result;
+        return take(m_exited, m_exitedCarry, m_enteredCarry > 0);
     }
 
     // Forget every buffered event and every tracked contact. PhysicsWorld::clear()
@@ -330,6 +355,7 @@ public:
         m_exited.clear();
         m_enteredOverlap.clear();
         m_exitedOverlap.clear();
+        m_enteredCarry = m_exitedCarry = m_enteredOverlapCarry = m_exitedOverlapCarry = 0;
     }
 
     // reset() for ONE entity — what removeEntity() needs and what clear() did to
@@ -352,17 +378,25 @@ public:
             else
                 ++it;
         }
-        const auto drop = [entityId](std::vector<PhysicsWorld::CollisionEvent>& queue) {
-            queue.erase(std::remove_if(queue.begin(), queue.end(),
-                                       [entityId](const PhysicsWorld::CollisionEvent& ev) {
-                                           return ev.entityA == entityId || ev.entityB == entityId;
-                                       }),
-                        queue.end());
+        // Keeps count of how many of the carried-over events survive, so the part of
+        // the queue that is "already sorted, goes out first" stays that part.
+        const auto drop = [entityId](std::vector<PhysicsWorld::CollisionEvent>& queue, size_t& carried) {
+            size_t kept = 0, keptCarried = 0;
+            for (size_t i = 0; i < queue.size(); ++i)
+            {
+                if (queue[i].entityA == entityId || queue[i].entityB == entityId)
+                    continue;
+                if (i < carried)
+                    ++keptCarried;
+                queue[kept++] = queue[i];
+            }
+            queue.resize(kept);
+            carried = keptCarried;
         };
-        drop(m_entered);
-        drop(m_exited);
-        drop(m_enteredOverlap);
-        drop(m_exitedOverlap);
+        drop(m_entered, m_enteredCarry);
+        drop(m_exited, m_exitedCarry);
+        drop(m_enteredOverlap, m_enteredOverlapCarry);
+        drop(m_exitedOverlap, m_exitedOverlapCarry);
     }
 
 private:
@@ -387,7 +421,40 @@ private:
         return (static_cast<uint64_t>(lo) << 32) | static_cast<uint64_t>(hi);
     }
 
+    // One poll of one queue. The first `carried` events were sorted and held back by
+    // an earlier poll and go out first; only what arrived since is sorted (by entity
+    // pair, as always), so with no limit this is exactly "swap the queue out and
+    // sort it". `hold` leaves the queue alone (an exit waiting for the enters).
+    std::vector<PhysicsWorld::CollisionEvent> take(std::vector<PhysicsWorld::CollisionEvent>& queue,
+                                                   size_t& carried, bool hold)
+    {
+        std::vector<PhysicsWorld::CollisionEvent> result;
+        if (hold)
+        {
+            // Everything in it stays; the part that arrived since is not sorted yet,
+            // but it will be when the poll that takes it comes.
+            return result;
+        }
+        std::sort(queue.begin() + static_cast<std::ptrdiff_t>(carried), queue.end(),
+                  [](const PhysicsWorld::CollisionEvent& a, const PhysicsWorld::CollisionEvent& b)
+                  { return a.entityA != b.entityA ? a.entityA < b.entityA : a.entityB < b.entityB; });
+        if (m_limit == 0 || queue.size() <= m_limit)
+        {
+            result.swap(queue);
+            carried = 0;
+            return result;
+        }
+        result.assign(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(m_limit));
+        queue.erase(queue.begin(), queue.begin() + static_cast<std::ptrdiff_t>(m_limit));
+        carried = queue.size();
+        m_deferredTotal += queue.size();
+        return result;
+    }
+
     std::mutex m_mutex;
+    uint32_t   m_limit = 0;
+    uint64_t   m_deferredTotal = 0;
+    size_t     m_enteredCarry = 0, m_exitedCarry = 0, m_enteredOverlapCarry = 0, m_exitedOverlapCarry = 0;
     std::unordered_map<uint64_t, ActiveContact> m_active;
     // Body pairs held together by a joint whose collideConnected is false.
     // Keyed the same way m_active is, so a recycled body slot cannot inherit an
@@ -406,11 +473,26 @@ struct PhysicsWorld::Impl
     ObjectVsBPLayerFilterImpl ovbpFilter;
     ObjectLayerPairFilterImpl ooFilter;
 
+    // What Jolt's caches were sized by (see HE::PhysicsLimits). Declared before the
+    // allocator, which is sized from it.
+    const HE::PhysicsLimits      limits;
+
     // Both must outlive every Update() call — keep as members.
-    JPH::TempAllocatorImpl       tempAllocator{ 10u * 1024u * 1024u };
+    //
+    // The scratch block is sized from the caps (HE::PhysicsTuning::tempBytesFor)
+    // and falls back to the heap when a step wants more. It used to be Jolt's plain
+    // TempAllocatorImpl at a fixed 10 MB, which std::abort()s the process on
+    // overflow while the measured peak was 8.6 to 9.9 MB of it.
+    JPH::TempAllocatorImplWithMallocFallback tempAllocator;
+    std::size_t                  tempBlockBytes = 0;
     JPH::JobSystemThreadPool     jobSystem;
     JPH::PhysicsSystem           physicsSystem;
     HEContactListener            contactListener;
+
+    // Threads that take part in a step, the caller included (setThreadCount).
+    int                          threads = 1;
+    // What the steps said about themselves (stepStats()).
+    PhysicsWorld::StepStats      stats;
 
     // Entity id (cast to uint32_t) → Jolt body id
     std::unordered_map<uint32_t, JPH::BodyID> entityToBody;
@@ -498,10 +580,18 @@ struct PhysicsWorld::Impl
     // every pass that resolved ANYTHING, because a chain resolves one link per
     // pass and the entries at the far end would otherwise be dropped for being
     // patient. Only a pass in which nothing at all moved counts against them.
+    //
+    // `patient` is the other kind of waiting: the partner is not late, it is in
+    // a streamed cell that is not loaded, and it will be back whenever the camera
+    // is. Such an entry is not failing, so it is never counted against and never
+    // given up on (a cell may be a long walk away, and every other cell's load
+    // would otherwise use up its eight passes); it is retried quietly when its
+    // partner exists, and it falls off the list once its owner is gone.
     struct PendingJoint
     {
         uint32_t entityId = 0;
         int      attempts = 0;
+        bool     patient  = false;
     };
     std::vector<PendingJoint> pendingJoints;
 
@@ -520,7 +610,22 @@ struct PhysicsWorld::Impl
         for (const auto& p : pendingJoints)
             if (p.entityId == entityId)
                 return;
-        pendingJoints.push_back({ entityId, 0 });
+        pendingJoints.push_back({ entityId, 0, false });
+    }
+
+    // The same, for a joint that waits for a cell (see PendingJoint::patient). An
+    // entry that is on the list already becomes patient: the partner it waited for
+    // is the one that has just gone.
+    void queuePatientJoint(uint32_t entityId)
+    {
+        for (auto& p : pendingJoints)
+            if (p.entityId == entityId)
+            {
+                p.patient  = true;
+                p.attempts = 0;
+                return;
+            }
+        pendingJoints.push_back({ entityId, 0, true });
     }
 
     // Remove just the joint this entity AUTHORED, and leave alone the ones other
@@ -567,12 +672,112 @@ struct PhysicsWorld::Impl
     // the iterator underneath it — that would be a rehash mid-loop, i.e. the
     // kind of crash that only shows up in a shipped build. Members rather than
     // locals so the per-frame allocation happens once.
-    std::vector<uint32_t> stepBodies;
-    std::vector<uint32_t> stepCharacters;
+    std::vector<std::pair<uint32_t, JPH::BodyID>> stepBodies;   // entity, its body
+    std::vector<uint32_t>                         stepCharacters;
 
-    // Hard limits handed to Jolt below. Exceeding them makes CreateAndAddBody
-    // return an invalid id, which used to be swallowed silently — the scene then
-    // simply had objects that never fell. They are logged instead.
+    // ── Time budget (Thema 178 step 3) ────────────────────────────────────────
+    // See HE::PhysicsBudgetConfig. The budget is spent on the work around Update():
+    // what queries and body work charged since the previous step comes off first,
+    // the characters take the rest.
+    HE::PhysicsBudgetConfig budget;
+    HE::PhysicsBudgetStats  budgetStats;
+    // Scene queries and body add/remove charge here from wherever they run (a
+    // query may come from a job), the step takes the sums.
+    std::atomic<int64_t>    queryNs{0};
+    std::atomic<uint32_t>   queryCount{0};
+    std::atomic<int64_t>    bodyNs{0};
+    // Body work nests (addEntities → addEntity, removeEntityTree → removeEntityImpl);
+    // only the outermost call charges. Game thread only, like every writer.
+    int                     bodyWorkDepth = 0;
+    // The time a character that was put off still owes (steppedDt), by entity.
+    // Absent = nothing owed. Only the step writes it; removeEntity erases.
+    std::unordered_map<uint32_t, float> characterOwed;
+
+    // ── Water (Thema 179 step 2, PhysicsWorld::applyWater) ───────────────────
+    // setWaterPhysics; HE_PHYSICS_WATER=0 starts a world with it off.
+    bool                    waterOn = HE::PhysicsTuning::waterFromEnv() != 0;
+    // Seconds of dt step() has been given since initialize(): the clock of the waves.
+    double                  simTime = 0.0;
+    // The landscapes with water, kept from step to step so that the wet rectangle of
+    // one is only rescanned when its field's revision moved.
+    HE::water::WaterIndex   waterIndex;
+    // The time a body that the buoyancy put off still owes it (steppedDt), by entity.
+    // Only the ones put off have an entry. Written by applyWater alone.
+    std::unordered_map<uint32_t, float> waterOwed;
+    // What the water made of a body at its latest serving, by entity: the share of its
+    // volume under water and the lift (buoyancy factor times share: how many times its
+    // own weight the water carries it). One map for both, so that the two cannot be
+    // remembered for different sets of bodies.
+    struct WaterTrack
+    {
+        float share = 0.0f;
+        float lift  = 0.0f;
+    };
+    std::unordered_map<uint32_t, WaterTrack> waterTrack;
+    // Bodies that went into the water or came out of it since the last pollWaterEvents
+    // (Thema 179 step 5). Written by applyWater alone, bounded by kMaxWaterEvents.
+    std::vector<PhysicsWorld::WaterEvent> waterEvents;
+    // What the latest applyWater did, for the budget stats.
+    uint32_t                waterWet = 0, waterDeferred = 0;
+    // The rings on the water (Thema 179 step 3): raised by applyWater, aged by step(),
+    // read by whoever packs them for the renderer. Display only.
+    HE::water::RippleField  ripples;
+    // When (simTime) a body last left a trail ring, by entity: a body moving through the
+    // surface raises one every kTrailInterval, not one per step. Only a body that is
+    // wet and moving has an entry; removeEntity and clear() erase.
+    std::unordered_map<uint32_t, double> waterTrailAt;
+    // Scratch, kept so the per-step allocation happens once.
+    struct WaterCandidate
+    {
+        uint32_t            entity = 0;
+        JPH::BodyID         id;
+        float               owed   = 0.0f;
+        HE::water::Surface  surface;
+    };
+    std::vector<WaterCandidate>    waterScratch;
+    std::vector<HE::water::Region> waterRegions;
+    std::unordered_map<uint32_t, float> waterOwedNext;
+    std::unordered_map<uint32_t, WaterTrack> waterTrackNext;
+    // The bodies the water has forbidden to sleep, by entity (with the body to give the
+    // permission back to). A body afloat rides a surface that never stands still: left to
+    // Jolt it would drop below the sleep speed in a lull between two waves, fall asleep,
+    // and hang there while the water moved on — and the water only serves active bodies.
+    // It may sleep again once it is fully under, out of the water, or the water is off.
+    std::unordered_map<uint32_t, JPH::BodyID> waterNoSleep;
+    std::unordered_set<uint32_t>              waterSeen;
+
+    // ── Region hold (setRegionHold) ──────────────────────────────────────────
+    // The test the application gave, or empty.
+    PhysicsWorld::HoldTest holdTest;
+    // The cheap half of it (setRegionHold's `mayHold`), or empty: false means the
+    // test would say "no" to every position.
+    PhysicsWorld::HoldProbe holdProbe;
+    // Whether this step has to ask the test about anything. True without a probe,
+    // and whenever a body or a character is held (it may have to be let go).
+    bool holdNeeded() const
+    {
+        if (!holdTest)
+            return false;
+        if (!holdProbe || holdProbe())
+            return true;
+        return !heldBodies.empty() || !heldCharacters.empty();
+    }
+    // Every DYNAMIC body, by entity: the only ones the hold is asked about. Kept
+    // beside entityToBody so that the per-step pass walks the few things that can
+    // fall and not all the (tens of thousands of) static ones. A character's own
+    // proxy is kinematic and is not in it. The body id rides along, so the pass
+    // does not look the entity up in entityToBody once per body per step.
+    std::unordered_map<uint32_t, JPH::BodyID> dynamicBodies;
+    // The ones among them that are out of Jolt's broad phase right now. They stay
+    // in entityToBody, so hasPhysics() is still true for them and a rebuild or a
+    // removal finds them.
+    std::unordered_set<uint32_t> heldBodies;
+    // Characters that were not stepped the last time they were looked at.
+    std::unordered_set<uint32_t> heldCharacters;
+
+    // Hard limits handed to Jolt below. Exceeding the BODY table makes
+    // CreateAndAddBody return an invalid id, which used to be swallowed silently —
+    // the scene then simply had objects that never fell. That is logged instead.
     //
     // They were 1024 each — the numbers from Jolt's HelloWorld, whose own
     // comment says a real project wants "something in the order of 65536"
@@ -580,31 +785,144 @@ struct PhysicsWorld::Impl
     // first wall a larger world hit, long before float precision
     // (docs/world-streaming-baseline-2026-10-06.md §3.6). Jolt allocates the
     // body table and broadphase up front from these, a few MB per world.
-    static constexpr uint32_t kMaxBodies             = 65536;
-    static constexpr uint32_t kMaxBodyPairs          = 65536;
-    static constexpr uint32_t kMaxContactConstraints = 10240;
+    //
+    // The pair and constraint caps are HE::PhysicsLimits now (`limits`): a dense
+    // pile of ten thousand bodies filled the old ones in every step, and Jolt
+    // dropped contacts without a word (docs/physics-threading-baseline.md §4).
+    static constexpr uint32_t kMaxBodies = PhysicsWorld::kMaxBodies;
 
-    Impl()
+    explicit Impl(const HE::PhysicsLimits& lim)
+        : limits(lim),
+          tempAllocator(tempBlockSize(lim))
     {
-        // Jolt's own worker threads (the caller joins in too): up to four,
-        // half the cores minus one, so a step with thousands of bodies in
-        // contact is not one core's work while the engine pool sits next to
-        // it. The simulation stays deterministic whatever the count (Jolt,
-        // Docs/Architecture.md "Deterministic Simulation").
-        const int hw = static_cast<int>(std::thread::hardware_concurrency());
-        jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::clamp(hw / 2 - 1, 0, 4));
+        tempBlockBytes = tempBlockSize(lim);
+
+        // Named, so a profiler and a thread dump can tell the Jolt workers from the
+        // engine pool and the driver threads; Jolt names its own only on Windows and
+        // Linux, and on macOS they were "(unnamed)" between Metal and SDL threads.
+        // The log name matches what the engine pool does for its workers.
+        jobSystem.SetThreadInitFunction([](int index)
+        {
+            char name[16];
+            std::snprintf(name, sizeof(name), "Jolt-%d", index);
+            HE::Log::setThreadName(name);
+#if defined(__APPLE__)
+            pthread_setname_np(name);
+#endif
+        });
+
+        // Jolt's own worker threads (the caller joins in too). The environment
+        // can pin the number from the start; the project's setting arrives later
+        // through setThreadCount, once the application has read it. Whatever the
+        // count, the simulation stays deterministic (Jolt, Docs/Architecture.md
+        // "Deterministic Simulation").
+        threads = HE::PhysicsTuning::resolveThreads(0, HE::PhysicsTuning::threadsFromEnv(),
+                                                    std::thread::hardware_concurrency());
+        jobSystem.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads - 1);
+        // The time budget: the default, unless the environment pins it; the project's
+        // setting arrives through setBudget, like the thread count.
+        budget.frameMs = HE::PhysicsBudgetRules::resolveFrameMs(
+            budget.frameMs, HE::PhysicsBudgetRules::frameMsFromEnv());
         physicsSystem.Init(
             kMaxBodies,
             0,      // num body mutexes (0 = auto)
-            kMaxBodyPairs,
-            kMaxContactConstraints,
+            lim.maxBodyPairs,
+            lim.maxContactConstraints,
             bpLayerInterface,
             ovbpFilter,
             ooFilter
         );
         physicsSystem.SetContactListener(&contactListener);
     }
+
+    // The scratch block for these caps, in the 32 bits Jolt's constructor takes.
+    static JPH::uint tempBlockSize(const HE::PhysicsLimits& lim)
+    {
+        const std::size_t bytes = HE::PhysicsTuning::tempBytesFor(kMaxBodies, lim.maxContactConstraints);
+        return static_cast<JPH::uint>(std::min<std::size_t>(bytes, 0xF0000000u));
+    }
 };
+
+// The bodies of one addEntities charge: created and recorded in entityToBody, but
+// not in the broad phase yet. Only addEntities makes one, and puts the lot in.
+struct PhysicsWorld::BodyBatch
+{
+    std::vector<JPH::BodyID> ids;
+};
+
+// ─── Time budget: charging the work around Update() ───────────────────────────
+namespace {
+
+using BudgetClock = std::chrono::steady_clock;
+
+// The newest step's numbers from ANY world, for the profiler panel (which has no
+// handle on the world). Written once per step, read by the UI thread.
+std::mutex             g_publishedMutex;
+HE::PhysicsBudgetStats g_published;
+
+void publishBudgetStats(const HE::PhysicsBudgetStats& stats)
+{
+    std::lock_guard<std::mutex> lock(g_publishedMutex);
+    g_published = stats;
+}
+
+int64_t nsSince(BudgetClock::time_point from)
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(BudgetClock::now() - from).count();
+}
+
+thread_local int t_queryDepth = 0;
+
+// Charges the scene query it lives in to the budget (and counts it). Queries are
+// synchronous - a script wants the answer on this line - so they cannot be put off;
+// they come off the characters' share of the budget in the next step instead. Nested
+// queries (a query that calls another) charge once. Templated on the world's private
+// Impl only so that this file-level class does not have to name it.
+template <class ImplT>
+class QueryCharge
+{
+public:
+    explicit QueryCharge(ImplT* impl) : m_impl(impl), m_outer(t_queryDepth++ == 0), m_start(BudgetClock::now()) {}
+    ~QueryCharge()
+    {
+        --t_queryDepth;
+        if (!m_impl || !m_outer)
+            return;
+        m_impl->queryNs.fetch_add(nsSince(m_start), std::memory_order_relaxed);
+        m_impl->queryCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    QueryCharge(const QueryCharge&)            = delete;
+    QueryCharge& operator=(const QueryCharge&) = delete;
+private:
+    ImplT*                  m_impl;
+    bool                    m_outer;
+    BudgetClock::time_point m_start;
+};
+
+// The same for the bodies a streamed cell adds and removes. Game thread only (every
+// writer of the body tables is), so the nesting depth needs no atomics.
+template <class ImplT>
+class BodyWorkCharge
+{
+public:
+    explicit BodyWorkCharge(ImplT* impl) : m_impl(impl), m_outer(impl && impl->bodyWorkDepth++ == 0), m_start(BudgetClock::now()) {}
+    ~BodyWorkCharge()
+    {
+        if (!m_impl)
+            return;
+        --m_impl->bodyWorkDepth;
+        if (m_outer)
+            m_impl->bodyNs.fetch_add(nsSince(m_start), std::memory_order_relaxed);
+    }
+    BodyWorkCharge(const BodyWorkCharge&)            = delete;
+    BodyWorkCharge& operator=(const BodyWorkCharge&) = delete;
+private:
+    ImplT*                  m_impl;
+    bool                    m_outer;
+    BudgetClock::time_point m_start;
+};
+
+} // namespace
 
 // ─── World space ──────────────────────────────────────────────────────────────
 namespace {
@@ -914,7 +1232,7 @@ JPH::ShapeSettings::ShapeResult buildHeightFieldShape(const TerrainComponent& tc
     // physics build can run before the terrain has ever ticked (initialize() at
     // scene start), and a component this class mutated behind TerrainSystem's
     // back would be a second author of the same data.
-    uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
+    uint32_t res   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     uint32_t cells = res - 1, p = 1;
     while (p < cells) p <<= 1;
     const uint32_t snapped = p + 1;
@@ -1181,14 +1499,157 @@ struct CharacterFilters
 
 // ─── PhysicsWorld ─────────────────────────────────────────────────────────────
 PhysicsWorld::PhysicsWorld()
+    : PhysicsWorld(HE::PhysicsLimits{})
+{
+}
+
+PhysicsWorld::PhysicsWorld(const HE::PhysicsLimits& limits)
 {
     joltEnsureInit();
-    m_impl = std::make_unique<Impl>();
+    HE::PhysicsLimits lim = limits;
+    // A cap of zero is a world that can never hold a contact; Jolt asserts on it.
+    lim.maxBodyPairs          = std::max<uint32_t>(lim.maxBodyPairs, 1u);
+    lim.maxContactConstraints = std::max<uint32_t>(lim.maxContactConstraints, 1u);
+    m_impl = std::make_unique<Impl>(lim);
+    // Once per process: a test run builds hundreds of worlds, and the line is for
+    // the log of a game or an editor session, where there is one.
+    HE_LOG_ONCE(Physics, Info,
+                "Physics world: %d thread(s) per step (%d Jolt worker(s) + the caller) on %u hardware "
+                "thread(s); limits %u body pairs, %u contact constraints; %zu MiB scratch block",
+                m_impl->threads, m_impl->threads - 1, std::thread::hardware_concurrency(),
+                lim.maxBodyPairs, lim.maxContactConstraints, m_impl->tempBlockBytes >> 20);
 }
 
 PhysicsWorld::~PhysicsWorld()
 {
     clear();
+}
+
+void PhysicsWorld::setThreadCount(int threads)
+{
+    if (!m_impl)
+        return;
+    const int resolved = HE::PhysicsTuning::resolveThreads(
+        threads, HE::PhysicsTuning::threadsFromEnv(), std::thread::hardware_concurrency());
+    if (resolved == m_impl->threads)
+        return;   // joining and starting workers is not free, and nothing would change
+
+    // Jolt's SetNumThreads joins the workers and starts new ones; it is only legal
+    // between steps, which is the only place the applications call this from.
+    m_impl->jobSystem.SetNumThreads(resolved - 1);
+    HE_LOG_INFO(Physics, "Physics threads: %d -> %d (%d Jolt worker(s) + the caller)",
+                m_impl->threads, resolved, resolved - 1);
+    m_impl->threads = resolved;
+}
+
+int PhysicsWorld::threadCount() const
+{
+    return m_impl ? m_impl->threads : 1;
+}
+
+PhysicsWorld::StepStats PhysicsWorld::stepStats() const
+{
+    return m_impl ? m_impl->stats : StepStats{};
+}
+
+void PhysicsWorld::setBudget(const HE::PhysicsBudgetConfig& config)
+{
+    if (!m_impl)
+        return;
+    HE::PhysicsBudgetConfig resolved = config;
+    // The environment wins over whatever the application asks for (a benchmark or a
+    // bug report pins it), 0 meaning "no budget".
+    resolved.frameMs = HE::PhysicsBudgetRules::resolveFrameMs(
+        config.frameMs, HE::PhysicsBudgetRules::frameMsFromEnv());
+    m_impl->budget = resolved;
+    m_impl->contactListener.setLimit(resolved.eventsPerPoll);
+    if (resolved.frameMs <= 0.0)
+        m_impl->characterOwed.clear();   // no budget: nobody owes anything
+}
+
+HE::PhysicsBudgetConfig PhysicsWorld::budget() const
+{
+    return m_impl ? m_impl->budget : HE::PhysicsBudgetConfig{};
+}
+
+HE::PhysicsBudgetStats PhysicsWorld::budgetStats() const
+{
+    return m_impl ? m_impl->budgetStats : HE::PhysicsBudgetStats{};
+}
+
+HE::PhysicsBudgetStats PhysicsWorld::lastBudgetStats()
+{
+    std::lock_guard<std::mutex> lock(g_publishedMutex);
+    return g_published;
+}
+
+void PhysicsWorld::setWaterPhysics(bool on)
+{
+    if (!m_impl)
+        return;
+    m_impl->waterOn = on;
+    if (!on)
+    {
+        // Nothing is owed and nothing is wet while the water does nothing.
+        m_impl->waterOwed.clear();
+        m_impl->waterTrack.clear();
+        m_impl->waterTrailAt.clear();
+    }
+}
+
+bool PhysicsWorld::waterPhysics() const
+{
+    return m_impl && m_impl->waterOn;
+}
+
+double PhysicsWorld::simTime() const
+{
+    return m_impl ? m_impl->simTime : 0.0;
+}
+
+float PhysicsWorld::submergedFraction(uint32_t entityId) const
+{
+    if (!m_impl)
+        return 0.0f;
+    const auto it = m_impl->waterTrack.find(entityId);
+    return it != m_impl->waterTrack.end() ? it->second.share : 0.0f;
+}
+
+float PhysicsWorld::waterLift(uint32_t entityId) const
+{
+    if (!m_impl)
+        return 0.0f;
+    const auto it = m_impl->waterTrack.find(entityId);
+    return it != m_impl->waterTrack.end() ? it->second.lift : 0.0f;
+}
+
+std::vector<PhysicsWorld::WaterEvent> PhysicsWorld::pollWaterEvents()
+{
+    if (!m_impl)
+        return {};
+    std::vector<WaterEvent> result;
+    result.swap(m_impl->waterEvents);
+    return result;
+}
+
+HE::water::RippleField& PhysicsWorld::waterRipples()
+{
+    return m_impl->ripples;
+}
+
+const HE::water::RippleField& PhysicsWorld::waterRipples() const
+{
+    return m_impl->ripples;
+}
+
+HE::PhysicsLimits PhysicsWorld::limits() const
+{
+    return m_impl ? m_impl->limits : HE::PhysicsLimits{};
+}
+
+std::size_t PhysicsWorld::tempBytes() const
+{
+    return m_impl ? m_impl->tempBlockBytes : 0;
 }
 
 void PhysicsWorld::setContentManager(ContentManager* content)
@@ -1218,16 +1679,21 @@ void PhysicsWorld::setCollisionLayers(const HE::CollisionLayerConfig& config)
     // Statics are skipped by Jolt itself, and this runs once per matrix edit
     // (the editor on a change, GameApplication before a single body exists), so
     // it never touches the frame loop.
+    //
+    // Not the held ones: a body the region hold took out of the broad phase must
+    // not be woken (Jolt would put it on its active list, outside the tree). It
+    // is woken when the hold ends, and by then the matrix is the new one.
     std::vector<JPH::BodyID> ids;
     ids.reserve(m_impl->entityToBody.size());
     for (const auto& [entityId, bodyId] : m_impl->entityToBody)
-        ids.push_back(bodyId);
+        if (!m_impl->heldBodies.count(entityId))
+            ids.push_back(bodyId);
     if (!ids.empty())
         m_impl->physicsSystem.GetBodyInterface().ActivateBodies(
             ids.data(), static_cast<int>(ids.size()));
 }
 
-bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
+bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId, BodyBatch* batch)
 {
     auto&        reg    = world.registry();
     const Entity entity = static_cast<Entity>(entityId);
@@ -1329,8 +1795,18 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
     // it is invisible to all of them, silently.
     bcs.mUserData = static_cast<uint64_t>(entityId);
 
-    const JPH::BodyID bodyId =
-        m_impl->physicsSystem.GetBodyInterface().CreateAndAddBody(bcs, activation);
+    // In a charge the body is only CREATED here and goes into the broad phase with
+    // the others (addEntities), activated then; a lone build adds it at once.
+    auto&       bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    JPH::BodyID bodyId;
+    if (batch)
+    {
+        const JPH::Body* created = bodyInterface.CreateBody(bcs);
+        if (created)
+            bodyId = created->GetID();
+    }
+    else
+        bodyId = bodyInterface.CreateAndAddBody(bcs, activation);
     if (bodyId.IsInvalid())
     {
         HE_LOG_ERROR(Physics, "Entity %u: body creation failed — the %u-body limit is "
@@ -1339,7 +1815,11 @@ bool PhysicsWorld::buildBodyFor(HorizonWorld& world, uint32_t entityId)
         return false;
     }
 
+    if (batch)
+        batch->ids.push_back(bodyId);
     m_impl->entityToBody[entityId] = bodyId;
+    if (motionType == JPH::EMotionType::Dynamic)
+        m_impl->dynamicBodies[entityId] = bodyId;
     return true;
 }
 
@@ -1634,6 +2114,14 @@ bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
         return false;
     }
 
+    // Not to a body the region hold has out of the broad phase (see applyRegionHold):
+    // it waits, as a joint waits for a partner that is away, and the hold's end builds it.
+    if (m_impl->heldBodies.count(entityId) || m_impl->heldBodies.count(targetId))
+    {
+        m_impl->queuePatientJoint(entityId);
+        return false;
+    }
+
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     const JPH::EMotionType motionA = bodyInterface.GetMotionType(itA->second);
     const JPH::EMotionType motionB = bodyInterface.GetMotionType(itB->second);
@@ -1807,15 +2295,18 @@ bool PhysicsWorld::buildJointFor(HorizonWorld& world, uint32_t entityId)
     m_impl->setJointedPairCollides(itA->second, itB->second, jc->collideConnected);
 
     // A settled crate does not feel a rope that was tied to it while it slept:
-    // Jolt only solves constraints between active bodies.
-    if (motionA != JPH::EMotionType::Static) bodyInterface.ActivateBody(itA->second);
-    if (motionB != JPH::EMotionType::Static) bodyInterface.ActivateBody(itB->second);
+    // Jolt only solves constraints between active bodies. (Not a held one: it is
+    // outside the broad phase and is woken by the hold's end.)
+    if (motionA != JPH::EMotionType::Static && !m_impl->heldBodies.count(entityId))
+        bodyInterface.ActivateBody(itA->second);
+    if (motionB != JPH::EMotionType::Static && !m_impl->heldBodies.count(targetId))
+        bodyInterface.ActivateBody(itB->second);
     return true;
 }
 
-void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
+void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, JointFate fate)
 {
-    if (!requeue)
+    if (fate == JointFate::Drop)
         m_impl->unqueueJoint(entityId);
     if (m_impl->joints.empty())
         return;
@@ -1841,8 +2332,16 @@ void PhysicsWorld::destroyJointsInvolving(uint32_t entityId, bool requeue)
         // Every owner, including this entity's own joint: it is a rebuild for
         // that one too. A permanent removal instead lets the entries fall off
         // the list on their own, which is where the give-up message comes from.
-        if (requeue)
+        //
+        // A WAIT is a rebuild that is not due yet: the entity belongs to a streamed
+        // cell and comes back with it. Every owner is queued as one that waits, the
+        // surviving ones above all (a door of the base, hinged to a frame in the
+        // cell); the ones that were in the cell die with it, and the next retry
+        // drops their entries because the entity is gone.
+        if (fate == JointFate::Rebuild)
             m_impl->queueJoint(owner);
+        else if (fate == JointFate::Wait)
+            m_impl->queuePatientJoint(owner);
     }
 }
 
@@ -1853,13 +2352,14 @@ void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
 
     // A snapshot, because buildJointFor removes its own entry on success and on
     // a refusal — both of which would invalidate an iterator over the list.
-    std::vector<uint32_t> ids;
+    struct Waiting { uint32_t id; bool patient; };
+    std::vector<Waiting> ids;
     ids.reserve(m_impl->pendingJoints.size());
     for (const auto& p : m_impl->pendingJoints)
-        ids.push_back(p.entityId);
+        ids.push_back({ p.entityId, p.patient });
 
     bool progress = false;
-    for (const uint32_t id : ids)
+    for (const auto& [id, patient] : ids)
     {
         const Entity entity = static_cast<Entity>(id);
         if (!world.registry().valid(entity) || !world.registry().all_of<JointComponent>(entity))
@@ -1867,18 +2367,37 @@ void PhysicsWorld::resolvePendingJoints(HorizonWorld& world)
             m_impl->unqueueJoint(id);   // nothing left to build — not a failure
             continue;
         }
+        if (patient)
+        {
+            // The partner of a joint that waits for a cell is not late, it is
+            // away; asking buildJointFor about it every pass would only repeat its
+            // complaint about a body that is not there. Look first, in silence.
+            const auto& jc = world.registry().get<JointComponent>(entity);
+            if (jc.target != HE::UUID{})
+            {
+                const Entity partner = world.findByEntityId(jc.target);
+                if (partner == entt::null
+                    || !m_impl->entityToBody.count(id)
+                    || !m_impl->entityToBody.count(static_cast<uint32_t>(partner))
+                    || m_impl->heldBodies.count(id)
+                    || m_impl->heldBodies.count(static_cast<uint32_t>(partner)))
+                    continue;
+            }
+        }
         if (buildJointFor(world, id))
             progress = true;
     }
 
     // A chain resolves one link per pass, so the entries at the far end are
     // patient rather than broken: a pass that built ANYTHING forgives all of
-    // them. Only a pass in which nothing moved counts against the survivors.
+    // them. Only a pass in which nothing moved counts against the survivors —
+    // the ones that are not waiting for a cell, that is: those are not counted.
     for (auto& p : m_impl->pendingJoints)
-        p.attempts = progress ? 0 : p.attempts + 1;
+        if (!p.patient)
+            p.attempts = progress ? 0 : p.attempts + 1;
 
     const auto giveUp = [this](const Impl::PendingJoint& p) {
-        if (p.attempts < Impl::kMaxJointAttempts)
+        if (p.patient || p.attempts < Impl::kMaxJointAttempts)
             return false;
         // Said once, at the point it stops being tried. Anything else would
         // either repeat every spawn or say nothing at all, and "my joint does
@@ -1952,14 +2471,29 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     // which of the two comes first. Half a chain would build and the other half
     // would not, differently on every run.
     //
-    // Nothing goes on the pending list here. Every body a scene HAS was built in
-    // phase one, so a joint that cannot be built now names something that has no
-    // body at all — buildJointFor says so and drops it, rather than leaving an
-    // entry that would resolve on the first unrelated spawn.
+    // Nothing goes on the pending list here (but for the one case below). Every
+    // body a scene HAS was built in phase one, so a joint that cannot be built now
+    // names something that has no body at all — buildJointFor says so and drops
+    // it, rather than leaving an entry that would resolve on the first unrelated
+    // spawn.
     std::size_t builtJoints = 0;
     for (uint32_t entityId : jointed)
         if (buildJointFor(world, entityId))
             ++builtJoints;
+
+    // The one case that does go on the list: a partner that is not in the world at
+    // all. With streamed cells that is no mistake, the partner may be in a cell
+    // that has not been loaded yet, and the joint has to be there when it is. (A
+    // partner that exists and has no body is the other thing, said and dropped
+    // above; so is every refusal.) These wait for the partner as long as it takes.
+    for (uint32_t entityId : jointed)
+    {
+        if (m_impl->joints.count(entityId))
+            continue;
+        const auto* jc = reg.try_get<JointComponent>(static_cast<Entity>(entityId));
+        if (jc && jc->target != HE::UUID{} && world.findByEntityId(jc->target) == entt::null)
+            m_impl->queuePatientJoint(entityId);
+    }
 
     m_impl->physicsSystem.OptimizeBroadPhase();
     m_impl->initialized = true;
@@ -1977,6 +2511,7 @@ void PhysicsWorld::initialize(HorizonWorld& world)
 
 bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl)
         return false;
 
@@ -1995,7 +2530,7 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
     // is not called here: a new body is going up in the same breath, so the
     // chain this entity was part of has to survive the swap. resolvePendingJoints
     // below rebuilds them.
-    removeEntityImpl(entityId, /*requeueJoints=*/true);
+    removeEntityImpl(entityId, JointFate::Rebuild);
 
     bool built = buildBodyFor(world, entityId);
     built      = buildCharacterFor(world, entityId) || built;
@@ -2024,6 +2559,80 @@ bool PhysicsWorld::addEntity(HorizonWorld& world, uint32_t entityId)
                         "Entity %u was given a physics body before the world was initialised — "
                         "it will not simulate, and initialize() discards it", entityId);
     return built;
+}
+
+int PhysicsWorld::addEntities(HorizonWorld& world, const std::vector<uint32_t>& entityIds)
+{
+    BodyWorkCharge bodyCharge(m_impl.get());
+    if (!m_impl || entityIds.empty())
+        return 0;
+
+    m_impl->world = &world;
+    auto& reg     = world.registry();
+
+    // Phase one: every body is CREATED (it owns its slot in Jolt's body table and
+    // is in entityToBody), none is in the broad phase yet. Everything that does
+    // not depend on the other entities of the charge happens here, in order, with
+    // the same builders addEntity uses.
+    BodyBatch batch;
+    batch.ids.reserve(entityIds.size());
+    std::unordered_set<uint32_t> seen;
+    seen.reserve(entityIds.size());
+    int built = 0;
+    for (const uint32_t entityId : entityIds)
+    {
+        const Entity entity = static_cast<Entity>(entityId);
+        if (!reg.valid(entity) || !seen.insert(entityId).second)
+            continue;
+
+        // Replace-if-present, as addEntity. The teardown is only run when there is
+        // something to tear down: a charge of fresh entities (the normal case, a
+        // slice of a cell) would otherwise pay a walk over every joint in the
+        // world per entity, to find that none names a body that does not exist.
+        if (hasPhysics(entityId))
+            removeEntityImpl(entityId, JointFate::Rebuild);
+
+        bool one = buildBodyFor(world, entityId, &batch);
+        one      = buildCharacterFor(world, entityId) || one;
+        if (!one)
+            one = buildTerrainBodyFor(world, entityId);
+        if (!one)
+            continue;
+        ++built;
+        if (reg.all_of<JointComponent>(entity))
+            m_impl->queueJoint(entityId);
+    }
+
+    // Phase two: the bodies go into the broad phase together. Jolt sorts them by
+    // layer and builds one subtree per layer to merge into the live one, which is
+    // what the single adds of addEntity cannot do, and activates the moving ones
+    // (a static body is not activated, whatever the mode says).
+    if (!batch.ids.empty())
+    {
+        auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+        const int count = static_cast<int>(batch.ids.size());
+        const JPH::BodyInterface::AddState state =
+            bodyInterface.AddBodiesPrepare(batch.ids.data(), count);
+        bodyInterface.AddBodiesFinalize(batch.ids.data(), count, state, JPH::EActivation::Activate);
+    }
+
+    // Phase three, ONCE for the charge: a body of the charge may be the missing
+    // half of a joint of the base or of another entity of the charge (they are all
+    // in now), and the entries that wait for a cell are looked at.
+    if (built > 0)
+    {
+        resolvePendingJoints(world);
+        if (!m_impl->initialized)
+            HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                            "%d entities were given physics bodies before the world was initialised — "
+                            "they will not simulate, and initialize() discards them", built);
+    }
+    return built;
+}
+
+std::size_t PhysicsWorld::bodyCount() const
+{
+    return m_impl ? m_impl->entityToBody.size() : 0;
 }
 
 int PhysicsWorld::addEntityTree(HorizonWorld& world, uint32_t rootEntityId)
@@ -2062,25 +2671,46 @@ void PhysicsWorld::removeEntity(uint32_t entityId)
     // the two reaps in step(), the zone unloads in both applications, entity.destroy
     // from a script. None of them is going to put the body back, so a joint aimed at
     // this entity must not go on the pending list waiting for one.
-    removeEntityImpl(entityId, /*requeueJoints=*/false);
+    removeEntityImpl(entityId, JointFate::Drop);
 }
 
-void PhysicsWorld::removeEntityImpl(uint32_t entityId, bool requeueJoints)
+void PhysicsWorld::removeEntityImpl(uint32_t entityId, JointFate fate)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl)
         return;
-    destroyBodyFor(entityId, requeueJoints);
+    destroyBodyFor(entityId, fate);
     // A CharacterVirtual has no Jolt body of its own (mInnerBodyShape is never
     // set), so it appears in no raycast, overlap or contact — erasing the owning
     // pointer IS its complete removal.
     m_impl->entityToCharacter.erase(entityId);
     m_impl->characterLayer.erase(entityId);
+    m_impl->heldCharacters.erase(entityId);
+    m_impl->characterOwed.erase(entityId);
+    // What the water remembers of a body goes with it (its body is gone: no permission
+    // to give back).
+    m_impl->waterOwed.erase(entityId);
+    m_impl->waterTrack.erase(entityId);
+    m_impl->waterNoSleep.erase(entityId);
+    m_impl->waterTrailAt.erase(entityId);
+    // …and so do the events that nobody has asked for yet: a script that polls later must
+    // not be handed an entity that is gone (the same line pollCollisionExit draws).
+    if (!m_impl->waterEvents.empty())
+        m_impl->waterEvents.erase(
+            std::remove_if(m_impl->waterEvents.begin(), m_impl->waterEvents.end(),
+                           [entityId](const WaterEvent& e) { return e.entity == entityId; }),
+            m_impl->waterEvents.end());
 }
 
-int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
+int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints)
 {
+    BodyWorkCharge bodyCharge(m_impl.get());
     if (!m_impl)
         return 0;
+
+    // The streamed cell's own removal keeps the joints it cut for the return of
+    // the entity; every other one is permanent (see removeEntity).
+    const JointFate fate = requeueJoints ? JointFate::Wait : JointFate::Drop;
 
     auto&        reg  = world.registry();
     const Entity root = static_cast<Entity>(rootEntityId);
@@ -2089,7 +2719,7 @@ int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
         // The handle is already gone, so the hierarchy cannot be walked. Remove
         // what we can name and let step()'s reap collect the rest.
         const bool had = hasPhysics(rootEntityId);
-        removeEntity(rootEntityId);
+        removeEntityImpl(rootEntityId, fate);
         return had ? 1 : 0;
     }
 
@@ -2104,7 +2734,7 @@ int PhysicsWorld::removeEntityTree(HorizonWorld& world, uint32_t rootEntityId)
         const uint32_t id = static_cast<uint32_t>(current);
         if (hasPhysics(id))
         {
-            removeEntity(id);
+            removeEntityImpl(id, fate);
             ++removed;
         }
         if (const auto* hierarchy = reg.try_get<HierarchyComponent>(current))
@@ -2278,9 +2908,11 @@ bool PhysicsWorld::setJointMotor(HorizonWorld& world, uint32_t entityA,
     // moment both its bodies are asleep, so a door told to open while nothing
     // was moving would simply stay shut.
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
-    if (bodyInterface.GetMotionType(it->second.bodyA) != JPH::EMotionType::Static)
+    if (bodyInterface.GetMotionType(it->second.bodyA) != JPH::EMotionType::Static
+        && !m_impl->heldBodies.count(entityA))
         bodyInterface.ActivateBody(it->second.bodyA);
-    if (bodyInterface.GetMotionType(it->second.bodyB) != JPH::EMotionType::Static)
+    if (bodyInterface.GetMotionType(it->second.bodyB) != JPH::EMotionType::Static
+        && !m_impl->heldBodies.count(it->second.partner))
         bodyInterface.ActivateBody(it->second.bodyB);
     return true;
 }
@@ -2384,7 +3016,7 @@ void PhysicsWorld::breakOverloadedJoints(HorizonWorld& world, float dt)
     }
 }
 
-void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
+void PhysicsWorld::destroyBodyFor(uint32_t entityId, JointFate fate)
 {
     // FIRST, before the body goes anywhere. A Jolt constraint keeps raw Body
     // pointers, so a constraint left behind by a destroyed body reads freed
@@ -2398,17 +3030,22 @@ void PhysicsWorld::destroyBodyFor(uint32_t entityId, bool requeueJoints)
     // for a body nobody was going to build. It stayed on the list, was retried
     // by every unrelated spawn after it, and gave up eight passes later with a
     // warning about a joint that had nothing wrong with it.
-    destroyJointsInvolving(entityId, requeueJoints);
+    destroyJointsInvolving(entityId, fate);
 
     const auto it = m_impl->entityToBody.find(entityId);
     if (it == m_impl->entityToBody.end())
         return;
 
     // Remove THEN destroy — Jolt's own order, and the one clear() has always used.
+    // A body the region hold already took out of the broad phase is not in it to be
+    // removed: Jolt's RemoveBody checks and does nothing, and DestroyBody is the
+    // same for a body that was never in.
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     bodyInterface.RemoveBody(it->second);
     bodyInterface.DestroyBody(it->second);
     m_impl->entityToBody.erase(it);
+    m_impl->dynamicBodies.erase(entityId);
+    m_impl->heldBodies.erase(entityId);
 
     // And forget its contacts. Jolt fires OnContactRemoved for a destroyed body's
     // cached contacts during the NEXT Update(); without this the listener would
@@ -2602,8 +3239,54 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
     m_impl->world = &world;
 
-    m_impl->physicsSystem.Update(dt, 1,
-        &m_impl->tempAllocator, &m_impl->jobSystem);
+    // Before the simulation, not after: a body whose floor is gone must be out of
+    // the broad phase when Update runs, or it falls for one step before anything
+    // notices, and a body whose floor is back must be in it.
+    applyRegionHold();
+
+    // The water: buoyancy, drag and current for the bodies in it, as an impulse for
+    // the step that is about to run. Here and nowhere else — this is the window in
+    // which no Jolt worker is inside a body (Update() has not started) and every
+    // writer is this thread. A scene with no water leaves it after one test.
+    // The rings on the water age first, by this step's dt: the ones applyWater raises
+    // next start at age 0, so the frame that follows draws them at their full size.
+    m_impl->ripples.advance(dt);
+    const double buoyancyMs = applyWater(world, dt);
+    // The waves' clock moves on after the water has used it: a step's impulse is for
+    // the surface as it stood at the start of that step.
+    m_impl->simTime += static_cast<double>(dt);
+
+    // One collision step per 1/60 s at most, which Jolt asks for: the default 60 Hz
+    // (and anything from 45 Hz up) is still ONE, a 30 Hz project gets two. See
+    // PhysicsTuning::collisionStepsFor for why it rounds.
+    const int collisionSteps = HE::PhysicsTuning::collisionStepsFor(dt);
+    const JPH::EPhysicsUpdateError updateErrors = m_impl->physicsSystem.Update(
+        dt, collisionSteps, &m_impl->tempAllocator, &m_impl->jobSystem);
+
+    // The value Update() hands back used to be dropped on the floor. A non-zero one
+    // is Jolt telling us it ran out of room and LEFT CONTACTS OUT of this step (bodies
+    // sink into each other, stacks lean), and it does so again in the next step.
+    {
+        StepStats& stats = m_impl->stats;
+        ++stats.steps;
+        stats.collisionSteps = collisionSteps;
+        stats.lastErrors     = static_cast<uint32_t>(updateErrors);
+        if (updateErrors != JPH::EPhysicsUpdateError::None)
+        {
+            ++stats.saturatedSteps;
+            HE_LOG_THROTTLE(Physics, Warning, 5.0,
+                            "Jolt dropped contacts in this step (%s%s%s): a collision cache is full. "
+                            "%zu bodies; limits %u body pairs / %u contact constraints; "
+                            "%llu of %llu steps so far. Raise HE::PhysicsLimits for a scene this dense.",
+                            (stats.lastErrors & 1u) ? "manifold cache " : "",
+                            (stats.lastErrors & 2u) ? "body-pair cache " : "",
+                            (stats.lastErrors & 4u) ? "contact constraints " : "",
+                            m_impl->entityToBody.size(),
+                            m_impl->limits.maxBodyPairs, m_impl->limits.maxContactConstraints,
+                            static_cast<unsigned long long>(stats.saturatedSteps),
+                            static_cast<unsigned long long>(stats.steps));
+        }
+    }
 
     // Immediately after Update and before anything else: a constraint's
     // accumulated impulse describes the step that just ran, and the next call
@@ -2612,22 +3295,27 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
     auto& reg           = world.registry();
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    // What the write-back reads of a body (motion type, position, rotation) goes
+    // through Jolt's no-lock lookup, once per body instead of three locked calls.
+    // Update() has returned, so no Jolt worker is inside a body, and everything
+    // that writes one is a call on this thread; the answers are the ones the
+    // locking BodyInterface would give, minus a mutex round trip per read
+    // (Thema 178: those were a fifth of a 20 000-body step).
+    const JPH::BodyLockInterfaceNoLock& bodyLookup = m_impl->physicsSystem.GetBodyLockInterfaceNoLock();
 
     // Snapshot the ids before touching anything. The write-back below runs game
     // code's contact handlers indirectly and may itself remove entries (the reap),
-    // and either would rehash the map out from under a range-for.
+    // and either would rehash the map out from under a range-for. The body id is
+    // kept with the entity: a body removed since the snapshot fails the lookup
+    // below (Jolt checks the id's sequence number), which is the same "removed
+    // since the snapshot was taken" answer a second find() gave.
     m_impl->stepBodies.clear();
     m_impl->stepBodies.reserve(m_impl->entityToBody.size());
     for (const auto& entry : m_impl->entityToBody)
-        m_impl->stepBodies.push_back(entry.first);
+        m_impl->stepBodies.emplace_back(entry.first, entry.second);
 
-    for (const uint32_t entityId : m_impl->stepBodies)
+    for (const auto& [entityId, bodyId] : m_impl->stepBodies)
     {
-        auto bodyIt = m_impl->entityToBody.find(entityId);
-        if (bodyIt == m_impl->entityToBody.end())
-            continue;   // removed since the snapshot was taken
-        const JPH::BodyID bodyId = bodyIt->second;
-
         // The reap, and it has to come BEFORE the static-body skip: nothing
         // notifies this class when an entity is deleted, and a static body whose
         // entity is gone would otherwise never be looked at again — an invisible
@@ -2639,8 +3327,18 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
             continue;
         }
 
+        // Removed since the snapshot was taken (or never valid): nothing to read.
+        const JPH::Body* body = bodyLookup.TryGetBody(bodyId);
+        if (!body)
+            continue;
+
         // Only write back non-static bodies
-        if (bodyInterface.GetMotionType(bodyId) == JPH::EMotionType::Static)
+        if (body->GetMotionType() == JPH::EMotionType::Static)
+            continue;
+
+        // A held body did not move: its pose in Jolt is the one the transform was
+        // given last, and writing it back would only repeat that.
+        if (!m_impl->heldBodies.empty() && m_impl->heldBodies.count(entityId))
             continue;
 
         // An entity that also has a character controller belongs to the character
@@ -2670,8 +3368,8 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         // when this was written — but a convex hull's centre of mass sits
         // wherever the geometry puts it, and reading that would shift the mesh
         // by the offset on the very first step and every step after.
-        JPH::RVec3 pos = bodyInterface.GetPosition(bodyId);
-        JPH::Quat  rot = bodyInterface.GetRotation(bodyId);
+        JPH::RVec3 pos = body->GetPosition();
+        JPH::Quat  rot = body->GetRotation();
 
         // A body that goes non-finite (degenerate shape, absurd mass, a huge
         // impulse from a script) writes NaN into the transform, and from there
@@ -2715,6 +3413,42 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     for (const auto& entry : m_impl->entityToCharacter)
         m_impl->stepCharacters.push_back(entry.first);
 
+    // The time budget (HE::PhysicsBudgetConfig). Scene queries and the body work of
+    // streaming have been charging since the previous step; what is left is the
+    // characters'. With no budget (0) none of this runs and every character is
+    // stepped exactly as before.
+    const auto msSince = [](BudgetClock::time_point from)
+    {
+        return std::chrono::duration<double, std::milli>(BudgetClock::now() - from).count();
+    };
+    const double budgetMs   = m_impl->budget.frameMs;
+    const bool   budgeted   = budgetMs > 0.0;
+    const double queriesMs  = static_cast<double>(m_impl->queryNs.exchange(0)) * 1.0e-6;
+    const double bodiesMs   = static_cast<double>(m_impl->bodyNs.exchange(0)) * 1.0e-6;
+    const uint32_t queryCount = m_impl->queryCount.exchange(0);
+    // The water's time counts against the budget like any other work around Update():
+    // what it took this step comes off the characters' share.
+    const double chargedMs  = queriesMs + bodiesMs + buoyancyMs;
+    const auto   charactersFrom = BudgetClock::now();
+    uint32_t     stepped = 0, deferred = 0;
+
+    if (budgeted)
+    {
+        // The ones that were put off go first, longest wait first (entity id breaks a
+        // tie, so the order never depends on the hash map): every character is stepped
+        // within ceil(characters / stepped per step) steps whatever the budget.
+        auto& owedOf = m_impl->characterOwed;
+        std::stable_sort(m_impl->stepCharacters.begin(), m_impl->stepCharacters.end(),
+                         [&owedOf](uint32_t a, uint32_t b)
+                         {
+                             const auto ia = owedOf.find(a), ib = owedOf.find(b);
+                             const float oa = ia != owedOf.end() ? ia->second : 0.0f;
+                             const float ob = ib != owedOf.end() ? ib->second : 0.0f;
+                             if (oa != ob) return oa > ob;
+                             return oa > 0.0f && a < b;
+                         });
+    }
+
     for (const uint32_t entityId : m_impl->stepCharacters)
     {
         const auto characterIt = m_impl->entityToCharacter.find(entityId);
@@ -2734,12 +3468,55 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         if (!cc || !transform)
             continue;
 
+        // The region hold, for a character: it has no Jolt body to take out of the
+        // broad phase, so it is simply not stepped. No gravity, no movement, the
+        // transform and the proxy body stay where they are — standing at the spot
+        // where the floor will be, instead of falling through the place it is not
+        // yet. (A spawn or a teleport into a cell that is still loading is the case.)
+        // Not asked at all while the probe says nothing can be held and nothing is.
+        if (m_impl->holdNeeded())
+        {
+            const JPH::RVec3 at = character->GetPosition();
+            if (m_impl->holdTest(glm::vec3(static_cast<float>(at.GetX()),
+                                           static_cast<float>(at.GetY()),
+                                           static_cast<float>(at.GetZ()))))
+            {
+                m_impl->heldCharacters.insert(entityId);
+                continue;
+            }
+            m_impl->heldCharacters.erase(entityId);
+        }
+
+        // Over the budget: this character waits, and is stepped later with the time it
+        // missed (cdt below), so it covers the same distance and falls the same way,
+        // only later. The first kGuaranteedCharacters are always stepped, so a budget
+        // smaller than one ExtendedUpdate still makes progress and a small scene never
+        // sees a deferral; the ones that waited longest are first in the next step
+        // (sorted above). What a character may owe is
+        // capped (PhysicsBudgetRules::kMaxOwedSteps): a crowd the budget can never
+        // keep up with slows down instead of stepping with an enormous dt.
+        float cdt = dt;
+        if (budgeted)
+        {
+            float& owed = m_impl->characterOwed[entityId];
+            if (stepped >= HE::PhysicsBudgetRules::kGuaranteedCharacters &&
+                chargedMs + msSince(charactersFrom) >= budgetMs)
+            {
+                owed = HE::PhysicsBudgetRules::carryOwed(owed, dt);
+                ++deferred;
+                continue;
+            }
+            cdt  = HE::PhysicsBudgetRules::steppedDt(dt, owed);
+            owed = 0.0f;
+        }
+        ++stepped;
+
         // Use Jolt character's current velocity so setCharacterVelocity() takes effect.
         // cc->velocity is an output field — game code drives velocity via setCharacterVelocity.
         float grav = cc->gravity;
         JPH::Vec3 vel = character->GetLinearVelocity();
         if (!character->IsSupported())
-            vel.SetY(vel.GetY() - grav * dt);
+            vel.SetY(vel.GetY() - grav * cdt);
         character->SetLinearVelocity(vel);
 
         JPH::Vec3 gravity(0.0f, -grav, 0.0f);
@@ -2764,7 +3541,7 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         const CharacterFilters filters(m_impl->ovbpFilter, m_impl->ooFilter,
                                        m_impl->characterLayerOf(entityId));
 
-        character->ExtendedUpdate(dt, gravity, euSettings,
+        character->ExtendedUpdate(cdt, gravity, euSettings,
             filters.bp, filters.ol, selfFilter, filters.shape,
             m_impl->tempAllocator);
 
@@ -2788,7 +3565,7 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
 
         // The coyote credit, in SIMULATED time: it accrues per fixed step, so it
         // measures the same grace whatever the frame rate. Landing restores it.
-        cc->airTime = cc->isGrounded ? 0.0f : cc->airTime + dt;
+        cc->airTime = cc->isGrounded ? 0.0f : cc->airTime + cdt;
 
         // ── Drag the collision proxy along ───────────────────────────────────
         // A character usually carries BOTH a CharacterVirtual (what moves) and a
@@ -2814,9 +3591,536 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
             const glm::quat q = worldPoseOf(world, entity).rotation;
             bodyInterface.MoveKinematic(bodyIt->second,
                 JPH::RVec3(worldPos.x, worldPos.y, worldPos.z),
-                JPH::Quat(q.x, q.y, q.z, q.w), dt);
+                JPH::Quat(q.x, q.y, q.z, q.w), cdt);
         }
     }
+
+    // ── What the budget did, for the profiler (PhysicsWorld::budgetStats) ───────
+    {
+        HE::PhysicsBudgetStats& bs = m_impl->budgetStats;
+        const double charactersMs = msSince(charactersFrom);
+        bs.budgetMs           = budgeted ? budgetMs : 0.0;
+        bs.charactersMs       = charactersMs;
+        bs.queriesMs          = queriesMs;
+        bs.bodiesMs           = bodiesMs;
+        bs.buoyancyMs         = buoyancyMs;
+        bs.wetBodies          = m_impl->waterWet;
+        bs.buoyancyDeferred   = m_impl->waterDeferred;
+        bs.usedMs             = chargedMs + charactersMs;
+        bs.queries            = queryCount;
+        bs.characters         = static_cast<uint32_t>(m_impl->stepCharacters.size());
+        bs.charactersStepped  = stepped;
+        bs.charactersDeferred = deferred;
+        bs.eventsBacklog      = m_impl->contactListener.backlog();
+        bs.eventsDeferred     = m_impl->contactListener.deferredTotal();
+        uint32_t waited = 0;
+        for (const auto& [id, owed] : m_impl->characterOwed)
+            waited = std::max(waited, HE::PhysicsBudgetRules::waitedSteps(owed, dt));
+        bs.maxOwedSteps = waited;
+        if (budgeted)
+        {
+            ++bs.steps;
+            bs.deferredCharacterSteps += deferred;
+            if (deferred > 0 || bs.usedMs >= budgetMs)
+                ++bs.overBudgetSteps;
+        }
+        publishBudgetStats(bs);
+    }
+}
+
+// ─── Region hold ──────────────────────────────────────────────────────────────
+
+void PhysicsWorld::setRegionHold(HoldTest held, HoldProbe mayHold)
+{
+    if (!m_impl)
+        return;
+    m_impl->holdTest  = std::move(held);
+    m_impl->holdProbe = m_impl->holdTest ? std::move(mayHold) : HoldProbe{};
+    if (m_impl->holdTest)
+        return;
+
+    // No test any more: nothing is held. Every body that was out goes back in, the
+    // way a hold that ends does it (applyRegionHold), so that taking the test away
+    // is never what leaves a crate floating outside the world.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const bool any = !m_impl->heldBodies.empty();
+    for (const uint32_t entityId : m_impl->heldBodies)
+        if (const auto it = m_impl->entityToBody.find(entityId); it != m_impl->entityToBody.end())
+            bodyInterface.AddBody(it->second, JPH::EActivation::Activate);
+    m_impl->heldBodies.clear();
+    m_impl->heldCharacters.clear();
+    if (any && m_impl->world)
+        resolvePendingJoints(*m_impl->world);   // the joints that waited for them
+}
+
+std::size_t PhysicsWorld::heldCount() const
+{
+    return m_impl ? m_impl->heldBodies.size() + m_impl->heldCharacters.size() : 0;
+}
+
+void PhysicsWorld::applyRegionHold()
+{
+    // Nothing to ask while the probe says no position can be held and no body is
+    // (a world that streams no cells: the test would answer "no" tens of thousands
+    // of times a second for nothing).
+    if (!m_impl->holdNeeded())
+        return;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    // Position reads only, so the no-lock lookup (this runs on the stepping thread,
+    // before Update, with no Jolt worker inside a body); taking a body in or out of
+    // the broad phase below stays on the locking interface.
+    const JPH::BodyLockInterfaceNoLock& bodyLookup = m_impl->physicsSystem.GetBodyLockInterfaceNoLock();
+    const bool anyCharacter = !m_impl->entityToCharacter.empty();
+    bool       released     = false;
+    for (const auto& [entityId, bodyId] : m_impl->dynamicBodies)
+    {
+        // The proxy body of a character is kinematic and never here; a dynamic body
+        // on an entity that also has a character is an odd authoring, and the
+        // character loop is what decides about that entity.
+        if (anyCharacter && m_impl->entityToCharacter.count(entityId))
+            continue;
+        // dynamicBodies is kept in step with entityToBody (the body id is recorded
+        // with the entity and goes with it), so the entity lookup that used to be
+        // here had nothing to find that the map does not already hold.
+        const JPH::Body* body = bodyLookup.TryGetBody(bodyId);
+        if (!body)
+            continue;
+
+        const JPH::RVec3 at = body->GetPosition();
+        const bool wanted = m_impl->holdTest(glm::vec3(static_cast<float>(at.GetX()),
+                                                       static_cast<float>(at.GetY()),
+                                                       static_cast<float>(at.GetZ())));
+        const bool held = m_impl->heldBodies.count(entityId) != 0;
+        if (wanted == held)
+            continue;
+
+        if (wanted)
+        {
+            // Its joints go first, and wait for it. A constraint to a body that is
+            // not in the broad phase is not harmless: when the other end is active,
+            // Jolt activates this one in the middle of the step (TwoBodyConstraint::
+            // BuildIslands, which does not ask whether it is in the tree), and a body
+            // that is on the active list and not in the tree is a crash. The free end
+            // is on its own meanwhile; the joint is built again when the hold ends.
+            destroyJointsInvolving(entityId, JointFate::Wait);
+            // Out of the broad phase, nothing else: the Body object keeps its pose,
+            // its velocity and its shape, which is what lets it carry on as it was.
+            // Jolt deactivates it on the way out.
+            bodyInterface.RemoveBody(bodyId);
+            m_impl->heldBodies.insert(entityId);
+        }
+        else
+        {
+            // Back in, awake: whatever it rested on may be a different floor now,
+            // and a body that went to sleep before the hold will find out within a
+            // few steps.
+            bodyInterface.AddBody(bodyId, JPH::EActivation::Activate);
+            m_impl->heldBodies.erase(entityId);
+            released = true;
+        }
+    }
+
+    // The joints that waited for a body to be let go come back now that it is in.
+    if (released && m_impl->world)
+        resolvePendingJoints(*m_impl->world);
+}
+
+// ─── Water ────────────────────────────────────────────────────────────────────
+//
+// WHEN: from step(), after applyRegionHold and before physicsSystem.Update, on the
+// stepping thread. That is the one window in which no Jolt worker is inside a body and
+// every writer is a call on this thread, so the bodies are read through Jolt's own
+// locks (BodyLockWrite, uncontended) and nothing else touches them. Nothing outside
+// step() can reach this function: it is private, and the public water calls
+// (setWaterPhysics, simTime, submergedFraction) only touch this class's own state.
+//
+// WHO: the ACTIVE, DYNAMIC, non-sensor bodies whose centre of mass stands over water.
+//   • active only: a body asleep on the lake bed would be woken by every impulse and
+//     never rest again, and one that rests has nothing to do. (A body that sleeps
+//     floating on perfectly calm water stays asleep until something touches it.)
+//   • dynamic only: a kinematic body (a character's proxy, a platform) is moved by
+//     code, not by the water; a sensor is a volume, not a thing.
+//   • RigidBodyComponent::affectedByWater, and not a character (its own movement path).
+//   • not a held body (the region hold took it out of the broad phase, so it is not
+//     found).
+//
+// HOW MANY: not more than HE::PhysicsBudgetConfig::waterBodiesPerStep per step (a
+// count, so the same on every machine). The others are served in a later step with
+// the time they missed (steppedDt), the ones that waited longest first and entity id
+// breaking a tie, so the order never depends on a hash or on the broad phase's tree.
+// The impulse is linear in dt, so a body served late sinks and floats just as far,
+// only later; what it owes is capped like a character's (kMaxOwedSteps).
+//
+// WHAT: Jolt's Body::ApplyBuoyancyImpulse with a plane through the centre of mass
+// whose height and tilt are the water's there (WaterQuery), the factor from the
+// densities (PhysicsTuning::buoyancyFactorFor), and the body of water's drags and
+// current. ONE plane per body, taken at its centre of mass: a boat longer than a wave
+// does not tilt with the wave. docs/water-physics-plan.md §3.5.
+//
+// WHAT IT KEEPS (step 5): per body the share under water and the lift (factor times
+// share), for submergedFraction() and waterLift(), and an event each time the share
+// crosses kWetShare (pollWaterEvents). A body the step no longer finds in the water
+// (it left over the shore) exits without a speed.
+double PhysicsWorld::applyWater(HorizonWorld& world, float dt)
+{
+    Impl& impl = *m_impl;
+    impl.waterWet      = 0;
+    impl.waterDeferred = 0;
+
+    // Give a body its sleep back (it may be gone: Jolt's id carries a sequence number,
+    // so a lock on a removed body fails instead of landing on whoever has its slot).
+    const auto allowSleepAgain = [&impl](JPH::BodyID id)
+    {
+        JPH::BodyLockWrite lock(impl.physicsSystem.GetBodyLockInterface(), id);
+        if (lock.Succeeded())
+            lock.GetBody().SetAllowSleeping(true);
+    };
+    const auto forgetBodies = [&impl, &allowSleepAgain]
+    {
+        impl.waterOwed.clear();
+        impl.waterTrack.clear();
+        impl.waterTrailAt.clear();
+        for (const auto& [entity, id] : impl.waterNoSleep)
+            allowSleepAgain(id);
+        impl.waterNoSleep.clear();
+    };
+    if (!impl.waterOn)
+    {
+        forgetBodies();
+        return 0.0;
+    }
+
+    const auto from = BudgetClock::now();
+    impl.waterIndex.refresh(world);
+    if (impl.waterIndex.empty())
+    {
+        // No water anywhere: this is the whole price of a scene without it, and it is
+        // not charged to the budget (a scene without water keeps its accounting).
+        forgetBodies();
+        return 0.0;
+    }
+
+    auto& reg = world.registry();
+    const JPH::BodyLockInterfaceNoLock& lookup = impl.physicsSystem.GetBodyLockInterfaceNoLock();
+    const JPH::SpecifiedBroadPhaseLayerFilter movingOnly(HEBPLayers::MOVING);
+
+    // ── Who is in a body of water ───────────────────────────────────────────────
+    std::vector<Impl::WaterCandidate>& candidates = impl.waterScratch;
+    candidates.clear();
+    impl.waterOwedNext.clear();
+    impl.waterTrackNext.clear();
+    impl.waterIndex.regions(impl.waterRegions);
+    for (const HE::water::Region& region : impl.waterRegions)
+    {
+        JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> hits;
+        impl.physicsSystem.GetBroadPhaseQuery().CollideAABox(
+            JPH::AABox(JPH::Vec3(region.min.x, region.min.y, region.min.z),
+                       JPH::Vec3(region.max.x, region.max.y, region.max.z)),
+            hits, movingOnly);
+
+        for (const JPH::BodyID& bodyId : hits.mHits)
+        {
+            const JPH::Body* body = lookup.TryGetBody(bodyId);
+            if (!body || !body->IsDynamic() || body->IsSensor())
+                continue;
+            if (!body->IsActive())
+            {
+                // At rest: nothing to serve (see above), and it is still as far under
+                // as it was when it came to rest — a stone on the bed is "fully under"
+                // for as long as it lies there, not 0 from the moment it sleeps.
+                const uint32_t asleep = static_cast<uint32_t>(body->GetUserData());
+                if (const auto last = impl.waterTrack.find(asleep); last != impl.waterTrack.end())
+                    impl.waterTrackNext[asleep] = last->second;
+                continue;
+            }
+            const uint32_t entityId = static_cast<uint32_t>(body->GetUserData());
+            const Entity   entity   = static_cast<Entity>(entityId);
+            if (!reg.valid(entity))
+                continue;   // gone: the reap in step() removes its body after Update
+            if (!impl.entityToCharacter.empty() && impl.entityToCharacter.count(entityId))
+                continue;
+            const auto* rigid = reg.try_get<RigidBodyComponent>(entity);
+            if (rigid && !rigid->affectedByWater)
+                continue;
+
+            const JPH::RVec3 centre = body->GetCenterOfMassPosition();
+            Impl::WaterCandidate c;
+            c.entity = entityId;
+            c.id     = bodyId;
+            if (!impl.waterIndex.surfaceAt(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetZ()),
+                                           impl.simTime, c.surface) ||
+                !c.surface.physics.enabled)
+                continue;
+            const auto owedIt = impl.waterOwed.find(entityId);
+            c.owed = owedIt != impl.waterOwed.end() ? owedIt->second : 0.0f;
+            candidates.push_back(std::move(c));
+        }
+    }
+
+    // Longest wait first, entity id on a tie; the same body found through two
+    // landscapes' boxes is one.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Impl::WaterCandidate& a, const Impl::WaterCandidate& b)
+              {
+                  if (a.owed != b.owed) return a.owed > b.owed;
+                  return a.entity < b.entity;
+              });
+    candidates.erase(std::unique(candidates.begin(), candidates.end(),
+                                 [](const Impl::WaterCandidate& a, const Impl::WaterCandidate& b)
+                                 { return a.entity == b.entity; }),
+                     candidates.end());
+
+    // A body that was afloat and is no longer among them (out of the water, off the
+    // landscape, dried up) may sleep again.
+    if (!impl.waterNoSleep.empty())
+    {
+        impl.waterSeen.clear();
+        for (const Impl::WaterCandidate& c : candidates)
+            impl.waterSeen.insert(c.entity);
+        for (auto it = impl.waterNoSleep.begin(); it != impl.waterNoSleep.end();)
+        {
+            if (impl.waterSeen.count(it->first))
+            {
+                ++it;
+                continue;
+            }
+            allowSleepAgain(it->second);
+            it = impl.waterNoSleep.erase(it);
+        }
+    }
+
+    // ── The rings ───────────────────────────────────────────────────────────────
+    // What a body raises on the surface (HE::water::RippleField, display only): a ring where
+    // it goes into the water fast enough (before = the share under water it had at its last
+    // serving, 0 when it had none), a smaller one where it comes out fast, and a trail of small
+    // ones while it cuts the surface at speed, one every kTrailInterval of simulation time.
+    // `vel` is read BEFORE the buoyancy impulse (the impulse is the water's answer, and the
+    // impact is what the body arrived with). Speeds are relative to the surface's normal and
+    // the water's current, so a crate that drifts with the river leaves no wake. Bounded per
+    // step (RippleTriggers) in the order the bodies are served, which is deterministic; the
+    // list itself is bounded too (RippleField::kMax). The size of a ring follows the body's
+    // horizontal half extent, its strength the speed, `splash` of the water scales both
+    // ways (0 = this water makes no rings).
+    using HE::water::RippleTriggers;
+    int impactsRaised = 0, trailsRaised = 0;
+    const auto raiseRings = [&](const Impl::WaterCandidate& c, const JPH::Body& body, const JPH::Vec3& vel,
+                                float before, float share)
+    {
+        const HE::water::Surface& s = c.surface;
+        if (!(s.physics.splash > 0.0f))
+            return;
+        const glm::vec3& n = s.normal;
+        const JPH::RVec3 centre = body.GetCenterOfMassPosition();
+        const JPH::Vec3  half   = body.GetWorldSpaceBounds().GetExtent();
+        const float      size   = std::max(half.GetX(), half.GetZ());
+        // Positive = going down into the surface, negative = coming up out of it.
+        const float into = -(vel.GetX() * n.x + vel.GetY() * n.y + vel.GetZ() * n.z);
+
+        HE::water::Ripple r;
+        r.pos   = glm::vec2(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetZ()));
+        r.drift = glm::vec2(s.flow.x, s.flow.z);
+        const bool wasIn = before >= RippleTriggers::kWetShare, isIn = share >= RippleTriggers::kWetShare;
+        if (!wasIn && isIn)
+        {
+            if (into >= RippleTriggers::kImpactSpeed && impactsRaised < RippleTriggers::kMaxImpactsPerStep)
+            {
+                r.kind     = WaterRippleImpact;
+                r.radius   = std::clamp(size, 0.15f, 3.0f);
+                r.strength = std::clamp(into / 6.0f, 0.15f, 1.0f) * s.physics.splash;
+                impl.ripples.add(r);
+                ++impactsRaised;
+                // The splash IS the ring here: the first trail comes one interval later, not
+                // on top of it in the same step.
+                impl.waterTrailAt[c.entity] = impl.simTime;
+            }
+        }
+        else if (wasIn && !isIn)
+        {
+            if (-into >= RippleTriggers::kExitSpeed && impactsRaised < RippleTriggers::kMaxImpactsPerStep)
+            {
+                r.kind     = WaterRippleExit;
+                r.radius   = std::clamp(0.8f * size, 0.15f, 3.0f);
+                r.strength = std::clamp(-into / 8.0f, 0.1f, 0.6f) * s.physics.splash;
+                impl.ripples.add(r);
+                ++impactsRaised;
+            }
+        }
+
+        // The trail: on the surface (part of the body in, part out) and moving through the water.
+        const float relX = vel.GetX() - s.flow.x, relY = vel.GetY() - s.flow.y, relZ = vel.GetZ() - s.flow.z;
+        const float speed = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+        const bool cutting = isIn && share <= RippleTriggers::kTrailMaxShare && speed >= RippleTriggers::kTrailSpeed;
+        if (!cutting)
+        {
+            if (!impl.waterTrailAt.empty())
+                impl.waterTrailAt.erase(c.entity);
+            return;
+        }
+        const auto last = impl.waterTrailAt.find(c.entity);
+        if (last != impl.waterTrailAt.end() &&
+            impl.simTime - last->second < static_cast<double>(RippleTriggers::kTrailInterval))
+            return;
+        if (trailsRaised >= RippleTriggers::kMaxTrailsPerStep)
+            return;
+        r.kind     = WaterRippleTrail;
+        r.radius   = std::clamp(0.5f * size, 0.12f, 1.0f);
+        r.strength = std::clamp(speed / 8.0f, 0.0f, 0.5f) * s.physics.splash;
+        impl.ripples.add(r);
+        impl.waterTrailAt[c.entity] = impl.simTime;
+        ++trailsRaised;
+    };
+
+    // ── The events ──────────────────────────────────────────────────────────────
+    // A body that goes into the water or comes out of it, for pollWaterEvents (Thema 179
+    // step 5). Not part of raiseRings: that is the display, it gives up when `splash` is 0
+    // or the body is slow, and an event must depend on neither a visual knob nor a speed.
+    // Bounded like the joints' queue: nobody drains it on their own, so past the bound the
+    // OLDEST are dropped, because a caller that finally asks wants the news, not the archive.
+    const auto pushEvent = [&impl](const PhysicsWorld::WaterEvent& ev)
+    {
+        if (impl.waterEvents.size() >= PhysicsWorld::kMaxWaterEvents)
+        {
+            impl.waterEvents.erase(impl.waterEvents.begin());
+            HE_LOG_THROTTLE(Physics, Warning, 10.0,
+                            "%zu water events are waiting and nothing is calling pollWaterEvents - "
+                            "the oldest are being dropped.", PhysicsWorld::kMaxWaterEvents);
+        }
+        impl.waterEvents.push_back(ev);
+    };
+
+    // ── Serve them ──────────────────────────────────────────────────────────────
+    const uint32_t cap     = impl.budget.waterBodiesPerStep;
+    const JPH::Vec3 gravity = impl.physicsSystem.GetGravity();
+    uint32_t processed = 0;
+    for (const Impl::WaterCandidate& c : candidates)
+    {
+        if (cap != 0 && processed >= cap)
+        {
+            // Over the count: it waits, owing this step's time on top of what it owed,
+            // and keeps the share it last had so the answer to "is it wet" does not
+            // flicker to dry for a step.
+            impl.waterOwedNext[c.entity] = HE::PhysicsBudgetRules::carryOwed(c.owed, dt);
+            const auto last = impl.waterTrack.find(c.entity);
+            if (last != impl.waterTrack.end())
+                impl.waterTrackNext[c.entity] = last->second;
+            ++impl.waterDeferred;
+            continue;
+        }
+        ++processed;
+
+        JPH::BodyLockWrite lock(impl.physicsSystem.GetBodyLockInterface(), c.id);
+        if (!lock.Succeeded())
+            continue;
+        JPH::Body& body = lock.GetBody();
+        const JPH::MotionProperties* motion = body.GetMotionProperties();
+        if (!motion || !(motion->GetInverseMass() > 0.0f))
+            continue;
+
+        // The plane the water is at the body: through the column of its centre of
+        // mass, at the height of the waves there, tilted like them.
+        const JPH::RVec3 centre = body.GetCenterOfMassPosition();
+        const glm::vec3& n = c.surface.normal;
+        float total = 0.0f, submerged = 0.0f;
+        JPH::Vec3 centreOfBuoyancy = JPH::Vec3::sZero();
+        body.GetSubmergedVolume(JPH::RVec3(centre.GetX(), c.surface.height, centre.GetZ()),
+                                JPH::Vec3(n.x, n.y, n.z), total, submerged, centreOfBuoyancy);
+        // A shape without a volume (a degenerate one) has nothing to float; dividing
+        // by it would send the body to infinity.
+        if (!(total > 1.0e-6f) || !std::isfinite(total) || !std::isfinite(submerged))
+            continue;
+
+        const auto* rigid = reg.try_get<RigidBodyComponent>(static_cast<Entity>(c.entity));
+        const float bodyDensity = (rigid && rigid->density > 0.0f)
+            ? rigid->density
+            : 1.0f / (motion->GetInverseMass() * total);   // mass / volume
+        const float factor = HE::PhysicsTuning::buoyancyFactorFor(c.surface.physics.density, bodyDensity);
+        const glm::vec3& flow = c.surface.flow;
+        // What the body arrived with, before the water's impulse changes it (the rings).
+        const JPH::Vec3 arrival = body.GetLinearVelocity();
+        body.ApplyBuoyancyImpulse(total, submerged, centreOfBuoyancy, factor,
+                                  c.surface.physics.linearDrag, c.surface.physics.angularDrag,
+                                  JPH::Vec3(flow.x, flow.y, flow.z), gravity,
+                                  HE::PhysicsBudgetRules::steppedDt(dt, c.owed));
+
+        const float share = std::clamp(submerged / total, 0.0f, 1.0f);
+        {
+            const auto was = impl.waterTrack.find(c.entity);
+            const float before = was != impl.waterTrack.end() ? was->second.share : 0.0f;
+            raiseRings(c, body, arrival, before, share);
+
+            // The same crossing the rings look at (the share passes kWetShare), as an event
+            // with the speed it went through the surface: along the surface normal, relative
+            // to the current, down for an entry and up for an exit.
+            const bool wasIn = before >= RippleTriggers::kWetShare, isIn = share >= RippleTriggers::kWetShare;
+            if (wasIn != isIn)
+            {
+                const glm::vec3& nrm = c.surface.normal;
+                const float into = -((arrival.GetX() - flow.x) * nrm.x + (arrival.GetY() - flow.y) * nrm.y +
+                                     (arrival.GetZ() - flow.z) * nrm.z);
+                PhysicsWorld::WaterEvent ev;
+                ev.entity   = c.entity;
+                ev.entered  = isIn;
+                ev.speed    = std::max(0.0f, isIn ? into : -into);
+                ev.position = glm::vec3(static_cast<float>(centre.GetX()), static_cast<float>(centre.GetY()),
+                                        static_cast<float>(centre.GetZ()));
+                pushEvent(ev);
+            }
+        }
+        impl.waterTrackNext[c.entity] = Impl::WaterTrack{ share, factor * share };
+        if (submerged > 0.0f)
+            ++impl.waterWet;
+
+        // Afloat (part of it under, part of it out) = on the surface = never at rest.
+        // Fully under or fully out, it may sleep like any body.
+        if (share > 0.0f && share < 1.0f)
+        {
+            if (body.GetAllowSleeping())
+                body.SetAllowSleeping(false);
+            impl.waterNoSleep[c.entity] = c.id;
+        }
+        else if (const auto held = impl.waterNoSleep.find(c.entity); held != impl.waterNoSleep.end())
+        {
+            body.SetAllowSleeping(true);
+            impl.waterNoSleep.erase(held);
+        }
+    }
+    // A body that was in the water at its last serving and is not among the ones the water
+    // knows now has left it altogether: over the shore, out of the box of the water, or into
+    // a landscape that dried up. It did not pass the surface where the step could see it, so
+    // its exit has no speed. A destroyed entity is not an exit (the reap has it), and a body
+    // the region hold parked is where it was: it keeps what it had.
+    if (!impl.waterTrack.empty())
+    {
+        std::vector<uint32_t> left;
+        for (const auto& [entity, track] : impl.waterTrack)
+        {
+            if (track.share < RippleTriggers::kWetShare || impl.waterTrackNext.count(entity))
+                continue;
+            if (!impl.heldBodies.empty() && impl.heldBodies.count(entity))
+            {
+                impl.waterTrackNext[entity] = track;
+                continue;
+            }
+            if (!reg.valid(static_cast<Entity>(entity)))
+                continue;
+            left.push_back(entity);
+        }
+        std::sort(left.begin(), left.end());   // the map's order is not ours to depend on
+        for (const uint32_t entity : left)
+        {
+            PhysicsWorld::WaterEvent ev;
+            ev.entity   = entity;
+            ev.entered  = false;
+            ev.speed    = 0.0f;
+            ev.position = HE::worldPositionOf(world, static_cast<Entity>(entity));
+            pushEvent(ev);
+        }
+    }
+    impl.waterOwed.swap(impl.waterOwedNext);
+    impl.waterTrack.swap(impl.waterTrackNext);
+
+    return std::chrono::duration<double, std::milli>(BudgetClock::now() - from).count();
 }
 
 namespace {
@@ -3075,6 +4379,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     RaycastHit result;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
         return result;
@@ -3138,6 +4443,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3155,6 +4461,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::boxCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
         return {};
@@ -3179,6 +4486,7 @@ PhysicsWorld::RaycastHit PhysicsWorld::capsuleCast(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3198,6 +4506,7 @@ std::vector<uint32_t> PhysicsWorld::overlapSphere(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3214,6 +4523,7 @@ std::vector<uint32_t> PhysicsWorld::overlapBox(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
         return {};
@@ -3235,6 +4545,7 @@ std::vector<uint32_t> PhysicsWorld::overlapCapsule(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     if (!m_impl || !m_impl->initialized || radius <= 0.0f)
         return {};
 
@@ -3254,6 +4565,7 @@ std::vector<PhysicsWorld::RaycastHit> PhysicsWorld::raycastAll(
     uint32_t         ignoreEntityId,
     uint32_t         layerMask) const
 {
+    QueryCharge budgetCharge(m_impl.get());
     std::vector<RaycastHit> hits;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
         return hits;
@@ -3620,9 +4932,13 @@ void PhysicsWorld::setGravity(const glm::vec3& gravity)
     // system, but a sleeping body is not stepped at all — so without this,
     // flipping gravity leaves every crate that had come to rest hanging in the
     // air until something else happens to touch it.
+    //
+    // Except a body the region hold has out of the broad phase: it is woken when
+    // the hold lets it back in.
     auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
     for (const auto& entry : m_impl->entityToBody)
-        if (bodyInterface.GetMotionType(entry.second) != JPH::EMotionType::Static)
+        if (bodyInterface.GetMotionType(entry.second) != JPH::EMotionType::Static
+            && !m_impl->heldBodies.count(entry.first))
             bodyInterface.ActivateBody(entry.second);
 }
 
@@ -3692,6 +5008,25 @@ void PhysicsWorld::clear()
     m_impl->entityToBody.clear();
     m_impl->entityToCharacter.clear();
     m_impl->characterLayer.clear();
+    // What the hold knew about those bodies goes with them. The TEST stays: it is
+    // set up once for the world, like the collision matrix, and a world that is
+    // initialised again keeps asking it.
+    m_impl->dynamicBodies.clear();
+    m_impl->heldBodies.clear();
+    m_impl->heldCharacters.clear();
+    // The water's clock starts over with the world, and what it knew of the bodies
+    // (and of the landscapes: their components may be gone) goes with them.
+    m_impl->simTime = 0.0;
+    m_impl->waterIndex = HE::water::WaterIndex{};
+    m_impl->waterOwed.clear();
+    m_impl->waterTrack.clear();
+    m_impl->waterEvents.clear();    // about a scene that no longer exists
+    m_impl->waterNoSleep.clear();   // the bodies they belonged to were just destroyed
+    m_impl->waterScratch.clear();
+    // The rings belong to the world that raised them: a scene swapped or stopped must not
+    // leave them standing on the next one's lake.
+    m_impl->ripples.clear();
+    m_impl->waterTrailAt.clear();
     // After the bodies are gone: drop the contact bookkeeping, otherwise the
     // OnContactRemoved callbacks Jolt fires for them would emit exit events
     // referring to entities that no longer exist.

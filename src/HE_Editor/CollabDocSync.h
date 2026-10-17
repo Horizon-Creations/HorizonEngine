@@ -49,11 +49,18 @@ enum class Kind : std::uint8_t
     Node = 0,       // graph node / animator state
     Link,           // graph link / animator transition
     Variable,       // HorizonCode graph variable
-    Comment,        // material graph comment box
+    Comment,        // material / HorizonCode graph comment box
     Element,        // UI designer element
+    // Appended, never inserted: the byte is on the wire.
+    Event,          // HorizonCode declared (custom) event, keyed by name like a variable
+    Setting,        // a per-document singleton (HorizonCode: the Extract spec), see kSettingExtract
     COUNT
 };
 inline constexpr int kKindCount = static_cast<int>(Kind::COUNT);
+
+// Item ids of Kind::Setting. A setting always exists (its empty value has a JSON
+// form of its own), so it is only ever replaced, never created or removed.
+inline constexpr std::int64_t kSettingExtract = 1;
 
 // Which document inside one asset. A UI widget file holds two: the element tree
 // the designer edits and the HorizonCode graph its Graph tab edits. They share
@@ -123,6 +130,13 @@ void seed(const IDocAdapter& doc, DocMirror& mirror, Scope scope);
 // Updates the mirror. Empty out = nothing changed, which is the common case.
 void diffInto(const IDocAdapter& doc, DocMirror& mirror, Scope scope,
               std::vector<HE::Net::CollabSession::DocDelta>& out);
+
+// Would diffInto emit anything? Read-only: the mirror is left as it is, so the
+// edit is still there to send once we may. For a document that has no dirty
+// flag to tell "the user changed something" (the Level Script, the Game
+// Instance graph), this is that flag. An unseeded mirror has nothing to compare
+// against and answers false.
+bool hasLocalChanges(const IDocAdapter& doc, const DocMirror& mirror);
 
 // Apply a peer's batch. Only deltas whose scope matches are considered, so one
 // call per document of a multi-document asset. Returns true when anything was

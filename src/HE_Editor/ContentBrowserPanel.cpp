@@ -1,4 +1,5 @@
 #include "ContentBrowserPanel.h"
+#include <Platform/ProjectWriteGate.h>   // refuse file operations while an export reads the project
 #include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorTheme.h"     // brand palette (selected tiles, labels)
 #include <algorithm>
@@ -574,6 +575,24 @@ static void collectEngineSources(const std::vector<std::string>& paths,
 	std::sort(out.begin(), out.end());
 }
 
+// A file operation the user asked for did not happen. Until now these were an
+// HE_LOG_ERROR and nothing else (the log reaches the bell only as a developer-style
+// line, throttled): the item just stayed where it was, which reads as "the click did
+// nothing". A toast with the reason says what to look at.
+static void notifyFileFailure(std::string text, const std::string& reason, std::string path = {})
+{
+	// An export that is reading the project turned the operation away and said so
+	// (ProjectWriteGate.h); "could not delete X" on top of that would be a second,
+	// less useful toast for the same refusal.
+	if (HE::ProjectWriteGate::locked()) return;
+	HE::Ed::NoteSpec note;
+	note.level     = HE::Ed::NoteLevel::Important;
+	note.text      = std::move(text);
+	note.detail    = reason;
+	note.assetPath = std::move(path);
+	HE::Ed::notify(std::move(note));
+}
+
 // Copy `sources` into Content/<targetRel> and import the copies. With
 // `keepStructure` each file also keeps its sub-folder from the engine tree
 // (Engine/Audio/x.wav → <target>/Audio/x.wav). A name the project already uses
@@ -584,6 +603,7 @@ static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sou
 {
 	namespace fs = std::filesystem;
 	if (!ctx.contentManager || sources.empty()) return;
+	if (HE::ProjectWriteGate::refuse("import files")) return;
 	const fs::path contentRoot(ctx.contentManager->contentRoot());
 	const HE::Ed::Rewards::DirSnapshot before =
 		HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / targetRel).string());
@@ -641,7 +661,7 @@ static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sou
 	                    std::to_string(sources.size() - textures.size()) + " file(s) into " + where;
 	if (!textures.empty())
 		text += "; " + std::to_string(textures.size()) + " texture(s) wait for their color space";
-	HE::Ed::notify(failed ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Info,
+	HE::Ed::notify(failed ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
 	               "Imported into the project", text + (failed ? " (" + std::to_string(failed) + " failed — see the console)" : "") + ".");
 }
 
@@ -1113,7 +1133,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				// Said out loud: a click that lands on the scene tab and shows
 				// nothing reads as a broken button.
-				HE::Ed::notify(HE::Ed::NoteLevel::Warning, "Not in the Content Browser",
+				HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not in the Content Browser",
 					"\"" + fs::path(target).filename().string() +
 					"\" is not listed under Content, Engine or Source.");
 			}
@@ -1377,7 +1397,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			for (auto& c : e) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
 			if (e == ".mat")                                   return { I.material, {0.60f, 0.90f, 0.60f, 1.0f} };
 			if (e == ".obj" || e == ".fbx" || e == ".gltf"
-				|| e == ".glb" || e == ".dae")                 return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
+				|| e == ".glb" || e == ".dae" || e == ".blend")  return { I.model3d,  {0.70f, 0.80f, 1.00f, 1.0f} };
 			if (e == ".svg" || e == ".ai")                     return { I.model2d,  {0.80f, 0.70f, 1.00f, 1.0f} };
 			if (e == ".cs"  || e == ".lua" || e == ".py"
 				|| e == ".js")                                  return { I.script,   {0.90f, 0.90f, 0.50f, 1.0f} };
@@ -2414,7 +2434,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (moveIsAllowed && !requested)
 			{
 				ec.clear();
-				std::filesystem::rename(src, dst, ec);
+				// Read as "failed, try again later", which is what an export in progress is.
+				if (HE::ProjectWriteGate::refuse("move a file"))
+					ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+				else
+					std::filesystem::rename(src, dst, ec);
 				if (!ec)
 				{
 					// Everything that pointed at the old path — other assets' stored
@@ -2457,6 +2481,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// not offer it — the code was not reachable from there.
 		auto createFolderIn = [&](const std::string& targetFolder)
 		{
+			if (HE::ProjectWriteGate::refuse("create a folder")) return;
 			std::string base = targetFolder + "/NewFolder";
 			std::string dir  = base;
 			int counter = 1;
@@ -2468,6 +2493,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not create folder '" + dir + "': " + mkEc.message()).c_str());
+				notifyFileFailure("Could not create the folder \"" + std::filesystem::path(dir).filename().string() + "\".", mkEc.message(), dir);
 				return;
 			}
 
@@ -2749,12 +2775,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// deletion are separate things — the menu item now only asks.
 		auto deleteAssetNow = [&](const std::string& assetAbs, bool isSourceClass)
 		{
+			if (HE::ProjectWriteGate::refuse("delete an asset")) return;
 			std::error_code ec;
 			std::filesystem::remove(assetAbs, ec);
 			if (ec)
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not delete '" + assetAbs + "': " + ec.message()).c_str());
+				notifyFileFailure("Could not delete \"" + std::filesystem::path(assetAbs).filename().string() + "\".", ec.message(), assetAbs);
 				return;
 			}
 			// The path is free again: a NEW asset of a different type may be created
@@ -2830,6 +2858,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not remove the local copy of '" + cacheRel + "': " + ec.message()).c_str());
+				notifyFileFailure("Could not remove the local copy of \"" + std::filesystem::path(cacheRel).filename().string() + "\".", ec.message(), cacheRel);
 				return false;
 			}
 
@@ -2878,7 +2907,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 								// copy they just removed looks like it took the
 								// asset with it for good.
 								if (!success)
-									HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+									HE::Ed::notify(HE::Ed::NoteLevel::Important,
 										"\"" + std::filesystem::path(remotePath).filename().string()
 											+ "\" could not be downloaded again.",
 										"Its local copy was removed and the server did not hand "
@@ -2931,12 +2960,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// away, one holding assets only gets here after the confirmation dialog.
 		auto deleteFolderNow = [&](const std::string& folderAbs)
 		{
+			if (HE::ProjectWriteGate::refuse("delete a folder")) return;
 			std::error_code ec;
 			std::filesystem::remove_all(folderAbs, ec);
 			if (ec)
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not delete folder '" + folderAbs + "': " + ec.message()).c_str());
+				notifyFileFailure("Could not delete the folder \"" + std::filesystem::path(folderAbs).filename().string() + "\".", ec.message(), folderAbs);
 				return;
 			}
 			// Both caches are keyed by path and every asset below the folder just
@@ -3030,7 +3061,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			    EditorWidgets::menuItem("Revert to Default"))
 			{
 				const std::string relPath = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
-				if (!relPath.empty())
+				// An override is a project file like any other, and reverting
+				// deletes it. In a session that is the host's call — the same
+				// one every other delete gets — or this machine falls back to
+				// the default while every peer keeps the override.
+				const std::string key = relPath.empty() ? std::string()
+				                                        : collabKeyFor(ctx, s_ctxMenuItem);
+				if (!key.empty() && ctx.collab && ctx.collab->requestAssetDelete(key))
+				{
+					s_ctxMenuItem.clear();
+				}
+				else if (!relPath.empty() && !HE::ProjectWriteGate::refuse("revert an asset"))
 				{
 					const HE::UUID id = ctx.contentManager->loadAsset(relPath); // current (override) id
 					std::error_code ec;
@@ -3048,7 +3089,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						HE_LOG_INFO(Editor, "%s", ("Editor: reverted '" + relPath + "' to its engine default").c_str());
 					}
 					else
+					{
 						HE_LOG_ERROR(Editor, "%s", ("Editor: could not remove override for '" + relPath + "'").c_str());
+						notifyFileFailure("Could not revert \"" + std::filesystem::path(relPath).filename().string() + "\" to its engine default.", "The override could not be removed.", relPath);
+					}
 				}
 				ImGui::CloseCurrentPopup();
 			}
@@ -3190,8 +3234,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							HE::Ed::Rewards::markImported(ctx, before);
 						}
 						else
+						{
 							HE_LOG_ERROR(Editor, "%s",
 								("Editor: import failed for " + srcPath.string()).c_str());
+							notifyFileFailure("Could not import \"" + srcPath.filename().string() + "\".", "The importer rejected the file. Check that it is a supported, undamaged format.", srcPath.string());
+						}
 						ctx.contentRefreshPending = true;
 					}
 					ImGui::CloseCurrentPopup();
@@ -3247,8 +3294,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						if (lease)
 						{
 							if (!Importer::reimport(s_ctxMenuItem, ctx.contentManager->contentRoot()))
+							{
 								HE_LOG_ERROR(Editor, "%s",
 									("Editor: reimport failed for " + s_ctxMenuItem).c_str());
+								notifyFileFailure("Could not reimport \"" + std::filesystem::path(s_ctxMenuItem).filename().string() + "\".", "The source file may have moved or no longer imports.", s_ctxMenuItem);
+							}
 							// The new bytes have to reach the others, or every peer
 							// keeps the old asset with no sign that it changed. What
 							// actually travels depends on the type: authored assets go
@@ -3756,7 +3806,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// first would leave us out of step until the answer, and out
 					// of step for good if the answer is no.
 					std::error_code ec;
-					if (!requested) std::filesystem::rename(oldPath, newPath, ec);
+					if (!requested)
+					{
+						if (HE::ProjectWriteGate::refuse("rename a file"))
+							ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+						else
+							std::filesystem::rename(oldPath, newPath, ec);
+					}
 					// A rename that FAILS used to close the dialog and say nothing —
 					// no message, no log line — so a name the filesystem refuses
 					// (permissions, a lock, a case-only change on a case-insensitive
@@ -4243,11 +4299,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						continue;   // asked for; the host's answer moves it everywhere
 
 					std::error_code ec;
-					std::filesystem::rename(oldAbs, newAbs, ec);
+					if (HE::ProjectWriteGate::refuse("rename a file"))
+						ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+					else
+						std::filesystem::rename(oldAbs, newAbs, ec);
 					if (ec)
 					{
 						HE_LOG_ERROR(Editor, "%s",
 							("Editor: rename of '" + oldAbs + "' failed: " + ec.message()).c_str());
+						notifyFileFailure("Could not rename \"" + std::filesystem::path(oldAbs).filename().string() + "\".", ec.message(), oldAbs);
 						continue;
 					}
 					retargetReferences(ctx, oldAbs, newAbs, /*folder=*/false);
@@ -4621,7 +4681,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						// is nothing at all, forever.
 						if (!success)
 						{
-							HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+							HE::Ed::notify(HE::Ed::NoteLevel::Important,
 								"\"" + std::filesystem::path(relPath).filename().string()
 									+ "\" could not be downloaded.",
 								"The EngineContent server did not hand over the file. Check "
@@ -4811,7 +4871,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					}
 				}
 				else
+				{
 					HE_LOG_ERROR(Editor, "%s", "Editor: failed to create C++ class");
+					notifyFileFailure("Could not create the C++ class.", "The files could not be written. Check that the project's Source folder is writable.");
+				}
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();

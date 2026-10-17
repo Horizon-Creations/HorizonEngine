@@ -71,7 +71,7 @@ float terrainFbm(int seed, float x, float z, int octaves,
 
 std::vector<float> computeTerrainHeightField(const TerrainComponent& tc)
 {
-    const uint32_t res       = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t res       = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     const uint32_t vertCount = res * res;
     std::vector<float> heights(vertCount, 0.0f);
     if (tc.sculptHeights.size() == static_cast<size_t>(vertCount))
@@ -95,7 +95,7 @@ std::vector<float> computeTerrainHeightField(const TerrainComponent& tc)
 
 StaticMeshAsset generateTerrainMesh(const TerrainComponent& tc)
 {
-    const uint32_t res   = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t res   = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     const float    halfX = tc.sizeX * 0.5f;
     const float    halfZ = tc.sizeZ * 0.5f;
     const float    stepX = tc.sizeX / static_cast<float>(res - 1);
@@ -182,7 +182,7 @@ float terrainHeightAt(const TerrainComponent& tc, float localX, float localZ)
     const float nx = (localX + tc.sizeX * 0.5f) / tc.sizeX;
     const float nz = (localZ + tc.sizeZ * 0.5f) / tc.sizeZ;
 
-    const uint32_t res = std::clamp(tc.resolution, 2u, 1024u);
+    const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
     if (tc.sculptHeights.size() == static_cast<size_t>(res * res))
     {
         // Bilinear sample from sculpted heights
@@ -493,4 +493,107 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     mesh.name = "terrain_chunk_tess";
     mesh.path = "mem://terrain_chunk_tess";
     return mesh;
+}
+
+// ─── Seam stitching ─────────────────────────────────────────────────────────
+StaticMeshAsset stitchTerrainChunkEdges(const StaticMeshAsset& level, uint32_t levelCells,
+                                        const StaticMeshAsset& lod0, uint32_t lod0Cells,
+                                        const TerrainChunkStitch& stitch)
+{
+    const size_t N = static_cast<size_t>(levelCells) + 1;   // vertices per side
+    const size_t M = static_cast<size_t>(lod0Cells)  + 1;
+    // buildChunkMesh's layout: the N×N grid row-major, then one skirt vertex
+    // per ring vertex (4·(N-1) of them).
+    auto fits = [](const StaticMeshAsset& m, size_t n)
+    {
+        const size_t verts = n * n + 4 * (n - 1);
+        return n >= 2 && !m.cooked && m.vertices.size() == verts * 3 &&
+               m.normals.size() == verts * 3;
+    };
+    if (levelCells == 0 || lod0Cells == 0 || !fits(level, N) || !fits(lod0, M))
+        return {};
+
+    StaticMeshAsset out;
+    out.type     = level.type;
+    out.name     = level.name;
+    out.path     = level.path;
+    out.vertices = level.vertices;
+    out.indices  = level.indices;
+    out.normals  = level.normals;
+    out.uvs      = level.uvs;
+
+    // Grid index of the p-th vertex along edge e (p runs with u on the
+    // bottom/top edges and with v on the right/left ones), n per side.
+    auto edgeVertex = [](uint32_t e, size_t p, size_t n) -> size_t
+    {
+        switch (e)
+        {
+            case 0:  return p;                         // v0: j = 0
+            case 1:  return p * n + (n - 1);           // u1: i = n-1
+            case 2:  return (n - 1) * n + p;           // v1: j = n-1
+            default: return p * n;                     // u0: i = 0
+        }
+    };
+    // x/z already agree (same dyadic UV on both grids); height and normal
+    // are LOD0's, i.e. the plain field without displacement.
+    auto copyFromLod0 = [&](size_t dst, size_t src)
+    {
+        out.vertices[dst * 3 + 1] = lod0.vertices[src * 3 + 1];
+        for (int c = 0; c < 3; ++c) out.normals[dst * 3 + c] = lod0.normals[src * 3 + c];
+    };
+
+    for (uint32_t e = 0; e < 4; ++e)
+    {
+        const uint32_t c = stitch.edgeCells[e];
+        if (c == 0 || c >= levelCells || levelCells % c != 0 || lod0Cells % c != 0) continue;
+        const size_t s  = levelCells / c;     // this level's cells per coarse cell
+        const size_t sL = lod0Cells  / c;     // LOD0's
+        for (size_t p = 0; p < N; ++p)
+        {
+            const size_t a  = p / s;
+            const size_t r  = p % s;
+            const size_t dst = edgeVertex(e, p, N);
+            const size_t ia  = edgeVertex(e, a * sL, M);
+            if (r == 0) { copyFromLod0(dst, ia); continue; }   // a coarse vertex itself
+            const size_t ib = edgeVertex(e, (a + 1) * sL, M);
+            const float t = static_cast<float>(r) / static_cast<float>(s);
+            const float ya = lod0.vertices[ia * 3 + 1], yb = lod0.vertices[ib * 3 + 1];
+            out.vertices[dst * 3 + 1] = ya + (yb - ya) * t;
+            // The neighbour's rasteriser interpolates its two vertex normals
+            // along the edge; the shader renormalises.
+            float n[3], len2 = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float na = lod0.normals[ia * 3 + k], nb = lod0.normals[ib * 3 + k];
+                n[k] = na + (nb - na) * t;
+                len2 += n[k] * n[k];
+            }
+            const float inv = len2 > 0.0f ? 1.0f / std::sqrt(len2) : 0.0f;
+            for (int k = 0; k < 3; ++k) out.normals[dst * 3 + k] = n[k] * inv;
+        }
+    }
+
+    // Pinned corners: grid corner k of this level ↔ the same corner of LOD0.
+    const size_t cornerOf[4][2] = { { 0, 0 }, { N - 1, 0 }, { N - 1, N - 1 }, { 0, N - 1 } };
+    const size_t cornerL [4][2] = { { 0, 0 }, { M - 1, 0 }, { M - 1, M - 1 }, { 0, M - 1 } };
+    for (int k = 0; k < 4; ++k)
+        if (stitch.corners & (1u << k))
+            copyFromLod0(cornerOf[k][1] * N + cornerOf[k][0], cornerL[k][1] * M + cornerL[k][0]);
+
+    // The skirt hangs below the ring at a fixed depth: shift each skirt vertex
+    // by what its ring vertex moved. Ring order as buildChunkMesh lays it out.
+    size_t k = 0;
+    const size_t skirtBase = N * N;
+    auto follow = [&](size_t idx)
+    {
+        const float moved = out.vertices[idx * 3 + 1] - level.vertices[idx * 3 + 1];
+        const size_t sv = skirtBase + k++;
+        out.vertices[sv * 3 + 1] += moved;
+        for (int c = 0; c < 3; ++c) out.normals[sv * 3 + c] = out.normals[idx * 3 + c];
+    };
+    for (size_t i = 0;     i < N;     ++i) follow(0 * N + i);
+    for (size_t j = 1;     j < N;     ++j) follow(j * N + (N - 1));
+    for (size_t i = N - 1; i-- > 0;      ) follow((N - 1) * N + i);
+    for (size_t j = N - 1; j-- > 1;      ) follow(j * N + 0);
+    return out;
 }

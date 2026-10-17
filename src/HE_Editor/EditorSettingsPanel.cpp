@@ -1,6 +1,7 @@
 #include "EditorSettingsPanel.h"
+#include "EditorGraphics.h"   // which rows the project's values lock
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
-#include "ToolchainDialog.h"             // Tool Status > cmake/compiler "Fix" opens the dialog
+#include "ToolSetupDialog.h"             // Tool Status "Fix" opens the setup dialog on that tool's row
 #include "GitController.h"               // Source Control page
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
@@ -10,14 +11,17 @@
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
 #include "ShortcutsPage.h"             // the Shortcuts page (its own module: headless-testable)
+#include "ProjectSettingsPanel.h"       // Source Control: "where the repository went"
 #include "QuickSettingsFavorites.h"    // isFavorite, without a string per row
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include "EditorRewards.h"             // Feedback > each tone's "Preview"
+#include "HeprojRegistration.h"        // Tool Status > File types: the .heproj registration switch
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitHubTokenStore.h>  // kHost: which remote the sign-in covers
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
+#include "TeamView.h"                    // Team: the team server and the sign-in
 #include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
 #include <Types/Enums.h>
@@ -172,6 +176,14 @@ const char* prefScopeFor(const char* cat)
 // logical setting group; `widget` draws its control(s).
 void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* categoryFilter)
 {
+	DrawOptions options;
+	options.category = categoryFilter;
+	DrawEngineSettings(ctx, mode, options);
+}
+
+void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& options)
+{
+	const char* const categoryFilter = options.category;
 	// Wrapped for the whole catalog, and pushed here rather than in render(): the
 	// wrap position lives on the window, this runs inside two different ones (the
 	// Preferences body and the docked Quick Settings panel), and a docked panel is
@@ -198,12 +210,22 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	// somebody moved a setting from Display to Effects.
 	HE::Ed::Help::Scope helpScope("Preferences");
 
-	EditorConfig& cfg = ctx.editorConfig;
+	EditorConfig& cfg = options.config ? *options.config : ctx.editorConfig;
 	const char* lastCat = nullptr;
 	int shown = 0;
 	auto row = [&](const char* key, const char* cat, auto&& widget)
 	{
-		if (categoryFilter && std::strcmp(cat, categoryFilter) != 0) return;
+		// A page names its rows, or a category. The rows of a page need not share
+		// a category (Viewport Quality draws rows of three), which is why the
+		// category stays what the help table is keyed by and nothing more.
+		if (options.rows)
+		{
+			bool wanted = false;
+			for (int i = 0; i < options.rowCount; ++i)
+				if (std::strcmp(options.rows[i], key) == 0) { wanted = true; break; }
+			if (!wanted) return;
+		}
+		else if (categoryFilter && std::strcmp(cat, categoryFilter) != 0) return;
 		const bool fav = isFavorite(cfg, key);
 		if (mode == SettingsMode::QuickSettings && !fav) return;
 		// Retarget the open scope at this row's category. setScope rather than a
@@ -212,41 +234,62 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		HE::Ed::Help::setScope(prefScopeFor(cat));
 		// With a category filter the page heading already names the category, so
 		// the per-category separator is only drawn for the unfiltered catalog.
-		if (!categoryFilter && (!lastCat || std::strcmp(lastCat, cat) != 0))
+		if (!categoryFilter && !options.rows && (!lastCat || std::strcmp(lastCat, cat) != 0))
 		{ ImGui::SeparatorText(cat); lastCat = cat; }
+
+		// While the open project's graphics are what the config holds, an edit to
+		// them would be overwritten on the next frame: the rows say so and wait
+		// (Preferences ▸ Viewport Quality has the switch to use one's own values).
+		const bool locked = !options.config && cfg.GraphicsFromProject &&
+		                    EditorGraphics::isGraphicsRow(key);
+		const auto draw = [&]
+		{
+			if (locked) ImGui::BeginDisabled();
+			widget();
+			if (locked) ImGui::EndDisabled();
+		};
 
 		if (mode == SettingsMode::QuickSettings)
 		{
-			widget();
+			if (locked) ImGui::TextDisabled("Follows the project");
+			draw();
+		}
+		else if (mode == SettingsMode::Project)
+		{
+			draw();
 		}
 		else
 		{
-			// A two-column row: the setting on the left, its pin toggle in a fixed
-			// column on the right. The pin used to be a bare checkbox squeezed in
-			// front of the widget, which put two unlabelled checkboxes side by side
-			// on every boolean setting — indistinguishable, and neither said what it
-			// did. A table also handles a multi-line setting properly: the pin stays
-			// at the row's top right instead of drifting down after the last slider.
+			// A two-column row: a narrow gutter on the left with the pin, the setting
+			// beside it. The pin is a bare star, not a labelled button: a "☆ Pin"
+			// button at the far right edge sat on its own above every setting, away
+			// from the thing it belonged to, and repeated its caption down the whole
+			// page. A star in the gutter reads as a marker on the row — dim while
+			// unpinned, amber once pinned — and the tooltip says what it does. A
+			// table keeps it at the row's first line when a setting runs several.
 			ImGui::PushID(key);
 			if (ImGui::BeginTable("##row", 2, ImGuiTableFlags_SizingFixedFit))
 			{
+				ImGui::TableSetupColumn("##pin",     ImGuiTableColumnFlags_WidthFixed, 26.0f);
 				ImGui::TableSetupColumn("##setting", ImGuiTableColumnFlags_WidthStretch);
-				ImGui::TableSetupColumn("##pin",     ImGuiTableColumnFlags_WidthFixed, 72.0f);
 				ImGui::TableNextRow();
 
 				ImGui::TableSetColumnIndex(0);
-				widget();
+				using namespace HE::Ed;
+				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::alpha(Theme::AccentHi, 0.18f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Theme::alpha(Theme::AccentHi, 0.30f));
+				ImGui::PushStyleColor(ImGuiCol_Text, fav ? Theme::AccentHi
+				                                         : Theme::alpha(Theme::TextDim, 0.7f));
+				if (ImGui::SmallButton(fav ? "\xe2\x98\x85##pin" : "\xe2\x98\x86##pin"))
+					toggleFavorite(cfg, key);
+				ImGui::PopStyleColor(4);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(fav ? "Unpin from the Quick Settings panel"
+					                      : "Pin to the Quick Settings panel");
 
 				ImGui::TableSetColumnIndex(1);
-				// Labelled, so it is obvious what the control is for, and coloured
-				// when active so a pinned setting is visible at a glance.
-				if (fav) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-				if (ImGui::SmallButton(fav ? "\xe2\x98\x85 Pinned" : "\xe2\x98\x86 Pin"))
-					toggleFavorite(cfg, key);
-				if (fav) ImGui::PopStyleColor();
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip(fav ? "Remove from the Quick Settings panel"
-					                      : "Show this setting in the Quick Settings panel");
+				draw();
 				ImGui::EndTable();
 			}
 			ImGui::PopID();
@@ -291,7 +334,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		Row::combo("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
+			ImGui::SetTooltip("Deferred needs this backend's G-buffer pipeline to finish setting up.");
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
@@ -359,8 +402,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
 		else if (aaMode >= 3 && !taaOK)
-			hint("TAA needs a velocity buffer — Metal and OpenGL so far (both render paths); "
-			     "this backend falls back to SMAA.");
+			hint("TAA needs a velocity buffer, which this backend does not write yet; falls back to SMAA.");
 		else if (aaMode == 0)
 			hint("No edge smoothing at all; the post chain still runs.");
 		else if (aaMode == 2)
@@ -441,7 +483,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
-			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
+			ImGui::SetTooltip("Needs this backend's post-processing pipeline to finish setting up.");
 		else if (supported)
 			hint("Metallic surfaces reflect the actual scene (deferred path).");
 	});
@@ -523,7 +565,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			hint("Simulate rain/snow on the GPU (transform feedback).");
 	});
 
-	row("landiscovery", "Collaboration", [&]{
+	row("weathersound", "Effects", [&]{
+		EditorWidgets::checkbox("Weather Sounds in Edit Mode", &cfg.WeatherSoundInEditor);
+		hint("Hear the scene's weather (rain, wind, snow, storm, thunder) in the "
+		     "edit-mode viewport, not only in Play.");
+	});
+
+	row("landiscovery", "Team", [&]{
 		EditorWidgets::checkbox("Find Sessions on the Local Network", &cfg.CollabLanDiscovery);
 		hint("Hosts announce a session on the local network and guests see it in "
 		     "a list, so nobody has to exchange an address or a session ID. This "
@@ -533,7 +581,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "visible on.");
 	});
 
-	row("collabsynclarge", "Collaboration", [&]{
+	row("collabsynclarge", "Team", [&]{
 		// Locked while a session is live, and this is the reason: everyone in the
 		// session joined under THIS value — a guest is asked about it before the
 		// join and is refused if it disagrees. Flipping it afterwards would leave
@@ -568,7 +616,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			     "holding different files. Leave the session to change it.");
 	});
 
-	row("collabmaxasset", "Collaboration", [&]{
+	row("collabmaxasset", "Team", [&]{
 		// NOT locked during a session, unlike the checkbox above it. That one is
 		// a promise made to the other peers at the join; this is a bound on what
 		// this machine will read, hold and hand out, and a bound you cannot
@@ -610,6 +658,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "same silence.");
 	});
 
+	// (The "Relay Server" row that ended this group is the Team Server field at
+	// the top of the Team page now — TeamView::drawSettings. Same config value:
+	// the team server is the relay.)
+
 	// ── Remote Control (the MCP bridge) ──────────────────────────────────────
 	// The human switch the security model was missing. Everything else about the
 	// gate was already in place — off by default, loopback only, a token in a
@@ -642,7 +694,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			if (running)
 			{
 				const std::size_t clients = ctx.mcp->clientCount();
-				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+				ImGui::TextColored(HE::Ed::Theme::Ok,
 				                   "Listening on 127.0.0.1:%u \xE2\x80\x94 %zu client%s connected",
 				                   static_cast<unsigned>(ctx.mcp->port()),
 				                   clients, clients == 1 ? "" : "s");
@@ -655,7 +707,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			else if (wanted)
 			{
 				// The honest reading of a ticked box with a dead socket.
-				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+				ImGui::TextColored(HE::Ed::Theme::Warn,
 				                   "Enabled, but the listener is not up.");
 				hint("The port could not be opened, or the endpoint file could not be "
 				     "written; the editor log says which. Nothing is listening, so no "
@@ -775,7 +827,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 
 		if (!s_claudeTools.ready())
 		{
-			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "%s",
+			ImGui::TextColored(HE::Ed::Theme::Warn, "%s",
 			                   s_claudeTools.blocker.c_str());
 			// Without this the blocked state is a dead end: the button that would
 			// re-probe is the one that is greyed out, so installing the CLI would
@@ -790,9 +842,16 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (s_claudeJob)
 		{
 			const Setup::Outcome& r = s_claudeJob->outcome;
-			ImGui::TextColored(r.ok ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f)
-			                        : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
-			                   "%s", r.message.c_str());
+			// The result of pressing Register is a notification, said once per run; the
+			// transcript below stays for the failure one line cannot explain.
+			static const void* s_claudeReported = nullptr;
+			if (s_claudeReported != static_cast<const void*>(s_claudeJob.get()))
+			{
+				s_claudeReported = static_cast<const void*>(s_claudeJob.get());
+				HE::Ed::notify(r.ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+				               r.ok ? "Registered with Claude" : "Could not register with Claude",
+				               r.message);
+			}
 			// The transcript, collapsed. It is here for the failure that the one
 			// line above cannot explain — a CLI version that words its refusal
 			// differently, an npm shim that dies before it prints anything — and
@@ -834,7 +893,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (!in) return;
 		// Connection readout answers "is my pad even seen?" before any tuning.
 		if (in->gamepad().connected)
-			ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Gamepad connected");
+			ImGui::TextColored(HE::Ed::Theme::Ok, "Gamepad connected");
 		else
 			ImGui::TextDisabled("No gamepad connected");
 
@@ -870,7 +929,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 
 	row("fontscale", "Appearance", [&]{
-		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 3.0f, "%.2fx");
 	});
 
 	row("cpucache", "Content Browser", [&]{
@@ -916,6 +975,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		EditorWidgets::checkbox("Success Feedback", &cfg.RewardsEnabled);
 		{
 			SubGroup sub(cfg.RewardsEnabled);
+			ImGui::SeparatorText("Visual cues");
 			EditorWidgets::checkbox("Visual Cues", &cfg.RewardsVisual);
 			{
 				// V1 and V2b belong to the line; V4 and V5 live elsewhere and
@@ -927,6 +987,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			// Moments 4–6 (topic 140): each switches off only its moment, the
 			// counting goes on — so they are not under Visual Cues, which
 			// does not silence a moment's sound either.
+			ImGui::SeparatorText("Moments");
 			EditorWidgets::checkbox("Compile Moment", &cfg.RewardsMomentCompile);
 			EditorWidgets::checkbox("Commit Moment", &cfg.RewardsMomentCommit);
 			EditorWidgets::checkbox("Tutorial Moment", &cfg.RewardsMomentTutorial);
@@ -939,6 +1000,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			cfg.RewardsReducedMotion = std::clamp(cfg.RewardsReducedMotion, 0, 1);
 			Row::combo("Reduced Motion", &cfg.RewardsReducedMotion, motionItems,
 			           IM_ARRAYSIZE(motionItems));
+			ImGui::SeparatorText("Sounds");
 			EditorWidgets::checkbox("Success Sound", &cfg.RewardsSound);
 			{
 				SubGroup snd(cfg.RewardsSound && !cfg.EditorSoundsMuted);
@@ -990,6 +1052,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 				if (EditorWidgets::button("Preview##dragdrop"))
 					HE::Ed::Rewards::previewDragCues(ctx);
 			}
+			ImGui::SeparatorText("Footer");
 			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
 			{
 				SubGroup prog(cfg.RewardsShowProgress);
@@ -1009,14 +1072,27 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "computer.");
 	});
 
+	row("notifications", "Feedback", [&]{
+		// Read by the store every frame (EditorApplication pushes it), so a change
+		// is live. The bell and its list are always there; this only decides
+		// whether a notification may also interrupt.
+		EditorWidgets::checkbox("Show Notification Popups", &cfg.NotificationPopups);
+		hint("Important notifications appear as a small card in the bottom-right "
+		     "corner for a few seconds, and critical ones as a dialog that waits to "
+		     "be acknowledged. Turn this off and everything goes to the notification "
+		     "centre (the bell in the footer) only: it still rings and counts, but "
+		     "nothing opens over your work. Buttons such as Join or Retry are then "
+		     "on the rows in the centre.");
+	});
+
 	if (mode == SettingsMode::QuickSettings && shown == 0)
-		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press \xe2\x98\x86 Pin "
-		     "on the settings you want here.");
+		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press the star (\xe2\x98\x86) "
+		     "next to the settings you want here.");
 }
 
 // ─── Preferences tab state ───────────────────────────────────────────────────
 
-static Page s_page          = Page::Display;
+static Page s_page          = Page::EditorRenderer;
 static bool s_openRequested = false;
 // Frame stamp of the last drawn Source Control page (see sourceControlPageActive).
 static int  s_scPageFrame   = -1;
@@ -1095,19 +1171,9 @@ bool s_idSeeded      = false;
 
 void drawGitMessages(GitController* git)
 {
-	if (!git->lastError().empty())
-	{
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-		ImGui::TextWrapped("%s", git->lastError().c_str());
-		ImGui::PopStyleColor();
-	}
-	else if (!git->lastInfo().empty())
-	{
-		ImGui::Spacing();
-		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());
-	}
-	if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
+	// Errors and the outcome of the last operation are both posted to the
+	// notifications by GitController; only the busy state is drawn here.
+	if (git->busyWithWork()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
 // Repository half of the page: init, remote / GitHub setup, auto-push.
@@ -1139,11 +1205,23 @@ void drawRepositorySection(AppContext& ctx)
 			GitCloneDialog::requestOpen();
 		return;
 	}
+	// The setup below would be refused anyway (GitController::mayModify), so say
+	// why instead of offering buttons that do nothing. Before the missing-git
+	// line: with the server keeping the history, git is nothing to install.
+	if (git->blockedByTeamServer())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+		ImGui::TextWrapped("The team server keeps this project's history "
+		                   "(Config/ProjectSettings.json, sourceControl), so the editor "
+		                   "sets up no repository of its own here.");
+		ImGui::PopStyleColor();
+		return;
+	}
 	if (ctx.gitProbe && !ctx.gitProbe->gitFound)
 	{
 		// The install instructions are the section directly above this one, so
 		// this only has to say why the repository controls are missing.
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 		ImGui::TextWrapped("git was not found on this machine — install it above to "
 		                   "put this project under source control.");
 		ImGui::PopStyleColor();
@@ -1172,24 +1250,24 @@ void drawRepositorySection(AppContext& ctx)
 		if (!lfs)
 		{
 			ImGui::Spacing();
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
 			ImGui::TextWrapped("git-lfs was not found — the repository will work, "
 			                   "but large assets will not be tracked through LFS "
 			                   "until it is installed.");
 			ImGui::PopStyleColor();
 		}
 		ImGui::Spacing();
-		if (git->busy()) ImGui::BeginDisabled();
+		if (git->busyWithWork()) ImGui::BeginDisabled();
 		if (EditorWidgets::button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
 			git->requestInit(lfs);
-		if (git->busy()) ImGui::EndDisabled();
+		if (git->busyWithWork()) ImGui::EndDisabled();
 		drawGitMessages(git);
 		return;
 	}
 
 	// ── Branch line ─────────────────────────────────────────────────────────
 	if (st.detached)
-		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "Detached HEAD");
+		ImGui::TextColored(HE::Ed::Theme::Warn, "Detached HEAD");
 	else
 		ImGui::Text("Branch: %s", st.branch.empty() ? "(unknown)" : st.branch.c_str());
 	if (!st.initialCommit && !st.upstream.empty())
@@ -1223,7 +1301,7 @@ void drawRepositorySection(AppContext& ctx)
 		// The GitHub account (above) is the only way in: an empty token makes the
 		// service read the sign-in from the credential helper itself.
 		const bool signedIn = GitHubSignIn::account() == GitHubSignIn::Account::SignedIn;
-		ImGui::BeginDisabled(git->busy() || !signedIn ||
+		ImGui::BeginDisabled(git->busyWithWork() || !signedIn ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
 		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
 			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, {});
@@ -1249,7 +1327,7 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::InputTextWithHint("##remoteurl", "https://github.com/you/project.git",
 		                         s_remoteUrl, sizeof(s_remoteUrl));
 		ImGui::SameLine();
-		ImGui::BeginDisabled(git->busy() || s_remoteUrl[0] == '\0');
+		ImGui::BeginDisabled(git->busyWithWork() || s_remoteUrl[0] == '\0');
 		if (EditorWidgets::button("Set##remote"))
 		{
 			git->requestSetRemote(s_remoteUrl);
@@ -1383,7 +1461,7 @@ void drawRepositorySection(AppContext& ctx)
 		                         ImGuiInputTextFlags_Password);
 
 		ImGui::Spacing();
-		ImGui::BeginDisabled(git->busy() || s_credHost[0] == '\0' ||
+		ImGui::BeginDisabled(git->busyWithWork() || s_credHost[0] == '\0' ||
 		                     s_credUser[0] == '\0' || s_credToken[0] == '\0');
 		if (EditorWidgets::primaryButton("Save token", ImVec2(140.0f, 0.0f)))
 		{
@@ -1422,7 +1500,7 @@ void drawGitSetupSection(AppContext& ctx)
 	{
 		ImGui::BulletText("git was not found.");
 		ImGui::Indent();
-		GitMissingDialog::drawGitInstallRemedy();
+		GitMissingDialog::drawGitInstallRemedy(ctx);
 		ImGui::Unindent();
 		ImGui::Spacing();
 	}
@@ -1451,7 +1529,7 @@ void drawGitSetupSection(AppContext& ctx)
 			"it those would be committed straight into the repository, which most "
 			"hosts reject above 100 MB per file and which makes every clone "
 			"download the entire history of every asset.");
-		GitMissingDialog::drawLfsInstallRemedy();
+		GitMissingDialog::drawLfsInstallRemedy(ctx);
 		ImGui::Unindent();
 		ImGui::Spacing();
 	}
@@ -1539,9 +1617,15 @@ void drawSourceControlPage(AppContext& ctx)
 	ImGui::SeparatorText("GitHub account");
 	GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/false);
 
+	// The repository of the open PROJECT is on the Project Settings tab, next to
+	// the other things that belong to the project; say where, since this page
+	// used to hold it.
 	ImGui::Spacing();
 	ImGui::SeparatorText("Repository");
-	drawRepositorySection(ctx);
+	ImGui::TextDisabled("Init, remote, auto-push and large files belong to the project: "
+	                    "Edit \xe2\x96\xb8 Project Settings \xe2\x96\xb8 Source Control.");
+	if (EditorWidgets::button("Open Project Settings\xe2\x80\xa6", ImVec2(240.0f, 0.0f)))
+		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
 }
 
 // ─── Status page (Tools) ─────────────────────────────────────────────────────
@@ -1556,12 +1640,12 @@ ImVec4 statusColor(StatusLevel s)
 {
 	switch (s)
 	{
-	case StatusLevel::Ok:       return ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
-	case StatusLevel::Warn:     return ImVec4(1.00f, 0.78f, 0.35f, 1.0f);
-	case StatusLevel::Missing:  return ImVec4(1.00f, 0.50f, 0.45f, 1.0f);
+	case StatusLevel::Ok:       return HE::Ed::Theme::Ok;
+	case StatusLevel::Warn:     return HE::Ed::Theme::Warn;
+	case StatusLevel::Missing:  return HE::Ed::Theme::Bad;
 	case StatusLevel::Checking: break;
 	}
-	return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+	return HE::Ed::Theme::TextDim;
 }
 
 const char* statusMark(StatusLevel s)
@@ -1626,8 +1710,15 @@ void drawStatusPage(AppContext& ctx)
 	// business but the router's.
 	EditorWidgets::WrapText wrap;
 
+#if defined(__APPLE__)
 	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
 	                   "the background at startup; nothing here changes any setting.");
+#else
+	// (The file type switch at the foot of the page is not built on macOS.)
+	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
+	                   "the background at startup; the rows change no setting. The one "
+	                   "setting on this page, at the end, is the .heproj file type.");
+#endif
 	ImGui::Spacing();
 
 	// The Claude rows are the one check that is not run at startup, so opening
@@ -1647,16 +1738,20 @@ void drawStatusPage(AppContext& ctx)
 		ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("##fix",  ImGuiTableColumnFlags_WidthFixed, 44.0f);
 
-		// Every git row leads to the same place: the one page that reports the
-		// install and configures the repository.
-		const auto openSourceControl = []{ s_page = Page::Repository; };
-		// cmake and the compiler have no settings page of their own — the remedy
-		// is the install dialog that already carries the per-platform steps. It
-		// opens on a completed probe, so the recheck is what makes it appear (and
-		// the answer it shows is a fresh one, which is the question being asked).
-		const auto showToolchainHelp = [&ctx]{
-			if (ctx.recheckToolchain) ctx.recheckToolchain();
-			ToolchainDialog::requestShow();
+		// Every row that can be fixed by installing something leads to the same
+		// place: the setup dialog, opened on that tool's row. It asks for a fresh
+		// probe first (the question being asked is "is it still missing?"). The
+		// credential helper has no install behind it and stays on the Source
+		// Control page, where it is configured.
+		const auto openSourceControl = []{ s_page = Page::SourceControl; };
+		const auto showSetup = [&ctx](ToolSetupDialog::Tool tool)
+		{
+			return [&ctx, tool]
+			{
+				if (ctx.recheckToolchain) ctx.recheckToolchain();
+				if (ctx.recheckGit)       ctx.recheckGit();
+				ToolSetupDialog::requestShow(tool);
+			};
 		};
 
 		// ── Source control ───────────────────────────────────────────────────
@@ -1675,7 +1770,7 @@ void drawStatusPage(AppContext& ctx)
 			              ? (g.gitVersion.empty() ? std::string("found") : g.gitVersion) +
 			                (g.gitPath.empty() ? "" : " at " + g.gitPath.string())
 			              : std::string("not found — source control is unavailable"),
-			          openSourceControl);
+			          showSetup(ToolSetupDialog::Tool::Git));
 
 			// A warning, not an error: the repository works without LFS, it just
 			// commits big binaries the wrong way.
@@ -1683,14 +1778,14 @@ void drawStatusPage(AppContext& ctx)
 			          g.lfsFound ? g.lfsVersion
 			                     : std::string("not found — large assets would be committed "
 			                                   "directly into the repository"),
-			          openSourceControl);
+			          showSetup(ToolSetupDialog::Tool::GitLfs));
 
 			statusRow("git identity",
 			          g.identityConfigured ? StatusLevel::Ok : StatusLevel::Warn,
 			          g.identityConfigured ? g.userName + " <" + g.userEmail + ">"
 			                               : std::string("user.name / user.email are not set — "
 			                                             "commits will fail"),
-			          openSourceControl);
+			          showSetup(ToolSetupDialog::Tool::GitIdentity));
 
 			statusRow("Credential helper",
 			          g.credentialHelper.empty() ? StatusLevel::Warn : StatusLevel::Ok,
@@ -1713,10 +1808,10 @@ void drawStatusPage(AppContext& ctx)
 			          t.cmakeFound ? t.cmakeVersion
 			                       : std::string("not found — needed for C++ export codegen "
 			                                     "and C++ projects"),
-			          showToolchainHelp);
+			          showSetup(ToolSetupDialog::Tool::Cmake));
 			statusRow("C++ compiler", t.compilerFound ? StatusLevel::Ok : StatusLevel::Missing,
 			          t.compilerFound ? t.compilerId : std::string("not found"),
-			          showToolchainHelp);
+			          showSetup(ToolSetupDialog::Tool::Compiler));
 		}
 
 		// ── Collaboration ────────────────────────────────────────────────────
@@ -1928,6 +2023,44 @@ void drawStatusPage(AppContext& ctx)
 			ImGui::TreePop();
 		}
 	}
+
+	// ── File types ───────────────────────────────────────────────────────────
+	// The editor registering .heproj for itself at start (HeprojRegistration.h). A
+	// plain GlobalState entry like the Panels page's, read once at startup: turning
+	// it on here also runs it now, so the effect is not "after the next restart".
+	// macOS has no use for it (the Info.plist is the registration).
+#if !defined(__APPLE__)
+	ImGui::Spacing();
+	ImGui::SeparatorText("File types");
+	{
+		GlobalState& gs = GlobalState::getInstance();
+		bool on = gs.getCustomConfigBool(HeprojRegistration::kSettingKey, true);
+		if (EditorWidgets::checkbox("Register .heproj with this editor", &on))
+		{
+			gs.setCustomConfigEntry(HeprojRegistration::kSettingKey, on);
+			if (!gs.writeConfig())
+				HE::Ed::notify(HE::Ed::NoteLevel::Important,
+				               "Could not save the file type setting",
+				               "The choice applies now, but this session's config file could "
+				               "not be written \xe2\x80\x94 the next launch will use the old one.");
+			if (on)
+			{
+				const HeprojRegistration::StartupReport report = HeprojRegistration::startAtStartup(true);
+				if (report.result.outcome == HeprojRegistration::Outcome::LeftAlone)
+					HE::Ed::notify(HE::Ed::NoteLevel::Info,
+					               ".heproj project files open with " + report.result.detail +
+					                   ", so the editor left the file type alone",
+					               "To open them with the Horizon Editor instead, use \"Open with\" in "
+					               "your file manager, or run the script in the editor's FileTypes folder.");
+			}
+		}
+		EditorWidgets::hint("At every start the editor checks that double-clicking a .heproj opens it here, "
+		                    "and sets that up for your user account if it does not (no administrator rights). "
+		                    "It never replaces another application's choice, and it writes nothing when the "
+		                    "registration is already right. The FileTypes folder next to the editor still has "
+		                    "the scripts that do it by hand.");
+	}
+#endif
 }
 
 // The C++ toolchain had a page of its own here once. It said what the Status
@@ -1968,7 +2101,7 @@ void drawPanelsPage()
 		// the look it just rejected. Which only holds if the write lands, so a
 		// failure is said out loud instead of being discovered next launch.
 		if (!gs.writeConfig())
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			               "Could not save the variable display setting",
 			               "The choice applies now, but this session's config file could "
 			               "not be written — the next launch will show the old look.");
@@ -2010,7 +2143,7 @@ void drawPanelsPage()
 		// Same reasoning as the variable display above: a look picked once is
 		// written now, and a failed write is said out loud.
 		if (!gs.writeConfig())
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			               "Could not save the Pre Construct setting",
 			               "The choice applies now, but this session's config file could "
 			               "not be written \xe2\x80\x94 the next launch will use the old one.");
@@ -2027,43 +2160,38 @@ void drawPanelsPage()
 struct NavItem  { Page page; const char* label; };
 struct NavGroup { const char* label; const NavItem* items; int count; };
 
-constexpr NavItem kGeneralItems[] = {
+constexpr NavItem kEditorItems[] = {
 	{ Page::Appearance,     "Appearance" },
 	{ Page::Viewport,       "Viewport" },
 	{ Page::ContentBrowser, "Content Browser" },
 	{ Page::Autosave,       "Autosave" },
+	{ Page::Panels,         "Panels" },
+	{ Page::Shortcuts,      "Shortcuts" },
 	{ Page::Feedback,       "Feedback" },
 };
-// Everything the EDITOR does that is not the renderer, under one heading. The
-// three groups that used to stand alone here (Collaboration, Source Control,
-// Tools) were one page each: three headings for three rows made the rail long
-// and said nothing the page titles did not. The labels grew back what the
-// headings carried — "Sessions" under no heading is not a topic.
-constexpr NavItem kEditorItems[] = {
-	{ Page::Panels,        "Panels" },
-	{ Page::Shortcuts,     "Shortcuts" },
-	{ Page::CollabGeneral, "Collaboration" },
-	{ Page::RemoteControl, "Remote Control" },
-	{ Page::Repository,    "Source Control" },
-	{ Page::Status,        "Tool Status" },
+// What the viewport is drawn with on THIS machine. The graphics a GAME ships with
+// are the project's (Project Settings ▸ Rendering); this is the editor's own
+// renderer and the user's own preview values.
+constexpr NavItem kPreviewItems[] = {
+	{ Page::EditorRenderer,  "Editor Renderer" },
+	{ Page::ViewportQuality, "Viewport Quality" },
 };
-constexpr NavItem kRenderingItems[] = {
-	{ Page::Display,            "Display" },
-	{ Page::PostProcessing,     "Post-Processing" },
-	{ Page::GlobalIllumination, "Global Illumination" },
-	{ Page::Effects,            "Effects" },
+constexpr NavItem kConnectionItems[] = {
+	{ Page::SourceControl, "Source Control" },
+	{ Page::Team,          "Team" },
+	{ Page::RemoteControl, "Remote Control" },
+};
+constexpr NavItem kToolItems[] = {
+	{ Page::Status, "Tool Status" },
 };
 constexpr NavGroup kNavGroups[] = {
-	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
-	// Right behind General: these are the editor's own tools, so they belong
-	// next to the rest of "how the editor behaves" and ahead of the renderer.
-	{ "Editor",    kEditorItems,    IM_ARRAYSIZE(kEditorItems) },
-	{ "Rendering", kRenderingItems, IM_ARRAYSIZE(kRenderingItems) },
-	// No "Project" group any more: everything on this tab follows the EDITOR
-	// from project to project. What travels with the project and into its
-	// exported build has a tab of its own now — Edit ▸ Project Settings
-	// (ProjectSettingsPanel), which is where the four pages that used to sit
-	// here went.
+	{ "Editor",                  kEditorItems,     IM_ARRAYSIZE(kEditorItems) },
+	{ "Preview",                 kPreviewItems,    IM_ARRAYSIZE(kPreviewItems) },
+	{ "Accounts & Connections",  kConnectionItems, IM_ARRAYSIZE(kConnectionItems) },
+	{ "Tools",                   kToolItems,       IM_ARRAYSIZE(kToolItems) },
+	// No "Project" group: everything on this tab follows the EDITOR from project
+	// to project. What travels with the project and into its exported build has a
+	// tab of its own — Edit ▸ Project Settings (ProjectSettingsPanel).
 };
 
 // Engine-settings pages map onto one catalog category each; the rest have
@@ -2073,17 +2201,36 @@ const char* catalogCategory(Page p)
 	switch (p)
 	{
 	case Page::Appearance:         return "Appearance";
-	case Page::Viewport:           return "Viewport";
 	case Page::ContentBrowser:     return "Content Browser";
 	case Page::Autosave:           return "Autosave";
 	case Page::Feedback:           return "Feedback";
-	case Page::Display:           return "Display";
-	case Page::PostProcessing:     return "Post-Processing";
-	case Page::GlobalIllumination: return "Global Illumination";
-	case Page::Effects:            return "Effects";
-	case Page::CollabGeneral:      return "Collaboration";
+	case Page::Team:               return "Team";
 	case Page::RemoteControl:      return "Remote Control";
 	default:                       return nullptr;
+	}
+}
+
+// The pages whose rows are picked by key and not by category. The Viewport page
+// also carries the gamepad deadzones — their category ("Input") had no page at
+// all, so they could only be reached through a Quick Settings pin — and the
+// weather sound; the two Preview pages split the old Display / Post-Processing /
+// Global Illumination / Effects pages by WHO the setting is for.
+constexpr const char* kViewportRows[]       = { "camspeed", "pointerinput", "gamepad", "weathersound" };
+constexpr const char* kEditorRendererRows[] = { "backend", "vsync", "maxfps" };
+constexpr const char* kViewportQualityRows[] = {
+	"renderpath", "occlusion", "aa", "gpuparticles",
+	"bloom", "ssao", "dof", "motionblur",
+	"ssr", "gi", "girefl",
+};
+
+bool pageRows(Page p, DrawOptions& out)
+{
+	switch (p)
+	{
+	case Page::Viewport:        out.rows = kViewportRows;        out.rowCount = IM_ARRAYSIZE(kViewportRows);        return true;
+	case Page::EditorRenderer:  out.rows = kEditorRendererRows;  out.rowCount = IM_ARRAYSIZE(kEditorRendererRows);  return true;
+	case Page::ViewportQuality: out.rows = kViewportQualityRows; out.rowCount = IM_ARRAYSIZE(kViewportQualityRows); return true;
+	default:                    return false;
 	}
 }
 
@@ -2095,7 +2242,60 @@ const char* pageTitle(Page p)
 	return "";
 }
 
+// ─── Preview ▸ Viewport Quality ──────────────────────────────────────────────
+// The top of the page. These rows are the USER's own graphics values; whether
+// they are what the viewport shows depends on the open project. A project that
+// sets its own graphics (Project Settings ▸ Rendering) makes the viewport follow
+// them by default — what you see is what ships — and this is where a machine
+// that cannot carry them says "use mine for the preview". It changes nothing an
+// export writes.
+void drawViewportQualityHeader(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Viewport Quality");
+	EditorConfig& cfg = ctx.editorConfig;
+	EditorWidgets::hint("Your own graphics values: what the viewport shows for a project that "
+	                    "sets none, and where a project's can start from. What a GAME ships "
+	                    "with is set per project, in Project Settings \xe2\x96\xb8 Rendering.");
+	ImGui::Spacing();
+
+	const bool projectOpen = ctx.projectManager && !ctx.projectManager->currentProject().path.empty();
+	if (!projectOpen || !ctx.projectManager->currentProject().settings.graphics.enabled)
+	{
+		if (projectOpen)
+			ImGui::TextDisabled("The open project does not set its own graphics, so the viewport "
+			                    "uses the values below.");
+		return;
+	}
+
+	ImGui::SeparatorText("Preview of this project");
+	int mode = std::clamp(cfg.PreviewQualityMode, 0, 1);
+	bool changed = false;
+	if (ImGui::RadioButton("Same as the project", mode == 0)) { mode = 0; changed = true; }
+	EditorWidgets::helpForLabel("Same as the project");
+	ImGui::SameLine();
+	if (ImGui::RadioButton("My own values", mode == 1)) { mode = 1; changed = true; }
+	EditorWidgets::helpForLabel("My own values");
+	if (changed) cfg.PreviewQualityMode = mode;
+	EditorWidgets::hint(mode == 0
+		? "The viewport shows what this project's build will: the values on the project's "
+		  "Rendering pages. The rows below are greyed out while that is so."
+		: "The viewport uses the values below, whatever the project says — for a machine "
+		  "that struggles with its bloom or GI. The exported build still gets the project's.");
+	ImGui::Spacing();
+	ImGui::SeparatorText("Your values");
+}
+
 } // namespace
+
+// The repository half, on the Project Settings tab's Source Control page. Marks
+// the page as a source-control page this frame so the Source Control window keeps
+// its fast status poll running while somebody looks at it, as it did for the
+// Preferences page this half used to be on.
+void DrawRepositorySection(AppContext& ctx)
+{
+	s_scPageFrame = ImGui::GetFrameCount();
+	drawRepositorySection(ctx);
+}
 
 // ─── The Preferences tab ─────────────────────────────────────────────────────
 
@@ -2112,7 +2312,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	// Its own shade, taller rows, and the active page marked with an accent bar
 	// at the rail's edge — the way every settings sidebar this decade says
 	// "you are here". The Selectable's own blue fill comes from the theme.
-	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.09f, 0.095f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.075f));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 12.0f));
 	ImGui::BeginChild("##prefnav", ImVec2(210.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
 	                  ImGuiWindowFlags_NoScrollbar);
@@ -2159,19 +2359,37 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	const char* category = catalogCategory(s_page);
+	DrawOptions pageOptions;
+	const bool  pickedByRows = pageRows(s_page, pageOptions);
+	if (!pickedByRows) pageOptions.category = catalogCategory(s_page);
+	const bool  settingsPage = pickedByRows || pageOptions.category != nullptr;
 
 	// Body scrolls on its own so the footer row below stays put.
 	const float footerH = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 	ImGui::BeginChild("##prefbody", ImVec2(0.0f, -footerH));
-	if (category)
+	if (settingsPage)
 	{
-		EditorWidgets::hint("Press \xe2\x98\x86 Pin on a setting to keep it in the Quick Settings "
+		// The Team page leads with the team server and the sign-in, which are
+		// not catalog settings (nothing to pin, a password in a field); the
+		// session settings below them are.
+		if (s_page == Page::Team && ctx.team)
+		{
+			EditorWidgets::WrapText wrap;
+			TeamView::drawSettings(*ctx.team,
+			                       { &ctx.editorConfig.CollabRelayAddress,
+			                         &ctx.editorConfig.TeamName,
+			                         &ctx.editorConfig.TeamMember },
+			                       TeamView::editorForm());
+			ImGui::Spacing();
+			ImGui::SeparatorText("Sessions");
+		}
+		if (s_page == Page::ViewportQuality) drawViewportQualityHeader(ctx);
+		EditorWidgets::hint("Press the star (\xe2\x98\x86) next to a setting to keep it in the Quick Settings "
 		                    "panel next to the viewport.");
 		ImGui::Spacing();
-		DrawEngineSettings(ctx, SettingsMode::Preferences, category);
+		DrawEngineSettings(ctx, SettingsMode::Preferences, pageOptions);
 	}
-	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
+	else if (s_page == Page::SourceControl) drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
 	else if (s_page == Page::Panels)      drawPanelsPage();
 	else if (s_page == Page::Shortcuts)   ShortcutsPage::draw();
@@ -2181,7 +2399,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	ImGui::Separator();
 	// Outside the pages, so no page's scope is open here any more.
 	HE::Ed::Help::Scope footerScope("Preferences");
-	if (category)
+	if (settingsPage)
 	{
 		EditorConfig& cfg = ctx.editorConfig;
 		if (EditorWidgets::button("Restore Defaults"))
@@ -2215,6 +2433,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsSoundProblem       = true;
 			cfg.RewardsSoundDragDrop      = true;
 			cfg.RewardsProblemPulse       = true;
+			cfg.NotificationPopups        = true;
 			cfg.RewardsShowProgress  = true;
 			cfg.RewardsCounterTick   = true;
 			cfg.RewardsStreakTooltip = true;
@@ -2227,6 +2446,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.SSAOIntensity     = 1.0f;
 			cfg.SSAOMethod        = 0;
 			cfg.GpuParticles      = true;
+			cfg.WeatherSoundInEditor = true;
 			cfg.CollabLanDiscovery = true;
 			// Restore Defaults is the one path that can move CollabSyncLargeAssets
 			// without touching its (disabled) checkbox, so it has to honour the same
@@ -2240,6 +2460,12 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			// the session config carries as its own default (Config::maxAssetBytes,
 			// which is the asset ceiling now — the join snapshot keeps its own).
 			cfg.CollabMaxAssetMB  = 64;
+			// Peer-to-peer, no team server. A session already running stays on
+			// the relay it started with, and a signed-in team connection on the
+			// server it signed in with (the page shows that one, not this field);
+			// the setting is read at the next host, join or sign-in. Team and
+			// member names are not settings but who you are, and stay.
+			cfg.CollabRelayAddress.clear();
 			// Remote control goes back OFF, unconditionally and whatever it is
 			// doing right now. Every other setting here resets to "what a fresh
 			// editor does"; for this one that default is also the security model's

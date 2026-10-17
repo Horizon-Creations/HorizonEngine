@@ -262,6 +262,7 @@ void handleGraphKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& av
 struct GraphTabs
 {
 	std::vector<int> open;        // FunctionEntry ids that have a tab, in tab order
+	bool restored    = false;     // the remembered tab set has been adopted (needs a loaded graph)
 	int  lastShown   = -1;        // the graph the canvas state below belongs to (-1: none yet)
 	int  forceSelect = 0;         // frames left to push the host's choice into the tab bar
 };

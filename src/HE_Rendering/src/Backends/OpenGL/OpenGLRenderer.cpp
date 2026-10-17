@@ -14,6 +14,7 @@
 #include <HorizonRendering/GiInstanceSurface.h> // shared flat surface for a GI/reflection hit
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
+#include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
@@ -2450,7 +2451,7 @@ vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
 	            * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
 	vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
 	float pms   = giLands[li].autoSlope.w;
-	float flat_ = (1.0 - smoothstep(0.5 * pms, pms, slope)) * (1.0 - snow);
+	float flat_ = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
 	return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
 }
 
@@ -4749,6 +4750,23 @@ void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjCle
 		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
 		if (!mesh || !mesh->vao || mesh->indexCount <= 0) continue;
 
+		// A foliage cluster stands for a bucket of plants: draw every one of them,
+		// static (previous pose = this pose, so the velocity is the camera's own
+		// motion). The entity-keyed history below holds ONE pose per entity, which
+		// is all a cluster must not use: every plant of a layer shares the terrain's id.
+		if (obj.isCluster())
+		{
+			glBindVertexArray(mesh->vao);
+			m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+			{
+				glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * model));
+				glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * model));
+				glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * model));
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			});
+			continue;
+		}
+
 		// An object seen for the first time reports no motion — its "previous"
 		// position is where it is now. Anything else invents a streak out of
 		// nowhere on the frame something spawns.
@@ -5430,6 +5448,312 @@ unsigned int OpenGLRenderer::RenderMotionBlur(unsigned int sourceHdr, int fullW,
 	return m_mbColor;
 }
 
+// ─── Underwater caustics (Thema 185 Schritt 3) ────────────────────────────────
+// The refracted-light net on whatever lies below the flat surface plane. Per pixel:
+// the depth names a world position P; the sun's ray through P (bent by Snell's law on
+// the way down) pierces the surface plane at S; the engine water's own wave trains
+// (Physics/WaterWaves.h, spliced in below) give the surface's curvature at S, and the
+// Jacobian of "where the light enters" -> "where it lands" says how much that spot's
+// light is squeezed: 1/|det| (a lens focus where the surface bulges up like a crest,
+// a dim spot where it dips). The wave trains are the SAME ones the surface material
+// draws and the physics floats on, so the net moves with the swell seen from above.
+//
+// Thema 205 Schritt 2 reworked the look (docs/underwater-caustics-rework-2026-10-15.md):
+// the three trains alone gave soft lenses that only appeared below ~2 m and peaked at
+// 8-14 m, the opposite of real water. Now ten short chop trains (1.2 m down to 0.4 m,
+// golden-angle directions, derived in the loop — no second table to keep in step) ride
+// on top of the engine's six, and the light travels a FIXED focal distance (kFocal) to
+// the floor instead of the real depth, so the fold lines of the mapping make a fine net
+// that is already there in a hand's depth of water. The depth only fades it: full in the
+// shallows, eased out to nothing at uCaustics.w (smoothstep), the lines growing wider
+// and dimmer on the way (the cap on 1/|det|). The light is redistributed, not just added:
+// rgb = the light the lines gain, a = the share the cells between them lose, for the
+// ONE/INV_SRC_ALPHA blend the D3D/Vulkan backends draw it with (dst' = rgb + dst * (1 - a)),
+// mirrored below as scene * (1 - a) + rgb.
+// uCaustics.x is already multiplied by the waterline fade-in (RenderExtractor.cpp's
+// causticsFadeIn) and is exactly 0 on the line, where the net is skipped in the shader.
+//
+// The same pass carries the depth fog (Thema 185 Schritt 2 on the D3D/Vulkan backends,
+// a separate alpha-blended pass there): GL has no blend-onto-HDR step in this chain, and
+// a second full-resolution read+write for a few instructions would double the cost, so
+// the fog is folded in AFTER the net (the order the D3D backends draw them in). The pass
+// therefore runs whenever the camera is under water and either knob is non-zero.
+static const char* kUnderwaterCausticsFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform mat4 uInvViewProj;
+uniform vec4 uCamSurface;   // xyz = camera world position, w = surface Y
+uniform vec4 uSun;          // xyz = direction TOWARD the sun (unit)
+uniform vec4 uSunColor;     // rgb = sun radiance (0 at night)
+uniform vec4 uCaustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
+uniform vec4 uTintDensity;  // rgb = resolved fog tint, a = per-metre density (the fog stage, see main)
+const float kTrains[12] = float[12](@TRAINS@);
+const float kTwoPi = 6.28318530718;
+const float kEta   = 1.33;
+const int   kChopTrains = 10;     // short trains on top of the engine's six (lengths, directions: see the loop)
+const float kChopSteep  = 0.05;
+const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
+const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (see the cap below)
+
+// The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
+// cells between them lose (vec4(0) where there is no net). The screen derivatives of P come
+// in as arguments: main() takes them before any branch. Past the one early-out (the same for
+// every pixel) it runs for EVERY pixel, sky and dry ones included, with the result selected
+// away at the end: fwidth(det) below is undefined in divergent flow. A sky pixel's P (far
+// plane, or near-infinite) is parked at the camera so nothing turns NaN in its quad.
+vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
+{
+	vec3 L = uSun.xyz;
+	if (uCaustics.x <= 0.0 || L.y <= 0.02) return vec4(0.0);   // off, or no sun
+	P = hit ? P : uCamSurface.xyz;
+	float depth = uCamSurface.w - P.y;                      // metres below the flat surface
+	float fadeDepth = uCaustics.w;
+
+	// The sun's ray inside the water (Snell: the horizontal part shrinks by 1/eta),
+	// followed back up to the surface plane.
+	vec2  hz   = L.xz / kEta;
+	float cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
+	vec3  Lr   = vec3(hz.x, cosT, hz.y);
+	vec2  S    = P.xz + hz / max(cosT, 0.1) * depth;
+	// The material bends its wave phase with a slow FBM field; a cheap two-sine stand-in
+	// does the same here, so the lattice of the plane trains does not read as a grid.
+	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * uCaustics.z), sin(0.37 * S.x - 0.27 * uCaustics.z));
+
+	// Curvature of the wave surface at S, summed over the trains.
+	// h = (steepness / k) sin(k (d.p - speed t)); H = -steepness k sin(.) d d^T.
+	// Trains 0-2 are the engine water's own; 3-5 are their companions (turned 57 degrees,
+	// 0.73x the length, 0.6x the steepness, a touch faster) — the material shades a
+	// companion per knob as well. Trains 6+ are the fine chop the net's lines come from:
+	// lengths 1.2 m down to 0.4 m in geometric steps, each turned the golden angle from
+	// the last (no two parallel, so no lattice), deep-water speed sqrt(g L / 2 pi).
+	// gxx/gzz/gxz are the gradients of mxx/mzz/mxz over S (for the anti-aliasing below).
+	float mxx = 0.0, mzz = 0.0, mxz = 0.0;
+	vec2  gxx = vec2(0.0), gzz = vec2(0.0), gxz = vec2(0.0);
+	for (int i = 0; i < 6 + kChopTrains; ++i)
+	{
+		float deg, len, stp, spd;
+		if (i < 6)
+		{
+			int   b    = i % 3;
+			float comp = i >= 3 ? 1.0 : 0.0;
+			deg = kTrains[b * 4] + comp * 57.0;
+			len = kTrains[b * 4 + 2] * mix(1.0, 0.73, comp);
+			stp = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+			spd = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		}
+		else
+		{
+			float j = float(i - 5);
+			deg = 20.0 + 137.508 * j;
+			len = 1.2 * pow(1.0 / 3.0, (j - 1.0) / float(kChopTrains - 1));
+			stp = kChopSteep;
+			spd = sqrt(9.81 / kTwoPi * len);
+		}
+		float rad = radians(deg);
+		vec2  dv  = vec2(cos(rad), sin(rad));
+		float k   = kTwoPi / len * uCaustics.y;
+		float ph  = k * (dot(dv, S) - spd * uCaustics.z);
+		float c   = stp * k * sin(ph);
+		vec2  dc  = (stp * k * k * cos(ph)) * dv;
+		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;   gzz -= dc * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;   gxz -= dc * dv.x * dv.y;
+	}
+	// How far the bend moves the light on its way down: a fixed focal distance, not the
+	// real depth, so the net's fold lines are as crisp in a hand's depth as further down.
+	float kd  = (kEta - 1.0) / kEta * kFocal;
+	float det = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+	vec2  gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
+	// Depth fade: full in the shallows, eased out to nothing at fadeDepth; a few centimetres
+	// of ramp at the waterline so the net does not end on a hard edge where the floor
+	// leaves the water (dry pixels get 0 from that ramp). The cap on the squeeze softens
+	// with it: thin bright lines near the surface, wider dimmer ones deeper down.
+	// Anti-aliasing: J sits at the cap where |det| < 1 / cap, a band 2 / (cap * dDet) pixels
+	// wide, dDet = how much det changes from one pixel to the next: its exact gradient over
+	// S times the pixel's step in S (S is smooth, so its screen derivatives are too; fwidth
+	// of det itself is per 2x2 quad and leaves a grain where the folds are steep). capAA
+	// keeps the band two pixels wide or more; where even a cap of 2 would be thinner
+	// (far away, grazing, the long folds of the big trains) the net fades out instead of
+	// breaking into dotted moire lines. The gradient is ~0 at det's own peaks and dips, so
+	// it is floored by the pixel's step in S against the chop's ~10 / m: once a pixel spans
+	// a quarter of the shortest chop wave, no point of the net survives as a lone sparkle.
+	// Line width (Thema 205 step 6, docs/underwater-caustics-line-width-2026-10-17.md): with
+	// every J > 1 lit, the whole |det| < 1 band glowed and the lines covered 26 % of the
+	// reference floor against 15-18 % in the human's photo. Now the near cap is 10 (was 5)
+	// and a line lights up only where J passes kCore of the way from 1 to the cap: the thin
+	// core of each fold. Tied to the cap, not a fixed J, so the wider dimmer lines at depth
+	// (cap 2) and the anti-aliased far ones (capAA) keep a core too.
+	vec2  dSx   = dFdx(S);
+	vec2  dSy   = dFdy(S);
+	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
+	                  10.0 * uCaustics.y * (length(dSx) + length(dSy)));
+	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
+	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
+	float capAA = 2.0 / max(dDet, 1e-4);
+	float cap   = min(mix(10.0, 2.0, t), capAA);
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
+
+	// Surfaces that face the refracted sun catch it; a wall barely does.
+	vec3 n = normalize(cross(dPx, dPy));
+	if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
+	float w = uCaustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
+	vec4 net = vec4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	                kDark * min(w, 1.0) * max(1.0 - J, 0.0));
+	return hit ? net : vec4(0.0);
+}
+
+void main()
+{
+	vec3 scene = texture(uScene, vUV).rgb;
+	float d = texture(uDepth, vUV).r;
+	vec4 wp = uInvViewProj * vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+	vec3 P = wp.xyz / max(wp.w, 1e-8);
+	vec3 dPx = dFdx(P);                                     // before any early-out: derivatives are
+	vec3 dPy = dFdy(P);                                     // undefined after divergent flow
+	vec4 net = causticLight(P, dPx, dPy, d < 1.0);               // the sky has no floor to catch the net
+	vec3 lit = scene * (1.0 - net.a) + net.rgb;                  // the D3D/Vulkan blend, ONE / INV_SRC_ALPHA
+
+	// The fog (twin of the D3D/Vulkan underwater fog pass, HlslSources.h kUnderwaterFogHLSL):
+	// Beer-Lambert over the part of the camera->P ray that lies on the wet side of the flat
+	// surface plane. Both ends dry = 0 (a ray that never enters the water pays nothing); both
+	// wet = the whole ray; split = the part before the plane crossing, which is what keeps the
+	// waterline soft. Applied AFTER the net so the fog swallows it with distance, exactly as
+	// on the D3D backends (caustics first, then the premultiplied tint*fog + dst*(1-fog) blend).
+	vec3  camPos   = uCamSurface.xyz;
+	float surfaceY = uCamSurface.w;
+	bool  camBelow = camPos.y < surfaceY;
+	bool  pBelow   = P.y < surfaceY;
+	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
+	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
+	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
+	vec4 wn = uInvViewProj * vec4(vUV * 2.0 - 1.0, -1.0, 1.0);
+	bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+	float segment;
+	if (camBelow == pBelow)
+		segment = camBelow ? length(camPos - P) : 0.0;
+	else
+	{
+		float t = (surfaceY - camPos.y) / (P.y - camPos.y);
+		vec3 crossPt = camPos + t * (P - camPos);
+		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
+	}
+	float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
+	fragColor = vec4(mix(lit, uTintDensity.rgb, fogAmount), 1.0);
+}
+)GLSL";
+
+bool OpenGLRenderer::EnsureUnderwaterCausticsPipeline()
+{
+	if (m_ucProgram) return true;
+	if (m_ucTried) return false;
+	m_ucTried = true;
+	std::string fsSrc = kUnderwaterCausticsFS;
+	const std::string trains = HE::causticsWaveTrainsList();
+	fsSrc.replace(fsSrc.find("@TRAINS@"), 8, trains);
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc.c_str());
+	GLuint prog = glCreateProgram();
+	glAttachShader(prog, vs);
+	glAttachShader(prog, fs);
+	glLinkProgram(prog);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	GLint ok = GL_FALSE;
+	glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: underwater caustics program failed to link");
+		glDeleteProgram(prog);
+		return false;
+	}
+	m_ucProgram   = prog;
+	m_uUcScene    = glGetUniformLocation(prog, "uScene");
+	m_uUcDepth    = glGetUniformLocation(prog, "uDepth");
+	m_uUcInvVP    = glGetUniformLocation(prog, "uInvViewProj");
+	m_uUcCamSurf  = glGetUniformLocation(prog, "uCamSurface");
+	m_uUcSun      = glGetUniformLocation(prog, "uSun");
+	m_uUcSunColor = glGetUniformLocation(prog, "uSunColor");
+	m_uUcParams   = glGetUniformLocation(prog, "uCaustics");
+	m_uUcTint     = glGetUniformLocation(prog, "uTintDensity");
+	return true;
+}
+
+void OpenGLRenderer::EnsureUnderwaterCausticsTarget(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_ucFBO && fullW == m_ucW && fullH == m_ucH) return;
+	if (m_ucFBO)   { glDeleteFramebuffers(1, &m_ucFBO); m_ucFBO = 0; }
+	if (m_ucColor) { glDeleteTextures(1, &m_ucColor);   m_ucColor = 0; }
+	glGenFramebuffers(1, &m_ucFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ucFBO);
+	glGenTextures(1, &m_ucColor);
+	glBindTexture(GL_TEXTURE_2D, m_ucColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, fullW, fullH, 0, GL_RGBA, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ucColor, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: underwater caustics FBO incomplete");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_ucW = fullW;
+	m_ucH = fullH;
+}
+
+// Assumes m_fsVAO is bound and the depth test is off (the post-process pass's state);
+// restores nothing, the next pass rebinds its own output.
+unsigned int OpenGLRenderer::RenderUnderwaterCaustics(unsigned int sourceHdr, int fullW, int fullH,
+                                                      const glm::mat4& invViewProj,
+                                                      const glm::vec3& towardSun,
+                                                      const glm::vec3& sunColor)
+{
+	if (!sourceHdr || !m_hdrDepth || !EnsureUnderwaterCausticsPipeline()) return 0;
+	EnsureUnderwaterCausticsTarget(fullW, fullH);
+	if (!m_ucFBO) return 0;
+
+	const UnderwaterCameraData& uc = m_renderWorld.underwaterCamera;
+	// The wave clock the engine water material runs on (HE_SKY_TIME pins it for
+	// deterministic captures), scaled by the body's own speed.
+	static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+	const float engineSeconds = s_timeOv && *s_timeOv ? static_cast<float>(std::atof(s_timeOv))
+	                                                  : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	const glm::vec3 cam = m_renderWorld.camera.position;
+
+	glViewport(0, 0, m_ucW, m_ucH);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_ucFBO);
+	glDisable(GL_BLEND);
+	glUseProgram(m_ucProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, sourceHdr);
+	glUniform1i(m_uUcScene, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glUniform1i(m_uUcDepth, 1);
+	glUniformMatrix4fv(m_uUcInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+	glUniform4f(m_uUcCamSurf, cam.x, cam.y, cam.z, uc.surfaceY);
+	glUniform4f(m_uUcSun, towardSun.x, towardSun.y, towardSun.z, 0.0f);
+	glUniform4f(m_uUcSunColor, sunColor.r, sunColor.g, sunColor.b, 0.0f);
+	glUniform4f(m_uUcParams, uc.causticsIntensity, uc.causticsScale,
+	            engineSeconds * uc.causticsSpeed, uc.causticsDepth);
+	glUniform4f(m_uUcTint, uc.tintColor.r, uc.tintColor.g, uc.tintColor.b, uc.density);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// Units clean for the passes that follow (depth on unit 1 is what the scene pass renders into).
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return m_ucColor;
+}
+
 // ─── SSAO ────────────────────────────────────────────────────────────────────
 // Kernel + rotation noise come from HorizonRendering/SsaoKernel.h: the same
 // deterministic samples every backend bakes, which is what makes GL == Metal ==
@@ -5700,7 +6024,8 @@ void OpenGLRenderer::UpdateGIAccel()
 	};
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
-		if (!obj.castsShadow) continue;
+		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+		if (!obj.castsShadow || obj.isCluster()) continue;
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
@@ -6108,8 +6433,8 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 	int unresolved = 0;
 	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
@@ -7657,6 +7982,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				// has no local shadow atlas, so it passes false.
 				HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
 				HE::FillMaterialWind(GetEnvironment(), lit); // Wind nodes, next to Time
+				HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 				uiLightUploaded = true;
@@ -10656,9 +10982,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
 	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+			obj.refineWorldBounds(mesh->localBounds);
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	m_culler.cull(m_renderWorld, m_visible);
@@ -10854,11 +11179,31 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// THAT. Off → sceneHdr stays m_hdrColor and nothing here changes.
 			// Sibling scope, not nested in Bloom's: GL_TIME_ELAPSED cannot nest.
 			unsigned int sceneHdr = m_hdrColor;
+
 			if (m_dofEnabled)
 			{
 				GpuPassScope _dofTimer(this, "DoF");
 				if (const unsigned int dofTex = RenderDepthOfField(pw, ph, m_renderWorld.camera.projection))
 					sceneHdr = dofTex;
+			}
+
+			// Underwater caustics + fog next, on whatever DoF left (Thema 185 Schritte 2 und 3): light
+			// added to the scene and the depth fog over it, so motion blur/bloom treat both like
+			// any other lit surface. Runs only with the camera under water and at least one of
+			// the body's two knobs (net intensity, fog density) above 0 (the extractor's
+			// waterline fade-in makes the intensity exactly 0 on the line, the fog carries on
+			// through it); every other frame pays nothing. Sibling scope, like the passes below.
+			// Not gated on wet: density stays above 0 for a dry camera in the waterline band
+			// just above the surface (HE::fogWaterlineBand, Thema 185 Schritt 5).
+			if (m_renderWorld.underwaterCamera.causticsIntensity > 0.0f
+			    || m_renderWorld.underwaterCamera.density > 0.0f)
+			{
+				GpuPassScope _ucTimer(this, "UnderwaterCaustics");
+				glm::vec3 ucSunDir, ucSunColor;
+				m_renderWorld.dominantDirectionalLight(ucSunDir, ucSunColor);
+				if (const unsigned int ucTex = RenderUnderwaterCaustics(sceneHdr, pw, ph, invViewProj,
+				                                                        glm::normalize(sunDir), ucSunColor))
+					sceneHdr = ucTex;
 			}
 
 			// Motion blur next, on whatever DoF left: the camera's frame-to-frame
@@ -11383,6 +11728,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (matClustered)
 				HE::FillMaterialClusterParams(frameClusters, lit);
 			HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
+			HE::FillMaterialWeather(GetEnvironment(), lit); // Weather node + the generic wet/snow response
+			HE::FillMaterialWater(GetWaterRipples(), lit); // Water Ripple node: the rings the physics raised
 			// Local (point/spot) shadow atlas for heLitP — same matrices the
 			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
 			// PRE-BAKED so the shared preamble stays convention-free.
@@ -11529,9 +11876,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						pushTP(dc.transform);
 					continue;
 				}
-				if (!dc.instanceTransforms.empty() && m_gbufferInstancedProgram && m_instanceVBO)
+				// A graph material keeps its own program: the built-in instanced
+				// program would swap the look (no wind, no alpha discard, flat PBR),
+				// so those batches fall through to the per-instance loops below —
+				// the same rule Metal applies (cMaterialPipeline == nullptr).
+				if (!dc.instanceTransforms.empty() && !(gbProg || matProg)
+				    && m_gbufferInstancedProgram && m_instanceVBO)
 				{
-					// Instanced batches always take the built-in instanced program —
+					// Built-in PBR batches take the built-in instanced program —
 					// the same routing the forward loop uses.
 					glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
 					glBufferData(GL_ARRAY_BUFFER,
@@ -11558,20 +11910,29 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (hasCustom && !gbProg)
 				{
 					// No G-buffer variant → forward replay after the resolve.
-					TPDraw tp{ viewProj * dc.transform, dc.transform, baseColor,
-					           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
-					tp.indexOffset    = indexOffset;
-					tp.receivesShadow = dc.receivesShadow;
-					tp.matProg = matProg;
-					tp.params  = mParams;
-					for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
-					tp.gtexCount = mGtexCount;
+					// A batch replays one entry per instance, each with the material.
+					unsigned int wmTex = 0;
 					{
 						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
 							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
-						tp.wmTex = ResolveGraphTexture(wid, {});
+						wmTex = ResolveGraphTexture(wid, {});
 					}
-					deferredForward.push_back(std::move(tp));
+					auto pushForward = [&](const glm::mat4& t) {
+						TPDraw tp{ viewProj * t, t, baseColor,
+						           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
+						tp.indexOffset    = indexOffset;
+						tp.receivesShadow = dc.receivesShadow;
+						tp.matProg = matProg;
+						tp.params  = mParams;
+						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
+						tp.gtexCount = mGtexCount;
+						tp.wmTex     = wmTex;
+						deferredForward.push_back(std::move(tp));
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) pushForward(t);
+					else
+						pushForward(dc.transform);
 					continue;
 				}
 #if defined(HE_HAVE_SHADERC)
@@ -11581,15 +11942,6 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// binds as the forward custom branch (minus the lighting-only
 					// inputs the resolve owns).
 					glUseProgram(gbProg);
-					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
-					obj.mvp   = viewProj * dc.transform;
-					obj.model = dc.transform;
-					obj.color = glm::vec4(baseColor, 1.0f);
-					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
-					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
-					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					glBindBuffer(GL_UNIFORM_BUFFER, 0);
 					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
 					if (!mParams.empty())
@@ -11623,10 +11975,27 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+					// Only the per-object block changes between the instances of a
+					// batch; program, params and textures above stay bound.
+					auto drawGraphInstance = [&](const glm::mat4& t) {
+						struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+						obj.mvp   = viewProj * t;
+						obj.model = t;
+						obj.color = glm::vec4(baseColor, 1.0f);
+						obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+						obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						++m_counters.draws;
+						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					else
+						drawGraphInstance(dc.transform);
 					glUseProgram(m_gbufferProgram);
-					++m_counters.draws;
-					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					continue;
 				}
 #endif
@@ -11753,7 +12122,29 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				continue; // drawn in the transparency pass below
 			}
 
-			if (!dc.instanceTransforms.empty() && m_instancedProgram && m_instanceVBO)
+			// Per-material GL program (MaterialAsset custom shader), cross-compiled from
+			// canonical GLSL via the shared library; 0 for built-in PBR. Resolved BEFORE
+			// the instancing decision: a graph material keeps its own program, the
+			// built-in instanced one would swap the look (no wind, no alpha discard,
+			// flat PBR) — such a batch is drawn instance by instance below, the rule
+			// Metal applies too (cMaterialPipeline == nullptr).
+			unsigned int matProg = 0;
+#if defined(HE_HAVE_SHADERC)
+			{
+				uint64_t shKey; std::string shFrag, shVert;
+				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
+				{
+					const MaterialShaderVariant* pre = nullptr;
+					if (const MaterialAsset* ma = m_contentManager
+						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						for (const auto& var : ma->precompiledShaders)
+							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+				}
+			}
+#endif
+
+			if (!dc.instanceTransforms.empty() && !matProg && m_instancedProgram && m_instanceVBO)
 			{
 				// GPU-instanced opaque draw: upload all transforms to the scratch VBO,
 				// then call glDrawElementsInstanced with the instanced program.
@@ -11783,31 +12174,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			else
 			{
 #if defined(HE_HAVE_SHADERC)
-				// Per-material GL program (MaterialAsset custom shader), cross-compiled from
-				// canonical GLSL via the shared library. Feeds per-object + lighting through
-				// UBOs; same VAO/attribs as the unlit program. Materials without one fall
+				// Feeds per-object + lighting through UBOs; same VAO/attribs as the
+				// unlit program. Materials without a program (matProg == 0) fall
 				// through to the built-in shader below.
-				uint64_t shKey; std::string shFrag, shVert; unsigned int matProg = 0;
-				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
-				{
-					const MaterialShaderVariant* pre = nullptr;
-					if (const MaterialAsset* ma = m_contentManager
-						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
-						for (const auto& var : ma->precompiledShaders)
-							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-				}
 				if (matProg)
 				{
 					glUseProgram(matProg);
-					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
-					obj.mvp   = viewProj * dc.transform;
-					obj.model = dc.transform;
-					obj.color = glm::vec4(baseColor, 1.0f);
-					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
-					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
-					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 					HE::MaterialShaderLibrary::Lighting lit{};
 					fillMatLight(lit); // shared heLitP ABI fill (see the lambda above)
 					// Lighting is identical for every material draw this frame → upload once.
@@ -11893,10 +12265,27 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
-					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+					// Only the per-object block changes between the instances of a
+					// batch; program, lighting, params and textures stay bound.
+					auto drawGraphInstance = [&](const glm::mat4& t) {
+						struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+						obj.mvp   = viewProj * t;
+						obj.model = t;
+						obj.color = glm::vec4(baseColor, 1.0f);
+						obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+						obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
+						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+						glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						++m_counters.draws;
+						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					else
+						drawGraphInstance(dc.transform);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
-					++m_counters.draws;
-					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					continue;
 				}
 #endif

@@ -2157,6 +2157,18 @@ const HE::UIWidgetTree* WidgetManager::tree(int widgetId) const
 	return w ? &w->tree : nullptr;
 }
 
+bool WidgetManager::setElementProp(int widgetId, int elemId, const std::string& prop,
+                                   const HE::UIPropValue& value)
+{
+	Instance* w = find(widgetId);
+	HE::UIElement* e = w ? w->tree.find(elemId) : nullptr;
+	if (!e) return false;
+	if (e->getPropAny(prop).type != value.type) return false;   // unknown name or wrong type
+	e->setPropAny(prop, value);
+	m_visualDirty = true;
+	return true;
+}
+
 bool WidgetManager::isAlive(int id) const   { return find(id) != nullptr; }
 bool WidgetManager::isVisible(int id) const
 {

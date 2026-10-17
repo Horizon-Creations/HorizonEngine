@@ -1,4 +1,6 @@
 #include "SequencerPanel.h"
+#include <Platform/ProjectWriteGate.h>
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "SequencerTimeline.h"     // the strip: tracks, ruler, scrubbing, keys, curves
 #include "EditorApplication.h"     // AppContext
 #include "EditorAssetTypeCache.h"  // shared, invalidatable path → AssetType sniff
@@ -63,7 +65,6 @@ struct PanelState
 	std::vector<Snapshot> undo;
 	int undoPos = -1;
 
-	std::string lastSaveError;
 };
 AssetPanelState<PanelState> s_states;
 
@@ -78,16 +79,16 @@ PropertyAnimClipAsset* clipOf(const PanelState& st, AppContext& ctx)
 bool saveState(PanelState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
-	st.lastSaveError.clear();
 	PropertyAnimClipAsset* a = ctx.contentManager->getPropertyAnimClipMutable(st.assetId);
 	if (!a)
 	{
-		st.lastSaveError = "Not saved: this clip is no longer loaded.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "This clip is no longer loaded.");
 		return false;
 	}
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;
@@ -572,12 +573,6 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 		bar.readout(nullptr, "Property Animation", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, st.dirty && clip != nullptr)) saveState(st, ctx);
-	}
-	if (!st.lastSaveError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(220, 80, 80, 255));
-		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
-		ImGui::PopStyleColor();
 	}
 
 	if (!clip)

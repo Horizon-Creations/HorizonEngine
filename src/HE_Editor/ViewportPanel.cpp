@@ -9,6 +9,7 @@
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
 #include "PreviewPick.h"                 // screenRay — the surface-snap probe's ray
+#include "SplineTool.h"                  // Spline mode: points, handles, the Move gizmo on one
 #include <HorizonScene/TransformHierarchy.h>          // worldPositionOf — fresh, not a frame old
 #include <HorizonScene/Components/TerrainComponent.h>      // vertex snap skips the landscape
 #include <HorizonScene/Components/TerrainChunkComponent.h>
@@ -564,10 +565,45 @@ void showAll(AppContext& ctx)
 // Group and Ungroup rewrite the local transform of what they move (the world
 // pose is kept, the local is what changes), so those are the edited entities
 // — the roots going in, the children coming out.
+// In a collab session: does another participant hold a lock anywhere in these
+// subtrees? Group and Ungroup re-parent every entity they touch, and Ungroup
+// destroys the group after moving its children out. A moved entity somebody
+// else holds is put back by the structural diff (it cannot be re-parented under
+// their feet), and put back under a group that is gone, it would stay on this
+// machine while the group's destroy takes it away on theirs. So the whole
+// gesture is refused up front, as Delete is (withoutPeerHeld), and said so.
+static bool refusedForPeerLocks(AppContext& ctx, const std::vector<Entity>& roots,
+                                const char* what)
+{
+	if (!ctx.collab || !ctx.collab->inSession() || !ctx.world) return false;
+	auto& reg = ctx.world->registry();
+	const auto me = ctx.collab->localParticipant();
+	std::string holder;
+	std::vector<Entity> stack(roots.begin(), roots.end());
+	while (!stack.empty() && holder.empty())
+	{
+		const Entity e = stack.back();
+		stack.pop_back();
+		if (!reg.valid(e)) continue;
+		const HE::Net::LockInfo* lock = ctx.collab->lockFor(
+			ctx.collab->subjectFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+		if (lock && lock->owner != me) { holder = lock->ownerName; break; }
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			stack.insert(stack.end(), h->children.begin(), h->children.end());
+	}
+	if (holder.empty()) return false;
+	if (ctx.notifications)
+		ctx.notifications->post(HE::Ed::NoteLevel::Important,
+			std::string(what) + " did nothing: " + holder + " is editing part of the selection.",
+			"Try again once they have deselected it.");
+	return true;
+}
+
 void groupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
+	if (refusedForPeerLocks(ctx, roots, "Group")) return;
 	snapshot(ctx, "Group Selected");
 	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
 		noteEdited(ctx, roots);
@@ -575,6 +611,7 @@ void groupSelected(AppContext& ctx)
 void ungroupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
+	if (refusedForPeerLocks(ctx, ctx.selection.roots(ctx.world->registry()), "Ungroup")) return;
 	snapshot(ctx, "Ungroup Selected");
 	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
 }
@@ -1120,7 +1157,8 @@ void render(AppContext& ctx, float dt)
 								s_rmbTravel += std::abs(cin.mouseDelta.x) + std::abs(cin.mouseDelta.y);
 							// A flight with a still mouse — RMB held, W pressed,
 							// or the wheel dollying — is a look too, not a click.
-							if (cin.moveAxis != glm::vec3(0.0f) || cin.wheel != 0.0f)
+							if (cin.moveAxis != glm::vec3(0.0f) || cin.wheel != 0.0f ||
+							    cin.speedWheel != 0.0f)
 								s_rmbArmed = false;
 							const bool physRmb =
 								(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
@@ -1189,6 +1227,32 @@ void render(AppContext& ctx, float dt)
 						bookmarkKeys(cam);
 
 					cam.update(cin);
+					// Scrolling during a fly changed the fly speed: the Speed field in the
+					// toolbar and in Preferences is the same number, so it follows, and a
+					// line over the image says what it is now - there is nothing else to
+					// show that the wheel did anything.
+					{
+						static double s_speedShownAt = -10.0;
+						if (cin.look && cin.speedWheel != 0.0f)
+						{
+							ctx.editorConfig.EditorCameraSpeed = cam.flySpeed();
+							s_speedShownAt = ImGui::GetTime();
+						}
+						const double age = ImGui::GetTime() - s_speedShownAt;
+						if (age < 1.4)
+						{
+							char txt[48];
+							std::snprintf(txt, sizeof(txt), "Camera speed  %.1f u/s", cam.flySpeed());
+							const ImVec2 ts = ImGui::CalcTextSize(txt);
+							const float  a  = age < 0.9 ? 1.0f : static_cast<float>(1.0 - (age - 0.9) / 0.5);
+							const ImVec2 p0((rectMin.x + rectMax.x - ts.x) * 0.5f - 10.0f, rectMin.y + 14.0f);
+							ImDrawList* dl = ImGui::GetWindowDrawList();
+							dl->AddRectFilled(p0, ImVec2(p0.x + ts.x + 20.0f, p0.y + ts.y + 10.0f),
+							                  IM_COL32(0, 0, 0, static_cast<int>(150 * a)), 6.0f);
+							dl->AddText(ImVec2(p0.x + 10.0f, p0.y + 5.0f),
+							            IM_COL32(255, 255, 255, static_cast<int>(255 * a)), txt);
+						}
+					}
 					if (look.valid &&
 					    (cam.position() != camPosBefore || cam.yaw() != camYawBefore ||
 					     cam.pitch() != camPitchBefore || cam.orthographic() != camOrthoBefore))
@@ -1394,8 +1458,63 @@ void render(AppContext& ctx, float dt)
 				// Suppressed in Landscape mode: there LMB belongs to the sculpt
 				// brush, and a stray gizmo drag would silently move/scale the
 				// terrain — which then breaks the brush's world↔grid mapping.
+				// Spline mode has its own: Move on the selected control point.
 				bool gizmoActive = false;
-				if (ctx.editorConfig.mode != EditorMode::Landscape && ctx.world)
+				if (ctx.editorConfig.mode == EditorMode::Spline && ctx.world)
+				{
+					// The same surface / vertex snapping a Move drag has on an
+					// entity, minus the entity: a control point rests on nothing
+					// of its own, so the probe excludes nothing.
+					EditorTransformGizmo::SnapProbe probe;
+					if (s_tb.probeSnapActive() && ctx.contentManager)
+					{
+						probe = [&](ViewportToolbar::State::SnapMode mode,
+						            const ImVec2& screen, glm::vec3& out) -> bool
+						{
+							const std::unordered_set<uint32_t> none;
+							const glm::mat4 viewProj = s_sceneSnapshot.camera.projection
+							                         * s_sceneSnapshot.camera.view;
+							const glm::vec2 rmin(rectMin.x, rectMin.y);
+							const glm::vec2 rsize(rectMax.x - rectMin.x, rectMax.y - rectMin.y);
+							const glm::vec2 at(screen.x, screen.y);
+							if (mode == ViewportToolbar::State::SnapMode::Vertex)
+							{
+								auto& reg = ctx.world->registry();
+								const HE::ScenePick::ObjectFilter base = surfaceFilter(none);
+								const HE::ScenePick::VertexHit hit = HE::ScenePick::nearestVertex(
+									sceneSnapshot(ctx), meshLookup(*ctx.contentManager), viewProj,
+									rmin, rsize, at, s_tb.snapVertexRadiusPx,
+									[&](const RenderObject& obj)
+									{
+										if (!base(obj)) return false;
+										const Entity e = static_cast<Entity>(obj.entityId);
+										return !reg.valid(e) ||
+										       !(reg.all_of<TerrainComponent>(e) || HE::isTerrainGenerated(reg, e));
+									});
+								if (!hit.hit) return false;
+								out = hit.point;
+								return true;
+							}
+							glm::vec3 ro, rd;
+							if (!PreviewPick::screenRay(viewProj, rmin, rsize, at, ro, rd)) return false;
+							return probeSurface(ctx, sceneSnapshot(ctx), ro, rd, none, out);
+						};
+					}
+					// The ground a click lands on: the scene's surface under the
+					// ray, terrain included. Asked only on a click — the first
+					// ask of a frame runs the scene extract.
+					const SplineEdit::GroundProbe ground =
+						[&](const glm::vec3& origin, const glm::vec3& dir, glm::vec3& out) -> bool
+						{
+							const std::unordered_set<uint32_t> none;
+							return probeSurface(ctx, sceneSnapshot(ctx), origin, dir, none, out);
+						};
+					gizmoActive = SplineTool::updateInViewport(
+						ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
+						rectMin, rectMax, navigating, viewportHovered,
+						ImGui::IsItemClicked(ImGuiMouseButton_Left), s_tb, ground, probe);
+				}
+				if (ctx.editorConfig.mode == EditorMode::View && ctx.world)
 				{
 					// W/E/R switch operation while the viewport is hovered (but not
 					// while flying — W/A/S/D drive the camera then). The toolbar's
@@ -1419,6 +1538,25 @@ void render(AppContext& ctx, float dt)
 						movable.erase(std::remove_if(movable.begin(), movable.end(),
 						                             [&reg](Entity e) { return reg.all_of<EditorLockComponent>(e); }),
 						              movable.end());
+						// In a session, also every member but the primary whose
+						// collab lock we do not hold — the inspector's rule
+						// (membersToSkip). Only the primary is locked and its
+						// transform published, so the others moved on this
+						// screen and on nobody else's. The primary stays: its
+						// lock is a host round trip and may still be in flight.
+						if (ctx.collab && ctx.collab->inSession())
+						{
+							const Entity primary = ctx.selection.primary();
+							const auto me = ctx.collab->localParticipant();
+							movable.erase(std::remove_if(movable.begin(), movable.end(),
+								[&](Entity e) {
+									if (e == primary) return false;
+									const HE::Net::LockInfo* lock = ctx.collab->lockFor(
+										ctx.collab->subjectFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+									return !lock || lock->owner != me;
+								}),
+								movable.end());
+						}
 					}
 					// Surface / vertex snapping: what a move drag lands on, asked
 					// of this frame's extract. Only built when the mode calls for
@@ -1450,7 +1588,7 @@ void render(AppContext& ctx, float dt)
 										if (!base(obj)) return false;
 										const Entity e = static_cast<Entity>(obj.entityId);
 										return !reg.valid(e) ||
-										       !reg.any_of<TerrainComponent, TerrainChunkComponent>(e);
+										       !(reg.all_of<TerrainComponent>(e) || HE::isTerrainGenerated(reg, e));
 									});
 								if (!hit.hit) return false;
 								out = hit.point;
@@ -1497,7 +1635,7 @@ void render(AppContext& ctx, float dt)
 				static bool   s_pressArmed = false;  // LMB went down on the image with nothing else claiming it
 				static bool   s_frameLive  = false;  // …and has since moved far enough to be a frame
 				static ImVec2 s_pressPos{};
-				const bool pickable = ctx.editorConfig.mode != EditorMode::Landscape &&
+				const bool pickable = ctx.editorConfig.mode == EditorMode::View &&
 				                      ctx.world && !gizmoActive && !navigating && !io.KeyAlt;
 				if (pickable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
 				{
@@ -1507,7 +1645,7 @@ void render(AppContext& ctx, float dt)
 				}
 				// Whatever took the button mid-gesture — RMB fly-look, Alt orbit, a
 				// mode switch — cancels the gesture rather than finishing it.
-				if (s_pressArmed && (ctx.editorConfig.mode == EditorMode::Landscape ||
+				if (s_pressArmed && (ctx.editorConfig.mode != EditorMode::View ||
 				                     !ctx.world || navigating || io.KeyAlt))
 				{
 					s_pressArmed = false;
@@ -1560,7 +1698,7 @@ void render(AppContext& ctx, float dt)
 					{
 						const Entity e = static_cast<Entity>(entityId);
 						if (!reg.valid(e) || !seen.insert(entityId).second) return;
-						if (reg.any_of<TerrainChunkComponent, TerrainComponent>(e)) return;
+						if (reg.all_of<TerrainComponent>(e) || HE::isTerrainGenerated(reg, e)) return;
 						// Locked in the Outliner: not framed, as it is not clicked.
 						if (reg.all_of<EditorLockComponent>(e)) return;
 						const HE::AABB* box = (meshId != HE::UUID{} && ctx.contentManager)

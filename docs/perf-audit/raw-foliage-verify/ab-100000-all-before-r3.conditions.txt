@@ -1,0 +1,15 @@
+== ab-100000-all-before-r3  2026-10-10 20:41:22
+before:
+  uptime:      load averages: 13.58 12.02 10.40
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=96
+  power:       Now drawing from 'Battery Power'
+  busy procs:  53.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 52.8% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 51.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 51.1% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 
+after (rc=0):
+  uptime:      load averages: 12.31 11.94 10.46
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=85
+  power:       Now drawing from 'Battery Power'
+  busy procs:  115.9% /Applications/CLion.app/Contents/MacOS/clion; 86.5% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 85.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 85.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 

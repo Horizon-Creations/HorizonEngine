@@ -14,7 +14,7 @@ namespace HE
 
 int giAutoLandscapeParams(const MaterialAsset& ma,
                           const std::function<bool(const std::string& name, float& value)>& overrideValue,
-                          GiLandscape& out)
+                          GiLandscape& out, float puddleScale)
 {
 	// Live value of a named parameter: the per-entity override, else the
 	// asset's slot (an instance carries its parent's full slot list with its
@@ -57,7 +57,7 @@ int giAutoLandscapeParams(const MaterialAsset& ma,
 	// Puddle share of the flat ground, after the parameter's own description:
 	// Puddle Amount 0.32 ≈ 1/5, 0.5 ≈ half, and nothing below ~0.2 (the noise
 	// field seldom dips that low).
-	out.autoWet.w = std::clamp((pudAmt - 0.2f) / 0.6f, 0.0f, 1.0f);
+	out.autoWet.w = std::clamp((pudAmt * std::clamp(puddleScale, 0.0f, 1.0f) - 0.2f) / 0.6f, 0.0f, 1.0f);
 	return slot;
 }
 

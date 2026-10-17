@@ -10,6 +10,8 @@
 # libgit2: libgit2 has no LFS, no credential helpers and no partial clone, and
 # LFS is the entire reason this module exists (see docs/source-control-design.md).
 add_library(HorizonSourceControl SHARED
+	src/GitLocator.cpp
+	src/GitInstall.cpp
 	src/GitProbe.cpp
 	src/StatusParser.cpp
 	src/GitCli.cpp
@@ -18,6 +20,7 @@ add_library(HorizonSourceControl SHARED
 	src/GitHubOAuth.cpp
 	src/GitHubTokenStore.cpp
 	src/GitService.cpp
+	src/TeamSyncService.cpp
 )
 
 # HorizonCore for HE::Proc (the subprocess runner) and the engine log.

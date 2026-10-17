@@ -205,6 +205,7 @@ namespace HE::Ed
 		{
 			removeQuiet(tmp);
 			HE_LOG_WARN(Editor, "%s", ("AssetAutosave: writing a copy of " + rel + " failed").c_str());
+			reportAutosaveFailure("an open asset", "Writing a copy of " + rel + " failed.");
 			return false;
 		}
 		std::error_code ec;
@@ -213,6 +214,7 @@ namespace HE::Ed
 		{
 			removeQuiet(tmp);
 			HE_LOG_WARN(Editor, "%s", ("AssetAutosave: cannot replace " + snap.string() + ": " + ec.message()).c_str());
+			reportAutosaveFailure("an open asset", "Cannot replace " + snap.string() + ": " + ec.message());
 			return false;
 		}
 		const auto mtime = mtimeOf(src.file);
@@ -227,8 +229,10 @@ namespace HE::Ed
 		if (!writeManifest(live / (key + kManifestExt), j))
 		{
 			HE_LOG_WARN(Editor, "%s", ("AssetAutosave: cannot write the manifest for " + rel).c_str());
+			reportAutosaveFailure("an open asset", "Cannot write the manifest for " + rel + ".");
 			return false;
 		}
+		reportAutosaveWorking();
 		m_live.insert(key);
 		return true;
 	}
@@ -273,6 +277,7 @@ namespace HE::Ed
 		if (ec)
 		{
 			HE_LOG_WARN(Editor, "%s", ("AssetAutosave: cannot create " + liveDir() + ": " + ec.message()).c_str());
+			reportAutosaveFailure("an open asset", "Cannot create " + liveDir() + ": " + ec.message());
 			return 0;
 		}
 		std::size_t written = 0;

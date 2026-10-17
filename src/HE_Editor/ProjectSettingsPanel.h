@@ -23,21 +23,30 @@ namespace ProjectSettingsPanel
 	// Sentinel "asset path" identifying the tab (no backing .hasset).
 	constexpr const char* kTabPath = "::ProjectSettings::";
 
-	// Sub-pages, in the order the rail lists them.
+	// Sub-pages. The rail lists them in six groups (Project, Rendering, Input,
+	// Physics, Audio, Online); the enum is only an identity.
 	enum class Page
 	{
-		// Game — what the project IS; AntiCheat is what its host refuses to
-		// believe from a client (Config/ProjectSettings.json, "anticheat").
-		// …and Multiplayer is what a SESSION of it is: port, seats, tick rate
-		// (Config/ProjectSettings.json, "multiplayer").
-		General, Application, Permissions, Fonts, AntiCheat, Multiplayer,
-		// Rendering — how it draws
-		RenderDefaults, Shadows,
+		// Project — what it IS. SourceControl is its repository (init, remote,
+		// GitHub, large files): the repository belongs to the project, not to
+		// whoever has it open.
+		General, Application, SourceControl, Permissions, Fonts,
+		// Rendering — how it draws. RenderDefaults is the packaged build's window
+		// and backend; Quality / PostProcessing / Reflections are the graphics
+		// block (Config/ProjectSettings.json, "graphics") over the same rows
+		// Preferences ▸ Viewport Quality shows for the user's own values.
+		RenderDefaults, Quality, PostProcessing, Reflections, Shadows,
+		// Input — the game's gamepad deadzones ("input").
+		Input,
 		// Physics — how it simulates
 		Simulation, CollisionLayers,
 		// Audio — the mixer's buses live in their own window; the page points
 		// there rather than duplicating the strip.
 		AudioBuses,
+		// Online — what a session of it is: AntiCheat is what its host refuses to
+		// believe from a client ("anticheat"), Multiplayer the port, seats and
+		// tick rate ("multiplayer").
+		AntiCheat, Multiplayer,
 	};
 
 	// Fill the given tab rect with the tab (rail + content).

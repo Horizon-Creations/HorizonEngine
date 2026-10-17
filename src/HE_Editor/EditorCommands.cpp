@@ -202,6 +202,30 @@ Result EditorCommands::execute(const Command& cmd, Origin origin)
 		return res;
 	}
 
+	// A destroy takes the whole subtree, and the host only checks the lock of the
+	// entity the message names: a child another participant is editing would die
+	// with an unheld parent here and stay alive everywhere else.
+	if (cmd.kind == CommandKind::DestroySubtree && origin != Origin::Remote &&
+	    m_hooks.inSession && m_hooks.inSession() && m_hooks.lockedByOther)
+	{
+		std::vector<Entity> stack;
+		if (const auto* h = reg.try_get<HierarchyComponent>(cmd.target))
+			stack.assign(h->children.begin(), h->children.end());
+		while (!stack.empty())
+		{
+			const Entity e = stack.back();
+			stack.pop_back();
+			if (!reg.valid(e)) continue;
+			if (const std::uint64_t s = subjectOf(e); s != 0 && m_hooks.lockedByOther(s))
+			{
+				res.error = CmdError::LockedByOther;
+				return res;
+			}
+			if (const auto* h = reg.try_get<HierarchyComponent>(e))
+				stack.insert(stack.end(), h->children.begin(), h->children.end());
+		}
+	}
+
 	// Which stack this change belongs on. A peer's edit belongs on neither:
 	// putting it on ours would let us "undo" their work.
 	IUndoSink* sink = nullptr;
@@ -353,7 +377,9 @@ Result EditorCommands::applyComponents(const Command& cmd, Origin origin, Record
 		res.error = CmdError::InvalidPayload;
 		return res;
 	}
-	rec.afterComponents = cmd.blob;
+	// The whole state after, like the before: a session undo applies these as a
+	// replacement (both directions), and a patch would strip everything it omits.
+	rec.afterComponents = serializer.serializeEntityComponents(*m_world, cmd.target);
 
 	// A patch can plant a fresh asset UUID the same way a create can — see the
 	// hook's own comment.
@@ -362,11 +388,15 @@ Result EditorCommands::applyComponents(const Command& cmd, Origin origin, Record
 	if (auto* tc = m_world->registry().try_get<TransformComponent>(cmd.target))
 		tc->dirty = true;
 
+	// The entity's whole state after the write, not the patch: peers apply what
+	// arrives as a replacement (SceneSerializer::replaceEntityComponents), so a
+	// client's one-key patch sent as-is would strip every other component there.
 	if (origin != Origin::Remote && m_hooks.publishComponents &&
 	    m_hooks.inSession && m_hooks.inSession())
 	{
 		m_hooks.publishComponents(
-			static_cast<std::uint32_t>(entt::to_integral(cmd.target)), cmd.blob);
+			static_cast<std::uint32_t>(entt::to_integral(cmd.target)),
+			serializer.serializeEntityComponents(*m_world, cmd.target));
 	}
 	return res;
 }

@@ -55,13 +55,13 @@ void applyHorizonDarkTheme()
 	// actually is. FramePadding.y also drives every row height, so this is the
 	// single biggest lever the theme has.
 	s.WindowPadding    = ImVec2(10.0f, 8.0f);
-	s.FramePadding     = ImVec2(8.0f, 4.0f);
+	s.FramePadding     = ImVec2(10.0f, 5.0f);
 	s.CellPadding      = ImVec2(6.0f, 4.0f);
 	s.ItemSpacing      = ImVec2(8.0f, 6.0f);
 	s.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
-	s.IndentSpacing    = 16.0f;
-	s.ScrollbarSize    = 11.0f;
-	s.GrabMinSize      = 10.0f;
+	s.IndentSpacing    = 18.0f;
+	s.ScrollbarSize    = 14.0f;
+	s.GrabMinSize      = 12.0f;
 
 	// SeparatorText is the section header of every properties panel (Details,
 	// material properties, the input-asset pages, Preferences). Left-aligned

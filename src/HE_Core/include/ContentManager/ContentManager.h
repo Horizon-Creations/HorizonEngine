@@ -63,6 +63,21 @@ public:
 	// this?" cannot accidentally load it. That is what lets the scripting API
 	// unload or type-name an asset by the only handle a script has, its path.
 	HE::UUID idForPath(const std::string& relativePath) const;
+	// The other direction: the content-relative path ("Engine/…" for an engine
+	// default) an asset UUID is known under, or empty when nothing here knows it.
+	// The disk registry first (scanContentDirectory — every loose asset, loaded
+	// or not), then what was loaded or saved since that scan, which only the
+	// path index holds. Also a pure lookup; a linear scan over the loaded ones,
+	// so a caller asking every frame caches the answer. For the editor's
+	// task-board chips, which address an asset by UUID and jump to its file.
+	std::string pathForId(HE::UUID id) const
+	{
+		if (id == HE::UUID{}) return {};
+		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end()) return d->second;
+		for (const auto& [path, uuid] : m_pathToUUID)
+			if (uuid == id) return path;
+		return {};
+	}
 	bool saveAsset(RuntimeAsset& asset);
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
@@ -683,6 +698,22 @@ private:
 	                    std::function<void(HE::UUID)> callback,
 	                    std::shared_ptr<LoadInterest> interest);
 	// False when `id` is in no mount any more.
+	// ── Remote references ───────────────────────────────────────────────────────
+	// Asks for the download of the remote-only EngineContent asset behind `path` if there is
+	// one and no local file (real, override or cached) already answers it. Cheap and
+	// idempotent — the download itself is coalesced. True when `path` is, or has just
+	// become, a pending remote asset. Main thread.
+	bool requestRemotePath(const std::string& path);
+	// Every asset a freshly registered one points at — by path and by baked id — gets its
+	// download kicked now instead of when something first draws with it: a material pulls
+	// its textures, texture arrays, parent, shader and node-graph functions; a mesh its
+	// materials. No-op while nothing is remote (every packaged game, every offline editor).
+	void prefetchRemoteReferences(HE::UUID id);
+	// A material regenerates its GLSL from its graph on load; a graph that calls a function
+	// not on this machine yet must not bake the "missing function" placeholder into it. False
+	// (and the downloads requested) while a called function is still remote.
+	bool graphFunctionsReady(const std::string& nodeGraphJson);
+
 	bool launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 	                   std::function<void(HE::UUID)> callback,
 	                   std::shared_ptr<LoadInterest> interest);
@@ -724,6 +755,14 @@ private:
 		std::function<void(std::function<void(bool)>)> materialize;
 	};
 	std::unordered_map<HE::UUID, RemoteAssetEntry> m_remoteAssets;
+	// The same entries by PATH ("Engine/Textures/…"): a reference stored as a path — a
+	// material's texture, parent, function; a mesh's material — is resolved by
+	// loadAsset(path), which has no UUID to look a remote entry up by. Kept in step with
+	// m_remoteAssets (added by registerRemoteAsset, dropped when the download lands).
+	std::unordered_map<std::string, HE::UUID> m_remoteByPath;
+	// Paths whose download just landed, so the arrival can re-sync the material instances
+	// that were waiting on them as their parent (see pollAsyncResults).
+	std::unordered_set<std::string> m_remoteArrived;
 
 	struct PendingRemoteReady {
 		HE::UUID                      id;

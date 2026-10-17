@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-10-06",
+ "generated": "2026-10-12",
  "groups": [
   {
    "pages": [
@@ -6775,7 +6775,7 @@
          [
           {
            "s": "",
-           "t": "Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode."
+           "t": "Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode, or the lake controls of the selected spline in Spline mode."
           }
          ]
         ],
@@ -6859,7 +6859,7 @@
      ],
      "eyebrow": "Orientation",
      "id": "layout",
-     "text": "The editor is a single window built from dockable panels around a central Scene viewport. Double-clicking assets opens additional full-size asset editor tabs (material graphs, widget designer, particle graphs …) alongside the Scene tab. The editor's default layout: the panels and where they sit Panel Purpose Scene The 3D viewport — camera navigation, gizmos, play mode, landscape sculpting. Has its own inline toolbar. World Outliner Hierarchy tree of every entity in the active scene; create, rename, reparent, delete, save as prefab. Details All components and properties of the selected entity, plus the Add Component menu. Content Browser Every asset in the project — create, import, organise and open assets in their editors. Quick Settings Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode. Environment (View menu) Add or remove the scene's Sky and Weather entities. Performance Profiler (View menu) Live FPS/CPU/GPU HUD, benchmark captures, per-pass frame analysis. Play Session Report Summary shown after a play-in-editor session ends. The footer bar holds Undo/Redo buttons on the left, the status text in the centre, and the current resolution and FPS on the right. Log output is written to HorizonEngine.log next to the executable (truncated each launch).",
+     "text": "The editor is a single window built from dockable panels around a central Scene viewport. Double-clicking assets opens additional full-size asset editor tabs (material graphs, widget designer, particle graphs …) alongside the Scene tab. The editor's default layout: the panels and where they sit Panel Purpose Scene The 3D viewport — camera navigation, gizmos, play mode, landscape sculpting. Has its own inline toolbar. World Outliner Hierarchy tree of every entity in the active scene; create, rename, reparent, delete, save as prefab. Details All components and properties of the selected entity, plus the Add Component menu. Content Browser Every asset in the project — create, import, organise and open assets in their editors. Quick Settings Pinned engine settings; switches into the terrain tool while the viewport is in Landscape mode, or the lake controls of the selected spline in Spline mode. Environment (View menu) Add or remove the scene's Sky and Weather entities. Performance Profiler (View menu) Live FPS/CPU/GPU HUD, benchmark captures, per-pass frame analysis. Play Session Report Summary shown after a play-in-editor session ends. The footer bar holds Undo/Redo buttons on the left, the status text in the centre, and the current resolution and FPS on the right. Log output is written to HorizonEngine.log next to the executable (truncated each launch).",
      "title": "Editor Layout"
     },
     {
@@ -7188,11 +7188,671 @@
        ],
        "k": "callout",
        "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Opening a project from the file manager"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A project file ("
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": ") opens in the editor with a double click in Finder, Explorer or your Linux file manager. The editor takes it the same way the Hub's own Open does: if another project is open and has unsaved changes, it asks first, and if that very project is already open, nothing happens. The path also works on the command line, as in "
+        },
+        {
+         "s": "c",
+         "t": "HorizonEditor MyGame.heproj"
+        },
+        {
+         "s": "",
+         "t": ". If a "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " named at launch is missing, or the path is a folder, the editor shows the Project Hub with the reason instead of the last project. Anything that is not a "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " is only noted in the log."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "On Windows and Linux there is nothing to set up for this: the editor registers the file type for you every time it starts, as described below. On macOS the app itself carries it."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Platform"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "How the file type is registered"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What you do"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "macOS"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The app's "
+          },
+          {
+           "s": "c",
+           "t": "Info.plist"
+          },
+          {
+           "s": "",
+           "t": " declares the type, so the "
+          },
+          {
+           "s": "c",
+           "t": ".dmg"
+          },
+          {
+           "s": "",
+           "t": " already carries it."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Drag the app into "
+          },
+          {
+           "s": "c",
+           "t": "Applications"
+          },
+          {
+           "s": "",
+           "t": " and start it once. Until the first start macOS does not trust the new type, and a double click may open another program."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Windows"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The editor writes registry entries for the current user only, so no administrator is needed. It does so when they are missing or point to another place."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Unpack the "
+          },
+          {
+           "s": "c",
+           "t": ".zip"
+          },
+          {
+           "s": "",
+           "t": " and start the editor once. As a fallback, run "
+          },
+          {
+           "s": "c",
+           "t": "HorizonEditor.exe --register-file-types"
+          },
+          {
+           "s": "",
+           "t": " or "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes\\register_heproj.cmd"
+          },
+          {
+           "s": "",
+           "t": ". "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes\\unregister_heproj.cmd"
+          },
+          {
+           "s": "",
+           "t": " removes the entries."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Linux"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The editor writes a desktop entry, a MIME type and two icons into your own data directory ("
+          },
+          {
+           "s": "c",
+           "t": "$XDG_DATA_HOME"
+          },
+          {
+           "s": "",
+           "t": ", by default "
+          },
+          {
+           "s": "c",
+           "t": "~/.local/share"
+          },
+          {
+           "s": "",
+           "t": "), so no root is needed. It does so when they are missing or point to another place."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Unpack the archive and start the editor once. As a fallback, run "
+          },
+          {
+           "s": "c",
+           "t": "HorizonEditor --register-file-types"
+          },
+          {
+           "s": "",
+           "t": " or "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes/install_file_types.sh"
+          },
+          {
+           "s": "",
+           "t": ". Its "
+          },
+          {
+           "s": "c",
+           "t": "--uninstall"
+          },
+          {
+           "s": "",
+           "t": " takes the files away."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Note:"
+          },
+          {
+           "s": "",
+           "t": " on macOS an editor that is already running receives the file as an open document event and switches to it after the unsaved changes question. Windows and Linux start a new editor for every double click and do not pass the file to one that is already running. To change the project inside a running editor, open it from there."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Registering the file type"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "On Windows and Linux the editor checks early in every start, before the first frame, whether "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " already opens with this editor. The check is cheap: a few registry values on Windows, a few small files on Linux. Only when something is missing or different does a short background task write, so the start never waits for it. The registration is for your user only, needs no administrator rights, and doing it again changes nothing. A freshly unpacked editor therefore has to be started once before a double click can find it. If you move the editor or update it into another folder, the registration still points to the old place, and the next start rewrites it to the new one. On Windows the editor also tells Explorer, so icons refresh without signing out; on Linux it refreshes the desktop's databases where the tools for that exist."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Headless runs and runs with a hidden window do not register, and neither does an editor that runs without its "
+        },
+        {
+         "s": "c",
+         "t": "FileTypes"
+        },
+        {
+         "s": "",
+         "t": " folder next to it, such as a plain build folder instead of an unpacked package."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The editor does not take "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " away from another program. If on Windows the "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " association, or the "
+        },
+        {
+         "s": "i",
+         "t": "Open with » Always"
+        },
+        {
+         "s": "",
+         "t": " choice you made in Explorer, names another program, or on Linux your "
+        },
+        {
+         "s": "c",
+         "t": "mimeapps.list"
+        },
+        {
+         "s": "",
+         "t": " names another default application, the editor writes nothing, adds one line to the log and shows one notification that says how to switch. It shows it once for each such program, because the editor remembers which one it told you about. To switch, choose the editor under "
+        },
+        {
+         "s": "i",
+         "t": "Open with"
+        },
+        {
+         "s": "",
+         "t": " in your file manager, or run the script from the "
+        },
+        {
+         "s": "c",
+         "t": "FileTypes"
+        },
+        {
+         "s": "",
+         "t": " folder, which overwrites the association. On Windows a choice stored by "
+        },
+        {
+         "s": "i",
+         "t": "Open with » Always"
+        },
+        {
+         "s": "",
+         "t": " outranks the registry, so use "
+        },
+        {
+         "s": "i",
+         "t": "Open with"
+        },
+        {
+         "s": "",
+         "t": " there."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "You can turn the registration off with the checkbox "
+        },
+        {
+         "s": "i",
+         "t": "Register .heproj with this editor"
+        },
+        {
+         "s": "",
+         "t": ", under "
+        },
+        {
+         "s": "i",
+         "t": "File types"
+        },
+        {
+         "s": "",
+         "t": " at the end of "
+        },
+        {
+         "s": "c",
+         "t": "Edit » Preferences » Editor » Tool Status"
+        },
+        {
+         "s": "",
+         "t": ". macOS does not show it, because the app needs no registration. It is on by default and is stored in the editor's "
+        },
+        {
+         "s": "c",
+         "t": "config.json"
+        },
+        {
+         "s": "",
+         "t": " as "
+        },
+        {
+         "s": "c",
+         "t": "RegisterHeprojFileType"
+        },
+        {
+         "s": "",
+         "t": ". With it off, the editor never touches the file association. Switch it off before you remove the registration with the unregister script, because otherwise the next start registers it again."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Each start adds one line to the editor log that says what was done: registered, updated, already registered, left alone because of a named program, skipped or failed. A failure is a warning, not an error, and the editor starts as usual."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "As a fallback, "
+        },
+        {
+         "s": "c",
+         "t": "HorizonEditor --register-file-types"
+        },
+        {
+         "s": "",
+         "t": " ("
+        },
+        {
+         "s": "c",
+         "t": "HorizonEditor.exe"
+        },
+        {
+         "s": "",
+         "t": " on Windows) does the same registration at once and without opening a window. It ignores the checkbox, because you asked for it, but like the start it leaves a program that already handles "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " alone. It prints one line, a keyword and a sentence, and exits with a code you can test in a script:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Exit code"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Keyword"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "0"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "registered"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "updated"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "already-registered"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": ".heproj"
+          },
+          {
+           "s": "",
+           "t": " opens with this editor."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "failed"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Writing the registration failed. The line says why."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "3"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "left-alone"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Another program handles "
+          },
+          {
+           "s": "c",
+           "t": ".heproj"
+          },
+          {
+           "s": "",
+           "t": " and was left as it is."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "4"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "missing-files"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "There is no "
+          },
+          {
+           "s": "c",
+           "t": "FileTypes"
+          },
+          {
+           "s": "",
+           "t": " folder next to the editor."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "5"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "unsupported"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "macOS, where the app's "
+          },
+          {
+           "s": "c",
+           "t": "Info.plist"
+          },
+          {
+           "s": "",
+           "t": " does it and there is nothing to do."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The scripts in the "
+        },
+        {
+         "s": "c",
+         "t": "FileTypes"
+        },
+        {
+         "s": "",
+         "t": " folder do the same by hand. Unlike the editor, they take over a "
+        },
+        {
+         "s": "c",
+         "t": ".heproj"
+        },
+        {
+         "s": "",
+         "t": " that another program owns."
+        }
+       ]
       }
      ],
      "eyebrow": "Starting point",
      "id": "project-hub",
-     "text": "The editor launches into the Project Hub: a list of known projects plus a New Project form. Creating a project asks for a template, a scripting language, a name and a directory. Templates Template What it seeds Empty Project Only the basic folder skeleton (Content/, Config/, Shaders/) — no extra content. Game Scripts, Audio, Scenes, Models, Textures, Materials, Prefabs and UI folders, plus a startup scene that already contains a Sky and Weather entity. Simulation Data and Materials folders; startup scene with Sky and Weather. Tool Source and UI folders; a bare world with no Sky — ideal for utilities and non-game apps. Scripting language The language is a whole-project choice, fixed at creation. It gates which gameplay-logic assets the Content Browser offers and which components appear: Language What you write HorizonCode Visual node graphs; compiles to native C++ on export. Unlocks HorizonCode Class and Player Controller / Player Character assets. Lua Lightweight text scripting (the default script backend). Unlocks Script assets and the Script component. Python CPython scripting — needs a Python install on dev machines. Same Script workflow as Lua. C++ A native GameLogic library built with your own toolchain. Scaffolds a compilable Source/ tree (game runtime, GameInstance, a per-scene level script and a CMakeLists.txt). Hidden from the picker when no CMake/compiler is found on the machine. Note: widgets, the Level Script and the Game Instance are always authored in HorizonCode, regardless of the project language — the language choice governs entity scripting and gameplay classes.",
+     "text": "The editor launches into the Project Hub: a list of known projects plus a New Project form. Creating a project asks for a template, a scripting language, a name and a directory. Templates Template What it seeds Empty Project Only the basic folder skeleton (Content/, Config/, Shaders/) — no extra content. Game Scripts, Audio, Scenes, Models, Textures, Materials, Prefabs and UI folders, plus a startup scene that already contains a Sky and Weather entity. Simulation Data and Materials folders; startup scene with Sky and Weather. Tool Source and UI folders; a bare world with no Sky — ideal for utilities and non-game apps. Scripting language The language is a whole-project choice, fixed at creation. It gates which gameplay-logic assets the Content Browser offers and which components appear: Language What you write HorizonCode Visual node graphs; compiles to native C++ on export. Unlocks HorizonCode Class and Player Controller / Player Character assets. Lua Lightweight text scripting (the default script backend). Unlocks Script assets and the Script component. Python CPython scripting — needs a Python install on dev machines. Same Script workflow as Lua. C++ A native GameLogic library built with your own toolchain. Scaffolds a compilable Source/ tree (game runtime, GameInstance, a per-scene level script and a CMakeLists.txt). Hidden from the picker when no CMake/compiler is found on the machine. Note: widgets, the Level Script and the Game Instance are always authored in HorizonCode, regardless of the project language — the language choice governs entity scripting and gameplay classes. Opening a project from the file manager A project file (.heproj) opens in the editor with a double click in Finder, Explorer or your Linux file manager. The editor takes it the same way the Hub's own Open does: if another project is open and has unsaved changes, it asks first, and if that very project is already open, nothing happens. The path also works on the command line, as in HorizonEditor MyGame.heproj. If a .heproj named at launch is missing, or the path is a folder, the editor shows the Project Hub with the reason instead of the last project. Anything that is not a .heproj is only noted in the log. On Windows and Linux there is nothing to set up for this: the editor registers the file type for you every time it starts, as described below. On macOS the app itself carries it. Platform How the file type is registered What you do macOS The app's Info.plist declares the type, so the .dmg already carries it. Drag the app into Applications and start it once. Until the first start macOS does not trust the new type, and a double click may open another program. Windows The editor writes registry entries for the current user only, so no administrator is needed. It does so when they are missing or point to another place. Unpack the .zip and start the editor once. As a fallback, run HorizonEditor.exe --register-file-types or FileTypes\\register_heproj.cmd. FileTypes\\unregister_heproj.cmd removes the entries. Linux The editor writes a desktop entry, a MIME type and two icons into your own data directory ($XDG_DATA_HOME, by default ~/.local/share), so no root is needed. It does so when they are missing or point to another place. Unpack the archive and start the editor once. As a fallback, run HorizonEditor --register-file-types or FileTypes/install_file_types.sh. Its --uninstall takes the files away. Note: on macOS an editor that is already running receives the file as an open document event and switches to it after the unsaved changes question. Windows and Linux start a new editor for every double click and do not pass the file to one that is already running. To change the project inside a running editor, open it from there. Registering the file type On Windows and Linux the editor checks early in every start, before the first frame, whether .heproj already opens with this editor. The check is cheap: a few registry values on Windows, a few small files on Linux. Only when something is missing or different does a short background task write, so the start never waits for it. The registration is for your user only, needs no administrator rights, and doing it again changes nothing. A freshly unpacked editor therefore has to be started once before a double click can find it. If you move the editor or update it into another folder, the registration still points to the old place, and the next start rewrites it to the new one. On Windows the editor also tells Explorer, so icons refresh without signing out; on Linux it refreshes the desktop's databases where the tools for that exist. Headless runs and runs with a hidden window do not register, and neither does an editor that runs without its FileTypes folder next to it, such as a plain build folder instead of an unpacked package. The editor does not take .heproj away from another program. If on Windows the .heproj association, or the Open with » Always choice you made in Explorer, names another program, or on Linux your mimeapps.list names another default application, the editor writes nothing, adds one line to the log and shows one notification that says how to switch. It shows it once for each such program, because the editor remembers which one it told you about. To switch, choose the editor under Open with in your file manager, or run the script from the FileTypes folder, which overwrites the association. On Windows a choice stored by Open with » Always outranks the registry, so use Open with there. You can turn the registration off with the checkbox Register .heproj with this editor, under File types at the end of Edit » Preferences » Editor » Tool Status. macOS does not show it, because the app needs no registration. It is on by default and is stored in the editor's config.json as RegisterHeprojFileType. With it off, the editor never touches the file association. Switch it off before you remove the registration with the unregister script, because otherwise the next start registers it again. Each start adds one line to the editor log that says what was done: registered, updated, already registered, left alone because of a named program, skipped or failed. A failure is a warning, not an error, and the editor starts as usual. As a fallback, HorizonEditor --register-file-types (HorizonEditor.exe on Windows) does the same registration at once and without opening a window. It ignores the checkbox, because you asked for it, but like the start it leaves a program that already handles .heproj alone. It prints one line, a keyword and a sentence, and exits with a code you can test in a script: Exit code Keyword Meaning 0 registered, updated, already-registered .heproj opens with this editor. 1 failed Writing the registration failed. The line says why. 3 left-alone Another program handles .heproj and was left as it is. 4 missing-files There is no FileTypes folder next to the editor. 5 unsupported macOS, where the app's Info.plist does it and there is nothing to do. The scripts in the FileTypes folder do the same by hand. Unlike the editor, they take over a .heproj that another program owns.",
      "title": "Project Hub"
     },
     {
@@ -7215,6 +7875,14 @@
         {
          "s": "b",
          "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " / "
+        },
+        {
+         "s": "b",
+         "t": "Spline"
         },
         {
          "s": "",
@@ -7487,7 +8155,7 @@
      ],
      "eyebrow": "Where you live",
      "id": "viewport",
-     "text": "The Scene panel renders the world through the editor camera and carries an inline toolbar: a mode selector (View / Landscape), the gizmo buttons Move / Rotate / Scale, a gizmo-space combo (Local / World), a Screen ring toggle for the rotate gizmo, and the centred Play / Stop button. Where the Scene viewport sits in the default layout Camera navigation Input Action RMB hold Fly-look — steer with W A S D, E/Q up/down, Shift = fast Alt + LMB Orbit around the pivot MMB drag Pan Mouse wheel Zoom (works on hover, no button needed) F Frame the selected entity Gizmos W / E / R switch between translate, rotate and scale (mirrored by the toolbar buttons). The space combo toggles manipulation in local or world axes; Screen ring adds the view-axis outer ring to the rotate gizmo. Gizmos are suppressed while flying, while Alt is held, and in Landscape mode. Every edit is undoable (Ctrl/Cmd+Z). Static-mesh assets can be dragged from the Content Browser into the viewport to spawn an entity at the drop point.",
+     "text": "The Scene panel renders the world through the editor camera and carries an inline toolbar: a mode selector (View / Landscape / Spline), the gizmo buttons Move / Rotate / Scale, a gizmo-space combo (Local / World), a Screen ring toggle for the rotate gizmo, and the centred Play / Stop button. Where the Scene viewport sits in the default layout Camera navigation Input Action RMB hold Fly-look — steer with W A S D, E/Q up/down, Shift = fast Alt + LMB Orbit around the pivot MMB drag Pan Mouse wheel Zoom (works on hover, no button needed) F Frame the selected entity Gizmos W / E / R switch between translate, rotate and scale (mirrored by the toolbar buttons). The space combo toggles manipulation in local or world axes; Screen ring adds the view-axis outer ring to the rotate gizmo. Gizmos are suppressed while flying, while Alt is held, and in Landscape mode. Every edit is undoable (Ctrl/Cmd+Z). Static-mesh assets can be dragged from the Content Browser into the viewport to spawn an entity at the drop point.",
      "title": "Scene Viewport"
     },
     {
@@ -9157,12 +9825,401 @@
          "t": "."
         }
        ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Water"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "b",
+         "t": "Water"
+        },
+        {
+         "s": "",
+         "t": " tab paints ponds with the water brush (hold Ctrl to erase) and lists every pond and lake of the landscape under "
+        },
+        {
+         "s": "i",
+         "t": "Bodies"
+        },
+        {
+         "s": "",
+         "t": ". Under each body, "
+        },
+        {
+         "s": "b",
+         "t": "Physics"
+        },
+        {
+         "s": "",
+         "t": " sets what that water does to a body in it: density, drag, current and the strength of the rings. See "
+        },
+        {
+         "s": "i",
+         "t": "Water Physics"
+        },
+        {
+         "s": "",
+         "t": " in Systems."
+        }
+       ]
       }
      ],
      "eyebrow": "Terrain",
      "id": "landscape-mode",
-     "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Mountain The seventh tool, Mountain, grows a whole formation inside an area instead of under a brush. Drag across the ground to mark the area, as a Rectangle (corner to corner, the mountain fills the ellipse inside it) or a Circle (centre to rim); the outline follows the pointer and the mountain appears when you let go, as one undo step. It is added on top of the ground that is there, so earlier sculpting stays underneath, and outside the area nothing moves. Max Height is how far the tallest point rises (negative digs a basin), Falloff the width in metres of the slope back down to the rim, and Roughness, Octaves and Frequency shape the noisy relief. The same Seed, area and settings give the same mountain again; New Seed picks another. MCP clients reach the same operation through terrain_mountain. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering » Performance. Scatter vegetation with the Foliage component.",
+     "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Mountain The seventh tool, Mountain, grows a whole formation inside an area instead of under a brush. Drag across the ground to mark the area, as a Rectangle (corner to corner, the mountain fills the ellipse inside it) or a Circle (centre to rim); the outline follows the pointer and the mountain appears when you let go, as one undo step. It is added on top of the ground that is there, so earlier sculpting stays underneath, and outside the area nothing moves. Max Height is how far the tallest point rises (negative digs a basin), Falloff the width in metres of the slope back down to the rim, and Roughness, Octaves and Frequency shape the noisy relief. The same Seed, area and settings give the same mountain again; New Seed picks another. MCP clients reach the same operation through terrain_mountain. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering » Performance. Scatter vegetation with the Foliage component. Water The Water tab paints ponds with the water brush (hold Ctrl to erase) and lists every pond and lake of the landscape under Bodies. Under each body, Physics sets what that water does to a body in it: density, drag, current and the strength of the rings. See Water Physics in Systems.",
      "title": "Landscape Mode"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Landscape Mode's Quick Settings panel has a fifth tab, "
+        },
+        {
+         "s": "b",
+         "t": "Water"
+        },
+        {
+         "s": "",
+         "t": ", alongside Sculpt, Paint, Foliage and Setup. It puts water on the landscape three ways: painted free-form with a brush, drawn as a lake from a closed spline, or spawned ready-made with "
+        },
+        {
+         "s": "c",
+         "t": "Create Entity » Lake"
+        },
+        {
+         "s": "",
+         "t": " in the Outliner. All three share one body of water per landscape, so a painted stroke that starts on a lake widens it and a spline lake can sit beside painted water on the same terrain."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Painting water"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Paint Water"
+        },
+        {
+         "s": "",
+         "t": " drags a pond into existence on dry ground, at "
+        },
+        {
+         "s": "b",
+         "t": "Level"
+        },
+        {
+         "s": "",
+         "t": " or, with "
+        },
+        {
+         "s": "b",
+         "t": "From Ground"
+        },
+        {
+         "s": "",
+         "t": " on, a fixed "
+        },
+        {
+         "s": "b",
+         "t": "Above Ground"
+        },
+        {
+         "s": "",
+         "t": " distance over the lowest point under the first click. "
+        },
+        {
+         "s": "b",
+         "t": "Erase Water"
+        },
+        {
+         "s": "",
+         "t": " (or holding "
+        },
+        {
+         "s": "c",
+         "t": "Ctrl"
+        },
+        {
+         "s": "",
+         "t": " while painting) takes water away from every body it touches — a painted pond disappears once it is dry; a spline lake stays and can be painted back in. "
+        },
+        {
+         "s": "b",
+         "t": "Dig Bed"
+        },
+        {
+         "s": "",
+         "t": " lowers the ground under the stroke to a floor "
+        },
+        {
+         "s": "b",
+         "t": "Depth"
+        },
+        {
+         "s": "",
+         "t": " below the water as you paint, using the brush's own falloff as the bank, and only ever lowers. "
+        },
+        {
+         "s": "b",
+         "t": "Resolution"
+        },
+        {
+         "s": "",
+         "t": " sets how many cells the landscape's water grid has (32–2048 per side) — raise it for a small pond on a large landscape. The surface only ever exists where the ground is below the water, so it never climbs a bank."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Lakes from a spline"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Switch the viewport's mode selector to "
+        },
+        {
+         "s": "b",
+         "t": "Spline"
+        },
+        {
+         "s": "",
+         "t": " to draw an outline: click the ground to start a line, click again to add points, click the line itself to insert a point between two, and drag a point's handle — which carries the Move gizmo — to reposition it. "
+        },
+        {
+         "s": "b",
+         "t": "Closed"
+        },
+        {
+         "s": "",
+         "t": " joins the last point back to the first, which a lake needs. A painted pond becomes a lake the same way in reverse: "
+        },
+        {
+         "s": "b",
+         "t": "To Lake"
+        },
+        {
+         "s": "",
+         "t": " in the Water tab traces its edge into a new closed spline and hands the pond to it, ready to edit as points."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A closed spline shows a "
+        },
+        {
+         "s": "b",
+         "t": "Lake"
+        },
+        {
+         "s": "",
+         "t": " section in the Spline panel. "
+        },
+        {
+         "s": "b",
+         "t": "Create Lake"
+        },
+        {
+         "s": "",
+         "t": " lays water over the outline at the level set above — from the lowest ground under it plus "
+        },
+        {
+         "s": "b",
+         "t": "Above Ground"
+        },
+        {
+         "s": "",
+         "t": ", or a typed "
+        },
+        {
+         "s": "b",
+         "t": "Level"
+        },
+        {
+         "s": "",
+         "t": " — and, with "
+        },
+        {
+         "s": "b",
+         "t": "Dig Bed"
+        },
+        {
+         "s": "",
+         "t": " on, lowers the ground inside to "
+        },
+        {
+         "s": "b",
+         "t": "Depth"
+        },
+        {
+         "s": "",
+         "t": " below that level in the same undo step. From then on, dragging a point only reshapes the water; the ground is dug again only when you press "
+        },
+        {
+         "s": "b",
+         "t": "Dig Again"
+        },
+        {
+         "s": "",
+         "t": ", so moving points around does not dig a trench as you go. "
+        },
+        {
+         "s": "b",
+         "t": "Remove Lake"
+        },
+        {
+         "s": "",
+         "t": " takes the water away and cuts the spline's link to it, leaving both the outline and the dug ground behind."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "The shore"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Bank"
+        },
+        {
+         "s": "",
+         "t": " sets how far the slope reaches on either side of a lake's outline — inward down to the bed, outward back up to the old ground — both starting at the water's own level right on the outline, so the water always reaches its edge and nothing outside the bank ever sinks below the water level. "
+        },
+        {
+         "s": "c",
+         "t": "0"
+        },
+        {
+         "s": "",
+         "t": " is a hard edge; a wider bank makes a gentle shore instead of a cliff or a dry ring. "
+        },
+        {
+         "s": "b",
+         "t": "Clip To Ground"
+        },
+        {
+         "s": "",
+         "t": " (a landscape setting, shared by every lake and painted pond on it) stops the surface where the ground rises back through it, instead of drawing it flat over the whole outline; "
+        },
+        {
+         "s": "b",
+         "t": "Shore Overshoot"
+        },
+        {
+         "s": "",
+         "t": " lets the ground stand a little above the water and still count as covered, so the edge sits under the bank rather than a hair short of it."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Tip:"
+          },
+          {
+           "s": "",
+           "t": " "
+          },
+          {
+           "s": "c",
+           "t": "Create Entity » Lake"
+          },
+          {
+           "s": "",
+           "t": " in the Outliner spawns a ready-made closed spline — a 16-point ring a few metres across, parented under the landscape if there is one — without digging or adding water yet; press "
+          },
+          {
+           "s": "b",
+           "t": "Create Lake"
+          },
+          {
+           "s": "",
+           "t": " once it sits where you want it. Moving or rotating the whole lake entity afterwards moves the spline, the water and its dug bed together, provided the bed was dug by "
+          },
+          {
+           "s": "b",
+           "t": "Create Lake"
+          },
+          {
+           "s": "",
+           "t": " or "
+          },
+          {
+           "s": "b",
+           "t": "Dig Again"
+          },
+          {
+           "s": "",
+           "t": " on this lake; a lake loaded from an older scene, or converted from a painted pond, only carries its water along until you press "
+          },
+          {
+           "s": "b",
+           "t": "Dig Again"
+          },
+          {
+           "s": "",
+           "t": " once at the new spot."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "tip"
+      }
+     ],
+     "eyebrow": "Terrain",
+     "id": "water-tools",
+     "text": "Landscape Mode's Quick Settings panel has a fifth tab, Water, alongside Sculpt, Paint, Foliage and Setup. It puts water on the landscape three ways: painted free-form with a brush, drawn as a lake from a closed spline, or spawned ready-made with Create Entity » Lake in the Outliner. All three share one body of water per landscape, so a painted stroke that starts on a lake widens it and a spline lake can sit beside painted water on the same terrain. Painting water Paint Water drags a pond into existence on dry ground, at Level or, with From Ground on, a fixed Above Ground distance over the lowest point under the first click. Erase Water (or holding Ctrl while painting) takes water away from every body it touches — a painted pond disappears once it is dry; a spline lake stays and can be painted back in. Dig Bed lowers the ground under the stroke to a floor Depth below the water as you paint, using the brush's own falloff as the bank, and only ever lowers. Resolution sets how many cells the landscape's water grid has (32–2048 per side) — raise it for a small pond on a large landscape. The surface only ever exists where the ground is below the water, so it never climbs a bank. Lakes from a spline Switch the viewport's mode selector to Spline to draw an outline: click the ground to start a line, click again to add points, click the line itself to insert a point between two, and drag a point's handle — which carries the Move gizmo — to reposition it. Closed joins the last point back to the first, which a lake needs. A painted pond becomes a lake the same way in reverse: To Lake in the Water tab traces its edge into a new closed spline and hands the pond to it, ready to edit as points. A closed spline shows a Lake section in the Spline panel. Create Lake lays water over the outline at the level set above — from the lowest ground under it plus Above Ground, or a typed Level — and, with Dig Bed on, lowers the ground inside to Depth below that level in the same undo step. From then on, dragging a point only reshapes the water; the ground is dug again only when you press Dig Again, so moving points around does not dig a trench as you go. Remove Lake takes the water away and cuts the spline's link to it, leaving both the outline and the dug ground behind. The shore Bank sets how far the slope reaches on either side of a lake's outline — inward down to the bed, outward back up to the old ground — both starting at the water's own level right on the outline, so the water always reaches its edge and nothing outside the bank ever sinks below the water level. 0 is a hard edge; a wider bank makes a gentle shore instead of a cliff or a dry ring. Clip To Ground (a landscape setting, shared by every lake and painted pond on it) stops the surface where the ground rises back through it, instead of drawing it flat over the whole outline; Shore Overshoot lets the ground stand a little above the water and still count as covered, so the edge sits under the bank rather than a hair short of it. Tip: Create Entity » Lake in the Outliner spawns a ready-made closed spline — a 16-point ring a few metres across, parented under the landscape if there is one — without digging or adding water yet; press Create Lake once it sits where you want it. Moving or rotating the whole lake entity afterwards moves the spline, the water and its dug bed together, provided the bed was dug by Create Lake or Dig Again on this lake; a lake loaded from an older scene, or converted from a painted pond, only carries its water along until you press Dig Again once at the new spot.",
+     "title": "Water & Lakes"
     },
     {
      "blocks": [
@@ -14838,7 +15895,7 @@
        ]
       },
       {
-       "alt": "The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests",
+       "alt": "The engine water material on a plane at sunrise: a spread of wave trains with fine chop, the sky and the sun glittering in the ripples, a few whitecaps",
        "k": "figure",
        "src": "water_engine.jpg"
       },
@@ -14946,6 +16003,54 @@
        ]
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The surface is a spread of waves, not one pattern: each of WaveA, WaveB and WaveC also drives a second, shorter and weaker train at a turned angle, an irregular chop rides on top, and slow gusts make some patches rougher than others. The colour is dark on purpose; most of what you see of real water is the sky in it, so the picture depends on the sky and the time of day. The sun's glitter appears where the waves tilt toward it."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "No repeating pattern"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A sum of waves repeats exactly, so on a large surface the same bright patches and the same foam dots come back row after row. The water is therefore bombed, the way texture bombing hides a tiling texture: the surface is cut into hexagons, each wave knob (with its shorter companion) is evaluated once for every hexagon a pixel touches, each time with that hexagon's own direction and phase, and the three results are blended. Inside a hexagon the waves are as regular as before; neighbours do not agree. The "
+        },
+        {
+         "s": "c",
+         "t": "Variation"
+        },
+        {
+         "s": "",
+         "t": " parameter sets the hexagon size, the offsets and how sharp the seams are. The same hex grid is available to any material graph as the "
+        },
+        {
+         "s": "b",
+         "t": "Bombing Cells"
+        },
+        {
+         "s": "",
+         "t": " node, which reads no texture."
+        }
+       ]
+      },
+      {
+       "alt": "A 400 m water plane seen from straight above, twice. Left, Variation switched off: the same bright patches and white foam dots repeat in rows. Right, the default: the pattern is irregular.",
+       "k": "figure",
+       "src": "water_variation.jpg"
+      },
+      {
        "k": "h3",
        "r": [
         {
@@ -15005,7 +16110,7 @@
          [
           {
            "s": "",
-           "t": "0.10, 0.42, 0.45"
+           "t": "0.045, 0.20, 0.22"
           }
          ]
         ],
@@ -15031,7 +16136,7 @@
          [
           {
            "s": "",
-           "t": "0.01, 0.07, 0.12"
+           "t": "0.004, 0.028, 0.052"
           }
          ]
         ],
@@ -15057,7 +16162,7 @@
          [
           {
            "s": "",
-           "t": "0.35, 3.0"
+           "t": "0.45, 4.0"
           }
          ]
         ],
@@ -15093,13 +16198,13 @@
          [
           {
            "s": "",
-           "t": "Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off."
+           "t": "Three wave trains, each with a shorter companion at a turned angle. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. The three steepnesses together also set the strength of the chop; all three at 0 is flat."
           }
          ],
          [
           {
            "s": "",
-           "t": "A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12"
+           "t": "A: 20, 1.0, 14, 0.07\nB: 335, 0.8, 5, 0.10\nC: 70, 0.5, 1.6, 0.09"
           }
          ]
         ],
@@ -15171,13 +16276,13 @@
          [
           {
            "s": "",
-           "t": "Surface roughness of the highlight and reflection."
+           "t": "Surface roughness of the highlight and reflection. Distant water is made rougher on top."
           }
          ],
          [
           {
            "s": "",
-           "t": "0.06"
+           "t": "0.08"
           }
          ]
         ],
@@ -15229,7 +16334,7 @@
          [
           {
            "s": "",
-           "t": "0.55"
+           "t": "0.5"
           }
          ]
         ],
@@ -15281,7 +16386,7 @@
          [
           {
            "s": "",
-           "t": "0.92, 0.95, 0.97"
+           "t": "0.82, 0.88, 0.90"
           }
          ]
         ],
@@ -15301,13 +16406,13 @@
          [
           {
            "s": "",
-           "t": "x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s."
+           "t": "x: share of the wave crests covered (0 to 1; 0.3 is a rough sea). y: strength, 0 turns foam off. z: size of the noise that frays it, in metres. w: drift in m/s."
           }
          ],
          [
           {
            "s": "",
-           "t": "0.18, 0.8, 1.5, 0.3"
+           "t": "0.06, 0.5, 0.7, 0.3"
           }
          ]
         ],
@@ -15327,13 +16432,39 @@
          [
           {
            "s": "",
-           "t": "x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance)."
+           "t": "x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). It brightens the water body and fades with its transmittance, so it shows in clear shallow water, not in deep or murky water."
           }
          ],
          [
           {
            "s": "",
-           "t": "0.35, 2.5, 0.25, 25"
+           "t": "0.2, 2.0, 0.2, 18"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "Variation"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Vec4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Breaks the repeat of the waves. x: hexagon size in wavelengths. y: phase offset between hexagons, 0 to 1 of a wavelength. z: direction offset between hexagons in degrees (plus or minus). w: seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 switch it off."
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "3.5, 1.0, 22, 2.5"
           }
          ]
         ]
@@ -15353,15 +16484,7 @@
         [
          {
           "s": "",
-          "t": "The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from "
-         },
-         {
-          "s": "c",
-          "t": "Turbidity"
-         },
-         {
-          "s": "",
-          "t": ", foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted."
+          "t": "The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics brighten the water body instead of lighting a floor, and the scene seen through the water is not distorted."
          }
         ],
         [
@@ -15373,31 +16496,13 @@
         [
          {
           "s": "",
-          "t": "With the default turbidity the water is nearly opaque, which makes "
-         },
-         {
-          "s": "c",
-          "t": "FresnelPower"
-         },
+          "t": "With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.1, 3) for clear water where both show clearly, and where Caustics become visible."
+         }
+        ],
+        [
          {
           "s": "",
-          "t": " and "
-         },
-         {
-          "s": "c",
-          "t": "Reflection"
-         },
-         {
-          "s": "",
-          "t": " subtle. Lower the absorption (for example "
-         },
-         {
-          "s": "c",
-          "t": "Turbidity"
-         },
-         {
-          "s": "",
-          "t": " 0.05, 3) for clear water where both show clearly."
+          "t": "Variation runs every wave train three times per pixel (three sines instead of one; the noise that bends the crests is not repeated). Where two hexagons meet, waves of different phase add up, so a seam is different from a hexagon rather than calmer; turn Variation down (y and z toward 0) if you want one clean wave pattern."
          }
         ]
        ],
@@ -15406,7 +16511,7 @@
      ],
      "eyebrow": "Engine content",
      "id": "water",
-     "text": "The engine ships a ready made water material, Engine/Materials/Water.hasset. It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey. The engine water material on a plane: three wave trains, sky reflection, caustic lines and foam on the crests Using it Add a Plane and pick Engine/Materials/Water in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under Engine/Materials in every project. Every parameter is editable per entity in the Details panel under Material Parameters (this entity). Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default. For reusable variants (lake, ocean, swamp) right click Water.hasset and choose Create Material Instance. That creates a new project asset with Water as parent; the engine material itself is never modified. At runtime, horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0) takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone. The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name. Parameters Parameter Type Meaning Default ShallowColor Color Colour where the water is clear or shallow. 0.10, 0.42, 0.45 DeepColor Color Colour the water fades to with depth and absorption. 0.01, 0.07, 0.12 Turbidity Vec2 x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water. 0.35, 3.0 WaveA, WaveB, WaveC Vec4 Three wave trains. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. A: 30, 1.2, 8, 0.25\nB: 310, 0.8, 3.5, 0.18\nC: 100, 0.5, 1.2, 0.12 FresnelPower Float 1 to 10 Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles. 5 Reflection Float 0 to 1 Strength of the sky and scene reflection; also raises opacity at grazing angles. 0.8 Roughness Float 0 to 1 Surface roughness of the highlight and reflection. 0.06 Specular Float 0 to 1 Specular reflectance; the shader uses Specular × Reflection. 0.3 Opacity Float 0 to 1 Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there. 0.55 Refraction Float 0 to 1 Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves. 0.3 FoamColor Color Colour of the foam. 0.92, 0.95, 0.97 Foam Vec4 x: share of the wave crests covered (0 to 1). y: strength, 0 turns foam off. z: noise size in metres. w: drift in m/s. 0.18, 0.8, 1.5, 0.3 Caustics Vec4 x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). 0.35, 2.5, 0.25, 25 Limits The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics are drawn on the water surface, and the scene seen through the water is not distorted. Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette. With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.05, 3) for clear water where both show clearly.",
+     "text": "The engine ships a ready made water material, Engine/Materials/Water.hasset. It is an ordinary node graph material (lit, Translucent blend), built entirely from procedural nodes, so it needs no textures and runs on Metal, OpenGL, D3D11, D3D12 and Vulkan. It is offered in addition to the default material and replaces nothing: meshes without a material stay grey. The engine water material on a plane at sunrise: a spread of wave trains with fine chop, the sky and the sun glittering in the ripples, a few whitecaps Using it Add a Plane and pick Engine/Materials/Water in the material slot of its Material component. No setup is needed: the material is listed there and in the Content Browser under Engine/Materials in every project. Every parameter is editable per entity in the Details panel under Material Parameters (this entity). Hover a row for its tooltip, F1 opens its reference entry. Leaving a value untouched keeps the material default. For reusable variants (lake, ocean, swamp) right click Water.hasset and choose Create Material Instance. That creates a new project asset with Water as parent; the engine material itself is never modified. At runtime, horizon.setMaterialParam(entity, \"Turbidity\", 0.1, 3.0) takes one to four numbers. It writes the material asset, so every entity using the same material changes with it; give an entity its own instance if it should change alone. The water animates on its own from the engine clock. The order of the rows in the Details panel can differ between platforms, so look rows up by name. The surface is a spread of waves, not one pattern: each of WaveA, WaveB and WaveC also drives a second, shorter and weaker train at a turned angle, an irregular chop rides on top, and slow gusts make some patches rougher than others. The colour is dark on purpose; most of what you see of real water is the sky in it, so the picture depends on the sky and the time of day. The sun's glitter appears where the waves tilt toward it. No repeating pattern A sum of waves repeats exactly, so on a large surface the same bright patches and the same foam dots come back row after row. The water is therefore bombed, the way texture bombing hides a tiling texture: the surface is cut into hexagons, each wave knob (with its shorter companion) is evaluated once for every hexagon a pixel touches, each time with that hexagon's own direction and phase, and the three results are blended. Inside a hexagon the waves are as regular as before; neighbours do not agree. The Variation parameter sets the hexagon size, the offsets and how sharp the seams are. The same hex grid is available to any material graph as the Bombing Cells node, which reads no texture. A 400 m water plane seen from straight above, twice. Left, Variation switched off: the same bright patches and white foam dots repeat in rows. Right, the default: the pattern is irregular. Parameters Parameter Type Meaning Default ShallowColor Color Colour where the water is clear or shallow. 0.045, 0.20, 0.22 DeepColor Color Colour the water fades to with depth and absorption. 0.004, 0.028, 0.052 Turbidity Vec2 x: absorption per metre. y: assumed water depth in metres. 0 absorption gives clear water. 0.45, 4.0 WaveA, WaveB, WaveC Vec4 Three wave trains, each with a shorter companion at a turned angle. x: direction in degrees (0 = +X, 90 = +Z). y: speed in m/s. z: wavelength in metres. w: steepness (height over wavelength); 0 turns the train off. The three steepnesses together also set the strength of the chop; all three at 0 is flat. A: 20, 1.0, 14, 0.07\nB: 335, 0.8, 5, 0.10\nC: 70, 0.5, 1.6, 0.09 FresnelPower Float 1 to 10 Exponent of the Fresnel term computed from the wave normal. Higher values keep the reflection to grazing angles. 5 Reflection Float 0 to 1 Strength of the sky and scene reflection; also raises opacity at grazing angles. 0.8 Roughness Float 0 to 1 Surface roughness of the highlight and reflection. Distant water is made rougher on top. 0.08 Specular Float 0 to 1 Specular reflectance; the shader uses Specular × Reflection. 0.3 Opacity Float 0 to 1 Transparency looking straight down into clear water. Depth, Fresnel and foam raise it from there. 0.5 Refraction Float 0 to 1 Bends the view ray towards the wave normal, so the depth tint and the caustics move with the waves. 0.3 FoamColor Color Colour of the foam. 0.82, 0.88, 0.90 Foam Vec4 x: share of the wave crests covered (0 to 1; 0.3 is a rough sea). y: strength, 0 turns foam off. z: size of the noise that frays it, in metres. w: drift in m/s. 0.06, 0.5, 0.7, 0.3 Caustics Vec4 x: strength, 0 turns caustics off. y: pattern size in metres. z: speed. w: camera distance in metres over which the pattern fades out (avoids shimmer in the distance). It brightens the water body and fades with its transmittance, so it shows in clear shallow water, not in deep or murky water. 0.2, 2.0, 0.2, 18 Variation Vec4 Breaks the repeat of the waves. x: hexagon size in wavelengths. y: phase offset between hexagons, 0 to 1 of a wavelength. z: direction offset between hexagons in degrees (plus or minus). w: seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 switch it off. 3.5, 1.0, 22, 2.5 Limits The material only shades the surface; it does not read the scene behind it. Depth colouring uses the assumed depth from Turbidity, foam sits on the wave crests rather than along a shoreline, caustics brighten the water body instead of lighting a floor, and the scene seen through the water is not distorted. Waves move the normals, not the vertices, and assume a roughly horizontal surface. The engine plane is a single quad, so there is no visible displacement at the silhouette. With the default turbidity the water is nearly opaque, which makes FresnelPower and Reflection subtle. Lower the absorption (for example Turbidity 0.1, 3) for clear water where both show clearly, and where Caustics become visible. Variation runs every wave train three times per pixel (three sines instead of one; the noise that bends the crests is not repeated). Where two hexagons meet, waves of different phase add up, so a seam is different from a hexagon rather than calmer; turn Variation down (y and z toward 0) if you want one clean wave pattern.",
      "title": "Engine Water"
     }
    ],
@@ -16440,7 +17545,25 @@
          },
          {
           "s": "",
-          "t": " adds lightning flashes with an optional thunder sound asset."
+          "t": " adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Sound"
+         },
+         {
+          "s": "",
+          "t": " — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's "
+         },
+         {
+          "s": "b",
+          "t": "Sound"
+         },
+         {
+          "s": "",
+          "t": " section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode."
          }
         ],
         [
@@ -16488,7 +17611,7 @@
      ],
      "eyebrow": "Dynamic",
      "id": "weather",
-     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes with an optional thunder sound asset. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
+     "text": "The Weather entity blends between built-in presets — Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow — and writes cloud coverage, fog, wind, precipitation and wetness into the Environment over a configurable transition time. An Auto-Cycle mode wanders between weathers on its own. Intensity scales the active preset; Transition sets the blend duration. Precipitation — camera-following rain and snow particle pools (with per-type particle caps) that collide with the ground; on capable backends the simulation runs entirely on the GPU. Storm adds lightning flashes; each one is followed by thunder, later and quieter the farther away it struck. Sound — the weather makes its own noise: rain, wind, snow and storm beds that fade in and out with the weather, and a thunder roll after each strike. The sounds ship with the engine (Engine » Audio » Weather in the Content Browser), so a project needs no files of its own and no script starts or fades anything. The Weather component's Sound section switches it off, sets the volume and the mixer bus, and has a slot for each sound to swap in your own; an empty slot plays the engine's. In the editor viewport outside Play the sounds follow Preferences » Effects » Weather Sounds in Edit Mode. Environment sliders stay live — once you hand-tune a field, the weather stops owning it. Scripts can drive weather directly via env.setCloudCoverage, env.setFogDensity, env.setWindSpeed and friends.",
      "title": "Weather"
     },
     {
@@ -41236,6 +42359,486 @@
      "id": "nav",
      "text": "Lua / Python: horizon.nav.<function> · C++: HE::api::nav::<function> Sends an entity with a Nav Agent component across the scene's baked NavMesh. The agent walks by itself once moveTo has started it; if it has a Character Controller it is steered through it, so it collides and falls like the player. Every call on an entity without a Nav Agent does nothing, returns false / -1 and logs has no NavAgentComponent. Destinations are world positions, also for a parented agent, and they have to lie on the walkable surface: a point beside the mesh or a few metres above it is refused. For a target that moves, call moveTo again; each call plans a new route from where the agent stands. moveTo plans the route inside the call, so its false is final: no NavMesh, destination off it, or no connection. A refused call also stops an agent that was already walking, and the log line says which of the reasons it was. After arrival isMoving and hasPath are false and remainingDistance is -1, the same as after stop or a refusal. It never reads 0, so test \"arrived\" with isMoving. The agent stops within the Nav Agent's Stopping Distance of the target. setSpeed is the agent's own speed (default 3.5 m/s), not the Movement component's Max Speed. A negative value becomes 0, and an agent at speed 0 stands still while isMoving stays true. Example: nav.moveTo patrol.lua local M = {}\n\n-- On an entity with a Nav Agent. World positions on the baked NavMesh.\nlocal POINTS = { {6, 0, -6}, {6, 0, 6}, {-6, 0, 6} }\n\nlocal function goNext(self)\n    self.i = self.i % #POINTS + 1\n    local p = POINTS[self.i]\n    if not horizon.nav.moveTo(self.entityId, p[1], p[2], p[3]) then\n        horizon.log(\"patrol point \" .. self.i .. \" is not reachable\")\n    end\nend\n\nfunction M.onStart(self)\n    self.i = 0\n    goNext(self)\nend\n\nfunction M.onUpdate(self, dt)\n    -- isMoving turns false on arrival (and after a refusal).\n    if not horizon.nav.isMoving(self.entityId) then goNext(self) end\nend\n\nreturn M patrol.py import horizon\n\n# On an entity with a Nav Agent. World positions on the baked NavMesh.\nPOINTS = [(6, 0, -6), (6, 0, 6), (-6, 0, 6)]\n\nclass Patrol(horizon.Behavior):\n    def on_start(self):\n        self.i = -1\n        self.go_next()\n\n    def go_next(self):\n        self.i = (self.i + 1) % len(POINTS)\n        if not horizon.nav.moveTo(self.entity_id, *POINTS[self.i]):\n            horizon.log(f\"patrol point {self.i} is not reachable\")\n\n    def on_update(self, dt):\n        # isMoving turns false on arrival (and after a refusal).\n        if not horizon.nav.isMoving(self.entity_id):\n            self.go_next() Function Returns Description moveTo(entity: int, x: float, y: float, z: float) started: bool Sends a Nav Agent walking to a world position: the route across the baked nav mesh is searched right here, and then followed over the next frames without anything else being called. The one node an enemy needs in order to come after the player. It answers whether the walk started, and the answer is worth branching on, because a false means the agent will not move at all: no nav mesh has been baked, the destination is off the walkable surface, or the two ends sit on parts of the level that do not connect. A refused call also stops an agent that was already walking somewhere. For a target that keeps moving, simply call it again — each call replans from where the agent stands. The point must lie on the NavMesh surface; the same x/z five metres above it is refused.\nLua/Python horizon.nav.moveTo · HorizonCode Move To · C++ HE::api::nav::moveTo · action · entity is Self in HorizonCode stop(entity: int) — Halts the agent where it stands and throws its route away. The way to break off a chase or hold a patrol still during a conversation. It leaves the destination as it was, so Move To starts a fresh walk afterwards.\nLua/Python horizon.nav.stop · HorizonCode Stop Moving · C++ HE::api::nav::stop · action · entity is Self in HorizonCode isMoving(entity: int) moving: bool Is this agent walking a route right now? It falls to false by itself the moment the agent arrives, which is how a patrol knows it is time to hand out the next waypoint.\nLua/Python horizon.nav.isMoving · HorizonCode Is Moving · C++ HE::api::nav::isMoving · query · entity is Self in HorizonCode hasPath(entity: int) hasPath: bool Whether the agent is holding a route it can still follow. Is Moving is the order that was given; this is whether there turned out to be a way. Telling the two apart is how \"walking\" is distinguished from \"was sent somewhere it cannot reach\".\nLua/Python horizon.nav.hasPath · HorizonCode Has Path · C++ HE::api::nav::hasPath · query · entity is Self in HorizonCode remainingDistance(entity: int) distance: float How far the agent still has to walk, measured in metres along the route's corners rather than straight through the walls between. Good for slowing an NPC down near its goal, or for deciding that a chaser is close enough to strike. It is -1, never 0, whenever there is no route to measure — an agent standing still, or one that has just arrived — so compare against 0 only after Has Path says there is something to compare.\nLua/Python horizon.nav.remainingDistance · HorizonCode Remaining Distance · C++ HE::api::nav::remainingDistance · query · entity is Self in HorizonCode setSpeed(entity: int, speed: float) — The speed in metres per second at which the agent walks its route from now on. The current route is kept and only the pace changes, so this is how one guard strolls a patrol and then charges. It is the Nav Agent's own speed, not the character's Max Speed, which belongs to input-driven movement; a negative value is taken as standing still. At speed 0 the agent stands still and isMoving stays true.\nLua/Python horizon.nav.setSpeed · HorizonCode Set Agent Speed · C++ HE::api::nav::setSpeed · action · entity is Self in HorizonCode",
      "title": "Navigation"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Lua / Python: "
+        },
+        {
+         "s": "c",
+         "t": "horizon.water.<function>"
+        },
+        {
+         "s": "",
+         "t": " · C++: "
+        },
+        {
+         "s": "c",
+         "t": "HE::api::water::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What the water of a "
+        },
+        {
+         "s": "b",
+         "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " does to the things in it, and the moment they go in or come out. Everything is in world space and needs no landscape handle, except "
+        },
+        {
+         "s": "c",
+         "t": "setFlow"
+        },
+        {
+         "s": "",
+         "t": ", which names the landscape and the body of water it changes. The group also holds the lake and brush functions ("
+        },
+        {
+         "s": "c",
+         "t": "createLake"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "paint"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "bodyAt"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "levelAt"
+        },
+        {
+         "s": "",
+         "t": " and so on); they are listed with the other Engine Call nodes in the HorizonCode node reference. How the water behaves, and the settings an author gives it, are described under "
+        },
+        {
+         "s": "i",
+         "t": "Water Physics"
+        },
+        {
+         "s": "",
+         "t": " in Systems."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Functions"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Function"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Returns"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Description"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "surfaceAt(x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "wet: bool, height: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Whether there is water at a world point and how high its surface stands there, waves included: the height the water physics floats bodies on. It needs no landscape, and the highest surface wins where several overlap. Wet is false when the ground stands above the water or there is none, and height is then 0, so read wet first. While the game plays the waves move with the physics clock; outside play the surface stands at its level plus the waves at time zero.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.surfaceAt"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Water Surface At"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::surfaceAt"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "depthAt(x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "depth: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Metres of water over the ground at a world point, waves included; 0 when it is dry. The question a wading or swimming check asks.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.depthAt"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Water Depth At"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::depthAt"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "flowAt(x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "flow: vec3"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current at a world point in metres per second, in world axes (the landscape's turn is already in it). Zero where it is dry or the water stands still.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.flowAt"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Water Flow At"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::flowAt"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "submerged(entity: int)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "share: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How much of an entity's body is under water, from 0 to 1, as of the latest physics step: 0.5 is a crate that floats half out, 1 is a stone on the bed. 0 for an entity that is not in water or has no physics body.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.submerged"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Get Submerged Share"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::submerged"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "buoyancy(entity: int)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "lift: float"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How many times its own weight the water lifts the body right now: 1 means it floats where it is, more than 1 that it rises, less than 1 that it sinks (a stone is about 0.4 however deep it lies). The buoyancy factor, the water's density over the body's, times the share under water. 0 for an entity that is not in water.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.buoyancy"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Get Water Buoyancy"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::buoyancy"
+          },
+          {
+           "s": "",
+           "t": " · query"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "pollImmersion()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "entities: int[], entered: bool[], speeds: float[], positions: vec3[]"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Every body that went into the water or came out of it since the last call, as four parallel lists: index i of entities is the body, entered says which way (true = in), speeds is how fast it went through the surface in metres per second (0 for an exit over the shore) and positions is where its centre was. Reading empties the lists, so read them in one place. A body that starts the scene in the water enters on the first step. Needs a physics world and the water physics on; the queue keeps the newest 256.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.pollImmersion"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Poll Water Immersion"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::pollImmersion"
+          },
+          {
+           "s": "",
+           "t": " · action"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "disturb(x: float, z: float, radius: float, strength: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "—"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Raises a ring on the water at a world point: a footstep, a shot, a thrown stone. Radius is the size it starts at in metres (0.05 to 6), strength runs from 0 to 1. The ring travels with the current. It is the water material's picture only and moves no body; it shows while the game plays, on every surface that uses the engine water material.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.disturb"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Disturb Water"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::disturb"
+          },
+          {
+           "s": "",
+           "t": " · action"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "setFlow(terrain: int, body: int, x: float, z: float)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "ok: bool"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sets the current of one body of water, in world metres per second on x and z (held to 50 either way). terrain is the landscape and body the number from the body-at row. A body floating in that water is pulled toward it. False when the entity is no landscape or the body does not exist. Density, damping and the on/off switch are set in the Landscape panel.\nLua/Python "
+          },
+          {
+           "s": "c",
+           "t": "horizon.water.setFlow"
+          },
+          {
+           "s": "",
+           "t": " · HorizonCode "
+          },
+          {
+           "s": "i",
+           "t": "Set Water Flow"
+          },
+          {
+           "s": "",
+           "t": " · C++ "
+          },
+          {
+           "s": "c",
+           "t": "HE::api::water::setFlow"
+          },
+          {
+           "s": "",
+           "t": " · action"
+          }
+         ]
+        ]
+       ]
+      }
+     ],
+     "eyebrow": "Gameplay · water physics",
+     "id": "water",
+     "text": "Lua / Python: horizon.water.<function> · C++: HE::api::water::<function> What the water of a Landscape does to the things in it, and the moment they go in or come out. Everything is in world space and needs no landscape handle, except setFlow, which names the landscape and the body of water it changes. The group also holds the lake and brush functions (createLake, paint, bodyAt, levelAt and so on); they are listed with the other Engine Call nodes in the HorizonCode node reference. How the water behaves, and the settings an author gives it, are described under Water Physics in Systems. Functions Function Returns Description surfaceAt(x: float, z: float) wet: bool, height: float Whether there is water at a world point and how high its surface stands there, waves included: the height the water physics floats bodies on. It needs no landscape, and the highest surface wins where several overlap. Wet is false when the ground stands above the water or there is none, and height is then 0, so read wet first. While the game plays the waves move with the physics clock; outside play the surface stands at its level plus the waves at time zero.\nLua/Python horizon.water.surfaceAt · HorizonCode Water Surface At · C++ HE::api::water::surfaceAt · query depthAt(x: float, z: float) depth: float Metres of water over the ground at a world point, waves included; 0 when it is dry. The question a wading or swimming check asks.\nLua/Python horizon.water.depthAt · HorizonCode Water Depth At · C++ HE::api::water::depthAt · query flowAt(x: float, z: float) flow: vec3 The current at a world point in metres per second, in world axes (the landscape's turn is already in it). Zero where it is dry or the water stands still.\nLua/Python horizon.water.flowAt · HorizonCode Water Flow At · C++ HE::api::water::flowAt · query submerged(entity: int) share: float How much of an entity's body is under water, from 0 to 1, as of the latest physics step: 0.5 is a crate that floats half out, 1 is a stone on the bed. 0 for an entity that is not in water or has no physics body.\nLua/Python horizon.water.submerged · HorizonCode Get Submerged Share · C++ HE::api::water::submerged · query buoyancy(entity: int) lift: float How many times its own weight the water lifts the body right now: 1 means it floats where it is, more than 1 that it rises, less than 1 that it sinks (a stone is about 0.4 however deep it lies). The buoyancy factor, the water's density over the body's, times the share under water. 0 for an entity that is not in water.\nLua/Python horizon.water.buoyancy · HorizonCode Get Water Buoyancy · C++ HE::api::water::buoyancy · query pollImmersion() entities: int[], entered: bool[], speeds: float[], positions: vec3[] Every body that went into the water or came out of it since the last call, as four parallel lists: index i of entities is the body, entered says which way (true = in), speeds is how fast it went through the surface in metres per second (0 for an exit over the shore) and positions is where its centre was. Reading empties the lists, so read them in one place. A body that starts the scene in the water enters on the first step. Needs a physics world and the water physics on; the queue keeps the newest 256.\nLua/Python horizon.water.pollImmersion · HorizonCode Poll Water Immersion · C++ HE::api::water::pollImmersion · action disturb(x: float, z: float, radius: float, strength: float) — Raises a ring on the water at a world point: a footstep, a shot, a thrown stone. Radius is the size it starts at in metres (0.05 to 6), strength runs from 0 to 1. The ring travels with the current. It is the water material's picture only and moves no body; it shows while the game plays, on every surface that uses the engine water material.\nLua/Python horizon.water.disturb · HorizonCode Disturb Water · C++ HE::api::water::disturb · action setFlow(terrain: int, body: int, x: float, z: float) ok: bool Sets the current of one body of water, in world metres per second on x and z (held to 50 either way). terrain is the landscape and body the number from the body-at row. A body floating in that water is pulled toward it. False when the entity is no landscape or the body does not exist. Density, damping and the on/off switch are set in the Landscape panel.\nLua/Python horizon.water.setFlow · HorizonCode Set Water Flow · C++ HE::api::water::setFlow · action",
+     "title": "Water"
     },
     {
      "blocks": [
@@ -69843,6 +71446,718 @@
      "id": "physics",
      "text": "Physics runs on Jolt, stepped at a fixed timestep during play mode. Give an entity a Rigid Body (Static, Dynamic or Kinematic — with mass, friction and restitution) and optionally a Collider (Box, Sphere or Capsule; without one, a box is derived from the transform scale). A 2D-physics toggle routes bodies to a planar solver. Triggers — a collider marked Is Trigger generates events without a collision response. Character Controller — slope limit, step height, skin width, mass and gravity; scripts drive it with setVelocity and query isGrounded. Raycasts — raycast(origin, direction, maxDistance) returns the closest hit with entity, point, normal and distance, from Lua, Python, HorizonCode and C++. Collision callbacks — scripts receive onCollisionEnter / onCollisionExit (Lua) or on_collision_enter / on_collision_exit (Python) with the other entity's id, for solid contacts and triggers alike. Large worlds — positions are 32-bit floats, so far from the origin things start to shake (about a pixel at 30 km). Project Settings » Physics » Simulation » Floating origin radius (0 = off, the default) lets the exported game move the whole world back under the camera once it is that far out: entities, bodies, particles, trails, rain, the rig camera and nav agents move along, savegames and multiplayer carry absolute positions, and the navmesh is queried with the offset added. Positions a script keeps in its own variables, keyframes on a top-level entity's position and GPU particles jump by the shift; the editor and its Play keep absolute coordinates. Cell streaming — a scene too big to keep loaded whole can be split into a grid of cells in the editor (Performance Profiler » Streaming) or with scripts/split_scene_cells.py: placed things (meshes, point and spot lights, static bodies, decals) go into one scene file per grid square, everything else stays in the base scene, which names the cells. The exported game then loads a cell once the camera, or where it is heading, comes within the load radius, and unloads it beyond the unload radius; reading and parsing run on worker threads, only building the entities on the main thread, a few milliseconds a frame. Cells work with the floating origin. The editor holds the base scene and draws the cells as squares on the ground; merging them back makes the scene one piece to edit.",
      "title": "Physics"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "Bodies in water are lifted, slowed and carried. A crate floats, a stone sinks to the bed, a river drifts what lies on it, and something that falls in rings the surface. This is the water of a "
+        },
+        {
+         "s": "b",
+         "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " (lakes drawn from splines, ponds painted with the water brush), not a fluid simulation, and a scene that already has water needs nothing added: a Dynamic "
+        },
+        {
+         "s": "b",
+         "t": "Rigid Body"
+        },
+        {
+         "s": "",
+         "t": " with a Collider over a wet spot is picked up by it."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "What happens to a body"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Buoyancy"
+         },
+         {
+          "s": "",
+          "t": " — Jolt works out the volume of the shape under water (exact for boxes, spheres and capsules, a polygon cut for convex hulls) and lifts the body by it. A body floats when its density is below the water's (1000 kg/m3 for fresh water) and rides with the share of its volume under water that its density is of the water's: wood at 500 sits half out, ice at 920 hardly shows, stone at 2600 sinks, lies on the bed and goes to sleep there. Only Dynamic bodies are served, and only awake ones. A body whose centre of mass is over land gets nothing, even with half of it in the water."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Drag"
+         },
+         {
+          "s": "",
+          "t": " — the water slows a body that moves through it (the linear drag grows with the square of the speed against the current) and stops one that spins (the angular drag). Both grow with the share of the body under water."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Current"
+         },
+         {
+          "s": "",
+          "t": " — each body of water has one current, in metres per second. A body is dragged toward it, so a river carries what floats on it. There is no force beyond that drag, and the waves of the water material do not follow the current."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Waves"
+         },
+         {
+          "s": "",
+          "t": " — the surface a body floats on is the level of the water plus two waves of the sizes of the engine water material (about 0.16 m and 0.08 m at the defaults), running on the physics clock. They have the heights and directions of the water you see, not its exact phase: a crate rides the same swell as the picture, not the same crest. One plane per body, taken at its centre of mass, so a boat longer than a wave does not tilt with it."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Rings"
+         },
+         {
+          "s": "",
+          "t": " — a body that goes into the water at 1 m/s or more, comes out at 1.5 m/s or more, or cuts across the surface at speed raises rings that the engine water material draws (up to 16 at a time). They are a picture only and move no body. They are drawn on all five backends: Metal, OpenGL, Direct3D 11, Direct3D 12 and Vulkan. The physics is the same on all five."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Setting it up"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "On a body of water."
+        },
+        {
+         "s": "",
+         "t": " Select the Landscape, open the "
+        },
+        {
+         "s": "b",
+         "t": "Landscape"
+        },
+        {
+         "s": "",
+         "t": " panel, the "
+        },
+        {
+         "s": "b",
+         "t": "Water"
+        },
+        {
+         "s": "",
+         "t": " tab, and open "
+        },
+        {
+         "s": "b",
+         "t": "Physics"
+        },
+        {
+         "s": "",
+         "t": " under the pond or lake in the "
+        },
+        {
+         "s": "i",
+         "t": "Bodies"
+        },
+        {
+         "s": "",
+         "t": " list. Every change is one undo step and is saved with the scene. Only the numbers that differ from the defaults are written, so a scene without any stays as it was."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Setting"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Default"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Range"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Enabled"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ],
+         [],
+         [
+          {
+           "s": "",
+           "t": "Off lets this water do nothing to bodies: no lift, no damping, no current. It is still a lake to look at."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Density"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1000 kg/m3"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1 to 20000"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Fresh water 1000, sea water 1025, brine and mud more. A heavier water carries more: the share under water of a floating body is its density over this."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Linear Drag"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.5"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0 to 10"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How strongly the water slows a moving body. Above about 3 a light body no longer settles, so 3 is the top of the useful range."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Angular Drag"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.05"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0 to 10"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How strongly the water stops a spinning body. 0 lets a crate roll on."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Flow X, Flow Z"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0, 0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "-50 to 50 m/s"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current, along the landscape's own X and Z axes (the world's, unless the landscape is turned about Y)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Splash"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0 to 4"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Strength of the rings. 0 makes none; the body itself is not affected."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "On a Rigid Body."
+        },
+        {
+         "s": "",
+         "t": " Two rows on the component: "
+        },
+        {
+         "s": "b",
+         "t": "Affected By Water"
+        },
+        {
+         "s": "",
+         "t": " (on by default; switch it off for bullets, debris, anything that should fall through to the bed) and "
+        },
+        {
+         "s": "b",
+         "t": "Density"
+        },
+        {
+         "s": "",
+         "t": " (0 takes it from the Mass and the size of the Collider). Set a density when the mass is chosen for how the body hits things and not for how it swims: the Mass decides collisions, the Density decides buoyancy. Wood 500, ice 920, water 1000, stone 2600, iron 7800. Both are read at every physics step, so changing them while the game plays takes effect at once."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Switching it off."
+        },
+        {
+         "s": "",
+         "t": " "
+        },
+        {
+         "s": "c",
+         "t": "HE_PHYSICS_WATER=0"
+        },
+        {
+         "s": "",
+         "t": " in the environment starts the world without water physics. With it off, or with no water in the scene, the physics step does exactly what it did before water had physics."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Asking the water from a script"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The "
+        },
+        {
+         "s": "c",
+         "t": "water"
+        },
+        {
+         "s": "",
+         "t": " group answers in "
+        },
+        {
+         "s": "b",
+         "t": "world"
+        },
+        {
+         "s": "",
+         "t": " space and needs no landscape handle: the caller has a position or a body. It is the same in Lua and Python ("
+        },
+        {
+         "s": "c",
+         "t": "horizon.water.*"
+        },
+        {
+         "s": "",
+         "t": "), in HorizonCode (Engine Call nodes under Water) and in C++ ("
+        },
+        {
+         "s": "c",
+         "t": "HE::api::water::*"
+        },
+        {
+         "s": "",
+         "t": ")."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Function"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Returns"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "surfaceAt(x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "wet, height"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Whether there is water at the point and how high its surface stands there, waves included. Height is 0 when it is dry, so read wet first."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "depthAt(x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "depth"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Metres of water over the ground at the point; 0 when dry."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "flowAt(x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "vec3"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current at the point in world axes; zero when dry or still."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "submerged(entity)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "share"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How much of the entity's body is under water, 0 to 1."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "buoyancy(entity)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "lift"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How many times its own weight the water lifts the body: 1 floats where it is, above 1 rises, below 1 sinks."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "pollImmersion()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "entities, entered, speeds, positions"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Every body that went into the water or came out of it since the last call, as four parallel lists. Reading empties them."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "disturb(x, z, radius, strength)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "—"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Raises a ring at the point: a footstep, a shot."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "setFlow(terrain, body, x, z)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "ok"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sets the current of one body of water, in world metres per second."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- Rings and a log line where something heavy hits the water, and a wading check.\nfunction M.onUpdate(self, dt)\n    local who, entered, speed, where = horizon.water.pollImmersion()\n    for i = 1, #who do\n        if entered[i] and speed[i] > 2.0 then\n            local at = where[i]                      -- a vec3 in a list is {x, y, z}\n            horizon.water.disturb(at[1], at[3], 1.0, math.min(1.0, speed[i] / 6.0))\n            horizon.log(string.format(\"entity %d hit the water at %.1f m/s\", who[i], speed[i]))\n        end\n    end\n\n    local x, y, z = horizon.getPosition(self.entityId)\n    local wet, surface = horizon.water.surfaceAt(x, z)\n    self.wading = wet and surface > y                -- the surface is above my feet\nend\n\nreturn M\n",
+         "title": "splash.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Splash(horizon.Behavior):\n    # Rings and a log line where something heavy hits the water, and a wading check.\n    def on_update(self, dt):\n        who, entered, speed, where = horizon.water.pollImmersion()\n        for i in range(len(who)):\n            if entered[i] and speed[i] > 2.0:\n                x, y, z = where[i]                   # a vec3 in a list is [x, y, z]\n                horizon.water.disturb(x, z, 1.0, min(1.0, speed[i] / 6.0))\n                horizon.log(f\"entity {who[i]} hit the water at {speed[i]:.1f} m/s\")\n\n        x, y, z = horizon.getPosition(self.entity_id)\n        wet, surface = horizon.water.surfaceAt(x, z)\n        self.wading = wet and surface > y            # the surface is above my feet\n",
+         "title": "splash.py"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "An event is raised each time the share of a body under water crosses 2 %, with the speed it went through the surface at; a body that starts the scene in the water enters at the first step with no speed to speak of, and one that leaves over the shore or whose water is switched off under it exits with a speed of 0. A very light body bobbing at the surface raises one pair per wave. Nobody has to read the list, it only keeps the newest 256."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Limits"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Characters do not swim: a Character Controller walks its own path. "
+         },
+         {
+          "s": "c",
+          "t": "surfaceAt"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "depthAt"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "flowAt"
+         },
+         {
+          "s": "",
+          "t": " give a script what it needs to build swimming; nothing is built in."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "One plane per body at its centre of mass, so no body tilts with a wave."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A body that fell asleep on dry ground is not woken when the water rises to it; it floats once something touches or moves it."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The landscape must not be tipped about X or Z (turning it about Y, moving it and scaling it are fine)."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Fluid simulation, spray particles and underwater post-processing are not part of it."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Systems · Landscape water",
+     "id": "water-physics",
+     "text": "Bodies in water are lifted, slowed and carried. A crate floats, a stone sinks to the bed, a river drifts what lies on it, and something that falls in rings the surface. This is the water of a Landscape (lakes drawn from splines, ponds painted with the water brush), not a fluid simulation, and a scene that already has water needs nothing added: a Dynamic Rigid Body with a Collider over a wet spot is picked up by it. What happens to a body Buoyancy — Jolt works out the volume of the shape under water (exact for boxes, spheres and capsules, a polygon cut for convex hulls) and lifts the body by it. A body floats when its density is below the water's (1000 kg/m3 for fresh water) and rides with the share of its volume under water that its density is of the water's: wood at 500 sits half out, ice at 920 hardly shows, stone at 2600 sinks, lies on the bed and goes to sleep there. Only Dynamic bodies are served, and only awake ones. A body whose centre of mass is over land gets nothing, even with half of it in the water. Drag — the water slows a body that moves through it (the linear drag grows with the square of the speed against the current) and stops one that spins (the angular drag). Both grow with the share of the body under water. Current — each body of water has one current, in metres per second. A body is dragged toward it, so a river carries what floats on it. There is no force beyond that drag, and the waves of the water material do not follow the current. Waves — the surface a body floats on is the level of the water plus two waves of the sizes of the engine water material (about 0.16 m and 0.08 m at the defaults), running on the physics clock. They have the heights and directions of the water you see, not its exact phase: a crate rides the same swell as the picture, not the same crest. One plane per body, taken at its centre of mass, so a boat longer than a wave does not tilt with it. Rings — a body that goes into the water at 1 m/s or more, comes out at 1.5 m/s or more, or cuts across the surface at speed raises rings that the engine water material draws (up to 16 at a time). They are a picture only and move no body. They are drawn on all five backends: Metal, OpenGL, Direct3D 11, Direct3D 12 and Vulkan. The physics is the same on all five. Setting it up On a body of water. Select the Landscape, open the Landscape panel, the Water tab, and open Physics under the pond or lake in the Bodies list. Every change is one undo step and is saved with the scene. Only the numbers that differ from the defaults are written, so a scene without any stays as it was. Setting Default Range Meaning Enabled on  Off lets this water do nothing to bodies: no lift, no damping, no current. It is still a lake to look at. Density 1000 kg/m3 1 to 20000 Fresh water 1000, sea water 1025, brine and mud more. A heavier water carries more: the share under water of a floating body is its density over this. Linear Drag 0.5 0 to 10 How strongly the water slows a moving body. Above about 3 a light body no longer settles, so 3 is the top of the useful range. Angular Drag 0.05 0 to 10 How strongly the water stops a spinning body. 0 lets a crate roll on. Flow X, Flow Z 0, 0 -50 to 50 m/s The current, along the landscape's own X and Z axes (the world's, unless the landscape is turned about Y). Splash 1 0 to 4 Strength of the rings. 0 makes none; the body itself is not affected. On a Rigid Body. Two rows on the component: Affected By Water (on by default; switch it off for bullets, debris, anything that should fall through to the bed) and Density (0 takes it from the Mass and the size of the Collider). Set a density when the mass is chosen for how the body hits things and not for how it swims: the Mass decides collisions, the Density decides buoyancy. Wood 500, ice 920, water 1000, stone 2600, iron 7800. Both are read at every physics step, so changing them while the game plays takes effect at once. Switching it off. HE_PHYSICS_WATER=0 in the environment starts the world without water physics. With it off, or with no water in the scene, the physics step does exactly what it did before water had physics. Asking the water from a script The water group answers in world space and needs no landscape handle: the caller has a position or a body. It is the same in Lua and Python (horizon.water.*), in HorizonCode (Engine Call nodes under Water) and in C++ (HE::api::water::*). Function Returns Meaning surfaceAt(x, z) wet, height Whether there is water at the point and how high its surface stands there, waves included. Height is 0 when it is dry, so read wet first. depthAt(x, z) depth Metres of water over the ground at the point; 0 when dry. flowAt(x, z) vec3 The current at the point in world axes; zero when dry or still. submerged(entity) share How much of the entity's body is under water, 0 to 1. buoyancy(entity) lift How many times its own weight the water lifts the body: 1 floats where it is, above 1 rises, below 1 sinks. pollImmersion() entities, entered, speeds, positions Every body that went into the water or came out of it since the last call, as four parallel lists. Reading empties them. disturb(x, z, radius, strength) — Raises a ring at the point: a footstep, a shot. setFlow(terrain, body, x, z) ok Sets the current of one body of water, in world metres per second. splash.lua local M = {}\n\n-- Rings and a log line where something heavy hits the water, and a wading check.\nfunction M.onUpdate(self, dt)\n    local who, entered, speed, where = horizon.water.pollImmersion()\n    for i = 1, #who do\n        if entered[i] and speed[i] > 2.0 then\n            local at = where[i]                      -- a vec3 in a list is {x, y, z}\n            horizon.water.disturb(at[1], at[3], 1.0, math.min(1.0, speed[i] / 6.0))\n            horizon.log(string.format(\"entity %d hit the water at %.1f m/s\", who[i], speed[i]))\n        end\n    end\n\n    local x, y, z = horizon.getPosition(self.entityId)\n    local wet, surface = horizon.water.surfaceAt(x, z)\n    self.wading = wet and surface > y                -- the surface is above my feet\nend\n\nreturn M splash.py import horizon\n\nclass Splash(horizon.Behavior):\n    # Rings and a log line where something heavy hits the water, and a wading check.\n    def on_update(self, dt):\n        who, entered, speed, where = horizon.water.pollImmersion()\n        for i in range(len(who)):\n            if entered[i] and speed[i] > 2.0:\n                x, y, z = where[i]                   # a vec3 in a list is [x, y, z]\n                horizon.water.disturb(x, z, 1.0, min(1.0, speed[i] / 6.0))\n                horizon.log(f\"entity {who[i]} hit the water at {speed[i]:.1f} m/s\")\n\n        x, y, z = horizon.getPosition(self.entity_id)\n        wet, surface = horizon.water.surfaceAt(x, z)\n        self.wading = wet and surface > y            # the surface is above my feet An event is raised each time the share of a body under water crosses 2 %, with the speed it went through the surface at; a body that starts the scene in the water enters at the first step with no speed to speak of, and one that leaves over the shore or whose water is switched off under it exits with a speed of 0. A very light body bobbing at the surface raises one pair per wave. Nobody has to read the list, it only keeps the newest 256. Limits Characters do not swim: a Character Controller walks its own path. surfaceAt, depthAt and flowAt give a script what it needs to build swimming; nothing is built in. One plane per body at its centre of mass, so no body tilts with a wave. A body that fell asleep on dry ground is not woken when the water rises to it; it floats once something touches or moves it. The landscape must not be tipped about X or Z (turning it about Y, moving it and scaling it are fine). Fluid simulation, spray particles and underwater post-processing are not part of it.",
+     "title": "Water Physics"
     },
     {
      "blocks": [

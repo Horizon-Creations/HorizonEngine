@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <HorizonScene/SplineCurve.h>      // the Spline section's length readout
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -1015,8 +1016,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::InputText("##entity_name", buf, sizeof(buf),
 			                     ImGuiInputTextFlags_EnterReturnsTrue))
 			{
-				if (undo) undo->snapshotNow("Rename Entity");
-				world.renameEntity(entity, buf);
+				// Held by somebody else in the session: a request to the host,
+				// not a local name that only this machine would ever show. Only
+				// for the scene's world: a prefab editor's handles name other
+				// entities, and its world is nobody's to lock.
+				if (!(ctx.askHostToRename && &world == ctx.world && buf[0] != '\0' &&
+				      name->name != buf &&
+				      ctx.askHostToRename(entity, buf)))
+				{
+					if (undo) undo->snapshotNow("Rename Entity");
+					world.renameEntity(entity, buf);
+				}
 			}
 			// Off because of something above it: the box here is ticked, and
 			// the entity is still not in the game — say which is the case.
@@ -1305,8 +1315,33 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::sliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                 ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
-				hint("Picking a preset sets clouds/fog/wind/precip; the sliders above stay "
-				     "editable, so you can nudge any value afterwards.");
+				hint("Picking a preset sets every value below; each one stays editable, so "
+				     "you can take over any of them afterwards.");
+
+				// ── Every value of the weather on its own ───────────────────────────
+				// The sliders edit the live Sky values (the same ones the Sky's own panel
+				// shows) — a preset writes them, and WeatherSystem leaves a value alone from
+				// the moment you move it, until the next preset pick takes everything back.
+				// Thunder lives on the weather itself and follows the same rule.
+				EditorWidgets::subHeading("Conditions");
+				{
+					const Entity envEnt = world.environmentEntity();
+					EnvironmentComponent* wenv = (envEnt != entt::null && registry.valid(envEnt))
+						? registry.try_get<EnvironmentComponent>(envEnt) : nullptr;
+					if (wenv)
+					{
+						Row::sliderFloat("Cloud Coverage", &wenv->cloudCoverage, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Fog Density##wx", &wenv->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
+						Row::sliderFloat("Wind Speed##wx", &wenv->windSpeed, 0.0f, 4.0f); trackEdit();
+						Row::sliderFloat("Rain##wx", &wenv->rainAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Snow##wx", &wenv->snowAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Wetness##wx", &wenv->wetness, 0.0f, 1.0f); trackEdit();
+					}
+					else
+						hint("No Sky in the scene — add one (Window ▸ Environment) to dial the "
+						     "clouds, fog, wind, rain, snow and wetness.");
+					Row::sliderFloat("Thunder", &w->thunder, 0.0f, 1.0f); trackEdit();
+				}
 
 				EditorWidgets::subHeading("Current State");
 				if (w->currentKind != w->targetKind)
@@ -1319,6 +1354,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				     w->curCloudCoverage, w->curFogDensity,
 				     w->curWindSpeed, w->curPrecip);
 
+				// What MATERIALS read from the weather (the material graph's Weather node,
+				// MF_WeatherPuddles / MF_WeatherSnow): set by hand, not by the presets.
+				EditorWidgets::subHeading("Surface");
+				Row::sliderFloat("Puddles",     &w->puddleAmount, 0.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Puddle Size", &w->puddleSize,   0.5f, 100.0f, "%.1f m",
+				                 ImGuiSliderFlags_Logarithmic); trackEdit();
+				Row::sliderFloat("Snow Cover",  &w->snowCover,    0.0f, 1.0f); trackEdit();
+				hint("Read by materials through the Weather node — the auto landscape takes "
+				     "its puddles, their size and its ground snow from these.");
+
 				EditorWidgets::subHeading("Precipitation");
 				Row::dragInt("Max Rain Particles", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
 				Row::dragInt("Max Snow Particles", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();
@@ -1327,10 +1372,39 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Drops collide via physics in Play; else they die at Ground Y (the "
 				     "fallback floor).");
 
-				// Thunder sound — drop an audio .hasset here (played on each strike).
+				// Weather sounds (WeatherAudio). Every slot is optional: empty plays the
+				// EngineContent default, a dropped audio .hasset replaces just that one.
+				EditorWidgets::subHeading("Sound");
+				EditorWidgets::checkbox("Weather Sounds", &w->soundEnabled); trackEdit();
+				ImGui::BeginDisabled(!w->soundEnabled);
+				Row::sliderFloat("Volume##wxs", &w->soundVolume, 0.0f, 1.0f); trackEdit();
+				char wxBus[64];
+				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
+				wxBus[sizeof(wxBus) - 1] = '\0';
+				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
+				// An empty slot plays the engine's sound (Engine/Audio/Weather), so it says
+				// which; the entry behind each slot says how it behaves.
+				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
+					HE::AssetType::Audio, "wxrain", "(default: Rain)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Rain Sound");
+				EditorWidgets::assetDropSlot(ctx, "Wind", w->windSound,
+					HE::AssetType::Audio, "wxwind", "(default: Wind)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Wind Sound");
+				EditorWidgets::assetDropSlot(ctx, "Snow", w->snowSound,
+					HE::AssetType::Audio, "wxsnow", "(default: Snow)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Snow Sound");
+				EditorWidgets::assetDropSlot(ctx, "Storm", w->stormSound,
+					HE::AssetType::Audio, "wxstorm", "(default: Storm)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Storm Sound");
+				// Thunder: one roll per lightning strike, a random distance away.
 				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
-					HE::AssetType::Audio, "thunder", "(none — drop audio)",
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "thunder", "(default: Thunder)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Thunder Sound");
+				ImGui::EndDisabled();
+				hint("The beds fade with the weather by themselves: rain and snow with how much "
+				     "falls, wind with the wind speed, storm with wind and rain together. An "
+				     "empty slot plays the engine's sound; drop an audio asset to replace it. "
+				     "The bus falls back to the clip's own, then master.");
 
 			}
 			if (!quiet && !only) ImGui::Separator();
@@ -2639,6 +2713,64 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RopeComponent>(entity); }
 	}
 
+	// ── Spline ──────────────────────────────────────────────────────────────
+	// A line or an outline through its control points, in the entity's own space.
+	// It renders nothing and builds nothing by itself: the viewport draws it as a
+	// guide, and whatever uses it (a lake shore, a path) reads the points. The
+	// Spline mode of the Scene toolbar draws and edits the same data; this is the
+	// numeric view of it, and the way to type a point in exactly.
+	if (auto* spline = registry.try_get<SplineComponent>(entity))
+	{
+		if (componentHeader("Spline", true, removed))
+		{
+			EditorWidgets::checkbox("Closed##spline", &spline->closed); trackEdit();
+
+			char summary[96];
+			std::snprintf(summary, sizeof summary, "%zu point%s, %.2f m long",
+			              spline->controlPoints.size(),
+			              spline->controlPoints.size() == 1 ? "" : "s",
+			              HE::spline::Curve(*spline).length());
+			ImGui::TextDisabled("%s", summary);
+			if (spline->closed && spline->controlPoints.size() < 3)
+				hint("A closed spline needs at least three points; with fewer it is drawn open.");
+
+			// One fixed label for every row, so the tooltip lookup and the help
+			// audit see a single control rather than "Point 0", "Point 1" … (the
+			// same arrangement as the rope's control points).
+			ImGui::Spacing();
+			EditorWidgets::subHeading("Control Points");
+			for (int i = 0; i < static_cast<int>(spline->controlPoints.size()); ++i)
+			{
+				ImGui::PushID(i);
+				Row::dragFloat3("Point", &spline->controlPoints[static_cast<size_t>(i)].x,
+				                0.05f, -100000.0f, 100000.0f);
+				trackEdit();
+				// A spline may be emptied: every state on the way to a finished
+				// line is a valid component, the viewport tool deletes down to
+				// zero too.
+				if (EditorWidgets::dangerSmallButton("Remove##splinept"))
+				{
+					if (undo) undo->snapshotNow();
+					spline->controlPoints.erase(spline->controlPoints.begin() + i);
+					--i;
+				}
+				ImGui::PopID();
+			}
+			if (ImGui::Button("+ Point"))
+			{
+				if (undo) undo->snapshotNow();
+				// Carries on in the direction of the last segment, so the new point
+				// is somewhere you can see and grab; a lone point steps along +X.
+				const size_t n = spline->controlPoints.size();
+				const glm::vec3 tail = n ? spline->controlPoints[n - 1] : glm::vec3(0.0f);
+				glm::vec3 step = (n >= 2) ? (tail - spline->controlPoints[n - 2]) : glm::vec3(1.0f, 0.0f, 0.0f);
+				if (glm::dot(step, step) < 1e-8f) step = glm::vec3(1.0f, 0.0f, 0.0f);
+				spline->controlPoints.push_back(tail + step);
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SplineComponent>(entity); }
+	}
+
 	// ── Trail ───────────────────────────────────────────────────────────────
 	// The other half of the same feature and the opposite data rate: nothing here
 	// is geometry, it is the rule by which the entity drops points behind itself.
@@ -2702,6 +2834,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
+			// What water does to this body (Thema 179). Both are read at every physics
+			// step, so changing them while the game plays takes effect at once, and
+			// neither is part of what the body is built from: nothing is rebuilt.
+			EditorWidgets::checkbox("Affected By Water", &r->affectedByWater); trackEdit();
+			// "##rb": a CollapsingHeader opens no id scope, and the Environment's cloud
+			// "Density" is a bare one too; the help lookup ignores the suffix.
+			Row::dragFloat("Density##rb", &r->density, 10.0f, 0.0f, 20000.0f,
+			               r->density > 0.0f ? "%.0f kg/m3" : "from mass"); trackEdit();
+			r->density = std::max(0.0f, r->density);
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
@@ -3032,6 +3173,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SaveStateComponent>(entity); }
 	}
 
+	// ── Streaming (where it lives in a scene split into cells) ──────────────
+	if (auto* st = registry.try_get<StreamingComponent>(entity))
+	{
+		if (componentHeader("Streaming", true, removed))
+		{
+			int mode = static_cast<int>(st->mode);
+			if (Row::comboZ("Mode##streaming", &mode, "Auto Resident "))
+				st->mode = mode == 0 ? StreamingComponent::Mode::Auto : StreamingComponent::Mode::Resident;
+			trackEdit();
+			hint("Read when the scene is split into cells (Streaming tab). Resident keeps this "
+			     "entity, and the top-level subtree it is in, in the always-loaded base scene; "
+			     "Auto leaves it to the splitter. Split again after changing it.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<StreamingComponent>(entity); }
+	}
+
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -3200,6 +3357,25 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				changed |= Row::dragFloat("Disp. Tiling##tc", &t->displacementTiling,
 				                          0.25f, 0.0f, 4096.0f,
 				                          t->displacementTiling > 0.0f ? "%.2f x" : "= texture tiling");
+				trackEdit();
+				ImGui::EndDisabled();
+			}
+
+			// Water: where the sheets of this landscape's lakes and brushed water
+			// end against the ground. The water's own settings, so they go through
+			// setShoreClip and stay out of `changed` — which would regenerate every
+			// chunk of the landscape for a flag that only the water reads.
+			ImGui::SeparatorText("Water");
+			{
+				bool clip = t->water.clipToGround;
+				if (EditorWidgets::checkbox("Clip To Ground##tcw", &clip))
+					HE::water::setShoreClip(*t, clip, t->water.shoreOvershoot);
+				trackEdit();
+				ImGui::BeginDisabled(!t->water.clipToGround);
+				float over = t->water.shoreOvershoot;
+				if (Row::dragFloat("Shore Overshoot##tcw", &over, 0.01f, 0.0f,
+				                   HE::water::kMaxShoreOvershoot, "%.2f m"))
+					HE::water::setShoreClip(*t, t->water.clipToGround, over);
 				trackEdit();
 				ImGui::EndDisabled();
 			}
@@ -3616,6 +3792,7 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<FoliageComponent>("Foliage"),
 	addRow<LODComponent>("LOD"),
 	addRow<RopeComponent>("Rope"),
+	addRow<SplineComponent>("Spline"),
 	addRow<TrailComponent>("Trail"),
 };
 constexpr AddRow kPhysicsRows[] = {
@@ -3659,6 +3836,7 @@ constexpr AddRow kGameplayRows[] = {
 	// to give it logic, and the gate was hiding exactly the component you need.
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
+	addRow<StreamingComponent>("Streaming"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),

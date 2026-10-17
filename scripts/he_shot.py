@@ -11,6 +11,8 @@ Usage:
 
 Each KEY=VAL becomes HE_DUMP_<KEY>. Common keys (see dumpFrameHeadless):
     TOD=0.30          time of day 0..1 (0 midnight, 0.25 sunrise, 0.5 noon)
+    DAYNIGHT=0        day-night cycle off (fixed sun direction, TOD ignored); default on
+    SHADOW=60,2,2048,0.5   shadow settings: distance,cascades,resolution,lambda[,slopeBias,minBias]
     COVERAGE=0.6      cloud coverage 0..1
     CLOUDMODE=1       0 dome / 1 volumetric clouds
     PITCH=12 YAW=40   camera look (degrees); CAMX/CAMY/CAMZ position

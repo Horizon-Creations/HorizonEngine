@@ -116,6 +116,34 @@ struct RenderObject {
     // the paint per texel, instead of settling for the mean above (a mirrored
     // hillside would otherwise be one flat colour). See GiLandscape.h.
     int32_t      landscapeIndex = -1;
+    // Foliage cluster. -1 = an ordinary object, one entity = one entry. >= 0 = this
+    // ONE object stands for a whole run of instances (one bucket of a foliage layer):
+    // the index into RenderWorld::instanceBlocks that holds their storage, range and
+    // parent matrix. Then `transform` is the FIRST instance's world matrix — a reader
+    // that has never heard of clusters (a pick, a preview loop) still sees one real
+    // plant, not garbage — and `worldBounds` is the box of the WHOLE run, or invalid
+    // when the extractor could not read the mesh's own bounds yet (never culled, the
+    // same fail-safe an ordinary object has). Only GeometryPass and
+    // RenderSorter::batchDepthRuns unfold a cluster into its instances; culling,
+    // sorting and material resolve all run over clusters, which is the point.
+    int32_t      instanceBlock = -1;
+
+    bool isCluster() const { return instanceBlock >= 0; }
+
+    // The backends' per-pass "refine": replace the extractor's seeded bounds with
+    // the real mesh bounds under this object's transform (the extractor leaves them
+    // invalid for a mesh it could not read, and a unit-cube proxy for billboards).
+    // EVERY backend refreshes bounds through this and nowhere else. A cluster keeps
+    // what the extractor gave it: its box covers every instance of the run while its
+    // `transform` is one instance, so refining would shrink the box to a single plant
+    // and the whole bucket would vanish with it. tests/test_foliage_cluster.cpp reads
+    // the backend sources and fails on a hand-written refine, so a sixth backend
+    // cannot reintroduce the trap.
+    void refineWorldBounds(const HE::AABB& meshLocalBounds)
+    {
+        if (isCluster() || !meshLocalBounds.isValid()) return;
+        worldBounds = meshLocalBounds.transformed(transform);
+    }
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

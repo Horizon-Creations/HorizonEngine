@@ -123,9 +123,20 @@ HE_NET_API SocketResult socketAccept(SocketHandle listener, SocketHandle& outAcc
 // Returns Ok (connected immediately, typical on loopback), WouldBlock (in
 // progress — poll socketConnectPoll()), or Error. `outSocket` is kInvalidSocket
 // unless the call returns Ok or WouldBlock.
+//
+// A WouldBlock result is bound to ONE address: the first candidate whose connect
+// did not fail outright. If that address then never answers (a dual-stack host
+// whose IPv6 route is dead, a firewall dropping the SYN) the caller times out and
+// would otherwise have no way to reach the host's other addresses. So the call
+// can also be told to start `skipCandidates` addresses further down the resolver
+// list, and reports how many candidates there are (`outCandidateCount`, set even
+// on Error once the name resolved, 0 when it did not). Call again with
+// skipCandidates + 1 after a timeout until it reaches outCandidateCount.
 HE_NET_API SocketResult socketCreateTcpConnecting(const std::string& host,
                                                   std::uint16_t port,
-                                                  SocketHandle& outSocket);
+                                                  SocketHandle& outSocket,
+                                                  unsigned skipCandidates = 0,
+                                                  unsigned* outCandidateCount = nullptr);
 
 // Start a non-blocking connect on an existing IPv4 socket.
 HE_NET_API SocketResult socketConnect(SocketHandle h, const std::string& host,
@@ -166,6 +177,14 @@ HE_NET_API SocketHandle socketCreateUdp6();
 HE_NET_API bool         socketBindUdp6To(SocketHandle h, const std::string& localAddress,
                                          std::uint16_t port);
 // Bind to a local port (0 = any). Required before receiving.
+//
+// Deliberately WITHOUT SO_REUSEADDR. UDP has no TIME_WAIT, so a port is free the
+// moment its socket closes and a restart never needs it; what it does buy is
+// harm. On Linux two sockets that both set it may bind the same port — and the
+// ephemeral picker (port 0) does not skip a port a reuse socket already holds —
+// so two clients, or a client and a host, end up on one port and each other's
+// datagrams. A caller that really wants a shared port (discovery) says so with
+// socketBindUdpShared.
 HE_NET_API bool         socketBindUdp(SocketHandle h, std::uint16_t port);
 // Allow sending to multicast groups (SSDP's 239.255.255.250).
 HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);

@@ -3,6 +3,7 @@
 #include "RenderWorld.h"
 #include <material/MaterialShaderLibrary.h> // MaterialShaderLibrary::Lighting (the graph-material light ABI)
 #include <Renderer/EnvironmentSettings.h>   // FillMaterialWind's source
+#include <Renderer/WaterRipples.h>          // FillMaterialWater's source
 #include <Math/Math.h>
 #include <cstdint>
 #include <vector>
@@ -101,6 +102,24 @@ HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               r
 // leave the wind at 0 too.
 HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
                                        MaterialShaderLibrary::Lighting& out);
+
+// The weather block (Lighting::weather): x wetness and y snow amount — the generic ground
+// response heLitP applies to every lit graph material — and z puddles / w snow cover, the
+// two the Weather details panel sets for MATERIALS (the graph's Weather node reads all
+// four). Call it next to FillMaterialWind. Backends that used to set x/y by hand get the
+// same values; D3D11 / D3D12 / Vulkan, which never filled them, now answer to the weather
+// like OpenGL and Metal do.
+HE_RENDERING_API void FillMaterialWeather(const ::EnvironmentSettings&     env,
+                                          MaterialShaderLibrary::Lighting& out);
+
+// ── Graph-material water rings (the Water Ripple node, Thema 179) ─────────────
+// Copies the rings the water physics raised (IRenderer::GetWaterRipples) into the
+// Lighting tail waterRipples / waterRippleA / waterRippleB. Like wind and weather it
+// is a world-space value with no clip-space convention, so one helper serves every
+// backend; call it next to FillMaterialWeather at each fill site that draws graph
+// materials in the scene (a preview or UI pass leaves the tail zero = no rings).
+HE_RENDERING_API void FillMaterialWater(const ::WaterRippleBlock&       water,
+                                        MaterialShaderLibrary::Lighting& out);
 
 // ── Graph-material DDGI probe field (Lighting v2.5) ──────────────────────────
 // Writes giGridOrigin / giGridCounts / giProbe — the SAME grid the built-in
@@ -209,5 +228,16 @@ struct DirectionalLightWindow
 };
 
 HE_RENDERING_API DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw);
+
+// The CLUSTERED deferred resolve's light window (Thema 150): rewrites the
+// window half of a graph-material Lighting block to the directional lights
+// only (same pick as BuildDirectionalLightWindow), unused slots zeroed,
+// counts.x = their number. The resolve is injected WITHOUT HE_CLUSTERED, so its
+// heLitP walks the whole window, and heClusterLighting adds every point/spot
+// light from the lists on top — a full window would count them twice. Metal's
+// EncodeClusterData does the same in place. Fill a COPY: the forward-routed and
+// transparent graph materials of the same frame still need the full window.
+HE_RENDERING_API void FillMaterialDirectionalWindow(const RenderWorld&               rw,
+                                                   MaterialShaderLibrary::Lighting& out);
 
 } // namespace HE

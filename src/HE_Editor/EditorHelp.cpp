@@ -60,6 +60,12 @@ namespace
 	  "chain, a cable, a grapple line. It is geometry, not simulation: the points "
 	  "are where you put them, or where the entities its ends are attached to are.",
 	  "", "scenes#components" },
+	{ "Component/Spline", "Spline",
+	  "A line or a closed outline through its control points — a lake shore, a "
+	  "path, a fence run. It draws nothing in the game: the editor shows it as a "
+	  "guide, and whatever is built along it reads the points. Draw and edit it "
+	  "with the Spline mode of the Scene toolbar, or type the points in here.",
+	  "", "scenes#components" },
 	{ "Component/Trail", "Trail",
 	  "Leaves a band behind the entity as it moves: a weapon swipe, a tyre mark in "
 	  "the air, a projectile streak. Points are dropped as it travels and fade out "
@@ -171,6 +177,10 @@ namespace
 	  "Marks what a savegame keeps for this entity, so a saved game restores it "
 	  "as it was rather than as the scene file has it.",
 	  "", "scenes#scene-files" },
+	{ "Component/Streaming", "Streaming",
+	  "Where this entity lives when the scene is split into cells: in a cell that "
+	  "loads around the camera, or always loaded in the base scene.",
+	  "", "scenes#streaming" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -246,7 +256,8 @@ namespace
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
 	  "that decides whether something reads as wet, polished or worn. On the "
 	  "engine water it is a parameter of its own: keep it low for sharp "
-	  "reflections and a tight sun glint.",
+	  "reflections and a tight sun glint. Distant water is made rougher on top "
+	  "of it, the way the eye averages ripples it can no longer resolve.",
 	  "", "rendering#lighting" },
 	{ "Material/Opacity", "",
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
@@ -287,17 +298,22 @@ namespace
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "
 	  "(0 = +X, 90 = +Z), y = speed in m/s, z = wavelength in metres, "
-	  "w = steepness (0 is flat, about 0.4 is choppy). The waves bend the "
-	  "normal only, the mesh stays flat.",
+	  "w = steepness (0 is flat, about 0.3 is choppy). Each train also drives a "
+	  "second, shorter and weaker one at a turned angle, so the sea is not a "
+	  "single grid of crests. The waves bend the normal only, the mesh stays "
+	  "flat.",
 	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
 	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
-	  "w = steepness. A steepness of 0 switches it off.",
+	  "w = steepness. A steepness of 0 switches it off. The foam sits on the "
+	  "crests of this train and of the fine ripples.",
 	  "", "materials#water" },
 	{ "Material/WaveC", "",
 	  "Fine ripples on top of the two larger trains. x = direction in degrees, "
-	  "y = speed in m/s, z = wavelength in metres, w = steepness.",
+	  "y = speed in m/s, z = wavelength in metres, w = steepness. The three "
+	  "steepnesses together also set how strong the irregular chop on top is: "
+	  "all three at 0 gives a flat surface.",
 	  "", "materials#water" },
 	{ "Material/FresnelPower", "",
 	  "How quickly the surface turns reflective toward grazing angles. 5 is "
@@ -323,16 +339,30 @@ namespace
 	  "tinted value suits murky or polluted water.",
 	  "", "materials#water" },
 	{ "Material/Foam", "",
-	  "x = coverage, the share of the wave crests that foam (0 = none), "
-	  "y = strength 0..1, z = size of the noise that breaks it up, in metres, "
-	  "w = drift speed in m/s. Foam sits on the crests, not at the shore — "
-	  "there is no scene depth to find a shoreline yet.",
+	  "x = coverage, the share of the wave crests that foam (0 = none; the "
+	  "default is a few whitecaps, 0.3 is a rough sea), y = strength 0..1, "
+	  "z = size of the noise that breaks it into lace, in metres, w = drift "
+	  "speed in m/s. Foam sits on the crests of the steeper waves, not at the "
+	  "shore — there is no scene depth to find a shoreline yet.",
 	  "", "materials#water" },
 	{ "Material/Caustics", "",
-	  "The shimmering light pattern on the surface. x = strength (0 = off), "
-	  "y = pattern size in metres, z = speed, w = camera distance in metres at "
-	  "which the pattern has faded out, so it does not shimmer into moiré far "
-	  "away.",
+	  "Focused light that brightens the water body, as a soft moving pattern. "
+	  "x = strength (0 = off), y = pattern size in metres, z = speed, "
+	  "w = camera distance in metres at which the pattern has faded out, so it "
+	  "does not shimmer into moiré far away. It fades with the water's own "
+	  "transmittance, so it shows in clear, shallow water (low Turbidity) and "
+	  "not in deep or murky water.",
+	  "", "materials#water" },
+	{ "Material/Variation", "",
+	  "Breaks the repeat of the waves, the way texture bombing hides a tiling "
+	  "texture. A sum of waves is periodic, so on a big surface the same bright "
+	  "patch and the same foam dot come back row after row. The water is cut "
+	  "into hexes and each wave train runs once per hex with its own direction "
+	  "and phase; the hexes blend. x = hex size in wavelengths (3.5 = a few "
+	  "waves per hex), y = phase offset between hexes, 0..1 of a wavelength, "
+	  "z = direction offset between hexes in degrees (plus or minus), "
+	  "w = seam sharpness (1 = broad blends, 8 = sharp). y = 0 and z = 0 "
+	  "switch it off.",
 	  "", "materials#water" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
@@ -387,6 +417,22 @@ namespace
 	  "Solve this body in the 2D solver — motion stays in the XY plane. For "
 	  "sprite games; pair it with a Transform 2D.",
 	  "", "systems#physics" },
+	{ "Rigid Body/Affected By Water", "",
+	  "Whether lakes, ponds and rivers act on this body: they lift it, slow it, "
+	  "carry it along with the current and ring where it falls in. Switch it off "
+	  "for what should ignore the water: bullets, debris, a body that has to fall "
+	  "through to the bed. Read at every physics step, so it also works while the "
+	  "game plays.",
+	  "", "systems#water-physics" },
+	{ "Rigid Body/Density", "",
+	  "The density the buoyancy uses, in kilograms per cubic metre. A body floats "
+	  "when it is below the water's (1000 for fresh water) and sinks when it is "
+	  "above; a floating body rides with that share of its volume under water, so "
+	  "500 sits half out and 920 (ice) hardly shows. 0 takes it from the Mass and "
+	  "the size of the Collider. Set it when the Mass is chosen for how the body "
+	  "hits things and not for how it swims: the Mass decides collisions, this "
+	  "decides buoyancy. Wood 500, ice 920, stone 2600, iron 7800.",
+	  "", "systems#water-physics" },
 	// Two entries, one per component scope, because that is what the combo
 	// resolves to: the Details panel sets the scope to the component it is
 	// drawing, so a single shared key would answer under neither. They say
@@ -757,6 +803,19 @@ namespace
 	  "How many times the displacement map repeats across the whole landscape. "
 	  "0 follows Texture Tiling, so it lines up with the material.",
 	  "", "scenes#terrain" },
+	{ "Terrain/Clip To Ground", "",
+	  "Water stops where the ground comes up through it: a lake over a slope ends "
+	  "at the bank instead of floating over the hill. Brushed water and lakes "
+	  "alike. Off draws every water body as the flat shape it was painted or "
+	  "drawn in, at its own height. The painted shape is never changed, so "
+	  "switching back restores the bank.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Shore Overshoot", "",
+	  "How far above the water the ground may stand and still be covered by it, "
+	  "in metres. A little keeps the water's rim tucked under the bank instead of "
+	  "a hair short of it. On a gentle bank it pushes the rim further than on a "
+	  "steep one. 0 ends it exactly where the surface meets the ground.",
+	  "", "scenes#terrain" },
 	{ "Terrain/Seed", "",
 	  "Which random landscape is generated. 0 is flat ground; any other number is "
 	  "a different set of hills, reproduced exactly on every load.",
@@ -1119,6 +1178,56 @@ namespace
 	  "Snow strength for the state being shown, 0 to 1.", "", "rendering#weather" },
 	{ "Environment/Wetness", "",
 	  "How wet surfaces look once it has been raining.", "", "rendering#weather" },
+	{ "Weather/Puddles", "",
+	  "How much standing water the scene's materials show, 0 to 1. The auto landscape "
+	  "scales its puddle level by this: 0 = dry ground, 1 = the most it can hold "
+	  "(its Puddle Amount parameter). Any material can read it through the Weather "
+	  "node or the MF_WeatherPuddles function. Not driven by the presets — set it by "
+	  "hand, or from a script.",
+	  "", "rendering#weather" },
+	{ "Weather/Puddle Size", "",
+	  "How big one puddle is, in metres: the scale of the hollows the standing water "
+	  "collects in. Small values give many small puddles, large ones a few big pools. "
+	  "The auto landscape reads it through MF_WeatherPuddles; any material can through "
+	  "the Weather node.",
+	  "", "rendering#weather" },
+	{ "Weather/Cloud Coverage", "",
+	  "How much of the sky is cloud, 0 to 1 — the Sky's own Coverage, set from here. A "
+	  "preset writes it; once you move it the weather leaves it alone until the next "
+	  "preset pick.",
+	  "", "rendering#weather" },
+	{ "Weather/Fog Density##wx", "",
+	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
+	  "preset until the next pick.",
+	  "", "rendering#weather" },
+	{ "Weather/Wind Speed##wx", "",
+	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",
+	  "", "rendering#weather" },
+	{ "Weather/Rain##wx", "",
+	  "How hard it rains, 0 to 1: the density of the rain streaks and the sky rainbow. "
+	  "Independent of the preset once moved.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow##wx", "",
+	  "How hard it snows, 0 to 1: flakes in the air and the white tint on every lit "
+	  "up-facing surface. Not the same as Snow Cover (below), which is what materials "
+	  "that read the Weather node lay on the ground.",
+	  "", "rendering#weather" },
+	{ "Weather/Wetness##wx", "",
+	  "How wet every lit surface looks, 0 to 1: darker and glossier. Rain presets raise it.",
+	  "", "rendering#weather" },
+	{ "Weather/Thunder", "",
+	  "How often lightning strikes, 0 to 1: 0 = never, 1 = the storm rhythm. The Storm "
+	  "preset sets it to the Intensity, every other preset to 0; move it to strike in "
+	  "any weather, or to silence a storm. Each strike flashes the sky and plays the "
+	  "thunder sound.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow Cover", "",
+	  "How much snow lies on the ground in materials that read it, 0 to 1. The auto "
+	  "landscape adds it to its altitude snow (cliffs stay bare) through the "
+	  "MF_WeatherSnow function; any material can read it through the Weather node. "
+	  "It is separate from the white tint every lit surface already takes in a Snow "
+	  "preset, and it is not driven by the presets.",
+	  "", "rendering#weather" },
 	{ "Weather/Max Rain Particles", "",
 	  "Hard ceiling on live raindrops. Emission throttles itself to stay under it, "
 	  "so this is the dial that trades downpour against frame rate.",
@@ -1128,6 +1237,54 @@ namespace
 	{ "Weather/Ground Y", "",
 	  "The height where drops and flakes die when nothing else stops them. In play "
 	  "mode collisions override it where they can.",
+	  "", "rendering#weather" },
+	{ "Weather/Weather Sounds", "",
+	  "The weather makes its own sound: rain, wind, snow and storm beds that fade "
+	  "with the weather, and thunder after each lightning strike. Off silences all "
+	  "of it for this weather. The Rain, Wind, Snow, Storm and Thunder slots below "
+	  "replace the engine's sound for just that one; empty plays the default.",
+	  "", "rendering#weather" },
+	{ "Weather/Volume", "",
+	  "How loud all weather sounds are, 0 to 1. The beds still follow the weather "
+	  "inside that: this only turns the whole mix up or down.",
+	  "", "rendering#weather" },
+	{ "Weather/Bus", "",
+	  "The mixer bus the weather plays through (SFX by default). A name the mixer "
+	  "does not have falls back to the clip's own bus, then to master.",
+	  "", "rendering#weather" },
+	{ "Weather/Rain Sound", "Rain Sound",
+	  "The rain bed, a loop that fades in as rain falls and out as it stops. Empty "
+	  "plays the engine's rain (Engine » Audio » Weather » Rain). Click to pick an "
+	  "audio asset or drop one from the Content Browser to use your own; it is played "
+	  "on repeat, so it should loop cleanly. Clear brings the engine's back.",
+	  "", "rendering#weather" },
+	{ "Weather/Wind Sound", "Wind Sound",
+	  "The wind bed. It follows the wind speed and swells with the gusts, and is "
+	  "silent when the air is calm. Empty plays the engine's wind (Engine » Audio » "
+	  "Weather » Wind). Click to pick an audio asset or drop one from the Content "
+	  "Browser to use your own; it is played on repeat, so it should loop cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Snow Sound", "Snow Sound",
+	  "The snow atmosphere, a quiet hush that fades in as snow falls and cross-fades "
+	  "with the rain when one turns into the other. Empty plays the engine's (Engine » "
+	  "Audio » Weather » Snow). Click to pick an audio asset or drop one from the "
+	  "Content Browser to use your own; it is played on repeat, so it should loop "
+	  "cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Storm Sound", "Storm Sound",
+	  "The storm bed, a heavy roar that comes in when strong wind and heavy rain "
+	  "arrive together. It plays on top of the rain and wind beds, not instead of "
+	  "them. Empty plays the engine's (Engine » Audio » Weather » Storm). Click to "
+	  "pick an audio asset or drop one from the Content Browser to use your own; it "
+	  "is played on repeat, so it should loop cleanly.",
+	  "", "rendering#weather" },
+	{ "Weather/Thunder Sound", "Thunder Sound",
+	  "The thunder after each lightning strike of a storm. It arrives later and "
+	  "quieter the farther away the strike was, picked at random for every strike. "
+	  "Empty plays the engine's (Engine » Audio » Weather » Thunder). Click to pick "
+	  "an audio asset or drop one from the Content Browser to use your own; it is "
+	  "played once per strike, so it should be a single roll that starts and ends "
+	  "in silence, not a loop.",
 	  "", "rendering#weather" },
 
 	// ── UI ───────────────────────────────────────────────────────────────────
@@ -1556,6 +1713,103 @@ namespace
 	  "Adds a control point at the far end, carrying on in the direction the last "
 	  "two describe, so it lands somewhere you can see and grab.",
 	  "", "scenes#components" },
+	{ "Spline/Closed", "",
+	  "Joins the last point back to the first, with the curve smooth across the "
+	  "join, so the line becomes an outline. It needs at least three points; with "
+	  "fewer it stays an open line until you add the third.",
+	  "", "scenes#components" },
+	{ "Spline/Point", "",
+	  "One control point, in the entity's own space. The curve passes through every "
+	  "one of them; drag the handle in the Scene view (Spline mode) or type the "
+	  "numbers here.",
+	  "", "scenes#components" },
+	{ "Spline/+ Point", "",
+	  "Adds a control point at the far end, carrying on in the direction of the "
+	  "last segment, so it lands somewhere you can see and grab.",
+	  "", "scenes#components" },
+	{ "Spline/Remove", "",
+	  "Deletes this control point. The spline stays even with none left, so you "
+	  "can start it again.",
+	  "", "scenes#components" },
+	{ "Spline Tool/Closed", "",
+	  "Joins the last point back to the first so the line becomes an outline "
+	  "(it needs three points). One undo step.",
+	  "", "editor#viewport" },
+	{ "Spline Tool/Delete Point", "",
+	  "Removes the selected point from the line. The Delete key does the same "
+	  "while the Scene view has the focus; the neighbouring point is selected "
+	  "next, so holding the key eats the line from the end you are at.",
+	  "", "editor#viewport" },
+	{ "Spline Tool/New Spline", "",
+	  "Lets go of the spline, so the next click on the ground starts a new line "
+	  "instead of adding to this one.",
+	  "", "editor#viewport" },
+
+	// ── Spline tool: the lake ────────────────────────────────────────────────
+	{ "Spline Tool/From Ground##lake", "Level From Ground",
+	  "Takes the water level from the lowest ground under the outline, plus "
+	  "Above Ground. Switch it off to type the level yourself. The ground is "
+	  "read before the bed is dug.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Above Ground##lake", "Lake Above Ground",
+	  "How far above the lowest ground under the outline the surface stands, "
+	  "in metres. At 0 the water is level with the lowest point of the bank.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Level##lake", "Lake Level",
+	  "The height of the surface, in metres on the landscape's own height scale "
+	  "(a landscape standing at Y = 100 with level 2 has its water at 102). On "
+	  "a lake that exists this moves the surface; the shape and the ground stay. "
+	  "One undo step per drag.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Dig Bed##lake", "Dig Bed",
+	  "Makes the lake with a bed: the ground inside the outline is lowered to "
+	  "Depth below the water level, with a Bank that eases on both sides of "
+	  "the outline — down to the bed inside it, back up to the old ground "
+	  "outside it. It only ever lowers, and never below the water level "
+	  "outside the outline. Off makes just the water, for a lake that fills a "
+	  "hollow that is already there.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Depth##lake", "Lake Depth",
+	  "How far below the water level the bed is dug, in metres. Used by Create "
+	  "Lake with Dig Bed on, and by Dig Again.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Bank##lake", "Lake Bank",
+	  "The width of the slope on either side of the outline, in metres: inward "
+	  "down to the bed, outward back up to the old ground, both starting at "
+	  "the water's own level right on the outline, so the water reaches the "
+	  "outline and nothing outside it ever sinks below the water's level. 0 is "
+	  "a hard edge; a wide bank makes a gentle shore.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Clip To Ground##lake", "Clip To Ground",
+	  "A landscape setting, shared by every lake and every painted pond on it: "
+	  "the water surface stops where the ground comes up through it instead of "
+	  "reaching over the bank. Off draws the surface over the whole outline at "
+	  "its level.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Shore Overshoot##lake", "Shore Overshoot",
+	  "How far above the water the ground may stand and still count as under "
+	  "it, in metres, so the edge of the surface sits under the bank and not a "
+	  "hair short of it. The same landscape setting as in the Terrain details.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Create Lake", "",
+	  "Turns the closed outline into a lake: digs the bed (with Dig Bed on) and "
+	  "lays the water over it, at the level set above, in one undo step. From "
+	  "then on, moving a point (or the whole spline) reshapes the water and, "
+	  "if the bed was dug, moves the bed with it while you drag: the old bed is "
+	  "filled back in and a new one dug under the new outline. Water you paint "
+	  "with the Water brush on this lake stays when the points move.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Dig Again", "",
+	  "Digs the bed again under the lake's current outline, to Depth below "
+	  "its water level with the Bank slope. It only lowers; one undo step. "
+	  "From then on the bed follows the points with this Depth and Bank — "
+	  "which is also how a lake made without Dig Bed, or one from an older "
+	  "scene, starts taking its bed along when its points move.",
+	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Remove Lake", "",
+	  "Takes the lake's water away and cuts its link to the spline. The spline "
+	  "stays, and so does the ground that was dug. One undo step.",
+	  "", "editor#landscape-mode" },
 	{ "Trail/Visible", "",
 	  "Off hides the band. Points keep being dropped and keep ageing, so switching "
 	  "it back on shows the trail as it would have been.",
@@ -1601,6 +1855,13 @@ namespace
 	  "onUpdate. The way to take one out of the picture without losing its "
 	  "property values.",
 	  "", "scripting#attach" },
+	{ "Streaming/Mode", "",
+	  "Resident keeps this entity in the base scene, always loaded, and with it "
+	  "everything in the same top-level group (its parents and their children): use "
+	  "it for what the level's logic needs at all times, a manager script or a "
+	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
+	  "effect the next time the scene is split.",
+	  "", "scenes#streaming" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -1796,6 +2057,11 @@ namespace
 	  "Host or join a live editing session — several people in one scene, with "
 	  "locks so two of you cannot edit the same thing.",
 	  "", "collaboration#overview" },
+	{ "Window/Team", "",
+	  "Your team on the team server: who is in it and who is online, the "
+	  "sessions they host, and Invite, Join or Decline. Admins add and remove "
+	  "members here.",
+	  "", "collaboration" },
 	{ "Window/Source Control", "",
 	  "The repository: what changed, what to commit, what the others have "
 	  "pushed. Large assets included.",
@@ -1820,6 +2086,12 @@ namespace
 	  "by itself when a run stops; while nothing is stopped it shows the Game "
 	  "Instance's variables live.",
 	  "", "horizoncode#debugging" },
+	{ "Window/Task Board", "",
+	  "The project's to-do list: tasks with a status and a priority, linked to "
+	  "the assets, entities, scenes and panels they are about. Kept in "
+	  "Config/TaskBoard.json, so it travels with the project through source "
+	  "control and the whole team sees the same list.",
+	  "", "editor#menus" },
 	{ "View/View Mode", "",
 	  "How the Scene window draws the whole scene: Lit, Unlit, Wireframe, or "
 	  "one channel of the G-buffer. The same picker as the toolbar's View Mode "
@@ -1974,7 +2246,7 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Assets/Import Asset...", "",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
-	  "COLLADA), textures, audio, fonts — converting it to the engine's own format "
+	  "COLLADA, Blender up to 3.4), textures, audio, fonts — converting it to the engine's own format "
 	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "Assets/Refresh Assets", "",
@@ -1992,6 +2264,11 @@ namespace
 	{ "Build/Export Project...", "",
 	  "Packages the project as a standalone game: cooked assets, the runtime, "
 	  "and a config beside it. The export profile decides platform and packing.",
+	  "", "export#overview" },
+	{ "Build/Show Last Build Log", "",
+	  "Reopens the Build window on the last export or game-logic build. Click a "
+	  "ring to read that step's log — Package lists every asset that went into "
+	  "the pak. Greyed until something has been built in this session.",
 	  "", "export#overview" },
 	{ "Build/Build and Reload Game Logic", "",
 	  "Compiles this project's Source/ folder into its native GameLogic library "
@@ -2020,6 +2297,11 @@ namespace
 	  "Opens a pre-filled issue on the project's tracker, with the version, the "
 	  "platform and the recent log already in it.",
 	  "", "editor#notifications" },
+	{ "Help/Check for Updates...", "",
+	  "Asks the update server whether a newer editor is out, downloads it for "
+	  "this platform and checks it byte for byte. Installing restarts the editor "
+	  "after the usual question about unsaved changes, and reopens the project.",
+	  "", "editor#menus" },
 	{ "Help/About", "",
 	  "Which version this is — the number to quote in a bug report.",
 	  "", "editor#menus" },
@@ -2354,7 +2636,7 @@ namespace
 	{ "Content Browser/Import", "",
 	  "Brings this file into the project as an engine asset. The original is not "
 	  "moved; a .hasset beside it records where it came from. Greyed out for an "
-	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
+	  "FBX/OBJ/COLLADA/Blender file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Import to Project", "",
 	  "For source files inside the engine's own content (a sound, a picture, a "
@@ -2546,12 +2828,57 @@ namespace
 	{ "Console/Clear", "",
 	  "Empties the view. The log file next to the executable keeps everything.",
 	  "", "advanced#diagnostics" },
-	{ "Console/Auto-scroll", "",
-	  "Follow the newest line. Switch it off to read something while the log "
-	  "keeps growing.",
+	{ "Console/Copy", "",
+	  "Copies every line currently shown, in the shape of the log file — the "
+	  "level chips, the category filter and the search all apply.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Search", "",
+	  "Narrows the list to lines containing this text, anywhere in them: the "
+	  "message, the category, the time. Not case sensitive.",
+	  "", "advanced#diagnostics" },
+	{ "Console/All", "",
+	  "Shows every level again. The number is how many lines the console holds "
+	  "right now, repeats included.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Debug", "",
+	  "Debug and Trace lines. Click to show only these; click again to show "
+	  "everything. Ctrl-click (Cmd on a Mac) adds or removes this level from "
+	  "what is shown. The engine only logs these for categories whose "
+	  "verbosity is raised (HE_LOG, or logVerbosity in config.json).",
+	  "", "advanced#diagnostics" },
+	{ "Console/Info", "",
+	  "Ordinary progress lines and everything a script prints. Click to show "
+	  "only these; click again to show everything. Ctrl-click (Cmd on a Mac) "
+	  "adds or removes this level from what is shown.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Warnings", "",
+	  "Things that went wrong but did not stop anything. Click to show only "
+	  "warnings; click again to show everything. Ctrl-click (Cmd on a Mac) "
+	  "adds or removes this level from what is shown.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Errors", "",
+	  "Errors and critical failures. Click to show only these; click again to "
+	  "show everything. Ctrl-click (Cmd on a Mac) adds or removes this level "
+	  "from what is shown. The number counts repeats too.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Category", "",
+	  "Hide or show whole parts of the engine — Render, Physics, Script and so "
+	  "on. Only categories that have logged something are listed, with how "
+	  "many lines each has under the current search and levels.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Show all categories", "",
+	  "Brings back every category hidden in this list.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Reset filters", "",
+	  "Clears the search, shows every level and every category again.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Latest", "",
+	  "Jumps to the newest line and follows the log again. Shown while you "
+	  "have scrolled away from the end; the number is what arrived since.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Copy Line", "",
-	  "Copies the selected line — the one to paste into a bug report.",
+	  "Copies this line, in the shape of the log file — the one to paste into "
+	  "a bug report.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
@@ -2559,14 +2886,15 @@ namespace
 	{ "Console/Go to Node", "",
 	  "Opens the HorizonCode graph this line came from and selects the node "
 	  "that wrote it — a Print, or the node whose call raised the warning. "
-	  "Only on lines with a [node N] marker; double-clicking the line does the "
-	  "same.",
+	  "Only on lines with a `node N` link after the message; clicking the link "
+	  "or double-clicking the line does the same.",
 	  "", "advanced#diagnostics" },
 	{ "Console/Go to Line", "",
 	  "Opens the Lua or Python script this error names and selects the line — "
-	  "the `script:7:` in front of the message. Only on script errors that "
-	  "carry a line, and only while an entity in the scene runs the script "
-	  "under that name; double-clicking the line does the same.",
+	  "the `script:7:` in front of the message, shown as a link after it. Only "
+	  "on script errors that carry a line, and only while an entity in the "
+	  "scene runs the script under that name; clicking the link or "
+	  "double-clicking the line does the same.",
 	  "", "advanced#diagnostics" },
 	// ── Undo History ─────────────────────────────────────────────────────────
 	// The scene undo stack as a list. Its rows are the operations' own labels
@@ -2607,6 +2935,105 @@ namespace
 	  "Takes Break on Next Node back before anything has run, so the next node "
 	  "goes through as usual.",
 	  "", "horizoncode#debugging" },
+
+	// ── Task Board ───────────────────────────────────────────────────────────
+	// The project's to-do list. The cards, the chips and the panel names in
+	// Link Panel are the board's own data, built at run time; the fixed
+	// controls are the toolbar, the details of the selected task and the
+	// banner a file that cannot be read or written raises.
+	{ "Task Board/New Task", "New Task",
+	  "Adds a task to the board, selects it and opens its details, where you "
+	  "give it a title. It is saved into Config/TaskBoard.json at once.",
+	  "", "" },
+	{ "Task Board/Columns", "Columns",
+	  "Shows the board as four lanes — Open, In Progress, Blocked, Done. Drag "
+	  "a card into another lane to change its status.",
+	  "", "" },
+	{ "Task Board/List", "List",
+	  "Shows the board as one list, grouped by status. Done is folded away "
+	  "until you open it.",
+	  "", "" },
+	{ "Task Board/Reload", "Reload",
+	  "Reads Config/TaskBoard.json again. For a file that could not be read — "
+	  "fix it first (a merge conflict leaves <<<<<<< markers in it) — or to "
+	  "drop an edit that could not be saved and take what is on disk instead.",
+	  "", "" },
+	{ "Task Board/Retry Save", "Retry Save",
+	  "Writes the board to Config/TaskBoard.json again, after a save failed "
+	  "(the file was locked or read-only).",
+	  "", "" },
+	{ "Task Board/Title", "",
+	  "What the task is, in a sentence. Saved when you leave the field.",
+	  "", "" },
+	{ "Task Board/Status", "",
+	  "Open, In Progress, Blocked or Done. Each change is written into the "
+	  "task's history with your name; on the board the card moves to its "
+	  "group or lane.",
+	  "", "" },
+	{ "Task Board/Priority", "",
+	  "Low, Normal, High or Urgent — the colour of the stripe down the card's "
+	  "left edge.",
+	  "", "" },
+	{ "Task Board/Description", "",
+	  "The details: what is wrong, what done looks like, where to start. "
+	  "Saved when you leave the field.",
+	  "", "" },
+	// Only while signed in to a team server (Preferences ▸ Team).
+	{ "Task Board/Assigned To", "",
+	  "Who on your team does this task. Tick members in the list, one or "
+	  "several; untick to take it from them. Whoever it concerns hears about "
+	  "it: the people it is given to or taken from, whoever created it and "
+	  "whoever wrote in its history. Someone who is not online hears it when "
+	  "they sign in. Without a team server the field is not shown.",
+	  "", "" },
+	{ "Task Board/From the Team", "From the Team",
+	  "What your teammates did to tasks that concern you: assigned you one, "
+	  "changed a status, wrote a comment. The same lines are in the bell. "
+	  "Click one to open the task — a task created on another machine shows "
+	  "up here after your next pull.",
+	  "", "" },
+	{ "Task Board/Link Selection", "Link Selection",
+	  "Links the entities selected in the scene to this task. Dragging an "
+	  "entity from the World Outliner onto the task does the same. A link "
+	  "remembers the entity by its id and the scene it is in, so it still "
+	  "finds it after a reload; click the chip to select it again.",
+	  "", "" },
+	{ "Task Board/Link Scene", "Link Scene",
+	  "Links the open scene to this task. Click the chip to open it — through "
+	  "the unsaved-changes prompt, like File ▸ Open Scene.",
+	  "", "" },
+	{ "Task Board/Link Panel", "Link Panel",
+	  "Links an editor panel to this task — for work that is about the editor "
+	  "itself. Click the chip to bring the panel up. Assets are linked by "
+	  "dragging them from the Content Browser onto the task.",
+	  "", "" },
+	{ "Task Board/Add Comment", "Add Comment",
+	  "Adds what you wrote to the task's history, with your name and the time.",
+	  "", "" },
+	{ "Task Board/Delete Task", "Delete Task",
+	  "Removes the task from the board and from Config/TaskBoard.json. What "
+	  "it linked to is not touched.",
+	  "", "" },
+	// The board's widget in the footer, and the list it opens. The widget and
+	// the rows are drawn by hand, so they are looked up by key.
+	{ "Task Board/Footer", "Tasks",
+	  "How many tasks are still open in this project — everything not Done — "
+	  "and, in the accent colour, how many of them are assigned to you; then "
+	  "the next one: yours first, blocked ones last, then by priority. Click "
+	  "for the list of open tasks, where you can tick one off.",
+	  "", "" },
+	{ "Task Board/Tick Off", "Done",
+	  "Marks the task Done, with your name in its history, and saves the "
+	  "board. The row stays in the list until it closes — untick it to put "
+	  "the task back the way it was.",
+	  "", "" },
+	{ "Task Board/Footer Task", "",
+	  "Opens the Task Board with this task's details.",
+	  "", "" },
+	{ "Task Board/Open Task Board", "Open Task Board",
+	  "Brings up the Task Board panel (Window ▸ Task Board), where tasks are "
+	  "added, linked and assigned.",
+	  "", "" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
@@ -2653,6 +3080,18 @@ namespace
 	{ "Notifications/Mark all as seen", "",
 	  "Clears the bell without discarding the entries — they stay readable in "
 	  "the list.",
+	  "", "editor#notifications" },
+	{ "Notifications/Dismiss", "",
+	  "Closes this message without choosing any of its buttons. It stays in the "
+	  "notification centre (the bell in the footer), marked as read.",
+	  "", "editor#notifications" },
+	{ "Notifications/OK", "",
+	  "Closes this message. It stays in the notification centre (the bell in "
+	  "the footer), marked as read.",
+	  "", "editor#notifications" },
+	{ "Notifications/x", "",
+	  "Closes this popup now instead of waiting for it to fade. It stays in the "
+	  "notification centre (the bell in the footer), still unread.",
 	  "", "editor#notifications" },
 	{ "Notifications/Clear", "",
 	  "Discards every notification. Anything that still needs doing is not "
@@ -2703,6 +3142,31 @@ namespace
 	  "Puts the offer away. It comes back through Help ▸ Interactive Tutorial "
 	  "whenever you want it.",
 	  "", "getting-started#first-project" },
+	{ "Scene Changed/Reload Scene", "",
+	  "Loads the scene file as it is on disk now, replacing what is open. Use it "
+	  "after a git pull that brought a newer version of this scene. Unsaved edits "
+	  "in the open scene are dropped, and the undo history starts over.",
+	  "", "" },
+	{ "Scene Changed/Keep My Version", "",
+	  "Leaves the open scene as it is. Nothing is loaded, and the next save "
+	  "overwrites the file that came from disk with what is open here. Another "
+	  "change to the file on disk asks again.",
+	  "", "" },
+	{ "Project Hub/Open Anyway", "",
+	  "Opens the project although some of the engine content it uses could not be "
+	  "downloaded. Materials and meshes that use the missing files look wrong until "
+	  "they arrive; the editor keeps trying to fetch them whenever something needs them.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Close Project", "",
+	  "Does not open the project and goes back to the Project Hub. Nothing was loaded, "
+	  "so nothing needs saving; open it again once the EngineContent server is reachable.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Close Editor", "",
+	  "Quits the editor without opening the project.",
+	  "", "editor#project-hub" },
+	{ "Project Hub/Cancel", "",
+	  "Stops checking the project's engine content and does not open it.",
+	  "", "editor#project-hub" },
 	{ "Documentation/Start", "",
 	  "Back to the first page of the manual.", "", "editor#menus" },
 	{ "Documentation/Online", "",
@@ -2906,7 +3370,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
-	  "while flying for three times this.",
+	  "while flying for four times this. While flying (right mouse button held), "
+	  "the scroll wheel changes it on the spot: up is faster, down is slower, and "
+	  "this field follows.",
 	  "", "editor#viewport" },
 	{ "viewport.view", "View",
 	  "Which way the scene is looked at: Perspective, or an orthographic Top, "
@@ -2926,7 +3392,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
-	  "sculpting and painting tool, with its brushes in Quick Settings.",
+	  "sculpting and painting tool, with its brushes in Quick Settings. Spline "
+	  "draws lines and outlines: click the ground to add points, click the line "
+	  "to insert one, drag the gizmo to move one, Delete removes it.",
 	  "", "editor#landscape-mode" },
 	{ "viewport.show", "Show",
 	  "Which overlays the editor draws over the scene: the ground grid, the "
@@ -2994,28 +3462,45 @@ namespace
 	{ "outliner.search", "Search",
 	  "Narrows the tree to entities whose name contains this text, in any case. "
 	  "Every entity in the scene is searched, including those under folded "
-	  "rows. Hits are shown with the rows above them, dimmed, so you can see "
-	  "where each one lives; clearing the box puts the tree back as it was.",
+	  "rows. Hits are shown with the matching letters marked and the rows above "
+	  "them dimmed, so you can see where each one lives; clearing the box puts "
+	  "the tree back as it was.",
 	  "", "editor#outliner" },
 	{ "outliner.type-filter", "Type filter",
-	  "Shows only entities that carry the chosen component, such as every Light "
-	  "or every Camera. An entity is the sum of its components, so this is what "
-	  "\"type\" means here. Combined with the search box, both have to match.",
+	  "One pill per kind of entity the scene contains, with how many there are: "
+	  "click Mesh to see only meshes, click it again to see everything. An "
+	  "entity is the sum of its components, so a kind means \"carries that "
+	  "component\" — the crate that is a Mesh, a Collider and a Rigid Body is "
+	  "counted under all three, and its icon shows the one that tells it apart. "
+	  "Combined with the search box, both have to match. If the pills do not "
+	  "fit, the rest are behind the +N one.",
 	  "", "editor#outliner" },
 	{ "outliner.visibility", "Visibility",
 	  "Hides or shows this entity and everything under it: every mesh, light, "
 	  "particle system, foliage, rope and trail in the subtree is switched off "
 	  "or on. This is the same Visible flag the Details panel and scripts use, "
-	  "so it is saved with the scene and applies in the game too. A row with "
-	  "nothing to draw under it has no eye. One undo step.",
+	  "so it is saved with the scene and applies in the game too. The eye "
+	  "shows while the pointer is on the row; a hidden entity keeps its slashed "
+	  "eye in the accent colour and its row dimmed. A row with nothing to draw "
+	  "under it has no eye. One undo step.",
 	  "", "editor#outliner" },
 	{ "outliner.lock", "Lock",
 	  "Keeps the mouse in the viewport off this entity: a click passes through "
 	  "it to whatever is behind, the selection frame does not take it, and the "
 	  "gizmo will not move it. It can still be selected here and edited in the "
 	  "Details panel. Lock the floor and the walls, and the props in front of "
-	  "them stop being hard to grab. Saved with the scene.",
+	  "them stop being hard to grab. The padlock shows while the pointer is on "
+	  "the row; a locked entity keeps it in the accent colour. Saved with the "
+	  "scene.",
 	  "", "editor#outliner" },
+	{ "outliner.rename", "Rename",
+	  "Double-click a name, or press F2 with the entity selected, to type a new "
+	  "one in place. Enter keeps it, Escape leaves the old name, an empty name "
+	  "changes nothing. One undo step. (Drag a row onto another to parent it; "
+	  "on a row's top or bottom edge, where a line shows, to place it before or "
+	  "after that row instead. Alt-click on a folded row's arrow opens the whole "
+	  "branch.)",
+	  "F2", "editor#outliner" },
 
 	// ── Details panel ────────────────────────────────────────────────────────
 	{ "details.add-component", "Add Component",
@@ -3168,7 +3653,8 @@ namespace
 	// ── Content Browser ──────────────────────────────────────────────────────
 	{ "content.import", "Import Asset",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
-	  "COLLADA), textures, audio, fonts. It is converted to the engine's own format "
+	  "COLLADA, .blend files saved with Blender 3.4 or older — export newer ones "
+	  "as glTF), textures, audio, fonts. It is converted to the engine's own format "
 	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "content.create", "Create Asset",
@@ -3194,8 +3680,8 @@ namespace
 	{ "Preferences/Display/Backend", "Backend",
 	  "Which graphics API the editor and the game render through. Changing it "
 	  "takes effect on the next start, and the list holds only what this build "
-	  "and this machine actually support — some features (deferred shading, "
-	  "ray-traced GI) exist on some backends and not on others.",
+	  "and this machine actually support — some features (ray-traced GI) exist "
+	  "on some backends and not on others.",
 	  "", "rendering#backends" },
 	{ "Preferences/Display/Render Path", "",
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
@@ -3216,7 +3702,8 @@ namespace
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
-	  "motion but needs a velocity buffer, which only the Metal and OpenGL backends write so far.",
+	  "motion but needs a velocity buffer, which falls back to SMAA on a backend "
+	  "that is not ready to write one yet.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "
@@ -3347,11 +3834,16 @@ namespace
 	  "Simulate rain and snow on the GPU. Far more drops for the same frame time; "
 	  "it needs a backend that can do it, and falls back quietly where it cannot.",
 	  "", "rendering#weather" },
-	{ "Preferences/Collaboration/Find Sessions on the Local Network", "",
+	{ "Preferences/Effects/Weather Sounds in Edit Mode", "",
+	  "Hear the scene's weather (rain, wind, snow, storm, thunder) in the edit-mode "
+	  "viewport as well as in Play. Turn it off when a rain loop is in the way; the "
+	  "Weather component's own Weather Sounds switch is the one that counts in Play.",
+	  "", "rendering#weather" },
+	{ "Preferences/Team/Find Sessions on the Local Network", "",
 	  "Announce and discover collaboration sessions on this network, so joining "
 	  "needs no address. Off, a session is still reachable by its id and code.",
 	  "", "collaboration#discovery" },
-	{ "Preferences/Collaboration/Sync Large Assets (Meshes, Textures, Audio)", "",
+	{ "Preferences/Team/Sync Large Assets (Meshes, Textures, Audio)", "",
 	  "Send the big files to peers as well as the small ones. Off, everybody needs "
 	  "their own copy of the meshes and textures — but joining is instant.",
 	  "", "collaboration#bigassets" },
@@ -3381,7 +3873,7 @@ namespace
 	  "was installed while this editor was already running — the search happens "
 	  "when the page opens, and nothing notices an install on its own.",
 	  "", "collaboration#remote-control" },
-	{ "Preferences/Collaboration/Largest Asset to Transfer (MB)", "",
+	{ "Preferences/Team/Largest Asset to Transfer (MB)", "",
 	  "The ceiling on a single transferred file. Anything above it is skipped and "
 	  "reported rather than holding up the session.",
 	  "", "collaboration#bigassets" },
@@ -3566,6 +4058,14 @@ namespace
 	  "frame; dragging a node around stays silent. Same volume and mute as the "
 	  "other feedback sounds. Preview plays all five in a row.",
 	  "", "horizoncode#graphs" },
+	{ "Preferences/Feedback/Show Notification Popups", "",
+	  "On (the default): an important notification shows as a small card in the "
+	  "bottom-right corner for a few seconds without taking the keyboard, and a "
+	  "critical one as a dialog you have to acknowledge. Off: none of that — every "
+	  "notification goes to the notification centre only (the bell in the footer, "
+	  "which still counts and rings). Buttons like Join or Retry are then on the "
+	  "rows in the centre. Popups that are up when you switch this off close at once.",
+	  "", "editor#notifications" },
 	{ "Preferences/Feedback/Problem Pulse", "",
 	  "When a new problem arrives in the notifications, one thin ring widens "
 	  "around the footer bell and fades within about half a second; with "
@@ -4030,6 +4530,17 @@ namespace
 	  "STORED BUT NOT YET READ: same later step as the directory above. A host "
 	  "on the internet needs the forwarding set up by hand for now.",
 	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Relay server (host:port)", "Relay server (host:port)",
+	  "A relay server that every connection of a game session goes through, "
+	  "for when the host cannot open a port. Empty is the default: the host "
+	  "opens a UDP port and players connect to it directly.\n\n"
+	  "With an address, nobody opens a port: the host registers the session on "
+	  "the relay and players connect out to it, finding the session by the join "
+	  "code alone; the address and port of the Join dialog are not used. The "
+	  "session then runs over TCP, so it arrives a little later under packet "
+	  "loss than direct UDP. Everyone needs the same relay, which only passes "
+	  "encrypted bytes along. Port 7777 if none is given.",
+	  "", "collaboration#gameplay" },
 	{ "Multiplayer/Max remote calls per second", "Max remote calls per second",
 	  "What one client may ask the host to run per second before the excess "
 	  "counts as suspicious — the rate limit on calling a function across the "
@@ -4038,17 +4549,64 @@ namespace
 	  "count as an attack. A client past the limit has its extra calls dropped "
 	  "and the overage weighed against it, exactly like a flood of input.",
 	  "", "collaboration#gameplay" },
+	// ── Settings sorting: project graphics, input, viewport quality ──────────
+	{ "Project Graphics/This project sets its own graphics", "This project sets its own graphics",
+	  "Off, the exported build ships the graphics of whoever exports it (their "
+	  "Preferences) and every editor previews the project with its own values — "
+	  "the way every project has worked so far. On, the rows on this page are the "
+	  "project's answer: they are written into Config/ProjectSettings.json, go "
+	  "into the exported build's config.json and are what the viewport previews "
+	  "with, unless the user chose their own values under Preferences ▸ Viewport "
+	  "Quality.\n\n"
+	  "Switching on starts from the values the editor shows right now, so nothing "
+	  "jumps. Switching off leaves the project's values in the file, unused.",
+	  "", "export#overview" },
+	{ "Input/This project sets its own deadzones", "This project sets its own deadzones",
+	  "Off, the game uses the deadzones of the machine it runs on: your "
+	  "Preferences in the editor, the defaults in an exported build. On, play mode "
+	  "and the exported game both use the stick and trigger deadzones below, so "
+	  "what you tuned is what ships. Switching on starts from your current values.",
+	  "", "" },
+	{ "Input/Stick Deadzone", "Stick Deadzone",
+	  "How far a stick must be pushed before the game sees it move. Below this "
+	  "the stick reads exactly zero; above it the value is re-scaled so full tilt "
+	  "still reaches 1. Raise it for worn sticks; lower it for finer low-speed "
+	  "control.",
+	  "", "" },
+	{ "Input/Trigger Deadzone", "Trigger Deadzone",
+	  "How far a trigger must be pulled before the game sees it. Below this it "
+	  "reads zero; the rest of the travel is re-scaled to 0–1.",
+	  "", "" },
+	{ "Viewport Quality/Same as the project", "Same as the project",
+	  "The viewport previews with the values of the open project's graphics "
+	  "pages when the project sets its own, so what you see is what it ships. A "
+	  "project that sets none is previewed with your own values. The rows on the "
+	  "page are locked while this is on and a project's values are showing.",
+	  "", "" },
+	{ "Viewport Quality/My own values", "My own values",
+	  "The viewport previews with the values on this page even when the project "
+	  "sets its own — for a machine that cannot carry the project's bloom and "
+	  "global illumination. Only the preview changes: exporting still writes the "
+	  "project's values, and play mode follows the project.",
+	  "", "" },
+	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
+	  "Opens the Project Settings page of the repository: initialising it, the "
+	  "remote, GitHub setup and large files. The repository belongs to the "
+	  "project, so those controls travel with it and no longer sit here; git on "
+	  "this machine and the signed-in account stay on this page.",
+	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
-	  "On, the packaged build boots with whatever this editor's Preferences and "
-	  "Export dialog hold at export time — the way every export has worked, and "
+	  "On, the packaged build boots with the window and backend this editor's "
+	  "Export dialog holds at export time — the way every export has worked, and "
 	  "what a project that never opened this page keeps doing. Off, the window "
 	  "and backend below are the project's answer, on every machine it is "
 	  "exported from.\n\n"
 	  "Saved to Config/ProjectSettings.json. With this off, the Export dialog "
 	  "shows the project's window and backend instead of its own rows and writes "
-	  "them into the build's config.json. Bloom, ambient occlusion and the other "
-	  "graphics settings still come from this editor's Preferences either way.",
+	  "them into the build's config.json. How the game looks (anti-aliasing, "
+	  "bloom, ambient occlusion, GI) is the project's on the Quality, "
+	  "Post-Processing and Reflections & GI pages.",
 	  "", "export#overview" },
 	{ "Render Defaults/Width", "Width",
 	  "The window's width in pixels when the game starts windowed. Ignored in "
@@ -4117,7 +4675,41 @@ namespace
 	  "exact and 0.01667 is not.\n\n"
 	  "Saved to Config/ProjectSettings.json and read on every step, in the "
 	  "editor's Play and in the exported build alike — the two cannot simulate "
-	  "at different rates.",
+	  "at different rates.\n\n"
+	  "Below about 40 Hz a step is longer than the physics engine likes (it asks "
+	  "for at most 1/60 s per collision step), so the engine splits it into "
+	  "several collision steps on its own: 30 Hz runs two, 10 Hz six.",
+	  "", "systems#physics" },
+	{ "Physics/Physics threads", "Physics threads",
+	  "How many threads work on one simulation step, the one that runs the game "
+	  "included. Auto leaves about half the cores to streaming, rendering and "
+	  "audio and uses at most four physics workers beside the game thread; 1 "
+	  "simulates on the game thread alone.\n\n"
+	  "The result of the simulation is the same whatever the number — only the "
+	  "time a step takes changes — so this is safe to tune for a machine. The "
+	  "environment variable HE_PHYSICS_THREADS overrides it for one run, which "
+	  "is what a benchmark or a bug report wants.\n\n"
+	  "Saved to Config/ProjectSettings.json; the editor's Play and the exported "
+	  "build read the same value.",
+	  "", "systems#physics" },
+	{ "Physics/Physics budget", "Physics budget",
+	  "How many milliseconds one simulation step may spend on the work around the "
+	  "physics engine itself: the character controllers' update, scene queries "
+	  "(raycasts, sweeps, overlaps) and adding or removing the bodies of streamed "
+	  "cells. It does not limit the simulation: the fixed rate and the physics "
+	  "threads do that.\n\n"
+	  "When the budget is spent, the characters that have not been updated yet "
+	  "wait for the next step and are then updated with the time they missed, so "
+	  "they walk and fall the same distance, a step or two later. The ones that "
+	  "waited longest go first. The first 32 characters are always updated, so "
+	  "an ordinary game never notices the budget; it is there for crowds. Scene "
+	  "queries and streaming cannot wait (a script wants its answer now), so "
+	  "they are counted against the budget and leave less for the characters.\n\n"
+	  "Off applies no limit. What the budget spent and put off is shown in the "
+	  "Performance Profiler under Overview, Physics budget. The environment "
+	  "variable HE_PHYSICS_BUDGET_MS overrides this for one run.\n\n"
+	  "Saved to Config/ProjectSettings.json; the editor's Play and the exported "
+	  "build read the same value.",
 	  "", "systems#physics" },
 	{ "Physics/Gravity", "Gravity",
 	  "The acceleration every rigid body is under, in metres per second squared "
@@ -4290,6 +4882,18 @@ namespace
 	  "or the dialog that does it for you. It only appears on rows that are not "
 	  "already in order.",
 	  "", "editor#preferences" },
+	// The one setting on the page, under "File types" at its foot.
+	{ "Tool Status/Register .heproj with this editor", "Register .heproj with this editor",
+	  "Lets the editor make .heproj project files open with it when you double-click "
+	  "them in the file manager. At every start it looks whether that is already so "
+	  "and, only when it is not (first start, or the editor was moved or updated), "
+	  "writes the registration for your user account: the HKCU registry keys on "
+	  "Windows, the .desktop entry and MIME files in your XDG data folder on Linux. "
+	  "No administrator rights, nothing machine-wide. If another application "
+	  "already handles .heproj, the editor leaves that alone and tells you once. "
+	  "Off: it never touches the file association (the scripts in the FileTypes "
+	  "folder still work). macOS needs none of this; the app bundle carries it.",
+	  "", "editor#project-hub" },
 	{ "Tool Status/Recheck all", "Recheck all",
 	  "Runs every probe again: git, the C++ toolchain, the router, and the Claude "
 	  "connection. The first three are cached from startup, so this is what to "
@@ -4299,43 +4903,56 @@ namespace
 	  "editor, which are the two things that change its answer.",
 	  "", "editor#preferences" },
 
-	// ── The build-tools dialog ───────────────────────────────────────────────
-	// Shown at startup when cmake or a C++ compiler is missing. Its own scope
-	// because its "Recheck" and the settings page's are the same word for the
-	// same probe in two very different situations.
-	{ "Build Tools/Install Automatically", "Install Automatically",
-	  "Installs cmake and the compiler through this system's package manager — "
-	  "Homebrew and the Xcode Command Line Tools on macOS, winget on Windows, "
-	  "apt, dnf or pacman on Linux. It can be a several hundred MB download, and "
-	  "the log below says what it is doing.",
+	// ── The tool setup dialog (ToolSetupDialog) ──────────────────────────────
+	// cmake, the C++ compiler, git, Git LFS and the git identity in one list. It
+	// opens at startup when something is missing and from every "Set Up…" notice.
+	// Its own scope because its "Recheck" and the settings page's are the same word
+	// for the same probes in two very different situations.
+	{ "Tool Setup/Install", "Install",
+	  "Installs this one tool with the system's package manager: winget on Windows, "
+	  "Homebrew or Apple's Command Line Tools on macOS, apt, dnf, pacman or zypper "
+	  "on Linux. The row names the package and says what to expect first (a "
+	  "Windows permission prompt, a password dialog, Apple's installer window). It "
+	  "runs in plain sight: the row shows the phase and how long it has been "
+	  "running, and Install log has the installer's own output. Only one install "
+	  "runs at a time.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Copy 'brew install cmake'", "Copy the brew command",
-	  "Puts the install command on the clipboard, for running it in your own "
-	  "terminal instead of letting the editor do it.",
+	{ "Tool Setup/Install All Missing", "Install All Missing",
+	  "Installs every missing tool the editor can install, one after another. "
+	  "cmake and the compiler go in one run, so there is one password prompt for "
+	  "both. It stops at the first failure instead of asking for a password for "
+	  "each of the rest. Tools the editor cannot install here are left for Manual "
+	  "install below.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Copy winget Command", "Copy the winget command",
-	  "Puts the install command for CMake and the Visual Studio C++ Build Tools "
-	  "on the clipboard, for running it in your own shell.",
+	{ "Tool Setup/Retry", "Retry",
+	  "Runs the install for this tool again. The log of the failed run is still "
+	  "there until the new one starts.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Copy 'sudo apt install build-essential cmake'", "Copy the apt command",
-	  "Puts the install command on the clipboard. On a distribution without apt, "
-	  "the package names are the same for dnf and pacman.",
+	{ "Tool Setup/Show Log", "Show Log",
+	  "Opens the installer's output below the list, where the last lines say why "
+	  "it stopped.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/cmake.org", "cmake.org",
-	  "Opens the CMake download page in a browser, for installing it by hand.",
+	{ "Tool Setup/Copy Command", "Copy the install command",
+	  "Puts the command on the clipboard, for running it in your own terminal "
+	  "instead of letting the editor do it. Press Recheck afterwards; no restart "
+	  "is needed.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Download Page", "Download Page",
-	  "Opens Microsoft's page for the Visual Studio C++ Build Tools, which is "
-	  "where the compiler comes from on Windows.",
+	{ "Tool Setup/Open Download Page", "Open Download Page",
+	  "Opens the tool's download page in a browser, for installing it by hand.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Don't show this again", "",
+	{ "Tool Setup/Don't show this at startup", "",
 	  "Stops this dialog appearing at startup. The tools stay missing, and "
 	  "Preferences » Editor » Tool Status still says so — this only silences the "
-	  "interruption.",
+	  "interruption. Every \"Set Up…\" notice still opens it.",
 	  "", "horizoncode#compiler" },
-	{ "Build Tools/Recheck", "Recheck",
-	  "Probes for cmake and a compiler again. A clean result closes this dialog "
-	  "on its own, so this is what to press after an install finishes elsewhere.",
+	{ "Tool Setup/Recheck", "Recheck",
+	  "Looks for cmake, a compiler, git and Git LFS again, without restarting the "
+	  "editor. This is what to press after installing something by hand. When "
+	  "everything is found the dialog closes on its own.",
+	  "", "horizoncode#compiler" },
+	{ "Tool Setup/Set Up…", "Set Up…",
+	  "Opens the tool setup dialog on the row of the missing tool, where it can be "
+	  "installed.",
 	  "", "horizoncode#compiler" },
 
 	// ── The recovery dialog (SceneRecoveryDialog) ────────────────────────────
@@ -6292,6 +6909,35 @@ namespace
 	// Nine numbers that decide what the ground looks like before there is any
 	// ground to look at. Octaves, Lacunarity and Gain are the noise vocabulary,
 	// and nobody should have to know it to make a hill.
+	{ "New Landscape/Material", "",
+	  "The material the new landscape is created with; it decides which layers can "
+	  "be painted. Leave it empty for the engine's default terrain material. It "
+	  "can be changed later from the Landscape panel.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Heightmap", "",
+	  "A greyscale texture that shapes the ground as the landscape is created: "
+	  "black is 0 m, white is the Height Scale. With one set, the noise settings "
+	  "are not used. Project textures are 8-bit; use Choose File for a 16-bit PNG "
+	  "or an .r16 when the terrain is tall.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Choose File...", "",
+	  "Picks a heightmap straight from the disk: 8- or 16-bit PNG, PGM, or a "
+	  "headerless 16-bit .r16/.raw. Reading it directly keeps the full 16-bit "
+	  "precision, which a texture asset does not.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Remove File", "",
+	  "Forgets the chosen heightmap file; the landscape will be created from the "
+	  "noise settings below instead.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Flip Z", "",
+	  "Mirrors the heightmap top-to-bottom before it is laid over the landscape. "
+	  "Some tools export their maps the other way up; this is the fix.",
+	  "", "editor#landscape-mode" },
+	{ "New Landscape/Use Image Resolution", "",
+	  "Gives the landscape the heightmap's own vertex resolution (rounded to the "
+	  "2^n+1 the chunks use, at most 513) instead of resampling the picture onto "
+	  "the Resolution above.",
+	  "", "editor#landscape-mode" },
 	{ "New Landscape/Width (X)", "",
 	  "How wide the new landscape will be along X, in metres. The green preview "
 	  "grid in the viewport is this size.",
@@ -6365,6 +7011,16 @@ namespace
 	  "that node's list IS the set of layers there are to paint — without one "
 	  "this stays greyed out.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Setup", "Landscape Setup",
+	  "The things done once rather than per stroke: the landscape's material, "
+	  "importing a heightmap, the weightmap and foliage-mask resolutions, and the "
+	  "reset buttons. The brush is off while this tab is open.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Fill With Layer", "",
+	  "Puts the selected layer on every texel of the landscape, replacing whatever "
+	  "was painted. A starting point for a landscape built by hand: fill with the "
+	  "base layer, then paint the rest over it. One undo step.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
@@ -6372,23 +7028,38 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "
-	  "drawn on the ground. The same value is used for sculpting and for "
-	  "painting, so changing it in one mode changes it in the other.",
+	  "drawn on the ground. The same value is used for sculpting, painting, "
+	  "foliage and water, so changing it in one tab changes it in the others. "
+	  "In the viewport, [ and ] make it smaller and larger.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Falloff", "Brush Falloff",
 	  "How far past the radius the brush keeps working, in metres — the faint "
 	  "outer circle. Strength falls off linearly from full at the radius to "
 	  "nothing at the outer edge, so 0 gives a hard-edged brush and a large "
-	  "value a very soft one. Shared with painting.",
+	  "value a very soft one. Shared with painting and the water brush, where "
+	  "it is the width of the shore the water thins out over. In the viewport, "
+	  "Shift+[ and Shift+] change it. The curve above the sliders draws the "
+	  "profile.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Strength", "Brush Strength",
-	  "How fast the brush works while the left button is held. Raise and Lower "
-	  "move the ground by roughly this many metres a second under the "
-	  "full-strength part of the brush; Smooth, Flatten and Ramp use it as a "
-	  "rate of blending towards their target instead.",
+	  "How hard the brush works while the left button is held, from 0 to 1. For "
+	  "Raise and Lower the scale is squared, so the gentle end gets most of the "
+	  "slider; at 1 the ground moves about 50 m a second under the full-strength "
+	  "part of the brush. Smooth, Flatten and Ramp use it as a rate of blending "
+	  "towards their target instead. The water brush uses it as how fast a spot "
+	  "fills with water (or dries) while the button is held. Hold Ctrl while "
+	  "dragging to turn the brush around: Raise lowers, Lower raises.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Strength", "Paint Strength",
+	  "How much of the selected layer a texel takes while you paint, from 0 to 1. "
+	  "At 1 the first touch gives the layer 100 % at once, whatever was there "
+	  "before; lower values build it up the longer the left button is held "
+	  "(0.1 takes about half a second to cover a spot). Applies to layer painting "
+	  "only — sculpting, foliage and water keep the Brush Strength.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Weightmap", "Weightmap Resolution",
-	  "How many texels per side the layer weightmap has, from 32 to 2048, "
+	  "How many texels per side the layer weightmap has, from 32 to 2048 — click "
+	  "the field and type a number, 1024 for instance — "
 	  "stretched over the whole landscape — a large terrain needs more of them "
 	  "before a painted edge stops looking blocky. It is locked as soon as "
 	  "anything has been painted, because changing it would throw the existing "
@@ -6570,6 +7241,199 @@ namespace
 	  "the mask resolution unlocks. One undo step, the whole mask.",
 	  "", "editor#landscape-mode" },
 
+	// ── Landscape: the water brush ───────────────────────────────────────────
+	{ "Landscape/Water", "Water",
+	  "Paints water onto the landscape the way the other brushes paint ground: "
+	  "drag in the viewport and a pond appears under the cursor, hold Ctrl to "
+	  "wipe it off again. It writes into the landscape's water — the same data "
+	  "a lake drawn from a spline lives in — so a stroke that starts on a lake "
+	  "widens that lake, and the eraser can notch it. The surface only exists "
+	  "where the ground is below the water, so it never climbs a bank. A "
+	  "stroke is one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Water", "Paint Water",
+	  "Water goes where you drag. A stroke that starts on dry ground makes a "
+	  "new body of water at the level set below; one that starts on water goes "
+	  "on with that water, at its level. Holding the button over a spot fills "
+	  "it up (Strength sets how fast), so a quick pass leaves a thin trail "
+	  "and a slow one a solid pond. The cursor is blue; the faint dashed ring "
+	  "marks the height the surface will stand at.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erase Water", "Erase Water",
+	  "Takes water away under the brush, from every body of water it touches. "
+	  "A pond painted with the brush is gone once it has no water left; a lake "
+	  "drawn from a spline stays and can be drawn back in. The cursor turns "
+	  "red. Holding Ctrl while you drag does the same without switching.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/From Ground##water", "Level From Ground",
+	  "Takes the surface height from the ground under the first point of each "
+	  "stroke, plus Above Ground — click in a hollow and the water stands "
+	  "just above its bottom. Switch it off to type the level yourself, for a "
+	  "second pond that has to match the first. Dragging uphill afterwards "
+	  "does not tilt the water: the level is fixed when the stroke begins.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Above Ground##water", "Water Above Ground",
+	  "How far above the ground at the first point the surface stands, in "
+	  "metres. Water level with the ground has no depth at all, so a click on "
+	  "flat ground paints nothing visible at 0; the default puts the first "
+	  "point a little under water. A negative value starts the surface below "
+	  "the ground: the pond then fills only the lower land around it.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Level##water", "Water Level",
+	  "The height of the surface for new water, in metres on the landscape's "
+	  "own height scale (a landscape standing at Y = 100 with level 2 has its "
+	  "water at 102). Strokes that start on existing water ignore it and keep "
+	  "that water's level.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Dig Bed##water", "Dig Bed",
+	  "Also digs while you paint: the ground under the brush is lowered to a "
+	  "floor Depth below the water level, with the brush falloff as the bank. "
+	  "It digs only where the water is, so the pit never reaches past it: "
+	  "ground at the edge of a stroke stays as it is until the water has "
+	  "spread there, and ground above the water level is cut down to it "
+	  "the moment the water covers it. "
+	  "Where that leaves ground standing above the water (painting uphill), "
+	  "it is shaved into a dry bank that slopes down to the waterline, "
+	  "reaching up to the brush's radius plus falloff past the shore. "
+	  "It only ever lowers — a hole already deeper stays — and holding still "
+	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
+	  "The eraser never digs. One undo step takes the water and the pit back "
+	  "together.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Depth##water", "Bed Depth",
+	  "How far below the water level the bed is dug, in metres. Only used "
+	  "with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Resolution##water", "Water Grid Resolution",
+	  "How many cells per side the landscape's water is stored in, from 32 to "
+	  "2048, stretched over the whole landscape. The cell size is shown under "
+	  "it: a shore can only be as fine as that, so a large landscape wants more "
+	  "cells for small ponds. Type a number and press Enter (or click away): it "
+	  "is applied then, not on every digit, keeping the shape of what is "
+	  "painted; one undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/To Lake", "",
+	  "Turns this painted pond into a lake: reads the outline of its water, "
+	  "draws a closed spline through it (a handful of points, in the Outliner "
+	  "under the landscape) and gives the pond to that spline, with the Spline "
+	  "tool switched on so you can move the points. The surface keeps its "
+	  "level. The ragged painted edge becomes the smooth curve of the spline, "
+	  "an island inside the pond is filled (erase it again with the brush; the "
+	  "erase stays when the points move), and a piece of the pond that is "
+	  "separate from the main one stays as painted water. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Select Spline", "",
+	  "Selects the spline this lake was drawn from and switches to the Spline "
+	  "tool, where its points and the Lake controls are.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Detach", "",
+	  "This lake's spline has been deleted, so the water has nothing to follow. "
+	  "Detach makes it a painted pond: the water stays exactly as it is, and "
+	  "it can be turned into a lake again with To Lake. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Clear All Water", "",
+	  "Removes every body of water from the landscape — painted ponds and "
+	  "spline lakes alike. The ground is not touched, and the grid resolution "
+	  "stays. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Physics##wphys", "Water Physics",
+	  "What this body of water does to a body in it: it lifts the light ones, "
+	  "slows the moving ones, carries them along with its current and rings where "
+	  "something falls in. The settings are saved with the landscape and every "
+	  "change is one undo step. The surface a body floats on is this water's "
+	  "level plus the waves of the engine water material, so the waves are not "
+	  "set here; Density, the drags and Flow are.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Enabled##wphys", "Water Physics On",
+	  "Off makes this water do nothing to the bodies in it: no lift, no damping, "
+	  "no current, so a body falls through to the bed. It is still a lake to look "
+	  "at. Bodies can opt out on their own with Affected By Water on the Rigid "
+	  "Body.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Density##wphys", "Water Density",
+	  "The density of this water in kilograms per cubic metre: 1000 is fresh "
+	  "water, 1025 sea water, more for brine or mud. A body whose own Density is "
+	  "lower floats, a higher one sinks, and the share of a floating body that "
+	  "is under water is its density over this one, so heavier water carries "
+	  "more. From 1 to 20000.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Linear Drag##wphys", "Water Linear Drag",
+	  "How strongly this water slows a body moving through it, growing with the "
+	  "square of the speed against the current and with the share of the body "
+	  "under water. 0.5 is a good start. Above about 3 a light body no longer "
+	  "settles (its speed collapses and creeps back), so 3 is the top of the "
+	  "useful range; the field accepts up to 10.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Angular Drag##wphys", "Water Angular Drag",
+	  "How strongly this water stops a body from spinning, in proportion to the "
+	  "share of it under water. The default 0.05 settles a crate that rocks on "
+	  "the waves; 0 lets it roll on.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Flow##wphys", "Water Flow",
+	  "The current of this water in metres per second, along the landscape's own "
+	  "X and Z axes (the world's, unless the landscape is turned about Y). A body "
+	  "in the water is pulled toward it through the drag, so a river carries what "
+	  "floats on it; there is no force beyond that, and the waves of the water "
+	  "material do not follow it. Rings travel with it. 0 is still water.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Splash##wphys", "Water Splash",
+	  "How strong the rings are that a body makes in this water when it falls in, "
+	  "comes out or cuts across the surface. 1 is the default; 0 makes none (the "
+	  "body itself is unaffected); up to 4 for something thick. The rings are "
+	  "the water material's picture and move no body.",
+	  "", "systems#water-physics" },
+
+	// ── What the water looks like from below (Thema 185) ─────────────────────
+	{ "Landscape/Underwater Fog##wfog", "Underwater Fog",
+	  "How the view looks while the camera is under this water: a tint that deepens "
+	  "with the camera's own depth, and a fog that thickens with the distance the "
+	  "view ray travels through the water. Separate from the water material's own "
+	  "colours, which shade the surface when you look down into it.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Shallow Color##wfog", "Underwater Shallow Color",
+	  "The tint just under the surface.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Deep Color##wfog", "Underwater Deep Color",
+	  "The tint the view ramps toward the deeper the camera dives.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Density##wfog", "Underwater Density",
+	  "How fast the water swallows the view, per metre (Beer-Lambert). Higher is "
+	  "murkier: things vanish into the tint sooner. 0 is perfectly clear.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Depth Curve##wfog", "Underwater Depth Curve",
+	  "Shapes how fast the tint goes from shallow to deep. Above 1 it lingers near "
+	  "the shallow colour before darkening, below 1 it reaches the deep colour "
+	  "sooner. Does not touch the fog.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Refracted Light##wcau", "Refracted Light",
+	  "The moving net of bright lines the waves throw onto whatever lies below the "
+	  "surface while the camera is under water. It follows the same waves the "
+	  "water material draws (Physics/WaterWaves.h) plus a fine chop, so it moves "
+	  "with the swell you see from above, takes the sun's colour and is gone at "
+	  "night. It is strongest in shallow water and fades out with depth; the light "
+	  "the lines gain is taken from the patches between them. It eases in over the "
+	  "first half metre of a dive, so crossing the waterline never pops. Intensity "
+	  "0 turns it off and costs nothing.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Intensity##wcau", "Refracted Light Intensity",
+	  "How bright the net is, as a multiple of the sun's light on the spot, and how "
+	  "much darker the patches between its lines get. 0 is off. Around 0.5 is a "
+	  "clear net on a sunny day; up to 4 for a stylised look.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Scale##wcau", "Refracted Light Scale",
+	  "The size of the net's cells. At 1 they are around half a metre across; 2 "
+	  "makes the net twice as fine, 0.5 twice as wide.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Speed##wcau", "Refracted Light Speed",
+	  "How fast the net moves relative to the surface's waves. 1 keeps step with "
+	  "them, 0 freezes the net.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Fade Depth##wcau", "Refracted Light Fade Depth",
+	  "The depth below the surface where the net is gone. It is at full strength in "
+	  "the shallows and eases out toward this depth, its lines growing wider and "
+	  "dimmer on the way. Deeper floors get no net at all.",
+	  "", "systems#water-physics" },
+
 	// ── The Environment window ───────────────────────────────────────────────
 	{ "Environment Window/Select", "Select the entity",
 	  "Selects the Sky or Weather entity, which is what puts its settings into "
@@ -6649,6 +7513,13 @@ namespace
 	  "every .hpak it finds as an overlay on the base archive. An entry with the "
 	  "same UUID replaces the original and a new UUID is added, the packed "
 	  "startup scene included.",
+	  "", "export#mods" },
+	{ "Export/Development hotkeys", "",
+	  "The exported game answers two keys meant for testing: F10 shows a card in "
+	  "the top-right corner with frame times and the GPU time of each render "
+	  "pass, and V toggles VSync. The Development profile has it on, Shipping off "
+	  "- leave it off for the build players get. Works with any runtime, release "
+	  "builds included. The log says what the game did with the key.",
 	  "", "export#mods" },
 	{ "Export/Incremental packing", "",
 	  "Reuses the stored bytes of unchanged assets from the previous export at "
@@ -6786,6 +7657,11 @@ namespace
 	  "export aimed at another platform, or one that shipped no game runtime at "
 	  "all, leaves it greyed out.",
 	  "", "export#shipped-files" },
+	{ "Build Window/Hide", "",
+	  "Puts this window away while the build keeps running. The footer shows its "
+	  "progress; click that to bring the window back. When the build ends with the "
+	  "window away, a notification says how it went.",
+	  "", "export#shipped-files" },
 	{ "Build Window/Build Again", "",
 	  "Runs the same export once more with the settings the last run used, "
 	  "reporting into this window. Unlike the other two buttons it leaves the "
@@ -6818,10 +7694,14 @@ namespace
 	  "", "editor#profiler" },
 	{ "Profiler/Split into Streaming Cells", "",
 	  "Moves the scene's placed things (meshes, point and spot lights, static "
-	  "bodies, decals) into one scene file per grid square, next to the scene in "
+	  "bodies, decals, placed prefabs, particle systems, skeletal meshes and "
+	  "animators) into one scene file per grid square, next to the scene in "
 	  "a folder named after it. The rest stays: sky, terrain, cameras, scripts, "
-	  "characters, dynamic bodies, prefab instances. The game then loads the "
-	  "squares around its camera and drops the far ones. One undo step; save the "
+	  "characters, dynamic bodies, audio sources. The game then loads the "
+	  "squares around its camera and drops the far ones; the things in a square "
+	  "keep their ids, so a placed prefab comes back as the same entities. Play "
+	  "in the editor streams the squares the same way, around the play camera. "
+	  "One undo step; save the "
 	  "scene to keep it. The scene has to have been saved once.",
 	  "", "editor#profiler" },
 	{ "Profiler/Merge Cells into the Scene", "",
@@ -7676,6 +8556,11 @@ namespace
 	  "Keeps the rename inside the graph you are editing. Everything listed goes "
 	  "on naming the old one, which for a call means it now names nothing.",
 	  "", "horizoncode#functions" },
+	{ "Rename Across Project/Ask for it", "Ask the person editing it",
+	  "Somebody else in the collaboration session is editing this graph, so the "
+	  "rename cannot be written into it. This asks them to hand it over; once they "
+	  "say yes it moves up to the list that will be renamed.",
+	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
 	  "Python, and through a Call Function (Ref) node on a reference to this "
@@ -7918,19 +8803,6 @@ namespace
 	  "guest needs those two values and never an address. Your open scene becomes "
 	  "the session's scene.",
 	  "", "collaboration#starting" },
-	{ "Collaboration Session/Announce this session on the local network", "",
-	  "Announces that a session exists here, so people on the same network find "
-	  "it in their list and join without an address. The join code is never "
-	  "announced, so it still has to be given out. It is one switch for both "
-	  "halves of discovery: the same setting also listens for other people's "
-	  "sessions, whether or not you are hosting.",
-	  "", "collaboration#starting" },
-	{ "Collaboration Session/Look for sessions on this network", "",
-	  "Listens for hosts announcing themselves nearby and lists what it hears: "
-	  "who is hosting, which project, and how many people are in it. Picking a "
-	  "row fills in the session ID for you; the join code is still typed, because "
-	  "it is the only thing keeping strangers on this network out.",
-	  "", "collaboration#starting" },
 	{ "Collaboration Session/Join code", "",
 	  "The code the host gives you, and the only thing keeping strangers out of a "
 	  "session they can otherwise see. It is never announced on the network and "
@@ -7986,6 +8858,139 @@ namespace
 	  "Clears the failure above and puts the panel back to the host-or-join form. "
 	  "It retries nothing: the attempt it is reporting has already ended.",
 	  "", "collaboration#starting" },
+	{ "Collaboration Session/Rejoin", "",
+	  "Shown when the connection to the host dropped. Joins the same session again, "
+	  "the same way you joined it the first time. The host then sends you the scene "
+	  "and every file the session changed while you were away, so nothing you missed "
+	  "stays missing. Changes you made here while you were disconnected are replaced "
+	  "by the session's state.",
+	  "", "collaboration#starting" },
+
+	// ── The team (Preferences ▸ Team and Window ▸ Team, TeamView.cpp) ────────
+	{ "Team/Team Server (host:port)", "",
+	  "The team server: it keeps the team's members and passwords, shows who is "
+	  "online and is where team sessions are announced. It is also the relay those "
+	  "sessions run on, and the one sessions from the Collaboration window use. "
+	  "Empty means peer to peer and no team. Port 7777 if none is given.",
+	  "", "collaboration" },
+	{ "Team/Team", "",
+	  "The team's name on the server: 1-64 letters, digits, - or _. Everyone in "
+	  "the team signs in with the same one.",
+	  "", "collaboration" },
+	{ "Team/Member", "",
+	  "Your name in the team, as an admin created it (or as you created the team "
+	  "with). Upper and lower case do not matter.",
+	  "", "collaboration" },
+	{ "Team/Password", "",
+	  "Your team password. It is never written to disk: once you are signed in, "
+	  "the team server hands this editor a session token instead, which is what "
+	  "signs you in again after a restart.",
+	  "", "collaboration" },
+	{ "Team/Sign In", "",
+	  "Signs in to the team server. Signed in, the others see you as online and "
+	  "can invite you; the connection is kept and comes back on its own after a "
+	  "dropped network. You stay signed in across restarts until you sign out, "
+	  "change your password or are removed from the team.",
+	  "", "collaboration" },
+	{ "Team/Create Team", "",
+	  "Creates a new team on the server with you as its first admin, and signs "
+	  "you in. Refused when the name is taken.",
+	  "", "collaboration" },
+	{ "Team/Sign Out", "",
+	  "Closes the connection to the team server: the others see you go offline "
+	  "and a session you announced disappears from their list. This computer "
+	  "forgets the saved sign-in and the server revokes it, so the next start "
+	  "asks for the password. A collaboration session that is running carries on.",
+	  "", "collaboration" },
+	{ "Team/Sign Out Everywhere", "",
+	  "Signs you out here and on every other computer that stays signed in as "
+	  "you: the server revokes all of your saved sign-ins, and those editors ask "
+	  "for the password again. For a computer you no longer have.",
+	  "", "collaboration" },
+	{ "Team/Invite", "",
+	  "Invites this member to the session you are hosting. Their editor shows the "
+	  "invitation and they join with one press. Only online members can be "
+	  "invited.",
+	  "", "collaboration" },
+	{ "Team/Open Team Window", "",
+	  "Opens Window > Team: the whole roster, sessions, and (for admins) adding "
+	  "and removing members. The footer's list only invites.",
+	  "", "collaboration" },
+	{ "Team/Remove", "",
+	  "Removes this member from the team (admins only). Asks once more first.",
+	  "", "collaboration" },
+	{ "Team/Confirm Remove", "",
+	  "Removes the member for good: their editors are signed out and their name "
+	  "and password are gone from the server.",
+	  "", "collaboration" },
+	{ "Team/Anyone in the Team May Join", "",
+	  "On: every member sees the session and can join it without an invitation. "
+	  "Off: only the members you invite can join. Can be changed while hosting.",
+	  "", "collaboration" },
+	{ "Team/Host Session", "",
+	  "Starts a collaboration session through the team server and announces it "
+	  "to the team. Nobody needs an address or a join code: the session is found "
+	  "by its announcement.",
+	  "", "collaboration" },
+	{ "Team/Join", "",
+	  "Joins this member's session: through an invitation, or because the host "
+	  "opened it to the whole team. The project is synced the way any "
+	  "collaboration join syncs it.",
+	  "", "collaboration" },
+	{ "Team/Decline", "",
+	  "Turns the invitation down; the host is told.",
+	  "", "collaboration" },
+	{ "Team/New Member", "",
+	  "The name the new member signs in with (admins only).",
+	  "", "collaboration" },
+	{ "Team/Their Password", "",
+	  "The new member's first password. Tell it to them yourself; they can change "
+	  "it once signed in.",
+	  "", "collaboration" },
+	{ "Team/Admin", "",
+	  "Admins can add and remove members. A team always keeps at least one.",
+	  "", "collaboration" },
+	{ "Team/Add Member", "",
+	  "Adds the member to the team on the server. They can sign in right away.",
+	  "", "collaboration" },
+	{ "Team/Current Password", "",
+	  "Your password as it is now — the server checks it before changing it.",
+	  "", "collaboration" },
+	{ "Team/New Password", "",
+	  "The password you will sign in with from now on.",
+	  "", "collaboration" },
+	{ "Team/Change Password", "",
+	  "Changes your team password on the server. This editor keeps its "
+	  "connection; your other editors use the new one at their next sign-in.",
+	  "", "collaboration" },
+	{ "Team/Choose Picture...", "",
+	  "Picks an image file (PNG, JPG, BMP, TGA, GIF) as your team picture. It is "
+	  "cropped to a square and scaled to 64 pixels here, then kept by the team "
+	  "server: every member sees it next to your name, on any computer you sign "
+	  "in from.",
+	  "", "collaboration" },
+	{ "Team/Change Picture...", "",
+	  "Picks another image file as your team picture. Cropped to a square and "
+	  "scaled to 64 pixels; the team sees the new one right away.",
+	  "", "collaboration" },
+	{ "Team/Remove Picture", "",
+	  "Removes your team picture from the server. The team sees your colour with "
+	  "your initial instead.",
+	  "", "collaboration" },
+	{ "Team/Use Collaboration Profile", "",
+	  "Copies the picture and colour you set in the Collaboration window to your "
+	  "team profile, so you look the same in a session and in the team. Without a "
+	  "picture there, the team picture is removed too.",
+	  "", "collaboration" },
+	{ "Team/None", "",
+	  "No colour of your own: the team shows you in grey, and in a session the "
+	  "host picks a free colour for you.",
+	  "", "collaboration" },
+	{ "Team/Custom", "",
+	  "Any colour, not just the presets. The team sees it shortly after you stop "
+	  "changing it. Two members may have the same colour; in a session the host "
+	  "gives one of them another if they collide.",
+	  "", "collaboration" },
 
 	{ "Session Participants/Block", "",
 	  "Removes this person from the session and refuses them if they try to "
@@ -8009,6 +9014,11 @@ namespace
 	// that installs and configures git. Several of these carry no topic: the
 	// shipped manual has no source-control chapter, and a link to a near-miss is
 	// worse than none.
+	{ "Source Control Panel/Recheck##git", "Recheck",
+	  "Looks for git again, without restarting the editor. Press this after "
+	  "installing git yourself; when it is found, the panel reads this project's "
+	  "repository at once. An install started with Install Git does this by itself.",
+	  "", "editor#preferences" },
 	{ "Source Control Panel/New branch…", "New branch",
 	  "Opens the branch dialog, starting from the current state of the project "
 	  "rather than from a commit in the history. It is unavailable while a git "
@@ -8025,12 +9035,12 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Preferences page that owns the setup: initialising the "
+	  "Opens the Project Settings page that owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },
-	{ "Source Control Panel/Set up in Preferences…", "Set up in Preferences",
-	  "Opens the Preferences page where a project folder is turned into a git "
+	{ "Source Control Panel/Set up in Project Settings…", "Set up in Project Settings",
+	  "Opens the Project Settings page where a project folder is turned into a git "
 	  "repository and a remote is added. Until it is one, this window has nothing "
 	  "to show.",
 	  "", "editor#preferences" },
@@ -8053,11 +9063,139 @@ namespace
 	  "switched off and you move to it once you have committed.",
 	  "", "" },
 	{ "sc.commit", "Commit",
-	  "Records every changed file in one commit with the message above; the "
-	  "button says how many that is. It stays unavailable without a message, with "
+	  "Records a commit with the message above. With files ticked it commits exactly "
+	  "those, and the button says how many; with nothing ticked it commits every "
+	  "changed file, as it always did. It stays unavailable without a message, with "
 	  "nothing changed, and while a conflict is unresolved — a commit that keeps "
-	  "conflict markers preserves the mess for good. With auto-push on, the "
-	  "commit goes to the remote as it is made.",
+	  "conflict markers preserves the mess for good. With auto-push on, the commit "
+	  "goes to the remote as it is made.",
+	  "", "" },
+	{ "sc.commit.more", "More ways to commit",
+	  "Commit and push in one step, commit everything even though some files are "
+	  "ticked, or fold what is staged into the last commit.",
+	  "", "" },
+	{ "Team Sync/Sync Now", "",
+	  "Sends every change in the project folder that the team server does not have "
+	  "yet, and fetches what the others saved. Every save in the editor does this "
+	  "by itself a second later; the button is for files changed outside the "
+	  "editor (a script edited in an IDE, a texture exported from a paint program).",
+	  "", "" },
+	{ "Team Sync/Take the Team's Versions", "",
+	  "This copy has never synced with the team server, and the files listed differ "
+	  "from the team's. Replaces each of them with the team's version. Your copies "
+	  "are not uploaded: pick this for an old copy of the project.",
+	  "", "" },
+	{ "Team Sync/Keep Mine and Merge", "",
+	  "Uploads the listed files as your changes. The server merges each with the "
+	  "team's version: scenes by entity and settings by key keep both sides where "
+	  "they differ in different places; where both changed the same thing, and for "
+	  "graphs and binary assets, your version wins and the team's is kept on the "
+	  "server's horizon-conflicts branch.",
+	  "", "" },
+	{ "Team Sync/Create Project on Team Server", "",
+	  "Team admins only. Creates this project on the team server and uploads the "
+	  "project folder as its first revision. From then on every member's saves go "
+	  "through the server, which merges them.",
+	  "", "" },
+	{ "Team Sync/Open My Version", "",
+	  "Somebody's later save won over yours for this file. Downloads your version "
+	  "from the team server into Saved/TeamSync/Lost/ and shows that folder; the "
+	  "project keeps the winning version. To bring yours back, copy it over the "
+	  "project's file and save.",
+	  "", "" },
+	{ "Source Control Panel/Commit & Push", "",
+	  "Commits (the ticked files, or everything when none is ticked) and pushes the "
+	  "branch to the remote straight away. If the push fails the commit stays; "
+	  "the message says so.",
+	  "", "" },
+	{ "Source Control Panel/Commit everything (stage all first)", "",
+	  "Stages every changed file and commits them all, ignoring which ones are "
+	  "ticked. For the moment you ticked a few files and then decided you wanted "
+	  "the lot after all.",
+	  "", "" },
+	{ "Source Control Panel/Amend last commit", "",
+	  "Rewrites the last commit: the ticked files are added to it and, if you "
+	  "typed a message, it replaces the old one. Only offered while that commit has "
+	  "not been pushed, because rewriting one the server already has would hurt "
+	  "everyone who pulled it.",
+	  "", "" },
+	{ "sc.row.stage", "Stage",
+	  "Tick to include this file in the next commit. Ticked files are committed "
+	  "alone; leave all unticked to commit everything.",
+	  "", "" },
+	{ "sc.row.unstage", "Unstage",
+	  "Untick to take this file out of the next commit. The file itself is not "
+	  "touched; it moves back to Changes.",
+	  "", "" },
+	{ "sc.row.discard", "Discard changes",
+	  "Throws away your edits to this file and puts it back to how the last commit "
+	  "has it. Asks first, because the edits are not in any commit and cannot be "
+	  "brought back.",
+	  "", "" },
+	{ "sc.row.delete", "Delete new file",
+	  "Deletes this file from the project folder. It is not in any commit yet, so "
+	  "there is no getting it back. Asks first.",
+	  "", "" },
+	{ "sc.row.reveal", "Show in Content Browser",
+	  "Opens the Content Browser at this file and selects it. Double-clicking the "
+	  "row does the same.",
+	  "", "" },
+	{ "sc.row.mine", "Keep mine",
+	  "Resolves the conflict with the version from the branch you are on and "
+	  "stages the file. The other side's edits to it are dropped.",
+	  "", "" },
+	{ "sc.row.theirs", "Take theirs",
+	  "Resolves the conflict with the incoming version and stages the file. Your "
+	  "edits to it are dropped.",
+	  "", "" },
+	{ "sc.stage_all", "Stage all",
+	  "Ticks every file in this group (only the ones the filter shows).",
+	  "", "" },
+	{ "sc.unstage_all", "Unstage all",
+	  "Unticks every staged file (only the ones the filter shows). Nothing on "
+	  "disk changes.",
+	  "", "" },
+	{ "sc.discard_all", "Discard all",
+	  "Throws away your edits to every file in this group (only the ones the filter "
+	  "shows) after asking. Not undoable.",
+	  "", "" },
+	{ "sc.delete_all", "Delete all",
+	  "Deletes every new file in this group (only the ones the filter shows) from "
+	  "the project folder after asking. They are in no commit, so not undoable.",
+	  "", "" },
+	{ "sc.filter", "Filter by type",
+	  "Shows only one kind of asset in the list below: scenes, materials, "
+	  "textures, meshes, code, audio. The number is how many changed files there "
+	  "are of that kind.",
+	  "", "" },
+	{ "Source Control Panel/Switch", "",
+	  "Checks this branch out and replaces the files in the project folder with "
+	  "its contents. With uncommitted changes it asks whether to stash them or "
+	  "carry them over.",
+	  "", "" },
+	{ "Source Control Panel/Check out", "",
+	  "Creates a local branch that follows this one on the server and switches to "
+	  "it. With uncommitted changes it asks whether to stash them or carry them "
+	  "over.",
+	  "", "" },
+	{ "Source Control Panel/Bring back stashed changes", "",
+	  "Re-applies the most recent stash and removes it from the list. If it "
+	  "conflicts with the current files, git keeps the stash and the conflicts "
+	  "show up under Changes.",
+	  "", "" },
+	{ "Source Control Panel/Manage branches…", "",
+	  "Opens the Branches tab: every branch on this computer, the ones that only "
+	  "exist on the server, and any stashed changes.",
+	  "", "" },
+	{ "Source Control Panel/Carry them over", "",
+	  "Switches branch and takes your uncommitted changes along. This works only "
+	  "when the other branch has not changed the same files; otherwise git refuses "
+	  "and nothing moves.",
+	  "", "" },
+	{ "Source Control Panel/Stash & switch", "",
+	  "Puts all uncommitted changes (new files included) in a stash, switches to a "
+	  "clean project on the other branch, and keeps the stash for you to bring "
+	  "back from the Branches tab.",
 	  "", "" },
 
 	// ── The startup dialog for a missing git ─────────────────────────────────
@@ -8065,51 +9203,47 @@ namespace
 	// state the same facts about the same machine, and its remedy buttons are
 	// drawn by helpers the page calls too. "Save Identity" is already an entry
 	// there and is deliberately not repeated here.
-	{ "Source Control/Don't show this again", "",
-	  "Stops this dialog appearing at startup. Nothing is installed or configured "
-	  "by dismissing it: source control stays unavailable, and the Tools page in "
-	  "Preferences still reports git, Git LFS and your git identity as missing.",
-	  "", "editor#preferences" },
 	{ "Source Control/Recheck", "",
-	  "Looks for git and Git LFS again, without restarting the editor. A clean "
-	  "result closes this dialog by itself, so this is what to press once an "
-	  "install has finished elsewhere.",
+	  "Looks for git and Git LFS again, without restarting the editor. This is "
+	  "what to press once an install has finished elsewhere.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy 'xcode-select --install'", "Copy the Xcode tools command",
-	  "Puts the command on the clipboard, to run in your own terminal. On macOS "
-	  "git arrives with the Xcode Command Line Tools, so that one command is the "
-	  "whole install.",
+	// The git remedy (GitMissingDialog::drawGitInstallRemedy) opens this scope
+	// itself, so these three hold in the dialog, Preferences, the clone dialog
+	// and the Source Control panel alike.
+	{ "Source Control/Install Git", "Install Git",
+	  "Installs git with this machine's own installer: winget on Windows, Homebrew "
+	  "or Apple's Command Line Tools on macOS, the distribution's package manager "
+	  "on Linux. It runs in the background, but in plain sight: the installer's "
+	  "output appears below the button, and Windows, macOS or Linux may ask for "
+	  "permission or a password on the way. When git runs afterwards, the editor "
+	  "looks again by itself and source control picks up where it was.",
 	  "", "editor#preferences" },
-	{ "Source Control/git-scm.com", "git-scm.com",
-	  "Opens git's own download page in a browser, for installing it by hand "
-	  "instead of through a package manager.",
-	  "", "editor#preferences" },
-	{ "Source Control/Copy winget Command", "Copy the winget command",
-	  "Puts a winget install command on the clipboard, to run in your own shell. "
-	  "It is the command for whichever piece this bullet is about — git itself, "
-	  "or Git LFS. After installing Git for Windows, restart the editor so it "
-	  "picks up the new PATH.",
+	{ "Source Control/Copy Install Command", "Copy the install command",
+	  "Puts the command shown above on the clipboard, to run in your own "
+	  "terminal. This is the way when the editor cannot install git itself, for "
+	  "example on Linux without a graphical password prompt. Press Recheck "
+	  "afterwards; no restart is needed.",
 	  "", "editor#preferences" },
 	{ "Source Control/Download Page", "Download Page",
-	  "Opens the Git for Windows download page, which is where git comes from on "
-	  "Windows.",
+	  "Opens git's download page for this system in a browser, for installing it "
+	  "by hand. On Windows without winget this is the Git for Windows installer, "
+	  "which brings Git LFS along.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy 'sudo apt install git'", "Copy the apt command",
-	  "Puts the command on the clipboard, to run in your own terminal. The editor "
-	  "does not install git for you on Linux; it only says what is missing.",
+	{ "Source Control/Install Git LFS", "Install Git LFS",
+	  "Installs Git LFS the same way: winget on Windows, Homebrew on macOS, the "
+	  "distribution's package manager on Linux. Git LFS is what keeps meshes, "
+	  "textures and audio out of the repository's own history, so a clone does not "
+	  "drag down every version of every asset. Where the editor cannot install it "
+	  "(Apple's Command Line Tools have no LFS), the command to run yourself is "
+	  "shown instead.",
 	  "", "editor#preferences" },
-	{ "Source Control/Copy 'brew install git-lfs'", "Copy the brew command",
-	  "Puts the command on the clipboard, to run in your own terminal. Press "
-	  "Recheck afterwards rather than restarting.",
+	{ "Source Control/Copy LFS Command", "Copy the Git LFS command",
+	  "Puts the Git LFS install command on the clipboard, to run in your own "
+	  "terminal. Press Recheck afterwards rather than restarting.",
 	  "", "editor#preferences" },
 	{ "Source Control/git-lfs.com", "git-lfs.com",
 	  "Opens the Git LFS home page, where it can be downloaded and installed by "
 	  "hand.",
-	  "", "editor#preferences" },
-	{ "Source Control/Copy 'sudo apt install git-lfs'", "Copy the apt command for Git LFS",
-	  "Puts the command on the clipboard, to run in your own terminal. Git LFS is "
-	  "what keeps meshes, textures and audio out of the repository's own history, "
-	  "so a clone does not drag down every version of every asset.",
 	  "", "editor#preferences" },
 
 	// ── The issue reporter ───────────────────────────────────────────────────
@@ -8171,6 +9305,21 @@ namespace
 	  "Opens the issue that has just been filed in your browser. Its address is "
 	  "shown above and stays there until this dialog is closed.",
 	  "", "advanced#diagnostics" },
+	{ "Self-Update/Download", "",
+	  "Fetches the new version for this platform into a staging folder and "
+	  "checks its size and SHA-256 against the server's list. Nothing is "
+	  "installed yet, and the editor keeps running as it is.",
+	  "", "editor#menus" },
+	{ "Self-Update/Restart to Update", "",
+	  "Closes the editor, swaps in the downloaded version and starts it again "
+	  "with the same project. Unsaved changes are asked about first, exactly as "
+	  "when quitting; Cancel there keeps everything as it is. If the new version "
+	  "fails to start, the old one is put back.",
+	  "", "editor#menus" },
+	{ "Self-Update/Check Again", "",
+	  "Asks the update server once more, for instance after a release was "
+	  "published while this window was open.",
+	  "", "editor#menus" },
 	{ "Report Issue/Copy Link", "",
 	  "Puts the address of the issue that has just been filed on the clipboard. "
 	  "The report itself is already on GitHub; this is only the way back to it.",
@@ -8198,6 +9347,10 @@ namespace
 	  "Host or join a live editing session: several people in one scene, with "
 	  "locks so two of you cannot edit the same thing at once.",
 	  "", "collaboration#overview" },
+	{ "panel.team", "Team",
+	  "Your team on the team server: members and who is online, the sessions "
+	  "they host, invitations. Signing in is in Preferences ▸ Team or right here.",
+	  "", "collaboration" },
 	{ "panel.source-control", "Source Control",
 	  "Git for the whole project, large assets included: what has changed, what to "
 	  "commit, and what the rest of the team has pushed.",
@@ -8298,6 +9451,7 @@ namespace
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
+		{ "Task Board/",       "editor-interface", "Editor Interface", "Task Board" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },
@@ -8331,7 +9485,7 @@ namespace
 		{ "Preferences/Post-Processing/",     "editor-settings", "Settings Reference", "Post-Processing" },
 		{ "Preferences/Global Illumination/", "editor-settings", "Settings Reference", "Global Illumination" },
 		{ "Preferences/Effects/",             "editor-settings", "Settings Reference", "Effects" },
-		{ "Preferences/Collaboration/",       "editor-settings", "Settings Reference", "Collaboration" },
+		{ "Preferences/Team/",                "editor-settings", "Settings Reference", "Team" },
 		// Above the bare "Preferences/" fallback like the rest — without its own
 		// rule these three would land under the "Preferences" heading instead of
 		// their own, which is the silent kind of wrong: the entry exists, F1
@@ -8356,7 +9510,10 @@ namespace
 		// the editor, one section per page so the reference is split the way
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
-		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
+		{ "Project Graphics/", "editor-settings", "Settings Reference", "Project: graphics" },
+		{ "Input/",            "editor-settings", "Settings Reference", "Project: input" },
+		{ "Viewport Quality/", "editor-settings", "Settings Reference", "Viewport" },
+		{ "Anti-Cheat/",      "editor-settings", "Settings Reference", "Project: anti-cheat" },
 		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
@@ -8366,7 +9523,7 @@ namespace
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
 		{ "Collision Layers/", "editor-settings", "Settings Reference", "Collision layers" },
-		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
+		{ "Tool Setup/",      "editor-settings", "Settings Reference", "Build tools" },
 		// The recovery dialog is the autosave's other half, so its three
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
@@ -8415,6 +9572,7 @@ namespace
 		{ "env.",                 "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },
 		{ "Landscape/",           "editor-landscape", "Landscape Tools", "Sculpting and painting" },
+		{ "Spline Tool/",         "editor-landscape", "Landscape Tools", "Drawing splines" },
 		{ "Environment Window/",  "editor-landscape", "Landscape Tools", "Environment window" },
 		{ "anim.",                      "editor-animation", "Animation Editors", "Animator" },
 		{ "State Machine/",             "editor-animation", "Animation Editors", "State machine" },
@@ -8439,12 +9597,19 @@ namespace
 		{ "collab.",   "editor-collab",    "Collaboration & Source Control", "Collaboration" },
 		{ "sc.",                    "editor-collab", "Collaboration & Source Control", "Source control" },
 		{ "Collaboration Session/", "editor-collab", "Collaboration & Source Control", "Collaboration window" },
+		{ "Team/",                  "editor-collab", "Collaboration & Source Control", "Team" },
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The Source Control window when the team server keeps the history.
+		{ "Team Sync/",             "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The reload question after a pull changed the open scene's file.
+		{ "Scene Changed/",         "editor-collab", "Collaboration & Source Control", "Scene changed on disk" },
 		// The bug reporter is neither collaboration nor source control: it
 		// attaches the engine log and files an issue, which is diagnostics.
 		{ "Report Issue/",          "editor-export", "Export & Diagnostics", "Report an issue" },
+		// Help ▸ Check for Updates: diagnostics' neighbour in the Help menu.
+		{ "Self-Update/",           "editor-export", "Export & Diagnostics", "Updating the editor" },
 	};
 
 	// Every component scope maps to the component page, with the component as
@@ -8453,14 +9618,14 @@ namespace
 	// editor.
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
-		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
+		"Decal", "Rope", "Spline", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Replication",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

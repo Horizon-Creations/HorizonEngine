@@ -14,14 +14,20 @@
 #include <cmath>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace GraphViewStore
 {
 	struct View { float panX = 0.0f, panY = 0.0f, zoom = 1.0f; };
 
+	// Which graph tabs a HorizonCode editor had open: the graph on screen (0 = the
+	// event graph) and the function ids that had a tab, in tab order.
+	struct OpenTabs { int active = 0; std::vector<int> open; };
+
 	struct Table
 	{
 		std::unordered_map<std::string, View> views;
+		std::unordered_map<std::string, OpenTabs> tabs;
 		bool   dirty     = false;   // something moved since the last write
 		double changedAt = 0.0;     // when, in ImGui time — the write waits for quiet
 	};
@@ -35,6 +41,29 @@ namespace GraphViewStore
 		if (it == v.end()) return false;
 		out = it->second;
 		return true;
+	}
+
+	inline bool getTabs(const std::string& key, OpenTabs& out)
+	{
+		const auto& t = table().tabs;
+		const auto it = t.find(key);
+		if (it == t.end()) return false;
+		out = it->second;
+		return true;
+	}
+
+	// Every frame, like put(): a change in the set or the active graph marks the
+	// table for writing, an unchanged one costs a compare.
+	inline void putTabs(const std::string& key, int active, const std::vector<int>& open, double now)
+	{
+		Table& t = table();
+		const auto it = t.tabs.find(key);
+		if (it == t.tabs.end() ? (active == 0 && open.empty())
+		                       : (it->second.active == active && it->second.open == open))
+			return;
+		t.tabs[key] = { active, open };
+		t.dirty = true;
+		t.changedAt = now;
 	}
 
 	// Called every frame by a canvas that has a key: only a real move (half a pixel,

@@ -1,0 +1,15 @@
+== base-100000-r2  2026-10-10 13:33:21
+before:
+  uptime:      load averages: 2.66 2.99 5.59
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    1
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'Battery Power'
+  busy procs:  121.2% /Applications/CLion.app/Contents/MacOS/clion; 6.9% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 3.1% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 1.5% /usr/sbin/notifyd; 
+after (rc=0):
+  uptime:      load averages: 3.20 3.08 5.53
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    1
+  gpu:         "Device Utilization %"=38
+  power:       Now drawing from 'Battery Power'
+  busy procs:  14.0% /Applications/CLion.app/Contents/MacOS/clion; 13.9% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 7.6% /Applications/Hive/Hive.app/Contents/MacOS/Hive; 6.1% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 

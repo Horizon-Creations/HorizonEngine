@@ -12,7 +12,7 @@
 // editor, the tests) sees an Assimp header, so the scene type is forward-declared.
 struct aiScene;
 
-// The FBX / OBJ / COLLADA half of MeshImporter: everything glTF does natively
+// The FBX / OBJ / COLLADA / Blender half of MeshImporter: everything glTF does natively
 // through cgltf comes in here through Assimp, converted into the same
 // StaticMeshAsset streams (SoA positions/normals/UVs + indices + BakedRange
 // table) so the rest of the import — normals, sections, sidecars, the write —
@@ -21,10 +21,20 @@ struct aiScene;
 // Only compiled when HE_HAVE_ASSIMP is defined (root CMakeLists, HE_ENABLE_ASSIMP).
 namespace Importer
 {
-	// True for the extensions this file reads: .fbx, .obj, .dae (any case).
+	// True for the extensions this file reads: .fbx, .obj, .dae, .blend (any case).
 	// The routing in ImporterCommon (classifySource) and the asset compiler ask
 	// this rather than keeping their own copy of the list.
 	bool isAssimpSource(const std::filesystem::path& sourcePath);
+
+	// What to tell someone whose .blend Assimp could not read: the Blender version
+	// the file was saved with (from its header) and the one reason Assimp is
+	// known to refuse it for — "" when the header gives no reason to suspect one.
+	// Assimp's reader understands Blender up to 3.4, gzip-compressed files
+	// included; 3.5 moved mesh data into generic attributes, 3.0+ can compress
+	// with zstd, and 4.x/5.x write a longer header. Each of those is a file the
+	// reader fails on with a message about a missing field, which names neither
+	// Blender's version nor what to do about it. Reads at most a dozen bytes.
+	std::string blendReadHint(const std::filesystem::path& sourcePath);
 
 	// One scene's geometry, baked the way MeshImporter bakes glTF: every mesh
 	// instance of every node with the node's world transform applied, vertices
@@ -72,7 +82,10 @@ namespace Importer
 		// FBX geometry arrives in the file's units and is brought to metres via
 		// its UnitScaleFactor (centimetres per unit; the .cpp explains why Assimp
 		// does not do that itself). COLLADA's <unit> and <up_axis> are already in
-		// Assimp's root transform; OBJ has no units.
+		// Assimp's root transform; OBJ has no units. Blender files arrive Z-up,
+		// -Y forward, and Assimp leaves them that way, so they get the rotation
+		// Blender's own glTF exporter applies: (x, y, z) -> (x, z, -y). Blender's
+		// unit is a metre unless the scene says otherwise, and it is not read.
 		// Meshes no node references are baked untransformed as a fallback, as the
 		// glTF path does for files without a node hierarchy.
 		// False when nothing triangular came out.
@@ -98,6 +111,7 @@ namespace Importer
 		struct Impl;
 		std::unique_ptr<Impl> impl_;
 		bool                  fbx_ = false;   // source was FBX: bake() applies the cm → m factor
+		bool                  blend_ = false; // source was Blender: bake() turns Z-up into Y-up
 	};
 
 	// Imports every material of a loaded scene — describeMaterials() handed to

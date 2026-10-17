@@ -111,6 +111,7 @@ HLSL_ENTRY_PROFILE = {
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",
     "PSPreviewMesh": "ps_5_0", "PSPreviewSkinned": "ps_5_0",  # kWorldPreviewPSHLSL
     "VSVelocity": "vs_5_0", "PSVelocity": "ps_5_0",            # kTaaVelocityHLSL
+    "GBufPS": "ps_5_0",  # D3D11 + D3D12 kSceneHLSL: deferred G-buffer, built-in materials (Thema 150)
     "main": "ps_5_0",  # the common case; exceptions below
 }
 
@@ -124,11 +125,21 @@ HLSL_PROFILE_OVERRIDE = {
 GLSL_STAGE_BY_SUFFIX = [("VS", "vert"), ("FS", "frag"), ("CS", "comp")]
 
 
+# The Thema 185 caustic shaders (kUnderwaterCausticsHLSL / kUnderwaterCausticsFS /
+# kUnderwaterCausticsMSL) carry "@TRAINS@" where EVERY call site splices the engine water's
+# wave trains before compiling (HE::causticsWaveTrainsList() in UnderwaterCausticsShared.h:
+# dirDeg, speed, length, steepness x 3 = twelve numbers). A compiler only needs the arity,
+# so the check splices twelve plausible numbers — the same replace the call sites do.
+CAUSTICS_TRAINS_TOKEN = "@TRAINS@"
+CAUSTICS_TRAINS_DUMMY = "225.0, 2.1, 38.0, 0.28, 140.0, 1.7, 19.0, 0.2, 315.0, 1.3, 9.0, 0.14"
+
+
 def extract(path: Path, tag: str) -> dict[str, str]:
-    """All `kName = R"TAG( ... )TAG";` literals in one file."""
+    """All `kName = R"TAG( ... )TAG";` literals in one file, call-site tokens spliced."""
     src = path.read_text(encoding="utf-8", errors="replace")
     pat = r'(k[A-Za-z0-9]*)\s*=\s*R"' + tag + r'\((.*?)\)' + tag + r'";'
-    return {m.group(1): m.group(2) for m in re.finditer(pat, src, re.S)}
+    return {m.group(1): m.group(2).replace(CAUSTICS_TRAINS_TOKEN, CAUSTICS_TRAINS_DUMMY)
+            for m in re.finditer(pat, src, re.S)}
 
 
 def find_tool(env_var: str, names: list[str], hints: list[str]) -> str | None:
