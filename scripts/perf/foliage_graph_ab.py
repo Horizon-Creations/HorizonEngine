@@ -23,6 +23,18 @@ camera on the field (the dump camera looks along -Z; a 100 m field needs CAMZ=60
     python  scripts/perf/foliage_graph_ab.py --editor C:/hw182/deploy/Editor --out C:/tmp/graph_ab --rhi OpenGL
 
 Exit status 0 when every case is identical with fewer draws and both controls move the plants.
+
+D3D11, D3D12 and Vulkan (Thema 182, 2f): their SKY differs from run to run even between two
+identical runs (D3D ~8 %, Vulkan ~4 % of the frame, rows 0..88 at this camera), and Vulkan's far
+ground near the horizon wobbles by up to 8/255. There, compare the ground with a tolerance and
+the plant mask exactly:
+
+    python scripts/perf/foliage_graph_ab.py --editor C:/hw182/deploy/Editor --rhi D3D12 --ground 100 --tol 8
+
+The triangle count ("tris") must match too. --plants changes the field's plant count: D3D12 and
+Vulkan cap graph-material draws at k_matMaxDraws (1024) per frame, so their per-instance LOOP
+drops plants above roughly 1000 visible ones; the loop is a valid reference only below that
+(--plants 800), and at 2000 the instanced run must reach the full triangle count the loop misses.
 Note for GL on Windows: the program-binary cache (glprogcache) lives under SDL_GetPrefPath, which a
 private config dir does NOT redirect; the log says per run whether a program was built or loaded.
 """
@@ -72,9 +84,9 @@ def shoot(deploy: Path, out: Path, keys, rhi: str, cfg: Path, extra_env=None):
     except subprocess.TimeoutExpired:
         pass   # the dump may have been written before a hang on teardown; the file decides
     text = log.read_text(errors="replace") if log.exists() else ""
-    m = re.search(r"dump counters\D+draws=(\d+)", text)
+    m = re.search(r"dump counters\D+draws=(\d+) tris=(\d+)", text)
     ok = out.exists() and out.stat().st_size > 1024
-    return ok, (int(m.group(1)) if m else -1)
+    return ok, (int(m.group(1)) if m else -1), (int(m.group(2)) if m else -1)
 
 
 def pixels(path: Path):
@@ -84,15 +96,28 @@ def pixels(path: Path):
     return (w, abs(h), bpp), data[off:]
 
 
-def compare(a: Path, b: Path) -> str:
+def compare(a: Path, b: Path, ground: int = 0, tol: int = 0) -> str:
+    """Rows from `ground` down (the dumps are top-down BMPs), a pixel differs when a channel
+    moves by more than `tol`. ground 0 + tol 0 = the raw whole-image comparison."""
     (ga, pa), (gb, pb) = pixels(a), pixels(b)
     if ga != gb:
         return f"DIFFERENT SIZE {ga} {gb}"
-    if pa == pb:
+    if ground == 0 and pa == pb:
         return "identical"
-    bp = ga[2] // 8
-    differing = sum(1 for i in range(0, len(pa) - bp + 1, bp) if pa[i:i + bp] != pb[i:i + bp])
-    total = ga[0] * ga[1]
+    w, h, bpp = ga
+    bp = bpp // 8
+    row = ((w * bp + 3) // 4) * 4
+    differing = 0
+    for y in range(ground, h):
+        ra, rb = pa[y * row:y * row + w * bp], pb[y * row:y * row + w * bp]
+        if ra == rb:
+            continue
+        for i in range(0, w * bp, bp):
+            if any(abs(ra[i + k] - rb[i + k]) > tol for k in range(3)):
+                differing += 1
+    if differing == 0:
+        return "identical" if ground == 0 and tol == 0 else "ground identical"
+    total = w * (h - ground)
     return f"{differing} of {total} pixels ({100.0 * differing / total:.3f} %)"
 
 
@@ -123,6 +148,9 @@ def main() -> int:
     ap.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "graph_ab"), help="BMPs and logs")
     ap.add_argument("--rhi", default="Metal", choices=["Metal", "OpenGL", "D3D11", "D3D12", "Vulkan"])
     ap.add_argument("--only", default="", help="comma list of case names (default: all)")
+    ap.add_argument("--ground", type=int, default=0, help="first top-down image row compared (D3D/Vulkan: 100)")
+    ap.add_argument("--tol", type=int, default=0, help="per-channel tolerance on the ground (Vulkan: 8)")
+    ap.add_argument("--plants", type=int, default=2000, help="plants in the field (HE_DUMP_FOLIAGETEST)")
     args = ap.parse_args()
 
     deploy, out = Path(args.editor).resolve(), Path(args.out).resolve()
@@ -133,19 +161,22 @@ def main() -> int:
     cfg = out / "config"
     cfg.mkdir(exist_ok=True)
     ok = True
-    print(f"{'case':4} {'instanced vs loop':22} draws inst/loop")
+    plants = f"FOLIAGETEST={args.plants}"
+    print(f"{'case':4} {'instanced vs loop':22} {'plant mask':12} draws inst/loop  tris inst/loop")
     for n in [n for n in CASES if not args.only or n in args.only.split(",")]:
         desc, keys = CASES[n]
+        keys = [plants if k.startswith("FOLIAGETEST=") else k for k in keys]
         a, b = out / f"{n}_inst.bmp", out / f"{n}_loop.bmp"
-        oka, da = shoot(deploy, a, keys, args.rhi, cfg, {"HE_GRAPH_INSTANCING": "1"})
-        okb, db = shoot(deploy, b, keys, args.rhi, cfg, {"HE_GRAPH_INSTANCING": "0"})
-        verdict = compare(a, b) if oka and okb else "NO IMAGE"
-        good = verdict == "identical" and 0 < da < db
+        oka, da, ta = shoot(deploy, a, keys, args.rhi, cfg, {"HE_GRAPH_INSTANCING": "1"})
+        okb, db, tb = shoot(deploy, b, keys, args.rhi, cfg, {"HE_GRAPH_INSTANCING": "0"})
+        verdict = compare(a, b, args.ground, args.tol) if oka and okb else "NO IMAGE"
+        mask = f"{mask_moved(a, b)[1]} px" if oka and okb else "-"
+        good = verdict.endswith("identical") and mask == "0 px" and 0 < da < db and ta == tb
         ok &= good
-        print(f"{n:4} {verdict:22} {da}/{db}   [{desc}]{'' if good else '  <-- FAILED'}")
+        print(f"{n:4} {verdict:22} {mask:12} {da}/{db}  {ta}/{tb}   [{desc}]{'' if good else '  <-- FAILED'}")
 
     # Controls: the wind really moves the plants (instanced path, forward).
-    wind = CASES["WF"][1]
+    wind = [plants if k.startswith("FOLIAGETEST=") else k for k in CASES["WF"][1]]
     ref = out / "WF_inst.bmp"
     if not ref.exists():
         shoot(deploy, ref, wind, args.rhi, cfg)

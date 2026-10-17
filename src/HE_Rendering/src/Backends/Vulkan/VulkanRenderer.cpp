@@ -3076,7 +3076,8 @@ void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
 VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
                                                       const std::string& vertBody,
                                                       const MaterialShaderVariant* precompiled,
-                                                      bool hdr, bool transparent, bool gbuffer)
+                                                      bool hdr, bool transparent, bool gbuffer,
+                                                      bool instanced)
 {
     // `gbuffer` (Thema 150): `frag` is the material's G-BUFFER tail
     // (resolveGBufferShaders), drawn into m_gbufferRP's four targets. Its own
@@ -3090,6 +3091,15 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         precompiled = nullptr; transparent = false; hdr = true;
         hash ^= 0x6742756666657231ULL;
     }
+    // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
+    // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
+    // batch in ONE call, the model per instance at locations 4..7 from the instance
+    // buffer at binding 1. Its own pipeline key; the fragment is the plain one, so
+    // the library's fragment caches keep the unsalted `libHash`. The pak bakes no
+    // instanced vertex: no twin, the caller loops (as on GL).
+    if (instanced && precompiled) return VK_NULL_HANDLE;
+    const uint64_t libHash = hash;
+    if (instanced) hash ^= 0x1D57A9CEDB0B1E55ULL;
     // A layer-blend graph samples heLandscapeWeights; on a device whose layout had to
     // leave binding 14 out (createMaterialResources) its pipeline would be invalid. No
     // pipeline then — drawDCVk draws it built-in PBR, the warm-up skips it. Checked
@@ -3169,10 +3179,14 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     }
     if (!built)
     {
-        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to SPIR-V.
-        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-            ? m_matShaderLib.standardVertex(Backend::SpirV)
-            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::SpirV);
+        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to
+        // SPIR-V — or their instanced twins.
+        const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+        const HE::MaterialShaderLibrary::Compiled& vc = instanced
+            ? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::SpirV)
+                                : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::SpirV))
+            : (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::SpirV)
+                                : m_matShaderLib.customVertex(vh, vertBody, Backend::SpirV));
         // Thema 117: the clustered twin while the cluster SSBOs exist and the A/B
         // guard is not set — the draw loop then writes them at set 0 bindings
         // 24..26 and DrawScene opens the gate (FillMaterialClusterParams). A
@@ -3182,7 +3196,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         const HE::MaterialShaderLibrary::Compiled* fcp = nullptr;
         if (!gbuffer && m_forwardClustered && m_clusterReady)
         {
-            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.fragmentClustered(hash, frag, Backend::SpirV);
+            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.fragmentClustered(libHash, frag, Backend::SpirV);
             if (cc.ok && !cc.spirv.empty())
                 fcp = &cc;
             else
@@ -3190,7 +3204,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
                                                     "using the 8-light window: ") + cc.log).c_str());
         }
         const HE::MaterialShaderLibrary::Compiled& fc =
-            fcp ? *fcp : m_matShaderLib.fragment(hash, frag, Backend::SpirV);
+            fcp ? *fcp : m_matShaderLib.fragment(libHash, frag, Backend::SpirV);
         if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
         {
             HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: A4 material shader cross-compile failed: ")
@@ -3213,17 +3227,28 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
 
     // Vertex input identical to the scene pipeline (binding 0 = interleaved pos/normal/uv,
-    // 32 B; the standard/custom vertex reads attribute locations 0/1/2).
-    VkVertexInputBindingDescription bind{ 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription attrs[3] = {
+    // 32 B; the standard/custom vertex reads attribute locations 0/1/2). The instanced
+    // twin adds the model at locations 4..7 from binding 1: the 128-byte {mvp, model}
+    // slots of m_instanceBuf, the model half at +64 (the twin forms heMvp = U.mvp *
+    // model itself, the mvp half stays unread).
+    static_assert(k_instStride == 2 * sizeof(glm::mat4), "the twin reads the model half of {mvp, model}");
+    const VkVertexInputBindingDescription binds[2] = {
+        { 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+        { 1, k_instStride,       VK_VERTEX_INPUT_RATE_INSTANCE },
+    };
+    const VkVertexInputAttributeDescription attrs[7] = {
         { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
         { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 },
         { 2, 0, VK_FORMAT_R32G32_SFLOAT,    24 },
+        { 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  64 },
+        { 5, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  80 },
+        { 6, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  96 },
+        { 7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 112 },
     };
     VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vi.vertexBindingDescriptionCount   = 1;
-    vi.pVertexBindingDescriptions      = &bind;
-    vi.vertexAttributeDescriptionCount = 3;
+    vi.vertexBindingDescriptionCount   = instanced ? 2u : 1u;
+    vi.pVertexBindingDescriptions      = binds;
+    vi.vertexAttributeDescriptionCount = instanced ? 7u : 3u;
     vi.pVertexAttributeDescriptions    = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
@@ -3292,9 +3317,15 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     VkPipeline pipe = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
     {
-        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material pipeline creation failed");
+        HE_LOG_ERROR(RHI, "%s", instanced
+            ? "VulkanRenderer: A4 instanced material pipeline creation failed, its batches draw per instance"
+            : "VulkanRenderer: A4 material pipeline creation failed");
         pipe = VK_NULL_HANDLE;
     }
+    else if (instanced)
+        HE_LOG_INFO(RHI, "%s", gbuffer
+            ? "VulkanRenderer: built an INSTANCED G-buffer material twin (one draw per batch)"
+            : "VulkanRenderer: built an INSTANCED material twin (one draw per batch)");
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
@@ -8266,6 +8297,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::Vulkan);
                     VkPipeline matPipe = VK_NULL_HANDLE;
+                    // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
+                    // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
+                    // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
+                    // build failed) sends it back to the per-instance loop.
+                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                                       && m_instanceBuf[m_currentFrame].mapped
+                                       && RenderSorter::graphInstancingEnabled();
+                    VkPipeline matInstPipe = VK_NULL_HANDLE;
                     if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
@@ -8281,10 +8320,20 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
+                        if (wantTwin)
+                            matInstPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                     true, false, /*gbuffer=*/true,
+                                                                     /*instanced=*/true);
                     }
                     else
+                    {
                         matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
                                                              matPre, hdr, matTransp);
+                        if (matPipe != VK_NULL_HANDLE && wantTwin)
+                            matInstPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
+                                                                     matPre, hdr, false,
+                                                                     /*gbuffer=*/false, /*instanced=*/true);
+                    }
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
                     // A full ring is a silent optics change (built-in look, or a skipped
                     // instance tail) — say so once per session instead of never.
@@ -8361,15 +8410,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &voff);
                         vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
 
-                        auto drawMatInstance = [&](const glm::mat4& model) {
-                            if (cursor >= k_matMaxDraws) { noteRingFull(); return; }
+                        // One U/HeParams ring slot and its descriptor set, bound with
+                        // `pipe`: the per-draw half of every material draw. false =
+                        // the ring is full (noted once) or the pool ran dry.
+                        auto bindMatSlot = [&](VkPipeline pipe, const glm::mat4& mvp, const glm::mat4& model) -> bool {
+                            if (cursor >= k_matMaxDraws) { noteRingFull(); return false; }
                             const uint32_t i = cursor++;
 
                             // std140 U block (176 B) into ring slot i (256-B stride).
                             struct UBlock { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
                             static_assert(sizeof(UBlock) == 176, "U block must be std140 176 B");
                             UBlock ub;
-                            ub.mvp   = viewProj * model;
+                            ub.mvp   = mvp;
                             ub.model = model;
                             // Per-instance tint (RenderObject::instanceTint), as Metal and GL
                             // multiply it in: a graph reads it through Vertex Color (the editor
@@ -8394,7 +8446,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             dsai.descriptorSetCount = 1;
                             dsai.pSetLayouts        = &m_matSetLayout;
                             VkDescriptorSet set = VK_NULL_HANDLE;
-                            if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return;
+                            if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return false;
 
                             const VkDeviceSize slot = static_cast<VkDeviceSize>(i) * k_matSlotStride;
                             VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0,
@@ -8558,16 +8610,44 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             }
                             vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
 
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                     m_matPipelineLayout, 0, 1, &set, 0, nullptr);
+                            return true;
+                        };
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            if (!bindMatSlot(matPipe, viewProj * model, model)) return;
                             vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
                             ++m_statDraws;
                             m_statTris += range.count / 3;
                         };
-                        // Instanced graph materials: draw each instance via the material path
-                        // (this increment does NOT combine graph materials with A3 instancing).
-                        if (!dc.instanceTransforms.empty())
+                        const uint32_t instCount = static_cast<uint32_t>(dc.instanceTransforms.size());
+                        if (matInstPipe != VK_NULL_HANDLE
+                            && static_cast<uint64_t>(instCursor) + instCount <= k_maxInstances)
+                        {
+                            // The batch: every model into the model half of its slot in the
+                            // frame's instance buffer, ONE U slot + descriptor set with the
+                            // batch-constant half (U.mvp = viewProj, the twin multiplies the
+                            // model in), one instanced draw.
+                            if (bindMatSlot(matInstPipe, viewProj, glm::mat4(1.0f)))
+                            {
+                                InstanceBuf& ib = m_instanceBuf[m_currentFrame];
+                                auto* dst = static_cast<uint8_t*>(ib.mapped)
+                                          + static_cast<size_t>(instCursor) * k_instStride;
+                                for (uint32_t k = 0; k < instCount; ++k)
+                                    std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
+                                                &dc.instanceTransforms[k], sizeof(glm::mat4));
+                                const VkDeviceSize instOff = static_cast<VkDeviceSize>(instCursor) * k_instStride;
+                                vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &instOff);
+                                vkCmdDrawIndexed(cmd, range.count, instCount, range.start, 0, 0);
+                                ++m_statDraws;
+                                m_statTris += (range.count / 3) * instCount;
+                                instCursor += instCount;
+                            }
+                        }
+                        else if (!dc.instanceTransforms.empty())
+                            // No twin (or the instance buffer is full): each instance through
+                            // the material path, one ring slot apiece.
                             for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
                         else
                             drawMatInstance(dc.transform);

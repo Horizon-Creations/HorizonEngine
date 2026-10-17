@@ -3656,7 +3656,8 @@ struct D3D12RendererImpl
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool hdr, bool transparent, bool gbuffer = false);
+                                               bool hdr, bool transparent, bool gbuffer = false,
+                                               bool instanced = false);
 
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
@@ -9021,7 +9022,8 @@ void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const gl
 ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                               const std::string& vertBody,
                                                               const MaterialShaderVariant* precompiled,
-                                                              bool hdr, bool transparent, bool gbuffer)
+                                                              bool hdr, bool transparent, bool gbuffer,
+                                                              bool instanced)
 {
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (RGBA8) /
     // HDR (RGBA16F) / opaque / transparent PSOs never collide (same constants as Vulkan A4).
@@ -9032,6 +9034,17 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     // and never the clustered variant: the pak bakes no G-buffer HLSL, and its forward
     // variant would write LIT colour into GB0 — plausible-looking and wrong.
     if (gbuffer) { precompiled = nullptr; transparent = false; hash ^= 0x6742756666657231ULL; }
+    // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
+    // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
+    // batch in ONE call, the model per instance at TEXCOORD4..7 from the instance
+    // ring bound as vertex buffer 1. Its own key in BOTH caches: the bytecode cache
+    // is keyed by hash alone, and the PLAIN vertex behind the instanced input layout
+    // builds without a complaint and stacks every instance on one spot. The fragment
+    // is the plain one, so the library's fragment caches keep the unsalted `libHash`.
+    // The pak bakes no instanced vertex: no twin, the caller loops (as on GL).
+    if (instanced && precompiled) return nullptr;
+    const uint64_t libHash = hash;
+    if (instanced) hash ^= 0x1D57A9CEDB0B1E55ULL;
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
                               ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
     if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
@@ -9113,10 +9126,14 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         }
         if (!built)
         {
-            // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
-            const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-                ? m_matShaderLib.standardVertex(Backend::HLSL)
-                : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+            // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to
+            // HLSL — or their instanced twins.
+            const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+            const HE::MaterialShaderLibrary::Compiled& vc = instanced
+                ? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::HLSL)
+                                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::HLSL))
+                : (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::HLSL)
+                                    : m_matShaderLib.customVertex(vh, vertBody, Backend::HLSL));
             // Clustered heLitP first (Thema 117): point/spot lights from the
             // t24..t26 cluster lists instead of the 8-light window. A variant
             // that does not cross-compile or that FXC rejects falls back to the
@@ -9124,7 +9141,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             if (!gbuffer && matClustered() && vc.ok && !vc.source.empty())
             {
                 const HE::MaterialShaderLibrary::Compiled& cc =
-                    m_matShaderLib.fragmentClustered(hash, frag, Backend::HLSL);
+                    m_matShaderLib.fragmentClustered(libHash, frag, Backend::HLSL);
                 if (cc.ok && !cc.source.empty())
                     built = compilePair(vc.source, cc.source, "cross-compiled, clustered");
                 if (!built)
@@ -9133,7 +9150,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             }
             if (!built)
             {
-                const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+                const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(libHash, frag, Backend::HLSL);
                 if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
                 {
                     HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
@@ -9158,17 +9175,26 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     // (no remap_vertex_attributes is registered in ShaderCompiler.cpp), so the material
     // input layout uses TEXCOORD0/1/2 — NOT the scene's POSITION/NORMAL/TEXCOORD. Same
     // interleaved 32-B pos/normal/uv vertex buffer the scene meshes use.
+    // The instanced twin adds the model (locations 4..7 = TEXCOORD4..7) from vertex
+    // buffer 1: the 128-byte {mvp, model} slots of perInstanceRing, the model half at
+    // +64 (the twin forms heMvp = U.mvp * model itself, the mvp half stays unread).
+    static_assert(k_instStride == 2 * sizeof(glm::mat4), "the twin reads the model half of {mvp, model}");
+    constexpr auto kInst = D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
     const D3D12_INPUT_ELEMENT_DESC layout[] = {
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  64, kInst, 1 },
+        { "TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  80, kInst, 1 },
+        { "TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  96, kInst, 1 },
+        { "TEXCOORD", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 112, kInst, 1 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature        = m_matRootSig.Get();
     pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
     pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
-    pd.InputLayout           = { layout, 3 };
+    pd.InputLayout           = { layout, instanced ? 7u : 3u };
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets      = 1;
     pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -9211,10 +9237,16 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     ComPtr<ID3D12PipelineState> pso12;
     if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12))))
     {
-        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material PSO creation failed");
+        HE_LOG_ERROR(RHI, "%s", instanced
+            ? "D3D12Renderer: A4 instanced material PSO creation failed, its batches draw per instance"
+            : "D3D12Renderer: A4 material PSO creation failed");
         m_materialPSOs.emplace(key, nullptr); // cache the failure → no per-draw retry
         return nullptr;
     }
+    if (instanced)
+        HE_LOG_INFO(RHI, "%s", gbuffer
+            ? "D3D12Renderer: built an INSTANCED G-buffer material twin (one draw per batch)"
+            : "D3D12Renderer: built an INSTANCED material twin (one draw per batch)");
     return m_materialPSOs.emplace(key, pso12).first->second.Get();
 }
 
@@ -10986,6 +11018,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D12);
                     ID3D12PipelineState* matPso = nullptr;
+                    // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
+                    // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
+                    // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
+                    // build failed) sends it back to the per-instance loop.
+                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                                       && instRingPtr && RenderSorter::graphInstancingEnabled();
+                    ID3D12PipelineState* matInstPso = nullptr;
                     if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
@@ -11001,10 +11040,20 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
+                        if (wantTwin)
+                            matInstPso = p.GetOrBuildMaterialPSO(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                 p.usingHDR, false, /*gbuffer=*/true,
+                                                                 /*instanced=*/true);
                     }
                     else
+                    {
                         matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
                                                          matPre, p.usingHDR, matTransp);
+                        if (matPso && wantTwin)
+                            matInstPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
+                                                                 matPre, p.usingHDR, false,
+                                                                 /*gbuffer=*/false, /*instanced=*/true);
+                    }
                     // A full ring is a silent optics change (built-in look, or a skipped
                     // instance tail) — say so once per session instead of never.
                     auto noteRingFull = [&]() {
@@ -11138,15 +11187,17 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         const D3D12_GPU_VIRTUAL_ADDRESS objBase = p.m_matObjRing[p.frameIndex]->GetGPUVirtualAddress();
                         const D3D12_GPU_VIRTUAL_ADDRESS parBase = p.m_matParamRing[p.frameIndex]->GetGPUVirtualAddress();
 
-                        auto drawMatInstance = [&](const glm::mat4& model) {
+                        // One U/HeParams ring slot, bound: the per-draw half of every
+                        // material draw. false = the ring is full (noted once).
+                        auto bindMatSlot = [&](const glm::mat4& mvp, const glm::mat4& model) -> bool {
                             UINT& cur = p.m_matDrawCursor[p.frameIndex];
-                            if (cur >= D3D12RendererImpl::k_matMaxDraws) { noteRingFull(); return; }
+                            if (cur >= D3D12RendererImpl::k_matMaxDraws) { noteRingFull(); return false; }
                             const UINT i = cur++;
                             // std140 U block (176 B) into obj-ring slot i (256-B stride).
                             struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
                             static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
                             MatU u;
-                            u.mvp   = viewProj * model;
+                            u.mvp   = mvp;
                             u.model = model;
                             // Per-instance tint (RenderObject::instanceTint), as Metal and GL
                             // multiply it in: a graph reads it through Vertex Color (the editor
@@ -11170,12 +11221,39 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             cl->SetGraphicsRootConstantBufferView(1, objVA); // b1 U (VS)
                             cl->SetGraphicsRootConstantBufferView(2, parVA); // b3 HeParams (FS)
                             cl->SetGraphicsRootConstantBufferView(4, parVA); // b9 HeParams (WPO VS)
+                            return true;
+                        };
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            if (!bindMatSlot(viewProj * model, model)) return;
                             cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                             ++p.statDraws; p.statTris += range.count / 3;
                         };
-                        // Instanced graph materials draw each instance via the material path
-                        // (this increment does NOT combine graph materials with A3 instancing).
-                        if (!dc.instanceTransforms.empty())
+                        const UINT instCount = static_cast<UINT>(dc.instanceTransforms.size());
+                        if (matInstPso && static_cast<UINT64>(instCursor) + instCount <= k_maxInstances)
+                        {
+                            // The batch: every model into the model half of its ring slot,
+                            // ONE U slot with the batch-constant half (U.mvp = viewProj, the
+                            // twin multiplies the model in), one instanced draw.
+                            if (bindMatSlot(viewProj, glm::mat4(1.0f)))
+                            {
+                                uint8_t* dst = instRingPtr + static_cast<size_t>(instCursor) * k_instStride;
+                                for (UINT k = 0; k < instCount; ++k)
+                                    std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
+                                                &dc.instanceTransforms[k], sizeof(glm::mat4));
+                                D3D12_VERTEX_BUFFER_VIEW ivb{};
+                                ivb.BufferLocation = instRingBase + static_cast<UINT64>(instCursor) * k_instStride;
+                                ivb.SizeInBytes    = instCount * k_instStride;
+                                ivb.StrideInBytes  = k_instStride;
+                                cl->IASetVertexBuffers(1, 1, &ivb);
+                                cl->SetPipelineState(matInstPso);
+                                cl->DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);
+                                ++p.statDraws; p.statTris += (range.count / 3) * instCount;
+                                instCursor += instCount;
+                            }
+                        }
+                        else if (!dc.instanceTransforms.empty())
+                            // No twin (or the instance ring is full): each instance through
+                            // the material path, one ring slot apiece.
                             for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
                         else
                             drawMatInstance(dc.transform);

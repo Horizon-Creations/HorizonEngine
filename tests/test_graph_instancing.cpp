@@ -11,7 +11,9 @@
 //   * GL links it: the blocks it shares with the fragment are declared identically;
 //   * the plain forms are untouched (the twin is opt-in, own cache slots);
 //   * the GL and Metal draw sites gate it the way the plan says (source guards, since a
-//     GL context or a Metal device is not there on every CI machine).
+//     GL context or a Metal device is not there on every CI machine);
+//   * since step 4 (plan 2f) the D3D11, D3D12 and Vulkan draw sites too, with the twin's
+//     own cache key salted before the first cache lookup.
 #include "doctest.h"
 #include <algorithm>
 #include <cstdlib>
@@ -266,4 +268,57 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 	// Both loops hand the batch to drawInstance, which binds buffer 5 and draws instanceCount.
 	CHECK(countOf(mtl, "drawInstance(dc.instanceTransforms.front(), cMaterialPipeline") == 2);
 	CHECK(countOf(mtl, "instanceCount:instCount];") == 2);
+}
+
+TEST_CASE("D3D11, D3D12 and Vulkan draw a graph-material batch once, with the material's instanced twin")
+{
+	// Thema 182 step 4 (plan 2f): the twin wired on the Windows backends. Read as source like
+	// the GL/Metal guard above (no D3D device on the macOS/Linux runners); the run on real
+	// hardware is scripts/perf/foliage_graph_ab.py --rhi D3D11|D3D12|Vulkan.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - graph instancing guard skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	struct Site { const char* name; fs::path file; const char* salt; const char* firstCacheUse;
+	              const char* lastInstElement; const char* batchDraw; };
+	const Site sites[] = {
+		{ "D3D11", dir / "D3D11" / "D3D11Renderer.cpp",
+		  "^ (instanced ? 0x1D57A9CEDB0B1E55ULL : 0ULL);", "m_materialShaders.find(key)",
+		  "{ \"TEXCOORD\", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 }",
+		  "DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);" },
+		{ "D3D12", dir / "D3D12" / "D3D12Renderer.cpp",
+		  "if (instanced) hash ^= 0x1D57A9CEDB0B1E55ULL;", "m_matBytecode.find(hash)",
+		  "{ \"TEXCOORD\", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 112, kInst, 1 }",
+		  "DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);" },
+		{ "Vulkan", dir / "Vulkan" / "VulkanRenderer.cpp",
+		  "if (instanced) hash ^= 0x1D57A9CEDB0B1E55ULL;", "m_materialPipelines.find(key)",
+		  "{ 7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 112 }",
+		  "vkCmdDrawIndexed(cmd, range.count, instCount, range.start, 0, 0);" },
+	};
+	for (const Site& s : sites)
+	{
+		INFO(s.name);
+		const std::string src = readFile(s.file);
+		REQUIRE(!src.empty());
+		// Forward and G-buffer pass: one twin build each, behind the switch.
+		CHECK(countOf(src, "/*instanced=*/true)") == 2);
+		CHECK(countOf(src, "RenderSorter::graphInstancingEnabled()") == 1);
+		// The pak bakes no instanced vertex: a precompiled material gets no twin.
+		CHECK(src.find("if (instanced && precompiled) return") != std::string::npos);
+		// The twin has its own cache key, salted BEFORE the first cache lookup: the plain
+		// vertex behind the instanced input layout builds silently and stacks every plant
+		// on one spot (the bytecode/shader caches are keyed by the shader hash alone).
+		const size_t salt = src.find(s.salt), use = src.find(s.firstCacheUse);
+		CHECK(salt != std::string::npos);
+		CHECK(use != std::string::npos);
+		CHECK(salt < use);
+		// The model at locations 4..7, stepped per instance, and ONE draw for the batch.
+		CHECK(src.find(s.lastInstElement) != std::string::npos);
+		CHECK(countOf(src, s.batchDraw) == 1);
+		// The per-instance material loop stays as the fallback.
+		CHECK(src.find("drawMatInstance(t)") != std::string::npos);
+	}
 }
