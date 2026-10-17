@@ -205,7 +205,9 @@ built: caching layers *across* frames. That needs a dirty signal for "no caster 
 (cascades, local point and spot, day-night, decals, foliage, odd render scale). All 42
 are md5-identical before vs after, and two after runs were identical (noise floor 0).
 All 42 md5s differ from each other. `ls_point_day_fwd` and `shadinst_fwd` were looked at;
-the cascade and local shadows are in the picture.
+the cascade and local shadows are in the picture. OpenGL (same env, `RHI=OpenGL`):
+`ls_point_day_fwd`, `ls_spot_fwd`, `shadinst_fwd` are md5-identical before vs after, and
+their md5s differ from the Metal shots. The point light frame was looked at.
 
 ## Handoff (step 1)
 
@@ -329,11 +331,12 @@ the cascade and local shadows are in the picture.
   `HOME`.
   HorizonEditor builds (Metal + GL). Vulkan `clang -fsyntax-only` against MoltenVK: rc 0;
   the negative control without MoltenVK fails at `vulkan/vulkan.h`, and a typo at
-  `cullAndSortCamera` fails at the three sites. Metal pixel A/B: 42/42 md5-identical.
-  Bench and real-frame figures above.
-- **Not verified:** D3D11 and D3D12 do not compile on the Mac; CI decides. The change
-  there is one call plus one member each, the same shape as GL. GL and Vulkan were not
-  rendered (no display / no device). `test_material_graph` was not run.
+  `cullAndSortCamera` fails at the three sites. Pixel A/B: Metal 42/42 and OpenGL 3/3
+  md5-identical. Bench and real-frame figures above. Editor, game and scene code do
+  no cull or sort of their own (grep), so the source pin covers every caller.
+- **Not verified:** D3D11 and D3D12 do not compile on the Mac; CI run 39080059803
+  decides. The change there is one call plus one member each, the same shape as GL.
+  Vulkan was not rendered (no device). `test_material_graph` was not run.
 - **Decisions taken:**
   - The owner is a new frontend class, not `RenderGraph`. RenderGraph is a pass list
     that only D3D11/D3D12 drive, and it does not see the Metal/Vulkan/GL pass functions.
