@@ -6648,7 +6648,7 @@ struct D3D12RendererImpl
             // t3). The MRT reflection pre-pass keeps the loop: its VS is the
             // library's cross-compiled GLSL, whose instanced variant reads the
             // model as vertex attributes, not from a structured buffer.
-            const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+            const HE::Mat4Range& inst = dc->instanceTransforms;
             if (!reflMrt)
             {
                 cl->IASetVertexBuffers(0, 1, &m.vbv);
@@ -7858,7 +7858,7 @@ struct D3D12RendererImpl
                 };
                 // A GeometryPass batch is one instanced draw with the loop's
                 // {mvp, model} per instance (root parameter 1 of giGBufRS = t3).
-                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                const HE::Mat4Range& inst = dc->instanceTransforms;
                 if (drawDepthInstanced(cl, fi, giGBufPSOInstanced.Get(), giGBufPSO.Get(), 1,
                         range.count, range.start, static_cast<UINT>(inst.size()),
                         [&](UINT k, glm::mat4* pair) {

@@ -2567,7 +2567,7 @@ struct D3D11RendererImpl
                 // keeps the loop: its VS is the library's cross-compiled GLSL,
                 // whose instanced variant reads the model as vertex attributes,
                 // not from a structured buffer.
-                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                const HE::Mat4Range& inst = dc->instanceTransforms;
                 if (!reflMrt && drawDepthInstanced(ctx, ssaoPosVSInstanced.Get(), ssaoPosVS.Get(),
                         range.count, range.start, static_cast<UINT>(inst.size()),
                         [&](UINT k, glm::mat4* pair) {
@@ -3587,7 +3587,7 @@ struct D3D11RendererImpl
                 };
                 // A GeometryPass batch is one instanced draw with the loop's
                 // {mvp, model} per instance (same bytes as PerObjectCB's head).
-                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                const HE::Mat4Range& inst = dc->instanceTransforms;
                 if (drawDepthInstanced(ctx, giGBufVSInstanced.Get(), giGBufVS.Get(),
                         range.count, range.start, static_cast<UINT>(inst.size()),
                         [&](UINT k, glm::mat4* pair) {

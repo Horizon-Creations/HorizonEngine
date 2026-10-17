@@ -5,10 +5,15 @@
 #include <HorizonRendering/RenderTarget.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/MaterialScalars.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -895,4 +900,243 @@ TEST_CASE("batchDepthCasters ignores out-of-range indices and clears stale outpu
 	REQUIRE(out.batches.size() == 1);
 	CHECK(out.batches[0].count == 1);
 	CHECK(out.transforms.size() == 1);
+}
+
+// ─── Instance + bone matrices as windows into one arena (REN-901/902/1002) ──
+// DrawCall::instanceTransforms / SkinnedDrawCall::boneMatrices name a slice of
+// the CommandBuffer's flat matrix arena. GeometryPass unfolds a run once; the
+// slots of a multi-section mesh and the chunks of a split run share that copy.
+
+namespace {
+	// `n` objects of one mesh + material at x = 0..n-1, every one carrying `slots`.
+	RenderWorld sameMeshRun(size_t n, const std::vector<RenderSection>& slots)
+	{
+		RenderWorld world;
+		for (size_t k = 0; k < n; ++k)
+		{
+			RenderObject o = makeObj(1, { float(k), 0.0f, 0.0f });
+			o.sections = slots;
+			world.objects.push_back(o);
+		}
+		return world;
+	}
+	std::vector<uint32_t> iota(size_t n)
+	{
+		std::vector<uint32_t> v(n);
+		for (size_t k = 0; k < n; ++k) v[k] = static_cast<uint32_t>(k);
+		return v;
+	}
+}
+
+TEST_CASE("GeometryPass: the slots of a batched multi-section run share one instance copy")
+{
+	const RenderWorld world = sameMeshRun(3, twoSlots());
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, iota(3), cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	const DrawCall& a = cmds.drawCalls()[0];
+	const DrawCall& b = cmds.drawCalls()[1];
+	REQUIRE(a.instanceTransforms.size() == 3);
+	REQUIRE(b.instanceTransforms.size() == 3);
+	CHECK(a.instanceTransforms.data() == b.instanceTransforms.data()); // one copy, two windows
+	CHECK(cmds.matrixArena().size() == 3);
+	for (size_t k = 0; k < 3; ++k) CHECK(b.instanceTransforms[k] == world.objects[k].transform);
+}
+
+TEST_CASE("GeometryPass: the chunks of a split run are slices of one unfolded copy")
+{
+	const size_t cap   = HE::kMaxInstancesPerDraw;
+	const size_t total = cap + 5;
+	const RenderWorld world = sameMeshRun(total, twoSlots());
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, iota(total), cmds);
+
+	// Two chunks x two slots, in chunk order.
+	REQUIRE(cmds.drawCalls().size() == 4);
+	CHECK(cmds.matrixArena().size() == total);
+	const DrawCall& c0 = cmds.drawCalls()[0];
+	const DrawCall& c1 = cmds.drawCalls()[2];
+	REQUIRE(c0.instanceTransforms.size() == cap);
+	REQUIRE(c1.instanceTransforms.size() == 5);
+	CHECK(c0.instanceTransforms.data() == cmds.drawCalls()[1].instanceTransforms.data());
+	CHECK(c1.instanceTransforms.data() == c0.instanceTransforms.data() + cap);
+	CHECK(c1.transform == world.objects[cap].transform);
+	CHECK(c1.instanceTransforms[4] == world.objects[total - 1].transform);
+}
+
+TEST_CASE("CommandBuffer: windows recorded early still read right after the arena grew")
+{
+	// 300 runs of 3: the arena reallocates many times while the pass records.
+	RenderWorld world;
+	for (uint32_t m = 0; m < 300; ++m)
+		for (uint32_t k = 0; k < 3; ++k)
+			world.objects.push_back(makeObj(m + 1, { float(k), float(m), 0.0f }));
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, iota(world.objects.size()), cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 300);
+	for (size_t d = 0; d < 300; ++d)
+	{
+		const DrawCall& dc = cmds.drawCalls()[d];
+		REQUIRE(dc.instanceTransforms.size() == 3);
+		CHECK(dc.instanceTransforms[0] == world.objects[d * 3].transform);
+		CHECK(dc.instanceTransforms[2] == world.objects[d * 3 + 2].transform);
+	}
+}
+
+TEST_CASE("CommandBuffer: a copy or a move reads its own arena, reset keeps the capacity")
+{
+	const RenderWorld world = sameMeshRun(4, {});
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, iota(4), cmds);
+	REQUIRE(cmds.drawCalls().size() == 1);
+
+	CommandBuffer copy = cmds;
+	CHECK(copy.drawCalls()[0].instanceTransforms.data() == copy.matrixArena().data());
+	CommandBuffer assigned;
+	assigned = cmds;
+	CHECK(assigned.drawCalls()[0].instanceTransforms.data() == assigned.matrixArena().data());
+
+	const size_t capacity = cmds.matrixArena().capacity();
+	cmds.reset();
+	CHECK(cmds.matrixArena().empty());
+	CHECK(cmds.matrixArena().capacity() == capacity);
+	CHECK(copy.drawCalls()[0].instanceTransforms[3] == world.objects[3].transform);
+	CHECK(assigned.drawCalls()[0].instanceTransforms[3] == world.objects[3].transform);
+
+	CommandBuffer moved = std::move(copy);
+	REQUIRE(moved.drawCalls().size() == 1);
+	CHECK(moved.drawCalls()[0].instanceTransforms.data() == moved.matrixArena().data());
+	CHECK(moved.drawCalls()[0].instanceTransforms[1] == world.objects[1].transform);
+	CommandBuffer moveAssigned;
+	moveAssigned = std::move(moved);
+	CHECK(moveAssigned.drawCalls()[0].instanceTransforms[2] == world.objects[2].transform);
+}
+
+TEST_CASE("CommandBuffer: a draw recorded from another buffer gets its own matrices")
+{
+	const RenderWorld world = sameMeshRun(2, {});
+	CommandBuffer src;
+	GeometryPass{}.execute(world, iota(2), src);
+	REQUIRE(src.drawCalls().size() == 1);
+
+	CommandBuffer dst;
+	dst.recordDraw(src.drawCalls()[0]);
+	// The source's next frame overwrites its arena in place.
+	RenderWorld next = sameMeshRun(2, {});
+	for (RenderObject& o : next.objects) o.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0, 50, 0));
+	src.reset();
+	GeometryPass{}.execute(next, iota(2), src);
+	REQUIRE(src.matrixArena().size() == 2);
+	CHECK(src.matrixArena()[1] == next.objects[1].transform);
+	REQUIRE(dst.drawCalls().size() == 1);
+	CHECK(dst.drawCalls()[0].instanceTransforms.data() == dst.matrixArena().data());
+	CHECK(dst.drawCalls()[0].instanceTransforms[1] == world.objects[1].transform);
+}
+
+TEST_CASE("CommandBuffer: storeMatrices may re-store a window onto its own arena")
+{
+	CommandBuffer cmds;
+	std::vector<glm::mat4> m;
+	for (int k = 0; k < 5; ++k) m.push_back(glm::mat4(float(k + 1)));
+	const HE::Mat4Range a = cmds.storeMatrices(m);
+	// Re-storing [1, 4) grows the arena past its capacity mid-copy.
+	cmds.matrixArena().shrink_to_fit();
+	const HE::Mat4Range sub = a.slice(1, 3);
+	const HE::Mat4Range b   = cmds.storeMatrices(sub.data(), sub.size());
+	REQUIRE(b.size() == 3);
+	CHECK(b[0] == glm::mat4(2.0f));
+	CHECK(b[2] == glm::mat4(4.0f));
+	CHECK(a[4] == glm::mat4(5.0f));
+	CHECK(a.slice(4, 10).size() == 1);
+	CHECK(a.slice(5, 1).empty());
+	CHECK(cmds.storeMatrices(nullptr, 0).empty());
+}
+
+TEST_CASE("GeometryPass: the slots of a skinned mesh share one copy of the pose")
+{
+	RenderWorld world;
+	SkinnedRenderObject so;
+	so.meshAssetId  = HE::UUID::generate();
+	so.boneMatrices = { glm::mat4(1.0f), glm::mat4(2.0f) };
+	so.sections     = twoSlots();
+	world.skinnedObjects.push_back(so);
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, {}, cmds);
+
+	REQUIRE(cmds.skinnedDrawCalls().size() == 2);
+	CHECK(cmds.skinnedDrawCalls()[0].boneMatrices.data() == cmds.skinnedDrawCalls()[1].boneMatrices.data());
+	CHECK(cmds.matrixArena().size() == 2);
+	CHECK(cmds.skinnedDrawCalls()[1].boneMatrices[1] == glm::mat4(2.0f));
+}
+
+// ─── GeometryPass cost (REN-901/902/1002) ───────────────────────────────────
+// Off unless HE_GEOMPASS_BENCH is set: times GeometryPass::execute on the shapes
+// the audit named (a split foliage run, many multi-section runs, skinned slots)
+// into one CommandBuffer reused across frames, the way the backends hold it.
+// Prints the median per frame; the figures for the step record come from here.
+TEST_CASE("GeometryPass bench (HE_GEOMPASS_BENCH)")
+{
+	if (!std::getenv("HE_GEOMPASS_BENCH")) return;
+	std::vector<RenderSection> slots = twoSlots();
+	{
+		RenderSection c; c.indexOffset = 60; c.indexCount = 12; c.materialAssetId.hi = 33; c.materialAssetId.lo = 3;
+		slots.push_back(c);
+	}
+	auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+	auto timeIt = [&](const char* name, const RenderWorld& world, const std::vector<uint32_t>& sorted)
+	{
+		CommandBuffer cmds;
+		std::vector<double> ms;
+		for (int it = 0; it < 31; ++it)
+		{
+			const auto t0 = std::chrono::steady_clock::now();
+			cmds.reset();
+			GeometryPass{}.execute(world, sorted, cmds);
+			const auto t1 = std::chrono::steady_clock::now();
+			ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+		}
+		std::printf("[geompass-bench] %-34s draws=%zu skinned=%zu median=%.3f ms\n", name,
+		            cmds.drawCalls().size(), cmds.skinnedDrawCalls().size(), median(ms));
+	};
+
+	{   // 140k plants of one mesh, three slots: the split path (3 chunks x 3 slots).
+		RenderWorld world;
+		std::vector<uint32_t> sorted;
+		for (uint32_t k = 0; k < 140000; ++k)
+		{
+			RenderObject o = makeObj(1, { float(k % 400), 0.0f, float(k / 400) });
+			o.sections = slots;
+			world.objects.push_back(o);
+			sorted.push_back(k);
+		}
+		timeIt("split run 140k x 3 slots", world, sorted);
+	}
+	{   // 200 meshes x 250 instances, three slots each.
+		RenderWorld world;
+		std::vector<uint32_t> sorted;
+		for (uint32_t m = 0; m < 200; ++m)
+			for (uint32_t k = 0; k < 250; ++k)
+			{
+				RenderObject o = makeObj(m + 1, { float(k), float(m), 0.0f });
+				o.sections = slots;
+				sorted.push_back(static_cast<uint32_t>(world.objects.size()));
+				world.objects.push_back(o);
+			}
+		timeIt("200 runs x 250 inst x 3 slots", world, sorted);
+	}
+	{   // 500 characters, 64 bones, two slots.
+		RenderWorld world;
+		for (uint32_t k = 0; k < 500; ++k)
+		{
+			SkinnedRenderObject so;
+			so.meshAssetId.hi = k + 1;
+			so.entityId       = k;
+			so.boneMatrices.assign(64, glm::mat4(1.0f));
+			so.sections       = twoSlots();
+			world.skinnedObjects.push_back(so);
+		}
+		timeIt("500 skinned x 64 bones x 2 slots", world, {});
+	}
 }

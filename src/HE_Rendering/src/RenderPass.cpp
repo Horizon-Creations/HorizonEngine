@@ -78,15 +78,16 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.paramOverride   = first.paramOverride; // per-entity HeParams block (empty = none)
 		dc.weightmapTextureId = first.weightmapTextureId; // landscape layer weights
 
-		// One draw (per section) over the instance list `d` already carries.
-		auto recordRun = [&](const DrawCall& d)
+		// One draw (per section) over the instance window `d` already carries. The
+		// window is shared, so a slot's copy of `d` copies no matrices.
+		auto recordRun = [&](DrawCall&& d)
 		{
 			if (first.sections.empty())
 			{
 				// One-section mesh (and every primitive, terrain chunk, override):
 				// exactly the draw this pass always recorded — whole index buffer,
 				// one material, one DrawCall per run.
-				outCmds.recordDraw(d);
+				outCmds.recordDraw(std::move(d));
 				return;
 			}
 			// Multi-section mesh: one DrawCall per material slot over the same
@@ -114,7 +115,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 				// (RenderExtractor merges it for that one); a slot overridden with
 				// another material draws that one plain.
 				if (sec.materialAssetId != d.materialAssetId) sd.paramOverride.clear();
-				outCmds.recordDraw(sd);
+				outCmds.recordDraw(std::move(sd));
 			}
 		};
 
@@ -129,25 +130,30 @@ void GeometryPass::execute(const RenderWorld&           world,
 		{
 			// A single instance stays a plain draw: instanceTransforms empty, the
 			// transform in dc.transform. Backends keep their non-instanced program for it.
-			recordRun(dc);
+			recordRun(std::move(dc));
+			i = j;
+			continue;
 		}
-		else if (total <= HE::kMaxInstancesPerDraw)
+
+		// Unfold the run ONCE, straight into the command buffer's matrix arena; every
+		// section and every chunk below is a window onto that one copy.
+		std::vector<glm::mat4>& arena = outCmds.matrixArena();
+		const size_t base = arena.size();
+		for (size_t k = i; k < j; ++k)
+			world.appendInstances(world.objects[sortedIndices[k]], arena);
+		const HE::Mat4Range all = outCmds.matrixRange(base, total);
+
+		if (total <= HE::kMaxInstancesPerDraw)
 		{
-			dc.instanceCount = static_cast<uint32_t>(total);
-			dc.instanceTransforms.reserve(total);
-			for (size_t k = i; k < j; ++k)
-				world.appendInstances(world.objects[sortedIndices[k]], dc.instanceTransforms);
-			recordRun(dc);
+			dc.instanceCount      = static_cast<uint32_t>(total);
+			dc.instanceTransforms = all;
+			recordRun(std::move(dc));
 		}
 		else
 		{
 			// More than one instanced draw may carry: cut the run into draws of at most
 			// kMaxInstancesPerDraw. Without this every backend quietly fell back to one
 			// draw per instance above its ring size (140k plants = 140k draws).
-			std::vector<glm::mat4> all;
-			all.reserve(total);
-			for (size_t k = i; k < j; ++k)
-				world.appendInstances(world.objects[sortedIndices[k]], all);
 			for (size_t from = 0; from < total; from += HE::kMaxInstancesPerDraw)
 			{
 				const size_t to = std::min<size_t>(total, from + HE::kMaxInstancesPerDraw);
@@ -161,11 +167,10 @@ void GeometryPass::execute(const RenderWorld&           world,
 				}
 				else
 				{
-					chunk.instanceCount = static_cast<uint32_t>(to - from);
-					chunk.instanceTransforms.assign(all.begin() + static_cast<std::ptrdiff_t>(from),
-					                                all.begin() + static_cast<std::ptrdiff_t>(to));
+					chunk.instanceCount      = static_cast<uint32_t>(to - from);
+					chunk.instanceTransforms = all.slice(from, to - from);
 				}
-				recordRun(chunk);
+				recordRun(std::move(chunk));
 			}
 		}
 		i = j;
@@ -191,11 +196,12 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.baseColor     = obj.baseColor;
 		dc.metallic      = obj.metallic;
 		dc.roughness     = obj.roughness;
-		dc.boneMatrices  = obj.boneMatrices;
+		// One copy of the pose into the arena; every slot below shares it.
+		dc.boneMatrices  = outCmds.storeMatrices(obj.boneMatrices);
 		dc.paramOverride = obj.paramOverride; // per-entity HeParams block (empty = none)
 		if (obj.sections.empty())
 		{
-			outCmds.recordSkinnedDraw(dc);
+			outCmds.recordSkinnedDraw(std::move(dc));
 			continue;
 		}
 		// Multi-section skinned mesh: the same one-draw-per-slot expansion as
@@ -215,7 +221,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 			sd.metallic        = sec.metallic;
 			sd.roughness       = sec.roughness;
 			if (sec.materialAssetId != dc.materialAssetId) sd.paramOverride.clear();
-			outCmds.recordSkinnedDraw(sd);
+			outCmds.recordSkinnedDraw(std::move(sd));
 		}
 	}
 }

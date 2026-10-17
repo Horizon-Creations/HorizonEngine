@@ -47,7 +47,8 @@ TEST_CASE("CommandBuffer records skinned draw calls")
     cb.reset();
 
     SkinnedDrawCall dc;
-    dc.boneMatrices = { glm::mat4(1.0f) };
+    const glm::mat4 bindPose(1.0f);
+    dc.boneMatrices = cb.storeMatrices(&bindPose, 1);
     dc.transform    = glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 0.0f, 0.0f));
     cb.recordSkinnedDraw(dc);
 
@@ -61,7 +62,8 @@ TEST_CASE("CommandBuffer reset clears skinned draw calls")
 {
     CommandBuffer cb;
     SkinnedDrawCall dc;
-    dc.boneMatrices = { glm::mat4(1.0f) };
+    const glm::mat4 bindPose(1.0f);
+    dc.boneMatrices = cb.storeMatrices(&bindPose, 1);
     cb.recordSkinnedDraw(dc);
     cb.reset();
     CHECK(cb.skinnedDrawCalls().empty());
