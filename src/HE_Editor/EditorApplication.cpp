@@ -9396,6 +9396,61 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
 	}
 
+	// ── ParticleGraph witness (HE_DUMP_PARTICLETEST=1) ────────────────────────
+	// Three emitters in front of the camera, ticked here because the capture
+	// loop only calls Render(): without a ParticleSystem::update there is not a
+	// single live particle, and the scene's instanced particle path (one upload
+	// per batch, RenderWorld::particleBatches) would never run headless. The
+	// default graph is resolved first and then recoloured/resized in place, so
+	// the three batches are told apart by colour; the resolved config is not
+	// re-resolved afterwards (same asset id, configDirty cleared by the resolve).
+	// The emitter RNG is seeded, so the picture is the same every run. Shoot it
+	// with SECTIONTEST=1 beside it when comparing against an older build: until
+	// Thema 216 a scene of particles only took Metal's sky-only exit and drew none.
+	if (const char* pt = std::getenv("HE_DUMP_PARTICLETEST"); pt && *pt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 right = glm::normalize(glm::cross(camFwd, glm::vec3(0.0f, 1.0f, 0.0f)));
+		const glm::vec3 origin = m_editorCamera.position() + camFwd * 10.0f;
+		// Off-centre, so a SECTIONTEST sphere beside them hides none.
+		const float     offsets[3] = { -6.5f, -3.5f, 4.5f };
+		const glm::vec3 colors[3] = { { 1.0f, 0.35f, 0.1f }, { 0.2f, 1.0f, 0.3f }, { 0.25f, 0.45f, 1.0f } };
+		for (int i = 0; i < 3; ++i)
+		{
+			auto e = m_editorWorld->createEntity("ParticleTest");
+			TransformComponent tc;
+			tc.position = origin + right * offsets[i] + glm::vec3(0.0f, -2.5f, 0.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			ParticleSystemComponent ps;
+			ps.rng.seed(42u + static_cast<unsigned>(i));
+			ParticleSystem::resolveConfig(ps, contentManager());
+			HE::ParticleEmitterConfig& c = ps.resolvedConfig;
+			c.emitRate     = 60.0f;
+			c.maxParticles = 200;
+			c.startSize    = 0.45f;
+			c.endSize      = 0.1f;
+			c.endAlpha     = 0.6f;
+			c.velocitySpread = 1.5f;
+			c.initialVelocity[0] = 0.0f; c.initialVelocity[1] = 3.0f; c.initialVelocity[2] = 0.0f;
+			c.gravity[0]         = 0.0f; c.gravity[1]         = -1.0f; c.gravity[2]        = 0.0f;
+			for (int k = 0; k < 3; ++k)
+			{
+				c.startColor[k] = colors[i][k];
+				c.endColor[k]   = colors[i][k] * 0.5f;
+			}
+			reg.emplace<ParticleSystemComponent>(e, std::move(ps));
+		}
+		for (int t = 0; t < 90; ++t)
+			ParticleSystem::update(*m_editorWorld, contentManager(), 0.016f);
+		size_t live = 0;
+		for (auto [e, ps] : reg.view<ParticleSystemComponent>().each()) live += ps.particles.size();
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_PARTICLETEST three ticked emitters added, %zu live particles",
+		            live);
+	}
+
 	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
 	// under a MOVED parent, which is where a local position and a world
 	// position part ways.
