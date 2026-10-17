@@ -38,6 +38,7 @@
 #include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
+#include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
@@ -3404,90 +3405,87 @@ struct D3D12RendererImpl
     uint8_t*                     perObjectPtr[k_frameCount]{};
     ComPtr<ID3D12Resource>       perInstanceRing[k_frameCount]; // upload: instance {mvp,model} (A3)
     uint8_t*                     perInstancePtr[k_frameCount]{};
-    UINT                         instRingCursor = 0; // next free slot of the current chunk, reset per DrawScene
 
-    // ── Instance arena (Thema 182, plan 2f) ─────────────────────────────────
+    // ── Instance arena (Thema 182, plan 2f; sizing step 8) ──────────────────
     // Every instanced run of a frame takes its own slots — each shadow cascade, the
     // SSAO and GI pre-passes, the scene — so foliage asks for several times its visible
     // count. A frame that outgrew the k_maxInstances ring used to fall back to the
     // per-object loop, and that loop shares the k_maxDraws constant-buffer ring: at 100k
     // foliage instances the shadow pass used it up and the scene pass drew NOTHING
-    // (measured on the RTX 4070, terrain included). Now a full chunk opens another,
-    // twice as large (kept alive in instOverflow[slot] until the slot's fence came
-    // back), and the slot's next frame replaces them by one main chunk of their summed
-    // size. Bounded by k_instArenaMax instances per slot; past that the loop again,
-    // said once with the numbers.
-    static constexpr UINT        k_instArenaMax = 1u << 20; // 128 MiB of {mvp, model} per frame slot
+    // (measured on the RTX 4070, terrain included). Now a full chunk opens another
+    // (kept alive in instOverflow[slot] until the slot's fence came back), and every
+    // slot's main chunk grows to what the largest frame asked. The sizing is
+    // HE::InstanceArena (shared with Vulkan, tested in he_tests): the old capacity
+    // count refused the 1M chunk at 983 040, and 500k plants in range drew no scene.
+    // Bounded by the arena's budget (512 MiB a slot, HE_INST_ARENA_MIB); past that
+    // the loop again, said once with the numbers.
+    HE::InstanceArena            instArena{ HE::InstanceArena::budgetFromEnv(k_instStride) };
     UINT                         instMainCap[k_frameCount]{}; // perInstanceRing[slot] size, in instances
-    UINT                         instArenaCap[k_frameCount]{}; // main + overflow chunks of the slot's last frame
+    UINT                         instWant = 0;          // main size the slots grow to (largest frame asked)
     std::vector<ComPtr<ID3D12Resource>> instOverflow[k_frameCount];
     uint8_t*                     instCurPtr = nullptr;  // current chunk, CPU side
     D3D12_GPU_VIRTUAL_ADDRESS    instCurVA  = 0;        // current chunk, GPU side
-    UINT                         instCurCap = 0;        // current chunk, in instances
     bool                         instArenaWarned = false;
     struct InstSlice { uint8_t* cpu = nullptr; D3D12_GPU_VIRTUAL_ADDRESS gpu = 0; };
 
     // At the top of DrawScene, after Render()'s waitForFrame(fi): the slot's chunks of
-    // its previous frame are idle. More than one → one main chunk of their summed size.
+    // its previous frame are idle. instArena still holds the frame before (another
+    // slot); a slot whose main chunk is smaller than the largest frame asked gets one
+    // of that size.
     void beginInstanceFrame(UINT fi)
     {
-        if (!instOverflow[fi].empty())
+        if (instArena.overflowed())
         {
-            UINT want = instMainCap[fi];
-            while (want < instArenaCap[fi] && want < k_instArenaMax) want *= 2;
-            instOverflow[fi].clear();
+            instWant = std::max<UINT>(instWant, instArena.nextMainCapacity());
+            if (instArena.refused() && !instArenaWarned)
+            {
+                instArenaWarned = true;
+                HE_LOG_WARN(RHI, "D3D12Renderer: instance arena full — a frame asked %u instances, %u drew "
+                            "per object (budget %u per frame slot, HE_INST_ARENA_MIB)",
+                            instArena.asked(), instArena.refused(), instArena.budget());
+            }
+        }
+        instOverflow[fi].clear();
+        if (instWant > instMainCap[fi] && perInstanceRing[fi])
+        {
             uint8_t* ptr = nullptr;
-            ComPtr<ID3D12Resource> buf = createUploadBuffer(static_cast<UINT64>(want) * k_instStride,
+            ComPtr<ID3D12Resource> buf = createUploadBuffer(static_cast<UINT64>(instWant) * k_instStride,
                                                             reinterpret_cast<void**>(&ptr));
             if (buf && ptr)
             {
                 HE_LOG_INFO(RHI, "D3D12Renderer: instance ring of frame slot %u grows from %u to %u instances",
-                            fi, instMainCap[fi], want);
+                            fi, instMainCap[fi], instWant);
                 perInstanceRing[fi] = buf;
                 perInstancePtr[fi]  = ptr;
-                instMainCap[fi]     = want;
+                instMainCap[fi]     = instWant;
             }
         }
-        instArenaCap[fi]  = instMainCap[fi];
-        instRingCursor    = 0;
-        instCurPtr        = perInstancePtr[fi];
-        instCurVA         = perInstanceRing[fi] ? perInstanceRing[fi]->GetGPUVirtualAddress() : 0;
-        instCurCap        = instMainCap[fi];
+        instArena.beginFrame(perInstancePtr[fi] ? instMainCap[fi] : 0);
+        instCurPtr = perInstancePtr[fi];
+        instCurVA  = perInstanceRing[fi] ? perInstanceRing[fi]->GetGPUVirtualAddress() : 0;
     }
 
     // `count` consecutive {mvp, model} slots of this frame. false = no arena, or the
-    // slot would pass k_instArenaMax: the caller loops per object.
+    // frame would pass the arena's budget: the caller loops per object.
     bool allocInstances(UINT fi, UINT count, InstSlice& out)
     {
         if (!instCurPtr || count == 0) return false;
-        if (static_cast<UINT64>(instRingCursor) + count > instCurCap)
+        const uint32_t chunk = instArena.chunkFor(count);
+        if (chunk == HE::InstanceArena::kRefused) { instArena.refuse(count); return false; }
+        if (chunk)
         {
-            UINT cap = std::max(instCurCap, 1024u) * 2;
-            while (cap < count) cap *= 2;
             uint8_t* ptr = nullptr;
-            ComPtr<ID3D12Resource> buf;
-            if (static_cast<UINT64>(instArenaCap[fi]) + cap <= k_instArenaMax)
-                buf = createUploadBuffer(static_cast<UINT64>(cap) * k_instStride, reinterpret_cast<void**>(&ptr));
-            if (!buf || !ptr)
-            {
-                if (!instArenaWarned)
-                {
-                    instArenaWarned = true;
-                    HE_LOG_WARN(RHI, "D3D12Renderer: instance arena full (%u instances in this frame slot, "
-                                "%u more asked) — the rest draws per object", instArenaCap[fi], count);
-                }
-                return false;
-            }
+            ComPtr<ID3D12Resource> buf = createUploadBuffer(static_cast<UINT64>(chunk) * k_instStride,
+                                                            reinterpret_cast<void**>(&ptr));
+            if (!buf || !ptr) { instArena.refuse(count); return false; }
             instOverflow[fi].push_back(buf);
-            instArenaCap[fi] += cap;
+            instArena.openChunk(chunk);
             instCurPtr = ptr;
             instCurVA  = buf->GetGPUVirtualAddress();
-            instCurCap = cap;
-            instRingCursor = 0;
         }
-        out.cpu = instCurPtr + static_cast<size_t>(instRingCursor) * k_instStride;
-        out.gpu = instCurVA + static_cast<UINT64>(instRingCursor) * k_instStride;
-        instRingCursor += count;
+        const uint32_t first = instArena.take(count);
+        out.cpu = instCurPtr + static_cast<size_t>(first) * k_instStride;
+        out.gpu = instCurVA + static_cast<UINT64>(first) * k_instStride;
         return true;
     }
 

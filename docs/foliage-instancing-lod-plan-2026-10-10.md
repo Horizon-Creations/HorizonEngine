@@ -1030,20 +1030,51 @@ Vulkan ändert sich stärker, weil sein D16 schon vorher der gröbere war (0,512
 - **Speicher:** die Vorpasstiefe wächst von 2 auf 4 Byte je Pixel der SSAO-Auflösung (bei 640×360 ~0,5 MB mehr).
 - **Nicht geprüft:** Metal und GL (nicht betroffen, nicht angefasst); exportiertes Spiel (gleicher Renderer-Code); GI an; Editor von Hand.
 
+## 20. Instanz-Arena bei 500k Pflanzen in Reichweite (Thema 182, Schritt 8, 17.10.2026)
+
+Ursache des Befunds aus 18: die Arena zählte **Kapazitäten** der sich verdoppelnden Chunks gegen 1 M je Slot, nicht belegte Slots.
+64k + 128k + 256k + 512k = 983 040, der nächste verdoppelte Chunk (1 M) passte nie, obwohl der Frame nur rund 1,1 M brauchte (Vulkan zeichnete danach noch ~107k
+Pro-Objekt-Draws, D3D12 leerte den `k_maxDraws`-Ring und zeichnete keine Szene). Das Hauptpuffer-Wachstum verdoppelte bis zur selben Grenze, also jeden Frame wieder.
+
+Jetzt: Buchführung in `HorizonRendering/InstanceArena.h` (ohne GPU, Muster `FrameUploadRing.h`), D3D12 (`D3D12Renderer.cpp` `beginInstanceFrame`/`allocInstances`
+um `:3409`) und Vulkan (`VulkanRenderer.cpp:6940`, Member in `VulkanRenderer.h:386`) rufen sie, die Puffer bleiben beim Backend.
+- Der letzte Chunk wird auf den Rest des Budgets **gekappt** statt abgelehnt; Ablehnung nur, wenn auch der Rest den Lauf nicht fasst.
+- Der Hauptpuffer jedes Slots wächst auf das, was der größte Frame **verlangt** hat (genommen + abgelehnt, + 1/8, auf 64k gerundet), nicht auf die
+  verdoppelte Kapazitätssumme. Bei 500k "alle" (Nachbau im Test: 3 Kaskaden mit je 12 Buckets, SSAO und Szene mit allen 169) sind das 1 245 184 Instanzen
+  = 152 MiB je Slot; danach öffnet kein Frame mehr einen Chunk.
+- Budget **512 MiB je Slot** (4 M Paare à 128 B, reicht für etwa 1,5 bis 2 M Pflanzen in Reichweite), `HE_INST_ARENA_MIB=<MiB>` überschreibt es für einen Lauf.
+  Speicher folgt dem Bedarf, nicht dem Budget. D3D12 hat 3 Slots: bei 500k "alle" etwa 3 × 152 MiB Upload-Heap im eingeschwungenen Zustand.
+- Die Warnung nennt jetzt den ganzen Frame: „instance arena full — a frame asked N instances, R drew per object (budget B …)“ (einmal, beim nächsten
+  Frame-Anfang). Wachstum weiter als „instance ring/buffer of frame slot … grows from … to …“.
+
+Geprüft auf dem Mac (kein D3D12-Compiler, keine Windows-GPU): `tests/test_instance_arena.cpp` (5 Fälle; Negativkontrolle = die alte Arithmetik
+nachgebaut, sie lehnt bei 983 040 in jedem Frame ab), Guard in `test_graph_instancing.cpp` angepasst (kein `k_instArenaMax`, beide Backends rufen die Arena),
+Vulkan `-fsyntax-only` gegen MoltenVK mit Negativkontrolle. D3D12 kompiliert nur der Windows-Job der CI. **Nicht gemessen:** die Leiter 500k "alle" auf
+D3D12/Vulkan (NN-WS03); erwartet ~20 Draws, keine „arena full“-Zeile, je Slot eine „grows from 65536 to …“-Zeile, RSS mitschreiben (vorher +720 MB).
+
+Strukturelle Folge, nicht gebaut: jeder Pass schreibt {clip·model, model} für jede Pflanze neu (128 B × Pässe). Ein gemeinsamer 64-B-Modellpuffer je Frame
+plus clip je Pass im Konstantenpuffer würde den Bedarf um Faktor 6 bis 12 senken, braucht aber neue instanzierte Shader und PSOs auf D3D12/Vulkan.
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 6 (SSAO-Vorpass D16 → D32, Entscheidung 110); Schritte 1-5 in den Abschnitten 14-18, dieser in Abschnitt 19
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, `653f343a` (+ dieser Doku-Nachtrag), gepusht
-- **Done:** Die SSAO-Vorpasstiefe ist auf D3D11, D3D12 und Vulkan D32; Foliage-Cluster gegen ordered ist dort jetzt pixelgleich (vorher 0,21/0,21/0,51 % des Bodens).
-- **Files touched:** die drei Backends (Stellen in 19), `tests/test_foliage_cluster.cpp` (neuer Guard am Ende), `scripts/perf/ssao_depth_ab.py` (neu),
-  `docs/audit/modul_rendering.md` (Nachtrag: SSAO erledigt), dieser Abschnitt.
-- **Verified:** Tabellen in 19 (Bilder angesehen, Rauschboden je Fall); `he_tests --source-file=*test_foliage_cluster.cpp` 22/22 mit Negativkontrolle; voller `he_tests` (Release, scratch `APPDATA`): 5422 Fälle, 5418 grün, 4 rot, 12 übersprungen; rot genau die vier bekannten (`test_inspector_ui` Zwischenablage ×2, `test_profiler` ×2, wie 17.2).
-- **Not verified:** Metal, GL (nicht berührt); GI an; exportiertes Spiel; CI-Lauf läuft noch beim Abschluss.
-- **Decisions taken:** GI-G-Buffer-Stellen nicht angefasst (Thema 204 hat sie, sonst Merge-Konflikt); Vulkan mit eigener Konstante statt `m_depthFormat`
-  (beides D32_SFLOAT, aber der Vorpass soll nicht still mitwandern, wenn jemand die Haupttiefe ändert).
-- **Decisions suggested, not taken:** nach dem Merge von Thema 204 einen Guard „kein `D16_UNORM` in den drei Backends“ (Audit-Nachtrag); die 22 px Kreuzkarten-Gleichstand
-  im Vulkan-Szenenpass sind keine Fehlstelle der Cluster (GL 10 px), nichts tun.
-- **Pending:** Schritt 8 (Arena-Überlauf bei 500k sichtbaren Pflanzen auf D3D12/Vulkan, Abschnitt 18); Metal-Lauf; Anfrage 105.
-- **Traps:** Der Zeuge der 16.2-Zahlen ist `foliage_lod_shot.py --levels ""` (ohne Stufen, Nacht); nachts ist SSAO kaum sichtbar, für die Bildwirkung `TOD=0.4`.
-  PowerShell 5.1 verschluckt `""` als Argument: das Skript aus Git-Bash starten. `HE_DUMP_SSAO=0` aus der Umgebung reicht durch beide Skripte durch.
-- **Next steps:** 1. Schritt 8 (Arena). 2. Metal-Lauf auf einem Mac (`foliage_graph_ab.py --rhi Metal`). 3. Anfrage 105.
+- **Topic / step:** Thema 182, Schritt 8 (Arena-Überlauf bei 500k Pflanzen in Reichweite auf D3D12/Vulkan); Schritte 1-6 in 14-19, dieser in Abschnitt 20
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Commit dieses Schritts (siehe `git log`), gepusht
+- **Done:** Die Arena zählt belegte statt reservierte Slots, kappt den letzten Chunk auf das Budget und dimensioniert den Hauptpuffer je Slot nach dem
+  verlangten Bedarf; Budget 512 MiB je Slot (`HE_INST_ARENA_MIB`). Im Nachbau passt 500k "alle" (1,1 M Slots) ab dem zweiten Frame ohne Chunk.
+- **Files touched:** `src/HE_Rendering/include/HorizonRendering/InstanceArena.h` (neu, die Buchführung), `D3D12Renderer.cpp` (Arena-Block um `:3409`),
+  `VulkanRenderer.cpp:6940` + `VulkanRenderer.h:386`, `tests/test_instance_arena.cpp` (neu), `tests/test_graph_instancing.cpp` (Guard), Abschnitt 20.
+- **Verified:** Mac, Release: `he_tests --source-file=*test_instance_arena.cpp` 5/5 (Negativkontrolle: alte Arithmetik lehnt bei 983 040 jeden Frame ab);
+  `test_graph_instancing` 7/7, `test_foliage_cluster` 22/22, `test_frame_upload_ring` 7/7. Vulkan `-fsyntax-only` gegen MoltenVK rc=0, Negativkontrolle
+  (`chunkFour`) rc=1. Voller `he_tests`: 5420 Fälle, 5417 grün, 3 rot: `test_profiler` ×2 (unter Last, allein grün) und `test_hpak` „Disk registry“
+  (auch mit dem main-Binary vom 15.10. rot, Lektion 381), keiner berührt.
+- **Not verified:** D3D12 kompiliert auf dem Mac nicht (nur der Windows-Job der CI); Laufzeit auf D3D12/Vulkan nicht (kein Gerät hier): die Leiter
+  500k "alle" auf NN-WS03 fehlt. Metal/GL/D3D11 nicht berührt.
+- **Decisions taken:** Buchführung als Header ohne GPU (testbar, beide Backends teilen sie); Hauptpuffer-Ziel global (größter Frame), jeder Slot wächst
+  bei seiner nächsten Nutzung; Budget als Bytes statt Instanzkonstante; Warnung beim nächsten Frame-Anfang mit dem ganzen Frame (verlangt/abgelehnt).
+- **Decisions suggested, not taken:** gemeinsamer 64-B-Modellpuffer je Frame + clip je Pass (Bedarf ÷6 bis ÷12, neue Shader/PSOs, Abschnitt 20);
+  D3D12-Schattenschleife soll den `k_maxDraws`-Ring nicht vor der Szene leeren (greift jetzt erst über dem Budget).
+- **Pending:** Windows-Laufzeitprüfung dieses Schritts; Metal-Lauf; Anfrage 105.
+- **Traps:** Die Leiter mit 500k "alle" vorher auf Vulkan braucht `--warmup 10 --frames 20` (1,6 s je Frame). Arena-Wachstum zeigt sich auf D3D12 erst ab
+  `HE_DUMP_FRAMES=8` (3 Slots). Die Dump-Kamera sieht weniger Pflanzen als die Leiter-Kamera: der Überlauf zeigt sich nur in der Leiter.
+- **Next steps:** 1. NN-WS03: `foliage_ladder_win.py` 500k "alle" auf D3D12 und Vulkan, im Log keine „arena full“-Zeile, je Slot eine „grows“-Zeile,
+  ~20 Draws, D3D12-Bild vollständig, RSS notieren. 2. Bei Bedarf `HE_INST_ARENA_MIB` probieren (1 M Pflanzen). 3. Metal-Lauf. 4. Anfrage 105.

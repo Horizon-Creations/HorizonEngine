@@ -6934,70 +6934,61 @@ void VulkanRenderer::destroyInstanceBuf(InstanceBuf& b)
 }
 
 // Where a frame's instance slots start (Render() and DrawViewportFrame()): the main
-// buffer of m_currentFrame, which an overflowing frame before has replaced by one of
-// the size that frame needed. The replaced buffer may still be read by its last
-// frame — it ages out in m_instRetired like every overflow chunk.
+// buffer of m_currentFrame, which grows to what the largest frame before asked
+// (m_instArena still holds the last one). The replaced buffer may still be read by
+// its last frame — it ages out in m_instRetired like every overflow chunk.
 void VulkanRenderer::beginInstanceFrame()
 {
+    if (m_instArena.overflowed())
+    {
+        m_instWant = std::max(m_instWant, m_instArena.nextMainCapacity());
+        if (m_instArena.refused() && !m_instArenaWarned)
+        {
+            m_instArenaWarned = true;
+            HE_LOG_WARN(RHI, "VulkanRenderer: instance arena full — a frame asked %u instances, %u drew "
+                        "per object (budget %u per frame, HE_INST_ARENA_MIB)",
+                        m_instArena.asked(), m_instArena.refused(), m_instArena.budget());
+        }
+    }
     InstanceBuf& main = m_instanceBuf[m_currentFrame];
     uint32_t&    cap  = m_instMainCap[m_currentFrame];
     if (m_instWant > cap && main.buf)
     {
-        uint32_t want = cap;
-        while (want < m_instWant && want < k_instArenaMax) want *= 2;
         InstanceBuf grown;
-        if (createInstanceBuf(want, grown))
+        if (createInstanceBuf(m_instWant, grown))
         {
             HE_LOG_INFO(RHI, "VulkanRenderer: instance buffer of frame slot %u grows from %u to %u instances",
-                        m_currentFrame, cap, want);
+                        m_currentFrame, cap, m_instWant);
             m_instRetired.push_back({ main, static_cast<int>(k_maxFramesInFlight) + 1 });
             main = grown;
-            cap  = want;
+            cap  = m_instWant;
         }
-        // Each slot grows on its own next use; the want stays until both have.
-        bool all = true;
-        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i) all &= m_instMainCap[i] >= m_instWant;
-        if (all) m_instWant = 0;
     }
-    m_instCursor   = 0;
-    m_instCur      = main;
-    m_instCurCap   = main.mapped ? cap : 0;
-    m_instFrameCap = m_instCurCap;
+    m_instCur = main;
+    m_instArena.beginFrame(main.mapped ? cap : 0);
 }
 
 // `count` consecutive {mvp, model} slots of this frame: the buffer to bind at binding 1,
 // the byte offset, and where the CPU writes them. false = no arena, or the frame would
-// pass k_instArenaMax: the caller draws per object.
+// pass the arena's budget: the caller draws per object.
 bool VulkanRenderer::allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu)
 {
     if (!m_instCur.mapped || count == 0) return false;
-    if (static_cast<uint64_t>(m_instCursor) + count > m_instCurCap)
+    const uint32_t chunkCap = m_instArena.chunkFor(count);
+    if (chunkCap == HE::InstanceArena::kRefused) { m_instArena.refuse(count); return false; }
+    if (chunkCap)
     {
-        uint32_t cap = std::max(m_instCurCap, 1024u) * 2;
-        while (cap < count) cap *= 2;
         InstanceBuf chunk;
-        if (static_cast<uint64_t>(m_instFrameCap) + cap > k_instArenaMax || !createInstanceBuf(cap, chunk))
-        {
-            if (!m_instArenaWarned)
-            {
-                m_instArenaWarned = true;
-                HE_LOG_WARN(RHI, "VulkanRenderer: instance arena full (%u instances in this frame, "
-                            "%u more asked) — the rest draws per object", m_instFrameCap, count);
-            }
-            return false;
-        }
+        if (!createInstanceBuf(chunkCap, chunk)) { m_instArena.refuse(count); return false; }
         // In use from now until this frame retired: ages out like a replaced main buffer.
         m_instRetired.push_back({ chunk, static_cast<int>(k_maxFramesInFlight) + 1 });
-        m_instCur      = chunk;
-        m_instCurCap   = cap;
-        m_instCursor   = 0;
-        m_instFrameCap += cap;
-        m_instWant     = std::max(m_instWant, m_instFrameCap);
+        m_instCur = chunk;
+        m_instArena.openChunk(chunkCap);
     }
+    const uint32_t first = m_instArena.take(count);
     buf    = m_instCur.buf;
-    offset = static_cast<VkDeviceSize>(m_instCursor) * k_instStride;
+    offset = static_cast<VkDeviceSize>(first) * k_instStride;
     cpu    = static_cast<uint8_t*>(m_instCur.mapped) + offset;
-    m_instCursor += count;
     return true;
 }
 

@@ -200,6 +200,8 @@ add_executable(he_tests
     test_bloom_kernel.cpp
     # Metal's per-frame upload ring (perf audit B6): slices, recycling, threads.
     test_frame_upload_ring.cpp
+    # D3D12/Vulkan instance-arena sizing (Thema 182 step 8): 500k plants in range replayed.
+    test_instance_arena.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
     test_profiler_layout.cpp

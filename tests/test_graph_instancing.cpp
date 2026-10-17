@@ -349,8 +349,16 @@ TEST_CASE("D3D12 and Vulkan take every instanced run's slots from a growable are
 		CHECK(countOf(*src, "allocInstances(") >= 4); // the definition and three callers
 		CHECK(src->find("<= k_maxInstances") == std::string::npos);
 		CHECK(src->find("> k_maxInstances") == std::string::npos);
-		CHECK(src->find("k_instArenaMax") != std::string::npos);
+		// Step 8: the sizing is HE::InstanceArena's (test_instance_arena.cpp), no
+		// backend-local cap that counts chunk capacities.
+		CHECK(src->find("k_instArenaMax") == std::string::npos);
+		CHECK(src->find(".chunkFor(count)") != std::string::npos);
+		CHECK(countOf(*src, ".refuse(count)") == 2); // over budget, chunk creation failed
+		CHECK(src->find(".nextMainCapacity()") != std::string::npos);
 	}
+	const std::string vkH = readFile(root / "src" / "HE_Rendering" / "include" / "Backends" / "Vulkan" / "VulkanRenderer.h");
+	CHECK(d3d12.find("InstanceArena::budgetFromEnv(k_instStride)") != std::string::npos);
+	CHECK(vkH.find("InstanceArena::budgetFromEnv(k_instStride)") != std::string::npos);
 	// The slot's ring is reset once per frame through the arena, never by hand.
 	CHECK(d3d12.find("p.beginInstanceFrame(p.frameIndex);") != std::string::npos);
 	CHECK(countOf(vk, "beginInstanceFrame();") == 2); // Render() and DrawViewportFrame()
