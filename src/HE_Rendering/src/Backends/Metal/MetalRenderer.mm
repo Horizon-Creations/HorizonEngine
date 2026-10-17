@@ -6446,7 +6446,10 @@ struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; 
                 // Section draw: byte offset into the index buffer (0 = from the
                 // start, which is every whole-mesh draw). Trailing + defaulted so
                 // the positional initialisers stay as they are.
-                NSUInteger indexOffset = 0; };
+                NSUInteger indexOffset = 0;
+                // Byte offset of the vertices in vbuf: 0 for a mesh, the ring
+                // slice for a trail (CollectRibbonDraws).
+                NSUInteger vbufOffset = 0; };
 
 // The index range a DrawCall covers on the mesh it ends up drawing. A whole-mesh
 // draw (indexCount 0 — every one-section mesh, every draw before sections
@@ -7121,6 +7124,23 @@ bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& ou
 	return true;
 }
 
+bool MetalRenderer::UploadBonePalette(const std::vector<glm::mat4>& bones, int boneSlots,
+                                      void*& outBuf, size_t& outOffset)
+{
+	// Was a full 128-matrix (8 KB) identity fill, a copy over it and a fresh
+	// MTLBuffer per object and frame (REN-402). Only what the mesh can read is
+	// written now: a mesh naming joint ids up to N-1 reads N matrices, the
+	// pose's own and identity past its end (what the full fill gave them).
+	constexpr int kMaxBones = 128; // = the boneMats palette the shaders index
+	const int boneCount = static_cast<int>(std::min(bones.size(), static_cast<size_t>(kMaxBones)));
+	const int slots     = std::clamp(std::max(boneSlots, boneCount), 1, kMaxBones);
+	auto* dst = static_cast<glm::mat4*>(UploadTransient(slots * sizeof(glm::mat4), outBuf, outOffset));
+	if (!dst) return false;
+	std::copy_n(bones.begin(), boneCount, dst);
+	std::fill(dst + boneCount, dst + slots, glm::mat4(1.0f));
+	return true;
+}
+
 void MetalRenderer::ReleaseUploadRing()
 {
 	// In-flight command buffers retain the chunks they bound, so dropping our
@@ -7158,7 +7178,6 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 
 	@autoreleasepool
 	{
-		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		for (const RibbonBatch& rb : m_renderWorld.ribbonBatches)
 		{
 			if (rb.vertices.empty() || rb.indices.empty()) continue;
@@ -7221,17 +7240,20 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 			}
 #endif
 
-			id<MTLBuffer> vbuf = [device newBufferWithBytes:rb.vertices.data()
-			                                         length:rb.vertices.size() * sizeof(float)
-			                                        options:MTLResourceStorageModeShared];
-			id<MTLBuffer> ibuf = [device newBufferWithBytes:rb.indices.data()
-			                                         length:rb.indices.size() * sizeof(uint32_t)
-			                                        options:MTLResourceStorageModeShared];
-			if (!vbuf || !ibuf) continue;
-			m_ribbonBuffers.push_back((void*)CFBridgingRetain(vbuf));
-			m_ribbonBuffers.push_back((void*)CFBridgingRetain(ibuf));
-			t.vbuf = (__bridge void*)vbuf;
-			t.ibuf = (__bridge void*)ibuf;
+			// Both halves are slices of the upload ring; retained regardless, see
+			// m_ribbonBuffers (on a ring chunk that is only a reference count).
+			void*  vbuf = nullptr;
+			void*  ibuf = nullptr;
+			size_t vOff = 0, iOff = 0;
+			if (!UploadTransientBytes(rb.vertices.data(), rb.vertices.size() * sizeof(float), vbuf, vOff)
+			    || !UploadTransientBytes(rb.indices.data(), rb.indices.size() * sizeof(uint32_t), ibuf, iOff))
+				continue;
+			m_ribbonBuffers.push_back((void*)CFBridgingRetain((__bridge id<MTLBuffer>)vbuf));
+			m_ribbonBuffers.push_back((void*)CFBridgingRetain((__bridge id<MTLBuffer>)ibuf));
+			t.vbuf        = vbuf;
+			t.ibuf        = ibuf;
+			t.vbufOffset  = static_cast<NSUInteger>(vOff);
+			t.indexOffset = static_cast<NSUInteger>(iOff);
 			out.push_back(std::move(t));
 		}
 	}
@@ -9368,6 +9390,10 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	GpuSkeletalMesh mesh;
 	mesh.indexCount  = static_cast<int>(asset->indices.size());
 	mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
+	// An id past the palette (≥ 128) read outside the old 8 KB buffer too; it
+	// keeps the full palette and stays as undefined as it was.
+	const uint32_t maxBoneId = boneIds.empty() ? 0u : *std::max_element(boneIds.begin(), boneIds.end());
+	mesh.boneSlots = static_cast<int>(std::min<uint32_t>(maxBoneId, 127u)) + 1;
 	mesh.vertexBuf  = (void*)CFBridgingRetain(
 		[device newBufferWithBytes:interleaved.data()
 		                    length:interleaved.size() * sizeof(float)
@@ -10871,20 +10897,17 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	}
 
 	// ── Skinned meshes (the pose the AnimatorHost last wrote, or the bind pose).
-	constexpr int kMaxBones = 128;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skelPreviewPipeline];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 	for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
 	{
 		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
 		if (!smesh || !smesh->vertexBuf || !smesh->indexBuf || smesh->indexCount <= 0) continue;
-		std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
-		const int boneCount = static_cast<int>(std::min(obj.boneMatrices.size(),
-		                                                static_cast<size_t>(kMaxBones)));
-		if (boneCount > 0) std::copy_n(obj.boneMatrices.begin(), boneCount, boneScratch.begin());
-		id<MTLBuffer> boneBuf = [device newBufferWithBytes:boneScratch.data()
-		                                            length:kMaxBones * sizeof(glm::mat4)
-		                                           options:MTLResourceStorageModeShared];
+		// Own command buffer, no ring frame open: the palette is a fresh buffer.
+		void*  boneBufPtr = nullptr;
+		size_t boneOff    = 0;
+		if (!UploadBonePalette(obj.boneMatrices, smesh->boneSlots, boneBufPtr, boneOff)) continue;
+		id<MTLBuffer> boneBuf = (__bridge id<MTLBuffer>)boneBufPtr;
 		UnlitUniforms u;
 		u.mvp   = viewProj * obj.transform;
 		u.model = obj.transform;
@@ -10898,7 +10921,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
 		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
-		[enc setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+		[enc setVertexBuffer:boneBuf                                   offset:boneOff atIndex:4];
 		[enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
 		[enc setFragmentTexture:(__bridge id<MTLTexture>)(smesh->texture ? smesh->texture : m_dummyTexture) atIndex:0];
 		[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -13946,7 +13969,6 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 		return;
 
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	id<MTLDevice>               device  = (__bridge id<MTLDevice>)m_device;
 	const SceneUniforms& scene = *static_cast<const SceneUniforms*>(sceneUniformsPtr);
 
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skinnedPipeline];
@@ -13968,26 +13990,17 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 
-	constexpr int kMaxBones = 128;
-	std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
-
 	for (const SkinnedRenderObject& obj : m_renderWorld.skinnedObjects)
 	{
 		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
 		if (!smesh) continue;
 
-		// Upload bone matrices for this object — allocate a temporary buffer so
-		// each object gets its own range (the encoder retains it until GPU
-		// completion). One buffer serves every section of the object.
-		const int boneCount = static_cast<int>(
-		    std::min(obj.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
-		std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
-		if (boneCount > 0)
-			std::copy_n(obj.boneMatrices.begin(), boneCount, boneScratch.begin());
-
-		id<MTLBuffer> boneBuf = [device newBufferWithBytes:boneScratch.data()
-		                                            length:kMaxBones * sizeof(glm::mat4)
-		                                           options:MTLResourceStorageModeShared];
+		// This object's bone palette, a slice of the upload ring: each object
+		// gets its own range, one range serves every section of the object.
+		void*  boneBufPtr = nullptr;
+		size_t boneOff    = 0;
+		if (!UploadBonePalette(obj.boneMatrices, smesh->boneSlots, boneBufPtr, boneOff)) continue;
+		id<MTLBuffer> boneBuf = (__bridge id<MTLBuffer>)boneBufPtr;
 
 		// One draw per material slot — or one over the whole mesh when the
 		// extractor left no table (a one-section asset, a whole-mesh override).
@@ -14022,7 +14035,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
 			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
 			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
-			[encoder setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+			[encoder setVertexBuffer:boneBuf                                   offset:boneOff atIndex:4];
 			[encoder setFragmentTexture:(__bridge id<MTLTexture>)texPtr atIndex:0];
 			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 			                    indexCount:range.count
@@ -14032,7 +14045,6 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 			++m_counters.draws;
 			m_counters.tris += static_cast<uint32_t>(range.count / 3);
 		}
-		// boneBuf is released here (ARC); the encoder holds its own strong reference
 	}
 
 	// Restore the regular scene pipeline for subsequent passes
@@ -14382,7 +14394,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						[encoder setVertexBytes:padded length:sizeof(padded) atIndex:3];
 					}
 				}
-				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)t.vbuf offset:0 atIndex:0];
+				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)t.vbuf offset:t.vbufOffset atIndex:0];
 				[encoder setVertexBytes:&t.u length:sizeof(t.u) atIndex:1];
 				[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.tex atIndex:0];
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -14795,7 +14807,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					[encoder setVertexBytes:padded length:sizeof(padded) atIndex:3];
 				}
 			}
-			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)t.vbuf offset:0 atIndex:0];
+			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)t.vbuf offset:t.vbufOffset atIndex:0];
 			[encoder setVertexBytes:&t.u length:sizeof(t.u) atIndex:1];
 			[encoder setFragmentTexture:(__bridge id<MTLTexture>)t.tex atIndex:0];
 			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -17835,7 +17847,6 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 {
 	if (m_renderWorld.particleBatches.empty()) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	// Camera-facing basis for billboard expansion — same convention as RenderParticlePreview.
 	// vec4, not vec3: heParticleGraphVertex reads `constant float3&` = 16 bytes
@@ -17866,16 +17877,21 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 		void* matTex = nullptr;
 		const bool hasTex = ResolveMaterialTexture(batch.materialAssetId, matTex);
 
-		std::vector<float> inst;
-		inst.reserve(batch.instances.size() * 5);
+		// pos3 + size + t01 per particle, written straight into this frame's ring slice.
+		void*  instBufPtr = nullptr;
+		size_t instOff    = 0;
+		float* inst = static_cast<float*>(
+			UploadTransient(batch.instances.size() * 5 * sizeof(float), instBufPtr, instOff));
+		if (!inst) continue;
 		for (const ParticleInstance& p : batch.instances)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
-		id<MTLBuffer> instBuf = [device newBufferWithBytes:inst.data()
-			length:inst.size() * sizeof(float) options:MTLResourceStorageModeShared];
+		{
+			*inst++ = p.position.x; *inst++ = p.position.y; *inst++ = p.position.z;
+			*inst++ = p.size;       *inst++ = p.t01;
+		}
 
 		glm::mat4 vp = viewProj;
 		[enc setRenderPipelineState:pso];
-		[enc setVertexBuffer:instBuf offset:0 atIndex:0];
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBufPtr offset:instOff atIndex:0];
 		[enc setVertexBytes:&vp       length:sizeof(vp)       atIndex:1];
 		[enc setVertexBytes:&camRight length:sizeof(camRight) atIndex:2];
 		[enc setVertexBytes:&camUp    length:sizeof(camUp)    atIndex:3];

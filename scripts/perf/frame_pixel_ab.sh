@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Metal pixel A/B for changes in how a frame is extracted and encoded (Thema 162, Schritt 2 and 4).
 #
-#   scripts/perf/frame_pixel_ab.sh <outdir> [<tree>] [frame|shadow|all]
+#   scripts/perf/frame_pixel_ab.sh <outdir> [<tree>] [frame|shadow|upload|all]
 #
 # Renders the witness set below with the deployed editor of <tree> (default: this checkout's
 # out/deploy/Editor) and prints "<name> <md5 of the PNG>" per shot. Run it once per build and
@@ -39,7 +39,7 @@
 #   odd_casc2  two cascades at the odd render scale
 # GI and the low-resolution clouds are NOT here: they are not bit-reproducible.
 set -u
-OUT=${1:?usage: frame_pixel_ab.sh <outdir> [<tree>] [frame|shadow|all]}
+OUT=${1:?usage: frame_pixel_ab.sh <outdir> [<tree>] [frame|shadow|upload|all]}
 TREE=${2:-${0:A:h:h:h}}
 SET=${3:-frame}
 mkdir -p "$OUT"
@@ -110,4 +110,21 @@ run casc3_split_fwd     ${=SC} SHADOW=60,3,2048,0.5 YAW=40
 run ls_point_day_fwd    LOCALSHADOW=point RENDERPATH=0 TOD=0.35 COVERAGE=0 CAMY=206 CAMZ=2 PITCH=-40
 run ls_spot_day_def     LOCALSHADOW=spot  RENDERPATH=1 TOD=0.35 COVERAGE=0 CAMY=206 CAMZ=2 PITCH=-40
 run odd_casc2_fwd       ${=SC} SHADOW=60,2,2048,0.5 RENDERSCALE=0.51 SSAO=1
+fi
+
+# The `upload` set (Thema 216): every draw that takes its per-frame data from the upload ring
+# instead of a fresh MTLBuffer. skin_* the three-band sphere through the skinned path (bone
+# palette per object), rope_* a tube rope, a ribbon rope and a swept trail (the trail is the
+# per-frame ribbon vertex/index upload), part_* three ParticleGraph emitters (one instance
+# upload per batch) beside the plain sphere, which keeps an older build out of Metal's
+# sky-only exit (see HE_DUMP_PARTICLETEST).
+if [[ $SET == upload || $SET == all ]]; then
+UP="TOD=0.5 DAYNIGHT=0 COVERAGE=0.3 PITCH=0"
+run skin_fwd            SECTIONTEST=skinned     RENDERPATH=0 ${=UP}
+run skin_def            SECTIONTEST=skinned     RENDERPATH=1 ${=UP}
+run skinslot_fwd        SECTIONTEST=skinnedslot RENDERPATH=0 ${=UP}
+run rope_fwd            ROPETEST=1              RENDERPATH=0 ${=UP}
+run rope_def            ROPETEST=1              RENDERPATH=1 ${=UP}
+run part_fwd            PARTICLETEST=1 SECTIONTEST=1 RENDERPATH=0 ${=UP}
+run part_def            PARTICLETEST=1 SECTIONTEST=1 RENDERPATH=1 ${=UP}
 fi

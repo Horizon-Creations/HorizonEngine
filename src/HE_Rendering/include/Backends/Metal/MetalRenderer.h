@@ -198,6 +198,11 @@ private:
 		int   indexCount = 0;
 		void* texture    = nullptr; // id<MTLTexture>, base color (nullptr = none)
 		HE::AABB localBounds;
+		// Highest joint index any vertex names, plus one (clamped to the palette's
+		// 128): how many matrices a draw's bone palette must hold. The skinning
+		// shader reads boneMats[id] for all four ids unchecked, zero weights
+		// included, so every named id needs a matrix. Default = the whole palette.
+		int   boneSlots  = 128;
 	};
 
 	void CreateTarget(SDL_Window* sdlWin, WindowTarget& out);
@@ -810,11 +815,11 @@ private:
 	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
 	// RenderWorld::particleBatches) — one compiled pipeline per unique color/alpha-
 	// over-life config, hash-keyed cache mirroring m_materialPipelineCache. Each
-	// batch's instance MTLBuffer is allocated fresh per draw (newBufferWithBytes,
-	// same convention as RenderParticlePreview) rather than reusing one persistent
-	// buffer across frames — Metal gives no implicit CPU/GPU sync on a shared-mode
-	// buffer, so overwriting one in flight would race the previous frame's draw; a
-	// few emitters' worth of small per-frame allocations is a non-issue. No
+	// batch's instances are written into a slice of the per-frame upload ring
+	// (UploadTransient): never one persistent buffer across frames, because
+	// Metal gives no implicit CPU/GPU sync on a shared-mode buffer and
+	// overwriting one in flight would race the previous frame's draw, and no
+	// longer a fresh MTLBuffer per batch either (perf audit REN-302). No
 	// HE_HAVE_SHADERC dependency: the source is hand-templated (HorizonRendering::
 	// ParticleShaderTemplates), never cross-compiled. Drawn in the transparency
 	// pass, alpha-blended.
@@ -1366,9 +1371,13 @@ private:
 	// cooked vertex layout in WORLD space, so it is collected into the same
 	// blended-draw list the transparency pass already replays and picks up the
 	// material's own pipeline where it has one (docs/rope-trail-plan.md §6.2).
-	// The staging buffers are retained here because TPDraw holds them as bare
-	// pointers; they are released on the NEXT frame's collect, by which time the
-	// command buffer that referenced them is long done.
+	// The vertices and indices go into the upload ring (TPDraw::vbufOffset and
+	// indexOffset locate them). The buffers are still retained here because
+	// TPDraw holds them as bare pointers and is replayed after the collect's
+	// autorelease pool drained: a ring chunk outlives that anyway, but the
+	// ring's fallback (no ring frame open, or Metal refused a chunk) is a fresh
+	// autoreleased buffer. Released on the NEXT frame's collect, by which time
+	// the command buffer that referenced them is long done.
 	std::vector<void*> m_ribbonBuffers;   // retained id<MTLBuffer>, vertex/index pairs
 	void  CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
 	                         const glm::vec3& cameraPos);
@@ -1376,7 +1385,11 @@ private:
 
 	// ── Per-frame upload ring (perf audit B6) ───────────────────────────────
 	// Instance matrices, clustered-light lists and debug lines used to get a
-	// fresh MTLBuffer each, hundreds per frame. They now take a slice of a
+	// fresh MTLBuffer each, hundreds per frame; skinned bone palettes, particle
+	// instances and trail geometry followed (REN-302/402, Thema 216). The GI
+	// per-frame instance tables still allocate their own: they are kept as
+	// members across passes and belong to the TLAS rework (REN-404/405).
+	// Every ring user takes a slice of a
 	// long-lived shared chunk: EncodeFrame opens the ring's frame after creating
 	// its command buffer, and a completion handler on that (last) command buffer
 	// returns the frame's chunks. Held by shared_ptr so the handler outlives the
@@ -1390,6 +1403,11 @@ private:
 	void* UploadTransient(size_t len, void*& outBuf, size_t& outOffset);
 	// Same, filled with a copy of `data`; false (nothing bound) only on failure.
 	bool  UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset);
+	// A skinned draw's bone palette: the first min(bones, 128) matrices, padded
+	// with identity up to `boneSlots` (GpuSkeletalMesh::boneSlots), so every
+	// joint id the mesh names reads a matrix of this slice. Bind at buffer 4.
+	bool  UploadBonePalette(const std::vector<glm::mat4>& bones, int boneSlots,
+	                        void*& outBuf, size_t& outOffset);
 	void  ReleaseUploadRing();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──
