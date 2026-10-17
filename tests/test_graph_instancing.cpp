@@ -14,6 +14,7 @@
 //     GL context or a Metal device is not there on every CI machine).
 #include "doctest.h"
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -177,6 +178,55 @@ TEST_CASE("GL links the instanced WPO twin: the shared blocks match the fragment
 		REQUIRE_FALSE(vu.empty());
 		if (!fu.empty()) CHECK_MESSAGE(vu == fu, "vertex:\n", vu, "\nfragment:\n", fu);
 	}
+}
+TEST_CASE("Graph instancing: dump the instanced Wind Sway twins for the offline compilers (HE_DUMP_WATER_SHADERS)")
+{
+	// The in-process checks above stop at SPIRV-Cross. The Metal side of 2e is a text patch
+	// on Windows, and the macOS CI job is the only place a real Metal compiler sees it:
+	// scripts/water_shader_offline_check.py runs this case next to the water dump and hands
+	// the files to glslangValidator -l (GL pairs linked), spirv-val, fxc and xcrun metal.
+	const char* dir = std::getenv("HE_DUMP_WATER_SHADERS");
+	if (!dir || !*dir)
+	{
+		MESSAGE("HE_DUMP_WATER_SHADERS not set - nothing dumped (scripts/water_shader_offline_check.py sets it)");
+		return;
+	}
+	const MatShaderGen gen = windGraph();
+	const fs::path out(dir);
+	fs::create_directories(out);
+	auto put = [&](const char* name, const std::string& text) {
+		std::ofstream f(out / name, std::ios::binary);
+		f.write(text.data(), static_cast<std::streamsize>(text.size()));
+		REQUIRE_MESSAGE(f.good(), "could not write ", (out / name).string());
+	};
+	auto putSpv = [&](const char* name, const std::vector<uint32_t>& words) {
+		std::ofstream f(out / name, std::ios::binary);
+		f.write(reinterpret_cast<const char*>(words.data()), static_cast<std::streamsize>(words.size() * 4));
+		REQUIRE_MESSAGE(f.good(), "could not write ", (out / name).string());
+	};
+	auto need = [](const MaterialShaderLibrary::Compiled& c, const char* what) -> const MaterialShaderLibrary::Compiled& {
+		REQUIRE_MESSAGE(c.ok, what, ": ", c.log);
+		return c;
+	};
+	using B = MaterialShaderLibrary::Backend;
+	MaterialShaderLibrary lib;
+	const uint64_t vh = std::hash<std::string>{}(gen.vertexBody);
+	const uint64_t hf = std::hash<std::string>{}(gen.glsl), hg = std::hash<std::string>{}(gen.glslGBuffer);
+	// GL: the twin with the fragments it is linked to at runtime.
+	put("wind_inst_gl410.vert",      need(lib.customVertexInstanced(vh, gen.vertexBody, B::GLSL410), "GL410 wind twin").source);
+	put("inst_gl410.vert",           need(lib.standardVertexInstanced(B::GLSL410), "GL410 plain twin").source);
+	put("wind_gl410.frag",           need(lib.fragment(hf, gen.glsl, B::GLSL410), "GL410 wind fragment").source);
+	put("wind_gl410_gbuf.frag",      need(lib.fragment(hg, gen.glslGBuffer, B::GLSL410), "GL410 wind G-buffer").source);
+	put("wind_inst_es300.vert",      need(lib.customVertexInstanced(vh, gen.vertexBody, B::GLSLES300), "ES300 wind twin").source);
+	put("wind_es300.frag",           need(lib.fragment(hf, gen.glsl, B::GLSLES300), "ES300 wind fragment").source);
+	put("wind_inst_gl430.vert",      need(lib.customVertexInstanced(vh, gen.vertexBody, B::GLSL430), "GL430 wind twin").source);
+	put("wind_gl430_clustered.frag", need(lib.fragmentClustered(hf, gen.glsl, B::GLSL430), "GL430 wind clustered").source);
+	// D3D / Vulkan: compiled, not wired yet (Windows track).
+	put("wind_inst_hlsl_vert.hlsl",  need(lib.customVertexInstanced(vh, gen.vertexBody, B::HLSL), "HLSL wind twin").source);
+	putSpv("wind_inst_vk_vert.spv",  need(lib.customVertexInstanced(vh, gen.vertexBody, B::SpirV), "SPIR-V wind twin").spirv);
+	// Metal: both twins as MetalRenderer builds them (pinned, instance array at buffer 5).
+	put("wind_inst_metal_vert.metal", need(lib.customVertexInstanced(vh, gen.vertexBody, B::Metal), "MSL wind twin").source);
+	put("inst_metal_vert.metal",      need(lib.standardVertexInstanced(B::Metal), "MSL plain twin").source);
 }
 #endif // HE_TESTS_HAVE_SHADERC
 

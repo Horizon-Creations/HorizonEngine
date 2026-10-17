@@ -781,22 +781,77 @@ Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`), Zweig `claude/folia
   also Reihenfolge/globaler Profiler-Zustand). Keiner berührt Foliage.
 - `HorizonEditor` baut. **Nicht** von Hand im Editor angeklickt, kein Bild; die UI ist nur durch den headless UI-Test belegt.
 
+## 15. Stand Graph-Material-Instancing (Thema 182, Schritt 2 = Teil 2e, 17.10.2026)
+
+Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`, RTX 4070). W-B aus Abschnitt 3: ein Batch eines Graph-Materials (Foliage-Vorlage, Wind Sway am WPO-Pin)
+zeichnet auf GL **einmal** mit dem Fragment des Materials und einem instanzierten Zwilling seines Vertex. Metal ist als Textpatch gebaut, hier weder übersetzt noch gelaufen.
+
+### 15.1 Was gebaut ist
+
+- **Shader-Bibliothek** (`MaterialShaderLibrary.cpp:71` `assembleVertex(..., instanced)`, `standardVertexInstanced` `:1102`, `customVertexInstanced` `:987`): `u.model`/`u.mvp`
+  werden zu den Locals `heModel`/`heMvp`, am Anfang von `main()` je Instanz gelesen. Metal: `mat4`-Feld an Vertex-Buffer 5, **{mvp, model} je Instanz** (das `k_instStride`-Layout
+  des Szenen-Instanzpfads), also dieselbe Rechnung wie der Einzel-Draw samt Transpose-Trick des WPO. GL/D3D/Vulkan: Modell aus den Attributen 4-7 (Divisor 1, liegt in jedem
+  Mesh-VAO), `U.mvp` trägt `viewProj`. U-Block, `HeLighting` und Varyings bleiben die des einfachen Vertex, jedes Material-Fragment passt. Der einfache Text bleibt byte-gleich,
+  eigene Cache-Slots.
+- **OpenGL** (`OpenGLRenderer.cpp`): `GetOrBuildMaterialProgram(..., instanced)` `:3771` (eigener Programmschlüssel, folgt GLSL 4.10/4.30 wie das Material),
+  `DrawGraphBatchInstanced` `:3952`. G-Buffer-Pass `:11815`/`:11964` und Forward-Pass `:12139`/`:12271` bauen den Zwilling nur für einen Batch; 0 lässt die Schleife.
+- **Metal** (`MetalRenderer.mm`): `GetOrBuildMaterialPipeline(..., instanced)` `:12662` (Fragment-Cache geteilt, PSO-Slot eigen), Forward `:14675`, G-Buffer `:16516`: der
+  Zwilling-PSO entsteht beim **ersten Batch** des Materials, `drawInstance` bekommt PSO, Instanzpuffer und Anzahl und macht alle bisherigen Binds (HeLighting/HeParams an 2/3,
+  Texturen, Weightmap) plus Buffer 5 und `instanceCount`.
+- **Schalter** `HE_GRAPH_INSTANCING=0` (`RenderSorter::graphInstancingEnabled`): Rückweg auf die Schleife im selben Binary (das A/B), für alle Backends gedacht.
+- **Zeuge** `HE_DUMP_FOLIAGEMAT=wind` (`EditorApplication.cpp`, Foliage-Zeuge): Magenta-Graph plus Wind Sway am WPO-Pin. Offset = `windSpeed * 0.1 m` oben an einem 1-m-Biegeband;
+  `HE_DUMP_WINDSPEED` und `HE_SKY_TIME` (die Uhr des Graphen) festnageln.
+- **A/B-Skript** `scripts/perf/foliage_graph_ab.py` (ein Editor, instanziert gegen `HE_GRAPH_INSTANCING=0`, plus zwei Wind-Kontrollen über die Pflanzenmaske).
+
+### 15.2 Was bewusst weiter schleift
+
+- **Gebackene Pak-Varianten** (`MaterialShaderVariant`, exportiertes Spiel): kein instanzierter Vertex gebacken → `GetOrBuild...(instanced)` gibt 0/nullptr, die Schleife zeichnet.
+  **Im exportierten Spiel zeichnet Graph-Foliage deshalb weiter je Pflanze.** Entscheidung bei der Queen (Anfrage 105): (a, empfohlen) `vertexInstanced`
+  (+ `vertexInstancedClustered` für GL 4.30) backen wie `uiVertex`, mit HAsset-Tail-Regel und Alt-Pak-Test, passt zu Schritt 4; (b) nur den Vertex zur Laufzeit übersetzen.
+- GL-Rückfall ohne G-Buffer-Variante (`deferredForward`-Replay), durchscheinende Batches (sortiert, `pushTP`), Metal-`forwardOpaque`-Umleitung: je Instanz wie bisher.
+- Tiefen-/Schattenpässe: kein WPO (starrer Schatten, 7.7), unverändert.
+- D3D11/D3D12/Vulkan: die Zwillinge übersetzen (HLSL `TEXCOORD4..7`, SPIR-V), sind aber **nicht verdrahtet**; ihre Input-Layouts brauchen den Instanzstrom (Schritt 4).
+- Ein handgeschriebenes Fragment, das `u.model` liest, bekommt auf GL im Batch die Einheitsmatrix (Graph-Fragmente lesen `u.model` nicht).
+
+### 15.3 Prüfung
+
+- `he_tests --source-file=*test_graph_instancing.cpp`: 5 Fälle (Zwilling übersetzt auf Metal, GL 4.10/4.30, ES 3.0, HLSL, SPIR-V mit echtem Wind-Sway-Körper; Metal liest
+  `[[buffer(5)]]`/`[[instance_id]]`; einfache Formen unberührt; GL-Blockgleichheit `HeLighting`/`U`; Quelltext-Guards der GL- und Metal-Zeichenstellen; Dump für die Offline-Compiler).
+- `scripts/water_shader_offline_check.py` gibt die Zwillinge jetzt mit in `glslangValidator -l` (GL-Paare gelinkt), `spirv-val`, `fxc` und **`xcrun metal` auf dem macOS-CI-Runner**
+  (der einzige echte Metal-Compiler, der den Metal-Teil je sieht).
+- **GL-Zeuge** (2000 Pflanzen, 100-m-Feld, Kamera `CAMX=0 CAMY=25 CAMZ=60 PITCH=-20`, `SHADOW=0.1`, Wind 20, Uhr 3.0): draws **1941 → 5** (Forward) und **1942 → 6** (Deferred),
+  gleiche 58 060 Dreiecke, `glGetError=0`, 0 Warnungen. Bild instanziert gegen Schleife **bitgleich** (0 von 921 600 Pixeln) für Wind und flachen Graph, Forward und Deferred,
+  bei Uhr 3.0 und 7.3, mit kaltem (Programm gebaut) und warmem Programm-Cache (Programm aus `glprogcache` geladen). Kontrollen: Wind 0 gegen 20 verschiebt 20 % der
+  Pflanzenpixel, Uhr 3.0 gegen 7.3 23 %; der Wind wirkt also und bleibt erhalten.
+  `python scripts/perf/foliage_graph_ab.py --editor C:/hw182/deploy/Editor --rhi OpenGL` bestätigt das: WF/WD/GF/GD identisch, draws 5/1941 und 6/1942, beide Kontrollen bewegen die Pflanzen.
+- `water_shader_offline_check.py --he-tests C:/hw182/tests/he_tests.exe` hier: 21 bestanden, 0 rot, Metal übersprungen (kein Xcode); die fünf neuen GL-Paare gelinkt, SPIR-V und HLSL der Zwillinge gültig.
+- Voller `he_tests`-Lauf (Release, scratch `APPDATA`): 5406 Fälle, 5402 grün, 4 rot, 12 übersprungen; rot sind genau die vier aus 14.2 (`test_inspector_ui` Zwischenablage ×2,
+  `test_profiler` ×2), keiner berührt Material oder Foliage.
+
+### 15.4 Nicht geprüft
+
+Metal (weder übersetzt noch gelaufen; Bitgleichheit dort folgt aus der identischen Rechnung, ist aber kein Bild); Zeitmessung (nur `draws`); exportiertes Spiel (Schleife, 15.2);
+der Editor von Hand; Linux-GL (CI übersetzt).
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 1 von 5 (Teil 2d, Schichten)
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `433f2be8` (Code), Reihenfolge-Fix und Doku danach (gepusht: ja)
-- **Done:** Ein Landscape trägt mehrere Foliage-Schichten; jede streut, malt, zeichnet und reist im Collab für sich; alte Szenen laden und speichern unverändert.
-- **Files touched:** `FoliageComponent.h` (Modell), `FoliageSystem.cpp` (`scatterLayer`), `FoliageExtract.cpp:285` (Schicht-Schleife), `SceneSerializer.cpp` (`foliageLayerToJson`),
-  `SceneSystems.cpp:262`, `TerrainSync.cpp` (`foliageLayerOf`, `restoreFoliage`, `forEachGrid`), `InspectorPanel.cpp` (Foliage), `TerrainTools.cpp` (Foliage-Tab, Pinsel ~:741).
-- **Verified:** die Testdateien aus 14.2, voller `he_tests`-Lauf (4 rote Fälle, nicht Foliage, 14.2); Editor-Build; Hilfe-Audit.
-- **Not verified:** Editor von Hand (Klicks, Optik), Live-Collab zwischen zwei Editoren (nur der Test-Rig `test_terrain_sync`), macOS/Linux (CI).
-- **Decisions taken:** flaches Format für eine Schicht (D2, byte-gleich); Komponenten-`dirty` = alle Schichten, damit Sculpt/Mountain/Import unverändert bleiben;
-  `activeLayer` an der Komponente statt einer statischen Variable, damit Inspector und Pinsel dieselbe Schicht meinen; Masken-Felder `16 + i` mit Protokoll-Bump;
-  `kMaxLayers = 32`; `bucketSize` hat kein UI-Feld (nur Format).
-- **Decisions suggested, not taken:** Voreinstellungen (Gras/Busch/Baum/Fels) aus der 2d-Zeile von Abschnitt 8 sind nicht gebaut; Schichten verschieben/duplizieren nicht gebaut;
-  Regeln für Thema 180 (Hang, Höhe, Paint-Schicht) gehören als Felder an `FoliageLayer` (Abschnitt 5).
-- **Pending:** Schritt 2 (2e Graph-Material-Instancing), 3 (3a LOD-Stufen: `lods` je `FoliageLayer`), 4 (Windows-Gleis), 5 (Verifikation).
-- **Traps:** Undo stellt die Welt aus CBOR wieder her, `activeLayer` springt dann auf 0. Eine Schicht ohne Mesh warnt bei jedem Neustreuen (gehaltener Sculpt-Pinsel = jeder Frame),
-  wie vorher bei einer Komponente ohne Mesh. Tests, die `fol.dirty` nach `FoliagePaint` prüfen, müssen `layers[i].dirty` fragen.
-- **Next steps:** 1. Schritt 2 (2e) beginnt in `MaterialShaderLibrary.cpp` und den Backends, `FoliageLayer` braucht dafür nichts Neues. 2. Für 3a `std::vector<FoliageLod> lods`
-  an `FoliageLayer` hängen und in `foliageLayerToJson` nur schreiben, wenn nicht leer (byte-gleich bleibt).
+- **Topic / step:** Thema 182, Schritt 2 von 5 (Teil 2e, Graph-Material-Instancing); Schritt 1 (2d) steht in Abschnitt 14
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `722c08e7` (Code) + Folgecommit (Offline-Check, A/B-Skript, Doku); gepusht: ja
+- **Done:** Ein Foliage-Batch mit Graph-Material (auch mit Wind/WPO) zeichnet auf GL in einem Draw mit dem Material, bitgleich zur alten Schleife; Metal als Textpatch.
+- **Files touched:** `MaterialShaderLibrary.cpp:71` (`assembleVertex` instanced), `:987`, `:1102`; `OpenGLRenderer.cpp:3771`, `:3952`, `:11815`, `:12139`;
+  `MetalRenderer.mm:12662`, `:14675`, `:16516`; `RenderSorter.cpp` (`graphInstancingEnabled`); `EditorApplication.cpp` (Zeuge `FOLIAGEMAT=wind`);
+  `tests/test_graph_instancing.cpp`; `scripts/water_shader_offline_check.py`; `scripts/perf/foliage_graph_ab.py`.
+- **Verified:** 15.3 (GL-Bild-A/B auf RTX 4070, Offline-Compiler ohne Metal, `test_graph_instancing` 5/5, voller `he_tests` mit den bekannten 4 Roten).
+- **Not verified:** Metal (kein Mac: nicht übersetzt, nicht gelaufen; die CI-Schritte `metal -c` über die Zwillinge und der macOS-Build sind die einzige Prüfung); Zeitmessung;
+  exportiertes Spiel; Editor von Hand.
+- **Decisions taken:** Metal liest {mvp, model} aus Buffer 5 (bitgleich zur Schleife), GL das Modell aus 4-7 mit `U.mvp = viewProj`; Zwilling erst beim ersten Batch bauen;
+  gebackene Varianten fallen auf die Schleife zurück statt Laufzeit-Vertex neben gebackenem Fragment; D3D/Vulkan nur übersetzt, nicht verdrahtet (Schritt 4).
+- **Decisions suggested, not taken:** Anfrage 105 an die Queen: `vertexInstanced` backen (Option a, empfohlen) oder Laufzeit-Vertex (b). Roadmap-Satz "GPU-instanced foliage with wind"
+  stimmt weiter nicht für das exportierte Spiel und D3D/Vulkan; Änderung braucht den Menschen.
+- **Pending:** Metal auf einem Mac laufen lassen (`foliage_graph_ab.py --rhi Metal`), Backen (Anfrage 105), Schritt 3 (3a LOD), 4 (Windows-Gleis: D3D/Vulkan verdrahten,
+  Input-Layouts mit Instanzstrom, Material-Ring 1024), 5 (Verifikation, Zeitmessung).
+- **Traps:** `glprogcache` liegt unter `SDL_GetPrefPath`, scratch `APPDATA`/`HE_CONFIG_DIR` trennt ihn nicht. Ganzes-Bild-Diff zeigt den Wind nicht (Wolken bewegen sich mit),
+  Pflanzenmaske nehmen. Metal-G-Buffer-PSO kommt nie aus dem Pak, Forward-PSO schon (`cShBaked`).
+- **Next steps:** 1. Mac: `python3 scripts/perf/foliage_graph_ab.py --editor out/deploy/Editor --rhi Metal`, erwartet identisch und weniger draws. 2. Nach Entscheid 105:
+  Felder in `MaterialShaderVariant` (Assets.h:15) und `MaterialShaderBake.cpp`, HAsset-Tail-Regel, Alt-Pak-Test. 3. Schritt 4: D3D11 `drawMatInstance` durch einen Instanz-Draw
+  mit `customVertexInstanced(HLSL)` ersetzen (Input-Layout: TEXCOORD4..7, Slot 1, per Instanz).
