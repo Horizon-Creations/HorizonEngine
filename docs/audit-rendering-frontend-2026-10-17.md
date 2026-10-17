@@ -34,8 +34,8 @@ call site are all this one cause.
 - **Hash.** The key formula is unchanged, bit for bit: `frag`, then
   `^= vert * 0x9E3779B97F4A7C15` when there is a WPO body.
 - **Backends.** The per-draw sites now use the pointer form:
-  - GL: `resolveMaterialShader` and `resolveMaterialShaderGB` (all 9 callers).
-  - Metal: `ResolveMaterialShader` and `ResolveMaterialShaderGB` (all 10 callers).
+  - GL: `resolveMaterialShader` and `resolveMaterialShaderGB` (all 10 callers).
+  - Metal: `ResolveMaterialShader` and `ResolveMaterialShaderGB` (all 9 callers).
   - Vulkan: `VulkanRenderer.cpp:8253`.
   - D3D11: `D3D11Renderer.cpp:7009`.
   - D3D12: `D3D12Renderer.cpp:10974`.
