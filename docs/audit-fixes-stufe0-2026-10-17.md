@@ -4,7 +4,7 @@ Findings from `docs/audit/AUDIT.md` Stufe 0, fixed one by one with the existing 
 the net. Step 1 (REN-804, EDT-401) is commit 27e7067f; its notes live in the Hive handoff
 only. This file starts with step 2.
 
-## Handoff
+## Step 2 (release traps part 2)
 
 - **Topic / step:** Thema 212, step 2 of 3 (release traps part 2)
 - **Branch / commit:** claude/audit-fixes-korrektheit-und-release-fallen-stufe-0 @ 29d15980 (pushed: yes);
@@ -49,3 +49,37 @@ only. This file starts with step 2.
 - **Next steps:**
   1. Read CI 39043434861. If red, check `test_process_runner` (orphan-holder) and `test_sftp_timeout` on Linux/macOS first.
   2. Step 3: EDT-604 (`##wx` in reference titles), EDT-1718 (double-encoded dash), EDT-307 (collab reload never effective).
+
+## Handoff
+
+- **Topic / step:** Thema 212, step 3 of 3 (visible defects EDT-604, EDT-1718, EDT-307)
+- **Branch:** claude/audit-fixes-korrektheit-und-release-fallen-stufe-0 (commit and push: see the Hive result post)
+- **Done:** all three are fixed, and AUDIT.md Stufe 0 is fully ticked.
+- **Files touched:**
+  - `src/HE_Editor/EditorReference.cpp:38` `labelOf` (EDT-604): the heading drops the `##` suffix, `sec.id` keeps it (F1 anchor), and the search text follows the heading.
+  - `src/HE_Editor/CppClassEditorPanel.cpp:91` `stateFor` (EDT-307): path resolution and loading are now separate steps, `if (!loaded) loadBuf`, as in `ScriptEditorPanel`.
+  - `:278` `reloadFromDisk`: exact key first, otherwise any class with that path as a half (compared with `fs::path ==`).
+  - `:314` new `bufferText(path, header)`, the tests' read side.
+  - `src/HE_Editor/TypeAssetPanel.cpp:543` (EDT-1718): `C3 A2 C2 80 C2 94` replaced by `\xe2\x80\x94`. A byte sweep over src/tests/scripts/EditorDeps found no other occurrence.
+  - `tests/test_editor_help.cpp`: the reverse loop now checks that no heading contains `##`; a new case at :153 pins `Weather/Fog Density##wx` → "Fog Density".
+  - `tests/test_cpp_class_editor.cpp` (new): reload of the header; a peer edit to the `.cpp` reaching a tab opened on the `.h`; an unrelated path returns false.
+  - `tests/CMakeLists.txt`: CppClassEditorPanel.cpp, the two ImGuiColorTextEdit sources and their include dir, per-file `HE_IMGUI_ENABLED`.
+- **Verified (Windows, Release tree C:/hw212):**
+  - *Negative control (tests written first, built against the old code):* red as expected. 5 `##wx` headings plus the pinned case. Reload kept the old text, and `reloadFromDisk(Foo.cpp)` returned false.
+  - *After the fix:* both files green. `editor_help_audit.py --check` 1205/1205. HorizonEditor builds.
+  - *Full `he_tests` (one binary, scratch APPDATA):* 5424 cases, 4 failed, the same 4 as step 2 (2 inspector-ui clipboard, 2 EngineProfiler order-dependence).
+- **Not verified:**
+  - The dash in the running editor (no screenshot). The byte check of the line is the evidence.
+  - Linux/macOS: CI (link in the Hive result).
+  - "Unsaved edits are dropped on reload" is not tested: the test cannot type into the TextEditor.
+- **Decisions taken:**
+  - A reload drops unsaved local edits of the class (the audit's open question). This is safe because `EditorUI` draws a peer-locked tab inside `BeginDisabled` (`tabReadOnly`, EditorUI.cpp ~3976-4105), and it matches ScriptEditorPanel.
+  - Local strip in `labelOf` rather than exporting `Help::visible()`. The latter would mean a change to `EditorHelp.h`, which most of the editor includes.
+  - EDT-1718 only the dash. The comment and cleanup items (TutorialPanel.h:39-41, TerrainTools.cpp:2164, ThemeAssetPanel "Nine/ten roles", `styleValueRow` `key`/`const_cast`, TutorialSteps duplicate "7.") are deliberately left open.
+- **Traps:**
+  - A new include dir on `he_tests` recompiles all ~520 objects once.
+  - The agents' Bash tool turns a double backslash into a single one, even inside a quoted heredoc. A Python edit meant to write the escape text `\xe2` therefore wrote the raw UTF-8 dash. Build the backslash with `bytes([0x5c])` or use the Edit tool, then check the bytes with `od -c`.
+- **Next steps:**
+  1. Read the CI run. If red, check `test_cpp_class_editor` first: TextEditor in the test target is new on Linux/macOS.
+  2. The topic is complete; the queen merges into release/0.7.0.
+  3. Optional: the remaining EDT-1718 items as their own small step.
