@@ -15,6 +15,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/InactiveComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
@@ -1317,4 +1318,106 @@ TEST_CASE("inspector ui: the Rigid Body section's water rows opt a body out and 
     CHECK(undo.undoDepth() == 1);                            // the undo of the checkbox was taken; this is the only entry
     REQUIRE(undo.undo());
     CHECK(body().density == 0.0f);                           // back to "from mass"
+}
+
+TEST_CASE("inspector ui: the Foliage section adds a detail level and gives it the cross card, each one undo step")
+{
+	// Thema 182 Schritt 3. The layer's detail levels are authored here and nowhere else:
+	// Add Level has to be on the panel and put a level halfway to the draw distance,
+	// Cross Card on that level's row has to give it the engine's card, each one undo step.
+	Harness harness;
+	constexpr int TW = 420, TH = 1700;
+	ImGui::GetIO().DisplaySize = ImVec2(float(TW), float(TH));
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+	const Entity land = world.createEntity("Landscape");
+	FoliageComponent fol;
+	fol.layers[0].meshAssetId  = HE::kDefaultCubeMeshId;
+	fol.layers[0].drawDistance = 80.0f;
+	reg.emplace<FoliageComponent>(land, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGuiID addLevel = 0, crossCard0 = 0;
+	auto tallFrame = [&](bool left, he_ui::Image* shot = nullptr) -> ImGuiID {
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
+		ImGui::Begin("Details");
+		addLevel = ImGui::GetID("Add Level##fol");
+		ImGui::PushID(0);
+		crossCard0 = ImGui::GetID("Cross Card##fol");
+		ImGui::PopID();
+		InspectorPanel::renderFor(ctx, world, land, &undo);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), TW, TH);
+		return hovered;
+	};
+	auto idAtT = [&](float x, float y) {
+		ImGui::GetIO().AddMousePosEvent(x, y);
+		tallFrame(false);
+		return tallFrame(false);
+	};
+	auto clickT = [&](float x, float y) {
+		ImGui::GetIO().AddMousePosEvent(x, y);
+		tallFrame(false);
+		tallFrame(false);
+		tallFrame(true);
+		tallFrame(false);
+		tallFrame(false);
+	};
+	auto findT = [&](ImGuiID wanted, float x) {
+		for (float yy = 12.0f; yy < float(TH) - 12.0f; yy += 2.0f)
+			if (idAtT(x, yy) == wanted) return yy + 3.0f;
+		return -1.0f;
+	};
+	auto layer = [&]() -> const FoliageLayer& { return reg.get<FoliageComponent>(reg.view<FoliageComponent>().front()).layers[0]; };
+
+	ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
+	for (int i = 0; i < 4; ++i) tallFrame(false);
+	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+	const float addY = findT(addLevel, x);
+	REQUIRE_MESSAGE(addY > 0.0f, "the Foliage section has no Add Level button on the panel");
+
+	REQUIRE(layer().lods.empty());
+	REQUIRE_FALSE(undo.canUndo());
+	clickT(x, addY);
+	REQUIRE(layer().lods.size() == 1u);
+	CHECK(layer().lods[0].distance == doctest::Approx(40.0f));     // halfway to the 80 m draw distance
+	CHECK(layer().lods[0].density == doctest::Approx(1.0f));
+	CHECK(layer().lods[0].meshAssetId == HE::UUID{});               // the layer's mesh until one is given
+	const size_t depth = undo.undoDepth();
+	CHECK(depth >= 1u);
+
+	// The new row's Cross Card button: right of "Level 1", so walk along the row's line.
+	float cardX = -1.0f, cardY = -1.0f;
+	for (float yy = addY - 260.0f; yy < addY && cardY < 0.0f; yy += 2.0f)
+		for (float xx = x; xx < float(TW) - 20.0f && cardY < 0.0f; xx += 8.0f)
+			if (idAtT(xx, yy) == crossCard0) { cardX = xx + 2.0f; cardY = yy + 3.0f; }
+	REQUIRE_MESSAGE(cardY > 0.0f, "the new detail level has no Cross Card button");
+	clickT(cardX, cardY);
+	CHECK(layer().lods[0].meshAssetId == HE::kEngineCrossCardMeshId);
+	CHECK(undo.undoDepth() == depth + 1);
+
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+	{
+		he_ui::Image img;
+		tallFrame(false, &img);
+		if (img.valid()) he_ui::writeBmp(img, std::string(dir) + "/inspector-foliage-levels.bmp");
+	}
+
+	// Back: first the card, then the level itself.
+	REQUIRE(undo.undo());
+	REQUIRE(layer().lods.size() == 1u);
+	CHECK(layer().lods[0].meshAssetId == HE::UUID{});
+	REQUIRE(undo.undo());
+	CHECK(layer().lods.empty());
 }

@@ -836,25 +836,90 @@ Metal (weder übersetzt noch gelaufen; Bitgleichheit dort folgt aus der identisc
 Forward-Schleife und Deferred-Zwilling folgen aus dem Quelltext, 15.2);
 der Editor von Hand; Linux-GL (CI übersetzt).
 
+## 16. Stand LOD-Stufen (Thema 182, Schritt 3 = Teil 3a, 17.10.2026)
+
+Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`, RTX 4070). D7 aus Abschnitt 6/7.6: handgemachte Stufen je Schicht, Ausdünnung, Hysterese,
+Kreuz-Karte als Datei. Kein Backend geändert: eine Stufe ist nur ein weiteres Cluster-Objekt mit anderem Mesh/Material.
+
+### 16.1 Was gebaut ist
+
+- **Datenmodell** (`FoliageComponent.h:18`): `FoliageLod { meshAssetId, materialAssetId, distance, density }`, `FoliageLayer::lods` (höchstens `kMaxLods = 7`, `:71`)
+  und `lodHysteresis` (Standard 2 m, `:76`). **Abweichung vom Plan 7.1:** `distance` ist der **Anfang** der Stufe, nicht `maxDistance`; das eigene Mesh der Schicht ist
+  Stufe 0 vom Betrachter bis zur ersten Stufe, die letzte reicht bis `drawDistance` (bleibt das harte Ende). Leeres Mesh = das der Schicht (eine Stufe, die nur ausdünnt),
+  leeres Material = das der **Schicht** (nicht das des Stufen-Meshs). `density` 0..1, 0 = nichts.
+- **Extraktion** (`FoliageExtract.cpp`): `levelsOf` `:253` sortiert die Stufen je Frame (der Inspector darf sie beim Ziehen umordnen), `Levels::plain/choose/whole`
+  `:205-250`. Je Bucket: liegt er in Reichweite **und** frei von jedem Band (Grenze ± Hysterese, mit dem `kRangeMargin` der Reichweite), ist er **ein** Cluster seiner Stufe,
+  ohne Kopie (Ausdünnung = Präfix). Sonst (Reichweite oder ein Band schneidet ihn) Pflanze für Pflanze, je Stufe ein Cluster über den Scratch (`:560`). Die Box je Cluster
+  nimmt die Reichweite des **Stufen-Meshs** (`clusterBounds(b, level)`). Eine Schicht ohne Stufen läuft im alten Code (eigener Zweig, Ausgabe gleich).
+- **Ausdünnung** (`keptOf` `:186`): die ersten `round(density · count)` Pflanzen jedes Buckets, **ein** Ausdruck für den Ganz- und den Einzelweg, sonst wechselten Pflanzen,
+  sobald ein Bucket den Weg wechselt. Gleichmäßig, weil das Streuen gleichverteilt zufällig zieht (`FoliageSystem.cpp` `scatterLayer`, Test „evenly“).
+- **Hysterese** (`FoliageExtract.h:27` `FoliageLodMemory`): **je Ansicht**, weil `RenderExtractor` eine Ansicht ist (Szene, Vorschau): `RenderExtractor.h:332`
+  `m_foliageLod`, angelegt in `RenderExtractor.cpp:1424`. Je Store ein Byte je Bucket (Stufe des ganzen Buckets / gemischt / unbekannt), ein Byte je Pflanze erst, wenn eine
+  Grenze einen Bucket geteilt hat; wechselt ein Bucket von ganz zu geteilt, erben seine Pflanzen die Stufe des Buckets. Eine Pflanze behält ihre Nachbarstufe, solange sie
+  höchstens `lodHysteresis` hinter der Grenze liegt; an `drawDistance` keine Hysterese. Einträge eines Stores, der im Frame nicht extrahiert wurde, fallen am Ende weg
+  (`:649`; ein gehaltener Sculpt-Pinsel streut jeden Frame neu). `extractFoliage(..., nullptr)` = ohne Gedächtnis = nach Abstand.
+- **PerInstance / Ordered** nehmen dieselbe Stufen- und Ausdünnungsregel nach Abstand (ohne Hysterese); Ordered bildet je Mesh+Material ein Cluster in Sortierreihenfolge.
+- **Zähler** (`FoliageExtractStats`): `levelInstances[8]`, `thinnedInstances`, `heldInstances`; die `HE_FOLIAGE_STATS`-Zeile endet jetzt auf `per level a/b/c, N thinned, M held`.
+- **Format** (`SceneSerializer.cpp:184`, `:221`): `lods` und `lodHysteresis` nur, wenn gesetzt (eine Schicht ohne Stufen schreibt die alten Schlüssel, byte-gleich), in beiden
+  Formen (flach und `layers`). Laden sortiert, kappt bei `kMaxLods`, klemmt `density` auf 0..1 und `distance` auf ≥ 0. `settingsKeyOf` (Revision) und `collectAssetRefs`
+  (Export/Preload) nennen Mesh und Material jeder Stufe.
+- **Editor** (`InspectorPanel.cpp:3572`): „Detail Levels“ unter Shadow Distance: je Stufe Mesh- und Material-Slot, `Level Distance`, `Level Density`, `Cross Card`
+  (setzt die Engine-Karte), `Remove Level`; `Add Level` (halbe Strecke bis `drawDistance`), `Level Hysteresis`. Hinweis „never drawn“ bei Anfang ≥ `drawDistance`.
+  Hilfe in `EditorHelp.cpp`, `editor_help_audit.py --check` 1216/1216.
+- **Kreuz-Karte als Datei** (`mesh_gen`, `MeshGen/main.cpp:143`): `EditorDeps/EngineContent/Meshes/CrossCard.hasset`, Eintrag 8 = `kEngineCrossCardMeshId` `0x108`
+  (`DefaultAssets.h:104`, `static_assert` im Generator). Zwei aufrechte 1×1-Quads über Kreuz, **beide Seiten** je Ebene (16 Vertices, 8 Dreiecke), Drehpunkt **unten**
+  (y 0..1, anders als die zentrierten Primitive), volle UV 0..1 je Fläche. Die Textur (Bild der Pflanze) ist Sache des Materials; das Backen ist Teil 3c.
+- **Zeuge** `HE_DUMP_FOLIAGELOD=<ab>[:cube|sphere|card[:dichte]],...` (`EditorApplication.cpp:7565`, im Foliage-Zeugen; lädt Kugel und Karte als Engine-Dateien und loggt,
+  ob die Karte mit ihrer UUID kam) und `scripts/perf/foliage_lod_shot.py` (keine Stufen / Stufen / ordered / je Pflanze, ein Binary).
+
+### 16.2 Prüfung
+
+- `tests/test_foliage_lod.cpp`, 10 Fälle: Mesh je Pflanze nach Abstand in allen drei Modi gleich der Testkopie der Regel (2 Grenzen + Reichweite, ganze und geteilte Buckets),
+  Ausdünnung gleichmäßig (Anteil und Quadranten), derselbe Bucket ganz vs. bei vier Schnitttiefen geteilt behält dieselben Pflanzen, Hysterese (gehaltene Pflanzen genau die
+  im Band, Zähler stimmt, zweite Ansicht ohne Gedächtnis, weit weg wieder nach Abstand), Gedächtnis folgt den Stores (5× neu streuen, verbergen, Stufen weg), Cluster-Box
+  hält das Stufen-Mesh an jeder Pflanze, Revision, Format (flach, `layers`, Handarbeit sortiert/geklemmt/gekappt), Export-Refs, die Karten-Datei (UUID, Maße, Wicklung,
+  Normalen, UV). **Negativkontrolle:** Hysterese abgeschaltet und Ausdünnung im Einzelweg um eins verschoben → 4 Fälle rot (der Ganz/geteilt-Fall erst, seit er vier
+  Schnitttiefen nimmt).
+- `test_inspector_ui` „the Foliage section adds a detail level and gives it the cross card“: Add Level und Cross Card per Klick, je ein Undo-Schritt, beide zurück;
+  das BMP (`HE_UI_DUMP_DIR`) zeigt die Zeilen sauber.
+- Voller `he_tests` (Release, scratch `APPDATA`): 5417 Fälle, 5413 grün, 4 rot, 12 übersprungen; rot genau die vier aus 14.2/15.3 (`test_inspector_ui` Zwischenablage ×2,
+  `test_profiler` ×2), keiner berührt Foliage.
+- Je Datei grün: test_foliage 16, test_foliage_cluster 20, test_foliage_layers 8, test_scene_serializer 46, test_terrain_sync 14, test_graph_instancing 5, test_editor_help 19, test_lod 11.
+- **Zeuge auf echter Hardware** (6000 Pflanzen, 200-m-Feld, `drawDistance` 90, Stufen `25:sphere,50:card:0.5`, Kamera `CAMX=0 CAMY=6 CAMZ=60 PITCH=-6`): GL, D3D11 und Vulkan
+  zählen gleich, **296/840/866** je Stufe, 879 ausgedünnt; 41 Cluster, 7 Draws (ohne Stufen 29 Cluster, 5 Draws); Karte „loaded with its engine UUID“. Bild (nur Boden,
+  der Himmel rauscht auf D3D/Vulkan von Lauf zu Lauf): ordered == je Pflanze **pixelgleich** auf allen drei; Wiederholung desselben Laufs 0 Pixel; Cluster gegen ordered
+  GL 10 Pixel, D3D11 0,13 %, Vulkan 0,25 % (fast alle ≤ 8 Stufen). **Dieselbe Abweichung besteht ohne Stufen** (D3D11 0,21 %, Vulkan 0,51 %): sie gehört zum Cluster-Pfad
+  auf D3D/Vulkan, nicht zu den Stufen, und ist ein Fall für Schritt 4.
+- Mesh-Generator: ein Neulauf schreibt auch die acht alten Dateien um, aber nur weil der heutige Schreiber den META-Block 4 Byte länger macht (Geometrie gleich); die alten
+  Dateien sind zurückgesetzt, nur `CrossCard.hasset` ist neu.
+
+### 16.3 Nicht gebaut, nicht geprüft
+
+Dither-Überblendung (braucht ein Instanzfeld, 7.6), Bildschirmgröße statt Abstand, Hysterese/Bildschirmgröße im `LODSystem` der Entities, Voreinstellungen
+(Gras/Busch/Baum/Fels), das Backen der Kartentextur (3c), Auto-LOD (3b). Cutout der Karte im Schattenpass (7.7) bleibt offen: eine Karte mit Alpha wirft ein volles
+Rechteck, also Stufen mit Karte besser ohne Schatten oder mit `shadowDistance` davor. Nicht geprüft: Metal (kein Mac), der Editor von Hand (nur der headless UI-Test
+aus 16.2), das exportierte Spiel, Zeitmessung.
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 2 von 5 (Teil 2e, Graph-Material-Instancing); Schritt 1 (2d) steht in Abschnitt 14
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `722c08e7` (Code) + Folgecommit (Offline-Check, A/B-Skript, Doku); gepusht: ja
-- **Done:** Ein Foliage-Batch mit Graph-Material (auch mit Wind/WPO) zeichnet auf GL in einem Draw mit dem Material, bitgleich zur alten Schleife; Metal als Textpatch.
-- **Files touched:** `MaterialShaderLibrary.cpp:71` (`assembleVertex` instanced), `:987`, `:1102`; `OpenGLRenderer.cpp:3771`, `:3952`, `:11815`, `:12139`;
-  `MetalRenderer.mm:12662`, `:14675`, `:16516`; `RenderSorter.cpp` (`graphInstancingEnabled`); `EditorApplication.cpp` (Zeuge `FOLIAGEMAT=wind`);
-  `tests/test_graph_instancing.cpp`; `scripts/water_shader_offline_check.py`; `scripts/perf/foliage_graph_ab.py`.
-- **Verified:** 15.3 (GL-Bild-A/B auf RTX 4070, Offline-Compiler ohne Metal, `test_graph_instancing` 5/5, voller `he_tests` mit den bekannten 4 Roten).
-- **Not verified:** Metal (kein Mac: nicht übersetzt, nicht gelaufen; die CI-Schritte `metal -c` über die Zwillinge und der macOS-Build sind die einzige Prüfung); Zeitmessung;
-  exportiertes Spiel; Editor von Hand.
-- **Decisions taken:** Metal liest {mvp, model} aus Buffer 5 (bitgleich zur Schleife), GL das Modell aus 4-7 mit `U.mvp = viewProj`; Zwilling erst beim ersten Batch bauen;
-  gebackene Varianten fallen auf die Schleife zurück statt Laufzeit-Vertex neben gebackenem Fragment; D3D/Vulkan nur übersetzt, nicht verdrahtet (Schritt 4).
-- **Decisions suggested, not taken:** Anfrage 105 an die Queen: `vertexInstanced` backen (Option a, empfohlen) oder Laufzeit-Vertex (b). Roadmap-Satz "GPU-instanced foliage with wind"
-  stimmt weiter nicht für den Standard des exportierten Spiels (Forward + gebackene Variante; Deferred instanziert) und nicht für D3D/Vulkan; Änderung braucht den Menschen.
-- **Pending:** Metal auf einem Mac laufen lassen (`foliage_graph_ab.py --rhi Metal`), Backen (Anfrage 105), Schritt 3 (3a LOD), 4 (Windows-Gleis: D3D/Vulkan verdrahten,
-  Input-Layouts mit Instanzstrom, Material-Ring 1024), 5 (Verifikation, Zeitmessung).
-- **Traps:** `glprogcache` liegt unter `SDL_GetPrefPath`, scratch `APPDATA`/`HE_CONFIG_DIR` trennt ihn nicht. Ganzes-Bild-Diff zeigt den Wind nicht (Wolken bewegen sich mit),
-  Pflanzenmaske nehmen. Metal-G-Buffer-PSO kommt nie aus dem Pak, Forward-PSO schon (`cShBaked`).
-- **Next steps:** 1. Mac: `python3 scripts/perf/foliage_graph_ab.py --editor out/deploy/Editor --rhi Metal`, erwartet identisch und weniger draws. 2. Nach Entscheid 105:
-  Felder in `MaterialShaderVariant` (Assets.h:15) und `MaterialShaderBake.cpp`, HAsset-Tail-Regel, Alt-Pak-Test. 3. Schritt 4: D3D11 `drawMatInstance` durch einen Instanz-Draw
-  mit `customVertexInstanced(HLSL)` ersetzen (Input-Layout: TEXCOORD4..7, Slot 1, per Instanz).
+- **Topic / step:** Thema 182, Schritt 3 von 5 (Teil 3a, LOD-Stufen); Schritt 1 (2d) in Abschnitt 14, Schritt 2 (2e) in Abschnitt 15, dieser in Abschnitt 16
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `f2eddc0d` (Code, Tests, Karten-Datei) + Folgecommit (Zeuge, Skript, Doku); gepusht: ja
+- **Done:** Foliage-Schichten haben Detailstufen (Mesh/Material/Anfang/Dichte), je Pflanze nach Abstand gewählt, mit Hysterese je Ansicht und gleichmäßiger Ausdünnung;
+  die Kreuz-Karte ist eine Engine-Datei mit fester UUID.
+- **Files touched:** `FoliageComponent.h:18`, `FoliageExtract.h:27`, `FoliageExtract.cpp:186-650`, `RenderExtractor.h:332`/`.cpp:1424`, `SceneSerializer.cpp:184`/`:221`,
+  `FoliageSystem.cpp` (`settingsKeyOf`), `SceneSystems.cpp:262`, `InspectorPanel.cpp:3572`, `EditorHelp.cpp`, `MeshGen/main.cpp:143`, `DefaultAssets.h:104`,
+  `EditorDeps/EngineContent/Meshes/CrossCard.hasset`, `EditorApplication.cpp:7565` (Zeuge), `tests/test_foliage_lod.cpp`, `tests/test_inspector_ui.cpp` (letzter Fall),
+  `scripts/perf/foliage_lod_shot.py`.
+- **Verified:** 16.2 (10 neue Fälle mit Negativkontrolle, UI-Test, Nachbardateien grün, Zeuge auf GL/D3D11/Vulkan mit gleichen Zählern und pixelgleichem ordered/je Pflanze,
+  voller he_tests mit den bekannten 4 Roten).
+- **Not verified:** Metal; Inspector von Hand (nur headless UI-Test); exportiertes Spiel; Zeitmessung.
+- **Decisions taken:** `distance` = Anfang der Stufe (nicht `maxDistance` wie Plan 7.1), Stufe 0 = Mesh der Schicht; leeres Stufen-Material = Material der Schicht;
+  Hysterese je `RenderExtractor` (= je Ansicht), nicht in der Komponente; `drawDistance` ohne Hysterese; PerInstance/Ordered ohne Hysterese; Karte mit Drehpunkt unten.
+- **Decisions suggested, not taken:** Kartenstufen standardmäßig ohne Schatten, bis Cutout in Tiefenpässen (7.7) da ist; Dither-Überblendung mit dem kompakten Instanzformat.
+- **Pending (aus Schritt 2 weiter offen):** Metal-Übersetzung/-Lauf (CI-macOS-Job, `foliage_graph_ab.py --rhi Metal`), Anfrage 105 (instanzierten Vertex backen).
+- **Traps:** Engine-Meshes außer den eingebauten (Würfel, Quad, Schneeflocke) sind **Dateien**: ohne `loadAsset`/Preload zeichnet das Backend den Ersatzwürfel, ohne
+  Fehlermeldung. `mesh_gen` neu laufen lassen ändert alle alten `.hasset` (META 4 Byte länger): nur die neue Datei committen. Auf D3D/Vulkan rauscht der Himmel von Lauf zu Lauf;
+  Bildvergleiche dort nur über den Boden (`foliage_lod_shot.py` druckt Bild und Boden ab Zeile 330; die Dumps sind BMP **top-down**, negative Höhe).
+- **Next steps:** 1. Schritt 4 (Windows-Gleis): die Cluster-gegen-ordered-Abweichung auf D3D11/Vulkan (0,2-0,5 % des Bodens, ohne Stufen) erklären, dazu `python
+  scripts/perf/foliage_lod_shot.py --editor <deploy> --rhi D3D11`. 2. D3D/Vulkan-Graph-Instancing verdrahten (Abschnitt 15). 3. Schritt 5: Messleiter mit Stufen
+  (`HE_DUMP_FOLIAGELOD`), Zeit je Backend.
