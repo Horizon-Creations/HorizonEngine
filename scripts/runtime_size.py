@@ -190,7 +190,19 @@ LIMITS = {
     # tree carries one OpenGL backend where the game tree carries all of them,
     # and app-basic carries the software rasterizer alone.
     "linux": {
-        "game":         (64.0, 38.0),
+        # game: (64.0, 38.0) until 17.10.2026, raised on purpose. Thema 182
+        # (run 39033396153 on commit 2f0331ce, ubuntu-latest, the ci.yml recipe)
+        # weighed 60.8 MB total, 38.0 MB without python (scene 14.1, rendering 8.7,
+        # core 8.6) and went red by less than 0.05 MB; the row had not been
+        # re-measured since 05.09. (29.9 MB), and a month of world streaming,
+        # multiplayer and the rest ate the headroom the same way the win32 row
+        # above records. What tipped it on this branch is foliage, nothing linked
+        # in from outside: layers and their serializer in HorizonScene, detail
+        # levels and the graph-material instanced twins in HorizonRendering
+        # (Thema 182 steps 1-4). Thema 183 measured the same 60.8 / 38.0 on its own
+        # branch and raised the row to the same numbers. New limits: measured plus
+        # 10 percent, the rule the other rows follow.
+        "game":         (67.0, 42.0),
         "app-advanced": (56.0, 31.0),
         "app-basic":    (55.0, 30.0),
     },
