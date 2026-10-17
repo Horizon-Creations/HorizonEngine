@@ -743,3 +743,57 @@ billigere Bucket-Sortierung. Nicht geändert.
   3a (LOD-Stufen), 3b (Auto-LOD mit meshoptimizer, braucht eine Abhängigkeits-Entscheidung), 3c (Impostor). **Die zweite Hälfte des Themas, LOD und Impostor für ferne Vegetation, ist damit nicht erfüllt.**
 - **Auch nicht gebaut, ohne dass es dafür einen Hive-Schritt gab:** 2d (Schichten: `layers`, Serialisierung der neuen Felder, Inspector), `giOccluder`, Entfaltung für Picking, `revision` im FrameKey (Thema 162).
 - **Zur Roadmap (Entscheidung 6 in Abschnitt 10):** der Text "GPU-instanced foliage with wind" stimmt für 0.7 nicht (kein Wind, Graph-Material-Layer zeichnen je Pflanze). Die Korrektur braucht die Bestätigung des Menschen für den Deploy; nicht erfolgt.
+
+## 14. Stand Schichten (Thema 182, Schritt 1 = Teil 2d, 17.10.2026)
+
+Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`), Zweig `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`.
+
+### 14.1 Was gebaut ist
+
+- **Datenmodell** (`FoliageComponent.h`): `FoliageLayer` trägt alles je Schicht (Name, eigener `visible`, Mesh, Material, Dichte, Seed, Skala, `drawDistance`, Maske,
+  `bucketSize`, `castsShadow`, `contributesAO`, `shadowDistance`, dazu Laufzeit `dirty`, `cachedInstances`, `store`). Die Komponente behält `visible` (Zonen-Ausblenden),
+  `dirty` (= alle Schichten, der Boden hat sich bewegt: Sculpt, Mountain, Heightmap; diese Aufrufer sind unverändert), `revision`, `settingsKey` und neu `activeLayer`
+  (Editor-Zustand, nicht gespeichert, vor Gebrauch klemmen: `activeIndex()`). `layers` ist nie leer; `kMaxLayers = 32`; `addLayer()` vergibt Namen und einen freien Seed.
+- **Streuen** (`FoliageSystem.cpp`): `scatterLayer` ist der alte Körper, je Schicht. Schicht 0 bleibt bitgleich (Test vergleicht gegen eine Einzelschicht).
+  `settingsKeyOf` hasht alle Schichten und ihre Anzahl, also zählt Hinzufügen/Entfernen als Revision.
+- **Extraktion** (`FoliageExtract.cpp`): eine innere Schleife über sichtbare Schichten, die Terrain-Pose einmal je Komponente. `FoliageExtractStats::layers` zählt jetzt Schichten.
+- **Export/Preload** (`SceneSystems.cpp:262`): `collectAssetRefs` nennt Mesh und Material jeder Schicht (sonst fehlten im exportierten Spiel alle außer Schicht 0).
+- **Format** (`SceneSerializer.cpp`, `foliageLayerToJson/FromJson`): eine Schicht = die alten flachen Schlüssel, neue Felder nur wenn nicht Standard, der
+  Schicht-Schalter flach als `layerVisible` (denn `visible` war immer der Komponenten-Schalter). Ab zwei Schichten `"layers": [...]` mit `visible` je Schicht.
+  Alte Szenen speichern damit byte-gleich (Test: Schlüsselmenge einer bemalten Standardschicht == alte Menge). Leere Liste lädt als eine Standardschicht, mehr als 32 werden gekappt.
+- **Collab** (`TerrainSync.*`, `CollabSession.h`): Maske der Schicht i reist als Feld `16 + i` (`FoliageMask`, Feld 4 entfällt), Spiegel je Feld, ein Spiegel ohne
+  Schicht wird geleert (eine später dort erscheinende Schicht geht ganz). `restoreFoliage` behält die empfangenen Einstellungen und übernimmt je Index nur Maske und
+  noch gültige Streuung (vorher `n = move(o)`, das hätte eine fremde `castsShadow`-Änderung zurückgedreht, sobald sie serialisiert wird). Protokoll **17**.
+- **Editor:** Inspector (`InspectorPanel.cpp`, Abschnitt Foliage): Schichtliste mit Sichtbarkeit, Add/Remove Layer (letzte bleibt), Name, Cast Shadows, Ambient Occlusion,
+  Shadow Distance. Landscape-Tab Foliage (`TerrainTools.cpp`): Schicht-Wähler im Stil der Paint-Liste, `Add Foliage Layer##more`; Pinsel, Maskenauflösung, Erase Everywhere
+  und Reset Mask wirken auf die aktive Schicht. Hilfe-Einträge in `EditorHelp.cpp`, `editor_help_audit.py --check` grün (1210/1210).
+
+### 14.2 Prüfung
+
+- `he_tests` je Datei (Release, scratch `APPDATA`): test_foliage 16, test_foliage_cluster 20, **test_foliage_layers 8 (neu)**, test_scene_serializer 46,
+  test_terrain_sync 13 (3 neu), test_terrain_tools_ui 6 (zweite Schicht per Panel angelegt und bemalt, Schicht 0 unberührt), test_net_collab 114, test_net_lanbeacon 17,
+  test_editor_help 19: alle grün.
+- Voller `he_tests`-Lauf (Release): 5401 Fälle, 5397 grün, 4 rot, 12 übersprungen. Rot: zwei Fälle in `test_inspector_ui` (Zwischenablage, `GetClipboardText` = null,
+  Light/Network-Komponente; auf NN-WS03 bekannt, siehe Memory „Pre-existing Vulkan/D3D/ctest noise“) und zwei in `test_profiler` (im Einzellauf 18/18 grün,
+  also Reihenfolge/globaler Profiler-Zustand). Keiner berührt Foliage.
+- `HorizonEditor` baut. **Nicht** von Hand im Editor angeklickt, kein Bild; die UI ist nur durch den headless UI-Test belegt.
+
+## Handoff
+
+- **Topic / step:** Thema 182, Schritt 1 von 5 (Teil 2d, Schichten)
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ siehe `git log` (gepusht: ja)
+- **Done:** Ein Landscape trägt mehrere Foliage-Schichten; jede streut, malt, zeichnet und reist im Collab für sich; alte Szenen laden und speichern unverändert.
+- **Files touched:** `FoliageComponent.h` (Modell), `FoliageSystem.cpp` (`scatterLayer`), `FoliageExtract.cpp:285` (Schicht-Schleife), `SceneSerializer.cpp` (`foliageLayerToJson`),
+  `SceneSystems.cpp:262`, `TerrainSync.cpp` (`foliageLayerOf`, `restoreFoliage`, `forEachGrid`), `InspectorPanel.cpp` (Foliage), `TerrainTools.cpp` (Foliage-Tab, Pinsel ~:741).
+- **Verified:** die Testdateien aus 14.2, voller `he_tests`-Lauf (4 rote Fälle, nicht Foliage, 14.2); Editor-Build; Hilfe-Audit.
+- **Not verified:** Editor von Hand (Klicks, Optik), Live-Collab zwischen zwei Editoren (nur der Test-Rig `test_terrain_sync`), macOS/Linux (CI).
+- **Decisions taken:** flaches Format für eine Schicht (D2, byte-gleich); Komponenten-`dirty` = alle Schichten, damit Sculpt/Mountain/Import unverändert bleiben;
+  `activeLayer` an der Komponente statt einer statischen Variable, damit Inspector und Pinsel dieselbe Schicht meinen; Masken-Felder `16 + i` mit Protokoll-Bump;
+  `kMaxLayers = 32`; `bucketSize` hat kein UI-Feld (nur Format).
+- **Decisions suggested, not taken:** Voreinstellungen (Gras/Busch/Baum/Fels) aus der 2d-Zeile von Abschnitt 8 sind nicht gebaut; Schichten verschieben/duplizieren nicht gebaut;
+  Regeln für Thema 180 (Hang, Höhe, Paint-Schicht) gehören als Felder an `FoliageLayer` (Abschnitt 5).
+- **Pending:** Schritt 2 (2e Graph-Material-Instancing), 3 (3a LOD-Stufen: `lods` je `FoliageLayer`), 4 (Windows-Gleis), 5 (Verifikation).
+- **Traps:** Undo stellt die Welt aus CBOR wieder her, `activeLayer` springt dann auf 0. Eine Schicht ohne Mesh warnt bei jedem Neustreuen (gehaltener Sculpt-Pinsel = jeder Frame),
+  wie vorher bei einer Komponente ohne Mesh. Tests, die `fol.dirty` nach `FoliagePaint` prüfen, müssen `layers[i].dirty` fragen.
+- **Next steps:** 1. Schritt 2 (2e) beginnt in `MaterialShaderLibrary.cpp` und den Backends, `FoliageLayer` braucht dafür nichts Neues. 2. Für 3a `std::vector<FoliageLod> lods`
+  an `FoliageLayer` hängen und in `foliageLayerToJson` nur schreiben, wenn nicht leer (byte-gleich bleibt).
