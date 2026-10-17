@@ -404,6 +404,14 @@ TEST_CASE("GL tessellation stages declare the fragment's HeLighting block")
 			{ "material.tese", &te.source }, { "material.frag", &fs.source } };
 		for (const auto& [file, src] : files)
 			std::ofstream(fs::path(dir) / file, std::ios::binary) << *src;
+		// The D3D units too, for an offline HLSL check (glslangValidator -D, entry
+		// HSMain -S tesc / DSMain -S tese): there is no FXC on a Mac.
+		const auto& hs = lib.tessControl(h, gen.displacementBody, B::HLSL);
+		const auto& ds = lib.tessEval(h, gen.displacementBody, B::HLSL);
+		REQUIRE_MESSAGE(hs.ok, hs.log);
+		REQUIRE_MESSAGE(ds.ok, ds.log);
+		std::ofstream(fs::path(dir) / "material.hs.hlsl", std::ios::binary) << hs.source;
+		std::ofstream(fs::path(dir) / "material.ds.hlsl", std::ios::binary) << ds.source;
 	}
 }
 #endif // HE_TESTS_HAVE_SHADERC
