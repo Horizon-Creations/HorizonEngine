@@ -58,7 +58,7 @@ only. This file starts with step 2.
 - **Files touched:**
   - `src/HE_Editor/EditorReference.cpp:38` `labelOf` (EDT-604): the heading drops the `##` suffix, `sec.id` keeps it (F1 anchor), and the search text follows the heading.
   - `src/HE_Editor/CppClassEditorPanel.cpp:91` `stateFor` (EDT-307): path resolution and loading are now separate steps, `if (!loaded) loadBuf`, as in `ScriptEditorPanel`.
-  - `:278` `reloadFromDisk`: exact key first, otherwise any class with that path as a half (compared with `fs::path ==`).
+  - `:278` `reloadFromDisk`: every class that holds the path as one of its halves, compared with `fs::path ==`. The key is always a half, so a pair opened under both names reloads in both states.
   - `:314` new `bufferText(path, header)`, the tests' read side.
   - `src/HE_Editor/TypeAssetPanel.cpp:543` (EDT-1718): `C3 A2 C2 80 C2 94` replaced by `\xe2\x80\x94`. A byte sweep over src/tests/scripts/EditorDeps found no other occurrence.
   - `tests/test_editor_help.cpp`: the reverse loop now checks that no heading contains `##`; a new case at :153 pins `Weather/Fog Density##wx` → "Fog Density".

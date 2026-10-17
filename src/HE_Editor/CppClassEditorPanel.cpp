@@ -284,29 +284,21 @@ namespace CppClassEditorPanel
 		//
 		// The path names the file that changed, which is either half: a class
 		// opened on Foo.h is keyed by Foo.h, and a peer's edit to Foo.cpp
-		// arrives as Foo.cpp. So the exact key first, then any class that holds
-		// the path as one of its halves (path ==, so a separator spelled the
-		// other way round still matches).
+		// arrives as Foo.cpp. So every class that holds the path as one of its
+		// halves — the key is always one of them, and the same pair can be open
+		// under both names. path ==, so a separator spelled the other way round
+		// still matches.
 		bool any = false;
-		auto reload = [&any](State& st) {
+		const fs::path changed(assetPath);
+		s_states.forEach([&](const std::string&, State& st) {
+			if ((st.header.path.empty() || fs::path(st.header.path) != changed) &&
+			    (st.source.path.empty() || fs::path(st.source.path) != changed))
+				return;
 			// The pair of buffers each carry their own loaded flag.
 			st.header.loaded = false;
 			st.source.loaded = false;
 			any = true;
-		};
-		if (State* st = s_states.find(assetPath))
-		{
-			reload(*st);
-		}
-		else
-		{
-			const fs::path changed(assetPath);
-			s_states.forEach([&](const std::string&, State& st) {
-				if ((!st.header.path.empty() && fs::path(st.header.path) == changed) ||
-				    (!st.source.path.empty() && fs::path(st.source.path) == changed))
-					reload(st);
-			});
-		}
+		});
 		// dirty derives from undo indices; the reload resets them with the buffers.
 		return any;
 	}
