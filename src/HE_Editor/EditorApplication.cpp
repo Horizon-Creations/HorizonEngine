@@ -12903,6 +12903,9 @@ void EditorApplication::setPlayMode(bool play)
 			h.content       = &contentManager();
 			return h;
 		});
+		// Play as Host: the cells stand under every player's character, as on the
+		// game's host. The session lives as long as the editor.
+		m_playCells->setSession(&m_netSession);
 		m_playCells->begin([this] { return m_physicsWorld.get(); });
 		// The script API's streaming group (cellAt, isSettled, pin) asks this runtime
 		// while the session plays; taken away again at Stop. Before any script runs.

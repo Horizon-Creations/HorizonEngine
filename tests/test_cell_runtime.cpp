@@ -12,8 +12,13 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/NetworkComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/GameReplication.h>
+#include <HorizonScene/Net/NetGameSession.h>
+#include <HorizonScene/Net/SpawnReplicator.h>
+#include <Net/LoopbackTransport.h>
 #include <ContentManager/DefaultAssets.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -86,6 +91,8 @@ struct FakeHost final : HE::ICellHost
 	std::map<uint32_t, std::vector<uint32_t>> cellOf;      // root → every entity of the cell
 	std::vector<bool> tokenLiveAtUnloading;                // per unloading call
 	bool bodiesThereAtUnloading = true;
+	std::vector<HE::CellPlayer> players;                   // named as they are, every frame
+	NetGameSession*             session = nullptr;         // and the session's, as the apps do
 
 	std::function<bool(std::vector<uint8_t>&)> openCellFile(const std::string& path) override
 	{
@@ -121,6 +128,11 @@ struct FakeHost final : HE::ICellHost
 		const auto t = tokenOf.find(static_cast<uint32_t>(root));
 		tokenLiveAtUnloading.push_back(t != tokenOf.end() && !t->second.cancelled());
 		if (physics) bodiesThereAtUnloading = bodiesThereAtUnloading && physics->bodyCount() > 0;
+	}
+	void cellPlayers(HorizonWorld& world, std::vector<HE::CellPlayer>& out) override
+	{
+		out.insert(out.end(), players.begin(), players.end());
+		HE::sessionPlayers(session, world, out);
 	}
 };
 
@@ -499,4 +511,189 @@ TEST_CASE("CellRuntime: pins go with the session, and the streaming rows answer 
 	const Installed installed(&rt);
 	CHECK(callRow(c, "streaming.isSettled", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }), Value::ofFloat(50.0f) })[0].b);
 	CHECK_FALSE(callRow(c, "streaming.cellAt", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }) })[2].b);
+}
+
+// ── Players as anchors (Thema 183 step 4) ────────────────────────────────────
+
+TEST_CASE("CellRuntime: the host's players are anchors without a camera, each with their own lookahead")
+{
+	const auto root = writeRow("he_cell_runtime_players");
+	FakeHost host;
+	host.root = root;
+	HorizonWorld world;   // a server's: no camera
+	world.setCellManifestJson(kManifest);
+	HE::CellRuntime rt(host);
+
+	// Nobody there yet: nothing to stream around, nothing read.
+	for (int i = 0; i < 5; ++i) rt.update(world, 0.016f);
+	CHECK(rt.streamer().stats().loaded == 0u);
+	CHECK(host.opened == 0);
+
+	// Player 7 stands at x = 30 in cell 0; the neighbour is 70 m off.
+	host.players = { { 7u, { 30.0, 0.0, 50.0 } } };
+	pump(rt, world, 0.1f, [&] { return rt.streamer().stats().loaded == 1; });
+	CHECK(rt.streamer().isLoaded(0, 0));
+	CHECK_FALSE(rt.streamer().isLoaded(1, 0));
+	CHECK(rt.streamer().stats().anchors == 1u);
+
+	// Walking +X at 100 m/s, as the camera does in the lookahead case above: cell 2 is
+	// built while the player is still in cell 0. Without their own lookahead it would
+	// wait until x = 140.
+	double x = 30.0;
+	bool   aheadInTime = false;
+	for (int i = 0; i < 600 && !aheadInTime; ++i)
+	{
+		x += 0.1;
+		host.players[0].position.x = x;
+		rt.update(world, 0.001f);
+		aheadInTime = rt.streamer().isLoaded(2, 0) && x < 100.0;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	CHECK(aheadInTime);
+
+	// The player leaves; a second one stands in cell 3. What only the first wanted goes.
+	host.players = { { 8u, { 350.0, 0.0, 50.0 } } };
+	pump(rt, world, 0.016f, [&] { return !rt.streamer().isLoaded(0, 0) && rt.streamer().isLoaded(3, 0); });
+	CHECK_FALSE(rt.streamer().isLoaded(0, 0));
+	CHECK(rt.streamer().isLoaded(3, 0));
+	CHECK(rt.streamer().stats().anchors == 1u);
+
+	rt.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+namespace
+{
+// A host and one client over a loopback pair, both on their own world: what a
+// listen server and a joined game are, without sockets.
+struct NetPair
+{
+	HorizonWorld   hostWorld, clientWorld;
+	NetGameSession host, client;
+
+	NetPair()
+	{
+		auto [a, b] = HE::Net::LoopbackTransport::createPair();
+		host.setWorld(&hostWorld);
+		client.setWorld(&clientWorld);
+		// The client makes what the host spawns, like an application's createObject.
+		client.setSpawnFunction([this](const std::string& cls, const glm::vec3& pos, const glm::vec3&,
+		                               HE::Net::Game::PlayerId) -> Entity
+		{
+			const Entity e = clientWorld.createEntity(cls);
+			clientWorld.registry().emplace_or_replace<TransformComponent>(e).position = pos;
+			return e;
+		});
+		NetGameSession::HostOptions ho;
+		ho.displayName = "Host";
+		ho.announceLan = false;
+		ho.projectId   = "cells";
+		REQUIRE(host.hostOn(std::move(a), ho));
+		NetGameSession::JoinOptions jo;
+		jo.displayName = "Anna";
+		jo.projectId   = "cells";
+		REQUIRE(client.joinOn(std::move(b), jo));
+		for (int i = 0; i < 60 && client.status() != NetGameSession::Status::Joined; ++i) step();
+		REQUIRE(client.status() == NetGameSession::Status::Joined);
+	}
+	void step()
+	{
+		host.update(1.0f / 60.0f);
+		client.update(1.0f / 60.0f);
+	}
+	// A character on the host for `player`, spawned through the session and given to them.
+	Entity character(HE::Net::Game::PlayerId player, const glm::vec3& at)
+	{
+		const Entity e = hostWorld.createEntity("Character");
+		hostWorld.registry().emplace_or_replace<TransformComponent>(e).position = at;
+		REQUIRE(host.spawns()->notifySpawned(e, "classes/PlayerCharacter.hcclass", player) != 0u);
+		REQUIRE(host.assignControl(player, e));
+		return e;
+	}
+};
+} // namespace
+
+TEST_CASE("CellRuntime: on a host every player's character holds its cells; a client streams for none of them")
+{
+	const auto root = writeRow("he_cell_runtime_net");
+	NetPair net;
+	const HE::Net::Game::PlayerId anna = net.client.localPlayer();
+	REQUIRE(anna != HE::Net::Game::kNoPlayer);
+	REQUIRE(anna != HE::Net::Game::kHostPlayer);
+
+	// A world origin, so that a player read without it stands in the wrong square:
+	// world x = absolute x - 500. No camera on the host — a server's world.
+	net.hostWorld.setOrigin({ 500.0, 0.0, 0.0 });
+	net.hostWorld.setCellManifestJson(kManifest);
+	// The host's own character in cell 0 (absolute 10), Anna's in cell 2 (absolute 250).
+	const Entity mine  = net.character(HE::Net::Game::kHostPlayer, { -490.0f, 0.0f, 50.0f });
+	const Entity hers  = net.character(anna, { -250.0f, 0.0f, 50.0f });
+	for (int i = 0; i < 10; ++i) net.step();
+
+	std::vector<HE::CellPlayer> players;
+	HE::sessionPlayers(&net.host, net.hostWorld, players);
+	REQUIRE(players.size() == 2u);
+	std::map<uint32_t, double> xOf;
+	for (const auto& p : players) xOf[p.id] = p.position.x;
+	CHECK(xOf[HE::Net::Game::kHostPlayer] == doctest::Approx(10.0));
+	CHECK(xOf[anna] == doctest::Approx(250.0));
+	// Another world under the same net ids is somebody else's.
+	players.clear();
+	HE::sessionPlayers(&net.host, net.clientWorld, players);
+	CHECK(players.empty());
+
+	FakeHost host;
+	host.root    = root;
+	host.session = &net.host;
+	HE::CellRuntime rt(host);
+	pump(rt, net.hostWorld, 0.016f, [&] { return rt.streamer().isLoaded(0, 0) && rt.streamer().isLoaded(2, 0); });
+	CHECK(rt.streamer().isLoaded(0, 0));
+	CHECK(rt.streamer().isLoaded(2, 0));
+	CHECK(rt.streamer().stats().anchors == 2u);
+
+	// Anna walks off the row (a jump: standing); her cell goes, the host's stays.
+	tf(net.hostWorld, hers).position.x = 1500.0f;
+	pump(rt, net.hostWorld, 0.016f, [&] { return !rt.streamer().isLoaded(2, 0); });
+	CHECK_FALSE(rt.streamer().isLoaded(2, 0));
+	CHECK(rt.streamer().isLoaded(0, 0));
+	// …and back, into cell 3 (absolute 350).
+	tf(net.hostWorld, hers).position.x = -150.0f;
+	pump(rt, net.hostWorld, 0.016f, [&] { return rt.streamer().isLoaded(3, 0); });
+	CHECK(rt.streamer().isLoaded(3, 0));
+
+	// The client: even with her character on its roster (which a client's roster
+	// does not carry today), it is not the authority and names nobody.
+	{
+		const auto* mineOnClient = net.client.roster().find(anna);
+		REQUIRE(mineOnClient != nullptr);
+		const std::uint32_t netId = net.hostWorld.registry().get<NetworkComponent>(hers).netId;
+		REQUIRE((net.client.replication()->entityOf(netId) != entt::null));
+		const_cast<HE::Net::Game::PlayerInfo*>(mineOnClient)->characterNetId = netId;
+		players.clear();
+		HE::sessionPlayers(&net.client, net.clientWorld, players);
+		CHECK(players.empty());
+	}
+
+	// Anna leaves: her roster entry goes, and with it the anchor; her cell unloads,
+	// the host's own stays.
+	net.client.leave();
+	for (int i = 0; i < 10; ++i) net.step();
+	CHECK(net.host.roster().size() == 1u);
+	players.clear();
+	HE::sessionPlayers(&net.host, net.hostWorld, players);
+	REQUIRE(players.size() == 1u);
+	CHECK(players[0].id == HE::Net::Game::kHostPlayer);
+	pump(rt, net.hostWorld, 0.016f, [&] { return !rt.streamer().isLoaded(3, 0); });
+	CHECK_FALSE(rt.streamer().isLoaded(3, 0));
+	CHECK(rt.streamer().isLoaded(0, 0));
+	CHECK(rt.streamer().stats().anchors == 1u);
+
+	// The session over: no players at all.
+	net.host.leave();
+	players.clear();
+	HE::sessionPlayers(&net.host, net.hostWorld, players);
+	CHECK(players.empty());
+	(void)mine;
+	rt.clear(net.hostWorld);
+	he_test::removeAllQuiet(root);
 }

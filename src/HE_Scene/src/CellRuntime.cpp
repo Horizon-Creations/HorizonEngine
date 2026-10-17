@@ -3,6 +3,7 @@
 #include "HorizonScene/EngineApi.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/Net/NetGameSession.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include <Diagnostics/Log.h>
@@ -136,26 +137,45 @@ void CellRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 		begin(world, manifestJson);
 	if (!m_streamer.active()) return;
 
+	// The lookahead follows an anchor's motion; a jump (a teleport, a respawn) is
+	// not a speed, so anything faster than an airliner counts as standing.
+	const auto velocityOf = [dt](const glm::dvec3& now, const glm::dvec3* last)
+	{
+		if (!last || dt <= 0.0f) return glm::vec3(0.0f);
+		const glm::vec3 v((now - *last) / static_cast<double>(dt));
+		return glm::length(v) > 300.0f ? glm::vec3(0.0f) : v;
+	};
+
+	std::vector<CellPlayer> players;
+	m_host.cellPlayers(world, players);
+
 	std::vector<CellAnchor> anchors;
-	anchors.reserve(1 + m_pins.size());
+	anchors.reserve(1 + players.size() + m_pins.size());
 	glm::dvec3 camera(0.0);
 	if (cameraAnchor(world, camera))
 	{
-		// The lookahead follows the camera's motion; a jump (a teleport, a respawn)
-		// is not a speed, so anything faster than an airliner counts as standing.
-		glm::vec3 velocity(0.0f);
-		if (m_hasLastCamera && dt > 0.0f)
-		{
-			velocity = glm::vec3((camera - m_lastCamera) / static_cast<double>(dt));
-			if (glm::length(velocity) > 300.0f) velocity = glm::vec3(0.0f);
-		}
-		m_lastCamera    = camera;
-		m_hasLastCamera = true;
 		CellAnchor cam;
 		cam.position = camera;
-		cam.velocity = velocity;
+		cam.velocity = velocityOf(camera, m_hasLastCamera ? &m_lastCamera : nullptr);
+		m_lastCamera    = camera;
+		m_hasLastCamera = true;
 		anchors.push_back(cam);
 	}
+	// Every player, each with their own lookahead. On a server these are the only
+	// anchors there are; on a host the one the camera follows is counted twice,
+	// which costs a scan and changes nothing.
+	std::unordered_map<uint32_t, glm::dvec3> lastPlayers;
+	lastPlayers.reserve(players.size());
+	for (const CellPlayer& p : players)
+	{
+		const auto last = m_lastPlayers.find(p.id);
+		CellAnchor a;
+		a.position = p.position;
+		a.velocity = velocityOf(p.position, last != m_lastPlayers.end() ? &last->second : nullptr);
+		anchors.push_back(a);
+		lastPlayers[p.id] = p.position;
+	}
+	m_lastPlayers = std::move(lastPlayers);
 	// A pin stands still; its radius in units of the manifest's load radius.
 	const float loadRadius = m_streamer.manifest().loadRadius;
 	for (const auto& [handle, p] : m_pins)
@@ -202,6 +222,7 @@ void CellRuntime::reset()
 	m_world = nullptr;
 	m_manifestJson.clear();
 	m_hasLastCamera = false;
+	m_lastPlayers.clear();
 	m_pins.clear();
 }
 
@@ -213,6 +234,24 @@ bool CellRuntime::cameraAnchor(HorizonWorld& world, glm::dvec3& absolute)
 		return true;
 	}
 	return false;
+}
+
+void sessionPlayers(NetGameSession* session, HorizonWorld& world, std::vector<CellPlayer>& out)
+{
+	if (!session || !session->isActive() || !session->isAuthority()) return;
+	// Net ids are the session's world's; another world's entity under the same
+	// number is somebody else.
+	if (session->world() != &world) return;
+	GameReplication* replication = session->replication();
+	if (!replication) return;
+	auto& reg = world.registry();
+	for (const Net::Game::PlayerInfo& p : session->roster().players())
+	{
+		if (p.characterNetId == 0) continue;
+		const entt::entity e = replication->entityOf(p.characterNetId);
+		if (e == entt::null || !reg.valid(e) || !reg.all_of<TransformComponent>(e)) continue;
+		out.push_back({ p.id, glm::dvec3(worldPositionOf(world, e)) + world.origin() });
+	}
 }
 
 } // namespace HE

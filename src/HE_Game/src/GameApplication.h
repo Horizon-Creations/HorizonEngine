@@ -374,6 +374,12 @@ private:
     // helper the editor's Play calls too (HE::startCellScripts / stopCellScripts).
     void cellLoaded(HorizonWorld& world, entt::entity root, const std::vector<entt::entity>& created) override;
     void cellUnloading(HorizonWorld& world, entt::entity root) override;
+    // Hosting a session, every player's character is an anchor, not only the one
+    // the camera follows (HE::sessionPlayers; a client gets none).
+    void cellPlayers(HorizonWorld& world, std::vector<HE::CellPlayer>& out) override
+    {
+        HE::sessionPlayers(&m_netSession, world, out);
+    }
     HE::CellScriptHosts cellScriptHosts();
     HE::CellRuntime m_cellRuntime{ *this };
 };

@@ -12,11 +12,21 @@
 
 class HorizonWorld;
 class PhysicsWorld;
+class NetGameSession;   // global, like the class itself (NetGameSession.h)
 
 namespace HE::api { struct Ctx; }
 
 namespace HE
 {
+
+// A player the cells are kept around (Thema 183 step 4): their character's
+// position, absolute (world origin added), under an id that stays the same while
+// they are in the session (a PlayerId), so their motion can be the lookahead.
+struct CellPlayer
+{
+	uint32_t   id = 0;
+	glm::dvec3 position{ 0.0 };
+};
 
 // ── Cell streaming for an application (Thema 164, step 2c) ──────────────────
 // A CellStreamer (CellStreamer.h) knows cells; it does not know where a cell's
@@ -72,7 +82,26 @@ public:
 	// neither written out nor put back. Default: nothing added (transform and
 	// visibility only).
 	virtual void cellApiCtx(api::Ctx& ctx) { (void)ctx; }
+
+	// The players whose characters the cells must stand under, asked once a frame:
+	// on a server every player's, not only the one the camera follows, because the
+	// server simulates them all and a character whose cell is missing is held, not
+	// stepped (cellHolds). Anchors only: what a cell holds is not replicated, each
+	// side loads its cells around its own anchors. Both applications answer with
+	// sessionPlayers(). Default: none (the camera and the pins only).
+	virtual void cellPlayers(HorizonWorld& world, std::vector<CellPlayer>& out)
+	{
+		(void)world; (void)out;
+	}
 };
+
+// The players of a multiplayer session as cell anchors, appended to `out`: every
+// roster entry whose character the session knows (PlayerInfo::characterNetId, set
+// by NetGameSession::assignControl) and that stands in `world` with a transform.
+// Only where this side is the authority (host or server): a client streams around
+// its own camera, it does not simulate the others. Nothing for a null or idle
+// session, or one that replicates another world.
+void sessionPlayers(NetGameSession* session, HorizonWorld& world, std::vector<CellPlayer>& out);
 
 class CellRuntime
 {
@@ -90,8 +119,10 @@ public:
 	// over when it or the world changes (the old cells are forgotten, not unloaded:
 	// a world that changed under the runtime has dropped them already), and stops
 	// for a scene without cells or with a malformed list (logged once). Then streams
-	// around the world's camera (cameraAnchor) with its motion as the lookahead, and
-	// around every pin. No camera and no pin: nothing changes this frame.
+	// around the world's camera (cameraAnchor) with its motion as the lookahead,
+	// around every player the host names (ICellHost::cellPlayers, each with its own
+	// lookahead) and around every pin. A server has no camera; its players are its
+	// anchors. No anchor at all: nothing changes this frame.
 	void update(HorizonWorld& world, float dt, double budgetMs = kDefaultBudgetMs);
 
 	// ── Pins (Thema 183 step 3, the API's streaming.pin) ──
@@ -143,6 +174,9 @@ private:
 	std::string   m_manifestJson;      // and the manifest it started from
 	glm::dvec3    m_lastCamera{ 0.0 };
 	bool          m_hasLastCamera = false;
+	// Where each player stood last frame, for their lookahead; a player who is no
+	// longer named is dropped with the frame, so one who rejoins starts standing.
+	std::unordered_map<uint32_t, glm::dvec3> m_lastPlayers;
 	std::unordered_map<uint32_t, CancelToken> m_tokens;   // cell root → its asset loads
 	CellState     m_state;
 	struct Pin
