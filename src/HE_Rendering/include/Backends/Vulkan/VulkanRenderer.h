@@ -410,6 +410,7 @@ private:
 	void destroyInstanceBuf(InstanceBuf& b);
 	void beginInstanceFrame();
 	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
+	std::vector<glm::mat4> m_clusterScratch; // one cluster's world matrices (decal depth)
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
 	// G-buffer); the shadow layers keep m_shadowBatches.
 	RenderSorter::DepthBatchList m_preBatches;
@@ -1219,6 +1220,10 @@ private:
 	VkFramebuffer    m_reflPrepassFB = VK_NULL_HANDLE; // {ssaoPos, attr, ndc, ssaoPosDepth}
 	VkRenderPass     m_reflPrepassRP = VK_NULL_HANDLE; // 3 color + D16
 	VkPipeline       m_reflPrepassPipeline   = VK_NULL_HANDLE;
+	// Its instanced twin (Thema 182, 2f): a foliage cluster in ONE draw, the model per instance
+	// from the instance arena at binding 1 (reflPrepassVertexInstanced, {viewProj, view} in U).
+	// Optional: without it clusters go plant by plant through the slot ring below.
+	VkPipeline       m_reflPrepassInstPipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_reflPrepassSetLayout  = VK_NULL_HANDLE; // binding 1: U (dynamic)
 	VkPipelineLayout      m_reflPrepassPipeLayout = VK_NULL_HANDLE;
 	VkDescriptorPool      m_reflPrepassPool       = VK_NULL_HANDLE;

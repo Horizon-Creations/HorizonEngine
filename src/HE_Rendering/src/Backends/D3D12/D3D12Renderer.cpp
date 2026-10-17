@@ -11778,14 +11778,36 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             p.taaCurTransforms.clear();
             for (const uint32_t idx : p.m_sortedIndices)
             {
-                if (drawIdx >= k_maxDraws) break;
+                if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); break; }
                 const RenderObject& obj = p.m_renderWorld.objects[idx];
-                // A foliage cluster is one plant's transform with a whole bucket's worth
-                // of instances: it writes no velocity here yet (Metal and GL draw each
-                // plant, static). Windows track: unfold it like they do.
-                if (obj.isCluster()) continue;
                 const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
                 if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+                // A foliage cluster stands for a bucket of plants: draw every one of
+                // them, static (previous pose = this pose, so the velocity is the
+                // camera's own motion), as GL and Metal do (Thema 182, 2f). The
+                // entity-keyed history below holds ONE pose per entity, which a
+                // cluster must not use: every plant of a layer shares the terrain's id.
+                // One ring slot per plant, after the geometry's: past the ring's end
+                // the rest of the field keeps the clear's zero (said once).
+                if (obj.isCluster())
+                {
+                    cl->IASetVertexBuffers(0, 1, &mesh->vbv);
+                    cl->IASetIndexBuffer(&mesh->ibv);
+                    p.m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
+                        if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
+                        HE::TaaVelocityConstants c;
+                        c.mvpJitter = viewProj * model;
+                        c.mvpNow    = viewProjClean * model;
+                        c.mvpPrev   = p.taaPrevViewProj * model;
+                        std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
+                        cl->SetGraphicsRootConstantBufferView(
+                            0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+                        cl->DrawIndexedInstanced(mesh->indexCount, 1, 0, 0, 0);
+                        ++drawIdx;
+                    });
+                    continue;
+                }
 
                 // An object seen for the first time reports no motion — its
                 // "previous" position is where it is now.

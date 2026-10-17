@@ -1108,3 +1108,48 @@ TEST_CASE("OpenGL: a graph material keeps its own program, only built-in PBR tak
 	CHECK(countOf(text, "drawGraphInstance(t)") >= 2);
 	CHECK(countOf(text, "pushForward(t)") >= 1);
 }
+
+TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, decal depth and pre-passes unfold it")
+{
+	// Thema 182 step 4 (plan 2f). A cluster carries ONE plant's transform for a whole bucket;
+	// a per-object loop that skips it loses the bucket, one that draws `transform` keeps one
+	// plant. Until step 4 D3D11/D3D12/Vulkan skipped clusters in the TAA velocity pass (every
+	// plant then reported "did not move" under a moving camera: measured on the RTX 4070,
+	// motion-vs-static 6.2 % of the ground off by > 24/255 against 2.4-3.0 % unfolded, GL 2.0 %),
+	// and Vulkan also in the decal depth and the SSAO/SSR reflection pre-pass. The only
+	// cluster test left in a backend is the GI/caster exclusion (checked above) or a branch
+	// that unfolds.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - cluster unfold check skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	for (const char* rel : { "Metal/MetalRenderer.mm", "OpenGL/OpenGLRenderer.cpp", "D3D11/D3D11Renderer.cpp",
+	                         "D3D12/D3D12Renderer.cpp", "Vulkan/VulkanRenderer.cpp" })
+	{
+		INFO(rel);
+		const std::string text = readFile(dir / rel);
+		REQUIRE(!text.empty());
+		CHECK(text.find("if (obj.isCluster()) continue;") == std::string::npos);
+	}
+	// The velocity pass of each Windows backend walks the plants, static (prev = now).
+	struct Site { const char* rel; const char* prevPerPlant; };
+	const Site sites[] = {
+		{ "D3D11/D3D11Renderer.cpp",   "c.mvpPrev   = taaPrevViewProj * model;" },
+		{ "D3D12/D3D12Renderer.cpp",   "c.mvpPrev   = p.taaPrevViewProj * model;" },
+		{ "Vulkan/VulkanRenderer.cpp", "const PushConstants pc{ m_taaViewProjJit * model, prevJit * model };" },
+	};
+	for (const Site& s : sites)
+	{
+		INFO(s.rel);
+		const std::string text = readFile(dir / s.rel);
+		CHECK(text.find(s.prevPerPlant) != std::string::npos);
+		CHECK(text.find("forEachInstance(obj") != std::string::npos);
+	}
+	// Vulkan's decal depth and reflection pre-pass take the whole cluster.
+	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
+	CHECK(countOf(vk, "m_renderWorld.appendInstances(obj, m_clusterScratch);") == 2);
+	CHECK(vk.find("m_reflPrepassInstPipeline && n > 1 && allocInstances(n") != std::string::npos);
+}

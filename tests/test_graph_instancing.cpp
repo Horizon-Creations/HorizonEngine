@@ -304,7 +304,7 @@ TEST_CASE("D3D11, D3D12 and Vulkan draw a graph-material batch once, with the ma
 		const std::string src = readFile(s.file);
 		REQUIRE(!src.empty());
 		// Forward and G-buffer pass: one twin build each, behind the switch.
-		CHECK(countOf(src, "/*instanced=*/true)") == 2);
+		CHECK(countOf(src, "/*instanced=*/true);") == 2);
 		CHECK(countOf(src, "RenderSorter::graphInstancingEnabled()") == 1);
 		// The pak bakes no instanced vertex: a precompiled material gets no twin.
 		CHECK(src.find("if (instanced && precompiled) return") != std::string::npos);

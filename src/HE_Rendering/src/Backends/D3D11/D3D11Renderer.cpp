@@ -1893,12 +1893,31 @@ struct D3D11RendererImpl
         for (const uint32_t idx : m_sortedIndices)
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
-            // A foliage cluster is one plant's transform with a whole bucket's worth
-            // of instances: it writes no velocity here yet (Metal and GL draw each
-            // plant, static). Windows track: unfold it like they do.
-            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId, cm);
             if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+            // A foliage cluster stands for a bucket of plants: draw every one of them,
+            // static (previous pose = this pose, so the velocity is the camera's own
+            // motion), as GL and Metal do (Thema 182, 2f). The entity-keyed history
+            // below holds ONE pose per entity, which a cluster must not use: every
+            // plant of a layer shares the terrain's id.
+            if (obj.isCluster())
+            {
+                ctx->IASetVertexBuffers(0, 1, mesh->vbuf.GetAddressOf(), &stride, &offset);
+                ctx->IASetIndexBuffer(mesh->ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
+                    HE::TaaVelocityConstants c;
+                    c.mvpJitter = vpJit * model;
+                    c.mvpNow    = vpClean * model;
+                    c.mvpPrev   = taaPrevViewProj * model;
+                    D3D11_MAPPED_SUBRESOURCE m{};
+                    if (FAILED(ctx->Map(taaVelocityCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
+                    std::memcpy(m.pData, &c, sizeof(c));
+                    ctx->Unmap(taaVelocityCB.Get(), 0);
+                    ctx->DrawIndexed(mesh->indexCount, 0, 0);
+                });
+                continue;
+            }
 
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
