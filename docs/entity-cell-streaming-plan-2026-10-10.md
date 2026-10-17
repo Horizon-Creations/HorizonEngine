@@ -1169,26 +1169,59 @@ Host vor CellState beim Entladen (Variable verloren), Stopp aus, Start ohne Filt
 aber nicht in der App gelaufen); Python in einer Zelle (nur Lua, derselbe `startScriptsFor`); Linux/macOS nur über die CI; `audiosource` und
 `animstatemachine` stehen weiter nicht in der Klassentabelle (der Host startet sie noch nicht).
 
+## 19. Schritt 4: Spieler als Anker auf dem Server (Thema 183 Schritt 4, 17.10.2026)
+
+Ein Host oder Server simuliert **alle** Spieler, nicht nur den, dem seine Kamera folgt; ein Charakter, dessen Zelle fehlt, wird
+gehalten und nicht gesteppt (`cellHolds`, Befund 18). Darum stehen die Zellen jetzt unter jedem Spieler-Charakter. Nur Anker:
+Zellinhalt wird weiter nicht repliziert (6.4), jede Seite lädt um ihre eigenen Anker.
+
+| Teil | Wo | Stand |
+|---|---|---|
+| Quelle | `ICellHost::cellPlayers(world, out)` (`CellRuntime.h:92`), `HE::CellPlayer { id, position }` (`:25`) | Einmal je Frame gefragt, Vorgabe: keine. Absolute Position (Ursprung addiert), `id` = PlayerId |
+| Ein Helfer für beide Hosts | `HE::sessionPlayers(session, world, out)` (`CellRuntime.h:104`, `CellRuntime.cpp:239`) | Jeder Roster-Eintrag mit `characterNetId`, dessen Entity (`GameReplication::entityOf`) in **dieser** Welt mit Transform steht. Nur wenn diese Seite Autorität ist (Host/Server): ein Client streamt um seine Kamera und simuliert die anderen nicht. Null, inaktiv oder eine andere Welt: nichts |
+| Anker | `CellRuntime::update` (`CellRuntime.cpp:142`–) | Spieler neben Kamera und Pins, **jeder mit eigener Vorausschau** (`m_lastPlayers`, nach PlayerId, dieselbe 300-m/s-Klemme wie die Kamera; wer nicht mehr genannt wird, fällt mit dem Frame heraus, `reset()` leert). Ohne Kamera, mit Spielern wird gestreamt (der Server). Der Spieler, dem die Kamera folgt, zählt auf dem Host doppelt: eine Suche mehr, sonst nichts |
+| Hosts | `GameApplication.h:379` (`&m_netSession`), `PlayCellStreaming.h:57` + `setSession` (gesetzt im Play, `EditorApplication.cpp:12908`) | Dünne Aufrufe, wie bei den Skripten (Abschnitt 18). Der Editor-Pfad gilt für *Play as Host* |
+
+**Wichtig, nicht gebaut:** Nichts in den Apps ruft `NetGameSession::assignControl` (auch keine `net.*`/`player.*`-Row; `player.possess`
+ist rein lokal). Darum bleibt `PlayerInfo::characterNetId` in einer echten Sitzung 0, und der Haken feuert dort erst, wenn das Besitzen
+über das Netz verdrahtet ist (Mehrspielerplan, „step 5 PlayerHost rework“). Der Roster ist trotzdem die richtige Quelle: er ist die
+eine Stelle, die „das ist der Charakter von Spieler N“ autoritativ weiß. Bewusst **kein** Ersatz über `NetworkComponent::owner` +
+Charaktercontroller (eigene Projektile würden Anker). Der Königin als Info gemeldet (Anfrage 108).
+
+**Entschieden:** Spieler als `ICellHost`-Haken mit gemeinsamem Helfer statt `CellRuntime` an `NetGameSession` zu binden (der Runtime-Test
+bleibt ohne Netz, die Hosts bleiben dünn); Vorausschau nach PlayerId, nicht nach Entity; keine Spieler-Anker offline (Einzelspieler
+unverändert: die Kamera folgt dem Charakter, Pins decken den Rest).
+
+**Geprüft** (Release, `C:/hw183`, NN-WS03): `test_cell_runtime` 8/8, 373 Checks, dreimal hintereinander grün. Neu:
+„the host's players are anchors without a camera, each with their own lookahead“ (Welt ohne Kamera: nichts gelesen, bis ein Spieler da ist;
+ein laufender Spieler lädt Zelle 2 noch in Zelle 0; wer geht, nimmt seine Zellen mit) und „on a host every player's character holds its
+cells; a client streams for none of them“ (echtes Host/Client-Paar über `LoopbackTransport`, Ursprung 500 m, Spawn über die Sitzung +
+`assignControl`; zwei Anker, Zellen folgen dem Charakter; der Client nennt auch mit gefälschtem Roster-Eintrag niemanden; Anna geht →
+ihre Zelle geht, die des Hosts bleibt; Sitzung zu → keine Spieler). **Negativkontrollen**, jede einzeln, DLL nach `tests/` kopiert, jede
+nur auf ihren Checks rot: Ursprung nicht addiert (7 Checks), Spieler nie gefragt (12, beide Fälle), keine Autoritätsprüfung (nur der
+Client-Check), keine Vorausschau (nur `aheadInTime`), keine Weltprüfung (nur „another world“). `HorizonEditor` und `HorizonGame` bauen.
+Voller `ctest` 298/299 (nur `test_inspector_ui`, das bekannte Clipboard-Rauschen; 2 übersprungen, `runtime_size_*`).
+
+**Nicht geprüft:** Kein Spiel und kein Play as Host per Hand mit zwei Spielern in einem gesplitteten Projekt (geht erst mit verdrahtetem
+Besitzen, siehe oben); Linux/macOS nur über die CI.
+
 ## Handoff
 
-- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 3 von 5 (Skripte pro Zelle, Gruppe `streaming`, `StreamingComponent`)
-- **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ 5f4ac78c, bb4f9ccf und der Commit mit
-  `StreamingComponent`, der Linux-Schwelle und diesem Abschnitt (gepusht)
-- **Done:** Zellen starten und stoppen ihre Skripte in Spiel und Editor-Play, Skript-Entities wandern beim Split in Zellen, Save-Game-
-  Variablen überleben das Entladen; fünf Rows `streaming.*` in HorizonCode/Lua/Python; Autorenschalter *Streaming ▸ Resident*.
-- **Files touched:** `CellScripts.h/.cpp` (neu), `CellRuntime.h/.cpp` (Pins), `EngineApi.h/.cpp` (Gruppe), `CellSplit.cpp` (Tabelle,
-  Schalter), `StreamingComponent.h` (neu) + Registrierstellen (Abschnitt 18), `GameApplication.h/.cpp`, `PlayCellStreaming.h/.cpp`,
-  `EditorApplication.cpp`, `HcNodeDocs.cpp`, `scripts/runtime_size.py`; Tests `test_cell_scripts.cpp` (neu), `test_cell_runtime.cpp`, `test_cell_split.cpp`.
-- **Verified / not verified:** Abschnitt 18; das Ergebnis des vollen `ctest` steht im Thema.
-- **Decisions taken:** Variablen nach BeginPlay (Abschnitt 18); Pins im `CellRuntime`, nicht im Streamer; `isSettled` neutral wahr;
-  `StreamingComponent` mit Vorgabe Resident; Linux-Schwelle (67, 42).
-- **Decisions suggested, not taken:** BeginPlay erst nach den Variablen (braucht `EntityHost::bind` in zwei Hälften); den Sitzungszustand
-  beim `save.write` ins Savegame schreiben (Abschnitt 17); `audiosource`/`animstatemachine` über denselben Host starten
-  (`AudioSystem::playOnStart` je Zelle; `AnimatorHost` bindet nur beim Start).
-- **Pending:** Schritt 4 (Spieler als Anker auf dem Server: `CellRuntime::update` nimmt schon Anker ohne Kamera, die Spieler müssten als
-  weitere Anker dazukommen), Schritt 5 (Dorf mit 50 NPCs, Messleiter, voller ctest).
-- **Traps:** `cmd //c "…vcvars64.bat…"` aus Git-Bash scheitert still am Pfad („Das System kann den angegebenen Pfad nicht finden“) und baut
-  nichts — eine Negativkontrolle lief so gegen die alte DLL. Builds über PowerShell: `cmd /c '"…\18\…\vcvars64.bat" >nul 2>&1 && cmake …'`.
-  Die vcvars von VS 2022 linken gegen die alte STL (`__std_rotate` …), nur VS 18 nehmen. Nach jeder Änderung nur in HorizonScene die DLL nach `tests/` kopieren.
-- **Next steps:** 1. CI des Zweigs ansehen (Linux `runtime_size` mit der neuen Schwelle). 2. Schritt 4: Spieler-Anker in `CellRuntime::update`
-  (Server: `NetGameSession`). 3. Ein Play per Hand in einem gesplitteten Projekt mit einer Skript-Klasse in einer Zelle.
+- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 4 von 5 (Spieler als Anker auf dem Server, nur Anker)
+- **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ c6c0f88a (Code, Tests) und der Commit mit diesem
+  Abschnitt (gepusht)
+- **Done:** `ICellHost::cellPlayers` + `HE::sessionPlayers`; `CellRuntime::update` streamt um jeden Spieler-Charakter der Autorität, mit
+  eigener Vorausschau, auch ohne Kamera; Spiel und Editor-Play (Play as Host) liefern ihre Sitzung.
+- **Files touched:** `CellRuntime.h/.cpp`, `GameApplication.h`, `PlayCellStreaming.h`, `EditorApplication.cpp` (eine Zeile),
+  `tests/test_cell_runtime.cpp`, dieses Dokument.
+- **Verified / not verified:** Abschnitt 19.
+- **Decisions taken:** Roster als Quelle, Haken + Helfer statt Kopplung, Vorausschau nach PlayerId, offline keine Spieler-Anker.
+- **Decisions suggested, not taken:** Besitzen über das Netz verdrahten (`player.possess` auf dem Host → `assignControl`, oder der
+  PlayerHost-Umbau des Mehrspielerplans); erst dann feuert der Anker in einer echten Sitzung.
+- **Traps:** Wer eine Negativkontrolle mit `Copy-Item`/`cp -p` aus einer vorher gemachten Sicherung zurücklegt, behält deren alte mtime:
+  ninja baut nichts neu, und der „saubere“ Lauf misst still die letzte Mutation (Lektion 367). Danach die Datei auf jetzt setzen.
+  Die TEMP-Ordner je Test (`%LOCALAPPDATA%/Temp/he_tests/<stem>`) legt nur das Konfigurieren an; fehlen sie, scheitert jeder Test
+  in 0,02 s ohne Ausgabe. Neu anlegen statt neu konfigurieren.
+- **Next steps:** 1. CI des Zweigs ansehen. 2. Schritt 5: Dorf mit Prefab-Häusern und 50 NPCs mit Skript, Wegpunkte und Manager
+  *Resident* markieren (Falle aus Schritt 3), Zellen mehrfach laden/entladen, Messleiter, voller ctest. 3. Ein Play per Hand in einem
+  gesplitteten Projekt mit einer Skript-Klasse in einer Zelle.
