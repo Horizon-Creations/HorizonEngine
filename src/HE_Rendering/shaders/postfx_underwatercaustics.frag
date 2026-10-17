@@ -46,6 +46,7 @@ const float kChopSteep  = 0.05;
 const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
 const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
 const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
 void main()
 {
@@ -123,7 +124,9 @@ void main()
     float det  = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
     vec2  gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
     // Depth fade (full in the shallows, gone at fadeDepth, a short ramp at the waterline);
-    // the cap on the squeeze softens with depth and keeps the fold lines at least 2 px wide:
+    // the cap on the squeeze softens with depth and keeps the fold lines at least 2 px wide.
+    // Only the core of a fold lights up, where J passes kCore of the way to the cap (Thema 205
+    // step 6: the whole |det| < 1 band read as lines 26 % of the floor, the photo has 15-18 %):
     // dDet is det's change per pixel (exact gradient over S times the pixel's smooth step in
     // S, floored by that step against the chop's ~10 / m since det's peaks have no gradient).
     // Where 2 px is out of reach the net fades instead of aliasing.
@@ -134,13 +137,14 @@ void main()
     float tD    = clamp(depth / fadeDepth, 0.0, 1.0);
     float fade  = (1.0 - tD * tD * (3.0 - 2.0 * tD)) * smoothstep(0.0, 0.15, depth);
     float capAA = 2.0 / max(dDet, 1e-4);
-    float J     = 1.0 / max(abs(det), 1.0 / min(mix(5.0, 2.0, tD), capAA));
+    float cap   = min(mix(10.0, 2.0, tD), capAA);
+    float J     = 1.0 / max(abs(det), 1.0 / cap);
 
     // Surfaces that face the refracted sun catch it; a wall barely does.
     vec3 n = normalize(cross(dPx, dPy));
     if (dot(n, pc.camSurface.xyz - P) < 0.0) n = -n;
     float w = pc.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-    vec4 net = vec4(pc.sunColor.rgb * (w * kGain * pow(max(J - 1.0, 0.0), 1.5)),
+    vec4 net = vec4(pc.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
                     kDark * min(w, 1.0) * max(1.0 - J, 0.0));
     outColor = hit ? net : vec4(0.0);
 }

@@ -5498,6 +5498,7 @@ const float kChopSteep  = 0.05;
 const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
 const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
 const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (see the cap below)
 
 // The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
 // cells between them lose (vec4(0) where there is no net). The screen derivatives of P come
@@ -5581,6 +5582,12 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	// breaking into dotted moire lines. The gradient is ~0 at det's own peaks and dips, so
 	// it is floored by the pixel's step in S against the chop's ~10 / m: once a pixel spans
 	// a quarter of the shortest chop wave, no point of the net survives as a lone sparkle.
+	// Line width (Thema 205 step 6, docs/underwater-caustics-line-width-2026-10-17.md): with
+	// every J > 1 lit, the whole |det| < 1 band glowed and the lines covered 26 % of the
+	// reference floor against 15-18 % in the human's photo. Now the near cap is 10 (was 5)
+	// and a line lights up only where J passes kCore of the way from 1 to the cap: the thin
+	// core of each fold. Tied to the cap, not a fixed J, so the wider dimmer lines at depth
+	// (cap 2) and the anti-aliased far ones (capAA) keep a core too.
 	vec2  dSx   = dFdx(S);
 	vec2  dSy   = dFdy(S);
 	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
@@ -5588,13 +5595,14 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
 	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
 	float capAA = 2.0 / max(dDet, 1e-4);
-	float J     = 1.0 / max(abs(det), 1.0 / min(mix(5.0, 2.0, t), capAA));
+	float cap   = min(mix(10.0, 2.0, t), capAA);
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
 
 	// Surfaces that face the refracted sun catch it; a wall barely does.
 	vec3 n = normalize(cross(dPx, dPy));
 	if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
 	float w = uCaustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-	vec4 net = vec4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0, 0.0), 1.5)),
+	vec4 net = vec4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
 	                kDark * min(w, 1.0) * max(1.0 - J, 0.0));
 	return hit ? net : vec4(0.0);
 }

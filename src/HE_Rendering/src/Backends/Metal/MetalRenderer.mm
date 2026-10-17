@@ -1747,6 +1747,7 @@ constant float kChopSteep  = 0.05;
 constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
 constant float kGain       = 0.45;   // line brightness per unit of squeeze above 1
 constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
 // The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
 // cells between them lose (float4(0) where there is no net; Thema 205 Schritt 2, the GL twin
@@ -1815,12 +1816,13 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
 	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
 	float capAA = 2.0 / max(dDet, 1e-4);                      // fold lines >= 2 px, else fade (GL twin)
-	float J     = 1.0 / max(abs(det), 1.0 / min(mix(5.0, 2.0, t), capAA));
+	float cap   = min(mix(10.0, 2.0, t), capAA);                // only the core above kCore lights up (GL twin)
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
 
 	float3 n = normalize(cross(dPx, dPy));
 	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
 	float w = u.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0, 0.0), 1.5)),
+	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
 	                    kDark * min(w, 1.0) * max(1.0 - J, 0.0));
 	return hit ? net : float4(0.0);
 }

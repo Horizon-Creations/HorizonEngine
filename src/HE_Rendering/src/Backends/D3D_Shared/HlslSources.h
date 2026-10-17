@@ -520,6 +520,7 @@ static const float kChopSteep  = 0.05;
 static const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
 static const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
 static const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+static const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 float4 main(In i) : SV_Target
 {
@@ -598,12 +599,13 @@ float4 main(In i) : SV_Target
     float tD    = saturate(depth / fadeDepth);
     float fade  = (1.0 - tD * tD * (3.0 - 2.0 * tD)) * smoothstep(0.0, 0.15, depth);
     float capAA = 2.0 / max(dDet, 1e-4);
-    float J     = 1.0 / max(abs(det), 1.0 / min(lerp(5.0, 2.0, tD), capAA));
+    float cap   = min(lerp(10.0, 2.0, tD), capAA);             // only the core above kCore lights up (GL twin)
+    float J     = 1.0 / max(abs(det), 1.0 / cap);
 
     float3 n = normalize(cross(dPx, dPy));
     if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
     float w = uCaustics.x * saturate(dot(n, Lr)) * fade * smoothstep(1.0, 2.0, capAA);
-    float4 net = float4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0, 0.0), 1.5)),
+    float4 net = float4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
                         kDark * min(w, 1.0) * max(1.0 - J, 0.0));
     return hit ? net : float4(0.0, 0.0, 0.0, 0.0);
 }
