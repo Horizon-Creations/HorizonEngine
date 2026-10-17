@@ -901,26 +901,86 @@ Dither-Überblendung (braucht ein Instanzfeld, 7.6), Bildschirmgröße statt Abs
 Rechteck, also Stufen mit Karte besser ohne Schatten oder mit `shadowDistance` davor. Nicht geprüft: Metal (kein Mac), der Editor von Hand (nur der headless UI-Test
 aus 16.2), das exportierte Spiel, Zeitmessung.
 
+## 17. Stand Windows-Gleis (Thema 182, Schritt 4 = Teil 2f, 17.10.2026)
+
+Gebaut und gelaufen auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`, RTX 4070), D3D11, D3D12 und Vulkan. Drei Commits: `28845a11` (Graph-Material-Zwilling),
+`6154b254` (Instanz-Arena), `da8cd627` (Cluster in Pro-Objekt-Pässen). Metal unberührt.
+
+### 17.1 Was gebaut ist
+
+- **Graph-Material-Instancing (2e auf Windows):** `GetOrBuildMaterialShaders/PSO/Pipeline(..., instanced)` (D3D11 `:4698`, D3D12 `:9117`, Vulkan `:3082`) bauen den
+  Zwilling aus `customVertexInstanced`/`standardVertexInstanced`, das Modell an Location 4..7 (`TEXCOORD4..7`) aus Vertexpuffer 1. D3D12/Vulkan binden dafür den
+  128-Byte-Instanzring `{mvp, model}` (Modell bei +64), D3D11 einen eigenen dynamischen 64-Byte-Vertexpuffer (`ensureMatInstVB` `:1403`; der `instanceSB` ist ein
+  StructuredBuffer und darf kein Vertexpuffer sein). Gebaut nur für einen Batch im opaken und im G-Buffer-Pass (`wantTwin` D3D11 `:7092`, D3D12 `:11119`, Vulkan `:8441`),
+  ein U/HeParams-Slot je Batch (`U.mvp = viewProj`). **Eigener Schlüssel in jedem Cache, vor dem ersten Nachschlagen gesalzen:** der Bytecode-Cache von D3D12 und der
+  Shader-Cache von D3D11 hängen nur am Shader-Hash, der einfache Vertex hinter dem instanzierten Input-Layout baut ohne Klage und stapelt alle Pflanzen auf einen Fleck.
+  Gebackene Pak-Variante, `HE_GRAPH_INSTANCING=0`, durchscheinend oder Ring voll: die Schleife wie bisher.
+- **Instanz-Arena (D3D12, Vulkan):** `allocInstances`/`beginInstanceFrame` (D3D12 `:3432`/`:3460`, Vulkan `:6940`/`:6971`). Jeder instanzierte Lauf eines Frames
+  (jede Kaskade, SSAO-, GI-Vorpass, Szene) nimmt eigene Plätze; 100k Pflanzen verlangen rund 460k. Bisher fiel alles über 65 536 auf die Pro-Objekt-Schleife zurück. Jetzt
+  öffnet ein voller Block einen weiteren, doppelt so großen (lebt bis zum Fence seines Frames; Vulkan altert ihn in `m_instRetired` aus wie die Viewport-Bilder), und der
+  nächste Frame desselben Slots ersetzt den Hauptpuffer durch einen der Summengröße (einmal je Slot geloggt: „grows from 65536 to 524288 instances“). Grenze
+  `k_instArenaMax` = 1 Mio. Instanzen je Frame-Slot, darüber Schleife plus Meldung. D3D12 meldet außerdem einmal, wenn der Pro-Objekt-Ring (`k_maxDraws` 16 384) endet
+  (`noteDrawRingFull` `:3497`), statt den Frame still abzuschneiden.
+- **Cluster in Pro-Objekt-Pässen (die 2a-Guards, zur Laufzeit geprüft):** TAA-Velocity auf allen drei zeichnet jede Pflanze statisch (vorher = jetzt), wie GL/Metal
+  (D3D11 `:1908`, D3D12 `:11797`, Vulkan `:5723`). Vulkan-Decal-Tiefe nimmt den Cluster als einen Draw über den instanzierten Schatten-Zwilling (`:3986`). Vulkans
+  SSAO/SSR-Reflexionsvorpass (MRT-Weg, läuft sobald SSR an ist) übersprang Cluster ganz; jetzt ein neues, optionales instanziertes Pipeline-Paar aus
+  `reflPrepassVertexInstanced` (`:13021`, ohne UV-Attribut, also keine neue Validierungswarnung), sonst je Pflanze. D3D11/D3D12 speisen diesen Vorpass aus den
+  `DrawCall`s des GeometryPass und waren nie betroffen.
+
+### 17.2 Prüfung
+
+- **Graph-A/B** (`foliage_graph_ab.py`, neu `--ground/--tol/--plants/--mask-tol`, vergleicht Boden, Pflanzenmaske und Dreiecke; der Himmel rauscht auf D3D/Vulkan):
+  800 Pflanzen, draws **774 → 5** (Forward) und **775 → 6** (Deferred) auf allen drei, gleiche Dreiecke; Boden und Maske identisch auf D3D11/D3D12, Vulkan 0-4
+  Maskenpixel = sein eigenes Lauf-zu-Lauf-Rauschen desselben Modus. Wind 0 gegen 20 bewegt ~22 % der Pflanzenpixel.
+- **Budget, vorher gemessen:** 2000 Graph-Pflanzen zeichneten auf D3D12/Vulkan nur **47 104 von 58 060** Dreiecken (`k_matMaxDraws` = 1024 Graph-Draws je Frame,
+  Rest übersprungen); jetzt 58 060 in 5 Draws. **100k eingebaute Pflanzen mit Schatten: D3D12 zeichnete nichts außer Himmel und Grau** (Schattenpass leerte den
+  Pro-Objekt-Ring), Vulkan richtig aber mit 56 104 Draws. Jetzt D3D12 vollständig (8 Settle-Frames: Bild nach dem Wachsen = Bild des Blockweges, Boden identisch),
+  Vulkan 5 Draws / 708 016 Dreiecke wie D3D11 und GL, sein Bild gleich der alten (vollständigen) Schleife im Rauschen.
+- **TAA-Velocity:** 6000 Pflanzen, AA=3, ein Frame Kamerabewegung (`HE_DUMP_MBYAWSTEP=2`) gegen ruhig, Boden um > 24/255: D3D11 2,98 %, D3D12 2,45 %, Vulkan 2,41 %,
+  GL 2,0 %. **Negativkontrolle** (Entfaltung im Bau abgeschaltet): D3D11 6,25 %, Vulkan 6,24 %.
+- **Rauchlauf GI+SSR+TAA** auf allen drei, 6000 Pflanzen, Cluster und je Pflanze: keine neue Warnung, kein Fehler (Vulkan: die eine bekannte Validierungszeile
+  „location 2 not consumed“ in beiden Modi). Decal-Zeuge Cluster gegen je Pflanze: 17 px (D3D11/D3D12), 96 px (Vulkan) über Toleranz 8. Reflexionsvorpass-Zeuge:
+  „reflection pre-pass instanced (first cluster: 39 plants)“.
+- **Tests:** `test_graph_instancing.cpp` 7 Fälle (Quelltext-Guards der drei Zeichenstellen, Salz vor dem ersten Cache-Zugriff, Arena ohne festen Kapazitätstest),
+  `test_foliage_cluster.cpp` 21 Fälle (kein Backend überspringt einen Cluster mehr in einem Pro-Objekt-Pass). Jede neue Prüfung mit Negativkontrolle rot gesehen.
+  Voller `he_tests` (Release, scratch `APPDATA`): 5421 Fälle, 5417 grün, 4 rot, 12 übersprungen; rot genau die vier aus 14.2-16.2 (`test_inspector_ui`
+  Zwischenablage ×2, `test_profiler` ×2).
+- **Request 109 (Queen):** `scripts/runtime_size.py` Linux-Spielzeile (64, 38) → (67, 42) MB (`21096c3e`), gemessen in CI 39033396153 auf `2f0331ce`:
+  60,8 MB gesamt, 38,0 MB ohne Python, nach der Regel der Datei plus 10 %; dieselben Zahlen wie Thema 183 (`d1dbbd3e`), beim Mergen also kein inhaltlicher Konflikt.
+
+### 17.3 Befund: Cluster gegen ordered auf D3D/Vulkan ist der SSAO-Vorpass
+
+Die Abweichung aus 16.2 (D3D11 0,21 %, Vulkan 0,51 % des Bodens, ohne Stufen) verschwindet mit `HE_DUMP_SSAO=0` vollständig (Bloom und Schatten ändern nichts).
+Ursache: der SSAO-Positionsvorpass von D3D11, D3D12 und Vulkan schreibt in eine **D16**-Tiefe (GL: 24 Bit). Auf 50-90 m fallen Würfel und Boden auf gleiche
+16-Bit-Werte, und die Zeichenreihenfolge entscheidet (die Tiefengleichstand-Lektion, nur viel häufiger). Versuch: D3D11 mit `DXGI_FORMAT_D32_FLOAT` dort → Cluster
+gegen ordered **identisch**. Nicht übernommen (ändert das SSAO-Bild jeder Szene auf drei Backends), Vorschlag an die Queen.
+
+### 17.4 Nicht gebaut, nicht geprüft
+
+- 64-Byte-Schattenstride nicht gebaut: die Arena macht ihn fürs Funktionieren unnötig, er würde nur den Speicher halbieren (bei 100k Pflanzen 2 × 64 MiB je Slot).
+- `k_matMaxDraws` (1024 Graph-Draws je Frame, D3D12/Vulkan) bleibt für nicht gebatchte Graph-Objekte; mehr als 1024 verschiedene sichtbare Graph-Objekte verlieren
+  weiter den Rest (einmal gemeldet). Batches brauchen jetzt einen Slot.
+- Die `dump counters` von D3D12 zählen die Schattenkaskaden mit (vorbestehend), Dreiecksvergleiche über Backends deshalb mit `SHADOW=0.1`.
+- Zeit nicht gemessen (Schritt 5). Metal nicht berührt. Exportiertes Spiel: gebackene Varianten schleifen weiter (Anfrage 105). SSR-Bild-A/B auf Vulkan nicht
+  aussagekräftig (SSR rauscht 1,6 % von Lauf zu Lauf), dort nur der Zeuge. Editor von Hand nicht.
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 3 von 5 (Teil 3a, LOD-Stufen); Schritt 1 (2d) in Abschnitt 14, Schritt 2 (2e) in Abschnitt 15, dieser in Abschnitt 16
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `f2eddc0d` (Code, Tests, Karten-Datei) + Folgecommit (Zeuge, Skript, Doku); gepusht: ja
-- **Done:** Foliage-Schichten haben Detailstufen (Mesh/Material/Anfang/Dichte), je Pflanze nach Abstand gewählt, mit Hysterese je Ansicht und gleichmäßiger Ausdünnung;
-  die Kreuz-Karte ist eine Engine-Datei mit fester UUID.
-- **Files touched:** `FoliageComponent.h:18`, `FoliageExtract.h:27`, `FoliageExtract.cpp:186-650`, `RenderExtractor.h:332`/`.cpp:1424`, `SceneSerializer.cpp:184`/`:221`,
-  `FoliageSystem.cpp` (`settingsKeyOf`), `SceneSystems.cpp:262`, `InspectorPanel.cpp:3572`, `EditorHelp.cpp`, `MeshGen/main.cpp:143`, `DefaultAssets.h:104`,
-  `EditorDeps/EngineContent/Meshes/CrossCard.hasset`, `EditorApplication.cpp:7565` (Zeuge), `tests/test_foliage_lod.cpp`, `tests/test_inspector_ui.cpp` (letzter Fall),
-  `scripts/perf/foliage_lod_shot.py`.
-- **Verified:** 16.2 (10 neue Fälle mit Negativkontrolle, UI-Test, Nachbardateien grün, Zeuge auf GL/D3D11/Vulkan mit gleichen Zählern und pixelgleichem ordered/je Pflanze,
-  voller he_tests mit den bekannten 4 Roten).
-- **Not verified:** Metal; Inspector von Hand (nur headless UI-Test); exportiertes Spiel; Zeitmessung.
-- **Decisions taken:** `distance` = Anfang der Stufe (nicht `maxDistance` wie Plan 7.1), Stufe 0 = Mesh der Schicht; leeres Stufen-Material = Material der Schicht;
-  Hysterese je `RenderExtractor` (= je Ansicht), nicht in der Komponente; `drawDistance` ohne Hysterese; PerInstance/Ordered ohne Hysterese; Karte mit Drehpunkt unten.
-- **Decisions suggested, not taken:** Kartenstufen standardmäßig ohne Schatten, bis Cutout in Tiefenpässen (7.7) da ist; Dither-Überblendung mit dem kompakten Instanzformat.
-- **Pending (aus Schritt 2 weiter offen):** Metal-Übersetzung/-Lauf (CI-macOS-Job, `foliage_graph_ab.py --rhi Metal`), Anfrage 105 (instanzierten Vertex backen).
-- **Traps:** Engine-Meshes außer den eingebauten (Würfel, Quad, Schneeflocke) sind **Dateien**: ohne `loadAsset`/Preload zeichnet das Backend den Ersatzwürfel, ohne
-  Fehlermeldung. `mesh_gen` neu laufen lassen ändert alle alten `.hasset` (META 4 Byte länger): nur die neue Datei committen. Auf D3D/Vulkan rauscht der Himmel von Lauf zu Lauf;
-  Bildvergleiche dort nur über den Boden (`foliage_lod_shot.py` druckt Bild und Boden ab Zeile 330; die Dumps sind BMP **top-down**, negative Höhe).
-- **Next steps:** 1. Schritt 4 (Windows-Gleis): die Cluster-gegen-ordered-Abweichung auf D3D11/Vulkan (0,2-0,5 % des Bodens, ohne Stufen) erklären, dazu `python
-  scripts/perf/foliage_lod_shot.py --editor <deploy> --rhi D3D11`. 2. D3D/Vulkan-Graph-Instancing verdrahten (Abschnitt 15). 3. Schritt 5: Messleiter mit Stufen
-  (`HE_DUMP_FOLIAGELOD`), Zeit je Backend.
+- **Topic / step:** Thema 182, Schritt 4 von 5 (Teil 2f, Windows-Gleis); 1-3 in den Abschnitten 14-16, dieser in Abschnitt 17
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `28845a11`, `6154b254`, `da8cd627`, `21096c3e` (runtime_size) + Doku-Commit; gepusht: ja; CI 39037311272
+- **Done:** Graph-Foliage (Wind) zeichnet auf D3D11/D3D12/Vulkan einen Draw je Batch; D3D12/Vulkan haben eine wachsende Instanz-Arena (100k Pflanzen: D3D12 nicht mehr
+  leer, Vulkan 5 statt 56k Draws); TAA-Velocity, Vulkan-Decal-Tiefe und Vulkan-Reflexionsvorpass sehen jeden Cluster.
+- **Files touched:** `D3D11Renderer.cpp` (`:1403`, `:1908`, `:4698`, `:7092`), `D3D12Renderer.cpp` (`:3432-3505`, `:9117`, `:11119`, `:11797`), `VulkanRenderer.cpp`
+  (`:3082`, `:3986`, `:5723`, `:6940-6990`, `:8441`, `:13021`), `VulkanRenderer.h` (Arena, `m_reflPrepassInstPipeline`), `tests/test_graph_instancing.cpp`,
+  `tests/test_foliage_cluster.cpp` (letzter Fall), `scripts/perf/foliage_graph_ab.py`.
+- **Verified:** 17.2 (Graph-A/B auf drei Backends, Budget vorher/nachher, TAA mit Negativkontrolle, GI/SSR/Decal-Rauchlauf, Quelltext-Guards mit Negativkontrolle,
+  voller he_tests).
+- **Not verified:** Metal; Zeit; exportiertes Spiel; Editor von Hand; Vulkan-SSR im Bild (nur Zeuge).
+- **Decisions taken:** Arena wächst statt Front-End-Ausdünnung (7.5 Punkt 6): richtig ab dem ersten Frame, Grenze 1 Mio. je Slot; D3D11 bekommt einen eigenen
+  Instanz-Vertexpuffer statt den StructuredBuffer umzubauen; Velocity je Pflanze wie GL (kein instanzierter Velocity-Shader).
+- **Decisions suggested, not taken:** SSAO-Vorpass-Tiefe D16 → D32 auf D3D11/D3D12/Vulkan (17.3); instanzierte Velocity, wenn TAA mit großer Foliage zu langsam wird.
+- **Pending:** Schritt 5 (Messleiter vorher/nachher auf allen Backends, Bildvergleich, voller ctest); Metal-Lauf; Anfrage 105.
+- **Traps:** Auf D3D/Vulkan rauscht der Himmel, Vulkan auch den fernen Boden (≤ 8/255) und die Pflanzenmaske (0-4 px): `--ground 100 --tol 8 --mask-tol 4`. D3D12/Vulkan
+  verlieren in der Graph-**Schleife** über 1024 Pflanzen Draws: die Schleife ist dort nur unter ~1000 sichtbaren Pflanzen eine gültige Referenz (`--plants 800`).
+  Dumps rendern 3 Settle-Frames, D3D12 hat 3 Slots: das Wachsen des Hauptpuffers sieht man erst mit `HE_DUMP_FRAMES=8`.
+- **Next steps:** 1. Schritt 5: `foliage_graph_ab.py` und ein 100k-Lauf je Backend in die Messleiter, Zeit je Backend. 2. Entscheidung 17.3 (D32) und Anfrage 105.
