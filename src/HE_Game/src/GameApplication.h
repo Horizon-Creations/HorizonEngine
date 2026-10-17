@@ -17,7 +17,7 @@
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
-#include <HorizonScene/CellStreamer.h>
+#include <HorizonScene/CellRuntime.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/WeatherAudio.h>
@@ -31,7 +31,7 @@ class ScriptContext;
 
 // Game-specific Application: handles the packaged-shipping bootstrap
 // (project.hcfg, encrypted hpak, key derivation, GameLogic.dll loading).
-class GameApplication : public HE::Application
+class GameApplication : public HE::Application, private HE::ICellHost
 {
 public:
     // Both defined in the .cpp, where HorizonWorld + ScriptContext are complete
@@ -356,16 +356,16 @@ private:
     std::unordered_map<int, HE::CancelToken> m_zoneStreamTokens;
     void cancelZoneStreaming();
 
-    // ── Cell streaming (Thema 153) ───────────────────────────────────────────
-    // A scene split into cells (HE::CellStreamer) loads them by camera distance.
-    // Started when the world's cell manifest appears or changes, reset when the
-    // world is swapped out.
+    // ── Cell streaming (Thema 153, 164) ──────────────────────────────────────
+    // A scene split into cells loads them around the camera. HE::CellRuntime does
+    // the streaming, shared with the editor's Play; the game is its ICellHost: where
+    // a cell's file comes from (a mounted pak, else the loose file), its physics
+    // world, its asset loads. Reset when the world is swapped out.
     void updateCellStreaming(float dt);
-    HE::CellStreamer   m_cellStreamer;
-    const HorizonWorld* m_cellWorld = nullptr;   // the world it streams into
-    std::string        m_cellManifestJson;       // and the manifest it started from
-    glm::dvec3         m_cellLastCamera{ 0.0 };
-    bool               m_cellHasLastCamera = false;
-    std::unordered_map<uint32_t, HE::CancelToken> m_cellStreamTokens;   // cell root → its asset loads
+    std::function<bool(std::vector<uint8_t>&)> openCellFile(const std::string& path) override;
+    PhysicsWorld* cellPhysics() override { return m_physicsWorld.get(); }
+    void streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
+                          const std::vector<uint32_t>& entities) override;
+    HE::CellRuntime m_cellRuntime{ *this };
 };
 

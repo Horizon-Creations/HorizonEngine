@@ -1515,111 +1515,41 @@ void GameApplication::cancelZoneStreaming()
 	m_zoneStreamTokens.clear();
 }
 
+std::function<bool(std::vector<uint8_t>&)> GameApplication::openCellFile(const std::string& path)
+{
+	// A cell file: the scene's entry in a mounted pak (shipped builds), else the
+	// loose file in the project or next to the executable — the order
+	// loadSceneInto looks in. The worker gets everything by value.
+	if (auto pak = contentManager().detachedMountedEntryReader(sceneUuidForPath(path)))
+		return [pak = std::move(pak)](std::vector<uint8_t>& out) { out = pak(); return !out.empty(); };
+	std::vector<std::filesystem::path> candidates;
+	if (!contentManager().contentRoot().empty())
+		candidates.push_back(std::filesystem::path(contentManager().contentRoot()).parent_path() / path);
+	if (const char* base = SDL_GetBasePath()) candidates.push_back(std::filesystem::path(base) / path);
+	std::error_code ec;
+	for (const auto& file : candidates)
+		if (std::filesystem::exists(file, ec))
+			return [file](std::vector<uint8_t>& out)
+			{
+				std::ifstream in(file, std::ios::binary);
+				out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+				return !out.empty();
+			};
+	return {};
+}
+
+void GameApplication::streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
+                                       const std::vector<uint32_t>& entities)
+{
+	// What a zone gets when it streams in (executeSceneRequests). Cells carry no
+	// scripts yet.
+	streamSceneAssets(world, token, &entities);
+}
+
 void GameApplication::updateCellStreaming(float dt)
 {
-	const std::string& manifestJson = m_world->cellManifestJson();
-	if (m_cellWorld != m_world.get() || manifestJson != m_cellManifestJson)
-	{
-		for (auto& [root, token] : m_cellStreamTokens) token.cancel();
-		m_cellStreamTokens.clear();
-		m_cellStreamer.reset();
-		m_cellWorld         = m_world.get();
-		m_cellManifestJson  = manifestJson;
-		m_cellHasLastCamera = false;
-		HE::CellManifest manifest;
-		if (manifestJson.empty()) return;
-		if (!HE::CellManifest::parse(manifestJson, manifest) || manifest.empty())
-		{
-			HE_LOG_WARN(Core, "%s", "GameApplication: the scene's cell manifest is malformed; "
-			                        "only the base scene is loaded");
-			return;
-		}
-
-		// A cell file: the scene's entry in a mounted pak (shipped builds), else
-		// the loose file in the project or next to the executable — the order
-		// loadSceneInto looks in. The worker gets everything by value.
-		auto reader = [this](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
-		{
-			if (auto pak = contentManager().detachedMountedEntryReader(sceneUuidForPath(path)))
-				return [pak = std::move(pak)](std::vector<uint8_t>& out) { out = pak(); return !out.empty(); };
-			std::vector<std::filesystem::path> candidates;
-			if (!contentManager().contentRoot().empty())
-				candidates.push_back(std::filesystem::path(contentManager().contentRoot()).parent_path() / path);
-			if (const char* base = SDL_GetBasePath()) candidates.push_back(std::filesystem::path(base) / path);
-			std::error_code ec;
-			for (const auto& file : candidates)
-				if (std::filesystem::exists(file, ec))
-					return [file](std::vector<uint8_t>& out)
-					{
-						std::ifstream in(file, std::ios::binary);
-						out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-						return !out.empty();
-					};
-			return {};
-		};
-		HE::CellStreamer::Hooks hooks;
-		// What a zone gets when it streams in (executeSceneRequests): collision,
-		// and its assets under a token of its own. Cells carry no scripts. A cell is
-		// built in slices, and each brings its own entities: their bodies and their
-		// asset loads start with the slice, inside the frame's budget, instead of all
-		// at once when the last one is done. One token per cell, made with its first
-		// slice, so that unloading the cell cancels the loads of every slice.
-		hooks.loadedSlice = [this](entt::entity root, const std::vector<entt::entity>& created)
-		{
-			// The slice's bodies go in as one charge (cellSliceBodies is the call the
-			// tests make too).
-			if (m_physicsWorld)
-				HE::cellSliceBodies(*m_physicsWorld, *m_world, created);
-			std::vector<uint32_t> ids;
-			ids.reserve(created.size());
-			for (entt::entity e : created) ids.push_back((uint32_t)e);
-			auto token = m_cellStreamTokens.find((uint32_t)root);
-			if (token == m_cellStreamTokens.end())
-				token = m_cellStreamTokens.emplace((uint32_t)root, HE::CancelToken::create()).first;
-			streamSceneAssets(*m_world, token->second, &ids);
-		};
-		hooks.unloading = [this](entt::entity root)
-		{
-			// Bodies first, in a pass of their own, with the joints that name them kept
-			// for the cell's return (a door of the base hinged to a frame in the cell).
-			if (m_physicsWorld)
-				HE::cellUnloadBodies(*m_physicsWorld, *m_world, root);
-			if (const auto t = m_cellStreamTokens.find((uint32_t)root); t != m_cellStreamTokens.end())
-			{
-				t->second.cancel();
-				m_cellStreamTokens.erase(t);
-			}
-		};
-		// A cell is not started when the physics world has no room for its bodies.
-		hooks.bodiesFit = [this](uint32_t bodies)
-		{
-			return !m_physicsWorld || HE::cellBodiesFit(*m_physicsWorld, bodies);
-		};
-		m_cellStreamer.begin(manifest, std::move(reader), std::move(hooks));
-	}
-	if (!m_cellStreamer.active()) return;
-
-	glm::dvec3 camera(0.0);
-	bool       haveCamera = false;
-	for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
-	{
-		camera     = glm::dvec3(HE::worldPositionOf(*m_world, e)) + m_world->origin();
-		haveCamera = true;
-		break;
-	}
-	if (!haveCamera) return;
-	// The lookahead follows the camera's motion; a jump (a teleport, a respawn)
-	// is not a speed, so anything faster than an airliner counts as standing.
-	glm::vec3 velocity(0.0f);
-	if (m_cellHasLastCamera && dt > 0.0f)
-	{
-		velocity = glm::vec3((camera - m_cellLastCamera) / static_cast<double>(dt));
-		if (glm::length(velocity) > 300.0f) velocity = glm::vec3(0.0f);
-	}
-	m_cellLastCamera    = camera;
-	m_cellHasLastCamera = true;
 	HE_PROFILE_SCOPE_N("CellStreaming");
-	m_cellStreamer.update(*m_world, camera, velocity, /*budgetMs=*/4.0);
+	m_cellRuntime.update(*m_world, dt);
 }
 
 // ── Scene transitions ────────────────────────────────────────────────────────
@@ -1857,11 +1787,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	cancelZoneStreaming();
 	m_sceneStreamToken = std::move(streamToken);
 	// The old world's cells go with it; the new one starts its own next frame.
-	for (auto& [root, token] : m_cellStreamTokens) token.cancel();
-	m_cellStreamTokens.clear();
-	m_cellStreamer.reset();
-	m_cellWorld = nullptr;
-	m_cellManifestJson.clear();
+	m_cellRuntime.reset();
 
 	// Tear down the old scene: unload event first (handlers still see the world),
 	// then scripts (finalizers may touch entities), sounds, zones. The app-level
@@ -2168,10 +2094,10 @@ void GameApplication::startPhysics()
 	// the first one about every dynamic body in every step.
 	m_physicsWorld->setRegionHold([this](const glm::vec3& p)
 	{
-		return m_world && HE::cellHolds(m_cellStreamer, *m_world, p);
+		return m_world && HE::cellHolds(m_cellRuntime.streamer(), *m_world, p);
 	}, [this]
 	{
-		return m_cellStreamer.active();
+		return m_cellRuntime.active();
 	});
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
