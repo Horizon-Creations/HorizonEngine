@@ -4,6 +4,7 @@
 #include "../src/HE_Editor/TerrainSync.h"
 
 #include <HorizonScene/FoliagePaint.h>
+#include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/TerrainPaint.h>
@@ -13,6 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <deque>
 #include <memory>
@@ -56,8 +58,9 @@ std::unique_ptr<Machine> makeMachine(int id, bool sculpted = true, bool foliage 
 	if (foliage)
 	{
 		FoliageComponent fol;
-		fol.maskRes = 32;
+		fol.layers[0].maskRes = 32;
 		fol.dirty = false;
+		fol.layers[0].dirty = false;
 		m->world.registry().emplace<FoliageComponent>(m->terrain, std::move(fol));
 	}
 	return m;
@@ -194,7 +197,7 @@ TEST_CASE("Landscape sync: layer paint and the foliage mask travel the same way"
 	TerrainPaint::paint(host->tc(), 5.0f, 5.0f, /*layer*/2, 6.0f, 2.0f, 1.0f);
 	TerrainPaint::paint(host->tc(), -9.0f, 4.0f, /*layer*/5, 4.0f, 1.0f, 1.0f);   // second page
 	auto& fol = host->world.registry().get<FoliageComponent>(host->terrain);
-	FoliagePaint::paint(fol, host->tc(), 0.0f, 0.0f, 8.0f, 2.0f, 1.0f, 0.0f);
+	FoliagePaint::paint(fol.layers[0], host->tc(), 0.0f, 0.0f, 8.0f, 2.0f, 1.0f, 0.0f);
 	net.collect(*host);
 	net.deliver();
 
@@ -203,8 +206,8 @@ TEST_CASE("Landscape sync: layer paint and the foliage mask travel the same way"
 	CHECK(client->tc().layerWeights2 == host->tc().layerWeights2);
 	CHECK(client->tc().weightRes == host->tc().weightRes);
 	CHECK(client->tc().weightsDirty);
-	CHECK(got.densityMask == fol.densityMask);
-	CHECK(got.dirty);
+	CHECK(got.layers[0].densityMask == fol.layers[0].densityMask);
+	CHECK(got.layers[0].dirty);
 
 	// A later dab goes as a rectangle of the weightmap, not the whole page again.
 	// After the pause the whole 1 MB page bought (1 MB / kBytesPerMs = 256 ms).
@@ -492,4 +495,146 @@ TEST_CASE("Landscape sync: a client's stroke reaches the host through the real s
 	TerrainSculpt::apply(hostM->tc(), 20.0f, -20.0f, TerrainSculpt::Op::Lower, 3.0f, 1.0f, 2.0f);
 	collect(host, hostM->world, hostM->sync, true);
 	REQUIRE(pump([&] { return hostM->tc().sculptHeights == ctc.sculptHeights; }));
+}
+
+// ── Foliage layers (Thema 182): one mask grid per layer ─────────────────────
+
+namespace {
+// A second foliage layer on a machine, the same on every machine (as a snapshot
+// would have it): no mask yet, nothing to scatter.
+FoliageComponent& addSecondLayer(Machine& m)
+{
+	auto& fol = m.world.registry().get<FoliageComponent>(m.terrain);
+	fol.addLayer();
+	fol.layers[1].maskRes = 32;
+	fol.layers[1].dirty   = false;
+	return fol;
+}
+
+std::vector<std::uint8_t> fieldsSent(const std::vector<Patch>& sent)
+{
+	std::vector<std::uint8_t> f;
+	for (const Patch& p : sent) f.push_back(static_cast<std::uint8_t>(p.field & ~TerrainSync::kWholeGrid));
+	return f;
+}
+} // namespace
+
+TEST_CASE("Landscape sync: every foliage layer's mask travels on a field of its own")
+{
+	auto host = makeMachine(0, true, /*foliage=*/true), client = makeMachine(1, true, true);
+	addSecondLayer(*host);
+	addSecondLayer(*client);
+	Net net({ host.get(), client.get() });
+	net.collectAll();
+
+	net.tick();
+	net.clearSent();
+	auto& fol = host->world.registry().get<FoliageComponent>(host->terrain);
+	FoliagePaint::paint(fol.layers[1], host->tc(), 4.0f, -6.0f, 8.0f, 2.0f, 1.0f, 0.0f);
+	net.collect(*host);
+	const std::vector<std::uint8_t> fields = fieldsSent(net.sentBy[0]);
+	CHECK(std::count(fields.begin(), fields.end(),
+	                 static_cast<std::uint8_t>(TerrainSync::FoliageMask + 1)) >= 1);
+	CHECK(std::count(fields.begin(), fields.end(), static_cast<std::uint8_t>(TerrainSync::FoliageMask)) == 0);
+	net.deliver();
+
+	const auto& got = client->world.registry().get<FoliageComponent>(client->terrain);
+	REQUIRE(got.layers.size() == 2u);
+	CHECK(got.layers[1].densityMask == fol.layers[1].densityMask);
+	CHECK(got.layers[1].dirty);
+	CHECK(got.layers[0].densityMask.empty());   // the other layer saw nothing
+	CHECK_FALSE(got.layers[0].dirty);
+}
+
+TEST_CASE("Landscape sync: a foliage layer added, painted and removed ends the same on both sides")
+{
+	auto host = makeMachine(0, true, /*foliage=*/true), client = makeMachine(1, true, true);
+	Net net({ host.get(), client.get() });
+	net.collectAll();
+	auto& hf = host->world.registry().get<FoliageComponent>(host->terrain);
+	auto& cf = client->world.registry().get<FoliageComponent>(client->terrain);
+
+	// The host adds a layer and paints it: the settings bring the layer, then its
+	// mask arrives whole on the new field.
+	net.tick();
+	FoliageLayer* trees = hf.addLayer();
+	REQUIRE(trees);
+	trees->name        = "Trees";
+	trees->meshAssetId = HE::UUID{ 0x71, 0x72 };
+	trees->maskRes     = 32;
+	FoliagePaint::paint(*trees, host->tc(), -8.0f, 8.0f, 10.0f, 2.0f, 1.0f, 0.0f);
+	net.collect(*host);
+	net.deliver();
+	REQUIRE(cf.layers.size() == 2u);
+	CHECK(cf.layers[1].name == "Trees");
+	CHECK(cf.layers[1].meshAssetId == HE::UUID{ 0x71, 0x72 });
+	CHECK(cf.layers[1].densityMask == hf.layers[1].densityMask);
+
+	// The first layer goes: what was layer 1 is layer 0 now, mask and all.
+	net.tick();
+	hf.layers.erase(hf.layers.begin());
+	net.collect(*host);
+	net.deliver();
+	REQUIRE(cf.layers.size() == 1u);
+	CHECK(cf.layers[0].name == "Trees");
+	CHECK(cf.layers[0].densityMask == hf.layers[0].densityMask);
+
+	// Settled: neither side has anything left to send.
+	net.tick();
+	net.clearSent();
+	net.collectAll();
+	CHECK(net.sentBy[0].empty());
+	CHECK(net.sentBy[1].empty());
+
+	// A layer appearing again at index 1 sends its mask whole, not against the
+	// mask a removed layer once had there.
+	net.tick();
+	FoliageLayer* bushes = hf.addLayer();
+	REQUIRE(bushes);
+	bushes->maskRes = 32;
+	FoliagePaint::paint(*bushes, host->tc(), 0.0f, 0.0f, 4.0f, 1.0f, 1.0f, 0.0f);
+	net.collect(*host);
+	net.deliver();
+	REQUIRE(cf.layers.size() == 2u);
+	CHECK(cf.layers[1].densityMask == hf.layers[1].densityMask);
+}
+
+TEST_CASE("Landscape sync: a peer's change to how a layer is drawn sticks, and the scatter stays")
+{
+	auto host = makeMachine(0, true, /*foliage=*/true), client = makeMachine(1, true, true);
+	for (Machine* m : { host.get(), client.get() })
+	{
+		auto& f = m->world.registry().get<FoliageComponent>(m->terrain);
+		f.layers[0].meshAssetId = HE::UUID{ 0x61, 0x62 };
+		f.layers[0].density     = 0.05f;
+		f.dirty = true;
+		FoliageSystem::update(m->world);
+		REQUIRE_FALSE(f.layers[0].cachedInstances.empty());
+	}
+	Net net({ host.get(), client.get() });
+	net.collectAll();
+	auto& cf = client->world.registry().get<FoliageComponent>(client->terrain);
+	const auto storeBefore = cf.layers[0].store;
+	const size_t countBefore = cf.layers[0].cachedInstances.size();
+
+	// Not a scatter input: the receiver takes the new value and keeps its scatter.
+	net.tick();
+	auto& hf = host->world.registry().get<FoliageComponent>(host->terrain);
+	hf.layers[0].castsShadow    = false;
+	hf.layers[0].shadowDistance = 30.0f;
+	net.collect(*host);
+	net.deliver();
+	CHECK_FALSE(cf.layers[0].castsShadow);
+	CHECK(cf.layers[0].shadowDistance == doctest::Approx(30.0f));
+	CHECK(cf.layers[0].store == storeBefore);
+	CHECK(cf.layers[0].cachedInstances.size() == countBefore);
+	CHECK_FALSE(cf.layers[0].dirty);
+
+	// A scatter input: the receiver scatters again.
+	net.tick();
+	hf.layers[0].seed = 1234;
+	net.collect(*host);
+	net.deliver();
+	CHECK(cf.layers[0].seed == 1234);
+	CHECK(cf.layers[0].dirty);
 }

@@ -188,6 +188,8 @@ add_executable(he_tests
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
     test_foliage_cluster.cpp
+    # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
+    test_foliage_layers.cpp
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp

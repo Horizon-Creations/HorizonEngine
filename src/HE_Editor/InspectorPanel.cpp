@@ -3484,11 +3484,55 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
-	if (auto* fol = registry.try_get<FoliageComponent>(entity))
+	if (auto* folc = registry.try_get<FoliageComponent>(entity))
 	{
 		if (componentHeader("Foliage", true, removed))
 		{
 			EditorWidgets::WrapText wrap;
+			// One row per layer (one kind of plant: grass, a bush, a tree), the
+			// chosen one's fields below. The Landscape panel's Foliage brush paints
+			// the same chosen layer (FoliageComponent::activeLayer), so picking a
+			// layer here and painting it there go together.
+			if (folc->layers.empty()) folc->layers.emplace_back();   // never empty, see FoliageComponent
+			folc->activeLayer = static_cast<int>(folc->activeIndex());
+			for (size_t i = 0; i < folc->layers.size(); ++i)
+			{
+				FoliageLayer& l = folc->layers[i];
+				ImGui::PushID(static_cast<int>(i));
+				EditorWidgets::checkbox("##folvis", &l.visible); trackEdit();
+				EditorWidgets::helpForKey("Foliage/Layer Visible");
+				ImGui::SameLine();
+				const std::string label = foliageLayerLabel(l, i) + "  ("
+				                        + std::to_string(l.cachedInstances.size()) + ")";
+				if (ImGui::Selectable(label.c_str(), folc->activeLayer == static_cast<int>(i)))
+					folc->activeLayer = static_cast<int>(i);
+				EditorWidgets::helpForKey("Foliage/Layer");
+				ImGui::PopID();
+			}
+			ImGui::BeginDisabled(folc->layers.size() >= FoliageComponent::kMaxLayers);
+			if (EditorWidgets::smallButton("Add Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Layer");
+				folc->addLayer();
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Layer##fol");
+			ImGui::SameLine();
+			// The last layer stays: a component without one would be a component
+			// that does nothing, and removing the component says that better.
+			ImGui::BeginDisabled(folc->layers.size() <= 1);
+			if (EditorWidgets::dangerSmallButton("Remove Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Layer");
+				folc->layers.erase(folc->layers.begin() + static_cast<std::ptrdiff_t>(folc->activeIndex()));
+				folc->activeLayer = static_cast<int>(folc->activeIndex());
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Remove Layer##fol");
+			ImGui::Separator();
+
+			FoliageLayer* fol = folc->active();
+			Row::inputText("Name##fol", &fol->name); trackEdit();
 			// The layer had no way to be pointed at a mesh from here at all:
 			// a Foliage component added from "Add Component" kept a null mesh
 			// and scattered nothing, with only a log line to say why. Same
@@ -3514,8 +3558,13 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			// What the renderer does with the layer, not where it grows: no re-scatter.
+			EditorWidgets::checkbox("Cast Shadows##fol", &fol->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
+			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
+			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
-			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
+			if (ImGui::Button("Regenerate")) { folc->dirty = true; trackEdit(); }
 			// The painted density mask is authored in Landscape mode's Foliage
 			// brush; here it is only reported and, if need be, dropped.
 			if (fol->densityMask.empty())

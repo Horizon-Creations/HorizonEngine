@@ -7518,15 +7518,16 @@ void EditorApplication::dumpFrameHeadless()
 		ftc.dirty       = true;
 		reg.emplace<TerrainComponent>(land, ftc);
 		FoliageComponent fol;
-		fol.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
+		FoliageLayer&    fl = fol.layers[0];
+		fl.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
 		// +0.5: the scatter takes int(area * density), and float rounding must
 		// not cost the last instance.
-		fol.density      = (static_cast<float>(want) + 0.5f) / (side * side);
-		fol.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
-		fol.minScale     = scaleMin;
-		fol.maxScale     = scaleMax;
-		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
-		fol.dirty        = true;
+		fl.density      = (static_cast<float>(want) + 0.5f) / (side * side);
+		fl.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
+		fl.minScale     = scaleMin;
+		fl.maxScale     = scaleMax;
+		fl.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
+		fl.dirty        = true;
 		// HE_DUMP_FOLIAGEMAT=graph: the layer carries a node-graph material (one flat
 		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
 		// instances the batch with its built-in program draws it grey; one that keeps
@@ -7548,7 +7549,7 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderVertGlsl = gen.vertexBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
-			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
+			fl.materialAssetId = contentManager().registerMaterial(std::move(mat));
 		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
@@ -7556,7 +7557,7 @@ void EditorApplication::dumpFrameHeadless()
 		FoliageSystem::update(*m_editorWorld);
 		const double scatterMs = std::chrono::duration<double, std::milli>(
 			std::chrono::steady_clock::now() - t0).count();
-		const FoliageComponent& placedFol = reg.get<FoliageComponent>(land);
+		const FoliageLayer& placedFol = reg.get<FoliageComponent>(land).layers[0];
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGETEST witness field added "
 			"(%zu instances placed of %ld asked, %s, %.0f m square, scale %.2f-%.2f, "
 			"drawDistance %.0f, scatter %.1f ms)",

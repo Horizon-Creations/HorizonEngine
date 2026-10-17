@@ -11,7 +11,7 @@ class ContentManager;
 namespace HE
 {
 
-// Emits the foliage of every visible FoliageComponent into `out` — which must
+// Emits every visible layer of every visible FoliageComponent into `out` — which must
 // already hold the camera. By default ONE cluster RenderObject per bucket that is
 // in range (RenderObject::instanceBlock, RenderWorld::instanceBlocks), so the cost
 // is O(buckets) plus the instances of the few buckets the draw distance cuts
@@ -46,7 +46,7 @@ void setFoliageModeOverride(int mode);
 // every few hundred extracts when HE_FOLIAGE_STATS is set.
 struct FoliageExtractStats
 {
-    uint32_t layers               = 0;   // FoliageComponents that took part
+    uint32_t layers               = 0;   // foliage layers that took part (visible, scattered)
     uint32_t buckets              = 0;   // buckets looked at (all of them: the O(buckets) part)
     uint32_t clusters             = 0;   // cluster objects emitted
     uint32_t straddlingBuckets    = 0;   // buckets the draw distance cut through (instance by instance)

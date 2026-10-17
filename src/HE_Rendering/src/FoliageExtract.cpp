@@ -117,7 +117,7 @@ namespace
         float above = 0.0f;        // highest point relative to the origin's Y
     };
 
-    Reach reachOf(const FoliageComponent& fol, const HE::AABB& mb)
+    Reach reachOf(const FoliageLayer& fol, const HE::AABB& mb)
     {
         Reach r;
         if (!mb.isValid()) return r;
@@ -174,7 +174,7 @@ namespace
     // ── The old path ────────────────────────────────────────────────────────
     // One RenderObject per instance in range, bounds left invalid for the backends
     // to refine — what extractFoliage did before clusters (HE_FOLIAGE_CLUSTERS=0).
-    void extractPerInstance(const FoliageComponent& fol, entt::entity e, const InstanceBlock& all,
+    void extractPerInstance(const FoliageLayer& fol, entt::entity e, const InstanceBlock& all,
                             const glm::vec3& cam, RenderWorld& out)
     {
         const FoliageStore& store = *fol.store;
@@ -205,7 +205,7 @@ namespace
     // FoliageMode::Ordered: every instance in range, in the order RenderSorter::sort would give
     // the per-instance objects (mesh first — one mesh here — then squared 3D distance from the
     // camera to the instance's origin, nearest first), as ONE cluster over the frame's scratch.
-    void extractOrdered(const FoliageComponent& fol, entt::entity e, const InstanceBlock& all,
+    void extractOrdered(const FoliageLayer& fol, entt::entity e, const InstanceBlock& all,
                         const glm::vec3& cam, RenderWorld& out,
                         std::shared_ptr<std::vector<glm::mat4>>& scratch)
     {
@@ -286,140 +286,146 @@ void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager*
     {
         // Plain names for what the lambdas below capture: older compilers reject a lambda
         // that captures a structured binding.
-        const entt::entity     e   = entityBinding;
-        const FoliageComponent& fol = folBinding;
-        if (!fol.visible) continue; // hidden (e.g. a preloaded zone)
+        const entt::entity     e    = entityBinding;
+        const FoliageComponent& comp = folBinding;
+        if (!comp.visible) continue; // hidden (e.g. a preloaded zone)
         if (active.off(e)) continue;
-        if (fol.meshAssetId == HE::UUID{}) continue;
-        if (!fol.store || fol.store->buckets.empty()) continue;   // not scattered (yet), or nothing grew
-
-        const FoliageStore& store = *fol.store;
-        ++t_stats.layers;
-        t_stats.buckets        += static_cast<uint32_t>(store.buckets.size());
-        t_stats.totalInstances += store.local.size();
 
         // The terrain's pose NOW, so a layer follows a terrain that is moved, rotated, scaled
         // or parented after the scatter (the instances are stored relative to it).
         glm::mat4 parent(1.0f);
         if (const auto* tf = reg.try_get<TransformComponent>(e)) parent = tf->worldMatrix;
 
-        InstanceBlock layer;
-        layer.matrices = std::shared_ptr<const std::vector<glm::mat4>>(fol.store, &store.local);
-        layer.parent   = parent;
-        layer.kind     = InstanceBlock::classify(parent);
-
-        if (mode == FoliageMode::PerInstance)
+        // Each layer is its own set of clusters: its own mesh, material, distances and flags.
+        for (const FoliageLayer& fol : comp.layers)
         {
-            extractPerInstance(fol, e, layer, cam, out);
-            continue;
-        }
-        if (mode == FoliageMode::Ordered)
-        {
-            extractOrdered(fol, e, layer, cam, out, scratch);
-            continue;
-        }
+            if (!fol.visible) continue;   // the layer's own switch
+            if (fol.meshAssetId == HE::UUID{}) continue;
+            if (!fol.store || fol.store->buckets.empty()) continue;   // not scattered (yet), or nothing grew
 
-        const float dd2     = fol.drawDistance * fol.drawDistance;
-        const float inside  = dd2 * (1.0f - kRangeMargin);
-        const float outside = dd2 * (1.0f + kRangeMargin);
-        const float sd      = fol.shadowDistance > 0.0f ? fol.shadowDistance : fol.drawDistance;
-        const float sd2     = sd * sd;
+            const FoliageStore& store = *fol.store;
+            ++t_stats.layers;
+            t_stats.buckets        += static_cast<uint32_t>(store.buckets.size());
+            t_stats.totalInstances += store.local.size();
 
-        const Reach reach = reachOf(fol, meshLocalBounds(cm, fol.meshAssetId));
+            InstanceBlock layer;
+            layer.matrices = std::shared_ptr<const std::vector<glm::mat4>>(fol.store, &store.local);
+            layer.parent   = parent;
+            layer.kind     = InstanceBlock::classify(parent);
 
-        // Pass 1: decide each bucket from its box alone. The ones the draw distance
-        // cuts through are collected for pass 2, so the scratch vector can be sized once.
-        std::vector<const FoliageBucket*> straddlers;
-        size_t straddlerInstances = 0;
-        struct Whole { const FoliageBucket* bucket; float nearSq; };
-        std::vector<Whole> wholes;
-        for (const FoliageBucket& b : store.buckets)
-        {
-            const HE::AABB wb = worldBox(b.localBounds, layer.kind, parent);
-            float nearSq, farSq;
-            rangeOf(wb, cam, nearSq, farSq);
-            if (nearSq > outside) continue;                       // the whole bucket is out of range
-            if (farSq <= inside) wholes.push_back({ &b, nearSq });   // the whole bucket is in range
-            else { straddlers.push_back(&b); straddlerInstances += b.count; }
-        }
-        if (!straddlers.empty())
-        {
-            if (!scratch) scratch = std::make_shared<std::vector<glm::mat4>>();
-            scratch->reserve(scratch->size() + straddlerInstances);
-        }
-
-        // The box a bucket's cluster is culled with: where its instances are, plus how far
-        // the mesh reaches from each of them, in the terrain's own axes and then moved by its
-        // pose. Invalid (never culled) when the mesh's bounds are unknown — see extractFoliage.
-        auto clusterBounds = [&](const FoliageBucket& b) -> HE::AABB
-        {
-            if (!reach.known) return HE::AABB{};
-            HE::AABB lb = b.localBounds;
-            const float h = reach.horizontal + kWindReserve;
-            lb.min.x -= h; lb.max.x += h;
-            lb.min.z -= h; lb.max.z += h;
-            lb.min.y += reach.below - kWindReserve;
-            lb.max.y += reach.above + kWindReserve;
-            return worldBox(lb, layer.kind, parent);
-        };
-
-        auto emit = [&](const InstanceBlock& block, const HE::AABB& bounds, float nearSq)
-        {
-            RenderObject obj;
-            obj.meshAssetId     = fol.meshAssetId;
-            obj.materialAssetId = fol.materialAssetId;
-            obj.transform       = block.world(0);          // the first instance: what a cluster-unaware reader draws
-            obj.worldBounds     = bounds;
-            obj.entityId        = static_cast<uint32_t>(e);
-            // A bucket beyond the shadow distance stops casting: the cheapest shadow saving
-            // there is. It counts as a caster while ANY part of it is within reach.
-            obj.castsShadow     = fol.castsShadow && nearSq <= sd2 * (1.0f + kRangeMargin);
-            obj.contributesAO   = fol.contributesAO;
-            obj.instanceBlock   = static_cast<int32_t>(out.instanceBlocks.size());
-            out.objects.push_back(obj);
-            out.instanceBlocks.push_back(block);
-            ++t_stats.clusters;
-            t_stats.clusterInstances += block.count;
-        };
-
-        for (const Whole& w : wholes)
-        {
-            InstanceBlock block = layer;
-            block.first = w.bucket->first;
-            block.count = w.bucket->count;
-            emit(block, clusterBounds(*w.bucket), w.nearSq);
-        }
-
-        // Pass 2: a bucket the draw distance cuts through. Its instances are tested one by
-        // one — the same test, on the same world positions, the per-instance path made — and
-        // the survivors become a cluster of their own over the frame's scratch vector.
-        for (const FoliageBucket* b : straddlers)
-        {
-            ++t_stats.straddlingBuckets;
-            t_stats.instanceTests += b->count;
-            const uint32_t from = static_cast<uint32_t>(scratch->size());
-            for (uint32_t i = b->first; i < b->first + b->count; ++i)
+            if (mode == FoliageMode::PerInstance)
             {
-                // Position first: most of a straddling bucket's plants are rejected, and a
-                // rejected plant costs three floats instead of a 64-byte matrix.
-                const glm::vec3 wp = layer.position(i);
-                const float dx = wp.x - cam.x;
-                const float dz = wp.z - cam.z;
-                if (dx * dx + dz * dz > dd2) continue;
-                scratch->push_back(layer.world(i));
+                extractPerInstance(fol, e, layer, cam, out);
+                continue;
             }
-            const uint32_t kept = static_cast<uint32_t>(scratch->size()) - from;
-            if (kept == 0) continue;
+            if (mode == FoliageMode::Ordered)
+            {
+                extractOrdered(fol, e, layer, cam, out, scratch);
+                continue;
+            }
 
-            InstanceBlock block;
-            block.matrices = scratch;       // already world space: no parent
-            block.first    = from;
-            block.count    = kept;
-            block.kind     = InstanceBlock::Parent::Identity;
+            const float dd2     = fol.drawDistance * fol.drawDistance;
+            const float inside  = dd2 * (1.0f - kRangeMargin);
+            const float outside = dd2 * (1.0f + kRangeMargin);
+            const float sd      = fol.shadowDistance > 0.0f ? fol.shadowDistance : fol.drawDistance;
+            const float sd2     = sd * sd;
 
-            float nearSq, farSq;
-            rangeOf(worldBox(b->localBounds, layer.kind, parent), cam, nearSq, farSq);
-            emit(block, clusterBounds(*b), nearSq);
+            const Reach reach = reachOf(fol, meshLocalBounds(cm, fol.meshAssetId));
+
+            // Pass 1: decide each bucket from its box alone. The ones the draw distance
+            // cuts through are collected for pass 2, so the scratch vector can be sized once.
+            std::vector<const FoliageBucket*> straddlers;
+            size_t straddlerInstances = 0;
+            struct Whole { const FoliageBucket* bucket; float nearSq; };
+            std::vector<Whole> wholes;
+            for (const FoliageBucket& b : store.buckets)
+            {
+                const HE::AABB wb = worldBox(b.localBounds, layer.kind, parent);
+                float nearSq, farSq;
+                rangeOf(wb, cam, nearSq, farSq);
+                if (nearSq > outside) continue;                       // the whole bucket is out of range
+                if (farSq <= inside) wholes.push_back({ &b, nearSq });   // the whole bucket is in range
+                else { straddlers.push_back(&b); straddlerInstances += b.count; }
+            }
+            if (!straddlers.empty())
+            {
+                if (!scratch) scratch = std::make_shared<std::vector<glm::mat4>>();
+                scratch->reserve(scratch->size() + straddlerInstances);
+            }
+
+            // The box a bucket's cluster is culled with: where its instances are, plus how far
+            // the mesh reaches from each of them, in the terrain's own axes and then moved by its
+            // pose. Invalid (never culled) when the mesh's bounds are unknown — see extractFoliage.
+            auto clusterBounds = [&](const FoliageBucket& b) -> HE::AABB
+            {
+                if (!reach.known) return HE::AABB{};
+                HE::AABB lb = b.localBounds;
+                const float h = reach.horizontal + kWindReserve;
+                lb.min.x -= h; lb.max.x += h;
+                lb.min.z -= h; lb.max.z += h;
+                lb.min.y += reach.below - kWindReserve;
+                lb.max.y += reach.above + kWindReserve;
+                return worldBox(lb, layer.kind, parent);
+            };
+
+            auto emit = [&](const InstanceBlock& block, const HE::AABB& bounds, float nearSq)
+            {
+                RenderObject obj;
+                obj.meshAssetId     = fol.meshAssetId;
+                obj.materialAssetId = fol.materialAssetId;
+                obj.transform       = block.world(0);          // the first instance: what a cluster-unaware reader draws
+                obj.worldBounds     = bounds;
+                obj.entityId        = static_cast<uint32_t>(e);
+                // A bucket beyond the shadow distance stops casting: the cheapest shadow saving
+                // there is. It counts as a caster while ANY part of it is within reach.
+                obj.castsShadow     = fol.castsShadow && nearSq <= sd2 * (1.0f + kRangeMargin);
+                obj.contributesAO   = fol.contributesAO;
+                obj.instanceBlock   = static_cast<int32_t>(out.instanceBlocks.size());
+                out.objects.push_back(obj);
+                out.instanceBlocks.push_back(block);
+                ++t_stats.clusters;
+                t_stats.clusterInstances += block.count;
+            };
+
+            for (const Whole& w : wholes)
+            {
+                InstanceBlock block = layer;
+                block.first = w.bucket->first;
+                block.count = w.bucket->count;
+                emit(block, clusterBounds(*w.bucket), w.nearSq);
+            }
+
+            // Pass 2: a bucket the draw distance cuts through. Its instances are tested one by
+            // one — the same test, on the same world positions, the per-instance path made — and
+            // the survivors become a cluster of their own over the frame's scratch vector.
+            for (const FoliageBucket* b : straddlers)
+            {
+                ++t_stats.straddlingBuckets;
+                t_stats.instanceTests += b->count;
+                const uint32_t from = static_cast<uint32_t>(scratch->size());
+                for (uint32_t i = b->first; i < b->first + b->count; ++i)
+                {
+                    // Position first: most of a straddling bucket's plants are rejected, and a
+                    // rejected plant costs three floats instead of a 64-byte matrix.
+                    const glm::vec3 wp = layer.position(i);
+                    const float dx = wp.x - cam.x;
+                    const float dz = wp.z - cam.z;
+                    if (dx * dx + dz * dz > dd2) continue;
+                    scratch->push_back(layer.world(i));
+                }
+                const uint32_t kept = static_cast<uint32_t>(scratch->size()) - from;
+                if (kept == 0) continue;
+
+                InstanceBlock block;
+                block.matrices = scratch;       // already world space: no parent
+                block.first    = from;
+                block.count    = kept;
+                block.kind     = InstanceBlock::Parent::Identity;
+
+                float nearSq, farSq;
+                rangeOf(worldBox(b->localBounds, layer.kind, parent), cam, nearSq, farSq);
+                emit(block, clusterBounds(*b), nearSq);
+            }
         }
     }
 
