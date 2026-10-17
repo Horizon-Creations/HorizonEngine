@@ -313,3 +313,76 @@ per input (CORE-301, not this step).
   3. The class cache keeps each ancestor's `graphJson` once per derived class that
      was resolved (a base with N subclasses: N copies). That was deliberate; if it
      shows up in a large project, key the links by asset instead.
+
+## Step 4: the pak hash (CORE-403)
+
+**Hash.** `Hpak::hash64` is now FNV-1a over 64-bit little-endian words in four
+lanes, so four multiplies are in flight instead of one per byte. After each multiply,
+`h ^= h >> 32` feeds the high half back down. Plain word-wise FNV only carries a
+difference upward: two flips of bit 63 in the same lane cancel. The lanes fold in
+order, then the tail (whole words, then bytes), the length, and a murmur3 finalizer.
+The old function is still there as `fnv1a64Bytes`.
+
+**Format (audit option B).** `Hpak::k_version` 3, `k_oldestVersion` 2; the layout is
+unchanged. This is a bump by the `HAsset.h` rule: an older reader would refuse every v3
+package as *corrupt*. `HpakReader::Toc` records the version. `open` checks the TOC with
+`hash64ForVersion`, `readStoredBytes` the content the same way, and `openShared`
+compares against the TOC's version, not the build's. `readStoredEntry` hands out the
+*current* hash, so a v2 entry that incremental packing carries verbatim into a v3
+package stays valid (`addPackedEntry` copies it as is). `kPackPipelineVersion` 3
+(`ProjectExporter.cpp:316`) throws away the old export manifests. Their
+`srcHash`/`inHash` were byte-wise.
+
+**Not switched:** ContentSync (`EngineContentPublish.cpp:94,239`) uses `fnv1a64Bytes`
+on purpose. Its manifest lives on the server, and a new function would make every
+published entry look changed. The comment at `EngineContentManifest.h:36` says so.
+Options A (no hash for encrypted entries) and C (hash per 4 MiB block) were not done.
+
+**Measurement** (Release, MacBook M5, **low-power mode on**, otherwise idle):
+
+| | before | after |
+|---|---|---|
+| hash over 256 MiB (`Hash bench`, `--no-skip`) | `fnv1a64Bytes` 0.25-0.26 GB/s | `hash64` 4.22-4.25 GB/s (~17x) |
+| streaming 128 x 1 MiB zstd (`Streaming bench`) | wall 280-293 ms | wall 221-259 ms |
+| streaming 4000 small entries | wall 88-93 ms | wall 88-90 ms (no hash share worth naming) |
+
+The 0.25 GB/s is below the audit's 664 MB/s (x86, g++). That fits low-power mode,
+but it was not measured with low-power mode off. A first after-run was thrown away:
+another bee had all 10 cores busy with `yes` (topic 208).
+
+## Handoff (step 4)
+
+- **Topic / step:** 213, step 4 of 4
+- **Branch / commits:** d2ec8b14 (code + tests), plus this doc.
+- **Files touched:** `HpakFormat.h` (`k_version`, `fnv1a64Bytes`, `hash64`,
+  `hash64ForVersion`), `HpakReader.h/.cpp` (`Toc::version`, `open`, `openShared`,
+  `readStoredBytes`, `readStoredEntry`), `ProjectExporter.cpp:316`,
+  `EngineContentPublish.cpp`, `EngineContentManifest.h`, `tests/test_hpak.cpp`
+  (end of the file, 6 cases plus a skipped bench), `tests/fixtures/hpak_v2_sample.h` (new).
+- **Fixture:** 13097 bytes, written by the *unchanged* HpakWriter at d83c87f2 before any
+  Hpak edit, from `v2FixtureBlob`/`v2FixtureSettings` (Store, LZ4, zstd,
+  Store+AES). No current writer can make it again; do not regenerate it.
+- **Verified** (macOS, Release, `out/build/release`):
+  - `test_hpak` 59/59, 767 assertions (empty `HOME`, lesson 382).
+  - `test_project_exporter` 34, `test_export_profiles` 50, `test_integrity` 11,
+    `test_engine_content_manifest_refresh` 4: all green.
+  - Negative controls, each rebuilt; each fails exactly where expected:
+    - A: TOC check always uses `hash64`. The 4 version cases fail.
+    - B: carry-over keeps the old hash. The carry-over case fails.
+    - C: `openShared` compares against `k_version`. The v2 read case fails.
+    - D, standalone: without the xor-shift, the two top-bit flips at offsets 7/39
+      collide.
+  - Full `ctest -j4`: 302/303. The only failure is the known `test_hpak` "Disk
+    registry" case (6 == 2, from the 4 `.hasset` files in this Mac's EngineContent
+    cache, lesson 382); with an empty `HOME`, `test_hpak` passes 59/59.
+- **Not verified:** an editor export of a real project over a v2 pak (the exporter
+  tests cover the manifest path, not the old-pak reuse path). The ContentSync publish
+  path against a server (it only compiled). HorizonEditor/HorizonGame not built
+  locally. Windows/Linux: CI only.
+- **Decisions:** option B with a version bump, no new dependency (no XXH3). ContentSync
+  stays byte-wise. A v2 package stays readable indefinitely (`k_oldestVersion`); a
+  re-export writes v3.
+- **Traps:** `hash64` is now on-disk format. The test pins two values; changing the
+  function means `k_version` 4 plus a `hash64ForVersion` branch.
+- **Next steps:** stage 1 of the topic is done with this step. Options A and C only if a
+  profiler still shows the hash on the read path.
