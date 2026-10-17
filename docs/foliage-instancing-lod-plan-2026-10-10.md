@@ -1017,7 +1017,7 @@ gleich. Das ist ein Tiefengleichstand im Szenenpass selbst (Kreuzkarten = sich s
 | MT Berglandschaft, Kamera 200 m entfernt | 0,06 %, ≤ 1 | 0,16 %, ≤ 2 | 1,60 %, ≤ 5 |
 | M0 = MT mit SSAO aus (Kontrolle) | identisch | identisch | identisch |
 | SR = FC mit SSR an (Reflexions-MRT-Vorpass) | 2,54 %, ≤ 9 | 2,54 %, ≤ 9 | 5,82 %, ≤ 24 |
-| Rauschboden (nachher gegen nachher) | 0 px | 0 px | 0-3 px, ≤ 1 |
+| Rauschboden (nachher gegen nachher) | 0 px | 0 px | 0-1 px, ≤ 1 |
 
 Die Änderung liegt nur im fernen Band am Horizont (Differenzbild ×25), nichts nahe der Kamera; auf Vulkan halten sich dunkler (13 250 px) und heller (13 863 px)
 die Waage (Mittel +0,85/765), also kein AO-Verlust, sondern genauere Tiefe. Mit dem Auge sind vorher und nachher nicht zu unterscheiden (Ausschnitt angesehen).
