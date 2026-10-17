@@ -3798,10 +3798,14 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
     REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
 
     std::uint64_t clock = 0;
-    const auto tickUntil = [&](auto done, std::uint64_t maxSimMs) {
+    // A wait for the network is also capped by wall clock (a tick costs ~35 ms on
+    // a loaded Mac, where sleep_for(1ms) coalesces). A quiet window is not: it
+    // must run its full sim time, or the clock falls short of kIdleMs and the
+    // Idle wait after it fails.
+    const auto tickUntil = [&](auto done, std::uint64_t maxSimMs, bool wallCapped = true) {
         const std::uint64_t end = clock + maxSimMs;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (clock < end && std::chrono::steady_clock::now() < deadline) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (clock < end && (!wallCapped || std::chrono::steady_clock::now() < deadline)) {
             anna.update(clock);
             bob.update(clock);
             if (done()) return true;
@@ -3868,19 +3872,20 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
             anna.update(clock); bob.update(clock);
             clock += 50;
         }
-        // Bounded by tickUntil's wall clock like the waits above, not by 100
-        // ticks: a slow CI runner delivered the transforms later than that (red
-        // on macOS CI). Safe to wait long: the scene cannot be written, so the
-        // key stays pending however far the clock runs.
+        // Bounded by tickUntil's wall clock like the waits above. When this was
+        // red on macOS CI no transform had been sent at all (the grant race the
+        // ownsLock wait closes), so no tick bound could have helped. Safe to wait
+        // long: the scene cannot be written, so the key stays pending however far
+        // the clock runs.
         REQUIRE(tickUntil([&] { return anna.settlePending(CollabSettle::kSceneKey); }, 600000));
         // Quiet long enough, but Anna is in Play: nothing is reported as kept.
-        CHECK_FALSE(tickUntil([&] { return !kept.empty(); }, CollabSettle::kIdleMs + 1000));
+        CHECK_FALSE(tickUntil([&] { return !kept.empty(); }, CollabSettle::kIdleMs + 1000, false));
         CHECK(anna.settlePending(CollabSettle::kSceneKey));
 
         sceneWritable = true;
         REQUIRE(tickUntil([&] { return keptAs(CollabSettle::kSceneKey, CollabSettle::Reason::Idle) == 1; }, 1000));
         // Once: nothing changed since.
-        CHECK_FALSE(tickUntil([&] { return kept.size() > 1; }, 2 * CollabSettle::kIdleMs));
+        CHECK_FALSE(tickUntil([&] { return kept.size() > 1; }, 2 * CollabSettle::kIdleMs, false));
         CHECK(bob.lockFor(subject) != nullptr);
     }
 
