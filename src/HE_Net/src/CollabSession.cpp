@@ -977,8 +977,10 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
     if (!r.readUInt32(index) || !r.readUInt32(len)) return;
 
     // Refuse a chunk that would push the payload past the announced size, rather
-    // than growing the buffer to whatever arrives.
-    if (len == 0 || m_snapshotReceived + len > m_snapshotExpected) {
+    // than growing the buffer to whatever arrives. Subtracted, not added: two
+    // uint32 sums wrap, and len = 0xFFFFFFF0 then passed and asked for ~4 GiB.
+    // received <= expected holds, every accepted chunk keeps it.
+    if (len == 0 || len > m_snapshotExpected - m_snapshotReceived) {
         HE_LOG_ERROR(Net, "Collab: snapshot chunk %u would overrun the announced size "
                           "(%u + %u > %u) — aborting the transfer",
                      index, m_snapshotReceived, len, m_snapshotExpected);
@@ -988,8 +990,12 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
     }
 
     const std::size_t offset = m_snapshotBuf.size();
-    m_snapshotBuf.resize(offset + len);
-    if (!r.readBytes(m_snapshotBuf.data() + offset, len)) {
+    bool truncated = !r.hasBytes(len);   // before the buffer grows, not after
+    if (!truncated) {
+        m_snapshotBuf.resize(offset + len);
+        truncated = !r.readBytes(m_snapshotBuf.data() + offset, len);
+    }
+    if (truncated) {
         HE_LOG_ERROR(Net, "Collab: snapshot chunk %u is truncated — aborting the transfer", index);
         m_snapshotBuf.resize(offset);   // truncated frame
         m_snapshotActive = false;
@@ -1221,6 +1227,7 @@ bool readComponentBody(BitReader& r, std::uint64_t& netId,
     std::uint32_t len = 0;
     if (!r.readUInt64(netId) || !r.readUInt32(len)) return false;
     if (len == 0 || len > maxBlob) return false;   // never allocate on trust
+    if (!r.hasBytes(len)) return false;            // nor more than the frame holds
     blob.resize(len);
     return r.readBytes(blob.data(), len);
 }
@@ -1302,6 +1309,7 @@ bool readTerrainBody(BitReader& r, CollabSession::TerrainPatch& p, std::uint32_t
     }
     // An empty patch is legal: res 0 says "this grid is gone" (a cleared sculpt).
     if (len > maxBytes) return false;   // never allocate on trust
+    if (!r.hasBytes(len)) return false; // nor more than the frame holds
     p.bytes.resize(len);
     if (len > 0 && !r.readBytes(p.bytes.data(), len)) return false;
     return !r.overflowed();
@@ -1575,8 +1583,9 @@ bool CollabSession::readStructuralBody(BitReader& r, StructuralChange& out,
         !r.readUInt32(len)) {
         return false;
     }
-    // Never allocate what the peer claims beyond our own bound.
-    if (len > maxBlob) return false;
+    // Never allocate what the peer claims beyond our own bound, nor beyond
+    // what the frame actually holds.
+    if (len > maxBlob || !r.hasBytes(len)) return false;
 
     out.blob.clear();
     if (len > 0) {
@@ -2345,6 +2354,7 @@ void CollabSession::installAssetChunkHandlers() {
 
             // Never grow past what the sender announced.
             if (a.bytes.size() + len > a.expected) { a.expected = 0; return; }
+            if (!r.hasBytes(len)) { a.expected = 0; return; }   // truncated frame: broken
             const std::size_t offset = a.bytes.size();
             a.bytes.resize(offset + len);
             if (!r.readBytes(a.bytes.data() + offset, len)) {

@@ -176,6 +176,13 @@ public:
     std::size_t bitsRemaining() const { return m_bitCapacity - m_bitPos; }
     bool        overflowed()    const { return m_bitPos > m_bitCapacity; }
 
+    // Whether the frame still holds `len` whole bytes. Ask it BEFORE sizing a
+    // buffer to a length the peer wrote: a bound like "at most 64 MiB" alone
+    // still lets one tiny message make us allocate and zero that much.
+    bool hasBytes(std::size_t len) const {
+        return !overflowed() && bitsRemaining() / 8 >= len;
+    }
+
 private:
     const std::uint8_t* m_data       = nullptr;
     std::size_t         m_bitCapacity = 0;

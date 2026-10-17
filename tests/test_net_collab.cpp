@@ -340,6 +340,99 @@ TEST_CASE("CollabSession: a snapshot larger than the client's limit is refused")
     CHECK_FALSE(p->client->isJoined());
 }
 
+namespace {
+constexpr MessageId kIdSnapshotBegin = kFirstUserMessage + 5;
+constexpr MessageId kIdSnapshotChunk = kFirstUserMessage + 6;
+
+// A client session fed snapshot frames by a host that is NOT a CollabSession —
+// the only way to send a chunk whose length field lies.
+struct RawHostToClient {
+    std::unique_ptr<LoopbackTransport> hostT, clientT;
+    std::unique_ptr<NetSession>        hostNet, clientNet;
+    std::unique_ptr<CollabSession>     client;
+    FakeState                          clientState;
+    JoinRejectReason                   reason = JoinRejectReason::None;
+    int                                rejections = 0;
+
+    RawHostToClient() {
+        auto [a, b] = LoopbackTransport::createPair();
+        hostT = std::move(a); clientT = std::move(b);
+        hostNet   = std::make_unique<NetSession>(hostT.get(), NetRole::Host);
+        clientNet = std::make_unique<NetSession>(clientT.get(), NetRole::Client);
+        client    = std::make_unique<CollabSession>(clientNet.get(), NetRole::Client);
+        client->setStateProvider(&clientState);
+        client->onJoinRejected([this](JoinRejectReason r, const std::string&) { reason = r; ++rejections; });
+        pump();
+    }
+    void pump() {
+        for (int i = 0; i < 6; ++i) {
+            hostT->update(); clientT->update();
+            hostNet->pump(); clientNet->pump();
+            client->update();
+        }
+    }
+    void begin(std::uint32_t total, std::uint32_t chunks) {
+        BitWriter w;
+        w.writeUInt32(total); w.writeUInt32(chunks); w.writeUInt64(1);
+        hostNet->send(LoopbackTransport::kPeer, kIdSnapshotBegin, w);
+    }
+    // `claimed` is what the length field says; `actual` bytes really follow.
+    void chunk(std::uint32_t index, std::uint32_t claimed, std::size_t actual) {
+        BitWriter w;
+        w.writeUInt32(index); w.writeUInt32(claimed);
+        for (std::size_t i = 0; i < actual; ++i) w.writeByte(static_cast<std::uint8_t>(i));
+        hostNet->send(LoopbackTransport::kPeer, kIdSnapshotChunk, w);
+    }
+};
+} // namespace
+
+TEST_CASE("CollabSession: a snapshot chunk whose length wraps the announced size is refused (NET-105)")
+{
+    // received + len used to be summed in uint32: 50 + 0xFFFFFFF0 wraps to 34,
+    // passed "<= 100", and the client then resized its buffer to ~4 GiB on a
+    // number the peer wrote. Not run as a negative control on purpose — the old
+    // path really asks for the 4 GiB.
+    RawHostToClient s;
+    s.begin(100, 2);
+    s.chunk(0, 50, 50);
+    s.pump();
+    REQUIRE(s.rejections == 0);          // the honest first half is fine
+    s.chunk(1, 0xFFFFFFF0u, 0);
+    s.pump();
+    CHECK(s.reason == JoinRejectReason::SnapshotFailed);
+    CHECK(s.rejections == 1);
+    CHECK_FALSE(s.client->isJoined());
+}
+
+TEST_CASE("CollabSession: a chunk claiming more bytes than its frame holds is refused before any allocation (NET-106)")
+{
+    // Within the announced size, but the frame carries 10 of the 60 bytes it
+    // claims: the reader checks the frame before sizing a buffer to the claim.
+    RawHostToClient s;
+    s.begin(100, 2);
+    s.chunk(0, 60, 10);
+    s.pump();
+    CHECK(s.reason == JoinRejectReason::SnapshotFailed);
+    CHECK_FALSE(s.client->isJoined());
+}
+
+TEST_CASE("BitReader::hasBytes answers for whole bytes left")
+{
+    const std::uint8_t data[4] = { 1, 2, 3, 4 };
+    BitReader r(data, sizeof(data));
+    CHECK(r.hasBytes(4));
+    CHECK_FALSE(r.hasBytes(5));
+    std::uint8_t b = 0;
+    REQUIRE(r.readByte(b));
+    CHECK(r.hasBytes(3));
+    CHECK_FALSE(r.hasBytes(4));
+    CHECK_FALSE(r.hasBytes(std::size_t(-1)));   // a peer's 4 GiB never fits, no wrap
+    bool bit = false;
+    REQUIRE(r.readBool(bit));                    // 23 bits left: two WHOLE bytes
+    CHECK(r.hasBytes(2));
+    CHECK_FALSE(r.hasBytes(3));
+}
+
 // ─── Rejections ──────────────────────────────────────────────────────────────
 
 TEST_CASE("CollabSession: a mismatched protocol version is rejected")
