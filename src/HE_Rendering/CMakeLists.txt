@@ -304,6 +304,7 @@ add_library(HorizonRendering SHARED
     src/FrustumCuller.cpp
     src/OcclusionCuller.cpp
     src/RenderSorter.cpp
+    src/FrameVisibility.cpp
     src/ScenePick.cpp
     # Cross-backend shared renderer helpers (audit 1a). The backend static libs
     # only reuse this target's PUBLIC include path — they do not link it — but

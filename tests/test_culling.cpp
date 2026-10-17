@@ -6,6 +6,7 @@
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/FrameVisibility.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/CommandBuffer.h>
@@ -31,6 +32,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -4066,4 +4068,423 @@ TEST_CASE("GI auto landscape: the three kernel copies carry the reference's mask
 	CHECK(count(mtl, "landWeights, hitPos, hitN, painted)") == 2);
 	CHECK(count(mtl, "if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }") == 2);
 	CHECK(count(gl, "albedo = giAutoLandAlbedo(li, hitPos, hitN);") == 1);
+}
+
+// ── Cull + sort once per walk (audit REN-805/304/407, Thema 214 Schritt 3) ──────────────────
+
+namespace framevis {
+
+RenderObject boxAt(uint64_t mesh, const glm::vec3& pos, uint32_t entity, bool caster = true)
+{
+	RenderObject o;
+	o.meshAssetId.hi = mesh;
+	o.meshAssetId.lo = mesh;
+	o.entityId       = entity;
+	o.castsShadow    = caster;
+	o.transform      = glm::translate(glm::mat4(1.0f), pos);
+	HE::AABB b;
+	b.expand(pos - glm::vec3(0.5f));
+	b.expand(pos + glm::vec3(0.5f));
+	o.worldBounds = b;
+	return o;
+}
+
+// n objects of `meshes` meshes on a grid around the origin, every 7th no caster, every
+// distance to the camera distinct (a small per-object offset) so sort() has no ties.
+RenderWorld gridWorld(uint32_t n, uint32_t meshes, float spacing)
+{
+	RenderWorld w;
+	w.camera.position   = { 0.3f, 2.0f, 0.7f };
+	w.camera.view       = glm::lookAt(w.camera.position, w.camera.position + glm::vec3(0, -0.3f, -1), glm::vec3(0, 1, 0));
+	w.camera.projection = glm::perspective(glm::radians(70.0f), 16.0f / 9.0f, 0.1f, 400.0f);
+	const uint32_t side = static_cast<uint32_t>(std::ceil(std::sqrt(float(n))));
+	for (uint32_t i = 0; i < n; ++i)
+	{
+		const glm::vec3 p((float(i % side) - side * 0.5f) * spacing + i * 1e-4f, 0.0f,
+		                  (float(i / side) - side * 0.5f) * spacing);
+		w.objects.push_back(boxAt((i * 2654435761u) % meshes + 1, p, i, i % 7 != 0));
+	}
+	return w;
+}
+
+// Light views over the grid: three nested ortho "cascades" looking down, and local spot views.
+std::vector<glm::mat4> lightViews(int cascades, int locals, float extent)
+{
+	std::vector<glm::mat4> v;
+	const glm::mat4 down = glm::lookAt(glm::vec3(5, 100, 3), glm::vec3(0, 0, 0), glm::vec3(0, 0, -1));
+	for (int c = 0; c < cascades; ++c)
+	{
+		const float r = extent * (0.15f + 0.4f * c);
+		v.push_back(glm::ortho(-r, r, -r, r, 1.0f, 300.0f) * down);
+	}
+	for (int l = 0; l < locals; ++l)
+	{
+		const glm::vec3 at(extent * 0.3f * std::cos(l * 0.9f), 8.0f, extent * 0.3f * std::sin(l * 0.9f));
+		v.push_back(glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 40.0f)
+		            * glm::lookAt(at, at + glm::vec3(0.3f, -1.0f, 0.2f), glm::vec3(0, 0, -1)));
+	}
+	return v;
+}
+
+// world.shadow as the extractor fills it: the first `cascades` views are the cascades, the rest
+// the local layers. FrameVisibility::shadowLayer reads the list from here.
+void listShadowViews(RenderWorld& w, const std::vector<glm::mat4>& views, int cascades)
+{
+	w.shadow.enabled      = cascades > 0;
+	w.shadow.cascadeCount = cascades;
+	for (int c = 0; c < cascades; ++c) w.shadow.cascadeViewProj[c] = views[c];
+	w.shadow.localLayerCount = static_cast<int>(views.size()) - cascades;
+	for (size_t v = cascades; v < views.size(); ++v) w.shadow.localViewProj[v - cascades] = views[v];
+}
+
+// The per-layer path every backend ran before: cull, sort the visible set, batch.
+void oldLayer(const RenderWorld& w, const glm::mat4& vp, uint32_t skip, RenderSorter::DepthBatchList& out)
+{
+	FrustumCuller culler;
+	RenderSorter  sorter;
+	std::vector<uint8_t>  vis;
+	std::vector<uint32_t> sorted;
+	culler.cull(w, vp, vis);
+	sorter.sort(w, vis, sorted);
+	RenderSorter::batchDepthCasters(w, sorted, skip, out);
+}
+
+void requireSameBatches(const RenderSorter::DepthBatchList& a, const RenderSorter::DepthBatchList& b)
+{
+	REQUIRE(a.batches.size() == b.batches.size());
+	REQUIRE(a.transforms.size() == b.transforms.size());
+	for (size_t i = 0; i < a.batches.size(); ++i)
+	{
+		CHECK(a.batches[i].meshAssetId == b.batches[i].meshAssetId);
+		CHECK(a.batches[i].first == b.batches[i].first);
+		CHECK(a.batches[i].count == b.batches[i].count);
+	}
+	CHECK(std::memcmp(a.transforms.data(), b.transforms.data(), a.transforms.size() * sizeof(glm::mat4)) == 0);
+}
+
+} // namespace framevis
+
+TEST_CASE("RenderSorter: the walk's one caster sort, filtered per view, is each view's own sort")
+{
+	using namespace framevis;
+	const RenderWorld w = gridWorld(3000, 23, 2.0f);
+	RenderSorter sorter;
+	std::vector<uint32_t> presorted;
+	sorter.sortShadowCasters(w, {}, presorted); // no mask: every caster
+	size_t casters = 0;
+	for (const RenderObject& o : w.objects) casters += o.castsShadow ? 1 : 0;
+	CHECK(presorted.size() == casters);
+
+	FrustumCuller culler;
+	int views = 0, culling = 0;
+	for (const glm::mat4& vp : lightViews(3, 6, 110.0f))
+	{
+		INFO("view " << views);
+		std::vector<uint8_t> vis;
+		culler.cull(w, vp, vis);
+		std::vector<uint32_t> own, filtered;
+		sorter.sort(w, vis, own);
+		RenderSorter::keepVisible(presorted, vis, filtered);
+		// Without ties the order is the same object for object; the old list also holds the
+		// non-casters, which batchDepthCasters drops.
+		std::vector<uint32_t> ownCasters;
+		for (uint32_t i : own) if (w.objects[i].castsShadow) ownCasters.push_back(i);
+		CHECK(ownCasters == filtered);
+		CHECK(!filtered.empty());
+		culling += filtered.size() < presorted.size() ? 1 : 0;
+		++views;
+	}
+	CHECK(culling >= 7); // the two wide cascades see the whole grid, every other view culls
+}
+
+TEST_CASE("FrameVisibility::shadowLayer: same runs as the per-layer cull + sort, one sort per walk")
+{
+	using namespace framevis;
+	RenderWorld w = gridWorld(2000, 11, 2.0f);
+	// Ties: two casters of one mesh at the exact same spot, and a run longer than nothing else.
+	w.objects.push_back(boxAt(3, { 1.0f, 0.0f, -4.0f }, 90001));
+	w.objects.push_back(boxAt(3, { 1.0f, 0.0f, -4.0f }, 90002));
+	const uint32_t skip = w.objects[40].entityId;
+
+	HE::FrameVisibility fv;
+	std::vector<glm::mat4> views = lightViews(3, 8, 90.0f);
+	listShadowViews(w, views, 3);
+	auto renderAll = [&](const HE::FrameVisibility::Key& key, const char* what) {
+		for (size_t i = 0; i < views.size(); ++i)
+		{
+			INFO(what << " view " << i);
+			const uint32_t s = (i % 3 == 2) ? skip : kNoOwnerEntity;
+			RenderSorter::DepthBatchList oldB, newB;
+			oldLayer(w, views[i], s, oldB);
+			fv.shadowLayer(w, key, views[i], s, newB);
+			requireSameBatches(oldB, newB);
+		}
+	};
+	renderAll({ 10 }, "walk 10");
+	renderAll({ 11 }, "walk 11");
+	CHECK(fv.shadowLayers() == 2 * views.size());
+	CHECK(fv.shadowPresorts() == 2);  // one per walk, not one per layer
+	CHECK(fv.shadowFallbacks() == 0); // every layer was one of world.shadow's views
+
+	// A view that is not in world.shadow: the old cull + sort, the same runs.
+	const glm::mat4 foreign = glm::ortho(-20.0f, 20.0f, -20.0f, 20.0f, 1.0f, 300.0f)
+	                        * glm::lookAt(glm::vec3(-30, 100, 10), glm::vec3(-30, 0, 10), glm::vec3(0, 0, -1));
+	{
+		RenderSorter::DepthBatchList oldB, newB;
+		oldLayer(w, foreign, kNoOwnerEntity, oldB);
+		fv.shadowLayer(w, { 11 }, foreign, kNoOwnerEntity, newB);
+		requireSameBatches(oldB, newB);
+		CHECK(fv.shadowFallbacks() == 1);
+		CHECK(fv.shadowPresorts() == 2);
+	}
+
+	// Within one walk the presort follows what it was built from: a cascade refit in place
+	// (the extractor's aspect tail), the camera position (the sort key), the object array, the
+	// bounds (a refine).
+	views[1] = glm::ortho(-25.0f, 25.0f, -25.0f, 25.0f, 1.0f, 300.0f)
+	         * glm::lookAt(glm::vec3(40, 100, 3), glm::vec3(40, 0, 0), glm::vec3(0, 0, -1));
+	listShadowViews(w, views, 3);
+	renderAll({ 11 }, "cascade refit");
+	CHECK(fv.shadowPresorts() == 3);
+	w.camera.position.x += 30.0f;
+	renderAll({ 11 }, "camera moved");
+	CHECK(fv.shadowPresorts() == 4);
+	w.objects.push_back(boxAt(5, { 0, 0, -6 }, 90003));
+	renderAll({ 11 }, "object added");
+	CHECK(fv.shadowPresorts() == 5);
+	w.objects[7].worldBounds = boxAt(1, { 0, -500, 0 }, 0).worldBounds; // out of every view
+	renderAll({ 11, 1 }, "bounds refined");
+	CHECK(fv.shadowPresorts() == 6);
+	CHECK(fv.shadowFallbacks() == 1);
+}
+
+TEST_CASE("FrameVisibility: the camera cull + sort is reused within a walk and recomputed on any change")
+{
+	using namespace framevis;
+	RenderWorld w = gridWorld(500, 7, 3.0f);
+	HE::FrameVisibility fv;
+	FrustumCuller culler;
+	RenderSorter  sorter;
+	auto expectFresh = [&](const std::vector<uint8_t>& vis, const std::vector<uint32_t>& sorted) {
+		std::vector<uint8_t>  v;
+		std::vector<uint32_t> s;
+		culler.cull(w, v);
+		sorter.sort(w, v, s);
+		CHECK(vis == v);
+		CHECK(sorted == s);
+	};
+
+	HE::FrameVisibility::Key key{ 7, 1, 0 };
+	std::vector<uint8_t>  vis;
+	std::vector<uint32_t> sorted;
+	CHECK(fv.cullAndSortCamera(w, key, vis, sorted));
+	expectFresh(vis, sorted);
+	CHECK(!sorted.empty());
+	CHECK(sorted.size() < w.objects.size());
+
+	// The next three passes of the walk: reused, and written out even when a pass reused the
+	// vectors for something else in between (Metal's shadow pass did exactly that).
+	for (int pass = 0; pass < 3; ++pass)
+	{
+		vis.assign(3, 0u);
+		sorted = { 1, 2, 3 };
+		CHECK_FALSE(fv.cullAndSortCamera(w, key, vis, sorted));
+		expectFresh(vis, sorted);
+	}
+	CHECK(fv.cameraComputes() == 1);
+	CHECK(fv.cameraReuses() == 3);
+
+	auto recomputes = [&](const char* what) {
+		INFO(what);
+		CHECK(fv.cullAndSortCamera(w, key, vis, sorted));
+		expectFresh(vis, sorted);
+	};
+	key.walk = 8;                          recomputes("a new walk");
+	key.boundsStamp = 2;                   recomputes("bounds refined since");
+	key.variant = 1;                       recomputes("another variant (occlusion on)");
+	w.camera.position.z += 0.25f;          recomputes("camera moved");
+	w.camera.projection = glm::perspective(glm::radians(70.0f), 1.0f, 0.1f, 400.0f);
+	                                       recomputes("another aspect: the projection was redone in place");
+	w.objects.push_back(boxAt(2, { 0, 0, -9 }, 777));
+	                                       recomputes("another object count");
+	RenderWorld other = w;                 // same contents, another consumer
+	CHECK(fv.cullAndSortCamera(other, key, vis, sorted));
+	CHECK(fv.cameraReuses() == 3);
+
+	// The reason boundsStamp exists: an object whose bound was still invalid (never culled)
+	// gets its real bound behind the camera. A cull from before is not this cull.
+	RenderWorld r = gridWorld(50, 3, 3.0f);
+	r.objects.push_back(RenderObject{});    // invalid bound: visible
+	r.objects.back().castsShadow = true;
+	const HE::FrameVisibility::Key before{ 20, 5, 0 };
+	CHECK(fv.cullAndSortCamera(r, before, vis, sorted));
+	CHECK(vis.back() == 1u);
+	r.objects.back().worldBounds = boxAt(1, { 0, 0, 200 }, 0).worldBounds; // behind the camera
+	const HE::FrameVisibility::Key after{ 20, 6, 0 };
+	CHECK(fv.cullAndSortCamera(r, after, vis, sorted));
+	CHECK(vis.back() == 0u);
+}
+
+TEST_CASE("Every backend's shadow layers and Metal's/Vulkan's camera passes go through FrameVisibility")
+{
+	// No GPU under ctest, so this pins the source: a shadow layer that culls and sorts by
+	// itself again pays the O(n log n) sort per layer (up to 19 a frame), and a Vulkan camera
+	// pass with its own cull + sort pays it up to four times a frame.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - FrameVisibility pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const auto count = [](const std::string& hay, const char* needle) {
+		size_t n = 0;
+		for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+		return n;
+	};
+	struct Site { const char* file; size_t sorts; size_t cameraCalls; };
+	// sorts: the `.sort(` calls left (the one camera sort of GL/D3D11/D3D12 and Metal's
+	// CullCameraObjects), cameraCalls: cullAndSortCamera( sites.
+	const Site sites[] = { { "Metal/MetalRenderer.mm", 1, 0 },  { "OpenGL/OpenGLRenderer.cpp", 1, 0 },
+	                       { "D3D11/D3D11Renderer.cpp", 1, 0 }, { "D3D12/D3D12Renderer.cpp", 1, 0 },
+	                       { "Vulkan/VulkanRenderer.cpp", 0, 4 } };
+	for (const Site& s : sites)
+	{
+		INFO(s.file);
+		const std::string src = stripLineComments(readFile(be / s.file));
+		REQUIRE(!src.empty());
+		CHECK(count(src, "isibility.shadowLayer(") == 1);
+		CHECK(count(src, "batchDepthCasters(") == 0);
+		CHECK(count(src, "m_sorter.sort(") == s.sorts);
+		CHECK(count(src, "cullAndSortCamera(") == s.cameraCalls);
+	}
+	const std::string mtl = stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm"));
+	const size_t fn = mtl.find("void MetalRenderer::CullCameraObjects()");
+	REQUIRE(fn != std::string::npos);
+	const std::string body = mtl.substr(fn, mtl.find("\n}\n", fn) - fn);
+	const size_t find  = body.find("m_visibility.findCamera(");
+	const size_t cull  = body.find("m_culler.cull(");
+	const size_t store = body.find("m_visibility.storeCamera(");
+	REQUIRE(find != std::string::npos);
+	REQUIRE(store != std::string::npos);
+	CHECK(find < cull);
+	CHECK(cull < store);
+}
+
+// Off unless HE_FRAMEVIS_BENCH is set: CPU time of the cull + sort the step removed, per shadow
+// layer and per camera pass, on 50k objects (the audit's figure). Two worlds: a dense one that
+// the far cascade covers almost entirely, and an open one four times the shadow range across,
+// where most objects are in no shadow view at all. Median of 31.
+TEST_CASE("FrameVisibility bench (HE_FRAMEVIS_BENCH)")
+{
+	if (!std::getenv("HE_FRAMEVIS_BENCH")) return;
+	using namespace framevis;
+	auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+	using clk = std::chrono::steady_clock;
+	auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
+	auto runCase = [&](const char* name, float spacing, float viewExtent)
+	{
+		RenderWorld w = gridWorld(50000, 200, spacing);
+		const auto views = lightViews(3, 8, viewExtent);
+		listShadowViews(w, views, 3);
+
+		FrustumCuller culler;
+		RenderSorter  sorter;
+		std::vector<uint8_t>  vis;
+		std::vector<uint32_t> sorted;
+		RenderSorter::DepthBatchList batches;
+		std::vector<double> oldShadow, newShadow, oldCull, oldSort, newFirst, newLayer, oldCam, newCam;
+		HE::FrameVisibility fv;
+		for (int it = 0; it < 31; ++it)
+		{
+			// Old: every layer culls, sorts its visible set and batches.
+			double cullSum = 0, sortSum = 0;
+			const auto t0 = clk::now();
+			for (const glm::mat4& vp : views)
+			{
+				const auto a = clk::now();
+				culler.cull(w, vp, vis);
+				const auto b = clk::now();
+				sorter.sort(w, vis, sorted);
+				const auto c = clk::now();
+				RenderSorter::batchDepthCasters(w, sorted, kNoOwnerEntity, batches);
+				cullSum += ms(a, b);
+				sortSum += ms(b, c);
+			}
+			oldShadow.push_back(ms(t0, clk::now()));
+			oldCull.push_back(cullSum / views.size());
+			oldSort.push_back(sortSum / views.size());
+
+			// New: the walk's first layer culls every view and sorts their union, the others filter.
+			const HE::FrameVisibility::Key key{ uint64_t(100 + it) };
+			const auto n0 = clk::now();
+			fv.shadowLayer(w, key, views[0], kNoOwnerEntity, batches);
+			const auto n1 = clk::now();
+			for (size_t i = 1; i < views.size(); ++i)
+				fv.shadowLayer(w, key, views[i], kNoOwnerEntity, batches);
+			const auto n2 = clk::now();
+			newShadow.push_back(ms(n0, n2));
+			newFirst.push_back(ms(n0, n1));
+			newLayer.push_back(ms(n1, n2) / (views.size() - 1));
+
+			// Camera: four passes of one walk (Vulkan decal depth, GI, SSAO, scene).
+			const auto c0 = clk::now();
+			for (int p = 0; p < 4; ++p) { culler.cull(w, vis); sorter.sort(w, vis, sorted); }
+			const auto c1 = clk::now();
+			for (int p = 0; p < 4; ++p) fv.cullAndSortCamera(w, key, vis, sorted);
+			oldCam.push_back(ms(c0, c1));
+			newCam.push_back(ms(c1, clk::now()));
+		}
+		CHECK(fv.shadowFallbacks() == 0);
+		size_t layerSum = 0, unionCount = 0;
+		std::vector<uint8_t> any(w.objects.size(), 0u);
+		for (const glm::mat4& vp : views)
+		{
+			culler.cull(w, vp, vis);
+			for (size_t i = 0; i < vis.size(); ++i) { layerSum += vis[i]; any[i] |= vis[i]; }
+		}
+		for (uint8_t a : any) unionCount += a;
+		culler.cull(w, vis);
+		size_t camVisible = 0;
+		for (uint8_t v : vis) camVisible += v;
+		std::printf("[framevis-bench] %s: 50k objects over %.0f m, 200 meshes, %zu layers (3 cascades + 8 local), "
+		            "layer sets sum %zu, union %zu, camera sees %zu\n",
+		            name, std::ceil(std::sqrt(50000.0f)) * spacing, views.size(), layerSum, unionCount, camVisible);
+		std::printf("[framevis-bench]   shadow old %.3f ms/frame (per layer: cull %.3f + sort %.3f ms)\n",
+		            median(oldShadow), median(oldCull), median(oldSort));
+		std::printf("[framevis-bench]   shadow new %.3f ms/frame (first layer: all culls + union sort %.3f ms; "
+		            "others %.3f ms/layer)\n", median(newShadow), median(newFirst), median(newLayer));
+		std::printf("[framevis-bench]   camera x4 old %.3f ms, new %.3f ms\n", median(oldCam), median(newCam));
+		return w;
+	};
+	const RenderWorld dense = runCase("dense", 2.0f, 220.0f);
+	runCase("open", 9.0f, 220.0f);
+
+	// What one sort of 50k objects costs, and where: building the keys from the 280-byte
+	// RenderObjects, or std::sort over them (the comparator, not the memory).
+	struct K { uint64_t hi, lo; float d; uint32_t i; };
+	std::vector<double> build, srt;
+	std::vector<K> keys;
+	for (int it = 0; it < 31; ++it)
+	{
+		const auto a = clk::now();
+		keys.clear();
+		for (uint32_t i = 0; i < dense.objects.size(); ++i)
+		{
+			const RenderObject& o = dense.objects[i];
+			const glm::vec3 d = glm::vec3(o.transform[3]) - dense.camera.position;
+			keys.push_back(K{ o.meshAssetId.hi, o.meshAssetId.lo, glm::dot(d, d), i });
+		}
+		const auto b = clk::now();
+		std::sort(keys.begin(), keys.end(), [](const K& x, const K& y) {
+			if (x.hi != y.hi) return x.hi < y.hi;
+			if (x.lo != y.lo) return x.lo < y.lo;
+			return x.d < y.d; });
+		build.push_back(ms(a, b));
+		srt.push_back(ms(b, clk::now()));
+	}
+	std::printf("[framevis-bench] one sort of 50k objects (sizeof(RenderObject) %zu): key build %.3f ms, std::sort %.3f ms\n",
+	            sizeof(RenderObject), median(build), median(srt));
 }

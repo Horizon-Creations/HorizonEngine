@@ -11,6 +11,23 @@ public:
               const std::vector<uint8_t>& visible,
               std::vector<uint32_t>&      outSortedIndices);
 
+    // ── One sort for many views (shadow layers, REN-407) ────────────────────
+    // sort()'s key is (mesh, distance to the CAMERA): it does not depend on the
+    // view that culled, so every shadow layer of a frame sorted its own visible
+    // set by the same key. sortShadowCasters sorts the castsShadow objects of
+    // `visible` (sort()'s rule: no entry = visible; the union of all layers'
+    // culls) ONCE by that key, with the object index as the last tie-break so
+    // the order is total; keepVisible then filters that list by one layer's cull
+    // in O(n). The result is sort()'s order of the same visible set, except that
+    // objects with an exactly equal (mesh, distance) come out by index instead of
+    // in std::sort's unspecified order — they belong to the same depth-only run
+    // either way.
+    void sortShadowCasters(const RenderWorld& world, const std::vector<uint8_t>& visible,
+                           std::vector<uint32_t>& outSortedIndices);
+    static void keepVisible(const std::vector<uint32_t>& sortedIndices,
+                            const std::vector<uint8_t>&  visible,
+                            std::vector<uint32_t>&       outSortedIndices);
+
     // ── Transparency (shared by every backend's draw loop) ───────────────────
     // A draw counts as opaque only at (effectively) full opacity. The epsilon
     // keeps 1.0f-rounding noise out of the blended pass, which costs a depth

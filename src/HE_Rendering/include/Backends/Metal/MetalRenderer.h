@@ -8,6 +8,7 @@
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/FrameVisibility.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/FrameUploadRing.h>
@@ -583,6 +584,14 @@ private:
 	RenderWorld     m_renderWorld;
 	FrustumCuller   m_culler;
 	RenderSorter    m_sorter;
+	// The camera cull + sort once per walk (CullCameraObjects), the shadow layers' one
+	// caster sort per walk (audit REN-304/407).
+	HE::FrameVisibility m_visibility;
+	HE::FrameVisibility::Key VisibilityKey() const
+	{
+		return { m_extractor.fullExtractCount(), m_refineRuns,
+		         m_occlusionCuller.settings().enabled ? 1u : 0u };
+	}
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
@@ -591,8 +600,10 @@ private:
 	// The camera cull every camera-facing pass runs — frustum, then (when on)
 	// occlusion, then the sort — in one place, because the Metal frame runs it
 	// up to four times (GI G-buffer, SSAO pre-pass, scene, deferred G-buffer),
-	// each after its own extraction. The occlusion refine is the expensive part
-	// (a CPU rasterization), so its result is kept for the frame and reused
+	// each after its own extraction. All three steps are answered from
+	// m_visibility while the walk, the refine, the occlusion switch, the object
+	// array and the camera match. Under that, the occlusion refine (a CPU
+	// rasterization, the expensive part) is also kept for the frame and reused
 	// while the frame stamp, object count and view-projection match; a reuse is
 	// ANDed onto the fresh frustum result, never copied over it. The shadow
 	// pass culls into its own list against the light and stays out of this.
@@ -671,6 +682,7 @@ private:
 	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
 	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
 	size_t              m_refinedCount   = 0;
+	uint64_t            m_refineRuns     = 0;            // times the loop ran: FrameVisibility::Key::boundsStamp
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────

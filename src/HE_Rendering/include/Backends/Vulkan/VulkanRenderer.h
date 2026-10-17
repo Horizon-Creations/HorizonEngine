@@ -7,6 +7,7 @@
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/FrameVisibility.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
@@ -192,6 +193,11 @@ private:
 	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
 	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
 	size_t              m_refinedCount   = 0;
+	uint64_t            m_refineRuns     = 0;            // times the loop ran: FrameVisibility::Key::boundsStamp
+	// The four camera passes (decal depth, GI, SSAO, scene) cull + sort once per walk, the
+	// shadow layers share one caster sort per walk (audit REN-805/407).
+	HE::FrameVisibility m_visibility;
+	HE::FrameVisibility::Key visibilityKey() const { return { m_extractor.fullExtractCount(), m_refineRuns }; }
 	// Own render pass, before the scene. `aspect` is the camera aspect the
 	// cascades are fit against — the single map never cared, a cascade fit to
 	// a square frustum drops the screen edges of a wide viewport.
@@ -226,10 +232,8 @@ private:
 	ShadowSettings m_shadowSettings;
 	bool           m_shadowSizeDirty = false;
 	bool           m_debugShadowCascades = false;
-	// Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
+	// Per-layer caster runs (m_visibility.shadowLayer; NOT m_visible/m_sortedIndices —
 	// those hold the camera cull DrawScene consumes).
-	std::vector<uint8_t>         m_shadowVisible;
-	std::vector<uint32_t>        m_shadowSorted;
 	RenderSorter::DepthBatchList m_shadowBatches;
 	// The cascade constants DrawScene uploads into the Frame UBO; filled by
 	// EncodeShadowMap from the SAME extract the cascades were rendered with
@@ -684,9 +688,7 @@ private:
 	void createCube();
 
 	RenderExtractor m_extractor;
-	RenderWorld     m_renderWorld;
-	FrustumCuller   m_culler;
-	RenderSorter    m_sorter;
+	RenderWorld     m_renderWorld;   // culled + sorted through m_visibility
 	RenderGraph     m_renderGraph;
 	CommandBuffer   m_cmds;
 	std::vector<uint8_t>  m_visible;

@@ -10990,7 +10990,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// Occlusion (off by default): drops what the frustum kept but a nearer
 	// opaque surface hides — the same m_visible the sort and every camera pass
 	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
-	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	// The shadow pass below culls into its own m_shadowVisibility and is untouched.
 	m_counters.occlusionCulled =
 		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
@@ -11077,10 +11077,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 			// Depth-only render of every shadow caster into one layer of `target` —
 			// shared by the CSM cascades and the local (point/spot) shadow views.
-			// Cull + sort against the view's light frustum into scratch buffers
-			// (NOT m_visible/m_sortedIndices — those hold the camera cull the
-			// geometry pass consumes). Sorting keeps draws grouped by mesh id so
-			// the per-mesh resolve memoisation stays valid.
+			// Cull against the view's light frustum, take the casters in the walk's
+			// one sort (HE::FrameVisibility, NOT m_visible/m_sortedIndices — those
+			// hold the camera cull the geometry pass consumes). The sort keeps draws
+			// grouped by mesh id so the per-mesh resolve memoisation stays valid.
 			// `skipEntity` keeps ONE entity's geometry out of this layer: the entity
 			// the local light itself sits on. Without it a light authored onto a mesh
 			// entity renders that mesh at z≈0 into its own depth map and shadows
@@ -11091,12 +11091,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			{
 				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);
 				glClear(GL_DEPTH_BUFFER_BIT);
-				m_culler.cull(m_renderWorld, vp, m_shadowVisible);
-				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
 				// Same-mesh runs → one instanced draw each. A run of one keeps the
 				// plain depth program (no instance upload for a single caster).
-				RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity,
-				                                m_shadowBatches);
+				m_shadowVisibility.shadowLayer(m_renderWorld, { m_extractor.fullExtractCount() }, vp,
+				                               skipEntity, m_shadowBatches);
 				const bool canInstance = m_depthInstancedProgram && m_instanceVBO;
 				unsigned int boundProgram = m_depthProgram; // glUseProgram'd by the caller
 				for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)

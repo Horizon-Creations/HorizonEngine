@@ -41,6 +41,49 @@ void RenderSorter::sort(const RenderWorld&          world,
 		outSortedIndices.push_back(k.index);
 }
 
+void RenderSorter::sortShadowCasters(const RenderWorld& world, const std::vector<uint8_t>& visible,
+                                     std::vector<uint32_t>& outSortedIndices)
+{
+	const glm::vec3 camPos = world.camera.position;
+
+	m_keys.clear();
+	m_keys.reserve(world.objects.size());
+	for (uint32_t i = 0; i < world.objects.size(); ++i)
+	{
+		if (i < visible.size() && !visible[i])
+			continue;
+		const RenderObject& o = world.objects[i];
+		if (!o.castsShadow) continue; // batchDepthCasters drops them anyway
+		const glm::vec3 d = glm::vec3(o.transform[3]) - camPos;
+		m_keys.push_back(SortKey{ o.meshAssetId.hi, o.meshAssetId.lo, glm::dot(d, d), i });
+	}
+
+	std::sort(m_keys.begin(), m_keys.end(),
+		[](const SortKey& a, const SortKey& b)
+		{
+			if (a.meshHi != b.meshHi) return a.meshHi < b.meshHi;
+			if (a.meshLo != b.meshLo) return a.meshLo < b.meshLo;
+			if (a.distSq != b.distSq) return a.distSq < b.distSq;
+			return a.index < b.index;
+		});
+
+	outSortedIndices.clear();
+	outSortedIndices.reserve(m_keys.size());
+	for (const SortKey& k : m_keys)
+		outSortedIndices.push_back(k.index);
+}
+
+void RenderSorter::keepVisible(const std::vector<uint32_t>& sortedIndices,
+                               const std::vector<uint8_t>&  visible,
+                               std::vector<uint32_t>&       outSortedIndices)
+{
+	outSortedIndices.clear();
+	outSortedIndices.reserve(sortedIndices.size());
+	for (uint32_t idx : sortedIndices)
+		if (idx >= visible.size() || visible[idx]) // sort()'s rule: no entry = visible
+			outSortedIndices.push_back(idx);
+}
+
 void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
                                       std::vector<const DrawCall*>& outOpaque,
                                       std::vector<const DrawCall*>& outTransparent,

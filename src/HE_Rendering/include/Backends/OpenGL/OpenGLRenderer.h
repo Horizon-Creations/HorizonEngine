@@ -7,6 +7,7 @@
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/FrameVisibility.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderConstants.h>
@@ -675,10 +676,10 @@ private:
 	unsigned int m_depthInstancedProgram = 0;
 	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
-	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
-	// shadow pass never clobbers the camera cull the geometry pass relies on).
-	std::vector<uint8_t>  m_shadowVisible;
-	std::vector<uint32_t> m_shadowSorted;
+	// Per-layer caster cull + the walk's one caster sort (audit REN-407), kept off
+	// m_visible/m_sortedIndices so the shadow pass never clobbers the camera cull the
+	// geometry pass relies on.
+	HE::FrameVisibility          m_shadowVisibility;
 	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
 	void CreateShadowResources();
 

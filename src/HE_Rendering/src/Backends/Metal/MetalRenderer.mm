@@ -7954,6 +7954,7 @@ void MetalRenderer::RefineObjectBounds()
 			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
 				obj.refineWorldBounds(mesh->localBounds);
 	}
+	++m_refineRuns; // a camera cull from before this loop no longer holds
 	m_refinedWalk    = walk;
 	m_refinedObjects = objects;
 	m_refinedCount   = count;
@@ -8001,8 +8002,12 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj,
 		                            uint32_t skipEntity)
 		{
-			m_culler.cull(m_renderWorld, viewProj, m_visible);
-			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+			// Same-mesh runs → one instanced draw each; a run of one stays on the
+			// plain pipeline. The casters come in the walk's one sort, culled
+			// against this view (HE::FrameVisibility, not m_visible/m_sortedIndices:
+			// those stay the camera cull).
+			m_visibility.shadowLayer(m_renderWorld, VisibilityKey(), viewProj, skipEntity,
+			                         m_shadowBatches);
 			const glm::mat4 lightClip = HE::kMetalClipFix * viewProj;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -8020,11 +8025,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 			[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)size, (double)size, 0.0, 1.0 }];
 
-			// Same-mesh runs → one instanced draw each; a run of one stays on the
-			// plain pipeline. HE_MTL_INSTANCING=0 is the same A/B switch as the
-			// scene pass: it sends every run back through the per-caster loop.
-			RenderSorter::batchDepthCasters(m_renderWorld, m_sortedIndices, skipEntity,
-			                                m_shadowBatches);
+			// HE_MTL_INSTANCING=0 is the same A/B switch as the scene pass: it
+			// sends every run back through the per-caster loop.
 			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 			void* boundPipeline = m_shadowPipeline;
 			std::vector<glm::mat4> mvps;
@@ -17944,6 +17946,12 @@ void MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& 
 
 void MetalRenderer::CullCameraObjects()
 {
+	// An earlier pass of this walk asked the same: its frustum, occlusion and sort hold.
+	if (m_visibility.findCamera(m_renderWorld, VisibilityKey(), m_visible, m_sortedIndices))
+	{
+		if (m_occlusionCuller.settings().enabled) m_counters.occlusionCulled = m_occlusionCacheCulled;
+		return;
+	}
 	m_culler.cull(m_renderWorld, m_visible);
 	if (m_occlusionCuller.settings().enabled)
 	{
@@ -17974,6 +17982,7 @@ void MetalRenderer::CullCameraObjects()
 		}
 	}
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	m_visibility.storeCamera(m_renderWorld, VisibilityKey(), m_visible, m_sortedIndices);
 }
 
 void MetalRenderer::SetSSRSettings(const SSRSettings& s)

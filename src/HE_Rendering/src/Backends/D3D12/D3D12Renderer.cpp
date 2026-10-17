@@ -7,6 +7,7 @@
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/FrameVisibility.h>
 #include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
@@ -1522,10 +1523,10 @@ struct D3D12RendererImpl
     IRenderer::ShadowSettings    shadowSettings;
     bool                         shadowSizeDirty = false;
     bool                         debugShadowCascades = false;
-    // Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
-    // those hold the camera cull the geometry pass consumes).
-    std::vector<uint8_t>         shadowVisible;
-    std::vector<uint32_t>        shadowSorted;
+    // Per-layer caster cull + the walk's one caster sort (audit REN-407; NOT
+    // m_visible/m_sortedIndices — those hold the camera cull the geometry pass
+    // consumes).
+    HE::FrameVisibility          shadowVisibility;
     RenderSorter::DepthBatchList shadowBatches;
 
     // The array SRV every consumer of the cascade array uses (scene t0, graph
@@ -10627,9 +10628,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
             // Depth-only render of every shadow caster into one array slice,
             // shared by the CSM cascades and the local (point/spot) views.
-            // Cull + sort against the view's light frustum into scratch
-            // buffers; the sort groups draws by mesh so the resolve stays
-            // memoised. batchDepthCasters keeps castsShadow objects only and
+            // Cull against the view's light frustum, take the casters in the
+            // walk's one sort (HE::FrameVisibility); the sort groups draws by
+            // mesh so the resolve stays memoised. batchDepthCasters keeps castsShadow objects only and
             // drops `skipEntity`'s geometry: the entity the local light itself
             // sits on (a light authored onto a mesh entity would otherwise
             // render that mesh at z≈0 into its own map and shadow itself out);
@@ -10649,10 +10650,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->RSSetScissorRects(1, &ssc);
                 cl->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
                 cl->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
-                p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
-                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
-                                                p.shadowBatches);
+                p.shadowVisibility.shadowLayer(p.m_renderWorld, { p.m_extractor.fullExtractCount() },
+                                               viewProj, skipEntity, p.shadowBatches);
                 for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
                 {
                     const GpuMesh* mesh = p.resolveMesh(b.meshAssetId, m_contentManager);

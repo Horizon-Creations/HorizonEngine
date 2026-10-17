@@ -3888,8 +3888,7 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     // would count as opaque in this pre-pass and transparent in the scene pass
     // — depth where the scene writes none, and the decal lands on the glass.
     HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    m_visibility.cullAndSortCamera(m_renderWorld, visibilityKey(), m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
     if (d.fb == VK_NULL_HANDLE)
@@ -6889,6 +6888,7 @@ void VulkanRenderer::refineObjectBounds()
     for (RenderObject& obj : m_renderWorld.objects)
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
             obj.refineWorldBounds(mesh->localBounds);
+    ++m_refineRuns; // a camera cull from before this loop no longer holds
     m_refinedWalk    = walk;
     m_refinedObjects = objects;
     m_refinedCount   = count;
@@ -7004,9 +7004,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdSetDepthBias(cmd, kShadowBiasConstant, 0.0f, kShadowBiasSlope);
-        m_culler.cull(m_renderWorld, viewProj, m_shadowVisible);
-        m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
-        RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity, m_shadowBatches);
+        m_visibility.shadowLayer(m_renderWorld, visibilityKey(), viewProj, skipEntity, m_shadowBatches);
         for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
         {
             const GpuMesh* mesh = resolveMesh(b.meshAssetId);
@@ -7837,8 +7835,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
     HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
 
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    m_visibility.cullAndSortCamera(m_renderWorld, visibilityKey(), m_visible, m_sortedIndices);
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
     m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
     if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) return;
@@ -11507,8 +11504,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     ensureGiProbeGrid();
     if (m_giProbeGridBuilt) ensureGiProbeAtlas();
 
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    m_visibility.cullAndSortCamera(m_renderWorld, visibilityKey(), m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
     const glm::mat4 vp = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -12653,8 +12649,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
 
     refineObjectBounds();
 
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    m_visibility.cullAndSortCamera(m_renderWorld, visibilityKey(), m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
     const glm::mat4 view     = m_renderWorld.camera.view;

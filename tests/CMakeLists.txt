@@ -440,6 +440,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrameVisibility.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SsaoKernel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyNoise3D.cpp
