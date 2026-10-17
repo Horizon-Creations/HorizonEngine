@@ -108,7 +108,7 @@ Schritt 3; Windows, Linux und lavapipe gruen, also auch der neue lavapipe-Fall `
 - **Topic / step:** Thema 205, Schritt 5 (Windows-Abnahme D3D11/D3D12/Vulkan)
 - **Branch / commit:** `claude/unterwasser-postfx-wirkt-billig-caustics-wasseroberfl-chen-u`, Commit "Underwater
   Windows acceptance (Thema 205 step 5)"
-- **Done:** Release-Build NN-WS03, 72 Aufnahmen + 16 Netz-aus + 20 Wiederholungen, Tabellen Abschnitte 2 bis 4, ctest.
+- **Done:** Release-Build NN-WS03, 72 Aufnahmen + 16 Netz-aus + 40 Wiederholungen, Tabellen Abschnitte 2 bis 4, ctest.
 - **Files touched:** `scripts/underwater_look_shots.py` (Windows: Thema-185-Runner mit Kill nach Dump, PNG per PIL),
   `scripts/underwater_reference_compare.py` (PIL statt sips, Laufwerksbuchstabe im `path:box`), 
   `scripts/underwater_backend_compare.py` (neu, numpy+PIL), dieses Dokument, 5 Bilder.
