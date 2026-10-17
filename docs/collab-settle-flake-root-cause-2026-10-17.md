@@ -22,7 +22,7 @@ acdd0101 had raised that wait's bound from 5000 to 600000 sim-ms. That could not
 because the transforms it waited for were never sent. 5ee30ca0 added
 `REQUIRE(tickUntil(bob.ownsLock(subject)))` (`:3858`) before publishing, and that closes the
 race. The comment at `:3871-3874` still blames "a slow CI runner". The CI job ran the whole
-file in 19 s, so the runner was not slow; the comment is misleading.
+file in 19 s, so the runner was not slow; the comment is misleading (corrected in step 2, below).
 
 ## Evidence
 
@@ -77,6 +77,7 @@ Even a 6x wall budget does not help. ctest gives each test its own TMPDIR
 
 ## Step 2: margin fix and verification
 
+Line references in the sections above are from before 5a8d5713 (shifted by 4 to 7 lines since).
 Commit 5a8d5713 changes only the Settle case's `tickUntil` (`tests/test_collab_controller.cpp:3801-3815`) and two calls:
 
 - The comment at `:3875-3879` gives the real cause (no transform sent, the grant race), not "slow runner".
@@ -102,6 +103,10 @@ So 41 of 42 runs were green. The one red run was never reproduced in 41 attempts
 fresh binary's first start). The change only lengthens waits; it can make a `CHECK_FALSE` stricter,
 but it cannot cut a wait short. So the red case was most likely one of the known load flakes in other
 cases of this file (Hive lessons: the "Larger assets" re-dial `pumpUntil`, the `openSession` REQUIRE).
+The red run's assertion count (84062 against 84073 in every green run, so 11 not executed) does
+not settle the question either. In the Settle case only a failed `joinSession` REQUIRE on the
+second subcase's pass leaves exactly 11 (a socket failure, not the grant race); the race's
+REQUIRE at `:3880` would leave 6. Other cases in the file may leave 11 too.
 Next time, keep every log from the first run on.
 
 ## Handoff
