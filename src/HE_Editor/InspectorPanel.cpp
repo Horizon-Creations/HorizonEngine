@@ -3173,6 +3173,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SaveStateComponent>(entity); }
 	}
 
+	// ── Streaming (where it lives in a scene split into cells) ──────────────
+	if (auto* st = registry.try_get<StreamingComponent>(entity))
+	{
+		if (componentHeader("Streaming", true, removed))
+		{
+			int mode = static_cast<int>(st->mode);
+			if (Row::comboZ("Mode##streaming", &mode, "Auto Resident "))
+				st->mode = mode == 0 ? StreamingComponent::Mode::Auto : StreamingComponent::Mode::Resident;
+			trackEdit();
+			hint("Read when the scene is split into cells (Streaming tab). Resident keeps this "
+			     "entity, and the top-level subtree it is in, in the always-loaded base scene; "
+			     "Auto leaves it to the splitter. Split again after changing it.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<StreamingComponent>(entity); }
+	}
+
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -3820,6 +3836,7 @@ constexpr AddRow kGameplayRows[] = {
 	// to give it logic, and the gate was hiding exactly the component you need.
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
+	addRow<StreamingComponent>("Streaming"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),

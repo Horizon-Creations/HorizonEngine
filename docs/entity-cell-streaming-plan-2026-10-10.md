@@ -1133,24 +1133,62 @@ den Teleport. Kein Editor-Play und kein Spiel per Hand mit Zellzustand; Linux/ma
 - Kosten: beim Entladen ein Gang über den Teilbaum der Zelle (Map UUID → Entity), beim Laden ein Nachschlag je Datensatz; 16 Byte je gebauter
   Entity bis zum Entladen. Nicht gemessen.
 
+## 18. Schritt 3: Skripte pro Zelle, Gruppe `streaming`, `StreamingComponent` (Thema 183 Schritt 3, 17.10.2026)
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| Skripte pro Zelle | `src/HE_Scene/include/HorizonScene/CellScripts.h`, `src/CellScripts.cpp` (neu) | `HE::startCellScripts(hosts, world, created)` bindet die HorizonCode-Klassen (`EntityHost::bindFor`, Construct + BeginPlay) und startet Lua/Python (`ScriptContext::startScriptsFor`, onStart) dessen, was die Zelle gebaut hat; **was schon läuft, wird übersprungen** (`bind` fragt nicht, `startScriptsFor` überschreibt den Map-Eintrag: doppelter Start, geleakte Instanz). `HE::stopCellScripts(hosts, world, root)` geht den Teilbaum unter der Wurzel **so, wie er jetzt ist**, ab: `unbind` (Destruct, während die Zelle ganz ist), Lua-Instanz `destroyInstance`, Map-Eintrag und `unwatch(scriptToken)`. Was ein Skript aus der Zelle gehängt hat, behält sein Skript. Eine Kopie für beide Hosts; die Zonen-Entladungen der zwei Apps waren schon auseinandergelaufen (Editor: kein `erase`/`unwatch`, Spiel: kein `destroyInstance`) |
+| Hosts | `GameApplication::cellLoaded/cellUnloading/cellScriptHosts` (`GameApplication.cpp:1568`), `PlayCellStreaming::cellLoaded/cellUnloading` + `setScripts` (gesetzt in `setPlayMode`, `EditorApplication.cpp:12896`) | Dünne Aufrufe. Editor-Stop: `EntityHost::end` läuft vor `PlayCellStreaming::end`, dort sind nur noch die Lua-Instanzen zu stoppen; ein Szenenwechsel im Spiel ruft kein `cellUnloading` (`reset`), die App räumt ohnehin alles ab |
+| Klassentabelle | `CellSplit.cpp:88` | `script` → `Stateful`. Mit `characterController`, `movement`, dynamischem Body, Kamera … bleibt es weiter Resident (die strengste Komponente entscheidet). Was die Basis-Logik immer braucht, markiert der Autor als Resident (unten) |
+| Gruppe `streaming` | `EngineApi.h:1594`, `EngineApi.cpp:2701` (Funktionen), `:7483` (Rows), `:8445` (Namen), `isScriptGroup`, `HcNodeDocs.cpp` | `cellAt(position) → x, z, exists`, `isLoaded(x, z)`, `isSettled(position, radius)`, `pin(position, radius) → handle`, `unpin(handle)`. Weltpositionen; der Ursprung wird in der Row addiert. Die App installiert ihre Laufzeit (`streaming::install`): das Spiel in `OnInit` vor dem ersten Skript (`GameApplication.cpp:1409`), weg in `OnShutdown`; der Editor zwischen Play (`:12909`) und Stop (`:13209`). Nichts installiert / keine Zellen: kein Treffer, `pin` 0, **`isSettled` wahr** (ein Teleport-Tor darf in einem ungesplitteten Level nicht hängen) |
+| Pins | `CellRuntime::pin/unpin/pinCount` (`CellRuntime.h:108`), `update()` | Anker neben der Kamera, `radiusScale = radius / loadRadius` (nicht positiv: die Radien des Manifests). Sie überleben den Start für das Manifest (ein Pin aus BeginPlay kommt vor dem ersten `update`, das die Zellen sieht) und gehen mit `clear()`/`reset()`. Ohne Kamera, aber mit Pin wird gestreamt (Vorgriff auf den Server, Schritt 4) |
+| `StreamingComponent` | `Components/StreamingComponent.h` (neu), `HorizonScene.h`, `SceneSerializer.cpp` (Speichern, Laden, `HE_SCENE_COMPONENT_KEYS`, `isKnownComponentKey`), `InspectorPanel.cpp` (Abschnitt + Add Component unter Gameplay), `InspectorPrefabKeys.cpp`, `EditorHelp.cpp` (Komponente, `Streaming/Mode`, `kComponentScopes`) | `Mode { Auto, Resident }`, **Vorgabe Resident** (hinzufügen heißt „behalten“; Auto gibt einer Prefab-Platzierung zurück, was ihr Prefab verlangte). Schlüssel `streaming`, `{ "mode": 0/1 }`. Der Splitter wertet den Wert aus (`CellSplit.cpp:153`): alles außer einer expliziten 0 ist Resident, und ein Resident-Kind hält den ganzen obersten Teilbaum in der Basis. Kein vorhandenes Tag oder Layer passte (es gibt keins; `EditorLockComponent` ist etwas anderes) |
+
+**Entschieden:** Die Save-Game-Variablen einer Klasse kommen **nach** BeginPlay zurück (`bind` feuert Construct und BeginPlay zusammen,
+`CellState::cellBuilt` läuft nach `host.cellLoaded`). Das entspricht dem normalen Savegame-Weg (eine Klasse ruft Apply Saved State in
+ihrem BeginPlay, also danach) und ist in `test_cell_scripts` festgehalten (`goldAtBeginPlay == 0`, `gold == 42`). Wer den Wert in
+BeginPlay braucht, liest ihn im ersten Tick. Die Alternative (BeginPlay erst nach den Variablen) braucht eine Trennung in `EntityHost::bind`.
+Keine Services-Tabelle in `HorizonGameServices.h` für C++-GameLogic (wie bei `content`); `scripts/script_api_docs/registry.json` ist nicht neu erzeugt.
+
+**Linux-Laufzeitgröße** (Auftrag 107 der Königin): CI 39031060917 wog das Spiel auf Linux mit 38,0 MB ohne Python gegen die Schwelle 38,0
+(seit 05.09. nicht neu gemessen; die Basis `1e41c2d2` war grün). Die Zunahme ist Zellstreaming in HorizonScene ohne neue Abhängigkeit.
+Die Schwelle ist nach der Regel „gemessen plus 10 Prozent“ auf (67,0, 42,0) gehoben, begründet in `scripts/runtime_size.py`. Ob der Lauf
+damit grün ist, sagt erst die CI dieses Schritts.
+
+**Geprüft** (Release, `C:/hw183`, NN-WS03): `test_cell_scripts` 4/4 (neu: Start/Stopp je Laden, Save-Game-Variable über das Entladen und
+ihre Reihenfolge zu BeginPlay, aus der Zelle gehängte Entity, Idempotenz und die Stop-Form des Editors); `test_cell_runtime` 6/6 (zwei neu:
+Pin mit Weltursprung 500 m, alle fünf Rows über die Registry, neutrale Antworten); `test_cell_split` 14/14 (Schalter je Wert, Resident-Kind,
+Rundweg durch Speicher/CBOR und Split). **Negativkontrollen**, jede einzeln, die DLL jeweils nach `tests/` kopiert, jede nur auf ihren Checks rot:
+Host vor CellState beim Entladen (Variable verloren), Stopp aus, Start ohne Filter, Ursprung nicht addiert, `isSettled` falsch ohne Laufzeit,
+`begin()` löscht Pins, Splitter ignoriert den Schalter. Dazu `test_engine_api`, `test_hc_node_docs`, `test_editor_help`, `test_scene_serializer`,
+`test_entity_host` und `test_world_scale` grün; `editor_help_audit.py --check` 1205/1205; `HorizonEditor` und `HorizonGame` bauen.
+
+**Nicht geprüft:** Kein Editor-Play und kein Spiel per Hand mit einem Skript in einer Zelle (der Weg je Frame ist derselbe wie im Test, ist
+aber nicht in der App gelaufen); Python in einer Zelle (nur Lua, derselbe `startScriptsFor`); Linux/macOS nur über die CI; `audiosource` und
+`animstatemachine` stehen weiter nicht in der Klassentabelle (der Host startet sie noch nicht).
+
 ## Handoff
 
-- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 2 von 5 (`CellState`, 3b)
-- **Branch:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte`
-- **Done:** Tombstones und `SaveState`-Zustand einer Zelle überleben Entladen und Laden in Spiel und Editor-Play (Abschnitt 17);
-  Entities mit `SaveStateComponent` wandern beim Split in Zellen.
-- **Files:** `CellState.h/.cpp` (neu), `CellRuntime.h/.cpp` (Reihenfolge, `cellApiCtx`, `state()`), `CellStreamer.h/.cpp` (`Hooks::skip`,
-  `keepsIds`, `Stats::skipped`), `EngineApi.h/.cpp` (`entity::stateOf/applyState`), `CellSplit.cpp` (Klasse `Stateful`),
-  `GameApplication.h/.cpp`, `PlayCellStreaming.h` + `EditorApplication.cpp` (Ctx des Hosts), `tests/test_cell_state.cpp` (neu), `tests/test_cell_split.cpp`.
-- **Verified / not verified:** siehe Abschnitt 17 (`test_cell_state` 8/8 mit fünf Negativkontrollen, voller `ctest` 299/300 mit nur dem
-  bekannten `test_inspector_ui`). Nicht: Skript-Hälfte mit Zellen, Hand-Play, Linux/macOS (CI).
-- **Pending (Schritt 3):** Skripte pro Zelle über `cellLoaded`/`cellUnloading` (Spiel `bindFor`/`startScriptsFor`, Editor die Zonen-Entladung
-  um `EditorApplication.cpp:3263`); dann `script` (und `audiosource`, `animstatemachine`) in `kComponentClasses` als `Stateful`; ein Test für die
-  Skript-Hälfte (Klasse mit Save-Game-Variable in einer Zelle); die Frage BeginPlay vor oder nach den Variablen (Abschnitt 17);
-  Zustände der Sitzung beim `save.write` ins Savegame (heute nur Rückfall in die andere Richtung).
-- **Traps:** Nach einer Änderung nur in `HorizonScene` ist `<build>/tests/HorizonScene.dll` alt, wenn `he_tests` nicht neu linkt — eine
-  Negativkontrolle lief so still gegen die vorige Mutation. Vor jedem Lauf `src/HE_Scene/HorizonScene.dll` nach `tests/` kopieren.
-  Ein Tombstone muss vor dem Bau wirken (Befund 23), nicht danach. Die beiden Hosts bauen Zellen weiter unterschiedlich ab (Abschnitt 16);
-  `CellState` schreibt bei `clear()` bewusst nichts heraus.
-- **Next steps:** 1. `cellLoaded`/`cellUnloading` mit Skriptstart/-abbau in beiden Hosts, Reihenfolge in `test_cell_runtime.cpp`.
-  2. `script` als `Stateful`, Test „Save-Game-Variable überlebt das Entladen“. 3. Gruppe `streaming` in der API.
+- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 3 von 5 (Skripte pro Zelle, Gruppe `streaming`, `StreamingComponent`)
+- **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ 5f4ac78c, bb4f9ccf und der Commit mit
+  `StreamingComponent`, der Linux-Schwelle und diesem Abschnitt (gepusht)
+- **Done:** Zellen starten und stoppen ihre Skripte in Spiel und Editor-Play, Skript-Entities wandern beim Split in Zellen, Save-Game-
+  Variablen überleben das Entladen; fünf Rows `streaming.*` in HorizonCode/Lua/Python; Autorenschalter *Streaming ▸ Resident*.
+- **Files touched:** `CellScripts.h/.cpp` (neu), `CellRuntime.h/.cpp` (Pins), `EngineApi.h/.cpp` (Gruppe), `CellSplit.cpp` (Tabelle,
+  Schalter), `StreamingComponent.h` (neu) + Registrierstellen (Abschnitt 18), `GameApplication.h/.cpp`, `PlayCellStreaming.h/.cpp`,
+  `EditorApplication.cpp`, `HcNodeDocs.cpp`, `scripts/runtime_size.py`; Tests `test_cell_scripts.cpp` (neu), `test_cell_runtime.cpp`, `test_cell_split.cpp`.
+- **Verified / not verified:** Abschnitt 18; das Ergebnis des vollen `ctest` steht im Thema.
+- **Decisions taken:** Variablen nach BeginPlay (Abschnitt 18); Pins im `CellRuntime`, nicht im Streamer; `isSettled` neutral wahr;
+  `StreamingComponent` mit Vorgabe Resident; Linux-Schwelle (67, 42).
+- **Decisions suggested, not taken:** BeginPlay erst nach den Variablen (braucht `EntityHost::bind` in zwei Hälften); den Sitzungszustand
+  beim `save.write` ins Savegame schreiben (Abschnitt 17); `audiosource`/`animstatemachine` über denselben Host starten
+  (`AudioSystem::playOnStart` je Zelle; `AnimatorHost` bindet nur beim Start).
+- **Pending:** Schritt 4 (Spieler als Anker auf dem Server: `CellRuntime::update` nimmt schon Anker ohne Kamera, die Spieler müssten als
+  weitere Anker dazukommen), Schritt 5 (Dorf mit 50 NPCs, Messleiter, voller ctest).
+- **Traps:** `cmd //c "…vcvars64.bat…"` aus Git-Bash scheitert still am Pfad („Das System kann den angegebenen Pfad nicht finden“) und baut
+  nichts — eine Negativkontrolle lief so gegen die alte DLL. Builds über PowerShell: `cmd /c '"…\18\…\vcvars64.bat" >nul 2>&1 && cmake …'`.
+  Die vcvars von VS 2022 linken gegen die alte STL (`__std_rotate` …), nur VS 18 nehmen. Nach jeder Änderung nur in HorizonScene die DLL nach `tests/` kopieren.
+- **Next steps:** 1. CI des Zweigs ansehen (Linux `runtime_size` mit der neuen Schwelle). 2. Schritt 4: Spieler-Anker in `CellRuntime::update`
+  (Server: `NetGameSession`). 3. Ein Play per Hand in einem gesplitteten Projekt mit einer Skript-Klasse in einer Zelle.

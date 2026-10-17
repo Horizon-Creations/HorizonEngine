@@ -86,6 +86,9 @@ constexpr ComponentClass kComponentClasses[] = {
 	// splitter cannot tell a class's base from the file: a placed player character
 	// stays in the base by its character controller, not by its class.
 	{ "script",           StreamClass::Stateful },
+	// The author's switch (StreamingComponent): Auto is as if it were not there,
+	// Resident keeps the entity, and so its subtree, in the base (entityClass).
+	{ "streaming",        StreamClass::Static },
 	// Deliberately NOT here, though some look like dressing:
 	//   audiosource       Nothing starts a streamed entity's sound: AudioSystem::playOnStart
 	//                     runs at a scene start or switch (GameApplication), not for what a
@@ -145,6 +148,11 @@ StreamClass entityClass(const json& e)
 	if (const auto b = comps->find("rigidbody"); b != comps->end() && b->is_object()
 	    && b->value("type", 0) != 0)
 		return StreamClass::Resident;   // dynamic: would unload with the square it started in
+	// Anything but an explicit Auto (0) is Resident, a malformed block and a mode a
+	// newer editor wrote included: the loader reads them so too.
+	if (const auto st = comps->find("streaming"); st != comps->end()
+	    && !(st->is_object() && st->value("mode", 1) == 0))
+		return StreamClass::Resident;   // the author keeps it in the base
 	return cls;
 }
 
