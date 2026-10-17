@@ -48,6 +48,7 @@
 #include "McpLockBook.h"         // external locks, per MCP client
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
 #include "EditorCommands.h"
+#include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -62,9 +63,6 @@
 #include <imgui.h>
 #include <cstdint>
 #endif
-
-class PlayCellStreaming;   // PlayCellStreaming.h: cell streaming during Play
-namespace HE { class CellRuntime; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.

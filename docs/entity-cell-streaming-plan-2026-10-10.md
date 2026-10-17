@@ -1048,3 +1048,50 @@ einer Testdatei rund 7 bis 9 min, weil CMake nach jedem Lauf neu konfiguriert un
 `ctest -j4 --timeout 1500`: **`100% tests passed out of 256`**, `CTEST_RC=0`, 305 s, die zwei `runtime_size_app_*` übersprungen wie in jedem
 Lauf davor. `test_world_scale` und `test_cell_split` grün, `test_material_graph` 282 s und grün. Der Bench ist `doctest::skip` und fehlt
 in diesen 256; er lief mit `--no-skip` nur für die Messung. Die CI der Plattformen läuft über die Zweige und ist hier nicht abgewartet.
+
+## 16. Schritt 2c: `CellRuntime`/`ICellHost`, Zellen im Editor-Play (Thema 183 Schritt 1, 17.10.2026)
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| `HE::CellRuntime` | `src/HE_Scene/include/HorizonScene/CellRuntime.h`, `src/HE_Scene/src/CellRuntime.cpp` | besitzt `CellStreamer`, Welt-Zeiger und Manifest-Text (Neustart, wenn sich eins davon ändert), ein `CancelToken` je Zelle, die Bodies einer Scheibe als eine Charge (`cellSliceBodies`), die Reserve (`cellBodiesFit`), die Kamera als Anker samt Vorausschau (300-m/s-Klemme) und das Budget 4 ms. `clear(world)` entlädt über die Hooks, `reset()` vergisst nur |
+| `HE::ICellHost` | ebda. | `openCellFile(path)`, `cellPhysics()` (bei jedem Aufruf gefragt), `streamCellAssets(world, token, ids)`; dazu `cellLoaded`/`cellUnloading` mit leerem Default, **für die Skripte aus 3b**. Reihenfolge beim Entladen: erst der Host (Zelle noch ganz), dann die Bodies, dann das Token |
+| Spiel | `GameApplication.h:359`, `GameApplication.cpp` (`openCellFile`, `streamCellAssets`, `updateCellStreaming` :1518–1553) | `GameApplication` ist privater `ICellHost`; Reader (Pak-Eintrag, sonst lose Datei) und Asset-Streaming unverändert, `updateCellStreaming` ist ein Aufruf; Szenenwechsel `m_cellRuntime.reset()`, Region-Hold liest `m_cellRuntime.streamer()`. Reines Umsortieren |
+| Editor-Play | `src/HE_Editor/PlayCellStreaming.{h,cpp}`, `EditorApplication.cpp` (`setPlayMode`, `OnRender` nach `updatePlayCameraController`) | `PlayCellStreaming` ist der Host: Zellen aus dem Projektordner (Elternordner der Content-Wurzel, wie `projectRootOf` im Streaming-Tab), Assets über `loadAssetAsync` und den Editor-Drain. Begonnen vor `m_physicsWorld->initialize`, **zusammen mit `setRegionHold`** (fehlte im Play bisher ganz), beendet mit `end(world)` **vor** `m_editorWorld->clear()` beim Stop. Die Warnung „Play shows only the base“ ist weg; der Streaming-Tab zeigt im Play die Zahlen der Laufzeit (`AppContext::playCells`) |
+| Zeuge | `EditorApplication.cpp`, `HE_DUMP_PLAYCELLS` in `dumpFrameHeadless` | 13×13 Würfel, in 40-m-Zellen nach `%TEMP%/he_dump_playcells` gesplittet, Bild der Basis nach `<dump>.edit.bmp`, Play, Laufzeit bis die gewollten Zellen stehen, Aufnahme, Stop mit Zählung |
+| Tests | `tests/test_cell_runtime.cpp` (neu) | Fake-`ICellHost`: ein Token je Zelle über alle Scheiben, Host hört das Entladen bei noch lebendem Token und noch vorhandenen Bodies, fehlende Datei einmal, ohne Kamera keine Arbeit; Vorausschau und Klemme (290 vs 310 m/s bei 1 s); Manifest-/Weltwechsel vergisst, `clear` entlädt, `reset` vergisst; Bodies in eine echte `PhysicsWorld` und wieder heraus |
+
+**Geprüft** (Release, `C:/hw183`, `HE_ENABLE_SHADERC=ON`, NN-WS03):
+- `he_tests --source-file=*test_cell_runtime.cpp` 4/4 (232 Assertions). **Negativkontrolle:** Klemme aus (`3e9`) und
+  Entlade-Reihenfolge umgedreht (Token und Bodies vor dem Host) → genau die drei zugehörigen Checks rot, zurückgesetzt wieder grün.
+- `test_world_scale` 44/44, `test_cell_split` 11/11; `ctest -j4 --timeout 1500`: 298/299, rot nur `test_inspector_ui`
+  (Zwischenablage im Agenten-Prozess, bekanntes Rauschen, Panel nicht angefasst).
+- **Bild-Zeuge Editor-Play** (D3D11, `HE_DUMP_SKYTEST` CAMY=90 PITCH=-89, `HE_DUMP_PLAYCELLS=1`): 169 Würfel → 16 Zellen, 0 in der Basis;
+  Edit-Bild leer, Play-Bild genau 8×8 Würfel (die vier Zellen im 30-m-Radius), „4 of 4 wanted cells built in 3 ms, 64 cubes“;
+  nach Stop „0 cubes in the edit world, cell runtime idle, manifest kept“. Bilder als Dateien 47/48 im Thema 183.
+- **Spiel** (loses Verzeichnis `C:/hw183/game`, dieselben Zelldateien, `HE_CAPTURE_FRAME=240`, OpenGL): dasselbe 8×8-Bild;
+  Kontrolle ohne `Bench.cells` → „cell … not found“, 0 helle Pixel gegen 6 937.
+
+**Nicht geprüft:** Vulkan/D3D12/Metal für den Zeugen (kein Backend-Code geändert); ein echtes Projekt mit Assets, Physik-Bodies
+und Skripten im Play (die Referenzwelt hat keine); Linux/macOS-Bau (CI angestoßen, siehe Thema).
+
+**Entscheidungen:** 2c vor 3b (die Königin hat es so geplant). Bodies, Reserve und Token liegen in der Laufzeit, nicht im Host —
+beide Hosts hätten denselben Code gehabt. `PlayCellStreaming` hängt am `EditorApplication`-Header (Header ist klein; ein
+vorwärts deklarierter `unique_ptr` bricht in jeder Übersetzungseinheit, die den Inline-Konstruktor sieht).
+
+## Handoff
+
+- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 1 von 5 (2c)
+- **Branch:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte`
+- **Done:** Spiel und Editor-Play streamen Zellen über denselben `HE::CellRuntime`; Play eines gesplitteten Projekts zeigt die Zellen (Abschnitt 16).
+- **Files:** `CellRuntime.h/.cpp` (HE_Scene), `GameApplication.h/.cpp` (Host), `PlayCellStreaming.h/.cpp` + `EditorApplication.cpp`
+  (`setPlayMode`, Frame-Update, `HE_DUMP_PLAYCELLS`), `StreamingDebugView.cpp` (Tab), `tests/test_cell_runtime.cpp`.
+- **Verified / not verified:** siehe Abschnitt 16.
+- **Pending (Schritt 3b ff.):** Skripte pro Zelle über `ICellHost::cellLoaded/cellUnloading` (beide Hosts: Spiel `startScriptsFor`,
+  Editor die Zonen-Entladung um `EditorApplication.cpp:3263`, ohne `unwatch`), danach `audiosource`/`animstatemachine` in `kComponentClasses` (Lektion:
+  `playOnStart`/`AnimatorHost::begin` laufen nur beim Szenenstart). `CellState`. Spieler als Anker (heute nur die Kamera, `CellRuntime::cameraAnchor`).
+- **Traps:** `ContentManager` ist eine **globale** Klasse — `namespace HE { class ContentManager; }` erzeugt still eine zweite
+  und bricht entfernte Aufrufe mit C2664. Nach DLL-only-Bau ist `deploy/Game/HorizonScene.dll` alt (hier gesehen), selbst kopieren.
+- **Next steps:** 1. `cellLoaded`/`cellUnloading` in `GameApplication` und `PlayCellStreaming` mit Skriptstart/-abbau füllen und
+  in `test_cell_runtime.cpp` die Reihenfolge prüfen. 2. Anker-Liste statt einer Kamera in `CellRuntime::update` (Spieler, Pins).

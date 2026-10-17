@@ -30,7 +30,6 @@
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
-#include "PlayCellStreaming.h"     // a split scene's cells streamed while playing
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
 #include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view

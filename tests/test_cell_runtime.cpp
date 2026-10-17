@@ -262,19 +262,27 @@ TEST_CASE("CellRuntime: the camera's motion is the lookahead, a jump is not")
 	CHECK(x < 100.0f);
 	rt.clear(world);
 
-	// The same 10 m in a thousandth of a second is a teleport (10 km/s), not a
-	// speed: nothing ahead is asked for.
-	HorizonWorld world2;
-	const Entity cam2 = makeCamera(world2, 30.0);
-	world2.setCellManifestJson(kManifest);
-	pump(rt, world2, 0.1f, [&] { return rt.streamer().stats().loaded == 1; });
-	tf(world2, cam2).position.x = 40.0f;
-	rt.update(world2, 0.001f);
-	pump(rt, world2, 0.0f, [&] { return true; });
-	CHECK(rt.streamer().isLoaded(0, 0));
-	CHECK_FALSE(rt.streamer().isLoaded(1, 0));
-	CHECK_FALSE(rt.streamer().isLoaded(2, 0));
-	rt.clear(world2);
+	// A jump is not a speed: anything over 300 m/s counts as standing. With one second
+	// of lookahead the point ahead of a camera at x = 33 lands in cell 3 for any speed
+	// up to ~360 m/s, so the two runs differ only in the clamp: 290 m/s starts reading
+	// cell 3 in that very update (the control), 310 m/s reads nothing.
+	std::string oneSecond = kManifest;
+	oneSecond.replace(oneSecond.find("\"lookaheadSec\": 2"), 17, "\"lookaheadSec\": 1");
+	for (const float speed : { 290.0f, 310.0f })
+	{
+		HorizonWorld world2;
+		const Entity cam2 = makeCamera(world2, 30.0);
+		world2.setCellManifestJson(oneSecond);
+		pump(rt, world2, 0.01f, [&] { return rt.streamer().stats().loaded == 1; });
+		REQUIRE(rt.streamer().isLoaded(0, 0));
+		tf(world2, cam2).position.x = 30.0f + speed * 0.01f;
+		rt.update(world2, 0.01f);
+		const auto& st = rt.streamer().stats();
+		const size_t touched = st.inFlight + st.ready + st.building + st.loaded;   // cell 0 alone: 1
+		if (speed < 300.0f) CHECK(touched > 1);
+		else                CHECK(touched == 1);
+		rt.clear(world2);
+	}
 	he_test::removeAllQuiet(root);
 }
 

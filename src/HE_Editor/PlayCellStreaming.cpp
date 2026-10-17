@@ -5,7 +5,7 @@
 #include <fstream>
 #include <iterator>
 
-PlayCellStreaming::PlayCellStreaming(HE::ContentManager& content) : m_content(content) {}
+PlayCellStreaming::PlayCellStreaming(ContentManager& content) : m_content(content) {}
 
 void PlayCellStreaming::begin(std::function<PhysicsWorld*()> physics, std::filesystem::path root)
 {

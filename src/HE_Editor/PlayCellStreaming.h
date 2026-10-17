@@ -5,7 +5,7 @@
 
 class HorizonWorld;
 class PhysicsWorld;
-namespace HE { class ContentManager; }
+class ContentManager;
 
 // ── Streaming cells while the editor plays (Thema 164, step 2c) ─────────────
 // Play runs in the editor's own world, which after a split holds only the base
@@ -17,7 +17,7 @@ namespace HE { class ContentManager; }
 class PlayCellStreaming final : public HE::ICellHost
 {
 public:
-	explicit PlayCellStreaming(HE::ContentManager& content);
+	explicit PlayCellStreaming(ContentManager& content);
 
 	// `physics` is asked at every call: the play session owns it, and it is gone
 	// after Stop. `root` overrides the project folder the manifest's paths are
@@ -39,7 +39,7 @@ public:
 	                      const std::vector<uint32_t>& entities) override;
 
 private:
-	HE::ContentManager&            m_content;
+	ContentManager&                m_content;
 	HE::CellRuntime                m_runtime{ *this };
 	std::function<PhysicsWorld*()> m_physics;
 	std::filesystem::path          m_root;
