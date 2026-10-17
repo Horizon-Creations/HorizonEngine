@@ -266,6 +266,22 @@ namespace
         HE::UIElement& offKid = addTo(t, off.id, HE::UIWidgetType::Button);
         offKid.rotation = 45.0f; offKid.pivotX = 0.5f; offKid.pivotY = 0.5f;
 
+        // A caption and a wrapping text that fills what the caption leaves: the
+        // second one's width — and so the height it measures — depends on the
+        // width the first one just measured. The case that shows whether
+        // auto-size sees its own earlier writes.
+        HE::UIElement& line = addTo(t, root.id, HE::UIWidgetType::HorizontalBox);
+        line.name = "Line";
+        HE::uiSetAnchorPreset(line, 0);
+        line.posX = 100.0f; line.posY = 20.0f; line.sizeX = 900.0f; line.sizeY = 80.0f;
+        auto& caption = static_cast<HE::UIText&>(addTo(t, line.id, HE::UIWidgetType::Text));
+        caption.text = "Caption:";
+        auto& body = static_cast<HE::UIText&>(addTo(t, line.id, HE::UIWidgetType::Text));
+        body.text = "words that wrap at whatever width the caption leaves them, and a few "
+                    "more of them so that every change of that width moves a line break";
+        body.wordWrap = true;
+        body.slotFill = 1.0f;
+
         // A parent that is not there.
         HE::UIElement& orphan = addTo(t, 0, HE::UIWidgetType::Panel);
         orphan.parentId = 9999;
@@ -406,6 +422,43 @@ TEST_CASE("UI layout scope: frame cost of an application shell" * doctest::skip(
                 "processPointer=%.3f ms/call\n",
                 elements, quads, extractMs, pointerMs);
     CHECK(quads > 0);
+
+    // Where a frame goes, on a copy of the same tree: auto-size (structure
+    // tables only, as extract runs it), then every question the draw asks of
+    // every element, memoized. The rest of extract is the elements drawing.
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(tree, 1920.0f, 1080.0f);
+    t0 = std::chrono::steady_clock::now();
+    for (int f = 0; f < frames; ++f)
+    {
+        HE::UILayoutScope scope(tree, &canvas);
+        HE::uiApplyAutoSize(tree, &canvas, 1.0f);
+        HE::uiUpdateScrollExtents(tree);
+    }
+    const double autoMs = msSince(t0, frames);
+    t0 = std::chrono::steady_clock::now();
+    int shown = 0;
+    for (int f = 0; f < frames; ++f)
+    {
+        HE::UILayoutScope scope(tree, &canvas);
+        scope.memoizeValues();
+        for (const auto& ep : tree.elements)
+        {
+            if (!HE::uiElementEffectiveVisible(tree, *ep)) continue;
+            ++shown;
+            HE::UIWidgetRect clip{};
+            HE::UIRotation rot;
+            float us = 1.0f, vs = 1.0f;
+            (void)HE::uiElementRect(tree, *ep, &canvas);
+            (void)HE::uiElementClipRect(tree, *ep, clip, &canvas);
+            (void)HE::uiElementEffectiveOpacity(tree, *ep);
+            (void)HE::uiElementEffectiveEnabled(tree, *ep);
+            (void)HE::uiElementRotation(tree, *ep, rot, &canvas);
+            HE::uiElementUnitScale(tree, *ep, us, vs, &canvas);
+        }
+    }
+    const double askMs = msSince(t0, frames);
+    std::printf("[ui-layout-bench] autosize+scroll=%.3f ms/frame layout-questions=%.3f "
+                "ms/frame (%d shown)\n", autoMs, askMs, shown / frames);
 }
 
 // ── The scope answers exactly what the walk answers ──────────────────────────
@@ -453,19 +506,41 @@ TEST_CASE("UI layout scope: auto-size and scroll extents write the same sizes in
     // grid/wrap measurement run too.
     for (auto& ep : base.elements)
         if (auto* box = dynamic_cast<HE::UIBoxBase*>(ep.get()))
-            if (ep->type() != HE::UIWidgetType::ScrollBox) box->sizeToContent = true;
+            if (ep->type() != HE::UIWidgetType::ScrollBox && ep->name != "Line")
+                box->sizeToContent = true;
 
     HE::UIWidgetTree walked = base, scoped = base;
     const HE::UIWidgetCanvas c = HE::uiResolveCanvas(base, 1600.0f, 900.0f, 1.0f);
 
-    HE::uiApplyAutoSize(walked, &c, 1.5f);
-    HE::uiUpdateScrollExtents(walked);
+    // Three frames: the first one moves almost every size (the memo auto-size
+    // borrows is forgotten write after write), the second is steady (nothing
+    // forgotten, everything from the memo), the third follows the caption
+    // getting longer — one write, and the wrapping text beside it has to see it.
+    std::vector<float> bodyHeights;
+    for (int frame = 0; frame < 3; ++frame)
     {
-        HE::UILayoutScope scope(scoped, &c);
-        HE::uiApplyAutoSize(scoped, &c, 1.5f);
-        HE::uiUpdateScrollExtents(scoped);
+        CAPTURE(frame);
+        if (frame == 2)
+            for (HE::UIWidgetTree* t : { &walked, &scoped })
+                for (auto& ep : t->elements)
+                    if (auto* tx = dynamic_cast<HE::UIText*>(ep.get()); tx && tx->text == "Caption:")
+                        tx->text = "A caption that grew:";
+        HE::uiApplyAutoSize(walked, &c, 1.5f);
+        HE::uiUpdateScrollExtents(walked);
+        {
+            HE::UILayoutScope scope(scoped, &c);
+            HE::uiApplyAutoSize(scoped, &c, 1.5f);
+            HE::uiUpdateScrollExtents(scoped);
+        }
+        CHECK(HE::uiWidgetTreeToJson(walked) == HE::uiWidgetTreeToJson(scoped));
+        for (const auto& ep : walked.elements)
+            if (const auto* tx = dynamic_cast<const HE::UIText*>(ep.get());
+                tx && tx->text.rfind("words that wrap", 0) == 0)
+                bodyHeights.push_back(tx->sizeY);
     }
-    CHECK(HE::uiWidgetTreeToJson(walked) == HE::uiWidgetTreeToJson(scoped));
+    // The case is only a case if the caption's growth reached the wrapping text.
+    REQUIRE(bodyHeights.size() == 3);
+    CHECK(bodyHeights[2] != bodyHeights[1]);
     for (std::size_t i = 0; i < walked.elements.size(); ++i)
     {
         const HE::UIElement& a = *walked.elements[i];
@@ -513,4 +588,57 @@ TEST_CASE("UI layout scope: only the scoped tree is answered from the tables")
     }
     // The outer scope is still the one answering for `a`.
     for (const auto& ep : a.elements) CHECK(a.find(ep->id) == ep.get());
+}
+
+// ── A label measures again only when what it measures from changed (CORE-602)
+// Each step compares the cached label against a FRESH one with the same inputs,
+// which measures for certain: a key that misses an input shows up as a size
+// that stayed behind.
+TEST_CASE("UI text auto-size: a changed input re-measures in the same call")
+{
+    HE::UIText label;
+    label.text = "Short";
+    const auto expectSameAsFresh = [&](float width, float fontScale)
+    {
+        HE::UIText fresh;
+        fresh.text = label.text; fresh.fontSize = label.fontSize;
+        fresh.wordWrap = label.wordWrap; fresh.richText = label.richText;
+        fresh.alignH = label.alignH; fresh.alignV = label.alignV;
+        fresh.sizeX = label.sizeX; fresh.sizeY = label.sizeY;
+        label.applyAutoSize(width, fontScale);
+        fresh.applyAutoSize(width, fontScale);
+        CHECK(label.sizeX == fresh.sizeX);
+        CHECK(label.sizeY == fresh.sizeY);
+    };
+
+    expectSameAsFresh(200.0f, 1.0f);
+    const float shortW = label.sizeX;
+    expectSameAsFresh(200.0f, 1.0f);                  // nothing changed: the cache
+    CHECK(label.sizeX == shortW);
+
+    label.text = "A considerably longer label";        // the words
+    expectSameAsFresh(200.0f, 1.0f);
+    CHECK(label.sizeX > shortW);
+
+    expectSameAsFresh(200.0f, 1.5f);                  // the reader's text size
+    label.fontSize = 30.0f;                            // the authored size
+    expectSameAsFresh(200.0f, 1.5f);
+
+    label.wordWrap = true;                             // the wrap column
+    label.sizeX = 120.0f;
+    expectSameAsFresh(120.0f, 1.0f);
+    const float wrappedH = label.sizeY;
+    expectSameAsFresh(60.0f, 1.0f);
+    CHECK(label.sizeY > wrappedH);
+
+    label.richText = true;                             // the markup
+    label.text = "A <b>bold</b> and <size=2>big</size> word";
+    expectSameAsFresh(300.0f, 1.0f);
+
+    // A script that wrote the size in between is overruled, as before: only the
+    // measurement is cached, the write is not skipped.
+    const float h = label.sizeY;
+    label.sizeY = 3.0f;
+    label.applyAutoSize(300.0f, 1.0f);
+    CHECK(label.sizeY == h);
 }

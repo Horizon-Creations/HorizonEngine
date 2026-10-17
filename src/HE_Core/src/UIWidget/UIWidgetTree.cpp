@@ -24,6 +24,7 @@ namespace
     {
         enum : uint8_t { kRect = 1, kUnbounded = 2, kScale = 4,
                          kVisible = 8, kEnabled = 16, kOpacity = 32 };
+        uint32_t     gen = 0;     // the scope generation `have` belongs to
         uint8_t      have = 0;
         bool         visible = false, enabled = false;
         float        opacity = 1.0f, scaleX = 1.0f, scaleY = 1.0f;
@@ -1091,9 +1092,14 @@ struct UILayoutScope::Impl
     std::vector<const UIElement*>  order;
     std::vector<int>               childPos;     // element index → place among its siblings
 
-    // VALUES, by element index; empty until memoizeValues.
+    // VALUES, by element index; empty until memoizeValues. An entry counts only
+    // while its `gen` is the scope's: bumping `gen` forgets every value at once,
+    // which is how auto-size borrows the memo between two of its own writes.
     std::vector<LayoutMemo>             memo;
     std::unordered_map<int, GridSolved> grids;   // by the grid's element index
+    uint32_t                            gen = 0;
+
+    void forgetValues() { ++gen; grids.clear(); }
 };
 
 namespace
@@ -1178,7 +1184,9 @@ namespace
         // An element that is not THIS tree's (a copy, a probe the caller made
         // up) shares nothing with the table.
         if (i < 0 || s->elems[static_cast<std::size_t>(i)] != &e) return nullptr;
-        return &s->memo[static_cast<std::size_t>(i)];
+        LayoutMemo& m = s->memo[static_cast<std::size_t>(i)];
+        if (m.gen != s->gen) { m = LayoutMemo{}; m.gen = s->gen; }
+        return &m;
     }
 
     const GridSolved* scopedGrid(const UIWidgetTree& tree, const UIGrid& grid,
@@ -1242,7 +1250,46 @@ void UILayoutScope::memoizeValues()
 {
     m_impl->values = true;
     m_impl->memo.assign(m_impl->elems.size(), LayoutMemo{});
-    m_impl->grids.clear();
+    m_impl->forgetValues();
+}
+
+namespace
+{
+    // Auto-size WRITES sizes, one element at a time, and the next element's
+    // rect may depend on the size just written (a box stacks its children by
+    // their sizes). So it may not run on a frozen memo — but in a steady frame
+    // almost no write changes anything, and re-solving every rect up its whole
+    // parent chain for nothing was most of what a frame cost.
+    //
+    // So auto-size BORROWS the memo of a structure scope on its canvas: values
+    // are remembered, and every write that changes a size forgets all of them
+    // at once (forgetValues, O(1)). Sizes are the only layout input auto-size
+    // and the element overrides write; a frame where nothing moved solves each
+    // rect once. Lent and taken back here, so callers see a structure scope
+    // before and after, exactly as they opened it.
+    struct BorrowedMemo
+    {
+        UILayoutScope::Impl* s = nullptr;
+        BorrowedMemo(const UIWidgetTree& tree, const UIWidgetCanvas* canvas)
+        {
+            UILayoutScope::Impl* a = activeScope(tree);
+            if (!a || a->values || !sameCanvas(*a, canvas)) return;
+            s = a;
+            s->values = true;
+            s->memo.assign(s->elems.size(), LayoutMemo{});
+            s->forgetValues();
+        }
+        ~BorrowedMemo()
+        {
+            if (!s) return;
+            s->values = false;
+            s->memo.clear();
+            s->grids.clear();
+        }
+        // A size was written: if it changed, nothing remembered can be trusted.
+        void wrote(float before, float after) const
+        { if (s && before != after) s->forgetValues(); }
+    };
 }
 
 namespace
@@ -1629,9 +1676,11 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
     // anchor is a point that is just the element's own size (nothing changes);
     // where it stretches, it is the span the parent gives it, which is what a
     // wrapping text has to be measured against.
+    const BorrowedMemo memo(tree, canvas);
     for (auto& e : tree.elements)
     {
         if (!e) continue;
+        const float wasX = e->sizeX, wasY = e->sizeY;
         // The width is handed over in the element's OWN units: it measures its
         // content in those (a font size is authored there), and inside an
         // embedded widget the resolved rect is in the host's units instead.
@@ -1646,6 +1695,8 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
         const int axes = e->autoSizedAxes();
         if (axes & UIElement::kAxisX) e->sizeX = held(*e, e->sizeX, true);
         if (axes & UIElement::kAxisY) e->sizeY = held(*e, e->sizeY, false);
+        memo.wrote(wasX, e->sizeX);
+        memo.wrote(wasY, e->sizeY);
     }
 
     // Then the containers that size themselves to what is in them, INNERMOST
@@ -1681,7 +1732,9 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
             float wus = 1.0f, wvs = 1.0f;
             uiElementUnitScale(tree, *wb, wus, wvs, canvas);
             const float pad = std::max(0.0f, wb->padding);
+            const float wasY = wb->sizeY;
             wb->sizeY = held(*wb, content / std::max(1e-4f, wvs) + 2.0f * pad, false);
+            memo.wrote(wasY, wb->sizeY);
             continue;
         }
         // A grid is measured by its TRACKS. Fixed and `auto` ones add up;
@@ -1694,8 +1747,11 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
             float gus = 1.0f, gvs = 1.0f;
             uiElementUnitScale(tree, *gr, gus, gvs, canvas);
             const float pad = std::max(0.0f, gr->padding);
+            const float wasX = gr->sizeX, wasY = gr->sizeY;
             gr->sizeX = held(*gr, sg.contentW / std::max(1e-4f, gus) + 2.0f * pad, true);
             gr->sizeY = held(*gr, sg.contentH / std::max(1e-4f, gvs) + 2.0f * pad, false);
+            memo.wrote(wasX, gr->sizeX);
+            memo.wrote(wasY, gr->sizeY);
             continue;
         }
         const bool  vert = box->stacksVertically();
@@ -1719,8 +1775,11 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
         if (count > 1) along += gap * static_cast<float>(count - 1);
         const float w = (vert ? across : along) + 2.0f * pad;
         const float h = (vert ? along : across) + 2.0f * pad;
+        const float wasX = box->sizeX, wasY = box->sizeY;
         box->sizeX = held(*box, w, true);
         box->sizeY = held(*box, h, false);
+        memo.wrote(wasX, box->sizeX);
+        memo.wrote(wasY, box->sizeY);
     }
 }
 

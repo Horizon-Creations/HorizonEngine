@@ -1442,11 +1442,23 @@ void UIText::applyAutoSize(float resolvedWidth, float fontScale)
     // which is the whole reason this argument exists.
     const float fs = fontSize * fontScale;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    // The same inputs as last frame measure the same size (see MeasuredFor).
+    // Only the MEASUREMENT is skipped: the writes below still happen every
+    // time, because a script or an anchor change may have touched sizeX/sizeY
+    // in between, and auto-size owning those fields is the whole contract.
+    const MeasuredFor& was = m_measuredFor;
+    const bool same = was.valid && was.fs == fs && was.wrapW == wrapW &&
+                      was.alignH == alignH && was.alignV == alignV &&
+                      was.wordWrap == wordWrap && was.richText == richText &&
+                      was.fontKey == fontAtlasKey && was.font == f &&
+                      was.text == text;
     // Rich text measures through the rich layout, or a label would be sized for
     // the markup it is written in rather than the words it shows — the tags
     // would count as characters and a <size=2> word would not count enough.
     glm::vec2 m;
-    if (richText)
+    if (same)
+        m = m_measured;
+    else if (richText)
     {
         const HE::BakedUIFont& font = f ? *f : HE::sharedUIFont();
         m = HE::uiLayoutRichText(font, parsed(), { 0.0f, 0.0f },
@@ -1456,6 +1468,12 @@ void UIText::applyAutoSize(float resolvedWidth, float fontScale)
     else
         m = f ? HE::measureUIText(*f, text, fs, wrapW, opts)
               : HE::measureUIText(text, fs, wrapW, opts);
+    if (!same)
+    {
+        m_measuredFor = MeasuredFor{ true, text, fs, wrapW, alignH, alignV,
+                                     wordWrap, richText, fontAtlasKey, f };
+        m_measured = m;
+    }
     // An axis the anchor stretches belongs to the parent — content does not get
     // to resize it, or a label anchored across a side would come out one text
     // width WIDER than the side it is anchored to.
