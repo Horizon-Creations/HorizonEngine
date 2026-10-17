@@ -378,7 +378,8 @@ another bee had all 10 cores busy with `yes` (topic 208).
 - **Not verified:** an editor export of a real project over a v2 pak (the exporter
   tests cover the manifest path, not the old-pak reuse path). The ContentSync publish
   path against a server (it only compiled). HorizonEditor/HorizonGame not built
-  locally. Windows/Linux: CI only.
+  locally. Windows/Linux: CI only. The no-crypto `#else` branch of the v2 mount test
+  never compiles here or in CI (a crypto backend is always present).
 - **Decisions:** option B with a version bump, no new dependency (no XXH3). ContentSync
   stays byte-wise. A v2 package stays readable indefinitely (`k_oldestVersion`); a
   re-export writes v3.
