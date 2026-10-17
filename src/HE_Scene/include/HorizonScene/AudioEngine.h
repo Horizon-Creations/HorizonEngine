@@ -61,8 +61,9 @@ public:
     bool  isMasterMuted() const;
 
     // Voices alive on a bus right now ("" = the ones on master). Finished
-    // voices are still counted until something stops or reaps them; it is what
-    // the mixer shows as activity, not an exact "audible now".
+    // voices are still counted until something stops or reaps them
+    // (reapFinished, once per frame in play); it is what the mixer shows as
+    // activity, not an exact "audible now".
     int   busVoiceCount(const std::string& name) const;
 
     // Bring the engine in line with a project's bus list: create what is
@@ -207,6 +208,16 @@ public:
     void stop(uint64_t handle);
     void stopAll();
     bool isPlaying(uint64_t handle) const;
+
+    // Free every voice that has played to its end — what stop() would do, for
+    // the ones nobody stops: a script's one-shot (audio.play) hands back a
+    // handle that is usually dropped, and each finished voice otherwise keeps
+    // its clip copy and its slot until the session ends. Paused and looping
+    // voices stay. A reaped handle reads as unknown afterwards (isPlaying false,
+    // as before; cursor/length/bus now 0/""), and resumeSound on it no longer
+    // restarts the clip. The play loops call it once per frame (AudioSystem
+    // ::updateSpatial's callers). Returns how many went.
+    size_t reapFinished();
 
     // ─── Transport / live parameters ─────────────────────────────────────────
     // Everything below is a no-op (or 0) for an unknown handle.

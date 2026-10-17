@@ -1071,6 +1071,47 @@ TEST_CASE("AudioEngine: isPaused tells a paused voice from a finished or unknown
     engine.shutdown();
 }
 
+TEST_CASE("AudioEngine: reapFinished frees played-out voices and nothing else (SCN-112)")
+{
+    // A script's audio.play one-shot is never stopped by anyone; before the
+    // reap each one kept its PCM copy and its slot (busVoiceCount) for the rest
+    // of the session.
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto tiny = makeSilence(480, 2);       // 10 ms
+    auto longClip = makeSilence(48000, 2); // 1 s
+    const uint64_t oneShotA = engine.play(tiny, 48000, 2);
+    const uint64_t oneShotB = engine.play(tiny, 48000, 2);
+    const uint64_t paused   = engine.play(tiny, 48000, 2);
+    const uint64_t looping  = engine.play(tiny, 48000, 2, 1.0f, 1.0f, /*loop=*/true);
+    const uint64_t running  = engine.play(longClip, 48000, 2);
+    REQUIRE((oneShotA && oneShotB && paused && looping && running));
+    engine.pauseSound(paused);             // before it could finish: it is waiting
+    REQUIRE(engine.isPaused(paused));
+
+    CHECK(engine.reapFinished() == 0u);    // nothing has ended yet
+    CHECK(engine.busVoiceCount("") == 5);
+
+    std::vector<float> mix(4800 * 2);
+    engine.readMixedFrames(mix.data(), 4800);   // well past the one-shots' end …
+    engine.readMixedFrames(mix.data(), 4800);   // … and the period miniaudio needs to notice
+    REQUIRE(!engine.isPlaying(oneShotA));
+
+    CHECK(engine.reapFinished() == 2u);
+    CHECK(engine.busVoiceCount("") == 3);
+    CHECK(engine.getSoundLengthFrames(oneShotA) == 0u);   // unknown now, as after stop()
+    CHECK(engine.getSoundLengthFrames(oneShotB) == 0u);
+    CHECK(engine.isPaused(paused));                        // kept: resume still has it
+    CHECK(engine.getSoundLengthFrames(paused) == 480u);
+    CHECK(engine.isPlaying(looping));                      // never ends
+    CHECK(engine.isPlaying(running));                      // not there yet
+
+    engine.stop(oneShotA);                  // a late stop on a reaped handle is a no-op
+    CHECK(engine.reapFinished() == 0u);
+    engine.shutdown();
+}
+
 TEST_CASE("AudioEngine: getSoundVolume/getSoundPitch read back what play and the setters left")
 {
     AudioEngine engine;

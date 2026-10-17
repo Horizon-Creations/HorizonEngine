@@ -1016,6 +1016,28 @@ void AudioEngine::stop(uint64_t handle)
     m_impl->sounds.erase(it);
 }
 
+size_t AudioEngine::reapFinished()
+{
+    // at_end and not paused: a paused voice is merely waiting (isPaused), and a
+    // looping one never reaches its end. A voice resumed after its end was
+    // cleared of the flag by ma_sound_start and is playing again, so it stays.
+    // Handles come from m_nextHandle++ and are never reused, so a reaped handle
+    // cannot come to name a later voice — it just turns unknown.
+    size_t reaped = 0;
+    for (auto s = m_impl->sounds.begin(); s != m_impl->sounds.end(); )
+    {
+        ActiveSound& snd = *s->second;
+        if (snd.soundOk && !snd.paused && ma_sound_at_end(&snd.sound) == MA_TRUE)
+        {
+            snd.release();
+            s = m_impl->sounds.erase(s);
+            ++reaped;
+        }
+        else ++s;
+    }
+    return reaped;
+}
+
 void AudioEngine::stopAll()
 {
     for (auto& [handle, snd] : m_impl->sounds)

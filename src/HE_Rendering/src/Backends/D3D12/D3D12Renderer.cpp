@@ -3020,12 +3020,16 @@ struct D3D12RendererImpl
         if (!makeDbgPso(DXGI_FORMAT_R16G16B16A16_FLOAT, debugHdrPso)) return false;
         makeDbgPso(DXGI_FORMAT_R8G8B8A8_UNORM, debugLdrPso);
 
-        // Upload vertex buffer (up to 4096 lines = 8192 vertices × 24 bytes).
-        debugVBuf = createUploadBuffer(static_cast<UINT64>(8192 * 6 * sizeof(float)),
-                                       reinterpret_cast<void**>(&debugVBufPtr));
-        debugCBuf = createUploadBuffer(64, reinterpret_cast<void**>(&debugCBufPtr));
-
-        debugReady = debugRootSig && debugHdrPso && debugVBuf && debugCBuf;
+        // Upload vertex + constant buffer per frame in flight, like perFrameCB and
+        // skyCBuf: with one of each, this frame's lines and matrix were written
+        // while the GPU still drew the previous two frames from them.
+        debugReady = debugRootSig && debugHdrPso;
+        for (UINT f = 0; f < k_frameCount; ++f)
+        {
+            debugVBuf[f] = createUploadBuffer(kDebugLineBytes, reinterpret_cast<void**>(&debugVBufPtr[f]));
+            debugCBuf[f] = createUploadBuffer(64, reinterpret_cast<void**>(&debugCBufPtr[f]));
+            debugReady = debugReady && debugVBuf[f] && debugCBuf[f];
+        }
         return debugReady;
     }
 
@@ -3085,7 +3089,10 @@ struct D3D12RendererImpl
     }
 
     // `hdr` picks the PSO for the bound target (the world preview's is always HDR).
-    void drawDebugLines(ID3D12GraphicsCommandList* cl,
+    // `fi` is the frame slot whose buffers are written — the one waitForFrame
+    // made idle. Recorded once per submission (DrawScene, or the preview between
+    // two full flushes), so one pair per slot is enough.
+    void drawDebugLines(ID3D12GraphicsCommandList* cl, UINT fi,
                         const D3D12_CPU_DESCRIPTOR_HANDLE& dsv,
                         const glm::mat4& viewProj,
                         const std::vector<DebugLine>& lines,
@@ -3095,30 +3102,32 @@ struct D3D12RendererImpl
         auto* pso12 = hdr ? debugHdrPso.Get() : (debugLdrPso ? debugLdrPso.Get() : nullptr);
         if (!pso12) return;
 
-        // Fill vertex buffer.
-        const UINT64 needed = static_cast<UINT64>(lines.size() * 2 * 6 * sizeof(float));
-        if (!debugVBuf || needed > 8192ULL * 6 * sizeof(float)) return;
-        if (debugVBufPtr) {
-            float* v = reinterpret_cast<float*>(debugVBufPtr);
-            for (const DebugLine& l : lines) {
+        // Past the buffer the rest is cut, not the whole set dropped: a scene
+        // with one line too many used to lose every line at once.
+        const size_t lineCount = std::min(lines.size(), kMaxDebugLines);
+        const UINT64 needed    = static_cast<UINT64>(lineCount * kDebugLineVertexBytes * 2);
+        if (debugVBufPtr[fi]) {
+            float* v = reinterpret_cast<float*>(debugVBufPtr[fi]);
+            for (size_t i = 0; i < lineCount; ++i) {
+                const DebugLine& l = lines[i];
                 *v++=l.start.x;*v++=l.start.y;*v++=l.start.z;
                 *v++=l.color.r;*v++=l.color.g;*v++=l.color.b;
                 *v++=l.end.x;  *v++=l.end.y;  *v++=l.end.z;
                 *v++=l.color.r;*v++=l.color.g;*v++=l.color.b;
             }
         }
-        if (debugCBufPtr) std::memcpy(debugCBufPtr, glm::value_ptr(viewProj), 64);
+        if (debugCBufPtr[fi]) std::memcpy(debugCBufPtr[fi], glm::value_ptr(viewProj), 64);
 
         cl->SetGraphicsRootSignature(debugRootSig.Get());
         cl->SetPipelineState(pso12);
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
         D3D12_VERTEX_BUFFER_VIEW vbv{};
-        vbv.BufferLocation = debugVBuf->GetGPUVirtualAddress();
+        vbv.BufferLocation = debugVBuf[fi]->GetGPUVirtualAddress();
         vbv.SizeInBytes    = static_cast<UINT>(needed);
-        vbv.StrideInBytes  = 6 * sizeof(float);
+        vbv.StrideInBytes  = static_cast<UINT>(kDebugLineVertexBytes);
         cl->IASetVertexBuffers(0, 1, &vbv);
-        cl->SetGraphicsRootConstantBufferView(0, debugCBuf->GetGPUVirtualAddress());
-        cl->DrawInstanced(static_cast<UINT>(lines.size() * 2), 1, 0, 0);
+        cl->SetGraphicsRootConstantBufferView(0, debugCBuf[fi]->GetGPUVirtualAddress());
+        cl->DrawInstanced(static_cast<UINT>(lineCount * 2), 1, 0, 0);
     }
 
     // ── World preview (RenderWorldPreview) ──────────────────────────────────
@@ -3765,10 +3774,14 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  debugRootSig;
     ComPtr<ID3D12PipelineState>  debugHdrPso;      // RGBA16F
     ComPtr<ID3D12PipelineState>  debugLdrPso;      // RGBA8
-    ComPtr<ID3D12Resource>       debugVBuf;
-    uint8_t*                     debugVBufPtr = nullptr;
-    ComPtr<ID3D12Resource>       debugCBuf;
-    uint8_t*                     debugCBufPtr = nullptr;
+    // Up to kMaxDebugLines lines (two pos3+rgb3 vertices each), per frame slot.
+    static constexpr size_t      kMaxDebugLines        = 4096;
+    static constexpr size_t      kDebugLineVertexBytes = 6 * sizeof(float);
+    static constexpr UINT64      kDebugLineBytes       = kMaxDebugLines * 2 * kDebugLineVertexBytes;
+    ComPtr<ID3D12Resource>       debugVBuf[k_frameCount];
+    uint8_t*                     debugVBufPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       debugCBuf[k_frameCount];
+    uint8_t*                     debugCBufPtr[k_frameCount]{};
     bool                         debugReady   = false;
     std::vector<DebugLine>       m_debugLines;
     float                        m_wallTime   = 0.0f;
@@ -11695,7 +11708,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             auto dsv12 = p.viewportDsvHeap ?
                 p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart() :
                 p.dsvHandle(0);
-            p.drawDebugLines(cl, dsv12, viewProj, p.m_debugLines, p.usingHDR);
+            p.drawDebugLines(cl, p.frameIndex, dsv12, viewProj, p.m_debugLines, p.usingHDR);
             // Restore scene state for any future draws.
             cl->SetGraphicsRootSignature(p.rootSig.Get());
             p.bindClusterRoots(cl);
@@ -12497,7 +12510,7 @@ void* D3D12Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
             lines.push_back({ { verts[i],     verts[i + 1], verts[i + 2] },
                               { verts[i + 6], verts[i + 7], verts[i + 8] },
                               { verts[i + 3], verts[i + 4], verts[i + 5] } });
-        p.drawDebugLines(cl, dsv, drawVP, lines, /*hdr=*/true);
+        p.drawDebugLines(cl, p.frameIndex, dsv, drawVP, lines, /*hdr=*/true);
     }
 
     // ── Meshes. Albedo SRVs live in sceneSrvHeap (uploaded on first sight

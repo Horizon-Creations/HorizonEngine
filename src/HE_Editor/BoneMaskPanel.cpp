@@ -117,6 +117,10 @@ void jointRow(PanelState& st, const SkeletalMeshAsset& mesh, int index)
 		if (on) setEntry(st.mask, j.name, 1.0f);
 		else    eraseEntry(st.mask, j.name);
 		st.dirty = true;
+		// Re-found rather than kept: the toggle just grew or shifted the vector,
+		// and a pointer into a vector that just changed is the oldest bug in
+		// this codebase.
+		e = on ? entryFor(st.mask, j.name) : nullptr;
 	}
 	ImGui::SameLine();
 	ImGui::TextUnformatted(j.name.c_str());
@@ -126,13 +130,7 @@ void jointRow(PanelState& st, const SkeletalMeshAsset& mesh, int index)
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(110.0f);
 		float w = e->weight;
-		if (ImGui::SliderFloat("Weight", &w, 0.0f, 1.0f, "%.2f"))
-		{
-			// Re-found rather than kept: the slider is drawn after the checkbox
-			// above may have rewritten the vector, and a pointer into a vector
-			// that just grew is the oldest bug in this codebase.
-			if (auto* cur = entryFor(st.mask, j.name)) { cur->weight = w; st.dirty = true; }
-		}
+		if (ImGui::SliderFloat("Weight", &w, 0.0f, 1.0f, "%.2f")) { e->weight = w; st.dirty = true; }
 	}
 
 	ImGui::PopID();

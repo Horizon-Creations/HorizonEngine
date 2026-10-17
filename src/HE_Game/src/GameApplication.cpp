@@ -3246,9 +3246,13 @@ void GameApplication::OnRender(float deltaTime)
 	// Then the cells of a split scene, against the camera where it now stands.
 	if (m_world && !m_appMode) updateCellStreaming(gameDt);
 
-	// Keep the audio listener + spatial sources tracking their entities.
+	// Keep the audio listener + spatial sources tracking their entities, and give
+	// back the voices that played out (script one-shots are never stopped).
 	if (m_world && m_audioEngine.isInitialized())
+	{
 		AudioSystem::updateSpatial(*m_world, m_audioEngine);
+		m_audioEngine.reapFinished();
+	}
 
 	// Live widgets: per-frame logic tick (EventTick). RAW dt on purpose — the
 	// pause menu is a widget, and a menu that stops ticking when the game pauses

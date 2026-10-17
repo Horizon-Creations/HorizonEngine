@@ -3954,11 +3954,13 @@ void EditorApplication::OnRender(float dt)
 			m_playCells->update(*m_editorWorld, gameDt);
 		}
 
-		// Keep spatial audio sources and listener in sync each play-mode frame
+		// Keep spatial audio sources and listener in sync each play-mode frame, and
+		// give back the voices that played out (script one-shots are never stopped).
 		if (m_isPlaying && m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("AudioSpatial");
 			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
+			m_audioEngine.reapFinished();
 		}
 
 		// The weather's sound: rain/wind/snow/storm beds that follow the live weather,
