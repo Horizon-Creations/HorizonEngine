@@ -53,10 +53,20 @@ Option (b), the registry, would miss files added after the last scan.
 - **Verified** (Windows, MSVC Release, `C:/hw213`):
   - `test_contentmanager` passes 89/89.
   - Negative control: the old `ContentManager.cpp` against the new tests fails exactly
-    the 3 new cases (10 + 1 + 2 checks).
+    the 3 new cases (17 assertions: 6 stale paths + 4 refused unloads + 4 still
+    loaded, 1 self-save, 2 pinned). The 201 commit message says "10 checks"; it means
+    the 10 stale-path and refused-unload checks.
   - `test_player_host`, `test_project_exporter` and `test_asset_ref_retarget` are green.
   - `HorizonEditor` builds.
-  - Full `he_tests` run: see the step's result post.
+  - Full `he_tests` run: 5416 cases, 4 failed.
+    - 2 are the `inspector_ui` clipboard cases, which are known baseline.
+    - 2 are `EngineProfiler` cases that depend on run order: `test_profiler.cpp` passes
+      alone (18/18). Not in the baseline note and not compared against the base commit;
+      the CI run will show whether they reproduce.
+  - `saveAsset` callers outside `HE_Editor`: the importers (`ImporterCommon.cpp`
+    310/358) and the `*_gen` tools save through their own temporary `ContentManager`,
+    so the editor's poll still sees a reimport. `HE_Scene` and `HE_Python` have none.
+    No prefab tab saves through `saveAsset`; `pushToPrefab` syncs placements itself.
 - **Not verified:**
   - The editor was not run by hand: GI colours after a Material Editor save, and the
     mesh-tab preview after a slot change.
