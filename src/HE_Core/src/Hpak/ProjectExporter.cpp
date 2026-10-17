@@ -313,7 +313,7 @@ bool readEmbeddedPakKey(const std::filesystem::path& binary, uint8_t outKey[32])
 // cache skips an unchanged asset's whole pipeline (Hpak::CachedEntry), so it cannot
 // notice a change in the CODE that produced the entry; this is how it is told.
 // "Incremental" off in the export dialog is the manual escape hatch.
-static constexpr uint8_t kPackPipelineVersion = 2;
+static constexpr uint8_t kPackPipelineVersion = 3; // 3: hpak v3 hash (manifest hashes changed)
 
 static uint64_t settingsFingerprint(const Hpak::PackSettings& s)
 {

@@ -5,7 +5,7 @@
 #include "ContentSync/SftpCredentials.h"
 
 #include <ContentManager/HAsset.h>
-#include <Hpak/HpakFormat.h> // Hpak::hash64 — same content-hash function incremental packing uses
+#include <Hpak/HpakFormat.h> // Hpak::fnv1a64Bytes — the manifest's change key, see EngineContentManifestEntry
 
 #include <filesystem>
 #include <fstream>
@@ -91,7 +91,7 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 		EngineContentManifestEntry entry;
 		entry.relativePath = rel.generic_string();
 		entry.uuid          = id;
-		entry.contentHash   = Hpak::hash64(bytes.data(), bytes.size());
+		entry.contentHash   = Hpak::fnv1a64Bytes(bytes.data(), bytes.size());
 		entry.size          = bytes.size();
 		local.entries.push_back(std::move(entry));
 	}
@@ -236,7 +236,7 @@ RebuildManifestResult rebuildManifestFromServerBlocking(std::function<void(const
 		EngineContentManifestEntry entry;
 		entry.relativePath = f.relativePath;
 		entry.uuid          = id;
-		entry.contentHash   = Hpak::hash64(bytes.data(), bytes.size());
+		entry.contentHash   = Hpak::fnv1a64Bytes(bytes.data(), bytes.size());
 		entry.size          = bytes.size();
 		manifest.entries.push_back(std::move(entry));
 		++result.hassetEntries;

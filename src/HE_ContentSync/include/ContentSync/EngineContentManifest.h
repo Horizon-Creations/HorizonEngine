@@ -33,8 +33,10 @@ struct EngineContentManifestEntry
 	// (EngineContentPublish::publishEngineContentBlocking), left empty when
 	// discovered by scanning the server directly (rebuildManifestFromServerBlocking).
 	HE::UUID    uuid;
-	// hash64 of the file's bytes (Hpak::hash64 — same function incremental
-	// packing uses) — the change-detection key for .hasset entries. 0 for raw
+	// Hash of the file's bytes (Hpak::fnv1a64Bytes, the byte-wise FNV-1a; NOT
+	// Hpak::hash64, which packages switched to in hpak v3: manifests already on
+	// the server carry this one, and a different function would make every entry
+	// look changed) — the change-detection key for .hasset entries. 0 for raw
 	// entries: computing it would mean downloading every file just to hash it,
 	// which defeats the point of a server-side scan (see RemoteFileInfo). Raw
 	// entries use `mtime` for change detection instead.
