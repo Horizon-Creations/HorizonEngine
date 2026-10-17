@@ -322,3 +322,39 @@ TEST_CASE("D3D11, D3D12 and Vulkan draw a graph-material batch once, with the ma
 		CHECK(src.find("drawMatInstance(t)") != std::string::npos);
 	}
 }
+
+TEST_CASE("D3D12 and Vulkan take every instanced run's slots from a growable arena")
+{
+	// Thema 182 step 4 (plan 2f, the instance budget). Every instanced run of a frame takes
+	// slots of its own (each cascade, SSAO, GI, the scene), and a frame past the fixed
+	// 65536-slot ring used to fall back to one draw per object. On D3D12 that loop shares the
+	// k_maxDraws constant-buffer ring, which the shadow pass used up at 100k foliage plants:
+	// the scene pass then drew nothing, terrain included (RTX 4070). The arena opens a further
+	// chunk instead. Pinned as source: no draw site may test the fixed capacity any more.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - instance arena guard skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::string d3d12 = readFile(dir / "D3D12" / "D3D12Renderer.cpp");
+	const std::string vk    = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
+	REQUIRE(!d3d12.empty());
+	REQUIRE(!vk.empty());
+	for (const std::string* src : { &d3d12, &vk })
+	{
+		INFO((src == &d3d12 ? "D3D12" : "Vulkan"));
+		// drawDepthInstanced + the scene's built-in batch + the graph twin.
+		CHECK(countOf(*src, "allocInstances(") >= 4); // the definition and three callers
+		CHECK(src->find("<= k_maxInstances") == std::string::npos);
+		CHECK(src->find("> k_maxInstances") == std::string::npos);
+		CHECK(src->find("k_instArenaMax") != std::string::npos);
+	}
+	// The slot's ring is reset once per frame through the arena, never by hand.
+	CHECK(d3d12.find("p.beginInstanceFrame(p.frameIndex);") != std::string::npos);
+	CHECK(countOf(vk, "beginInstanceFrame();") == 2); // Render() and DrawViewportFrame()
+	CHECK(vk.find("m_instCursor = 0;") == std::string::npos);
+	// Where the per-object ring still runs out, it says so.
+	CHECK(countOf(d3d12, "p.noteDrawRingFull()") >= 3);
+}

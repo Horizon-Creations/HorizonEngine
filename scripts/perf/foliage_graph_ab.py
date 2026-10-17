@@ -30,6 +30,10 @@ ground near the horizon wobbles by up to 8/255. There, compare the ground with a
 the plant mask exactly:
 
     python scripts/perf/foliage_graph_ab.py --editor C:/hw182/deploy/Editor --rhi D3D12 --ground 100 --tol 8
+    python scripts/perf/foliage_graph_ab.py --editor C:/hw182/deploy/Editor --rhi Vulkan --ground 100 --tol 8 --mask-tol 4
+
+Vulkan's plant mask itself moves by 0-4 pixels between two runs of the SAME mode (measured on the
+RTX 4070, 800 plants), hence --mask-tol there; D3D11 and D3D12 hold 0.
 
 The triangle count ("tris") must match too. --plants changes the field's plant count: D3D12 and
 Vulkan cap graph-material draws at k_matMaxDraws (1024) per frame, so their per-instance LOOP
@@ -151,6 +155,7 @@ def main() -> int:
     ap.add_argument("--ground", type=int, default=0, help="first top-down image row compared (D3D/Vulkan: 100)")
     ap.add_argument("--tol", type=int, default=0, help="per-channel tolerance on the ground (Vulkan: 8)")
     ap.add_argument("--plants", type=int, default=2000, help="plants in the field (HE_DUMP_FOLIAGETEST)")
+    ap.add_argument("--mask-tol", type=int, default=0, help="plant-mask pixels allowed to differ (Vulkan: 4)")
     args = ap.parse_args()
 
     deploy, out = Path(args.editor).resolve(), Path(args.out).resolve()
@@ -170,8 +175,12 @@ def main() -> int:
         oka, da, ta = shoot(deploy, a, keys, args.rhi, cfg, {"HE_GRAPH_INSTANCING": "1"})
         okb, db, tb = shoot(deploy, b, keys, args.rhi, cfg, {"HE_GRAPH_INSTANCING": "0"})
         verdict = compare(a, b, args.ground, args.tol) if oka and okb else "NO IMAGE"
-        mask = f"{mask_moved(a, b)[1]} px" if oka and okb else "-"
-        good = verdict.endswith("identical") and mask == "0 px" and 0 < da < db and ta == tb
+        moved = mask_moved(a, b)[1] if oka and okb else -1
+        mask = f"{moved} px" if moved >= 0 else "-"
+        # The mask tolerance also covers the few ground pixels it moves (same pixels).
+        near = verdict.endswith("identical") or (
+            args.mask_tol > 0 and verdict.split(" ")[0].isdigit() and int(verdict.split(" ")[0]) <= args.mask_tol)
+        good = near and 0 <= moved <= args.mask_tol and 0 < da < db and ta == tb
         ok &= good
         print(f"{n:4} {verdict:22} {mask:12} {da}/{db}  {ta}/{tb}   [{desc}]{'' if good else '  <-- FAILED'}")
 

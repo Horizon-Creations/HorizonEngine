@@ -386,8 +386,30 @@ private:
 	// local: the shadow pass, runGi and runSSAO record their instanced depth
 	// draws into the SAME command buffer before the geometry pass, and the GPU
 	// reads every slot only at submit — so each pass takes slots of its own.
-	// Reset at the top of Render() and DrawViewportFrame().
+	// Reset at the top of Render() and DrawViewportFrame() (beginInstanceFrame).
+	// Counts slots of the CURRENT chunk (m_instCur), see the arena below.
 	uint32_t              m_instCursor = 0;
+	// Instance arena (Thema 182, plan 2f). Every instanced run of a frame takes its own
+	// slots (each shadow cascade, the SSAO/GI pre-passes, the scene), so foliage asks for
+	// several times its visible count; past k_maxInstances every run fell back to one
+	// draw per object (complete, but 56k draws at 100k plants). A full chunk now opens a
+	// further one, twice as large; the next frame's beginInstanceFrame replaces the
+	// slot's main buffer by one of the summed size. Overflow chunks and replaced main
+	// buffers age out in m_instRetired (swept at the top of Render(), like
+	// m_retiredViewports). Bounded by k_instArenaMax instances per frame.
+	struct RetiredInstBuf { InstanceBuf b; int frames; };
+	std::vector<RetiredInstBuf> m_instRetired;
+	uint32_t              m_instMainCap[2] = {};  // m_instanceBuf[slot] size, in instances
+	InstanceBuf           m_instCur{};            // the chunk being filled (main or overflow)
+	uint32_t              m_instCurCap   = 0;
+	uint32_t              m_instFrameCap = 0;     // instances in every chunk of this frame
+	uint32_t              m_instWant     = 0;     // an overflowing frame's total; 0 = none
+	bool                  m_instArenaWarned = false;
+	static constexpr uint32_t k_instArenaMax = 1u << 20; // 128 MiB of {mvp, model} per frame
+	bool createInstanceBuf(uint32_t instances, InstanceBuf& out);
+	void destroyInstanceBuf(InstanceBuf& b);
+	void beginInstanceFrame();
+	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
 	// G-buffer); the shadow layers keep m_shadowBatches.
 	RenderSorter::DepthBatchList m_preBatches;

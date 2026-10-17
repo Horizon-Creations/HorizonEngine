@@ -423,7 +423,7 @@ void VulkanRenderer::Render()
     m_ssrRanThisFrame  = false;  // cleared each frame; set true only by RenderForwardSSR()
     m_ssrResultView    = VK_NULL_HANDLE;
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
-    m_instCursor = 0; // this frame's instance-buffer slots start from the top
+    beginInstanceFrame(); // this frame's instance-buffer slots start from the top
     m_sceneMatCursor = 0; m_sceneMatOffset = 0; // ...and its built-in material-ring slots
 
     // This frame's sun, once, before the first extraction. The cascades, the
@@ -449,6 +449,16 @@ void VulkanRenderer::Render()
             if (it->img)  vkDestroyImage    (m_device, it->img,  nullptr);
             if (it->mem)  vkFreeMemory       (m_device, it->mem,  nullptr);
             it = m_retiredViewports.erase(it);
+        }
+        else ++it;
+    }
+    // The instance arena's overflow chunks and replaced buffers, the same way.
+    for (auto it = m_instRetired.begin(); it != m_instRetired.end(); )
+    {
+        if (--it->frames <= 0)
+        {
+            destroyInstanceBuf(it->b);
+            it = m_instRetired.erase(it);
         }
         else ++it;
     }
@@ -710,10 +720,10 @@ void VulkanRenderer::Render()
 void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
     // The shadow, GI and SSAO depth passes and the geometry pass below all take
-    // instance-buffer slots from this frame's m_instCursor. Reset here too, not
+    // instance-buffer slots from this frame's arena (beginInstanceFrame). Reset here too, not
     // only in Render(): RenderSceneImage records this frame on its own. Same for
     // the built-in material ring (m_sceneMatBuf) the geometry pass fills.
-    m_instCursor = 0;
+    beginInstanceFrame();
     m_sceneMatCursor = 0;
     m_sceneMatOffset = 0;
 
@@ -2383,21 +2393,13 @@ void VulkanRenderer::createScenePipeline()
     }
 
     // A3: per-frame instance-transform vertex buffer (host-visible + mapped), used by
-    // the instanced scene pipeline at binding 1.
+    // the instanced scene pipeline at binding 1. The main chunk of the instance arena.
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
-        VkBufferCreateInfo ibci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        ibci.size  = static_cast<VkDeviceSize>(k_maxInstances) * k_instStride;
-        ibci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        vkCheck(vkCreateBuffer(m_device, &ibci, nullptr, &m_instanceBuf[i].buf), "instance buffer");
-        VkMemoryRequirements ireq{}; vkGetBufferMemoryRequirements(m_device, m_instanceBuf[i].buf, &ireq);
-        VkMemoryAllocateInfo imai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        imai.allocationSize  = ireq.size;
-        imai.memoryTypeIndex = findMemoryType(ireq.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vkCheck(vkAllocateMemory(m_device, &imai, nullptr, &m_instanceBuf[i].mem), "instance memory");
-        vkBindBufferMemory(m_device, m_instanceBuf[i].buf, m_instanceBuf[i].mem, 0);
-        vkMapMemory(m_device, m_instanceBuf[i].mem, 0, ibci.size, 0, &m_instanceBuf[i].mapped);
+        if (createInstanceBuf(k_maxInstances, m_instanceBuf[i]))
+            m_instMainCap[i] = k_maxInstances;
+        else
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instance buffer failed — instanced batches draw per object");
     }
 
     VkShaderModule vs = loadShaderModule("scene.vert.spv");
@@ -2617,10 +2619,14 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_frameUBO[i].buf) vkDestroyBuffer(m_device, m_frameUBO[i].buf, nullptr);
         if (m_frameUBO[i].mem) vkFreeMemory   (m_device, m_frameUBO[i].mem, nullptr);
         m_frameUBO[i] = {};
-        if (m_instanceBuf[i].mem)    vkUnmapMemory(m_device, m_instanceBuf[i].mem);
-        if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
-        if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
-        m_instanceBuf[i] = {};
+        destroyInstanceBuf(m_instanceBuf[i]);
+        m_instMainCap[i] = 0;
+        if (i == 0) // the arena's overflow chunks and replaced buffers (m_instCur only borrows)
+        {
+            for (RetiredInstBuf& r : m_instRetired) destroyInstanceBuf(r.b);
+            m_instRetired.clear();
+            m_instCur = {};
+        }
         if (m_sceneMatBuf[i].mapped) vkUnmapMemory(m_device, m_sceneMatBuf[i].mem);
         if (m_sceneMatBuf[i].buf)    vkDestroyBuffer(m_device, m_sceneMatBuf[i].buf, nullptr);
         if (m_sceneMatBuf[i].mem)    vkFreeMemory   (m_device, m_sceneMatBuf[i].mem, nullptr);
@@ -6859,33 +6865,130 @@ uint64_t VulkanRenderer::GetCompletedFrameSerial()
     return m_completedSerial;
 }
 
+// One host-visible, host-coherent, persistently mapped vertex buffer of `instances`
+// {mvp, model} slots: a chunk of the instance arena (binding 1 of every instanced pipeline).
+bool VulkanRenderer::createInstanceBuf(uint32_t instances, InstanceBuf& out)
+{
+    out = {};
+    VkBufferCreateInfo ibci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    ibci.size  = static_cast<VkDeviceSize>(instances) * k_instStride;
+    ibci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (vkCreateBuffer(m_device, &ibci, nullptr, &out.buf) != VK_SUCCESS) { out = {}; return false; }
+    VkMemoryRequirements ireq{}; vkGetBufferMemoryRequirements(m_device, out.buf, &ireq);
+    VkMemoryAllocateInfo imai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imai.allocationSize  = ireq.size;
+    imai.memoryTypeIndex = findMemoryType(ireq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(m_device, &imai, nullptr, &out.mem) != VK_SUCCESS
+        || vkBindBufferMemory(m_device, out.buf, out.mem, 0) != VK_SUCCESS
+        || vkMapMemory(m_device, out.mem, 0, ibci.size, 0, &out.mapped) != VK_SUCCESS)
+    {
+        destroyInstanceBuf(out);
+        return false;
+    }
+    return true;
+}
+
+void VulkanRenderer::destroyInstanceBuf(InstanceBuf& b)
+{
+    if (b.mapped) vkUnmapMemory(m_device, b.mem);
+    if (b.buf)    vkDestroyBuffer(m_device, b.buf, nullptr);
+    if (b.mem)    vkFreeMemory   (m_device, b.mem, nullptr);
+    b = {};
+}
+
+// Where a frame's instance slots start (Render() and DrawViewportFrame()): the main
+// buffer of m_currentFrame, which an overflowing frame before has replaced by one of
+// the size that frame needed. The replaced buffer may still be read by its last
+// frame — it ages out in m_instRetired like every overflow chunk.
+void VulkanRenderer::beginInstanceFrame()
+{
+    InstanceBuf& main = m_instanceBuf[m_currentFrame];
+    uint32_t&    cap  = m_instMainCap[m_currentFrame];
+    if (m_instWant > cap && main.buf)
+    {
+        uint32_t want = cap;
+        while (want < m_instWant && want < k_instArenaMax) want *= 2;
+        InstanceBuf grown;
+        if (createInstanceBuf(want, grown))
+        {
+            HE_LOG_INFO(RHI, "VulkanRenderer: instance buffer of frame slot %u grows from %u to %u instances",
+                        m_currentFrame, cap, want);
+            m_instRetired.push_back({ main, static_cast<int>(k_maxFramesInFlight) + 1 });
+            main = grown;
+            cap  = want;
+        }
+        // Each slot grows on its own next use; the want stays until both have.
+        bool all = true;
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i) all &= m_instMainCap[i] >= m_instWant;
+        if (all) m_instWant = 0;
+    }
+    m_instCursor   = 0;
+    m_instCur      = main;
+    m_instCurCap   = main.mapped ? cap : 0;
+    m_instFrameCap = m_instCurCap;
+}
+
+// `count` consecutive {mvp, model} slots of this frame: the buffer to bind at binding 1,
+// the byte offset, and where the CPU writes them. false = no arena, or the frame would
+// pass k_instArenaMax: the caller draws per object.
+bool VulkanRenderer::allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu)
+{
+    if (!m_instCur.mapped || count == 0) return false;
+    if (static_cast<uint64_t>(m_instCursor) + count > m_instCurCap)
+    {
+        uint32_t cap = std::max(m_instCurCap, 1024u) * 2;
+        while (cap < count) cap *= 2;
+        InstanceBuf chunk;
+        if (static_cast<uint64_t>(m_instFrameCap) + cap > k_instArenaMax || !createInstanceBuf(cap, chunk))
+        {
+            if (!m_instArenaWarned)
+            {
+                m_instArenaWarned = true;
+                HE_LOG_WARN(RHI, "VulkanRenderer: instance arena full (%u instances in this frame, "
+                            "%u more asked) — the rest draws per object", m_instFrameCap, count);
+            }
+            return false;
+        }
+        // In use from now until this frame retired: ages out like a replaced main buffer.
+        m_instRetired.push_back({ chunk, static_cast<int>(k_maxFramesInFlight) + 1 });
+        m_instCur      = chunk;
+        m_instCurCap   = cap;
+        m_instCursor   = 0;
+        m_instFrameCap += cap;
+        m_instWant     = std::max(m_instWant, m_instFrameCap);
+    }
+    buf    = m_instCur.buf;
+    offset = static_cast<VkDeviceSize>(m_instCursor) * k_instStride;
+    cpu    = static_cast<uint8_t*>(m_instCur.mapped) + offset;
+    m_instCursor += count;
+    return true;
+}
+
 // The Vulkan twin of D3D11/D3D12's drawDepthInstanced: every caller writes the
 // products its per-object loop pushes as constants, so the instanced frame is
 // the loop's frame. The buffer is host-coherent and read at submit, which is
-// why the slots come from the frame-wide m_instCursor and never get reused
-// inside one frame.
+// why the slots come from the frame's arena (allocInstances) and never get
+// reused inside one frame.
 template <class Fill>
 bool VulkanRenderer::drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
                                         uint32_t indexCount, uint32_t count, Fill&& fill)
 {
     static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
-    InstanceBuf& ib = m_instanceBuf[m_currentFrame];
-    if (!instPipe || !ib.mapped || count < 2 || !RenderSorter::depthInstancingEnabled()
-        || static_cast<uint64_t>(m_instCursor) + count > k_maxInstances)
+    VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize off = 0; uint8_t* dst = nullptr;
+    if (!instPipe || count < 2 || !RenderSorter::depthInstancingEnabled()
+        || !allocInstances(count, ibuf, off, dst))
         return false;
-    auto* dst = static_cast<uint8_t*>(ib.mapped) + static_cast<size_t>(m_instCursor) * k_instStride;
     for (uint32_t k = 0; k < count; ++k)
     {
         glm::mat4 pair[2];
         fill(k, pair);
         std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
     }
-    const VkDeviceSize off = static_cast<VkDeviceSize>(m_instCursor) * k_instStride;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
-    vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &off);
+    vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &off);
     vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, 0);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, restorePipe);
-    m_instCursor += count;
     return true;
 }
 
@@ -8236,13 +8339,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         RenderSorter::sortBackToFront(transparentDCs, camPos);
 
         // A3: real instancing applies to the opaque pass only (transparent keeps the
-        // per-instance loop for blend + depth sort). instCursor sub-allocates the
-        // per-frame instance buffer across the frame's instanced batches — the
-        // frame-wide cursor, because the instanced depth draws of the shadow
-        // pass, runGi and runSSAO already hold the slots below it and the GPU
-        // reads all of them only at submit.
+        // per-instance loop for blend + depth sort). allocInstances sub-allocates the
+        // frame's instance arena across the frame's instanced batches — frame-wide,
+        // because the instanced depth draws of the shadow pass, runGi and runSSAO
+        // already hold the slots below and the GPU reads all of them only at submit.
         bool allowInstancing = true;
-        uint32_t& instCursor = m_instCursor;
         // A4: the scene pipeline the CURRENT pass expects bound on entry to drawDCVk. A
         // graph-material draw binds its own per-material pipeline, so it restores THIS after
         // itself — otherwise the next built-in draw would inherit the material pipeline.
@@ -8302,7 +8403,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
                     // build failed) sends it back to the per-instance loop.
                     const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
-                                       && m_instanceBuf[m_currentFrame].mapped
+                                       && m_instCur.mapped
                                        && RenderSorter::graphInstancingEnabled();
                     VkPipeline matInstPipe = VK_NULL_HANDLE;
                     if (gbufferPass)
@@ -8622,27 +8723,22 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             m_statTris += range.count / 3;
                         };
                         const uint32_t instCount = static_cast<uint32_t>(dc.instanceTransforms.size());
-                        if (matInstPipe != VK_NULL_HANDLE
-                            && static_cast<uint64_t>(instCursor) + instCount <= k_maxInstances)
+                        VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize instOff = 0; uint8_t* dst = nullptr;
+                        if (matInstPipe != VK_NULL_HANDLE && allocInstances(instCount, ibuf, instOff, dst))
                         {
                             // The batch: every model into the model half of its slot in the
-                            // frame's instance buffer, ONE U slot + descriptor set with the
+                            // frame's instance arena, ONE U slot + descriptor set with the
                             // batch-constant half (U.mvp = viewProj, the twin multiplies the
                             // model in), one instanced draw.
                             if (bindMatSlot(matInstPipe, viewProj, glm::mat4(1.0f)))
                             {
-                                InstanceBuf& ib = m_instanceBuf[m_currentFrame];
-                                auto* dst = static_cast<uint8_t*>(ib.mapped)
-                                          + static_cast<size_t>(instCursor) * k_instStride;
                                 for (uint32_t k = 0; k < instCount; ++k)
                                     std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
                                                 &dc.instanceTransforms[k], sizeof(glm::mat4));
-                                const VkDeviceSize instOff = static_cast<VkDeviceSize>(instCursor) * k_instStride;
-                                vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &instOff);
+                                vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &instOff);
                                 vkCmdDrawIndexed(cmd, range.count, instCount, range.start, 0, 0);
                                 ++m_statDraws;
                                 m_statTris += (range.count / 3) * instCount;
-                                instCursor += instCount;
                             }
                         }
                         else if (!dc.instanceTransforms.empty())
@@ -8729,28 +8825,24 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 // instance's {mvp,model}, bind the instanced pipeline + binding 1, ONE draw.
                 static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
                 const uint32_t count = static_cast<uint32_t>(dc.instanceTransforms.size());
-                InstanceBuf& ib = m_instanceBuf[m_currentFrame];
                 // Match the instanced pipeline to the active scene target (= what the
                 // non-instanced bind resolves to). Null → fits=false → per-instance fallback
                 // (never bind an LDR pipeline to the HDR render pass).
                 VkPipeline instPipe = gbufferPass ? m_gbufInstancedPipeline      // 4 targets (Thema 150)
                                     : (hdr && m_scenePipelineHDR)
                                     ? m_sceneInstancedPipelineHDR : m_sceneInstancedPipeline;
-                const bool fits = allowInstancing && instPipe && ib.mapped
-                                  && (static_cast<uint64_t>(instCursor) + count) <= k_maxInstances;
+                VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize instOff = 0; uint8_t* dst = nullptr;
+                const bool fits = allowInstancing && instPipe && allocInstances(count, ibuf, instOff, dst);
                 if (fits)
                 {
-                    auto* dst = static_cast<uint8_t*>(ib.mapped)
-                              + static_cast<size_t>(instCursor) * k_instStride;
                     for (uint32_t k = 0; k < count; ++k)
                     {
                         const glm::mat4& t = dc.instanceTransforms[k];
                         const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major)
                         std::memcpy(dst + static_cast<size_t>(k) * k_instStride, xf, sizeof(xf));
                     }
-                    const VkDeviceSize instOff = static_cast<VkDeviceSize>(instCursor) * k_instStride;
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
-                    vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &instOff);
+                    vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &instOff);
                     vkCmdDrawIndexed(cmd, range.count, count, range.start, 0, 0);
                     // Restore the pass's non-instanced pipeline for subsequent draws
                     // (instancing runs in the opaque and G-buffer passes only —
@@ -8758,7 +8850,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
                     ++m_statDraws;
                     m_statTris += (range.count / 3) * count;
-                    instCursor += count;
                 }
                 else
                 {
