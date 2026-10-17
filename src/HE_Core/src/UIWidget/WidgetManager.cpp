@@ -4,6 +4,7 @@
 #include <ContentManager/Assets.h>
 #include <Renderer/UIFont.h>
 #include <UIWidget/UIShortcut.h>  // a menu entry's chord, parsed out of its text
+#include <UIWidget/UILayoutScope.h>  // one layout pass per widget in extract and the hit test
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <cmath>      // std::abs — the border stamp compares rects
@@ -2966,13 +2967,19 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		const float sx = canvas.scaleX;
 		const float sy = canvas.scaleY;
+		// The scan only reads (UILayoutScope.h), so every rect and inherited
+		// state is solved once for this widget rather than once per question.
+		HE::UILayoutScope layout(w.tree, &canvas);
+		layout.memoizeValues();
 		for (const auto& ep : w.tree.elements)
 		{
 			const HE::UIElement& e = *ep;
-			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
 			// hitTestable false = transparent to the pointer: the only way
-			// out of the stack.
+			// out of the stack. Asked first because it is one field — the
+			// tests below are a conjunction, so their order changes nothing
+			// but the cost (CORE-702).
 			if (!e.hitTestable) continue;
+			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
 			// Disabled is inert, all the way down: a greyed-out button that
 			// still hovers and clicks is the classic UI lie.
 			if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
@@ -3092,6 +3099,8 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 		if (!w.visible || !takesInput(w.id) || w.windowId != m_pointerWindow) continue;
 		const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 		const float sx = canvas.scaleX, sy = canvas.scaleY;
+		HE::UILayoutScope layout(w.tree, &canvas);
+		layout.memoizeValues();
 		for (const auto& ep : w.tree.elements)
 		{
 			const HE::UIElement& e = *ep;
@@ -6151,6 +6160,11 @@ void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
 		const float sx = canvas.scaleX;
 		const float sy = canvas.scaleY;
 
+		// One layout pass for this widget this frame (UILayoutScope.h). Opened
+		// after syncLists, the last thing that adds or moves elements; from here
+		// on every id lookup and child index comes from its tables.
+		HE::UILayoutScope layout(w.tree, &canvas);
+
 		// Auto-sizing elements fit themselves BEFORE the rects are resolved, so a
 		// text/font change made this frame (script, HorizonCode Set Property) is
 		// already reflected in the layout below.
@@ -6158,10 +6172,14 @@ void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
 		// Scroll boxes measure their content after auto-size (a text that grew
 		// changes it) and before any rect is asked for.
 		HE::uiUpdateScrollExtents(w.tree);
+		// The last write to the tree this frame. From here the draw only reads,
+		// so each rect, visibility and opacity is solved once and remembered.
+		layout.memoizeValues();
 
 		// Draw elements of this widget, painter-ordered by (layer, depth).
 		struct Item { const HE::UIElement* e; int key; HE::UIWidgetRect r; };
 		std::vector<Item> items;
+		items.reserve(w.tree.elements.size());
 		for (const auto& ep : w.tree.elements)
 		{
 			const HE::UIElement& e = *ep;

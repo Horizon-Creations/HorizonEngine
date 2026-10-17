@@ -153,15 +153,9 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 // ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
 HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
-	std::ifstream f(path, std::ios::binary);
-	if (!f.is_open()) return HE::AssetType::Unknown;
-
-	HAsset::FileHeader hdr{};
-	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-	if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0)
-		return HE::AssetType::Unknown;
-
-	return static_cast<HE::AssetType>(hdr.asset_type);
+	uint16_t type = 0;
+	return HAsset::readAssetTypeFromFile(path, type) ? static_cast<HE::AssetType>(type)
+	                                                 : HE::AssetType::Unknown;
 }
 
 // ─── parseAndRegisterAsset ────────────────────────────────────────────────────
@@ -2313,6 +2307,19 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
 	noteContentChanged();   // may be the file somebody looked for and did not find
 
+	// What was just written IS the loaded copy, so pollHotReload must not take it
+	// for an outside edit: that unloaded, re-parsed and re-invalidated the asset
+	// after every save (CORE-204). Stat the file the poll stats, which for an
+	// "Engine/" path is not always the one written (resolveAbsolutePath vs
+	// resolveSavePath). Only paths the poll already watches: a freshly created
+	// asset was never watched, and starting now would change what it reloads.
+	if (auto watched = m_pathMtime.find(asset.path); watched != m_pathMtime.end())
+	{
+		std::error_code ec;
+		const auto mtime = std::filesystem::last_write_time(resolveAbsolutePath(asset.path), ec);
+		if (!ec) watched->second = mtime;
+	}
+
 	// Tell whoever is listening that this asset's bytes changed. Fired only on a
 	// successful write, so a collaboration session never publishes a save that
 	// did not happen. ContentManager itself stays unaware of who listens.
@@ -2714,33 +2721,18 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return false;
 	const SlotHandle handle = it->second;
 
-	// Remove from whichever map actually holds *this* asset. The id check guards
-	// against the same SlotHandle being valid in another map (see lookupAsset).
-	auto tryRemove = [&](auto& map) -> bool
+	// Remove from whichever pool actually holds *this* asset. The id check guards
+	// against the same SlotHandle being valid in another pool (see lookupAsset).
+	// A pool anyPool does not visit would make unloadAsset() return false for its
+	// type, which silently disables hot reload (pollHotReload unloads-then-reloads)
+	// and leaks the slot on manual delete — hence the single list in the header.
+	const bool removed = anyPool([&](auto& pool) -> bool
 	{
-		auto* a = map.get(handle);
+		auto* a = pool.get(handle);
 		if (!a || !(a->id == id)) return false;
-		map.remove(handle);
+		pool.remove(handle);
 		return true;
-	};
-
-	// This chain MUST list every SlotMap member of the class. A type missing here
-	// makes unloadAsset() return false for it, which silently disables hot reload
-	// (pollHotReload unloads-then-reloads) and leaks the slot on manual delete —
-	// exactly what happened to InputAction/InputMappingContext/ParticleGraph/
-	// AnimatorStateMachine after those maps were added.
-	const bool removed =
-		tryRemove(m_staticMeshAssets)   || tryRemove(m_skeletalMeshAssets) ||
-		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
-		tryRemove(m_sceneAssets)        || tryRemove(m_scriptAssets)       ||
-		tryRemove(m_audioAssets)        || tryRemove(m_fontAssets)         ||
-		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets) ||
-		tryRemove(m_propAnimClipAssets) || tryRemove(m_materialFunctionAssets) ||
-		tryRemove(m_widgetAssets)       || tryRemove(m_hcClassAssets)     ||
-		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
-		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
-		tryRemove(m_animatorStateMachineAssets) || tryRemove(m_boneMaskAssets) ||
-		tryRemove(m_blendSpaceAssets)   || tryRemove(m_sequenceAssets);
+	});
 	if (!removed)
 		return false;
 
@@ -2823,9 +2815,12 @@ std::vector<HE::UUID> ContentManager::discoverAssets(HE::AssetType type)
 	{
 		if (ec) break;
 		if (!it->is_regular_file(ec) || it->path().extension() != ".hasset") continue;
-		HAsset::Reader r;
-		if (!r.open(it->path().string()) ||
-		    r.assetType() != static_cast<uint16_t>(type)) continue;
+		// The 32-byte header, not Reader::open(): that pulls every chunk payload
+		// into memory, and this walk runs over the whole tree several times per
+		// play start (PlayerHost, TypeRegistry) only to throw most files away.
+		uint16_t fileType = 0;
+		if (!HAsset::readAssetTypeFromFile(it->path().string(), fileType) ||
+		    fileType != static_cast<uint16_t>(type)) continue;
 		const std::string rel =
 			std::filesystem::relative(it->path(), root, ec).generic_string();
 		const HE::UUID id = loadAsset(rel);
@@ -2871,7 +2866,17 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 		// File changed — unload old entry (removes from m_pathMtime) then reload.
 		auto pathIt = m_pathToUUID.find(relPath);
 		if (pathIt == m_pathToUUID.end()) continue;
-		unloadAsset(pathIt->second);
+		if (!unloadAsset(pathIt->second))
+		{
+			// Pinned by a live AssetRef: the old copy has to stay. loadAsset would
+			// only hand that copy back (the path is still loaded), and without the
+			// new mtime every later poll would report the same file again. Take
+			// the change as seen; a later edit of the file is picked up as usual.
+			HE_LOG_INFO(Asset, "Hot reload: '%s' changed on disk but is in use — kept the loaded copy",
+			            relPath.c_str());
+			storedIt->second = mtime;
+			continue;
+		}
 
 		const HE::UUID newId = loadAsset(relPath); // re-records mtime
 		if (!(newId == HE::UUID{}))
@@ -3027,21 +3032,10 @@ void ContentManager::retargetAssetReferencesInMemory(const std::string& oldRel,
 
 	// …and the `path` an already-loaded asset carries, which is where saveAsset()
 	// writes it back to.
-	auto rekeyAssetPaths = [&](auto& slotMap)
+	forEachPool([&](auto& pool)
 	{
-		for (auto& asset : slotMap) HE::AssetRefs::retargetValue(asset.path, rules);
-	};
-	rekeyAssetPaths(m_staticMeshAssets);   rekeyAssetPaths(m_skeletalMeshAssets);
-	rekeyAssetPaths(m_textureAssets);      rekeyAssetPaths(m_materialAssets);
-	rekeyAssetPaths(m_sceneAssets);        rekeyAssetPaths(m_scriptAssets);
-	rekeyAssetPaths(m_materialFunctionAssets); rekeyAssetPaths(m_widgetAssets);
-	rekeyAssetPaths(m_hcClassAssets);      rekeyAssetPaths(m_inputActionAssets);
-	rekeyAssetPaths(m_inputMappingAssets); rekeyAssetPaths(m_particleGraphAssets);
-	rekeyAssetPaths(m_animatorStateMachineAssets);
-	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
-	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
-	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
-	rekeyAssetPaths(m_sequenceAssets);
+		for (auto& asset : pool) HE::AssetRefs::retargetValue(asset.path, rules);
+	});
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────
@@ -3279,19 +3273,7 @@ void ContentManager::setContentRoot(std::string root)
 void ContentManager::forgetProjectContent()
 {
 	// Every pool, because the DATA is the old project's.
-	m_staticMeshAssets.clear();       m_skeletalMeshAssets.clear();
-	m_textureAssets.clear();          m_materialAssets.clear();
-	m_sceneAssets.clear();            m_scriptAssets.clear();
-	m_materialFunctionAssets.clear(); m_widgetAssets.clear();
-	m_hcClassAssets.clear();          m_inputActionAssets.clear();
-	m_inputMappingAssets.clear();     m_particleGraphAssets.clear();
-	m_animatorStateMachineAssets.clear();
-	m_audioAssets.clear();            m_fontAssets.clear();
-	m_shaderAssets.clear();           m_prefabAssets.clear();
-	m_animClipAssets.clear();         m_propAnimClipAssets.clear();
-	m_sequenceAssets.clear();
-	m_structTypeAssets.clear();      m_enumTypeAssets.clear();
-	m_saveTemplateAssets.clear();
+	forEachPool([](auto& pool) { pool.clear(); });
 
 	// …and every index that pointed into them. m_pathToUUID is the one that
 	// caused the bug; the rest would merely answer about assets that no longer

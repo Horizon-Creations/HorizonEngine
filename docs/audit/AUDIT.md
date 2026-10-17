@@ -83,7 +83,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] Sichtbare Defekte: EDT-604 (`##wx` in Referenztiteln), EDT-1718 (Gedankenstrich doppelt kodiert), EDT-307 (Collab-Reload nie wirksam)
 
 **Stufe 1 – Core-Fundamente (beeinflussen alles darüber)**
-- [ ] CORE-201 `forEachPool`; CORE-202 Typ-Header statt Volllesen; CORE-204 `m_pathMtime` nach Save
+- [x] CORE-201 `forEachPool`; CORE-202 Typ-Header statt Volllesen; CORE-204 `m_pathMtime` nach Save (`docs/audit-core-fundamente-2026-10-17.md`)
 - [ ] UIWidgetTree: `id→index` + Kinder-Index (M2), danach CORE-601/602/701–703 (ein Layoutpass)
 - [ ] CORE-302 `coerce(const Value&)` (Einzeiler), CORE-401/402/303 Context-/Index-/Klassen-Cache (mit Messung)
 - [ ] CORE-403 Hash: wortweise FNV mit Versions-Bump und Reader für alte Version (HAsset.h-Regel beachten)

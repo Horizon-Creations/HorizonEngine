@@ -3569,7 +3569,14 @@ namespace
 // yields the target's zero. Coercing INTO Enum/Struct never invents a typeName —
 // wiring already type-checked the definition, so a same-type value passes
 // through above and a mismatch degrades to a typed empty value.
-Value coerce(Value v, PinType want)
+//
+// Two overloads, one rule (CORE-302). A Value is some 280 bytes with three
+// strings and two vectors in it, and the by-value form copied every lvalue it
+// was handed (a pin default, the event argument, an array element) even when
+// the copy was converted into something else straight away. Now an lvalue is
+// read in place and copied only when it passes through unchanged, and an
+// rvalue (every evalInput result) is moved through once instead of twice.
+Value coerce(const Value& v, PinType want)
 {
     if (v.isArray) return v;   // arrays are never scalar-coerced (pass through whole)
     if (v.type == want) return v;
@@ -3613,6 +3620,11 @@ Value coerce(Value v, PinType want)
         default: break;
     }
     return r;
+}
+Value coerce(Value&& v, PinType want)
+{
+    if (v.isArray || v.type == want) return std::move(v);
+    return coerce(static_cast<const Value&>(v), want);
 }
 
 // The short type word the Pull on Construct sentences use ("Float", "Int[]").
@@ -3759,7 +3771,10 @@ std::string extractFailureText(ExtractFailure why, const std::string& member,
     return {};
 }
 
-Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
+Runner::Runner(const Graph& graph, Context ctx)
+    : m_graph(graph), m_ctxHold(std::make_shared<const Context>(std::move(ctx))), m_ctx(*m_ctxHold) {}
+Runner::Runner(const Graph& graph, std::shared_ptr<const Context> ctx)
+    : m_graph(graph), m_ctxHold(std::move(ctx)), m_ctx(*m_ctxHold) {}
 
 CallFrame* Runner::frameFor(int fnEntryId)
 {

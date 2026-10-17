@@ -514,6 +514,86 @@ TEST_CASE("ContentManager unload works for every asset type it can load")
 	CHECK_FALSE(cm.unloadAsset(actionId));
 }
 
+// CORE-201: the pools used to be listed by hand three times, and each copy
+// missed different types. unloadAsset knew no struct/enum/save-template/theme
+// (false, so pollHotReload could never replace them) and the in-memory half of
+// a rename left struct/enum/save-template/theme/bone-mask/blend-space with
+// their old `path`, so a later saveAsset wrote to the vacated location. Both
+// now walk ContentManager::anyPool; these are the types that were missing.
+TEST_CASE("ContentManager unload and rename reach the late-added asset pools")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	struct Probe { HE::AssetType type; const char* stem; };
+	// Struct/enum JSON stays empty on purpose: a parsable one would be mirrored
+	// into the process-wide TypeRegistry and outlive this test.
+	const Probe probes[] = {
+		{ HE::AssetType::StructType,       "ST_Probe" },
+		{ HE::AssetType::EnumType,         "E_Probe" },
+		{ HE::AssetType::SaveGameTemplate, "SG_Probe" },
+		{ HE::AssetType::Theme,            "TH_Probe" },
+		{ HE::AssetType::BoneMask,         "BM_Probe" },
+		{ HE::AssetType::BlendSpace,       "BS_Probe" },
+	};
+	auto save = [&](auto asset, const Probe& p)
+	{
+		asset.type = p.type;
+		asset.name = p.stem;
+		asset.path = std::string("Old/") + p.stem + ".hasset";
+		if (p.type != HE::AssetType::StructType && p.type != HE::AssetType::EnumType)
+			asset.json = "{}";
+		return cm.saveAsset(asset);
+	};
+	fs::create_directories(dir.path / "Old");
+	REQUIRE(save(StructTypeAsset{},       probes[0]));
+	REQUIRE(save(EnumTypeAsset{},         probes[1]));
+	REQUIRE(save(SaveGameTemplateAsset{}, probes[2]));
+	REQUIRE(save(ThemeAsset{},            probes[3]));
+	REQUIRE(save(BoneMaskAsset{},         probes[4]));
+	REQUIRE(save(BlendSpaceAsset{},       probes[5]));
+
+	std::vector<HE::UUID> ids;
+	for (const Probe& p : probes)
+	{
+		const HE::UUID id = cm.loadAsset(std::string("Old/") + p.stem + ".hasset");
+		REQUIRE_MESSAGE(id != HE::UUID{}, std::string(p.stem));
+		REQUIRE(cm.assetType(id) == p.type);
+		ids.push_back(id);
+	}
+
+	// The folder moves on disk, then the in-memory half follows it.
+	fs::rename(dir.path / "Old", dir.path / "New");
+	cm.retargetAssetReferencesInMemory("Old", "New", /*folder=*/true);
+
+	auto pathOf = [&](HE::UUID id) -> std::string
+	{
+		switch (cm.assetType(id))
+		{
+		case HE::AssetType::StructType:       return cm.getStructType(id)->path;
+		case HE::AssetType::EnumType:         return cm.getEnumType(id)->path;
+		case HE::AssetType::SaveGameTemplate: return cm.getSaveGameTemplate(id)->path;
+		case HE::AssetType::Theme:            return cm.getTheme(id)->path;
+		case HE::AssetType::BoneMask:         return cm.getBoneMask(id)->path;
+		case HE::AssetType::BlendSpace:       return cm.getBlendSpace(id)->path;
+		default:                              return {};
+		}
+	};
+	for (size_t i = 0; i < ids.size(); ++i)
+	{
+		CAPTURE(std::string(probes[i].stem));
+		CHECK(pathOf(ids[i]) == std::string("New/") + probes[i].stem + ".hasset");
+		CHECK(cm.isLoaded(std::string("New/") + probes[i].stem + ".hasset"));
+	}
+
+	for (size_t i = 0; i < ids.size(); ++i)
+	{
+		CAPTURE(std::string(probes[i].stem));
+		CHECK(cm.unloadAsset(ids[i]));
+		CHECK_FALSE(cm.isLoaded(ids[i]));
+	}
+}
+
 TEST_CASE("ContentManager round-trips a material's custom shader (and defaults empty)")
 {
 	TempContentDir dir;
@@ -1162,6 +1242,74 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 
 	// Second poll with no further changes is quiet.
 	CHECK(cm.pollHotReload().empty());
+}
+
+// CORE-204: saveAsset wrote the file but left the mtime of the load in
+// m_pathMtime, so the editor's next poll took its OWN save for an outside edit
+// and unloaded, re-parsed and re-invalidated the asset it had just written.
+TEST_CASE("ContentManager pollHotReload does not report the manager's own save")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type     = HE::AssetType::Material;
+	mat.name     = "selfsave";
+	mat.path     = "selfsave.hasset";
+	mat.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat));
+
+	// Load from a file that is clearly older than the save below; otherwise the
+	// load and the save can share one filesystem tick and the poll is quiet for
+	// the wrong reason.
+	const fs::path diskPath = dir.path / "selfsave.hasset";
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) - std::chrono::seconds(10));
+	const HE::UUID id = cm.loadAsset("selfsave.hasset");
+	REQUIRE(cm.getMaterialMutable(id) != nullptr);
+	CHECK(cm.pollHotReload().empty());
+
+	MaterialAsset* live = cm.getMaterialMutable(id);
+	live->metallic = 0.7f;
+	REQUIRE(cm.saveAsset(*live));
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.getMaterial(id)->metallic == doctest::Approx(0.7f));
+
+	// A change from outside is still seen, exactly once.
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) + std::chrono::seconds(2));
+	const auto changed = cm.pollHotReload();
+	REQUIRE(changed.size() == 1);
+	CHECK(changed[0] == id);
+	CHECK(cm.pollHotReload().empty());
+}
+
+// CORE-204: an asset that cannot be unloaded (a live AssetRef pins it) used to
+// come back from every poll: unloadAsset refused, loadAsset handed back the old
+// copy without recording the new mtime, and the next poll found the same
+// "change" again — every 1.5 s for as long as the pin lived.
+TEST_CASE("ContentManager pollHotReload reports a pinned asset's change at most once")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type     = HE::AssetType::Material;
+	mat.name     = "pinned";
+	mat.path     = "pinned.hasset";
+	mat.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat));
+	const HE::UUID id = cm.loadAsset("pinned.hasset");
+	REQUIRE(id != HE::UUID{});
+
+	auto pin = cm.acquireMaterial(id);
+	REQUIRE(cm.isPinned(id));
+
+	const fs::path diskPath = dir.path / "pinned.hasset";
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) + std::chrono::seconds(2));
+	// The loaded copy has to stay while it is pinned, so there is nothing new to
+	// report — and above all not the same file again on the next poll.
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.getMaterial(id) != nullptr);
 }
 
 // What a collaboration peer's whole-file update relies on (EditorApplication::
