@@ -12,6 +12,8 @@ auf jedem Backend: Linienanteil 26,0 bis 26,3 % gegen 15 bis 18 % im Foto, die L
 ![Vorgabe-Ausschnitt, vier Backends, Foto, Metal](images/underwater-windows-reference-4backends.jpg)
 ![Unterseite (up), vier Backends und Metal](images/underwater-windows-up-4backends.jpg)
 ![Thema-185-Rahmen floor, vier Backends](images/underwater-windows-floor-4backends.jpg)
+![Vorgabe-Ausschnitt D3D11 (= D3D12), volle Aufloesung](images/underwater-windows-reference-d3d11.jpg)
+![Vorgabe-Ausschnitt Vulkan, volle Aufloesung](images/underwater-windows-reference-vulkan.jpg)
 
 ## 1. Build, Deploy, Tests
 
@@ -19,8 +21,11 @@ auf jedem Backend: Linienanteil 26,0 bis 26,3 % gegen 15 bis 18 % im Foto, die L
 - Deploy = Repo: `Water.hasset` md5 `c81b8ae9` (wie Schritt 4), `postfx_underwatercaustics/-fog.frag.spv` im Deploy
   gleich dem Build-Baum. Alle Aufnahmen 1280x720.
 - `mat_gen` unter MSVC schreibt `Water.hasset` zweimal gleich (`54812863`), aber nicht byte-gleich zum Mac (`c81b8ae9`):
-  nur die Knotennummern im erzeugten Shadertext sind anders (`n224` gegen `n176`, gleich viele Zeilen). MSVC wertet
-  verschachtelte Builder-Aufrufe in anderer Reihenfolge aus. Das Repo-Asset bleibt das vom Mac; nicht ersetzt.
+  gleich sind Knoten, Seeds (3/17/41), Parameternamen und Zeilenzahl (2490); anders sind die Knotennummern (`n224` gegen
+  `n176`), die Reihenfolge der Zeilen und die **Parameter-Slots** (`heParams.v[11]` Mac Specular, Windows Reflection;
+  ebenso Opacity/FresnelPower 14/15, Refraction 7 gegen 6). Vermutlich wertet MSVC verschachtelte Builder-Aufrufe in
+  anderer Reihenfolge aus (nicht nachgesehen). Ob das Windows-Asset gleich rendert, ist **nicht geprueft**. Das Repo- und
+  Deploy-Asset bleibt das vom Mac; nicht ersetzt.
 - ctest (privates `APPDATA`, `HE_NET_LOOPBACK_ONLY=1`, `-j 4`): siehe Abschnitt 6.
 
 ## 2. Laeuft es wirklich? (je Backend)
@@ -38,7 +43,7 @@ auf jedem Backend: Linienanteil 26,0 bis 26,3 % gegen 15 bis 18 % im Foto, die L
 - D3D12 meldet je Lauf nur die zwei allgemeinen Warnungen, die Thema 185 schon notiert hat (Pixel-Shader mit Ziel 3
   in einem PSO ohne RTV 3; Clear-Wert). Die Unterwasser-Passes betrifft das nicht.
 - GPU: der Editor-Prozess aus `C:\hw205\deploy` stand waehrend der D3D12-Serie in `nvidia-smi` (RTX 4070).
-- Netz-aus-Schalter erreicht den Koerper: Log `caustics set intensity 0.00` in jeder Aus-Aufnahme.
+- Netz-aus-Schalter erreicht den Koerper: Log `caustics set intensity 0.00` in allen 16 Aus-Aufnahmen (grep).
 
 ## 3. Backends gegeneinander (mittl. \|Δ\| je Kanal, 0..255)
 
@@ -106,14 +111,14 @@ Schritt 3; Windows, Linux und lavapipe gruen, also auch der neue lavapipe-Fall `
 - **Done:** Release-Build NN-WS03, 72 Aufnahmen + 16 Netz-aus + 20 Wiederholungen, Tabellen Abschnitte 2 bis 4, ctest.
 - **Files touched:** `scripts/underwater_look_shots.py` (Windows: Thema-185-Runner mit Kill nach Dump, PNG per PIL),
   `scripts/underwater_reference_compare.py` (PIL statt sips, Laufwerksbuchstabe im `path:box`), 
-  `scripts/underwater_backend_compare.py` (neu, numpy+PIL), dieses Dokument, 3 Bilder.
+  `scripts/underwater_backend_compare.py` (neu, numpy+PIL), dieses Dokument, 5 Bilder.
 - **Verified:** Abschnitte 2 bis 4 (Befehle oben; Aufnahmen in `C:\hw205\shots\<Backend>`, nicht im Repo).
 - **Not verified:** GPU-Kosten, Bewegung, exportiertes Spiel, D3D11 ohne Debug-Layer (nur Bildbeleg).
 - **Decisions taken:** Kein Shader-Abstimmen (Abnahme). Mac-`Water.hasset` bleibt, obwohl MSVC-`mat_gen` anders nummeriert.
 - **Decisions suggested, not taken:** Linien nah schmaler (Ziel 15 bis 18 % in `reference`, jetzt auf allen Backends
   belegt); fuer das Linienmass auf D3D den Boden pro Backend mit Netz aus normieren, statt cell/peak absolut.
-- **Traps:** `mat_gen` ist nicht compiler-uebergreifend byte-gleich (Knotennummern): md5-Vergleiche nur auf demselben
-  System. `Remove-Item Env:X` wird vom Werkzeug-Schutz geblockt, `$env:X=$null` nehmen. Ohne privates `APPDATA` setzt
+- **Traps:** `mat_gen` ist nicht compiler-uebergreifend byte-gleich (Knotennummern, Zeilenfolge, Parameter-Slots):
+  md5-Vergleiche nur auf demselben System, und `Water.hasset` nicht unter Windows neu erzeugen und einchecken. `Remove-Item Env:X` wird vom Werkzeug-Schutz geblockt, `$env:X=$null` nehmen. Ohne privates `APPDATA` setzt
   ctest die Editor-Konfiguration des Menschen zurueck.
 - **Next steps:** 1. Mensch entscheidet ueber Befund 4.2 (Linienbreite) und 4.5 (Farbe) -> eigener Schritt.
   2. GPU-Kosten auf NN-WS03 mit `underwater_acceptance.py --gputime` (Netz seit Schritt 2 ohne Kostendeckel).
