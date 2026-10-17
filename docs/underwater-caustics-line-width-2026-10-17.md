@@ -7,7 +7,8 @@ Zwei-Drittel). Mass: `scripts/underwater_reference_compare.py` (Luminanz, Linie 
 
 **Kurz:** Nur der Kern jeder Faltlinie leuchtet noch. `reference` jetzt **GL 17,2 %, D3D11 = D3D12 = Vulkan 16,9 %**,
 Kontrast GL 1,54 -> **1,66** (Foto 1,66 bis 1,71), D3D/Vulkan 1,35 -> 1,43. Netz-Topologie, Tiefenausblendung und
-Unterseite unveraendert. Metal ist gleich editiert, aber **nicht gelaufen** (kein Mac hier).
+Unterseite unveraendert. Metal (Schritt 7, Mac nachgezogen): `reference` **17,2 %, Kontrast 1,66**, gleich GL
+(Abschnitt 6).
 
 ![Vorgabe-Ausschnitt vorher/nachher, vier Backends, Foto](images/underwater-linewidth-reference-4backends.jpg)
 ![Tiefe Rahmen GL vorher/nachher: floor, shore, deep_to_shore ohne Nebel](images/underwater-linewidth-depth-gl.jpg)
@@ -65,8 +66,7 @@ das Netz in der Tiefe (Deckel 2) und in der Ferne (capAA < 3) ganz verschwunden.
 
 ## 4. Nicht gemessen / offen
 
-- **Metal nicht gelaufen** (NN-WS03 hat keinen Mac): Text gleich wie die anderen drei Kopien, Syntax prueft der
-  macOS-CI-Lauf. Bild auf Metal: eigener Mac-Lauf (`underwater_look_shots.py --rhi Metal --only reference`).
+- ~~Metal nicht gelaufen~~: in Schritt 7 auf dem Mac nachgezogen, Abschnitt 6.
 - Bloom: alle Abnahmebilder haben `BLOOM=0`, der HDR-Gipfel im Linienkern ist aber ~2,4x hoeher (Deckel 10). Gegenprobe
   Vulkan `reference` mit `BLOOM=1`: Linien vorher 25,7 %, nachher **18,1 %** (Kontrast 1,43); Bloom an/aus aendert das
   Bild jetzt um 2,27 statt 0,11 (mittl. |Δ|): ein schmaler Schein um die Kerne, wie im Foto, nichts brennt aus.
@@ -88,7 +88,42 @@ das Netz in der Tiefe (Deckel 2) und in der Ferne (capAA < 3) ganz verschwunden.
 - `test_underwater_camera` (Wellenzug-Abgleich der `.frag`) und `test_material_graph` gruen; `test_collab_controller`
   gruen.
 
+## 6. Metal (Schritt 7, 17.10.2026, MacBook Air M-Serie)
+
+Release-Baum `out/build/release` des Worktrees, `--target HorizonEditor` (ninja baute nur `MetalRenderer.mm` und
+`OpenGLRenderer.cpp` neu, die einzigen Quelltexte seit Schritt 4; `libHorizonRendering.dylib` im Deploy enthaelt den
+MSL-Text mit `kCore = 0.2`). Alle 18 Ansichten mit `scripts/underwater_look_shots.py --rhi Metal`, 18/18 OK, 0 `[ERROR]`
+/ `compile failed` in den Logs; dazu GL `reference` im selben Deploy, und vor dem Neubau `reference` mit dem alten
+Deploy (Stand Schritt 4) als Vorher-Bild.
+
+![Vorgabe-Ausschnitt Metal nachher, volle Aufloesung](images/underwater-linewidth-reference-metal.jpg)
+
+| `underwater_reference_compare.py` | cell | peak | Kontrast | Linien % |
+|---|---|---|---|---|
+| Foto ganz (`0,0,1,0.93`) / unteres Zwei-Drittel (`0,0.33,1,0.93`) | 139 / 145 | 238 / 241 | 1,71 / 1,66 | 15,3 / 18,5 |
+| `reference` Metal vorher (alter Deploy) | 148 | 228 | 1,54 | 26,4 |
+| **`reference` Metal nachher** | **147** | **243** | **1,66** | **17,2** |
+| `reference` GL nachher (Mac, gleicher Deploy) | 147 | 243 | 1,66 | 17,2 |
+| `reference_nofog` Metal vorher / nachher | | | 1,26 / 1,29 | 32,1 / 20,3 |
+| `floor` / `shore` Metal nachher (GL Schritt 6: 10,7 / 12,1) | | | 2,42 / 2,17 | 10,8 / 12,2 |
+
+- Metal gegen GL (mittl. |Δ| je Kanal): alle 18 Ansichten 0,004 bis 0,63, `reference` 0,33 (max 11); genau die Werte
+  von Schritt 4 (`dry_shallow` 0,63 / 8 % > 2 in der Himmelsspiegelung, `zenith` 0,17/0,19), das Netz weicht also
+  zwischen den zwei Mac-Backends nicht weiter ab als vorher.
+- Netz an/aus (`HE_DUMP_UWCAUSTICS=0`, Metal): `reference` 17,70 (vorher 22,22), `floor` 10,56 (vorher 11,73); GL
+  Schritt 6: 17,7 / 10,5.
+- Vorher/nachher auf Metal: `reference` 8,63, `reference_nofog` 5,48 (nur das Netz). Unberuehrt: `up` md5 `73aa998c`,
+  `dry_shallow` `c1c8dede`, beide gleich Schritt 3/4 (Unterseite und Oberseite unveraendert).
+- Nicht gemacht: ctest (keine Code-Aenderung in Schritt 7, nur dieser Bericht und ein Bild); Bewegung, GPU-Kosten.
+- CI 39016248197 (Commit d97d0a1a, Code von Schritt 6) war gruen, damit auch der MSL-Offline-Check und der
+  lavapipe-Fall `underwater`.
+
 ## Handoff
+
+- **Schritt 7 (Metal, Mac):** `reference` Metal 17,2 % / Kontrast 1,66 = GL, Metal-GL 0,004 bis 0,63 wie Schritt 4,
+  `up`/`dry_shallow` md5-gleich zu Schritt 3/4 (Abschnitt 6). Bilder in `/tmp/uw7` (nicht im Repo), eines in
+  `docs/images/underwater-linewidth-reference-metal.jpg`. Metal ist damit abgenommen; offen bleiben Bewegung,
+  GPU-Kosten, exportiertes Spiel, Farbe/Nebelton und der weiche Schein neben den Linien.
 
 - **Topic / step:** Thema 205, Schritt 6 (Kaustik-Liniendichte 26 % -> 15 bis 18 %)
 - **Branch / commit:** `claude/unterwasser-postfx-wirkt-billig-caustics-wasseroberfl-chen-u`, Commit "Underwater caustics
@@ -107,5 +142,5 @@ das Netz in der Tiefe (Deckel 2) und in der Ferne (capAA < 3) ganz verschwunden.
 - **Traps:** schnellste Schleife = `.frag` per glslc direkt nach `deploy/Editor/Shaders` kompilieren und nur Vulkan
   schiessen (2 s pro Bild, kein C++-Build); `reference` stimmt zwischen den Backends auf 0,3 Prozentpunkte. D3D12-Debug-
   Layer nur mit `HE_GPU_DEBUG=1`.
-- **Next steps:** 1. Mac: Metal-Bild `reference` und Linien % (Erwartung ~17 %, wie GL). 2. CI-Lauf ansehen (lavapipe-Fall
-  `underwater`, Schwelle 1,5 auf `floor` an/aus, gemessen 8,7 auf Vulkan).
+- **Next steps:** ~~1. Mac: Metal-Bild~~ (Schritt 7 erledigt). ~~2. CI-Lauf~~ (39016248197 gruen). Danach: weicher
+  Schein neben den Linien / Farbe (Nebelton) als eigene Schritte, falls der Mensch das will.
