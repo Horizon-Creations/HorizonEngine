@@ -11776,9 +11776,28 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(p.taaVelocityPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             p.taaCurTransforms.clear();
+            // The blended tail below draws AFTER this pass from the same ring, one slot
+            // per instance: velocity stops where only its slots (and a margin) are
+            // left, so a large foliage field under TAA cannot cost the frame its
+            // water, glass and particles. The plants past that keep the clear's
+            // zero motion (said once).
+            UINT velLimit = k_maxDraws;
+            {
+                size_t tail = 64;
+                for (const DrawCall* dc : transparentDCs)
+                    tail += std::max<size_t>(1, dc->instanceTransforms.size());
+                velLimit = tail >= k_maxDraws ? 0u : static_cast<UINT>(k_maxDraws - tail);
+            }
+            auto velFull = [&]() -> bool {
+                if (drawIdx < velLimit) return false;
+                HE_LOG_ONCE(RHI, Warning, "D3D12Renderer: TAA velocity stops at %u per-object draws, the "
+                            "rest of the ring is kept for the blended pass; further plants show no motion",
+                            velLimit);
+                return true;
+            };
             for (const uint32_t idx : p.m_sortedIndices)
             {
-                if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); break; }
+                if (velFull()) break;
                 const RenderObject& obj = p.m_renderWorld.objects[idx];
                 const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
                 if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
@@ -11788,14 +11807,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 // camera's own motion), as GL and Metal do (Thema 182, 2f). The
                 // entity-keyed history below holds ONE pose per entity, which a
                 // cluster must not use: every plant of a layer shares the terrain's id.
-                // One ring slot per plant, after the geometry's: past the ring's end
-                // the rest of the field keeps the clear's zero (said once).
+                // One ring slot per plant, after the geometry's, up to velLimit.
                 if (obj.isCluster())
                 {
                     cl->IASetVertexBuffers(0, 1, &mesh->vbv);
                     cl->IASetIndexBuffer(&mesh->ibv);
                     p.m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
-                        if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
+                        if (velFull()) return;
                         HE::TaaVelocityConstants c;
                         c.mvpJitter = viewProj * model;
                         c.mvpNow    = viewProjClean * model;

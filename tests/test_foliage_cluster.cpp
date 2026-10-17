@@ -1148,6 +1148,12 @@ TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, de
 		CHECK(text.find(s.prevPerPlant) != std::string::npos);
 		CHECK(text.find("forEachInstance(obj") != std::string::npos);
 	}
+	// D3D12's velocity takes per-object ring slots, and the blended pass draws AFTER it from
+	// the same ring: unfolded foliage must leave that pass its slots (100k plants under TAA
+	// otherwise cost the frame its water: "the rest of the frame is not drawn", RTX 4070).
+	const std::string d3d12 = readFile(dir / "D3D12" / "D3D12Renderer.cpp");
+	CHECK(d3d12.find("tail += std::max<size_t>(1, dc->instanceTransforms.size());") != std::string::npos);
+	CHECK(countOf(d3d12, "if (velFull())") == 2); // the object loop and the plant loop
 	// Vulkan's decal depth and reflection pre-pass take the whole cluster.
 	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
 	CHECK(countOf(vk, "m_renderWorld.appendInstances(obj, m_clusterScratch);") == 2);

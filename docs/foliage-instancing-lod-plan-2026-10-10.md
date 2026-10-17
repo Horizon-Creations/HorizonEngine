@@ -922,7 +922,8 @@ Gebaut und gelaufen auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`, RTX 407
   `k_instArenaMax` = 1 Mio. Instanzen je Frame-Slot, darüber Schleife plus Meldung. D3D12 meldet außerdem einmal, wenn der Pro-Objekt-Ring (`k_maxDraws` 16 384) endet
   (`noteDrawRingFull` `:3497`), statt den Frame still abzuschneiden.
 - **Cluster in Pro-Objekt-Pässen (die 2a-Guards, zur Laufzeit geprüft):** TAA-Velocity auf allen drei zeichnet jede Pflanze statisch (vorher = jetzt), wie GL/Metal
-  (D3D11 `:1908`, D3D12 `:11797`, Vulkan `:5723`). Vulkan-Decal-Tiefe nimmt den Cluster als einen Draw über den instanzierten Schatten-Zwilling (`:3986`). Vulkans
+  (D3D11 `:1908`, D3D12 `:11797`, Vulkan `:5723`). D3D12 nimmt dafür Pro-Objekt-Ringplätze, und der durchscheinende Pass zeichnet **danach** aus demselben Ring:
+  die Velocity hört bei `k_maxDraws` minus den Plätzen des Blend-Passes (+ 64) auf (`velLimit`), weitere Pflanzen zeigen keine Bewegung (einmal gemeldet). Vulkan-Decal-Tiefe nimmt den Cluster als einen Draw über den instanzierten Schatten-Zwilling (`:3986`). Vulkans
   SSAO/SSR-Reflexionsvorpass (MRT-Weg, läuft sobald SSR an ist) übersprang Cluster ganz; jetzt ein neues, optionales instanziertes Pipeline-Paar aus
   `reflPrepassVertexInstanced` (`:13021`, ohne UV-Attribut, also keine neue Validierungswarnung), sonst je Pflanze. D3D11/D3D12 speisen diesen Vorpass aus den
   `DrawCall`s des GeometryPass und waren nie betroffen.
@@ -938,6 +939,8 @@ Gebaut und gelaufen auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`, RTX 407
   Vulkan 5 Draws / 708 016 Dreiecke wie D3D11 und GL, sein Bild gleich der alten (vollständigen) Schleife im Rauschen.
 - **TAA-Velocity:** 6000 Pflanzen, AA=3, ein Frame Kamerabewegung (`HE_DUMP_MBYAWSTEP=2`) gegen ruhig, Boden um > 24/255: D3D11 2,98 %, D3D12 2,45 %, Vulkan 2,41 %,
   GL 2,0 %. **Negativkontrolle** (Entfaltung im Bau abgeschaltet): D3D11 6,25 %, Vulkan 6,24 %.
+- **Velocity-Reserve (D3D12):** 100k Pflanzen, AA=3, Wasser-Zeuge (`HE_DUMP_WATERTEST=1`): Wasser an gegen aus 0,54 % (AA=0: 0,48 %), Meldung „TAA velocity
+  stops at 16320“. **Negativkontrolle** ohne Reserve: „the rest of the frame is not drawn“, Wasser an gegen aus nur noch 0,26 % — das Wasser fiel weg.
 - **Rauchlauf GI+SSR+TAA** auf allen drei, 6000 Pflanzen, Cluster und je Pflanze: keine neue Warnung, kein Fehler (Vulkan: die eine bekannte Validierungszeile
   „location 2 not consumed“ in beiden Modi). Decal-Zeuge Cluster gegen je Pflanze: 17 px (D3D11/D3D12), 96 px (Vulkan) über Toleranz 8. Reflexionsvorpass-Zeuge:
   „reflection pre-pass instanced (first cluster: 39 plants)“.
@@ -977,7 +980,8 @@ gegen ordered **identisch**. Nicht übernommen (ändert das SSAO-Bild jeder Szen
   voller he_tests).
 - **Not verified:** Metal; Zeit; exportiertes Spiel; Editor von Hand; Vulkan-SSR im Bild (nur Zeuge).
 - **Decisions taken:** Arena wächst statt Front-End-Ausdünnung (7.5 Punkt 6): richtig ab dem ersten Frame, Grenze 1 Mio. je Slot; D3D11 bekommt einen eigenen
-  Instanz-Vertexpuffer statt den StructuredBuffer umzubauen; Velocity je Pflanze wie GL (kein instanzierter Velocity-Shader).
+  Instanz-Vertexpuffer statt den StructuredBuffer umzubauen; Velocity je Pflanze wie GL (kein instanzierter Velocity-Shader), auf D3D12 mit Reserve für den
+  Blend-Pass (über ~16k Pflanzen unter TAA bekommt der Rest keine Bewegung).
 - **Decisions suggested, not taken:** SSAO-Vorpass-Tiefe D16 → D32 auf D3D11/D3D12/Vulkan (17.3); instanzierte Velocity, wenn TAA mit großer Foliage zu langsam wird.
 - **Pending:** Schritt 5 (Messleiter vorher/nachher auf allen Backends, Bildvergleich, voller ctest); Metal-Lauf; Anfrage 105.
 - **Traps:** Auf D3D/Vulkan rauscht der Himmel, Vulkan auch den fernen Boden (≤ 8/255) und die Pflanzenmaske (0-4 px): `--ground 100 --tol 8 --mask-tol 4`. D3D12/Vulkan
