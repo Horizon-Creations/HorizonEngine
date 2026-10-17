@@ -806,7 +806,9 @@ zeichnet auf GL **einmal** mit dem Fragment des Materials und einem instanzierte
 ### 15.2 Was bewusst weiter schleift
 
 - **Gebackene Pak-Varianten** (`MaterialShaderVariant`, exportiertes Spiel): kein instanzierter Vertex gebacken → `GetOrBuild...(instanced)` gibt 0/nullptr, die Schleife zeichnet.
-  **Im exportierten Spiel zeichnet Graph-Foliage deshalb weiter je Pflanze.** Entscheidung bei der Queen (Anfrage 105): (a, empfohlen) `vertexInstanced`
+  Das trifft den **Forward-Pfad**, und Forward ist der Standard des Spiels (`ProjectSettings::renderPath` = 0, `GameApplication.cpp:3574`): **im exportierten Spiel zeichnet
+  Graph-Foliage im Standard weiter je Pflanze.** Der Deferred-Pfad instanziert dort dagegen, denn die G-Buffer-Variante wird nie gebacken, sondern immer zur Laufzeit übersetzt
+  (außer im Stub-Flavour ohne Cross-Compiler, `app-advanced`/`app-basic`: dort weder G-Buffer-Variante noch Zwilling). Entscheidung bei der Queen (Anfrage 105): (a, empfohlen) `vertexInstanced`
   (+ `vertexInstancedClustered` für GL 4.30) backen wie `uiVertex`, mit HAsset-Tail-Regel und Alt-Pak-Test, passt zu Schritt 4; (b) nur den Vertex zur Laufzeit übersetzen.
 - GL-Rückfall ohne G-Buffer-Variante (`deferredForward`-Replay), durchscheinende Batches (sortiert, `pushTP`), Metal-`forwardOpaque`-Umleitung: je Instanz wie bisher.
 - Tiefen-/Schattenpässe: kein WPO (starrer Schatten, 7.7), unverändert.
@@ -830,7 +832,8 @@ zeichnet auf GL **einmal** mit dem Fragment des Materials und einem instanzierte
 
 ### 15.4 Nicht geprüft
 
-Metal (weder übersetzt noch gelaufen; Bitgleichheit dort folgt aus der identischen Rechnung, ist aber kein Bild); Zeitmessung (nur `draws`); exportiertes Spiel (Schleife, 15.2);
+Metal (weder übersetzt noch gelaufen; Bitgleichheit dort folgt aus der identischen Rechnung, ist aber kein Bild); Zeitmessung (nur `draws`); exportiertes Spiel (nicht gelaufen;
+Forward-Schleife und Deferred-Zwilling folgen aus dem Quelltext, 15.2);
 der Editor von Hand; Linux-GL (CI übersetzt).
 
 ## Handoff
@@ -847,7 +850,7 @@ der Editor von Hand; Linux-GL (CI übersetzt).
 - **Decisions taken:** Metal liest {mvp, model} aus Buffer 5 (bitgleich zur Schleife), GL das Modell aus 4-7 mit `U.mvp = viewProj`; Zwilling erst beim ersten Batch bauen;
   gebackene Varianten fallen auf die Schleife zurück statt Laufzeit-Vertex neben gebackenem Fragment; D3D/Vulkan nur übersetzt, nicht verdrahtet (Schritt 4).
 - **Decisions suggested, not taken:** Anfrage 105 an die Queen: `vertexInstanced` backen (Option a, empfohlen) oder Laufzeit-Vertex (b). Roadmap-Satz "GPU-instanced foliage with wind"
-  stimmt weiter nicht für das exportierte Spiel und D3D/Vulkan; Änderung braucht den Menschen.
+  stimmt weiter nicht für den Standard des exportierten Spiels (Forward + gebackene Variante; Deferred instanziert) und nicht für D3D/Vulkan; Änderung braucht den Menschen.
 - **Pending:** Metal auf einem Mac laufen lassen (`foliage_graph_ab.py --rhi Metal`), Backen (Anfrage 105), Schritt 3 (3a LOD), 4 (Windows-Gleis: D3D/Vulkan verdrahten,
   Input-Layouts mit Instanzstrom, Material-Ring 1024), 5 (Verifikation, Zeitmessung).
 - **Traps:** `glprogcache` liegt unter `SDL_GetPrefPath`, scratch `APPDATA`/`HE_CONFIG_DIR` trennt ihn nicht. Ganzes-Bild-Diff zeigt den Wind nicht (Wolken bewegen sich mit),
