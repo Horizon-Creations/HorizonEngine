@@ -67,6 +67,12 @@ das Netz in der Tiefe (Deckel 2) und in der Ferne (capAA < 3) ganz verschwunden.
 
 - **Metal nicht gelaufen** (NN-WS03 hat keinen Mac): Text gleich wie die anderen drei Kopien, Syntax prueft der
   macOS-CI-Lauf. Bild auf Metal: eigener Mac-Lauf (`underwater_look_shots.py --rhi Metal --only reference`).
+- Bloom: alle Abnahmebilder haben `BLOOM=0`, der HDR-Gipfel im Linienkern ist aber ~2,4x hoeher (Deckel 10). Gegenprobe
+  Vulkan `reference` mit `BLOOM=1`: Linien vorher 25,7 %, nachher **18,1 %** (Kontrast 1,43); Bloom an/aus aendert das
+  Bild jetzt um 2,27 statt 0,11 (mittl. |Δ|): ein schmaler Schein um die Kerne, wie im Foto, nichts brennt aus.
+- Lavapipe-Fall `underwater` (CI): `floor` an/aus war 9,53 (Lauf 38731406474, RTX hier 9,51), erwartet jetzt ~8,7
+  gegen die Schwelle 1,5. Metal-Syntax: der macOS-CI-Schritt "Compile-check the runtime MSL strings" kompiliert die
+  MSL-Strings offline.
 - Bewegung/Flimmern der schmaleren Linien (nur Standbilder; capAA haelt das Band >= 2 px wie vorher).
 - GPU-Kosten (eine Subtraktion mehr, nicht gemessen), exportiertes Spiel (`deploy/*/Game` nicht neu gelinkt).
 - Farbe (graublau statt tuerkis, Nebelton) und der weiche Schein neben den Linien im Foto: nicht Teil des Schritts.
