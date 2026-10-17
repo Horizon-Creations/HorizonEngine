@@ -5101,6 +5101,26 @@ namespace
 	  "discarded entirely, leaving a hard edge. It is what makes leaves and "
 	  "chain-link fences out of one quad.",
 	  "", "materials#concept" },
+	{ "Material Settings/Max Factor", "Tessellation Factor",
+	  "How finely each triangle is subdivided close to the camera, so the "
+	  "Displacement pin has vertices to move. 1 adds none, 64 is the most any "
+	  "GPU allows. Detail costs: a factor of 16 turns one triangle into a few "
+	  "hundred.",
+	  "", "materials#concept" },
+	{ "Material Settings/Fade Near", "Fade Near",
+	  "Up to this distance from the camera, in metres, triangles get the full "
+	  "Max Factor.",
+	  "", "materials#concept" },
+	{ "Material Settings/Fade Far", "Fade Far",
+	  "From this distance on, in metres, triangles are no longer subdivided and "
+	  "only the mesh's own vertices move. Between Fade Near and here the factor "
+	  "falls off. It always stays above Fade Near.",
+	  "", "materials#concept" },
+	{ "Material Settings/Max Displacement", "Max Displacement",
+	  "The furthest, in metres, the Displacement pin may push the surface in or "
+	  "out. Larger heights are clamped to it. Keep it close to what the graph "
+	  "really produces: shadows and lighting still see the flat mesh.",
+	  "", "materials#concept" },
 	{ "Material Preview/Show Material", "Show Material",
 	  "Puts the finished material back on the preview ball, after Preview This "
 	  "Node put a single node's output there.",

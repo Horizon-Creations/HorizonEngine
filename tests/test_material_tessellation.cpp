@@ -226,6 +226,22 @@ TEST_CASE("A UI material ignores the Displacement pin")
 	CHECK(HE::generateFragment(g).displacementBody.empty());
 }
 
+// The Material Editor animates its preview only for text that reads Time. A
+// height driven by Time lives in the displacement body alone, so the editor
+// asks that body too (MaterialEditorPanel, usesTime) — this is what it relies on.
+TEST_CASE("A Time-driven height is found in the displacement body, not the fragment")
+{
+	MaterialGraph g = MaterialGraph::makeDefault();
+	const int time = g.addNode(MatNodeType::Time);
+	const int sine = g.addNode(MatNodeType::Sine);
+	REQUIRE(g.connect(time, 0, sine, 0));
+	REQUIRE(g.connect(sine, 0, outputOf(g), HE::kMatOutputDisplacementPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.displacementBody.empty());
+	CHECK(HE::matGlslUsesTime(gen.displacementBody));
+	CHECK_FALSE(HE::matGlslUsesTime(gen.glsl));
+}
+
 TEST_CASE("MTRL tail: the displacement body survives save and load")
 {
 	const fs::path root = fs::temp_directory_path() / "he_test_tessellation" / "Content";

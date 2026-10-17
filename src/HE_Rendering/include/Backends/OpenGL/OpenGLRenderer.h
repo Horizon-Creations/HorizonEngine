@@ -54,6 +54,7 @@ public:
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
 	                            float timeSeconds = -1.0f) override;
+	bool  SupportsTessellation() const override { return m_tessSupported; }
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
