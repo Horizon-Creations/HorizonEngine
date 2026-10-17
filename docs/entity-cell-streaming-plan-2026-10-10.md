@@ -1281,8 +1281,29 @@ beide:
 - `cellUnloading` (Skripte stoppen) ist billig: 0,3 bis 0,5 ms für alle 16 Zellen.
 - **Vorschlag, nicht gebaut:** Skriptstart und Herausschreiben in das Budget nehmen (Start je Scheibe statt je Zelle, nach dem Muster von
   `sliceBuilt`; Entladen über mehrere Frames). Erst nötig, wenn Zellen mit mehr als rund 30 Skript-NPCs gebaut werden.
-- Die Leiter von 153 §11.3 (Editor, 101k) und der Extract-Bench aus 15 sind **nicht** neu gelaufen: dieser Schritt ändert keinen
-  Render- oder Ladepfad, und Mac-Zahlen wären mit Windows nicht vergleichbar.
+- Rohzeilen aller Läufe (drei Läufe der Dorf-Leiter, die Spiel-Dumps unten): `docs/perf-audit/raw-cells/bench-183-step5.txt`.
+
+**Die 101k-Welt durch `CellRuntime` im echten Spiel** (der Weg aus 15.2; bisher nur vor `CellRuntime` gemessen, auf dem Mac). Die
+Referenzwelt (`gen_reference_world.py --count 100000 --extent 8000 --groups 1000 --lights 64`, 101 068 Entities), vom Extract-Bench in
+256 Zellen zu 512 m geteilt (Radius 1 100 m, 9 908 geladen bei Kamera 0, 25, 90), als loses Spielverzeichnis
+(`scripts/perf/make_cell_game_dir.py`, jetzt auch außerhalb von macOS), `HorizonGame` mit OpenGL (Vorgabe des Spiels), verstecktes
+Fenster 2 560 × 1 440, `HE_PROFILE_CAPTURE=120`, `WARMUP=300`, `COUNTERS=0`, Vsync aus. Läufe abwechselnd, der erste je Welt verworfen,
+Spitze des Working Sets alle 0,5 s gelesen. Der Extract-Bench selbst ist **nicht** neu gelaufen: er treibt `CellStreamer` direkt und misst
+nichts von diesem Thema.
+
+| Welt | Frame-CPU p50 | `extract` je Frame, p50 | `CellStreaming` je Frame, p50 (p90) | Working Set (Spitze) |
+|---|---|---|---|---|
+| ganz, 101 069 Entities (Lauf 2, 3) | 23,9 bis 24,1 ms (Lauf 1: 26,0) | 11,4 bis 11,5 ms | – | 778 bis 786 MB |
+| gestreamt, 9 908 geladen (Lauf 2, 3) | 2,0 bis 2,1 ms | 0,84 bis 0,87 ms | **0,007 bis 0,008 ms** (≤ 0,020) | 372 bis 378 MB |
+
+- **Kein Mehraufwand der Laufzeit aus den Schritten 1 bis 4 zu sehen:** `CellStreaming` (jetzt `CellRuntime::update` mit CellState-Haken,
+  Skript-Helfer, Pins und Spieler-Abfrage) kostet bei stehender Kamera 0,007 bis 0,008 ms je Frame; 15.2 hatte 0,019 ms vor `CellRuntime`
+  (Mac, anderes Gerät, nicht direkt vergleichbar, aber nicht mehr). `extract` sinkt mit dem Streaming um das 13-Fache, der Frame um das
+  11-Fache, das Working Set auf weniger als die Hälfte. OpenGL ruft `extract` einmal je Frame (Metal dreimal), darum ist die Spalte hier
+  ein Aufruf.
+- **Grenze wie in 15.4:** stehende Kamera, gesättigter Streamer; das Profil während des Ladens beim Fahren steckt im Gang der Dorf-Leiter
+  oben, nicht in diesem Lauf. Die Editor-Leiter (153 §11.3) ist nicht gelaufen: sie lädt die ganze Szene im Editor, Play per Leiter-Skript
+  gibt es nicht.
 
 **Geprüft** (Release, `C:/hw183`, `HE_ENABLE_SHADERC=ON`, NN-WS03, Scratch-`APPDATA`): `test_cell_village` dreimal hintereinander grün
 (18 697 Checks, schlechtestes `update()` im Test 1,4 bis 1,7 ms); `test_cell_state` 8/8, `test_cell_scripts` 4/4 nach dem Zurücklegen der
@@ -1301,8 +1322,10 @@ Linux/macOS nur über die CI.
 - **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ 1fe0f23f (Test), 9195dd6a (Kontrollstufe der
   Leiter) und der Commit mit diesem Abschnitt (gepusht)
 - **Done:** `tests/test_cell_village.cpp`: Dorf durch den echten Splitter, 104 Ladungen / 88 Entladungen mit allen Invarianten,
-  Kontrollen im Dorf, drei Negativkontrollen im Quelltext; Dichte-Leiter (3/30/125 je Zelle, ohne `SaveState` als Kontrolle).
-- **Files touched:** `tests/test_cell_village.cpp` (neu), `tests/CMakeLists.txt`, dieses Dokument. Kein Engine-Code.
+  Kontrollen im Dorf, drei Negativkontrollen im Quelltext; Dichte-Leiter (3/30/125 je Zelle, ohne `SaveState` als Kontrolle); die
+  101k-Welt durch `CellRuntime` im Spiel (OpenGL), gestreamt gegen ganz.
+- **Files touched:** `tests/test_cell_village.cpp` (neu), `tests/CMakeLists.txt`, `scripts/perf/make_cell_game_dir.py` (Kopie ohne
+  `cp -c` außerhalb von macOS), `docs/perf-audit/raw-cells/bench-183-step5.txt` (neu), dieses Dokument. Kein Engine-Code.
 - **Verified / not verified:** Abschnitt 20.
 - **Decisions taken:** Dorf als Test statt als Szene im Repo; Gelenk-Kriterium über Splitter und Hold (Abschnitt 20), nicht über ein
   Gelenk in einer Zelle; NPCs ohne Körper (Grenze der Klassentabelle).
@@ -1311,5 +1334,8 @@ Linux/macOS nur über die CI.
 - **Traps:** doctest vergleicht `entt::null` nur in doppelten Klammern (C2593); `INFO(const char*)` druckt „1“ (in `std::string`
   wickeln); ein dynamischer Körper der Basis verliert sein Gelenk, solange sein eigenes Feld weg ist (Hold, gewollt). Negativkontrollen
   mit `git checkout -- <datei>` zurücklegen (frische mtime), DLL nach `tests/` kopieren.
-- **Next steps:** 1. CI des Zweigs ansehen. 2. Königin: Thema zusammenführen (alle fünf Schritte erledigt). 3. Folgearbeit: Play per Hand
-  im gesplitteten Dorf; Budget für Skriptstart und Herausschreiben; `audiosource`/`animstatemachine` über den Host; Besitzen übers Netz.
+- **Next steps:** 1. Zusammenführen erst, wenn (a) CI 39037133010 (Stand 47fb0189, alle Code-Commits des Themas) grün ist, (b) „Runtime
+  flavours“ wieder grün ist (rot seit Schritt 3, Lauf 39033860815; der Push dieses Schritts sollte einen neuen auslösen) und (c) die
+  Königin zu Anfrage 108 entschieden hat: der Spieler-Anker aus Schritt 4 feuert in einer echten Sitzung erst mit verdrahtetem Besitzen
+  (`assignControl`), heute nur im Test. 2. Folgearbeit: Play per Hand im gesplitteten Dorf; Budget für Skriptstart und Herausschreiben;
+  `audiosource`/`animstatemachine` über den Host; Besitzen übers Netz.
