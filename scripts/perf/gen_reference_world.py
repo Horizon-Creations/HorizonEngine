@@ -62,6 +62,9 @@ def main():
     ap.add_argument("--extent", type=float, default=2000.0, help="square side in metres")
     ap.add_argument("--offset", default="0,0,0", help="x,y,z added to every mesh position")
     ap.add_argument("--lights", type=int, default=0, help="point lights spread over the area")
+    ap.add_argument("--shadow-lights", type=int, default=0,
+                    help="shadow-casting point lights on a 15 m ring around the origin (6 local "
+                         "shadow layers each, the atlas holds 16)")
     ap.add_argument("--physics", type=float, default=0.0,
                     help="fraction of meshes that get a static box collider + rigidbody")
     ap.add_argument("--groups", type=int, default=0, help="parent meshes under N group entities")
@@ -170,6 +173,18 @@ def main():
                           "visible": True},
                 "transform": transform((x, 3.0 + off[1], z))},
              "name": f"Light {i}", "parent": world["uuid"], "uuid": make_uuid(rng)}
+        world["children"].append(e["uuid"])
+        entities.append(e)
+
+    for i in range(a.shadow_lights):
+        ang = 2.0 * math.pi * i / max(a.shadow_lights, 1)
+        pos = (15.0 * math.cos(ang) + off[0], 4.0 + off[1], 15.0 * math.sin(ang) + off[2])
+        e = {"children": [], "components": {
+                "light": {"castsShadow": True, "color": [1.0, 0.9, 0.8], "cullDistance": 0.0,
+                          "intensity": 6.0, "range": 25.0, "spotAngle": 30.0, "type": 1,
+                          "visible": True},
+                "transform": transform(pos)},
+             "name": f"Shadow Light {i}", "parent": world["uuid"], "uuid": make_uuid(rng)}
         world["children"].append(e["uuid"])
         entities.append(e)
 
