@@ -288,7 +288,8 @@ per input (CORE-301, not this step).
   - The full `ctest -j4` run: 302/303, 2 skipped. The one failure is `test_hpak`
     "Disk registry", which also fails on its own (6 == 2). `scanContentDirectory` also
     scans the user's real `EngineContentCache` (4 `.hasset` files on this Mac); that is
-    environment, not this step (lesson recorded; CI's cache is empty).
+    environment, not this step: with `HOME=<empty temp dir>` the case passes 9/9
+    (lesson 382; CI's cache is empty).
 - **Not verified:** HorizonEditor and HorizonGame were not built here (Scene was, through
   he_tests). No Runner is constructed outside Core/tests. Windows/Linux: CI only. The
   editor and game were not run by hand. A spawn in a real project with structs: the
@@ -306,4 +307,9 @@ per input (CORE-301, not this step).
   1. Step 4: CORE-403, the hash.
   2. Later: CORE-301 (evalInput link index, cached pin ranges), the biggest remaining
      share of a tick. CORE-408 (`Inst::levels` as shared const graphs) would also save
-     the remaining copy on spawn.
+     the remaining copy on spawn. Delete the unused non-const `Inst::leaf()` with it:
+     `DispatchIndex` holds `const Node*` into `levels`, so "never written after
+     registration" should become something the compiler checks.
+  3. The class cache keeps each ancestor's `graphJson` once per derived class that
+     was resolved (a base with N subclasses: N copies). That was deliberate; if it
+     shows up in a large project, key the links by asset instead.
