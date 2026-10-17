@@ -5586,6 +5586,42 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(met, 0, out, HE::kMatOutputMetallicPin);
 				g.connect(rgh, 0, out, HE::kMatOutputRoughnessPin);
 			}
+			else if (std::string(mt) == "displace")
+			{
+				// Displacement witness (Thema 207): a lit sphere, value noise × height on
+				// the Displacement pin — tessellated where the backend can (GL 4.0+).
+				// HE_DUMP_DISPHEIGHT = metres (default 0.4), HE_DUMP_DISPPIN=0 leaves the
+				// pin unconnected (the A/B reference), HE_DUMP_DISPFACTOR = maxFactor
+				// (1 adds no vertices, so height 0 must match the reference bit for bit).
+				const char* hEnv = std::getenv("HE_DUMP_DISPHEIGHT");
+				const char* pEnv = std::getenv("HE_DUMP_DISPPIN");
+				const char* fEnv = std::getenv("HE_DUMP_DISPFACTOR");
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.80f; g.findNode(col)->p[1] = 0.72f; g.findNode(col)->p[2] = 0.62f;
+				const int rgh = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(rgh)->p[0] = 0.6f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				g.connect(rgh, 0, out, HE::kMatOutputRoughnessPin);
+				// Noise over WORLD xy, not uv: the sphere's uv seam duplicates its vertices,
+				// and a height that differs across the seam would tear it open.
+				const int wpos  = g.addNode(HE::MatNodeType::WorldPos);
+				const int noise = g.addNode(HE::MatNodeType::ValueNoise);
+				const int scale = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(scale)->p[0] = 2.0f;
+				g.connect(wpos, 0, noise, 0);
+				const int amp = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(amp)->p[0] = (hEnv && *hEnv) ? static_cast<float>(std::atof(hEnv)) : 0.4f;
+				const int mul = g.addNode(HE::MatNodeType::Multiply);
+				g.connect(scale, 0, noise, 1);
+				g.connect(noise, 0, mul, 0);
+				g.connect(amp, 0, mul, 1);
+				if (!(pEnv && std::string(pEnv) == "0"))
+					g.connect(mul, 0, out, HE::kMatOutputDisplacementPin);
+				HE::MatTessSettings& t = g.findNode(out)->tess;
+				t.maxFactor = (fEnv && *fEnv) ? static_cast<float>(std::atof(fEnv)) : 16.0f;
+				t.fadeNear = 20.0f; t.fadeFar = 60.0f; t.maxDisplacement = 1.0f;
+			}
 			else if (std::string(mt) == "noise")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
