@@ -2714,33 +2714,18 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return false;
 	const SlotHandle handle = it->second;
 
-	// Remove from whichever map actually holds *this* asset. The id check guards
-	// against the same SlotHandle being valid in another map (see lookupAsset).
-	auto tryRemove = [&](auto& map) -> bool
+	// Remove from whichever pool actually holds *this* asset. The id check guards
+	// against the same SlotHandle being valid in another pool (see lookupAsset).
+	// A pool anyPool does not visit would make unloadAsset() return false for its
+	// type, which silently disables hot reload (pollHotReload unloads-then-reloads)
+	// and leaks the slot on manual delete — hence the single list in the header.
+	const bool removed = anyPool([&](auto& pool) -> bool
 	{
-		auto* a = map.get(handle);
+		auto* a = pool.get(handle);
 		if (!a || !(a->id == id)) return false;
-		map.remove(handle);
+		pool.remove(handle);
 		return true;
-	};
-
-	// This chain MUST list every SlotMap member of the class. A type missing here
-	// makes unloadAsset() return false for it, which silently disables hot reload
-	// (pollHotReload unloads-then-reloads) and leaks the slot on manual delete —
-	// exactly what happened to InputAction/InputMappingContext/ParticleGraph/
-	// AnimatorStateMachine after those maps were added.
-	const bool removed =
-		tryRemove(m_staticMeshAssets)   || tryRemove(m_skeletalMeshAssets) ||
-		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
-		tryRemove(m_sceneAssets)        || tryRemove(m_scriptAssets)       ||
-		tryRemove(m_audioAssets)        || tryRemove(m_fontAssets)         ||
-		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets) ||
-		tryRemove(m_propAnimClipAssets) || tryRemove(m_materialFunctionAssets) ||
-		tryRemove(m_widgetAssets)       || tryRemove(m_hcClassAssets)     ||
-		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
-		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
-		tryRemove(m_animatorStateMachineAssets) || tryRemove(m_boneMaskAssets) ||
-		tryRemove(m_blendSpaceAssets)   || tryRemove(m_sequenceAssets);
+	});
 	if (!removed)
 		return false;
 
@@ -3027,21 +3012,10 @@ void ContentManager::retargetAssetReferencesInMemory(const std::string& oldRel,
 
 	// …and the `path` an already-loaded asset carries, which is where saveAsset()
 	// writes it back to.
-	auto rekeyAssetPaths = [&](auto& slotMap)
+	forEachPool([&](auto& pool)
 	{
-		for (auto& asset : slotMap) HE::AssetRefs::retargetValue(asset.path, rules);
-	};
-	rekeyAssetPaths(m_staticMeshAssets);   rekeyAssetPaths(m_skeletalMeshAssets);
-	rekeyAssetPaths(m_textureAssets);      rekeyAssetPaths(m_materialAssets);
-	rekeyAssetPaths(m_sceneAssets);        rekeyAssetPaths(m_scriptAssets);
-	rekeyAssetPaths(m_materialFunctionAssets); rekeyAssetPaths(m_widgetAssets);
-	rekeyAssetPaths(m_hcClassAssets);      rekeyAssetPaths(m_inputActionAssets);
-	rekeyAssetPaths(m_inputMappingAssets); rekeyAssetPaths(m_particleGraphAssets);
-	rekeyAssetPaths(m_animatorStateMachineAssets);
-	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
-	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
-	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
-	rekeyAssetPaths(m_sequenceAssets);
+		for (auto& asset : pool) HE::AssetRefs::retargetValue(asset.path, rules);
+	});
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────
@@ -3279,19 +3253,7 @@ void ContentManager::setContentRoot(std::string root)
 void ContentManager::forgetProjectContent()
 {
 	// Every pool, because the DATA is the old project's.
-	m_staticMeshAssets.clear();       m_skeletalMeshAssets.clear();
-	m_textureAssets.clear();          m_materialAssets.clear();
-	m_sceneAssets.clear();            m_scriptAssets.clear();
-	m_materialFunctionAssets.clear(); m_widgetAssets.clear();
-	m_hcClassAssets.clear();          m_inputActionAssets.clear();
-	m_inputMappingAssets.clear();     m_particleGraphAssets.clear();
-	m_animatorStateMachineAssets.clear();
-	m_audioAssets.clear();            m_fontAssets.clear();
-	m_shaderAssets.clear();           m_prefabAssets.clear();
-	m_animClipAssets.clear();         m_propAnimClipAssets.clear();
-	m_sequenceAssets.clear();
-	m_structTypeAssets.clear();      m_enumTypeAssets.clear();
-	m_saveTemplateAssets.clear();
+	forEachPool([](auto& pool) { pool.clear(); });
 
 	// …and every index that pointed into them. m_pathToUUID is the one that
 	// caused the bug; the rest would merely answer about assets that no longer

@@ -813,6 +813,38 @@ private:
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 	SlotMap<SequenceAsset>           m_sequenceAssets;
 
+	// The ONE list of every SlotMap above. A new pool goes here as well, nowhere
+	// else: unloadAsset, forgetProjectContent and retargetAssetReferencesInMemory
+	// all walk the pools through it. They used to keep three hand-written copies,
+	// and each copy missed different types — unloadAsset returned false for
+	// struct/enum/save-template/theme (so hot reload could never replace them),
+	// a project switch kept the old theme/bone-mask/blend-space pools, and a
+	// rename left six types with their old `path` (CORE-201).
+	// anyPool stops at the first visitor that returns true.
+	template<typename F>
+	bool anyPool(F&& f)
+	{
+		return f(m_staticMeshAssets)       || f(m_skeletalMeshAssets)  ||
+		       f(m_textureAssets)          || f(m_materialAssets)      ||
+		       f(m_sceneAssets)            || f(m_scriptAssets)        ||
+		       f(m_materialFunctionAssets) || f(m_widgetAssets)        ||
+		       f(m_hcClassAssets)          || f(m_inputActionAssets)   ||
+		       f(m_inputMappingAssets)     || f(m_particleGraphAssets) ||
+		       f(m_animatorStateMachineAssets) ||
+		       f(m_audioAssets)            || f(m_fontAssets)          ||
+		       f(m_shaderAssets)           || f(m_prefabAssets)        ||
+		       f(m_animClipAssets)         || f(m_propAnimClipAssets)  ||
+		       f(m_structTypeAssets)       || f(m_enumTypeAssets)      ||
+		       f(m_saveTemplateAssets)     || f(m_themeAssets)         ||
+		       f(m_boneMaskAssets)         || f(m_blendSpaceAssets)    ||
+		       f(m_sequenceAssets);
+	}
+	template<typename F>
+	void forEachPool(F&& f)
+	{
+		anyPool([&](auto& pool) { f(pool); return false; });
+	}
+
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {
 		std::unique_ptr<HpakReader> reader;   // main-thread synchronous reads (ensureResident)
