@@ -1,4 +1,5 @@
 #include <UIWidget/UIWidgetTree.h>
+#include <UIWidget/UILayoutScope.h>
 #include <Diagnostics/Logger.h>
 #include <cstdint>
 #include <GraphCommon/GraphJson.h>
@@ -7,21 +8,86 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 namespace HE {
+
+// ── The layout scope's hooks (see UILayoutScope.h) ───────────────────────────
+// Declared up here because find() and every layout walk below ask them; the
+// scope itself is defined after the layout, next to the GridSolved it caches.
+namespace
+{
+    // What the value memo holds for one element. `have` says which of the
+    // fields are filled in; an unfilled one is computed the old way and then
+    // written here.
+    struct LayoutMemo
+    {
+        enum : uint8_t { kRect = 1, kUnbounded = 2, kScale = 4,
+                         kVisible = 8, kEnabled = 16, kOpacity = 32 };
+        uint8_t      have = 0;
+        bool         visible = false, enabled = false;
+        float        opacity = 1.0f, scaleX = 1.0f, scaleY = 1.0f;
+        UIWidgetRect rect{}, unbounded{};
+    };
+
+    // The element with this id from the active scope's table, or null when no
+    // scope is active for `tree` or the table does not know the id — the caller
+    // then falls back to the walk, so a table that missed something is slow,
+    // never wrong.
+    const UIElement* scopedFind(const UIWidgetTree& tree, int id);
+    // The children of `parentId` in tree order, from the active scope. False =
+    // no scope; walk the tree.
+    bool scopedChildren(const UIWidgetTree& tree, int parentId,
+                        const UIElement* const*& outKids, int& outCount);
+    // True with the answer when a scope knows `childId`'s place under `parentId`.
+    bool scopedChildIndex(const UIWidgetTree& tree, int parentId, int childId, int& out);
+    bool scopedChildCount(const UIWidgetTree& tree, int parentId, int& out);
+    // The memo slot of `e`, or null when values are not being memoized for this
+    // tree — or not on this canvas, when `canvasMatters` (rects and unit scales
+    // are in canvas units; visibility, enabled state and opacity are not).
+    LayoutMemo* memoFor(const UIWidgetTree& tree, const UIElement& e,
+                        const UIWidgetCanvas* canvas, bool canvasMatters);
+
+    // The walks behind the memoized public answers, unchanged.
+    float uiElementEffectiveOpacityWalk(const UIWidgetTree& tree, const UIElement& e);
+    bool  uiElementEffectiveEnabledWalk(const UIWidgetTree& tree, const UIElement& e);
+
+    template <class F>
+    void forEachChild(const UIWidgetTree& tree, int parentId, F&& f)
+    {
+        const UIElement* const* kids = nullptr;
+        int n = 0;
+        if (scopedChildren(tree, parentId, kids, n))
+        {
+            for (int i = 0; i < n; ++i) f(*kids[i]);
+            return;
+        }
+        for (const auto& sp : tree.elements)
+            if (sp && sp->parentId == parentId) f(*sp);
+    }
+}
 
 // A widget tree is a parent-id TREE, not a link graph: it shares find/add id
 // handling with the node graphs (GraphModel.h) but has no links, hence no
 // connect/disconnect and a removeSubtree instead of removeNode.
 UIElement* UIWidgetTree::find(int id)
-{ return HE::graph::findNodeById(elements, id); }
+{
+    // The scope's table holds const pointers because the scope only reads; the
+    // elements themselves are this tree's own, so handing one back mutable is
+    // exactly what the walk below would do.
+    if (const UIElement* e = scopedFind(*this, id)) return const_cast<UIElement*>(e);
+    return HE::graph::findNodeById(elements, id);
+}
 const UIElement* UIWidgetTree::find(int id) const
-{ return HE::graph::findNodeById(elements, id); }
+{
+    if (const UIElement* e = scopedFind(*this, id)) return e;
+    return HE::graph::findNodeById(elements, id);
+}
 
 std::vector<int> UIWidgetTree::childrenOf(int parentId) const
 {
     std::vector<int> out;
-    for (const auto& e : elements) if (e->parentId == parentId) out.push_back(e->id);
+    forEachChild(*this, parentId, [&](const UIElement& e){ out.push_back(e.id); });
     return out;
 }
 
@@ -484,20 +550,23 @@ namespace
         const float axisSpace = vert ? inner.h : inner.w;
 
         // One pass over the siblings for the totals, a second to walk to this
-        // child. The lists are short (a box holds what fits on a screen), and
-        // this keeps the layout stateless — no cached slot table to invalidate.
+        // child. Stateless on its own; inside a layout scope the siblings come
+        // from the scope's child table, and with values memoized the second
+        // pass writes EVERY visible sibling's slot as it walks past it — the
+        // same arithmetic in the same order, so the box is walked once a frame
+        // instead of once per child.
         float fixed = 0.0f, fillSum = 0.0f;
         int   count = 0;
-        for (const auto& sp : tree.elements)
+        forEachChild(tree, box.id, [&](const UIElement& sp)
         {
-            if (!sp || sp->parentId != box.id || !sp->visible) continue;
+            if (!sp.visible) return;
             ++count;
             // A child's own size is in the same units as the box's (they are in
             // the same widget), so one axis factor converts both.
-            if (sp->slotFill > 0.0f) fillSum += sp->slotFill;
-            else                     fixed += (vert ? sp->sizeY + slotPadY(*sp)
-                                                    : sp->sizeX + slotPadX(*sp)) * axisScale;
-        }
+            if (sp.slotFill > 0.0f) fillSum += sp.slotFill;
+            else                    fixed += (vert ? sp.sizeY + slotPadY(sp)
+                                                   : sp.sizeX + slotPadX(sp)) * axisScale;
+        });
         const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
         const float leftover = std::max(0.0f, axisSpace - fixed - gaps);
 
@@ -507,23 +576,33 @@ namespace
         float cursor = vert ? inner.y : inner.x;
         if (const auto* sb = dynamic_cast<const UIScrollBox*>(&box))
             cursor -= sb->scrollOffset * axisScale;
-        UIWidgetRect out{ inner.x, inner.y, inner.w, inner.h };
-        for (const auto& sp : tree.elements)
+        const UIWidgetRect out{ inner.x, inner.y, inner.w, inner.h };
+        const bool  memoAll = memoFor(tree, child, canvas, true) != nullptr;
+        bool         found = false;
+        UIWidgetRect result = out;
+        forEachChild(tree, box.id, [&](const UIElement& sp)
         {
-            if (!sp || sp->parentId != box.id || !sp->visible) continue;
-            const float extent = (sp->slotFill > 0.0f && fillSum > 0.0f)
-                ? leftover * (sp->slotFill / fillSum)
-                : (vert ? sp->sizeY + slotPadY(*sp)
-                        : sp->sizeX + slotPadX(*sp)) * axisScale;
-            if (sp->id == child.id)
+            if (!sp.visible || (found && !memoAll)) return;
+            const float extent = (sp.slotFill > 0.0f && fillSum > 0.0f)
+                ? leftover * (sp.slotFill / fillSum)
+                : (vert ? sp.sizeY + slotPadY(sp)
+                        : sp.sizeX + slotPadX(sp)) * axisScale;
+            const UIWidgetRect slot = vert ? UIWidgetRect{ inner.x, cursor, inner.w, extent }
+                                           : UIWidgetRect{ cursor, inner.y, extent, inner.h };
+            if (!found && sp.id == child.id)
             {
-                if (vert) { out.x = inner.x; out.w = inner.w; out.y = cursor; out.h = extent; }
-                else      { out.y = inner.y; out.h = inner.h; out.x = cursor; out.w = extent; }
-                return alignInSlot(child, out, bus, bvs);
+                result = alignInSlot(child, slot, bus, bvs);
+                found = true;
             }
+            if (memoAll)
+                if (LayoutMemo* m = memoFor(tree, sp, canvas, true))
+                {
+                    m->unbounded = alignInSlot(sp, slot, bus, bvs);
+                    m->have |= LayoutMemo::kUnbounded;
+                }
             cursor += extent + gap;
-        }
-        return out;
+        });
+        return result;
     }
 
     // ── The Grid, solved in one go ───────────────────────────────────────────
@@ -545,21 +624,53 @@ namespace
         // tracks count as nothing here, exactly as a filling child counts as
         // nothing when a box measures itself.
         float contentW = 0.0f, contentH = 0.0f;
-        int cellOf(int elemId, int& col, int& row, int& cs, int& rs) const
+        // Each placed element's first cell in reading order and the span walked
+        // from it, filled once by indexCells. It used to be a scan of every
+        // cell per question, and the questions are one per child per `auto`
+        // track — a 150-child grid with auto rows asked over a million.
+        struct Cell { int col, row, cs, rs; };
+        std::unordered_map<int, Cell> cells;
+        void indexCells()
         {
+            cells.clear();
             for (int r = 0; r < rows; ++r)
                 for (int c = 0; c < cols; ++c)
-                    if (who[static_cast<std::size_t>(r) * cols + c] == elemId)
-                    {
-                        col = c; row = r;
-                        // Walk the run to recover the span it was placed with.
-                        cs = 1; while (col + cs < cols &&
-                                       who[static_cast<std::size_t>(r) * cols + col + cs] == elemId) ++cs;
-                        rs = 1; while (row + rs < rows &&
-                                       who[static_cast<std::size_t>(row + rs) * cols + col] == elemId) ++rs;
-                        return 1;
-                    }
-            return 0;
+                {
+                    const int elemId = who[static_cast<std::size_t>(r) * cols + c];
+                    if (elemId == 0 || cells.count(elemId)) continue;
+                    // Walk the run to recover the span it was placed with.
+                    int cs = 1; while (c + cs < cols &&
+                                       who[static_cast<std::size_t>(r) * cols + c + cs] == elemId) ++cs;
+                    int rs = 1; while (r + rs < rows &&
+                                       who[static_cast<std::size_t>(r + rs) * cols + c] == elemId) ++rs;
+                    cells.emplace(elemId, Cell{ c, r, cs, rs });
+                }
+        }
+        int cellOf(int elemId, int& col, int& row, int& cs, int& rs) const
+        {
+            // 0 is what an EMPTY cell holds, so an element with id 0 (only a
+            // hand-edited file has one) lands on the first free cell — as it
+            // always did, by the scan this table replaced.
+            if (elemId == 0)
+            {
+                for (int r = 0; r < rows; ++r)
+                    for (int c = 0; c < cols; ++c)
+                        if (who[static_cast<std::size_t>(r) * cols + c] == 0)
+                        {
+                            col = c; row = r;
+                            cs = 1; while (col + cs < cols &&
+                                           who[static_cast<std::size_t>(r) * cols + col + cs] == 0) ++cs;
+                            rs = 1; while (row + rs < rows &&
+                                           who[static_cast<std::size_t>(row + rs) * cols + col] == 0) ++rs;
+                            return 1;
+                        }
+                return 0;
+            }
+            const auto it = cells.find(elemId);
+            if (it == cells.end()) return 0;
+            col = it->second.col; row = it->second.row;
+            cs  = it->second.cs;  rs  = it->second.rs;
+            return 1;
         }
     };
 
@@ -571,8 +682,7 @@ namespace
         uiElementUnitScale(tree, grid, us, vs, canvas);
 
         std::vector<const UIElement*> kids;
-        for (const auto& sp : tree.elements)
-            if (sp && sp->parentId == grid.id && sp->visible) kids.push_back(sp.get());
+        forEachChild(tree, grid.id, [&](const UIElement& sp){ if (sp.visible) kids.push_back(&sp); });
 
         g.cols = static_cast<int>(grid.colTracks.size());
         if (g.cols < 1) g.cols = 1;
@@ -644,6 +754,7 @@ namespace
             // which is visible and fixable rather than drawn on top of a
             // neighbour.
         }
+        g.indexCells();
 
         // ── Track sizes ──────────────────────────────────────────────────────
         const UIWidgetRect b = uiElementRect(tree, grid, canvas);
@@ -710,6 +821,11 @@ namespace
         return g;
     }
 
+    // The grid solved once per scope when values are memoized (every child of
+    // a grid asks for the whole solve), null otherwise. Defined with the scope.
+    const GridSolved* scopedGrid(const UIWidgetTree& tree, const UIGrid& grid,
+                                 const UIWidgetCanvas* canvas);
+
     // ── A tab's page gets everything under the strip ─────────────────────────
     // Every page, not only the active one: a page that is not showing still has
     // a real rect, so switching to it does not have to lay it out from nothing
@@ -741,13 +857,12 @@ namespace
 
         std::vector<float> bodies;
         int idx = -1, i = 0;
-        for (const auto& cp : tree.elements)
+        forEachChild(tree, acc.id, [&](const UIElement& cp)
         {
-            if (!cp || cp->parentId != acc.id) continue;
-            if (cp->id == child.id) idx = i;
-            bodies.push_back(cp->sizeY);
+            if (cp.id == child.id) idx = i;
+            bodies.push_back(cp.sizeY);
             ++i;
-        }
+        });
         // Not one of mine, or past the 32nd section: an empty slot at the top
         // rather than the whole rect, so an element that ended up in here is
         // invisible instead of a full-size sheet over the stack.
@@ -799,7 +914,10 @@ namespace
         const float pad = std::max(0.0f, grid.padding);
         const UIWidgetRect inner{ b.x + pad * us, b.y + pad * vs, 0.0f, 0.0f };
 
-        const GridSolved g = solveGrid(tree, grid, canvas);
+        GridSolved solvedHere;
+        const GridSolved* cached = scopedGrid(tree, grid, canvas);
+        if (!cached) solvedHere = solveGrid(tree, grid, canvas);
+        const GridSolved& g = cached ? *cached : solvedHere;
         int c = 0, r = 0, cs = 1, rs = 1;
         if (!g.cellOf(child.id, c, r, cs, rs)) return { inner.x, inner.y, 0.0f, 0.0f };
 
@@ -853,13 +971,13 @@ namespace
         std::vector<Placed> placed;
         std::vector<float>  lineHeights;
         float x = inner.x, y = inner.y, lineH = 0.0f;
-        for (const auto& sp : tree.elements)
+        forEachChild(tree, box.id, [&](const UIElement& sp)
         {
-            if (!sp || sp->parentId != box.id || !sp->visible) continue;
+            if (!sp.visible) return;
             // The slot is the child plus its margins: that is what runs along
             // the line and what the line has to be tall enough for.
-            const float w = (sp->sizeX + slotPadX(*sp)) * us;
-            const float h = (sp->sizeY + slotPadY(*sp)) * vs;
+            const float w = (sp.sizeX + slotPadX(sp)) * us;
+            const float h = (sp.sizeY + slotPadY(sp)) * vs;
             // A break only when something is already on this line: a child wider
             // than the whole box still gets its own line rather than an empty
             // one above it.
@@ -870,28 +988,46 @@ namespace
                 y += lineH + gapY;
                 lineH = 0.0f;
             }
-            placed.push_back({ sp.get(), x, y, w, h, static_cast<int>(lineHeights.size()) });
+            placed.push_back({ &sp, x, y, w, h, static_cast<int>(lineHeights.size()) });
             x += w + gapX;
             lineH = std::max(lineH, h);
-        }
+        });
         lineHeights.push_back(lineH);
         if (outContentHeight) *outContentHeight = (y + lineH) - inner.y;
 
         UIWidgetRect found{ inner.x, inner.y, 0.0f, 0.0f };
         if (!child) return found;
-        for (const Placed& p : placed)
+        // Fill on the line's axis means what it always did here — the child's
+        // own height, at the top of the line — and not "as tall as the tallest
+        // thing on this line": a row of chips with one tall entry must not grow
+        // every chip beside it. Top/Center/Bottom pin the child's own height
+        // within the line.
+        const auto slotOf = [&](const Placed& p)
         {
-            if (p.e->id != child->id) continue;
-            // Fill on the line's axis means what it always did here — the
-            // child's own height, at the top of the line — and not "as tall as
-            // the tallest thing on this line": a row of chips with one tall
-            // entry must not grow every chip beside it. Top/Center/Bottom pin
-            // the child's own height within the line.
             UIWidgetRect slot{ p.x, p.y, p.w, p.h };
-            if (child->slotVAlign != UISlotVAlign::Fill)
+            if (p.e->slotVAlign != UISlotVAlign::Fill)
                 slot.h = lineHeights[static_cast<std::size_t>(p.line)];
-            return alignInSlot(*child, slot, us, vs);
-        }
+            return alignInSlot(*p.e, slot, us, vs);
+        };
+        // With values memoized every child's slot is written now, as the box
+        // does: the lines were broken for all of them anyway.
+        if (memoFor(tree, *child, canvas, true))
+            for (const Placed& p : placed)
+                if (LayoutMemo* m = memoFor(tree, *p.e, canvas, true))
+                {
+                    m->unbounded = slotOf(p);
+                    m->have |= LayoutMemo::kUnbounded;
+                }
+        for (const Placed& p : placed)
+            if (p.e->id == child->id)
+            {
+                // The CHILD asked, not the placed entry with its id: the same
+                // element unless a hand-edited file repeats an id.
+                UIWidgetRect slot{ p.x, p.y, p.w, p.h };
+                if (child->slotVAlign != UISlotVAlign::Fill)
+                    slot.h = lineHeights[static_cast<std::size_t>(p.line)];
+                return alignInSlot(*child, slot, us, vs);
+            }
         return found;                            // not a child of this box
     }
 
@@ -933,8 +1069,186 @@ namespace
     }
 }
 
-void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
-                        float& outScaleX, float& outScaleY, const UIWidgetCanvas* canvas)
+// ── The layout scope (see UILayoutScope.h) ───────────────────────────────────
+
+struct UILayoutScope::Impl
+{
+    const UIWidgetTree* tree = nullptr;
+    bool                hasCanvas = false;
+    UIWidgetCanvas      canvas{};
+    bool                values = false;
+    Impl*               prev = nullptr;          // the scope this one was opened inside
+
+    // STRUCTURE. `elems` is tree.elements by index; `index` maps an id to the
+    // FIRST element carrying it, which is what the linear find returns.
+    std::vector<const UIElement*> elems;
+    std::unordered_map<int, int>  index;
+    // Children grouped by their parentId VALUE — a parent that is not in the
+    // tree still has its children counted, exactly like the walk counts them —
+    // and in tree order inside each group.
+    struct Range { int begin = 0, count = 0; };
+    std::unordered_map<int, Range> kids;
+    std::vector<const UIElement*>  order;
+    std::vector<int>               childPos;     // element index → place among its siblings
+
+    // VALUES, by element index; empty until memoizeValues.
+    std::vector<LayoutMemo>             memo;
+    std::unordered_map<int, GridSolved> grids;   // by the grid's element index
+};
+
+namespace
+{
+    // Per thread, so a tree laid out on one thread never sees another thread's
+    // tables; a stack, so a scope opened inside another one (a different tree)
+    // hands the outer one back when it closes.
+    thread_local UILayoutScope::Impl* t_layoutScopes = nullptr;
+
+    UILayoutScope::Impl* activeScope(const UIWidgetTree& tree)
+    {
+        for (UILayoutScope::Impl* s = t_layoutScopes; s; s = s->prev)
+            if (s->tree == &tree) return s;
+        return nullptr;
+    }
+
+    // The element index of `id`, or -1. Checked against the element itself, so
+    // an entry that went stale (an id rewritten under an open scope) is a miss
+    // and the caller walks, rather than an answer about the wrong element.
+    int scopedIndexOf(const UILayoutScope::Impl& s, int id)
+    {
+        const auto it = s.index.find(id);
+        if (it == s.index.end()) return -1;
+        const UIElement* e = s.elems[static_cast<std::size_t>(it->second)];
+        return e && e->id == id ? it->second : -1;
+    }
+
+    const UIElement* scopedFind(const UIWidgetTree& tree, int id)
+    {
+        const UILayoutScope::Impl* s = activeScope(tree);
+        if (!s) return nullptr;
+        const int i = scopedIndexOf(*s, id);
+        return i >= 0 ? s->elems[static_cast<std::size_t>(i)] : nullptr;
+    }
+
+    bool scopedChildren(const UIWidgetTree& tree, int parentId,
+                        const UIElement* const*& outKids, int& outCount)
+    {
+        const UILayoutScope::Impl* s = activeScope(tree);
+        if (!s) return false;
+        const auto it = s->kids.find(parentId);
+        outKids  = it == s->kids.end() ? nullptr : s->order.data() + it->second.begin;
+        outCount = it == s->kids.end() ? 0 : it->second.count;
+        return true;
+    }
+
+    bool scopedChildIndex(const UIWidgetTree& tree, int parentId, int childId, int& out)
+    {
+        const UILayoutScope::Impl* s = activeScope(tree);
+        if (!s) return false;
+        const int i = scopedIndexOf(*s, childId);
+        if (i < 0) return false;
+        out = s->elems[static_cast<std::size_t>(i)]->parentId == parentId
+            ? s->childPos[static_cast<std::size_t>(i)] : -1;
+        return true;
+    }
+
+    bool scopedChildCount(const UIWidgetTree& tree, int parentId, int& out)
+    {
+        const UILayoutScope::Impl* s = activeScope(tree);
+        if (!s) return false;
+        const auto it = s->kids.find(parentId);
+        out = it == s->kids.end() ? 0 : it->second.count;
+        return true;
+    }
+
+    bool sameCanvas(const UILayoutScope::Impl& s, const UIWidgetCanvas* canvas)
+    {
+        if (!canvas) return !s.hasCanvas;
+        return s.hasCanvas &&
+               canvas->scaleX == s.canvas.scaleX && canvas->scaleY == s.canvas.scaleY &&
+               canvas->width  == s.canvas.width  && canvas->height == s.canvas.height;
+    }
+
+    LayoutMemo* memoFor(const UIWidgetTree& tree, const UIElement& e,
+                        const UIWidgetCanvas* canvas, bool canvasMatters)
+    {
+        UILayoutScope::Impl* s = activeScope(tree);
+        if (!s || !s->values) return nullptr;
+        if (canvasMatters && !sameCanvas(*s, canvas)) return nullptr;
+        const int i = scopedIndexOf(*s, e.id);
+        // An element that is not THIS tree's (a copy, a probe the caller made
+        // up) shares nothing with the table.
+        if (i < 0 || s->elems[static_cast<std::size_t>(i)] != &e) return nullptr;
+        return &s->memo[static_cast<std::size_t>(i)];
+    }
+
+    const GridSolved* scopedGrid(const UIWidgetTree& tree, const UIGrid& grid,
+                                 const UIWidgetCanvas* canvas)
+    {
+        if (!memoFor(tree, grid, canvas, true)) return nullptr;
+        UILayoutScope::Impl& s = *activeScope(tree);
+        const int i = scopedIndexOf(s, grid.id);
+        auto it = s.grids.find(i);
+        // Solved BEFORE it goes into the map: the solve asks for the grid's own
+        // rect, which may solve an enclosing grid and insert that one first.
+        if (it == s.grids.end()) it = s.grids.emplace(i, solveGrid(tree, grid, canvas)).first;
+        return &it->second;
+    }
+}
+
+UILayoutScope::UILayoutScope(const UIWidgetTree& tree, const UIWidgetCanvas* canvas)
+    : m_impl(std::make_unique<Impl>())
+{
+    Impl& s = *m_impl;
+    s.tree = &tree;
+    if (canvas) { s.hasCanvas = true; s.canvas = *canvas; }
+
+    const std::size_t n = tree.elements.size();
+    s.elems.resize(n);
+    s.childPos.assign(n, -1);
+    s.index.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const UIElement* e = tree.elements[i].get();
+        s.elems[i] = e;
+        if (!e) continue;
+        s.index.emplace(e->id, static_cast<int>(i));
+        ++s.kids[e->parentId].count;
+    }
+    int at = 0;
+    for (auto& [parentId, r] : s.kids) { r.begin = at; at += r.count; r.count = 0; }
+    s.order.resize(static_cast<std::size_t>(at));
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const UIElement* e = s.elems[i];
+        if (!e) continue;
+        Impl::Range& r = s.kids[e->parentId];
+        s.childPos[i] = r.count;
+        s.order[static_cast<std::size_t>(r.begin + r.count++)] = e;
+    }
+
+    s.prev = t_layoutScopes;
+    t_layoutScopes = &s;
+}
+
+UILayoutScope::~UILayoutScope()
+{
+    // Scopes close in reverse order of opening; unlinking from the middle is
+    // only the defensive answer to one that did not.
+    for (Impl** link = &t_layoutScopes; *link; link = &(*link)->prev)
+        if (*link == m_impl.get()) { *link = m_impl->prev; break; }
+}
+
+void UILayoutScope::memoizeValues()
+{
+    m_impl->values = true;
+    m_impl->memo.assign(m_impl->elems.size(), LayoutMemo{});
+    m_impl->grids.clear();
+}
+
+namespace
+{
+void uiElementUnitScaleWalk(const UIWidgetTree& tree, const UIElement& e,
+                            float& outScaleX, float& outScaleY, const UIWidgetCanvas* canvas)
 {
     outScaleX = outScaleY = 1.0f;
     // Nearest WidgetRef above this element, if any.
@@ -963,6 +1277,20 @@ void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
         }
         cur = p;
     }
+}
+}
+
+void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
+                        float& outScaleX, float& outScaleY, const UIWidgetCanvas* canvas)
+{
+    LayoutMemo* m = memoFor(tree, e, canvas, true);
+    if (m && (m->have & LayoutMemo::kScale))
+    {
+        outScaleX = m->scaleX; outScaleY = m->scaleY;
+        return;
+    }
+    uiElementUnitScaleWalk(tree, e, outScaleX, outScaleY, canvas);
+    if (m) { m->scaleX = outScaleX; m->scaleY = outScaleY; m->have |= LayoutMemo::kScale; }
 }
 
 void uiGridTracks(const UIWidgetTree& tree, const UIGrid& grid,
@@ -1012,15 +1340,40 @@ namespace
 UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                            const UIWidgetCanvas* canvas)
 {
+    // Inside a scope with values memoized, a rect is solved once: the parent
+    // chain every child walks up is then one lookup per step, not a solve.
+    LayoutMemo* m = memoFor(tree, e, canvas, true);
+    if (m && (m->have & LayoutMemo::kRect)) return m->rect;
     UIWidgetRect r = uiElementRectUnbounded(tree, e, canvas);
     applySizeBounds(tree, e, canvas, r);
+    if (m) { m->rect = r; m->have |= LayoutMemo::kRect; }
     return r;
+}
+
+namespace
+{
+    UIWidgetRect rectUnboundedWalk(const UIWidgetTree& tree, const UIElement& e,
+                                   const UIWidgetCanvas* canvas);
 }
 
 // Split out so the bound is applied in exactly one place instead of at each of
 // the seven ways out of this walk.
 UIWidgetRect uiElementRectUnbounded(const UIWidgetTree& tree, const UIElement& e,
                                     const UIWidgetCanvas* canvas)
+{
+    // A box or a wrap box may already have written this one while placing a
+    // sibling (see boxSlotRect).
+    LayoutMemo* m = memoFor(tree, e, canvas, true);
+    if (m && (m->have & LayoutMemo::kUnbounded)) return m->unbounded;
+    const UIWidgetRect r = rectUnboundedWalk(tree, e, canvas);
+    if (m) { m->unbounded = r; m->have |= LayoutMemo::kUnbounded; }
+    return r;
+}
+
+namespace
+{
+UIWidgetRect rectUnboundedWalk(const UIWidgetTree& tree, const UIElement& e,
+                               const UIWidgetCanvas* canvas)
 {
     // A child of a layout container does not place itself: the box does, and
     // the child's own anchors and position are not consulted at all.
@@ -1060,6 +1413,7 @@ UIWidgetRect uiElementRectUnbounded(const UIWidgetTree& tree, const UIElement& e
     solveAxis(lox, hix, e.posX * us, e.sizeX * us, e.pivotX, r.x, r.w);
     solveAxis(loy, hiy, e.posY * vs, e.sizeY * vs, e.pivotY, r.y, r.h);
     return r;
+}
 }
 
 // left = pos - pivot*size and right = -left - size, from solveAxis with the
@@ -1250,11 +1604,12 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
         auto* tabs = dynamic_cast<UITabBox*>(e.get());
         if (!tabs) continue;
         tabs->tabLabels.clear();
-        for (const auto& c : tree.elements)
-            if (c && c->parentId == tabs->id)
-                // An unnamed page still needs something on its tab, or the strip
-                // grows a gap nobody can click with any confidence.
-                tabs->tabLabels.push_back(c->name.empty() ? std::string("Page") : c->name);
+        forEachChild(tree, tabs->id, [&](const UIElement& c)
+        {
+            // An unnamed page still needs something on its tab, or the strip
+            // grows a gap nobody can click with any confidence.
+            tabs->tabLabels.push_back(c.name.empty() ? std::string("Page") : c.name);
+        });
     }
 
     // The measured extent, held between the element's floor and its ceiling. The
@@ -1348,19 +1703,19 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
         const float gap  = std::max(0.0f, box->spacing);
         float along = 0.0f, across = 0.0f;
         int   count = 0;
-        for (const auto& cp : tree.elements)
+        forEachChild(tree, box->id, [&](const UIElement& cp)
         {
-            if (!cp || cp->parentId != box->id || !cp->visible) continue;
+            if (!cp.visible) return;
             ++count;
             // A filling child's size IS the leftover this is computing, so it
             // contributes nothing along the axis — across it still counts. The
             // slot margins are part of the child's cost on both axes, exactly
             // as boxSlotRect charges them.
-            if (cp->slotFill <= 0.0f) along += vert ? cp->sizeY + slotPadY(*cp)
-                                                    : cp->sizeX + slotPadX(*cp);
-            across = std::max(across, vert ? cp->sizeX + slotPadX(*cp)
-                                           : cp->sizeY + slotPadY(*cp));
-        }
+            if (cp.slotFill <= 0.0f) along += vert ? cp.sizeY + slotPadY(cp)
+                                                   : cp.sizeX + slotPadX(cp);
+            across = std::max(across, vert ? cp.sizeX + slotPadX(cp)
+                                           : cp.sizeY + slotPadY(cp));
+        });
         if (count > 1) along += gap * static_cast<float>(count - 1);
         const float w = (vert ? across : along) + 2.0f * pad;
         const float h = (vert ? along : across) + 2.0f * pad;
@@ -1500,6 +1855,10 @@ UISnapResult uiSnapDelta(const UIWidgetRect& rect, const std::vector<UISnapLine>
 
 int uiChildIndexOf(const UIWidgetTree& tree, int parentId, int childId)
 {
+    // The fast place the header promised: a scope has every element's place
+    // among its siblings in a table (CORE-601 — hidesChild asks this for every
+    // element on every visibility walk).
+    if (int scoped = -1; scopedChildIndex(tree, parentId, childId, scoped)) return scoped;
     int i = 0;
     for (const auto& ep : tree.elements)
     {
@@ -1512,6 +1871,7 @@ int uiChildIndexOf(const UIWidgetTree& tree, int parentId, int childId)
 
 int uiChildCountOf(const UIWidgetTree& tree, int parentId)
 {
+    if (int scoped = 0; scopedChildCount(tree, parentId, scoped)) return scoped;
     int n = 0;
     for (const auto& ep : tree.elements)
         if (ep && ep->parentId == parentId) ++n;
@@ -1522,14 +1882,17 @@ bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
 {
     if (!e.visible) return false;
     if (e.parentId == 0) return true;
+    LayoutMemo* m = memoFor(tree, e, nullptr, false);
+    if (m && (m->have & LayoutMemo::kVisible)) return m->visible;
     const UIElement* p = tree.find(e.parentId);
     if (!p) return true;
     // …and whether the PARENT is showing it. A Tab Box hides every page but
     // one, and this is the single place that has to know, because everything
     // that asks "is this on screen" — the extract, the hit test, the designer —
     // already comes through here.
-    if (p->hidesChild(tree, e)) return false;
-    return uiElementEffectiveVisible(tree, *p);
+    const bool shown = !p->hidesChild(tree, e) && uiElementEffectiveVisible(tree, *p);
+    if (m) { m->visible = shown; m->have |= LayoutMemo::kVisible; }
+    return shown;
 }
 
 void uiUpdateScrollExtents(UIWidgetTree& tree)
@@ -1562,15 +1925,14 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         {
             acc->sectionLabels.clear();
             acc->sectionBodies.clear();
-            for (const auto& cp : tree.elements)
+            forEachChild(tree, acc->id, [&](const UIElement& cp)
             {
-                if (!cp || cp->parentId != acc->id) continue;
                 // An unnamed section still needs something on its heading, or
                 // the stack grows a band nobody can aim at with any confidence.
-                acc->sectionLabels.push_back(cp->name.empty() ? std::string("Section")
-                                                              : cp->name);
-                acc->sectionBodies.push_back(cp->sizeY);
-            }
+                acc->sectionLabels.push_back(cp.name.empty() ? std::string("Section")
+                                                             : cp.name);
+                acc->sectionBodies.push_back(cp.sizeY);
+            });
             const int n = static_cast<int>(acc->sectionBodies.size());
             if (n > UIAccordion::kMaxSections && !acc->warnedOverflow)
             {
@@ -1593,12 +1955,12 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         // what filling MEANS — so it contributes nothing to the overflow.
         float total = 0.0f;
         int   count = 0;
-        for (const auto& cp : tree.elements)
+        forEachChild(tree, sb->id, [&](const UIElement& cp)
         {
-            if (!cp || cp->parentId != sb->id || !cp->visible) continue;
+            if (!cp.visible) return;
             ++count;
-            if (cp->slotFill <= 0.0f) total += cp->sizeY + slotPadY(*cp);
-        }
+            if (cp.slotFill <= 0.0f) total += cp.sizeY + slotPadY(cp);
+        });
         if (count > 1) total += std::max(0.0f, sb->spacing) * static_cast<float>(count - 1);
         sb->contentExtent = total;
         sb->scrollOffset = std::clamp(sb->scrollOffset, 0.0f, sb->maxScroll());
@@ -1623,6 +1985,17 @@ bool uiScrollBy(UIWidgetTree& tree, int id, float delta)
 
 float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e)
 {
+    LayoutMemo* m = memoFor(tree, e, nullptr, false);
+    if (m && (m->have & LayoutMemo::kOpacity)) return m->opacity;
+    const float a = uiElementEffectiveOpacityWalk(tree, e);
+    if (m) { m->opacity = a; m->have |= LayoutMemo::kOpacity; }
+    return a;
+}
+
+namespace
+{
+float uiElementEffectiveOpacityWalk(const UIWidgetTree& tree, const UIElement& e)
+{
     float a = std::clamp(e.renderOpacity, 0.0f, 1.0f);
     // Iterative, not recursive: this runs per element per frame, and the guard
     // bounds a parent chain that a hand-edited file could have made cyclic.
@@ -1636,6 +2009,7 @@ float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e)
         cur = p;
     }
     return a;
+}
 }
 
 bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
@@ -1717,6 +2091,17 @@ void uiUnrotatePoint(const UIRotation& r, float x, float y, float& outX, float& 
 bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement& e)
 {
     if (!e.enabled) return false;
+    LayoutMemo* m = memoFor(tree, e, nullptr, false);
+    if (m && (m->have & LayoutMemo::kEnabled)) return m->enabled;
+    const bool on = uiElementEffectiveEnabledWalk(tree, e);
+    if (m) { m->enabled = on; m->have |= LayoutMemo::kEnabled; }
+    return on;
+}
+
+namespace
+{
+bool uiElementEffectiveEnabledWalk(const UIWidgetTree& tree, const UIElement& e)
+{
     int guard = 0;
     const UIElement* cur = &e;
     while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
@@ -1727,6 +2112,7 @@ bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement& e)
         cur = p;
     }
     return true;
+}
 }
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
