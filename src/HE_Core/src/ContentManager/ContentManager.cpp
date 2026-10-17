@@ -153,15 +153,9 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 // ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
 HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
-	std::ifstream f(path, std::ios::binary);
-	if (!f.is_open()) return HE::AssetType::Unknown;
-
-	HAsset::FileHeader hdr{};
-	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-	if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0)
-		return HE::AssetType::Unknown;
-
-	return static_cast<HE::AssetType>(hdr.asset_type);
+	uint16_t type = 0;
+	return HAsset::readAssetTypeFromFile(path, type) ? static_cast<HE::AssetType>(type)
+	                                                 : HE::AssetType::Unknown;
 }
 
 // ─── parseAndRegisterAsset ────────────────────────────────────────────────────
@@ -2808,9 +2802,12 @@ std::vector<HE::UUID> ContentManager::discoverAssets(HE::AssetType type)
 	{
 		if (ec) break;
 		if (!it->is_regular_file(ec) || it->path().extension() != ".hasset") continue;
-		HAsset::Reader r;
-		if (!r.open(it->path().string()) ||
-		    r.assetType() != static_cast<uint16_t>(type)) continue;
+		// The 32-byte header, not Reader::open(): that pulls every chunk payload
+		// into memory, and this walk runs over the whole tree several times per
+		// play start (PlayerHost, TypeRegistry) only to throw most files away.
+		uint16_t fileType = 0;
+		if (!HAsset::readAssetTypeFromFile(it->path().string(), fileType) ||
+		    fileType != static_cast<uint16_t>(type)) continue;
 		const std::string rel =
 			std::filesystem::relative(it->path(), root, ec).generic_string();
 		const HE::UUID id = loadAsset(rel);
