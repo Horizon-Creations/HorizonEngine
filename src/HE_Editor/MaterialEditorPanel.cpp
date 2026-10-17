@@ -2389,7 +2389,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					std::snprintf(tip, sizeof(tip), "Displacement pin: tessellation settings (tessellated on %s)", backend);
 
 				bar.group();
-				const bool open = effective && !truncated
+				const bool open = effective
 					? bar.item("##tess", T::iconMountain, "Tessellation", false, true, tip)
 					: bar.itemTinted("##tess", T::iconWarning, "Tessellation", T::kWarn, true, tip);
 				if (open) ImGui::OpenPopup("##tessPopup");
@@ -2411,10 +2411,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 						else
 							ImGui::TextDisabled("Tessellated on %s. Height in metres along the "
 							                    "surface normal.", backend);
+						// A note, not a warning: the registry types every Math node as a
+						// vector, so texture × scale (the usual height graph) lands here
+						// too, and there x is what was meant.
 						if (truncated)
-							ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(T::kWarn),
-								"Displacement is one number: only the first component (x, or "
-								"red of a texture) of the wired vector is used.");
+							ImGui::TextDisabled("Displacement is one number: of the wired "
+							                    "vector only the first component (x, or red "
+							                    "of a texture) is used.");
 					}
 					ImGui::Separator();
 					// Committed edits go through matSanitizeTess, so the node holds what

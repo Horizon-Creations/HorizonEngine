@@ -5103,9 +5103,9 @@ namespace
 	  "", "materials#concept" },
 	{ "Material Settings/Max Factor", "Tessellation Factor",
 	  "How finely each triangle is subdivided close to the camera, so the "
-	  "Displacement pin has vertices to move. 1 adds none, 64 is the most any "
-	  "GPU allows. Detail costs: a factor of 16 turns one triangle into a few "
-	  "hundred.",
+	  "Displacement pin has vertices to move. 1 adds none, 64 is the most the "
+	  "engine allows (the D3D11 limit). Detail costs: a factor of 16 turns one "
+	  "triangle into a few hundred.",
 	  "", "materials#concept" },
 	{ "Material Settings/Fade Near", "Fade Near",
 	  "Up to this distance from the camera, in metres, triangles get the full "
