@@ -57,8 +57,11 @@ GPU-side effects, Intel/AMD Macs.
   after: skin_fwd/def, skinslot_fwd, rope_fwd/def, part_fwd/def all md5-identical, baseline
   noise floor 0 (two runs identical). Skinned, rope (deferred) and particle shots under
   `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`: no validation message, expected draw counts.
-  Particle-only: draws 0 → 3 forward / 4 deferred, image shows the three clouds. Full `he_tests`
-  run: see the step's result post.
+  Particle-only: draws 0 → 3 forward / 4 deferred, image shows the three clouds. Full
+  `he_tests` (Release, from the build dir): 5431 cases, 3 red, all known on this Mac and outside
+  this change: `test_hpak` scanContentDirectory (green with an empty HOME, 59/59) and two
+  `test_profiler` order cases (green alone, 18/18); see Hive lesson 381 and
+  `docs/audit-core-fundamente-2026-10-17.md`.
 - **Not verified:** a mesh with joint ids above its pose's bone count (the witness has one
   joint; shader validation checks the whole 1 MB chunk, not the slice, so it cannot prove the
   slot sizing). Intel/AMD Macs. Windows/Linux CI (Metal-only change; the witness is editor code).
