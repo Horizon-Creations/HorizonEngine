@@ -17,6 +17,7 @@
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 struct SDL_Window;
@@ -453,6 +454,18 @@ private:
 	// without ever colliding with the forward key space.
 	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                     std::string& vertBody);
+	// Displacement pin (Thema 207): GL 4.0+ adds tessellation stages to a material
+	// whose customShaderDispGlsl is set. Both resolvers fold that body into the key
+	// (only here, where it can take effect: on a context without tessellation the
+	// key stays the unconnected pin's) and file it under the key, where
+	// GetOrBuildMaterialProgram picks it up on a cache miss. Programs that did link
+	// with the two stages land in m_tessPrograms and draw GL_PATCHES.
+	bool         m_tessSupported = false;
+	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+	std::unordered_set<unsigned int>          m_tessPrograms;
+	void         foldDisplacement(const HE::UUID& materialId, uint64_t& key);
+	unsigned int MaterialPrimitive(unsigned int program) const
+	{ return m_tessPrograms.count(program) ? 0x000Eu /*GL_PATCHES*/ : 0x0004u /*GL_TRIANGLES*/; }
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)

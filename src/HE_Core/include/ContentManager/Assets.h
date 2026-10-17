@@ -296,6 +296,13 @@ struct MaterialAsset : public RuntimeAsset
 	// pipeline on fragment+vertex together.
 	std::string customShaderVertGlsl;
 
+	// Displacement for GPU tessellation (MatShaderGen::displacementBody: settings line,
+	// declarations, statements ending in `float heDisp`), generated when the graph's
+	// Displacement pin is connected. Empty → no tessellation. Regenerated at load like
+	// customShaderVertGlsl and serialized as the LAST MTRL tail field, which the packer
+	// passes on verbatim. Backends without tessellation ignore it (the fallback).
+	std::string customShaderDispGlsl;
+
 	// Deferred G-buffer fragment variant (MatShaderGen::glslGBuffer): the same graph
 	// evaluation with an MRT emit tail instead of heLitP. Regenerated from the graph
 	// at load and on every editor change like customShaderFragGlsl, AND serialized as

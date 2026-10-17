@@ -239,6 +239,7 @@ void regenerateMaterial(State& st, AppContext& ctx)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
+	mat->customShaderDispGlsl = gen.displacementBody;
 	st.complexity = estimateComplexity(st.lastGlsl);
 	// Live master→variants propagation: re-derive every loaded instance of this material.
 	ctx.contentManager->syncMaterialInstancesOf(st.relPath);

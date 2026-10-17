@@ -4,7 +4,9 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include "ShaderCompiler.h" // he::shaderc
+#include <MaterialGraph/MaterialGraph.h> // matSplitDisplacement
 
+#include <cstdio>
 #include <cstring>
 #include <functional>
 
@@ -936,6 +938,291 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::customVertex(
                                  toTarget(backend)));
     }
     return m_cvertCache.emplace(key, std::move(out)).first->second;
+}
+
+namespace
+{
+// ─── Tessellation stages for the Displacement pin (Thema 207) ────────────────
+// The control stage only reads world positions and the camera; the eval stage
+// wraps the graph statements the way assembleVertex wraps a WPO body. Both
+// declare HeLighting as the fragment preamble's block at the fragment's binding
+// 0 — never a shorter copy, GL links one program and a block of one name must
+// match in every stage (see wpoLightingBlock).
+std::string tessLightingBlock()
+{
+    std::string b = wpoLightingBlock();
+    const std::string from = "binding = 8)", to = "binding = 0)";
+    if (const size_t at = b.find(from); at != std::string::npos) b.replace(at, from.size(), to);
+    return b;
+}
+
+std::string tessF(float v)
+{
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.6f", v);
+    return buf;
+}
+
+constexpr const char* kTessU =
+    "layout(std140, set = 0, binding = 1) uniform U {\n"
+    "    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;\n"
+    "} u;\n";
+
+// Edge factor from the camera distance of the edge MIDPOINT: two triangles that
+// share an edge compute it from the same two world positions (a + b is exact in
+// either order), so they agree and the edge cannot crack open.
+std::string tessEdgeFunction(const MatTessSettings& t)
+{
+    return "float heTessEdge(vec3 a, vec3 b) {\n"
+           "    float d = distance(heLight.camPos.xyz, 0.5 * (a + b));\n"
+           "    return 1.0 + " + tessF(t.maxFactor - 1.0f) + " * clamp((" + tessF(t.fadeFar)
+         + " - d) / " + tessF(t.fadeFar - t.fadeNear) + ", 0.0, 1.0);\n"
+           "}\n";
+}
+
+std::string assembleTessControl(const MatTessSettings& t)
+{
+    std::string src = "#version 450\nlayout(vertices = 3) out;\n";
+    src += tessLightingBlock();
+    src += "layout(location = 0) in vec3 vNormal[];\n"
+           "layout(location = 1) in vec3 vColor[];\n"
+           "layout(location = 2) in vec2 vUV[];\n"
+           "layout(location = 3) in vec3 vWorldPos[];\n"
+           "layout(location = 0) out vec3 tcNormal[];\n"
+           "layout(location = 1) out vec3 tcColor[];\n"
+           "layout(location = 2) out vec2 tcUV[];\n"
+           "layout(location = 3) out vec3 tcWorldPos[];\n";
+    src += tessEdgeFunction(t);
+    src += "void main() {\n"
+           "    tcNormal[gl_InvocationID]   = vNormal[gl_InvocationID];\n"
+           "    tcColor[gl_InvocationID]    = vColor[gl_InvocationID];\n"
+           "    tcUV[gl_InvocationID]       = vUV[gl_InvocationID];\n"
+           "    tcWorldPos[gl_InvocationID] = vWorldPos[gl_InvocationID];\n"
+           "    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;\n"
+           "    if (gl_InvocationID == 0) {\n"
+           // Outer factor k belongs to the edge opposite control point k.
+           "        float e0 = heTessEdge(vWorldPos[1], vWorldPos[2]);\n"
+           "        float e1 = heTessEdge(vWorldPos[2], vWorldPos[0]);\n"
+           "        float e2 = heTessEdge(vWorldPos[0], vWorldPos[1]);\n"
+           "        gl_TessLevelOuter[0] = e0;\n"
+           "        gl_TessLevelOuter[1] = e1;\n"
+           "        gl_TessLevelOuter[2] = e2;\n"
+           "        gl_TessLevelInner[0] = max(e0, max(e1, e2));\n"
+           "    }\n"
+           "}\n";
+    return src;
+}
+
+// The one domain-stage assembler, two prologues (as assembleVertex has two
+// vertex fetches): a real tessellation-evaluation shader, or the same statements
+// as a VERTEX-stage kernel the D3D domain shell calls (heIn* inputs set by the
+// shell from its OutputPatch). Everything after the prologue is identical text.
+enum class DomainInput { TessEval, HlslKernel };
+
+std::string assembleDomain(DomainInput input, const MatTessSettings& t,
+                           const std::string& declarations, const std::string& statements)
+{
+    const bool eval = (input == DomainInput::TessEval);
+    std::string src = "#version 450\n";
+    if (eval)
+        src += "layout(triangles, fractional_odd_spacing, ccw) in;\n"
+               "layout(location = 0) in vec3 tcNormal[];\n"
+               "layout(location = 1) in vec3 tcColor[];\n"
+               "layout(location = 2) in vec2 tcUV[];\n"
+               "layout(location = 3) in vec3 tcWorldPos[];\n";
+    else
+        src += "layout(location = 0) in vec3 heInNormal;\n"
+               "layout(location = 1) in vec3 heInColor;\n"
+               "layout(location = 2) in vec2 heInUV;\n"
+               "layout(location = 3) in vec3 heInWorldPos;\n"
+               "layout(location = 4) in vec4 heInClip;\n";
+    src += kTessU;
+    src += tessLightingBlock();
+    src += declarations;
+    src += "layout(location = 0) out vec3 vNormal;\n"
+           "layout(location = 1) out vec3 vColor;\n"
+           "layout(location = 2) out vec2 vUV;\n"
+           "layout(location = 3) out vec3 vWorldPos;\n"
+           "void main() {\n";
+    // The varyings are WRITTEN first so the statements read them by their usual
+    // names. vNormal stays unnormalised like the vertex stage's (the fragment
+    // normalises), so a corner of the patch hands the fragment exactly what the
+    // vertex stage produced: 1 * a + 0 * b + 0 * c == a.
+    if (eval)
+        src += "    vec3 heB = gl_TessCoord;\n"
+               "    vNormal   = heB.x * tcNormal[0] + heB.y * tcNormal[1] + heB.z * tcNormal[2];\n"
+               "    vColor    = heB.x * tcColor[0] + heB.y * tcColor[1] + heB.z * tcColor[2];\n"
+               "    vUV       = heB.x * tcUV[0] + heB.y * tcUV[1] + heB.z * tcUV[2];\n"
+               "    vWorldPos = heB.x * tcWorldPos[0] + heB.y * tcWorldPos[1] + heB.z * tcWorldPos[2];\n"
+               // Clip space is linear in object space, so interpolating it BEFORE the
+               // divide is exact; only the offset below goes through u.mvp.
+               "    vec4 heClip = heB.x * gl_in[0].gl_Position + heB.y * gl_in[1].gl_Position"
+               " + heB.z * gl_in[2].gl_Position;\n";
+    else
+        src += "    vNormal   = heInNormal;\n"
+               "    vColor    = heInColor;\n"
+               "    vUV       = heInUV;\n"
+               "    vWorldPos = heInWorldPos;\n"
+               "    vec4 heClip = heInClip;\n";
+    src += statements; // graph statements → `float heDisp`
+    // The clamp is the bounds contract (maxDisplacement); the world offset goes
+    // back to object space with WPO's transpose trick (exact for rigid transforms
+    // with uniform scale), and only the offset: height 0 adds exactly nothing.
+    // A zero normal (degenerate vertex) displaces nowhere instead of to NaN.
+    src += "    heDisp = clamp(heDisp, -" + tessF(t.maxDisplacement) + ", " + tessF(t.maxDisplacement) + ");\n"
+           "    vec3 heDispW = vNormal * (inversesqrt(max(dot(vNormal, vNormal), 1e-12)) * heDisp);\n"
+           "    vWorldPos += heDispW;\n"
+           "    vec3 heObjDisp = (transpose(mat3(u.model)) * heDispW)\n"
+           "                   / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);\n"
+           "    gl_Position = heClip + u.mvp * vec4(heObjDisp, 0.0);\n"
+           "}\n";
+    return src;
+}
+
+// ── D3D shells (hs_5_0 / ds_5_0, FXC) ────────────────────────────────────────
+// The control point is the material vertex stage's output exactly as SPIRV-Cross
+// writes it (TEXCOORD<location>, SV_Position last), so the hull reads what the VS
+// writes and the pixel shader reads what the domain writes. D3D's tessellator
+// domain has its origin top left (like Vulkan's default), so the GL `ccw` above
+// is `triangle_cw` here: both keep the patch's own winding. [Not run on D3D yet.]
+constexpr const char* kHlslTessControlPoint = R"(struct HeTessCP {
+    float3 vNormal : TEXCOORD0;
+    float3 vColor : TEXCOORD1;
+    float2 vUV : TEXCOORD2;
+    float3 vWorldPos : TEXCOORD3;
+    float4 pos : SV_Position;
+};
+struct HeTessFactors {
+    float edge[3] : SV_TessFactor;
+    float inside : SV_InsideTessFactor;
+};
+)";
+
+std::string hlslHullShell(const MatTessSettings& t)
+{
+    std::string src = kHlslTessControlPoint;
+    // Only the head of HeLighting (b0, the fragment's register): camPos is its 4th vec4.
+    src += "cbuffer HeLightingHead : register(b0) {\n"
+           "    float4 heSunDir; float4 heSunColor; float4 heAmbient; float4 heCamPos;\n"
+           "};\n"
+           "float heTessEdge(float3 a, float3 b) {\n"
+           "    float d = distance(heCamPos.xyz, 0.5 * (a + b));\n"
+           "    return 1.0 + " + tessF(t.maxFactor - 1.0f) + " * saturate((" + tessF(t.fadeFar)
+         + " - d) / " + tessF(t.fadeFar - t.fadeNear) + ");\n"
+           "}\n"
+           "HeTessFactors HePatch(InputPatch<HeTessCP, 3> p) {\n"
+           "    HeTessFactors f;\n"
+           "    f.edge[0] = heTessEdge(p[1].vWorldPos, p[2].vWorldPos);\n"
+           "    f.edge[1] = heTessEdge(p[2].vWorldPos, p[0].vWorldPos);\n"
+           "    f.edge[2] = heTessEdge(p[0].vWorldPos, p[1].vWorldPos);\n"
+           "    f.inside  = max(f.edge[0], max(f.edge[1], f.edge[2]));\n"
+           "    return f;\n"
+           "}\n"
+           "[domain(\"tri\")]\n"
+           "[partitioning(\"fractional_odd\")]\n"
+           "[outputtopology(\"triangle_cw\")]\n"
+           "[outputcontrolpoints(3)]\n"
+           "[patchconstantfunc(\"HePatch\")]\n"
+           "[maxtessfactor(64.0)]\n"
+           "HeTessCP " + std::string(MaterialShaderLibrary::kHlslHullEntry)
+         + "(InputPatch<HeTessCP, 3> p, uint i : SV_OutputControlPointID) {\n"
+           "    return p[i];\n"
+           "}\n";
+    return src;
+}
+
+// Appended to the kernel's HLSL: its static globals (heIn*, v*, gl_Position) are
+// the shell's interface to heDispKernel_inner().
+std::string hlslDomainShell()
+{
+    std::string src = kHlslTessControlPoint;
+    src += "[domain(\"tri\")]\n"
+           "HeTessCP " + std::string(MaterialShaderLibrary::kHlslDomainEntry)
+         + "(HeTessFactors f, float3 b : SV_DomainLocation, const OutputPatch<HeTessCP, 3> p) {\n"
+           "    heInNormal   = b.x * p[0].vNormal + b.y * p[1].vNormal + b.z * p[2].vNormal;\n"
+           "    heInColor    = b.x * p[0].vColor + b.y * p[1].vColor + b.z * p[2].vColor;\n"
+           "    heInUV       = b.x * p[0].vUV + b.y * p[1].vUV + b.z * p[2].vUV;\n"
+           "    heInWorldPos = b.x * p[0].vWorldPos + b.y * p[1].vWorldPos + b.z * p[2].vWorldPos;\n"
+           "    heInClip     = b.x * p[0].pos + b.y * p[1].pos + b.z * p[2].pos;\n"
+           "    heDispKernel_inner();\n"
+           "    HeTessCP o;\n"
+           "    o.vNormal = vNormal; o.vColor = vColor; o.vUV = vUV; o.vWorldPos = vWorldPos;\n"
+           "    o.pos = gl_Position;\n"
+           "    return o;\n"
+           "}\n";
+    return src;
+}
+
+uint64_t tessKey(uint64_t dispHash, MaterialShaderLibrary::Backend b, bool eval)
+{
+    return dispHash ^ (0x165667B19E3779F9ULL * (static_cast<uint64_t>(b) + 1))
+                    ^ (eval ? 0xD6E8FEB86659FD93ULL : 0x27D4EB2F165667C5ULL);
+}
+
+bool backendTessellates(MaterialShaderLibrary::Backend b)
+{
+    using B = MaterialShaderLibrary::Backend;
+    return b == B::GLSL410 || b == B::GLSL430 || b == B::SpirV || b == B::HLSL;
+}
+} // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::tessControl(
+    uint64_t dispHash, const std::string& disp, Backend backend)
+{
+    const uint64_t key = tessKey(dispHash, backend, /*eval=*/false);
+    if (auto it = m_tessCache.find(key); it != m_tessCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    MatTessSettings t; std::string decls, stmts;
+    if (!backendTessellates(backend))
+        out.log = "MaterialShaderLibrary: no tessellation on this backend";
+    else if (!matSplitDisplacement(disp, t, decls, stmts))
+        out.log = "MaterialShaderLibrary: not a displacement body (MatShaderGen::displacementBody)";
+    else if (backend == Backend::HLSL)
+    {
+        out.ok = true;
+        out.source = hlslHullShell(t);
+    }
+    else
+        out = toCompiled(compile(assembleTessControl(t), Stage::TessControl, toTarget(backend)));
+    return m_tessCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::tessEval(
+    uint64_t dispHash, const std::string& disp, Backend backend)
+{
+    const uint64_t key = tessKey(dispHash, backend, /*eval=*/true);
+    if (auto it = m_tessCache.find(key); it != m_tessCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    MatTessSettings t; std::string decls, stmts;
+    if (!backendTessellates(backend))
+        out.log = "MaterialShaderLibrary: no tessellation on this backend";
+    else if (!matSplitDisplacement(disp, t, decls, stmts))
+        out.log = "MaterialShaderLibrary: not a displacement body (MatShaderGen::displacementBody)";
+    else if (backend == Backend::HLSL)
+    {
+        // The fragment's registers (kHlslMaterialPins + the cbuffers), so a D3D11
+        // backend binds the domain stage by copying the pixel stage's slots.
+        out = toCompiled(compileHlslKernel(assembleDomain(DomainInput::HlslKernel, t, decls, stmts),
+            "heDispKernel",
+            { { Stage::Vertex, 0,  0,  0 },      // HeLighting → b0
+              { Stage::Vertex, 0,  1,  1 },      // U          → b1
+              { Stage::Vertex, 0,  2,  2 },      // heTex0
+              { Stage::Vertex, 0,  3,  3 },      // HeParams   → b3
+              { Stage::Vertex, 0,  4,  4 },      // heTexP0..3
+              { Stage::Vertex, 0,  5,  5 },
+              { Stage::Vertex, 0,  6,  6 },
+              { Stage::Vertex, 0,  7,  7 },
+              { Stage::Vertex, 0, 14, 14, 0 } })); // heLandscapeWeights → t14, s0
+        if (out.ok) out.source += "\n" + hlslDomainShell();
+    }
+    else
+        out = toCompiled(compile(assembleDomain(DomainInput::TessEval, t, decls, stmts),
+                                 Stage::TessEval, toTarget(backend)));
+    return m_tessCache.emplace(key, std::move(out)).first->second;
 }
 
 bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID& materialId,

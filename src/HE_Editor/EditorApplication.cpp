@@ -5626,6 +5626,7 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderFragGlsl = gen.glsl;
 			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
+			mat.customShaderDispGlsl = gen.displacementBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
 			for (const auto& slot : gen.params)
@@ -6747,6 +6748,7 @@ void EditorApplication::dumpFrameHeadless()
 			fm.customShaderFragGlsl = gen.glsl;
 			fm.customShaderGBufGlsl = gen.glslGBuffer;
 			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.customShaderDispGlsl = gen.displacementBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
 			reg.emplace<MaterialComponent>(floorE,
@@ -6822,6 +6824,7 @@ void EditorApplication::dumpFrameHeadless()
 			fm.customShaderFragGlsl = gen.glsl;
 			fm.customShaderGBufGlsl = gen.glslGBuffer;
 			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.customShaderDispGlsl = gen.displacementBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
 			// HE_DUMP_MATPRECOMPILE bakes the floor exactly as the exporter would
@@ -7014,6 +7017,7 @@ void EditorApplication::dumpFrameHeadless()
 		lm.customShaderFragGlsl = gen.glsl;
 		lm.customShaderGBufGlsl = gen.glslGBuffer;
 		lm.customShaderVertGlsl = gen.vertexBody;
+		lm.customShaderDispGlsl = gen.displacementBody;
 		lm.blendMode            = gen.blendMode;
 		lm.domain               = gen.domain;
 		lm.graphLayerNames      = gen.layerNames;
@@ -7161,6 +7165,7 @@ void EditorApplication::dumpFrameHeadless()
 		am.customShaderFragGlsl = gen.glsl;
 		am.customShaderGBufGlsl = gen.glslGBuffer;
 		am.customShaderVertGlsl = gen.vertexBody;
+		am.customShaderDispGlsl = gen.displacementBody;
 		am.blendMode            = gen.blendMode;
 		am.domain               = gen.domain;
 		am.graphTexturePaths    = gen.textures;
@@ -7287,6 +7292,7 @@ void EditorApplication::dumpFrameHeadless()
 		am.customShaderFragGlsl = gen.glsl;
 		am.customShaderGBufGlsl = gen.glslGBuffer;
 		am.customShaderVertGlsl = gen.vertexBody;
+		am.customShaderDispGlsl = gen.displacementBody;
 		am.blendMode            = gen.blendMode;
 		am.domain               = gen.domain;
 		am.graphTexturePaths    = gen.textures;
@@ -7384,6 +7390,7 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderFragGlsl = gen.glsl;
 			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody;
+			mat.customShaderDispGlsl = gen.displacementBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
 			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
@@ -8519,6 +8526,7 @@ void EditorApplication::dumpFrameHeadless()
 				mat->customShaderFragGlsl = gen.glsl;
 				mat->customShaderGBufGlsl = gen.glslGBuffer;
 				mat->customShaderVertGlsl = gen.vertexBody;
+				mat->customShaderDispGlsl = gen.displacementBody;
 				mat->blendMode            = gen.blendMode;
 				mat->domain               = gen.domain;
 				mat->graphLayerNames      = gen.layerNames;
@@ -9120,6 +9128,7 @@ void EditorApplication::dumpFrameHeadless()
 			m.customShaderFragGlsl = gen.glsl;
 			m.customShaderGBufGlsl = gen.glslGBuffer;
 			m.customShaderVertGlsl = gen.vertexBody;
+			m.customShaderDispGlsl = gen.displacementBody;
 			m.blendMode            = gen.blendMode;
 			m.domain               = gen.domain;
 			for (const auto& slot : gen.params)
