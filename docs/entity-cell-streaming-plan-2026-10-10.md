@@ -1188,6 +1188,10 @@ ist rein lokal). Darum bleibt `PlayerInfo::characterNetId` in einer echten Sitzu
 eine Stelle, die „das ist der Charakter von Spieler N“ autoritativ weiß. Bewusst **kein** Ersatz über `NetworkComponent::owner` +
 Charaktercontroller (eigene Projektile würden Anker). Der Königin als Info gemeldet (Anfrage 108).
 
+**Ein leerer Server:** Gehen alle Spieler eines Servers ohne Kamera, gibt es keinen Anker mehr, `update()` kehrt früh zurück, und die
+Zellen bleiben geladen, bis jemand kommt. Das ist die geltende Regel „kein Anker: nichts ändert sich“ (eine Kamera, die einen Frame
+fehlt, soll nicht alles entladen); nicht geändert.
+
 **Entschieden:** Spieler als `ICellHost`-Haken mit gemeinsamem Helfer statt `CellRuntime` an `NetGameSession` zu binden (der Runtime-Test
 bleibt ohne Netz, die Hosts bleiben dünn); Vorausschau nach PlayerId, nicht nach Entity; keine Spieler-Anker offline (Einzelspieler
 unverändert: die Kamera folgt dem Charakter, Pins decken den Rest).
