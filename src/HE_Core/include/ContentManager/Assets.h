@@ -305,6 +305,32 @@ struct MaterialAsset : public RuntimeAsset
 	// forward extra pass.
 	std::string customShaderGBufGlsl;
 
+	// REN-1001: the shader-cache key of the three sources above, memoised for
+	// MaterialShaderLibrary::resolve* — every graph-material draw on every backend asks
+	// for it, and hashing ~20 KB of GLSL per draw was the cost. Render-side bookkeeping,
+	// not asset data: never serialized, and a copy or move of the asset starts with an
+	// empty memo, so it only ever describes the object it sits in. It is trusted while
+	// shaderRevision and each string's address and length are unchanged.
+	// ContentManager::getMaterialMutable bumps shaderRevision, so the rule is: change a
+	// registered material's shader text through a pointer taken from getMaterialMutable
+	// AFTER the last render that may have drawn it. A same-length edit in place through
+	// an older pointer is the one change the memo cannot see.
+	uint64_t shaderRevision = 0;
+	struct ShaderKeyMemo
+	{
+		ShaderKeyMemo() = default;
+		ShaderKeyMemo(const ShaderKeyMemo&) noexcept {}
+		ShaderKeyMemo& operator=(const ShaderKeyMemo&) noexcept { valid = false; return *this; }
+
+		bool        valid    = false;
+		uint64_t    revision = 0;
+		const char* frag = nullptr; size_t fragSize = 0;
+		const char* vert = nullptr; size_t vertSize = 0;
+		const char* gbuf = nullptr; size_t gbufSize = 0;
+		uint64_t    fragHash = 0, vertHash = 0, gbufHash = 0; // std::hash of each source
+	};
+	mutable ShaderKeyMemo shaderKeyMemo;
+
 	// CPU approximation of the graph's BaseColor/Emissive outputs (HE::
 	// matGraphApproxSurface), for consumers that shade per INSTANCE with no
 	// material evaluation — the GI ray kernels colour TLAS/BVH hits with these.

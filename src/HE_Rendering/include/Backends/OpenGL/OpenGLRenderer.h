@@ -445,14 +445,16 @@ private:
 	// before they can return — including via a memo hit or the on-disk program
 	// cache, neither of which compiles anything (see the definition).
 	void         EnsureMaterialUBOs();
-	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-	                                   std::string& vertBody);
+	// Both hand out the MaterialAsset's own strings (MaterialShaderLibrary's draw-loop
+	// form, REN-1001): no copy per draw, valid until the next content load / unload.
+	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+	                                   const std::string*& vertBody);
 	// Deferred G-buffer variant (customShaderGBufGlsl): false → the material has
 	// none and its draws run forward in the lighting pass. The returned key is a
 	// hash of the G-buffer SOURCE, so its programs share m_materialPrograms
 	// without ever colliding with the forward key space.
-	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-	                                     std::string& vertBody);
+	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+	                                     const std::string*& vertBody);
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)

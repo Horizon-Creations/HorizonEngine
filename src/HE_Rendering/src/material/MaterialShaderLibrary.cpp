@@ -938,16 +938,63 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::customVertex(
     return m_cvertCache.emplace(key, std::move(out)).first->second;
 }
 
+namespace
+{
+// The memoised std::hash of a material's three shader sources (REN-1001). Trusted
+// while nobody asked for write access (shaderRevision) and no string moved or changed
+// length; anything else rehashes all three once. Copying the asset resets the memo.
+const MaterialAsset::ShaderKeyMemo& shaderKeys(const MaterialAsset& mat)
+{
+    MaterialAsset::ShaderKeyMemo& k = mat.shaderKeyMemo;
+    const std::string& frag = mat.customShaderFragGlsl;
+    const std::string& vert = mat.customShaderVertGlsl;
+    const std::string& gbuf = mat.customShaderGBufGlsl;
+    if (k.valid && k.revision == mat.shaderRevision
+        && k.frag == frag.data() && k.fragSize == frag.size()
+        && k.vert == vert.data() && k.vertSize == vert.size()
+        && k.gbuf == gbuf.data() && k.gbufSize == gbuf.size())
+        return k;
+    k.fragHash = std::hash<std::string>{}(frag);
+    k.vertHash = std::hash<std::string>{}(vert);
+    k.gbufHash = std::hash<std::string>{}(gbuf);
+    k.frag = frag.data(); k.fragSize = frag.size();
+    k.vert = vert.data(); k.vertSize = vert.size();
+    k.gbuf = gbuf.data(); k.gbufSize = gbuf.size();
+    k.revision = mat.shaderRevision;
+    k.valid    = true;
+    return k;
+}
+
+// A WPO material's pipeline is keyed on fragment + vertex together.
+uint64_t foldVertex(uint64_t fragHash, const MaterialAsset::ShaderKeyMemo& k)
+{
+    return k.vertSize ? fragHash ^ (k.vertHash * 0x9E3779B97F4A7C15ULL) : fragHash;
+}
+} // namespace
+
+bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID& materialId,
+                                           uint64_t& hashOut, const std::string*& fragOut,
+                                           const std::string*& vertBodyOut) const
+{
+    if (materialId == UUID{}) return false;
+    const MaterialAsset* mat = cm.getMaterial(materialId);
+    if (!mat || mat->customShaderFragGlsl.empty()) return false;
+    const MaterialAsset::ShaderKeyMemo& k = shaderKeys(*mat);
+    hashOut     = foldVertex(k.fragHash, k);
+    fragOut     = &mat->customShaderFragGlsl;
+    vertBodyOut = &mat->customShaderVertGlsl;
+    return true;
+}
+
 bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID& materialId,
                                            uint64_t& hashOut, std::string& fragOut,
                                            std::string& vertBodyOut) const
 {
-    if (!resolveFragment(cm, materialId, hashOut, fragOut)) return false;
-    vertBodyOut.clear();
-    if (const MaterialAsset* mat = cm.getMaterial(materialId))
-        vertBodyOut = mat->customShaderVertGlsl;
-    if (!vertBodyOut.empty()) // fold the vertex into the pipeline key
-        hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+    const std::string* frag = nullptr;
+    const std::string* vert = nullptr;
+    if (!resolveShaders(cm, materialId, hashOut, frag, vert)) return false;
+    fragOut     = *frag;
+    vertBodyOut = *vert;
     return true;
 }
 
@@ -979,8 +1026,8 @@ bool MaterialShaderLibrary::spirvFromBytes(const std::string& bytes, std::vector
 }
 
 bool MaterialShaderLibrary::resolveGBufferShaders(const ContentManager& cm, const UUID& materialId,
-                                                  uint64_t& hashOut, std::string& fragOut,
-                                                  std::string& vertBodyOut) const
+                                                  uint64_t& hashOut, const std::string*& fragOut,
+                                                  const std::string*& vertBodyOut) const
 {
     if (materialId == UUID{}) return false;
     const MaterialAsset* mat = cm.getMaterial(materialId);
@@ -989,22 +1036,42 @@ bool MaterialShaderLibrary::resolveGBufferShaders(const ContentManager& cm, cons
     // covers with its own built-in G-buffer pipeline.
     if (!mat || mat->customShaderFragGlsl.empty() || mat->customShaderGBufGlsl.empty())
         return false;
-    fragOut = mat->customShaderGBufGlsl;
-    hashOut = std::hash<std::string>{}(fragOut);
-    vertBodyOut = mat->customShaderVertGlsl;
-    if (!vertBodyOut.empty()) // fold the vertex into the pipeline key (like resolveShaders)
-        hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+    const MaterialAsset::ShaderKeyMemo& k = shaderKeys(*mat);
+    hashOut     = foldVertex(k.gbufHash, k); // vertex folded in like resolveShaders
+    fragOut     = &mat->customShaderGBufGlsl;
+    vertBodyOut = &mat->customShaderVertGlsl;
+    return true;
+}
+
+bool MaterialShaderLibrary::resolveGBufferShaders(const ContentManager& cm, const UUID& materialId,
+                                                  uint64_t& hashOut, std::string& fragOut,
+                                                  std::string& vertBodyOut) const
+{
+    const std::string* frag = nullptr;
+    const std::string* vert = nullptr;
+    if (!resolveGBufferShaders(cm, materialId, hashOut, frag, vert)) return false;
+    fragOut     = *frag;
+    vertBodyOut = *vert;
+    return true;
+}
+
+bool MaterialShaderLibrary::resolveFragment(const ContentManager& cm, const UUID& materialId,
+                                            uint64_t& hashOut, const std::string*& glslOut) const
+{
+    if (materialId == UUID{}) return false;
+    const MaterialAsset* mat = cm.getMaterial(materialId);
+    if (!mat || mat->customShaderFragGlsl.empty()) return false;
+    hashOut = shaderKeys(*mat).fragHash;
+    glslOut = &mat->customShaderFragGlsl;
     return true;
 }
 
 bool MaterialShaderLibrary::resolveFragment(const ContentManager& cm, const UUID& materialId,
                                             uint64_t& hashOut, std::string& glslOut) const
 {
-    if (materialId == UUID{}) return false;
-    const MaterialAsset* mat = cm.getMaterial(materialId);
-    if (!mat || mat->customShaderFragGlsl.empty()) return false;
-    glslOut = mat->customShaderFragGlsl;
-    hashOut = std::hash<std::string>{}(glslOut);
+    const std::string* glsl = nullptr;
+    if (!resolveFragment(cm, materialId, hashOut, glsl)) return false;
+    glslOut = *glsl;
     return true;
 }
 

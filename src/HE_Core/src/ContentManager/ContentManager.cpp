@@ -2589,7 +2589,14 @@ const StructTypeAsset*    ContentManager::getStructType(HE::UUID id) const    { 
 StructTypeAsset*          ContentManager::getStructTypeMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_structTypeAssets, id); }
 const EnumTypeAsset*      ContentManager::getEnumType(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_enumTypeAssets, id); }
 EnumTypeAsset*            ContentManager::getEnumTypeMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_enumTypeAssets, id); }
-MaterialAsset*            ContentManager::getMaterialMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_materialAssets, id); }
+MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
+{
+	// Whoever asks for write access may change the shader text, so the renderers'
+	// memoised shader key (MaterialAsset::shaderKeyMemo, REN-1001) stops being trusted.
+	MaterialAsset* a = lookupAssetMutable(m_handleToUUID, m_materialAssets, id);
+	if (a) ++a->shaderRevision;
+	return a;
+}
 
 bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
                                       const float* values, int count)

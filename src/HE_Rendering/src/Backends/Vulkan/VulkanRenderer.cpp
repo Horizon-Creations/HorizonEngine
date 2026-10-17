@@ -8250,7 +8250,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // through unchanged when the material has no graph shader OR resources are down.
             if (m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
+                uint64_t matHash = 0; const std::string *matFrag = nullptr, *matVertBody = nullptr;
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                   matHash, matFrag, matVertBody))
                 {
@@ -8271,10 +8271,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
                         // does not build → the lit forward replay after the resolve.
-                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                        uint64_t gbHash = 0; const std::string *gbFrag = nullptr, *gbVertBody = nullptr;
                         if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                  gbHash, gbFrag, gbVertBody))
-                            matPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
+                            matPipe = GetOrBuildMaterialPipeline(gbHash, *gbFrag, *gbVertBody, nullptr,
                                                                  true, false, /*gbuffer=*/true);
                         if (matPipe == VK_NULL_HANDLE)
                         {
@@ -8283,7 +8283,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         }
                     }
                     else
-                        matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
+                        matPipe = GetOrBuildMaterialPipeline(matHash, *matFrag, *matVertBody,
                                                              matPre, hdr, matTransp);
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
                     // A full ring is a silent optics change (built-in look, or a skipped

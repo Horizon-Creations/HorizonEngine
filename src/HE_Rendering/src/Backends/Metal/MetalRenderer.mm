@@ -7190,7 +7190,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 #if defined(HE_HAVE_SHADERC)
 			// Custom material: the BLENDED pipeline variant, same as a translucent
 			// mesh takes in the opaque loop. Null pipeline = the built-in blend PSO.
-			uint64_t shKey = 0; std::string shFrag, shVert;
+			uint64_t shKey = 0; const std::string *shFrag = nullptr, *shVert = nullptr;
 			if (ResolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
 			{
 				std::vector<HE::UUID>    gtexIds;
@@ -7214,8 +7214,8 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 						gtexPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{});
 					}
 				}
-				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
-				t.wpo      = !shVert.empty();
+				t.pipeline = GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre, /*blend=*/true);
+				t.wpo      = !shVert->empty();
 				for (size_t i = 0; i < gtexIds.size(); ++i)
 					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i], (gtexArr >> i) & 1u);
 			}
@@ -9635,28 +9635,28 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 	int built = 0;
 	for (const HE::UUID& id : materialIds)
 	{
-		uint64_t shKey; std::string shFrag;
-		std::string shVert;
+		uint64_t shKey; const std::string* shFrag = nullptr;
+		const std::string* shVert = nullptr;
 		if (!ResolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPipelineCache.find(shKey) != m_materialPipelineCache.end()) continue; // warm
 		const MaterialShaderVariant* pre = nullptr;
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		if (GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre)) ++built;
 		// EncodeScene builds the alpha-blended twin of every graph material on its
 		// first draw, whatever the material's opacity (see there): its own MSL
 		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
 		// two frames after a scene open stalled in Metal::EncodeScene even with
 		// every material warmed (Thema 153 Schritt 5: the editor light icons).
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
+		if (GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre, /*blend=*/true)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
 		{
-			uint64_t gbKey; std::string gbFrag, gbVert;
+			uint64_t gbKey; const std::string *gbFrag = nullptr, *gbVert = nullptr;
 			if (ResolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
-			    && GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, nullptr,
+			    && GetOrBuildMaterialPipeline(gbKey, *gbFrag, *gbVert, nullptr,
 			                                  /*blend=*/false, /*gbuffer=*/true))
 				++built;
 		}
@@ -9681,14 +9681,14 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	if (!enc || !device || !m_contentManager) return false;
 
 	// Resolve the node-graph material pipeline (built-in-PBR materials have none).
-	uint64_t shKey; std::string shFrag, shVert;
+	uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 	if (!ResolveMaterialShader(materialId, shKey, shFrag, shVert)) return false;
 	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
 	const MaterialShaderVariant* pre = nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre);
 	if (!pso) return false;
 
 	// ── Geometry: a picked STATIC MESH, else the procedural primitive. A GpuMesh
@@ -9794,7 +9794,7 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 		              atIndex:HE::MaterialShaderLibrary::kMetalClusterIndexBufferIndex];
 	}
 	// WPO materials read HeLighting/HeParams in the VERTEX stage (buffers 2/3).
-	if (!shVert.empty())
+	if (!shVert->empty())
 	{
 		[enc setVertexBytes:&lit length:sizeof(lit) atIndex:2];
 		float vpad[64] = { 0 };
@@ -9978,7 +9978,7 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 	// out BEFORE allocating the target, so a material without a graph never costs a
 	// texture. The thumbnail path handles that case with its own fallback pipeline.
 	{
-		uint64_t probeKey; std::string probeFrag, probeVert;
+		uint64_t probeKey; const std::string *probeFrag = nullptr, *probeVert = nullptr;
 		if (!ResolveMaterialShader(materialId, probeKey, probeFrag, probeVert)) return nullptr;
 	}
 
@@ -12849,15 +12849,15 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 }
 
 // Delegate to the shared, backend-agnostic library (reads the MaterialAsset).
-bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-                                          std::string& vertBody)
+bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+                                          const std::string*& vertBody)
 {
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
-bool MetalRenderer::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-                                            std::string& vertBody)
+bool MetalRenderer::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+                                            const std::string*& vertBody)
 {
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
@@ -13312,7 +13312,7 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 // blended into the LDR UI target. Cache key = the material's shader hash.
 void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bool* usesBackdrop)
 {
-	uint64_t key = 0; std::string fragGlsl, vertBody;
+	uint64_t key = 0; const std::string* fragGlsl = nullptr; const std::string* vertBody = nullptr;
 	if (usesBackdrop) *usesBackdrop = false;
 	if (!ResolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return nullptr; // no custom shader → solid-color quad
@@ -13320,7 +13320,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bo
 	// the graph regeneration entirely (precompiled blobs) and a material instance
 	// takes a second road through syncMaterialInstance — the generated shader is
 	// the one thing all three configurations share.
-	if (usesBackdrop) *usesBackdrop = fragGlsl.find("heBackdrop") != std::string::npos;
+	if (usesBackdrop) *usesBackdrop = fragGlsl->find("heBackdrop") != std::string::npos;
 	if (auto it = m_uiMaterialPipelines.find(key); it != m_uiMaterialPipelines.end())
 		return it->second;
 
@@ -13349,7 +13349,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bo
 		// build without the translator this simply fails and the quad falls back
 		// to its solid colour.
 		const auto& v = m_matShaderLib.uiVertex(Backend::Metal);
-		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::Metal);
+		const auto& f = m_matShaderLib.fragment(key, *fragGlsl, Backend::Metal);
 		vertMSL = v.source; fragMSL = f.source; log = v.log + f.log;
 		ok = v.ok && f.ok;
 	}
@@ -14462,7 +14462,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
 				{
-					uint64_t shKey; std::string shFrag, shVert;
+					uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 					if (ResolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 					{
 						// Prefer a shader precompiled into the pack for this backend (no
@@ -14472,8 +14472,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-						cMaterialWpo      = !shVert.empty();
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						cMaterialWpo      = !shVert->empty();
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre);
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
 						// (not gated on this material's own opacity): a per-instance tint
@@ -14482,7 +14482,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						// per-draw basis, after this cache-miss-only block has already run.
 						if (cMaterialPipeline)
 							cMaterialPipelineBlend =
-								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+								GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre, /*blend=*/true);
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -16258,7 +16258,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cGraphTexCount    = 0;
 #if defined(HE_HAVE_SHADERC)
 				{
-					uint64_t shKey; std::string shFrag, shVert;
+					uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 					if (ResolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 					{
 						cMaterialCustom = true;
@@ -16267,19 +16267,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-						cMaterialWpo      = !shVert.empty();
+						cMaterialWpo      = !shVert->empty();
 						// Forward PSOs still needed: blended for the transparency
 						// replay, opaque for the forward-routed fallback.
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre);
 						if (cMaterialPipeline)
 							cMaterialPipelineBlend =
-								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+								GetOrBuildMaterialPipeline(shKey, *shFrag, *shVert, pre, /*blend=*/true);
 						// G-buffer variant — always runtime cross-compiled (baked
 						// packs carry no G-buffer MSL yet), never blended.
-						uint64_t gbKey; std::string gbFrag, gbVert;
+						uint64_t gbKey; const std::string *gbFrag = nullptr, *gbVert = nullptr;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
-								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+								gbKey, *gbFrag, *gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{

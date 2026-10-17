@@ -240,6 +240,20 @@ public:
                                uint64_t& hashOut, std::string& fragOut,
                                std::string& vertBodyOut) const;
 
+    // The draw-loop form of the three above (REN-101 / REN-1001): same answer, same
+    // hash bit for bit, but no copy — the pointers are the MaterialAsset's own strings
+    // (vertBodyOut points at an empty one when there is no WPO body), valid as long as
+    // cm.getMaterial(materialId) is, i.e. until the next load / unload. The hash comes
+    // from MaterialAsset::shaderKeyMemo, so a repeat resolve costs two lookups and a
+    // handful of compares instead of hashing the whole source. The string overloads
+    // are wrappers that copy; use them where the text has to outlive the asset.
+    bool resolveFragment(const ContentManager& cm, const UUID& materialId,
+                         uint64_t& hashOut, const std::string*& glslOut) const;
+    bool resolveShaders(const ContentManager& cm, const UUID& materialId, uint64_t& hashOut,
+                        const std::string*& fragOut, const std::string*& vertBodyOut) const;
+    bool resolveGBufferShaders(const ContentManager& cm, const UUID& materialId, uint64_t& hashOut,
+                               const std::string*& fragOut, const std::string*& vertBodyOut) const;
+
     // The variant the exporter baked for `backend` (MaterialAsset::precompiledShaders,
     // CHUNK_PSHD), or null → cross-compile at runtime. D3D11 and D3D12 share one HLSL
     // (same SM 5.0 source, same pinned registers), so either tag serves both: a pak

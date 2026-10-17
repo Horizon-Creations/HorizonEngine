@@ -3592,15 +3592,15 @@ void OpenGLRenderer::CreateUnlitPipeline()
 // every compile with ok = false.
 
 // Resolve a material's custom shader via the shared, backend-agnostic library.
-bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-                                           std::string& vertBody)
+bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+                                           const std::string*& vertBody)
 {
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
-bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-                                             std::string& vertBody)
+bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+                                             const std::string*& vertBody)
 {
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
@@ -3997,7 +3997,7 @@ unsigned int OpenGLRenderer::GetOrBuildParticleProgram(uint64_t key, const HE::P
 unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId,
                                                         bool* usesBackdrop)
 {
-	uint64_t key = 0; std::string fragGlsl, vertBody;
+	uint64_t key = 0; const std::string* fragGlsl = nullptr; const std::string* vertBody = nullptr;
 	if (usesBackdrop) *usesBackdrop = false;
 	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return 0; // no custom shader → solid-color quad
@@ -4005,7 +4005,7 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 	// the graph regeneration entirely (precompiled blobs) and a material instance
 	// takes a second road through syncMaterialInstance — the generated shader is
 	// the one thing all three configurations share.
-	if (usesBackdrop) *usesBackdrop = fragGlsl.find("heBackdrop") != std::string::npos;
+	if (usesBackdrop) *usesBackdrop = fragGlsl->find("heBackdrop") != std::string::npos;
 	// A UI quad can be the first material user of the session; same "before every
 	// return, memo hit included" rule as the mesh path.
 	EnsureMaterialUBOs();
@@ -4036,7 +4036,7 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		// build without the translator this simply fails and the quad falls back
 		// to its solid colour.
 		const auto& v = m_matShaderLib.uiVertex(Backend::GLSL410);
-		const auto& f = m_matShaderLib.fragment(key, fragGlsl, Backend::GLSL410);
+		const auto& f = m_matShaderLib.fragment(key, *fragGlsl, Backend::GLSL410);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log;
 		ok = v.ok && f.ok;
 	}
@@ -8982,23 +8982,23 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 	int built = 0;
 	for (const HE::UUID& id : materialIds)
 	{
-		uint64_t shKey; std::string shFrag;
-		std::string shVert;
+		uint64_t shKey; const std::string* shFrag = nullptr;
+		const std::string* shVert = nullptr;
 		if (!resolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPrograms.count(shKey)) continue; // already warm
 		const MaterialShaderVariant* pre = nullptr;
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-		if (GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
+		if (GetOrBuildMaterialProgram(shKey, *shFrag, *shVert, pre)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
 		{
-			uint64_t gbKey; std::string gbFrag, gbVert;
+			uint64_t gbKey; const std::string *gbFrag = nullptr, *gbVert = nullptr;
 			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
 			    && !m_materialPrograms.count(gbKey)
-			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true))
+			    && GetOrBuildMaterialProgram(gbKey, *gbFrag, *gbVert, nullptr, /*gbuffer=*/true))
 				++built;
 		}
 	}
@@ -9019,14 +9019,14 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 {
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
 	// nothing to draw). Reuses the same program cache + precompiled-variant path.
-	uint64_t shKey; std::string shFrag, shVert;
+	uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 	if (!resolveMaterialShader(materialId, shKey, shFrag, shVert)) return false;
 	const MaterialShaderVariant* pre = nullptr;
 	const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-	const unsigned int prog = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+	const unsigned int prog = GetOrBuildMaterialProgram(shKey, *shFrag, *shVert, pre);
 	if (!prog) return false;
 
 	// ── Geometry: a picked STATIC MESH, else the procedural primitive. A GpuMesh's
@@ -9387,7 +9387,7 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	// out BEFORE allocating the target, so a material without a graph never costs an
 	// FBO. The thumbnail path handles that case with its own fallback program.
 	{
-		uint64_t probeKey; std::string probeFrag, probeVert;
+		uint64_t probeKey; const std::string *probeFrag = nullptr, *probeVert = nullptr;
 		if (!resolveMaterialShader(materialId, probeKey, probeFrag, probeVert)) return nullptr;
 	}
 
@@ -11819,7 +11819,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				std::vector<float> mParams; unsigned int mGtex[4] = { 0, 0, 0, 0 }; int mGtexCount = 0;
 #if defined(HE_HAVE_SHADERC)
 				{
-					uint64_t shKey; std::string shFrag, shVert;
+					uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 					if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 					{
 						hasCustom = true;
@@ -11829,12 +11829,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						if (ma)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						matProg = GetOrBuildMaterialProgram(shKey, *shFrag, *shVert, pre);
 						// G-buffer variant — runtime cross-compiled only (baked packs
 						// carry no G-buffer GLSL yet).
-						uint64_t gbKey; std::string gbFrag, gbVert;
+						uint64_t gbKey; const std::string *gbFrag = nullptr, *gbVert = nullptr;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
-							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							gbProg = GetOrBuildMaterialProgram(gbKey, *gbFrag, *gbVert, nullptr, /*gbuffer=*/true);
 						if (ma)
 						{
 							mParams = !dc.paramOverride.empty() ? dc.paramOverride
@@ -12071,7 +12071,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				unsigned int tpGtex[4] = { 0, 0, 0, 0 }; int tpGtexCount = 0;
 #if defined(HE_HAVE_SHADERC)
 				{
-					uint64_t shKey; std::string shFrag, shVert;
+					uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 					if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 					{
 						const MaterialShaderVariant* pre = nullptr;
@@ -12080,7 +12080,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						if (ma)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-						tpProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						tpProg = GetOrBuildMaterialProgram(shKey, *shFrag, *shVert, pre);
 						if (tpProg && ma)
 						{
 							tpParams = !dc.paramOverride.empty() ? dc.paramOverride
@@ -12131,7 +12131,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			unsigned int matProg = 0;
 #if defined(HE_HAVE_SHADERC)
 			{
-				uint64_t shKey; std::string shFrag, shVert;
+				uint64_t shKey; const std::string *shFrag = nullptr, *shVert = nullptr;
 				if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
 				{
 					const MaterialShaderVariant* pre = nullptr;
@@ -12139,7 +12139,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					matProg = GetOrBuildMaterialProgram(shKey, *shFrag, *shVert, pre);
 				}
 			}
 #endif
@@ -12740,7 +12740,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			uint32_t rbArrMask = 0; // sampler2DArray slots (HE::matGlslTextureArrayMask)
 #if defined(HE_HAVE_SHADERC)
 			{
-				uint64_t shKey = 0; std::string shFrag, shVert;
+				uint64_t shKey = 0; const std::string *shFrag = nullptr, *shVert = nullptr;
 				if (resolveMaterialShader(rb.materialAssetId, shKey, shFrag, shVert))
 				{
 					std::vector<HE::UUID>    gIds;
@@ -12764,7 +12764,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							gPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i]   : std::string{});
 						}
 					}
-					rbProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					rbProg = GetOrBuildMaterialProgram(shKey, *shFrag, *shVert, pre);
 					if (rbProg)
 						for (size_t i = 0; i < gIds.size(); ++i)
 							rbGtex[rbGtexCount++] = ResolveGraphTexture(gIds[i], gPaths[i], (rbArrMask >> i) & 1u);

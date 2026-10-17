@@ -10971,7 +10971,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // through unchanged when the material has no graph shader OR resources are down.
             if (p.m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
+                uint64_t matHash = 0; const std::string *matFrag = nullptr, *matVertBody = nullptr;
                 if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody))
                 {
@@ -10992,10 +10992,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
                         // does not build → the lit forward replay after the resolve.
-                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                        uint64_t gbHash = 0; const std::string *gbFrag = nullptr, *gbVertBody = nullptr;
                         if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                    gbHash, gbFrag, gbVertBody))
-                            matPso = p.GetOrBuildMaterialPSO(gbHash, gbFrag, gbVertBody, nullptr,
+                            matPso = p.GetOrBuildMaterialPSO(gbHash, *gbFrag, *gbVertBody, nullptr,
                                                              p.usingHDR, false, /*gbuffer=*/true);
                         if (!matPso)
                         {
@@ -11004,7 +11004,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         }
                     }
                     else
-                        matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
+                        matPso = p.GetOrBuildMaterialPSO(matHash, *matFrag, *matVertBody,
                                                          matPre, p.usingHDR, matTransp);
                     // A full ring is a silent optics change (built-in look, or a skipped
                     // instance tail) — say so once per session instead of never.

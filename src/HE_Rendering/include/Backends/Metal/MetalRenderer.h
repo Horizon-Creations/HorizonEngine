@@ -847,12 +847,14 @@ private:
 	                                 const MaterialShaderVariant* precompiled = nullptr,
 	                                 bool blend = false, bool gbuffer = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
-	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-	                            std::string& vertBody);
+	// frag/vertBody are the MaterialAsset's own strings (no copy per draw, REN-1001),
+	// valid until the next content load / unload.
+	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+	                            const std::string*& vertBody);
 	// Same for the deferred G-buffer variant (customShaderGBufGlsl); false → the
 	// material has none and its draws are routed through the forward extra pass.
-	bool  ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
-	                              std::string& vertBody);
+	bool  ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, const std::string*& frag,
+	                              const std::string*& vertBody);
 
 	// ── Anti-aliasing resolve (docs/anti-aliasing-plan.md) ───────────────────
 	// Tonemap writes to m_ldrColor; this pass reads it and writes the final image

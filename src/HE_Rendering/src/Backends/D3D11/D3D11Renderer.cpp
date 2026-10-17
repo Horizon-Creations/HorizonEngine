@@ -7006,7 +7006,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             // which is exactly what an opaque / transparent graph material wants.
             if (p.m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
+                uint64_t matHash = 0; const std::string *matFrag = nullptr, *matVertBody = nullptr;
                 if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody))
                 {
@@ -7027,10 +7027,10 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
                         // does not build → the lit forward replay after the resolve.
-                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
+                        uint64_t gbHash = 0; const std::string *gbFrag = nullptr, *gbVertBody = nullptr;
                         if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                    gbHash, gbFrag, gbVertBody))
-                            sh = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
+                            sh = p.GetOrBuildMaterialShaders(gbHash, *gbFrag, *gbVertBody, nullptr,
                                                              false, /*gbuffer=*/true);
                         if (!(sh && sh->vs && sh->ps && sh->il))
                         {
@@ -7039,7 +7039,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                         }
                     }
                     else
-                        sh = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
+                        sh = p.GetOrBuildMaterialShaders(matHash, *matFrag, *matVertBody, matPre, matTransp);
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +

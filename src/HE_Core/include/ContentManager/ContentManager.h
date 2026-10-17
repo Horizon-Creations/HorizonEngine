@@ -199,6 +199,8 @@ public:
 	// Mutable access to a loaded material, for in-editor editing. Edits are
 	// visible immediately to any renderer sharing this manager; persist them to
 	// disk with saveAsset(). Returns nullptr when the UUID is not a material.
+	// Every call bumps MaterialAsset::shaderRevision (the renderers' shader-key memo):
+	// take the pointer fresh for an edit, don't keep it across a render.
 	MaterialAsset*           getMaterialMutable(HE::UUID id);
 
 	// Set a node-graph material parameter BY NAME at runtime (the scripting entry
