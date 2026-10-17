@@ -25,7 +25,14 @@ namespace CppClassEditorPanel
 	bool isDirty(const std::string& assetPath);
 
 	// Re-read the file on the next frame (collab: a peer's change landed).
+	// `assetPath` may name either half: a peer edits Foo.cpp while the tab is
+	// keyed by Foo.h.
 	bool reloadFromDisk(const std::string& assetPath);
+
+	// The text one half of the class holds, loaded the way render() loads it
+	// (the first call opens the class). The read side of the tests: a reload is
+	// only visible through what the buffer holds afterwards.
+	std::string bufferText(const std::string& assetPath, bool header);
 	// Paths of every unsaved tab this panel holds, open or already closed.
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.

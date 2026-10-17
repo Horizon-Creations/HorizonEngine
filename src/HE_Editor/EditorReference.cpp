@@ -43,7 +43,13 @@ namespace
 		// scope ("Preferences/Post-Processing/Bloom Threshold"), and what the
 		// section is called is the label at the end of it.
 		const std::size_t slash = key.rfind('/');
-		return slash == std::string::npos ? key : key.substr(slash + 1);
+		std::string label = slash == std::string::npos ? key : key.substr(slash + 1);
+		// And without its "##" suffix ("Fog Density##wx"): ImGui never draws that
+		// part, so the control does not say it. The anchor keeps it — that is
+		// what tells the two "Fog Density" rows apart for F1.
+		const std::size_t hash = label.find("##");
+		if (hash != std::string::npos) label.erase(hash);
+		return label;
 	}
 
 	// Where the control sits, spelled for someone who has to find it. The group

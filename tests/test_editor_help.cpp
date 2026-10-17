@@ -140,10 +140,33 @@ TEST_CASE("editor reference: F1 on a control opens the control, not a chapter")
 			++sections;
 			CHECK(!s.title.empty());
 			CHECK(!s.blocks.empty());
+			// The title is what the control says, and ImGui never shows a "##"
+			// suffix; the anchor (s.id) keeps it, the heading must not.
+			CHECK_MESSAGE(s.title.find("##") == std::string::npos,
+			              "a ##suffix in a reference heading: ", s.title);
 		}
 	}
 	INFO("sections in the generated reference: " << sections);
 	CHECK(sections >= checked);
+}
+
+TEST_CASE("editor reference: a ##suffixed key is titled by its visible label")
+{
+	// EDT-604: five Weather entries have no title of their own and a "##wx" key,
+	// and the manual headed them "Fog Density##wx". F1 still has to land on the
+	// suffixed anchor, so the suffix goes from the heading and nowhere else.
+	Docs::Library lib = shipped();
+	REQUIRE_MESSAGE(lib.loaded(), lib.error());
+	HE::Ed::EditorReference::install(lib);
+
+	const std::string topic = Help::referenceTopic("Weather/Fog Density##wx");
+	int page = -1, section = -1;
+	REQUIRE_MESSAGE(lib.resolve(topic, page, section), "F1 target does not resolve: ", topic);
+	REQUIRE(section >= 0);
+	const Docs::Section& s =
+		lib.pages()[static_cast<std::size_t>(page)].sections[static_cast<std::size_t>(section)];
+	CHECK(s.title == "Fog Density");
+	CHECK(s.text.rfind("Fog Density ", 0) == 0);
 }
 
 TEST_CASE("editor help: the interface's own controls resolve under their panel")

@@ -540,7 +540,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			if (isDefault)
 			{
 				ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 210, 140, 255));
-				ImGui::TextUnformatted("Project default â save.create() uses this template.");
+				ImGui::TextUnformatted("Project default \xe2\x80\x94 save.create() uses this template.");
 				ImGui::PopStyleColor();
 			}
 			else if (EditorWidgets::button("Set as Project Default", ImVec2(220.0f, 0.0f)))

@@ -306,6 +306,7 @@ add_executable(he_tests
     test_audio_mix_view.cpp
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
+    test_cpp_class_editor.cpp
     test_streaming_view.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
@@ -912,6 +913,12 @@ add_executable(he_tests
     # outside symbol, the Scene window's show flags, is stubbed in
     # WidgetDesignerLinkStubs.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
+    # The C++ class tab, for test_cpp_class_editor.cpp (Thema 212, EDT-307): a
+    # collaboration reload has to reach the buffer. Same AppContext, same
+    # per-file HE_IMGUI_ENABLED; the code editor it wraps comes along.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CppClassEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/ImGuiColorTextEdit/TextEditor.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/ImGuiColorTextEdit/LanguageDefinitions.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -980,6 +987,8 @@ set_source_files_properties(
     test_texture_viewer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CppClassEditorPanel.cpp
+    test_cpp_class_editor.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
     test_editor_tabs.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
@@ -994,6 +1003,7 @@ target_include_directories(he_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imguizmo
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/ImGuiColorTextEdit
 )
 # The HorizonRendering sources above are compiled straight into the test exe
 # instead of linking the DLL. Define HE_RENDERING_BUILD_DLL so HE_RENDERING_API

@@ -91,28 +91,32 @@ namespace
 	State& stateFor(const std::string& canonical)
 	{
 		State& st = s_states[canonical];
-		if (st.resolved) return st;
-
-		fs::path p(canonical);
-		const fs::path dir = p.parent_path();
-		st.className = p.stem().string();
-
-		if (isHeaderExt(p.extension().string()))
+		if (!st.resolved)
 		{
-			st.header.path = canonical;
-			st.source.path = findSibling(dir, st.className, { ".cpp", ".cc", ".cxx", ".c" });
-		}
-		else // source (or anything else) is the canonical file
-		{
-			st.source.path = canonical;
-			st.header.path = findSibling(dir, st.className, { ".h", ".hpp", ".hh", ".hxx" });
+			fs::path p(canonical);
+			const fs::path dir = p.parent_path();
+			st.className = p.stem().string();
+
+			if (isHeaderExt(p.extension().string()))
+			{
+				st.header.path = canonical;
+				st.source.path = findSibling(dir, st.className, { ".cpp", ".cc", ".cxx", ".c" });
+			}
+			else // source (or anything else) is the canonical file
+			{
+				st.source.path = canonical;
+				st.header.path = findSibling(dir, st.className, { ".h", ".hpp", ".hh", ".hxx" });
+			}
+
+			// Open on whichever half actually exists — prefer the header.
+			st.active = st.header.path.empty() ? 1 : 0;
+			st.resolved = true;
 		}
 
-		loadBuf(st.header);
-		loadBuf(st.source);
-		// Open on whichever half actually exists — prefer the header.
-		st.active = st.header.path.empty() ? 1 : 0;
-		st.resolved = true;
+		// Loading is its own step, after the paths: reloadFromDisk drops `loaded`
+		// on a resolved class, and this is the place that reads it again.
+		if (!st.header.loaded) loadBuf(st.header);
+		if (!st.source.loaded) loadBuf(st.source);
 		return st;
 	}
 
@@ -277,13 +281,40 @@ namespace CppClassEditorPanel
 		// makes the next frame re-read it while the rest of the State survives.
 		// Dirty is cleared deliberately: while a peer holds the asset's lock this
 		// panel is read-only anyway, so anything "unsaved" here is stale.
-		auto* st = s_states.find(assetPath);
-		if (!st) return false;
-		// The pair of buffers each carry their own loaded flag.
-		st->header.loaded = false;
-		st->source.loaded = false;
+		//
+		// The path names the file that changed, which is either half: a class
+		// opened on Foo.h is keyed by Foo.h, and a peer's edit to Foo.cpp
+		// arrives as Foo.cpp. So the exact key first, then any class that holds
+		// the path as one of its halves (path ==, so a separator spelled the
+		// other way round still matches).
+		bool any = false;
+		auto reload = [&any](State& st) {
+			// The pair of buffers each carry their own loaded flag.
+			st.header.loaded = false;
+			st.source.loaded = false;
+			any = true;
+		};
+		if (State* st = s_states.find(assetPath))
+		{
+			reload(*st);
+		}
+		else
+		{
+			const fs::path changed(assetPath);
+			s_states.forEach([&](const std::string&, State& st) {
+				if ((!st.header.path.empty() && fs::path(st.header.path) == changed) ||
+				    (!st.source.path.empty() && fs::path(st.source.path) == changed))
+					reload(st);
+			});
+		}
 		// dirty derives from undo indices; the reload resets them with the buffers.
-		return true;
+		return any;
+	}
+
+	std::string bufferText(const std::string& assetPath, bool header)
+	{
+		State& st = stateFor(assetPath);
+		return (header ? st.header : st.source).editor.GetText();
 	}
 
 }
