@@ -280,6 +280,9 @@ add_executable(he_tests
     test_dev_stats_tile.cpp
     test_app_preview_outliner.cpp
     test_ui_theme.cpp
+    # One layout pass per frame (Thema 213): the frame-cost bench and the
+    # differential guard that the scoped path answers what the walk does.
+    test_ui_layout_scope.cpp
     test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp
