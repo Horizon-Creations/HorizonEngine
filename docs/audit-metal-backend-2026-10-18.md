@@ -64,7 +64,9 @@ GPU-side effects, Intel/AMD Macs.
   `docs/audit-core-fundamente-2026-10-17.md`.
 - **Not verified:** a mesh with joint ids above its pose's bone count (the witness has one
   joint; shader validation checks the whole 1 MB chunk, not the slice, so it cannot prove the
-  slot sizing). Intel/AMD Macs. Windows/Linux CI (Metal-only change; the witness is editor code).
+  slot sizing). That the three sites take the ring and not its fresh-buffer fallback rests
+  on code position (`beginFrame` `.mm:16633` → `EncodeScene` → `endFrame`), not on
+  instrumentation; the pixel A/B cannot tell the two apart. Intel/AMD Macs. Windows/Linux CI (Metal-only change; the witness is editor code).
 - **Decisions taken:** GI tables stay for step 2 (see above). Trail buffers stay retained in
   `m_ribbonBuffers` (needed for the fallback buffer; on a ring chunk only a refcount).
   Joint ids ≥ 128 keep the full palette (as undefined as before).
