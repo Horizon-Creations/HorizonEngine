@@ -529,3 +529,469 @@ TEST_CASE("Tessellation settings round-trip, and an unused block is not written"
     CHECK(l->displacementStrength == doctest::Approx(0.35f));
     CHECK(l->displacementTiling == doctest::Approx(24.0f));
 }
+
+// ── Seam stitching (Thema 190) ────────────────────────────────────────────────
+// Where two chunks of different detail meet, the finer edge has to lie on the
+// coarser one; any step there casts a shadow the GI sun ray turns into a dashed
+// black line. The witness is the largest height gap between the two edge
+// polylines, both ways round, in world space.
+
+namespace
+{
+    struct EdgePt { float s, y; };   // position along the edge, height
+
+    // The grid edge `e` (TerrainChunkStitch order: v0, u1, v1, u0) of a chunk
+    // mesh with n vertices a side, in world space (the chunk centre added).
+    std::vector<EdgePt> edgeLine(const StaticMeshAsset& m, size_t n, int e,
+                                 float centreX, float centreZ)
+    {
+        std::vector<EdgePt> pts;
+        for (size_t p = 0; p < n; ++p)
+        {
+            const size_t idx = e == 0 ? p : e == 1 ? p * n + (n - 1)
+                             : e == 2 ? (n - 1) * n + p : p * n;
+            const bool alongX = (e == 0 || e == 2);
+            pts.push_back({ alongX ? m.vertices[idx * 3 + 0] + centreX
+                                   : m.vertices[idx * 3 + 2] + centreZ,
+                            m.vertices[idx * 3 + 1] });
+        }
+        return pts;
+    }
+
+    float heightOn(const std::vector<EdgePt>& line, float s)
+    {
+        for (size_t k = 0; k + 1 < line.size(); ++k)
+            if (s >= line[k].s - 1e-4f && s <= line[k + 1].s + 1e-4f)
+            {
+                const float t = std::clamp((s - line[k].s) / (line[k + 1].s - line[k].s), 0.0f, 1.0f);
+                return line[k].y + (line[k + 1].y - line[k].y) * t;
+            }
+        return line.back().y;
+    }
+
+    float edgeGap(const std::vector<EdgePt>& a, const std::vector<EdgePt>& b)
+    {
+        float gap = 0.0f;
+        for (const EdgePt& p : a) gap = std::max(gap, std::fabs(p.y - heightOn(b, p.s)));
+        for (const EdgePt& p : b) gap = std::max(gap, std::fabs(p.y - heightOn(a, p.s)));
+        return gap;
+    }
+
+    // Vertices a side of a chunk mesh: n² grid + 4(n-1) skirt vertices.
+    size_t sideOf(const StaticMeshAsset& m)
+    {
+        const size_t v = vertexCount(m);
+        size_t n = 2;
+        while (n * n + 4 * (n - 1) < v) ++n;
+        return n;
+    }
+
+    // The widest step along any seam of the landscape, between the meshes the
+    // chunks DRAW. `mixed` counts the seams whose two sides differ in detail.
+    float worstSeam(HorizonWorld& world, ContentManager& cm, int* mixed = nullptr)
+    {
+        auto& reg = world.registry();
+        float worst = 0.0f;
+        if (mixed) *mixed = 0;
+        for (auto [a, ca, ma, ta] : reg.view<TerrainChunkComponent, MeshComponent, TransformComponent>().each())
+            for (int e = 1; e <= 2; ++e)   // right and top neighbours: each seam once
+            {
+                const entt::entity b = chunkAt(world, ca.cx + (e == 1 ? 1 : 0), ca.cz + (e == 2 ? 1 : 0));
+                if (b == entt::null) continue;
+                const StaticMeshAsset* A = cm.getStaticMesh(ma.meshAssetId);
+                const StaticMeshAsset* B = cm.getStaticMesh(reg.get<MeshComponent>(b).meshAssetId);
+                REQUIRE(A != nullptr);
+                REQUIRE(B != nullptr);
+                const auto& tb = reg.get<TransformComponent>(b);
+                const size_t na = sideOf(*A), nb = sideOf(*B);
+                if (mixed && na != nb) ++*mixed;
+                worst = std::max(worst, edgeGap(
+                    edgeLine(*A, na, e,     ta.position.x, ta.position.z),
+                    edgeLine(*B, nb, (e + 2) % 4, tb.position.x, tb.position.z)));
+            }
+        return worst;
+    }
+}
+
+TEST_CASE("A stitched LOD0 edge lies on its LOD2 neighbour's edge")
+{
+    const uint32_t res = 33;   // 32 source cells; two chunks of 16 side by side
+    const std::vector<float> h = bumpyField(res);
+    const float size = 40.0f;
+    const StaticMeshAsset fine   = generateTerrainChunkMesh(h, res, size, size, 0.0f, 0.0f, 0.5f, 0.5f, 17);
+    const StaticMeshAsset coarse = generateTerrainChunkMesh(h, res, size, size, 0.5f, 0.0f, 1.0f, 0.5f, 5);
+    const float fineX = -10.0f, coarseX = 10.0f, z = -10.0f;   // chunk centres
+
+    const float before = edgeGap(edgeLine(fine, 17, 1, fineX, z), edgeLine(coarse, 5, 3, coarseX, z));
+    CHECK(before > 0.05f);   // the lens-shaped step the GI sun ray hits
+
+    TerrainChunkStitch st;
+    st.edgeCells[1] = 4;
+    const StaticMeshAsset s = stitchTerrainChunkEdges(fine, 16, fine, 16, st);
+    REQUIRE(vertexCount(s) == vertexCount(fine));
+    CHECK(edgeGap(edgeLine(s, 17, 1, fineX, z), edgeLine(coarse, 5, 3, coarseX, z)) < 1e-4f);
+
+    // Only that edge moved; x/z, UVs and indices are the level's.
+    for (int e : { 0, 2, 3 })
+    {
+        const auto a = edgeLine(s, 17, e, fineX, z), b = edgeLine(fine, 17, e, fineX, z);
+        for (size_t p = 0; p < a.size(); ++p) CHECK(a[p].y == b[p].y);
+    }
+    for (size_t j = 1; j + 1 < 17; ++j)
+        for (size_t i = 1; i + 1 < 17; ++i)
+            CHECK(s.vertices[(j * 17 + i) * 3 + 1] == fine.vertices[(j * 17 + i) * 3 + 1]);
+    for (size_t k = 0; k < vertexCount(s); ++k)
+    {
+        CHECK(s.vertices[k * 3 + 0] == fine.vertices[k * 3 + 0]);
+        CHECK(s.vertices[k * 3 + 2] == fine.vertices[k * 3 + 2]);
+    }
+    CHECK(s.uvs == fine.uvs);
+    CHECK(s.indices == fine.indices);
+
+    // The skirt keeps its depth below the moved ring: right edge = ring 16..32.
+    const size_t skirtBase = 17 * 17;
+    for (size_t j = 0; j < 17; ++j)
+    {
+        const size_t ringK = 16 + j, grid = j * 17 + 16;
+        const float depthBefore = fine.vertices[grid * 3 + 1] - fine.vertices[(skirtBase + ringK) * 3 + 1];
+        const float depthAfter  = s.vertices[grid * 3 + 1]    - s.vertices[(skirtBase + ringK) * 3 + 1];
+        CHECK(depthAfter == doctest::Approx(depthBefore).epsilon(1e-4));
+    }
+
+    // A count that does not fit, or a mesh of the wrong layout, changes nothing / gives nothing.
+    TerrainChunkStitch odd; odd.edgeCells[1] = 3;
+    CHECK(stitchTerrainChunkEdges(fine, 16, fine, 16, odd).vertices == fine.vertices);
+    CHECK(stitchTerrainChunkEdges(fine, 8, fine, 16, st).vertices.empty());
+}
+
+TEST_CASE("A displaced refined edge is stitched onto its LOD0 neighbour, corners included")
+{
+    const uint32_t res = 17;
+    const std::vector<float> h = bumpyField(res);
+    std::vector<float> grey(16 * 16);
+    for (size_t i = 0; i < grey.size(); ++i) grey[i] = static_cast<float>((i * 37) % 16) / 15.0f;
+    TerrainDisplacementMap d;
+    d.grey = grey.data(); d.width = 16; d.height = 16; d.strength = 0.4f; d.tiling = 3.0f;
+
+    const float size = 30.0f;
+    const uint32_t cells = 8, factor = 2, N = cells * factor + 1;
+    const StaticMeshAsset lod0  = generateTerrainChunkMesh(h, res, size, size, 0.0f, 0.0f, 0.5f, 0.5f, cells + 1);
+    const StaticMeshAsset tess  = generateTerrainChunkMeshTessellated(h, res, size, size,
+                                      0.0f, 0.0f, 0.5f, 0.5f, N, 1.0f, d);
+    const StaticMeshAsset right = generateTerrainChunkMesh(h, res, size, size, 0.5f, 0.0f, 1.0f, 0.5f, cells + 1);
+    const float x = -7.5f, rx = 7.5f, z = -7.5f;
+
+    CHECK(edgeGap(edgeLine(tess, N, 1, x, z), edgeLine(right, cells + 1, 3, rx, z)) > 0.05f);
+
+    TerrainChunkStitch st;
+    st.edgeCells[1] = cells;
+    st.corners = 0b1001;   // the two corners on the u0 edge, which itself stays displaced
+    const StaticMeshAsset s = stitchTerrainChunkEdges(tess, cells * factor, lod0, cells, st);
+    REQUIRE(vertexCount(s) == vertexCount(tess));
+    CHECK(edgeGap(edgeLine(s, N, 1, x, z), edgeLine(right, cells + 1, 3, rx, z)) < 1e-4f);
+    // Pinned corners carry LOD0's height and normal.
+    const size_t corner[2][2] = { { 0, 0 }, { (N - 1) * N, (cells) * (cells + 1) } };
+    for (const auto& c : corner)
+    {
+        CHECK(s.vertices[c[0] * 3 + 1] == lod0.vertices[c[1] * 3 + 1]);
+        for (int k = 0; k < 3; ++k) CHECK(s.normals[c[0] * 3 + k] == lod0.normals[c[1] * 3 + k]);
+    }
+    // Between them the u0 edge keeps its displacement.
+    CHECK(edgeGap(edgeLine(s, N, 3, x, z), edgeLine(tess, N, 3, x, z)) > 0.0f);
+    CHECK(s.vertices[(N / 2) * N * 3 + 1] == tess.vertices[(N / 2) * N * 3 + 1]);
+}
+
+TEST_CASE("Mixed-LOD seams of a landscape are closed by stitchSeams, same-LOD ones untouched")
+{
+    // lodDistanceScale 0.1 on 50 m chunks: LOD0 up to 30 m, LOD1 to 60, LOD2
+    // to 120. From the middle of chunk (0,0) the four chunks draw LOD0, LOD1,
+    // LOD1 and LOD2 — every seam is a mixed one.
+    const glm::vec3 cam(-25.0f, 0.0f, -25.0f);
+    auto build = [&](HorizonWorld& world, ContentManager& cm)
+    {
+        Entity te = makeLandscape(world, 1, 0.0f);
+        world.registry().get<TerrainComponent>(te).lodDistanceScale = 0.1f;
+        tick(world, cm, cam);
+    };
+
+    // Negative control: without the stitch the steps are there.
+    {
+        HorizonWorld world;
+        ContentManager cm(".");
+        build(world, cm);
+        int mixed = 0;
+        CHECK(worstSeam(world, cm, &mixed) > 0.01f);
+        CHECK(mixed == 4);
+    }
+
+    HorizonWorld world;
+    ContentManager cm(".");
+    build(world, cm);
+    TerrainSystem::stitchSeams(world, cm, nullptr);
+    int mixed = 0;
+    CHECK(worstSeam(world, cm, &mixed) < 1e-4f);
+    CHECK(mixed == 4);
+
+    auto& reg = world.registry();
+    const entt::entity c00 = chunkAt(world, 0, 0), c11 = chunkAt(world, 1, 1);
+    REQUIRE((c00 != entt::null));
+    REQUIRE((c11 != entt::null));
+    // The finest chunk draws its stitched copy, the coarsest its plain level.
+    const auto& lod00 = reg.get<LODComponent>(c00);
+    CHECK(lod00.current == 0);
+    CHECK(lod00.stitchedMeshId != HE::UUID{});
+    CHECK(reg.get<MeshComponent>(c00).meshAssetId == lod00.stitchedMeshId);
+    CHECK(reg.get<LODComponent>(c11).current == 2);
+    CHECK(reg.get<LODComponent>(c11).stitchedMeshId == HE::UUID{});
+
+    // LODSystem keeps the copy; a second pass with nothing changed rebuilds nothing.
+    const uint64_t key = reg.get<TerrainChunkComponent>(c00).stitchKey;
+    const StaticMeshAsset* copy = cm.getStaticMesh(lod00.stitchedMeshId);
+    LODSystem::update(world, cam);
+    CHECK(reg.get<MeshComponent>(c00).meshAssetId == lod00.stitchedMeshId);
+    TerrainSystem::stitchSeams(world, cm, nullptr);
+    CHECK(reg.get<TerrainChunkComponent>(c00).stitchKey == key);
+    CHECK(cm.getStaticMesh(lod00.stitchedMeshId) == copy);
+
+    // Far away every chunk is LOD3: no mixed seam, back to the plain levels.
+    const glm::vec3 far(5000.0f, 0.0f, 0.0f);
+    tick(world, cm, far);
+    TerrainSystem::stitchSeams(world, cm, nullptr);
+    CHECK(worstSeam(world, cm, &mixed) < 1e-4f);
+    CHECK(mixed == 0);
+    for (auto [e, cc, lod, mc] : reg.view<TerrainChunkComponent, LODComponent, MeshComponent>().each())
+    {
+        CHECK(lod.stitchedMeshId == HE::UUID{});
+        CHECK(mc.meshAssetId == lod.levels.back().meshId);
+    }
+}
+
+TEST_CASE("A refined chunk next to LOD0 chunks is stitched; its mesh goes when the chunk does")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    Entity te = makeLandscape(world, 2, 30.0f);
+    const glm::vec3 cam(-25.0f, 5.0f, -25.0f);
+    tick(world, cm, cam);
+    tick(world, cm, cam);
+    const entt::entity c00 = chunkAt(world, 0, 0);
+    REQUIRE((c00 != entt::null));
+    auto& reg = world.registry();
+    REQUIRE(reg.get<LODComponent>(c00).current == LODComponent::kRefined);
+
+    // Catmull-Rom against LOD0's straight segments: a (small) step unstitched.
+    int mixed = 0;
+    CHECK(worstSeam(world, cm, &mixed) > 1e-3f);
+    CHECK(mixed == 2);
+
+    TerrainSystem::stitchSeams(world, cm, nullptr);
+    CHECK(worstSeam(world, cm) < 1e-4f);
+    const HE::UUID stitched = reg.get<TerrainChunkComponent>(c00).stitchMeshId;
+    REQUIRE(stitched != HE::UUID{});
+    CHECK(reg.get<LODComponent>(c00).stitchedLevel == LODComponent::kRefined);
+    CHECK(reg.get<MeshComponent>(c00).meshAssetId == stitched);
+
+    // Sculpting rebuilds the chunk: it goes on drawing its refined level (as
+    // the plain mesh until the next stitch), and the next pass stitches again.
+    reg.get<TerrainComponent>(te).dirty = true;
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(reg.get<LODComponent>(c00).current == LODComponent::kRefined);
+    CHECK(reg.get<TerrainChunkComponent>(c00).stitchKey == 0);
+    TerrainSystem::stitchSeams(world, cm, nullptr);
+    CHECK(reg.get<MeshComponent>(c00).meshAssetId == stitched);
+    CHECK(worstSeam(world, cm) < 1e-4f);
+
+    // A resolution change destroys the chunk grid: the stitched mesh is given back.
+    reg.get<TerrainComponent>(te).resolution = 257;
+    reg.get<TerrainComponent>(te).dirty = true;
+    tick(world, cm, cam);
+    TerrainSystem::stitchSeams(world, cm, nullptr);
+    CHECK(cm.getStaticMesh(stitched) == nullptr);
+}
+
+// ── Seams under LOD changes and streaming (Thema 190, step 6) ─────────────────
+// The cases above look at one camera. Here a camera flies over the terrain and
+// every single tick is checked, so a frame in which LOD has switched a chunk but
+// its neighbour's stitch is not rebuilt yet (or a refined level still waits for
+// its build budget, or a sculpt just rebuilt the grid) shows up as a step.
+// Terrain is Resident in cell streaming, so "while streaming" for a landscape
+// means exactly these: levels arriving over several ticks, and rebuilds.
+
+namespace
+{
+    // The terrain part of SceneSystems::tickWorld, in its order:
+    // TerrainTess → LOD → TerrainSeams.
+    void tickFull(HorizonWorld& world, ContentManager& cm, const glm::vec3& cam, bool stitch)
+    {
+        tick(world, cm, cam);
+        if (stitch) TerrainSystem::stitchSeams(world, cm, nullptr);
+    }
+
+    struct SweepTerrain
+    {
+        const char* name;
+        uint32_t    res;
+        float       size, heightScale;
+        int         factor;     // tessellation factor (1 = off)
+        glm::vec3   pos;
+    };
+
+    Entity makeSweepLandscape(HorizonWorld& world, const SweepTerrain& t)
+    {
+        auto& reg = world.registry();
+        Entity te = world.createEntity("Landscape");
+        TransformComponent tr;
+        tr.position = t.pos;
+        reg.emplace<TransformComponent>(te, tr);
+        TerrainComponent tc;
+        tc.resolution  = t.res;
+        tc.sizeX = tc.sizeZ = t.size;
+        tc.seed        = 11;
+        tc.heightScale = t.heightScale;
+        tc.lodDistanceScale     = 0.1f;   // every LOD within a few chunk widths
+        tc.tessellationFactor   = t.factor;
+        tc.tessellationDistance = t.factor > 1 ? t.size * 0.3f : 0.0f;
+        tc.dirty = true;
+        reg.emplace<TerrainComponent>(te, tc);
+        return te;
+    }
+
+    // From far outside in along one diagonal, low over the terrain, then back
+    // over the other one — every chunk goes through every level both ways.
+    glm::vec3 sweepCam(const SweepTerrain& t, int i, int steps)
+    {
+        const int   half = steps / 2;
+        const float k    = static_cast<float>(i % half) / static_cast<float>(half - 1);
+        const float a    = -2.0f * t.size + 4.0f * t.size * k;
+        const float y    = t.heightScale + 2.0f;
+        return t.pos + (i < half ? glm::vec3(a, y, a) : glm::vec3(-a, y, a));
+    }
+
+    struct SweepResult { float worst = 0.0f; int ticksMixed = 0, maxMixed = 0, ticksRefined = 0; };
+
+    SweepResult runSweep(const SweepTerrain& t, int steps, bool stitch, float tol)
+    {
+        HorizonWorld world;
+        ContentManager cm(".");
+        Entity te = makeSweepLandscape(world, t);
+        SweepResult r;
+        for (int i = 0; i < steps; ++i)
+        {
+            // A third of the way in the terrain is sculpted: the whole chunk
+            // grid is rebuilt in the middle of the flight.
+            if (i == steps / 3) world.registry().get<TerrainComponent>(te).dirty = true;
+            tickFull(world, cm, sweepCam(t, i, steps), stitch);
+            int mixed = 0;
+            const float w = worstSeam(world, cm, &mixed);
+            r.worst = std::max(r.worst, w);
+            if (mixed > 0) ++r.ticksMixed;
+            r.maxMixed = std::max(r.maxMixed, mixed);
+            for (auto [e, lod] : world.registry().view<LODComponent>().each())
+                if (lod.current == LODComponent::kRefined) { ++r.ticksRefined; break; }
+            if (stitch)
+            {
+                CAPTURE(i);
+                CHECK(w <= tol);
+            }
+        }
+        return r;
+    }
+
+    const SweepTerrain kSweepTerrains[] = {
+        { "100 m, 2x2 chunks",              129,  100.0f, 10.0f, 1, glm::vec3(0.0f) },
+        { "8 m, 2x2 chunks",                129,    8.0f,  0.8f, 1, glm::vec3(0.0f) },
+        { "400 m, 4x4 chunks, off origin",  257,  400.0f, 40.0f, 1, glm::vec3(1000.0f, 50.0f, -300.0f) },
+        { "1 km, 8x8 chunks",               513, 1000.0f, 80.0f, 1, glm::vec3(0.0f) },
+        { "100 m, 2x2 chunks, tess x2",     129,  100.0f, 10.0f, 2, glm::vec3(0.0f) },
+    };
+}
+
+TEST_CASE("Every tick of a camera flight keeps every terrain seam closed")
+{
+    const int steps = 160;
+    for (const SweepTerrain& t : kSweepTerrains)
+    {
+        CAPTURE(std::string(t.name));
+        // Relative to the relief: a small terrain's steps are far below any
+        // absolute threshold that suits a big one.
+        const float tol = 1e-5f * t.heightScale;
+
+        const SweepResult on = runSweep(t, steps, true, tol);
+        // The flight did what it is for: mixed seams in most ticks, and the
+        // refined level where there is one.
+        CHECK(on.ticksMixed > steps / 4);
+        CHECK(on.maxMixed > 0);
+        if (t.factor > 1) CHECK(on.ticksRefined > 0);
+        MESSAGE(std::string(t.name) << ": worst stitched step " << on.worst << " m, "
+                << on.ticksMixed << "/" << steps << " ticks with mixed seams (max "
+                << on.maxMixed << ")");
+
+        // Negative control: the same flight without stitchSeams has the steps.
+        const SweepResult off = runSweep(t, steps, false, tol);
+        CHECK(off.worst > 10.0f * tol);
+        MESSAGE(std::string(t.name) << ": worst unstitched step " << off.worst << " m");
+    }
+}
+
+TEST_CASE("A camera jittering across a LOD distance keeps the seams closed and reuses the stitched meshes")
+{
+    // LOD0 ends at 30 m on these 50 m chunks (lodDistanceScale 0.1). The camera
+    // stands 30 m from chunk (1,1)'s centre and jitters by ±0.5 m across that
+    // line, so the chunk flips LOD0 ↔ LOD1 every tick and its neighbours' seams
+    // change from mixed to plain and back.
+    HorizonWorld world;
+    ContentManager cm(".");
+    const SweepTerrain t = kSweepTerrains[0];
+    makeSweepLandscape(world, t);
+    auto& reg = world.registry();
+    const glm::vec3 centre11(25.0f, 0.0f, 25.0f);
+    const glm::vec3 dir = glm::normalize(glm::vec3(-1.0f, 0.0f, -0.2f));
+    auto camAt = [&](float d) { return centre11 + dir * d; };
+
+    tickFull(world, cm, camAt(29.5f), true);
+    tickFull(world, cm, camAt(30.5f), true);
+    std::vector<std::pair<entt::entity, HE::UUID>> ids;
+    for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        if (cc.stitchMeshId != HE::UUID{}) ids.push_back({ e, cc.stitchMeshId });
+
+    const entt::entity c11 = chunkAt(world, 1, 1);
+    REQUIRE((c11 != entt::null));
+    int toggles = 0, rebuilds = 0;
+    const int ticks = 40;
+    for (int i = 0; i < ticks; ++i)
+    {
+        std::vector<uint64_t> before;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each()) before.push_back(cc.stitchKey);
+        const uint8_t was = reg.get<LODComponent>(c11).current;
+        tickFull(world, cm, camAt(i % 2 ? 30.5f : 29.5f), true);
+        if (reg.get<LODComponent>(c11).current != was) ++toggles;
+        size_t k = 0;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+            if (cc.stitchKey != before[k++] && cc.stitchKey != 0) ++rebuilds;
+        CAPTURE(i);
+        CHECK(worstSeam(world, cm) <= 1e-5f * t.heightScale);
+    }
+    CHECK(toggles == ticks);
+    // A rebuild refills the chunk's one stitched mesh in place: no new asset
+    // per flip, nothing piles up in the ContentManager.
+    for (const auto& [e, id] : ids)
+        CHECK(reg.get<TerrainChunkComponent>(e).stitchMeshId == id);
+    // Known cost (see the fix doc): every flip re-stitches the chunks whose
+    // neighbour changed — at most the flipping chunk and its four neighbours.
+    CHECK(rebuilds <= 5 * toggles);
+    MESSAGE("jitter: " << toggles << " LOD flips in " << ticks << " ticks, "
+            << rebuilds << " stitched-mesh rebuilds");
+
+    // Standing still (where the last jitter tick left the camera) costs nothing.
+    int still = 0;
+    for (int i = 0; i < 10; ++i)
+    {
+        std::vector<uint64_t> before;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each()) before.push_back(cc.stitchKey);
+        tickFull(world, cm, camAt(ticks % 2 ? 29.5f : 30.5f), true);
+        size_t k = 0;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+            if (cc.stitchKey != before[k++]) ++still;
+    }
+    CHECK(still == 0);
+}

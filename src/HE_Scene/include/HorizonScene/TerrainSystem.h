@@ -42,4 +42,16 @@ namespace TerrainSystem
     // because that one has callers without a camera.
     void updateTessellation(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
                             const glm::vec3& cameraPos);
+
+    // Seams between chunks drawn at different detail (LOD0 next to LOD2, a
+    // refined chunk next to LOD0): the finer chunk draws a copy of its level
+    // whose edge lies exactly on the coarser neighbour's, so the seam has no
+    // step — a step casts a real shadow and the GI sun ray, starting a few cm
+    // above the surface, turns it into a dashed black line. Run right AFTER
+    // LODSystem::update: it reads the levels that pass chose and installs the
+    // copy as LODComponent::stitchedMeshId, which LODSystem keeps from then
+    // on. A copy is rebuilt only when the chunk's level or a neighbour's
+    // changes. Chunks with no neighbour on a side (terrain border, a chunk
+    // not built yet) leave that side as it is.
+    void stitchSeams(HorizonWorld& world, ContentManager& cm, IRenderer* renderer);
 }
