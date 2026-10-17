@@ -307,6 +307,7 @@ add_executable(HorizonEditor WIN32
 	ProfilerPanel.cpp
 	ProfilerWidgets.cpp
 	StreamingDebugView.cpp
+	PlayCellStreaming.cpp
 	ConsolePanel.cpp
 	ConsoleView.cpp
 	EnvironmentPanel.cpp

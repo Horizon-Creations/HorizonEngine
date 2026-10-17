@@ -48,6 +48,7 @@
 #include "McpLockBook.h"         // external locks, per MCP client
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
 #include "EditorCommands.h"
+#include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -174,6 +175,9 @@ struct AppContext
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
+	// The cells Play streams in a split scene (PlayCellStreaming), for the
+	// Streaming tab; null before the first Play.
+	const HE::CellRuntime* playCells = nullptr;
 	// An APPLICATION project has no play mode: its UI runs permanently and the
 	// viewport panel is the app itself (docs/he-apps-plan.md E2). Panels that ask
 	// "are we playing?" to decide whether the in-game UI owns the pointer must
@@ -754,6 +758,10 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
+	// A split scene's cells, streamed around the play camera — the game's
+	// CellRuntime with the editor as its host (PlayCellStreaming.h). Made at the
+	// first Play, ended at every Stop before the edited scene is restored.
+	std::unique_ptr<PlayCellStreaming> m_playCells;
 	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
 	// builds the block itself and pushEnvironment hands it to the renderer instead of the
 	// physics world's. Off outside the dump.

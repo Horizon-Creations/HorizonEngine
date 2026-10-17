@@ -1048,3 +1048,294 @@ einer Testdatei rund 7 bis 9 min, weil CMake nach jedem Lauf neu konfiguriert un
 `ctest -j4 --timeout 1500`: **`100% tests passed out of 256`**, `CTEST_RC=0`, 305 s, die zwei `runtime_size_app_*` übersprungen wie in jedem
 Lauf davor. `test_world_scale` und `test_cell_split` grün, `test_material_graph` 282 s und grün. Der Bench ist `doctest::skip` und fehlt
 in diesen 256; er lief mit `--no-skip` nur für die Messung. Die CI der Plattformen läuft über die Zweige und ist hier nicht abgewartet.
+
+## 16. Schritt 2c: `CellRuntime`/`ICellHost`, Zellen im Editor-Play (Thema 183 Schritt 1, 17.10.2026)
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| `HE::CellRuntime` | `src/HE_Scene/include/HorizonScene/CellRuntime.h`, `src/HE_Scene/src/CellRuntime.cpp` | besitzt `CellStreamer`, Welt-Zeiger und Manifest-Text (Neustart, wenn sich eins davon ändert), ein `CancelToken` je Zelle, die Bodies einer Scheibe als eine Charge (`cellSliceBodies`), die Reserve (`cellBodiesFit`), die Kamera als Anker samt Vorausschau (300-m/s-Klemme) und das Budget 4 ms. `clear(world)` entlädt über die Hooks, `reset()` vergisst nur |
+| `HE::ICellHost` | ebda. | `openCellFile(path)`, `cellPhysics()` (bei jedem Aufruf gefragt), `streamCellAssets(world, token, ids)`; dazu `cellLoaded`/`cellUnloading` mit leerem Default, **für die Skripte aus 3b**. Reihenfolge beim Entladen: erst der Host (Zelle noch ganz), dann die Bodies, dann das Token |
+| Spiel | `GameApplication.h:359`, `GameApplication.cpp` (`openCellFile`, `streamCellAssets`, `updateCellStreaming` :1518–1553) | `GameApplication` ist privater `ICellHost`; Reader (Pak-Eintrag, sonst lose Datei) und Asset-Streaming unverändert, `updateCellStreaming` ist ein Aufruf; Szenenwechsel `m_cellRuntime.reset()`, Region-Hold liest `m_cellRuntime.streamer()`. Reines Umsortieren |
+| Editor-Play | `src/HE_Editor/PlayCellStreaming.{h,cpp}`, `EditorApplication.cpp` (`setPlayMode`, `OnRender` nach `updatePlayCameraController`) | `PlayCellStreaming` ist der Host: Zellen aus dem Projektordner (Elternordner der Content-Wurzel, wie `projectRootOf` im Streaming-Tab), Assets über `loadAssetAsync` und den Editor-Drain. Begonnen vor `m_physicsWorld->initialize`, **zusammen mit `setRegionHold`** (fehlte im Play bisher ganz), beendet mit `end(world)` **vor** `m_editorWorld->clear()` beim Stop. Die Warnung „Play shows only the base“ ist weg; der Streaming-Tab zeigt im Play die Zahlen der Laufzeit (`AppContext::playCells`) |
+| Zeuge | `EditorApplication.cpp`, `HE_DUMP_PLAYCELLS` in `dumpFrameHeadless` | 13×13 Würfel, in 40-m-Zellen nach `%TEMP%/he_dump_playcells` gesplittet, Bild der Basis nach `<dump>.edit.bmp`, Play, Laufzeit bis die gewollten Zellen stehen, Aufnahme, Stop mit Zählung |
+| Tests | `tests/test_cell_runtime.cpp` (neu) | Fake-`ICellHost`: ein Token je Zelle über alle Scheiben, Host hört das Entladen bei noch lebendem Token und noch vorhandenen Bodies, fehlende Datei einmal, ohne Kamera keine Arbeit; Vorausschau und Klemme (290 vs 310 m/s bei 1 s); Manifest-/Weltwechsel vergisst, `clear` entlädt, `reset` vergisst; Bodies in eine echte `PhysicsWorld` und wieder heraus |
+
+**Geprüft** (Release, `C:/hw183`, `HE_ENABLE_SHADERC=ON`, NN-WS03):
+- `he_tests --source-file=*test_cell_runtime.cpp` 4/4 (232 Assertions). **Negativkontrolle:** Klemme aus (`3e9`) und
+  Entlade-Reihenfolge umgedreht (Token und Bodies vor dem Host) → genau die drei zugehörigen Checks rot, zurückgesetzt wieder grün.
+- `test_world_scale` 44/44, `test_cell_split` 11/11; `ctest -j4 --timeout 1500`: 298/299, rot nur `test_inspector_ui`
+  (Zwischenablage im Agenten-Prozess, bekanntes Rauschen, Panel nicht angefasst).
+- **Bild-Zeuge Editor-Play** (D3D11, `HE_DUMP_SKYTEST` CAMY=90 PITCH=-89, `HE_DUMP_PLAYCELLS=1`): 169 Würfel → 16 Zellen, 0 in der Basis;
+  Edit-Bild leer, Play-Bild genau 8×8 Würfel (die vier Zellen im 30-m-Radius), „4 of 4 wanted cells built in 3 ms, 64 cubes“;
+  nach Stop „0 cubes in the edit world, cell runtime idle, manifest kept“. Bilder als Dateien 47/48 im Thema 183.
+- **Spiel** (loses Verzeichnis `C:/hw183/game`, dieselben Zelldateien, `HE_CAPTURE_FRAME=240`, OpenGL): dasselbe 8×8-Bild;
+  Kontrolle ohne `Bench.cells` → „cell … not found“, 0 helle Pixel gegen 6 937.
+
+**Nicht geprüft:** Der Zeuge läuft vor der Hauptschleife und ruft `PlayCellStreaming::update` selbst, mit dem Temp-Ordner als
+Wurzel: der Aufruf je Frame in `OnRender` (nach `updatePlayCameraController`) und der Leser über die Projektwurzel
+(`contentRoot().parent_path()`, derselbe Ausdruck wie `projectRootOf` beim Split und wie im Spiel) sind darin nicht gelaufen;
+ein Play per Hand in einem gesplitteten Projekt steht aus. Vulkan/D3D12/Metal für den Zeugen (kein Backend-Code geändert); ein
+echtes Projekt mit Assets, Physik-Bodies und Skripten im Play; Linux/macOS-Bau (CI des Zweigs angestoßen, siehe Thema).
+
+**Entscheidungen:** 2c vor 3b (die Königin hat es so geplant). Bodies, Reserve und Token liegen in der Laufzeit, nicht im Host —
+beide Hosts hätten denselben Code gehabt. `PlayCellStreaming` hängt am `EditorApplication`-Header (Header ist klein; ein
+vorwärts deklarierter `unique_ptr` bricht in jeder Übersetzungseinheit, die den Inline-Konstruktor sieht).
+
+## 17. Schritt 3b, Teil `CellState`: Zustand überlebt Entladen und Laden (Thema 183 Schritt 2, 17.10.2026)
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| `HE::CellState` | `src/HE_Scene/include/HorizonScene/CellState.h`, `src/CellState.cpp` | Je Sitzung im Speicher: **Tombstones** (UUIDs) und **Zustände** (UUID → JSON-Text in der Form von `entity.saveState`). `sliceBuilt` merkt sich je Zellwurzel die UUIDs, die das Laden gebracht hat, und setzt die Welt-Hälfte eines gespeicherten Zustands (Transform, Sichtbarkeit) **vor** den Bodies der Scheibe; `cellBuilt` setzt die Skript-Hälfte (Save-Game-Variablen) nach `host.cellLoaded`; `cellUnloading` schreibt für alles, was das Laden gebracht hat und **noch unter der Wurzel** hängt, den Zustand (nur mit aktivem `SaveStateComponent`), alles andere wird Tombstone. Nur für Zellen mit stabilen Ids (`CellStreamer::keepsIds`, Version 2); eine Zelle ohne Kopf behält nichts (einmal geloggt) |
+| Tombstones vor dem Bau | `CellStreamer::Hooks::skip`, `dropSkippedRecords` in `CellStreamer.cpp`, `Stats::skipped` | Ein Tombstone wird **nicht gebaut und danach zerstört**, sondern sein Datensatz (samt Teilbaum, und seine Id aus den `children` der übrigen) vor `loadAdditiveFromJson` aus der Scheibe genommen: kein Body, kein Asset-Load, kein Aufblitzen. Der erste Entwurf zerstörte nach dem Bau und war für Befund 23 blind |
+| Zustand ohne Savegame | `HE::api::entity::stateOf` / `applyState(…, parts)` in `EngineApi.h/.cpp` | Der Kern von `saveState`/`applySavedState` (`captureStateJson`/`applyStateJson`) ohne die Schranken „Play-Modus“ und „aktives Savegame“, und still für Entities ohne Komponente; die beiden Script-Rows sind dünne Hüllen darum (Ausgabe byte-gleich, `test_engine_api` 130/130). `kStateWorld`/`kStateScript` trennen die zwei Hälften |
+| Laufzeit | `CellRuntime.cpp` | Entladen: **CellState** (Skripte laufen noch) → Host → Bodies → Token. Laden je Scheibe: `skip` (im Streamer) → Welt-Hälfte → Bodies → Assets; am Ende `host.cellLoaded` mit der um Ungültiges bereinigten Liste, dann die Skript-Hälfte. `clear()` schreibt nichts heraus (`m_clearing`: beim Stop des Editors sind die Skript-Hosts schon beendet); `clear`, `reset` und ein Neubeginn für ein anderes Manifest oder eine andere Welt vergessen alles. `CellRuntime::state()` für Tests und eine spätere Anzeige |
+| Ctx des Hosts | `ICellHost::cellApiCtx(api::Ctx&)`, `GameApplication::cellApiCtx`, `PlayCellStreaming::setApiCtx` (`EditorApplication.cpp`, `setPlayMode`) | Beide Hosts reichen ihren `apiCtx(world, physics, content)` durch (Runtime, `EntityHost`), damit Save-Game-Variablen gelesen und gesetzt werden können. Default: nur Welt und Physik |
+| Savegame als Rückfall | `CellState::restoreText` | Eine Entity, deren Abgang die Sitzung noch nicht gesehen hat, nimmt ihren Zustand aus dem **aktiven Savegame** (Play-Modus, aktives Save, Eintrag unter ihrer UUID), also das, was `entity.applySavedState` ihr beim Laden des Spiels gegeben hätte, wäre ihre Zelle da gewesen. Ein eigener Zustand der Sitzung ist neuer und gewinnt. Ohne das wäre der Wechsel nach `Stateful` (Zeile unten) für gesplittete Projekte ein Rückschritt gewesen: eine Tür, die vorher Resident war und per Skript aus dem Save gesetzt wurde, liegt nach dem Split in einer Zelle, die beim Laden des Spiels nicht da ist. Koordinaten passen ohne Umrechnung: das Save hält Top-Level-Entities absolut, und die lokale Position eines Zellkinds **ist** die absolute (die Wurzel steht bei -origin) |
+| Klasse „zustandsbehaftet“ | `CellSplit.cpp` (`kComponentClasses`: `saveState` → `Stateful`; `movesIntoCell` = nicht Resident) | Vorher blieb **jede** Entity mit `SaveStateComponent` in der Basis, `CellState` wäre in einem echten Split totes Holz gewesen. Die übrigen Komponenten entscheiden weiter (Skript, dynamischer Body → Basis). Der Kopf zählt `classes.stateful` |
+
+**Befund 23 (vom Bauplan nicht gesehen): eine aus der Zelle gehängte Entity käme doppelt.** Hängt ein Skript eine Zell-Entity unter die
+Basis, überlebt sie das Entladen. Beim Wiederladen ist ihre Id noch in der Welt, und der Lader gibt dem neu gebauten Datensatz eine **frische**
+Id (`idCollisions`), schon *vor* jedem Hook; nach dem Bau ist der Doppelgänger von keiner anderen Entity zu unterscheiden. Darum zählt als
+Tombstone „nicht mehr unter der Wurzel“ (nicht „nicht mehr in der Welt“), und darum wirkt der Tombstone vor dem Bau (`skip`). Die Mutation
+„Tombstone nur, wenn die Id aus der ganzen Welt weg ist“ macht genau diesen Fall rot.
+
+**Geprüft** (Release, `C:/hw183`, NN-WS03): `tests/test_cell_state.cpp` 8/8: zerstörte Kiste bleibt weg (zwei Runden, Scheiben
+zu drei; der Host bekommt sie nicht, `bodyCount` und `skipped` stimmen, `idCollisions` 0); bewegte und versteckte Kiste mit `SaveState` steht
+wieder da, **ihr Body auch** (Raycast an der neuen Stelle trifft sie, an der alten nichts), eine Kiste ohne Komponente als Kontrolle am
+Ursprungsort; die aus der Zelle gehängte Kiste gibt es einmal; eine Zelle ohne Kopf behält nichts und hat frische Ids; eine halb gebaute,
+aufgegebene Zelle lässt Zustand und Tombstones ihrer ungebauten Scheiben stehen; Ursprungsverschiebung um 1 km zwischen Entladen und Laden;
+`clear()` vergisst; `stateOf`/`applyState` mit Teilen; Rückfall aufs aktive Save (Eintrag gilt beim ersten Laden, der eigene Zustand danach,
+außerhalb des Play-Modus kein Rückfall). **Negativkontrollen** (einzeln, die DLL jeweils von Hand nach `tests/` kopiert, siehe
+Falle im Handoff): `skip` aus → nur die Tombstone-Checks rot (3 Fälle); kein Herausschreiben beim Entladen → alle Zustands- und
+Tombstone-Checks rot (5 Fälle); Tombstone nach „Id in der Welt“ → nur der Aus-der-Zelle-Fall rot; Rückfall aus → nur der Save-Check rot. Dazu `test_cell_split` 11/11 (Klassentabelle:
+`saveState` wandert, mit Skript oder dynamischem Body nicht), `test_cell_runtime` 4/4, `test_world_scale` 44/44, `test_engine_api` 130/130,
+`test_physics` 105/105, `test_scene_serializer` 46/46, `test_horizoncode_codegen` 53/53; `HorizonEditor` und `HorizonGame` bauen. Voller `ctest -j4 --timeout 1500`: 299/300, rot nur `test_inspector_ui` (Zwischenablage im
+Agenten-Prozess, bekanntes Rauschen wie in Schritt 1, Panel nicht angefasst).
+
+**Nicht geprüft:** Die **Skript-Hälfte** (Save-Game-Variablen) läuft durch denselben Code wie `entity.saveState`, aber in keinem Test mit
+Zellen: Entities mit Skript sind bis Schritt 3 Resident, und `cellLoaded` startet in keinem Host Skripte. Die Reihenfolge „Welt-Hälfte vor den
+Bodies“ trägt **kein** Test: umgedreht teleportiert `applyState` den Body selbst (`teleportToLocalPose`) und der Test bleibt grün; sie spart
+den Teleport. Kein Editor-Play und kein Spiel per Hand mit Zellzustand; Linux/macOS nur über die CI.
+
+**Entscheidungen und Grenzen:**
+- Die Skript-Hälfte kommt **nach** `host.cellLoaded`, also nach BeginPlay, sobald Schritt 3 dort `EntityHost::bindFor` ruft (`bind` feuert
+  Construct und BeginPlay zusammen). Plan 6.3 wollte „vor dem Start der Skripte“; das geht erst, wenn `bind` die beiden trennt oder Schritt 3
+  `CellRuntime` dazwischen die Variablen setzen lässt. Für Schritt 3 zu entscheiden.
+- Je Sitzung: ein Szenenwechsel im Spiel (`m_cellRuntime.reset()`) und Stop/Play im Editor verlieren den Zustand der Sitzung (das Save
+  bleibt Rückfall). **CellState schreibt nicht ins Savegame:** speichert das Spiel, während die Zelle einer Tür draußen ist, behält das Save den
+  Eintrag, den es hatte (auch `entity.saveState` erreicht sie dann nicht). Folgearbeit: beim `save.write` die Zustände der Sitzung mitschreiben.
+- Was ein Skript zur Laufzeit **unter** eine Zellwurzel spawnt, hat keine Id aus der Datei, geht mit der Zelle und kommt nicht wieder. Eine
+  Entity, die beim Laden eine frische Id bekam (`idCollisions`), bekommt ihren Zustand nicht zurück.
+- Kosten: beim Entladen ein Gang über den Teilbaum der Zelle (Map UUID → Entity), beim Laden ein Nachschlag je Datensatz; 16 Byte je gebauter
+  Entity bis zum Entladen. Nicht gemessen.
+
+## 18. Schritt 3: Skripte pro Zelle, Gruppe `streaming`, `StreamingComponent` (Thema 183 Schritt 3, 17.10.2026)
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| Skripte pro Zelle | `src/HE_Scene/include/HorizonScene/CellScripts.h`, `src/CellScripts.cpp` (neu) | `HE::startCellScripts(hosts, world, created)` bindet die HorizonCode-Klassen (`EntityHost::bindFor`, Construct + BeginPlay) und startet Lua/Python (`ScriptContext::startScriptsFor`, onStart) dessen, was die Zelle gebaut hat; **was schon läuft, wird übersprungen** (`bind` fragt nicht, `startScriptsFor` überschreibt den Map-Eintrag: doppelter Start, geleakte Instanz). `HE::stopCellScripts(hosts, world, root)` geht den Teilbaum unter der Wurzel **so, wie er jetzt ist**, ab: `unbind` (Destruct, während die Zelle ganz ist), Lua-Instanz `destroyInstance`, Map-Eintrag und `unwatch(scriptToken)`. Was ein Skript aus der Zelle gehängt hat, behält sein Skript. Eine Kopie für beide Hosts; die Zonen-Entladungen der zwei Apps waren schon auseinandergelaufen (Editor: kein `erase`/`unwatch`, Spiel: kein `destroyInstance`) |
+| Hosts | `GameApplication::cellLoaded/cellUnloading/cellScriptHosts` (`GameApplication.cpp:1568`), `PlayCellStreaming::cellLoaded/cellUnloading` + `setScripts` (gesetzt in `setPlayMode`, `EditorApplication.cpp:12896`) | Dünne Aufrufe. Editor-Stop: `EntityHost::end` läuft vor `PlayCellStreaming::end`, dort sind nur noch die Lua-Instanzen zu stoppen; ein Szenenwechsel im Spiel ruft kein `cellUnloading` (`reset`), die App räumt ohnehin alles ab |
+| Klassentabelle | `CellSplit.cpp:88` | `script` → `Stateful`. Mit `characterController`, `movement`, dynamischem Body, Kamera … bleibt es weiter Resident (die strengste Komponente entscheidet). Was die Basis-Logik immer braucht, markiert der Autor als Resident (unten) |
+| Gruppe `streaming` | `EngineApi.h:1594`, `EngineApi.cpp:2701` (Funktionen), `:7483` (Rows), `:8445` (Namen), `isScriptGroup`, `HcNodeDocs.cpp` | `cellAt(position) → x, z, exists`, `isLoaded(x, z)`, `isSettled(position, radius)`, `pin(position, radius) → handle`, `unpin(handle)`. Weltpositionen; der Ursprung wird in der Row addiert. Die App installiert ihre Laufzeit (`streaming::install`): das Spiel in `OnInit` vor dem ersten Skript (`GameApplication.cpp:1409`), weg in `OnShutdown`; der Editor zwischen Play (`:12909`) und Stop (`:13209`). Nichts installiert / keine Zellen: kein Treffer, `pin` 0, **`isSettled` wahr** (ein Teleport-Tor darf in einem ungesplitteten Level nicht hängen) |
+| Pins | `CellRuntime::pin/unpin/pinCount` (`CellRuntime.h:108`), `update()` | Anker neben der Kamera, `radiusScale = radius / loadRadius` (nicht positiv: die Radien des Manifests). Sie überleben den Start für das Manifest (ein Pin aus BeginPlay kommt vor dem ersten `update`, das die Zellen sieht) und gehen mit `clear()`/`reset()`. Ohne Kamera, aber mit Pin wird gestreamt (Vorgriff auf den Server, Schritt 4) |
+| `StreamingComponent` | `Components/StreamingComponent.h` (neu), `HorizonScene.h`, `SceneSerializer.cpp` (Speichern, Laden, `HE_SCENE_COMPONENT_KEYS`, `isKnownComponentKey`), `InspectorPanel.cpp` (Abschnitt + Add Component unter Gameplay), `InspectorPrefabKeys.cpp`, `EditorHelp.cpp` (Komponente, `Streaming/Mode`, `kComponentScopes`) | `Mode { Auto, Resident }`, **Vorgabe Resident** (hinzufügen heißt „behalten“; Auto gibt einer Prefab-Platzierung zurück, was ihr Prefab verlangte). Schlüssel `streaming`, `{ "mode": 0/1 }`. Der Splitter wertet den Wert aus (`CellSplit.cpp:153`): alles außer einer expliziten 0 ist Resident, und ein Resident-Kind hält den ganzen obersten Teilbaum in der Basis. Kein vorhandenes Tag oder Layer passte (es gibt keins; `EditorLockComponent` ist etwas anderes) |
+
+**Entschieden:** Die Save-Game-Variablen einer Klasse kommen **nach** BeginPlay zurück (`bind` feuert Construct und BeginPlay zusammen,
+`CellState::cellBuilt` läuft nach `host.cellLoaded`). Das entspricht dem normalen Savegame-Weg (eine Klasse ruft Apply Saved State in
+ihrem BeginPlay, also danach) und ist in `test_cell_scripts` festgehalten (`goldAtBeginPlay == 0`, `gold == 42`). Wer den Wert in
+BeginPlay braucht, liest ihn im ersten Tick. Die Alternative (BeginPlay erst nach den Variablen) braucht eine Trennung in `EntityHost::bind`.
+Keine Services-Tabelle in `HorizonGameServices.h` für C++-GameLogic (wie bei `content`); `scripts/script_api_docs/registry.json` ist nicht neu erzeugt.
+
+**Linux-Laufzeitgröße** (Auftrag 107 der Königin): CI 39031060917 wog das Spiel auf Linux mit 38,0 MB ohne Python gegen die Schwelle 38,0
+(seit 05.09. nicht neu gemessen; die Basis `1e41c2d2` war grün). Die Zunahme ist Zellstreaming in HorizonScene ohne neue Abhängigkeit.
+Die Schwelle ist nach der Regel „gemessen plus 10 Prozent“ auf (67,0, 42,0) gehoben, begründet in `scripts/runtime_size.py`. Ob der Lauf
+damit grün ist, sagt erst die CI dieses Schritts.
+
+**Geprüft** (Release, `C:/hw183`, NN-WS03): `test_cell_scripts` 4/4 (neu: Start/Stopp je Laden, Save-Game-Variable über das Entladen und
+ihre Reihenfolge zu BeginPlay, aus der Zelle gehängte Entity, Idempotenz und die Stop-Form des Editors); `test_cell_runtime` 6/6 (zwei neu:
+Pin mit Weltursprung 500 m, alle fünf Rows über die Registry, neutrale Antworten); `test_cell_split` 14/14 (Schalter je Wert, Resident-Kind,
+Rundweg durch Speicher/CBOR und Split). **Negativkontrollen**, jede einzeln, die DLL jeweils nach `tests/` kopiert, jede nur auf ihren Checks rot:
+Host vor CellState beim Entladen (Variable verloren), Stopp aus, Start ohne Filter, Ursprung nicht addiert, `isSettled` falsch ohne Laufzeit,
+`begin()` löscht Pins, Splitter ignoriert den Schalter. Dazu `test_engine_api`, `test_hc_node_docs`, `test_editor_help`, `test_scene_serializer`,
+`test_entity_host` und `test_world_scale` grün; `editor_help_audit.py --check` 1205/1205; `HorizonEditor` und `HorizonGame` bauen.
+
+**Nicht geprüft:** Kein Editor-Play und kein Spiel per Hand mit einem Skript in einer Zelle (der Weg je Frame ist derselbe wie im Test, ist
+aber nicht in der App gelaufen); Python in einer Zelle (nur Lua, derselbe `startScriptsFor`); Linux/macOS nur über die CI; `audiosource` und
+`animstatemachine` stehen weiter nicht in der Klassentabelle (der Host startet sie noch nicht).
+
+## 19. Schritt 4: Spieler als Anker auf dem Server (Thema 183 Schritt 4, 17.10.2026)
+
+Ein Host oder Server simuliert **alle** Spieler, nicht nur den, dem seine Kamera folgt; ein Charakter, dessen Zelle fehlt, wird
+gehalten und nicht gesteppt (`cellHolds`, Befund 18). Darum stehen die Zellen jetzt unter jedem Spieler-Charakter. Nur Anker:
+Zellinhalt wird weiter nicht repliziert (6.4), jede Seite lädt um ihre eigenen Anker.
+
+| Teil | Wo | Stand |
+|---|---|---|
+| Quelle | `ICellHost::cellPlayers(world, out)` (`CellRuntime.h:92`), `HE::CellPlayer { id, position }` (`:25`) | Einmal je Frame gefragt, Vorgabe: keine. Absolute Position (Ursprung addiert), `id` = PlayerId |
+| Ein Helfer für beide Hosts | `HE::sessionPlayers(session, world, out)` (`CellRuntime.h:104`, `CellRuntime.cpp:239`) | Jeder Roster-Eintrag mit `characterNetId`, dessen Entity (`GameReplication::entityOf`) in **dieser** Welt mit Transform steht. Nur wenn diese Seite Autorität ist (Host/Server): ein Client streamt um seine Kamera und simuliert die anderen nicht. Null, inaktiv oder eine andere Welt: nichts |
+| Anker | `CellRuntime::update` (`CellRuntime.cpp:142`–) | Spieler neben Kamera und Pins, **jeder mit eigener Vorausschau** (`m_lastPlayers`, nach PlayerId, dieselbe 300-m/s-Klemme wie die Kamera; wer nicht mehr genannt wird, fällt mit dem Frame heraus, `reset()` leert). Ohne Kamera, mit Spielern wird gestreamt (der Server). Der Spieler, dem die Kamera folgt, zählt auf dem Host doppelt: eine Suche mehr, sonst nichts |
+| Hosts | `GameApplication.h:379` (`&m_netSession`), `PlayCellStreaming.h:57` + `setSession` (gesetzt im Play, `EditorApplication.cpp:12908`) | Dünne Aufrufe, wie bei den Skripten (Abschnitt 18). Der Editor-Pfad gilt für *Play as Host* |
+
+**Wichtig, nicht gebaut:** Nichts in den Apps ruft `NetGameSession::assignControl` (auch keine `net.*`/`player.*`-Row; `player.possess`
+ist rein lokal). Darum bleibt `PlayerInfo::characterNetId` in einer echten Sitzung 0, und der Haken feuert dort erst, wenn das Besitzen
+über das Netz verdrahtet ist (Mehrspielerplan, „step 5 PlayerHost rework“). Der Roster ist trotzdem die richtige Quelle: er ist die
+eine Stelle, die „das ist der Charakter von Spieler N“ autoritativ weiß. Bewusst **kein** Ersatz über `NetworkComponent::owner` +
+Charaktercontroller (eigene Projektile würden Anker). Der Königin als Info gemeldet (Anfrage 108).
+
+**Ein leerer Server:** Gehen alle Spieler eines Servers ohne Kamera, gibt es keinen Anker mehr, `update()` kehrt früh zurück, und die
+Zellen bleiben geladen, bis jemand kommt. Das ist die geltende Regel „kein Anker: nichts ändert sich“ (eine Kamera, die einen Frame
+fehlt, soll nicht alles entladen); nicht geändert.
+
+**Entschieden:** Spieler als `ICellHost`-Haken mit gemeinsamem Helfer statt `CellRuntime` an `NetGameSession` zu binden (der Runtime-Test
+bleibt ohne Netz, die Hosts bleiben dünn); Vorausschau nach PlayerId, nicht nach Entity; keine Spieler-Anker offline (Einzelspieler
+unverändert: die Kamera folgt dem Charakter, Pins decken den Rest).
+
+**Geprüft** (Release, `C:/hw183`, NN-WS03): `test_cell_runtime` 8/8, 373 Checks, dreimal hintereinander grün. Neu:
+„the host's players are anchors without a camera, each with their own lookahead“ (Welt ohne Kamera: nichts gelesen, bis ein Spieler da ist;
+ein laufender Spieler lädt Zelle 2 noch in Zelle 0; wer geht, nimmt seine Zellen mit) und „on a host every player's character holds its
+cells; a client streams for none of them“ (echtes Host/Client-Paar über `LoopbackTransport`, Ursprung 500 m, Spawn über die Sitzung +
+`assignControl`; zwei Anker, Zellen folgen dem Charakter; der Client nennt auch mit gefälschtem Roster-Eintrag niemanden; Anna geht →
+ihre Zelle geht, die des Hosts bleibt; Sitzung zu → keine Spieler). **Negativkontrollen**, jede einzeln, DLL nach `tests/` kopiert, jede
+nur auf ihren Checks rot: Ursprung nicht addiert (7 Checks), Spieler nie gefragt (12, beide Fälle), keine Autoritätsprüfung (nur der
+Client-Check), keine Vorausschau (nur `aheadInTime`), keine Weltprüfung (nur „another world“). `HorizonEditor` und `HorizonGame` bauen.
+Voller `ctest` 298/299 (nur `test_inspector_ui`, das bekannte Clipboard-Rauschen; 2 übersprungen, `runtime_size_*`).
+
+**Nicht geprüft:** Kein Spiel und kein Play as Host per Hand mit zwei Spielern in einem gesplitteten Projekt (geht erst mit verdrahtetem
+Besitzen, siehe oben); Linux/macOS nur über die CI.
+
+## 20. Schritt 5: Verifikation am Dorf (Thema 183 Schritt 5, 17.10.2026)
+
+Die Abnahme aus Abschnitt 8 (Schritt 3): ein Dorf aus Prefab-Häusern, 50 NPCs mit Skript und `SaveState`, Wegpunkte als Resident, dessen
+Zellen mehrfach entladen und geladen werden, ohne dass ein NPC seine Position, ein Gelenk oder eine zerstörte Kiste verliert. Gebaut als
+Test, nicht als Szene im Repo: `tests/test_cell_village.cpp`.
+
+**Aufbau** (`Village`, Zeile 208): in einer Editor-Welt gebaut und mit dem **Splitter des Editors** (`splitWorldIntoCells`) in 4 × 4
+Zellen zu 100 m geteilt, kein handgeschriebenes Zell-JSON. 24 Prefab-Platzierungen (Wurzel, Wand mit statischem Body, Tür mit Override),
+25 Lua-Dorfbewohner und 25 Händler (HorizonCode-Klasse, Save-Game-Variable `trips`, +1 je Tick), alle 50 mit `SaveStateComponent`, 20
+Kisten (statischer Body), 8 Wegpunkte und ein Bürgermeister (Lua) mit `StreamingComponent` (Resident), 3 Wachen mit Charaktercontroller
+und Skript, ein Tor (dynamischer Body) mit festem Gelenk an einem Pfosten (statisch). Der Host (`Host`, Zeile 355) ist der des Spiels in
+klein: Zelldateien aus dem Split, Bodies in eine echte `PhysicsWorld` samt Region-Hold, Skripte über `startCellScripts`/`stopCellScripts`,
+`cellApiCtx` mit Runtime und `EntityHost`. Die Basis lädt wie im Spiel über den Speicher (CBOR), die Basis-Skripte starten vorher.
+
+**Was der Splitter daraus macht** (geprüft): 143 Entities wandern (72 Haus-Entities, 50 NPCs, der Drifter, 20 Kisten), alle 16 Zellen
+mit Kopf (Version 2). In der Basis bleiben Wegpunkte und Bürgermeister (Schalter), die Wachen (Charaktercontroller, Klassentabelle), das
+Tor (dynamisch) und **sein Pfosten über die Ref-Hülle** (`keptForRefs == 1`). Die NPCs finden den Brunnen zur Laufzeit per
+`horizon.entity.findByName` (29 von 29 Starts finden ihn): eine Entity-Variable im Skript wäre ein Verweis im Komponentenblock, und die
+Ref-Hülle hielte den NPC in der Basis.
+
+**Runden** (Testfall Zeile 632): alles rein; 30 Frames (Lua `onUpdate`, `EntityHost::tick`, Physik, Laufzeit); fünf Kisten zerstört,
+Villager 0 per `reparentEntity` unter die Basis gehängt; alles raus; alles rein; vier Gänge der Kamera quer über das Dorf in 50-m-Schritten
+(je 15 Halte, an jedem bleiben Zellen und andere gehen, dazwischen 10 Frames Skripte); zweimal raus und rein. Zusammen **104
+Zell-Ladungen, 88 Entladungen**. „Alles rein“ ist ein Pin (`CellRuntime::pin`, Radius 400 m), „raus“ die Kamera 5 km weg.
+
+**Nach jedem Halt** (`checkVillage`, Zeile 511): jeder NPC ist genau dann da, wenn seine Zelle geladen ist (der ausgehängte immer); er
+steht, wo er zuletzt gesehen wurde (zwischen Aufzeichnung und Kamerabewegung läuft kein Skript), der Händler hat seine `trips`; jeder Name
+höchstens einmal; zerstörte Kisten nie wieder, die übrigen mit ihrer Zelle; jedes Haus mit allen drei Bindungen unter seiner Wurzel;
+Lua-Instanzen = Basis + ausgehängter + die der geladenen Dorfbewohner, Klassen-Instanzen = geladene Händler; `bodyCount` = Basis + Wände +
+Kisten der geladenen Zellen; `idCollisions == 0`, `failed == 0`. Nach dem ersten Entladen: 6 Tombstones (5 Kisten + Villager 0), 49
+Zustände. Der Bürgermeister läuft durch alles, der ausgehängte Dorfbewohner behält seine eine Lua-Instanz.
+
+**Kontrollen im selben Dorf** (ohne Neubau): der Drifter (Skript, kein `SaveState`) kommt nach jedem Wiederladen an seiner Dateiposition
+zurück; die nicht zerstörten Kisten kommen wieder; die Wachen bleiben in der Basis. **Negativkontrollen im Quelltext** (`CellRuntime.cpp`,
+jede einzeln, DLL nach `tests/` kopiert, mit `git checkout` zurückgelegt, das setzt die mtime): `skip` aus → Doppelte (14), zerstörte Kisten
+zurück (97), eine Lua-Instanz zu viel, `idCollisions` (66), `skipped`; kein Herausschreiben beim Entladen → Positionen (137) und `trips`
+(142) verloren, dazu alles von `skip`; Host vor `CellState` beim Entladen → **nur** `trips` (142), Positionen bleiben. Zurückgesetzt grün.
+
+**Befund: das Gelenk der Basis wartet, solange das Feld des Tors weg ist.** Ein Gelenk kommt mit dem Splitter nie in eine Zelle
+(`joint` steht nicht in der Klassentabelle, der Träger bleibt Resident, die Ref-Hülle zieht das Ziel nach); Basis→Zelle gibt es nur bei
+handgeschriebenen Zellen (`test_world_scale` „a joint from the base to a cell“). Trotzdem verschwindet das Gelenk des Tors zeitweise: das
+Tor steht in Zelle 2,0, und ist die weg, nimmt der Region-Hold den dynamischen Körper aus der Broad-Phase und das Gelenk wartet
+(`PhysicsWorld::applyRegionHold`, `destroyJointsInvolving(…, Wait)`); mit der Zelle ist es nach dem nächsten Schritt wieder da. Der Test
+hält genau das fest (`hasJoint == loaded(2,0)`, das Tor hängt in allen Runden auf 10 m). Das Plan-Kriterium „kein Gelenk verloren“ ist
+damit erfüllt durch Splitter (Gelenk und Ziel bleiben Resident) und Hold (wartet, kommt wieder), nicht durch ein Gelenk in einer Zelle.
+
+**Grenze der Klassentabelle, wie sie heute ist:** gestreamte NPCs sind Entities **ohne Körper** mit Skript und `SaveState`. Ein NPC mit
+`characterController`, `movement` oder dynamischem Body bleibt in der Basis (die Wachen sind die Kontrolle). Wer laufende NPCs mit Physik in
+Zellen will, braucht Charaktere in der Tabelle (Hold und Zustand für Charaktere); nicht Teil dieses Themas.
+
+**Messleiter** (`Village bench`, Zeile 784, `doctest::skip`, `he_tests --no-skip --test-case="Village bench*"`): NPC-Dichte je Zelle,
+16 Zellen, je Stufe dreimal rein und raus und ein Gang mit 20 m/s (2 100 Frames, Vorausschau an, Skripte je Frame); gemessen wird nur
+`CellRuntime::update`. NN-WS03 (32 Kerne, Windows 11, Release, zwei andere Bienen auf dem Gerät, CPU um 7 %), zwei Läufe, Spannen über
+beide:
+
+| NPCs je Zelle (gesamt) | rein: schlechtester Frame | `cellLoaded` je Zelle (Skriptstart), max | raus, 16 Zellen in einem Frame | Gang 20 m/s: p50 / p99 / max |
+|---|---|---|---|---|
+| 3 (48) | 0,96 bis 1,7 ms | 0,10 bis 0,22 ms | 0,19 bis 0,24 ms | 0,001 / ≤0,02 / 0,20 bis 0,26 ms |
+| 30 (480) | 4,2 bis 4,6 ms | 0,42 bis 0,73 ms | 1,1 bis 1,35 ms | 0,001 / ≤0,02 / 1,35 bis 1,39 ms |
+| 125 (2 000) | 5,5 bis 5,95 ms | 1,57 bis 1,77 ms | **5,0 bis 5,6 ms** | 0,002 / ≤0,04 / 5,4 bis 6,9 ms |
+| 125 (2 000), **ohne `SaveState`** | 5,4 bis 5,9 ms | 1,53 bis 1,78 ms | **1,45 bis 1,7 ms** | 0,002 / ≤0,03 / 3,9 bis 4,4 ms |
+
+- **Unter der Abnahme von 15.3 (unter 8 ms) in allen Stufen, aber über dem Budget von 4 ms ab rund 30 NPCs je Zelle.** Der Skriptstart
+  (`host.cellLoaded`: Klassen binden mit Construct und BeginPlay, Lua `onStart`) läuft einmal je Zelle in einem `update()`, **außerhalb**
+  des Scheiben-Budgets: 1,5 bis 1,8 ms für eine Zelle mit 125 NPCs (rund 13 µs je NPC), dazu die letzte Scheibe.
+- **Das Herausschreiben von `CellState` kostet beim Entladen rund 3,6 bis 3,9 ms für 2 000 Zustände** (5,0 bis 5,6 gegen 1,45 bis 1,7 ms),
+  rund 2 µs je NPC oder 0,24 ms je Zelle mit 125. Das Entladen ist nicht budgetiert: 16 Zellen in einem Frame ist der Teleport-Fall, beim
+  Gang gehen ein bis vier Zellen je Frame. Das Wiederanwenden (rund 6 µs je NPC; Summe der Ladeframes 44 bis 45 gegen 32 bis 34 ms)
+  verteilt sich auf die Scheiben und hebt den schlechtesten Frame nicht.
+- `cellUnloading` (Skripte stoppen) ist billig: 0,3 bis 0,5 ms für alle 16 Zellen.
+- **Vorschlag, nicht gebaut:** Skriptstart und Herausschreiben in das Budget nehmen (Start je Scheibe statt je Zelle, nach dem Muster von
+  `sliceBuilt`; Entladen über mehrere Frames). Erst nötig, wenn Zellen mit mehr als rund 30 Skript-NPCs gebaut werden.
+- Rohzeilen aller Läufe (drei Läufe der Dorf-Leiter, die Spiel-Dumps unten): `docs/perf-audit/raw-cells/bench-183-step5.txt`.
+
+**Die 101k-Welt durch `CellRuntime` im echten Spiel** (der Weg aus 15.2; bisher nur vor `CellRuntime` gemessen, auf dem Mac). Die
+Referenzwelt (`gen_reference_world.py --count 100000 --extent 8000 --groups 1000 --lights 64`, 101 068 Entities), vom Extract-Bench in
+256 Zellen zu 512 m geteilt (Radius 1 100 m, 9 908 geladen bei Kamera 0, 25, 90), als loses Spielverzeichnis
+(`scripts/perf/make_cell_game_dir.py`, jetzt auch außerhalb von macOS), `HorizonGame` mit OpenGL (Vorgabe des Spiels), verstecktes
+Fenster 2 560 × 1 440, `HE_PROFILE_CAPTURE=120`, `WARMUP=300`, `COUNTERS=0`, Vsync aus. Läufe abwechselnd, der erste je Welt verworfen,
+Spitze des Working Sets alle 0,5 s gelesen. Der Extract-Bench selbst ist **nicht** neu gelaufen: er treibt `CellStreamer` direkt und misst
+nichts von diesem Thema.
+
+| Welt | Frame-CPU p50 | `extract` je Frame, p50 | `CellStreaming` je Frame, p50 (p90) | Working Set (Spitze) |
+|---|---|---|---|---|
+| ganz, 101 069 Entities (Lauf 2, 3) | 23,9 bis 24,1 ms (Lauf 1: 26,0) | 11,4 bis 11,5 ms | – | 778 bis 786 MB |
+| gestreamt, 9 908 geladen (Lauf 2, 3) | 2,0 bis 2,1 ms | 0,84 bis 0,87 ms | **0,007 bis 0,008 ms** (≤ 0,020) | 372 bis 378 MB |
+
+- **Kein Mehraufwand der Laufzeit aus den Schritten 1 bis 4 zu sehen:** `CellStreaming` (jetzt `CellRuntime::update` mit CellState-Haken,
+  Skript-Helfer, Pins und Spieler-Abfrage) kostet bei stehender Kamera 0,007 bis 0,008 ms je Frame; 15.2 hatte 0,019 ms vor `CellRuntime`
+  (Mac, anderes Gerät, nicht direkt vergleichbar, aber nicht mehr). `extract` sinkt mit dem Streaming um das 13-Fache, der Frame um das
+  11-Fache, das Working Set auf weniger als die Hälfte. OpenGL ruft `extract` einmal je Frame (Metal dreimal), darum ist die Spalte hier
+  ein Aufruf.
+- **Grenze wie in 15.4:** stehende Kamera, gesättigter Streamer; das Profil während des Ladens beim Fahren steckt im Gang der Dorf-Leiter
+  oben, nicht in diesem Lauf. Die Editor-Leiter (153 §11.3) ist nicht gelaufen: sie lädt die ganze Szene im Editor, Play per Leiter-Skript
+  gibt es nicht.
+
+**Geprüft** (Release, `C:/hw183`, `HE_ENABLE_SHADERC=ON`, NN-WS03, Scratch-`APPDATA`): `test_cell_village` dreimal hintereinander grün
+(18 697 Checks, schlechtestes `update()` im Test 1,4 bis 1,7 ms); `test_cell_state` 8/8, `test_cell_scripts` 4/4 nach dem Zurücklegen der
+Mutationen; voller `ctest -j4 --timeout 1500`: **300/302**, 220 s, `test_cell_village` darin grün; rot `test_inspector_ui` (Zwischenablage im Agenten-Prozess,
+bekanntes Rauschen wie in Schritt 1 bis 4) und `test_team_sync` (ein Zähler-Check `waiting == 2` war 0 unter `-j4`-Last; allein zweimal
+grün, 6 s; Netz, von diesem Schritt nicht angefasst: Zeitabhängigkeit, nicht dieser Zweig); 2 übersprungen (`runtime_size_app_*`).
+`HorizonEditor` nicht neu gebaut (kein Engine- oder Editor-Code geändert); `HorizonGame` hat der Lauf mitgebaut.
+
+**Nicht geprüft:** Kein Editor-Play und kein Spiel per Hand mit dem Dorf (der Weg ist derselbe Host-Code, aber nicht in der App gelaufen);
+Python-Skripte in Zellen; das Dorf über einen Ursprungswechsel; Spieler als Anker im Dorf (Schritt 4, braucht verdrahtetes Besitzen);
+Linux/macOS nur über die CI.
+
+## Handoff
+
+- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 5 von 5 (Verifikation: Dorf, Zellen mehrfach, Messleiter, voller ctest)
+- **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ 1fe0f23f (Test), 9195dd6a (Kontrollstufe der
+  Leiter) und der Commit mit diesem Abschnitt (gepusht)
+- **Done:** `tests/test_cell_village.cpp`: Dorf durch den echten Splitter, 104 Ladungen / 88 Entladungen mit allen Invarianten,
+  Kontrollen im Dorf, drei Negativkontrollen im Quelltext; Dichte-Leiter (3/30/125 je Zelle, ohne `SaveState` als Kontrolle); die
+  101k-Welt durch `CellRuntime` im Spiel (OpenGL), gestreamt gegen ganz.
+- **Files touched:** `tests/test_cell_village.cpp` (neu), `tests/CMakeLists.txt`, `scripts/perf/make_cell_game_dir.py` (Kopie ohne
+  `cp -c` außerhalb von macOS), `docs/perf-audit/raw-cells/bench-183-step5.txt` (neu), dieses Dokument. Kein Engine-Code.
+- **Verified / not verified:** Abschnitt 20.
+- **Decisions taken:** Dorf als Test statt als Szene im Repo; Gelenk-Kriterium über Splitter und Hold (Abschnitt 20), nicht über ein
+  Gelenk in einer Zelle; NPCs ohne Körper (Grenze der Klassentabelle).
+- **Decisions suggested, not taken:** Skriptstart und `CellState`-Herausschreiben ins Budget nehmen (ab ~30 Skript-NPCs je Zelle über
+  4 ms); Charaktere in die Klassentabelle; Besitzen übers Netz (Schritt 4).
+- **Traps:** doctest vergleicht `entt::null` nur in doppelten Klammern (C2593); `INFO(const char*)` druckt „1“ (in `std::string`
+  wickeln); ein dynamischer Körper der Basis verliert sein Gelenk, solange sein eigenes Feld weg ist (Hold, gewollt). Negativkontrollen
+  mit `git checkout -- <datei>` zurücklegen (frische mtime), DLL nach `tests/` kopieren.
+- **Next steps:** 1. Zusammenführen erst, wenn (a) CI 39037133010 (Stand 47fb0189, alle Code-Commits des Themas) grün ist, (b) „Runtime
+  flavours“ wieder grün ist (rot seit Schritt 3, Lauf 39033860815; der Push dieses Schritts sollte einen neuen auslösen) und (c) die
+  Königin zu Anfrage 108 entschieden hat: der Spieler-Anker aus Schritt 4 feuert in einer echten Sitzung erst mit verdrahtetem Besitzen
+  (`assignControl`), heute nur im Test. 2. Folgearbeit: Play per Hand im gesplitteten Dorf; Budget für Skriptstart und Herausschreiben;
+  `audiosource`/`animstatemachine` über den Host; Besitzen übers Netz.

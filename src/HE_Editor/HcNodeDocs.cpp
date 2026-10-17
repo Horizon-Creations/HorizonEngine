@@ -1503,6 +1503,31 @@ namespace
 	  "first. Useful when a path arrives from somewhere and you want to know "
 	  "what you were handed." },
 
+	// ── Streaming ────────────────────────────────────────────────────────────
+	// A scene split into cells (the Streaming tab) loads them around the camera.
+	// In a scene without cells these answer as if everything were there.
+	{ "streaming.cellAt",
+	  "Which cell of the scene's grid a place is in, as two numbers X and Z. "
+	  "Exists is false when nothing was split out of that square (or the scene "
+	  "has no cells at all)." },
+	{ "streaming.isLoaded",
+	  "Is this cell there, built in full? False while it is still loading, once "
+	  "the camera has left it behind, and for a cell the scene does not have." },
+	{ "streaming.isSettled",
+	  "Is everything within Radius of this place loaded, collision included? Wait "
+	  "for this after a teleport before you let the player go, or they fall "
+	  "through a floor that is still being built. True in a scene without cells." },
+	{ "streaming.pin",
+	  "Keeps the cells within Radius of a place loaded as if the camera stood "
+	  "there: a teleport's destination, a cutscene filmed somewhere else, a quest "
+	  "site. Radius 0 uses the scene's own load distance. Hands back a handle for "
+	  "Unpin Cells; the pin also goes when the game ends or the level changes. 0 "
+	  "means nothing streams here." },
+	{ "streaming.unpin",
+	  "Lets the cells a Pin Cells kept go again, using its handle. They unload "
+	  "once nothing else (the camera, another pin) needs them. Ok is false when "
+	  "that handle was not pinned." },
+
 	// ── Audio ────────────────────────────────────────────────────────────────
 	{ "audio.play",
 	  "Plays a sound flat — the same in both ears, wherever the listener is. "

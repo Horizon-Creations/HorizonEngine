@@ -31,8 +31,10 @@ namespace
 //             unload and built again from the file on the next load, and nothing
 //             that was lost on the way matters.
 //   Stateful  things with state or a script (an NPC): the state has to be written
-//             out on an unload and applied on the load. Step 3b of Thema 164;
-//             nothing is in this class yet, so nothing moves as one.
+//             out on an unload and applied on the load, which the runtime does
+//             (CellState.h, Thema 164 step 3b): what carries a SaveStateComponent,
+//             and what runs a script, which the cell host starts when the cell is
+//             built and stops before it goes (CellScripts.h, Thema 183 step 3).
 //   Resident  everything else. It is always there.
 enum class StreamClass : uint8_t
 {
@@ -71,6 +73,22 @@ constexpr ComponentClass kComponentClasses[] = {
 	{ "animator",         StreamClass::Static },
 	{ "animatorblend",    StreamClass::Static },
 	{ "propertyanimator", StreamClass::Static },
+	// Opted into a savegame: its transform, visibility and Save Game variables are
+	// what CellState keeps over an unload, so it may go into a cell. The other
+	// components still decide: a dynamic body or a script keeps it in the base.
+	{ "saveState",        StreamClass::Stateful },
+	// A script (a HorizonCode class or Lua/Python) runs while its cell is there: the
+	// host starts it once the cell is built and stops it before the cell goes. What
+	// it keeps over an unload is what a SaveStateComponent beside it asks for (a
+	// class's Save Game variables); without one it starts afresh on every load. An
+	// entity the base's logic needs at all times — a manager, a waypoint a level
+	// script looks up — is marked Resident by its author (StreamingComponent). The
+	// splitter cannot tell a class's base from the file: a placed player character
+	// stays in the base by its character controller, not by its class.
+	{ "script",           StreamClass::Stateful },
+	// The author's switch (StreamingComponent): Auto is as if it were not there,
+	// Resident keeps the entity, and so its subtree, in the base (entityClass).
+	{ "streaming",        StreamClass::Static },
 	// Deliberately NOT here, though some look like dressing:
 	//   audiosource       Nothing starts a streamed entity's sound: AudioSystem::playOnStart
 	//                     runs at a scene start or switch (GameApplication), not for what a
@@ -93,8 +111,8 @@ StreamClass classOfKey(const std::string& key)
 	return it != kTable.end() ? it->second : StreamClass::Resident;
 }
 
-// Whether a class goes into a cell at all. Stateful joins in step 3b.
-constexpr bool movesIntoCell(StreamClass c) { return c == StreamClass::Static; }
+// Whether a class goes into a cell at all.
+constexpr bool movesIntoCell(StreamClass c) { return c != StreamClass::Resident; }
 
 // An entity reference ([hi, lo], or a legacy number) as a map key.
 std::string idKey(const json& v) { return v.dump(); }
@@ -130,6 +148,11 @@ StreamClass entityClass(const json& e)
 	if (const auto b = comps->find("rigidbody"); b != comps->end() && b->is_object()
 	    && b->value("type", 0) != 0)
 		return StreamClass::Resident;   // dynamic: would unload with the square it started in
+	// Anything but an explicit Auto (0) is Resident, a malformed block and a mode a
+	// newer editor wrote included: the loader reads them so too.
+	if (const auto st = comps->find("streaming"); st != comps->end()
+	    && !(st->is_object() && st->value("mode", 1) == 0))
+		return StreamClass::Resident;   // the author keeps it in the base
 	return cls;
 }
 
@@ -590,7 +613,7 @@ CellSplitResult splitSceneIntoCells(const json& scene, const CellSplitOptions& o
 		// The head the streamer reads off the parsed file (CellStreamer.h): the
 		// format version, which says the ids in the file are stable and are to be
 		// kept on load, and what the cell holds. The classes are how many of its
-		// entities belong to each streaming class; only Static moves for now.
+		// entities belong to each streaming class (Stateful: what CellState keeps).
 		json head = json::object();
 		head["version"] = kCellFormatVersion;
 		head["cell"]    = json::array({ x, z });

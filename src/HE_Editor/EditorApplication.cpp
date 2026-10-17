@@ -30,6 +30,8 @@
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
+#include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
@@ -147,6 +149,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <string>
 #include <array>
 #include <future>
+#include <thread>
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
@@ -3942,6 +3945,14 @@ void EditorApplication::OnRender(float dt)
 		// lag is visible. Same order as the packaged game, which is the point of a
 		// preview.
 		updatePlayCameraController(gameDt);
+
+		// Then the cells of a split scene, against the camera where it now stands
+		// (the game's order: after physics and the camera).
+		if (m_isPlaying && m_editorWorld && m_playCells)
+		{
+			HE_PROFILE_SCOPE_N("CellStreaming");
+			m_playCells->update(*m_editorWorld, gameDt);
+		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
@@ -9792,6 +9803,95 @@ void EditorApplication::dumpFrameHeadless()
 			settleFrames = atTod;
 		}
 	}
+	// HE_DUMP_PLAYCELLS=1 (with HE_DUMP_SKYTEST, e.g. CAMY=90 PITCH=-89): the witness
+	// that Play streams a split scene's cells (Thema 164 step 2c). A 13 x 13 grid of
+	// cubes, 10 m apart around the origin, is split into 40 m cells written to a temp
+	// folder, so the scene keeps none of them; the frame of that base goes to
+	// <dump>.edit.bmp. Then Play starts (its cells read from that folder), the play
+	// runtime runs until the cells around the play camera are built (load within 30 m,
+	// so the four squares at the origin and not the ring around them), and the dump's
+	// own capture is the play frame. After it Play stops, and the log says whether
+	// the cells went with it. Counts, not only pictures: cubes in the base, cells
+	// built, cubes in the play world, cubes after Stop.
+	bool playCellsWitness = false;
+	if (const char* pc = std::getenv("HE_DUMP_PLAYCELLS"); pc && *pc && m_editorWorld && !m_isPlaying)
+	{
+		auto& reg = m_editorWorld->registry();
+		for (int i = -6; i <= 6; ++i)
+			for (int k = -6; k <= 6; ++k)
+			{
+				auto e = m_editorWorld->createEntity("PlayCellCube");
+				TransformComponent tc;
+				tc.position = glm::vec3(10.0f * float(i) + 5.0f, 1.0f, 10.0f * float(k) + 5.0f);
+				tc.scale    = glm::vec3(3.0f);
+				reg.emplace<TransformComponent>(e, tc);
+				reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			}
+		auto countCubes = [&] { size_t n = 0; for (auto e : reg.view<MeshComponent>()) { (void)e; ++n; } return n; };
+		const size_t authored = countCubes();
+		const std::filesystem::path cellRoot = std::filesystem::temp_directory_path() / "he_dump_playcells";
+		std::error_code ec;
+		std::filesystem::remove_all(cellRoot, ec);
+		HE::CellSplitOptions o;
+		o.cellSize     = 40.0f;
+		o.loadRadius   = 30.0f;
+		o.unloadRadius = 40.0f;
+		o.lookaheadSec = 0.0f;
+		o.dir          = "PlayCells.cells";
+		const HE::CellSplitResult split = HE::splitWorldIntoCells(*m_editorWorld, o,
+			[&](const std::string& path, const std::string& text)
+			{
+				std::filesystem::create_directories((cellRoot / path).parent_path(), ec);
+				std::ofstream out(cellRoot / path, std::ios::binary | std::ios::trunc);
+				out << text;
+				return static_cast<bool>(out);
+			});
+		const size_t inBase = countCubes();
+		for (int i = 0; i < settleFrames; ++i) r->Render();
+		std::vector<uint8_t> editRgba;
+		uint32_t ew = 0, eh = 0;
+		const std::string editPath = m_dumpPath + ".edit.bmp";
+		const bool editOk = r->CaptureViewport(editRgba, ew, eh) && ew > 0 && eh > 0 &&
+		                    writeBMP(editPath, editRgba, ew, eh);
+
+		setPlayMode(true);
+		const bool played = m_isPlaying && m_playCells;
+		size_t built = 0, wanted = 0;
+		double ms = 0.0;
+		if (played)
+		{
+			// The same session, its cells read from the witness folder instead of a project.
+			m_playCells->begin([this] { return m_physicsWorld.get(); }, cellRoot);
+			glm::dvec3 eye(0.0);
+			HE::CellRuntime::cameraAnchor(*m_editorWorld, eye);
+			const auto t0 = std::chrono::steady_clock::now();
+			const auto until = t0 + std::chrono::seconds(20);
+			while (std::chrono::steady_clock::now() < until)
+			{
+				m_playCells->update(*m_editorWorld, 1.0f / 60.0f);
+				contentManager().pollAsyncResults(16, 2.0);
+				const HE::CellStreamer& cs = m_playCells->runtime().streamer();
+				wanted = 0;
+				for (const auto& v : cs.manifest().around(eye, cs.manifest().loadRadius))
+					if (v.reach == HE::CellManifest::View::Reach::Load) ++wanted;
+				const auto& st = cs.stats();
+				if (st.loaded >= wanted && st.inFlight == 0 && st.ready == 0 && st.building == 0) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+			built = m_playCells->runtime().streamer().stats().loaded;
+		}
+		playCellsWitness = played;
+		char line[512];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_PLAYCELLS %zu cubes authored, split into %zu cells (%s), %zu left in "
+			"the base; edit frame %s → %s; play %s, %zu of %zu wanted cells built in %.0f ms, %zu cubes in "
+			"the play world",
+			authored, split.cells.size(), split.error.empty() ? "ok" : split.error.c_str(), inBase,
+			editOk ? "written" : "NOT written", editPath.c_str(), played ? "started" : "did NOT start",
+			built, wanted, ms, countCubes());
+		HE_LOG_INFO(Editor, "%s", line);
+	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
 	// probe-grid refit witness. Halfway through the settle frames a second
 	// landscape appears beside the first, so the scene box leaves the fitted
@@ -9861,6 +9961,19 @@ void EditorApplication::dumpFrameHeadless()
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
+
+	// HE_DUMP_PLAYCELLS, second half: Stop, and what is left of the streamed cells.
+	if (playCellsWitness && m_isPlaying)
+	{
+		setPlayMode(false);
+		size_t cubes = 0;
+		for (auto e : m_editorWorld->registry().view<MeshComponent>()) { (void)e; ++cubes; }
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_PLAYCELLS after Stop: " + std::to_string(cubes) +
+			 " cubes in the edit world, cell runtime " +
+			 (m_playCells && m_playCells->runtime().active() ? "STILL ACTIVE" : "idle") +
+			 ", manifest " + (m_editorWorld->cellManifestJson().empty() ? "LOST" : "kept")).c_str());
+	}
 
 	// HE_DUMP_GPUTIME="frames[,WxH]": the pass-cost witness for backends whose GPU timer
 	// has no per-pass rows (D3D11, D3D12 and Vulkan time the whole frame only). AFTER the
@@ -12109,6 +12222,7 @@ AppContext EditorApplication::makeContext()
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
 		.isPlaying           = m_isPlaying,
+		.playCells           = m_playCells ? &m_playCells->runtime() : nullptr,
 		.appLivePreview      = m_projectManager.currentProject().appProject,
 		// The toolbar button, and the ONE path that deliberately drops the
 		// state: it exists to get out of one.
@@ -12703,17 +12817,6 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_playReportOpen = false;
 		Logger::setSink(&hePlayLogSink, this);
-		// A scene split into streaming cells has the game load them around the camera
-		// (HE::CellStreamer, GameApplication::updateCellStreaming). Play runs in THIS
-		// world, which after a split holds only the base, and nothing in the editor
-		// streams cells (Thema 164, docs/entity-cell-streaming-plan-2026-10-10.md L7).
-		// Said here, after the sink is in, so the post-play report carries it and an
-		// apparently empty scene is explained.
-		if (!m_editorWorld->cellManifestJson().empty())
-			HE_LOG_WARN(Editor, "%s", "Play shows only the base of this scene: it is split into "
-			            "streaming cells, and the editor does not stream them while playing. Merge "
-			            "the cells back (Profiler > Streaming > Merge Cells into the Scene) to play "
-			            "all of it, or run the game build.");
 		// Edits made while playing are not undoable. Clearing here only opens the
 		// session with an empty history; what keeps it that way is makeContext
 		// withholding the undo system while m_isPlaying (so no panel records) and
@@ -12778,6 +12881,42 @@ void EditorApplication::setPlayMode(bool play)
 			const auto& physics = m_projectManager.currentProject().settings.physics;
 			m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
 		}
+		// A scene split into streaming cells streams them around the play camera, as
+		// the game does (HE::CellRuntime, the editor as its host). Begun here, before
+		// initialize(), together with the hold that keeps a body from falling through
+		// a floor whose cell is not built yet — the game's order in startPhysics.
+		if (!m_playCells) m_playCells = std::make_unique<PlayCellStreaming>(contentManager());
+		m_playCells->setApiCtx([this](HE::api::Ctx& c)
+		{
+			c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
+		});
+		// A cell's scripts start when it is built and stop before it goes, as in the
+		// game (HE::startCellScripts / stopCellScripts). Asked per cell: the script
+		// context below is made after this, and reset after the cells went at Stop.
+		m_playCells->setScripts([this]
+		{
+			HE::CellScriptHosts h;
+			h.entities      = &m_entityHost;
+			h.text          = m_scriptContext.get();
+			h.textInstances = &m_scriptInstances;
+			h.runtime       = &m_gameInstance.runtime();
+			h.content       = &contentManager();
+			return h;
+		});
+		// Play as Host: the cells stand under every player's character, as on the
+		// game's host. The session lives as long as the editor.
+		m_playCells->setSession(&m_netSession);
+		m_playCells->begin([this] { return m_physicsWorld.get(); });
+		// The script API's streaming group (cellAt, isSettled, pin) asks this runtime
+		// while the session plays; taken away again at Stop. Before any script runs.
+		HE::api::streaming::install(&m_playCells->runtime());
+		m_physicsWorld->setRegionHold([this](const glm::vec3& p)
+		{
+			return m_editorWorld && HE::cellHolds(m_playCells->runtime().streamer(), *m_editorWorld, p);
+		}, [this]
+		{
+			return m_playCells->runtime().active();
+		});
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -13023,6 +13162,9 @@ void EditorApplication::setPlayMode(bool play)
 		m_gameInstance.fireShutdown();
 
 		setPlayMouseCaptured(false); // release the mouse when leaving play mode
+		// The streamed cells go first, while the physics world their bodies are in
+		// still stands; the snapshot below brings back the base the split left.
+		if (m_playCells) m_playCells->end(*m_editorWorld);
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 		{
@@ -13065,6 +13207,9 @@ void EditorApplication::setPlayMode(bool play)
 		HE::api::timer::cancelAll();
 		HE::api::fs::clearWatches();
 		HE::api::db::closeAll();
+		// The streaming group's runtime belongs to the session too; its pins went with
+		// the cells (PlayCellStreaming::end → CellRuntime::clear).
+		HE::api::streaming::install(nullptr);
 
 		// The entity host borrows the physics world and end() deliberately does
 		// not clear that pointer (the apps set it before begin()), so it is

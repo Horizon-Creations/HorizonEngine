@@ -177,6 +177,10 @@ namespace
 	  "Marks what a savegame keeps for this entity, so a saved game restores it "
 	  "as it was rather than as the scene file has it.",
 	  "", "scenes#scene-files" },
+	{ "Component/Streaming", "Streaming",
+	  "Where this entity lives when the scene is split into cells: in a cell that "
+	  "loads around the camera, or always loaded in the base scene.",
+	  "", "scenes#streaming" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -1851,6 +1855,13 @@ namespace
 	  "onUpdate. The way to take one out of the picture without losing its "
 	  "property values.",
 	  "", "scripting#attach" },
+	{ "Streaming/Mode", "",
+	  "Resident keeps this entity in the base scene, always loaded, and with it "
+	  "everything in the same top-level group (its parents and their children): use "
+	  "it for what the level's logic needs at all times, a manager script or a "
+	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
+	  "effect the next time the scene is split.",
+	  "", "scenes#streaming" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -7686,7 +7697,8 @@ namespace
 	  "characters, dynamic bodies, audio sources. The game then loads the "
 	  "squares around its camera and drops the far ones; the things in a square "
 	  "keep their ids, so a placed prefab comes back as the same entities. Play "
-	  "in the editor shows only what stays in the scene. One undo step; save the "
+	  "in the editor streams the squares the same way, around the play camera. "
+	  "One undo step; save the "
 	  "scene to keep it. The scene has to have been saved once.",
 	  "", "editor#profiler" },
 	{ "Profiler/Merge Cells into the Scene", "",
@@ -9610,7 +9622,7 @@ namespace
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 
