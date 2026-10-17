@@ -209,3 +209,101 @@ that (no visible change at 6.2 ms, short labels); its share at 0.77 ms is not me
   1. Step 3: CORE-302/401/402/303 (script context cache), with a micro-benchmark.
   2. Optionally, scope the designer's per-frame layout (`UIEditorPanel`), measured
      first.
+
+## Step 3: interpreter dispatch (CORE-302, CORE-303, CORE-401, CORE-402)
+
+**CORE-402 (dispatch index).** `Inst::dispatch` lists the events and functions by
+name, built on first use from `levels`, which are written only once at registration.
+Every declaration is kept leaf first, in node order. That way the element filter, the
+public-only skip of an inherited call, and `callOwn`'s "first entry in that level" pick
+exactly what the scans picked. `levelHandlingEvent`, `levelWithFunction`,
+`functionSignatureOf` and `callOwn`'s Run On lookup all read the index. The scan used
+to build the event names of every Input Action node on each fire, and that was all
+12 allocations of a frame without a handler.
+
+**CORE-401 (Context per instance).** `Inst::contexts` holds one
+`shared_ptr<const Context>` per level, built by `makeContext` on first use
+(`Runtime::contextFor`). `Runner` gets a second constructor over the shared pointer,
+and `m_ctx` is now a `const Context&`, so the compiler refuses any write to a Context
+that nested Runners share. The share keeps the Context alive through a run that
+destroys its own instance. A moved `Runtime` rebuilds its Contexts, because the
+lambdas hold its `this`. The compiled path (`bindContext`) is unchanged.
+
+**CORE-302 (`coerce`, audit stage 1 of 3).** There are two overloads now: `const Value&`
+copies once, and only when the value passes through unchanged; `Value&&` moves through
+once instead of twice. It is not timed separately: the effect is inside the noise, and
+none of the saved copies allocate (SSO). The `Value` layout (stage 2) is a project of
+its own.
+
+**CORE-303 (class cache).** `resolveClassAsset` keeps each clean walk: every class's
+`graphJson` and `baseClass` as read, plus the new `TypeRegistry::generation()`. A hit
+re-reads the chain and compares strings, without parsing. Validating instead of
+invalidating means there are no hooks in `ContentManager`. Saves no longer go through
+hot reload (step 1), a base can appear after its derived class, and the compare catches
+both. A walk that hit a missing base or a cycle is not cached, so it keeps reporting.
+Callers still get their own copy.
+
+**Measurement** (`test_hc_dispatch`, `--no-skip`, Release, MacBook M5, libc++). 1000
+instances of a two-level class with about 110 nodes per level. Three runs each:
+
+| case | before (3e8e2dcf) | after (cd1eecaa) |
+|---|---|---|
+| Tick inherited, 33 nodes | 29.0-30.6 ms, 878-926 ns/node, 21 allocs/inst | 22.3-25.3 ms, 675-768 ns/node, 6 allocs/inst |
+| Tick, no handler | 5.4-5.9 ms, 12 allocs/inst | 0.13 ms, 0 allocs |
+| host call of a base function | 8.6-9.0 us, 4 allocs | 4.5-5.4 us, 1 alloc |
+| spawn through `resolveClassAsset` | 3.12-3.16 ms, 9844 allocs | 53-61 us, 30 allocs |
+
+The load average was 4.5-14 (other bees), so the times are ranges. The allocation
+counts are exact: `malloc_logger` on the calling thread, which also sees the
+`HorizonCore` dylib. 401/402 alone (eb91b990): no-handler 0.13 ms, tick 26.4-28.3 ms,
+call 5.2-6.7 us, spawn unchanged. What remains of a ticking frame (~700 ns/node) is
+node evaluation: `evalInput` scans all links, and `pinRanges`/signatures are rebuilt
+per input (CORE-301, not this step).
+
+## Handoff (step 3)
+
+- **Topic / step:** 213, step 3 of 4
+- **Branch / commits:** 3e8e2dcf (bench, before), eb91b990 (401/402), 42f656de (302),
+  cd1eecaa (303), plus this doc.
+- **Files touched:**
+  - `HorizonCodeRuntime.h`: `DispatchIndex`, `Inst::contexts/contextsOf/dispatch`,
+    `contextFor`, `dispatchOf`.
+  - `HorizonCodeRuntime.cpp`: `dispatchOf`/`levelHandlingEvent`/`levelWithFunction`
+    at the end, `contextFor` after `makeContext`, `functionSignatureOf`, `callOwn`,
+    the five Runner sites.
+  - `HorizonCode.h`/`.cpp`: the `Runner` constructors and `m_ctxHold`/`m_ctx`;
+    `coerce` (anonymous namespace before `pullTypeWord`).
+  - `HcClassResolve.cpp`: `CachedClass`, `chainUnchanged`, `resolveClassAsset`.
+  - `TypeRegistry.h`/`.cpp`: `generation()`.
+  - `tests/test_hc_dispatch.cpp` (new): 10 cases plus the bench.
+- **Verified** (macOS, Release, `out/build/release`):
+  - `test_hc_dispatch`: 10/10, 103 assertions. The 6 level-choice cases were green
+    against the old scan before any change.
+  - Negative controls, each rebuilt:
+    - Without the elem filter and the public-only filter, 2 cases fail.
+    - A root-first index fails 5 of 6.
+    - A cache without the compare fails the edit case.
+    - Caching unclean walks fails the late-base case.
+  - The HC/engine-API/host/widget/ContentManager suites are green: 1085 cases.
+  - The full `ctest -j4` run: 302/303, 2 skipped. The one failure is `test_hpak`
+    "Disk registry", which also fails on its own (6 == 2). `scanContentDirectory` also
+    scans the user's real `EngineContentCache` (4 `.hasset` files on this Mac); that is
+    environment, not this step (lesson recorded; CI's cache is empty).
+- **Not verified:** HorizonEditor and HorizonGame were not built here (Scene was, through
+  he_tests). No Runner is constructed outside Core/tests. Windows/Linux: CI only. The
+  editor and game were not run by hand. A spawn in a real project with structs: the
+  registry is written only on struct load and editor actions, so the cache should hold
+  during play; this is not measured.
+- **Decisions:** validate by content instead of invalidation hooks. The cache is global
+  by class path; another ContentManager simply fails the compare. Leaf private shadows
+  base public for host calls (`callFunction` with `publicOnly=false`): this is existing
+  behaviour and is pinned by a test, not changed.
+- **Traps:** an edit test has to write the content system's own copy
+  (`getHorizonCodeClassMutable` + `saveAsset`), the way `saveClassState` does. A fresh
+  asset saved over the path never reaches the loaded copy, cache or not. On the Mac the
+  dylib is picked up directly; the `HorizonCore.dll` copy trap applies to Windows only.
+- **Next steps:**
+  1. Step 4: CORE-403, the hash.
+  2. Later: CORE-301 (evalInput link index, cached pin ranges), the biggest remaining
+     share of a tick. CORE-408 (`Inst::levels` as shared const graphs) would also save
+     the remaining copy on spawn.
