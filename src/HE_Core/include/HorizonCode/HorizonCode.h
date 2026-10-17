@@ -3,6 +3,7 @@
 #include <Types/Defines.h>
 #include <glm/glm.hpp>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1461,6 +1462,11 @@ class HE_API Runner
 {
 public:
     Runner(const Graph& graph, Context ctx);
+    // The same over a Context somebody else keeps and may hand to other
+    // Runners at the same time — the Runtime's one per instance and level. The
+    // Runner holds a share of it for its run, so it stays valid even if the
+    // instance is destroyed by the very graph running on it.
+    Runner(const Graph& graph, std::shared_ptr<const Context> ctx);
 
     // Fire every Event node whose name matches and whose element matches (an
     // Event bound to elem 0 fires for any element). `arg` feeds the event's
@@ -1524,7 +1530,10 @@ private:
     CallFrame* frameFor(int fnEntryId);
 
     const Graph& m_graph;
-    Context      m_ctx;
+    // Read-only by construction: a shared Context runs nested Runners at once,
+    // so nothing here may write it — the const reference is what says so.
+    std::shared_ptr<const Context> m_ctxHold;
+    const Context& m_ctx;
     Value        m_eventArg;
     int          m_steps = 0;
     // The step or depth limit has been reported for this run. Once: the outer

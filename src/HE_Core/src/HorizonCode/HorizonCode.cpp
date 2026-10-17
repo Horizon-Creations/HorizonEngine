@@ -3759,7 +3759,10 @@ std::string extractFailureText(ExtractFailure why, const std::string& member,
     return {};
 }
 
-Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
+Runner::Runner(const Graph& graph, Context ctx)
+    : m_graph(graph), m_ctxHold(std::make_shared<const Context>(std::move(ctx))), m_ctx(*m_ctxHold) {}
+Runner::Runner(const Graph& graph, std::shared_ptr<const Context> ctx)
+    : m_graph(graph), m_ctxHold(std::move(ctx)), m_ctx(*m_ctxHold) {}
 
 CallFrame* Runner::frameFor(int fnEntryId)
 {
