@@ -73,7 +73,14 @@ das Netz in der Tiefe (Deckel 2) und in der Ferne (capAA < 3) ganz verschwunden.
 
 ## 5. ctest
 
-CTEST_PLACEHOLDER
+`ctest --test-dir C:/hw205 -j 4` (privates `APPDATA`, `HE_NET_LOOPBACK_ONLY=1`): **286/290**, 2 uebersprungen
+(`runtime_size_app_*`, wie immer), 2 rot, beide nicht vom Zweig:
+- `test_contentmanager` (`:1780`): nur weil `APPDATA` mit Schraegstrichen gesetzt war (`C:/hw205/...`), der Test
+  vergleicht gegen den Pfad mit Backslashes. Allein mit Backslash-Pfad (`C:\hw205\appdata6b`) gruen.
+- `test_inspector_ui`: allein wieder rot an den Zwischenablage-Stellen (`:443`, `GetClipboardText` = nullptr), die
+  bekannte Agenten-Sitzung auf NN-WS03 wie in Schritt 5.
+- `test_underwater_camera` (Wellenzug-Abgleich der `.frag`) und `test_material_graph` gruen; `test_collab_controller`
+  gruen.
 
 ## Handoff
 
