@@ -5,6 +5,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonCode/HcClassResolve.h>
+#include <Types/TypeRegistry.h>
 
 #include <algorithm>
 #include <chrono>
@@ -374,6 +375,129 @@ TEST_CASE("dispatch: a function's signature is read off its nearest declaration"
     CHECK(sig.params.size() == 1);
     CHECK(sig.runOn == (std::uint8_t)RunOn::Local);
     CHECK_FALSE(rt.functionSignatureOf(id, "g").found);
+}
+
+// ── The class cache ──────────────────────────────────────────────────────────
+// resolveClassAsset keeps what it resolved and, on the next call, compares the
+// chain against the content system instead of parsing it again. These are the
+// ways a chain changes under a cached class.
+namespace
+{
+    std::string writeClass(ContentManager& cm, const char* name, const std::string& base,
+                           const Graph& g)
+    {
+        HorizonCodeClassAsset a;
+        a.type      = HE::AssetType::HorizonCodeClass;
+        a.name      = name;
+        a.path      = std::string(name) + ".hasset";
+        a.baseClass = base;
+        a.graphJson = toJson(g);
+        REQUIRE(cm.saveAsset(a));
+        return a.path;
+    }
+
+    // An edit the way the class editor makes it (saveClassState): into the
+    // content system's own copy, then saved. A fresh asset object saved over
+    // the path would not reach the loaded copy at all — with or without a
+    // cache, since saves are no hot-reload change (CORE-204).
+    void editClass(ContentManager& cm, const std::string& path, const std::string& base,
+                   const Graph& g)
+    {
+        HorizonCodeClassAsset* a = cm.getHorizonCodeClassMutable(cm.loadAsset(path));
+        REQUIRE(a != nullptr);
+        a->graphJson = toJson(g);
+        a->baseClass = base;
+        REQUIRE(cm.saveAsset(*a));
+    }
+
+    Graph oneEvent(const std::string& event)
+    {
+        Graph g; addMarkers(g);
+        setsBool(g, addEvent(g, event), 0, "root");
+        return g;
+    }
+
+    bool levelHasEvent(const ResolvedClass& rc, size_t level, const std::string& event)
+    {
+        if (level >= rc.levels.size()) return false;
+        for (const Node& n : rc.levels[level].nodes)
+            if (n.type == NodeType::Event && n.s == event) return true;
+        return false;
+    }
+}
+
+TEST_CASE("class cache: two resolves of one class answer the same")
+{
+    TempDir dir;
+    ContentManager cm(dir.path.string());
+    const std::string base = writeClass(cm, "CacheBase", "Entity", oneEvent("Ping"));
+    const std::string leaf = writeClass(cm, "CacheLeaf", base, oneEvent("Pong"));
+
+    const ResolvedClass a = resolveClassAsset(cm, leaf);
+    const ResolvedClass b = resolveClassAsset(cm, leaf);
+    REQUIRE(a.ok);
+    REQUIRE(b.ok);
+    REQUIRE(a.levels.size() == 2);
+    REQUIRE(b.levels.size() == 2);
+    CHECK(toJson(a.levels[0]) == toJson(b.levels[0]));
+    CHECK(toJson(a.levels[1]) == toJson(b.levels[1]));
+    CHECK(toJson(a.graph) == toJson(b.graph));
+    CHECK(a.chain == b.chain);
+    CHECK(b.engineBase == "Entity");
+}
+
+TEST_CASE("class cache: an edited base class reaches the next resolve")
+{
+    TempDir dir;
+    ContentManager cm(dir.path.string());
+    const std::string base = writeClass(cm, "EditBase", "Entity", oneEvent("Ping"));
+    const std::string leaf = writeClass(cm, "EditLeaf", base, oneEvent("Pong"));
+
+    REQUIRE(levelHasEvent(resolveClassAsset(cm, leaf), 0, "Ping"));
+
+    // A save of the BASE: the derived class's own asset did not change at all.
+    editClass(cm, base, "Entity", oneEvent("Renamed"));
+    const ResolvedClass after = resolveClassAsset(cm, leaf);
+    CHECK(levelHasEvent(after, 0, "Renamed"));
+    CHECK_FALSE(levelHasEvent(after, 0, "Ping"));
+
+    // And re-parenting the leaf onto an engine class drops the base level.
+    editClass(cm, leaf, "Entity", oneEvent("Pong"));
+    const ResolvedClass flat = resolveClassAsset(cm, leaf);
+    CHECK(flat.levels.size() == 1);
+    CHECK(flat.chain.empty());
+}
+
+TEST_CASE("class cache: a base class that appears later is picked up")
+{
+    TempDir dir;
+    ContentManager cm(dir.path.string());
+    const std::string leaf = writeClass(cm, "LateLeaf", "LateBase.hasset", oneEvent("Pong"));
+
+    // The base is missing: the walk stops at the leaf (and says so).
+    const ResolvedClass before = resolveClassAsset(cm, leaf);
+    REQUIRE(before.ok);
+    CHECK(before.levels.size() == 1);
+
+    writeClass(cm, "LateBase", "Entity", oneEvent("Ping"));
+    const ResolvedClass after = resolveClassAsset(cm, leaf);
+    REQUIRE(after.levels.size() == 2);
+    CHECK(levelHasEvent(after, 0, "Ping"));
+    CHECK(after.engineBase == "Entity");
+}
+
+TEST_CASE("TypeRegistry: every write moves the generation")
+{
+    // The class cache's third input. Registered under a path no other test
+    // uses, and removed again: the registry is process-global.
+    HE::TypeRegistry& reg = HE::TypeRegistry::instance();
+    const uint64_t g0 = reg.generation();
+    HE::EnumDef e; e.name = "CacheProbe"; e.assetPath = "test_hc_dispatch/CacheProbe.hasset";
+    reg.registerEnum(e);
+    const uint64_t g1 = reg.generation();
+    CHECK(g1 != g0);
+    reg.removeType(e.assetPath);
+    CHECK(reg.generation() != g1);
 }
 
 // ── The measurement ──────────────────────────────────────────────────────────
