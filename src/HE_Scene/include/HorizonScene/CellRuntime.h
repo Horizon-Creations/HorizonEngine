@@ -90,9 +90,25 @@ public:
 	// over when it or the world changes (the old cells are forgotten, not unloaded:
 	// a world that changed under the runtime has dropped them already), and stops
 	// for a scene without cells or with a malformed list (logged once). Then streams
-	// around the world's camera (cameraAnchor) with its motion as the lookahead. No
-	// camera: nothing changes this frame.
+	// around the world's camera (cameraAnchor) with its motion as the lookahead, and
+	// around every pin. No camera and no pin: nothing changes this frame.
 	void update(HorizonWorld& world, float dt, double budgetMs = kDefaultBudgetMs);
+
+	// ── Pins (Thema 183 step 3, the API's streaming.pin) ──
+	// A place a script wants the cells kept around as if a camera stood there: a
+	// teleport's destination, a cutscene whose camera is elsewhere, a quest site.
+	// `absolute` is a world position plus the world origin; `radius` (m) is how far
+	// around it cells load — it scales the manifest's two radii for this anchor
+	// (radius / loadRadius), so a pin keeps what it loaded until the unload radius
+	// scaled the same way. Not positive: the manifest's own radii. A handle > 0.
+	//
+	// Pins outlive a start over for another manifest — a pin set in BeginPlay comes
+	// before the first update() that sees the scene's cells — and go with the
+	// session: clear() and reset() drop them.
+	int    pin(const glm::dvec3& absolute, float radius);
+	// False for a handle that is not pinned (never was, or unpinned already).
+	bool   unpin(int handle);
+	size_t pinCount() const { return m_pins.size(); }
 
 	// Every cell unloaded from `world` through the hooks — the host's cellUnloading,
 	// the bodies out of the physics world, the loads cancelled — and the runtime
@@ -129,6 +145,13 @@ private:
 	bool          m_hasLastCamera = false;
 	std::unordered_map<uint32_t, CancelToken> m_tokens;   // cell root → its asset loads
 	CellState     m_state;
+	struct Pin
+	{
+		glm::dvec3 position{ 0.0 };   // absolute
+		float      radius = 0.0f;     // m; not positive = the manifest's
+	};
+	std::unordered_map<int, Pin> m_pins;
+	int           m_nextPin = 1;
 	// clear() is under way: the cells go with the session, so their state is not
 	// written out (nothing would read it, and on the editor's Stop the script hosts
 	// it would be read through have ended already).

@@ -5,6 +5,7 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
 #include <HorizonScene/CellRuntime.h>
+#include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -395,4 +396,107 @@ TEST_CASE("CellRuntime: a cell's bodies go into the host's physics world with it
 	rt.clear(world);
 	CHECK(phys.bodyCount() == 0u);
 	he_test::removeAllQuiet(root);
+}
+
+// ── The API's streaming group (Thema 183 step 3) ─────────────────────────────
+
+namespace
+{
+// The runtime the streaming rows ask, installed for one test and taken away again.
+struct Installed
+{
+	explicit Installed(HE::CellRuntime* rt) { HE::api::streaming::install(rt); }
+	~Installed() { HE::api::streaming::install(nullptr); }
+};
+
+using HorizonCode::Value;
+std::vector<Value> callRow(HE::api::Ctx& c, const char* id, std::vector<Value> args)
+{
+	const HE::api::ApiFn* fn = HE::api::find(id);
+	REQUIRE(fn != nullptr);
+	return fn->invoke(c, args);
+}
+} // namespace
+
+TEST_CASE("CellRuntime: a script's pin keeps the cells around it loaded, and the streaming rows say what is there")
+{
+	const auto root = writeRow("he_cell_runtime_pin");
+	FakeHost host;
+	host.root = root;
+	HorizonWorld world;
+	// A world origin, so that a row that forgot to add it asks about the wrong square:
+	// world position x = absolute x - 500.
+	world.setOrigin({ 500.0, 0.0, 0.0 });
+	const Entity cam = makeCamera(world, -2500.0);   // absolute -2000: far from every cell
+	world.setCellManifestJson(kManifest);
+	HE::CellRuntime rt(host);
+	const Installed installed(&rt);
+	HE::api::Ctx c{ &world, nullptr, nullptr };
+	CHECK(HE::api::isScriptGroup("streaming"));
+
+	// Cell (2,0) spans absolute x 200..300; its middle, as a script sees it, is -250.
+	const glm::vec3 inCell2{ -250.0f, 0.0f, 50.0f };
+	// Pinned before the runtime has seen the manifest at all, as a BeginPlay would.
+	const int handle = callRow(c, "streaming.pin", { Value::ofVec3(inCell2), Value::ofFloat(10.0f) })[0].i;
+	REQUIRE(handle > 0);
+	CHECK(rt.pinCount() == 1);
+
+	pump(rt, world, 0.016f, [&] { return rt.streamer().isLoaded(2, 0); });
+	CHECK(rt.pinCount() == 1);   // the start for the manifest kept it
+	CHECK(callRow(c, "streaming.isLoaded", { Value::ofInt(2), Value::ofInt(0) })[0].b);
+	// The pin's radius is its own (10 m), not the manifest's 60: the neighbour is 50 m off.
+	CHECK_FALSE(callRow(c, "streaming.isLoaded", { Value::ofInt(1), Value::ofInt(0) })[0].b);
+	CHECK(rt.streamer().stats().anchors == 2u);   // the camera and the pin
+
+	const auto at = callRow(c, "streaming.cellAt", { Value::ofVec3(inCell2) });
+	REQUIRE(at.size() == 3);
+	CHECK(at[0].i == 2);
+	CHECK(at[1].i == 0);
+	CHECK(at[2].b);
+	// Absolute -2000 is in square -20, where nothing was split out.
+	const auto far = callRow(c, "streaming.cellAt", { Value::ofVec3({ -2500.0f, 0.0f, 50.0f }) });
+	CHECK(far[0].i == -20);
+	CHECK_FALSE(far[2].b);
+
+	CHECK(callRow(c, "streaming.isSettled", { Value::ofVec3(inCell2), Value::ofFloat(10.0f) })[0].b);
+	// Cell 0 (absolute 0..100) is not there.
+	CHECK_FALSE(callRow(c, "streaming.isSettled", { Value::ofVec3({ -450.0f, 0.0f, 50.0f }), Value::ofFloat(10.0f) })[0].b);
+	// Nowhere near a cell: nothing to wait for.
+	CHECK(callRow(c, "streaming.isSettled", { Value::ofVec3({ -2500.0f, 0.0f, 50.0f }), Value::ofFloat(10.0f) })[0].b);
+
+	// Unpinned, the cell goes: the camera does not want it.
+	CHECK(callRow(c, "streaming.unpin", { Value::ofInt(handle) })[0].b);
+	CHECK_FALSE(callRow(c, "streaming.unpin", { Value::ofInt(handle) })[0].b);
+	pump(rt, world, 0.016f, [&] { return !rt.streamer().isLoaded(2, 0); });
+	CHECK_FALSE(rt.streamer().isLoaded(2, 0));
+	(void)cam;
+	rt.clear(world);
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("CellRuntime: pins go with the session, and the streaming rows answer neutrally without a runtime")
+{
+	FakeHost host;
+	HE::CellRuntime rt(host);
+	CHECK(rt.pin({ 1.0, 0.0, 1.0 }, 5.0f) > 0);
+	rt.reset();
+	CHECK(rt.pinCount() == 0);
+	HorizonWorld world;
+	CHECK(rt.pin({ 1.0, 0.0, 1.0 }, 5.0f) > 0);
+	rt.clear(world);
+	CHECK(rt.pinCount() == 0);
+
+	// Nothing installed (the editor outside Play, an app without a scene): no cell, no
+	// pin, and settled — a teleport gate must not hang where nothing streams.
+	HE::api::streaming::install(nullptr);
+	HE::api::Ctx c{ &world, nullptr, nullptr };
+	CHECK(callRow(c, "streaming.pin", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }), Value::ofFloat(10.0f) })[0].i == 0);
+	CHECK_FALSE(callRow(c, "streaming.unpin", { Value::ofInt(1) })[0].b);
+	CHECK_FALSE(callRow(c, "streaming.cellAt", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }) })[2].b);
+	CHECK_FALSE(callRow(c, "streaming.isLoaded", { Value::ofInt(0), Value::ofInt(0) })[0].b);
+	CHECK(callRow(c, "streaming.isSettled", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }), Value::ofFloat(50.0f) })[0].b);
+	// Installed but the scene has no cells: the same answers.
+	const Installed installed(&rt);
+	CHECK(callRow(c, "streaming.isSettled", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }), Value::ofFloat(50.0f) })[0].b);
+	CHECK_FALSE(callRow(c, "streaming.cellAt", { Value::ofVec3({ 0.0f, 0.0f, 0.0f }) })[2].b);
 }

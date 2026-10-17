@@ -12904,6 +12904,9 @@ void EditorApplication::setPlayMode(bool play)
 			return h;
 		});
 		m_playCells->begin([this] { return m_physicsWorld.get(); });
+		// The script API's streaming group (cellAt, isSettled, pin) asks this runtime
+		// while the session plays; taken away again at Stop. Before any script runs.
+		HE::api::streaming::install(&m_playCells->runtime());
 		m_physicsWorld->setRegionHold([this](const glm::vec3& p)
 		{
 			return m_editorWorld && HE::cellHolds(m_playCells->runtime().streamer(), *m_editorWorld, p);
@@ -13201,6 +13204,9 @@ void EditorApplication::setPlayMode(bool play)
 		HE::api::timer::cancelAll();
 		HE::api::fs::clearWatches();
 		HE::api::db::closeAll();
+		// The streaming group's runtime belongs to the session too; its pins went with
+		// the cells (PlayCellStreaming::end → CellRuntime::clear).
+		HE::api::streaming::install(nullptr);
 
 		// The entity host borrows the physics world and end() deliberately does
 		// not clear that pointer (the apps set it before begin()), so it is

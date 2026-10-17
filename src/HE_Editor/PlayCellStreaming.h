@@ -40,6 +40,7 @@ public:
 
 	bool                    playing() const { return m_playing; }
 	const HE::CellRuntime&  runtime() const { return m_runtime; }
+	HE::CellRuntime&        runtime() { return m_runtime; }
 
 	// ICellHost
 	std::function<bool(std::vector<uint8_t>&)> openCellFile(const std::string& path) override;

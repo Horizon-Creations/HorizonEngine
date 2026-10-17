@@ -136,19 +136,49 @@ void CellRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 		begin(world, manifestJson);
 	if (!m_streamer.active()) return;
 
+	std::vector<CellAnchor> anchors;
+	anchors.reserve(1 + m_pins.size());
 	glm::dvec3 camera(0.0);
-	if (!cameraAnchor(world, camera)) return;
-	// The lookahead follows the camera's motion; a jump (a teleport, a respawn)
-	// is not a speed, so anything faster than an airliner counts as standing.
-	glm::vec3 velocity(0.0f);
-	if (m_hasLastCamera && dt > 0.0f)
+	if (cameraAnchor(world, camera))
 	{
-		velocity = glm::vec3((camera - m_lastCamera) / static_cast<double>(dt));
-		if (glm::length(velocity) > 300.0f) velocity = glm::vec3(0.0f);
+		// The lookahead follows the camera's motion; a jump (a teleport, a respawn)
+		// is not a speed, so anything faster than an airliner counts as standing.
+		glm::vec3 velocity(0.0f);
+		if (m_hasLastCamera && dt > 0.0f)
+		{
+			velocity = glm::vec3((camera - m_lastCamera) / static_cast<double>(dt));
+			if (glm::length(velocity) > 300.0f) velocity = glm::vec3(0.0f);
+		}
+		m_lastCamera    = camera;
+		m_hasLastCamera = true;
+		CellAnchor cam;
+		cam.position = camera;
+		cam.velocity = velocity;
+		anchors.push_back(cam);
 	}
-	m_lastCamera    = camera;
-	m_hasLastCamera = true;
-	m_streamer.update(world, camera, velocity, budgetMs);
+	// A pin stands still; its radius in units of the manifest's load radius.
+	const float loadRadius = m_streamer.manifest().loadRadius;
+	for (const auto& [handle, p] : m_pins)
+	{
+		CellAnchor a;
+		a.position    = p.position;
+		a.radiusScale = p.radius > 0.0f && loadRadius > 0.0f ? p.radius / loadRadius : 1.0f;
+		anchors.push_back(a);
+	}
+	if (anchors.empty()) return;
+	m_streamer.update(world, anchors, budgetMs);
+}
+
+int CellRuntime::pin(const glm::dvec3& absolute, float radius)
+{
+	const int handle = m_nextPin++;
+	m_pins[handle] = { absolute, radius };
+	return handle;
+}
+
+bool CellRuntime::unpin(int handle)
+{
+	return m_pins.erase(handle) != 0;
 }
 
 void CellRuntime::clear(HorizonWorld& world)
@@ -172,6 +202,7 @@ void CellRuntime::reset()
 	m_world = nullptr;
 	m_manifestJson.clear();
 	m_hasLastCamera = false;
+	m_pins.clear();
 }
 
 bool CellRuntime::cameraAnchor(HorizonWorld& world, glm::dvec3& absolute)

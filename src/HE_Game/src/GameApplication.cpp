@@ -1403,6 +1403,10 @@ void GameApplication::OnInit()
 	// The player's settings over all of that: after the buses (a saved volume
 	// lands on the project's mixer, not under it) and after the window exists.
 	installPlayerSettings();
+	// The script API's streaming group (cellAt, isSettled, pin) asks the game's cell
+	// runtime, for the whole life of the application — before the first script runs,
+	// so a pin set in BeginPlay lands.
+	HE::api::streaming::install(&m_cellRuntime);
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -3685,6 +3689,8 @@ void GameApplication::OnShutdown()
 	HE::api::fs::clearWatches();
 	// …and so are the timers, for exactly the same reason.
 	HE::api::timer::cancelAll();
+	// The streaming group must not ask a runtime that is about to go.
+	HE::api::streaming::install(nullptr);
 	// The database connections last: closing one flushes it, and a file left
 	// half-written is the one of these three that costs somebody their data.
 	HE::api::db::closeAll();

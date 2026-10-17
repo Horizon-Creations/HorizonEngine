@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CellRuntime.h"   // the streaming group
 #include "HorizonScene/TransformHierarchy.h"   // world position, composed on demand
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/AudioEngine.h"
@@ -2695,6 +2696,61 @@ std::string typeNameId(Ctx& c, const HE::UUID& id)
 }
 
 } // namespace content
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+namespace streaming {
+
+namespace
+{
+HE::CellRuntime* g_cells = nullptr;
+
+// The world position plus the world's origin: what the streamer measures by.
+glm::dvec3 absoluteOf(const Ctx& c, const glm::vec3& position)
+{
+    glm::dvec3 p(position);
+    if (c.world) p += c.world->origin();
+    return p;
+}
+} // namespace
+
+void             install(HE::CellRuntime* runtime) { g_cells = runtime; }
+HE::CellRuntime* installed() { return g_cells; }
+
+Cell cellAt(Ctx& c, const glm::vec3& position)
+{
+    Cell out;
+    if (!g_cells || !g_cells->active()) return out;
+    const HE::CellManifest& m = g_cells->streamer().manifest();
+    const glm::dvec3 p = absoluteOf(c, position);
+    out.x = HE::CellManifest::cellIndex(p.x, m.cellSize);
+    out.z = HE::CellManifest::cellIndex(p.z, m.cellSize);
+    for (const HE::CellManifest::Cell& cell : m.cells)
+        if (cell.x == out.x && cell.z == out.z) { out.exists = true; break; }
+    return out;
+}
+
+bool isLoaded(Ctx&, int x, int z)
+{
+    return g_cells && g_cells->active() && g_cells->streamer().isLoaded(x, z);
+}
+
+bool isSettled(Ctx& c, const glm::vec3& position, float radius)
+{
+    if (!g_cells || !g_cells->active()) return true;
+    return g_cells->streamer().isSettled(absoluteOf(c, position), std::max(0.0f, radius));
+}
+
+int pin(Ctx& c, const glm::vec3& position, float radius)
+{
+    return g_cells ? g_cells->pin(absoluteOf(c, position), radius) : 0;
+}
+
+bool unpin(Ctx&, int handle)
+{
+    return g_cells && g_cells->unpin(handle);
+}
+
+} // namespace streaming
 
 // ── Audio ────────────────────────────────────────────────────────────────────
 namespace audio {
@@ -7422,6 +7478,26 @@ const std::vector<ApiFn>& registry()
             {{"type", P::String}}, "HE::api::content::typeName",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(content::typeName(c, aS(a, 0))) }; } });
 
+        // Streaming — the scene's cells. Unpermissioned: a pin loads what the scene
+        // would load anyway if the camera went there, and the rest only asks.
+        t.push_back({ "streaming.cellAt", "Streaming", false, {{"position", P::Vec3}},
+            {{"x", P::Int}, {"z", P::Int}, {"exists", P::Bool}}, "HE::api::streaming::cellAt",
+            [](Ctx& c, const VV& a){
+                const streaming::Cell cell = streaming::cellAt(c, aV3(a, 0));
+                return VV{ Value::ofInt(cell.x), Value::ofInt(cell.z), Value::ofBool(cell.exists) }; } });
+        t.push_back({ "streaming.isLoaded", "Streaming", false, {{"x", P::Int}, {"z", P::Int}},
+            {{"loaded", P::Bool}}, "HE::api::streaming::isLoaded",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::isLoaded(c, aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "streaming.isSettled", "Streaming", false, {{"position", P::Vec3}, {"radius", P::Float}},
+            {{"settled", P::Bool}}, "HE::api::streaming::isSettled",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::isSettled(c, aV3(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "streaming.pin", "Streaming", true, {{"position", P::Vec3}, {"radius", P::Float}},
+            {{"handle", P::Int}}, "HE::api::streaming::pin",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(streaming::pin(c, aV3(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "streaming.unpin", "Streaming", true, {{"handle", P::Int}},
+            {{"ok", P::Bool}}, "HE::api::streaming::unpin",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::unpin(c, aI(a, 0))) }; } });
+
         // Audio
         t.push_back({ "audio.play", "Audio", true,
             {{"asset", P::String}, {"volume", P::Float}, {"pitch", P::Float}, {"loop", P::Bool}},
@@ -8366,6 +8442,9 @@ const std::vector<ApiFn>& registry()
 #undef HE_ENV_NAME_ROW
             { "content.load", "Load Asset" },      { "content.unload", "Unload Asset" },
             { "content.isLoaded", "Is Asset Loaded" }, { "content.typeName", "Asset Type Name" },
+            { "streaming.cellAt", "Cell At" },     { "streaming.isLoaded", "Is Cell Loaded" },
+            { "streaming.isSettled", "Is Area Settled" },
+            { "streaming.pin", "Pin Cells" },      { "streaming.unpin", "Unpin Cells" },
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
@@ -8718,6 +8797,10 @@ bool isScriptGroup(std::string_view group)
                                                     // door opens" or "let go of the level I just
                                                     // left", which is what residency control is.
                                                     "content",
+                                                    // "streaming" has no flat twin either: a
+                                                    // teleport written in Lua could otherwise
+                                                    // never wait for the floor it lands on.
+                                                    "streaming",
                                                     // "anticheat" has no flat twin and never will:
                                                     // the plan's Lua and Python examples (§4.3)
                                                     // are horizon.anticheat.check / reportLevel /
