@@ -24,8 +24,10 @@ def main(argv):
     os.makedirs(cfg_dir)
     with open(os.path.join(cfg_dir, 'config.json'), 'w') as f:
         json.dump({'LastProjectPath': project.replace('\\', '/'), 'RHI': 1}, f)
-    # EXPORT190_CACHE=<EngineContentCache dir>: without it the export has no
-    # Engine/Textures/Landscape arrays (the packer takes them from the cache).
+    # EXPORT190_CACHE=<EngineContentCache dir>: copied into the editor's APPDATA.
+    # Meant to bring the Engine/Textures/Landscape arrays into the pak; on
+    # 2026-10-17 the pak still lacked them with it (same size, "Cannot load
+    # asset" in the game log), so the packed terrain draws a white fallback.
     cache = os.environ.get('EXPORT190_CACHE')
     if cache:
         shutil.copytree(cache, os.path.join(cfg_dir, 'EngineContentCache'))

@@ -12,7 +12,10 @@ ab etwa 100 m dunkle Striche auf den Chunk-Nähten, auch bei gleicher LOD und au
 des Menschen: das ist Defekt B aus Thema 204 (GI-G-Buffer-Tiefe `D16_UNORM`, Skirts gewinnen
 den Tiefentest), nicht diese Ursache, und laut Queen-Entscheid (#101) wird er in Thema 204
 behoben, nicht hier. Die Szene des Menschen ist flach (y = 0), dort erzeugt gemischte LOD keine
-Stufe; ihre Linien sind auf D3D11 (ihr aktuelles RHI) also sehr wahrscheinlich Defekt B.
+Stufe, das Vernähen kann dort also nichts ändern. Für ihre Linien bleiben zwei Kandidaten, die
+dieser Schritt für ihren Screenshot nicht getrennt hat: das Editor-Bodengitter, das mit der
+flachen Fläche z-fightet (nur Editor, alle Backends, mit und ohne GI, auch nah), und Defekt B
+(nur D3D, nur mit GI, wächst mit der Entfernung, auch im gepackten Spiel). Gefragt beim Menschen.
 
 ## Belege
 
