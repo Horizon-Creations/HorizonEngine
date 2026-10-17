@@ -1341,6 +1341,15 @@ TEST_CASE("inspector ui: the Foliage section adds a detail level and gives it th
 
 	ContextBits bits;
 	AppContext ctx = bits.make(world, undo);
+#ifdef HE_EDITOR_DEPS_DIR
+	// The card is an engine file: the click has to make it resident, or the level draws
+	// the fallback cube. An unscanned engine folder, as in a headless run: by path.
+	const std::filesystem::path content = std::filesystem::temp_directory_path() / "he_test_inspector_foliage_content";
+	std::filesystem::create_directories(content);
+	ContentManager cm(content.string());
+	cm.setEngineContentRoot(std::string(HE_EDITOR_DEPS_DIR) + "/EngineContent");
+	ctx.contentManager = &cm;
+#endif
 	ImGuiID addLevel = 0, crossCard0 = 0;
 	auto tallFrame = [&](bool left, he_ui::Image* shot = nullptr) -> ImGuiID {
 		ImGuiIO& io = ImGui::GetIO();
@@ -1406,6 +1415,9 @@ TEST_CASE("inspector ui: the Foliage section adds a detail level and gives it th
 	clickT(cardX, cardY);
 	CHECK(layer().lods[0].meshAssetId == HE::kEngineCrossCardMeshId);
 	CHECK(undo.undoDepth() == depth + 1);
+#ifdef HE_EDITOR_DEPS_DIR
+	CHECK(cm.getStaticMesh(HE::kEngineCrossCardMeshId) != nullptr);
+#endif
 
 	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
 	{

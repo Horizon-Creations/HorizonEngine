@@ -19,6 +19,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/DefaultAssets.h>   // kEngineCrossCardMeshId (foliage detail levels)
+#include <Diagnostics/Log.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <Types/Enums.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -3583,6 +3584,13 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				{
 					if (undo) undo->snapshotNow("Foliage Level Cross Card");
 					d.meshAssetId = HE::kEngineCrossCardMeshId;
+					// The card is an engine FILE: nothing loads it on its own, and a mesh
+					// that is not resident draws as the fallback cube without a word. By
+					// UUID once the engine folder is scanned, by path before that.
+					if (ctx.contentManager && !ctx.contentManager->ensureResident(HE::kEngineCrossCardMeshId)
+					    && ctx.contentManager->loadAsset("Engine/Meshes/CrossCard.hasset") != HE::kEngineCrossCardMeshId)
+						HE_LOG_WARN(Editor, "Foliage: the engine cross card (Engine/Meshes/CrossCard.hasset) is not "
+						                    "available — the level draws the fallback mesh");
 				}
 				EditorWidgets::helpForLabel("Cross Card##fol");
 				ImGui::SameLine();

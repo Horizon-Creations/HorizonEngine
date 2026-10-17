@@ -605,5 +605,21 @@ TEST_CASE("Foliage levels: the cross card is a committed engine mesh with the UU
 	// The whole picture on every face.
 	for (size_t i = 0; i < m->uvs.size(); ++i)
 		CHECK((m->uvs[i] == 0.0f || m->uvs[i] == 1.0f));
+
+	// A scene that names the card by UUID alone (a reopened scene, nobody loads the path):
+	// once the engine folder is scanned, the preload makes it resident. Without that the
+	// level would draw the fallback cube without a word.
+	ContentManager fresh(content.string());
+	fresh.setEngineContentRoot((fs::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	fresh.scanContentDirectory();
+	REQUIRE(fresh.getStaticMesh(HE::kEngineCrossCardMeshId) == nullptr);
+	HorizonWorld world;
+	const Entity e = world.createEntity("Land");
+	FoliageComponent fol;
+	fol.layers[0].meshAssetId = HE::kDefaultCubeMeshId;
+	fol.layers[0].lods = { lod(50.0f, HE::kEngineCrossCardMeshId) };
+	world.registry().emplace<FoliageComponent>(e, fol);
+	SceneSystems::preloadAssetRefs(world, fresh);
+	CHECK(fresh.getStaticMesh(HE::kEngineCrossCardMeshId) != nullptr);
 }
 #endif

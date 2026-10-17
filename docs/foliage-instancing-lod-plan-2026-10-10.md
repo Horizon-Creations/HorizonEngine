@@ -864,7 +864,7 @@ Kreuz-Karte als Datei. Kein Backend geändert: eine Stufe ist nur ein weiteres C
   Formen (flach und `layers`). Laden sortiert, kappt bei `kMaxLods`, klemmt `density` auf 0..1 und `distance` auf ≥ 0. `settingsKeyOf` (Revision) und `collectAssetRefs`
   (Export/Preload) nennen Mesh und Material jeder Stufe.
 - **Editor** (`InspectorPanel.cpp:3572`): „Detail Levels“ unter Shadow Distance: je Stufe Mesh- und Material-Slot, `Level Distance`, `Level Density`, `Cross Card`
-  (setzt die Engine-Karte), `Remove Level`; `Add Level` (halbe Strecke bis `drawDistance`), `Level Hysteresis`. Hinweis „never drawn“ bei Anfang ≥ `drawDistance`.
+  (setzt die Engine-Karte **und macht sie resident**: per UUID, wenn der Engine-Ordner gescannt ist, sonst per Pfad; sonst eine Warnung), `Remove Level`; `Add Level` (halbe Strecke bis `drawDistance`), `Level Hysteresis`. Hinweis „never drawn“ bei Anfang ≥ `drawDistance`.
   Hilfe in `EditorHelp.cpp`, `editor_help_audit.py --check` 1216/1216.
 - **Kreuz-Karte als Datei** (`mesh_gen`, `MeshGen/main.cpp:143`): `EditorDeps/EngineContent/Meshes/CrossCard.hasset`, Eintrag 8 = `kEngineCrossCardMeshId` `0x108`
   (`DefaultAssets.h:104`, `static_assert` im Generator). Zwei aufrechte 1×1-Quads über Kreuz, **beide Seiten** je Ebene (16 Vertices, 8 Dreiecke), Drehpunkt **unten**
@@ -881,7 +881,8 @@ Kreuz-Karte als Datei. Kein Backend geändert: eine Stufe ist nur ein weiteres C
   Normalen, UV). **Negativkontrolle:** Hysterese abgeschaltet und Ausdünnung im Einzelweg um eins verschoben → 4 Fälle rot (der Ganz/geteilt-Fall erst, seit er vier
   Schnitttiefen nimmt).
 - `test_inspector_ui` „the Foliage section adds a detail level and gives it the cross card“: Add Level und Cross Card per Klick, je ein Undo-Schritt, beide zurück;
-  das BMP (`HE_UI_DUMP_DIR`) zeigt die Zeilen sauber.
+  das BMP (`HE_UI_DUMP_DIR`) zeigt die Zeilen sauber; nach dem Klick ist die Karte im ContentManager resident. Der Karten-Datei-Fall prüft außerdem, dass eine
+  Szene, die die Karte nur per UUID nennt, sie nach `scanContentDirectory` über `preloadAssetRefs` bekommt (wiedergeöffnete Szene).
 - Voller `he_tests` (Release, scratch `APPDATA`): 5417 Fälle, 5413 grün, 4 rot, 12 übersprungen; rot genau die vier aus 14.2/15.3 (`test_inspector_ui` Zwischenablage ×2,
   `test_profiler` ×2), keiner berührt Foliage.
 - Je Datei grün: test_foliage 16, test_foliage_cluster 20, test_foliage_layers 8, test_scene_serializer 46, test_terrain_sync 14, test_graph_instancing 5, test_editor_help 19, test_lod 11.
