@@ -7137,7 +7137,7 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature> giGBufRS;      // b0 root CBV (per-object ring)
     ComPtr<ID3D12RootSignature> giComputeRS;   // b0/b1 CBVs, t0-t1+t5-t6 table, t2/t3/t4 root SRVs, u0-u1 table, t7 root SRV (DXR TLAS)
     ComPtr<ID3D12RootSignature> giFsRS;        // b0 CBV + t0-t2 table + s0 static point-clamp
-    ComPtr<ID3D12PipelineState> giGBufPSO;     // MRT pos+norm, D16
+    ComPtr<ID3D12PipelineState> giGBufPSO;     // MRT pos+norm, D32 (kGiGBufDepthFormat)
     ComPtr<ID3D12PipelineState> giGBufPSOInstanced; // GiGBufVSInstanced, {mvp, model} per instance at t3
     ComPtr<ID3D12PipelineState> giShadowPSO;   // compute
     ComPtr<ID3D12PipelineState> giProbePSO;    // compute
@@ -7193,6 +7193,12 @@ struct D3D12RendererImpl
     // Texture, PSO RTVFormats[0] and EVERY SRV of it use this one constant.
     // Consumers Load/point-sample it; normals stay RGBA16F.
     static constexpr DXGI_FORMAT kGiGBufPosFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    // G-buffer depth, D32 like Vulkan/Metal (Thema 204, defect B): as D16 a
+    // depth step is z^2/6554 m at near 0.1 (1.5 m at 100 m), so the chunk
+    // skirts won the depth test against the neighbour chunk and the stored ray
+    // origin sat under the terrain: dark dashes on every chunk seam beyond
+    // ~100 m. Texture and PSO DSVFormat (both G-buffer PSOs) use this constant.
+    static constexpr DXGI_FORMAT kGiGBufDepthFormat = DXGI_FORMAT_D32_FLOAT;
     ComPtr<ID3D12Resource> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
                            giLocalMaskTex, giHistTex[2], giResultTex,
                            giFilterTmpTex; // R16F between the two a-trous iterations
@@ -7807,7 +7813,7 @@ struct D3D12RendererImpl
                 && compile(kGiTemporalHLSL, "main", "ps_5_0", temporalPS)
                 && compile(kGiAtrousHLSL, "main", "ps_5_0", atrousPS);
 
-        if (ok) // G-buffer PSO: MRT RGBA32F pos + RGBA16F norm, D16 depth, scene input layout
+        if (ok) // G-buffer PSO: MRT RGBA32F pos + RGBA16F norm, D32 depth, scene input layout
         {
             const D3D12_INPUT_ELEMENT_DESC layout[] = {
                 { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -7823,7 +7829,7 @@ struct D3D12RendererImpl
             pd.NumRenderTargets      = 2;
             pd.RTVFormats[0]         = kGiGBufPosFormat;
             pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
+            pd.DSVFormat             = kGiGBufDepthFormat;
             pd.SampleDesc.Count      = 1;
             pd.SampleMask            = UINT_MAX;
             pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
@@ -8031,7 +8037,7 @@ struct D3D12RendererImpl
                           kPSR, true, giResultTex)
                && makeTex(DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                           kPSR, true, giFilterTmpTex)
-               && makeTex(DXGI_FORMAT_D16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+               && makeTex(kGiGBufDepthFormat, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
                           D3D12_RESOURCE_STATE_DEPTH_WRITE, false, giGBufDepth);
         if (!ok)
         {

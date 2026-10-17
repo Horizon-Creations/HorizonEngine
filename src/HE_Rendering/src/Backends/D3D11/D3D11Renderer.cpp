@@ -3721,12 +3721,16 @@ struct D3D11RendererImpl
                && makeTex(DXGI_FORMAT_R16_FLOAT,
                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
                           giFilterTmpTex, &giFilterTmpRTV, &giFilterTmpSRV, nullptr);
-        // Depth buffer for the G-buffer prepass.
+        // Depth buffer for the G-buffer prepass. D32 like Vulkan/Metal (Thema
+        // 204, defect B): as D16 a depth step is z^2/6554 m at near 0.1 (1.5 m
+        // at 100 m), so the chunk skirts won the depth test against the
+        // neighbour chunk and the stored ray origin sat under the terrain:
+        // dark dashes on every chunk seam beyond ~100 m.
         giGBufDSV.Reset(); giGBufDepth.Reset();
         D3D11_TEXTURE2D_DESC dd{};
         dd.Width = (UINT)w; dd.Height = (UINT)h;
         dd.MipLevels = dd.ArraySize = 1;
-        dd.Format = DXGI_FORMAT_D16_UNORM; dd.SampleDesc.Count = 1;
+        dd.Format = DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count = 1;
         dd.Usage = D3D11_USAGE_DEFAULT;
         dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         ok = ok && SUCCEEDED(device->CreateTexture2D(&dd, nullptr, &giGBufDepth))
