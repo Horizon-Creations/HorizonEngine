@@ -967,24 +967,37 @@ gegen ordered **identisch**. Nicht übernommen (ändert das SSAO-Bild jeder Szen
 - Zeit nicht gemessen (Schritt 5). Metal nicht berührt. Exportiertes Spiel: gebackene Varianten schleifen weiter (Anfrage 105). SSR-Bild-A/B auf Vulkan nicht
   aussagekräftig (SSR rauscht 1,6 % von Lauf zu Lauf), dort nur der Zeuge. Editor von Hand nicht.
 
+## 18. Stand Verifikation (Thema 182, Schritt 5, 17.10.2026)
+
+Gemessen auf NN-WS03 (RTX 4070) gegen einen Build des Merge-Basis-Commits `1e41c2d2` (vor Thema 182), GL, D3D11, D3D12 und Vulkan. Zahlen, Bedingungen und Bilder:
+`perf-audit/foliage-2-verification-2026-10-17.md`, Rohdaten `perf-audit/raw-foliage-2-verify/`. Neu: `he_perf_capture.py --rhi` (Windows), `scripts/perf/foliage_ladder_win.py`
+(Leiter, abwechselnd, `--table`), `scripts/perf/foliage_backend_ab.py` (Bild vorher/nachher mit Rauschboden, sechs Fälle).
+
+- **Eingebaute Foliage, Reichweite 100 m und alles bis 100k:** GL, D3D11 unverändert (Zeit, draws, Dreiecke, Bild identisch). D3D12: 100k "alle" und 500k/100 m
+  waren vorher **unvollständig** (16 385 Draws, Bild nur Himmel/Grau), jetzt vollständig in 19-20 Draws. Vulkan: 100k "alle" **271,6 → 4,4 ms** `Render` (61x),
+  500k/100 m **410,8 → 5,4 ms** (77x); vorher lief die Pro-Objekt-Schleife.
+- **Graph-Material (800 Pflanzen):** 774 → 5 Draws auf allen vier, Bild identisch (GL) bzw. Boden und Pflanzenmaske identisch (D3D/Vulkan). Zeit nicht gemessen.
+- **Neuer Befund, offen: 500k "alle in Reichweite" sprengt die Arena** (`k_instArenaMax` 1 M je Frame-Slot; Schatten-Kaskaden + SSAO + Szene brauchen mehr):
+  D3D12 bleibt unvollständig (Draw-Ring leer, gemeldet), Vulkan fällt auf die Schleife zurück (290 statt 1 600 ms, also nur 5,5x). Kandidaten: Arena-Grenze anheben
+  oder je Pass zurücksetzen, 64-Byte-Schattenstride (17.4), Ausdünnung in der Ferne (Stufen aus 3a); nicht gebaut.
+- **D3D11 500k "alle":** je Lauf entweder ≈18 oder ≈24 ms, in **beiden** Binaries (5 Läufe je Seite); keine Regression belegbar.
+- **Voller ctest:** 297 grün, 2 übersprungen, 1 rot (`test_inspector_ui` Zwischenablage, vorbestehend). Fehlender Temp-Ordner je Test täuschte drei rote vor (Lektion 378).
+- **Runtime flavours rot (Lauf 39037311399):** Linux app-advanced/app-basic je 0,1 MB über der Schwelle, allgemeine Drift (Thema 183 ebenso); die Queen hebt die
+  Zeilen auf release/0.7.0 an (Anfrage 111), hier nicht geändert.
+- **Nicht gemessen:** Metal, Graph-Material-Zeit, GI an, Kamera am Rand, 1 Mio., exportiertes Spiel.
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 4 von 5 (Teil 2f, Windows-Gleis); 1-3 in den Abschnitten 14-16, dieser in Abschnitt 17
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `28845a11`, `6154b254`, `da8cd627`, `21096c3e` (runtime_size) + Doku-Commit; gepusht: ja; CI 39037311272
-- **Done:** Graph-Foliage (Wind) zeichnet auf D3D11/D3D12/Vulkan einen Draw je Batch; D3D12/Vulkan haben eine wachsende Instanz-Arena (100k Pflanzen: D3D12 nicht mehr
-  leer, Vulkan 5 statt 56k Draws); TAA-Velocity, Vulkan-Decal-Tiefe und Vulkan-Reflexionsvorpass sehen jeden Cluster.
-- **Files touched:** `D3D11Renderer.cpp` (`:1403`, `:1908`, `:4698`, `:7092`), `D3D12Renderer.cpp` (`:3432-3505`, `:9117`, `:11119`, `:11797`), `VulkanRenderer.cpp`
-  (`:3082`, `:3986`, `:5723`, `:6940-6990`, `:8441`, `:13021`), `VulkanRenderer.h` (Arena, `m_reflPrepassInstPipeline`), `tests/test_graph_instancing.cpp`,
-  `tests/test_foliage_cluster.cpp` (letzter Fall), `scripts/perf/foliage_graph_ab.py`.
-- **Verified:** 17.2 (Graph-A/B auf drei Backends, Budget vorher/nachher, TAA mit Negativkontrolle, GI/SSR/Decal-Rauchlauf, Quelltext-Guards mit Negativkontrolle,
-  voller he_tests).
-- **Not verified:** Metal; Zeit; exportiertes Spiel; Editor von Hand; Vulkan-SSR im Bild (nur Zeuge).
-- **Decisions taken:** Arena wächst statt Front-End-Ausdünnung (7.5 Punkt 6): richtig ab dem ersten Frame, Grenze 1 Mio. je Slot; D3D11 bekommt einen eigenen
-  Instanz-Vertexpuffer statt den StructuredBuffer umzubauen; Velocity je Pflanze wie GL (kein instanzierter Velocity-Shader), auf D3D12 mit Reserve für den
-  Blend-Pass (über ~16k Pflanzen unter TAA bekommt der Rest keine Bewegung).
-- **Decisions suggested, not taken:** SSAO-Vorpass-Tiefe D16 → D32 auf D3D11/D3D12/Vulkan (17.3); instanzierte Velocity, wenn TAA mit großer Foliage zu langsam wird.
-- **Pending:** Schritt 5 (Messleiter vorher/nachher auf allen Backends, Bildvergleich, voller ctest); Metal-Lauf; Anfrage 105.
-- **Traps:** Auf D3D/Vulkan rauscht der Himmel, Vulkan auch den fernen Boden (≤ 8/255) und die Pflanzenmaske (0-4 px): `--ground 100 --tol 8 --mask-tol 4`. D3D12/Vulkan
-  verlieren in der Graph-**Schleife** über 1024 Pflanzen Draws: die Schleife ist dort nur unter ~1000 sichtbaren Pflanzen eine gültige Referenz (`--plants 800`).
-  Dumps rendern 3 Settle-Frames, D3D12 hat 3 Slots: das Wachsen des Hauptpuffers sieht man erst mit `HE_DUMP_FRAMES=8`.
-- **Next steps:** 1. Schritt 5: `foliage_graph_ab.py` und ein 100k-Lauf je Backend in die Messleiter, Zeit je Backend. 2. Entscheidung 17.3 (D32) und Anfrage 105.
+- **Topic / step:** Thema 182, Schritt 5 (Verifikation); 1-4 in den Abschnitten 14-17, dieser in Abschnitt 18
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Doku- und Skript-Commit nach `b23f765b` (kein Engine-Code geändert); CI 39038062444 grün auf `d183c063`
+- **Done:** Leiter vorher/nachher auf GL/D3D11/D3D12/Vulkan (10k/100k/500k × alle/100 m × 2), Bild-A/B sechs Fälle × vier Backends mit Rauschboden, voller ctest.
+- **Files touched:** `scripts/he_perf_capture.py` (`--rhi`, Windows), `scripts/perf/foliage_ladder_win.py`, `scripts/perf/foliage_backend_ab.py`,
+  `docs/perf-audit/foliage-2-verification-2026-10-17.md`, `docs/perf-audit/raw-foliage-2-verify/`, dieser Abschnitt.
+- **Verified:** Abschnitt 18 (alle Zahlen aus den Summaries, Bilder angesehen).
+- **Not verified:** Metal; Graph-Material-Zeit; GI; 1 Mio.; exportiertes Spiel.
+- **Decisions taken:** Vorher = Build von `1e41c2d2` in `C:/hw182b` (nicht Schalter desselben Binaries); `runtime_size.py` nicht angefasst (Queen, Anfrage 111).
+- **Decisions suggested, not taken:** Arena für 500k "alle" (siehe 18); D16 → D32 (Schritt 6).
+- **Traps:** `before`-Vulkan bei 500k "alle" braucht ~1,6 s je Frame (300 Frames > 600 s Timeout): mit 20 Frames messen. Fremd-Compiler auf NN-WS03 verzerren CPU-Zeiten,
+  `*.conditions.txt` zeigt sie. D3D11 500k ist zweigipflig je Lauf. ctest: fehlender `%TEMP%\he_tests\<test>` = rot nach 0,02 s ohne Ausgabe.
+- **Next steps:** 1. Schritt 6 (SSAO-Vorpass D32). 2. Entscheidung Queen: Arena-Überlauf bei 500k sichtbaren Pflanzen auf D3D12/Vulkan beheben oder als Grenze dokumentieren.
+  3. Metal-Lauf auf einem Mac (`foliage_graph_ab.py --rhi Metal`, `foliage_ladder.sh`). 4. Anfrage 105.

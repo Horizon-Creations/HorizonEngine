@@ -1,0 +1,7 @@
+== after-OpenGL-10000-all-r1
+before:
+  cpu 0%  procs:
+  gpu (util, temp, sm clock): 2 %, 34, 2910 MHz
+after (rc=0):
+  cpu 11%  procs: HorizonEditorx1
+  gpu (util, temp, sm clock): 5 %, 35, 2910 MHz
