@@ -691,6 +691,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::NormalMapArrayBombSample: return "NormalMapArrayBombSample";
 	case T::BombCells:           return "BombCells";
 	case T::WaterRipple:         return "WaterRipple";
+	case T::Sun:                 return "Sun";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";

@@ -1637,7 +1637,8 @@ struct D3D11RendererImpl
     ComPtr<ID3D11BlendState>        underwaterFogBlendState;
     bool underwaterFogReady = false;
     // ── Underwater caustics (Thema 185 Schritt 3) — a second fullscreen pass on the same
-    // target with the fog's blend state (output alpha 0 → plain additive), drawn first.
+    // target with the fog's blend state (rgb = light the lines gain, alpha = share the cells
+    // between them lose, Thema 205), drawn first.
     ComPtr<ID3D11PixelShader>       underwaterCausticsPS;
     ComPtr<ID3D11Buffer>            underwaterCausticsCB;
     bool underwaterCausticsReady = false;
@@ -7696,8 +7697,9 @@ void D3D11Renderer::DrawViewportFrame()
         const UnderwaterCameraData& uwCam = p.m_renderWorld.underwaterCamera;
 
         // Underwater caustics (Thema 185 Schritt 3), BEFORE the fog so the fog swallows the
-        // net with distance: light added onto hdrRTV by the fog's own blend state (the
-        // shader's alpha is 0, so ONE/INV_SRC_ALPHA is a plain add). Runs only with the
+        // net with distance: light redistributed on hdrRTV by the fog's own blend state
+        // (ONE/INV_SRC_ALPHA: dst' = rgb + dst * (1 - a), the cells' share in a, Thema 205).
+        // Runs only with the
         // camera under water and the body's intensity above 0 (the extractor's waterline
         // fade-in makes it exactly 0 on the line). See kUnderwaterCausticsHLSL.
         if (uwCam.wet && uwCam.causticsIntensity > 0.0f && p.underwaterCausticsReady && p.viewportDepthSRV)

@@ -7408,17 +7408,20 @@ namespace
 	{ "Landscape/Refracted Light##wcau", "Refracted Light",
 	  "The moving net of bright lines the waves throw onto whatever lies below the "
 	  "surface while the camera is under water. It follows the same waves the "
-	  "water material draws (Physics/WaterWaves.h), so it moves with the swell you "
-	  "see from above, takes the sun's colour and is gone at night. It eases in "
-	  "over the first half metre of a dive, so crossing the waterline never pops. "
-	  "Intensity 0 turns it off and costs nothing.",
+	  "water material draws (Physics/WaterWaves.h) plus a fine chop, so it moves "
+	  "with the swell you see from above, takes the sun's colour and is gone at "
+	  "night. It is strongest in shallow water and fades out with depth; the light "
+	  "the lines gain is taken from the patches between them. It eases in over the "
+	  "first half metre of a dive, so crossing the waterline never pops. Intensity "
+	  "0 turns it off and costs nothing.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Intensity##wcau", "Refracted Light Intensity",
-	  "How bright the net is, as a multiple of the sun's light on the spot. 0 is "
-	  "off. Around 0.5 is a gentle shimmer; up to 4 for a stylised look.",
+	  "How bright the net is, as a multiple of the sun's light on the spot, and how "
+	  "much darker the patches between its lines get. 0 is off. Around 0.5 is a "
+	  "clear net on a sunny day; up to 4 for a stylised look.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Scale##wcau", "Refracted Light Scale",
-	  "The size of the net's cells. 1 matches the water material's own waves; 2 "
+	  "The size of the net's cells. At 1 they are around half a metre across; 2 "
 	  "makes the net twice as fine, 0.5 twice as wide.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Speed##wcau", "Refracted Light Speed",
@@ -7426,9 +7429,9 @@ namespace
 	  "them, 0 freezes the net.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Fade Depth##wcau", "Refracted Light Fade Depth",
-	  "The depth below the surface where the net has faded to about a third, the "
-	  "water swallowing the light on its way down. Beyond five times this depth "
-	  "nothing is shaded at all.",
+	  "The depth below the surface where the net is gone. It is at full strength in "
+	  "the shallows and eases out toward this depth, its lines growing wider and "
+	  "dimmer on the way. Deeper floors get no net at all.",
 	  "", "systems#water-physics" },
 
 	// ── The Environment window ───────────────────────────────────────────────

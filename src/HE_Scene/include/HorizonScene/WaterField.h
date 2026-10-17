@@ -201,10 +201,11 @@ namespace HE::water
     // follows the sun's ray from the geometry up to the flat surface plane, bends
     // it by the slope of the engine water's own waves there (Physics/WaterWaves.h —
     // the numbers the surface material and the physics already share, so the net
-    // moves with the swell you see from above) and reads a tileable caustic pattern
-    // at the bent position. Defaults are visible but mild: a lake that never touches
-    // this panel still gets a gentle net once the camera dives, and 0 intensity
-    // turns the pass off entirely (zero cost, no draw).
+    // moves with the swell you see from above) plus a fine chop of its own, which
+    // is where the net's thin lines come from. Strongest in the shallows, fading out
+    // with depth (Thema 205 Schritt 2). A lake that never touches this panel gets a
+    // clear net once the camera dives, and 0 intensity turns the pass off entirely
+    // (zero cost, no draw).
     inline constexpr float kDefaultCausticsIntensity = 0.55f;
     inline constexpr float kMaxCausticsIntensity     = 4.0f;
     inline constexpr float kDefaultCausticsScale     = 1.0f;    // 1 = the water material's own wavelengths
@@ -212,7 +213,7 @@ namespace HE::water
     inline constexpr float kMaxCausticsScale         = 8.0f;
     inline constexpr float kDefaultCausticsSpeed     = 1.0f;    // 1 = the surface's own wave clock
     inline constexpr float kMaxCausticsSpeed         = 4.0f;
-    inline constexpr float kDefaultCausticsDepth     = 14.0f;   // m below the surface where it has faded to 1/e
+    inline constexpr float kDefaultCausticsDepth     = 10.0f;   // m below the surface where it has faded out (Thema 205)
     inline constexpr float kMinCausticsDepth         = 0.5f;
     inline constexpr float kMaxCausticsDepth         = 200.0f;
 
@@ -226,9 +227,10 @@ namespace HE::water
         float scale = kDefaultCausticsScale;
         // Animation speed relative to the surface's wave clock.
         float speed = kDefaultCausticsSpeed;
-        // Depth below the surface at which the net has faded to 1/e (the water
-        // swallows the light on its way down). Pixels deeper than 5x this are not
-        // shaded at all — the pass's cost cap for a surface far above.
+        // Depth below the surface at which the net is gone. Full strength in the
+        // shallows, eased out (smoothstep) over this depth with its lines growing
+        // wider and dimmer; pixels deeper than this are not shaded at all. Until
+        // Thema 205 this was the 1/e depth of an exponential fade (default 14 m).
         float depth = kDefaultCausticsDepth;
 
         bool operator==(const UnderwaterCausticsParams& o) const

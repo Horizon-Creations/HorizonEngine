@@ -404,10 +404,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// WaterRipple is the LAST enum value today; a node added after it
+	// Sun is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::WaterRipple; ++t)
+	for (int t = 0; t <= (int)MatNodeType::Sun; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -1384,6 +1384,45 @@ TEST_CASE("Water Ripple: one helper over the lighting block's rings, three outpu
 		CHECK(found == 1);
 		CHECK(HE::generateFragment(back).glsl == HE::generateFragment(g).glsl);
 	}
+}
+
+// ═══ Sun (Thema 205, Schritt 3) ════════════════════════════════════════════════
+// The dominant directional light from the lighting prefix: no helper, no texture,
+// the same two channels in the fragment and the World Position Offset stage.
+TEST_CASE("Sun: direction and colour straight from the lighting block, both stages")
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int sun = g.addNode(MatNodeType::Sun);
+	REQUIRE(g.connect(sun, 1, out, HE::kMatOutputEmissivePin));         // Color
+	REQUIRE(g.connect(sun, 0, out, HE::kMatOutputNormalPin));           // Direction
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.textures.empty());
+	CHECK(gen.glsl.find("= heLight.sunDir.xyz;") != std::string::npos);
+	CHECK(gen.glsl.find("= heLight.sunColor.rgb;") != std::string::npos);
+	CHECK(countOf(gen.glslGBuffer, "heLight.sunColor.rgb") == 1u);
+	// A graph without the node reads neither.
+	CHECK(HE::generateFragment(makeDemoGraph()).glsl.find("heLight.sunColor") == std::string::npos);
+
+	// The vertex stage reads the same prefix (Time and Wind already do).
+	{
+		MaterialGraph w;
+		const int o = w.addNode(MatNodeType::Output);
+		const int s = w.addNode(MatNodeType::Sun);
+		REQUIRE(w.connect(s, 0, o, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen wpo = HE::generateFragment(w);
+		CHECK(wpo.vertexBody.find("heLight.sunDir.xyz") != std::string::npos);
+	}
+
+	// The node survives a save and a reload.
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	int found = 0;
+	for (const auto& n : back.nodes)
+		if (n.type == MatNodeType::Sun) ++found;
+	CHECK(found == 1);
+	CHECK(HE::generateFragment(back).glsl == HE::generateFragment(g).glsl);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
