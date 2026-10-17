@@ -56,6 +56,14 @@ namespace
             h = mix(h, l.bucketSize);
             h = mix(h, l.castsShadow);        h = mix(h, l.contributesAO);
             h = mix(h, l.shadowDistance);
+            h = mix(h, l.lodHysteresis);
+            h = mix(h, l.lods.size());
+            for (const FoliageLod& d : l.lods)
+            {
+                h = mix(h, d.meshAssetId.hi);     h = mix(h, d.meshAssetId.lo);
+                h = mix(h, d.materialAssetId.hi); h = mix(h, d.materialAssetId.lo);
+                h = mix(h, d.distance);           h = mix(h, d.density);
+            }
         }
         return h;
     }

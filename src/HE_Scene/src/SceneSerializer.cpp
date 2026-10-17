@@ -181,6 +181,18 @@ namespace
 		if (l.castsShadow != def.castsShadow)       j["castsShadow"]    = l.castsShadow;
 		if (l.contributesAO != def.contributesAO)   j["contributesAO"]  = l.contributesAO;
 		if (l.shadowDistance != def.shadowDistance) j["shadowDistance"] = l.shadowDistance;
+		if (l.lodHysteresis != def.lodHysteresis)   j["lodHysteresis"]  = l.lodHysteresis;
+		// Farther detail levels; a layer without any writes no key at all.
+		if (!l.lods.empty())
+		{
+			json lods = json::array();
+			for (const FoliageLod& d : l.lods)
+				lods.push_back({ { "mesh",     uuidToJson(d.meshAssetId) },
+				                 { "material", uuidToJson(d.materialAssetId) },
+				                 { "distance", d.distance },
+				                 { "density",  d.density } });
+			j["lods"] = std::move(lods);
+		}
 		// Painted density mask, the same base64 treatment as the terrain's
 		// layer weights: one byte per texel, absent when the layer is uniform.
 		if (!l.densityMask.empty())
@@ -205,6 +217,23 @@ namespace
 		l.castsShadow     = c.value("castsShadow",    l.castsShadow);
 		l.contributesAO   = c.value("contributesAO",  l.contributesAO);
 		l.shadowDistance  = c.value("shadowDistance", l.shadowDistance);
+		l.lodHysteresis   = std::max(0.0f, c.value("lodHysteresis", l.lodHysteresis));
+		if (c.contains("lods") && c["lods"].is_array())
+		{
+			for (const json& d : c["lods"])
+			{
+				if (!d.is_object() || l.lods.size() >= FoliageLayer::kMaxLods) continue;
+				FoliageLod lod;
+				lod.meshAssetId     = jsonToUuid(d.value("mesh",     json()));
+				lod.materialAssetId = jsonToUuid(d.value("material", json()));
+				lod.distance        = std::max(0.0f, d.value("distance", lod.distance));
+				lod.density         = std::clamp(d.value("density", lod.density), 0.0f, 1.0f);
+				l.lods.push_back(lod);
+			}
+			// The extraction walks the levels outwards; a hand-edited file may not.
+			std::stable_sort(l.lods.begin(), l.lods.end(),
+			                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+		}
 		if (c.contains("densityMaskB64") && c["densityMaskB64"].is_string())
 		{
 			l.densityMask = base64Decode(c["densityMaskB64"].get<std::string>());

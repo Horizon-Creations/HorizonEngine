@@ -18,6 +18,7 @@
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/DefaultAssets.h>   // kEngineCrossCardMeshId (foliage detail levels)
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <Types/Enums.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -3563,6 +3564,74 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
 			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
 			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
+
+			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
+			// layer, the engine's cross card at the far end. The mesh above is the
+			// level the camera stands in; none of this re-scatters.
+			ImGui::Separator();
+			ImGui::TextUnformatted("Detail Levels");
+			EditorWidgets::helpForKey("Foliage/Detail Levels");
+			int  removeLod = -1;
+			bool sortLods  = false;
+			for (size_t k = 0; k < fol->lods.size(); ++k)
+			{
+				FoliageLod& d = fol->lods[k];
+				ImGui::PushID(static_cast<int>(k));
+				ImGui::Text("Level %zu", k + 1);
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Cross Card##fol"))
+				{
+					if (undo) undo->snapshotNow("Foliage Level Cross Card");
+					d.meshAssetId = HE::kEngineCrossCardMeshId;
+				}
+				EditorWidgets::helpForLabel("Cross Card##fol");
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("Remove Level##fol")) removeLod = static_cast<int>(k);
+				EditorWidgets::helpForLabel("Remove Level##fol");
+				EditorWidgets::assetDropSlot(ctx, "Mesh", d.meshAssetId,
+						HE::AssetType::StaticMesh, "follodmesh",
+						"(none — the layer's mesh, thinned)", "static mesh", /*showClear=*/true);
+				EditorWidgets::helpForKey("Foliage/Level Mesh");
+				if (EditorWidgets::assetDropSlot(ctx, "Material", d.materialAssetId,
+						HE::AssetType::Material, "follodmat",
+						"(none — the layer's material)", "material",
+						/*showClear=*/true) != EditorWidgets::SlotAction::None
+				    && ctx.renderer && d.materialAssetId != HE::UUID{})
+					ctx.renderer->InvalidateMaterial(d.materialAssetId);
+				EditorWidgets::helpForKey("Foliage/Level Material");
+				Row::dragFloat("Level Distance##fol", &d.distance, 1.0f, 0.0f, 2000.f, "from %.0f m"); trackEdit();
+				if (ImGui::IsItemDeactivatedAfterEdit()) sortLods = true;
+				Row::dragFloat("Level Density##fol", &d.density, 0.01f, 0.0f, 1.0f, "%.2f"); trackEdit();
+				if (d.distance >= fol->drawDistance)
+					ImGui::TextDisabled("Starts beyond the Draw Distance: never drawn");
+				ImGui::PopID();
+			}
+			if (removeLod >= 0)
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Level");
+				fol->lods.erase(fol->lods.begin() + removeLod);
+			}
+			// Kept in distance order, the order the list reads in and the file stores.
+			if (sortLods)
+				std::stable_sort(fol->lods.begin(), fol->lods.end(),
+				                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			ImGui::BeginDisabled(fol->lods.size() >= FoliageLayer::kMaxLods);
+			if (EditorWidgets::smallButton("Add Level##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Level");
+				// Halfway out for the first, then halfway from the last level to the edge.
+				const float last = fol->lods.empty() ? 0.0f : fol->lods.back().distance;
+				FoliageLod d;
+				d.distance = std::round(last + (fol->drawDistance - last) * 0.5f);
+				fol->lods.push_back(d);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Level##fol");
+			if (!fol->lods.empty())
+			{
+				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();
+			}
+			ImGui::Separator();
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
 			if (ImGui::Button("Regenerate")) { folc->dirty = true; trackEdit(); }
 			// The painted density mask is authored in Landscape mode's Foliage

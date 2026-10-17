@@ -7,6 +7,26 @@
 #include <string>
 #include <vector>
 
+// ── A farther detail level of a foliage layer ───────────────────────────────
+// The layer's own mesh and material are level 0 and draw from the camera out to
+// the first level's `distance`; each level here takes over from its `distance`
+// until the next one's, the last until the layer's drawDistance. A plant's level
+// is chosen by its own ground-plane distance (FoliageExtract.cpp), so a level
+// boundary through a bucket splits the bucket instead of popping it whole.
+// The last level is typically the engine's cross card (kEngineCrossCardMeshId)
+// with a material that carries a picture of the plant.
+struct FoliageLod {
+    // Null: the layer's own (a level that only thins). The material falls back
+    // to the LAYER's material, not to the level mesh's own.
+    HE::UUID meshAssetId;
+    HE::UUID materialAssetId;
+    float    distance = 50.0f;         // m, ground plane: where this level starts
+    // Share of the layer's plants this level still draws, 0..1 (0: none). The plants kept
+    // are the first of each bucket, which is an even thinning because the scatter
+    // order is random (FoliageStore).
+    float    density  = 1.0f;
+};
+
 // ── One kind of plant on a landscape ────────────────────────────────────────
 // Grass, a bush, a tree, pebbles: each is a layer with its own mesh, material,
 // density, seed, mask and draw settings, scattered on the terrain of the entity
@@ -45,6 +65,15 @@ struct FoliageLayer {
     bool  castsShadow    = true;    // false: the layer is never submitted to a shadow map
     bool  contributesAO  = true;    // false: the layer stays out of the SSAO pre-pass (grass)
     float shadowDistance = 0.0f;    // m; beyond it a bucket stops casting shadows. 0 = drawDistance
+
+    // Farther detail levels, ordered by distance (the loader sorts them). Empty =
+    // the layer's mesh all the way to drawDistance, as before levels existed.
+    static constexpr size_t kMaxLods = 7;
+    std::vector<FoliageLod> lods;
+    // m: a plant that has switched level keeps it until it is this far past the
+    // boundary, so a camera that wobbles on a boundary does not flip plants every
+    // frame. Not applied at drawDistance, which stays the hard edge it always was.
+    float lodHysteresis = 2.0f;
 
     // ── Runtime (not serialised) ────────────────────────────────────────────
     // Per-instance model matrices as the scatter produced them: WORLD space at

@@ -1,9 +1,13 @@
 #pragma once
 #include <cstdint>
+#include <memory>
+#include <unordered_map>
+#include <vector>
 #include <entt/entt.hpp>
 
 class RenderWorld;
 class ContentManager;
+struct FoliageStore;
 
 // ── Foliage → RenderWorld ───────────────────────────────────────────────────
 // RenderExtractor's one call into this file (src/FoliageExtract.cpp). Internal to
@@ -11,14 +15,39 @@ class ContentManager;
 namespace HE
 {
 
+// ── Detail levels: what a view remembers between frames ─────────────────────
+// The hysteresis of FoliageLayer::lods needs to know which level a plant was drawn
+// with last time, and "last time" belongs to a VIEW: the editor's scene view and a
+// preview each look from their own camera. So the memory lives on the RenderExtractor
+// (one per view) and is handed in here. Per layer store, one byte per bucket (the
+// level the whole bucket had, or "mixed", or unknown) and, only once one of its
+// buckets has been split by a level boundary, one byte per plant (its level).
+// Entries of stores that were not extracted in a frame are dropped at its end, so a
+// re-scatter every frame (a held sculpt brush) cannot make it grow.
+struct FoliageLodMemory
+{
+    struct Layer
+    {
+        std::weak_ptr<const FoliageStore> store;   // a dead store's address may come back as another one
+        std::vector<uint8_t> bucket;               // per FoliageStore::buckets entry
+        std::vector<uint8_t> plant;                // per FoliageStore::local entry; empty until needed
+        uint64_t             frame = 0;            // the extract that last used it
+    };
+    std::unordered_map<const FoliageStore*, Layer> layers;
+    uint64_t frame = 0;
+};
+
 // Emits every visible layer of every visible FoliageComponent into `out` — which must
-// already hold the camera. By default ONE cluster RenderObject per bucket that is
-// in range (RenderObject::instanceBlock, RenderWorld::instanceBlocks), so the cost
-// is O(buckets) plus the instances of the few buckets the draw distance cuts
-// through, not O(instances). `cm` supplies the mesh bounds the clusters are boxed
-// with; null leaves the boxes invalid (never culled), exactly what an ordinary
-// object gets for a mesh the extractor cannot read.
-void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager* cm);
+// already hold the camera. By default ONE cluster RenderObject per bucket and detail
+// level in range (RenderObject::instanceBlock, RenderWorld::instanceBlocks), so the
+// cost is O(buckets) plus the instances of the few buckets the draw distance or a
+// level boundary cuts through, not O(instances). `cm` supplies the mesh bounds the
+// clusters are boxed with; null leaves the boxes invalid (never culled), exactly what
+// an ordinary object gets for a mesh the extractor cannot read. `memory` carries the
+// level hysteresis from one call to the next; null chooses every plant's level by its
+// distance alone (what a first frame does anyway).
+void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager* cm,
+                    FoliageLodMemory* memory = nullptr);
 
 // How the foliage reaches the RenderWorld.
 //   Clusters     the default: one cluster object per bucket in range (above).
@@ -53,6 +82,12 @@ struct FoliageExtractStats
     uint64_t totalInstances       = 0;   // instances in the stores
     uint64_t clusterInstances     = 0;   // instances the emitted clusters stand for
     uint64_t instanceTests        = 0;   // instances actually tested one by one (the straddlers)
+    // Detail levels (FoliageLayer::lods); level 0 is the layer's own mesh. A layer
+    // without levels counts everything as level 0.
+    static constexpr int kLevels  = 8;   // FoliageLayer::kMaxLods + 1
+    uint64_t levelInstances[kLevels] = {};   // instances emitted per level, after thinning
+    uint64_t thinnedInstances     = 0;   // in range, but left out by a level's density
+    uint64_t heldInstances        = 0;   // drawn with last frame's level although their distance says the next
 };
 const FoliageExtractStats& lastFoliageExtractStats();
 

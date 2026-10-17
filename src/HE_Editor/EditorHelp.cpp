@@ -901,6 +901,47 @@ namespace
 	  "Beyond this distance the layer stops casting shadows, in metres. 0 casts "
 	  "as far as it is drawn (Draw Distance).",
 	  "", "scenes#foliage" },
+	{ "Foliage/Detail Levels", "",
+	  "What the layer turns into farther away: a simpler mesh, fewer plants, a "
+	  "cross card at the far end. The mesh above is drawn near the camera; each "
+	  "level takes over from its distance. Each plant picks its level by its own "
+	  "distance, so a whole patch never changes at once.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Level", "Add Detail Level",
+	  "Adds a farther detail level, halfway between the last one and the Draw "
+	  "Distance. Without a mesh of its own it draws the layer's mesh, so it can "
+	  "simply thin the layer out.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Level", "Remove Detail Level",
+	  "Removes this detail level; the level before it is then drawn out to the "
+	  "next one, or to the Draw Distance.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cross Card", "",
+	  "Uses the engine's cross card for this level: two crossed upright quads that "
+	  "show a picture of the plant. Give the level a material with that picture "
+	  "(alpha cut out) — it costs four quads per plant instead of the whole mesh.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Mesh", "Detail Level Mesh",
+	  "The mesh this level draws. Empty draws the layer's own mesh, which makes "
+	  "the level only thin the layer out (Level Density).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Material", "Detail Level Material",
+	  "The material for this level's mesh. Empty takes the LAYER's material (not "
+	  "the mesh's own), which is what a simpler mesh of the same plant wants.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Distance", "",
+	  "Where this level starts, in metres from the camera along the ground. A "
+	  "level that starts beyond the Draw Distance is never drawn.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Density", "",
+	  "Share of the layer's plants this level still draws: 1 all, 0.25 every "
+	  "fourth, 0 none. The plants kept are spread evenly over the landscape.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Hysteresis", "",
+	  "How far past a level boundary a plant keeps the level it had, in metres, "
+	  "so a camera that hovers on a boundary does not make plants flicker "
+	  "between two levels. The Draw Distance edge is not affected.",
+	  "", "scenes#foliage" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
 	{ "Nav Mesh/Cell Size", "",
