@@ -1263,6 +1263,8 @@ endif()
 # ctest entry gets its own HOME/APPDATA below — see the ENVIRONMENT after the loop.
 if(TARGET HorizonContentSync)
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp)
+    # CSY-102 (Thema 212): a silent server must not hold an SFTP call forever.
+    target_sources(he_tests PRIVATE test_sftp_timeout.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)

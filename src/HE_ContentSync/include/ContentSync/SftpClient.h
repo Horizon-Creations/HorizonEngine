@@ -30,7 +30,8 @@ struct SftpResult
 	bool        ok = false;
 	std::string error;   // human-readable, already scrubbed of the password — empty when ok
 	// True only when the failure was the CONNECTION itself (TCP connect timed
-	// out on every address, or the SSH handshake did not complete) — the kind a
+	// out on every address, the SSH handshake did not complete, or the server
+	// went silent during login past SftpEndpoint::sessionTimeoutMs) — the kind a
 	// second try a moment later can plausibly fix. Never set for a refused or
 	// unresolvable host, a rejected password, or a missing remote file: retrying
 	// those only repeats the same answer, slower.

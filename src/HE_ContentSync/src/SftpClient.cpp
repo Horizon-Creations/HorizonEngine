@@ -141,6 +141,12 @@ struct Session
 			return false;
 		}
 		libssh2_session_set_blocking(ssh, 1);
+		// Only the TCP connect had a limit before: a server that accepted and then
+		// stopped answering blocked the handshake (or any later read) for good —
+		// the download queue with it. A timed-out call returns
+		// LIBSSH2_ERROR_TIMEOUT through the error paths below.
+		libssh2_session_set_timeout(ssh, endpoint.sessionTimeoutMs > 0
+		                                     ? static_cast<long>(endpoint.sessionTimeoutMs) : 0L);
 
 		if (libssh2_session_handshake(ssh, static_cast<libssh2_socket_t>(sock)) != 0)
 		{
@@ -157,6 +163,9 @@ struct Session
 		                                  nullptr) != 0)
 		{
 			error = "SSH authentication failed: " + lastSshError();
+			// A server that stopped answering is worth a retry; a rejected
+			// password is not.
+			transient = libssh2_session_last_errno(ssh) == LIBSSH2_ERROR_TIMEOUT;
 			return false;
 		}
 

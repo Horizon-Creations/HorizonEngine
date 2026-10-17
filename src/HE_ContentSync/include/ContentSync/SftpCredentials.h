@@ -46,6 +46,11 @@ struct SftpEndpoint
 	// Materials/, …) live directly under this path. Empty string = the SFTP
 	// account's own home/root directory.
 	std::string remoteBasePath;
+	// How long any ONE blocking SSH/SFTP call (handshake, auth, one read or
+	// write) may wait for the server, in ms — per call, not per file, so a large
+	// download over a slow line is not cut off. Without it a server that accepts
+	// the TCP connection and then goes silent held the calling worker forever.
+	int sessionTimeoutMs = 30000;
 
 	bool configured() const { return !host.empty() && !username.empty(); }
 };
