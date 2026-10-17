@@ -7,13 +7,13 @@ Per picture: luminance (Rec. 709 on 8-bit sRGB values) over a box, then
   peak  = 99th percentile   (the brightest line)
   lines = share of pixels brighter than cell + 0.5 * (peak - cell)   — how much of the floor reads as "line"
   contrast = peak / cell
-No PIL, no numpy: JPG/PNG go through `sips` to a BMP first, read with struct.
+No numpy: JPG/PNG go through `sips` (or PIL where there is no sips) to a BMP first, read with struct.
 
   python3 scripts/underwater_reference_compare.py ref.jpg:0,0,1,0.93 /tmp/uw/reference.png /tmp/uw/floor.png
 
 `path:x0,y0,x1,y1` crops to a box in fractions of the frame (the photo has a caption bar at the bottom).
 """
-import pathlib, struct, subprocess, sys, tempfile
+import pathlib, shutil, struct, subprocess, sys, tempfile
 
 
 def read_bmp(path):
@@ -36,12 +36,18 @@ def load(path):
         return read_bmp(path)
     with tempfile.TemporaryDirectory() as d:
         out = pathlib.Path(d) / "x.bmp"
-        subprocess.run(["sips", "-s", "format", "bmp", path, "--out", str(out)], capture_output=True, check=True)
+        if shutil.which("sips"):
+            subprocess.run(["sips", "-s", "format", "bmp", path, "--out", str(out)], capture_output=True, check=True)
+        else:                                  # Windows/Linux: PIL writes the same 24-bit BMP
+            from PIL import Image
+            Image.open(path).convert("RGB").save(out)
         return read_bmp(out)
 
 
 def measure(spec):
-    path, _, box = spec.partition(":")
+    path, _, box = spec.rpartition(":")
+    if not path or not box[:1].isdigit():   # no box, or only a Windows drive letter ("C:/...")
+        path, box = spec, ""
     x0, y0, x1, y1 = (float(v) for v in box.split(",")) if box else (0.0, 0.0, 1.0, 1.0)
     w, h, step, rows = load(path)
     lum = []

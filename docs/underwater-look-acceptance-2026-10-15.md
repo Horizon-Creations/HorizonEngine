@@ -69,6 +69,7 @@ Was nicht passt (Befund, nicht geaendert, das ist Abstimmung fuer den Menschen):
 
 ## 4. D3D11, D3D12, Vulkan
 
+- **Nachtrag 17.10.:** auf NN-WS03 abgenommen, siehe `docs/underwater-windows-acceptance-2026-10-17.md` (Schritt 5).
 - **Hardware: nicht abgenommen.** NN-WS03 offline (zuletzt 13 h vor diesem Schritt). Laut Vorgabe des Menschen
   bleibt das offen und wird nicht per CI als erledigt gemeldet. Schritt 5 (Queen): `underwater_look_shots.py --rhi
   D3D11|D3D12|Vulkan` auf NN-WS03 und `scripts/underwater_acceptance.py --compare` gegen die Mac-Bilder.

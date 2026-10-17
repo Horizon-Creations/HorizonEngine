@@ -37,6 +37,20 @@ VIEWS = {
 
 
 def shoot(editor, out_dir, name, rhi, kv, timeout=180):
+    if os.name == "nt":
+        # Windows (Thema 205 step 5): D3D crashes or hangs after the dump and stdout is buffered, so take the
+        # Thema 185 runner, which kills a process whose BMP stopped growing and keeps HorizonEngine.log.
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import underwater_acceptance
+        ok = underwater_acceptance.shoot(editor, out_dir, name, rhi, {**COMMON, **kv}, 1, timeout)
+        bmp = out_dir / f"{name}.bmp"
+        if ok:
+            try:
+                from PIL import Image
+                Image.open(bmp).convert("RGB").save(bmp.with_suffix(".png"))
+            except ImportError:
+                pass
+        return ok
     cfg = tempfile.mkdtemp(prefix="uwlook_")
     bmp = out_dir / f"{name}.bmp"
     if bmp.exists():
