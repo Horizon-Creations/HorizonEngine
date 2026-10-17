@@ -986,18 +986,64 @@ Gemessen auf NN-WS03 (RTX 4070) gegen einen Build des Merge-Basis-Commits `1e41c
   Zeilen auf release/0.7.0 an (Anfrage 111), hier nicht geändert.
 - **Nicht gemessen:** Metal, Graph-Material-Zeit, GI an, Kamera am Rand, 1 Mio., exportiertes Spiel.
 
+## 19. SSAO-Positionsvorpass D16 → D32 (Thema 182, Schritt 6, Entscheidung 110, 17.10.2026)
+
+Der Positionsvorpass für SSAO (mit SSR an auch der Reflexions-MRT-Vorpass, der dieselbe Tiefe bindet) hatte auf D3D11, D3D12 und Vulkan eine eigene
+**D16**-Tiefe (GL 24 Bit, Metal 32). Jetzt D32, je Backend eine Konstante `kSsaoPosDepthFormat`, die jede Stelle nennt (Muster wie Thema 204 im GI-G-Buffer):
+D3D11 `D3D11Renderer.cpp:1971` (Textur `:2435`, die DSV erbt das Format), D3D12 `D3D12Renderer.cpp:4540` (Textur + Clear-Wert `:5949`, DSV `:5967`,
+`ssaoPosPSO`/`Instanced` `:5598`, `reflPrepassPSO` `:6235`), Vulkan `VulkanRenderer.cpp:12101` (Bild `:12754`, `m_ssaoPosRenderPass` `:12413`,
+`m_reflPrepassRP` `:13208`). Die GI-G-Buffer-Stellen (D3D11 `:3441`, D3D12 `:7393/7594`) sind hier absichtlich **nicht** angefasst: Thema 204 (`520f1453`)
+stellt sie auf seinem Branch um, beide zusammen auf release/0.7.0 ergeben keinen Konflikt.
+
+Gemessen auf NN-WS03 (RTX 4070), vorher = Kopie des Deploys von `d31aa6a7` (`C:/hw182/deploy_before`), nachher = derselbe Baum mit der Änderung:
+
+| Zeuge (Boden ab Zeile 330) | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| Cluster gegen ordered, ohne Stufen (`foliage_lod_shot.py --levels ""`, Nacht wie 16.2), vorher | 0,209 % | 0,209 % | 0,512 % |
+| dasselbe, nachher | **identisch** | **identisch** | **identisch** |
+| Cluster gegen ordered, Stufen `25:sphere,50:card:0.5`, vorher | 0,125 % | 0,125 % | 0,254 % |
+| dasselbe, nachher | **identisch** | **identisch** | 31 px (0,006 %) |
+| Rauschboden (zwei gleiche Läufe) | 0 px | 0 px | 0 px |
+
+Die 31 px auf Vulkan mit Stufen sind deterministisch (Lauf 1 = Lauf 2) und **nicht** der SSAO-Vorpass: mit `HE_DUMP_SSAO=0` bleiben 22 px, vorher wie nachher
+gleich. Das ist ein Tiefengleichstand im Szenenpass selbst (Kreuzkarten = sich schneidende Quads, Haupttiefe schon D32; GL hat dort 10 px, 16.2).
+
+**Wie stark ändert sich das SSAO-Bild jeder Szene?** (`scripts/perf/ssao_depth_ab.py`, Tag `TOD=0.4`, AA/SSR/Wolken aus, vorher gegen nachher, nachher zweimal als Rauschboden):
+
+| Fall | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| FC 6000 Pflanzen, Cluster | 2,23 %, Stufe ≤ 9 | 2,23 %, ≤ 9 | 5,43 %, ≤ 24 |
+| FO dasselbe, ordered | 2,18 %, ≤ 11 | 2,18 %, ≤ 11 | 5,34 %, ≤ 24 |
+| MT Berglandschaft, Kamera 200 m entfernt | 0,06 %, ≤ 1 | 0,16 %, ≤ 2 | 1,60 %, ≤ 5 |
+| M0 = MT mit SSAO aus (Kontrolle) | identisch | identisch | identisch |
+| SR = FC mit SSR an (Reflexions-MRT-Vorpass) | 2,54 %, ≤ 9 | 2,54 %, ≤ 9 | 5,82 %, ≤ 24 |
+| Rauschboden (nachher gegen nachher) | 0 px | 0 px | 0-3 px, ≤ 1 |
+
+Die Änderung liegt nur im fernen Band am Horizont (Differenzbild ×25), nichts nahe der Kamera; auf Vulkan halten sich dunkler (13 250 px) und heller (13 863 px)
+die Waage (Mittel +0,85/765), also kein AO-Verlust, sondern genauere Tiefe. Mit dem Auge sind vorher und nachher nicht zu unterscheiden (Ausschnitt angesehen).
+Vulkan ändert sich stärker, weil sein D16 schon vorher der gröbere war (0,512 % gegen 0,209 %). Nach Cluster gegen ordered ist FC == FO jetzt auf allen drei.
+
+- **Rauchlauf:** Vulkan-Validierung an („validation layer ENABLED“): vorher wie nachher nur die bekannte Zeile „location 2 not consumed“, der Reflexionsvorpass lief
+  („reflection pre-pass instanced“). D3D11/D3D12-Logs ohne ERROR/WARN (außer „No config file“ beim ersten Lauf).
+- **Test:** `test_foliage_cluster.cpp` „The SSAO position pre-pass depth is D32 on D3D11, D3D12 and Vulkan, at every site“ (Quelltext-Guard: Definition D32 und
+  jede Stelle nennt die Konstante). Negativkontrolle: D3D11-Definition auf D16 und Vulkans `atts[3]` auf das Literal → rot (2 Fehler), zurück → grün.
+- **Speicher:** die Vorpasstiefe wächst von 2 auf 4 Byte je Pixel der SSAO-Auflösung (bei 640×360 ~0,5 MB mehr).
+- **Nicht geprüft:** Metal und GL (nicht betroffen, nicht angefasst); exportiertes Spiel (gleicher Renderer-Code); GI an; Editor von Hand.
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 5 (Verifikation); 1-4 in den Abschnitten 14-17, dieser in Abschnitt 18
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Doku- und Skript-Commit nach `b23f765b` (kein Engine-Code geändert); CI 39038062444 grün auf `d183c063`
-- **Done:** Leiter vorher/nachher auf GL/D3D11/D3D12/Vulkan (10k/100k/500k × alle/100 m × 2), Bild-A/B sechs Fälle × vier Backends mit Rauschboden, voller ctest.
-- **Files touched:** `scripts/he_perf_capture.py` (`--rhi`, Windows), `scripts/perf/foliage_ladder_win.py`, `scripts/perf/foliage_backend_ab.py`,
-  `docs/perf-audit/foliage-2-verification-2026-10-17.md`, `docs/perf-audit/raw-foliage-2-verify/`, dieser Abschnitt.
-- **Verified:** Abschnitt 18 (alle Zahlen aus den Summaries, Bilder angesehen).
-- **Not verified:** Metal; Graph-Material-Zeit; GI; 1 Mio.; exportiertes Spiel.
-- **Decisions taken:** Vorher = Build von `1e41c2d2` in `C:/hw182b` (nicht Schalter desselben Binaries); `runtime_size.py` nicht angefasst (Queen, Anfrage 111).
-- **Decisions suggested, not taken:** Arena für 500k "alle" (siehe 18); D16 → D32 (Schritt 6).
-- **Traps:** `before`-Vulkan bei 500k "alle" braucht ~1,6 s je Frame (300 Frames > 600 s Timeout): mit 20 Frames messen. Fremd-Compiler auf NN-WS03 verzerren CPU-Zeiten,
-  `*.conditions.txt` zeigt sie. D3D11 500k ist zweigipflig je Lauf. ctest: fehlender `%TEMP%\he_tests\<test>` = rot nach 0,02 s ohne Ausgabe.
-- **Next steps:** 1. Schritt 6 (SSAO-Vorpass D32). 2. Entscheidung Queen: Arena-Überlauf bei 500k sichtbaren Pflanzen auf D3D12/Vulkan beheben oder als Grenze dokumentieren.
-  3. Metal-Lauf auf einem Mac (`foliage_graph_ab.py --rhi Metal`, `foliage_ladder.sh`). 4. Anfrage 105.
+- **Topic / step:** Thema 182, Schritt 6 (SSAO-Vorpass D16 → D32, Entscheidung 110); Schritte 1-5 in den Abschnitten 14-18, dieser in Abschnitt 19
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Commit nach `d31aa6a7` (siehe `git log`), gepusht
+- **Done:** Die SSAO-Vorpasstiefe ist auf D3D11, D3D12 und Vulkan D32; Foliage-Cluster gegen ordered ist dort jetzt pixelgleich (vorher 0,21/0,21/0,51 % des Bodens).
+- **Files touched:** die drei Backends (Stellen in 19), `tests/test_foliage_cluster.cpp` (neuer Guard am Ende), `scripts/perf/ssao_depth_ab.py` (neu),
+  `docs/audit/modul_rendering.md` (Nachtrag: SSAO erledigt), dieser Abschnitt.
+- **Verified:** Tabellen in 19 (Bilder angesehen, Rauschboden je Fall); `he_tests --source-file=*test_foliage_cluster.cpp` 22/22 mit Negativkontrolle; voller `he_tests` (Ergebnis im Commit-Text).
+- **Not verified:** Metal, GL (nicht berührt); GI an; exportiertes Spiel; CI-Lauf läuft noch beim Abschluss.
+- **Decisions taken:** GI-G-Buffer-Stellen nicht angefasst (Thema 204 hat sie, sonst Merge-Konflikt); Vulkan mit eigener Konstante statt `m_depthFormat`
+  (beides D32_SFLOAT, aber der Vorpass soll nicht still mitwandern, wenn jemand die Haupttiefe ändert).
+- **Decisions suggested, not taken:** nach dem Merge von Thema 204 einen Guard „kein `D16_UNORM` in den drei Backends“ (Audit-Nachtrag); die 22 px Kreuzkarten-Gleichstand
+  im Vulkan-Szenenpass sind keine Fehlstelle der Cluster (GL 10 px), nichts tun.
+- **Pending:** Schritt 8 (Arena-Überlauf bei 500k sichtbaren Pflanzen auf D3D12/Vulkan, Abschnitt 18); Metal-Lauf; Anfrage 105.
+- **Traps:** Der Zeuge der 16.2-Zahlen ist `foliage_lod_shot.py --levels ""` (ohne Stufen, Nacht); nachts ist SSAO kaum sichtbar, für die Bildwirkung `TOD=0.4`.
+  PowerShell 5.1 verschluckt `""` als Argument: das Skript aus Git-Bash starten. `HE_DUMP_SSAO=0` aus der Umgebung reicht durch beide Skripte durch.
+- **Next steps:** 1. Schritt 8 (Arena). 2. Metal-Lauf auf einem Mac (`foliage_graph_ab.py --rhi Metal`). 3. Anfrage 105.

@@ -188,6 +188,9 @@ Funde: **5 Hoch, 20 Mittel, 4 Niedrig** (29 gesamt). Alle Laufzeit-Aussagen sind
   `docs/foliage-instancing-lod-plan-2026-10-10.md` §17.3). Stand dieses Branches: SSAO-Vorpass `D3D11Renderer.cpp:2430`, `D3D12Renderer.cpp:5592/5943/5961/6229`,
   `VulkanRenderer.cpp:12406/12747/13201` (Reflexions-MRT-Pass); GI-G-Buffer `D3D11Renderer.cpp:3436`, `D3D12Renderer.cpp:7387/7588` (falls Thema 204 sie noch nicht
   umgestellt hat). Neue Vorpässe auf D3D/Vulkan: D32_FLOAT / D32_SFLOAT nehmen, und vor einem Bild-A/B nach `D16_UNORM` greppen.
+- **Erledigt (Thema 182 Schritt 6):** der SSAO-Positionsvorpass (mit dem Reflexions-MRT-Vorpass) ist auf allen drei D32, je Backend `kSsaoPosDepthFormat`,
+  bewacht von `test_foliage_cluster.cpp`; Cluster gegen ordered jetzt pixelgleich auf D3D11/D3D12/Vulkan (Plan §19). Offen bleibt nur der GI-G-Buffer, den
+  Thema 204 (`520f1453`) umstellt. Sind beide auf release/0.7.0, gibt es in den drei Backends kein `D16_UNORM` mehr; dann taugt ein Guard „kein D16“.
 
 ## Unsicher / Messung nötig
 

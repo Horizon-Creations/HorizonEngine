@@ -4531,7 +4531,13 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  ssaoRS;
     // Resources
     ComPtr<ID3D12Resource>       ssaoPosRT;          // RGBA16F positions
-    ComPtr<ID3D12Resource>       ssaoPosDepth;        // D16 depth for pos prepass
+    ComPtr<ID3D12Resource>       ssaoPosDepth;        // D32 depth for pos prepass (kSsaoPosDepthFormat)
+    // Pre-pass depth, D32 like the GI G-buffer (Thema 182 step 6, decision 110):
+    // as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at 50 m), so at
+    // 50-90 m a plant and the ground rounded to one value and the draw order
+    // decided which landed in the position target. Texture, DSV, ssaoPosPSO(+
+    // Instanced) and reflPrepassPSO (same DSV) all use this one constant.
+    static constexpr DXGI_FORMAT kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT;
     ComPtr<ID3D12Resource>       ssaoRT;              // R8 AO
     ComPtr<ID3D12Resource>       ssaoBlurRT;          // R8 blurred AO
     ComPtr<ID3D12Resource>       ssaoNoiseTex;        // 4x4 RGBA32F noise
@@ -5589,7 +5595,7 @@ struct D3D12RendererImpl
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             pd.NumRenderTargets      = 1;
             pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
+            pd.DSVFormat             = kSsaoPosDepthFormat;
             pd.SampleDesc.Count      = 1;
             pd.SampleMask            = UINT_MAX;
             pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -5940,7 +5946,7 @@ struct D3D12RendererImpl
 
         if (!makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, static_cast<UINT>(w), static_cast<UINT>(h),
                     false, ssaoPosRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
-        if (!makeRT(DXGI_FORMAT_D16_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
+        if (!makeRT(kSsaoPosDepthFormat, static_cast<UINT>(w), static_cast<UINT>(h),
                     true, ssaoPosDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE)) return;
         if (!makeRT(DXGI_FORMAT_R8_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
                     false, ssaoRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
@@ -5958,7 +5964,7 @@ struct D3D12RendererImpl
 
         // DSV
         D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
-        dvd.Format        = DXGI_FORMAT_D16_UNORM;
+        dvd.Format        = kSsaoPosDepthFormat;
         dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         device->CreateDepthStencilView(ssaoPosDepth.Get(), &dvd, ssaoDsvCpu);
 
@@ -6226,7 +6232,7 @@ struct D3D12RendererImpl
         pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // view-space position (= ssaoPosRT)
         pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // oct normal + roughness
         pd.RTVFormats[2]         = DXGI_FORMAT_R32_FLOAT;          // NDC depth
-        pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;          // the SSAO pre-pass's own depth
+        pd.DSVFormat             = kSsaoPosDepthFormat;            // the SSAO pre-pass's own depth
         pd.SampleDesc.Count      = 1;
         pd.SampleMask            = UINT_MAX;
         pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;

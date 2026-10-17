@@ -1159,3 +1159,41 @@ TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, de
 	CHECK(countOf(vk, "m_renderWorld.appendInstances(obj, m_clusterScratch);") == 2);
 	CHECK(vk.find("m_reflPrepassInstPipeline && n > 1 && allocInstances(n") != std::string::npos);
 }
+
+TEST_CASE("The SSAO position pre-pass depth is D32 on D3D11, D3D12 and Vulkan, at every site")
+{
+	// Thema 182 step 6 (decision 110). The pre-pass had its own D16 depth on the three Windows
+	// backends (GL 24 bit, Metal 32): at 50-90 m a plant and the ground rounded to one value
+	// and the draw order decided the position target, so foliage clusters against the ordered
+	// cluster differed in 0.21 % (D3D11/D3D12) and 0.51 % (Vulkan) of the ground; with D32 the
+	// two are pixel-identical (RTX 4070). Texture, view, PSO / render pass must agree on the
+	// format, so each backend keeps one constant and every site names it.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - SSAO depth check skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	struct Site { const char* rel; const char* def; std::vector<std::pair<const char*, size_t>> uses; };
+	const Site sites[] = {
+		{ "D3D11/D3D11Renderer.cpp", "kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT;",
+		  { { "dd.Format = kSsaoPosDepthFormat;", 1 } } },   // the DSV takes the texture's format
+		{ "D3D12/D3D12Renderer.cpp", "kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT;",
+		  { { "makeRT(kSsaoPosDepthFormat,", 1 }, { "dvd.Format        = kSsaoPosDepthFormat;", 1 },
+		    { "pd.DSVFormat             = kSsaoPosDepthFormat;", 2 } } },   // ssaoPosPSO(+Instanced), reflPrepassPSO
+		{ "Vulkan/VulkanRenderer.cpp", "kSsaoPosDepthFormat = VK_FORMAT_D32_SFLOAT;",
+		  { { "ssaoMakeImage(m_device, 0, kSsaoPosDepthFormat,", 1 },
+		    { "atts[1].format         = kSsaoPosDepthFormat;", 1 },     // m_ssaoPosRenderPass
+		    { "atts[3].format         = kSsaoPosDepthFormat;", 1 } } }, // m_reflPrepassRP, same image
+	};
+	for (const Site& s : sites)
+	{
+		INFO(s.rel);
+		const std::string text = readFile(dir / s.rel);
+		REQUIRE(!text.empty());
+		CHECK(countOf(text, s.def) == 1);
+		for (const auto& [use, n] : s.uses)
+			CHECK_MESSAGE(countOf(text, use) == n, std::string(use));
+	}
+}

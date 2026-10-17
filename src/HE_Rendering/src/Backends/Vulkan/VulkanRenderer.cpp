@@ -12093,6 +12093,13 @@ void VulkanRenderer::InvalidateTexture(const HE::UUID& textureId)
 // SSAO — screen-space ambient occlusion
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The position pre-pass's own depth, D32 like m_depthFormat (Thema 182 step 6,
+// decision 110): as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at 50 m),
+// so at 50-90 m a plant and the ground rounded to one value and the draw order
+// decided which landed in the position target. The image, m_ssaoPosRenderPass
+// and m_reflPrepassRP (which attaches the same image) use this constant.
+static constexpr VkFormat kSsaoPosDepthFormat = VK_FORMAT_D32_SFLOAT;
+
 // Helper: allocate + bind device-local image, create image view.
 // Aspect is COLOR for regular images, DEPTH_BIT for depth images.
 static void ssaoMakeImage(VkDevice dev, uint32_t memTypeBits,
@@ -12392,7 +12399,7 @@ void VulkanRenderer::createSSAOPipeline()
     }
 
     // ── Render passes ─────────────────────────────────────────────────────────
-    // Position prepass: RGBA16F color + D16_UNORM depth.
+    // Position prepass: RGBA16F color + D32 depth (kSsaoPosDepthFormat).
     {
         VkAttachmentDescription atts[2]{};
         atts[0].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -12403,7 +12410,7 @@ void VulkanRenderer::createSSAOPipeline()
         atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[0].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
         atts[0].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        atts[1].format         = VK_FORMAT_D16_UNORM;
+        atts[1].format         = kSsaoPosDepthFormat;
         atts[1].samples        = VK_SAMPLE_COUNT_1_BIT;
         atts[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -12743,8 +12750,8 @@ void VulkanRenderer::createSSAOTargets(uint32_t w, uint32_t h)
     // Position prepass color: RGBA16F
     ssaoMakeImage(m_device, 0, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, colorRT,
                   VK_IMAGE_ASPECT_COLOR_BIT, m_ssaoPosRT.image, m_ssaoPosRT.memory, m_ssaoPosRT.view, fmem);
-    // Position prepass depth: D16_UNORM
-    ssaoMakeImage(m_device, 0, VK_FORMAT_D16_UNORM, w, h, depthRT,
+    // Position prepass depth: D32 (kSsaoPosDepthFormat, not D16)
+    ssaoMakeImage(m_device, 0, kSsaoPosDepthFormat, w, h, depthRT,
                   VK_IMAGE_ASPECT_DEPTH_BIT, m_ssaoPosDepth.image, m_ssaoPosDepth.memory, m_ssaoPosDepth.view, fmem);
     // SSAO raw AO: R8_UNORM
     ssaoMakeImage(m_device, 0, VK_FORMAT_R8_UNORM, w, h, colorRT,
@@ -13198,7 +13205,7 @@ bool VulkanRenderer::EnsureSSRPipelines()
         atts[0] = colorAtt(VK_FORMAT_R16G16B16A16_SFLOAT); // view-space position (SSAO's)
         atts[1] = colorAtt(VK_FORMAT_R16G16B16A16_SFLOAT); // GB1: oct normal + roughness
         atts[2] = colorAtt(VK_FORMAT_R32_SFLOAT);          // NDC depth
-        atts[3].format         = VK_FORMAT_D16_UNORM;
+        atts[3].format         = kSsaoPosDepthFormat;   // = m_ssaoPosDepth
         atts[3].samples        = VK_SAMPLE_COUNT_1_BIT;
         atts[3].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[3].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;

@@ -1968,6 +1968,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> ssaoPosSRV;
     ComPtr<ID3D11Texture2D>          ssaoPosDepth;      // separate depth for position prepass
     ComPtr<ID3D11DepthStencilView>   ssaoPosDepthDSV;
+    static constexpr DXGI_FORMAT     kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT; // not D16, see createSSAOTargets
     ComPtr<ID3D11Texture2D>          ssaoTex;           // R8 AO output
     ComPtr<ID3D11RenderTargetView>   ssaoRTV;
     ComPtr<ID3D11ShaderResourceView> ssaoSRV;
@@ -2422,12 +2423,16 @@ struct D3D11RendererImpl
         makeRT(DXGI_FORMAT_R8_UNORM,           ssaoTex,    ssaoRTV,    ssaoSRV);
         makeRT(DXGI_FORMAT_R8_UNORM,           ssaoBlurTex, ssaoBlurRTV, ssaoBlurSRV);
 
-        // Depth buffer for position prepass
+        // Depth buffer for position prepass (and the reflection MRT pre-pass,
+        // which binds the same DSV). D32 like the GI G-buffer (Thema 182 step 6,
+        // decision 110): as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at
+        // 50 m), so at 50-90 m a plant and the ground rounded to one value and
+        // the draw order decided which landed in the position target.
         {
             D3D11_TEXTURE2D_DESC dd{};
             dd.Width = (UINT)w; dd.Height = (UINT)h;
             dd.MipLevels = dd.ArraySize = 1;
-            dd.Format = DXGI_FORMAT_D16_UNORM; dd.SampleDesc.Count = 1;
+            dd.Format = kSsaoPosDepthFormat; dd.SampleDesc.Count = 1;
             dd.Usage = D3D11_USAGE_DEFAULT;
             dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
             device->CreateTexture2D(&dd, nullptr, &ssaoPosDepth);
