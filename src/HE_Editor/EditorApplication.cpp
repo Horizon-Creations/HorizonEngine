@@ -7532,16 +7532,24 @@ void EditorApplication::dumpFrameHeadless()
 		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
 		// instances the batch with its built-in program draws it grey; one that keeps
 		// the material draws it magenta, once per instance (Thema 163 Teil 2b, GL gate).
-		if (const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT"); fm && std::string_view(fm) == "graph")
+		// =wind adds a Wind Sway node on the WPO pin (the Foliage template's vertex), so
+		// the batch exercises the instanced WPO vertex (Thema 182, 2e). The offset is
+		// windSpeed * 0.1 m at the top of a 1 m bend: pin it with HE_DUMP_WINDSPEED and
+		// HE_SKY_TIME (the graph's clock), and A/B against HE_GRAPH_INSTANCING=0.
+		const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT");
+		const bool  windMat = fm && std::string_view(fm) == "wind";
+		if (fm && (std::string_view(fm) == "graph" || windMat))
 		{
 			MaterialAsset mat;
 			mat.type = HE::AssetType::Material;
-			mat.name = "FoliageGraphTest";
+			mat.name = windMat ? "FoliageWindTest" : "FoliageGraphTest";
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.8f;
 			g.connect(col, 0, out, 0);
+			if (windMat)
+				g.connect(g.addNode(HE::MatNodeType::WindSway), 0, out, HE::kMatOutputWPOPin);
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
@@ -7549,6 +7557,8 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderVertGlsl = gen.vertexBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEMAT=%s (vertex body %zu chars)",
+			            fm, gen.vertexBody.size());
 			fl.materialAssetId = contentManager().registerMaterial(std::move(mat));
 		}
 		reg.emplace<FoliageComponent>(land, fol);

@@ -190,6 +190,8 @@ add_executable(he_tests
     test_foliage_cluster.cpp
     # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
     test_foliage_layers.cpp
+    # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
+    test_graph_instancing.cpp
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp
