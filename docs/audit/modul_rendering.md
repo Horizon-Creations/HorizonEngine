@@ -180,6 +180,15 @@ Funde: **5 Hoch, 20 Mittel, 4 Niedrig** (29 gesamt). Alle Laufzeit-Aussagen sind
 - `src/HE_Rendering/src/Backends/*`: `OcclusionCuller::refine` nur in GL (`:10929`) und Metal (`:17907`) verdrahtet; D3D11/D3D12/Vulkan rufen es nicht auf (Feature-Parität bzw. Absicht dokumentieren).
 - `include/HorizonRendering/LightPacking.h:27` (`kMaxLightWindow`) und `RenderConstants.h:14` (`kShadowMapResolution`) sollten die einzigen Quellen für 8 bzw. 2048 sein (REN-1017).
 
+**Nachtrag 17.10.2026 (Thema 182 Schritt 4, Entscheidung 110): Muster „D16-Tiefe auf D3D/Vulkan“, jetzt zweimal aufgefallen**
+
+- Die eigenen Tiefenpuffer der Kamera-Vorpässe sind auf D3D11/D3D12/Vulkan **D16** (GL 24 Bit, Metal 32). Ab einigen zehn Metern fallen Flächen auf gleiche
+  16-Bit-Werte, und die Zeichenreihenfolge entscheidet, welche im Vorpass landet: ein Bild, das von Batching/Sortierung abhängt. Gefunden im GI-G-Buffer
+  (Thema 204) und im SSAO-Positionsvorpass (Thema 182: Foliage-Cluster gegen ordered 0,21 %/0,51 % des Bodens auf D3D11/Vulkan, mit D32 auf D3D11 identisch;
+  `docs/foliage-instancing-lod-plan-2026-10-10.md` §17.3). Stand dieses Branches: SSAO-Vorpass `D3D11Renderer.cpp:2430`, `D3D12Renderer.cpp:5592/5943/5961/6229`,
+  `VulkanRenderer.cpp:12406/12747/13201` (Reflexions-MRT-Pass); GI-G-Buffer `D3D11Renderer.cpp:3436`, `D3D12Renderer.cpp:7387/7588` (falls Thema 204 sie noch nicht
+  umgestellt hat). Neue Vorpässe auf D3D/Vulkan: D32_FLOAT / D32_SFLOAT nehmen, und vor einem Bild-A/B nach `D16_UNORM` greppen.
+
 ## Unsicher / Messung nötig
 
 **Rendering_1.md**
