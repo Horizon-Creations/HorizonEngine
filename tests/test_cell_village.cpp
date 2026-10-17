@@ -223,7 +223,10 @@ struct Village
 	Thing                 drifter;
 	HE::UUID              gate, post;
 
-	Village(const char* name, int villagerCount, int traderCount, int houseCount, int crateCount)
+	// `withSaveState` false: the same village with no NPC keeping anything (the
+	// bench's control for what CellState's capture costs at the unload).
+	Village(const char* name, int villagerCount, int traderCount, int houseCount, int crateCount,
+	        bool withSaveState = true)
 		: root(std::filesystem::temp_directory_path() / name)
 		, cm((prepare(root) / "Content").string())
 	{
@@ -264,7 +267,7 @@ struct Village
 			const Cell c = cellXZ(i);
 			const Entity v = spawn(editor, "Villager " + std::to_string(i), slot(c.x, c.z, i / nCells, 0));
 			addScript(editor, v, villagerLua, "villager");
-			editor.addComponent(v, SaveStateComponent{});
+			if (withSaveState) editor.addComponent(v, SaveStateComponent{});
 			villagers.push_back(thing(v, c));
 		}
 		const int villagerRows = (villagerCount / nCells + 11) / 12 + 1;
@@ -273,7 +276,7 @@ struct Village
 			const Cell c = cellXZ(i);
 			const Entity t = spawn(editor, "Trader " + std::to_string(i), slot(c.x, c.z, i / nCells, villagerRows));
 			addScript(editor, t, traderClass, "Trader");
-			editor.addComponent(t, SaveStateComponent{});
+			if (withSaveState) editor.addComponent(t, SaveStateComponent{});
 			traders.push_back(thing(t, c));
 		}
 		// Crates: a static body each, nothing to run.
@@ -780,10 +783,12 @@ TEST_CASE("Village: prefab houses and 50 scripted NPCs keep everything over many
 //   he_tests --no-skip --test-case="Village bench*"
 TEST_CASE("Village bench: a cell's scripts and state by NPC density" * doctest::skip())
 {
-	for (const int perCell : { 3, 30, 125 })
+	struct Rung { int perCell; bool saveState; };
+	for (const Rung rung : { Rung{ 3, true }, Rung{ 30, true }, Rung{ 125, true }, Rung{ 125, false } })
 	{
+		const int perCell = rung.perCell;
 		const int npcs = perCell * kCells * kCells;
-		Village v("he_cell_village_bench", npcs / 2, npcs - npcs / 2, 24, 20);
+		Village v("he_cell_village_bench", npcs / 2, npcs - npcs / 2, 24, 20, rung.saveState);
 		Game g(v);
 		auto stats = [](std::vector<double> ms)
 		{
@@ -808,9 +813,9 @@ TEST_CASE("Village bench: a cell's scripts and state by NPC density" * doctest::
 			g.updateMs.clear();
 			g.allOut();
 			const auto out = stats(g.updateMs);
-			std::printf("VILLAGE_BENCH perCell=%d npcs=%d rep=%d | in: updates=%zu max=%.2f sum=%.1f ms, cellLoaded max=%.2f sum=%.1f"
+			std::printf("VILLAGE_BENCH perCell=%d npcs=%d saveState=%d rep=%d | in: updates=%zu max=%.2f sum=%.1f ms, cellLoaded max=%.2f sum=%.1f"
 			            " | out: updates=%zu max=%.2f sum=%.1f ms, cellUnloading max=%.2f sum=%.1f, states=%zu\n",
-			            perCell, npcs, rep, inUpdates, in.max, in.sum,
+			            perCell, npcs, rung.saveState ? 1 : 0, rep, inUpdates, in.max, in.sum,
 			            inHostMax, inHostSum, g.updateMs.size(), out.max, out.sum, g.host.unloadingMsMax,
 			            g.host.unloadingMsSum, g.cells.state().states());
 		}
@@ -826,8 +831,8 @@ TEST_CASE("Village bench: a cell's scripts and state by NPC density" * doctest::
 			g.frames(1);
 		}
 		const auto walk = stats(g.updateMs);
-		std::printf("VILLAGE_BENCH perCell=%d npcs=%d walk 20 m/s: frames=%zu p50=%.3f p99=%.3f max=%.2f ms, loads=%zu unloads=%zu\n",
-		            perCell, npcs, g.updateMs.size(), walk.p50, walk.p99, walk.max,
+		std::printf("VILLAGE_BENCH perCell=%d npcs=%d saveState=%d walk 20 m/s: frames=%zu p50=%.3f p99=%.3f max=%.2f ms, loads=%zu unloads=%zu\n",
+		            perCell, npcs, rung.saveState ? 1 : 0, g.updateMs.size(), walk.p50, walk.p99, walk.max,
 		            g.cells.streamer().stats().loadsDone, g.cells.streamer().stats().unloads);
 		std::fflush(stdout);
 	}
