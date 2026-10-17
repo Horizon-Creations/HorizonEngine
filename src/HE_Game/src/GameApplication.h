@@ -18,6 +18,7 @@
 #include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/CellRuntime.h>
+#include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/WeatherAudio.h>
@@ -369,6 +370,11 @@ private:
     // The game's own Ctx (apiCtx), so a cell's Save Game variables go through the
     // script runtime the entities run in (CellState).
     void cellApiCtx(HE::api::Ctx& ctx) override;
+    // A cell's scripts start when it is built and stop before it goes, through the
+    // helper the editor's Play calls too (HE::startCellScripts / stopCellScripts).
+    void cellLoaded(HorizonWorld& world, entt::entity root, const std::vector<entt::entity>& created) override;
+    void cellUnloading(HorizonWorld& world, entt::entity root) override;
+    HE::CellScriptHosts cellScriptHosts();
     HE::CellRuntime m_cellRuntime{ *this };
 };
 

@@ -673,9 +673,11 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 	CHECK(moves("rigidbody", { { "type", 0 } }));   // static
 	// Stateful (Thema 183 step 2): what the runtime's CellState keeps over an unload.
 	CHECK(moves("saveState"));
+	// …and a script, which the cell host starts and stops with the cell (step 3).
+	CHECK(moves("script", { { "asset", json::array({ 77, 77 }) } }));
 
 	for (const char* key : { "audiosource", "audiolistener", "animationlayers", "rootmotion",
-	                         "animstatemachine", "ik", "sequenceplayer", "script",
+	                         "animstatemachine", "ik", "sequenceplayer",
 	                         "navagent", "navmesh", "characterController", "movement", "camera",
 	                         "cameraRig", "joint", "rope", "trail", "network", "environment", "weather",
 	                         "terrain", "foliage", "uicanvas", "uielement", "uitext", "uiimage", "uibutton",
@@ -709,7 +711,8 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 		return r.moved == 1;
 	};
 	CHECK(movesWith({ { "mesh", json::object() }, { "saveState", json::object() } }));
-	CHECK_FALSE(movesWith({ { "saveState", json::object() }, { "script", json::object() } }));
+	CHECK(movesWith({ { "saveState", json::object() }, { "script", json::object() } }));
+	CHECK_FALSE(movesWith({ { "script", json::object() }, { "characterController", json::object() } }));
 	CHECK_FALSE(movesWith({ { "saveState", json::object() }, { "rigidbody", { { "type", 1 } } } }));
 }
 
@@ -747,7 +750,7 @@ TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree mov
 	};
 
 	// `lampComponents` is what the Lamp beside the placement carries: a mesh (it can
-	// move) or a script (it cannot).
+	// move) or a camera (it cannot).
 	const auto split = [&](json lampComponents)
 	{
 		json ents = json::array();
@@ -790,7 +793,7 @@ TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree mov
 
 	SUBCASE("the Lamp cannot move: placement and Lamp both stay in the base")
 	{
-		const HE::CellSplitResult r = split({ { "script", { { "asset", id(77) } } } });
+		const HE::CellSplitResult r = split({ { "camera", json::object() } });
 		REQUIRE(r.error.empty());
 		REQUIRE(r.cells.size() == 1);
 		const std::set<std::string> inCell = namesIn(r.cells[0].scene), inBase = namesIn(r.base);
@@ -861,11 +864,11 @@ TEST_CASE("splitSceneIntoCells: what the base refers to inside a cell keeps it i
 	}
 	SUBCASE("a movable thing that names something in the base stays with it")
 	{
-		// A lamp whose mesh block carries the id of a pole in the base (a script keeps the pole
+		// A lamp whose mesh block carries the id of a pole in the base (a camera keeps the pole
 		// there). The field is made up, and it is the only thing that tells the lamp from a
 		// free one: that is the point of finding references by their value.
 		json lamp = { { "mesh", { { "partner", id(11) } } } };
-		json pole = { { "script", { { "asset", id(77) } } } };
+		json pole = { { "camera", json::object() } };
 		const auto r = world({ record(10, "Lamp", lamp), record(11, "Pole", pole, 60.0) });
 		REQUIRE(r.error.empty());
 		const auto base = namesIn(r.base);

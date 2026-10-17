@@ -32,9 +32,9 @@ namespace
 //             that was lost on the way matters.
 //   Stateful  things with state or a script (an NPC): the state has to be written
 //             out on an unload and applied on the load, which the runtime does
-//             (CellState.h, Thema 164 step 3b). Today: what carries a
-//             SaveStateComponent. Scripts follow once a cell starts and stops
-//             them (Thema 183 step 3).
+//             (CellState.h, Thema 164 step 3b): what carries a SaveStateComponent,
+//             and what runs a script, which the cell host starts when the cell is
+//             built and stops before it goes (CellScripts.h, Thema 183 step 3).
 //   Resident  everything else. It is always there.
 enum class StreamClass : uint8_t
 {
@@ -77,6 +77,15 @@ constexpr ComponentClass kComponentClasses[] = {
 	// what CellState keeps over an unload, so it may go into a cell. The other
 	// components still decide: a dynamic body or a script keeps it in the base.
 	{ "saveState",        StreamClass::Stateful },
+	// A script (a HorizonCode class or Lua/Python) runs while its cell is there: the
+	// host starts it once the cell is built and stops it before the cell goes. What
+	// it keeps over an unload is what a SaveStateComponent beside it asks for (a
+	// class's Save Game variables); without one it starts afresh on every load. An
+	// entity the base's logic needs at all times — a manager, a waypoint a level
+	// script looks up — is marked Resident by its author (StreamingComponent). The
+	// splitter cannot tell a class's base from the file: a placed player character
+	// stays in the base by its character controller, not by its class.
+	{ "script",           StreamClass::Stateful },
 	// Deliberately NOT here, though some look like dressing:
 	//   audiosource       Nothing starts a streamed entity's sound: AudioSystem::playOnStart
 	//                     runs at a scene start or switch (GameApplication), not for what a

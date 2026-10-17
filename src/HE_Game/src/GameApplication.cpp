@@ -1541,14 +1541,36 @@ std::function<bool(std::vector<uint8_t>&)> GameApplication::openCellFile(const s
 void GameApplication::streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
                                        const std::vector<uint32_t>& entities)
 {
-	// What a zone gets when it streams in (executeSceneRequests). Cells carry no
-	// scripts yet.
+	// What a zone gets when it streams in (executeSceneRequests).
 	streamSceneAssets(world, token, &entities);
 }
 
 void GameApplication::cellApiCtx(HE::api::Ctx& ctx)
 {
 	ctx = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
+}
+
+HE::CellScriptHosts GameApplication::cellScriptHosts()
+{
+	HE::CellScriptHosts h;
+	h.entities      = &m_entityHost;
+	h.text          = m_scriptContext.get();
+	h.textInstances = &m_scriptInstances;
+	h.runtime       = &m_gameInstance.runtime();
+	h.content       = &contentManager();
+	return h;
+}
+
+void GameApplication::cellLoaded(HorizonWorld& world, entt::entity, const std::vector<entt::entity>& created)
+{
+	// Once the whole cell is built, like a zone's startScriptsFor: a BeginPlay sees
+	// every entity of its cell and stands on its bodies.
+	HE::startCellScripts(cellScriptHosts(), world, created);
+}
+
+void GameApplication::cellUnloading(HorizonWorld& world, entt::entity root)
+{
+	HE::stopCellScripts(cellScriptHosts(), world, root);
 }
 
 void GameApplication::updateCellStreaming(float dt)

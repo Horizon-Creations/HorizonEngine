@@ -12890,6 +12890,19 @@ void EditorApplication::setPlayMode(bool play)
 		{
 			c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
 		});
+		// A cell's scripts start when it is built and stop before it goes, as in the
+		// game (HE::startCellScripts / stopCellScripts). Asked per cell: the script
+		// context below is made after this, and reset after the cells went at Stop.
+		m_playCells->setScripts([this]
+		{
+			HE::CellScriptHosts h;
+			h.entities      = &m_entityHost;
+			h.text          = m_scriptContext.get();
+			h.textInstances = &m_scriptInstances;
+			h.runtime       = &m_gameInstance.runtime();
+			h.content       = &contentManager();
+			return h;
+		});
 		m_playCells->begin([this] { return m_physicsWorld.get(); });
 		m_physicsWorld->setRegionHold([this](const glm::vec3& p)
 		{

@@ -57,3 +57,15 @@ void PlayCellStreaming::streamCellAssets(HorizonWorld& world, const HE::CancelTo
 	for (HE::UUID r : SceneSystems::collectAssetRefs(world, entities))
 		m_content.loadAssetAsync(r, {}, options);
 }
+
+void PlayCellStreaming::cellLoaded(HorizonWorld& world, entt::entity, const std::vector<entt::entity>& created)
+{
+	if (m_scripts) HE::startCellScripts(m_scripts(), world, created);
+}
+
+void PlayCellStreaming::cellUnloading(HorizonWorld& world, entt::entity root)
+{
+	// Also at Stop (end() → clear()): the entity host has ended by then, so only
+	// the Lua/Python instances are still there to go.
+	if (m_scripts) HE::stopCellScripts(m_scripts(), world, root);
+}

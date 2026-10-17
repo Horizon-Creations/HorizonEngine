@@ -1,5 +1,6 @@
 #pragma once
 #include <HorizonScene/CellRuntime.h>
+#include <HorizonScene/CellScripts.h>
 #include <filesystem>
 #include <functional>
 
@@ -28,6 +29,10 @@ public:
 	// that a cell's Save Game variables go through the play session's script
 	// runtime (CellState). Unset: transform and visibility only.
 	void setApiCtx(std::function<void(HE::api::Ctx&)> fill) { m_apiCtx = std::move(fill); }
+	// The play session's script hosts, asked at every cell that is built or goes
+	// (the script context is made after begin() and reset after end()). Unset: a
+	// cell's scripts are neither started nor stopped.
+	void setScripts(std::function<HE::CellScriptHosts()> hosts) { m_scripts = std::move(hosts); }
 	void update(HorizonWorld& world, float dt);
 	// The cells out of `world` (their bodies out of the physics world, their loads
 	// cancelled), and nothing streams until the next begin().
@@ -42,12 +47,15 @@ public:
 	void streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
 	                      const std::vector<uint32_t>& entities) override;
 	void cellApiCtx(HE::api::Ctx& ctx) override { if (m_apiCtx) m_apiCtx(ctx); }
+	void cellLoaded(HorizonWorld& world, entt::entity root, const std::vector<entt::entity>& created) override;
+	void cellUnloading(HorizonWorld& world, entt::entity root) override;
 
 private:
 	ContentManager&                m_content;
 	HE::CellRuntime                m_runtime{ *this };
 	std::function<PhysicsWorld*()> m_physics;
 	std::function<void(HE::api::Ctx&)> m_apiCtx;
+	std::function<HE::CellScriptHosts()> m_scripts;
 	std::filesystem::path          m_root;
 	bool                           m_playing = false;
 };
