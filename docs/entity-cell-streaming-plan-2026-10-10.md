@@ -1209,23 +1209,107 @@ Voller `ctest` 298/299 (nur `test_inspector_ui`, das bekannte Clipboard-Rauschen
 **Nicht geprüft:** Kein Spiel und kein Play as Host per Hand mit zwei Spielern in einem gesplitteten Projekt (geht erst mit verdrahtetem
 Besitzen, siehe oben); Linux/macOS nur über die CI.
 
+## 20. Schritt 5: Verifikation am Dorf (Thema 183 Schritt 5, 17.10.2026)
+
+Die Abnahme aus Abschnitt 8 (Schritt 3): ein Dorf aus Prefab-Häusern, 50 NPCs mit Skript und `SaveState`, Wegpunkte als Resident, dessen
+Zellen mehrfach entladen und geladen werden, ohne dass ein NPC seine Position, ein Gelenk oder eine zerstörte Kiste verliert. Gebaut als
+Test, nicht als Szene im Repo: `tests/test_cell_village.cpp`.
+
+**Aufbau** (`Village`, Zeile 208): in einer Editor-Welt gebaut und mit dem **Splitter des Editors** (`splitWorldIntoCells`) in 4 × 4
+Zellen zu 100 m geteilt, kein handgeschriebenes Zell-JSON. 24 Prefab-Platzierungen (Wurzel, Wand mit statischem Body, Tür mit Override),
+25 Lua-Dorfbewohner und 25 Händler (HorizonCode-Klasse, Save-Game-Variable `trips`, +1 je Tick), alle 50 mit `SaveStateComponent`, 20
+Kisten (statischer Body), 8 Wegpunkte und ein Bürgermeister (Lua) mit `StreamingComponent` (Resident), 3 Wachen mit Charaktercontroller
+und Skript, ein Tor (dynamischer Body) mit festem Gelenk an einem Pfosten (statisch). Der Host (`Host`, Zeile 355) ist der des Spiels in
+klein: Zelldateien aus dem Split, Bodies in eine echte `PhysicsWorld` samt Region-Hold, Skripte über `startCellScripts`/`stopCellScripts`,
+`cellApiCtx` mit Runtime und `EntityHost`. Die Basis lädt wie im Spiel über den Speicher (CBOR), die Basis-Skripte starten vorher.
+
+**Was der Splitter daraus macht** (geprüft): 143 Entities wandern (72 Haus-Entities, 50 NPCs, der Drifter, 20 Kisten), alle 16 Zellen
+mit Kopf (Version 2). In der Basis bleiben Wegpunkte und Bürgermeister (Schalter), die Wachen (Charaktercontroller, Klassentabelle), das
+Tor (dynamisch) und **sein Pfosten über die Ref-Hülle** (`keptForRefs == 1`). Die NPCs finden den Brunnen zur Laufzeit per
+`horizon.entity.findByName` (29 von 29 Starts finden ihn): eine Entity-Variable im Skript wäre ein Verweis im Komponentenblock, und die
+Ref-Hülle hielte den NPC in der Basis.
+
+**Runden** (Testfall Zeile 632): alles rein; 30 Frames (Lua `onUpdate`, `EntityHost::tick`, Physik, Laufzeit); fünf Kisten zerstört,
+Villager 0 per `reparentEntity` unter die Basis gehängt; alles raus; alles rein; vier Gänge der Kamera quer über das Dorf in 50-m-Schritten
+(je 15 Halte, an jedem bleiben Zellen und andere gehen, dazwischen 10 Frames Skripte); zweimal raus und rein. Zusammen **104
+Zell-Ladungen, 88 Entladungen**. „Alles rein“ ist ein Pin (`CellRuntime::pin`, Radius 400 m), „raus“ die Kamera 5 km weg.
+
+**Nach jedem Halt** (`checkVillage`, Zeile 511): jeder NPC ist genau dann da, wenn seine Zelle geladen ist (der ausgehängte immer); er
+steht, wo er zuletzt gesehen wurde (zwischen Aufzeichnung und Kamerabewegung läuft kein Skript), der Händler hat seine `trips`; jeder Name
+höchstens einmal; zerstörte Kisten nie wieder, die übrigen mit ihrer Zelle; jedes Haus mit allen drei Bindungen unter seiner Wurzel;
+Lua-Instanzen = Basis + ausgehängter + die der geladenen Dorfbewohner, Klassen-Instanzen = geladene Händler; `bodyCount` = Basis + Wände +
+Kisten der geladenen Zellen; `idCollisions == 0`, `failed == 0`. Nach dem ersten Entladen: 6 Tombstones (5 Kisten + Villager 0), 49
+Zustände. Der Bürgermeister läuft durch alles, der ausgehängte Dorfbewohner behält seine eine Lua-Instanz.
+
+**Kontrollen im selben Dorf** (ohne Neubau): der Drifter (Skript, kein `SaveState`) kommt nach jedem Wiederladen an seiner Dateiposition
+zurück; die nicht zerstörten Kisten kommen wieder; die Wachen bleiben in der Basis. **Negativkontrollen im Quelltext** (`CellRuntime.cpp`,
+jede einzeln, DLL nach `tests/` kopiert, mit `git checkout` zurückgelegt, das setzt die mtime): `skip` aus → Doppelte (14), zerstörte Kisten
+zurück (97), eine Lua-Instanz zu viel, `idCollisions` (66), `skipped`; kein Herausschreiben beim Entladen → Positionen (137) und `trips`
+(142) verloren, dazu alles von `skip`; Host vor `CellState` beim Entladen → **nur** `trips` (142), Positionen bleiben. Zurückgesetzt grün.
+
+**Befund: das Gelenk der Basis wartet, solange das Feld des Tors weg ist.** Ein Gelenk kommt mit dem Splitter nie in eine Zelle
+(`joint` steht nicht in der Klassentabelle, der Träger bleibt Resident, die Ref-Hülle zieht das Ziel nach); Basis→Zelle gibt es nur bei
+handgeschriebenen Zellen (`test_world_scale` „a joint from the base to a cell“). Trotzdem verschwindet das Gelenk des Tors zeitweise: das
+Tor steht in Zelle 2,0, und ist die weg, nimmt der Region-Hold den dynamischen Körper aus der Broad-Phase und das Gelenk wartet
+(`PhysicsWorld::applyRegionHold`, `destroyJointsInvolving(…, Wait)`); mit der Zelle ist es nach dem nächsten Schritt wieder da. Der Test
+hält genau das fest (`hasJoint == loaded(2,0)`, das Tor hängt in allen Runden auf 10 m). Das Plan-Kriterium „kein Gelenk verloren“ ist
+damit erfüllt durch Splitter (Gelenk und Ziel bleiben Resident) und Hold (wartet, kommt wieder), nicht durch ein Gelenk in einer Zelle.
+
+**Grenze der Klassentabelle, wie sie heute ist:** gestreamte NPCs sind Entities **ohne Körper** mit Skript und `SaveState`. Ein NPC mit
+`characterController`, `movement` oder dynamischem Body bleibt in der Basis (die Wachen sind die Kontrolle). Wer laufende NPCs mit Physik in
+Zellen will, braucht Charaktere in der Tabelle (Hold und Zustand für Charaktere); nicht Teil dieses Themas.
+
+**Messleiter** (`Village bench`, Zeile 784, `doctest::skip`, `he_tests --no-skip --test-case="Village bench*"`): NPC-Dichte je Zelle,
+16 Zellen, je Stufe dreimal rein und raus und ein Gang mit 20 m/s (2 100 Frames, Vorausschau an, Skripte je Frame); gemessen wird nur
+`CellRuntime::update`. NN-WS03 (32 Kerne, Windows 11, Release, zwei andere Bienen auf dem Gerät, CPU um 7 %), zwei Läufe, Spannen über
+beide:
+
+| NPCs je Zelle (gesamt) | rein: schlechtester Frame | `cellLoaded` je Zelle (Skriptstart), max | raus, 16 Zellen in einem Frame | Gang 20 m/s: p50 / p99 / max |
+|---|---|---|---|---|
+| 3 (48) | 0,96 bis 1,7 ms | 0,10 bis 0,22 ms | 0,19 bis 0,24 ms | 0,001 / ≤0,02 / 0,20 bis 0,26 ms |
+| 30 (480) | 4,2 bis 4,6 ms | 0,42 bis 0,73 ms | 1,1 bis 1,35 ms | 0,001 / ≤0,02 / 1,35 bis 1,39 ms |
+| 125 (2 000) | 5,5 bis 5,95 ms | 1,57 bis 1,77 ms | **5,0 bis 5,6 ms** | 0,002 / ≤0,04 / 5,4 bis 6,9 ms |
+| 125 (2 000), **ohne `SaveState`** | 5,4 bis 5,9 ms | 1,53 bis 1,78 ms | **1,45 bis 1,7 ms** | 0,002 / ≤0,03 / 3,9 bis 4,4 ms |
+
+- **Unter der Abnahme von 15.3 (unter 8 ms) in allen Stufen, aber über dem Budget von 4 ms ab rund 30 NPCs je Zelle.** Der Skriptstart
+  (`host.cellLoaded`: Klassen binden mit Construct und BeginPlay, Lua `onStart`) läuft einmal je Zelle in einem `update()`, **außerhalb**
+  des Scheiben-Budgets: 1,5 bis 1,8 ms für eine Zelle mit 125 NPCs (rund 13 µs je NPC), dazu die letzte Scheibe.
+- **Das Herausschreiben von `CellState` kostet beim Entladen rund 3,6 bis 3,9 ms für 2 000 Zustände** (5,0 bis 5,6 gegen 1,45 bis 1,7 ms),
+  rund 2 µs je NPC oder 0,24 ms je Zelle mit 125. Das Entladen ist nicht budgetiert: 16 Zellen in einem Frame ist der Teleport-Fall, beim
+  Gang gehen ein bis vier Zellen je Frame. Das Wiederanwenden (rund 6 µs je NPC; Summe der Ladeframes 44 bis 45 gegen 32 bis 34 ms)
+  verteilt sich auf die Scheiben und hebt den schlechtesten Frame nicht.
+- `cellUnloading` (Skripte stoppen) ist billig: 0,3 bis 0,5 ms für alle 16 Zellen.
+- **Vorschlag, nicht gebaut:** Skriptstart und Herausschreiben in das Budget nehmen (Start je Scheibe statt je Zelle, nach dem Muster von
+  `sliceBuilt`; Entladen über mehrere Frames). Erst nötig, wenn Zellen mit mehr als rund 30 Skript-NPCs gebaut werden.
+- Die Leiter von 153 §11.3 (Editor, 101k) und der Extract-Bench aus 15 sind **nicht** neu gelaufen: dieser Schritt ändert keinen
+  Render- oder Ladepfad, und Mac-Zahlen wären mit Windows nicht vergleichbar.
+
+**Geprüft** (Release, `C:/hw183`, `HE_ENABLE_SHADERC=ON`, NN-WS03, Scratch-`APPDATA`): `test_cell_village` dreimal hintereinander grün
+(18 697 Checks, schlechtestes `update()` im Test 1,4 bis 1,7 ms); `test_cell_state` 8/8, `test_cell_scripts` 4/4 nach dem Zurücklegen der
+Mutationen; voller `ctest -j4 --timeout 1500`: **300/302**, 220 s, `test_cell_village` darin grün; rot `test_inspector_ui` (Zwischenablage im Agenten-Prozess,
+bekanntes Rauschen wie in Schritt 1 bis 4) und `test_team_sync` (ein Zähler-Check `waiting == 2` war 0 unter `-j4`-Last; allein zweimal
+grün, 6 s; Netz, von diesem Schritt nicht angefasst: Zeitabhängigkeit, nicht dieser Zweig); 2 übersprungen (`runtime_size_app_*`).
+`HorizonEditor` nicht neu gebaut (kein Engine- oder Editor-Code geändert); `HorizonGame` hat der Lauf mitgebaut.
+
+**Nicht geprüft:** Kein Editor-Play und kein Spiel per Hand mit dem Dorf (der Weg ist derselbe Host-Code, aber nicht in der App gelaufen);
+Python-Skripte in Zellen; das Dorf über einen Ursprungswechsel; Spieler als Anker im Dorf (Schritt 4, braucht verdrahtetes Besitzen);
+Linux/macOS nur über die CI.
+
 ## Handoff
 
-- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 4 von 5 (Spieler als Anker auf dem Server, nur Anker)
-- **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ c6c0f88a (Code, Tests) und der Commit mit diesem
-  Abschnitt (gepusht)
-- **Done:** `ICellHost::cellPlayers` + `HE::sessionPlayers`; `CellRuntime::update` streamt um jeden Spieler-Charakter der Autorität, mit
-  eigener Vorausschau, auch ohne Kamera; Spiel und Editor-Play (Play as Host) liefern ihre Sitzung.
-- **Files touched:** `CellRuntime.h/.cpp`, `GameApplication.h`, `PlayCellStreaming.h`, `EditorApplication.cpp` (eine Zeile),
-  `tests/test_cell_runtime.cpp`, dieses Dokument.
-- **Verified / not verified:** Abschnitt 19.
-- **Decisions taken:** Roster als Quelle, Haken + Helfer statt Kopplung, Vorausschau nach PlayerId, offline keine Spieler-Anker.
-- **Decisions suggested, not taken:** Besitzen über das Netz verdrahten (`player.possess` auf dem Host → `assignControl`, oder der
-  PlayerHost-Umbau des Mehrspielerplans); erst dann feuert der Anker in einer echten Sitzung.
-- **Traps:** Wer eine Negativkontrolle mit `Copy-Item`/`cp -p` aus einer vorher gemachten Sicherung zurücklegt, behält deren alte mtime:
-  ninja baut nichts neu, und der „saubere“ Lauf misst still die letzte Mutation (Lektion 367). Danach die Datei auf jetzt setzen.
-  Die TEMP-Ordner je Test (`%LOCALAPPDATA%/Temp/he_tests/<stem>`) legt nur das Konfigurieren an; fehlen sie, scheitert jeder Test
-  in 0,02 s ohne Ausgabe. Neu anlegen statt neu konfigurieren.
-- **Next steps:** 1. CI des Zweigs ansehen. 2. Schritt 5: Dorf mit Prefab-Häusern und 50 NPCs mit Skript, Wegpunkte und Manager
-  *Resident* markieren (Falle aus Schritt 3), Zellen mehrfach laden/entladen, Messleiter, voller ctest. 3. Ein Play per Hand in einem
-  gesplitteten Projekt mit einer Skript-Klasse in einer Zelle.
+- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 5 von 5 (Verifikation: Dorf, Zellen mehrfach, Messleiter, voller ctest)
+- **Branch / commit:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte` @ 1fe0f23f (Test), 9195dd6a (Kontrollstufe der
+  Leiter) und der Commit mit diesem Abschnitt (gepusht)
+- **Done:** `tests/test_cell_village.cpp`: Dorf durch den echten Splitter, 104 Ladungen / 88 Entladungen mit allen Invarianten,
+  Kontrollen im Dorf, drei Negativkontrollen im Quelltext; Dichte-Leiter (3/30/125 je Zelle, ohne `SaveState` als Kontrolle).
+- **Files touched:** `tests/test_cell_village.cpp` (neu), `tests/CMakeLists.txt`, dieses Dokument. Kein Engine-Code.
+- **Verified / not verified:** Abschnitt 20.
+- **Decisions taken:** Dorf als Test statt als Szene im Repo; Gelenk-Kriterium über Splitter und Hold (Abschnitt 20), nicht über ein
+  Gelenk in einer Zelle; NPCs ohne Körper (Grenze der Klassentabelle).
+- **Decisions suggested, not taken:** Skriptstart und `CellState`-Herausschreiben ins Budget nehmen (ab ~30 Skript-NPCs je Zelle über
+  4 ms); Charaktere in die Klassentabelle; Besitzen übers Netz (Schritt 4).
+- **Traps:** doctest vergleicht `entt::null` nur in doppelten Klammern (C2593); `INFO(const char*)` druckt „1“ (in `std::string`
+  wickeln); ein dynamischer Körper der Basis verliert sein Gelenk, solange sein eigenes Feld weg ist (Hold, gewollt). Negativkontrollen
+  mit `git checkout -- <datei>` zurücklegen (frische mtime), DLL nach `tests/` kopieren.
+- **Next steps:** 1. CI des Zweigs ansehen. 2. Königin: Thema zusammenführen (alle fünf Schritte erledigt). 3. Folgearbeit: Play per Hand
+  im gesplitteten Dorf; Budget für Skriptstart und Herausschreiben; `audiosource`/`animstatemachine` über den Host; Besitzen übers Netz.
