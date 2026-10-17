@@ -428,9 +428,18 @@ endif()
 # skips the fetch above, and links a libssh2.lib that is no longer produced by any
 # target ("missing and no known rule to make it"). So never accept a package config
 # from inside the build tree, and never consult the user package registry.
+#
+# HE_ENABLE_LIBSSH2=OFF builds the editor the way a machine without libssh2 (or
+# without a crypto backend for it) gets it: no HorizonContentSync, no self-update,
+# every HE_HAVE_LIBSSH2 call site compiled out. CI builds that form once so code
+# that only links with libssh2 present is caught before a release (EDT-401).
+option(HE_ENABLE_LIBSSH2 "Fetch/find libssh2 for the Editor's SFTP features (EngineContent sync, self-update)" ON)
 if(Libssh2_DIR AND "${Libssh2_DIR}" MATCHES "^${CMAKE_BINARY_DIR}")
     unset(Libssh2_DIR CACHE)
 endif()
+if(NOT HE_ENABLE_LIBSSH2)
+    message(STATUS "HorizonEngine: libssh2 disabled (HE_ENABLE_LIBSSH2=OFF) — Editor EngineContent SFTP sync and self-update unavailable")
+else()
 find_package(Libssh2 QUIET NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REGISTRY)
 if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
     if(WIN32)
@@ -480,6 +489,7 @@ else()
     message(STATUS "HorizonEngine: libssh2 found (system) — Editor EngineContent SFTP sync enabled")
     set(HE_HAVE_LIBSSH2 TRUE)
 endif()
+endif() # HE_ENABLE_LIBSSH2
 
 # ─── Python (optional: CPython embedding for Python gameplay scripting) ───────
 # Gameplay scripts can be written in Python (in addition to Lua). Dev builds link

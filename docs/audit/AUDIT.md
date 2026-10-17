@@ -77,8 +77,8 @@ Sortiert nach (Wirkung × Verbreitung) / Aufwand. Details und Code-Skizzen in de
 Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Ergebnisse nach oben durchschlagen). Jeder Punkt: separate PR, bestehende Tests (`tests/`) als Netz, vorher/nachher messen wo "Messung" angegeben.
 
 **Stufe 0 – Korrektheit und Release-Fallen (Stunden, geringes Risiko)**
-- [ ] REN-804 `gpuDebug` auf `_DEBUG || getenv("HE_GPU_DEBUG")` zurückstellen (Kommentar im Code sieht das vor)
-- [ ] EDT-401 `onProjectWriteRefused` auch ohne libssh2 definieren; Build ohne libssh2 in CI aufnehmen
+- [x] REN-804 `gpuDebug` auf `_DEBUG || getenv("HE_GPU_DEBUG")` zurückstellen (Kommentar im Code sieht das vor) — Thema 212 Schritt 1; `he_vk_imagetests.py` setzt `HE_GPU_DEBUG=1` und prüft, dass der Layer an war
+- [x] EDT-401 `onProjectWriteRefused` auch ohne libssh2 definieren; Build ohne libssh2 in CI aufnehmen — Thema 212 Schritt 1; Option `HE_ENABLE_LIBSSH2`, CI-Job `no-libssh2`
 - [ ] CORE-203 Use-after-return in `EngineDeps::resolve` (`shared_ptr`-Zustand); CORE-604 Zyklenschutz in `fieldDefault`; NET-105/106 Längenprüfungen vor `resize`; EDT-2007 Use-after-erase; REN-204 Debug-Buffer pro Frame in Flight; SCN-112 Stimmen abräumen; CORE-501/CSY-102 Timeouts
 - [ ] Sichtbare Defekte: EDT-604 (`##wx` in Referenztiteln), EDT-1718 (Gedankenstrich doppelt kodiert), EDT-307 (Collab-Reload nie wirksam)
 

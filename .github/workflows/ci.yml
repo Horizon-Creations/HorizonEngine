@@ -704,7 +704,8 @@ jobs:
 
       # The Linux job's packages, plus: the lavapipe ICD (mesa-vulkan-drivers),
       # loader + headers for the build (libvulkan-dev), vulkaninfo, the Khronos
-      # validation layer (the renderer turns it on by itself when it is installed,
+      # validation layer (a release renderer only loads it with HE_GPU_DEBUG set,
+      # which he_vk_imagetests.py does for every shot and then checks the log for,
       # so every image test is also a validation run), glslangValidator for the
       # scene SPIR-V, and Xvfb for the X11 fallback probe.
       - name: Install dependencies (+ lavapipe)
@@ -846,3 +847,67 @@ jobs:
             vk-shots/
             vkinfo.txt
           if-no-files-found: warn
+
+  # The editor as a machine without libssh2 gets it: HE_ENABLE_LIBSSH2=OFF, so no
+  # HorizonContentSync, no self-update, every HE_HAVE_LIBSSH2 block compiled out.
+  # Every other job links libssh2, so code that only builds with it present went
+  # unseen until someone configured without it (EDT-401: a ProjectWriteGate
+  # handler defined inside an HE_HAVE_LIBSSH2 block but used outside it). Build
+  # only — no tests, no package, no secrets: the question is "does it compile
+  # and link", the feature itself is tested by the jobs above.
+  no-libssh2:
+    name: Linux · editor without libssh2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      # The Linux job's build packages (see "Install Linux dependencies" above).
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libxkbcommon-dev libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
+            liblz4-dev libzstd-dev python3-dev \
+            libcurl4-openssl-dev
+
+      # A key of its own: HE_HAVE_LIBSSH2 is a compile definition of the editor,
+      # so its objects are not the Linux job's.
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: Linux-no-libssh2
+          max-size: 1G
+          save: ${{ github.event_name != 'pull_request' }}
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON -DHE_ENABLE_LIBSSH2=OFF
+
+      # Without this the job could quietly link libssh2 after all and prove nothing.
+      - name: Assert libssh2 is out of the build
+        run: |
+          grep -qx 'HE_ENABLE_LIBSSH2:BOOL=OFF' build/CMakeCache.txt \
+            || { echo "::error::HE_ENABLE_LIBSSH2 is not OFF in the cache"; exit 1; }
+          if [ -d build/_deps/libssh2-src ]; then
+            echo "::error::libssh2 was fetched although HE_ENABLE_LIBSSH2=OFF"
+            exit 1
+          fi
+          if [ -d build/src/HE_ContentSync ] || [ -d build/src/HE_SelfUpdate ]; then
+            echo "::error::HorizonContentSync/HorizonSelfUpdate are configured although HE_ENABLE_LIBSSH2=OFF"
+            exit 1
+          fi
+          echo "no libssh2, no HorizonContentSync, no HorizonSelfUpdate"
+
+      - name: Build editor
+        run: cmake --build build --target HorizonEditor -j 4

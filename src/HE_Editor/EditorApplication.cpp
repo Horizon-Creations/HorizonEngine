@@ -2412,7 +2412,6 @@ void EditorApplication::startGitProbe()
 	});
 }
 
-#ifdef HE_HAVE_LIBSSH2
 // ── A write the export lock turned away ─────────────────────────────────────
 // Called by whoever tried to change a file while an export runs (ProjectWriteGate),
 // possibly many times in a row — an autosave-style retry loop, a batch import — and
@@ -2437,6 +2436,7 @@ static void onProjectWriteRefused(const char* what)
 	HE::Ed::notify(std::move(note));
 }
 
+#ifdef HE_HAVE_LIBSSH2
 // ── EngineContent sync failures → notifications ──────────────────────────────
 // The library (HE_ContentSync) cannot talk to a user, and a worker thread that
 // fails ends in a log warning and a callback most callers ignore. Its listener is

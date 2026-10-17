@@ -380,6 +380,7 @@ ALLOWED_VALIDATION = {
 
 LOG_MARK_ARMED  = "frame dump armed"
 LOG_MARK_DUMPED = "frame dumped ("
+LOG_VALIDATION_ON = "VulkanRenderer: validation layer ENABLED"
 RE_DEVICE       = re.compile(r"VulkanRenderer: device 0 of \d+: (.*)")
 RE_VALIDATION   = re.compile(r"Vulkan validation: (.*)")
 
@@ -494,6 +495,9 @@ def run_shot(editor, outdir, name, dump_kv, env_kv, timeout):
     env.setdefault("HE_COLLAB_OFFLINE", "1")
     env.setdefault("HE_HIDDEN_WINDOW", "1")
     env.setdefault("HE_SKY_TIME", "10")
+    # A release build only turns the validation layer on when asked (REN-804);
+    # every shot here is meant to be a validation run as well.
+    env.setdefault("HE_GPU_DEBUG", "1")
     env["HE_DUMP_RHI"] = "Vulkan"
     env["HE_DUMP_PATH"] = str(bmp)
     env["HE_DUMP_QUIT"] = "1"
@@ -523,6 +527,8 @@ def run_shot(editor, outdir, name, dump_kv, env_kv, timeout):
     window = text[a if a >= 0 else 0: d if d >= 0 else len(text)]
     res["validation_in_dump"] = [v.strip() for v in RE_VALIDATION.findall(window)]
     res["validation_total"] = len(RE_VALIDATION.findall(text))
+    # Zero messages only means something when the layer was actually loaded.
+    res["validation_on"] = LOG_VALIDATION_ON in text
     res["dumped_line"] = LOG_MARK_DUMPED in text
     try:
         w, h, pix = read_bmp(bmp)
@@ -547,6 +553,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=900, help="seconds per shot")
     ap.add_argument("--require-device", default="llvmpipe",
                     help="substring the logged Vulkan device name must contain ('' = any)")
+    ap.add_argument("--allow-no-validation", action="store_true",
+                    help="don't fail a shot whose log shows no validation layer (machine without it)")
     args = ap.parse_args()
 
     editor = pathlib.Path(args.editor).resolve()
@@ -599,6 +607,8 @@ def main():
                           if not any(re.search(rx, v) for rx in allowed)]
             if unexpected:
                 problems.append(f"{vname}: {len(unexpected)} validation message(s) while drawing")
+            if not shot["validation_on"] and not args.allow_no_validation:
+                problems.append(f"{vname}: validation layer was not on (log lacks '{LOG_VALIDATION_ON}')")
             if shot["exit_code"] != 0:
                 # Reported, not judged: the BMP is written before the teardown.
                 print(f"::warning::{case}/{vname}: editor exit code {shot['exit_code']}"

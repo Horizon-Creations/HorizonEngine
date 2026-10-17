@@ -1280,11 +1280,15 @@ void VulkanRenderer::createInstance()
     std::vector<const char*> exts(sdlExts, sdlExts + extCount);
     std::vector<const char*> layers;
 
-    // GPU debug instrumentation (validation layer). TEMPORARILY forced ON while the Vulkan
-    // backend is still broken (black screen) so the user gets a validation log with zero
-    // setup. Re-gate to `_DEBUG || std::getenv("HE_GPU_DEBUG")` once Vulkan renders.
+    // GPU debug instrumentation (validation layer). Opt-in, as on D3D12: on in _DEBUG
+    // builds, or in any build when HE_GPU_DEBUG is set. The layer multiplies the cost of
+    // every vk* call, so a release editor without the variable must not pay it (REN-804).
+    // The lavapipe CI image tests set HE_GPU_DEBUG themselves (he_vk_imagetests.py).
+#ifdef _DEBUG
     const bool gpuDebug = true;
-    (void)0;
+#else
+    const bool gpuDebug = (std::getenv("HE_GPU_DEBUG") != nullptr);
+#endif
     bool haveDebugUtils = false;
     if (gpuDebug)
     {
