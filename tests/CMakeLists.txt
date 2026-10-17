@@ -226,6 +226,7 @@ add_executable(he_tests
     test_transform_propagation.cpp
     test_cell_split.cpp
     test_cell_runtime.cpp
+    test_cell_state.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp

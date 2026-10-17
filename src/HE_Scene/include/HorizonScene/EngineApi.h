@@ -321,6 +321,18 @@ namespace entity {
     bool saveState(Ctx&, Entity e);
     bool hasSavedState(Ctx&, Entity e);
     bool applySavedState(Ctx&, Entity e);
+    // The same state without the save: what saveState would write (JSON text),
+    // and the application of such a text, for an engine store that is not the
+    // active save — the cells' CellState (CellState.h), which keeps an unloaded
+    // cell's entities in memory. No play-mode or active-save gate and no log for
+    // an entity without an enabled SaveStateComponent: stateOf answers "" and
+    // applyState false, quietly, because a cell is full of such entities. Not
+    // script rows. `parts` picks what applyState touches: the world half
+    // (transform, visibility) can go on before an entity's body and its script
+    // exist, the script half (Save Game variables) needs the class instance.
+    enum : uint8_t { kStateWorld = 1, kStateScript = 2, kStateAll = 3 };
+    std::string stateOf(Ctx&, Entity e);
+    bool        applyState(Ctx&, Entity e, const std::string& text, uint8_t parts = kStateAll);
 }
 
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────

@@ -14,6 +14,7 @@ add_library(HorizonScene SHARED
     src/CellSplit.cpp
     src/CellPhysics.cpp
     src/CellRuntime.cpp
+    src/CellState.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp

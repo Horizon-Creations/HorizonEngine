@@ -671,9 +671,11 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 	CHECK(moves("light", { { "type", 1 } }));       // point
 	CHECK(moves("light", { { "type", 2 } }));       // spot
 	CHECK(moves("rigidbody", { { "type", 0 } }));   // static
+	// Stateful (Thema 183 step 2): what the runtime's CellState keeps over an unload.
+	CHECK(moves("saveState"));
 
 	for (const char* key : { "audiosource", "audiolistener", "animationlayers", "rootmotion",
-	                         "animstatemachine", "ik", "sequenceplayer", "script", "saveState",
+	                         "animstatemachine", "ik", "sequenceplayer", "script",
 	                         "navagent", "navmesh", "characterController", "movement", "camera",
 	                         "cameraRig", "joint", "rope", "trail", "network", "environment", "weather",
 	                         "terrain", "foliage", "uicanvas", "uielement", "uitext", "uiimage", "uibutton",
@@ -682,6 +684,33 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 	CHECK_FALSE(moves("light", { { "type", 0 } }));       // directional
 	CHECK_FALSE(moves("rigidbody", { { "type", 1 } }));   // dynamic
 	CHECK_FALSE(moves("rigidbody", { { "type", 2 } }));   // kinematic
+
+	// A stateful thing is still held back by what else it carries: the least movable
+	// component decides, as for a static one.
+	const auto movesWith = [&](json comps)
+	{
+		comps["transform"] = { { "position", { 50.0, 0.0, 50.0 } } };
+		json ents = json::array();
+		ents.push_back({ { "uuid", json::array({ 0x5100, 1 }) }, { "name", "World" }, { "parent", nullptr },
+		                 { "children", json::array({ json::array({ 0x5100, 2 }) }) } });
+		ents.push_back({ { "uuid", json::array({ 0x5100, 2 }) }, { "name", "Thing" },
+		                 { "parent", json::array({ 0x5100, 1 }) }, { "components", std::move(comps) } });
+		HE::CellSplitOptions o;
+		o.cellSize = 100.0f;
+		o.dir      = "Content/W.cells";
+		const HE::CellSplitResult r = HE::splitSceneIntoCells(json{ { "version", "1.1" }, { "entities", ents } }, o);
+		REQUIRE(r.error.empty());
+		if (r.moved == 1)
+		{
+			REQUIRE(r.cells.size() == 1);
+			CHECK(r.cells[0].scene["streaming"]["classes"]["stateful"] == 1);
+			CHECK(r.cells[0].scene["streaming"]["classes"]["static"] == 0);
+		}
+		return r.moved == 1;
+	};
+	CHECK(movesWith({ { "mesh", json::object() }, { "saveState", json::object() } }));
+	CHECK_FALSE(movesWith({ { "saveState", json::object() }, { "script", json::object() } }));
+	CHECK_FALSE(movesWith({ { "saveState", json::object() }, { "rigidbody", { { "type", 1 } } } }));
 }
 
 TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree moves only together with what it binds")

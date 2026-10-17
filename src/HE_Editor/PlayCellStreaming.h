@@ -24,6 +24,10 @@ public:
 	// relative to (a headless witness that writes its cells elsewhere); empty =
 	// the open project's.
 	void begin(std::function<PhysicsWorld*()> physics, std::filesystem::path root = {});
+	// How the editor builds a script API Ctx for the play world (its apiCtx), so
+	// that a cell's Save Game variables go through the play session's script
+	// runtime (CellState). Unset: transform and visibility only.
+	void setApiCtx(std::function<void(HE::api::Ctx&)> fill) { m_apiCtx = std::move(fill); }
 	void update(HorizonWorld& world, float dt);
 	// The cells out of `world` (their bodies out of the physics world, their loads
 	// cancelled), and nothing streams until the next begin().
@@ -37,11 +41,13 @@ public:
 	PhysicsWorld* cellPhysics() override { return m_physics ? m_physics() : nullptr; }
 	void streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
 	                      const std::vector<uint32_t>& entities) override;
+	void cellApiCtx(HE::api::Ctx& ctx) override { if (m_apiCtx) m_apiCtx(ctx); }
 
 private:
 	ContentManager&                m_content;
 	HE::CellRuntime                m_runtime{ *this };
 	std::function<PhysicsWorld*()> m_physics;
+	std::function<void(HE::api::Ctx&)> m_apiCtx;
 	std::filesystem::path          m_root;
 	bool                           m_playing = false;
 };

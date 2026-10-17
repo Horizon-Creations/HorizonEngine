@@ -1083,22 +1083,74 @@ echtes Projekt mit Assets, Physik-Bodies und Skripten im Play; Linux/macOS-Bau (
 beide Hosts hätten denselben Code gehabt. `PlayCellStreaming` hängt am `EditorApplication`-Header (Header ist klein; ein
 vorwärts deklarierter `unique_ptr` bricht in jeder Übersetzungseinheit, die den Inline-Konstruktor sieht).
 
+## 17. Schritt 3b, Teil `CellState`: Zustand überlebt Entladen und Laden (Thema 183 Schritt 2, 17.10.2026)
+
+**Gebaut**
+
+| Teil | Wo | Stand |
+|---|---|---|
+| `HE::CellState` | `src/HE_Scene/include/HorizonScene/CellState.h`, `src/CellState.cpp` | Je Sitzung im Speicher: **Tombstones** (UUIDs) und **Zustände** (UUID → JSON-Text in der Form von `entity.saveState`). `sliceBuilt` merkt sich je Zellwurzel die UUIDs, die das Laden gebracht hat, und setzt die Welt-Hälfte eines gespeicherten Zustands (Transform, Sichtbarkeit) **vor** den Bodies der Scheibe; `cellBuilt` setzt die Skript-Hälfte (Save-Game-Variablen) nach `host.cellLoaded`; `cellUnloading` schreibt für alles, was das Laden gebracht hat und **noch unter der Wurzel** hängt, den Zustand (nur mit aktivem `SaveStateComponent`), alles andere wird Tombstone. Nur für Zellen mit stabilen Ids (`CellStreamer::keepsIds`, Version 2); eine Zelle ohne Kopf behält nichts (einmal geloggt) |
+| Tombstones vor dem Bau | `CellStreamer::Hooks::skip`, `dropSkippedRecords` in `CellStreamer.cpp`, `Stats::skipped` | Ein Tombstone wird **nicht gebaut und danach zerstört**, sondern sein Datensatz (samt Teilbaum, und seine Id aus den `children` der übrigen) vor `loadAdditiveFromJson` aus der Scheibe genommen: kein Body, kein Asset-Load, kein Aufblitzen. Der erste Entwurf zerstörte nach dem Bau und war für Befund 23 blind |
+| Zustand ohne Savegame | `HE::api::entity::stateOf` / `applyState(…, parts)` in `EngineApi.h/.cpp` | Der Kern von `saveState`/`applySavedState` (`captureStateJson`/`applyStateJson`) ohne die Schranken „Play-Modus“ und „aktives Savegame“, und still für Entities ohne Komponente; die beiden Script-Rows sind dünne Hüllen darum (Ausgabe byte-gleich, `test_engine_api` 130/130). `kStateWorld`/`kStateScript` trennen die zwei Hälften |
+| Laufzeit | `CellRuntime.cpp` | Entladen: **CellState** (Skripte laufen noch) → Host → Bodies → Token. Laden je Scheibe: `skip` (im Streamer) → Welt-Hälfte → Bodies → Assets; am Ende `host.cellLoaded` mit der um Ungültiges bereinigten Liste, dann die Skript-Hälfte. `clear()` schreibt nichts heraus (`m_clearing`: beim Stop des Editors sind die Skript-Hosts schon beendet); `clear`, `reset` und ein Neubeginn für ein anderes Manifest oder eine andere Welt vergessen alles. `CellRuntime::state()` für Tests und eine spätere Anzeige |
+| Ctx des Hosts | `ICellHost::cellApiCtx(api::Ctx&)`, `GameApplication::cellApiCtx`, `PlayCellStreaming::setApiCtx` (`EditorApplication.cpp`, `setPlayMode`) | Beide Hosts reichen ihren `apiCtx(world, physics, content)` durch (Runtime, `EntityHost`), damit Save-Game-Variablen gelesen und gesetzt werden können. Default: nur Welt und Physik |
+| Savegame als Rückfall | `CellState::restoreText` | Eine Entity, deren Abgang die Sitzung noch nicht gesehen hat, nimmt ihren Zustand aus dem **aktiven Savegame** (Play-Modus, aktives Save, Eintrag unter ihrer UUID), also das, was `entity.applySavedState` ihr beim Laden des Spiels gegeben hätte, wäre ihre Zelle da gewesen. Ein eigener Zustand der Sitzung ist neuer und gewinnt. Ohne das wäre der Wechsel nach `Stateful` (Zeile unten) für gesplittete Projekte ein Rückschritt gewesen: eine Tür, die vorher Resident war und per Skript aus dem Save gesetzt wurde, liegt nach dem Split in einer Zelle, die beim Laden des Spiels nicht da ist. Koordinaten passen ohne Umrechnung: das Save hält Top-Level-Entities absolut, und die lokale Position eines Zellkinds **ist** die absolute (die Wurzel steht bei -origin) |
+| Klasse „zustandsbehaftet“ | `CellSplit.cpp` (`kComponentClasses`: `saveState` → `Stateful`; `movesIntoCell` = nicht Resident) | Vorher blieb **jede** Entity mit `SaveStateComponent` in der Basis, `CellState` wäre in einem echten Split totes Holz gewesen. Die übrigen Komponenten entscheiden weiter (Skript, dynamischer Body → Basis). Der Kopf zählt `classes.stateful` |
+
+**Befund 23 (vom Bauplan nicht gesehen): eine aus der Zelle gehängte Entity käme doppelt.** Hängt ein Skript eine Zell-Entity unter die
+Basis, überlebt sie das Entladen. Beim Wiederladen ist ihre Id noch in der Welt, und der Lader gibt dem neu gebauten Datensatz eine **frische**
+Id (`idCollisions`), schon *vor* jedem Hook; nach dem Bau ist der Doppelgänger von keiner anderen Entity zu unterscheiden. Darum zählt als
+Tombstone „nicht mehr unter der Wurzel“ (nicht „nicht mehr in der Welt“), und darum wirkt der Tombstone vor dem Bau (`skip`). Die Mutation
+„Tombstone nur, wenn die Id aus der ganzen Welt weg ist“ macht genau diesen Fall rot.
+
+**Geprüft** (Release, `C:/hw183`, NN-WS03): `tests/test_cell_state.cpp` 8/8: zerstörte Kiste bleibt weg (zwei Runden, Scheiben
+zu drei; der Host bekommt sie nicht, `bodyCount` und `skipped` stimmen, `idCollisions` 0); bewegte und versteckte Kiste mit `SaveState` steht
+wieder da, **ihr Body auch** (Raycast an der neuen Stelle trifft sie, an der alten nichts), eine Kiste ohne Komponente als Kontrolle am
+Ursprungsort; die aus der Zelle gehängte Kiste gibt es einmal; eine Zelle ohne Kopf behält nichts und hat frische Ids; eine halb gebaute,
+aufgegebene Zelle lässt Zustand und Tombstones ihrer ungebauten Scheiben stehen; Ursprungsverschiebung um 1 km zwischen Entladen und Laden;
+`clear()` vergisst; `stateOf`/`applyState` mit Teilen; Rückfall aufs aktive Save (Eintrag gilt beim ersten Laden, der eigene Zustand danach,
+außerhalb des Play-Modus kein Rückfall). **Negativkontrollen** (einzeln, die DLL jeweils von Hand nach `tests/` kopiert, siehe
+Falle im Handoff): `skip` aus → nur die Tombstone-Checks rot (3 Fälle); kein Herausschreiben beim Entladen → alle Zustands- und
+Tombstone-Checks rot (5 Fälle); Tombstone nach „Id in der Welt“ → nur der Aus-der-Zelle-Fall rot; Rückfall aus → nur der Save-Check rot. Dazu `test_cell_split` 11/11 (Klassentabelle:
+`saveState` wandert, mit Skript oder dynamischem Body nicht), `test_cell_runtime` 4/4, `test_world_scale` 44/44, `test_engine_api` 130/130,
+`test_physics` 105/105, `test_scene_serializer` 46/46, `test_horizoncode_codegen` 53/53; `HorizonEditor` und `HorizonGame` bauen. Voller `ctest -j4 --timeout 1500`: 299/300, rot nur `test_inspector_ui` (Zwischenablage im
+Agenten-Prozess, bekanntes Rauschen wie in Schritt 1, Panel nicht angefasst).
+
+**Nicht geprüft:** Die **Skript-Hälfte** (Save-Game-Variablen) läuft durch denselben Code wie `entity.saveState`, aber in keinem Test mit
+Zellen: Entities mit Skript sind bis Schritt 3 Resident, und `cellLoaded` startet in keinem Host Skripte. Die Reihenfolge „Welt-Hälfte vor den
+Bodies“ trägt **kein** Test: umgedreht teleportiert `applyState` den Body selbst (`teleportToLocalPose`) und der Test bleibt grün; sie spart
+den Teleport. Kein Editor-Play und kein Spiel per Hand mit Zellzustand; Linux/macOS nur über die CI.
+
+**Entscheidungen und Grenzen:**
+- Die Skript-Hälfte kommt **nach** `host.cellLoaded`, also nach BeginPlay, sobald Schritt 3 dort `EntityHost::bindFor` ruft (`bind` feuert
+  Construct und BeginPlay zusammen). Plan 6.3 wollte „vor dem Start der Skripte“; das geht erst, wenn `bind` die beiden trennt oder Schritt 3
+  `CellRuntime` dazwischen die Variablen setzen lässt. Für Schritt 3 zu entscheiden.
+- Je Sitzung: ein Szenenwechsel im Spiel (`m_cellRuntime.reset()`) und Stop/Play im Editor verlieren den Zustand der Sitzung (das Save
+  bleibt Rückfall). **CellState schreibt nicht ins Savegame:** speichert das Spiel, während die Zelle einer Tür draußen ist, behält das Save den
+  Eintrag, den es hatte (auch `entity.saveState` erreicht sie dann nicht). Folgearbeit: beim `save.write` die Zustände der Sitzung mitschreiben.
+- Was ein Skript zur Laufzeit **unter** eine Zellwurzel spawnt, hat keine Id aus der Datei, geht mit der Zelle und kommt nicht wieder. Eine
+  Entity, die beim Laden eine frische Id bekam (`idCollisions`), bekommt ihren Zustand nicht zurück.
+- Kosten: beim Entladen ein Gang über den Teilbaum der Zelle (Map UUID → Entity), beim Laden ein Nachschlag je Datensatz; 16 Byte je gebauter
+  Entity bis zum Entladen. Nicht gemessen.
+
 ## Handoff
 
-- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 1 von 5 (2c)
+- **Topic / step:** Thema 183 (Zellstreaming 2), Schritt 2 von 5 (`CellState`, 3b)
 - **Branch:** `claude/zellstreaming-2-editor-play-npc-zustand-skripte`
-- **Done:** Spiel und Editor-Play streamen Zellen über denselben `HE::CellRuntime`; Play eines gesplitteten Projekts zeigt die Zellen (Abschnitt 16).
-- **Files:** `CellRuntime.h/.cpp` (HE_Scene), `GameApplication.h/.cpp` (Host), `PlayCellStreaming.h/.cpp` + `EditorApplication.cpp`
-  (`setPlayMode`, Frame-Update, `HE_DUMP_PLAYCELLS`), `StreamingDebugView.cpp` (Tab), `tests/test_cell_runtime.cpp`.
-- **Verified / not verified:** siehe Abschnitt 16.
-- **Pending (Schritt 3b ff.):** Skripte pro Zelle über `ICellHost::cellLoaded/cellUnloading` (beide Hosts: Spiel `startScriptsFor`,
-  Editor die Zonen-Entladung um `EditorApplication.cpp:3263`, ohne `unwatch`), danach `audiosource`/`animstatemachine` in `kComponentClasses` (Lektion:
-  `playOnStart`/`AnimatorHost::begin` laufen nur beim Szenenstart). `CellState`. Spieler als Anker (heute nur die Kamera, `CellRuntime::cameraAnchor`).
-- **Traps:** Die beiden Hosts bauen Zellen **nicht gleich** ab: der Szenenwechsel im Spiel ruft `m_cellRuntime.reset()`
-  (kein `cellUnloading`), der Stop im Editor `end()` → `clear()` (feuert `cellUnloading`, aber erst nach `m_animatorHost.end()`,
-  `m_entityHost.end()`, `m_playerHost.end()`, `fireShutdown()` und vor dem Skript-Abbau nach `m_physicsWorld.reset()`). Ein
-  Skript-Abbau pro Zelle darf sich also nicht allein auf `cellUnloading` verlassen.
-  `ContentManager` ist eine **globale** Klasse — `namespace HE { class ContentManager; }` erzeugt still eine zweite
-  und bricht entfernte Aufrufe mit C2664. Nach DLL-only-Bau ist `deploy/Game/HorizonScene.dll` alt (hier gesehen), selbst kopieren.
-- **Next steps:** 1. `cellLoaded`/`cellUnloading` in `GameApplication` und `PlayCellStreaming` mit Skriptstart/-abbau füllen und
-  in `test_cell_runtime.cpp` die Reihenfolge prüfen. 2. Anker-Liste statt einer Kamera in `CellRuntime::update` (Spieler, Pins).
+- **Done:** Tombstones und `SaveState`-Zustand einer Zelle überleben Entladen und Laden in Spiel und Editor-Play (Abschnitt 17);
+  Entities mit `SaveStateComponent` wandern beim Split in Zellen.
+- **Files:** `CellState.h/.cpp` (neu), `CellRuntime.h/.cpp` (Reihenfolge, `cellApiCtx`, `state()`), `CellStreamer.h/.cpp` (`Hooks::skip`,
+  `keepsIds`, `Stats::skipped`), `EngineApi.h/.cpp` (`entity::stateOf/applyState`), `CellSplit.cpp` (Klasse `Stateful`),
+  `GameApplication.h/.cpp`, `PlayCellStreaming.h` + `EditorApplication.cpp` (Ctx des Hosts), `tests/test_cell_state.cpp` (neu), `tests/test_cell_split.cpp`.
+- **Verified / not verified:** siehe Abschnitt 17 (`test_cell_state` 8/8 mit fünf Negativkontrollen, voller `ctest` 299/300 mit nur dem
+  bekannten `test_inspector_ui`). Nicht: Skript-Hälfte mit Zellen, Hand-Play, Linux/macOS (CI).
+- **Pending (Schritt 3):** Skripte pro Zelle über `cellLoaded`/`cellUnloading` (Spiel `bindFor`/`startScriptsFor`, Editor die Zonen-Entladung
+  um `EditorApplication.cpp:3263`); dann `script` (und `audiosource`, `animstatemachine`) in `kComponentClasses` als `Stateful`; ein Test für die
+  Skript-Hälfte (Klasse mit Save-Game-Variable in einer Zelle); die Frage BeginPlay vor oder nach den Variablen (Abschnitt 17);
+  Zustände der Sitzung beim `save.write` ins Savegame (heute nur Rückfall in die andere Richtung).
+- **Traps:** Nach einer Änderung nur in `HorizonScene` ist `<build>/tests/HorizonScene.dll` alt, wenn `he_tests` nicht neu linkt — eine
+  Negativkontrolle lief so still gegen die vorige Mutation. Vor jedem Lauf `src/HE_Scene/HorizonScene.dll` nach `tests/` kopieren.
+  Ein Tombstone muss vor dem Bau wirken (Befund 23), nicht danach. Die beiden Hosts bauen Zellen weiter unterschiedlich ab (Abschnitt 16);
+  `CellState` schreibt bei `clear()` bewusst nichts heraus.
+- **Next steps:** 1. `cellLoaded`/`cellUnloading` mit Skriptstart/-abbau in beiden Hosts, Reihenfolge in `test_cell_runtime.cpp`.
+  2. `script` als `Stateful`, Test „Save-Game-Variable überlebt das Entladen“. 3. Gruppe `streaming` in der API.

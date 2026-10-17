@@ -536,13 +536,15 @@ glm::dvec3 saveOriginFor(Ctx& c, Entity e)
 }
 } // namespace
 
-bool saveState(Ctx& c, Entity e)
+namespace
 {
-    std::string uuid;
-    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
-    if (!ss) return false;
+// What entity.saveState writes and entity.applySavedState applies, without their
+// gates (play mode, an active save): the cells' in-memory state (CellState.h)
+// keeps an unloaded cell's entities in exactly this form.
+nlohmann::json captureStateJson(Ctx& c, Entity e, const SaveStateComponent& ss)
+{
     nlohmann::json j = nlohmann::json::object();
-    if (ss->saveTransform)
+    if (ss.saveTransform)
     {
         const glm::dvec3 origin = saveOriginFor(c, e);
         if (auto* t = c.world->registry().try_get<TransformComponent>((entt::entity)e))
@@ -552,14 +554,93 @@ bool saveState(Ctx& c, Entity e)
                 { "rot", { t->rotation.x, t->rotation.y, t->rotation.z } },
                 { "scl", { t->scale.x,    t->scale.y,    t->scale.z } } };
     }
-    if (ss->saveVisibility)
+    if (ss.saveVisibility)
         j["visible"] = getVisible(c, e);
     // Only when there is something: an entity whose class ticks nothing (or
     // that has no class) writes exactly the state it wrote before this existed.
-    if (ss->saveScriptVars)
+    if (ss.saveScriptVars)
         if (nlohmann::json vars = scriptVarsToJson(c, e); !vars.empty())
             j["vars"] = std::move(vars);
-    return save::setEntityState(uuid, j.dump());
+    return j;
+}
+
+void applyStateJson(Ctx& c, Entity e, const SaveStateComponent& ss, const nlohmann::json& j, uint8_t parts)
+{
+    // Partial application: only what the save carries touches the instance.
+    if (parts & kStateWorld)
+    {
+        if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss.saveTransform)
+        {
+            if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
+            {
+                auto vec3 = [&](const char* key, glm::vec3& out) {
+                    auto it = t->find(key);
+                    if (it != t->end() && it->is_array() && it->size() >= 3)
+                        out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+                };
+                if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
+                {
+                    const glm::dvec3 origin = saveOriginFor(c, e);
+                    tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
+                                             (*it)[1].get<double>() - origin.y,
+                                             (*it)[2].get<double>() - origin.z);
+                }
+                vec3("rot", tc->rotation);
+                vec3("scl", tc->scale);
+
+                // Restoring a physics entity means moving the BODY, not the
+                // transform: the step overwrites the transform from Jolt, so a save
+                // restore on the one kind of entity a save exists for (the player,
+                // the crate the player pushed) used to be undone the same frame.
+                // Velocity is reset because the save carries none — arriving with
+                // the motion the entity had before the load is an artefact of the
+                // restore, not restored state.
+                //
+                // The pose above is LOCAL — it came out of TransformComponent when
+                // the save was written — so it goes through teleportToLocalPose,
+                // which converts it to the world pose physics deals in and puts the
+                // saved spelling back afterwards (setTransform would otherwise
+                // return the rotation as degrees(eulerAngles(q)), the same
+                // orientation written differently, and save → load → save would stop
+                // being byte-identical).
+                if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+                    teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
+            }
+        }
+        if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss.saveVisibility)
+            setVisible(c, e, v->get<bool>());
+    }
+    if (parts & kStateScript)
+        if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss.saveScriptVars)
+            applyScriptVars(c, e, *v);
+}
+} // namespace
+
+bool saveState(Ctx& c, Entity e)
+{
+    std::string uuid;
+    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
+    if (!ss) return false;
+    return save::setEntityState(uuid, captureStateJson(c, e, *ss).dump());
+}
+
+std::string stateOf(Ctx& c, Entity e)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return {};
+    const auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled) return {};
+    return captureStateJson(c, e, *ss).dump();
+}
+
+bool applyState(Ctx& c, Entity e, const std::string& text, uint8_t parts)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return false;
+    const auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled) return false;
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return false;
+    applyStateJson(c, e, *ss, j, parts);
+    return true;
 }
 
 bool hasSavedState(Ctx& c, Entity e)
@@ -582,49 +663,7 @@ bool applySavedState(Ctx& c, Entity e)
     }
     nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return false;
-    // Partial application: only what the save carries touches the instance.
-    if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss->saveTransform)
-    {
-        if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
-        {
-            auto vec3 = [&](const char* key, glm::vec3& out) {
-                auto it = t->find(key);
-                if (it != t->end() && it->is_array() && it->size() >= 3)
-                    out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
-            };
-            if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
-            {
-                const glm::dvec3 origin = saveOriginFor(c, e);
-                tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
-                                         (*it)[1].get<double>() - origin.y,
-                                         (*it)[2].get<double>() - origin.z);
-            }
-            vec3("rot", tc->rotation);
-            vec3("scl", tc->scale);
-
-            // Restoring a physics entity means moving the BODY, not the
-            // transform: the step overwrites the transform from Jolt, so a save
-            // restore on the one kind of entity a save exists for (the player,
-            // the crate the player pushed) used to be undone the same frame.
-            // Velocity is reset because the save carries none — arriving with
-            // the motion the entity had before the load is an artefact of the
-            // restore, not restored state.
-            //
-            // The pose above is LOCAL — it came out of TransformComponent when
-            // the save was written — so it goes through teleportToLocalPose,
-            // which converts it to the world pose physics deals in and puts the
-            // saved spelling back afterwards (setTransform would otherwise
-            // return the rotation as degrees(eulerAngles(q)), the same
-            // orientation written differently, and save → load → save would stop
-            // being byte-identical).
-            if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
-                teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
-        }
-    }
-    if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
-        setVisible(c, e, v->get<bool>());
-    if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss->saveScriptVars)
-        applyScriptVars(c, e, *v);
+    applyStateJson(c, e, *ss, j, kStateAll);
     return true;
 }
 } // namespace entity

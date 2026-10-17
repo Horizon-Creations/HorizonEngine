@@ -12886,6 +12886,10 @@ void EditorApplication::setPlayMode(bool play)
 		// initialize(), together with the hold that keeps a body from falling through
 		// a floor whose cell is not built yet — the game's order in startPhysics.
 		if (!m_playCells) m_playCells = std::make_unique<PlayCellStreaming>(contentManager());
+		m_playCells->setApiCtx([this](HE::api::Ctx& c)
+		{
+			c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
+		});
 		m_playCells->begin([this] { return m_physicsWorld.get(); });
 		m_physicsWorld->setRegionHold([this](const glm::vec3& p)
 		{

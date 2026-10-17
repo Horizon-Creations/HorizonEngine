@@ -366,6 +366,9 @@ private:
     PhysicsWorld* cellPhysics() override { return m_physicsWorld.get(); }
     void streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
                           const std::vector<uint32_t>& entities) override;
+    // The game's own Ctx (apiCtx), so a cell's Save Game variables go through the
+    // script runtime the entities run in (CellState).
+    void cellApiCtx(HE::api::Ctx& ctx) override;
     HE::CellRuntime m_cellRuntime{ *this };
 };
 

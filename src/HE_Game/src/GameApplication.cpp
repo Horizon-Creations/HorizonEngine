@@ -1546,6 +1546,11 @@ void GameApplication::streamCellAssets(HorizonWorld& world, const HE::CancelToke
 	streamSceneAssets(world, token, &entities);
 }
 
+void GameApplication::cellApiCtx(HE::api::Ctx& ctx)
+{
+	ctx = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
+}
+
 void GameApplication::updateCellStreaming(float dt)
 {
 	HE_PROFILE_SCOPE_N("CellStreaming");

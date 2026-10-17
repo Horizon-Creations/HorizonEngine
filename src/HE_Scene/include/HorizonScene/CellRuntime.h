@@ -1,4 +1,5 @@
 #pragma once
+#include "HorizonScene/CellState.h"
 #include "HorizonScene/CellStreamer.h"
 #include <JobSystem/JobSystem.h>
 #include <entt/entt.hpp>
@@ -11,6 +12,8 @@
 
 class HorizonWorld;
 class PhysicsWorld;
+
+namespace HE::api { struct Ctx; }
 
 namespace HE
 {
@@ -61,6 +64,14 @@ public:
 	{
 		(void)world; (void)root;
 	}
+
+	// The script API context the cells' state is read and written through
+	// (CellState, entity.saveState's code): `ctx` comes with the world and
+	// cellPhysics() filled in; the host adds what only it has, the HorizonCode
+	// runtime and its EntityHost, without which a class's Save Game variables are
+	// neither written out nor put back. Default: nothing added (transform and
+	// visibility only).
+	virtual void cellApiCtx(api::Ctx& ctx) { (void)ctx; }
 };
 
 class CellRuntime
@@ -97,6 +108,10 @@ public:
 	CellStreamer&       streamer() { return m_streamer; }
 	// Cells with a live cancel token, i.e. that started building and have not gone.
 	size_t              cellsWithLoads() const { return m_tokens.size(); }
+	// What the session keeps of the cells that went (tombstones, SaveState): kept
+	// across unloads and loads, dropped with the session — by clear(), reset(), and a
+	// start over for another manifest or world.
+	const CellState&    state() const { return m_state; }
 
 	// The anchor update() streams around: the first entity with a transform and a
 	// camera, absolute (world origin added). False when the world has none.
@@ -113,6 +128,11 @@ private:
 	glm::dvec3    m_lastCamera{ 0.0 };
 	bool          m_hasLastCamera = false;
 	std::unordered_map<uint32_t, CancelToken> m_tokens;   // cell root → its asset loads
+	CellState     m_state;
+	// clear() is under way: the cells go with the session, so their state is not
+	// written out (nothing would read it, and on the editor's Stop the script hosts
+	// it would be read through have ended already).
+	bool          m_clearing = false;
 };
 
 } // namespace HE
