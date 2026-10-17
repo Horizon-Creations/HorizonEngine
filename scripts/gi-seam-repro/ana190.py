@@ -3,8 +3,9 @@
 usage: python ana190.py SHOTDIR NAME X0 X1 Y0 Y1 [BACKENDS...] [--montage out.png]
 
 For each backend it reads NAME-{lod0,nostitch,stitched}-<RHI>.bmp and counts, in
-the window x0..x1, y0..y1, the "dash pixels": luma below 0.75 x the median of
-its own row in the window AND at least 12 levels below it. The lod0 frame (every
+the window x0..x1, y0..y1, the "dash pixels": luma at least 12 levels below the
+median of the 13 pixels around it in its row or its column (thin dark lines,
+not the broad shading of the relief). The window must stay 6 px off the frame edge. The lod0 frame (every
 chunk LOD0, no mixed seam) is the relief's own count; nostitch is the negative
 control (it must be clearly above lod0, or the capture proves nothing); the fix
 is good when stitched comes down to about lod0. --montage writes the three
@@ -22,10 +23,15 @@ def luma(path):
     return 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2], a
 
 
-def dashes(l, x0, x1, y0, y1):
-    w = l[y0:y1, x0:x1]
-    med = np.median(w, axis=1, keepdims=True)
-    return int(np.count_nonzero((w < 0.75 * med) & (w < med - 12.0)))
+def dashes(l, x0, x1, y0, y1, r=6):
+    # Against the median of +-r pixels along its row OR its column: a thin dark
+    # line of either direction stands out, the broad shading of the relief does not.
+    c = l[y0:y1, x0:x1]
+    row = np.median(np.lib.stride_tricks.sliding_window_view(
+        l[y0:y1, x0 - r:x1 + r], 2 * r + 1, axis=1), axis=2)
+    col = np.median(np.lib.stride_tricks.sliding_window_view(
+        l[y0 - r:y1 + r, x0:x1], 2 * r + 1, axis=0), axis=2)
+    return int(np.count_nonzero((c < row - 12.0) | (c < col - 12.0)))
 
 
 def main():

@@ -65,6 +65,11 @@ def main(argv):
             {'Key': 'EditorCamPosX', 'Value': ex},
             {'Key': 'EditorCamPosY', 'Value': ey},
             {'Key': 'EditorCamPosZ', 'Value': ez},
+            # The editor's ground grid lies at y=0. On a terrain that is flat at
+            # y=0 (this one, mostly) it z-fights into dashed dark lines every 10 m
+            # on every backend, GI on or off — not the seam defect. Off unless
+            # LIVE190_GRID=1. (Play hides it too.)
+            {'Key': 'ViewportGroundGrid', 'Value': os.environ.get('LIVE190_GRID') == '1'},
         ],
     }
     with open(os.path.join(cfg_dir, 'config.json'), 'w') as f:
@@ -75,6 +80,14 @@ def main(argv):
 
     env = {k: v for k, v in os.environ.items() if not k.startswith('HE_DUMP')}
     env.update(APPDATA=app, HE_MCP='1', HE_COLLAB_OFFLINE='1', HE_NET_LOOPBACK_ONLY='1')
+    # LIVE190_VIEWMODE=basecolor|normals|...: the live viewport honours
+    # HE_DUMP_VIEWMODE every frame (albedo vs light).
+    if os.environ.get('LIVE190_VIEWMODE'):
+        env['HE_DUMP_VIEWMODE'] = os.environ['LIVE190_VIEWMODE']
+    # LIVE190_SHOTS='{"name": [[x,y,z], [lx,ly,lz], fov], ...}' replaces SHOTS.
+    shots = SHOTS
+    if os.environ.get('LIVE190_SHOTS'):
+        shots = json.loads(os.environ['LIVE190_SHOTS'])
     log = os.path.join(deploy, 'HorizonEngine.log')
     if os.path.exists(log):
         os.remove(log)
@@ -106,10 +119,12 @@ def main(argv):
                 break
             time.sleep(1.0)
         time.sleep(float(os.environ.get('LIVE190_SETTLE', '20')))
-        for shot, (pos, look) in SHOTS.items():
+        for shot, spec in shots.items():
             fname = '%s_%s' % (name, shot)
-            r = call('scene_screenshot', {'position': pos, 'look_at': look, 'output': 'file',
-                                          'name': fname})
+            args = {'position': spec[0], 'look_at': spec[1], 'output': 'file', 'name': fname}
+            if len(spec) > 2:
+                args['fov'] = spec[2]
+            r = call('scene_screenshot', args)
             path = None
             for c in r.get('content', []):
                 if c.get('type') == 'text':
