@@ -764,6 +764,9 @@ Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`), Zweig `claude/folia
 - **Collab** (`TerrainSync.*`, `CollabSession.h`): Maske der Schicht i reist als Feld `16 + i` (`FoliageMask`, Feld 4 entfällt), Spiegel je Feld, ein Spiegel ohne
   Schicht wird geleert (eine später dort erscheinende Schicht geht ganz). `restoreFoliage` behält die empfangenen Einstellungen und übernimmt je Index nur Maske und
   noch gültige Streuung (vorher `n = move(o)`, das hätte eine fremde `castsShadow`-Änderung zurückgedreht, sobald sie serialisiert wird). Protokoll **17**.
+  Reihenfolge: der Settings-Blob legt eine Schicht beim Peer an, also wartet die Maske einer Schicht, die der Peer noch nicht kennt (`Mirror::foliageLayers`), und eine
+  geänderte Schichtzahl schickt die Settings außer der Reihe (sonst überholte die 33-ms-Maske den 200-ms-Blob, der Peer verwarf sie, der Spiegel hielt sie für angekommen:
+  dauerhaft auseinander, z. B. nach Undo von Remove Layer; Test „a layer that arrives with its mask is not overtaken by the mask“).
 - **Editor:** Inspector (`InspectorPanel.cpp`, Abschnitt Foliage): Schichtliste mit Sichtbarkeit, Add/Remove Layer (letzte bleibt), Name, Cast Shadows, Ambient Occlusion,
   Shadow Distance. Landscape-Tab Foliage (`TerrainTools.cpp`): Schicht-Wähler im Stil der Paint-Liste, `Add Foliage Layer##more`; Pinsel, Maskenauflösung, Erase Everywhere
   und Reset Mask wirken auf die aktive Schicht. Hilfe-Einträge in `EditorHelp.cpp`, `editor_help_audit.py --check` grün (1210/1210).
@@ -771,7 +774,7 @@ Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`), Zweig `claude/folia
 ### 14.2 Prüfung
 
 - `he_tests` je Datei (Release, scratch `APPDATA`): test_foliage 16, test_foliage_cluster 20, **test_foliage_layers 8 (neu)**, test_scene_serializer 46,
-  test_terrain_sync 13 (3 neu), test_terrain_tools_ui 6 (zweite Schicht per Panel angelegt und bemalt, Schicht 0 unberührt), test_net_collab 114, test_net_lanbeacon 17,
+  test_terrain_sync 14 (4 neu), test_terrain_tools_ui 6 (zweite Schicht per Panel angelegt und bemalt, Schicht 0 unberührt), test_net_collab 114, test_net_lanbeacon 17,
   test_editor_help 19: alle grün.
 - Voller `he_tests`-Lauf (Release): 5401 Fälle, 5397 grün, 4 rot, 12 übersprungen. Rot: zwei Fälle in `test_inspector_ui` (Zwischenablage, `GetClipboardText` = null,
   Light/Network-Komponente; auf NN-WS03 bekannt, siehe Memory „Pre-existing Vulkan/D3D/ctest noise“) und zwei in `test_profiler` (im Einzellauf 18/18 grün,
@@ -781,7 +784,7 @@ Gebaut auf NN-WS03 (Windows, MSVC Release, Baum `C:/hw182`), Zweig `claude/folia
 ## Handoff
 
 - **Topic / step:** Thema 182, Schritt 1 von 5 (Teil 2d, Schichten)
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ siehe `git log` (gepusht: ja)
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme` @ `433f2be8` (Code), Reihenfolge-Fix und Doku danach (gepusht: ja)
 - **Done:** Ein Landscape trägt mehrere Foliage-Schichten; jede streut, malt, zeichnet und reist im Collab für sich; alte Szenen laden und speichern unverändert.
 - **Files touched:** `FoliageComponent.h` (Modell), `FoliageSystem.cpp` (`scatterLayer`), `FoliageExtract.cpp:285` (Schicht-Schleife), `SceneSerializer.cpp` (`foliageLayerToJson`),
   `SceneSystems.cpp:262`, `TerrainSync.cpp` (`foliageLayerOf`, `restoreFoliage`, `forEachGrid`), `InspectorPanel.cpp` (Foliage), `TerrainTools.cpp` (Foliage-Tab, Pinsel ~:741).

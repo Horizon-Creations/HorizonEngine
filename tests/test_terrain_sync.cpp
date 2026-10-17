@@ -638,3 +638,36 @@ TEST_CASE("Landscape sync: a peer's change to how a layer is drawn sticks, and t
 	CHECK(cf.layers[0].seed == 1234);
 	CHECK(cf.layers[0].dirty);
 }
+
+TEST_CASE("Landscape sync: a layer that arrives with its mask is not overtaken by the mask")
+{
+	// An undo of Remove Layer, or an MCP call carrying two layers, brings the layer
+	// and its mask in one frame. The mask is looked at every 33 ms, the settings that
+	// create the layer on the peer only every 200 ms: the mask must wait for them.
+	auto host = makeMachine(0, true, /*foliage=*/true), client = makeMachine(1, true, true);
+	Net net({ host.get(), client.get() });
+	net.collectAll();
+	auto& hf = host->world.registry().get<FoliageComponent>(host->terrain);
+	auto& cf = client->world.registry().get<FoliageComponent>(client->terrain);
+
+	net.tick();
+	hf.layers[0].drawDistance = 90.0f;   // the settings go now, and are not due again for 200 ms
+	net.collect(*host);
+	net.deliver();
+	REQUIRE(cf.layers[0].drawDistance == doctest::Approx(90.0f));
+
+	net.tick(40);
+	FoliageLayer restored;
+	restored.maskRes = 32;
+	restored.densityMask.assign(32u * 32u, 255);
+	restored.densityMask[100] = 0;
+	hf.layers.push_back(restored);
+	for (int i = 0; i < 8; ++i)   // a few frames, as the editor would run them
+	{
+		net.collect(*host);
+		net.deliver();
+		net.tick(40);
+	}
+	REQUIRE(cf.layers.size() == 2u);
+	CHECK(cf.layers[1].densityMask == hf.layers[1].densityMask);
+}

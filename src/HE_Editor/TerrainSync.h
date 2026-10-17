@@ -114,6 +114,11 @@ private:
 		std::uint32_t             res[kFieldCount]{};
 		std::uint64_t             settingsHash = 0;
 		std::uint64_t             nextAt[kFieldCount]{};
+		// How many foliage layers the peers know of: the settings blob creates a
+		// layer on their side, so a layer's mask must not overtake it (it would be
+		// dropped there, and the mirror would think it arrived). A mask of a layer
+		// at or past this index waits; a new count sends the settings out of turn.
+		std::size_t               foliageLayers = 0;
 	};
 	struct Pending
 	{

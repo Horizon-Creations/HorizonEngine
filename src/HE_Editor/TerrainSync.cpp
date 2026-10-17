@@ -49,6 +49,12 @@ template <class Fn> void forEachGrid(Fn&& fn)
 	for (std::uint8_t f = TerrainSync::FoliageMask; f < TerrainSync::kFieldCount; ++f) fn(f);
 }
 
+std::size_t foliageLayerCount(entt::registry& reg, Entity e)
+{
+	const auto* fol = reg.try_get<FoliageComponent>(e);
+	return fol ? fol->layers.size() : 0;
+}
+
 // The foliage layer a mask field belongs to, or null if `e` has no such layer.
 FoliageLayer* foliageLayerOf(entt::registry& reg, Entity e, std::uint8_t f)
 {
@@ -363,6 +369,7 @@ void TerrainSync::reset()
 
 void TerrainSync::baseline(entt::registry& reg, Entity e, Mirror& m)
 {
+	m.foliageLayers = foliageLayerCount(reg, e);
 	forEachGrid([&](std::uint8_t f) {
 		GridView v;
 		m.grid[f].clear();
@@ -417,8 +424,10 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 			continue;
 		}
 
-		// Settings before grids: a resolution travels with them.
-		if (nowMs >= m.nextAt[Settings])
+		// Settings before grids: a resolution travels with them, and so does a new
+		// foliage layer, which is why a changed layer count does not wait its turn.
+		const std::size_t layers = foliageLayerCount(reg, e);
+		if (nowMs >= m.nextAt[Settings] || layers != m.foliageLayers)
 		{
 			m.nextAt[Settings] = nowMs + kSettingsIntervalMs;
 			std::vector<std::uint8_t> blob = settingsBlob(world, e);
@@ -429,7 +438,11 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 				p.field = Settings;
 				p.bytes = std::move(blob);
 				// Not sent (the link is down): it is still a change, next time.
-				if (emit(e, p, send)) m.settingsHash = hash;
+				if (emit(e, p, send)) { m.settingsHash = hash; m.foliageLayers = layers; }
+			}
+			else if (hash == m.settingsHash)
+			{
+				m.foliageLayers = layers;   // what the peers hold already
 			}
 		}
 
@@ -449,6 +462,8 @@ void TerrainSync::collectGrid(entt::registry& reg, Entity e, Mirror& m, std::uin
 		if (isFoliageMask(f)) { m.grid[f].clear(); m.res[f] = 0; }
 		return;
 	}
+	// A layer the peers do not have yet: its mask waits for the settings that make it.
+	if (isFoliageMask(f) && static_cast<std::size_t>(f - FoliageMask) >= m.foliageLayers) return;
 
 	const std::uint32_t elem = elemOf(f);
 	std::vector<std::uint8_t>& mg = m.grid[f];
@@ -555,7 +570,11 @@ bool TerrainSync::applyOne(HorizonWorld& world, Entity e, const Patch& p)
 	{
 		if (!applyKeepingGrids(world, e, p.bytes, /*replace=*/false)) return false;
 		// What we now hold is what everybody holds: no change of ours to send.
-		if (mirror != m_mirrors.end()) mirror->second.settingsHash = fnv1a(settingsBlob(world, e));
+		if (mirror != m_mirrors.end())
+		{
+			mirror->second.settingsHash  = fnv1a(settingsBlob(world, e));
+			mirror->second.foliageLayers = foliageLayerCount(reg, e);
+		}
 		return true;
 	}
 	if (!isGrid(f)) return false;
