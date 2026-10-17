@@ -14114,8 +14114,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// otherwise empty scene that has one still has something to draw. Neither
 	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
 	// EncodeSkinnedObjects below): a scene of nothing but a character used to
-	// take this sky-only exit and never draw it.
-	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty();
+	// take this sky-only exit and never draw it. ParticleGraph batches
+	// (DrawParticleGraphBatches) likewise: emitters alone drew nothing.
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty()
+	                  && m_renderWorld.particleBatches.empty();
 	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor

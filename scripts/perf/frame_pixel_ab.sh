@@ -127,4 +127,7 @@ run rope_fwd            ROPETEST=1              RENDERPATH=0 ${=UP}
 run rope_def            ROPETEST=1              RENDERPATH=1 ${=UP}
 run part_fwd            PARTICLETEST=1 SECTIONTEST=1 RENDERPATH=0 ${=UP}
 run part_def            PARTICLETEST=1 SECTIONTEST=1 RENDERPATH=1 ${=UP}
+# Emitters alone: sky only on a build before Thema 216's sky-only-exit fix, so this one
+# differs against such a build by design.
+run partonly_fwd        PARTICLETEST=1 RENDERPATH=0 ${=UP}
 fi
