@@ -140,11 +140,11 @@ Release build on NN-WS03, through the real `WidgetManager`:
 |---|---|---|
 | before (9a8e81de) | 44.5 | 7.0 |
 | scope (fa85c46a) | 6.2 | 0.38 |
-| + auto-size memo, text cache (1ff11c3f) | 0.77 | 0.37 |
+| + borrowed auto-size memo (1ff11c3f, with the text cache) | 0.77 | 0.37 |
 
 All three rows emit the same 2847 quads. After the scope, auto-size was 5.8 of the
-6.2 ms. On its own, the text cache does not show in this bench, because the labels are
-short.
+6.2 ms; the borrowed memo is what removed it. The text cache was measured only before
+that (no visible change at 6.2 ms, short labels); its share at 0.77 ms is not measured.
 
 ## Handoff (step 2)
 
@@ -182,7 +182,9 @@ short.
     2 `inspector_ui` clipboard cases (baseline) and 2 order-dependent `EngineProfiler`
     cases.
   - `HorizonEditor` builds.
-- **Not verified:** the editor and game were not run by hand. The designer path is
+- **Not verified:** `extract` output before vs. after is compared by quad count (2847)
+  only, not quad by quad; equivalence is proven per layout function. The text cache's
+  share at 0.77 ms is not measured. The editor and game were not run by hand. The designer path is
   unchanged (it opens no scope). Linux, macOS and Metal: CI only.
 - **Decisions taken:**
   - A scope instead of a persistent index on the tree, because the vector is public
