@@ -1073,8 +1073,11 @@ in diesen 256; er lief mit `--no-skip` nur für die Messung. Die CI der Plattfor
 - **Spiel** (loses Verzeichnis `C:/hw183/game`, dieselben Zelldateien, `HE_CAPTURE_FRAME=240`, OpenGL): dasselbe 8×8-Bild;
   Kontrolle ohne `Bench.cells` → „cell … not found“, 0 helle Pixel gegen 6 937.
 
-**Nicht geprüft:** Vulkan/D3D12/Metal für den Zeugen (kein Backend-Code geändert); ein echtes Projekt mit Assets, Physik-Bodies
-und Skripten im Play (die Referenzwelt hat keine); Linux/macOS-Bau (CI angestoßen, siehe Thema).
+**Nicht geprüft:** Der Zeuge läuft vor der Hauptschleife und ruft `PlayCellStreaming::update` selbst, mit dem Temp-Ordner als
+Wurzel: der Aufruf je Frame in `OnRender` (nach `updatePlayCameraController`) und der Leser über die Projektwurzel
+(`contentRoot().parent_path()`, derselbe Ausdruck wie `projectRootOf` beim Split und wie im Spiel) sind darin nicht gelaufen;
+ein Play per Hand in einem gesplitteten Projekt steht aus. Vulkan/D3D12/Metal für den Zeugen (kein Backend-Code geändert); ein
+echtes Projekt mit Assets, Physik-Bodies und Skripten im Play; Linux/macOS-Bau (CI des Zweigs angestoßen, siehe Thema).
 
 **Entscheidungen:** 2c vor 3b (die Königin hat es so geplant). Bodies, Reserve und Token liegen in der Laufzeit, nicht im Host —
 beide Hosts hätten denselben Code gehabt. `PlayCellStreaming` hängt am `EditorApplication`-Header (Header ist klein; ein
@@ -1091,7 +1094,11 @@ vorwärts deklarierter `unique_ptr` bricht in jeder Übersetzungseinheit, die de
 - **Pending (Schritt 3b ff.):** Skripte pro Zelle über `ICellHost::cellLoaded/cellUnloading` (beide Hosts: Spiel `startScriptsFor`,
   Editor die Zonen-Entladung um `EditorApplication.cpp:3263`, ohne `unwatch`), danach `audiosource`/`animstatemachine` in `kComponentClasses` (Lektion:
   `playOnStart`/`AnimatorHost::begin` laufen nur beim Szenenstart). `CellState`. Spieler als Anker (heute nur die Kamera, `CellRuntime::cameraAnchor`).
-- **Traps:** `ContentManager` ist eine **globale** Klasse — `namespace HE { class ContentManager; }` erzeugt still eine zweite
+- **Traps:** Die beiden Hosts bauen Zellen **nicht gleich** ab: der Szenenwechsel im Spiel ruft `m_cellRuntime.reset()`
+  (kein `cellUnloading`), der Stop im Editor `end()` → `clear()` (feuert `cellUnloading`, aber erst nach `m_animatorHost.end()`,
+  `m_entityHost.end()`, `m_playerHost.end()`, `fireShutdown()` und vor dem Skript-Abbau nach `m_physicsWorld.reset()`). Ein
+  Skript-Abbau pro Zelle darf sich also nicht allein auf `cellUnloading` verlassen.
+  `ContentManager` ist eine **globale** Klasse — `namespace HE { class ContentManager; }` erzeugt still eine zweite
   und bricht entfernte Aufrufe mit C2664. Nach DLL-only-Bau ist `deploy/Game/HorizonScene.dll` alt (hier gesehen), selbst kopieren.
 - **Next steps:** 1. `cellLoaded`/`cellUnloading` in `GameApplication` und `PlayCellStreaming` mit Skriptstart/-abbau füllen und
   in `test_cell_runtime.cpp` die Reihenfolge prüfen. 2. Anker-Liste statt einer Kamera in `CellRuntime::update` (Spieler, Pins).
