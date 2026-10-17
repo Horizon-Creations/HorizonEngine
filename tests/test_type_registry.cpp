@@ -255,6 +255,60 @@ TEST_CASE("TypeRegistry: makeDefaultValue seeds nested defaults and guards cycle
     CHECK(unknown.items.empty());
 }
 
+TEST_CASE("TypeRegistry: a struct array's default slots keep the cycle guard (CORE-604)")
+{
+    // structToJson never writes slots for a struct array, but structFromJson
+    // makes one per "default" entry — so a hand-edited (or MCP-written)
+    // definition carries them. The array branch used to seed each element through
+    // makeDefaultValue, i.e. a FRESH cycle guard: A { arr: Array<A>, default [0] }
+    // then recursed until the stack ran out, on the first default anyone asked for.
+    RegistryCleanup cleanup;
+    cleanup.paths = { "Content/Cyc/A.hasset", "Content/Cyc/B.hasset" };
+    auto& reg = TypeRegistry::instance();
+    const std::string structType = std::to_string(static_cast<int>(PinType::Struct));
+    const auto arrayOf = [&](const std::string& name, const std::string& target)
+    {
+        return "{ \"fields\": [ { \"name\": \"" + name + "\", \"type\": " + structType +
+               ", \"isArray\": true, \"typeName\": \"" + target + "\", \"default\": [0, 0] } ] }";
+    };
+
+    // A → A, straight through its own array.
+    StructDef a;
+    REQUIRE(TypeRegistry::structFromJson(arrayOf("arr", "Content/Cyc/A.hasset"), a));
+    a.name = "A"; a.assetPath = "Content/Cyc/A.hasset";
+    REQUIRE(a.fields.size() == 1);
+    REQUIRE(a.fields[0].defaultValue.items.size() == 2);   // the slots the loader made
+    reg.registerStruct(a);
+    const Value va = reg.makeDefaultValue(a.assetPath);
+    REQUIRE(va.items.size() == 1);
+    REQUIRE(va.items[0].items.size() == 2);
+    CHECK(va.items[0].items[0].type == PinType::Struct);
+    CHECK(va.items[0].items[0].items.empty());   // the cycle edge stops descending
+
+    // A → B → A, B reached through A's array, A again through B's.
+    StructDef b;
+    REQUIRE(TypeRegistry::structFromJson(arrayOf("back", "Content/Cyc/A.hasset"), b));
+    b.name = "B"; b.assetPath = "Content/Cyc/B.hasset";
+    reg.registerStruct(b);
+    StructDef a2;
+    REQUIRE(TypeRegistry::structFromJson(arrayOf("arr", "Content/Cyc/B.hasset"), a2));
+    a2.name = "A"; a2.assetPath = "Content/Cyc/A.hasset";
+    reg.registerStruct(a2);
+    const Value vb = reg.makeDefaultValue(a2.assetPath);
+    REQUIRE(vb.items.size() == 1);
+    REQUIRE(vb.items[0].items.size() == 2);                // two B elements
+    const Value& firstB = vb.items[0].items[0];
+    REQUIRE(firstB.items.size() == 1);                     // B's own array
+    REQUIRE(firstB.items[0].items.size() == 2);            // two A slots in it…
+    CHECK(firstB.items[0].items[0].items.empty());         // …that stop at the cycle
+
+    // makeFieldDefault starts its guard at the field, not at A: B, then A, then
+    // the next B is the repeat that stops it — still finite.
+    const Value field = reg.makeFieldDefault(a2.fields[0]);
+    REQUIRE(field.items.size() == 2);
+    CHECK(field.items[0].items.size() == 1);
+}
+
 // ── Renames: formerNames ─────────────────────────────────────────────────────
 // Fields and entries have no ids; a rename books the old name as an alias so
 // data persisted under it (saves, graph defaults) still finds its field.

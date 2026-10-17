@@ -340,8 +340,12 @@ Result run(const Options& o)
 	std::mutex   mx;
 	LineSplitter outSplit(o.onStdoutLine);
 	LineSplitter errSplit(o.onStderrLine);
-	std::thread outThread([&] { drainPipe(outPipe.read, r.out, outSplit, mx); });
-	std::thread errThread([&] { drainPipe(errPipe.read, r.err, errSplit, mx); });
+	// Each reader signals its event at EOF, so the drain can be waited for with
+	// a deadline instead of an unbounded join (see the wait below).
+	HANDLE readerDone[2] = { ::CreateEventW(nullptr, TRUE, FALSE, nullptr),
+	                         ::CreateEventW(nullptr, TRUE, FALSE, nullptr) };
+	std::thread outThread([&] { drainPipe(outPipe.read, r.out, outSplit, mx); if (readerDone[0]) ::SetEvent(readerDone[0]); });
+	std::thread errThread([&] { drainPipe(errPipe.read, r.err, errSplit, mx); if (readerDone[1]) ::SetEvent(readerDone[1]); });
 
 	// Written only AFTER the readers are running. WriteFile blocks until the
 	// whole payload is consumed, and a child that echoes its input fills its
@@ -356,17 +360,41 @@ Result run(const Options& o)
 	}
 	inPipe.closeWrite();   // signals EOF to a child reading until end of input
 
-	const DWORD waitMs = o.timeoutMs ? o.timeoutMs : INFINITE;
-	if (::WaitForSingleObject(pi.hProcess, waitMs) == WAIT_TIMEOUT)
+	// ONE deadline for the child AND the drain, as the POSIX poll loop has. A
+	// child that exits normally but left a grandchild holding the inherited
+	// pipe ends (a daemon: `adb start-server`, a build server, git's fsmonitor)
+	// never lets the readers see EOF; waiting on the child alone and then
+	// joining hung the caller for good, timeoutMs or not.
+	const ULONGLONG deadline = o.timeoutMs ? ::GetTickCount64() + o.timeoutMs : 0;
+	const auto remainingMs = [&]() -> DWORD {
+		if (!deadline) return INFINITE;
+		const ULONGLONG now = ::GetTickCount64();
+		return now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+	};
+	bool expired = ::WaitForSingleObject(pi.hProcess, remainingMs()) == WAIT_TIMEOUT;
+	if (!expired && deadline && readerDone[0] && readerDone[1])
+		expired = ::WaitForMultipleObjects(2, readerDone, TRUE, remainingMs()) == WAIT_TIMEOUT;
+	if (expired)
 	{
 		r.timedOut = true;
+		// The job takes the grandchildren too, and with them the last write ends.
 		if (job) ::TerminateJobObject(job, 1);
 		else     ::TerminateProcess(pi.hProcess, 1);
 		::WaitForSingleObject(pi.hProcess, 5000);
+		// Without a job (or for a holder outside it) a reader can still be parked
+		// in ReadFile. Cancel it; retried, because a cancel that lands before the
+		// thread has entered ReadFile finds nothing to cancel.
+		if (readerDone[0] && readerDone[1])
+			while (::WaitForMultipleObjects(2, readerDone, TRUE, 50) == WAIT_TIMEOUT)
+			{
+				::CancelSynchronousIo(outThread.native_handle());
+				::CancelSynchronousIo(errThread.native_handle());
+			}
 	}
 
 	outThread.join();
 	errThread.join();
+	for (HANDLE e : readerDone) if (e) ::CloseHandle(e);
 	outSplit.flush();
 	errSplit.flush();
 

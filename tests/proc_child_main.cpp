@@ -184,6 +184,37 @@ int main(int argc, char** argv)
 		std::this_thread::sleep_for(std::chrono::seconds(30));
 		return 0;
 	}
+	if (mode == "orphan-holder")
+	{
+		// Starts a grandchild that INHERITS this process's stdout and sleeps on
+		// it, then exits at once — a daemon the way `adb start-server` leaves one.
+		// The child is done, but its pipe is not: no EOF until the grandchild goes.
+		const std::string ms   = argCount > 2 ? args[2] : "20000";
+		const std::string self = args[0];
+	#ifdef _WIN32
+		const std::string cmdText = "\"" + self + "\" sleep " + ms;
+		std::vector<char> cmd(cmdText.begin(), cmdText.end());
+		cmd.push_back('\0');
+		STARTUPINFOA si{}; si.cb = sizeof(si);
+		si.dwFlags    = STARTF_USESTDHANDLES;
+		si.hStdInput  = ::GetStdHandle(STD_INPUT_HANDLE);
+		si.hStdOutput = ::GetStdHandle(STD_OUTPUT_HANDLE);
+		si.hStdError  = ::GetStdHandle(STD_ERROR_HANDLE);
+		PROCESS_INFORMATION pi{};
+		::CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+		                 CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+		if (pi.hProcess) { ::CloseHandle(pi.hThread); ::CloseHandle(pi.hProcess); }
+	#else
+		if (::fork() == 0)
+		{
+			::execl(self.c_str(), self.c_str(), "sleep", ms.c_str(), nullptr);
+			::_exit(127);
+		}
+	#endif
+		std::printf("parent-done\n");
+		std::fflush(stdout);
+		return 0;
+	}
 	if (mode == "delayed-write")
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(1500));

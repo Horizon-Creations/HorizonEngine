@@ -200,6 +200,27 @@ TEST_CASE("Killing a child takes its grandchildren with it")
 	he_test::removeQuiet(marker);
 }
 
+TEST_CASE("A grandchild still holding the pipe after the child exited cannot outlast the timeout")
+{
+	// CORE-501: on Windows the timeout only covered waiting for the CHILD. A
+	// child that exits normally while a grandchild keeps the inherited stdout
+	// (a daemon it started) left the readers waiting for an EOF that never
+	// came, and the caller hung however small timeoutMs was. POSIX's poll loop
+	// already counted the drain against the same deadline; now both do.
+	Proc::Options o = child({ "orphan-holder", "20000" });
+	o.timeoutMs = 1500;
+
+	const auto start = std::chrono::steady_clock::now();
+	const Proc::Result r = Proc::run(o);
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+
+	REQUIRE_FALSE(r.launchFailed);
+	CHECK(r.timedOut);
+	CHECK(elapsed < std::chrono::seconds(8));                   // not the grandchild's 20 s
+	CHECK(r.out.find("parent-done") != std::string::npos);      // what came before still counts
+	CHECK(r.out.find("finished") == std::string::npos);         // the holder was killed, not waited out
+}
+
 #ifndef _WIN32
 TEST_CASE("A background process the child leaves behind does not hold the result")
 {

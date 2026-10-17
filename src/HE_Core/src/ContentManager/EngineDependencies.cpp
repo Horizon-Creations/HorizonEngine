@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -290,29 +291,39 @@ Result resolve(const Options& options)
 		// only be read once these are here.
 		if (!toFetch.empty())
 		{
-			std::mutex m;
-			std::condition_variable cv;
-			size_t finished = 0;
-			std::vector<char> ok(toFetch.size(), 0);
-			for (size_t i = 0; i < toFetch.size(); ++i)
-				options.fetch(toFetch[i].substr(kEnginePrefixLen), [&, i](bool success)
-				{
-					std::lock_guard<std::mutex> lock(m);
-					ok[i] = success ? 1 : 0;
-					++finished;
-					cv.notify_all();
-				});
+			// Shared with the completions, not on this stack: a cancel returns while
+			// the downloads already queued run on, and their callbacks still arrive
+			// afterwards, on the sync worker, into whatever this frame left behind.
+			struct FetchState
 			{
-				std::unique_lock<std::mutex> lock(m);
-				size_t lastReported = size_t(-1);
-				while (finished < toFetch.size())
+				std::mutex              m;
+				std::condition_variable cv;
+				size_t                  finished = 0;
+				std::vector<char>       ok;
+			};
+			const auto st = std::make_shared<FetchState>();
+			st->ok.assign(toFetch.size(), 0);
+			for (size_t i = 0; i < toFetch.size(); ++i)
+				options.fetch(toFetch[i].substr(kEnginePrefixLen), [st, i](bool success)
 				{
-					cv.wait_for(lock, std::chrono::milliseconds(100));
-					if (finished != lastReported)
+					std::lock_guard<std::mutex> lock(st->m);
+					st->ok[i] = success ? 1 : 0;
+					++st->finished;
+					st->cv.notify_all();
+				});
+			std::vector<char> ok;
+			{
+				std::unique_lock<std::mutex> lock(st->m);
+				size_t lastReported = size_t(-1);
+				while (st->finished < toFetch.size())
+				{
+					st->cv.wait_for(lock, std::chrono::milliseconds(100),
+					                [&] { return st->finished != lastReported; });
+					if (st->finished != lastReported)
 					{
-						lastReported = finished;
+						lastReported = st->finished;
 						lock.unlock();
-						w.report("Downloading", {}, finished, toFetch.size());
+						w.report("Downloading", {}, lastReported, toFetch.size());
 						lock.lock();
 					}
 					if (options.cancelled && options.cancelled())
@@ -322,6 +333,7 @@ Result resolve(const Options& options)
 						return w.result;
 					}
 				}
+				ok = st->ok;
 			}
 			for (size_t i = 0; i < toFetch.size(); ++i)
 			{

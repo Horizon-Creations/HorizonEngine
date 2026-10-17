@@ -9,8 +9,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <string>
+#include <thread>
+#include <vector>
 
 // What a project needs from the EngineContent library, answered from the files alone,
 // before the project is opened (EngineDependencies.h). A fake server stands in for the
@@ -229,6 +232,44 @@ TEST_CASE("resolve: cancelling stops the walk and says so")
 	CHECK(r.cancelled);
 	CHECK_FALSE(r.ok());
 	CHECK(f.fetchCalls.empty());
+}
+
+TEST_CASE("resolve: downloads that finish after a cancel land in state the call no longer owns (CORE-203)")
+{
+	// The sync queue keeps working after resolve() stopped waiting, so the
+	// completions arrive after it returned — on the sync worker, here a thread of
+	// our own. They used to write into resolve()'s stack frame (by-reference
+	// captures of a mutex, a counter and a vector that were gone). Without a
+	// sanitizer the old code may well survive this by luck: it is the net that
+	// keeps the shared-state shape, not proof of the bug.
+	Fixture f;
+	write(f.project.path / "Content" / "Mat.hasset",
+	      hasset(HE::AssetType::Material, lp("Engine/Textures/A.hasset") + lp("Engine/Textures/B.hasset")));
+	f.serve("Textures/A.hasset", hasset(HE::AssetType::Texture, ""));
+	f.serve("Textures/B.hasset", hasset(HE::AssetType::Texture, ""));
+
+	std::vector<std::function<void(bool)>> pending;
+	std::atomic<bool> asked{ false };
+	f.opt.fetch = [&](const std::string&, std::function<void(bool)> done)
+	{
+		pending.push_back(std::move(done));   // nothing finishes while resolve waits
+		asked = true;
+	};
+	f.opt.cancelled = [&] { return asked.load(); };   // cancel once the downloads are queued
+
+	const Result r = resolve(f.opt);
+	CHECK(r.cancelled);
+	REQUIRE(pending.size() == 2u);
+
+	// Now they finish, late, from another thread — and resolve's frame is reused
+	// by a second, unrelated call in between, so stale writes would land in it.
+	std::thread late([&] { for (auto& done : pending) done(true); });
+	f.opt.cancelled = nullptr;
+	f.opt.fetch     = nullptr;
+	const Result again = resolve(f.opt);
+	late.join();
+	CHECK(again.missing.size() == 2u);   // NoFetcher, each: the second walk ran to its end
+	pending.clear();   // the last owners of the shared state go here
 }
 
 TEST_CASE("locateEngineFile: the project's override beats the library, which beats the cache")

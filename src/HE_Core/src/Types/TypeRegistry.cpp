@@ -327,7 +327,10 @@ Value fieldDefault(const TypeRegistry& reg, const StructField& f,
             }
             else if (f.type == PinType::Struct)
             {
-                it = reg.makeDefaultValue(f.typeName);   // elements use their own defaults
+                // Elements use their own defaults, under THIS call's cycle guard:
+                // makeDefaultValue would start a fresh one, and a hand-edited
+                // `A { arr: Array<A> }` with a default slot then recursed forever.
+                it = structDefault(reg, f.typeName, visiting);
             }
         }
         if (v.container == HorizonCode::ContainerKind::Map)
