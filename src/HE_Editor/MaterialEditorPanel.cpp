@@ -282,6 +282,15 @@ bool saveToDisk(State& st, AppContext& ctx, const std::string& assetPath)
 	// Instances have no graph — their state is already live on the asset; masters
 	// regenerate first so the saved file always matches the canvas.
 	if (!st.isInstance) applyToMaterial(st, ctx);
+	// A master's GI-hit colours (approx*) are derived only by the manager's own
+	// codegen, which a save used to reach through its own hot reload. A save is no
+	// longer re-read (CORE-204), so derive them here — before the write, so the
+	// file carries them too — and pass them on to the loaded instances.
+	if (!st.isInstance && !st.isFunction)
+	{
+		ctx.contentManager->regenerateMaterialFromGraph(st.materialId);
+		ctx.contentManager->syncMaterialInstancesOf(st.relPath);
+	}
 	RuntimeAsset* toSave = st.isFunction
 		? static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialFunctionMutable(st.materialId))
 		: static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialMutable(st.materialId));

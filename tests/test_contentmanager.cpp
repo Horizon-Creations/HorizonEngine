@@ -1244,6 +1244,74 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 	CHECK(cm.pollHotReload().empty());
 }
 
+// CORE-204: saveAsset wrote the file but left the mtime of the load in
+// m_pathMtime, so the editor's next poll took its OWN save for an outside edit
+// and unloaded, re-parsed and re-invalidated the asset it had just written.
+TEST_CASE("ContentManager pollHotReload does not report the manager's own save")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type     = HE::AssetType::Material;
+	mat.name     = "selfsave";
+	mat.path     = "selfsave.hasset";
+	mat.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat));
+
+	// Load from a file that is clearly older than the save below; otherwise the
+	// load and the save can share one filesystem tick and the poll is quiet for
+	// the wrong reason.
+	const fs::path diskPath = dir.path / "selfsave.hasset";
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) - std::chrono::seconds(10));
+	const HE::UUID id = cm.loadAsset("selfsave.hasset");
+	REQUIRE(cm.getMaterialMutable(id) != nullptr);
+	CHECK(cm.pollHotReload().empty());
+
+	MaterialAsset* live = cm.getMaterialMutable(id);
+	live->metallic = 0.7f;
+	REQUIRE(cm.saveAsset(*live));
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.getMaterial(id)->metallic == doctest::Approx(0.7f));
+
+	// A change from outside is still seen, exactly once.
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) + std::chrono::seconds(2));
+	const auto changed = cm.pollHotReload();
+	REQUIRE(changed.size() == 1);
+	CHECK(changed[0] == id);
+	CHECK(cm.pollHotReload().empty());
+}
+
+// CORE-204: an asset that cannot be unloaded (a live AssetRef pins it) used to
+// come back from every poll: unloadAsset refused, loadAsset handed back the old
+// copy without recording the new mtime, and the next poll found the same
+// "change" again — every 1.5 s for as long as the pin lived.
+TEST_CASE("ContentManager pollHotReload reports a pinned asset's change at most once")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type     = HE::AssetType::Material;
+	mat.name     = "pinned";
+	mat.path     = "pinned.hasset";
+	mat.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat));
+	const HE::UUID id = cm.loadAsset("pinned.hasset");
+	REQUIRE(id != HE::UUID{});
+
+	auto pin = cm.acquireMaterial(id);
+	REQUIRE(cm.isPinned(id));
+
+	const fs::path diskPath = dir.path / "pinned.hasset";
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) + std::chrono::seconds(2));
+	// The loaded copy has to stay while it is pinned, so there is nothing new to
+	// report — and above all not the same file again on the next poll.
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.getMaterial(id) != nullptr);
+}
+
 // What a collaboration peer's whole-file update relies on (EditorApplication::
 // applyAssetBytes, docs/collab-sync-audit-materials-2026-10-14.md). The file is
 // written under a LOADED asset: loadAsset alone keeps answering with the old copy,
