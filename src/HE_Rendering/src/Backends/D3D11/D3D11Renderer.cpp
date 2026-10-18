@@ -41,6 +41,7 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D12/Vulkan)
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
@@ -1467,6 +1468,7 @@ struct D3D11RendererImpl
     // white default, no per-frame retry). InvalidateTexture drops the UUID key so an
     // edited texture re-uploads; a path-keyed loose asset is not hot-reloaded (same as GL).
     std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> graphTexCache;
+    uint64_t graphTexMissEpoch = 0; // contentEpoch its null misses were taken at (HE::forgetGraphTextureMisses)
     // UI quad images (Image widget, textured Panel/Border/Button): same keys, but
     // uploaded UNORM even for an sRGB-flagged asset (see resolveUITexture).
     std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> uiTexCache;
@@ -5020,6 +5022,10 @@ struct D3D11RendererImpl
         std::string key = graphTexKey(id, path);
         if (key.empty() || !cm) return nullptr;
         if (array) key += "#arr";
+        // A miss is cached (no file open per frame) until files may have appeared: an
+        // EngineContent download landing after this first ask (Thema 210, mirrors GL).
+        HE::forgetGraphTextureMisses(graphTexCache, graphTexMissEpoch, cm->contentEpoch(),
+                                     [](const ComPtr<ID3D11ShaderResourceView>& srv) { return srv.Get() == nullptr; });
         if (auto it = graphTexCache.find(key); it != graphTexCache.end())
             return it->second.Get();
         // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format

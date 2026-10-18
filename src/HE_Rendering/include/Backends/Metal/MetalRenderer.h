@@ -1333,6 +1333,7 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its nullptr misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────

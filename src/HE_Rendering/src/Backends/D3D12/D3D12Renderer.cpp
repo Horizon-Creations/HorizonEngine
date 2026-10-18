@@ -39,6 +39,7 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
 #include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
@@ -3666,6 +3667,7 @@ struct D3D12RendererImpl
     // retry). InvalidateTexture retires the UUID key past frames in flight; a path-keyed
     // loose asset is not hot-reloaded (same as GL).
     std::unordered_map<std::string, ComPtr<ID3D12Resource>> m_graphTexCache;
+    uint64_t m_graphTexMissEpoch = 0; // contentEpoch its null misses were taken at (HE::forgetGraphTextureMisses)
     std::vector<HE::UUID> m_pendingTexInval;
     static std::string graphTexKey(const HE::UUID& id, const std::string& path)
     {
@@ -3685,6 +3687,11 @@ struct D3D12RendererImpl
         std::string key = graphTexKey(id, path);
         if (key.empty() || !cm || !cl) return nullptr;
         if (array) key += "#arr";
+        // A miss is cached (no file open per frame) until files may have appeared: an
+        // EngineContent download landing after this first ask (Thema 210, mirrors GL).
+        // A null entry was never bound, so nothing in flight holds it.
+        HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, cm->contentEpoch(),
+                                     [](const ComPtr<ID3D12Resource>& r) { return r.Get() == nullptr; });
         if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
             return it->second.Get();
         ComPtr<ID3D12Resource> res;

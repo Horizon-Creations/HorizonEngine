@@ -1353,6 +1353,10 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 				m_remoteAssets.erase(r.id);
 				m_remoteByPath.erase(r.relativePath);
 				m_remoteArrived.insert(r.relativePath);
+				// A file appeared under an EngineContent root: whoever remembered the
+				// path as "not there" (a renderer's graph-texture miss, Thema 210) looks
+				// once more. Costs one fresh file index per download.
+				noteContentChanged();
 				loadAssetAsync(r.id, r.callback);
 			}
 			else if (r.callback)
