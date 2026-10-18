@@ -209,6 +209,107 @@ the cascade and local shadows are in the picture. OpenGL (same env, `RHI=OpenGL`
 `ls_point_day_fwd`, `ls_spot_fwd`, `shadinst_fwd` are md5-identical before vs after, and
 their md5s differ from the Metal shots. The point light frame was looked at.
 
+## Step 4: REN-903 / REN-908 / REN-401 (cluster build, SSAO kernel, sky IBL bake; M8)
+
+**Cluster build (REN-903).** `BuildClusterLights` allocated 3456 `std::vector<uint32_t>`
+per call (one per cell), filled them by `push_back` and copied them flat. It is now a
+two-pass counting sort (`LightPacking.cpp:141`): pass 1 admits the lights exactly as
+before and only counts per cell, keeping each light's cell box (`CellBox` `:164`, stack,
+256 entries); the prefix sum gives the offsets; pass 2 (`:263`) writes the indices in
+light order, so a cell's list is still ascending by light index. Count and cursor tables
+are on the stack (~15 KB). New in-place overload `BuildClusterLights(out, ...)`
+(`LightPacking.h:222`) plus `ClusterLightBuild::clear()` (`:199`, keeps capacity); the
+by-value form calls it. GL `:11448`, Vulkan `:7861`, D3D11 `:6323` and D3D12 `:10308`
+keep the build as a member scratch. Metal is unchanged (by value, two builds per frame
+in deferred, see below). `camFwd` still comes from `glm::inverse(view)`: the view-row
+shortcut is the same direction but not the same floats, and it feeds the shaders.
+
+**SSAO kernel (M8).** The generator was already shared, but Metal (`:12593`) and D3D11
+(`:2628`) rebuilt the kernel every frame they ran SSAO, and four backends each had their
+own vec3 to vec4 loop. `HE::SsaoKernelVec4()` (`SsaoKernel.h:45`) builds it once per
+process (function-local static), padded. Metal, D3D11, D3D12 (`:5797`) and Vulkan
+(`:12162`, the double memcpy is gone) copy it. GL keeps its one-time `glUniform3fv`.
+
+**Sky IBL bake (REN-908 / REN-401).** `HE::SkyEnvBaker` (`SkyEnvBake.h:260`,
+`src/SkyEnvBake.cpp`, new, also in `tests/CMakeLists.txt`) replaces the five copied
+drivers (fresh 1.5 MiB vector, `parallel_for`, serial half conversion behind each
+backend's own dead band). It owns the face size (`kSkyEnvFaceSize`, the four `128`s),
+the last baked sun, a reused scratch, and the bake. `bakeHalf` packs halves inside the
+row task and can write straight into mapped staging (Vulkan `:3028`, D3D12 `:8977`).
+Backends: GL `:4203`, Metal `:13862`, Vulkan `:3023`, D3D11 `:4621`, D3D12 `:8972`. Each
+keeps its own `m_skyEnvValid` (the texture holds a bake), so a recreated cube bakes at once.
+
+**Measurement** (`test_culling.cpp:1090`, `HE_SKYENV_BENCH=1`; M5, 10 pool threads, no
+`yes` hogs, low-power mode off, load average about 2.4):
+
+- **One 128² bake costs 52-59 ms with the pool and 284-298 ms serially.** It blocks the
+  render thread. The audit estimated 1-10 ms and the old code comments said "a few ms".
+  Under day-night auto-advance Metal (1e-4 dead band) baked on every frame, so the frame
+  could not be shorter than the bake (~17 fps). GL/Vulkan/D3D baked every third frame at
+  60 fps, which is 20 stalls of ~55 ms a second, so in practice the frame rate collapses
+  there as well.
+- Packing halves in the row task saves nothing measurable (52.3 vs 53.7 ms); the bake
+  dominates.
+- Where the cube changes (largest per-frame change of the cube's mean colour, 120 s day,
+  60 fps, per 1/24 of the day): about 1-2 % a frame around sunrise and sunset, 0.03-0.05 %
+  in full day, 0.00 % at night. More than 0.2 % a frame only for sun y in [-0.10, 0.16].
+
+So the dead band follows the sun's elevation (`SkyEnvSunTolerance`, `SkyEnvBake.cpp`):
+GL's 2e-3 (0.11°) when either sun is in the twilight band y in [-0.36, 0.27] (wider than
+the measured [-0.10, 0.16] on purpose); 0.5° when both are in full day (under one 128²
+texel of 0.7°, so the sun disk baked into the cube trails by less than a texel); 2° when
+both are deep in the night. There is no clock, so it is frame-rate independent, and a
+headless frame gets exactly the cube of its sun's last bake. A first try with a flat
+1/15 s interval was dropped: it cost up to 26 % cube error on a 20 s day, in twilight
+where the error shows.
+
+Simulated per policy over one full day at 60 fps (the extractor's sun path, the shipped
+`due()`). "Error" is the largest relative gap, over all frames, between the mean colour of
+the cube in use and that of a cube baked for that frame's sun (16² truth table):
+
+| Day length | Policy | Bakes / s | Worst error | Sun trails by |
+|---|---|---|---|---|
+| 120 s | Metal before (1e-4) | 60 | 0 % | 0.03° |
+| 120 s | GL/Vk/D3D before (2e-3) | 20 | 3.37 % | 0.09° |
+| 120 s | shared baker | **7.2** | 3.47 % | 1.96° (night band), 0.5° by day |
+| 20 s | before (all five) | 60 | 0 % | 0.03° |
+| 20 s | shared baker | **28.5** | 0.41 % | 1.92° (night band) |
+
+The worst error at 120 s is in twilight, where the rule is the old 2e-3. It differs from
+GL-before only in where the bakes fall. This is a simulation at a fixed 60 fps, not a
+real frame: the dump mode has no auto-advance and no project was at hand for
+`he_perf_capture.py`. Twilight is still bound by the 55 ms stall about 24 times a
+second. Throttling cannot fix that (see the handoff).
+
+**Cluster bench** (`test_culling.cpp:1947`, `HE_CLUSTER_BENCH=1`, median of 31; "before"
+is the old builder kept verbatim in the test as the reference):
+
+| Lights (admitted / indices) | before | by value | in place |
+|---|---|---|---|
+| 8 (6 / 83) | 58 µs | 13.5 µs | 11.5 µs |
+| 50 (40 / 8245) | 523 µs | 41 µs | 37 µs |
+| 256 (195 / 27618) | 1038 µs | 145 µs | 140 µs |
+
+**Equivalence.** The counting sort matches the old builder element for element in 7
+seeded light sets x 8 flag combinations (no light, over 256 lights, index-cap overflow,
+lights at and behind the camera, directional lights in between, both uv origins), through
+one scratch reused from big to small (`test_culling.cpp:1900`). The baker's floats equal
+`BuildSkyEnvFace` and its halves equal `packHalf1x16` of them (`:990`). The face hash
+pin is untouched. A source pin (`:4969`) keeps every backend on the baker and the packed
+kernel.
+
+**Pixel A/B.** The before side is a separate worktree at `493bae57` with its own Release
+build. Its deploy has no `SkyEnvBaker` symbol; the after side has 4.
+`scripts/perf/frame_pixel_ab.sh <out> <tree> all` (Metal, 42 shots: local point/spot
+lights forward and deferred-clustered, SSAO at render scale 0.51, eight day-night sky
+times, cascades, decals, foliage): all 42 md5-identical before vs after, two after runs
+identical (noise floor 0), 42 distinct md5s. Looked at `ls_point_def`, `dn_25_fwd` and
+`odd_shadinst_fwd`; each shows its subject. OpenGL (`he_shot.py ... RHI=OpenGL`):
+the day point light, the twilight `dn_25` and the SSAO odd scale are md5-identical
+before vs after, and differ from the Metal shots. A static sun bakes on the first frame
+under every policy, so no witness can show the dead bands. Only a moving sun can, and
+the bench above is that evidence.
+
 ## Handoff (step 1)
 
 - **Topic / step:** 214, step 1 of 4
@@ -311,7 +412,7 @@ their md5s differ from the Metal shots. The point light frame was looked at.
      what the `inst` alias is used for below those lines. Only `size/[]/empty/range-for`
      were found.
 
-## Handoff
+## Handoff (step 3)
 
 - **Topic / step:** 214, step 3 of 4 (REN-805/304/407)
 - **Branch / commit:** `claude/audit-optimierung-rendering-frontend-stufe-2`, code
@@ -369,3 +470,63 @@ their md5s differ from the Metal shots. The point light frame was looked at.
      struct at D3D11 `:1485` / D3D12 `:1529`).
   3. Later, its own step: the faster sort and the single-pass multi-frustum cull from
      "suggested" above.
+
+## Handoff
+
+- **Topic / step:** 214, step 4 of 4 (REN-903/908/401, M8)
+- **Branch / commit:** `claude/audit-optimierung-rendering-frontend-stufe-2`, code
+  `cdfc33a7` + `30197ab8` plus this doc commit, pushed.
+- **Done:** counting-sort cluster build with an in-place overload (GL/Vulkan/D3D11/D3D12
+  keep a member scratch); the SSAO kernel built once (`SsaoKernelVec4`); one shared sky
+  IBL rebake driver (`HE::SkyEnvBaker`) in all five backends, with dead bands by sun
+  elevation. Measured, see step 4 above.
+- **Files touched:** `LightPacking.h/.cpp`, `SsaoKernel.h/.cpp`, `SkyEnvBake.h` +
+  `src/SkyEnvBake.cpp` (new; `src/HE_Rendering/CMakeLists.txt`, `tests/CMakeLists.txt`),
+  the five backends (sites above), `OpenGLRenderer.h`, `VulkanRenderer.h`,
+  `MetalRenderer.h` (one include `:18`, one member `:642`), `tests/test_culling.cpp`.
+- **Verified:** `test_culling` 78/78 cases (17906 assertions). Full `ctest -j6` without
+  `test_material_graph`: 300/301, 2 skipped; the one failure is the known `test_hpak`
+  "Disk registry" 6 == 2 (4 cache files), green with an empty `HOME`. HorizonEditor
+  builds. Vulkan `clang -fsyntax-only` against MoltenVK: rc 0, and the negative control
+  fails at `vulkan/vulkan.h`. Pixel A/B: Metal 42/42 and OpenGL 3/3 md5-identical.
+- **Not verified:** D3D11/D3D12 do not compile on the Mac; CI decides (members, one
+  call each, the kernel copy, the baker calls; the `glm/gtc/packing.hpp` includes
+  there were removed as unused). No real frame under auto-advance: the rebake rates
+  are a simulation (bench), the bake cost is measured. Vulkan not rendered.
+  `test_material_graph` not run.
+- **Decisions taken:**
+  - Dead bands by sun elevation, no clock. A flat time interval was tried first and
+    measured worse in twilight (26 % on a 20 s day).
+  - Metal's 1e-4 is gone; it now rebakes like GL/Vulkan/D3D in twilight.
+  - `camFwd` keeps `glm::inverse(view)` (bit identity of the shader input).
+  - Face size stays 128² (no image change).
+  - The bake stays synchronous. Async touches the five upload paths (Vulkan/D3D12
+    per-frame staging slots) and two of them can't be built here.
+  - Metal keeps building its clusters by value (`MetalRenderer.mm` is held by topic 216).
+- **Decisions suggested, not taken:**
+  - **The bake itself is the real cost: 52-59 ms per 128² bake on 10 threads, on the
+    render thread**, about 24 times a second through twilight. Options, with numbers:
+    64² faces (4x cheaper, changes ambient on all platforms, re-pin the face hash);
+    an async bake on a dedicated thread with a double buffer (not a pool job: a nested
+    `parallel_for` there degrades to the ~290 ms serial path, see `JobSystem.h`); a GPU
+    bake as Metal's `EncodeSkyReflCube` already does for the reflection cube.
+  - Metal runs `BuildFrameClusterLights()` twice per frame in deferred mode
+    (`MetalRenderer.mm` ~14246 and ~15091). Build once into a member and reuse it.
+  - REN-104 (D3D11/D3D12 build the clusters twice per frame) is not a plain duplicate:
+    the second call carries the GI flag (mask channels). It is allocation-free now.
+- **Traps:**
+  - `MetalRenderer.h` (include `:18`, member `:642`) and `MetalRenderer.mm` (`:12593`,
+    `:13748`, `:13862`, `:7684`) are also edited on topic 216's branch (around `:8185-8640`).
+    Expect a textual merge, not a conflict of intent.
+  - A new `.cpp` in HE_Rendering's shared helpers must also go into
+    `tests/CMakeLists.txt`'s fixed list.
+  - A doctest `MESSAGE` with a `const char*` member of a local struct printed `1`; use
+    `std::string`.
+  - `globalPool()` is in the global namespace, not `HE`.
+- **Next steps:**
+  1. If Windows CI fails at D3D11 `:2628`/`:4621`/`:6323` or D3D12 `:5797`/`:8972`/
+     `:10308`, check the `SkyEnvBake.h` include and the impl-struct members
+     (`m_skyEnvBaker`, `frameClusterScratch`).
+  2. Its own step: take the sky bake off the render thread or onto the GPU (above). That
+     is where the day-night stall is.
+  3. Metal: one cluster build per frame (above), together with topic 216's Metal work.
