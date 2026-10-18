@@ -1271,7 +1271,9 @@ endif()
 # with libssh2, like HorizonSelfUpdate) and its private src/ for CsRename.h. Its
 # ctest entry gets its own HOME/APPDATA below — see the ENVIRONMENT after the loop.
 if(TARGET HorizonContentSync)
-    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp)
+    # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
+    # case runs only with HE_TEST_SFTP pointing at a throwaway server.
+    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)
