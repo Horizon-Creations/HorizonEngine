@@ -32,7 +32,9 @@ nächsten Hebel, denn A kann den Sky nicht unterbieten (Messung unten). C nur in
   von ihrer Aufrufstelle abweicht, wird daher nie ausgegeben, sie kostet nur Worker-Zeit. `finishStartup()`
   (:204) schreibt beim ersten Frame `[startup] D3D1x shader prefetch: submitted= joined= cached= workerMs= unused=`
   und nennt nicht genutzte Anfragen (Drift-Melder). `drain()` (:233) verwirft im Shutdown, was noch wartet, und
-  wartet auf laufende Jobs. `HE_D3D_SHADER_PREFETCH=0` schaltet den Prefetch ab (serieller Pfad, gleiche Binary).
+  wartet auf laufende Jobs. `DrainOnFailure` ruft `drain()` auf, wenn `Initialize` wirft: `Application::Run`
+  meldet den Fehler und kehrt ohne `Shutdown` zurück, ein laufender Sky-Job würde sonst die Renderer-DLL
+  überleben. `HE_D3D_SHADER_PREFETCH=0` schaltet den Prefetch ab (serieller Pfad, gleiche Binary).
 * `D3DStartupTiming.h` `timedD3DCompile` (:73): fragt zuerst `take()` (:92). Bei einem Join ist `ms=` die Wartezeit
   des Haupt-Threads, und die Logzeile trägt `prefetched worker=<FXC-Zeit>`. `first frame:` zählt `prefetched=`.
 * D3D11 `D3D11Renderer.cpp`: `skyCrossHlsl()` (:5468) übersetzt den Sky einmal pro Prozess, Prefetch und
@@ -74,6 +76,11 @@ nicht von sich aus langsamer. Mehrere große FXC-Läufe bremsen sich aber gegens
   schreibt nichts, eine abgewichene Anfrage wird nicht beantwortet. Außerdem 8 Threads FXC (zwei Quellen gemischt)
   = seriell, mit genau einer Datei pro Schlüssel und ohne `.tmp`-Reste. Keine Negativkontrolle gebaut. Diskriminierend
   sind der `prefetched`-Zähler und der Byte-Vergleich.
+* `he_tests` komplett (Release, Scratch-APPDATA): 5520/5522. Die 2 Fehler stecken in `test_profiler.cpp` (:107, :215,
+  `EngineProfiler`-Singleton, abhängig von der Reihenfolge). Mit `--source-file-exclude=*test_d3d_shader_cache.cpp`
+  kommen dieselben 2 Fehler (5517/5519), allein ist die Datei grün (18/18). Sie stammen also nicht von diesem Zweig.
+  Gegen `release/0.7.0` nicht gegengeprüft. `validate_embedded_shaders.py`: 55 HLSL + 58 GLSL fehlerfrei.
+  Warm-Smoke nach dem Guard: D3D11 und D3D12 Exit 0, alles joined.
 * Nicht verifiziert: ruhiges Gerät, Projekt-Start (Materialshader laufen weiter seriell im ersten Frame, nicht
   vorab bekannt), HorizonGame, Metal/Linux (nur `D3D_Shared`/D3D-Dateien geändert, dort nicht kompiliert), Debug-Build.
 
