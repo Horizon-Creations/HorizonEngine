@@ -214,9 +214,123 @@ Idle `updateTerrains` includes the weightmap check and `syncSplines`. That is wh
 landscape there is no factor to remove. The refining case (tessellation on) was
 not measured: it does the same work, with a lookup in place of the hash map.
 
+## Step 4: SCN-701, SCN-702 (serializer, prefab sync), SCN-302 (shared asset parse)
+
+- **SCN-701** (`SceneSerializer.cpp`): `buildSceneJson`/`buildSubtreeJson` move
+  `children`, `components`, the entity node and the entity array into the tree. In
+  `serializeComponents` the terrain block (base64 heights, weights, water cells) is
+  moved, and so are the rope/spline points, script properties, state machine params
+  and LOD levels (nlohmann's initializer list moves an rvalue). `json` is
+  `nlohmann::json` (sorted `std::map`), so the order and bytes cannot change.
+- **SCN-702** (`SceneSerializer.cpp`):
+  - (1) `syncPrefabInstances` parses each asset blob once, right after `getPrefab`,
+    and gives the same tree to every placement through the file-local
+    `syncPrefabInstanceParsed`. The public bytes overload is a wrapper with the same
+    root check, parse and log line. An empty blob still counts as unresolved. A blob
+    that does not parse is still refused per placement, not counted (new test).
+  - (2) `recordPresent` is an `unordered_set` of record keys, built once per
+    placement. `hasBinding` and `instanceOf/templateOf` stay linear: they are UUID
+    compares over a handful of bindings, while `recordPresent` did a `std::map`
+    string lookup per record per call.
+  - A template block taken whole (no property override, no nested props) is
+    compared as it stands. The deep `json merged = block` copy is only made when
+    something is merged.
+  - **Not done:** (3) skipping an unchanged placement. Hand edits to an instance are
+    not revisioned, so a skip would change what a save repairs. That is for the
+    queen, together with an asset revision.
+- **SCN-302** (`AnimatorStateMachineComponent.h`, `AnimationPose.h`,
+  `AnimationStateMachineSystem.cpp`, `PoseSource.cpp`):
+  - `resolvedGraph` is a `shared_ptr<const AnimatorStateMachineGraph>`, read through
+    `graph()`, which gives an empty graph while it is null.
+    `BlendSpaceCacheEntry::space` is a `shared_ptr<const BlendSpace>`.
+  - Both come from a process-wide cache keyed by asset id. An entry is handed out
+    only for exactly the JSON text it was parsed from: ContentManager has no asset
+    revision, and equal text gives an equal parse.
+  - The cache holds weak pointers and a mutex, and sweeps expired entries on each
+    new parse. Failed parses are not cached, so a broken asset still logs once per
+    component.
+  - `markConfigDirty` keeps its meaning: the first component to re-resolve parses
+    the new text, and the others share it. Readers switched to `graph()`:
+    `EditorApplication.cpp:2880` and `test_animationsystem.cpp`.
+  - **Not done, on purpose:**
+    - Params as a vector index (`params` is serialized and read by name from
+      HE::api, sync graphs and the Inspector).
+    - Moving `LegacyConfig` out (a `unique_ptr` would make the component
+      non-copyable, and entity duplicate/prefab copy it).
+    - The particle `resolvedConfig`: RandomRange is rolled per resolve, so sharing
+      would give every emitter the same roll.
+    - `AnimationLayerComponent::resolvedMasks`. Its blend spaces are shared through
+      the same cache entry.
+
+Tests:
+- `test_animationsystem.cpp`, three cases:
+  - Two entities share one graph. An edit plus `markConfigDirty` moves both onto
+    one new graph, and the old one is untouched. Red with the text check removed
+    from `sharedGraph`: `:1575`/`:1576`.
+  - A broken or missing asset gives an empty graph.
+  - Two entities share one blend-space parse, and an edit re-parses it once.
+- `test_prefab.cpp`, one case: an unreadable asset in the whole-world pass beside a
+  good one.
+
+Measurement: a temporary doctest file, not committed (a copy is in
+`/tmp/scn218_s4/bench_scn218_s4_tmp.cpp` on the Mac it ran on). The base is
+`63055532` with its own dylibs (`DYLD_LIBRARY_PATH`). Release, M5, load 5.5-7, no
+`yes` hogs, low-power mode off, three alternating runs per side, medians in ms.
+
+| case | base | this step |
+|---|---:|---:|
+| `saveToMemory`, 20k entities + 1025² sculpted terrain + rope/spline/LOD/script/SM | 189-190 | 101-105 |
+| `syncPrefabInstances`, 1000 placements × 50 records, nothing to do | 506-510 | 180-192 |
+| same, one property changed in the asset (1000 blocks applied) | 499-511 | 184-194 |
+| SM re-resolve, 200 entities on one 24-state/48-transition asset | 27.0-27.4 | 0.10-0.11 |
+
+`sizeof(AnimatorStateMachineComponent)` went from 440 to 344 bytes, and the 200
+entities now hold one heap graph instead of 200. The SM row is the same-text path
+(one string compare per component instead of a parse). After an edit, the first
+component pays one parse. The byte witness is the same binary pair on fixed input
+files written once by the base: the fixture scene re-saved, the subtree blob, and
+the prefab scene saved after syncing to asset v1 and v2. All four are identical
+under `cmp`, and the `PrefabSyncReport` counters are identical too.
+
 ## Handoff
 
-### Step 3 (latest)
+### Step 4 (latest)
+
+- **Topic / step:** 218, step 4 of 4 (Hive step 1076).
+- **Commits:** 3954c38b (SCN-701/702), 8900df40 (SCN-302), and this doc.
+- **Files:** `src/HE_Scene/src/SceneSerializer.cpp`,
+  `src/HE_Scene/src/AnimationStateMachineSystem.cpp`, `src/HE_Scene/src/PoseSource.cpp`,
+  `include/HorizonScene/Components/AnimatorStateMachineComponent.h`,
+  `include/HorizonScene/AnimationPose.h`, `src/HE_Editor/EditorApplication.cpp:2880`
+  (one reader). Tests: 3 new cases in `test_animationsystem.cpp`, 1 in `test_prefab.cpp`.
+- **Verified:**
+  - The byte witness and A/B above.
+  - The SCN-302 mutation, built and red.
+  - The touched suites are green: animation 49, prefab 63, blend space 13,
+    serializer 46, layers 20, prefab keys 3.
+  - `EditorApplication.cpp` passes `-fsyntax-only` against this worktree's headers
+    (compile line from the main checkout's `out/build/macos-release` compdb).
+  - Full `ctest -j4` (Release, without the temporary benchmark): 301/303, 2 skipped.
+    - `test_hpak` "Disk registry" (6 == 2) is the known environment failure.
+    - `test_team_sync` failed once at `:139` (`waiting == 0 == 2`, a file-sync
+      timing check with no scene code involved). It passed 5/5 when run alone
+      afterwards.
+- **Not verified:** the `HorizonEditor` target was not built, and there was no
+  editor or game run. Nested-prefab timing not measured separately (covered by the
+  existing tests). Linux and Windows only through CI.
+- **Decisions taken:** text-validated shared cache instead of an asset revision
+  (no HE_Core change). Failed parses not shared. No skip of unchanged prefab
+  placements.
+- **For the queen to decide:**
+  - An asset revision on ContentManager, which would replace the text compare and
+    allow a skip for unchanged prefab placements.
+  - Params as an index table, and moving `LegacyConfig` out.
+- **Merge risk:** `EditorApplication.cpp` (one line) is also edited by topic 220 on
+  its branch.
+- **Next steps:** none in this topic's plan. Open follow-ups from all four steps are
+  listed in their handoffs and in `docs/audit/AUDIT.md` Stufe 4.
+
+### Step 3
 
 - **Topic / step:** 218, step 3 of 4 (Hive step 1075).
 - **Commits:** 07a42442 (SCN-801/802), and this doc.
