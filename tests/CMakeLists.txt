@@ -1117,15 +1117,20 @@ foreach(t E_FixMood E_FixDup S_FixInner S_FixStats)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_type_${t}.h)
 endforeach()
 foreach(c ${HCGEN_CLASSES})
-    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_${c}.cpp)
+    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_${c}.cpp ${HCGEN_DIR}/hcgen_${c}.reflect.cpp)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_${c}.h)
 endforeach()
 add_custom_command(OUTPUT ${HCGEN_SOURCES} ${HCGEN_HEADERS}
     COMMAND hc_codegen --fixtures --out ${HCGEN_DIR}
     DEPENDS hc_codegen ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen/fixtures.h
     COMMENT "hc_codegen: generating HorizonCode parity fixtures")
-target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp)
+target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp
+                                test_hc_codegen_readable.cpp)
 target_include_directories(he_tests PRIVATE ${HCGEN_DIR} fixtures/hcodegen)
+# What the generated code looks like (Thema 211 step 7): byte-for-byte golden
+# files of three fixtures, kept LF by .gitattributes.
+set_source_files_properties(test_hc_codegen_readable.cpp PROPERTIES
+    COMPILE_DEFINITIONS HE_TEST_HCGEN_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen_golden")
 
 # The same generated sources also become a REAL shared library with the C
 # manifest export — test_hccompiled_loader.cpp loads it through

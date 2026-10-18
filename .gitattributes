@@ -18,6 +18,7 @@ docs/git-auto-install-e2e/*.sh text eol=lf
 # Golden generator output, compared byte for byte with what the generator writes
 # (LF on every platform): a CRLF checkout on Windows turned the test red.
 tests/fixtures/game_build_config/* text eol=lf
+tests/fixtures/hcodegen_golden/* text eol=lf
 
 ###############################################################################
 # Set default behavior for command prompt diff.
