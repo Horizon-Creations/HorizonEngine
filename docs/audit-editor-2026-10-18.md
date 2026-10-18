@@ -183,27 +183,40 @@ ignore the revision turns two of the net-id tests red. `test_collab_docsync.cpp`
 `DiffGate` rules, and an unsignalled edit on a real HorizonCode graph sent by the
 fallback diff.
 
+## Step 5: tables instead of parallel lists, first monolith split (EDT-801, 1208, CORE-603, M9)
+
+| Finding | Where | What changed |
+|---|---|---|
+| EDT-801 asset panels | `EditorUI.cpp` `kAssetPanels` (before `tabHasUnsavedEdits`) | One `constexpr` row per panel (isAsset, render, isDirty, appendDirtyPaths, save, appendSnapshots, collabDocs, forget, reloadFromDisk); the eight functions and the render dispatch loop over it. Row order = dispatch order, the script editor is the last row (fallthrough, `isAsset == nullptr`). `static_assert`: every row renders and forgets, isDirty comes with appendDirtyPaths and save. Gaps kept as visible `nullptr`: Cinematic has no recovery copy, Skeletal Mesh no reload, the Static Mesh and Texture viewers only render/forget. The material "Advanced Shader Effects off" screen moved into the row's render function. |
+| EDT-1208 MCP write gate | `McpToolCommon.h/.cpp` `refuseAssetWrite`, `WriteGateText` | Animator, clip, input, material, particle, sequence, type, widget: Engine → play → lock → dirty in one function; codes and messages byte-identical, play/dirty texts stay the family's own. Widget passes no dirty text (a dirty Designer tab takes the edit). Hook-struct base (`McpAssetGate`) not done: it lives in `McpToolRegistry.h`, which EDT-1209 splits. |
+| CORE-603 UIPropTable | `UIElement.cpp` `baseProps()`, `findBaseProp` | One row per shared property (descriptor, getter, setter, `BaseOffer`); `uiBaseProperties`, `allProperties`, `getPropAny`, `setPropAny` cut from it; name index instead of up to 53 compares. **Two deliberate changes** (the drift): `allProperties` now offers Accepts Drop / Draggable / Drag Payload (visible in the MCP widget property lists; WidgetManager's rememberOriginal and the PreConstruct write record now see them too), and `uiBaseProperties` carries Gradient Angle 0-360 / Gradient Shape 0-1 (a bounded slider in the Theme editor and the widget parameter rows). |
+| M9 `dumpFrameHeadless` | `EditorApplication.cpp` `buildDumpWitnessScenes` (before `dumpFrameHeadless`) | The 3157 lines of HE_DUMP_* witness scenes moved line for line into their own member; the material-test and layer-material ids are out-parameters. `dumpFrameHeadless` is ~1700 lines now. |
+
+**Measured** (CORE-603 lookup, standalone `clang++ -O2`, M5, two runs): old chain vs index,
+"Visible" (row 1) 20 → 40 ns, "Render Opacity" 85 → 40 ns, "Position" 205 → 33 ns, last row
+400 → 42 ns, a type's own property ("Color", misses all 53 first) 400 → 62 ns.
+EDT-801 claims no speed-up: the per-tab dirty check still asks every row, see Handoff.
+
+**Verified:** EDT-801: HorizonEditor old vs new with Widget, Material, HorizonCode class,
+Texture and C++ tabs forced active (temporary env hook, not committed): same panels and
+labels, differences = caret/AA/FPS noise. EDT-1208: MCP tool tests 339 + `test_mcp_hc` 20,
+new "refuseAssetWrite: Engine, play, lock, dirty, in that order, hooks asked lazily".
+CORE-603: `test_ui_widgets` 428 incl. new "allProperties offers the shared rows exactly as
+uiBaseProperties describes them", widget designer/MCP widget/theme tests. M9: Metal shots
+byte-identical old vs new: `frame_pixel_ab.sh frame` (16), sky, material, SSR, water,
+landscape layers, many lights, LAYEREDIT (sensitive: differs from layers alone) and the
+preview stress loop (runs only if the material-test id came back).
+
 ## Handoff
 
-- **Topic / step:** 220, step 4 of 5 (steps 1-3: records above)
-- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 70440211 (code + tests), 93f96ef0 (this record), then the retry-map fix (the commit after it).
-- **Done:** EDT-402/1601 (structure pass gated), EDT-202 (net-id maps + miss cache), EDT-201 (Level Script / Game Instance diff gate). Table in "Step 4" above.
-- **Files touched:** `StructuralSync.h` (`StructPassGate`), `EditorApplication.h/.cpp` (`syncStructuralChanges(nowMs)` ~11570, caller ~4990, `onWorldReplaced` ~1058, `editorDocDiffDue` before `publishDocDeltas`, the two loops of `updateAssetCollabSync`, `hc.endEdit`, `commitGameInstance`), `CollabController.h/.cpp` (net-id section ~2700, remote create ~1163, session reset ~1768, `setWorld`), `CollabDocSync.h` (`DiffGate`), `HorizonWorld.h/.cpp` (`entityIdRevision`); tests: `test_collab_controller.cpp` (+7), `test_collab_docsync.cpp` (+2).
-- **Verified:**
-  - Release `HorizonEditor` and `he_tests` build green. Full `ctest -j4`: 301 passed, 2 skipped, 1 failed: the known `test_hpak:1188` (EngineContentCache in this HOME).
-  - Collab files alone: controller 97, docsync 26, mcp_tools_prefab 22, mcp_tools_collab 7, net_collab 114, collab_undo 9, all green. Miss-cache mutation turns 2 new tests red.
-  - Standalone bench (table above).
-- **Not verified:**
-  - No live two-editor session was run. The gating inside `syncStructuralChanges`/`updateAssetCollabSync` is only compiled: `EditorApplication` is not in `he_tests`. Only the gate rules and the net-id table are tested.
-  - The doc-gate saving was not timed. Windows/Linux only via CI.
-- **Decisions taken:**
-  - A structure epoch plus a 1 s fallback, not entt `on_construct` sinks. The epoch already covers the world's own paths, and sinks would need re-wiring on every world replace.
-  - The EDT-201 signal is a sum of counters that only grow, plus a 250 ms fallback. That was the audit's lower-risk variant; there is no revision on `HorizonCode::Graph`.
-  - `forgetNetId` drops one handle entry (the one under that id). A second handle that cached the same id (a damaged merge) keeps its entry, where the vector dropped every pair.
-- **Suggested, not taken:** the audit's randomised equivalence test (full diff vs gated pass over create/destroy/reparent/undo) needs the pass moved out of `EditorApplication` into a testable `StructuralSyncPass`.
+- **Topic / step:** 220, step 5 of 5 (steps 1-4: records above)
+- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 89315c79 (EDT-801), 82456582 (EDT-1208), 5ce314cd (CORE-603), 0d409490 (M9 dump), then this record.
+- **Done:** table above.
+- **Verified:** `HorizonEditor` + `he_tests` build green. Full `he_tests` without `test_material_graph`: 5348/5351; red: `test_hpak:1188` (known, EngineContentCache in this HOME) and two `test_profiler` cases (107, 215) that pass alone 3/3, together with the two changed test files and under `ctest -R test_profiler` (one process per file, as CI runs it): red only in a single-process full run, order-dependent on the `EngineProfiler` singleton; not checked against the base commit. `editor_help_audit.py --check` green.
+- **Not verified:** EDT-801 save/forget/reload/snapshot loops only compiled (EditorUI.cpp is not in he_tests); no manual save/close/quit session. Windows/Linux only via CI.
+- **Decisions taken:** EDT-801 table order = render dispatch order (the other loops are order-free: each panel answers for its own paths). No per-tab panel-index cache: Skeletal Mesh answers isDirty for clip paths, not its tab's path, so caching by the drawing row would change the dirty mark. EDT-1208 as a function, not a hook base struct (header churn belongs to EDT-1209).
+- **Not done (decision or own step needed):** EDT-703/704 (which ranges win, what Restore Defaults resets: question posted on the topic), EDT-1209 (split `McpToolRegistry.h`, `unique_ptr<McpBridge>`; with it the `McpAssetGate` base), M9 for `ContentBrowserPanel::render` (~4400 lines) and `EditorUI::renderEditor` (~3000, EDT-802), Cinematic recovery copy (open question, EDT-801).
 - **Traps:**
-  - `onWorldReplaced` marks EVERY entity known, local-only ones included. The first pass then sends destroys for this machine's terrain chunks and lights, which receivers ignore. Found by reading the code, not tested. This was there before the step and was left as it is.
-  - A cached net-id miss is only valid for one world: `setWorld` clears it.
-  - Anything left in the retry maps (`m_structureUnsendable`, `m_structureUndeletable`, `m_structureReparentPending`) forces the pass on every frame. So dead entities are pruned from `m_structureUnsendable` at the start of each pass, both maps are cleared at session end and in `onWorldReplaced`, and a re-parent under a parent that is local-only is not marked pending (that parent will never be known).
-- **Pending:** plan step 5.
-- **Next steps:** 1. Step 5: tables instead of parallel lists (EDT-801, 1208/1209, 703/704, AssetPanelOps/UIPropTable), then Extract Method on the big monoliths.
+  - `restoreOpenTabs` sets `m_activeTab` but the tab bar only selects on `s_tabSelectRequest`, so a restored session always shows the Viewport tab (seen in the A/B, left as it was). Headless tab A/B needs a forced select request.
+  - A witness that does not show its subject proves nothing: LANDSCAPELAYERS needs `CAMY=392 PITCH=-89`; HE_DUMP_PREVIEW draws offscreen (prove it by log).
+- **Next steps:** 1. EDT-703/704 once the question is answered. 2. EDT-1209 + McpAssetGate base. 3. M9 `ContentBrowserPanel::render`, then `renderEditor` (UI-shot A/B; the Content Browser region has ~70 px run-to-run noise).
