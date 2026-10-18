@@ -177,6 +177,10 @@ namespace
 	  "Marks what a savegame keeps for this entity, so a saved game restores it "
 	  "as it was rather than as the scene file has it.",
 	  "", "scenes#scene-files" },
+	{ "Component/Streaming", "Streaming",
+	  "Where this entity lives when the scene is split into cells: in a cell that "
+	  "loads around the camera, or always loaded in the base scene.",
+	  "", "scenes#streaming" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -1927,6 +1931,13 @@ namespace
 	  "onUpdate. The way to take one out of the picture without losing its "
 	  "property values.",
 	  "", "scripting#attach" },
+	{ "Streaming/Mode", "",
+	  "Resident keeps this entity in the base scene, always loaded, and with it "
+	  "everything in the same top-level group (its parents and their children): use "
+	  "it for what the level's logic needs at all times, a manager script or a "
+	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
+	  "effect the next time the scene is split.",
+	  "", "scenes#streaming" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -7480,17 +7491,20 @@ namespace
 	{ "Landscape/Refracted Light##wcau", "Refracted Light",
 	  "The moving net of bright lines the waves throw onto whatever lies below the "
 	  "surface while the camera is under water. It follows the same waves the "
-	  "water material draws (Physics/WaterWaves.h), so it moves with the swell you "
-	  "see from above, takes the sun's colour and is gone at night. It eases in "
-	  "over the first half metre of a dive, so crossing the waterline never pops. "
-	  "Intensity 0 turns it off and costs nothing.",
+	  "water material draws (Physics/WaterWaves.h) plus a fine chop, so it moves "
+	  "with the swell you see from above, takes the sun's colour and is gone at "
+	  "night. It is strongest in shallow water and fades out with depth; the light "
+	  "the lines gain is taken from the patches between them. It eases in over the "
+	  "first half metre of a dive, so crossing the waterline never pops. Intensity "
+	  "0 turns it off and costs nothing.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Intensity##wcau", "Refracted Light Intensity",
-	  "How bright the net is, as a multiple of the sun's light on the spot. 0 is "
-	  "off. Around 0.5 is a gentle shimmer; up to 4 for a stylised look.",
+	  "How bright the net is, as a multiple of the sun's light on the spot, and how "
+	  "much darker the patches between its lines get. 0 is off. Around 0.5 is a "
+	  "clear net on a sunny day; up to 4 for a stylised look.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Scale##wcau", "Refracted Light Scale",
-	  "The size of the net's cells. 1 matches the water material's own waves; 2 "
+	  "The size of the net's cells. At 1 they are around half a metre across; 2 "
 	  "makes the net twice as fine, 0.5 twice as wide.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Speed##wcau", "Refracted Light Speed",
@@ -7498,9 +7512,9 @@ namespace
 	  "them, 0 freezes the net.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Fade Depth##wcau", "Refracted Light Fade Depth",
-	  "The depth below the surface where the net has faded to about a third, the "
-	  "water swallowing the light on its way down. Beyond five times this depth "
-	  "nothing is shaded at all.",
+	  "The depth below the surface where the net is gone. It is at full strength in "
+	  "the shallows and eases out toward this depth, its lines growing wider and "
+	  "dimmer on the way. Deeper floors get no net at all.",
 	  "", "systems#water-physics" },
 
 	// ── The Environment window ───────────────────────────────────────────────
@@ -7769,7 +7783,8 @@ namespace
 	  "characters, dynamic bodies, audio sources. The game then loads the "
 	  "squares around its camera and drops the far ones; the things in a square "
 	  "keep their ids, so a placed prefab comes back as the same entities. Play "
-	  "in the editor shows only what stays in the scene. One undo step; save the "
+	  "in the editor streams the squares the same way, around the play camera. "
+	  "One undo step; save the "
 	  "scene to keep it. The scene has to have been saved once.",
 	  "", "editor#profiler" },
 	{ "Profiler/Merge Cells into the Scene", "",
@@ -9693,7 +9708,7 @@ namespace
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

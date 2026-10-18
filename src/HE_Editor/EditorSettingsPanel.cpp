@@ -14,6 +14,7 @@
 #include "ProjectSettingsPanel.h"       // Source Control: "where the repository went"
 #include "QuickSettingsFavorites.h"    // isFavorite, without a string per row
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
+#include "McpBridge.h"                 // Remote Control: the listener's state, Restart
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include "EditorRewards.h"             // Feedback > each tone's "Preview"
 #include "HeprojRegistration.h"        // Tool Status > File types: the .heproj registration switch

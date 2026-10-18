@@ -282,6 +282,15 @@ bool saveToDisk(State& st, AppContext& ctx, const std::string& assetPath)
 	// Instances have no graph — their state is already live on the asset; masters
 	// regenerate first so the saved file always matches the canvas.
 	if (!st.isInstance) applyToMaterial(st, ctx);
+	// A master's GI-hit colours (approx*) are derived only by the manager's own
+	// codegen, which a save used to reach through its own hot reload. A save is no
+	// longer re-read (CORE-204), so derive them here — before the write, so the
+	// file carries them too — and pass them on to the loaded instances.
+	if (!st.isInstance && !st.isFunction)
+	{
+		ctx.contentManager->regenerateMaterialFromGraph(st.materialId);
+		ctx.contentManager->syncMaterialInstancesOf(st.relPath);
+	}
 	RuntimeAsset* toSave = st.isFunction
 		? static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialFunctionMutable(st.materialId))
 		: static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialMutable(st.materialId));
@@ -1320,7 +1329,12 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			{
 				if (EditorWidgets::menuItem("(mesh texture)", nullptr, n->s.empty()))
 					if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s.clear(); structuralEdit = true; }
-				for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Texture))
+				// Taken as the submenu opens, like the preview-subject picker
+				// below, not once per frame it stays open (EDT-1101).
+				static std::vector<HcEditorUtil::ClassRef> s_textures;
+				if (ImGui::IsWindowAppearing())
+					s_textures = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Texture);
+				for (const auto& a : s_textures)
 					if (ImGui::MenuItem((a.label + "##" + a.path).c_str(), nullptr, n->s == a.path))
 						if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s = a.path; structuralEdit = true; }
 				ImGui::EndMenu();

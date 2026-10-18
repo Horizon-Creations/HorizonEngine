@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // the cached header sniff — what a path holds
 #include "InputMappingModel.h"        // the decoded mapping + its JSON codec
@@ -247,30 +247,21 @@ Doc openDoc(ContentManager& content, const McpInputHooks& h, const json& args,
 
 	if (forWrite)
 	{
-		if (p.engine) { d.failure = failEngineReadOnly(p.rel); return d; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and the running session has already applied "
+			"this mapping — a change now would be half in effect and half not. It is "
+			"refused rather than half-applied. Ask the user to stop play mode.",
+			"is open in the editor with unsaved changes. The Input "
+			"Asset editor keeps no undo history, so there is no safe place to put "
+			"this edit: writing the file would be reverted by the human's next Save, "
+			"and writing into the tab would be a change they could not take back. "
+			"Ask the user to save or close that tab, then call again." };
+		const bool openDirty = d.openDirty;
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther,
+		                                    [openDirty](const std::string&) { return openDirty; },
+		                                    kGate))
 		{
-			d.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and the running session has already applied "
-				"this mapping — a change now would be half in effect and half not. It is "
-				"refused rather than half-applied. Ask the user to stop play mode.");
-			return d;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			d.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return d;
-		}
-		if (d.openDirty)
-		{
-			d.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' is open in the editor with unsaved changes. The Input "
-				"Asset editor keeps no undo history, so there is no safe place to put "
-				"this edit: writing the file would be reverted by the human's next Save, "
-				"and writing into the tab would be a change they could not take back. "
-				"Ask the user to save or close that tab, then call again.");
+			d.failure = std::move(*refused);
 			return d;
 		}
 	}

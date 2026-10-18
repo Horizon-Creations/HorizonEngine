@@ -234,6 +234,10 @@ add_executable(he_tests
     test_world_scale.cpp
     test_transform_propagation.cpp
     test_cell_split.cpp
+    test_cell_runtime.cpp
+    test_cell_scripts.cpp
+    test_cell_state.cpp
+    test_cell_village.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp
@@ -285,6 +289,12 @@ add_executable(he_tests
     test_dev_stats_tile.cpp
     test_app_preview_outliner.cpp
     test_ui_theme.cpp
+    # One layout pass per frame (Thema 213): the frame-cost bench and the
+    # differential guard that the scoped path answers what the walk does.
+    test_ui_layout_scope.cpp
+    # Interpreter dispatch (Thema 213, CORE-302/303/401/402): the bench for
+    # 1000 instances and the guard that the index picks what the scan picked.
+    test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
     test_async_streaming.cpp
@@ -417,6 +427,7 @@ add_executable(he_tests
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
     test_git_panel_ops.cpp
+    test_sourcecontrol_tree.cpp
     test_scene_file_stamp.cpp
     test_github_oauth.cpp
     test_game_replication.cpp

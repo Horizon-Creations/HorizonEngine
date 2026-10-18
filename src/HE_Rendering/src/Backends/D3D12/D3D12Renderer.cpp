@@ -1818,7 +1818,8 @@ struct D3D12RendererImpl
 
     // ── Underwater caustics (Thema 185 Schritt 3) — a second fullscreen pass onto the
     // same hdrRT, drawn right before the fog with the fog's own blend (the shader's
-    // alpha is 0, so ONE/INV_SRC_ALPHA adds its light; see kUnderwaterCausticsHLSL).
+    // ONE/INV_SRC_ALPHA gives dst' = rgb + dst * (1 - a): the lines' light in rgb, the
+    // share the cells between them lose in a, Thema 205; see kUnderwaterCausticsHLSL).
     // Same root sig shape as the fog's — one SRV table (t0, the depth at
     // k_underwaterFogDepthSlot) + the static point-clamp sampler (s0) — but 36 root
     // constants (b0, the 144-byte CB inlined) instead of 28, hence its own.
@@ -2271,7 +2272,7 @@ struct D3D12RendererImpl
                 pd.PS = { ucB->GetBufferPointer(), ucB->GetBufferSize() };
                 D3D12_RENDER_TARGET_BLEND_DESC& rt = pd.BlendState.RenderTarget[0];
                 rt.BlendEnable = TRUE;
-                // Same blend as the fog: the shader outputs alpha 0, so dst' = src*1 + dst*(1-0) = dst + light.
+                // Same blend as the fog: dst' = rgb + dst*(1-a), the lines' light plus the cells' darkening.
                 rt.SrcBlend = D3D12_BLEND_ONE;       rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
                 rt.SrcBlendAlpha = D3D12_BLEND_ONE;  rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
                 rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;

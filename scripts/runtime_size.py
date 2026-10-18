@@ -190,21 +190,31 @@ LIMITS = {
     # tree carries one OpenGL backend where the game tree carries all of them,
     # and app-basic carries the software rasterizer alone.
     "linux": {
-        # game: (64.0, 38.0) until 17.10.2026, raised on purpose. Thema 182
-        # (run 39033396153 on commit 2f0331ce, ubuntu-latest, the ci.yml recipe)
-        # weighed 60.8 MB total, 38.0 MB without python (scene 14.1, rendering 8.7,
-        # core 8.6) and went red by less than 0.05 MB; the row had not been
-        # re-measured since 05.09. (29.9 MB), and a month of world streaming,
+        # game: (64.0, 38.0) until 17.10.2026, raised on purpose. Thema 183
+        # Schritt 2 (run 39031060917, ubuntu-latest, the ci.yml recipe) weighed
+        # 60.8 MB total, 38.0 MB without python (scene 14.1, rendering 8.6, core
+        # 8.6) and went red by less than 0.05 MB; its merge base 1e41c2d2 on
+        # release/0.7.0 was green, so it stood at most at 38.0 — the row had not
+        # been re-measured since 05.09. (29.9 MB), and a month of world streaming,
         # multiplayer and the rest ate the headroom the same way the win32 row
-        # above records. What tipped it on this branch is foliage, nothing linked
-        # in from outside: layers and their serializer in HorizonScene, detail
-        # levels and the graph-material instanced twins in HorizonRendering
-        # (Thema 182 steps 1-4). Thema 183 measured the same 60.8 / 38.0 on its own
-        # branch and raised the row to the same numbers. New limits: measured plus
-        # 10 percent, the rule the other rows follow.
+        # above records. What tipped it is cell streaming in HorizonScene, nothing
+        # linked in from outside: CellRuntime/ICellHost (moved out of the game
+        # executable), CellState, the per-cell script start/stop (CellScripts),
+        # the streaming API group and StreamingComponent (Thema 183 steps 1-3).
+        # Thema 182 (foliage layers, detail levels, graph-material instanced
+        # twins) weighed the same 60.8 / 38.0 independently on its own branch.
+        # New limits: measured plus 10 percent, the rule the other rows follow.
+        #
+        # app-advanced/app-basic: (56.0, 31.0) and (55.0, 30.0) until
+        # 17.10.2026, raised on the same cell-streaming growth as the game row
+        # above (Thema 183 steps 1-3). Run 39037311399 (ubuntu-latest) weighed
+        # app-advanced at 53.9/31.1 MB and app-basic at 52.9/30.1 MB; the same
+        # two rows were red on Thema 183 (zellstreaming) within 0.1 MB. Already
+        # at the limit on release/0.7.0 itself, not specific to either branch.
+        # Measured plus 10 percent again.
         "game":         (67.0, 42.0),
-        "app-advanced": (56.0, 31.0),
-        "app-basic":    (55.0, 30.0),
+        "app-advanced": (59.0, 34.5),
+        "app-basic":    (58.0, 33.5),
     },
 }
 # ── On the headroom in the two tables above ─────────────────────────────────

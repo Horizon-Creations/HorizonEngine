@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CellRuntime.h"   // the streaming group
 #include "HorizonScene/TransformHierarchy.h"   // world position, composed on demand
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/AudioEngine.h"
@@ -536,13 +537,15 @@ glm::dvec3 saveOriginFor(Ctx& c, Entity e)
 }
 } // namespace
 
-bool saveState(Ctx& c, Entity e)
+namespace
 {
-    std::string uuid;
-    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
-    if (!ss) return false;
+// What entity.saveState writes and entity.applySavedState applies, without their
+// gates (play mode, an active save): the cells' in-memory state (CellState.h)
+// keeps an unloaded cell's entities in exactly this form.
+nlohmann::json captureStateJson(Ctx& c, Entity e, const SaveStateComponent& ss)
+{
     nlohmann::json j = nlohmann::json::object();
-    if (ss->saveTransform)
+    if (ss.saveTransform)
     {
         const glm::dvec3 origin = saveOriginFor(c, e);
         if (auto* t = c.world->registry().try_get<TransformComponent>((entt::entity)e))
@@ -552,14 +555,93 @@ bool saveState(Ctx& c, Entity e)
                 { "rot", { t->rotation.x, t->rotation.y, t->rotation.z } },
                 { "scl", { t->scale.x,    t->scale.y,    t->scale.z } } };
     }
-    if (ss->saveVisibility)
+    if (ss.saveVisibility)
         j["visible"] = getVisible(c, e);
     // Only when there is something: an entity whose class ticks nothing (or
     // that has no class) writes exactly the state it wrote before this existed.
-    if (ss->saveScriptVars)
+    if (ss.saveScriptVars)
         if (nlohmann::json vars = scriptVarsToJson(c, e); !vars.empty())
             j["vars"] = std::move(vars);
-    return save::setEntityState(uuid, j.dump());
+    return j;
+}
+
+void applyStateJson(Ctx& c, Entity e, const SaveStateComponent& ss, const nlohmann::json& j, uint8_t parts)
+{
+    // Partial application: only what the save carries touches the instance.
+    if (parts & kStateWorld)
+    {
+        if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss.saveTransform)
+        {
+            if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
+            {
+                auto vec3 = [&](const char* key, glm::vec3& out) {
+                    auto it = t->find(key);
+                    if (it != t->end() && it->is_array() && it->size() >= 3)
+                        out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+                };
+                if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
+                {
+                    const glm::dvec3 origin = saveOriginFor(c, e);
+                    tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
+                                             (*it)[1].get<double>() - origin.y,
+                                             (*it)[2].get<double>() - origin.z);
+                }
+                vec3("rot", tc->rotation);
+                vec3("scl", tc->scale);
+
+                // Restoring a physics entity means moving the BODY, not the
+                // transform: the step overwrites the transform from Jolt, so a save
+                // restore on the one kind of entity a save exists for (the player,
+                // the crate the player pushed) used to be undone the same frame.
+                // Velocity is reset because the save carries none — arriving with
+                // the motion the entity had before the load is an artefact of the
+                // restore, not restored state.
+                //
+                // The pose above is LOCAL — it came out of TransformComponent when
+                // the save was written — so it goes through teleportToLocalPose,
+                // which converts it to the world pose physics deals in and puts the
+                // saved spelling back afterwards (setTransform would otherwise
+                // return the rotation as degrees(eulerAngles(q)), the same
+                // orientation written differently, and save → load → save would stop
+                // being byte-identical).
+                if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+                    teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
+            }
+        }
+        if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss.saveVisibility)
+            setVisible(c, e, v->get<bool>());
+    }
+    if (parts & kStateScript)
+        if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss.saveScriptVars)
+            applyScriptVars(c, e, *v);
+}
+} // namespace
+
+bool saveState(Ctx& c, Entity e)
+{
+    std::string uuid;
+    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
+    if (!ss) return false;
+    return save::setEntityState(uuid, captureStateJson(c, e, *ss).dump());
+}
+
+std::string stateOf(Ctx& c, Entity e)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return {};
+    const auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled) return {};
+    return captureStateJson(c, e, *ss).dump();
+}
+
+bool applyState(Ctx& c, Entity e, const std::string& text, uint8_t parts)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return false;
+    const auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled) return false;
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return false;
+    applyStateJson(c, e, *ss, j, parts);
+    return true;
 }
 
 bool hasSavedState(Ctx& c, Entity e)
@@ -582,49 +664,7 @@ bool applySavedState(Ctx& c, Entity e)
     }
     nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return false;
-    // Partial application: only what the save carries touches the instance.
-    if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss->saveTransform)
-    {
-        if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
-        {
-            auto vec3 = [&](const char* key, glm::vec3& out) {
-                auto it = t->find(key);
-                if (it != t->end() && it->is_array() && it->size() >= 3)
-                    out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
-            };
-            if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
-            {
-                const glm::dvec3 origin = saveOriginFor(c, e);
-                tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
-                                         (*it)[1].get<double>() - origin.y,
-                                         (*it)[2].get<double>() - origin.z);
-            }
-            vec3("rot", tc->rotation);
-            vec3("scl", tc->scale);
-
-            // Restoring a physics entity means moving the BODY, not the
-            // transform: the step overwrites the transform from Jolt, so a save
-            // restore on the one kind of entity a save exists for (the player,
-            // the crate the player pushed) used to be undone the same frame.
-            // Velocity is reset because the save carries none — arriving with
-            // the motion the entity had before the load is an artefact of the
-            // restore, not restored state.
-            //
-            // The pose above is LOCAL — it came out of TransformComponent when
-            // the save was written — so it goes through teleportToLocalPose,
-            // which converts it to the world pose physics deals in and puts the
-            // saved spelling back afterwards (setTransform would otherwise
-            // return the rotation as degrees(eulerAngles(q)), the same
-            // orientation written differently, and save → load → save would stop
-            // being byte-identical).
-            if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
-                teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
-        }
-    }
-    if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
-        setVisible(c, e, v->get<bool>());
-    if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss->saveScriptVars)
-        applyScriptVars(c, e, *v);
+    applyStateJson(c, e, *ss, j, kStateAll);
     return true;
 }
 } // namespace entity
@@ -2656,6 +2696,61 @@ std::string typeNameId(Ctx& c, const HE::UUID& id)
 }
 
 } // namespace content
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+namespace streaming {
+
+namespace
+{
+HE::CellRuntime* g_cells = nullptr;
+
+// The world position plus the world's origin: what the streamer measures by.
+glm::dvec3 absoluteOf(const Ctx& c, const glm::vec3& position)
+{
+    glm::dvec3 p(position);
+    if (c.world) p += c.world->origin();
+    return p;
+}
+} // namespace
+
+void             install(HE::CellRuntime* runtime) { g_cells = runtime; }
+HE::CellRuntime* installed() { return g_cells; }
+
+Cell cellAt(Ctx& c, const glm::vec3& position)
+{
+    Cell out;
+    if (!g_cells || !g_cells->active()) return out;
+    const HE::CellManifest& m = g_cells->streamer().manifest();
+    const glm::dvec3 p = absoluteOf(c, position);
+    out.x = HE::CellManifest::cellIndex(p.x, m.cellSize);
+    out.z = HE::CellManifest::cellIndex(p.z, m.cellSize);
+    for (const HE::CellManifest::Cell& cell : m.cells)
+        if (cell.x == out.x && cell.z == out.z) { out.exists = true; break; }
+    return out;
+}
+
+bool isLoaded(Ctx&, int x, int z)
+{
+    return g_cells && g_cells->active() && g_cells->streamer().isLoaded(x, z);
+}
+
+bool isSettled(Ctx& c, const glm::vec3& position, float radius)
+{
+    if (!g_cells || !g_cells->active()) return true;
+    return g_cells->streamer().isSettled(absoluteOf(c, position), std::max(0.0f, radius));
+}
+
+int pin(Ctx& c, const glm::vec3& position, float radius)
+{
+    return g_cells ? g_cells->pin(absoluteOf(c, position), radius) : 0;
+}
+
+bool unpin(Ctx&, int handle)
+{
+    return g_cells && g_cells->unpin(handle);
+}
+
+} // namespace streaming
 
 // ── Audio ────────────────────────────────────────────────────────────────────
 namespace audio {
@@ -7383,6 +7478,26 @@ const std::vector<ApiFn>& registry()
             {{"type", P::String}}, "HE::api::content::typeName",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(content::typeName(c, aS(a, 0))) }; } });
 
+        // Streaming — the scene's cells. Unpermissioned: a pin loads what the scene
+        // would load anyway if the camera went there, and the rest only asks.
+        t.push_back({ "streaming.cellAt", "Streaming", false, {{"position", P::Vec3}},
+            {{"x", P::Int}, {"z", P::Int}, {"exists", P::Bool}}, "HE::api::streaming::cellAt",
+            [](Ctx& c, const VV& a){
+                const streaming::Cell cell = streaming::cellAt(c, aV3(a, 0));
+                return VV{ Value::ofInt(cell.x), Value::ofInt(cell.z), Value::ofBool(cell.exists) }; } });
+        t.push_back({ "streaming.isLoaded", "Streaming", false, {{"x", P::Int}, {"z", P::Int}},
+            {{"loaded", P::Bool}}, "HE::api::streaming::isLoaded",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::isLoaded(c, aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "streaming.isSettled", "Streaming", false, {{"position", P::Vec3}, {"radius", P::Float}},
+            {{"settled", P::Bool}}, "HE::api::streaming::isSettled",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::isSettled(c, aV3(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "streaming.pin", "Streaming", true, {{"position", P::Vec3}, {"radius", P::Float}},
+            {{"handle", P::Int}}, "HE::api::streaming::pin",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(streaming::pin(c, aV3(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "streaming.unpin", "Streaming", true, {{"handle", P::Int}},
+            {{"ok", P::Bool}}, "HE::api::streaming::unpin",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::unpin(c, aI(a, 0))) }; } });
+
         // Audio
         t.push_back({ "audio.play", "Audio", true,
             {{"asset", P::String}, {"volume", P::Float}, {"pitch", P::Float}, {"loop", P::Bool}},
@@ -8327,6 +8442,9 @@ const std::vector<ApiFn>& registry()
 #undef HE_ENV_NAME_ROW
             { "content.load", "Load Asset" },      { "content.unload", "Unload Asset" },
             { "content.isLoaded", "Is Asset Loaded" }, { "content.typeName", "Asset Type Name" },
+            { "streaming.cellAt", "Cell At" },     { "streaming.isLoaded", "Is Cell Loaded" },
+            { "streaming.isSettled", "Is Area Settled" },
+            { "streaming.pin", "Pin Cells" },      { "streaming.unpin", "Unpin Cells" },
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
@@ -8679,6 +8797,10 @@ bool isScriptGroup(std::string_view group)
                                                     // door opens" or "let go of the level I just
                                                     // left", which is what residency control is.
                                                     "content",
+                                                    // "streaming" has no flat twin either: a
+                                                    // teleport written in Lua could otherwise
+                                                    // never wait for the floor it lands on.
+                                                    "streaming",
                                                     // "anticheat" has no flat twin and never will:
                                                     // the plan's Lua and Python examples (§4.3)
                                                     // are horizon.anticheat.check / reportLevel /

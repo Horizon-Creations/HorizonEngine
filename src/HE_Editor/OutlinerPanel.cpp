@@ -1097,8 +1097,14 @@ void render(AppContext& ctx)
         // "between" means in the order the user sees — closed subtrees are not
         // in it. Collected during the loop and resolved after it, because the
         // clicked row may lie above the anchor.
-        std::vector<Entity> visibleRows;
-        visibleRows.reserve(s_outlinerCache.size());
+        //
+        // Only needed when this frame can BE a Shift-click (Shift is held);
+        // otherwise it was a push per entity and, at 50k, a 200 KB block
+        // allocated per frame for nothing (EDT-1404). Static so the capacity
+        // outlives the frame.
+        static std::vector<Entity> visibleRows;
+        visibleRows.clear();
+        const bool collectVisibleRows = ImGui::GetIO().KeyShift;
         Entity shiftRangeTarget = entt::null;
 
         // ── Row look, decided once per frame ──────────────────────────────
@@ -1151,7 +1157,7 @@ void render(AppContext& ctx)
             // a hit whose children all fell away is a leaf, arrow and all.
             const bool hasChildren = filterActive ? shown[nodeIndex].childShown
                                                   : node.hasChildren;
-            visibleRows.push_back(node.entity);
+            if (collectVisibleRows) visibleRows.push_back(node.entity);
 
             // Close tree levels we've left: on the path, and in ImGui as far
             // as they were really pushed.

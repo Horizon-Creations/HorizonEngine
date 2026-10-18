@@ -12,6 +12,7 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <unordered_set>
 
 using json = nlohmann::json;
 
@@ -180,6 +181,77 @@ void releaseOnWorker(json&& tree)
 // "version", or 1 for a file without one (a cell from scripts/split_scene_cells.py,
 // or from an editor older than the head). Read off the parsed tree rather than
 // from the world, on purpose: an additive load never touches the world's own head.
+// Takes the records `skip` names out of a slice, with every record below them,
+// and their ids out of the "children" of the records that stay. Returns how many
+// went. A slice is a few hundred records at most, so the subtrees are found by
+// passing over it until nothing more joins.
+size_t dropSkippedRecords(json& scene, const std::function<bool(const HE::UUID&)>& skip)
+{
+	const auto ents = scene.find("entities");
+	if (ents == scene.end() || !ents->is_array()) return 0;
+	const auto idOf = [](const json& r, const char* key, HE::UUID& out)
+	{
+		const auto v = r.find(key);
+		if (v == r.end() || !v->is_array() || v->size() != 2 || !(*v)[0].is_number_unsigned()
+		    || !(*v)[1].is_number_unsigned())
+			return false;
+		out.hi = (*v)[0].get<uint64_t>();
+		out.lo = (*v)[1].get<uint64_t>();
+		return true;
+	};
+	std::unordered_set<HE::UUID> gone;
+	for (const json& r : *ents)
+	{
+		HE::UUID id;
+		if (r.is_object() && idOf(r, "uuid", id) && skip(id)) gone.insert(id);
+	}
+	if (gone.empty()) return 0;
+	for (bool more = true; more;)
+	{
+		more = false;
+		for (const json& r : *ents)
+		{
+			HE::UUID id, parent;
+			if (r.is_object() && idOf(r, "uuid", id) && !gone.count(id) && idOf(r, "parent", parent)
+			    && gone.count(parent))
+			{
+				gone.insert(id);
+				more = true;
+			}
+		}
+	}
+	size_t dropped = 0;
+	json   kept    = json::array();
+	for (json& r : *ents)
+	{
+		HE::UUID id;
+		if (r.is_object() && idOf(r, "uuid", id) && gone.count(id))
+		{
+			++dropped;
+			continue;
+		}
+		if (const auto kids = r.find("children"); kids != r.end() && kids->is_array())
+		{
+			json left = json::array();
+			for (json& k : *kids)
+			{
+				HE::UUID kid;
+				if (k.is_array() && k.size() == 2 && k[0].is_number_unsigned() && k[1].is_number_unsigned())
+				{
+					kid.hi = k[0].get<uint64_t>();
+					kid.lo = k[1].get<uint64_t>();
+					if (gone.count(kid)) continue;
+				}
+				left.push_back(std::move(k));
+			}
+			*kids = std::move(left);
+		}
+		kept.push_back(std::move(r));
+	}
+	*ents = std::move(kept);
+	return dropped;
+}
+
 int cellFormatVersionOf(const json& scene)
 {
 	const auto head = scene.find("streaming");
@@ -255,6 +327,13 @@ bool CellStreamer::isBuilding(int x, int z) const
 {
 	const auto it = m_pending.find(key(x, z));
 	return it != m_pending.end() && it->second->next > 0;
+}
+
+bool CellStreamer::keepsIds(entt::entity root) const
+{
+	for (const auto& [k, p] : m_pending)
+		if (p->next > 0 && p->root == root) return p->preserveIds;
+	return false;
 }
 
 bool CellStreamer::isSettled(const glm::dvec3& position, double radius) const
@@ -528,6 +607,9 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 			options.idCollisions = &m_stats.idCollisions;
 			// The later slices hang under the root the first one made.
 			options.attachTo     = first ? entt::null : p->root;
+			// What the session has seen go is not built again (Hooks::skip).
+			if (p->preserveIds && m_hooks.skip)
+				m_stats.skipped += dropSkippedRecords(p->slices[p->next], m_hooks.skip);
 			const bool ok = ser.loadAdditiveFromJson(world, p->slices[p->next], &created, options);
 			releaseOnWorker(std::move(p->slices[p->next]));
 			builtOne = true;

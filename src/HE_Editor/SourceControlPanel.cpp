@@ -12,6 +12,7 @@
 #include "TeamSyncView.h"          // the team-sync view, in team-server mode
 #include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
 #include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
+#include "SourceControlTree.h"    // the "Tree view" as clippable lines
 
 #include <Diagnostics/GlobalState.h>
 #include <SourceControl/GitCli.h>
@@ -29,6 +30,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -272,6 +274,9 @@ struct ChangeRow
 struct Model
 {
 	std::vector<ChangeRow> conflicts, staged, unstaged, untracked;
+	// The four lists as "Tree view" lines (SourceControlTree.h), section order:
+	// conflicts, staged, changes, new.
+	std::vector<HE::Ed::ChangeTree::Line> tree[4];
 	int         catCounts[kCatCount] = {};
 	std::size_t total       = 0;     // every dirty file, whatever the filter hides
 	std::size_t stagedTotal = 0;
@@ -332,6 +337,10 @@ void rebuildModel(const HE::Sc::RepoStatus& st)
 	std::sort(m.staged.begin(),    m.staged.end(),    byPath);
 	std::sort(m.unstaged.begin(),  m.unstaged.end(),  byPath);
 	std::sort(m.untracked.begin(), m.untracked.end(), byPath);
+	const std::vector<ChangeRow>* lists[4] = { &m.conflicts, &m.staged, &m.unstaged, &m.untracked };
+	for (int s = 0; s < 4; ++s)
+		m.tree[s] = HE::Ed::ChangeTree::build(static_cast<int>(lists[s]->size()),
+			[&](int i) -> const std::string& { return (*lists[s])[static_cast<std::size_t>(i)].path; });
 	s_model = std::move(m);
 }
 
@@ -650,63 +659,59 @@ Bulk drawSectionHeader(const char* title, std::size_t count, bool& open, bool sh
 	return result;
 }
 
-struct DirNode
-{
-	std::map<std::string, DirNode> dirs;
-	std::vector<const ChangeRow*>  files;
-};
-
-void insertRow(DirNode& root, const ChangeRow& r)
-{
-	DirNode* node = &root;
-	std::size_t start = 0;
-	while (true)
-	{
-		const std::size_t slash = r.path.find('/', start);
-		if (slash == std::string::npos) { node->files.push_back(&r); return; }
-		node = &node->dirs[r.path.substr(start, slash - start)];
-		start = slash + 1;
-	}
-}
-
-template <class Fn>
-void drawDirNode(const std::string& name, const DirNode& node, Fn&& rowFn)
-{
-	// Single-child chains fold into one node ("Content/Meshes/Props"), the way VS Code
-	// does it.
-	const DirNode* n = &node;
-	std::string label = name;
-	while (n->files.empty() && n->dirs.size() == 1)
-	{
-		label += "/" + n->dirs.begin()->first;
-		n = &n->dirs.begin()->second;
-	}
-	ImGui::PushID(label.c_str());
-	if (ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
-	{
-		for (const auto& [sub, child] : n->dirs) drawDirNode(sub, child, rowFn);
-		for (const ChangeRow* r : n->files) rowFn(*r);
-		ImGui::TreePop();
-	}
-	ImGui::PopID();
-}
+// Folded folders of the "Tree view", per section (conflicts, staged, changes, new),
+// by full path. Kept by the panel, not in ImGui's storage: a folded folder has to
+// survive the status refresh, and the clipper below never submits it while it is
+// out of view.
+std::unordered_set<std::string> s_foldedDirs[4];
 
 // One section's rows, as a tree or flat, with the results of every row gathered.
+// Both clipped: a freshly imported project can have thousands of untracked rows.
+// Every line is one frame high, a folder line too (FramePadding), so the clipper's
+// fixed step holds for the tree as well.
 template <class Fn>
-void drawRows(const std::vector<ChangeRow>& rows, Fn&& rowFn)
+void drawRows(int section, const std::vector<ChangeRow>& rows,
+              const std::vector<HE::Ed::ChangeTree::Line>& tree, Fn&& rowFn)
 {
+	const float step = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
 	if (s_treeView)
 	{
-		DirNode root;
-		for (const ChangeRow& r : rows) insertRow(root, r);
-		for (const auto& [name, sub] : root.dirs) drawDirNode(name, sub, rowFn);
-		for (const ChangeRow* r : root.files) rowFn(*r);
+		std::unordered_set<std::string>& folded = s_foldedDirs[section];
+		static std::vector<int> s_visible;
+		HE::Ed::ChangeTree::visible(tree, folded, s_visible);
+		const float indentStep = ImGui::GetStyle().IndentSpacing;
+		// Read after the loop: toggling a folder changes what is visible, and the
+		// clipper is still walking this frame's list.
+		const std::string* toggled = nullptr;
+		ImGuiListClipper clip;
+		clip.Begin(static_cast<int>(s_visible.size()), step);
+		while (clip.Step())
+			for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i)
+			{
+				const HE::Ed::ChangeTree::Line& l = tree[static_cast<std::size_t>(s_visible[static_cast<std::size_t>(i)])];
+				const float indent = static_cast<float>(l.depth) * indentStep;
+				if (indent > 0.0f) ImGui::Indent(indent);
+				if (l.row >= 0)
+					rowFn(rows[static_cast<std::size_t>(l.row)]);
+				else
+				{
+					const bool open = folded.count(l.key) == 0;
+					ImGui::PushID(l.key.c_str());
+					ImGui::SetNextItemOpen(open, ImGuiCond_Always);
+					if (ImGui::TreeNodeEx(l.label.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth |
+					                                        ImGuiTreeNodeFlags_FramePadding |
+					                                        ImGuiTreeNodeFlags_NoTreePushOnOpen) != open)
+						toggled = &l.key;
+					ImGui::PopID();
+				}
+				if (indent > 0.0f) ImGui::Unindent(indent);
+			}
+		if (toggled && !folded.erase(*toggled)) folded.insert(*toggled);
 	}
 	else
 	{
-		// Clipped: a freshly imported project can have thousands of untracked rows.
 		ImGuiListClipper clip;
-		clip.Begin(static_cast<int>(rows.size()), ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y);
+		clip.Begin(static_cast<int>(rows.size()), step);
 		while (clip.Step())
 			for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) rowFn(rows[static_cast<std::size_t>(i)]);
 	}
@@ -921,7 +926,7 @@ void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatu
 			}
 			if (!s_sectionOpen[idx]) return;
 			ImGui::PushID(idx);
-			drawRows(rows, [&](const ChangeRow& r) {
+			drawRows(idx, rows, m.tree[idx], [&](const ChangeRow& r) {
 				const RowResult res = drawRow(r, kind, showDir, mayWrite, m.root);
 				if (res.toggle)
 				{

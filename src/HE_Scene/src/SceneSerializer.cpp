@@ -21,6 +21,7 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
+#include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
 #include "HorizonScene/Components/InactiveComponent.h"     // the "Active" switch, a component like any other
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
@@ -590,6 +591,9 @@ namespace
 				{ "saveScriptVars", ss->saveScriptVars },
 			};
 		}
+		// Where the entity lives in a split scene (the splitter reads it, CellSplit.cpp).
+		if (auto* st = registry.try_get<StreamingComponent>(entity))
+			comps["streaming"] = { { "mode", static_cast<int>(st->mode) } };
 		if (auto* pl = registry.try_get<PrefabInstanceComponent>(entity))
 		{
 			// Written like every other asset reference — [hi, lo] inside the
@@ -1543,6 +1547,17 @@ namespace
 			ss.saveVisibility = c.value("saveVisibility", ss.saveVisibility);
 			ss.saveScriptVars = c.value("saveScriptVars", ss.saveScriptVars);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
+		}
+		if (comps.contains("streaming"))
+		{
+			const json& c = comps["streaming"];
+			StreamingComponent st;
+			// An unknown mode (a newer editor's) is Resident: the safe side, the one that
+			// keeps the entity loaded.
+			const int mode = c.is_object() ? c.value("mode", static_cast<int>(st.mode)) : static_cast<int>(st.mode);
+			st.mode = mode == static_cast<int>(StreamingComponent::Mode::Auto) ? StreamingComponent::Mode::Auto
+			                                                                   : StreamingComponent::Mode::Resident;
+			registry.emplace_or_replace<StreamingComponent>(entity, st);
 		}
 		if (comps.contains("prefab"))
 		{
@@ -2856,7 +2871,7 @@ namespace
 	X("collider",            ColliderComponent) \
 	X("joint",               JointComponent) \
 	X("characterController", CharacterControllerComponent) \
-	X("saveState",           SaveStateComponent) \
+	X("saveState",           SaveStateComponent) 	X("streaming",           StreamingComponent) \
 	X("prefab",              PrefabInstanceComponent) \
 	X("script",              ScriptComponent) \
 	X("environment",         EnvironmentComponent) \
@@ -3128,7 +3143,10 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
-		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline", "terrain",
+		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline",
+		// Where the entity lives in a split scene (StreamingComponent).
+		"streaming",
+		"terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",

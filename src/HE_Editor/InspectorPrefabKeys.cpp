@@ -56,6 +56,7 @@ namespace
 		{ "Sequence Player",        "sequenceplayer" },
 		{ "Particle System",        "particlesystem" },
 		{ "Save State",             "saveState" },
+		{ "Streaming",              "streaming" },
 		{ "LOD",                    "lod" },
 		{ "Environment",            "environment" },
 		{ "Weather",                "weather" },

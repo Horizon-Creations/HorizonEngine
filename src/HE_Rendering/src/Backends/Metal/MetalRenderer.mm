@@ -1706,7 +1706,8 @@ fragment float4 dofCompositeFragment(FSOut in [[stage_in]],
 // position P; the sun's ray through P, bent by Snell's law, pierces the flat surface
 // plane at S; the engine water's wave trains (Physics/WaterWaves.h, spliced in at
 // @TRAINS@) give the surface's curvature there, and 1/|det| of the light's
-// surface->floor mapping is how much it is squeezed. Added to the scene colour.
+// surface->floor mapping is how much it is squeezed. Since Thema 205 Schritt 2 the light
+// is redistributed (scene * (1 - a) + rgb) and fades out by depth; see the GL twin.
 // Metal depth is already GL ndc z (same convention as mbVelocityFragment above).
 //
 // The same pass carries the depth fog (Thema 185 Schritt 2: a separate alpha-blended pass
@@ -1736,23 +1737,33 @@ struct UcParams
 	float4   camSurface;    // xyz = camera world position, w = surface Y
 	float4   sun;           // xyz = direction TOWARD the sun (unit)
 	float4   sunColor;      // rgb = sun radiance (0 at night)
-	float4   caustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = fade depth (m)
+	float4   caustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
 	float4   tintDensity;   // rgb = resolved fog tint, a = per-metre density (the fog stage, see ucFragment)
 };
 
 constant float kTrains[12] = { @TRAINS@ };
+constant int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
+constant float kChopSteep  = 0.05;
+constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
+constant float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
-// The light the refracted-sun net adds at P (float3(0) where there is none). The screen
-// derivatives of P come in as arguments: ucFragment takes them before any branch.
-static float3 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dPy)
+// The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
+// cells between them lose (float4(0) where there is no net; Thema 205 Schritt 2, the GL twin
+// carries the reasoning). The screen derivatives of P come in as arguments: ucFragment takes
+// them before any branch. Past the one uniform early-out it runs for every pixel, the result
+// selected away for the sky, so fwidth(det) stays defined (sky P parked at the camera).
+static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dPy, bool hit)
 {
 	const float kTwoPi = 6.28318530718;
 	const float kEta   = 1.33;
+	float3 L = u.sun.xyz;
+	if (u.caustics.x <= 0.0 || L.y <= 0.02)
+		return float4(0.0);                                     // off, or no sun
+	P = hit ? P : u.camSurface.xyz;
 	float  depth = u.camSurface.w - P.y;                        // metres below the flat surface
 	float  fadeDepth = u.caustics.w;
-	float3 L = u.sun.xyz;
-	if (u.caustics.x <= 0.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02)
-		return float3(0.0);                                     // off, dry, too deep, no sun
 
 	float2 hz   = L.xz / kEta;
 	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
@@ -1760,31 +1771,60 @@ static float3 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
 	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * u.caustics.z), sin(0.37 * S.x - 0.27 * u.caustics.z));
 
-	float mxx = 0.0, mzz = 0.0, mxz = 0.0;
-	for (int i = 0; i < 6; ++i)
+	// Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
+	float  mxx = 0.0, mzz = 0.0, mxz = 0.0;
+	float2 gxx = float2(0.0), gzz = float2(0.0), gxz = float2(0.0);   // their gradients over S
+	for (int i = 0; i < 6 + kChopTrains; ++i)
 	{
-		int   b    = i % 3;
-		float comp = i >= 3 ? 1.0 : 0.0;
-		float rad  = kTrains[b * 4] * (3.14159265359 / 180.0) + comp * 0.99483767;   // companion: +57 deg
+		float deg, len, stp, spd;
+		if (i < 6)
+		{
+			int   b    = i % 3;
+			float comp = i >= 3 ? 1.0 : 0.0;
+			deg = kTrains[b * 4] + comp * 57.0;
+			len = kTrains[b * 4 + 2] * mix(1.0, 0.73, comp);
+			stp = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+			spd = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		}
+		else
+		{
+			float j = float(i - 5);
+			deg = 20.0 + 137.508 * j;
+			len = 1.2 * pow(1.0 / 3.0, (j - 1.0) / float(kChopTrains - 1));
+			stp = kChopSteep;
+			spd = sqrt(9.81 / kTwoPi * len);
+		}
+		float  rad = deg * (3.14159265359 / 180.0);
 		float2 dv  = float2(cos(rad), sin(rad));
-		float k    = kTwoPi / (kTrains[b * 4 + 2] * mix(1.0, 0.73, comp)) * u.caustics.y;
-		float stp  = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
-		float spd  = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
-		float c    = stp * k * sin(k * (dot(dv, S) - spd * u.caustics.z));
-		mxx -= c * dv.x * dv.x;
-		mzz -= c * dv.y * dv.y;
-		mxz -= c * dv.x * dv.y;
+		float  k   = kTwoPi / len * u.caustics.y;
+		float  ph  = k * (dot(dv, S) - spd * u.caustics.z);
+		float  c   = stp * k * sin(ph);
+		float2 dc  = (stp * k * k * cos(ph)) * dv;
+		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;   gzz -= dc * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;   gxz -= dc * dv.x * dv.y;
 	}
-	float kd  = (kEta - 1.0) / kEta * (0.6 * depth + 2.0);
-	float det = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
-	float x   = max(1.0 / max(abs(det), 0.1) - 2.0, 0.0);
-	float net = x / (x + 2.0);
+	float  kd   = (kEta - 1.0) / kEta * kFocal;
+	float  det  = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+	float2 gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
+	// det's change per pixel: exact gradient over S times the pixel's (smooth) step in S.
+	// Floored by the pixel's step in S against the chop's ~10 / m (det's peaks have no gradient).
+	float2 dSx  = dfdx(S);
+	float2 dSy  = dfdy(S);
+	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
+	                  10.0 * u.caustics.y * (length(dSx) + length(dSy)));
+	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
+	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
+	float capAA = 2.0 / max(dDet, 1e-4);                      // fold lines >= 2 px, else fade (GL twin)
+	float cap   = min(mix(10.0, 2.0, t), capAA);                // only the core above kCore lights up (GL twin)
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
 
 	float3 n = normalize(cross(dPx, dPy));
 	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
-	float ndl   = clamp(dot(n, Lr), 0.0, 1.0);
-	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);
-	return u.sunColor.rgb * (u.caustics.x * net * ndl * atten);
+	float w = u.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
+	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	                    kDark * min(w, 1.0) * max(1.0 - J, 0.0));
+	return hit ? net : float4(0.0);
 }
 
 fragment float4 ucFragment(FSOut in [[stage_in]],
@@ -1800,7 +1840,8 @@ fragment float4 ucFragment(FSOut in [[stage_in]],
 	float3 P  = wp.xyz / max(wp.w, 1e-8);
 	float3 dPx = dfdx(P);                                       // before any early-out: derivatives are
 	float3 dPy = dfdy(P);                                       // undefined after divergent flow
-	float3 lit = sc + (d < 1.0 ? causticLight(u, P, dPx, dPy) : float3(0.0));   // the sky has no floor to catch the net
+	float4 net = causticLight(u, P, dPx, dPy, d < 1.0);               // the sky has no floor to catch the net
+	float3 lit = sc * (1.0 - net.a) + net.rgb;                         // the D3D/Vulkan blend, ONE / INV_SRC_ALPHA
 
 	// The fog (twin of kUnderwaterFogHLSL): Beer-Lambert over the part of the camera->P ray
 	// that lies on the wet side of the flat surface plane. Both ends dry = 0 (a ray that

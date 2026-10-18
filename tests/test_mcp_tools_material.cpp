@@ -3,7 +3,7 @@
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
 #include "McpBridge.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "TestFsUtil.h"
 
 #include <ContentManager/Assets.h>

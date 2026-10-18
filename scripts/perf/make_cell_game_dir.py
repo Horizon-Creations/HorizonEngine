@@ -19,6 +19,7 @@ import json
 import shutil
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -50,8 +51,11 @@ def main():
 
     if a.out.exists():
         shutil.rmtree(a.out)
-    # -c: APFS clone, instant and no extra space.
-    subprocess.run(["cp", "-cR", str(a.runtime), str(a.out)], check=True)
+    # -c: APFS clone, instant and no extra space. Elsewhere (Windows, Linux) a plain copy.
+    if sys.platform == "darwin":
+        subprocess.run(["cp", "-cR", str(a.runtime), str(a.out)], check=True)
+    else:
+        shutil.copytree(a.runtime, a.out)
     shutil.copytree(a.split / "Bench.cells", a.out / "Bench.cells")
 
     scene = json.loads((a.split / "Bench.hescene").read_text())

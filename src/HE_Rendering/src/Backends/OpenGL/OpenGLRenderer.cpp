@@ -5495,8 +5495,19 @@ unsigned int OpenGLRenderer::RenderMotionBlur(unsigned int sourceHdr, int fullW,
 // light is squeezed: 1/|det| (a lens focus where the surface bulges up like a crest,
 // a dim spot where it dips). The wave trains are the SAME ones the surface material
 // draws and the physics floats on, so the net moves with the swell seen from above.
-// Added to the scene colour (light, not a tint), faded by depth below the surface
-// (Beer-Lambert, uCaustics.w) and by the surface's lean toward the refracted sun.
+//
+// Thema 205 Schritt 2 reworked the look (docs/underwater-caustics-rework-2026-10-15.md):
+// the three trains alone gave soft lenses that only appeared below ~2 m and peaked at
+// 8-14 m, the opposite of real water. Now ten short chop trains (1.2 m down to 0.4 m,
+// golden-angle directions, derived in the loop — no second table to keep in step) ride
+// on top of the engine's six, and the light travels a FIXED focal distance (kFocal) to
+// the floor instead of the real depth, so the fold lines of the mapping make a fine net
+// that is already there in a hand's depth of water. The depth only fades it: full in the
+// shallows, eased out to nothing at uCaustics.w (smoothstep), the lines growing wider
+// and dimmer on the way (the cap on 1/|det|). The light is redistributed, not just added:
+// rgb = the light the lines gain, a = the share the cells between them lose, for the
+// ONE/INV_SRC_ALPHA blend the D3D/Vulkan backends draw it with (dst' = rgb + dst * (1 - a)),
+// mirrored below as scene * (1 - a) + rgb.
 // uCaustics.x is already multiplied by the waterline fade-in (RenderExtractor.cpp's
 // causticsFadeIn) and is exactly 0 on the line, where the net is skipped in the shader.
 //
@@ -5515,20 +5526,31 @@ uniform mat4 uInvViewProj;
 uniform vec4 uCamSurface;   // xyz = camera world position, w = surface Y
 uniform vec4 uSun;          // xyz = direction TOWARD the sun (unit)
 uniform vec4 uSunColor;     // rgb = sun radiance (0 at night)
-uniform vec4 uCaustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = fade depth (m)
+uniform vec4 uCaustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
 uniform vec4 uTintDensity;  // rgb = resolved fog tint, a = per-metre density (the fog stage, see main)
 const float kTrains[12] = float[12](@TRAINS@);
 const float kTwoPi = 6.28318530718;
 const float kEta   = 1.33;
+const int   kChopTrains = 10;     // short trains on top of the engine's six (lengths, directions: see the loop)
+const float kChopSteep  = 0.05;
+const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
+const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (see the cap below)
 
-// The light the refracted-sun net adds at P (vec3(0) where there is none). The screen
-// derivatives of P come in as arguments: main() takes them before any branch.
-vec3 causticLight(vec3 P, vec3 dPx, vec3 dPy)
+// The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
+// cells between them lose (vec4(0) where there is no net). The screen derivatives of P come
+// in as arguments: main() takes them before any branch. Past the one early-out (the same for
+// every pixel) it runs for EVERY pixel, sky and dry ones included, with the result selected
+// away at the end: fwidth(det) below is undefined in divergent flow. A sky pixel's P (far
+// plane, or near-infinite) is parked at the camera so nothing turns NaN in its quad.
+vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 {
+	vec3 L = uSun.xyz;
+	if (uCaustics.x <= 0.0 || L.y <= 0.02) return vec4(0.0);   // off, or no sun
+	P = hit ? P : uCamSurface.xyz;
 	float depth = uCamSurface.w - P.y;                      // metres below the flat surface
 	float fadeDepth = uCaustics.w;
-	vec3 L = uSun.xyz;
-	if (uCaustics.x <= 0.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02) return vec3(0.0);   // off, dry, too deep, or no sun
 
 	// The sun's ray inside the water (Snell: the horizontal part shrinks by 1/eta),
 	// followed back up to the surface plane.
@@ -5540,44 +5562,87 @@ vec3 causticLight(vec3 P, vec3 dPx, vec3 dPy)
 	// does the same here, so the lattice of the plane trains does not read as a grid.
 	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * uCaustics.z), sin(0.37 * S.x - 0.27 * uCaustics.z));
 
-	// Curvature of the wave surface at S, summed over the engine water's trains.
+	// Curvature of the wave surface at S, summed over the trains.
 	// h = (steepness / k) sin(k (d.p - speed t)); H = -steepness k sin(.) d d^T.
-	// The first three trains are the engine water's own; the other three are their
-	// companions (turned 57 degrees, 0.73x the length, 0.6x the steepness, a touch
-	// faster) — the material shades a companion per knob as well, and with one
-	// direction per knob the net would collapse to parallel stripes.
+	// Trains 0-2 are the engine water's own; 3-5 are their companions (turned 57 degrees,
+	// 0.73x the length, 0.6x the steepness, a touch faster) — the material shades a
+	// companion per knob as well. Trains 6+ are the fine chop the net's lines come from:
+	// lengths 1.2 m down to 0.4 m in geometric steps, each turned the golden angle from
+	// the last (no two parallel, so no lattice), deep-water speed sqrt(g L / 2 pi).
+	// gxx/gzz/gxz are the gradients of mxx/mzz/mxz over S (for the anti-aliasing below).
 	float mxx = 0.0, mzz = 0.0, mxz = 0.0;
-	for (int i = 0; i < 6; ++i)
+	vec2  gxx = vec2(0.0), gzz = vec2(0.0), gxz = vec2(0.0);
+	for (int i = 0; i < 6 + kChopTrains; ++i)
 	{
-		int   b    = i % 3;
-		float comp = i >= 3 ? 1.0 : 0.0;
-		float rad  = radians(kTrains[b * 4] + comp * 57.0);
-		vec2  dv   = vec2(cos(rad), sin(rad));
-		float k    = kTwoPi / (kTrains[b * 4 + 2] * mix(1.0, 0.73, comp)) * uCaustics.y;
-		float stp  = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
-		float spd  = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
-		float c    = stp * k * sin(k * (dot(dv, S) - spd * uCaustics.z));
-		mxx -= c * dv.x * dv.x;
-		mzz -= c * dv.y * dv.y;
-		mxz -= c * dv.x * dv.y;
+		float deg, len, stp, spd;
+		if (i < 6)
+		{
+			int   b    = i % 3;
+			float comp = i >= 3 ? 1.0 : 0.0;
+			deg = kTrains[b * 4] + comp * 57.0;
+			len = kTrains[b * 4 + 2] * mix(1.0, 0.73, comp);
+			stp = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+			spd = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		}
+		else
+		{
+			float j = float(i - 5);
+			deg = 20.0 + 137.508 * j;
+			len = 1.2 * pow(1.0 / 3.0, (j - 1.0) / float(kChopTrains - 1));
+			stp = kChopSteep;
+			spd = sqrt(9.81 / kTwoPi * len);
+		}
+		float rad = radians(deg);
+		vec2  dv  = vec2(cos(rad), sin(rad));
+		float k   = kTwoPi / len * uCaustics.y;
+		float ph  = k * (dot(dv, S) - spd * uCaustics.z);
+		float c   = stp * k * sin(ph);
+		vec2  dc  = (stp * k * k * cos(ph)) * dv;
+		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;   gzz -= dc * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;   gxz -= dc * dv.x * dv.y;
 	}
-	// How far the bend moves the light on its way down. The reference depth added to
-	// the real one stands for the fine chop the material shades on top of its trains,
-	// so shallow water still shows a net.
-	float kd  = (kEta - 1.0) / kEta * (0.6 * depth + 2.0);
+	// How far the bend moves the light on its way down: a fixed focal distance, not the
+	// real depth, so the net's fold lines are as crisp in a hand's depth as further down.
+	float kd  = (kEta - 1.0) / kEta * kFocal;
 	float det = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
-	// Only real focusing counts (1/|det| well above 1): bright pools and lines on a floor
-	// that keeps its own light, rather than a brightening of everything. Graded, so a
-	// pool has a core and a falloff instead of a flat plateau.
-	float x   = max(1.0 / max(abs(det), 0.1) - 2.0, 0.0);
-	float net = x / (x + 2.0);
+	vec2  gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
+	// Depth fade: full in the shallows, eased out to nothing at fadeDepth; a few centimetres
+	// of ramp at the waterline so the net does not end on a hard edge where the floor
+	// leaves the water (dry pixels get 0 from that ramp). The cap on the squeeze softens
+	// with it: thin bright lines near the surface, wider dimmer ones deeper down.
+	// Anti-aliasing: J sits at the cap where |det| < 1 / cap, a band 2 / (cap * dDet) pixels
+	// wide, dDet = how much det changes from one pixel to the next: its exact gradient over
+	// S times the pixel's step in S (S is smooth, so its screen derivatives are too; fwidth
+	// of det itself is per 2x2 quad and leaves a grain where the folds are steep). capAA
+	// keeps the band two pixels wide or more; where even a cap of 2 would be thinner
+	// (far away, grazing, the long folds of the big trains) the net fades out instead of
+	// breaking into dotted moire lines. The gradient is ~0 at det's own peaks and dips, so
+	// it is floored by the pixel's step in S against the chop's ~10 / m: once a pixel spans
+	// a quarter of the shortest chop wave, no point of the net survives as a lone sparkle.
+	// Line width (Thema 205 step 6, docs/underwater-caustics-line-width-2026-10-17.md): with
+	// every J > 1 lit, the whole |det| < 1 band glowed and the lines covered 26 % of the
+	// reference floor against 15-18 % in the human's photo. Now the near cap is 10 (was 5)
+	// and a line lights up only where J passes kCore of the way from 1 to the cap: the thin
+	// core of each fold. Tied to the cap, not a fixed J, so the wider dimmer lines at depth
+	// (cap 2) and the anti-aliased far ones (capAA) keep a core too.
+	vec2  dSx   = dFdx(S);
+	vec2  dSy   = dFdy(S);
+	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
+	                  10.0 * uCaustics.y * (length(dSx) + length(dSy)));
+	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
+	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
+	float capAA = 2.0 / max(dDet, 1e-4);
+	float cap   = min(mix(10.0, 2.0, t), capAA);
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
 
 	// Surfaces that face the refracted sun catch it; a wall barely does.
 	vec3 n = normalize(cross(dPx, dPy));
 	if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
-	float ndl = clamp(dot(n, Lr), 0.0, 1.0);
-	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);
-	return uSunColor.rgb * (uCaustics.x * net * ndl * atten);
+	float w = uCaustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
+	vec4 net = vec4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	                kDark * min(w, 1.0) * max(1.0 - J, 0.0));
+	return hit ? net : vec4(0.0);
 }
 
 void main()
@@ -5588,7 +5653,8 @@ void main()
 	vec3 P = wp.xyz / max(wp.w, 1e-8);
 	vec3 dPx = dFdx(P);                                     // before any early-out: derivatives are
 	vec3 dPy = dFdy(P);                                     // undefined after divergent flow
-	vec3 lit = scene + (d < 1.0 ? causticLight(P, dPx, dPy) : vec3(0.0));   // the sky has no floor to catch the net
+	vec4 net = causticLight(P, dPx, dPy, d < 1.0);               // the sky has no floor to catch the net
+	vec3 lit = scene * (1.0 - net.a) + net.rgb;                  // the D3D/Vulkan blend, ONE / INV_SRC_ALPHA
 
 	// The fog (twin of the D3D/Vulkan underwater fog pass, HlslSources.h kUnderwaterFogHLSL):
 	// Beer-Lambert over the part of the camera->P ray that lies on the wet side of the flat

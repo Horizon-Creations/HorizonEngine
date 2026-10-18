@@ -93,6 +93,10 @@ std::vector<std::string> classAndDescendants(ContentManager& cm, const std::stri
 {
 	std::vector<std::string> keys{ classKey };
 	if (classKey.empty()) return keys;
+	// The asset lists below come from ContentManager's file index, which is only
+	// as fresh as the last content refresh. A rename that misses a file rewrites
+	// everything but that one, so this asks for a new walk first.
+	cm.noteContentChanged();
 
 	// Every class asset's ancestry, resolved the way the runtime resolves it, so
 	// a chain three deep counts as much as a direct child.
@@ -112,6 +116,7 @@ Report scan(ContentManager& cm, const HcRename::Target& t,
 {
 	Report r;
 	if (t.oldName.empty() || t.newName.empty() || t.oldName == t.newName) return r;
+	cm.noteContentChanged();   // a fresh file index, see classAndDescendants
 
 	auto consider = [&](Kind kind, const std::string& display, const std::string& path,
 	                    HE::UUID id, const HorizonCode::Graph& g)
