@@ -4541,12 +4541,13 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	HE::MaterialShaderLibrary lib;
 	const VkUse weights{ 0, HE::vkmat::kLandscapeWeightsBinding, static_cast<int>(DescKind::CombinedImageSampler) };
 
-	// The row itself, fragment stage, ahead of the cluster lists.
+	// The row itself, fragment stage (plus the Displacement pin's tessellation
+	// stages, Thema 207 — never the vertex stage), ahead of the cluster lists.
 	bool row = false;
 	for (uint32_t i = 0; i < HE::vkmat::kPreClusterBindingCount; ++i)
 		row = row || (HE::vkmat::kBindings[i].binding == 14
 		              && HE::vkmat::kBindings[i].kind == DescKind::CombinedImageSampler
-		              && HE::vkmat::kBindings[i].stages == HE::vkmat::kStageFragment);
+		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
 	// The device limit: 17 fragment samplers with the row, 16 (the spec

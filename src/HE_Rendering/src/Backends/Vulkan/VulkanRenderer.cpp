@@ -3123,6 +3123,10 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     const std::string* disp = nullptr;
     if (m_tessSupported)
         if (auto it = m_tessDispByKey.find(hash); it != m_tessDispByKey.end()) disp = &it->second;
+    // A height that samples heLandscapeWeights on a device whose layout left binding
+    // 14 out (see below) would make the pipeline invalid: draw it untessellated.
+    if (disp && !m_matLandscapeWeights && disp->find("heLandscapeWeights") != std::string::npos)
+        disp = nullptr;
     if (gbuffer)
     {
         if (m_gbufferRP == VK_NULL_HANDLE) return VK_NULL_HANDLE;

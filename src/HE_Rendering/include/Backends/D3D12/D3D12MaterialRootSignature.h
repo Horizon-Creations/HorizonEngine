@@ -264,8 +264,9 @@ struct ResolveRootSignature
 
 inline void DescribeResolveRootSignature(ResolveRootSignature& out)
 {
+    // PIXEL: the resolve has no domain stage (the material's ALL is for Thema 207's).
     MaterialRootSignature mat;
-    DescribeMaterialRootSignature(mat);
+    DescribeMaterialRootSignature(mat, kRangeCount, kSamplerCount, kParamCount, D3D12_SHADER_VISIBILITY_PIXEL);
     out = ResolveRootSignature{};
     for (UINT i = 0; i < kParamCount; ++i)  out.params[i]   = mat.params[i];
     for (UINT i = 0; i < kRangeCount; ++i)  out.ranges[i]   = mat.ranges[i];
