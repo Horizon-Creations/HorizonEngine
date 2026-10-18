@@ -323,7 +323,7 @@ body or move behind a macro is open. They are needed for parity with the interpr
   - `ENV_OVERRIDES`: `HE_LOG`, `HE_LOG_NO_CONSOLE`, `HE_CONFIG_DIR` (`GlobalState.cpp`), `HE_ENGINE_CONTENT_EDITABLE` (`ContentManager.cpp`),
     `HE_PHYSICS_THREADS/_WATER/_BUDGET_MS` (`PhysicsTuning.h`, `PhysicsBudget.h`), `HE_PROPAGATE_FULL/_VERIFY` (`TransformHierarchy.cpp`).
   - The game logs `build profile '<dev|release>'` next to the runtime flavour. `BuildProfile.h` lists per switch what it covers.
-  - `scripts/build_profile_strings.py --profile dev|release <dir>`: 30 items (env names as whole C strings, log text, `nm -C` symbols).
+  - `scripts/build_profile_strings.py --profile dev|release <dir>`: 33 items (env names as whole C strings, log text, `nm -C` symbols).
 - **Verified:** both profiles `-fsyntax-only -Wundef -Wall` for the 9 changed TUs (clean). Dev tree (`out/build/release`, Release config):
   HorizonGame + he_tests build; `test_hidden_window` 9, `test_dev_stats_tile` 8, `test_build_profile` 5 (new case: he_tests gets the profile
   from HorizonCore, not the fallback), `test_physics_budget` 15, `test_physics_threading` 12, all green. Release tree
