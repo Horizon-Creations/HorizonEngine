@@ -4597,7 +4597,7 @@ namespace {
 // Run a shell command, streaming each output line (stdout+stderr merged) to
 // `onLine` and appending everything to `captured`. Returns the exit status.
 int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
-                 std::string& captured)
+                 std::string& captured, const std::atomic<bool>* cancel = nullptr)
 {
 #if defined(_WIN32)
     FILE* pipe = HE::hiddenPopen(cmdLine(cmd + " 2>&1"));
@@ -4608,6 +4608,16 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
     char buf[1024];
     while (std::fgets(buf, sizeof buf, pipe))
     {
+        if (cancel && cancel->load())
+        {
+            captured += "-- cancelled\n";
+#if defined(_WIN32)
+            HE::hiddenPclose(pipe);
+#else
+            pclose(pipe);
+#endif
+            return -2;
+        }
         captured += buf;
         if (onLine)
         {
@@ -5208,17 +5218,19 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
     // semicolon-separated list of them) and may contain spaces.
     for (const std::string& d : spec.defines)
         configure += " " + shq("-D" + d);
-    if (runStreaming(configure, onLine, captured) != 0)
+    if (runStreaming(configure, onLine, captured, spec.cancel) != 0)
     {
         flushLog();
-        out.message = "cmake configure failed (see " + out.logFile.string() + ")";
+        out.message = (spec.cancel && spec.cancel->load()) ? std::string("cancelled")
+            : "cmake configure failed (see " + out.logFile.string() + ")";
         return out;
     }
     const std::string build = cmake + " --build " + shq(buildDir) + " --config Release";
-    if (runStreaming(build, onLine, captured) != 0)
+    if (runStreaming(build, onLine, captured, spec.cancel) != 0)
     {
         flushLog();
-        out.message = "compile failed (see " + out.logFile.string() + ")";
+        out.message = (spec.cancel && spec.cancel->load()) ? std::string("cancelled")
+            : "compile failed (see " + out.logFile.string() + ")";
         return out;
     }
     flushLog();

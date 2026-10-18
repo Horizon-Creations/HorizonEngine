@@ -8,6 +8,7 @@
 #include <Hpak/ProjectConfig.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -206,6 +207,15 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
 
     const fs::path header = t.path / "work" / "HEGameBuildConfig.h";
     REQUIRE(HE::ExportSdk::writeBuildConfigFromExport(exportDir, exe, profile, header).empty());
+    {
+        // Cancel: the first toolchain line stops the run, nothing is built.
+        std::atomic<bool> stop{true};
+        auto spec   = HE::ExportSdk::makeBuildSpec(sdk, t.path / "cancelled", header);
+        spec.cancel = &stop;
+        const auto cancelled = HE::hccg::buildDylib(spec);
+        CHECK_FALSE(cancelled.ok);
+        CHECK(cancelled.message == "cancelled");
+    }
     const auto built = HE::hccg::buildDylib(HE::ExportSdk::makeBuildSpec(sdk, t.path / "work", header));
     INFO(built.message);
     REQUIRE(built.ok);

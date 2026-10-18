@@ -591,7 +591,10 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 
 	Build::setActivity("Compiling the game against the engine SDK\xe2\x80\xa6");
 	Build::stepProgress(0.1f);
-	const auto built = HE::hccg::buildDylib(HE::ExportSdk::makeBuildSpec(sdk, workDir, header),
+	auto spec = HE::ExportSdk::makeBuildSpec(sdk, workDir, header);
+	spec.cancel = Build::cancelFlag();
+	Build::setCancelable(true);
+	const auto built = HE::hccg::buildDylib(spec,
 		[step](const std::string& line)
 		{
 			const int sev = line.find("error") != std::string::npos ? 2
@@ -600,6 +603,7 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 			if (const auto p = toolchainProgress(line))
 				Build::stepProgress(0.1f + 0.8f * *p);
 		});
+	Build::setCancelable(false);
 	if (!built.ok) return fallBack(built.message);
 
 	std::vector<std::string> copied;

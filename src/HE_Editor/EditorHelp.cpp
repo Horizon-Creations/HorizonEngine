@@ -7672,6 +7672,10 @@ namespace
 	  "progress; click that to bring the window back. When the build ends with the "
 	  "window away, a notification says how it went.",
 	  "", "export#shipped-files" },
+	{ "Build Window/Cancel", "",
+	  "Stops the step that is compiling right now (the game from the engine SDK). "
+	  "The export stays as it was before that step: the prebuilt game ships.",
+	  "", "export#shipped-files" },
 	{ "Build Window/Build Again", "",
 	  "Runs the same export once more with the settings the last run used, "
 	  "reporting into this window. Unlike the other two buttons it leaves the "

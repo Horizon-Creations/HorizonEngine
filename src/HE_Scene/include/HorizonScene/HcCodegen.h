@@ -1,5 +1,6 @@
 #pragma once
 #include <HorizonCode/HorizonCode.h>
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -249,6 +250,10 @@ struct DylibBuildSpec
     std::vector<std::string> defines;
     // What the "nothing was produced" message calls the missing library.
     std::string              what = "HorizonCodeGen library";
+    // Set from another thread to stop the run: checked per output line, the
+    // pipe is closed (the toolchain dies on its next write) and the outcome is
+    // "cancelled". Null = not cancelable.
+    const std::atomic<bool>* cancel = nullptr;
 };
 BuildOutcome buildDylib(const DylibBuildSpec& spec,
                         const std::function<void(const std::string& line)>& onLine = {});
