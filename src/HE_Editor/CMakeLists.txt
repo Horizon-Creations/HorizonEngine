@@ -607,8 +607,12 @@ he_bundle_crt(HorizonEditor "${DEPLOY_EDITOR}")
 # works from a downloaded editor: the exporter's findRuntimeBundle() looks for
 # <editorBaseDir>/Game/HorizonGame[.exe]. HorizonEditor depends on HorizonGame
 # (add_dependencies in the root CMakeLists), so DEPLOY_GAME is fully populated (exe +
-# engine DLLs + SDL3 + Python + CRT) by the time this POST_BUILD runs. Copy it wholesale.
+# engine DLLs + SDL3 + Python + CRT) by the time this POST_BUILD runs. Copy it wholesale,
+# into an emptied folder: copy_directory never deletes, and a tree built before the
+# HorizonEngine/ layout (Thema 211 step 10) kept the four flat engine libraries beside
+# it, which every export from this editor then shipped too.
 add_custom_command(TARGET HorizonEditor POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E rm -rf "${DEPLOY_EDITOR}/Game"
 	COMMAND ${CMAKE_COMMAND} -E copy_directory "${DEPLOY_GAME}" "${DEPLOY_EDITOR}/Game"
 	COMMENT "Bundling the game runtime into ${DEPLOY_EDITOR}/Game (for in-editor export)"
 	VERBATIM)
