@@ -80,6 +80,12 @@ target_compile_definitions(HorizonCore
 	PUBLIC  HE_CORE_DLL
 )
 
+# Build profile (cmake/HorizonBuildProfile.cmake, Platform/BuildProfile.h): the
+# F9 capture, the headless hooks and the HE_* overrides in here exist only in a
+# dev tree. PUBLIC, so everything that links Core compiles its headers with the
+# same profile.
+he_target_build_profile(HorizonCore PUBLIC)
+
 target_link_libraries(HorizonCore
 	PUBLIC  glm::glm
 	PUBLIC  SDL3::SDL3

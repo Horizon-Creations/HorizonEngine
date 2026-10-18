@@ -40,6 +40,13 @@ if(HE_VULKAN_ENABLED)
 	target_compile_definitions(HorizonGame PRIVATE HE_VULKAN_ENABLED)
 endif()
 
+# ── Build profile ────────────────────────────────────────────────────────────
+# A release tree (HE_BUILD_PROFILE=release, what an SDK export compiles) has no
+# V/F10 code at all, whatever the config or the hcfg say (HE_FEATURE_DEV_HOTKEYS
+# in Platform/BuildProfile.h). Everything below about HE_GAME_DEV_HOTKEYS is the
+# dev tree's runtime choice, i.e. the prebuilt runtime the exporter copies.
+he_target_build_profile(HorizonGame PRIVATE)
+
 # ── Development-only hotkeys ─────────────────────────────────────────────────
 # Debug keys that must NOT be live in a shipped game (today: V = VSync toggle —
 # a player has no settings menu to undo it with, and a stray V would silently
@@ -55,6 +62,10 @@ target_compile_definitions(HorizonGame PRIVATE
 # ("development hotkeys compiled in" / "not compiled in").
 option(HE_GAME_DEV_HOTKEYS "Compile the development hotkeys (V = VSync, F10 = stats card) into HorizonGame in every configuration" OFF)
 if(HE_GAME_DEV_HOTKEYS)
+	if(HE_BUILD_PROFILE STREQUAL "release")
+		message(WARNING "HE_GAME_DEV_HOTKEYS is ignored in a release tree "
+		                "(HE_BUILD_PROFILE=release): the hotkeys are not compiled in")
+	endif()
 	target_compile_definitions(HorizonGame PRIVATE HE_GAME_DEV_HOTKEYS)
 endif()
 

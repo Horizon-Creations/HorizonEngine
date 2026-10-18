@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include "build_profile_probe.h"
 
+#include <Platform/BuildProfile.h>
+
 #include <string>
 
 // Platform/BuildProfile.h and he_target_build_profile() (cmake/HorizonBuildProfile.cmake).
@@ -77,4 +79,18 @@ TEST_CASE("Build profile: a FEATURES override changes one switch, not the profil
     CHECK(p.envOverrides == 0);
     CHECK(p.devOnly == 0);
     CHECK(p.releaseOnly == 7);
+}
+
+TEST_CASE("Build profile: the engine libraries pass their profile on to whatever links them")
+{
+    // he_tests gives itself no profile; it links HorizonCore, which carries the
+    // tree's PUBLIC (src/HE_Core/CMakeLists.txt). So this file got its macros from
+    // CMake, not from the header's fallback, and a tree that builds he_tests is a
+    // dev tree: the F9 capture, the test hooks and the env overrides it tests exist.
+    CHECK(HE_BUILD_PROFILE_DEFAULTED == 0);
+    CHECK(HE_BUILD_PROFILE_DEV == 1);
+    CHECK(HE_FEATURE_DEV_HOTKEYS == 1);
+    CHECK(HE_FEATURE_PROFILER_CAPTURE == 1);
+    CHECK(HE_FEATURE_TEST_HOOKS == 1);
+    CHECK(HE_FEATURE_ENV_OVERRIDES == 1);
 }

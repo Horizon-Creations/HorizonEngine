@@ -584,8 +584,9 @@ std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 	// The flavour goes in the log next to the backend because the two are the
 	// whole difference between the three shipped runtimes, and a report that
 	// says "the app is slow" is worth nothing without knowing which one ran.
-	HE_LOG_INFO(Core, "GameApplication: creating renderer (runtime flavour '%s')",
-	            RendererFactory::RuntimeFlavor());
+	// The build profile likewise: "F9 does nothing" is a release build.
+	HE_LOG_INFO(Core, "GameApplication: creating renderer (runtime flavour '%s', build profile '%s')",
+	            RendererFactory::RuntimeFlavor(), HE::kBuildProfileName);
 	return RendererFactory::Create(m_backend);
 }
 
@@ -597,8 +598,9 @@ void GameApplication::OnInit()
 	// Two doors: this executable was built with them (Debug/RelWithDebInfo or
 	// -DHE_GAME_DEV_HOTKEYS=ON), or the export profile asked for them (project.hcfg,
 	// "Development hotkeys" in the export dialog) - the second is what lets an
-	// exported Release runtime answer F10.
-#ifdef HE_GAME_DEV_HOTKEYS
+	// exported Release runtime answer F10. A release-profile build (SDK export) has
+	// neither door: the keys, the card and this log line are not compiled in.
+#if HE_FEATURE_DEV_HOTKEYS && defined(HE_GAME_DEV_HOTKEYS)
 	m_devHotkeys = true;
 #endif
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
@@ -654,11 +656,13 @@ void GameApplication::OnInit()
 #endif
 
 	const bool haveConfig = ProjectConfigLoader::load(exeDir, m_config);
+#if HE_FEATURE_DEV_HOTKEYS
 	if (haveConfig && m_config.devTools) m_devHotkeys = true;
 	HE_LOG_INFO(Core, "%s", m_devHotkeys
 		? "GameApplication: development hotkeys ON (V = VSync, F10 = stats card)"
 		: "GameApplication: development hotkeys OFF - export with the Development profile's "
 		  "\"Development hotkeys\" ticked, or build with Debug/RelWithDebInfo or -DHE_GAME_DEV_HOTKEYS=ON");
+#endif
 	if (!haveConfig)
 	{
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
@@ -2887,6 +2891,7 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		// shortcut at all. Bare keys are allowed here — F5 means F5 when nobody
 		// is in a text field.
 		if (menuShortcutFromKey(event.key)) return true;
+#if HE_FEATURE_DEV_HOTKEYS
 		if (m_devHotkeys)
 		{
 			// V: static VSync toggle — DEVELOPMENT BUILDS ONLY. A shipped game has no
@@ -2915,6 +2920,7 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				return true;
 			}
 		}
+#endif
 		// Esc closes the topmost dialog, popup or menu FIRST, and only when
 		// there is none does it mean what it always meant here. The order is the
 		// whole point: a pause dialog that Escape cannot dismiss because Escape
@@ -2960,6 +2966,7 @@ void GameApplication::OnRender(float deltaTime)
 
 	// The stats card (F10): a bool test while hidden. Before the frame's UI is
 	// extracted, so the text it shows is the one drawn this frame.
+#if HE_FEATURE_DEV_HOTKEYS
 	if (m_devHotkeys && m_devStats.visible())
 	{
 		static const char* const kBackendNames[] = { "OpenGL", "Vulkan", "D3D11", "D3D12", "Metal", "Software" };
@@ -2970,6 +2977,7 @@ void GameApplication::OnRender(float deltaTime)
 		m_devStats.update(m_widgets, r, deltaTime,
 		                  b < std::size(kBackendNames) ? kBackendNames[b] : "", pw, ph);
 	}
+#endif
 
 	// ── "Open with", delivered once ──────────────────────────────────────────
 	// Through the SAME door a drop uses, and deliberately so: an application that
@@ -3731,7 +3739,9 @@ void GameApplication::OnShutdown()
 	// Clear the app-level UI while the runtime it registered on is still alive
 	// (fires each widget's Destruct). It's a member destroyed before m_gameInstance
 	// anyway, but the destructor doesn't fire Destruct — do it explicitly.
+#if HE_FEATURE_DEV_HOTKEYS
 	m_devStats.shutdown(m_widgets);
+#endif
 	m_widgets.clear();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).

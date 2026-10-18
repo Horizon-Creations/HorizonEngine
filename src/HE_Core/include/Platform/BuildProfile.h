@@ -63,18 +63,21 @@
 #ifndef HE_FEATURE_DEV_HOTKEYS
 #  define HE_FEATURE_DEV_HOTKEYS HE_BUILD_PROFILE_DEV
 #endif
-// The F9 profiler capture and the HE_PROFILE_* / HE_CAPTURE_* / HE_PERF_*
-// environment automation around it.
+// The F9 profiler capture (Application::toggleProfilerCapture) and the
+// HE_PROFILE_* / HE_CAPTURE_* / HE_PERF_* environment automation around it.
 #ifndef HE_FEATURE_PROFILER_CAPTURE
 #  define HE_FEATURE_PROFILER_CAPTURE HE_BUILD_PROFILE_DEV
 #endif
 // Headless and image-test hooks: HE_HIDDEN_WINDOW, HE_EXIT_AFTER_FRAMES,
-// HE_DUMP_*, HE_BACKGROUND_FPS, HE_NO_SPLASH, HE_SPLASH_DUMP.
+// HE_DUMP_PATH (the Window side of it), HE_BACKGROUND_FPS, HE_NO_SPLASH,
+// HE_SPLASH_DUMP, HE_CONFIG_FALLBACK_DIR. The renderer backends' own HE_DUMP_*
+// readers are not behind it.
 #ifndef HE_FEATURE_TEST_HOOKS
 #  define HE_FEATURE_TEST_HOOKS HE_BUILD_PROFILE_DEV
 #endif
 // Environment variables that override shipped settings: HE_CONFIG_DIR, HE_LOG,
-// the physics tuning (HE_PHYSICS_*, HE_PROPAGATE_FULL).
+// HE_LOG_NO_CONSOLE, HE_ENGINE_CONTENT_EDITABLE, the physics tuning
+// (HE_PHYSICS_THREADS/_WATER/_BUDGET_MS) and HE_PROPAGATE_FULL/_VERIFY.
 #ifndef HE_FEATURE_ENV_OVERRIDES
 #  define HE_FEATURE_ENV_OVERRIDES HE_BUILD_PROFILE_DEV
 #endif

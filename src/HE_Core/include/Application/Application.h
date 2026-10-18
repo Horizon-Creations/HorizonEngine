@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include "Types/Defines.h"
+#include "Platform/BuildProfile.h"
 #include "Application/GameLoop.h"
 #include "Application/GameLogicLoader.h"
 #include "Application/Input.h"
@@ -214,7 +215,11 @@ namespace HE
 		// stop it restores the previous vsync state and writes a dump.
 		// forceVsyncOff=false keeps the current vsync (a scripted capture that
 		// wants the paced, user-visible frame rate); note labels the dump.
+		// Dev builds only (HE_FEATURE_PROFILER_CAPTURE): a release build has
+		// neither the key nor the function.
+#if HE_FEATURE_PROFILER_CAPTURE
 		void toggleProfilerCapture(bool forceVsyncOff = true, const char* note = nullptr);
+#endif
 
 		// What the process was started with, minus argv[0]. Kept because
 		// "open with" hands an application its document as an argument on Windows
