@@ -89,13 +89,48 @@ public:
 	bool writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const;
 
 	// A counter that moves whenever files may have appeared under the content
-	// root: every successful saveAsset, and every noteContentChanged() — the
-	// editor calls that after its content refresh (an import, a file copied in,
-	// a pull). For readers that remember a path as "not there" so they do not
-	// retry it every frame (RenderExtractor's section materials): when it
-	// moved, they forget and look once more. Never goes back, starts at 0.
+	// root: every successful saveAsset, every scanContentDirectory() (which the
+	// editor runs after each content refresh — an import, a file copied in, a
+	// pull, the periodic external-change poll) and every noteContentChanged().
+	// For readers that
+	// remember a path as "not there" so they do not retry it every frame
+	// (RenderExtractor's section materials) and for the file index below: when
+	// it moved, they forget and look once more. Never goes back, starts at 0.
 	uint64_t contentEpoch() const { return m_contentEpoch; }
 	void     noteContentChanged() { ++m_contentEpoch; }
+
+	// ── Loose-file index (the editor's asset pickers) ─────────────────────
+	// One file on disk: its stem (what a picker shows), the path a reference
+	// stores (content-relative, "Engine/<rest>" for the engine content root —
+	// what loadAsset takes) and its size, the only thing a picker can say about
+	// an asset's weight before loading it.
+	struct AssetFileEntry
+	{
+		std::string   label;
+		std::string   path;
+		std::uint64_t bytes = 0;
+	};
+	using AssetFileList = std::shared_ptr<const std::vector<AssetFileEntry>>;
+
+	// Every loose .hasset of `type`: the content root's first, then the engine
+	// content root's, each in directory-walk order (a project override of an
+	// engine asset is listed once per root). ONE header-only walk sorts every
+	// file of both roots into its type, and the result stands until
+	// contentEpoch() moves or a root changes. The editor used to walk both trees
+	// and open every .hasset for each open dropdown, every frame — and the
+	// widget palette, which is always open (EDT-901..1801).
+	//
+	// So it is as fresh as the last epoch bump, which is as fresh as the Content
+	// Browser. Code that wrote files behind the manager's back and has to see
+	// them NOW (a rename sweep, an export) calls noteContentChanged() first. The
+	// list is a snapshot: it survives a rebuild and any loadAsset, so holding it
+	// across a call that loads is fine. Main thread only (no locking), like
+	// every other editor-facing query here.
+	AssetFileList assetFiles(HE::AssetType type) const;
+	// Every .hescene under the PROJECT root (the content root's parent) as a
+	// project-relative path ("Content/Levels/A.hescene") — the key the exporter
+	// packs a scene under. Sorted by path, bytes left 0; same cache rules.
+	AssetFileList sceneFiles() const;
 
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
 	// A pure notification: ContentManager knows nothing about who listens or why.
@@ -872,6 +907,17 @@ private:
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
 	uint64_t                                                             m_contentEpoch = 0; // see contentEpoch()
+	// assetFiles()/sceneFiles() caches, built lazily by const queries. A fresh
+	// manager starts at epoch 0, so "never built" has to be a different value.
+	struct FileIndex
+	{
+		uint64_t    epoch = ~0ull;
+		std::string contentRoot, engineRoot;
+		std::unordered_map<uint16_t, AssetFileList> byType;   // assetFiles
+		AssetFileList                               scenes;   // sceneFiles
+	};
+	mutable FileIndex m_assetFileIndex;
+	mutable FileIndex m_sceneFileIndex;
 	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset
 
 	// Drop everything that belonged to the project we were pointing at, then

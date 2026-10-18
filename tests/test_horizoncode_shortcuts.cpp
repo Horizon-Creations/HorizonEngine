@@ -7,6 +7,9 @@
 #include "HcEditorUtil.h"   // assetNodeTitle — the header a Create node draws
 #include <HorizonCode/HorizonCode.h>
 #include <UIWidget/UIWidgetAnim.h>   // the two vocabularies the dropdowns offer
+#include <ContentManager/ContentManager.h>   // the project half of those lists
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 // The quick-spawn bindings are a hand-maintained table, and a table is exactly the
@@ -248,4 +251,60 @@ TEST_CASE("Engine call parameters: the ones with a closed list of values")
 	CHECK(choices(scene, "scene").empty());
 	CHECK(HcEditorUtil::engineParamHint(scene) != nullptr);
 	CHECK(HcEditorUtil::engineParamHint(title) == nullptr);
+}
+
+// The pin asks engineParamHasChoices every frame and only builds the list once
+// its dropdown is open (EDT-1002). If the two ever disagreed, a pin would flip
+// between a text box and an empty dropdown — so every row/parameter pair above
+// is asked both ways, without a project, with an empty one and with a full one.
+TEST_CASE("Engine call parameters: has-a-list agrees with the list")
+{
+	auto call = [](const char* id)
+	{
+		HC::Node n;
+		n.type = HC::NodeType::EngineCall;
+		n.s = id;
+		return n;
+	};
+	const std::vector<std::pair<const char*, const char*>> asks = {
+		{ "widget.playAnimation", "direction" }, { "widget.playAnimation", "easing" },
+		{ "theme.setMode", "mode" }, { "input.mode", "mode" },
+		{ "input.gamepadButton", "button" }, { "input.gamepadAxis", "axis" },
+		{ "scene.load", "scene" }, { "scene.load", "path" }, { "app.setTitle", "path" },
+		{ "object.spawn", "class" }, { "widget.create", "widgetAsset" },
+		{ "theme.apply", "themeAsset" }, { "audio.play", "asset" }, { "prefs.load", "asset" },
+		{ "save.getNumber", "field" }, { "prefs.setString", "key" }, { "app.setTitle", "title" },
+	};
+	auto agree = [&](ContentManager* cm)
+	{
+		for (const auto& [row, param] : asks)
+		{
+			CAPTURE(std::string(row) + " / " + param);
+			const HC::Node n = call(row);
+			CHECK(HcEditorUtil::engineParamHasChoices(n, param, cm) ==
+			      !HcEditorUtil::engineParamChoices(n, param, cm).empty());
+		}
+	};
+	agree(nullptr);
+
+	const std::filesystem::path proj =
+		std::filesystem::temp_directory_path() / "he_test_param_choices_proj";
+	std::filesystem::remove_all(proj);
+	std::filesystem::create_directories(proj / "Content");
+	{
+		ContentManager cm((proj / "Content").string());
+		agree(&cm);   // a project with nothing in it: every project list is empty
+
+		std::ofstream(proj / "Content" / "Main.hescene") << "{}";
+		HorizonCodeClassAsset cls;
+		cls.type = HE::AssetType::HorizonCodeClass;
+		cls.name = "Enemy";
+		cls.path = "Enemy.hasset";
+		REQUIRE(cm.saveAsset(cls));   // a save moves the epoch: the scene is seen too
+		CHECK(HcEditorUtil::engineParamHasChoices(call("scene.load"), "scene", &cm));
+		CHECK(HcEditorUtil::engineParamHasChoices(call("object.spawn"), "class", &cm));
+		agree(&cm);
+	}
+	std::error_code ec;
+	std::filesystem::remove_all(proj, ec);
 }

@@ -111,7 +111,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] SCM-101–103 git-Aufrufe reduzieren; CSY-101 SFTP-Session wiederverwenden; SUP-101 Takeover vom UI-Thread
 
 **Stufe 6 – Editor (viele kleine, voneinander unabhängige PRs)**
-- [ ] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug
+- [x] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug (`docs/audit-editor-2026-10-18.md`)
 - [ ] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set; Row-Clipping-Pass (M12)
 - [ ] Collab: EDT-402/1601/201/202 Signale+Revisionen
 - [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9)

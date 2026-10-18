@@ -7375,8 +7375,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// WidgetRef. This one is left out: a widget that embeds itself is
 			// refused at runtime, so it is not offered here either.
 			{
-				const auto widgets = HcEditorUtil::listAssets(ctx.contentManager,
-				                                              HE::AssetType::Widget);
+				// The palette is on screen whenever a widget tab is, so it reads
+				// the ContentManager's file index in place: no walk, no copy per
+				// frame. It walked both content roots and opened every .hasset
+				// in every frame before (EDT-1801).
+				static const std::vector<ContentManager::AssetFileEntry> kNoWidgets;
+				const ContentManager::AssetFileList widgetFiles = ctx.contentManager
+					? ctx.contentManager->assetFiles(HE::AssetType::Widget) : nullptr;
+				const auto& widgets = widgetFiles ? *widgetFiles : kNoWidgets;
 				// Two lists, not one. The engine's own components arrive under
 				// the "Engine/" prefix and would otherwise sit in the middle of
 				// the project's own widgets in alphabetical order — where an
@@ -7386,7 +7392,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				auto isEngine = [](const std::string& p)
 				{ return p.rfind("Engine/", 0) == 0; };
 
-				auto drawOne = [&](const HcEditorUtil::ClassRef& a)
+				auto drawOne = [&](const ContentManager::AssetFileEntry& a)
 				{
 					ImGui::PushID(a.path.c_str());
 					const bool clicked = ImGui::Button(a.label.c_str(), ImVec2(-1.0f, 0));
