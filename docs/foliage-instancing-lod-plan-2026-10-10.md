@@ -1055,26 +1055,37 @@ D3D12/Vulkan (NN-WS03); erwartet ~20 Draws, keine „arena full“-Zeile, je Slo
 Strukturelle Folge, nicht gebaut: jeder Pass schreibt {clip·model, model} für jede Pflanze neu (128 B × Pässe). Ein gemeinsamer 64-B-Modellpuffer je Frame
 plus clip je Pass im Konstantenpuffer würde den Bedarf um Faktor 6 bis 12 senken, braucht aber neue instanzierte Shader und PSOs auf D3D12/Vulkan.
 
+## 21. Laufzeitprüfung der Arena auf NN-WS03 (Thema 182, Schritt 9, 18.10.2026)
+
+Der Fix aus 20 (`e96e60df`) auf echter Hardware (RTX 4070), Leiter `foliage_ladder_win.py` D3D12/Vulkan × 100k/500k × alle/100 m, vorher = Deploy von
+Schritt 6 (direkter Vorgänger), nachher = `e96e60df`. Zahlen, Bild und Bedingungen: `perf-audit/foliage-arena-500k-2026-10-18.md`,
+Rohdaten `perf-audit/raw-foliage-arena-500k/`.
+
+- **500k „alle“:** keine „instance arena full“-Zeile mehr (vorher in jedem Lauf), je Frame-Slot genau eine Wachstumszeile bis Frame 6, danach keine.
+  D3D12 16 398 → **31** Draws, Bild **vollständig** (vorher fehlte die ferne Feldhälfte). Vulkan 291 → **19 ms** `Render`, 107 375 → 5 Draws,
+  Bild vorher == nachher pixelgleich (der instanzierte Pfad zeichnet, was die Schleife zeichnete).
+- **Abweichung:** der Hauptpuffer wächst auf **1 310 720**, nicht auf die im Nachbau erwarteten 1 245 184 (eine 64k-Granule mehr, der echte Frame
+  verlangt ~1,11-1,17 M). 160 MiB je Slot. Draws 31/5 statt ~20/3: Schnitte bei `kMaxInstancesPerDraw` = 65 536, keine Schleife.
+- **Alle anderen Fälle** unverändert in Zeit, Draws und Dreiecken. RSS sinkt, wo die Verdopplung überschoss: D3D12 100k „alle“ 617 → 394 MB,
+  500k/100 m 670 → 524 MB.
+- **RSS 500k „alle“:** gegen den Vorgänger D3D12 neutral (max 1077 → 1074), Vulkan +97 MB (979 → 1076). Gegen die Merge-Basis (heute 367 MB, zeichnete
+  nur Himmel) +706 MB max / +390 MB last: drei 160-MiB-Ringe plus Anlaufspitze, kein Leck. Kleiner nur mit dem 64-B-Modellpuffer (20).
+- **Nicht geprüft:** `HE_INST_ARENA_MIB`-Budgetpfad und 1 M Pflanzen auf Hardware, Metal, GI an, exportiertes Spiel.
+
 ## Handoff
 
-- **Topic / step:** Thema 182, Schritt 8 (Arena-Überlauf bei 500k Pflanzen in Reichweite auf D3D12/Vulkan); Schritte 1-6 in 14-19, dieser in Abschnitt 20
-- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Commit dieses Schritts (siehe `git log`), gepusht
-- **Done:** Die Arena zählt belegte statt reservierte Slots, kappt den letzten Chunk auf das Budget und dimensioniert den Hauptpuffer je Slot nach dem
-  verlangten Bedarf; Budget 512 MiB je Slot (`HE_INST_ARENA_MIB`). Im Nachbau passt 500k "alle" (1,1 M Slots) ab dem zweiten Frame ohne Chunk.
-- **Files touched:** `src/HE_Rendering/include/HorizonRendering/InstanceArena.h` (neu, die Buchführung), `D3D12Renderer.cpp` (Arena-Block um `:3409`),
-  `VulkanRenderer.cpp:6940` + `VulkanRenderer.h:386`, `tests/test_instance_arena.cpp` (neu), `tests/test_graph_instancing.cpp` (Guard), Abschnitt 20.
-- **Verified:** Mac, Release: `he_tests --source-file=*test_instance_arena.cpp` 5/5 (Negativkontrolle: alte Arithmetik lehnt bei 983 040 jeden Frame ab);
-  `test_graph_instancing` 7/7, `test_foliage_cluster` 22/22, `test_frame_upload_ring` 7/7. Vulkan `-fsyntax-only` gegen MoltenVK rc=0, Negativkontrolle
-  (`chunkFour`) rc=1. Voller `he_tests`: 5420 Fälle, 5417 grün, 3 rot: `test_profiler` ×2 (unter Last, allein grün) und `test_hpak` „Disk registry“
-  (auch mit dem main-Binary vom 15.10. rot, Lektion 381), keiner berührt.
-- **Not verified:** D3D12 kompiliert auf dem Mac nicht (nur der Windows-Job der CI); Laufzeit auf D3D12/Vulkan nicht (kein Gerät hier): die Leiter
-  500k "alle" auf NN-WS03 fehlt. Metal/GL/D3D11 nicht berührt.
-- **Decisions taken:** Buchführung als Header ohne GPU (testbar, beide Backends teilen sie); Hauptpuffer-Ziel global (größter Frame), jeder Slot wächst
-  bei seiner nächsten Nutzung; Budget als Bytes statt Instanzkonstante; Warnung beim nächsten Frame-Anfang mit dem ganzen Frame (verlangt/abgelehnt).
-- **Decisions suggested, not taken:** gemeinsamer 64-B-Modellpuffer je Frame + clip je Pass (Bedarf ÷6 bis ÷12, neue Shader/PSOs, Abschnitt 20);
-  D3D12-Schattenschleife soll den `k_maxDraws`-Ring nicht vor der Szene leeren (greift jetzt erst über dem Budget).
-- **Pending:** Windows-Laufzeitprüfung dieses Schritts; Metal-Lauf; Anfrage 105.
-- **Traps:** Die Leiter mit 500k "alle" vorher auf Vulkan braucht `--warmup 10 --frames 20` (1,6 s je Frame). Arena-Wachstum zeigt sich auf D3D12 erst ab
-  `HE_DUMP_FRAMES=8` (3 Slots). Die Dump-Kamera sieht weniger Pflanzen als die Leiter-Kamera: der Überlauf zeigt sich nur in der Leiter.
-- **Next steps:** 1. NN-WS03: `foliage_ladder_win.py` 500k "alle" auf D3D12 und Vulkan, im Log keine „arena full“-Zeile, je Slot eine „grows“-Zeile,
-  ~20 Draws, D3D12-Bild vollständig, RSS notieren. 2. Bei Bedarf `HE_INST_ARENA_MIB` probieren (1 M Pflanzen). 3. Metal-Lauf. 4. Anfrage 105.
+- **Topic / step:** Thema 182, Schritt 9 (Laufzeitprüfung des Arena-Fixes `e96e60df` auf D3D12/Vulkan, NN-WS03); Schritte 1-8 in 14-20, dieser in 21
+- **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Doku-Commit dieses Schritts (siehe `git log`), gepusht; kein Code geändert
+- **Done:** Leiter vorher/nachher (32 Läufe + 4 verworfene unter Fremdlast, in Ruhe wiederholt), Bildzeuge aus der Leiter-Kamera mit Rauschboden,
+  RSS gegen Vorgänger und Merge-Basis. Bericht `docs/perf-audit/foliage-arena-500k-2026-10-18.md`, Rohdaten `docs/perf-audit/raw-foliage-arena-500k/`.
+- **Verified:** keine „arena full“-Zeile nachher (`arena-lines.txt`), 3 bzw. 2 Wachstumszeilen je Lauf, D3D12-Bild vollständig (Differenz zu Vulkan
+  0,52 % < Rauschboden 1,57 % bei 100k), Vulkan pixelgleich zur Schleife. Binär-Identität: alter Warntext in den Vorher-Logs, DLL-Hashes in `binaries.txt`.
+- **Not verified:** Budgetpfad `HE_INST_ARENA_MIB` auf Hardware, 1 M Pflanzen, Metal, GI an, exportiertes Spiel; die Zuordnung der 31/5 Draws je Pass.
+- **Decisions taken:** Vorher = Schritt-6-Deploy (direkter Vorgänger) statt Merge-Basis; die Merge-Basis nur als RSS-Basis (2 Läufe D3D12).
+  Bild über `HE_CAPTURE_FRAME` im Editor statt Dump-Zeuge (der sieht den Überlauf nicht).
+- **Decisions suggested, not taken:** gemeinsamer 64-B-Modellpuffer je Frame (Speicher ÷6-12, Abschnitt 20).
+- **Traps:** `rssMB.max` ist die Anlaufspitze (Chunks der Frames 1-6), für den eingeschwungenen Stand `last` lesen. Fremde Builds auf NN-WS03
+  verfälschen einzelne Läufe: `*.conditions.txt` prüfen und wiederholen (`foliage_ladder_win.py` überspringt vorhandene Summaries).
+  Vulkan-Vorher 500k „alle“ braucht ~3 min je Lauf: eine Wiederholung je Tool-Aufruf.
+- **Next steps:** 1. Metal-Lauf (Anfrage 105). 2. Optional `HE_INST_ARENA_MIB=64` auf D3D12/Vulkan (Warntext, Schleife) und 1 M Pflanzen.
+  3. Queen: Thema 182 ist aus Windows-Sicht abnahmebereit.

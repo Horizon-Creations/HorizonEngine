@@ -1,0 +1,167 @@
+== after-D3D12-100000-all-r1.log
+[11:13:53.882] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 262144 instances
+[11:13:53.945] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 262144 instances
+[11:13:53.996] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 262144 instances
+[11:14:15.196] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.5 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== after-D3D12-100000-all-r2.log
+[11:14:30.300] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 262144 instances
+[11:14:30.361] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 262144 instances
+[11:14:30.409] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 262144 instances
+[11:14:51.639] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 33.4 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== after-D3D12-100000-d100-r1.log
+[11:16:35.403] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 30.9 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== after-D3D12-100000-d100-r2.log
+[11:17:09.078] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 30.8 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== after-D3D12-500000-all-r1.log
+[11:03:28.280] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 1310720 instances
+[11:03:28.386] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 1310720 instances
+[11:03:28.480] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 1310720 instances
+[11:03:54.156] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 37.5 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== after-D3D12-500000-all-r2.log
+[11:04:07.782] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 1310720 instances
+[11:04:07.838] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 1310720 instances
+[11:04:07.907] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 1310720 instances
+[11:04:33.460] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 36.4 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== after-D3D12-500000-d100-r1.log
+[11:18:33.132] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 393216 instances
+[11:18:33.189] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 393216 instances
+[11:18:33.258] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 393216 instances
+[11:18:54.952] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.8 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== after-D3D12-500000-d100-r2.log
+[11:19:08.540] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 393216 instances
+[11:19:08.599] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 393216 instances
+[11:19:08.667] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 393216 instances
+[11:19:30.247] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.4 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== after-Vulkan-100000-all-r1.log
+[11:20:41.689] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 262144 instances
+[11:20:41.749] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 262144 instances
+[11:21:03.256] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.1 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== after-Vulkan-100000-all-r2.log
+[11:21:07.657] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 262144 instances
+[11:21:07.716] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 262144 instances
+[11:21:29.310] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.1 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== after-Vulkan-100000-d100-r1.log
+[11:27:20.507] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 22.4 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== after-Vulkan-100000-d100-r2.log
+[11:27:46.010] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 22.5 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== after-Vulkan-500000-all-r1.log
+[11:08:47.418] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 1310720 instances
+[11:08:47.477] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 1310720 instances
+[11:09:13.677] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 27.8 s uptime, 602 frames, 5 warning(s), 6 error(s), 0 critical
+== after-Vulkan-500000-all-r2.log
+[11:09:24.375] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 1310720 instances
+[11:09:24.432] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 1310720 instances
+[11:09:50.683] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 27.8 s uptime, 602 frames, 5 warning(s), 6 error(s), 0 critical
+== after-Vulkan-500000-d100-r1.log
+[11:24:50.567] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 393216 instances
+[11:24:50.626] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 393216 instances
+[11:25:12.606] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.5 s uptime, 602 frames, 5 warning(s), 6 error(s), 0 critical
+== after-Vulkan-500000-d100-r2.log
+[11:25:17.003] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 393216 instances
+[11:25:17.063] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 393216 instances
+[11:25:39.041] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.4 s uptime, 602 frames, 5 warning(s), 6 error(s), 0 critical
+== before-D3D12-100000-all-r1.log
+[11:13:18.523] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 524288 instances
+[11:13:18.598] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 524288 instances
+[11:13:18.659] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 524288 instances
+[11:13:39.721] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.4 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== before-D3D12-100000-all-r2.log
+[11:15:06.115] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 524288 instances
+[11:15:06.179] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 524288 instances
+[11:15:06.252] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 524288 instances
+[11:15:27.228] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.6 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== before-D3D12-100000-d100-r1.log
+[11:16:01.602] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 31.4 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== before-D3D12-100000-d100-r2.log
+[11:17:43.584] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 31.6 s uptime, 602 frames, 3 warning(s), 1 error(s), 0 critical
+== before-D3D12-500000-all-r1.log
+[11:02:46.933] [ WARN] [RHI        ] [Main    ] [f      3] D3D12Renderer: instance arena full (983040 instances in this frame slot, 65536 more asked) — the rest draws per object  (D3D12Renderer.cpp:3477)
+[11:02:47.160] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 1048576 instances
+[11:02:47.249] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 1048576 instances
+[11:02:47.342] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 1048576 instances
+[11:03:13.711] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 37.9 s uptime, 602 frames, 7 warning(s), 1 error(s), 0 critical
+== before-D3D12-500000-all-r2.log
+[11:04:47.192] [ WARN] [RHI        ] [Main    ] [f      3] D3D12Renderer: instance arena full (983040 instances in this frame slot, 65536 more asked) — the rest draws per object  (D3D12Renderer.cpp:3477)
+[11:04:47.347] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 1048576 instances
+[11:04:47.415] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 1048576 instances
+[11:04:47.485] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 1048576 instances
+[11:05:12.929] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 36.5 s uptime, 602 frames, 7 warning(s), 1 error(s), 0 critical
+== before-D3D12-500000-d100-r1.log
+[11:17:57.552] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 524288 instances
+[11:17:57.608] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 524288 instances
+[11:17:57.680] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 524288 instances
+[11:18:19.156] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.6 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== before-D3D12-500000-d100-r2.log
+[11:19:43.625] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 524288 instances
+[11:19:43.693] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 524288 instances
+[11:19:43.760] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 524288 instances
+[11:20:05.241] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 32.1 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== before-Vulkan-100000-all-r1.log
+[11:20:15.631] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 524288 instances
+[11:20:15.689] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 524288 instances
+[11:20:37.220] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.1 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== before-Vulkan-100000-all-r2.log
+[11:21:33.671] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 524288 instances
+[11:21:33.730] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 524288 instances
+[11:21:55.260] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 22.9 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== before-Vulkan-100000-d100-r1.log
+[11:26:55.152] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 22.4 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== before-Vulkan-100000-d100-r2.log
+[11:28:11.348] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 22.3 s uptime, 602 frames, 3 warning(s), 6 error(s), 0 critical
+== before-Vulkan-500000-all-r1.log
+[11:05:46.288] [ WARN] [RHI        ] [Main    ] [f      3] VulkanRenderer: instance arena full (983040 instances in this frame, 65536 more asked) — the rest draws per object  (VulkanRenderer.cpp:6985)
+[11:05:46.934] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 1048576 instances
+[11:05:47.295] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 1048576 instances
+[11:08:42.833] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 178.3 s uptime, 602 frames, 155 warning(s), 8 error(s), 0 critical
+== before-Vulkan-500000-all-r2.log
+[11:09:55.141] [ WARN] [RHI        ] [Main    ] [f      3] VulkanRenderer: instance arena full (983040 instances in this frame, 65536 more asked) — the rest draws per object  (VulkanRenderer.cpp:6985)
+[11:09:55.766] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 1048576 instances
+[11:09:56.116] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 1048576 instances
+[11:12:54.434] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 180.7 s uptime, 602 frames, 155 warning(s), 8 error(s), 0 critical
+== before-Vulkan-500000-d100-r1.log
+[11:24:24.038] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 524288 instances
+[11:24:24.097] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 524288 instances
+[11:24:46.097] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.5 s uptime, 602 frames, 5 warning(s), 6 error(s), 0 critical
+== before-Vulkan-500000-d100-r2.log
+[11:25:43.467] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 524288 instances
+[11:25:43.526] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 524288 instances
+[11:26:05.510] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 23.5 s uptime, 602 frames, 5 warning(s), 6 error(s), 0 critical
+== base-D3D12-500000-all-r1.log
+[11:34:04.658] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 34.1 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== base-D3D12-500000-all-r2.log
+[11:34:38.529] [ INFO] [Core       ] [Main    ] [f    602] Session summary: 33.6 s uptime, 602 frames, 5 warning(s), 1 error(s), 0 critical
+== shot-after-D3D12.log
+[11:30:31.667] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 1310720 instances
+[11:30:31.695] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 1310720 instances
+[11:30:31.752] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 1310720 instances
+[11:30:33.741] [ INFO] [Core       ] [Main    ] [f    100] Captured frame 100 (1211x650) to C:/hw182/s9/shots/after-D3D12.ppm
+[11:30:34.563] [ INFO] [Core       ] [Main    ] [f    122] Session summary: 15.4 s uptime, 122 frames, 5 warning(s), 1 error(s), 0 critical
+== shot-after-Vulkan.log
+[11:30:36.425] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 1310720 instances
+[11:30:36.446] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 1310720 instances
+[11:30:38.547] [ INFO] [Core       ] [Main    ] [f    100] Captured frame 100 (1211x650) to C:/hw182/s9/shots/after-Vulkan.ppm
+[11:30:39.272] [ INFO] [Core       ] [Main    ] [f    122] Session summary: 4.3 s uptime, 122 frames, 5 warning(s), 8 error(s), 0 critical
+== shot-before-D3D12.log
+[11:29:39.352] [ WARN] [RHI        ] [Main    ] [f      3] D3D12Renderer: instance arena full (983040 instances in this frame slot, 65536 more asked) — the rest draws per object  (D3D12Renderer.cpp:3477)
+[11:29:39.438] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 1048576 instances
+[11:29:39.472] [ INFO] [RHI        ] [Main    ] [f      7] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 1048576 instances
+[11:29:39.509] [ INFO] [RHI        ] [Main    ] [f      8] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 1048576 instances
+[11:29:41.321] [ INFO] [Core       ] [Main    ] [f    100] Captured frame 100 (1211x650) to C:/hw182/s9/shots/before-D3D12.ppm
+[11:29:42.005] [ INFO] [Core       ] [Main    ] [f    122] Session summary: 14.5 s uptime, 122 frames, 7 warning(s), 1 error(s), 0 critical
+== shot-before-Vulkan.log
+[11:29:43.748] [ WARN] [RHI        ] [Main    ] [f      3] VulkanRenderer: instance arena full (983040 instances in this frame, 65536 more asked) — the rest draws per object  (VulkanRenderer.cpp:6985)
+[11:29:44.294] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 1048576 instances
+[11:29:44.597] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 1048576 instances
+[11:30:11.877] [ INFO] [Core       ] [Main    ] [f    100] Captured frame 100 (1211x650) to C:/hw182/s9/shots/before-Vulkan.ppm
+[11:30:18.723] [ INFO] [Core       ] [Main    ] [f    122] Session summary: 36.3 s uptime, 122 frames, 34 warning(s), 8 error(s), 0 critical
+== shot100k-after-D3D12.log
+[11:33:14.108] [ INFO] [RHI        ] [Main    ] [f      4] D3D12Renderer: instance ring of frame slot 0 grows from 65536 to 262144 instances
+[11:33:14.118] [ INFO] [RHI        ] [Main    ] [f      5] D3D12Renderer: instance ring of frame slot 1 grows from 65536 to 262144 instances
+[11:33:14.128] [ INFO] [RHI        ] [Main    ] [f      6] D3D12Renderer: instance ring of frame slot 2 grows from 65536 to 262144 instances
+[11:33:15.216] [ INFO] [Core       ] [Main    ] [f    100] Captured frame 100 (1211x650) to C:/hw182/s9/shots/100k-after-D3D12.ppm
+[11:33:16.405] [ INFO] [Core       ] [Main    ] [f    122] Session summary: 12.6 s uptime, 122 frames, 3 warning(s), 1 error(s), 0 critical
+== shot100k-after-Vulkan.log
+[11:33:17.955] [ INFO] [RHI        ] [Main    ] [f      4] VulkanRenderer: instance buffer of frame slot 1 grows from 65536 to 262144 instances
+[11:33:17.961] [ INFO] [RHI        ] [Main    ] [f      5] VulkanRenderer: instance buffer of frame slot 0 grows from 65536 to 262144 instances
+[11:33:19.105] [ INFO] [Core       ] [Main    ] [f    100] Captured frame 100 (1211x650) to C:/hw182/s9/shots/100k-after-Vulkan.ppm
+[11:33:20.214] [ INFO] [Core       ] [Main    ] [f    122] Session summary: 3.6 s uptime, 122 frames, 3 warning(s), 8 error(s), 0 critical
