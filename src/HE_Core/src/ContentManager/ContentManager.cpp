@@ -1,4 +1,5 @@
 #include "ContentManager/ContentManager.h"
+#include "ContentManager/AssetFile.h"
 #include <Platform/ProjectWriteGate.h>
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
@@ -2290,21 +2291,19 @@ bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPa
 	return true;
 }
 
-bool ContentManager::saveAsset(RuntimeAsset& asset)
+// The two halves of a save that HE::saveAssetFile shares with saveAsset: the export
+// gate, and the write with its log lines.
+static bool saveRefusedByExport(const RuntimeAsset& asset)
 {
 	// An export is reading the project's files (ProjectWriteGate.h). The edit stays
 	// in memory — the asset is still dirty and saves once the export is over.
-	if (HE::ProjectWriteGate::refuse("save this asset"))
-	{
-		HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
-		return false;
-	}
-	const std::string fullPath = resolveSavePath(asset.path);
-	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
-	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+	if (!HE::ProjectWriteGate::refuse("save this asset")) return false;
+	HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
+	return true;
+}
 
+static bool writeAssetFileLogged(RuntimeAsset& asset, const std::string& fullPath)
+{
 	if (!writeAssetFile(asset, fullPath))
 	{
 		// Losing a save silently is the worst possible failure mode in an editor.
@@ -2313,7 +2312,26 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		return false;
 	}
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
-	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
+	            asset.path.c_str(), static_cast<unsigned>(static_cast<uint16_t>(asset.type)), fullPath.c_str());
+	return true;
+}
+
+bool HE::saveAssetFile(RuntimeAsset& asset, const std::string& contentRoot)
+{
+	if (saveRefusedByExport(asset)) return false;
+	// resolveSavePath of a manager without an engine content root.
+	return writeAssetFileLogged(asset, contentRoot + "/" + asset.path);
+}
+
+bool ContentManager::saveAsset(RuntimeAsset& asset)
+{
+	if (saveRefusedByExport(asset)) return false;
+	const std::string fullPath = resolveSavePath(asset.path);
+	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
+		HE_LOG_INFO(Asset, "%s",
+			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+
+	if (!writeAssetFileLogged(asset, fullPath)) return false;
 	noteContentChanged();   // may be the file somebody looked for and did not find
 
 	// What was just written IS the loaded copy, so pollHotReload must not take it

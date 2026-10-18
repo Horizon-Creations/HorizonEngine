@@ -307,6 +307,13 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    # Topic 219 step 2: the importers' lean asset writer (TLS-101) and the pack
+    # manifest the packer CLI now shares with the export (TLS-203).
+    test_tools_writer_cache.cpp
+    # The export lock (Platform/ProjectWriteGate.h). Was only in the HE_IMGUI_ENABLED
+    # property list below, so it never ran, and the gate's state being one copy per
+    # Windows DLL went unseen.
+    test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
     # Assigning, posting updates and notices between two editors over a fake
@@ -986,7 +993,6 @@ set_source_files_properties(
     test_editor_rewards.cpp
     test_notification_popups_ui.cpp
     test_build_footer_ui.cpp
-    test_project_write_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp
@@ -1284,7 +1290,9 @@ endif()
 # with libssh2, like HorizonSelfUpdate) and its private src/ for CsRename.h. Its
 # ctest entry gets its own HOME/APPDATA below — see the ENVIRONMENT after the loop.
 if(TARGET HorizonContentSync)
-    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp)
+    # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
+    # case runs only with HE_TEST_SFTP pointing at a throwaway server.
+    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)
