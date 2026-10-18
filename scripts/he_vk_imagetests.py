@@ -619,6 +619,11 @@ def main():
                   f"/total={shot['validation_total']}", flush=True)
             for line in sorted(set(shot["validation_in_dump"]))[:10]:
                 print(f"      validation: {line[:300]}")
+            # The renderer's upload totals at shutdown (REN-802/803): uploads,
+            # batches, oversize staging buffers, time in upload calls and waits.
+            for line in shot["_log"].splitlines():
+                if "VulkanRenderer: uploads" in line:
+                    print(f"      {line.strip()[:300]}")
             if not img:
                 problems.append(f"{vname}: no image ({shot.get('bmp_error', 'missing')})")
                 print(f"  ── last log lines of {shot['log']} ──")
