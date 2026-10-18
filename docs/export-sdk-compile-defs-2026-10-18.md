@@ -736,3 +736,41 @@ body or move behind a macro is open. They are needed for parity with the interpr
   The .def step has fixed paths, so a multi-config generator (Visual Studio) is not supported; CI and NN-WS03 use Ninja.
 - **Next steps:** 1. Read the "HorizonEngine.def: N symbols" line and runtime_size in 39172175638. 2. Step 13 (HorizonCodeGen against
   the bundle).
+
+## Handoff (step 13: HorizonCodeGen against the game's SDK and profile)
+
+- **Topic / step:** Thema 211, step 13. Commit 8d479641 (+ this doc), pushed. CI https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39175897773 (not seen).
+- **Step 12 checked first:** CI 39172175638 and Runtime flavours 39172176022 on e2daabd6 both completed green on every job.
+  Windows log: "HorizonEngine.def: 48771 symbols exported from HorizonScene's objects" (link passed, so with the dllexports of
+  Core/Net/Rendering it is under 65535; headroom unknown). Linux runtime_size passed. Full ctest on 35b55cf5 before any edit: 311,
+  309 passed, 0 failed, 2 skipped, rc 0.
+- **Done:** `generateCMakeLists` package branch (`HcCodegen.cpp:4385`) links `HorizonEngine::HorizonEngine` of the lib set the
+  `HE_BUILD_PROFILE` define picks, rpath only `@loader_path`/`$ORIGIN`. `SdkInfo::profile` (`HcCodegen.h`); `buildDylib(genDir, sdk)`
+  passes it and builds in `build-<profile>`. The registry exports `HE_HorizonCodeGenProfile` (`:4323`, `HE::kBuildProfileName` of the
+  set's definitions). `CompiledClassTable::load(path, version, profile = engine's)` (`HcCompiledLoader.cpp:56`) refuses a library
+  without that export or of another profile (ERROR line, interpreted). Export: `ExportSdk::chooseCodegenSdk` (`ExportSdkBuild.cpp:142`)
+  decides on the UI thread (`ExportDialogPanel.cpp:1668`): game from a usable SDK -> that SDK + profile; HorizonEngine/ runtime without
+  it -> no build, "shipped interpreted (... turn on Compile game from SDK)"; flat runtime -> the old `resolveSdk` path. A Compile-game
+  fallback deletes the SDK-built library again (`compileGameFromSdk`, `hcFromSdk`). Dialog line + help text say it. The exporter puts
+  the library in `HorizonEngine/` (flat: data dir) and deletes a stale `data/` copy (`ProjectExporter.cpp:1255`); the game loads it
+  from `GameLayout::engineDir()` (new, `.app`: Contents/MacOS/HorizonEngine), else the data dir (`GameApplication.cpp:860`).
+- **Found in passing, fixed:** `relinkToBundledDeps` left the SDK's `libHorizonPython.dylib` on Homebrew's `Python.framework` (the old
+  e2e exports had no plugin, so nobody saw it); it now maps that to the bundled `libpython<ver>.dylib`, as `bundle_native_deps.sh` does.
+- **Verified (Mac, dev tree out/build/release, release tree out/build/release-profile, both SDK sets reinstalled, stamp 4ee645f5..):**
+  `hc_codegen --fixtures --cmake` (50 classes) built against `EngineSDK` with `HE_BUILD_PROFILE=dev` and `=release`: each links only
+  `@rpath/libHorizonEngine` + SDL3 of its own `lib/<profile>`, one LC_RPATH `@loader_path`, exports exactly the manifest + profile.
+  In a deployed game + TodoApp data (hidden, 30 frames, exit 0, engine version patched to 0.7.0 in the generated file because
+  `hc_codegen` bakes "dev"): dev library -> "HorizonCode: 50 compiled classes", loaded from HorizonEngine/, one libHorizonEngine;
+  release library -> "built for the 'release' profile but this engine is 'dev' — running interpreted". Gated SDK e2e (extended:
+  generate + `chooseCodegenSdk` + `buildDylib` + otool checks + copy into HorizonEngine/) over that folder: dev 140/140, game logs
+  "HorizonCode: 2 compiled classes"; release 132/132 (build only, lesson 458). Unit: loader refusal in `test_hc_codegen_export_build`,
+  `chooseCodegenSdk` cases, exporter placement (engine layout + flat). Help audit 1206/1206. All dev targets + release HorizonGame
+  build. Full ctest on 8d479641 (-j4, private HOME, HE_CONFIG_DIR unset): 311, 309 passed, 0 failed, 2 skipped, rc 0, 347 s.
+- **Not verified:** GUI click-through of an export with both checkboxes; Windows/Linux (CI compiles only; `$ORIGIN` rpath and the DLL
+  beside HorizonEngine.dll are untested at run time); a release game running compiled HorizonCode (never started, lesson 458).
+- **Decisions:** compiled HorizonCode only together with a game from the SDK (a prebuilt game's library may be another build than the
+  SDK's lib set; the version handshake cannot see that); a library without the profile export is refused (predates the check);
+  the editor's own play mode never loads the table, so it is unaffected.
+- **Next steps (step 14):** GUI export Development + Shipping with both checkboxes, twice each (cache hit), start the dev one;
+  `build_profile_strings.py --profile release` on the Shipping export incl. `HorizonEngine/libHorizonCodeGen.dylib`. Optional:
+  `hc_codegen --engine-version` so fixture builds need no patch.
