@@ -105,7 +105,10 @@ split between the two was measured.
     - predicate `x < v`: the NaN probe
     - no notify walk on a gated state-machine frame: the lap test
     - `blendAlpha` dropped from the blend key: the blend test
-  - Full ctest: see the result post (it was run after this doc was written).
+  - Full `ctest -j4` (Release): 302/303, 2 skipped. The one failure is `test_hpak`
+    "Disk registry" (6 == 2). It passes with `HOME=<empty temp dir>`. This is the
+    environment failure already recorded in `docs/audit-core-fundamente-2026-10-17.md`,
+    not this step.
 - **Not verified:**
   - No editor run by hand: the Cinematic preview bracket, and a hot reload with a
     paused animator.
