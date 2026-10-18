@@ -15,6 +15,8 @@
 # not make a run cold by itself; -CacheDir (HE_D3D_SHADER_CACHE_DIR) keeps a run
 # out of it altogether, and -Cold then clears that dir instead. -NoCache sets
 # HE_D3D_SHADER_CACHE=0: FXC on every start, the pre-fix behaviour, same binary.
+# -NoPrefetch sets HE_D3D_SHADER_PREFETCH=0 (Thema 200): the startup compiles run
+# one after the other on the main thread again, as before the parallel prefetch.
 param(
     [Parameter(Mandatory)] [string]$Exe,
     [Parameter(Mandatory)] [string]$OutDir,
@@ -25,7 +27,8 @@ param(
     [int]$Frames = 300,
     [string]$Dump = "",        # HE_D3D_SHADER_DUMP: every compiled HLSL source as a file
     [string]$CacheDir = "",    # HE_D3D_SHADER_CACHE_DIR: a private bytecode cache
-    [switch]$NoCache           # HE_D3D_SHADER_CACHE=0
+    [switch]$NoCache,          # HE_D3D_SHADER_CACHE=0
+    [switch]$NoPrefetch        # HE_D3D_SHADER_PREFETCH=0
 )
 $ErrorActionPreference = "Stop"
 Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' } |
@@ -65,6 +68,7 @@ $env:HE_EXIT_AFTER_FRAMES = "$Frames"; $env:HE_COLLAB_OFFLINE = "1"
 if ($Dump) { $env:HE_D3D_SHADER_DUMP = $Dump }
 if ($CacheDir) { $env:HE_D3D_SHADER_CACHE_DIR = $CacheDir }
 if ($NoCache) { $env:HE_D3D_SHADER_CACHE = "0" }
+if ($NoPrefetch) { $env:HE_D3D_SHADER_PREFETCH = "0" }
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -PassThru
@@ -91,6 +95,7 @@ if (-not (Test-Path $mineList) -and $new) { $new.Name | Set-Content $mineList }
 $lines = Select-String -Path $out -Pattern '\[startup\]' | ForEach-Object { $_.Line }
 $compiles = $lines | Where-Object { $_ -match 'D3DCompile ' }
 $sum = 0.0; foreach ($l in $compiles) { if ($l -match ' ms=([\d.]+)') { $sum += [double]$Matches[1] } }
-"D3DCompile lines=$(@($compiles).Count) cached=$(@($compiles | Where-Object { $_ -match ' cached' }).Count) sumMs=$([math]::Round($sum))"
+# With the prefetch, ms= of a joined line is the main thread's wait, not FXC.
+"D3DCompile lines=$(@($compiles).Count) cached=$(@($compiles | Where-Object { $_ -match ' cached' }).Count) prefetched=$(@($compiles | Where-Object { $_ -match ' prefetched' }).Count) sumMs=$([math]::Round($sum))"
 if (Test-Path $sc) { "cache files: $((Get-ChildItem $sc -File).Count)" }
 $lines | Where-Object { $_ -notmatch 'D3DCompile ' }

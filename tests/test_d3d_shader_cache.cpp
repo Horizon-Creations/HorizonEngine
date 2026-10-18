@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -183,6 +184,158 @@ TEST_CASE("D3D shader cache: hit returns FXC's bytes, damage and new keys recomp
         CHECK_FALSE(fs::exists(fileOf(broken, 0)));
     }
 
+    he_test::removeAllQuiet(dir);
+}
+
+// ─── Parallel prefetch (Thema 200, D3DShaderPrefetch.h) ─────────────────────
+// The renderers queue their startup compiles on the job pool and
+// timedD3DCompile joins them. What that may not change: the bytes, the error
+// path, and that only the exact request is answered.
+
+namespace
+{
+
+std::vector<char> fxcDirect(const std::string& src, UINT flags)
+{
+    ComPtr<ID3DBlob> code, err;
+    if (FAILED(::D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr,
+                            "main", "ps_5_0", flags, 0, &code, &err)) || !code)
+        return {};
+    const char* p = static_cast<const char*>(code->GetBufferPointer());
+    return std::vector<char>(p, p + code->GetBufferSize());
+}
+
+} // namespace
+
+TEST_CASE("D3D shader prefetch: a joined request returns FXC's result")
+{
+    const fs::path& dir = testCacheDir();
+    REQUIRE(HE::d3dprefetch::enabled());
+    using HE::d3dprefetch::submit;
+    using HE::d3dtiming::compileStats;
+
+    static int pass = 0;
+    const std::string src = std::string(kPS) + "// prefetch pass " + std::to_string(++pass) + " " +
+                            dir.filename().string() + "\n";
+
+    SUBCASE("same bytes as a direct D3DCompile, and the job filled the cache")
+    {
+        const std::vector<char> ref = fxcDirect(src, 0);
+        REQUIRE(ref.size() > 4);
+        submit(src, "prefetchtest", "main", "ps_5_0", 0);
+        submit(src, "prefetchtest", "main", "ps_5_0", 0);     // queued once
+        CHECK(HE::d3dprefetch::state().stats.submitted == 1);
+        const uint32_t before = compileStats().prefetched;
+        const Compiled got = compile(src, 0);
+        CHECK(SUCCEEDED(got.hr));
+        CHECK_FALSE(got.hadErrors);
+        CHECK(compileStats().prefetched == before + 1);
+        CHECK(got.code == ref);
+        CHECK(fs::exists(fileOf(src, 0)));
+        // A second ask (D3D12 builds some shaders twice) joins the same slot.
+        const Compiled again = compile(src, 0);
+        CHECK(compileStats().prefetched == before + 2);
+        CHECK(again.code == ref);
+    }
+
+    SUBCASE("a failing compile reports its errors through the join, writes nothing")
+    {
+        const std::string broken = src + "this is not hlsl;\n";
+        submit(broken, "prefetchtest", "main", "ps_5_0", 0);
+        const uint32_t before = compileStats().prefetched;
+        const Compiled bad = compile(broken, 0);
+        CHECK(FAILED(bad.hr));
+        CHECK(bad.hadErrors);
+        CHECK(bad.code.empty());
+        CHECK(compileStats().prefetched == before + 1);
+        CHECK_FALSE(fs::exists(fileOf(broken, 0)));
+    }
+
+    SUBCASE("a request that drifted from its prefetch is not answered by it")
+    {
+        submit(src + "// as queued\n", "prefetchtest", "main", "ps_5_0", 0);
+        submit(src, "prefetchtest", "main", "ps_5_0", D3DCOMPILE_PREFER_FLOW_CONTROL);
+        const uint32_t before = compileStats().prefetched;
+        const Compiled got = compile(src, 0);     // other source than the first, other flags than the second
+        CHECK(SUCCEEDED(got.hr));
+        CHECK(compileStats().prefetched == before);
+        CHECK(got.code == fxcDirect(src, 0));
+    }
+
+    HE::d3dprefetch::drain();
+    CHECK_FALSE(HE::d3dprefetch::active());
+    he_test::removeAllQuiet(dir);
+}
+
+// The prefetch only pays off if FXC may run on several threads at once and
+// still produce the bytes it produces alone, and if several writers of one
+// key leave exactly one intact file (two editors, or two jobs, racing).
+TEST_CASE("D3D shader cache: FXC on eight threads gives the serial bytes, one file per key")
+{
+    const fs::path& dir = testCacheDir();
+    const std::string tag = dir.filename().string();
+    const std::string srcA = std::string(kPS) + "// parallel A " + tag + "\n";
+    std::string srcB = srcA;
+    srcB.replace(srcB.find("i < 4"), 5, "i < 9");
+    srcB += "// parallel B\n";
+    const std::vector<char> refA = fxcDirect(srcA, D3DCOMPILE_PREFER_FLOW_CONTROL);
+    const std::vector<char> refB = fxcDirect(srcB, D3DCOMPILE_PREFER_FLOW_CONTROL);
+    REQUIRE(refA.size() > 4);
+    REQUIRE(refB.size() > 4);
+    REQUIRE(refA != refB);
+
+    constexpr int kThreads = 8;
+    std::vector<std::vector<char>> got(kThreads * 2);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t)
+        threads.emplace_back([&, t] {
+            // Half start with A, half with B, so different sources overlap too.
+            for (int k = 0; k < 2; ++k)
+            {
+                const bool a = ((t + k) % 2) == 0;
+                const std::string& src = a ? srcA : srcB;
+                const auto req = HE::d3dcache::makeRequest(src.data(), src.size(), "main", "ps_5_0",
+                                                           D3DCOMPILE_PREFER_FLOW_CONTROL, 0);
+                ComPtr<ID3DBlob> code, err;
+                if (SUCCEEDED(::D3DCompile(src.data(), src.size(), nullptr, nullptr, nullptr, "main",
+                                           "ps_5_0", D3DCOMPILE_PREFER_FLOW_CONTROL, 0, &code, &err)))
+                {
+                    HE::d3dcache::store(req, code.Get());
+                    const char* p = static_cast<const char*>(code->GetBufferPointer());
+                    got[t * 2 + k].assign(p, p + code->GetBufferSize());
+                }
+                got[t * 2 + k].insert(got[t * 2 + k].begin(), a ? 'A' : 'B');
+            }
+        });
+    for (std::thread& th : threads) th.join();
+
+    int mismatches = 0;
+    for (const std::vector<char>& g : got)
+    {
+        REQUIRE_FALSE(g.empty());
+        const std::vector<char>& ref = g[0] == 'A' ? refA : refB;
+        if (std::vector<char>(g.begin() + 1, g.end()) != ref) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+
+    int dxbc = 0, tmp = 0;
+    for (const auto& e : fs::directory_iterator(dir))
+    {
+        if (e.path().extension() == ".dxbc") ++dxbc;
+        if (e.path().extension() == ".tmp")  ++tmp;
+    }
+    CHECK(dxbc == 2);
+    CHECK(tmp == 0);
+    for (const std::string* p : std::initializer_list<const std::string*>{ &srcA, &srcB })
+    {
+        const auto req = HE::d3dcache::makeRequest(p->data(), p->size(), "main", "ps_5_0",
+                                                   D3DCOMPILE_PREFER_FLOW_CONTROL, 0);
+        ComPtr<ID3DBlob> hit;
+        hit.Attach(HE::d3dcache::load(req));
+        REQUIRE(hit);
+        const char* b = static_cast<const char*>(hit->GetBufferPointer());
+        CHECK(std::vector<char>(b, b + hit->GetBufferSize()) == (p == &srcA ? refA : refB));
+    }
     he_test::removeAllQuiet(dir);
 }
 #endif

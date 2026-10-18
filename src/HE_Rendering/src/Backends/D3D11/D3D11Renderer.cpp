@@ -5462,6 +5462,119 @@ struct D3D11RendererImpl
         return &meshCache.emplace(assetId, mesh).first->second;
     }
 
+#if defined(HE_HAVE_SHADERC)
+    // The GL sky cross-compiled to HLSL, once per process: the prefetch at the
+    // top of Initialize and createSkyPipeline need the same text.
+    static const he::shaderc::Result& skyCrossHlsl()
+    {
+        static const he::shaderc::Result r = [] {
+            using he::shaderc::Stage;
+            using namespace HE::glsl;
+            return he::shaderc::compileHlslPinned(
+                BuildSkyFragmentGLSL450(), Stage::Fragment, {
+                    { Stage::Fragment, 0, kSkySlotEnv.binding,   kSkySlotEnv.hlslReg   },
+                    { Stage::Fragment, 0, kSkySlotMoon.binding,  kSkySlotMoon.hlslReg  },
+                    { Stage::Fragment, 0, kSkySlotNoise.binding, kSkySlotNoise.hlslReg },
+                });
+        }();
+        return r;
+    }
+#endif
+
+    // ─── Startup shader prefetch (Thema 200, D3DShaderPrefetch.h) ───────────
+    // The compiles Initialize makes eagerly, queued on the job pool before the
+    // first of them is needed, so they run side by side instead of one after
+    // the other (7.9 s on a cold cache, the sky alone 5 s). The arguments are
+    // those of the call sites below — source, entry, profile, flags; a request
+    // that drifts from its call site is never handed out (no wrong shader), it
+    // only shows up as unused in the "[startup] D3D11 shader prefetch" line.
+    static UINT startupCompileFlags()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        return flags;
+    }
+
+    // The sky first and before the device exists: it is the longest compile,
+    // and its source (shaderc) needs nothing from D3D.
+    static void prefetchSkyShaders()
+    {
+#if defined(HE_HAVE_SHADERC)
+        const he::shaderc::Result& hlsl = skyCrossHlsl();
+        if (!hlsl.ok) return;
+        const UINT flags = startupCompileFlags() | D3DCOMPILE_PREFER_FLOW_CONTROL;
+        HE::d3dprefetch::submit(hlsl.source, "main", "main", "ps_5_0", flags);
+        HE::d3dprefetch::submit(HE::glsl::kSkyVSCrossHLSL, "VSSkyCross", "VSSkyCross", "vs_5_0", flags);
+#endif
+    }
+
+    // Everything else createPipeline builds (PostFX + TAA, deferred, scene,
+    // GI, skinned, debug lines, UI, SSAO), roughly the slowest first.
+    void prefetchPipelineShaders()
+    {
+        using HE::d3dprefetch::submit;
+        const UINT flags = startupCompileFlags();
+        // createPostFX / createTaaPipeline: sourceName = entry.
+        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        causticsSrc.replace(causticsSrc.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
+        for (const char* src : { kTonemapHLSL, kFxaaHLSL, kSmaaHLSL, kAABlitHLSL,
+                                 kBloomBrightHLSL, kBloomBlurHLSL, kUnderwaterFogHLSL })
+            submit(src, "main", "main", "ps_5_0", flags);
+        submit(causticsSrc, "main", "main", "ps_5_0", flags);
+        submit(kFSTriangleVS, "main", "main", "vs_5_0", flags);
+        submit(kTaaVelocityHLSL, "VSVelocity", "VSVelocity", "vs_5_0", flags);
+        submit(kTaaVelocityHLSL, "PSVelocity", "PSVelocity", "ps_5_0", flags);
+        submit(kTaaResolveHLSL,  "main", "main", "ps_5_0", flags);
+        submit(kTaaSharpenHLSL,  "main", "main", "ps_5_0", flags);
+        // createDeferredPipelines; the clustered resolve on speculation (it is
+        // built where the raw cluster lists exist, which createPipeline decides).
+        const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
+#if defined(HE_HAVE_SHADERC)
+        {
+            using Backend = HE::MaterialShaderLibrary::Backend;
+            const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& rc = m_matShaderLib.deferredResolve(Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.deferredResolveClustered(Backend::HLSL);
+            if (cc.ok) submit(cc.source, "resolveClusteredPS", "main", "ps_5_0", flags);
+            if (rc.ok) submit(rc.source, "resolvePS", "main", "ps_5_0", flags);
+            if (vc.ok) submit(vc.source, "resolveVS", "main", "vs_5_0", flags);
+            submit(sceneSource, "GBufPS", "GBufPS", "ps_5_0", flags);
+        }
+#endif
+        // createPipeline
+        submit(sceneSource, "scene", "PSMain", "ps_5_0", flags);
+        for (const char* e : { "VSMain", "VSDepth", "VSDepthInstanced", "VSMainInstanced" })
+            submit(sceneSource, "scene", e, "vs_5_0", flags);
+        // createGiPipelines: its own flags (no SKIP_OPTIMIZATION in Debug).
+        {
+            UINT giFlags = 0;
+#if defined(_DEBUG)
+            giFlags |= D3DCOMPILE_DEBUG;
+#endif
+            submit(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", giFlags);
+            submit(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL,  "gi", "GiProbeCS",  "cs_5_0", giFlags);
+            submit(kGiGBufHLSL, "gi", "GiGBufVS", "vs_5_0", giFlags);
+            submit(kGiGBufHLSL, "gi", "GiGBufPS", "ps_5_0", giFlags);
+            submit(kGiGBufHLSL, "gi", "GiGBufVSInstanced", "vs_5_0", giFlags);
+            submit(kGiTemporalHLSL, "gi", "main", "ps_5_0", giFlags);
+            submit(kGiAtrousHLSL,   "gi", "main", "ps_5_0", giFlags);
+        }
+        // createSkinnedPipeline, createDebugLinePipeline, createUIPipeline
+        submit(kSkinnedHLSL, "skinned", "VSMainSkinned", "vs_5_0", flags);
+        submit(kDebugLineHLSL, "dbgline", "VSLine", "vs_5_0", flags);
+        submit(kDebugLineHLSL, "dbgline", "PSLine", "ps_5_0", flags);
+        submit(kUIHLSL, nullptr, "UIVSMain", "vs_5_0", flags | D3DCOMPILE_ENABLE_STRICTNESS);
+        submit(kUIHLSL, nullptr, "UIPSMain", "ps_5_0", flags | D3DCOMPILE_ENABLE_STRICTNESS);
+        // createSSAOPipeline: flags 0 in every build.
+        for (const char* e : { "VSPos", "VSPosInstanced" })
+            submit(kSSAOPosHLSL, nullptr, e, "vs_5_0", 0);
+        submit(kSSAOPosHLSL,  nullptr, "PSPos",        "ps_5_0", 0);
+        submit(kSSAOHLSL,     nullptr, "SSAOMain",     "ps_5_0", 0);
+        submit(kSSAOBlurHLSL, nullptr, "SSAOBlurMain", "ps_5_0", 0);
+    }
+
     bool createSkyPipeline()
     {
         UINT flags = 0;
@@ -5493,18 +5606,11 @@ struct D3D11RendererImpl
         skyFullModel = false;
 #if defined(HE_HAVE_SHADERC)
         {
-            using he::shaderc::Stage;
-            using namespace HE::glsl;
-            const he::shaderc::Result hlsl = he::shaderc::compileHlslPinned(
-                BuildSkyFragmentGLSL450(), Stage::Fragment, {
-                    { Stage::Fragment, 0, kSkySlotEnv.binding,   kSkySlotEnv.hlslReg   },
-                    { Stage::Fragment, 0, kSkySlotMoon.binding,  kSkySlotMoon.hlslReg  },
-                    { Stage::Fragment, 0, kSkySlotNoise.binding, kSkySlotNoise.hlslReg },
-                });
+            const he::shaderc::Result& hlsl = skyCrossHlsl();
             const UINT savedFlags = flags;
             flags |= D3DCOMPILE_PREFER_FLOW_CONTROL;
             skyFullModel = hlsl.ok
-                && compile(kSkyVSCrossHLSL, std::strlen(kSkyVSCrossHLSL), "VSSkyCross", "vs_5_0", vsB)
+                && compile(HE::glsl::kSkyVSCrossHLSL, std::strlen(HE::glsl::kSkyVSCrossHLSL), "VSSkyCross", "vs_5_0", vsB)
                 && compile(hlsl.source.c_str(), hlsl.source.size(), "main", "ps_5_0", psB);
             flags = savedFlags;
             if (!skyFullModel)
@@ -6123,6 +6229,10 @@ void D3D11Renderer::Initialize(HE::Window* window)
     using HE::d3dtiming::Phase;
     s_startupClock.begin();
     Phase initPhase("D3D11", "Initialize");
+    {
+        Phase phase("D3D11", "prefetchSkyShaders");
+        D3D11RendererImpl::prefetchSkyShaders();
+    }
     // No debug layer in any build: the device is created with flags 0 (no
     // D3D11_CREATE_DEVICE_DEBUG); stated here so the timeline answers it too.
     HE_LOG_INFO(RHI, "%s", "[startup] D3D11 device flags=0 (no debug layer)");
@@ -6168,6 +6278,10 @@ void D3D11Renderer::Initialize(HE::Window* window)
         m_impl->createDepth(m_impl->width, m_impl->height);
     }
     {
+        Phase phase("D3D11", "prefetchPipelineShaders");
+        m_impl->prefetchPipelineShaders();
+    }
+    {
         Phase phase("D3D11", "createPipeline");
         if (!m_impl->createPipeline())
             HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
@@ -6193,6 +6307,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
 void D3D11Renderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: shutdown");
+    HE::d3dprefetch::drain();   // no prefetch job may outlive the renderer
     m_impl->meshCache.clear();
     m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
     m_impl->pendingMatInval.clear();
