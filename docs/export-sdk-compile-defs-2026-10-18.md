@@ -523,12 +523,14 @@ body or move behind a macro is open. They are needed for parity with the interpr
 ## Handoff (step 8: export compiles the game from the SDK)
 
 - **Topic / step:** Thema 211, step 8 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, commits 1895eb22, e3b0401f,
-  759621e3, 20312925, 49393404 (+ this doc). Done under the queen's 22:00 deadline; nothing was posted to CI by me (push only).
+  759621e3, 20312925, 49393404, f2d08ace (+ this doc). CI dispatched: https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39159490500 (not seen).
 - **Done:** `src/HE_Editor/ExportSdkBuild.{h,cpp}` (ImGui-free): `findGameSdk` (HE_GAME_SDK_DIR as given, else `<editor>/SDK-<profile>`,
   else `<editor>/../SDK-<profile>` = DEPLOY_DIR, where `--target HorizonSDK` installs), `unavailableReason`, `writeBuildConfigFromExport`
   (exported `project.hcfg` + `Config/ProjectSettings.json`; key from the hcfg or, when the exporter patched it into the prebuilt exe,
   `readEmbeddedPakKey` on that exe), `makeBuildSpec` (SDK template, `HorizonEngine_DIR`, `HE_GAME_BUILD_CONFIG`, private work dir),
-  `installBuiltGame` (exe + SDK `lib/*.dylib|*.so*`, `bin/*.dll` over the prebuilt copies). Dialog `ExportDialogPanel.cpp:1175`
+  `installBuiltGame` (exe + SDK `lib/*.dylib|*.so*`, `bin/*.dll` over the prebuilt copies), `relinkToBundledDeps` (macOS: the SDK
+  libs' `/opt/homebrew`/`/usr/local` links become `@rpath/<name>` when the folder bundles that lib, then ad hoc re-sign; mirrors
+  `scripts/bundle_native_deps.sh:84-107`). Dialog `ExportDialogPanel.cpp:1175`
   checkbox "Compile game from SDK" with the SDK path or "Will use the prebuilt game: <reason>"; worker step "Compile game"
   (`:1598`, after Clean up) calls `compileGameFromSdk` (`:555`) only after a successful export, so every failure leaves the
   prebuilt export as it was. Profile = Dev Tools ? dev : release. Work dir `$TMPDIR/HorizonSdkGame/<project>-<profile>` (header holds
@@ -541,21 +543,29 @@ body or move behind a macro is open. They are needed for parity with the interpr
   profile must match, reasons, header + key round trip, refusal without key, spec defines, swap). E2E (gated):
   `HE_EXPORT_SDK_E2E=out/deploy/SDK-dev HE_EXPORT_SDK_E2E_EXPORT=<export copy>`: real cmake build of the SDK template (~45 s), cancel
   gives "cancelled", swap over an export folder with today's prebuilt runtime, the game started hidden runs 30 frames, exit 0, logs
-  "project configuration compiled in (HEGameBuildConfig.h)" + "pak key from HEGameBuildConfig.h". Editor + he_tests build; related
+  "project configuration compiled in (HEGameBuildConfig.h)" + "pak key from HEGameBuildConfig.h", and `otool -L` of every swapped
+  file has no `/opt/homebrew/` (56 assertions). The SDK-built exe's rpath lists `@executable_path` first (checked on SdkExampleGame),
+  so the folder's libs load. Editor + he_tests build; related
   files green (project_exporter 34, export_profiles 50, horizoncode_codegen 53, hc_codegen_readable 4, game_build_config 5,
-  export_backend 11, hc_codegen_export_build 1). Full ctest: see the result line below.
+  export_backend 11, hc_codegen_export_build 1). Full ctest (`-j4`, private HOME, HE_CONFIG_DIR unset, before f2d08ace): 310/311,
+  `runtime_size_app_*` skipped; `test_collab_controller` failed under -j4 and passed alone (42 s), so I take it for a flake.
 - **Not verified:** a click-through export in the GUI (no live editor run); the release SDK path (no `SDK-release` built here);
   `.app` bundle swap + codesign; Windows/Linux (CI); the Cancel button on screen.
 - **Decisions taken:** compile AFTER the prebuilt export and swap (fallback is free, the exporter is unchanged); header from what
   the export wrote (one source of truth: `writeProjectConfig`), not a second ProjectConfig builder; strict profile match (no dev SDK
   for a Shipping export); `project.hcfg` stays in the folder (compiled config wins; incremental key reuse reads it); checkbox is
-  session-only (not in the .heproj profile yet). HorizonCode stays a separate `libHorizonCodeGen` shipped by the exporter, not linked into the exe.
+  session-only (not in the .heproj profile yet).
+- **Not done (against the step text "generierten HorizonCode-Code einbeziehen"):** generated HorizonCode is NOT built into the SDK
+  game. It still ships as the separate `libHorizonCodeGen`, built against the editor's dev codegen SDK, so a release-SDK game
+  plus that dylib is a dev/release profile mix that nobody has loaded yet.
 - **Traps:** swapping SDK engine libs into a folder whose `libHorizonPython.dylib` is from an OLDER engine build segfaults after
   PlayerHost (seen with step 4's 08:50 witness); the SDK has no Python plugin, so SDK and prebuilt runtime must come from the same
   build. The HorizonCode dylib is built against the editor's dev codegen SDK, so with a release game it is a profile mix (untested).
   macOS SDK libs still reference Homebrew lz4/zstd/openssl by absolute path (step 5 trap): the prebuilt folder's bundled copies
-  are not what the SDK libs load. `findGameSdk` runs per frame in the dialog (a few stats).
+  were not what the SDK libs loaded (fixed by `relinkToBundledDeps`; a dep the folder does NOT bundle stays absolute). The SDK
+  game keeps a second, absolute rpath to `<sdk>/lib` (harmless, leaks a path). `findGameSdk` runs per frame in the dialog (a few stats).
 - **Next steps:** 1. Step 9: GUI export with the checkbox on (dev and a built `SDK-release`), start the game, `build_profile_strings.py
   --profile release` on the swapped exe. 2. Ship `SDK-<profile>` in the editor package (CI packaging) and copy the Python plugin from
   the SDK tree or fail the swap when the folder holds one of another build. 3. Persist the checkbox in the export profile (.heproj).
-  4. Optionally link the generated HorizonCode sources into the game exe (`horizon_add_game SOURCES`) instead of the separate dylib.
+  4. Build the generated HorizonCode against the same SDK as the game (its `packageDir` branch in `generateCMakeLists`), or link the
+  sources into the exe (`horizon_add_game SOURCES` + a static registration hook). 5. Strip the absolute rpath (`install_name_tool -delete_rpath`).
