@@ -307,3 +307,39 @@ body or move behind a macro is open. They are needed for parity with the interpr
   replace `HE_GAME_DEV_HOTKEYS` + hcfg `devTools` (prebuilt path keeps the hcfg bit) with `HE_FEATURE_DEV_HOTKEYS`; put F9 /
   `HE_PROFILE_*` behind `HE_FEATURE_PROFILER_CAPTURE`, the A.1 headless hooks behind `HE_FEATURE_TEST_HOOKS`, `HE_CONFIG_DIR`/`HE_LOG`/physics
   env behind `HE_FEATURE_ENV_OVERRIDES`; decide whether release forces `HE_PROFILING` off; consider `-Wundef` on the gated targets.
+
+## Handoff (step 3: dev features behind the profile)
+
+- **Topic / step:** Thema 211, step 3 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, code commit 6cb54243 + the doc/script commit after it.
+- **Done:** `he_target_build_profile` on HorizonCore/Scene/Net (PUBLIC, `src/HE_*/CMakeLists.txt`) and HorizonGame (PRIVATE);
+  the renderer libs inherit it through Core, their CMake and code are untouched. Gated, by switch:
+  - `DEV_HOTKEYS`: V/F10, the hcfg `devTools` door, `m_devStats`/`m_devHotkeys` (`GameApplication.cpp` OnInit, OnEvent, OnRender, shutdown;
+    `GameApplication.h:187`), the whole of `DevStatsTile.cpp`. Dev keeps both doors exactly as before (`HE_GAME_DEV_HOTKEYS` from
+    Debug/RelWithDebInfo or the option, OR hcfg bit 4096). A release tree warns if `-DHE_GAME_DEV_HOTKEYS=ON` is given.
+  - `PROFILER_CAPTURE`: F9 handler, `Application::toggleProfilerCapture` (declaration and definition), `HE_PROFILE_*`, `HE_CAPTURE_FRAME/PATH`,
+    `HE_PERF_INPUT_EVENTS`, `InputLatencyProbe` (`Application.cpp`).
+  - `TEST_HOOKS`: `hiddenWindowRequested()` returns false and `backgroundFrameInterval()` the default (`Window.cpp`; the pure `*FromEnv`
+    helpers stay), `HE_EXIT_AFTER_FRAMES` (`Application.cpp`), `HE_NO_SPLASH`/`HE_SPLASH_DUMP` (`SplashScreen.cpp`), `HE_CONFIG_FALLBACK_DIR` (`GlobalState.cpp`).
+  - `ENV_OVERRIDES`: `HE_LOG`, `HE_LOG_NO_CONSOLE`, `HE_CONFIG_DIR` (`GlobalState.cpp`), `HE_ENGINE_CONTENT_EDITABLE` (`ContentManager.cpp`),
+    `HE_PHYSICS_THREADS/_WATER/_BUDGET_MS` (`PhysicsTuning.h`, `PhysicsBudget.h`), `HE_PROPAGATE_FULL/_VERIFY` (`TransformHierarchy.cpp`).
+  - The game logs `build profile '<dev|release>'` next to the runtime flavour. `BuildProfile.h` lists per switch what it covers.
+  - `scripts/build_profile_strings.py --profile dev|release <dir>`: 30 items (env names as whole C strings, log text, `nm -C` symbols).
+- **Verified:** both profiles `-fsyntax-only -Wundef -Wall` for the 9 changed TUs (clean). Dev tree (`out/build/release`, Release config):
+  HorizonGame + he_tests build; `test_hidden_window` 9, `test_dev_stats_tile` 8, `test_build_profile` 5 (new case: he_tests gets the profile
+  from HorizonCore, not the fallback), `test_physics_budget` 15, `test_physics_threading` 12, all green. Release tree
+  (`out/build/release-profile`, `-DHE_BUILD_PROFILE=release -DHE_BUILD_TESTS=OFF`): HorizonGame builds, 733/733.
+  Strings script: release tree 30/30 gone, dev tree 30/30 present; release mode against the dev tree fails with 30 (negative control).
+  By hand: `strings`/`nm -C` on libHorizonCore + HorizonGame agree. Dev smoke run (`HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=30`, deploy/Game):
+  hidden, exits at frame 30, hotkeys OFF as before for a Release-config runtime, log says `build profile 'dev'`.
+  Full ctest (`-j4`, private `HOME`, `HE_CONFIG_DIR` unset): 304/304 passed, the two `runtime_size_app_*` skipped (flavour-only).
+- **Not verified:** the release HorizonGame was not launched (no hidden mode in it: it would open a visible window). MSVC/GCC not built
+  locally (CI). Whether the editor, he_tests and the tools build in a release tree: they do NOT (expected, see traps).
+- **Decisions taken:** feature switches, not the bare profile, guard each site (a `FEATURES` override must work, so no `HE_DEV_ONLY` where the
+  guarded thing is a feature member); functions other libraries call stay and return the "off" answer, the F9 function itself is removed;
+  class layouts are the same in both profiles (`SplashScreen::m_dumpIndex` stays). `HE_NET_*`, `HE_HCGEN_SDK`, `HE_PROFILING`, renderer env untouched.
+- **Traps:** a release tree compiles only the runtime: `EditorApplication.cpp` calls `toggleProfilerCapture`, he_tests needs `DevStatsTile`.
+  Build `--target HorizonGame` there and pass `-DHE_BUILD_TESTS=OFF`. A second tree needs `CMAKE_MAKE_PROGRAM` (CLion's ninja) and the
+  `FETCHCONTENT_SOURCE_DIR_*` of the first; the configure line is in step 3's result post. The PUBLIC definitions changed every command line:
+  the first build after this commit is a near-full rebuild (840 steps here).
+- **Next steps:** step 4 (generated header). Step 5 must keep editor/tests out of a release tree (or make them build) and can call
+  `build_profile_strings.py --profile release` on the SDK libs; step 9 runs it on an exported game.

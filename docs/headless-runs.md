@@ -13,6 +13,13 @@ OnInit, UI. (Belegt ist das bisher über SDLs eigenen Fensterzustand im Log;
 die Kontrolle am entsperrten Bildschirm steht noch aus, siehe Audit
 „Nicht verifiziert" und die Negativkontrolle unten.)
 
+**Nur Dev-Builds.** Alle Schalter dieser Seite gibt es nur in einem Baum mit
+`HE_BUILD_PROFILE=dev` (Vorgabe; Editor, he_tests, die vorkompilierten Runtimes).
+Ein Release-Profil-Build (`-DHE_BUILD_PROFILE=release`, der SDK-Export aus Thema 211)
+hat sie nicht einkompiliert und ignoriert sie still. Welche Variable an welchem
+Schalter hängt: `src/HE_Core/include/Platform/BuildProfile.h`; Nachweis am Binary:
+`scripts/build_profile_strings.py`.
+
 ## Die Schalter
 
 | Variable | Gilt für | Was sie tut | Macht hidden? |
