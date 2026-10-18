@@ -187,6 +187,7 @@ if(APPLE)
     add_library(RendererMetal STATIC
         src/Backends/Metal/MetalRenderer.mm
         src/Backends/Metal/MetalShaderManager.mm
+        src/Backends/Metal/MetalRendererImpl.h
         include/Backends/Metal/MetalRenderer.h
         include/Backends/Metal/MetalShaderManager.h)
     target_include_directories(RendererMetal PUBLIC

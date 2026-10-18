@@ -1,4 +1,4 @@
-#include "Backends/Metal/MetalRenderer.h"
+#include "MetalRendererImpl.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
@@ -106,14 +106,14 @@ void attachPassEnd(MTLRenderPassDescriptor* d, id<MTLCounterSampleBuffer> sb, NS
 
 // ─── Per-frame GPU timer slot allocation + attachment helpers ─────────────────
 // All no-ops unless a capture with stage/draw timing is active this frame.
-uint32_t MetalRenderer::ftPair(const char* name)
+uint32_t MetalRendererImpl::ftPair(const char* name)
 {
 	if (m_ft.next + 2 > kMaxGpuSamples) return kInvalidSlot;
 	uint32_t base = m_ft.next; m_ft.next += 2;
 	m_ft.pairs.push_back({ name, base });
 	return base;
 }
-uint32_t MetalRenderer::ftPoint(const char* name)
+uint32_t MetalRendererImpl::ftPoint(const char* name)
 {
 	if (m_ft.next + 1 > kMaxGpuSamples) return kInvalidSlot;
 	uint32_t slot = m_ft.next++;
@@ -121,7 +121,7 @@ uint32_t MetalRenderer::ftPoint(const char* name)
 	return slot;
 }
 // Single-encoder pass: reserve a pair and attach start+end to its descriptor.
-void MetalRenderer::ftAttachPass(void* passDescPtr, const char* name)
+void MetalRendererImpl::ftAttachPass(void* passDescPtr, const char* name)
 {
 	if (!m_ft.stage || !m_ft.sampleBuf || !passDescPtr) return;
 	if (@available(macOS 11.0, *))
@@ -134,19 +134,19 @@ void MetalRenderer::ftAttachPass(void* passDescPtr, const char* name)
 }
 // Multi-encoder pass: reserve a pair up front (returns base, or kInvalidSlot),
 // then ftAttachStart on the first descriptor and ftAttachEnd on the last.
-uint32_t MetalRenderer::ftBeginMulti(const char* name)
+uint32_t MetalRendererImpl::ftBeginMulti(const char* name)
 {
 	if (!m_ft.stage || !m_ft.sampleBuf) return kInvalidSlot;
 	return ftPair(name);
 }
-void MetalRenderer::ftAttachStart(void* passDescPtr, uint32_t base)
+void MetalRendererImpl::ftAttachStart(void* passDescPtr, uint32_t base)
 {
 	if (base == kInvalidSlot || !m_ft.sampleBuf || !passDescPtr) return;
 	if (@available(macOS 11.0, *))
 		attachPassStart((__bridge MTLRenderPassDescriptor*)passDescPtr,
 		                (__bridge id<MTLCounterSampleBuffer>)m_ft.sampleBuf, base);
 }
-void MetalRenderer::ftAttachEnd(void* passDescPtr, uint32_t base)
+void MetalRendererImpl::ftAttachEnd(void* passDescPtr, uint32_t base)
 {
 	if (base == kInvalidSlot || !m_ft.sampleBuf || !passDescPtr) return;
 	if (@available(macOS 11.0, *))
@@ -154,7 +154,7 @@ void MetalRenderer::ftAttachEnd(void* passDescPtr, uint32_t base)
 		              (__bridge id<MTLCounterSampleBuffer>)m_ft.sampleBuf, base + 1);
 }
 // Draw-boundary sample inside one render encoder (intra-Scene element split).
-void MetalRenderer::SamplePoint(void* encoderPtr, const char* name)
+void MetalRendererImpl::SamplePoint(void* encoderPtr, const char* name)
 {
 	if (!m_ft.draw || !m_ft.sampleBuf || !encoderPtr) return;
 	if (@available(macOS 11.0, *))
@@ -6647,10 +6647,114 @@ static_assert(sizeof(GIProbeParamsCPU) == (6 + 24) * 16, "GIProbeParamsCPU must 
 // <HorizonRendering/ClipSpace.h>. Metal NDC y is up like GL, so it holds no y flip
 // — that flip happens when SAMPLING (texture origin is top-left).
 
-MetalRenderer::MetalRenderer()  = default;
+// ── MetalRenderer: the Pimpl facade (audit REN-301) ─────────────────────────
+// Each IRenderer entry point hands over to MetalRendererImpl, which holds the whole
+// backend; the definitions below it are all MetalRendererImpl's.
+MetalRenderer::MetalRenderer()  : m_impl(std::make_unique<MetalRendererImpl>(*this)) {}
 MetalRenderer::~MetalRenderer() = default;
 
-void MetalRenderer::Initialize(HE::Window* window)
+void MetalRenderer::Initialize(HE::Window* window) { m_impl->Initialize(window); }
+void MetalRenderer::Shutdown()                     { m_impl->Shutdown(); }
+void MetalRenderer::Render()                       { m_impl->Render(); }
+void MetalRenderer::WaitForFrame()                 { m_impl->WaitForFrame(); }
+IRenderer::Capabilities MetalRenderer::GetCapabilities() const   { return m_impl->GetCapabilities(); }
+IRenderer::FrameGpuStats MetalRenderer::GetFrameGpuStats() const { return m_impl->GetFrameGpuStats(); }
+void MetalRenderer::SetVSync(bool enabled) { m_impl->SetVSync(enabled); }
+
+void* MetalRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int height)
+{
+	return m_impl->CreateImGuiTexture(rgba8Pixels, width, height);
+}
+void MetalRenderer::DestroyImGuiTexture(void* handle) { m_impl->DestroyImGuiTexture(handle); }
+void MetalRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)
+{
+	m_impl->SetMoonTexture(rgba8Pixels, width, height);
+}
+
+void  MetalRenderer::SetViewportSize(uint32_t width, uint32_t height) { m_impl->SetViewportSize(width, height); }
+void* MetalRenderer::GetViewportTexture() { return m_impl->GetViewportTexture(); }
+bool  MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height)
+{
+	return m_impl->CaptureViewport(rgba, width, height);
+}
+bool  MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
+                                      std::vector<uint8_t>& rgba)
+{
+	return m_impl->RenderSceneImage(camera, width, height, rgba);
+}
+void  MetalRenderer::InvalidateMaterial(const HE::UUID& materialId) { m_impl->InvalidateMaterial(materialId); }
+void  MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds) { m_impl->WarmupMaterials(materialIds); }
+void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape, const HE::UUID& meshId, float timeSeconds)
+{
+	return m_impl->RenderMaterialPreview(cm, materialId, size, yaw, pitch, dist, shape, meshId, timeSeconds);
+}
+void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                           const std::vector<glm::mat4>& boneMatrices,
+                                           uint32_t width, uint32_t height,
+                                           float yaw, float pitch, float dist,
+                                           bool showSkeleton, glm::mat4* outViewProj)
+{
+	return m_impl->RenderSkeletalPreview(cm, meshId, boneMatrices, width, height, yaw, pitch, dist,
+	                                     showSkeleton, outViewProj);
+}
+void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                                        uint32_t width, uint32_t height,
+                                        const EditorCameraOverride& camera, const glm::vec3& origin,
+                                        const WorldPreviewEnv& env, glm::mat4* outViewProj, uint32_t slot)
+{
+	return m_impl->RenderWorldPreview(cm, world, width, height, camera, origin, env, outViewProj, slot);
+}
+void* MetalRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+	return m_impl->RenderParticlePreview(cm, meshId, materialId, particles, size, yaw, pitch, dist);
+}
+bool  MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+                                          uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	return m_impl->RenderAssetThumbnail(cm, kind, assetId, size, outRgba8);
+}
+bool  MetalRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+                                             const std::vector<ParticlePreviewInstance>& particles,
+                                             uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	return m_impl->RenderParticleThumbnail(cm, materialId, particles, size, outRgba8);
+}
+bool  MetalRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+                                           uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	return m_impl->RenderWidgetThumbnail(uiObjects, size, outRgba8);
+}
+void  MetalRenderer::InvalidateMesh(const HE::UUID& meshId)       { m_impl->InvalidateMesh(meshId); }
+void  MetalRenderer::InvalidateTexture(const HE::UUID& textureId) { m_impl->InvalidateTexture(textureId); }
+void  MetalRenderer::SetBloomSettings(const BloomSettings& s)               { m_impl->SetBloomSettings(s); }
+void  MetalRenderer::SetDepthOfFieldSettings(const DepthOfFieldSettings& s) { m_impl->SetDepthOfFieldSettings(s); }
+void  MetalRenderer::SetMotionBlurSettings(const MotionBlurSettings& s)     { m_impl->SetMotionBlurSettings(s); }
+void  MetalRenderer::SetSSAOSettings(const SSAOSettings& s)                 { m_impl->SetSSAOSettings(s); }
+void  MetalRenderer::SetShadowSettings(const ShadowSettings& s)             { m_impl->SetShadowSettings(s); }
+void  MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s) { m_impl->SetAntiAliasingSettings(s); }
+void  MetalRenderer::SetGISettings(const GISettings& s)                     { m_impl->SetGISettings(s); }
+void  MetalRenderer::SetSSRSettings(const SSRSettings& s)                   { m_impl->SetSSRSettings(s); }
+void  MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& s) { m_impl->SetOcclusionCullingSettings(s); }
+void  MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s) { m_impl->SetGIReflectionSettings(s); }
+void  MetalRenderer::SetShadowDebug(bool on)                                { m_impl->SetShadowDebug(on); }
+void  MetalRenderer::SetGpuParticleParams(const GpuParticleParams& p)       { m_impl->SetGpuParticleParams(p); }
+void  MetalRenderer::SetDebugLines(const std::vector<DebugLine>& lines)     { m_impl->SetDebugLines(lines); }
+
+void MetalRenderer::AttachWindow(HE::Window* window) { m_impl->AttachWindow(window); }
+void MetalRenderer::DetachWindow(HE::Window* window) { m_impl->DetachWindow(window); }
+void MetalRenderer::RenderWindow(HE::Window* window) { m_impl->RenderWindow(window); }
+
+void* MetalRenderer::GetDevice() const              { return m_impl->GetDevice(); }
+void* MetalRenderer::GetCommandQueue() const        { return m_impl->GetCommandQueue(); }
+void* MetalRenderer::GetFramePassDescriptor() const { return m_impl->GetFramePassDescriptor(); }
+
+// ── MetalRendererImpl ────────────────────────────────────────────────────────
+
+void MetalRendererImpl::Initialize(HE::Window* window)
 {
 	HE_LOG_INFO(RHI, "%s", "MetalRenderer: initializing");
 	m_primarySdlWindow = window->GetNativeWindow();
@@ -6709,11 +6813,11 @@ void MetalRenderer::Initialize(HE::Window* window)
 	// lets the env var win there too), the packaged game never does, so this
 	// read is what a headless game capture runs on.
 	if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
-		m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
+		m_owner.m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
 	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
 		if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
-			m_viewMode = static_cast<HE::ViewMode>(
+			m_owner.m_viewMode = static_cast<HE::ViewMode>(
 				static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
 	// P6 tile mode: single-pass memoryless G-buffer via framebuffer fetch —
 	// Apple-GPU family only ([[color(n)]] fragment inputs). HE_DEFERRED_TILE=0/1
@@ -6735,7 +6839,7 @@ void MetalRenderer::Initialize(HE::Window* window)
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
 }
 
-void MetalRenderer::Shutdown()
+void MetalRendererImpl::Shutdown()
 {
 	HE_LOG_INFO(RHI, "%s", "MetalRenderer: shutdown");
 	m_shaderManager.cleanup();
@@ -6971,12 +7075,12 @@ void MetalRenderer::Shutdown()
 // HE::BuildSSAONoise in <HorizonRendering/SsaoKernel.h> — one deterministic
 // generator for every backend, which is what makes GL == Metal == D3D == Vulkan.
 
-void MetalRenderer::SetDebugLines(const std::vector<DebugLine>& lines)
+void MetalRendererImpl::SetDebugLines(const std::vector<DebugLine>& lines)
 {
 	m_debugLines = lines;
 }
 
-void MetalRenderer::CreateDebugLinePipeline()
+void MetalRendererImpl::CreateDebugLinePipeline()
 {
 	@autoreleasepool
 	{
@@ -7030,7 +7134,7 @@ fragment float4 debugLineFrag(DebugVOut in [[stage_in]])
 	}
 }
 
-void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& viewProj)
+void MetalRendererImpl::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& viewProj)
 {
 	if (m_debugLines.empty() || !m_debugLinePipeline) return;
 
@@ -7075,7 +7179,7 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 	}
 }
 
-void* MetalRenderer::UploadTransient(size_t len, void*& outBuf, size_t& outOffset)
+void* MetalRendererImpl::UploadTransient(size_t len, void*& outBuf, size_t& outOffset)
 {
 	outBuf    = nullptr;
 	outOffset = 0;
@@ -7118,7 +7222,7 @@ void* MetalRenderer::UploadTransient(size_t len, void*& outBuf, size_t& outOffse
 	return fresh.contents;
 }
 
-bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset)
+bool MetalRendererImpl::UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset)
 {
 	void* dst = UploadTransient(len, outBuf, outOffset);
 	if (!dst) return false;
@@ -7126,7 +7230,7 @@ bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& ou
 	return true;
 }
 
-bool MetalRenderer::UploadBonePalette(const std::vector<glm::mat4>& bones, int boneSlots,
+bool MetalRendererImpl::UploadBonePalette(const std::vector<glm::mat4>& bones, int boneSlots,
                                       void*& outBuf, size_t& outOffset)
 {
 	// Was a full 128-matrix (8 KB) identity fill, a copy over it and a fresh
@@ -7143,7 +7247,7 @@ bool MetalRenderer::UploadBonePalette(const std::vector<glm::mat4>& bones, int b
 	return true;
 }
 
-void MetalRenderer::ReleaseUploadRing()
+void MetalRendererImpl::ReleaseUploadRing()
 {
 	// In-flight command buffers retain the chunks they bound, so dropping our
 	// references here is safe. A fresh ring keeps chunk indices and buffers in
@@ -7155,7 +7259,7 @@ void MetalRenderer::ReleaseUploadRing()
 	m_uploadRing = std::make_shared<HE::FrameUploadRing>();
 }
 
-void MetalRenderer::ReleaseRibbonBuffers()
+void MetalRendererImpl::ReleaseRibbonBuffers()
 {
 	for (void* b : m_ribbonBuffers)
 		if (b) CFBridgingRelease(b);
@@ -7170,7 +7274,7 @@ void MetalRenderer::ReleaseRibbonBuffers()
 // and replays. A trail whose material carries a node graph gets that material's
 // blended pipeline, which is what makes the age in uv.v drive colour and fade
 // without a single trail-specific uniform.
-void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
+void MetalRendererImpl::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
                                        const glm::vec3& cameraPos)
 {
 	if (m_renderWorld.ribbonBatches.empty()) return;
@@ -7218,8 +7322,8 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 				uint32_t                 gtexArr = 0; // sampler2DArray slots (Thema 158)
 				std::vector<std::string> gtexPaths;
 				const MaterialShaderVariant* pre = nullptr;
-				if (const MaterialAsset* ma = m_contentManager
-					? m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
+				if (const MaterialAsset* ma = m_owner.m_contentManager
+					? m_owner.m_contentManager->getMaterial(rb.materialAssetId) : nullptr)
 				{
 					for (const auto& var : ma->precompiledShaders)
 						if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
@@ -7261,7 +7365,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 	}
 }
 
-void MetalRenderer::CreateScenePipeline()
+void MetalRendererImpl::CreateScenePipeline()
 {
 	@autoreleasepool
 	{
@@ -7888,7 +7992,7 @@ void MetalRenderer::CreateScenePipeline()
 	}
 }
 
-void MetalRenderer::EnsureShadowResources()
+void MetalRendererImpl::EnsureShadowResources()
 {
 	@autoreleasepool
 	{
@@ -7943,19 +8047,19 @@ void MetalRenderer::EnsureShadowResources()
 	}
 }
 
-void MetalRenderer::ExtractFrame(float aspect)
+void MetalRendererImpl::ExtractFrame(float aspect)
 {
-	if (!m_world) return;
+	if (!m_owner.m_world) return;
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
-	m_extractor.setContentManager(m_contentManager);
-	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+	m_extractor.setContentManager(m_owner.m_contentManager);
+	m_extractor.extract(*m_owner.m_world, m_renderWorld, aspect, &m_owner.m_editorCamera);
 }
 
-void MetalRenderer::RefineObjectBounds()
+void MetalRendererImpl::RefineObjectBounds()
 {
 	// What the loop writes depends only on an object's transform and its mesh's bound, and the
 	// walk stays in m_renderWorld for the whole frame (RenderExtractor::beginFrame): a second loop
@@ -7983,9 +8087,9 @@ void MetalRenderer::RefineObjectBounds()
 	m_refinedCount   = count;
 }
 
-void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
+void MetalRendererImpl::EncodeShadowMap(void* cmdBufPtr, float aspect)
 {
-	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
+	if (!m_owner.m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
 
 	// The cascade light matrices + caster geometry are the frame's walk, which EncodeFrame took
 	// just before this pass (ExtractFrame); this call is the key check that m_renderWorld holds
@@ -8130,7 +8234,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 }
 // ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
 
-void MetalRenderer::EnsureRaytracingSupport()
+void MetalRendererImpl::EnsureRaytracingSupport()
 {
 	if (m_giRaytracingChecked) return;
 	m_giRaytracingChecked = true;
@@ -8184,7 +8288,7 @@ void MetalRenderer::EnsureRaytracingSupport()
 		: "MetalRenderer: MetalFX temporal scaling unavailable — the TAA mode covers it");
 }
 
-void* MetalRenderer::BuildBLAS(const GpuMesh& mesh, void* encoder)
+void* MetalRendererImpl::BuildBLAS(const GpuMesh& mesh, void* encoder)
 {
 	if (!mesh.vertexBuf || !mesh.indexBuf || mesh.indexCount <= 0 || !encoder) return nullptr;
 
@@ -8275,11 +8379,11 @@ static bool giAccelLogEnabled()
 	return on;
 }
 
-MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId)
+MetalRendererImpl::GISwBlasRange MetalRendererImpl::BuildGISwBlas(const HE::UUID& meshId)
 {
 	GISwBlasRange range;
-	if (!m_contentManager) return range;
-	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
+	if (!m_owner.m_contentManager) return range;
+	const StaticMeshAsset* asset = m_owner.m_contentManager->getStaticMesh(meshId);
 	if (!asset || asset->indices.empty()) return range;
 
 	// Same two layouts ResolveMesh uploads: cooked interleaved 8-float
@@ -8302,7 +8406,7 @@ MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId
 	return range;
 }
 
-void MetalRenderer::EncodeGISwAccelBuild()
+void MetalRendererImpl::EncodeGISwAccelBuild()
 {
 	// Same caster filter as the HW TLAS: castsShadow, unculled.
 	std::vector<GISwInstanceCPU>& instances = m_giSwInstCur;
@@ -8336,7 +8440,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		xforms.push_back(obj.transform);
 		glm::vec3 albedo, emissive;
 		float metallic, roughness;
-		giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
+		giInstanceShading(obj, m_owner.m_contentManager, albedo, emissive, metallic, roughness);
 		inst.baseColor    = glm::vec4(albedo, metallic);   // w = metallic (bounce loop)
 		inst.emissive     = glm::vec4(emissive, roughness); // w = roughness
 		inst.nodeOffset   = range.nodeOffset;
@@ -8412,7 +8516,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // entries differ from the live buffer's. The weightmap TEXTURES come from the
 // same UUID-keyed cache the raster path uses (uploaded once, re-uploaded only
 // when the paint changes) and are not part of the buffer.
-int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
+int MetalRendererImpl::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 {
 	outWeightTex.clear();
 	std::vector<GILandGpu>& gpu = m_giLandCur;
@@ -8463,7 +8567,7 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 	return static_cast<int>(m_giLandLast.size());
 }
 
-void MetalRenderer::ReleaseGIAccel()
+void MetalRendererImpl::ReleaseGIAccel()
 {
 	RetireGIObject(m_giTlas);                m_giTlas                = nullptr;
 	RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
@@ -8482,13 +8586,13 @@ void MetalRenderer::ReleaseGIAccel()
 	m_giAccelDirty      = true;
 }
 
-void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
+void MetalRendererImpl::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
 	// GI reflections reuse the acceleration structures without the probe/
 	// shadow passes, so the build also runs when ONLY they are enabled
 	// (either path — the reflection kernel has HW and SW-BVH variants).
 	const bool wantAccel = m_giSupported && (m_giEnabled || m_giReflEnabled);
-	if (!wantAccel || !m_world)
+	if (!wantAccel || !m_owner.m_world)
 	{
 		// GI just turned off (or was never on this run): release any TLAS/instance
 		// buffer left over from the last GI-active frame instead of holding them
@@ -8518,8 +8622,8 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
-	m_extractor.setContentManager(m_contentManager);
-	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+	m_extractor.setContentManager(m_owner.m_contentManager);
+	m_extractor.extract(*m_owner.m_world, m_renderWorld, aspect, &m_owner.m_editorCamera);
 
 	// Every exit below that builds nothing drops the live build: a TLAS kept from
 	// an earlier frame would hand the trace passes casters the scene no longer has.
@@ -8599,7 +8703,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			// values (editor slider drags), which no revision counter covers.
 			glm::vec3 albedo, emissive;
 			float metallic, roughness;
-			giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
+			giInstanceShading(obj, m_owner.m_contentManager, albedo, emissive, metallic, roughness);
 			cur.color.push_back(glm::vec4(albedo, metallic));
 			cur.color.push_back(glm::vec4(emissive, roughness));
 			cur.landIndex.push_back(obj.landscapeIndex); // paint sampling at the hit
@@ -8759,7 +8863,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 	}
 }
 
-void MetalRenderer::EnsureGIShadowPipelines()
+void MetalRendererImpl::EnsureGIShadowPipelines()
 {
 	if (m_giGBufPipeline) return; // already built
 	@autoreleasepool
@@ -8847,7 +8951,7 @@ void MetalRenderer::EnsureGIShadowPipelines()
 	}
 }
 
-void MetalRenderer::EnsureGIShadowTargets(int width, int height)
+void MetalRendererImpl::EnsureGIShadowTargets(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
@@ -8907,7 +9011,7 @@ void MetalRenderer::EnsureGIShadowTargets(int width, int height)
 	m_giShadowW = width; m_giShadowH = height;
 }
 
-void MetalRenderer::DestroyGIShadowTargets()
+void MetalRendererImpl::DestroyGIShadowTargets()
 {
 	if (m_giGBufPosTex)       { CFBridgingRelease(m_giGBufPosTex);       m_giGBufPosTex = nullptr; }
 	if (m_giGBufNormTex)      { CFBridgingRelease(m_giGBufNormTex);      m_giGBufNormTex = nullptr; }
@@ -8922,9 +9026,9 @@ void MetalRenderer::DestroyGIShadowTargets()
 	m_giShadowW = m_giShadowH = 0;
 }
 
-void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 {
-	if (!m_giEnabled || !m_giSupported || !m_world) return;
+	if (!m_giEnabled || !m_giSupported || !m_owner.m_world) return;
 	// The active path's acceleration structure must exist (built this frame by
 	// EncodeGIAccelBuild): HW = TLAS, SW = CPU-BVH buffers + at least 1 instance.
 	if (m_giHwRt ? !m_giTlas
@@ -9152,7 +9256,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 	}
 }
 
-void MetalRenderer::EnsureGIProbeGrid()
+void MetalRendererImpl::EnsureGIProbeGrid()
 {
 	if (m_renderWorld.objects.empty()) return; // wait for real geometry before committing to a grid
 	// Once built, only re-check when the scene's GEOMETRY changed (objects
@@ -9216,7 +9320,7 @@ void MetalRenderer::EnsureGIProbeGrid()
 		 + "), spacing " + std::to_string(m_giProbeSpacing)).c_str());
 }
 
-void MetalRenderer::EnsureGIProbePipeline()
+void MetalRendererImpl::EnsureGIProbePipeline()
 {
 	// HW and SW variants are mutually exclusive per session (m_giHwRt is fixed
 	// after EnsureRaytracingSupport), so one built pipeline means done.
@@ -9247,7 +9351,7 @@ void MetalRenderer::EnsureGIProbePipeline()
 	}
 }
 
-void MetalRenderer::EnsureGIProbeAtlas()
+void MetalRendererImpl::EnsureGIProbeAtlas()
 {
 	if (m_giProbeCount <= 0) return;
 	const int probeRows = static_cast<int>(std::ceil(static_cast<float>(m_giProbeCount) / static_cast<float>(m_giProbesPerRow)));
@@ -9274,15 +9378,15 @@ void MetalRenderer::EnsureGIProbeAtlas()
 	m_giVisibilityAtlas = (void*)CFBridgingRetain([device newTextureWithDescriptor:visDesc]);
 }
 
-void MetalRenderer::DestroyGIProbeAtlas()
+void MetalRendererImpl::DestroyGIProbeAtlas()
 {
 	if (m_giIrradianceAtlas) { CFBridgingRelease(m_giIrradianceAtlas); m_giIrradianceAtlas = nullptr; }
 	if (m_giVisibilityAtlas) { CFBridgingRelease(m_giVisibilityAtlas); m_giVisibilityAtlas = nullptr; }
 }
 
-void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
+void MetalRendererImpl::EncodeGIProbeUpdate(void* cmdBufPtr)
 {
-	if (!m_giEnabled || !m_giSupported || !m_world) return;
+	if (!m_giEnabled || !m_giSupported || !m_owner.m_world) return;
 	if (m_giHwRt ? !m_giTlas
 	             : (!m_giSwNodeBuf || !m_giSwTriBuf || !m_giSwInstanceBuf || m_giSwInstanceCount == 0))
 		return;
@@ -9379,15 +9483,15 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 // shipped format. Defined below; forward-declared so the mesh uploads can share it.
 static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb = true);
 
-const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
+const MetalRendererImpl::GpuMesh* MetalRendererImpl::ResolveMesh(const HE::UUID& assetId)
 {
-	if (assetId == HE::UUID{} || !m_contentManager)
+	if (assetId == HE::UUID{} || !m_owner.m_contentManager)
 		return nullptr;
 
 	if (auto it = m_meshCache.find(assetId); it != m_meshCache.end())
 		return &it->second;
 
-	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(assetId);
+	const StaticMeshAsset* asset = m_owner.m_contentManager->getStaticMesh(assetId);
 	if (!asset || asset->indices.empty() || (asset->vertices.empty() && !asset->cooked))
 		return nullptr;
 
@@ -9441,13 +9545,13 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 	// Base color texture via the mesh's material — baked UUID (packed builds)
 	// with the editor path as fallback (loose content).
 	if (const MaterialAsset* mat =
-	        m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
+	        m_owner.m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
 	{
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTexture(device, m_owner.m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9459,16 +9563,16 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 }
 
 // ─── Skeletal mesh upload ─────────────────────────────────────────────────────
-const MetalRenderer::GpuSkeletalMesh*
-MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
+const MetalRendererImpl::GpuSkeletalMesh*
+MetalRendererImpl::ResolveSkeletalMesh(const HE::UUID& assetId)
 {
-	if (assetId == HE::UUID{} || !m_contentManager)
+	if (assetId == HE::UUID{} || !m_owner.m_contentManager)
 		return nullptr;
 
 	if (auto it = m_skeletalMeshCache.find(assetId); it != m_skeletalMeshCache.end())
 		return &it->second;
 
-	const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(assetId);
+	const SkeletalMeshAsset* asset = m_owner.m_contentManager->getSkeletalMesh(assetId);
 	if (!asset || asset->vertices.empty() || asset->indices.empty())
 		return nullptr;
 
@@ -9533,13 +9637,13 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		                   options:MTLResourceStorageModeShared]);
 
 	if (const MaterialAsset* mat =
-	        m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
+	        m_owner.m_contentManager->resolveMaterialRef(asset->materialId, asset->materialPath))
 	{
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTexture(device, m_owner.m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	return &m_skeletalMeshCache.emplace(assetId, mesh).first->second;
@@ -9623,10 +9727,10 @@ static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, b
 	return (void*)CFBridgingRetain(texture);
 }
 
-bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex)
+bool MetalRendererImpl::ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex)
 {
 	outTex = nullptr;
-	if (materialId == HE::UUID{} || !m_contentManager)
+	if (materialId == HE::UUID{} || !m_owner.m_contentManager)
 		return false;
 
 	if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
@@ -9635,14 +9739,14 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 		return true;
 	}
 
-	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
+	const MaterialAsset* mat = m_owner.m_contentManager->getMaterial(materialId);
 	if (!mat)
 		return false; // not loaded yet — retry next frame without caching
 
 	const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 	const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
-		m_contentManager->resolveTextureRef(texId0, texPath0));
+		m_owner.m_contentManager->resolveTextureRef(texId0, texPath0));
 
 	m_materialTexCache.emplace(materialId, retained);
 	outTex = retained;
@@ -9696,15 +9800,15 @@ static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* t
 // under its own "#arr" key — the same asset can be 2D in one material and an array
 // in another — and NEVER nullptr: a missing one is the white array, so every caller
 // binds the right texture type without knowing about arrays.
-void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array)
+void* MetalRendererImpl::ResolveGraphTexture(const HE::UUID& texId, const std::string& path, bool array)
 {
 	std::string key = texId != HE::UUID{}
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
-	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
+	if (key.empty() || !m_owner.m_contentManager) return array ? m_whiteArrayTexture : nullptr;
 	if (array) key += "#arr";
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
-	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
+	const TextureAsset* asset = m_owner.m_contentManager->resolveTextureRef(texId, path);
 	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
 	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
 	m_graphTexCache.emplace(key, retained);
@@ -9718,24 +9822,24 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 // Raw bytes in = raw bytes out, exactly what the widget designer shows. Not
 // shared with m_graphTexCache on purpose: a material samples the same asset in
 // linear light, which is right there.
-void* MetalRenderer::ResolveUITexture(const HE::UUID& texId, const std::string& path)
+void* MetalRendererImpl::ResolveUITexture(const HE::UUID& texId, const std::string& path)
 {
 	const std::string key = texId != HE::UUID{}
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
-	if (key.empty() || !m_contentManager) return nullptr;
+	if (key.empty() || !m_owner.m_contentManager) return nullptr;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
 	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
-		m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
+		m_owner.m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, retained);
 	return retained;
 }
 
-bool MetalRenderer::ResolveMaterialParams(const HE::UUID& materialId,
+bool MetalRendererImpl::ResolveMaterialParams(const HE::UUID& materialId,
 	glm::vec3& outBaseColor, float& outMetallic, float& outRoughness, float& outOpacity)
 {
-	if (materialId == HE::UUID{} || !m_contentManager)
+	if (materialId == HE::UUID{} || !m_owner.m_contentManager)
 		return false;
-	const MaterialAsset* mat = m_contentManager->getMaterial(materialId);
+	const MaterialAsset* mat = m_owner.m_contentManager->getMaterial(materialId);
 	if (!mat)
 		return false; // not loaded yet — caller keeps defaults
 	outBaseColor = glm::vec3(mat->baseColor[0], mat->baseColor[1], mat->baseColor[2]);
@@ -9747,7 +9851,7 @@ bool MetalRenderer::ResolveMaterialParams(const HE::UUID& materialId,
 	return true;
 }
 
-void MetalRenderer::InvalidateMaterial(const HE::UUID& materialId)
+void MetalRendererImpl::InvalidateMaterial(const HE::UUID& materialId)
 {
 	if (materialId == HE::UUID{}) return;
 	if (auto it = m_materialTexCache.find(materialId); it != m_materialTexCache.end())
@@ -9759,21 +9863,21 @@ void MetalRenderer::InvalidateMaterial(const HE::UUID& materialId)
 	}
 }
 
-void MetalRenderer::InvalidateMesh(const HE::UUID& meshId)
+void MetalRendererImpl::InvalidateMesh(const HE::UUID& meshId)
 {
 	// Defer to the render loop where the Metal device context is active.
 	if (meshId != HE::UUID{})
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
-void MetalRenderer::InvalidateTexture(const HE::UUID& textureId)
+void MetalRendererImpl::InvalidateTexture(const HE::UUID& textureId)
 {
 	// Same deferral as meshes — the graph-texture cache is keyed by UUID string.
 	if (textureId != HE::UUID{})
 		m_pendingTexInvalidations.push_back(textureId);
 }
 
-void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+void MetalRendererImpl::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
 	// Build each custom-shader material's pipeline state NOW so the first draw
 	// doesn't stall on cross-compile + PSO creation inside the encoder loop. The
@@ -9787,7 +9891,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		if (!ResolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPipelineCache.find(shKey) != m_materialPipelineCache.end()) continue; // warm
 		const MaterialShaderVariant* pre = nullptr;
-		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
+		if (const MaterialAsset* ma = m_owner.m_contentManager ? m_owner.m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
@@ -9799,7 +9903,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
-		if (m_renderPath == HE::RenderPath::Deferred)
+		if (m_owner.m_renderPath == HE::RenderPath::Deferred)
 		{
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (ResolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
@@ -9819,18 +9923,18 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // a thumbnail that reused m_previewColorTex would silently replace whatever the
 // Material Editor is showing. The caller owns the render pass, its clear and the
 // depth-stencil state; this only sets the pipeline, buffers and textures.
-bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
+bool MetalRendererImpl::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
                                           float yaw, float pitch, float dist, int shape,
                                           const HE::UUID& meshId, float timeSeconds)
 {
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	if (!enc || !device || !m_contentManager) return false;
+	if (!enc || !device || !m_owner.m_contentManager) return false;
 
 	// Resolve the node-graph material pipeline (built-in-PBR materials have none).
 	uint64_t shKey; std::string shFrag, shVert;
 	if (!ResolveMaterialShader(materialId, shKey, shFrag, shVert)) return false;
-	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	const MaterialAsset* ma = m_owner.m_contentManager->getMaterial(materialId);
 	const MaterialShaderVariant* pre = nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
@@ -9847,7 +9951,7 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	// material pool — a dense vector — and moves `ma`, which is read for the
 	// preview's colour and params all the way to the end of this function. The
 	// first render after picking a preview mesh is exactly when it happens.
-	if (ma) ma = m_contentManager->getMaterial(materialId);
+	if (ma) ma = m_owner.m_contentManager->getMaterial(materialId);
 	void* vertBuf = nullptr; void* idxBuf = nullptr; int idxCount = 0;
 	glm::vec3 center(0.0f);
 	float     radius = 1.0f; // what `dist` is measured in, so it frames alike
@@ -9991,7 +10095,7 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 // Build the small unskinned preview pipeline once. Shared by the mesh/material
 // previews and the world preview, so there is exactly one place that knows this
 // shader — a second copy is how two previews start lighting differently.
-bool MetalRenderer::EnsureMeshPreviewPipeline()
+bool MetalRendererImpl::EnsureMeshPreviewPipeline()
 {
 	if (m_meshPreviewPipeline) return true;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -10070,7 +10174,7 @@ fragment float4 meshPreviewFragment(VOut in [[stage_in]],
 // The non-graph counterpart: any interleaved pos3/normal3/uv2 buffer, shaded by a
 // small lambert + metallic/roughness-driven highlight. Used for mesh thumbnails and
 // for materials whose only description is their PBR scalars. Same caller contract.
-void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf,
+void MetalRendererImpl::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf,
                                       int indexCount, void* texture, const glm::vec3& center,
                                       float extent, const glm::vec3& baseColor, float metallic,
                                       float roughness, float yaw, float pitch, float dist)
@@ -10111,12 +10215,12 @@ void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void
 	         indexBufferOffset:0];
 }
 
-void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+void* MetalRendererImpl::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
                                            int shape, const HE::UUID& meshId, float timeSeconds)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
+	if (!m_owner.m_contentManager) m_owner.m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
 	if (!device || !queue) return nullptr;
@@ -10219,7 +10323,7 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 // Lazily (re)create the shared thumbnail target at S×S. Its own textures, see
 // the header note: a thumbnail rendered into one of the interactive preview
 // targets would replace whatever editor panel is showing that preview.
-bool MetalRenderer::EnsureThumbnailTarget(int S)
+bool MetalRendererImpl::EnsureThumbnailTarget(int S)
 {
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	if (!device) return false;
@@ -10245,7 +10349,7 @@ bool MetalRenderer::EnsureThumbnailTarget(int S)
 // wait, and decode the RGBA16F to top-down RGBA8. The target is RGBA16F because
 // that is the format every material PSO is built against, so a thumbnail always
 // pays this half-float decode.
-bool MetalRenderer::CommitAndReadThumbnail(void* commandBuffer, int S, std::vector<uint8_t>& out)
+bool MetalRendererImpl::CommitAndReadThumbnail(void* commandBuffer, int S, std::vector<uint8_t>& out)
 {
 	id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)commandBuffer;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -10286,12 +10390,12 @@ bool MetalRenderer::CommitAndReadThumbnail(void* commandBuffer, int S, std::vect
 	return true;
 }
 
-bool MetalRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+bool MetalRendererImpl::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
                                             const std::vector<ParticlePreviewInstance>& particles,
                                             uint32_t size, std::vector<uint8_t>& outRgba8)
 {
 	const int S = std::clamp(static_cast<int>(size), 16, 512);
-	if (!m_contentManager) m_contentManager = &cm;
+	if (!m_owner.m_contentManager) m_owner.m_contentManager = &cm;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
 	if (!queue || particles.empty()) return false;
 	if (!EnsureParticlePreviewPipeline() || !EnsureThumbnailTarget(S)) return false;
@@ -10340,7 +10444,7 @@ bool MetalRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& 
 	return CommitAndReadThumbnail((__bridge void*)cb, S, outRgba8);
 }
 
-bool MetalRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+bool MetalRendererImpl::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
                                           uint32_t size, std::vector<uint8_t>& outRgba8)
 {
 	const int S = std::clamp(static_cast<int>(size), 16, 512);
@@ -10416,12 +10520,12 @@ bool MetalRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiO
 	return true;
 }
 
-bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+bool MetalRendererImpl::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
                                          const HE::UUID& assetId, uint32_t size,
                                          std::vector<uint8_t>& outRgba8)
 {
 	const int S = std::clamp(static_cast<int>(size), 16, 512);
-	if (!m_contentManager) m_contentManager = &cm;
+	if (!m_owner.m_contentManager) m_owner.m_contentManager = &cm;
 	if (assetId == HE::UUID{}) return false;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
@@ -10468,7 +10572,7 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 		drew = EncodeMaterialPreview((__bridge void*)enc, assetId, kYaw, kPitch, kMatGraphDist, 0 /*sphere*/);
 		if (!drew)
 		{
-			const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
+			const MaterialAsset* ma = m_owner.m_contentManager->getMaterial(assetId);
 			if (!m_previewVB || m_previewShape != 0)
 			{
 				// Reuse the material preview's sphere — building it here keeps the
@@ -10538,7 +10642,7 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 // shadow/SSAO/fog/sky-env), same "isolated preview" idea as the material
 // preview. Raw-buffer-indexed (no [[stage_in]]), matching skinnedVertex. Shared
 // by the skeletal preview and the world preview.
-bool MetalRenderer::EnsureSkelPreviewPipeline()
+bool MetalRendererImpl::EnsureSkelPreviewPipeline()
 {
 	if (m_skelPreviewPipeline) return true;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -10613,7 +10717,7 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 	return m_skelPreviewPipeline != nullptr;
 }
 
-void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+void* MetalRendererImpl::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
                                            const std::vector<glm::mat4>& boneMatrices,
                                            uint32_t width, uint32_t height,
                                            float yaw, float pitch, float dist,
@@ -10622,7 +10726,7 @@ void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& m
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 2048);
 	const int H = std::clamp(static_cast<int>(height), 32, 2048);
-	if (!m_contentManager) m_contentManager = &cm;
+	if (!m_owner.m_contentManager) m_owner.m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
 	if (!device || !queue) return nullptr;
@@ -10718,7 +10822,7 @@ void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& m
 	// boneMatrix is defined as globalJointXform * invBind (composeBoneMatrices).
 	if (showSkeleton && m_debugLinePipeline)
 	{
-		if (const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(meshId))
+		if (const SkeletalMeshAsset* asset = m_owner.m_contentManager->getSkeletalMesh(meshId))
 		{
 			std::vector<glm::vec3> jointWorld(asset->skeleton.size(), glm::vec3(0.0f));
 			for (size_t i = 0; i < asset->skeleton.size(); ++i)
@@ -10818,7 +10922,7 @@ void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& m
 	return m_skelPreviewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
-void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+void* MetalRendererImpl::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
                                         uint32_t width, uint32_t height,
                                         const EditorCameraOverride& camera,
                                         const glm::vec3& origin,
@@ -10829,7 +10933,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
 	const int H = std::clamp(static_cast<int>(height), 32, 4096);
 	WorldPreviewTarget& wp = m_worldPreview[std::min(slot, kWorldPreviewSlots - 1)];
-	if (!m_contentManager) m_contentManager = &cm;
+	if (!m_owner.m_contentManager) m_owner.m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
 	if (!device || !queue) return nullptr;
@@ -10851,7 +10955,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	// one carries the main scene's day-night state (setDayNight), and a preview
 	// inheriting the scene's sunset tint would be a puzzling surprise.
 	RenderExtractor previewExtractor;
-	previewExtractor.setContentManager(m_contentManager);
+	previewExtractor.setContentManager(m_owner.m_contentManager);
 	// One description of the preview's sky, built the way the editor and the
 	// packaged game build theirs. Hand-assembling it here would be a fourth copy
 	// of "what does a default sky look like" and would drift from the Sky panel.
@@ -11115,7 +11219,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 // interactive preview and the Content-Browser thumbnail so the two can never
 // drift; the thumbnail must NOT reuse the preview's own target or it would
 // overwrite what the Particle Graph Editor is showing.
-void MetalRenderer::EncodeParticleBillboards(void* renderEncoder, const HE::UUID& materialId,
+void MetalRendererImpl::EncodeParticleBillboards(void* renderEncoder, const HE::UUID& materialId,
                                              const std::vector<ParticlePreviewInstance>& particles,
                                              const glm::mat4& viewProj, const glm::vec3& camRight,
                                              const glm::vec3& camUp)
@@ -11155,7 +11259,7 @@ void MetalRenderer::EncodeParticleBillboards(void* renderEncoder, const HE::UUID
 
 // Build the billboard pipeline once. Split out so both the interactive preview
 // and the Content-Browser thumbnail can reach it.
-bool MetalRenderer::EnsureParticlePreviewPipeline()
+bool MetalRendererImpl::EnsureParticlePreviewPipeline()
 {
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	if (!device) return false;
@@ -11233,13 +11337,13 @@ fragment float4 particlePreviewFragment(VOut in [[stage_in]],
 	return m_particlePreviewPipeline != nullptr;
 }
 
-void* MetalRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+void* MetalRendererImpl::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
                                            const HE::UUID& materialId,
                                            const std::vector<ParticlePreviewInstance>& particles,
                                            uint32_t size, float yaw, float pitch, float dist)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
+	if (!m_owner.m_contentManager) m_owner.m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
 	if (!device || !queue) return nullptr;
@@ -11352,7 +11456,7 @@ void* MetalRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /
 
 // ─── Window targets ───────────────────────────────────────────────────────────
 
-void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
+void MetalRendererImpl::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
 {
 	SDL_MetalView view = SDL_Metal_CreateView(sdlWin);
 	if (!view)
@@ -11383,7 +11487,7 @@ void MetalRenderer::CreateTarget(SDL_Window* sdlWin, WindowTarget& out)
 	out.metalLayer = (__bridge void*)layer; // borrowed — the view keeps it alive
 }
 
-void MetalRenderer::DestroyTarget(WindowTarget& target)
+void MetalRendererImpl::DestroyTarget(WindowTarget& target)
 {
 	if (target.depthTexture)
 		CFBridgingRelease(target.depthTexture);
@@ -11394,7 +11498,7 @@ void MetalRenderer::DestroyTarget(WindowTarget& target)
 	target.depthTexture = nullptr;
 }
 
-void MetalRenderer::EnsureDepthTexture(WindowTarget& target, int width, int height)
+void MetalRendererImpl::EnsureDepthTexture(WindowTarget& target, int width, int height)
 {
 	if (target.depthTexture)
 	{
@@ -11418,18 +11522,18 @@ void MetalRenderer::EnsureDepthTexture(WindowTarget& target, int width, int heig
 
 // ─── Offscreen viewport target ────────────────────────────────────────────────
 
-void MetalRenderer::SetViewportSize(uint32_t width, uint32_t height)
+void MetalRendererImpl::SetViewportSize(uint32_t width, uint32_t height)
 {
 	m_viewportReqW = width;
 	m_viewportReqH = height;
 }
 
-void* MetalRenderer::GetViewportTexture()
+void* MetalRendererImpl::GetViewportTexture()
 {
 	return m_viewportColor;
 }
 
-bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height)
+bool MetalRendererImpl::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height)
 {
 	if (!m_viewportColor || !m_device || !m_commandQueue) return false;
 
@@ -11501,7 +11605,7 @@ bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width,
 // resizes them to the request and the next real frame resizes them back. That
 // is the one cost of not having a second render context, and it is the reason
 // this is a per-request path and not a per-frame one.
-bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+bool MetalRendererImpl::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
                                      uint32_t height, std::vector<uint8_t>& rgba)
 {
 	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer || !m_device || !m_commandQueue)
@@ -11513,13 +11617,13 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	void*                      liveDepth = m_viewportDepth;
 	const uint32_t             liveReqW  = m_viewportReqW;
 	const uint32_t             liveReqH  = m_viewportReqH;
-	const EditorCameraOverride liveCam   = m_editorCamera;
+	const EditorCameraOverride liveCam   = m_owner.m_editorCamera;
 
 	m_viewportColor = nullptr;
 	m_viewportDepth = nullptr;
 	m_viewportReqW  = width;
 	m_viewportReqH  = height;
-	m_editorCamera  = camera;
+	m_owner.m_editorCamera  = camera;
 	m_captureOnly   = true;
 	// TAA history is one camera's past. The screenshot must not blend against
 	// the viewport's (a request at exactly the viewport's size would reuse the
@@ -11543,7 +11647,7 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportDepth = liveDepth;
 	m_viewportReqW  = liveReqW;
 	m_viewportReqH  = liveReqH;
-	m_editorCamera  = liveCam;
+	m_owner.m_editorCamera  = liveCam;
 	m_captureOnly   = false;
 	m_taaHistoryValid = false;
 
@@ -11551,14 +11655,14 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	return ok;
 }
 
-void MetalRenderer::RetireTexture(void* texture)
+void MetalRendererImpl::RetireTexture(void* texture)
 {
 	if (!texture) return;
 	// 3 frames: current draw list + Metal's in-flight buffers (triple buffering)
 	m_retiredTextures.push_back({ texture, 3 });
 }
 
-void MetalRenderer::AgeRetiredTextures()
+void MetalRendererImpl::AgeRetiredTextures()
 {
 	for (auto it = m_retiredTextures.begin(); it != m_retiredTextures.end(); )
 	{
@@ -11572,7 +11676,7 @@ void MetalRenderer::AgeRetiredTextures()
 	}
 }
 
-void MetalRenderer::DrainRetiredTextures()
+void MetalRendererImpl::DrainRetiredTextures()
 {
 	for (auto& r : m_retiredTextures)
 		CFBridgingRelease(r.texture);
@@ -11583,13 +11687,13 @@ void MetalRenderer::DrainRetiredTextures()
 // reference the object this frame's build just replaced), generalised to any
 // retained Objective-C object — used for the GI TLAS and its tables, which are
 // replaced by fresh objects when the caster set changes, never mutated in place.
-void MetalRenderer::RetireGIObject(void* obj)
+void MetalRendererImpl::RetireGIObject(void* obj)
 {
 	if (!obj) return;
 	m_retiredGIObjects.push_back({ obj, 3 });
 }
 
-void MetalRenderer::AgeRetiredGIObjects()
+void MetalRendererImpl::AgeRetiredGIObjects()
 {
 	for (auto it = m_retiredGIObjects.begin(); it != m_retiredGIObjects.end(); )
 	{
@@ -11603,14 +11707,14 @@ void MetalRenderer::AgeRetiredGIObjects()
 	}
 }
 
-void MetalRenderer::DrainRetiredGIObjects()
+void MetalRendererImpl::DrainRetiredGIObjects()
 {
 	for (auto& r : m_retiredGIObjects)
 		CFBridgingRelease(r.object);
 	m_retiredGIObjects.clear();
 }
 
-void MetalRenderer::EnsureViewportTarget()
+void MetalRendererImpl::EnsureViewportTarget()
 {
 	if (m_viewportColor)
 	{
@@ -11641,7 +11745,7 @@ void MetalRenderer::EnsureViewportTarget()
 	m_viewportDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
 }
 
-void MetalRenderer::DestroyViewportTarget()
+void MetalRendererImpl::DestroyViewportTarget()
 {
 	// Deferred release — the ImGui draw list recorded this frame and the
 	// GPU's in-flight work may still reference these textures.
@@ -11649,7 +11753,7 @@ void MetalRenderer::DestroyViewportTarget()
 	RetireTexture(m_viewportDepth); m_viewportDepth = nullptr;
 }
 
-void MetalRenderer::EnsureHDRTarget(int width, int height)
+void MetalRendererImpl::EnsureHDRTarget(int width, int height)
 {
 	if (m_hdrColor && width == m_hdrW && height == m_hdrH)
 		return;
@@ -11674,14 +11778,14 @@ void MetalRenderer::EnsureHDRTarget(int width, int height)
 	m_hdrH = height;
 }
 
-void MetalRenderer::DestroyHDRTarget()
+void MetalRendererImpl::DestroyHDRTarget()
 {
 	if (m_hdrColor) { CFBridgingRelease(m_hdrColor); m_hdrColor = nullptr; }
 	if (m_hdrDepth) { CFBridgingRelease(m_hdrDepth); m_hdrDepth = nullptr; }
 	m_hdrW = m_hdrH = 0;
 }
 
-void MetalRenderer::EnsureGBufferTargets(int width, int height)
+void MetalRendererImpl::EnsureGBufferTargets(int width, int height)
 {
 	// Tile mode keeps the G-buffer memoryless — EXCEPT when SSR or the
 	// ray-traced GI reflections run this frame: their trace/composite passes
@@ -11726,7 +11830,7 @@ void MetalRenderer::EnsureGBufferTargets(int width, int height)
 	m_gbH = height;
 }
 
-void MetalRenderer::DestroyGBufferTargets()
+void MetalRendererImpl::DestroyGBufferTargets()
 {
 	if (m_gbColor0)   { CFBridgingRelease(m_gbColor0);   m_gbColor0 = nullptr; }
 	if (m_gbColor1)   { CFBridgingRelease(m_gbColor1);   m_gbColor1 = nullptr; }
@@ -11736,7 +11840,7 @@ void MetalRenderer::DestroyGBufferTargets()
 	m_gbW = m_gbH = 0;
 }
 
-bool MetalRenderer::EnsureDeferredPipelines()
+bool MetalRendererImpl::EnsureDeferredPipelines()
 {
 	// Tile mode builds m_deferredResolveTilePipeline INSTEAD of the sampling
 	// resolve — check the one this mode actually uses, or the second frame
@@ -11872,7 +11976,7 @@ bool MetalRenderer::EnsureDeferredPipelines()
 #endif
 }
 
-void MetalRenderer::EnsureBloomTargets(int width, int height)
+void MetalRendererImpl::EnsureBloomTargets(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
@@ -11891,7 +11995,7 @@ void MetalRenderer::EnsureBloomTargets(int width, int height)
 	m_bloomH = height;
 }
 
-void MetalRenderer::DestroyBloomTargets()
+void MetalRendererImpl::DestroyBloomTargets()
 {
 	for (int i = 0; i < 2; ++i)
 		if (m_bloomColor[i]) { CFBridgingRelease(m_bloomColor[i]); m_bloomColor[i] = nullptr; }
@@ -11899,7 +12003,7 @@ void MetalRenderer::DestroyBloomTargets()
 	m_bloomW = m_bloomH = 0;
 }
 
-void MetalRenderer::EnsureCloudTarget(int width, int height)
+void MetalRendererImpl::EnsureCloudTarget(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
@@ -11915,7 +12019,7 @@ void MetalRenderer::EnsureCloudTarget(int width, int height)
 	m_cloudH = height;
 }
 
-void MetalRenderer::DestroyCloudTarget()
+void MetalRendererImpl::DestroyCloudTarget()
 {
 	if (m_cloudColor) { CFBridgingRelease(m_cloudColor); m_cloudColor = nullptr; }
 	m_cloudW = m_cloudH = 0;
@@ -11925,7 +12029,7 @@ void MetalRenderer::DestroyCloudTarget()
 // The sky pass upsamples + composites it (bg*T + L) when EnvironmentSettings.lowResClouds
 // is on. The constants MUST stay identical to EncodeSky() so the clouds match the sky —
 // which is now structural: both go through the one HE::BuildSkyFrameParams translation.
-void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invViewProj,
+void MetalRendererImpl::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invViewProj,
 	const glm::vec3& sunDir, float time, int width, int height)
 {
 	if (!m_cloudPipeline || width <= 0 || height <= 0) return;
@@ -11959,7 +12063,7 @@ void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invView
 // ── Cloud shadows ────────────────────────────────────────────────────────────
 static constexpr int kCloudShadowMapSize = 512;
 
-void MetalRenderer::EnsureCloudShadowTarget()
+void MetalRendererImpl::EnsureCloudShadowTarget()
 {
 	if (m_cloudShadowTex) return;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -11972,7 +12076,7 @@ void MetalRenderer::EnsureCloudShadowTarget()
 	m_cloudShadowTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 }
 
-void MetalRenderer::DestroyCloudShadowTarget()
+void MetalRendererImpl::DestroyCloudShadowTarget()
 {
 	if (m_cloudShadowTex) { CFBridgingRelease(m_cloudShadowTex); m_cloudShadowTex = nullptr; }
 }
@@ -11983,7 +12087,7 @@ void MetalRenderer::DestroyCloudShadowTarget()
 // result at texture 16. Computes and stores the region + strength every frame
 // (m_cloudShadowParamsA/B) for the SceneUniforms/Lighting fills; strength 0 =
 // feature off this frame (the shaders then never sample the map).
-void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
+void MetalRendererImpl::EncodeCloudShadow(void* cmdBufPtr)
 {
 	m_cloudShadowParamsB = glm::vec4(0.0f);
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
@@ -12072,14 +12176,14 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	[enc endEncoding];
 }
 
-void MetalRenderer::SetBloomSettings(const BloomSettings& s)
+void MetalRendererImpl::SetBloomSettings(const BloomSettings& s)
 {
 	m_bloomEnabled   = s.enabled;
 	m_bloomThreshold = s.threshold;
 	m_bloomStrength  = s.intensity;
 }
 
-void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
+void MetalRendererImpl::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
 	// Resolve once, here, against what this backend can do — the render path
 	// then only ever sees a runnable method.
@@ -12093,7 +12197,7 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 // Bright-pass the HDR color then ping-pong blur (even pass count ends in
 // m_bloomColor[0]). Each fullscreen pass is its own encoder. Returns the result
 // texture, or nullptr if bloom is unavailable.
-void* MetalRenderer::EncodeBloom(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
+void* MetalRendererImpl::EncodeBloom(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
 {
 	if (!m_bloomBrightPipeline || !m_blurPipeline || !sourceHdr) return nullptr;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
@@ -12149,7 +12253,7 @@ void* MetalRenderer::EncodeBloom(void* cmdBufPtr, void* sourceHdr, int fullW, in
 }
 
 // ─── Depth of field ──────────────────────────────────────────────────────────
-void MetalRenderer::SetDepthOfFieldSettings(const DepthOfFieldSettings& s)
+void MetalRendererImpl::SetDepthOfFieldSettings(const DepthOfFieldSettings& s)
 {
 	m_dofEnabled       = s.enabled;
 	m_dofFocusDistance = s.focusDistance;
@@ -12157,7 +12261,7 @@ void MetalRenderer::SetDepthOfFieldSettings(const DepthOfFieldSettings& s)
 	m_dofAperture      = s.aperture;
 }
 
-void MetalRenderer::EnsureDepthOfFieldTargets(int fullW, int fullH)
+void MetalRendererImpl::EnsureDepthOfFieldTargets(int fullW, int fullH)
 {
 	fullW = std::max(2, fullW);
 	fullH = std::max(2, fullH);
@@ -12182,7 +12286,7 @@ void MetalRenderer::EnsureDepthOfFieldTargets(int fullW, int fullH)
 	m_dofH = fullH;
 }
 
-void MetalRenderer::DestroyDepthOfFieldTargets()
+void MetalRendererImpl::DestroyDepthOfFieldTargets()
 {
 	if (m_dofCocTex)     { CFBridgingRelease(m_dofCocTex);     m_dofCocTex = nullptr; }
 	if (m_dofBlurTex[0]) { CFBridgingRelease(m_dofBlurTex[0]); m_dofBlurTex[0] = nullptr; }
@@ -12195,7 +12299,7 @@ void MetalRenderer::DestroyDepthOfFieldTargets()
 // CoC → blur H → blur V → composite, four encoders in the caller's command
 // buffer. Same radius rule as the GL backend: the max blur follows the f-number
 // (f/2.8 ≈ 10 half-res texels at 720p) and scales with the target height.
-void* MetalRenderer::EncodeDepthOfField(void* cmdBufPtr, int fullW, int fullH)
+void* MetalRendererImpl::EncodeDepthOfField(void* cmdBufPtr, int fullW, int fullH)
 {
 	if (!m_dofCocPipeline || !m_dofBlurPipeline || !m_dofCompositePipeline
 	    || !m_hdrColor || !m_hdrDepth)
@@ -12264,14 +12368,14 @@ void* MetalRenderer::EncodeDepthOfField(void* cmdBufPtr, int fullW, int fullH)
 }
 
 // ─── Motion blur ─────────────────────────────────────────────────────────────
-void MetalRenderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+void MetalRendererImpl::SetMotionBlurSettings(const MotionBlurSettings& s)
 {
 	m_mbEnabled   = s.enabled;
 	m_mbIntensity = s.intensity;
 	m_mbMaxBlur   = s.maxBlur;
 }
 
-void MetalRenderer::EnsureMotionBlurTargets(int fullW, int fullH)
+void MetalRendererImpl::EnsureMotionBlurTargets(int fullW, int fullH)
 {
 	fullW = std::max(2, fullW);
 	fullH = std::max(2, fullH);
@@ -12293,7 +12397,7 @@ void MetalRenderer::EnsureMotionBlurTargets(int fullW, int fullH)
 	m_mbH = fullH;
 }
 
-void MetalRenderer::DestroyMotionBlurTargets()
+void MetalRendererImpl::DestroyMotionBlurTargets()
 {
 	if (m_mbVelocityTex) { CFBridgingRelease(m_mbVelocityTex); m_mbVelocityTex = nullptr; }
 	if (m_mbColor)       { CFBridgingRelease(m_mbColor);       m_mbColor = nullptr; }
@@ -12304,7 +12408,7 @@ void MetalRenderer::DestroyMotionBlurTargets()
 // the GL backend: the max blur is in pixels at 720p and scales with the target
 // height; the first frame (no previous matrix yet) reprojects with the current
 // one → zero velocity → an exact copy of the input.
-void* MetalRenderer::EncodeMotionBlur(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
+void* MetalRendererImpl::EncodeMotionBlur(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
 {
 	if (!m_mbVelocityPipeline || !m_mbBlurPipeline || !sourceHdr || !m_hdrDepth) return nullptr;
 	EnsureMotionBlurTargets(fullW, fullH);
@@ -12363,7 +12467,7 @@ void* MetalRenderer::EncodeMotionBlur(void* cmdBufPtr, void* sourceHdr, int full
 // Underwater caustics: one encoder in the caller's command buffer, sourceHdr + scene
 // depth in, the HDR image with the refracted-sun net added out (m_ucColor). The pipeline
 // is built on first use (a failure is logged once and the pass then stays off).
-void* MetalRenderer::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
+void* MetalRendererImpl::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
 {
 	if (!sourceHdr || !m_hdrDepth) return nullptr;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -12461,7 +12565,7 @@ void* MetalRenderer::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, 
 	return m_ucColor;
 }
 
-void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
+void MetalRendererImpl::SetSSAOSettings(const SSAOSettings& s)
 {
 	m_ssaoEnabled   = s.enabled;
 	m_ssaoRadius    = s.radius;
@@ -12469,7 +12573,7 @@ void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoMethod    = s.method;
 }
 
-void MetalRenderer::SetShadowSettings(const ShadowSettings& s)
+void MetalRendererImpl::SetShadowSettings(const ShadowSettings& s)
 {
 	// The fit parameters go straight to the extractor — every extract() this
 	// frame (shadow pass, GI build, scene) then agrees on the cascade layout.
@@ -12481,7 +12585,7 @@ void MetalRenderer::SetShadowSettings(const ShadowSettings& s)
 	m_extractor.setShadowSettings(s.distance, s.cascadeCount, s.splitLambda, m_shadowSize);
 }
 
-void MetalRenderer::EnsureSSAOTargets(int width, int height)
+void MetalRendererImpl::EnsureSSAOTargets(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
@@ -12520,7 +12624,7 @@ void MetalRenderer::EnsureSSAOTargets(int width, int height)
 	m_ssaoW = width; m_ssaoH = height;
 }
 
-void MetalRenderer::DestroySSAOTargets()
+void MetalRendererImpl::DestroySSAOTargets()
 {
 	if (m_ssaoPosTex)   { CFBridgingRelease(m_ssaoPosTex);   m_ssaoPosTex = nullptr; }
 	if (m_ssaoPosDepth) { CFBridgingRelease(m_ssaoPosDepth); m_ssaoPosDepth = nullptr; }
@@ -12535,10 +12639,10 @@ void MetalRenderer::DestroySSAOTargets()
 // View-space position pre-pass → occlusion → blur. Runs its own extract/cull/sort
 // (deterministic → matches EncodeScene's draw set) and its own render encoders.
 // Sets m_ssaoResult to the blurred AO texture (or null) for EncodeScene to bind.
-void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeSSAO(void* cmdBufPtr, int width, int height)
 {
 	m_ssaoResult = nullptr;
-	if (!m_ssaoPosPipeline || !m_ssaoPipeline || !m_ssaoBlurPipeline || !m_world) return;
+	if (!m_ssaoPosPipeline || !m_ssaoPipeline || !m_ssaoBlurPipeline || !m_owner.m_world) return;
 	if (width <= 0 || height <= 0) return;
 
 	// Deferred P5: the G-buffer was rasterized this frame — reconstruct the
@@ -12554,9 +12658,9 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
-	m_extractor.setContentManager(m_contentManager);
-	m_extractor.extract(*m_world, m_renderWorld,
-	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
+	m_extractor.setContentManager(m_owner.m_contentManager);
+	m_extractor.extract(*m_owner.m_world, m_renderWorld,
+	                    static_cast<float>(width) / static_cast<float>(height), &m_owner.m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
 	RefineObjectBounds();
 	CullCameraObjects();
@@ -12775,7 +12879,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 // UI material pipeline further down was never guarded and called straight into
 // this region, so gating it out did not even give a smaller build; it gave one
 // that failed to link.
-void* MetalRenderer::EnsureMaterialArchive()
+void* MetalRendererImpl::EnsureMaterialArchive()
 {
 	if (m_matArchiveTried) return m_matBinaryArchive;
 	m_matArchiveTried = true;
@@ -12844,7 +12948,7 @@ void* MetalRenderer::EnsureMaterialArchive()
 // glslang→SPIRV-Cross cross-compile (so every backend shares them); this function only
 // turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
 // hash); a null result is cached too so a broken shader isn't rebuilt every frame.
-void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
+void* MetalRendererImpl::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
                                                bool blend, bool gbuffer)
@@ -12993,18 +13097,18 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 }
 
 // Delegate to the shared, backend-agnostic library (reads the MaterialAsset).
-bool MetalRenderer::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+bool MetalRendererImpl::ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                           std::string& vertBody)
 {
-	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_owner.m_contentManager) return false;
+	return m_matShaderLib.resolveShaders(*m_owner.m_contentManager, materialId, key, frag, vertBody);
 }
 
-bool MetalRenderer::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+bool MetalRendererImpl::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                             std::string& vertBody)
 {
-	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_owner.m_contentManager) return false;
+	return m_matShaderLib.resolveGBufferShaders(*m_owner.m_contentManager, materialId, key, frag, vertBody);
 }
 
 // Build (or fetch) a Metal pipeline for GPU-instanced ParticleGraph particle
@@ -13014,7 +13118,7 @@ bool MetalRenderer::ResolveMaterialShaderGB(const HE::UUID& materialId, uint64_t
 // at export time (`precompiled`) or generated right now from `config` via
 // HE::generateParticleShaderSource + ParticleShaderTemplates. Always alpha-
 // blended (particles have no opaque variant). Cached by `key`; null cached too.
-void* MetalRenderer::GetOrBuildParticlePipeline(uint64_t key, const HE::ParticleEmitterConfig& config,
+void* MetalRendererImpl::GetOrBuildParticlePipeline(uint64_t key, const HE::ParticleEmitterConfig& config,
                                                 const ParticleShaderVariant* precompiled)
 {
 	if (auto it = m_particlePipelineCache.find(key); it != m_particlePipelineCache.end())
@@ -13073,7 +13177,7 @@ void* MetalRenderer::GetOrBuildParticlePipeline(uint64_t key, const HE::Particle
 // because it renders HDR too and must go through the SAME curve — writing sky
 // radiance and a sun at intensity 2.2 straight to display is what turned the
 // first sky-lit preview into a uniformly white mesh under a blown-out sky.
-void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool withBloom)
+void MetalRendererImpl::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool withBloom)
 {
 	void* hdr = sourceHdr ? sourceHdr : m_hdrColor;
 	if (!m_tonemapPipeline || !hdr) return;
@@ -13099,7 +13203,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool 
 
 // LDR intermediate the tonemap writes to and FXAA reads from. kSwapchainFormat so
 // the tonemap pipeline (which targets that format) is valid; recreated on resize.
-void MetalRenderer::EnsureLdrTarget(int width, int height)
+void MetalRendererImpl::EnsureLdrTarget(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
@@ -13115,7 +13219,7 @@ void MetalRenderer::EnsureLdrTarget(int width, int height)
 	m_ldrH = height;
 }
 
-void MetalRenderer::DestroyLdrTarget()
+void MetalRendererImpl::DestroyLdrTarget()
 {
 	if (m_ldrColor) { CFBridgingRelease(m_ldrColor); m_ldrColor = nullptr; }
 	m_ldrW = m_ldrH = 0;
@@ -13127,7 +13231,7 @@ void MetalRenderer::DestroyLdrTarget()
 // the graph-material codegen to write velocity — a material that forgot would
 // leave undefined motion and ghost. This pass is material-agnostic by
 // construction: it only ever reads positions.
-void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeVelocity(void* cmdBufPtr, int width, int height)
 {
 	if (!TemporalActive() || !m_velocityTex || m_sortedIndices.empty()) return;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
@@ -13218,7 +13322,7 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 // the tonemap and BEFORE the AA-resolve slot, so the history lives in the same
 // LDR space the user sees — which also keeps a single bright HDR sample from
 // poisoning the accumulation for the next dozen frames.
-void MetalRenderer::EncodeTaa(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeTaa(void* cmdBufPtr, int width, int height)
 {
 	if (!TaaActive() || !m_taaResolved || !m_ldrColor) return;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
@@ -13256,12 +13360,12 @@ void MetalRenderer::EncodeTaa(void* cmdBufPtr, int width, int height)
 }
 
 // ─── MetalFX temporal scaling (A5) ──────────────────────────────────────────
-bool MetalRenderer::MetalFxActive() const
+bool MetalRendererImpl::MetalFxActive() const
 {
 	return m_mfxSupported && ActiveAAMethod() == HE::AAMethod::MetalFX && m_velocityPipeline;
 }
 
-void MetalRenderer::EnsureMetalFX(int inW, int inH, int outW, int outH)
+void MetalRendererImpl::EnsureMetalFX(int inW, int inH, int outW, int outH)
 {
 #if HE_HAS_METALFX
 	if (m_mfxScaler && inW == m_mfxInW && inH == m_mfxInH &&
@@ -13302,7 +13406,7 @@ void MetalRenderer::EnsureMetalFX(int inW, int inH, int outW, int outH)
 #endif
 }
 
-void MetalRenderer::DestroyMetalFX()
+void MetalRendererImpl::DestroyMetalFX()
 {
 	if (m_mfxScaler) { CFBridgingRelease(m_mfxScaler); m_mfxScaler = nullptr; }
 	if (m_mfxOutput) { CFBridgingRelease(m_mfxOutput); m_mfxOutput = nullptr; }
@@ -13310,7 +13414,7 @@ void MetalRenderer::DestroyMetalFX()
 	m_mfxReset = true;
 }
 
-void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, void* sourceHdr, int inW, int inH, int outW, int outH)
+void* MetalRendererImpl::EncodeMetalFX(void* cmdBufPtr, void* sourceHdr, int inW, int inH, int outW, int outH)
 {
 #if HE_HAS_METALFX
 	if (!MetalFxActive() || !sourceHdr || !m_hdrDepth || !m_velocityTex) return nullptr;
@@ -13359,13 +13463,13 @@ void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, void* sourceHdr, int inW, in
 // render path any more: the velocity pass only needs a depth buffer with the
 // opaque geometry in it, and both paths produce one (EncodeFrame picks the
 // spot — after the G-buffer pass or after the HDR scene pass).
-bool MetalRenderer::TemporalActive() const
+bool MetalRendererImpl::TemporalActive() const
 {
 	const HE::AAMethod m = ActiveAAMethod();
 	return (m == HE::AAMethod::TAA || m == HE::AAMethod::MetalFX) && m_velocityPipeline;
 }
 
-bool MetalRenderer::TaaActive() const
+bool MetalRendererImpl::TaaActive() const
 {
 	return TemporalActive() && ActiveAAMethod() == HE::AAMethod::TAA && m_taaPipeline;
 }
@@ -13374,7 +13478,7 @@ bool MetalRenderer::TaaActive() const
 // of the projected x/y by a fraction of a pixel), which is the same thing as
 // shifting the sample grid — and it leaves the caller's matrix untouched, so the
 // unjittered one stays available for motion and reprojection.
-glm::mat4 MetalRenderer::JitteredViewProj(const glm::mat4& viewProj, int width, int height) const
+glm::mat4 MetalRendererImpl::JitteredViewProj(const glm::mat4& viewProj, int width, int height) const
 {
 	if (!TemporalActive() || width <= 0 || height <= 0) return viewProj;
 	glm::mat4 j(1.0f);
@@ -13383,7 +13487,7 @@ glm::mat4 MetalRenderer::JitteredViewProj(const glm::mat4& viewProj, int width, 
 	return j * viewProj;
 }
 
-void MetalRenderer::EnsureTaaTargets(int width, int height)
+void MetalRendererImpl::EnsureTaaTargets(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
@@ -13409,7 +13513,7 @@ void MetalRenderer::EnsureTaaTargets(int width, int height)
 	m_taaHistoryValid = false;
 }
 
-void MetalRenderer::DestroyTaaTargets()
+void MetalRendererImpl::DestroyTaaTargets()
 {
 	if (m_velocityTex) { CFBridgingRelease(m_velocityTex); m_velocityTex = nullptr; }
 	if (m_taaHistory)  { CFBridgingRelease(m_taaHistory);  m_taaHistory  = nullptr; }
@@ -13423,7 +13527,7 @@ void MetalRenderer::DestroyTaaTargets()
 // Fullscreen AA resolve of the tonemapped LDR image into the bound encoder's
 // target. This is the pass that FILLS that target, so it always draws — the AA
 // method only picks the pipeline (FXAA filter vs. straight blit).
-void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
+void MetalRendererImpl::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 {
 	const HE::AAMethod method = ActiveAAMethod();
 	// TAA already produced the finished image in its own pass; this slot only
@@ -13454,7 +13558,7 @@ void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 // Build (or fetch) the pipeline that draws a UI quad with a node-graph material:
 // the material's shared fragment MSL paired with the screen-space uiVertex, alpha-
 // blended into the LDR UI target. Cache key = the material's shader hash.
-void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bool* usesBackdrop)
+void* MetalRendererImpl::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bool* usesBackdrop)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
 	if (usesBackdrop) *usesBackdrop = false;
@@ -13478,7 +13582,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bo
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertMSL, fragMSL, log;
 	bool ok = false;
-	if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr)
+	if (const MaterialAsset* ma = m_owner.m_contentManager ? m_owner.m_contentManager->getMaterial(materialId) : nullptr)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal) && !var.uiVertex.empty())
 			{
@@ -13538,7 +13642,7 @@ void* MetalRenderer::GetOrBuildUIMaterialPipeline(const HE::UUID& materialId, bo
 	return result;
 }
 
-void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
+void* MetalRendererImpl::UIFontAtlasTexture(uint32_t key)
 {
 	if (key == 0) return m_uiFontTexture;
 	if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end()) return it->second;
@@ -13559,7 +13663,7 @@ void* MetalRenderer::UIFontAtlasTexture(uint32_t key)
 
 // Copy the UI target into the backdrop snapshot and rebuild its mip chain. Runs
 // between two halves of the UI pass, so no encoder may be open when it is called.
-bool MetalRenderer::SnapshotUIBackdrop(void* cmdBufPtr, void* srcTexturePtr)
+bool MetalRendererImpl::SnapshotUIBackdrop(void* cmdBufPtr, void* srcTexturePtr)
 {
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 	id<MTLTexture>       src    = (__bridge id<MTLTexture>)srcTexturePtr;
@@ -13598,7 +13702,7 @@ bool MetalRenderer::SnapshotUIBackdrop(void* cmdBufPtr, void* srcTexturePtr)
 	return true;
 }
 
-void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
+void* MetalRendererImpl::EncodeUIPass(void* renderEncoderPtr, int width, int height,
                                   void* cmdBufPtr, void* passDescPtr)
 {
 	if (!m_uiPipeline || m_renderWorld.uiObjects.empty()) return renderEncoderPtr;
@@ -13737,8 +13841,8 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 
 			// HeParams + graph textures, mirroring the mesh path's bind points.
-			if (const MaterialAsset* ma = m_contentManager
-				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
+			if (const MaterialAsset* ma = m_owner.m_contentManager
+				? m_owner.m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
 				float padded[64] = { 0 };
 				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
@@ -13849,7 +13953,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
-void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
+void MetalRendererImpl::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, float time,
                              const IRenderer::EnvironmentSettings& env,
                              const glm::vec3& camPos, bool lowResClouds, bool useSkyLut,
@@ -13903,7 +14007,7 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 // Frame level, before the scene encoder that draws the sky; re-bakes only when
 // the sun has moved. Cheap either way: 256×128 texels against the ~1 M sky
 // pixels it saves the integral on.
-void MetalRenderer::EncodeSkyViewLut(void* cmdBufPtr, const glm::vec3& sunDir)
+void MetalRendererImpl::EncodeSkyViewLut(void* cmdBufPtr, const glm::vec3& sunDir)
 {
 	if (!m_skyLutPipeline || !skyViewLutEnabled() || !GetEnvironment().skyEnabled) return;
 	if (m_skyLutValid && glm::distance(sunDir, m_skyLutSunDir) < 1e-4f) return;
@@ -13939,7 +14043,7 @@ void MetalRenderer::EncodeSkyViewLut(void* cmdBufPtr, const glm::vec3& sunDir)
 	m_skyLutValid  = true;
 }
 
-void MetalRenderer::DestroySkyViewLut()
+void MetalRendererImpl::DestroySkyViewLut()
 {
 	if (m_skyLutRayleigh) { CFBridgingRelease(m_skyLutRayleigh); m_skyLutRayleigh = nullptr; }
 	if (m_skyLutMie)      { CFBridgingRelease(m_skyLutMie);      m_skyLutMie = nullptr; }
@@ -13953,7 +14057,7 @@ void MetalRenderer::DestroySkyViewLut()
 // with the clock); 6 × 128² texels is about a tenth of a 720p sky pass. No
 // low-res cloud composite: that buffer is screen-space, a face is not.
 static constexpr int kSkyReflCubeSize = 128;
-void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
+void MetalRendererImpl::EncodeSkyReflCube(void* cmdBufPtr)
 {
 	m_skyReflValid = false;
 	static const bool s_off = [] {
@@ -13993,7 +14097,7 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 	m_skyReflValid = true;
 }
 
-void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
+void MetalRendererImpl::UpdateSkyEnvCube(const glm::vec3& sunDir)
 {
 	if (!m_skyEnvCube) return;
 	// The baked sky only changes with the sun direction — skip the rebuild + upload
@@ -14030,7 +14134,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 // render encoder (same attachments as the opaque geometry pass).
 // sceneUniformsPtr is a const SceneUniforms* (opaque to avoid pulling the struct
 // into the header).
-void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameState)
+void MetalRendererImpl::BindMaterialPreambleSlots(void* renderEncoder, bool frameState)
 {
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	auto pick = [&](void* live) { return (__bridge id<MTLTexture>)(frameState && live ? live : m_dummyTexture); };
@@ -14083,7 +14187,7 @@ void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameSta
 	[encoder setFragmentTexture:pick(m_cloudShadowTex) atIndex:16];
 }
 
-void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
+void MetalRendererImpl::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
                                          bool shadows, const void* sceneUniformsPtr)
 {
 	if (!m_skinnedPipeline || m_renderWorld.skinnedObjects.empty())
@@ -14172,10 +14276,10 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 }
 
-void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
+void MetalRendererImpl::EncodeScene(void* renderEncoder, int width, int height,
                                 MetalDeferredFrame* deferred)
 {
-	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
+	if (!m_owner.m_world || !m_scenePipeline || width <= 0 || height <= 0)
 		return;
 
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -14185,11 +14289,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
-	m_extractor.setContentManager(m_contentManager);
-	m_extractor.extract(*m_world, m_renderWorld,
+	m_extractor.setContentManager(m_owner.m_contentManager);
+	m_extractor.extract(*m_owner.m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
-	                    &m_editorCamera);
-	m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
+	                    &m_owner.m_editorCamera);
+	m_extractor.extractUI(*m_owner.m_world, static_cast<float>(width), static_cast<float>(height),
 	                      m_renderWorld);
 
 	// Jittered for TAA (no-op otherwise): the forward tail — sky, transparency,
@@ -14454,7 +14558,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		ru.depthParams[0] = -1.0f;
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
-		ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode)); // G-buffer view
+		ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_owner.m_viewMode)); // G-buffer view
 		// P7: point/spot lights come from the cluster lists; the resolve's
 		// heLight window shrinks to directional-only (a COPY — the full fill in
 		// `matLight` keeps serving the forward-routed and transparent draws).
@@ -14603,8 +14707,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						// Prefer a shader precompiled into the pack for this backend (no
 						// runtime cross-compile); else cross-compile via the shared library.
 						const MaterialShaderVariant* pre = nullptr;
-						if (const MaterialAsset* ma = m_contentManager
-							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						if (const MaterialAsset* ma = m_owner.m_contentManager
+							? m_owner.m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
@@ -14618,8 +14722,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						if (cMaterialPipeline)
 							cMaterialPipelineBlend =
 								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
-						if (const MaterialAsset* ma = m_contentManager
-							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						if (const MaterialAsset* ma = m_owner.m_contentManager
+							? m_owner.m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
 							// Node-graph project textures → fragment texture units 1..4.
@@ -14659,8 +14763,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// steady state costs nothing.
 			if (meshWasResolved && cMaterialParams)
 			{
-				const MaterialAsset* ma = m_contentManager
-					? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+				const MaterialAsset* ma = m_owner.m_contentManager
+					? m_owner.m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
 				cMaterialParams = (ma && !ma->shaderParamData.empty()) ? &ma->shaderParamData : nullptr;
 			}
 			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
@@ -14958,7 +15062,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 // implementation, no drift. Filled from the DOMINANT DIRECTIONAL LIGHT (colour ×
 // intensity — the same pick CSM/GI shadow along), NOT the raw environment
 // sunColor: the raw values are never modulated by sunUp/night or cloud cover.
-void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& matLight,
+void MetalRendererImpl::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& matLight,
                                          int width, int height, bool giActive,
                                          bool ssaoActive, bool shadows, float skyClock)
 {
@@ -15086,7 +15190,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 // read the same lists. Cheap (few hundred lights × few touched clusters) and
 // re-built fresh per frame like the particle instance buffers — no CPU/GPU
 // sync hazards.
-HE::ClusterLightBuild MetalRenderer::BuildFrameClusterLights() const
+HE::ClusterLightBuild MetalRendererImpl::BuildFrameClusterLights() const
 {
 	// GI local-mask channel: the ray-traced mask (heGILocal) covers the first 4
 	// NON-directional lights of the first-8 window; the builder reproduces that
@@ -15098,7 +15202,7 @@ HE::ClusterLightBuild MetalRenderer::BuildFrameClusterLights() const
 	                              giMasksValid);
 }
 
-void MetalRenderer::BindClusterBuffers(void* renderEncoder, const HE::ClusterLightBuild& build)
+void MetalRendererImpl::BindClusterBuffers(void* renderEncoder, const HE::ClusterLightBuild& build)
 {
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	using Lib = HE::MaterialShaderLibrary;
@@ -15125,7 +15229,7 @@ void MetalRenderer::BindClusterBuffers(void* renderEncoder, const HE::ClusterLig
 // cluster list there, or every windowed light would be counted twice. (The
 // forward graph-material variant keeps the full window and skips its point/spot
 // slots itself; see HE::FillMaterialClusterParams.)
-void MetalRenderer::EncodeClusterData(void* renderEncoder, const HE::ClusterLightBuild& build,
+void MetalRendererImpl::EncodeClusterData(void* renderEncoder, const HE::ClusterLightBuild& build,
                                       HE::MaterialShaderLibrary::Lighting& matLight,
                                       HE::MaterialShaderLibrary::ResolveUniforms& ru)
 {
@@ -15175,7 +15279,7 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder, const HE::ClusterLigh
 // lit colour to attachment 4 (the HDR target). All lighting inputs (matLight,
 // CSM/local atlases, sky env, AO, GI) are bound here — the G-buffer pass itself
 // binds none of them.
-void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, int height)
+void MetalRendererImpl::EncodeDeferredResolveTile(void* renderEncoder, int width, int height)
 {
 	if (!m_deferredResolveTilePipeline) return;
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -15201,7 +15305,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	ru.depthParams[0] = -1.0f; // same conventions as the two-pass resolve
 	ru.depthParams[1] = 1.0f;
 	ru.depthParams[2] = 0.0f;
-	ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode));
+	ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_owner.m_viewMode));
 #if defined(HE_HAVE_SHADERC)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
@@ -15256,7 +15360,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 }
 
 // ─── Deferred decals (P7 follow-up, tile mode) ───────────────────────────────
-bool MetalRenderer::EnsureDecalPipeline()
+bool MetalRendererImpl::EnsureDecalPipeline()
 {
 	if (m_decalPipeline) return true;
 	if (m_decalPipelineTried) return false;
@@ -15317,7 +15421,7 @@ bool MetalRenderer::EnsureDecalPipeline()
 
 // Rasterize this frame's decal projectors into the OPEN G-buffer pass encoder,
 // after the geometry and before the resolve (which fetches the blended GB0).
-void MetalRenderer::EncodeDecals(void* renderEncoder, int width, int height)
+void MetalRendererImpl::EncodeDecals(void* renderEncoder, int width, int height)
 {
 	if (m_renderWorld.decals.empty() || !EnsureDecalPipeline()) return;
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -15360,7 +15464,7 @@ void MetalRenderer::EncodeDecals(void* renderEncoder, int width, int height)
 }
 
 // ─── Screen-space reflections (docs/ssr-plan.md §4.5, deferred tile mode) ────
-bool MetalRenderer::EnsureSSRPipelines()
+bool MetalRendererImpl::EnsureSSRPipelines()
 {
 	if (m_ssrTracePipeline && m_ssrCompositePipeline) return true;
 	if (m_ssrPipelinesTried) return false;
@@ -15455,7 +15559,7 @@ bool MetalRenderer::EnsureSSRPipelines()
 #endif
 }
 
-void MetalRenderer::EnsureSSRTarget(int width, int height)
+void MetalRendererImpl::EnsureSSRTarget(int width, int height)
 {
 	if (m_ssrReflTex && width == m_ssrReflW && height == m_ssrReflH) return;
 	DestroySSRTarget();
@@ -15479,7 +15583,7 @@ void MetalRenderer::EnsureSSRTarget(int width, int height)
 	m_ssrReflH = height;
 }
 
-void MetalRenderer::DestroySSRTarget()
+void MetalRendererImpl::DestroySSRTarget()
 {
 	if (m_ssrReflTex)  { CFBridgingRelease(m_ssrReflTex);  m_ssrReflTex = nullptr; }
 	if (m_ssrPingTex)  { CFBridgingRelease(m_ssrPingTex);  m_ssrPingTex = nullptr; }
@@ -15498,7 +15602,7 @@ void MetalRenderer::DestroySSRTarget()
 // Shared env-specular composite: also runs for GI-reflections-only frames (the
 // SSR trace/blur are then skipped and the SSR samplers get a dummy with mix
 // weight 0 — see the m_giReflFrameActive wiring in EncodeFrame).
-void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 {
 	if (!m_ssrCompositePipeline || !m_gbStored) return;
 	const bool ssrOn    = m_ssrFrameActive && m_ssrTracePipeline;
@@ -15723,7 +15827,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 // and LAST frame's HDR copy — the hit reprojects into it via prevViewProj
 // (cfg2.z), one frame of content lag being the accepted forward trade. There
 // is no composite pass: heLitP/fragmentMain sample the result at slot 9.
-void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 {
 	m_fwdReflSsrTex = nullptr;
 	if (!m_ssrFrameActive || m_deferredFrameActive) return;
@@ -15851,7 +15955,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 }
 
 // ─── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────────
-bool MetalRenderer::EnsureGIReflPipeline()
+bool MetalRendererImpl::EnsureGIReflPipeline()
 {
 	if (m_giReflPipeline) return true;
 	if (m_giReflPipelineTried) return false;
@@ -15882,7 +15986,7 @@ bool MetalRenderer::EnsureGIReflPipeline()
 	}
 }
 
-void MetalRenderer::EnsureGIReflTarget(int width, int height)
+void MetalRendererImpl::EnsureGIReflTarget(int width, int height)
 {
 	if (m_giReflTex && width == m_giReflW && height == m_giReflH) return;
 	DestroyGIReflTarget();
@@ -15912,7 +16016,7 @@ void MetalRenderer::EnsureGIReflTarget(int width, int height)
 	m_giReflH = height;
 }
 
-void MetalRenderer::DestroyGIReflTarget()
+void MetalRendererImpl::DestroyGIReflTarget()
 {
 	auto rel = [](void*& t) { if (t) { CFBridgingRelease(t); t = nullptr; } };
 	rel(m_giReflTex);
@@ -15933,7 +16037,7 @@ void MetalRenderer::DestroyGIReflTarget()
 // composite reads the result. The acceleration structures were built earlier
 // this frame by EncodeGIAccelBuild (which also runs for reflections-only
 // frames) and m_renderWorld.camera is current.
-void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
+void MetalRendererImpl::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 {
 	if (!m_giReflFrameActive || !m_giReflPipeline) return;
 	// Input pair: the stored G-buffer in the deferred tile mode, the MRT
@@ -16267,9 +16371,9 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 // convention EncodeSSAO already relies on). Translucent draws and custom
 // materials without a G-buffer variant are collected into `out` and replayed
 // forward in the lighting pass.
-void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, MetalDeferredFrame& out)
+void MetalRendererImpl::EncodeGBuffer(void* renderEncoder, int width, int height, MetalDeferredFrame& out)
 {
-	if (!m_world || !m_gbufferPipeline || width <= 0 || height <= 0)
+	if (!m_owner.m_world || !m_gbufferPipeline || width <= 0 || height <= 0)
 		return;
 
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -16279,10 +16383,10 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
-	m_extractor.setContentManager(m_contentManager);
-	m_extractor.extract(*m_world, m_renderWorld,
+	m_extractor.setContentManager(m_owner.m_contentManager);
+	m_extractor.extract(*m_owner.m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height),
-	                    &m_editorCamera);
+	                    &m_owner.m_editorCamera);
 
 	// Rasterised with this frame's subpixel jitter when TAA is on (no-op
 	// otherwise). The clean matrix stays available for the velocity pass, which
@@ -16404,8 +16508,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					{
 						cMaterialCustom = true;
 						const MaterialShaderVariant* pre = nullptr;
-						if (const MaterialAsset* ma = m_contentManager
-							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						if (const MaterialAsset* ma = m_owner.m_contentManager
+							? m_owner.m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
@@ -16421,8 +16525,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
 								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
-						if (const MaterialAsset* ma = m_contentManager
-							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
+						if (const MaterialAsset* ma = m_owner.m_contentManager
+							? m_owner.m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
 							if (!ma->shaderParamData.empty()) cMaterialParams = &ma->shaderParamData;
 							const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
@@ -16456,8 +16560,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// cached pointer lives in.
 			if (meshWasResolved && cMaterialParams)
 			{
-				const MaterialAsset* ma = m_contentManager
-					? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+				const MaterialAsset* ma = m_owner.m_contentManager
+					? m_owner.m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
 				cMaterialParams = (ma && !ma->shaderParamData.empty()) ? &ma->shaderParamData : nullptr;
 			}
 			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
@@ -16640,7 +16744,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeFill];
 }
 
-void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)
+void MetalRendererImpl::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)
 {
 	@autoreleasepool
 	{
@@ -16893,7 +16997,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				HE_PROFILE_SCOPE_N("Metal::ExtractFrame");
 				ExtractFrame(shadowAspect);
-				if (m_world) RefineObjectBounds();
+				if (m_owner.m_world) RefineObjectBounds();
 			}
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
@@ -16999,7 +17103,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// draw instead of re-rasterizing the whole scene.
 			MetalDeferredFrame deferredFrame;
 			const bool deferredActive =
-				m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
+				m_owner.m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 			m_deferredFrameActive = deferredActive;
 
 			// ── TAA: this frame's jitter (A2) ───────────────────────────────
@@ -17185,7 +17289,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					[blit endEncoding];
 				}
 			}
-			else if (m_gbColor0 && m_renderPath != HE::RenderPath::Deferred)
+			else if (m_gbColor0 && m_owner.m_renderPath != HE::RenderPath::Deferred)
 				DestroyGBufferTargets(); // freed when the user switches back to forward
 
 			if (!deferredTile) runSSAO(); // forward, or two-pass deferred (P5 depth read)
@@ -17263,10 +17367,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_extractor.setDayNight(cenv.dayNightCycle, cenv.timeOfDay,
 					                        cenv.sunColor, cenv.sunIntensity,
 					                        cenv.moonColor, cenv.moonIntensity, cenv.cloudCoverage);
-					m_extractor.setContentManager(m_contentManager);
-					m_extractor.extract(*m_world, m_renderWorld,
+					m_extractor.setContentManager(m_owner.m_contentManager);
+					m_extractor.extract(*m_owner.m_world, m_renderWorld,
 					                    static_cast<float>(sceneW) / static_cast<float>(std::max(1, sceneH)),
-					                    &m_editorCamera);
+					                    &m_owner.m_editorCamera);
 					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
 						m_renderWorld.sunDirection,
@@ -17519,7 +17623,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					             (__bridge void*)cmdBuf, (__bridge void*)pass);
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
-			if (isPrimary && m_overlayCallback)
+			if (isPrimary && m_owner.m_overlayCallback)
 			{
 				[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 				MetalOverlayContext ctx{
@@ -17528,7 +17632,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					(__bridge void*)pass,
 				};
 				HE_PROFILE_SCOPE_N("Metal::Overlay");
-				m_overlayCallback(&ctx);
+				m_owner.m_overlayCallback(&ctx);
 			}
 
 			[encoder endEncoding];
@@ -17648,7 +17752,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 // time and the detailed-capture (one-cmdbuf-per-pass) accumulator, neither of
 // which needs counter sampling. Stage-boundary counter sampling is an optional
 // extra (the non-detailed per-encoder path); draw-boundary is a further option.
-void MetalRenderer::EnsureGpuTimer()
+void MetalRendererImpl::EnsureGpuTimer()
 {
 	if (m_gpuTimerChecked) return;
 	m_gpuTimerChecked = true;
@@ -17688,7 +17792,7 @@ void MetalRenderer::EnsureGpuTimer()
 	}
 }
 
-IRenderer::FrameGpuStats MetalRenderer::GetFrameGpuStats() const
+IRenderer::FrameGpuStats MetalRendererImpl::GetFrameGpuStats() const
 {
 	FrameGpuStats s;
 	if (m_gpuTimer)
@@ -17709,7 +17813,7 @@ IRenderer::FrameGpuStats MetalRenderer::GetFrameGpuStats() const
 	return s;
 }
 
-void MetalRenderer::Render()
+void MetalRendererImpl::Render()
 {
 	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer) return;
 	EncodeFrame(m_primarySdlWindow, m_primaryTarget, /*isPrimary=*/true);
@@ -17722,7 +17826,7 @@ void MetalRenderer::Render()
 // held through OnRender and the encode (~2 ms), which the layer's three
 // drawables absorb. HE_MTL_EARLY_DRAWABLE=0 puts the wait back behind the
 // encode, where it was — the A/B switch for measuring it and the way out.
-void MetalRenderer::WaitForFrame()
+void MetalRendererImpl::WaitForFrame()
 {
 	static const bool kEnabled = []
 	{
@@ -17865,7 +17969,7 @@ fragment float4 particleFragment(VOut in [[stage_in]])
 )";
 } // namespace
 
-void MetalRenderer::CreateParticlePipeline()
+void MetalRendererImpl::CreateParticlePipeline()
 {
 	@autoreleasepool
 	{
@@ -17904,7 +18008,7 @@ void MetalRenderer::CreateParticlePipeline()
 	}
 }
 
-void MetalRenderer::EnsureParticleBuffer(int count)
+void MetalRendererImpl::EnsureParticleBuffer(int count)
 {
 	if (count == m_particleCapacity && m_particleBuffer) return;
 	@autoreleasepool
@@ -17920,7 +18024,7 @@ void MetalRenderer::EnsureParticleBuffer(int count)
 	m_particleSeeded   = false;
 }
 
-void MetalRenderer::SeedParticleBuffer(int count)
+void MetalRendererImpl::SeedParticleBuffer(int count)
 {
 	// Shared with OpenGL (HE::SeedWeatherParticles) — the RNG, the (i+0.5)/count
 	// spread and the wind/life maths are a cross-backend contract, only the lane
@@ -17932,7 +18036,7 @@ void MetalRenderer::SeedParticleBuffer(int count)
 	m_particleSeeded = true;
 }
 
-void MetalRenderer::SimulateGpuParticles(void* cmdBuf)
+void MetalRendererImpl::SimulateGpuParticles(void* cmdBuf)
 {
 	const GpuParticleParams& p = m_gpuParticleParams;
 	if (!p.enabled || !m_particleSimPipeline) return;
@@ -17961,7 +18065,7 @@ void MetalRenderer::SimulateGpuParticles(void* cmdBuf)
 	}
 }
 
-void MetalRenderer::DrawGpuParticles(void* renderEncoder, const glm::mat4& viewProj, const glm::vec3& camPos)
+void MetalRendererImpl::DrawGpuParticles(void* renderEncoder, const glm::mat4& viewProj, const glm::vec3& camPos)
 {
 	const GpuParticleParams& p = m_gpuParticleParams;
 	if (!p.enabled || !m_particleDrawPipeline || !m_particleBuffer) return;
@@ -17980,7 +18084,7 @@ void MetalRenderer::DrawGpuParticles(void* renderEncoder, const glm::mat4& viewP
 	[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:(NSUInteger)count];
 }
 
-void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view)
+void MetalRendererImpl::DrawParticleGraphBatches(void* renderEncoder, const glm::mat4& viewProj, const glm::mat4& view)
 {
 	if (m_renderWorld.particleBatches.empty()) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
@@ -18001,7 +18105,7 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 		// A precompiled Metal variant (export-baked, CHUNK_PPSD) wins over an
 		// on-demand-compiled + hash-cached one — see GetOrBuildParticlePipeline.
 		const ParticleShaderVariant* precompiled = nullptr;
-		if (const ParticleGraphAsset* asset = m_contentManager ? m_contentManager->getParticleGraph(batch.particleAssetId) : nullptr)
+		if (const ParticleGraphAsset* asset = m_owner.m_contentManager ? m_owner.m_contentManager->getParticleGraph(batch.particleAssetId) : nullptr)
 			for (const auto& var : asset->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { precompiled = &var; break; }
 
@@ -18043,7 +18147,7 @@ void MetalRenderer::DrawParticleGraphBatches(void* renderEncoder, const glm::mat
 	}
 }
 
-IRenderer::Capabilities MetalRenderer::GetCapabilities() const
+IRenderer::Capabilities MetalRendererImpl::GetCapabilities() const
 {
 	Capabilities c;
 	c.supportsShadows            = true;
@@ -18083,19 +18187,19 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	return c;
 }
 
-void MetalRenderer::SetGpuParticleParams(const GpuParticleParams& p)
+void MetalRendererImpl::SetGpuParticleParams(const GpuParticleParams& p)
 {
 	m_gpuParticleParams = p;
 }
 
-void MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& s)
+void MetalRendererImpl::SetOcclusionCullingSettings(const OcclusionCullingSettings& s)
 {
 	OcclusionCuller::Settings oc = m_occlusionCuller.settings();
 	oc.enabled = s.enabled;
 	m_occlusionCuller.setSettings(oc);
 }
 
-void MetalRenderer::CullCameraObjects()
+void MetalRendererImpl::CullCameraObjects()
 {
 	m_culler.cull(m_renderWorld, m_visible);
 	if (m_occlusionCuller.settings().enabled)
@@ -18118,7 +18222,7 @@ void MetalRenderer::CullCameraObjects()
 		}
 		else
 		{
-			m_occlusionCacheCulled   = m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
+			m_occlusionCacheCulled   = m_occlusionCuller.refine(m_renderWorld, m_owner.m_contentManager, m_visible);
 			m_occlusionCacheVisible  = m_visible;
 			m_occlusionCacheStamp    = m_frameStamp;
 			m_occlusionCacheCount    = count;
@@ -18129,7 +18233,7 @@ void MetalRenderer::CullCameraObjects()
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 }
 
-void MetalRenderer::SetSSRSettings(const SSRSettings& s)
+void MetalRendererImpl::SetSSRSettings(const SSRSettings& s)
 {
 	m_ssrEnabled      = s.enabled;
 	m_ssrIntensity    = s.intensity;
@@ -18139,7 +18243,7 @@ void MetalRenderer::SetSSRSettings(const SSRSettings& s)
 	m_ssrQuality      = s.quality;
 }
 
-void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
+void MetalRendererImpl::SetGIReflectionSettings(const GIReflectionSettings& s)
 {
 	m_giReflEnabled      = s.enabled && m_giSupported;
 	m_giReflIntensity    = s.intensity;
@@ -18150,7 +18254,7 @@ void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflBounces      = std::clamp(s.bounces, 1, 4);
 }
 
-void MetalRenderer::SetGISettings(const GISettings& s)
+void MetalRendererImpl::SetGISettings(const GISettings& s)
 {
 	m_giEnabled             = s.enabled && m_giSupported;
 	m_giIndirectIntensity   = s.indirectIntensity;
@@ -18162,7 +18266,7 @@ void MetalRenderer::SetGISettings(const GISettings& s)
 	m_giShadowFilter        = s.shadowFilter;
 }
 
-void MetalRenderer::SetVSync(bool enabled)
+void MetalRendererImpl::SetVSync(bool enabled)
 {
 	m_vsync = enabled;
 	if (m_primaryTarget.metalLayer)
@@ -18173,7 +18277,7 @@ void MetalRenderer::SetVSync(bool enabled)
 
 // ─── Multi-window support ─────────────────────────────────────────────────────
 
-void MetalRenderer::AttachWindow(HE::Window* window)
+void MetalRendererImpl::AttachWindow(HE::Window* window)
 {
 	SDL_Window* sdlWin = window->GetNativeWindow();
 	if (m_secondaryTargets.count(sdlWin)) return; // already attached
@@ -18184,7 +18288,7 @@ void MetalRenderer::AttachWindow(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", "MetalRenderer: secondary window attached");
 }
 
-void MetalRenderer::DetachWindow(HE::Window* window)
+void MetalRendererImpl::DetachWindow(HE::Window* window)
 {
 	auto it = m_secondaryTargets.find(window->GetNativeWindow());
 	if (it == m_secondaryTargets.end()) return;
@@ -18193,7 +18297,7 @@ void MetalRenderer::DetachWindow(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", "MetalRenderer: secondary window detached");
 }
 
-void MetalRenderer::RenderWindow(HE::Window* window)
+void MetalRendererImpl::RenderWindow(HE::Window* window)
 {
 	auto it = m_secondaryTargets.find(window->GetNativeWindow());
 	if (it == m_secondaryTargets.end()) return;
@@ -18212,9 +18316,9 @@ void MetalRenderer::RenderWindow(HE::Window* window)
 // RenderWidgetThumbnail does — the extractor rebuilds that list per call and
 // the primary's must survive it) and EncodeUIPass, which is where every UI quad
 // this engine draws comes from, so the two windows cannot look different.
-void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uint32_t windowId)
+void MetalRendererImpl::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uint32_t windowId)
 {
-	if (!m_world || !target.metalLayer) return;
+	if (!m_owner.m_world || !target.metalLayer) return;
 	@autoreleasepool
 	{
 		CAMetalLayer* layer = (__bridge CAMetalLayer*)target.metalLayer;
@@ -18240,8 +18344,8 @@ void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uin
 		// put back so the primary's frame is untouched by ours.
 		std::vector<UIRenderObject> saved;
 		saved.swap(m_renderWorld.uiObjects);
-		m_extractor.setContentManager(m_contentManager);
-		m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
+		m_extractor.setContentManager(m_owner.m_contentManager);
+		m_extractor.extractUI(*m_owner.m_world, static_cast<float>(pw), static_cast<float>(ph),
 		                      m_renderWorld, windowId);
 
 		id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -18283,7 +18387,7 @@ void MetalRenderer::EncodeWindowUI(SDL_Window* sdlWin, WindowTarget& target, uin
 
 // ─── ImGui texture helpers ────────────────────────────────────────────────────
 
-void* MetalRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int height)
+void* MetalRendererImpl::CreateImGuiTexture(const void* rgba8Pixels, int width, int height)
 {
 	if (!m_device || !rgba8Pixels || width <= 0 || height <= 0) return nullptr;
 
@@ -18312,12 +18416,12 @@ void* MetalRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int 
 	}
 }
 
-void MetalRenderer::DestroyImGuiTexture(void* handle)
+void MetalRendererImpl::DestroyImGuiTexture(void* handle)
 {
 	if (handle) CFBridgingRelease(handle);
 }
 
-void MetalRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int height)
+void MetalRendererImpl::SetMoonTexture(const void* rgba8Pixels, int width, int height)
 {
 	if (!m_device || !rgba8Pixels || width <= 0 || height <= 0) return;
 
@@ -18347,6 +18451,6 @@ void MetalRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heigh
 
 // ─── Accessors ────────────────────────────────────────────────────────────────
 
-void* MetalRenderer::GetDevice() const              { return m_device; }
-void* MetalRenderer::GetCommandQueue() const        { return m_commandQueue; }
-void* MetalRenderer::GetFramePassDescriptor() const { return m_imguiPassDescriptor; }
+void* MetalRendererImpl::GetDevice() const              { return m_device; }
+void* MetalRendererImpl::GetCommandQueue() const        { return m_commandQueue; }
+void* MetalRendererImpl::GetFramePassDescriptor() const { return m_imguiPassDescriptor; }

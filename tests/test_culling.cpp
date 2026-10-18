@@ -3357,7 +3357,7 @@ TEST_CASE("Vulkan and Metal record a frame inside one extractor FrameScope (Them
 	{
 		const std::string mtl = stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm"));
 		REQUIRE(!mtl.empty());
-		const std::string body = bodyOf(mtl, "void MetalRenderer::EncodeFrame(");
+		const std::string body = bodyOf(mtl, "void MetalRendererImpl::EncodeFrame(");
 		const size_t scope = body.find(kScope);
 		REQUIRE(scope != std::string::npos);
 		const size_t p = body.find("EncodeShadowMap(");
@@ -3412,14 +3412,14 @@ TEST_CASE("The frame is walked before the shadow pass, through the function the 
 	{
 		const std::string mtl = stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm"));
 		REQUIRE(!mtl.empty());
-		const std::string frame = bodyOf(mtl, "void MetalRenderer::EncodeFrame(");
+		const std::string frame = bodyOf(mtl, "void MetalRendererImpl::EncodeFrame(");
 		const size_t scope = frame.find("RenderExtractor::FrameScope");
 		const size_t walk  = frame.find("ExtractFrame(");
 		const size_t bound = frame.find("RefineObjectBounds();");
 		const size_t pass  = frame.find("EncodeShadowMap(");
 		REQUIRE(scope != std::string::npos);
-		REQUIRE_MESSAGE(walk != std::string::npos, "MetalRenderer::EncodeFrame takes no frame walk");
-		REQUIRE_MESSAGE(bound != std::string::npos, "MetalRenderer::EncodeFrame refines no bounds before its first pass");
+		REQUIRE_MESSAGE(walk != std::string::npos, "MetalRendererImpl::EncodeFrame takes no frame walk");
+		REQUIRE_MESSAGE(bound != std::string::npos, "MetalRendererImpl::EncodeFrame refines no bounds before its first pass");
 		REQUIRE(pass != std::string::npos);
 		CHECK(scope < walk);
 		CHECK_MESSAGE(walk < pass, "the frame's walk comes after the shadow pass");
@@ -3427,7 +3427,7 @@ TEST_CASE("The frame is walked before the shadow pass, through the function the 
 		CHECK_MESSAGE(bound < pass, "the bounds are refined after the shadow pass");
 		CHECK(count(frame, "ExtractFrame(") == 1);
 
-		const std::string helper = bodyOf(mtl, "void MetalRenderer::ExtractFrame(");
+		const std::string helper = bodyOf(mtl, "void MetalRendererImpl::ExtractFrame(");
 		const size_t sun = helper.find("m_extractor.setDayNight(");
 		const size_t cm  = helper.find("m_extractor.setContentManager(");
 		const size_t ex  = helper.find("m_extractor.extract(");
@@ -3437,8 +3437,8 @@ TEST_CASE("The frame is walked before the shadow pass, through the function the 
 		CHECK(sun < cm);
 		CHECK(cm < ex);
 
-		passPushesNothing(bodyOf(mtl, "void MetalRenderer::EncodeShadowMap("), "ExtractFrame(",
-		                  "MetalRenderer::EncodeShadowMap");
+		passPushesNothing(bodyOf(mtl, "void MetalRendererImpl::EncodeShadowMap("), "ExtractFrame(",
+		                  "MetalRendererImpl::EncodeShadowMap");
 	}
 
 	// Vulkan: the same at the two places that record a frame (Render() without a viewport,
