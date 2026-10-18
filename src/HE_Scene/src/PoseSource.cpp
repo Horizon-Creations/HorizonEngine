@@ -6,8 +6,46 @@
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace HE {
+
+namespace {
+
+// One parse per asset TEXT, shared by every component that resolves it
+// (SCN-302). Keyed by id and checked against the JSON it was parsed from:
+// ContentManager carries no asset revision, and the same text always parses
+// to the same space, so an entry is handed out only for exactly that text.
+// Weak, so the spaces go when the last component lets go of them; the text
+// copy stays until the next parse sweeps expired entries. Only successful
+// parses are kept — a broken asset is still logged once per component, as
+// before. Locked because preview worlds may animate on another thread.
+struct SharedSpace
+{
+    std::string                     json;
+    std::weak_ptr<const BlendSpace> space;
+};
+std::mutex                                g_sharedSpacesMutex;
+std::unordered_map<HE::UUID, SharedSpace> g_sharedSpaces;
+
+std::shared_ptr<const BlendSpace> sharedBlendSpace(HE::UUID id, const std::string& json)
+{
+    std::lock_guard<std::mutex> lock(g_sharedSpacesMutex);
+    if (auto it = g_sharedSpaces.find(id); it != g_sharedSpaces.end() && it->second.json == json)
+        if (auto live = it->second.space.lock()) return live;
+
+    BlendSpace parsed;
+    if (!blendSpaceFromJson(json, parsed)) return nullptr;
+    auto space = std::make_shared<const BlendSpace>(std::move(parsed));
+    for (auto it = g_sharedSpaces.begin(); it != g_sharedSpaces.end();)
+        it = it->second.space.expired() ? g_sharedSpaces.erase(it) : std::next(it);
+    g_sharedSpaces[id] = SharedSpace{ json, space };
+    return space;
+}
+
+} // namespace
 
 const BlendSpace* resolveBlendSpace(BlendSpaceCache& cache,
                                     ContentManager& cm, HE::UUID id)
@@ -15,13 +53,14 @@ const BlendSpace* resolveBlendSpace(BlendSpaceCache& cache,
     if (id == HE::UUID{}) return nullptr;
 
     for (const BlendSpaceCacheEntry& e : cache)
-        if (e.id == id) return e.ok ? &e.space : nullptr;
+        if (e.id == id) return e.ok ? e.space.get() : nullptr;
 
     BlendSpaceCacheEntry entry;
     entry.id = id;
     if (const BlendSpaceAsset* asset = cm.getBlendSpace(id))
     {
-        entry.ok = blendSpaceFromJson(asset->json, entry.space);
+        entry.space = sharedBlendSpace(id, asset->json);
+        entry.ok    = entry.space != nullptr;
         if (!entry.ok)
             HE_LOG_WARN(Animation, "Blend space asset '%s' has unparsable JSON — "
                                    "anything pointing at it poses nothing",
@@ -39,7 +78,7 @@ const BlendSpace* resolveBlendSpace(BlendSpaceCache& cache,
     // instead of one per frame for as long as the scene is open.
     cache.push_back(std::move(entry));
     const BlendSpaceCacheEntry& stored = cache.back();
-    return stored.ok ? &stored.space : nullptr;
+    return stored.ok ? stored.space.get() : nullptr;
 }
 
 PoseSource makePoseSource(ContentManager& cm, BlendSpaceCache& cache,

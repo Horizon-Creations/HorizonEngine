@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
+#include <BlendSpace/BlendSpace.h>
 #include <HorizonScene/AnimationPreview.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/EngineApi.h>
@@ -601,8 +602,8 @@ TEST_CASE("AnimatorStateMachineComponent defaults")
 {
     AnimatorStateMachineComponent sm;
     CHECK(sm.stateMachineAssetId == HE::UUID{});
-    CHECK(sm.resolvedGraph.states.empty());
-    CHECK(sm.resolvedGraph.transitions.empty());
+    CHECK(sm.graph().states.empty());
+    CHECK(sm.graph().transitions.empty());
     CHECK(sm.params.empty());
     CHECK(sm.currentStateName.empty());
     CHECK(sm.clipTime      == doctest::Approx(0.0f));
@@ -928,9 +929,9 @@ TEST_CASE("AnimationStateMachineSystem migrates a legacy inline-graph entity int
     CHECK(!updatedSm.legacy.hasData);                       // migrated exactly once
     CHECK(updatedSm.stateMachineAssetId != HE::UUID{});      // now points at a real asset
     REQUIRE(cm.getAnimatorStateMachine(updatedSm.stateMachineAssetId) != nullptr);
-    REQUIRE(updatedSm.resolvedGraph.states.size() == 1);
-    CHECK(updatedSm.resolvedGraph.states[0].name == "Idle");
-    CHECK(updatedSm.resolvedGraph.states[0].x == doctest::Approx(5.0f));
+    REQUIRE(updatedSm.graph().states.size() == 1);
+    CHECK(updatedSm.graph().states[0].name == "Idle");
+    CHECK(updatedSm.graph().states[0].x == doctest::Approx(5.0f));
     CHECK(updatedSm.currentStateName == "Idle");
 
     // The migrated asset actually drives playback (not just a dangling reference).
@@ -1529,4 +1530,157 @@ TEST_CASE("SCN-102: a skipped pose still fires the notifies its playhead swept o
             CHECK(countFires(q, "Step") == 1);
         }
     }
+}
+
+// ─── SCN-302: one parse per asset, shared by every component ─────────────────
+
+TEST_CASE("AnimationStateMachineSystem: entities on one asset share one parsed graph, and an edit re-resolves them onto one new graph")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 1.0f, 0.0f}));
+
+    const AnimatorStateMachineComponent proto = makeSimpleSM(cm, clipAId, clipBId);
+    entt::entity es[2];
+    for (auto& e : es)
+    {
+        e = world.createEntity();
+        world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        world.addComponent(e, smc);
+        world.addComponent(e, proto);
+    }
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto first = reg.get<AnimatorStateMachineComponent>(es[0]).resolvedGraph;
+    REQUIRE(first != nullptr);
+    CHECK(first->states.size() == 2);
+    CHECK(reg.get<AnimatorStateMachineComponent>(es[1]).resolvedGraph == first);
+
+    // The asset gains a state; both components are told, and both end up on
+    // the SAME new parse — not on the old one, not on one each.
+    HE::AnimatorStateMachineGraph g = *first;
+    g.states.push_back({ 3, "Run", clipBId, HE::UUID{}, true, 0.0f, 0.0f });
+    cm.getAnimatorStateMachineMutable(proto.stateMachineAssetId)->graphJson = HE::animatorStateMachineToJson(g);
+    for (auto e : es) AnimationStateMachineSystem::markConfigDirty(reg.get<AnimatorStateMachineComponent>(e));
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto second = reg.get<AnimatorStateMachineComponent>(es[0]).resolvedGraph;
+    REQUIRE(second != nullptr);
+    CHECK(second != first);   // `first` is still held here, so the address cannot be reused
+    CHECK(second->states.size() == 3);
+    CHECK(reg.get<AnimatorStateMachineComponent>(es[1]).resolvedGraph == second);
+    CHECK(first->states.size() == 2);   // what a not-yet-told component still holds is untouched
+
+    // A component that is not told keeps posing from what it resolved.
+    const auto third = world.createEntity();
+    world.addComponent(third, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(third, smc);
+    world.addComponent(third, proto);
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+    CHECK(reg.get<AnimatorStateMachineComponent>(third).resolvedGraph == second);
+}
+
+TEST_CASE("AnimationStateMachineSystem: an unparsable or missing graph leaves the component on an empty graph")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    AnimatorStateMachineAsset broken;
+    broken.name      = "Broken";
+    broken.graphJson = "{ not json";
+    const HE::UUID brokenId = cm.registerAnimatorStateMachine(std::move(broken));
+
+    for (const HE::UUID id : { brokenId, HE::UUID::generate() })
+    {
+        const auto e = world.createEntity();
+        world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        world.addComponent(e, smc);
+        AnimatorStateMachineComponent sm; sm.stateMachineAssetId = id;
+        world.addComponent(e, sm);
+        AnimationStateMachineSystem::update(world, cm, 0.0f);
+        const auto& got = reg.get<AnimatorStateMachineComponent>(e);
+        CHECK(got.resolvedGraph == nullptr);
+        CHECK(got.graph().states.empty());
+        CHECK_FALSE(got.configDirty);
+        CHECK(got.currentStateName.empty());
+    }
+}
+
+TEST_CASE("AnimationStateMachineSystem: entities on one blend space share one parse of it")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID walk = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}));
+    const HE::UUID run  = cm.registerAnimationClip(makeConstantClip({3.0f, 0.0f, 0.0f}));
+
+    HE::BlendSpace space;
+    space.kind   = HE::BlendSpaceKind::OneD;
+    space.paramX = "speed";
+    { HE::BlendSpaceSample s; s.clipId = walk; s.x = 0.0f; space.samples.push_back(s); }
+    { HE::BlendSpaceSample s; s.clipId = run;  s.x = 1.0f; space.samples.push_back(s); }
+    BlendSpaceAsset bsa;
+    bsa.name = "Locomotion";
+    bsa.json = HE::blendSpaceToJson(space);
+    const HE::UUID spaceId = cm.registerBlendSpace(std::move(bsa));
+
+    HE::AnimatorStateMachineGraph g;
+    g.states.push_back({ 1, "Move", HE::UUID{}, spaceId, true, 0.0f, 0.0f });
+    g.startState = "Move";
+    g.defaultParams["speed"] = 0.5f;
+    AnimatorStateMachineAsset asset;
+    asset.name      = "Mover";
+    asset.graphJson = HE::animatorStateMachineToJson(g);
+    const HE::UUID smId = cm.registerAnimatorStateMachine(std::move(asset));
+
+    entt::entity es[2];
+    for (auto& e : es)
+    {
+        e = world.createEntity();
+        world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        world.addComponent(e, smc);
+        AnimatorStateMachineComponent sm; sm.stateMachineAssetId = smId;
+        world.addComponent(e, sm);
+    }
+    AnimationStateMachineSystem::update(world, cm, 0.1f);
+
+    const auto& a = reg.get<AnimatorStateMachineComponent>(es[0]).blendSpaces;
+    const auto& b = reg.get<AnimatorStateMachineComponent>(es[1]).blendSpaces;
+    REQUIRE(a.size() == 1);
+    REQUIRE(b.size() == 1);
+    REQUIRE(a.front().ok);
+    CHECK(a.front().space != nullptr);
+    CHECK(a.front().space == b.front().space);
+    CHECK(a.front().space->samples.size() == 2);
+    const auto old = a.front().space;
+
+    // The space is edited; the graph re-resolves (which clears the per-component
+    // list), and both pick up ONE new parse.
+    space.samples[1].x = 2.0f;
+    cm.getBlendSpaceMutable(spaceId)->json = HE::blendSpaceToJson(space);
+    for (auto e : es) AnimationStateMachineSystem::markConfigDirty(reg.get<AnimatorStateMachineComponent>(e));
+    AnimationStateMachineSystem::update(world, cm, 0.1f);
+    const auto& a2 = reg.get<AnimatorStateMachineComponent>(es[0]).blendSpaces;
+    const auto& b2 = reg.get<AnimatorStateMachineComponent>(es[1]).blendSpaces;
+    REQUIRE(a2.size() == 1);
+    REQUIRE(b2.size() == 1);
+    CHECK(a2.front().space != old);
+    CHECK(a2.front().space == b2.front().space);
+    CHECK(a2.front().space->samples[1].x == doctest::Approx(2.0f));
+    CHECK(old->samples[1].x == doctest::Approx(1.0f));
 }

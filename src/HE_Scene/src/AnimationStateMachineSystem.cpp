@@ -15,9 +15,44 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 
 namespace
 {
+// One parse per state machine asset TEXT, shared by every component resolved
+// from it (SCN-302): two hundred characters on one machine hold one graph. The
+// same discipline as the blend spaces in PoseSource.cpp — keyed by id, handed
+// out only for exactly the JSON it was parsed from (ContentManager has no
+// asset revision, and equal text parses to an equal graph), weak so a graph
+// goes with its last component, only successful parses kept so a broken asset
+// still logs per component. markConfigDirty after an edit therefore still
+// works per component: the first one to re-resolve parses the new text, the
+// others share that parse.
+struct SharedGraph
+{
+    std::string                                        json;
+    std::weak_ptr<const HE::AnimatorStateMachineGraph> graph;
+};
+std::mutex                                g_sharedGraphsMutex;
+std::unordered_map<HE::UUID, SharedGraph> g_sharedGraphs;
+
+std::shared_ptr<const HE::AnimatorStateMachineGraph> sharedGraph(HE::UUID id, const std::string& json)
+{
+    std::lock_guard<std::mutex> lock(g_sharedGraphsMutex);
+    if (auto it = g_sharedGraphs.find(id); it != g_sharedGraphs.end() && it->second.json == json)
+        if (auto live = it->second.graph.lock()) return live;
+
+    HE::AnimatorStateMachineGraph parsed;
+    if (!HE::animatorStateMachineFromJson(json, parsed)) return nullptr;
+    auto graph = std::make_shared<const HE::AnimatorStateMachineGraph>(std::move(parsed));
+    for (auto it = g_sharedGraphs.begin(); it != g_sharedGraphs.end();)
+        it = it->second.graph.expired() ? g_sharedGraphs.erase(it) : std::next(it);
+    g_sharedGraphs[id] = SharedGraph{ json, graph };
+    return graph;
+}
+
 // One-off migration for scenes saved before AnimatorStateMachineComponent
 // referenced an AnimatorStateMachineAsset: bake the legacy inline
 // states/transitions/params into a real asset — same "asset instead of inline
@@ -49,15 +84,14 @@ void resolveConfigIfNeeded(AnimatorStateMachineComponent& sm, ContentManager& cm
 
     if (!sm.configDirty && sm.resolvedFromAssetId == sm.stateMachineAssetId) return;
 
-    HE::AnimatorStateMachineGraph graph;
+    std::shared_ptr<const HE::AnimatorStateMachineGraph> graph;
     if (const AnimatorStateMachineAsset* asset = cm.getAnimatorStateMachine(sm.stateMachineAssetId);
         asset && !asset->graphJson.empty())
     {
-        HE::AnimatorStateMachineGraph parsed;
-        if (HE::animatorStateMachineFromJson(asset->graphJson, parsed))
+        if (auto parsed = sharedGraph(sm.stateMachineAssetId, asset->graphJson))
         {
             HE_LOG_DEBUG(Animation, "Resolved state machine '%s': %zu state(s), %zu transition(s)",
-                         asset->name.c_str(), parsed.states.size(), parsed.transitions.size());
+                         asset->name.c_str(), parsed->states.size(), parsed->transitions.size());
             graph = std::move(parsed);
         }
         else
@@ -76,7 +110,7 @@ void resolveConfigIfNeeded(AnimatorStateMachineComponent& sm, ContentManager& cm
                     static_cast<unsigned long long>(sm.stateMachineAssetId.lo));
     }
 
-    sm.resolvedGraph       = graph;
+    sm.resolvedGraph       = std::move(graph);
     sm.resolvedFromAssetId = sm.stateMachineAssetId;
     sm.configDirty         = false;
     // The parsed blend spaces belonged to the graph that just went away. Keeping
@@ -87,22 +121,22 @@ void resolveConfigIfNeeded(AnimatorStateMachineComponent& sm, ContentManager& cm
     // Seed live params from the graph's defaults (only newly-appeared keys —
     // an in-flight edit shouldn't clobber a param a script already tweaked at
     // runtime, e.g. re-resolving after the graph gained a NEW param).
-    for (const auto& [k, v] : sm.resolvedGraph.defaultParams)
+    for (const auto& [k, v] : sm.graph().defaultParams)
         sm.params.try_emplace(k, v);
 
     // First resolve for this entity (no current state yet) — enter the
     // graph's start state (or its first state, if any).
     if (sm.currentStateName.empty())
     {
-        sm.currentStateName = !sm.resolvedGraph.startState.empty()
-            ? sm.resolvedGraph.startState
-            : (sm.resolvedGraph.states.empty() ? std::string() : sm.resolvedGraph.states.front().name);
+        sm.currentStateName = !sm.graph().startState.empty()
+            ? sm.graph().startState
+            : (sm.graph().states.empty() ? std::string() : sm.graph().states.front().name);
     }
 }
 
 const HE::AnimationState* findState(const AnimatorStateMachineComponent& sm, const std::string& name)
 {
-    for (const auto& s : sm.resolvedGraph.states)
+    for (const auto& s : sm.graph().states)
         if (s.name == name) return &s;
     return nullptr;
 }
@@ -155,12 +189,12 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         const HE::AnimationState* curState = findState(sm, sm.currentStateName);
         if (!curState)
         {
-            if (!sm.resolvedGraph.states.empty())
+            if (!sm.graph().states.empty())
                 HE_LOG_THROTTLE(Animation, Warning, 5.0,
                                 "Entity %u: state machine is in unknown state '%s' — "
                                 "the graph has %zu state(s) and none match",
                                 static_cast<uint32_t>(e), sm.currentStateName.c_str(),
-                                sm.resolvedGraph.states.size());
+                                sm.graph().states.size());
             continue;
         }
 
@@ -215,7 +249,7 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         // Check transitions (only when not mid-transition)
         if (!sm.inTransition)
         {
-            for (const auto& t : sm.resolvedGraph.transitions)
+            for (const auto& t : sm.graph().transitions)
             {
                 if (t.fromState != sm.currentStateName) continue;
                 if (!evalTransition(sm, t)) continue;
