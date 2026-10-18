@@ -151,6 +151,11 @@ std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
             // Symlinks (libSDL3.dylib -> libSDL3.0.dylib) are copied as the file
             // they name: the export folder holds plain files, like the prebuilt one.
             if (!e.is_regular_file(ec) || !isEngineLibrary(e.path())) continue;
+            // The lib set carries the Python plugin built against it; it replaces
+            // the prebuilt one, and goes nowhere a non-Python export left it out.
+            if (e.path().filename().string().find("HorizonPython") != std::string::npos &&
+                !fs::exists(dstDir / e.path().filename(), ec))
+                continue;
             fs::copy_file(e.path(), dstDir / e.path().filename(),
                           fs::copy_options::overwrite_existing, ec);
             if (ec) return "cannot copy " + e.path().string() + ": " + ec.message();
