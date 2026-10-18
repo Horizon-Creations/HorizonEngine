@@ -150,29 +150,59 @@ folds, 5 000 files). All `ui shot*` frames from before the step are byte-equal a
 except the 7 console shots and `texture_viewer_asset`, which differ between two runs of
 the same build as well.
 
+## Step 4: collab structure diff, net ids and doc diffs on signals (EDT-402/1601/202/201)
+
+| Finding | Where | What changed |
+|---|---|---|
+| EDT-402/1601 structure diff | `StructuralSync.h` `StructPassGate`; `EditorApplication.cpp` `syncStructuralChanges(nowMs)` | The pass runs when `HorizonWorld::structureEpoch()` moved (create, destroy, reparent, sibling order, clear, loaders, cell streaming), while a create/re-parent/destroy waits for a retry (`m_structureUnsendable`, `m_structureUndeletable`, new `m_structureReparentPending`: `kSendRetryFrames` still counts frames), or once a second (fallback for raw `registry().create()`, hand-rewired hierarchy, a component that makes an entity local-only). Gate reset outside a session and in `onWorldReplaced`. `current` is a member set. The diff rules are unchanged. |
+| EDT-202 net-id table | `CollabController.h/.cpp` `m_netByHandle`/`m_handleByNet`/`m_netMisses`, `rememberNetId`, `netIdOf` | Two hash maps instead of the vector of pairs; first entry per key wins, as the first match did. `seedNetIds` reserves and is O(N). A miss of `entityForNetId` is cached against the new `HorizonWorld::entityIdRevision()` (bumped by the id signals that already feed `findByEntityId`), so a peer's selection of an entity this machine lacks scans the registry once per id change instead of every frame. Misses capped at 4096; cleared on `setWorld` to another world, session end, seed. |
+| EDT-201 Level Script / Game Instance diff | `CollabDocSync.h` `DiffGate`; `EditorApplication.cpp` `editorDocDiffDue`, the tab and untabbed loops of `updateAssetCollabSync` | Diff (and `hasLocalChanges`) when `m_undo.revision() + m_editorDocEdits` moved (Level Script edits snapshot; `commitGameInstance` and `hc.endEdit` bump the count), the lock changed hands or the mirror is unseeded; otherwise every 250 ms. Gate at the per-frame callers only: the MCP `beginEdit` path calls `publishDocDeltas` directly and always runs. A skipped untabbed key stays in `openRel` (keeps its lock). |
+
+**Measured** (standalone `clang++ -O2` against the real `StructuralSync.h` and entt, M5,
+flat scene under the root, per frame averaged over 30 frames; two runs, at load ~10 from
+parallel builds and at load ~3.7):
+
+| Entities | old diff per frame | gate, idle frame | seed: vector | seed: maps |
+|---|---|---|---|---|
+| 1 000 | 0.053 / 0.055 ms | ~1 ns | 0.2 / 0.6 ms | 0.05 / 0.06 ms |
+| 10 000 | 0.83 / 0.48 ms | ~1 ns | 52 / 19 ms | 0.65 / 0.46 ms |
+| 50 000 | 6.3 / 2.3 ms | ~1 ns | 1 114 / 488 ms | 4.9 / 2.2 ms |
+| 100 000 | 9.7 / 4.7 ms | ~1 ns | (not run) | 12 / 4.0 ms |
+
+The idle-session cost of the structure pass is now the fallback pass once a second
+(so ~1/60 of the old per-frame cost at 60 FPS). The doc gate was not timed: the audit's
+own estimate is 0.1-2 ms per frame for a few-hundred-node graph, now at most 4 diffs a
+second plus one per edit.
+
+**Tests:** `test_collab_controller.cpp`: "Net ids: a seeded world resolves every entity
+both ways" (20 000), "...an id nobody has is not found until an entity takes it",
+"...a cached miss also yields to a raw emplace of the id", "...forgetting an id drops it
+both ways, and a recycled handle gets its own"; "Structure gate: ..." (idle frames do not
+run, each structure change wakes it, retries and the fallback). Making a cached miss
+ignore the revision turns two of the net-id tests red. `test_collab_docsync.cpp`: the
+`DiffGate` rules, and an unsignalled edit on a real HorizonCode graph sent by the
+fallback diff.
+
 ## Handoff
 
-- **Topic / step:** 220, step 3 of 5 (steps 1 and 2: records above)
-- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 17629338 (910/1802/1503/1404), e0e3c8a9 (302), 69ea22c0 (301), 1c4ac63f (909), then this record.
-- **Done:** row clipping for the Content Browser grid, docs reader, source-control tree, UI widget hierarchy and asset picker; the palette without per-row allocations; outliner stage 1. Table in "Step 3" above.
-- **Files touched:** `ContentBrowserPanel.cpp` (`tileInView`, before the folder loop), `DocsPanel.cpp/.h` (`drawPage`, `setSectionClipping`/`sectionsDrawn`), `SourceControlTree.h` (new), `SourceControlPanel.cpp` (`Model::tree`, `drawRows`), `UIEditorPanel.cpp/.h` (`HierarchyIndex`, `drawHierarchyNode`, hooks), `EditorWidgets.cpp` (picker), `HcEditorUtil.cpp` (`searchMenuItem`, `apiRowMatches`), `OutlinerPanel.cpp` (~1100); tests: `test_widget_designer_ui`, `test_ui_shot` (+2), `test_sourcecontrol_tree` (new, in `tests/CMakeLists.txt`).
+- **Topic / step:** 220, step 4 of 5 (steps 1-3: records above)
+- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 70440211 (code + tests), then this record.
+- **Done:** EDT-402/1601 (structure pass gated), EDT-202 (net-id maps + miss cache), EDT-201 (Level Script / Game Instance diff gate). Table in "Step 4" above.
+- **Files touched:** `StructuralSync.h` (`StructPassGate`), `EditorApplication.h/.cpp` (`syncStructuralChanges(nowMs)` ~11570, caller ~4990, `onWorldReplaced` ~1058, `editorDocDiffDue` before `publishDocDeltas`, the two loops of `updateAssetCollabSync`, `hc.endEdit`, `commitGameInstance`), `CollabController.h/.cpp` (net-id section ~2700, remote create ~1163, session reset ~1768, `setWorld`), `CollabDocSync.h` (`DiffGate`), `HorizonWorld.h/.cpp` (`entityIdRevision`); tests: `test_collab_controller.cpp` (+7), `test_collab_docsync.cpp` (+2).
 - **Verified:**
-  - Release `he_tests` + `HorizonEditor` build green. Full `ctest -j4`: 303/304. The red one is the known `test_hpak:1188` (6 == 2, EngineContentCache in this HOME).
-  - All `ui shot*` frames from before are byte-equal after, except 8 that also vary run to run. The new clipped frames are pixel-equal to the unclipped ones.
-  - Hidden-editor A/B for the grid (numbers above). `editor_help_audit.py --check` exits 0.
+  - Release `HorizonEditor` and `he_tests` build green. Full `ctest -j4`: 301 passed, 2 skipped, 1 failed: the known `test_hpak:1188` (EngineContentCache in this HOME).
+  - Collab files alone: controller 97, docsync 26, mcp_tools_prefab 22, mcp_tools_collab 7, net_collab 114, collab_undo 9, all green. Miss-cache mutation turns 2 new tests red.
+  - Standalone bench (table above).
 - **Not verified:**
-  - The Source Control panel is not in `he_tests`. Its tree is only compiled, plus the pure-line tests; nobody has looked at it as an image.
-  - A **scrolled** Content Browser A/B: there is no headless scroll, so only the top of the grid and the thumb were compared.
-  - Windows/Linux (CI).
+  - No live two-editor session was run. The gating inside `syncStructuralChanges`/`updateAssetCollabSync` is only compiled: `EditorApplication` is not in `he_tests`. Only the gate rules and the net-id table are tested.
+  - The doc-gate saving was not timed. Windows/Linux only via CI.
 - **Decisions taken:**
-  - Folder lines in the SC tree are now one frame high (`FramePadding`) like the file rows. The clipper needs one step, so they are a few px taller than before.
-  - Folds of the SC tree are kept in the panel (they now survive a status refresh).
-  - The palette has no clipper (see table); outliner stage 2 not done.
-  - Picker row ids are the index, not `label##path`.
-- **Suggested, not taken:** EDT-302's `splitWords` cache and per-page `panelForTopic` (now only per drawn section). EDT-304 (copy of the search hits per frame) is next in the grid's path. Outliner stage 2 after a 50k measurement.
+  - A structure epoch plus a 1 s fallback, not entt `on_construct` sinks. The epoch already covers the world's own paths, and sinks would need re-wiring on every world replace.
+  - The EDT-201 signal is a sum of counters that only grow, plus a 250 ms fallback. That was the audit's lower-risk variant; there is no revision on `HorizonCode::Graph`.
+  - `forgetNetId` drops one handle entry (the one under that id). A second handle that cached the same id (a damaged merge) keeps its entry, where the vector dropped every pair.
+- **Suggested, not taken:** the audit's randomised equivalence test (full diff vs gated pass over create/destroy/reparent/undo) needs the pass moved out of `EditorApplication` into a testable `StructuralSyncPass`.
 - **Traps:**
-  - Variable-height memos: trust only a height that was the same in two draws.
-  - Editor A/B: the old binary must sit in the build's `HE_Editor` dir (EditorDeps), and the noise of two runs is ~70 px.
-  - The widget designer test derives row ids from `Name##hn<id>`; keep that label.
-- **Pending:** plan steps 4-5.
-- **Next steps:** 1. Step 4: Collab EDT-402/1601/201/202 (signals and revisions instead of the per-frame structure diff).
+  - `onWorldReplaced` marks EVERY entity known, local-only ones included. The first pass then sends destroys for this machine's terrain chunks and lights, which receivers ignore. Found by reading the code, not tested. This was there before the step and was left as it is.
+  - A cached net-id miss is only valid for one world: `setWorld` clears it.
+- **Pending:** plan step 5.
+- **Next steps:** 1. Step 5: tables instead of parallel lists (EDT-801, 1208/1209, 703/704, AssetPanelOps/UIPropTable), then Extract Method on the big monoliths.

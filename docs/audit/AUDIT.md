@@ -113,7 +113,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 **Stufe 6 – Editor (viele kleine, voneinander unabhängige PRs)**
 - [x] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug (`docs/audit-editor-2026-10-18.md`)
 - [x] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set (beides erledigt, `docs/audit-editor-2026-10-18.md` Step 2); Row-Clipping-Pass (M12) erledigt (Step 3: EDT-301/302/1503/1802/910 geclippt, 909 ohne Clipper nur allokationsfrei, 1404 Stufe 1; Stufe 2 von 1404 offen)
-- [ ] Collab: EDT-402/1601/201/202 Signale+Revisionen
+- [x] Collab: EDT-402/1601/201/202 Signale+Revisionen (`docs/audit-editor-2026-10-18.md` Step 4: Struktur-Pass per structureEpoch + 1-s-Netz, Net-IDs als Hash-Maps mit Fehltreffer-Cache, LS/GI-Diff per Signal + 250 ms)
 - [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9)
 
 ## 5. Nicht beurteilbar / Messung nötig
