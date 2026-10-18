@@ -1105,6 +1105,7 @@ set(HCGEN_CLASSES
     CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings PlayerSlots
     PullConstruct PullSpawner BindTo
     ExtractDestruct ExtractDerived ExtractListener
+    EngineWorld
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs
