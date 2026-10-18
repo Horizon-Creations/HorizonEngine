@@ -1491,9 +1491,27 @@ void VulkanRenderer::createDevice()
     asEnable.pNext = &rqEnable;
     rqEnable.pNext = &bdaEnable;
 
+    // The one core feature: tessellationShader, for the material Displacement pin
+    // (Thema 207). Optional — without it every displacement material draws
+    // untessellated, exactly as with the pin unconnected. HE_TESSELLATION=0 leaves
+    // it off (GL's switch, the A/B reference on the same binary).
+    VkPhysicalDeviceFeatures coreEnable{};
+    {
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(m_physDevice, &have);
+        const char* tessEnv = std::getenv("HE_TESSELLATION");
+        m_tessSupported = have.tessellationShader == VK_TRUE && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        coreEnable.tessellationShader = m_tessSupported ? VK_TRUE : VK_FALSE;
+        HE_LOG_INFO(RHI, "%s", m_tessSupported
+            ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
+            : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
+              "displacement materials draw untessellated");
+    }
+
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.pNext                   = wantHwRt ? &asEnable : nullptr;
+    dci.pEnabledFeatures        = &coreEnable;
     dci.queueCreateInfoCount    = 1;
     dci.pQueueCreateInfos       = &qci;
     dci.enabledExtensionCount   = static_cast<uint32_t>(devExts.size());
@@ -2775,6 +2793,8 @@ void VulkanRenderer::createMaterialResources()
     //    the plain fragment(), a baked pak blob). ──
     static_assert(HE::vkmat::kStageVertex   == VK_SHADER_STAGE_VERTEX_BIT,   "vkmat stage bits are Vulkan's");
     static_assert(HE::vkmat::kStageFragment == VK_SHADER_STAGE_FRAGMENT_BIT, "vkmat stage bits are Vulkan's");
+    static_assert(HE::vkmat::kStageTessControl == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, "vkmat stage bits are Vulkan's");
+    static_assert(HE::vkmat::kStageTessEval == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, "vkmat stage bits are Vulkan's");
     auto vkType = [](HE::vkmat::DescKind k) -> VkDescriptorType {
         switch (k)
         {
@@ -2822,7 +2842,9 @@ void VulkanRenderer::createMaterialResources()
         b[nb].binding         = HE::vkmat::kBindings[i].binding;
         b[nb].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
         b[nb].descriptorCount = 1;
-        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages;
+        // The tessellation bits only where the device enabled the feature.
+        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages
+                              & (m_tessSupported ? ~0u : ~HE::vkmat::kStageTess);
         ++nb;
     }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
@@ -3069,6 +3091,18 @@ void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
     m_skyEnvValid  = true;
 }
 
+// Displacement pin (Thema 207), OpenGLRenderer::foldDisplacement's rule: the body
+// goes into the shader hash only where it can take effect, so a device without
+// tessellation keeps the unconnected pin's key and pipeline.
+void VulkanRenderer::foldDisplacement(const HE::UUID& materialId, uint64_t& hash)
+{
+    if (!m_tessSupported) return;
+    const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+    if (!ma || ma->customShaderDispGlsl.empty()) return;
+    hash ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+    m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
+}
+
 // `precompiled` (the pak's baked SPIR-V for Vulkan, MaterialShaderLibrary::precompiledFor)
 // wins over the runtime cross-compile — same split as GL's GetOrBuildMaterialProgram and
 // Metal's GetOrBuildMaterialPipeline, and the only source of shaders in a flavour built
@@ -3084,6 +3118,11 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     // handed out as a forward one would write attributes into the lit colour.
     // Cross-compiled only and never the clustered variant: the pak bakes no
     // G-buffer SPIR-V, and its forward variant would write LIT colour into GB0.
+    // Displacement (Thema 207): foldDisplacement filed the body under this very
+    // hash (before the G-buffer salt below), only on a device with tessellation.
+    const std::string* disp = nullptr;
+    if (m_tessSupported)
+        if (auto it = m_tessDispByKey.find(hash); it != m_tessDispByKey.end()) disp = &it->second;
     if (gbuffer)
     {
         if (m_gbufferRP == VK_NULL_HANDLE) return VK_NULL_HANDLE;
@@ -3206,11 +3245,40 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         return VK_NULL_HANDLE;
     }
 
-    VkPipelineShaderStageCreateInfo stages[2]{};
+    // Displacement: the two tessellation stages between the (unchanged) vertex and
+    // fragment stage. Cross-compiled even next to a baked pair (a pak carries no
+    // tessellation stages yet), so without shaderc the material simply draws
+    // untessellated — the fallback, never a missing draw.
+    VkShaderModule tcs = VK_NULL_HANDLE, tes = VK_NULL_HANDLE;
+    if (disp)
+    {
+        const uint64_t dh = std::hash<std::string>{}(*disp);
+        const HE::MaterialShaderLibrary::Compiled& tc = m_matShaderLib.tessControl(dh, *disp, Backend::SpirV);
+        const HE::MaterialShaderLibrary::Compiled& te = m_matShaderLib.tessEval(dh, *disp, Backend::SpirV);
+        if (tc.ok && te.ok && !tc.spirv.empty() && !te.spirv.empty())
+        {
+            tcs = makeModule(tc.spirv);
+            tes = makeModule(te.spirv);
+        }
+        if (!tcs || !tes)
+        {
+            if (tcs) vkDestroyShaderModule(m_device, tcs, nullptr);
+            if (tes) vkDestroyShaderModule(m_device, tes, nullptr);
+            tcs = tes = VK_NULL_HANDLE;
+            HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: displacement stages failed to cross-compile, "
+                "drawing the material untessellated\n") + tc.log + te.log).c_str());
+        }
+    }
+
+    VkPipelineShaderStageCreateInfo stages[4]{};
     stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vs; stages[0].pName = "main";
     stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+    stages[2].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[2].stage  = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;    stages[2].module = tcs; stages[2].pName = "main";
+    stages[3].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[3].stage  = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT; stages[3].module = tes; stages[3].pName = "main";
 
     // Vertex input identical to the scene pipeline (binding 0 = interleaved pos/normal/uv,
     // 32 B; the standard/custom vertex reads attribute locations 0/1/2).
@@ -3228,6 +3296,10 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    // Patches of the mesh's own triangles; the topology is baked into the
+    // pipeline, so the draw loop's vkCmdDrawIndexed stays as it is.
+    VkPipelineTessellationStateCreateInfo ts{ VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+    ts.patchControlPoints = 3;
     VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
     vp.viewportCount = 1; vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
@@ -3289,14 +3361,35 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     pci.renderPass          = rp;
     pci.subpass             = 0;
 
+    // Four stages as one PATCH_LIST pipeline; one the tessellation stages broke is
+    // built again without them (displacement ignored, logged — cached either way).
+    auto setTess = [&](bool on) {
+        pci.stageCount         = on ? 4u : 2u;
+        pci.pTessellationState = on ? &ts : nullptr;
+        ia.topology            = on ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    };
+    setTess(tcs != VK_NULL_HANDLE);
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
+    VkResult pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe);
+    if (pr != VK_SUCCESS && tcs != VK_NULL_HANDLE)
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: material pipeline with tessellation stages failed, "
+            "drawing it untessellated");
+        setTess(false);
+        pipe = VK_NULL_HANDLE;
+        pr = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe);
+    }
+    if (pr != VK_SUCCESS)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material pipeline creation failed");
         pipe = VK_NULL_HANDLE;
     }
+    else if (pci.stageCount == 4u)
+        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: built a tessellated material pipeline (Displacement pin)");
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
+    if (tcs) vkDestroyShaderModule(m_device, tcs, nullptr);
+    if (tes) vkDestroyShaderModule(m_device, tes, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
     return pipe;
 }
@@ -7667,15 +7760,19 @@ void VulkanRenderer::drainMaterialWarmup(bool hdr)
     {
         uint64_t hash = 0; std::string frag, vertBody;
         if (!m_matShaderLib.resolveShaders(*m_contentManager, id, hash, frag, vertBody)) continue;
+        foldDisplacement(id, hash);
         // Deferred (Thema 150): the G-buffer variant too, so the first deferred
         // frame does not hitch on its cross-compile (GL's WarmupMaterials rule).
         // Only for the HDR viewport frame, the one that renders deferred.
         if (hdr && m_deferredReady && m_renderPath == HE::RenderPath::Deferred)
         {
             uint64_t gbHash = 0; std::string gbFrag, gbVert;
-            if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, id, gbHash, gbFrag, gbVert)
-                && GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
-                ++built;
+            if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, id, gbHash, gbFrag, gbVert))
+            {
+                foldDisplacement(id, gbHash);
+                if (GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
+                    ++built;
+            }
         }
         const MaterialAsset* ma = m_contentManager->getMaterial(id);
         const bool transparent = ma && (ma->blendMode == 2
@@ -8254,6 +8351,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                   matHash, matFrag, matVertBody))
                 {
+                    foldDisplacement(dc.materialAssetId, matHash);
                     // Transparent graph materials get a blend-on / depth-write-off
                     // pipeline variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
@@ -8274,8 +8372,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
                         if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                  gbHash, gbFrag, gbVertBody))
+                        {
+                            foldDisplacement(dc.materialAssetId, gbHash);
                             matPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
                                                                  true, false, /*gbuffer=*/true);
+                        }
                         if (matPipe == VK_NULL_HANDLE)
                         {
                             deferredForwardDCs.push_back(&dc);

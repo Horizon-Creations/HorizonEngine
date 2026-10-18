@@ -1019,13 +1019,18 @@ std::string assembleTessControl(const MatTessSettings& t)
 // shell from its OutputPatch). Everything after the prologue is identical text.
 enum class DomainInput { TessEval, HlslKernel };
 
+// `upperLeft`: Vulkan's default tessellation domain origin is the upper left, the
+// mirror of GL's, so the same input winding is `cw` there. Swapping the word costs
+// nothing; chaining a LOWER_LEFT domain origin would need Vulkan 1.1 or
+// VK_KHR_maintenance2, and the renderer may run a 1.0 instance.
 std::string assembleDomain(DomainInput input, const MatTessSettings& t,
-                           const std::string& declarations, const std::string& statements)
+                           const std::string& declarations, const std::string& statements,
+                           bool upperLeft = false)
 {
     const bool eval = (input == DomainInput::TessEval);
     std::string src = "#version 450\n";
     if (eval)
-        src += "layout(triangles, fractional_odd_spacing, ccw) in;\n"
+        src += std::string("layout(triangles, fractional_odd_spacing, ") + (upperLeft ? "cw" : "ccw") + ") in;\n"
                "layout(location = 0) in vec3 tcNormal[];\n"
                "layout(location = 1) in vec3 tcColor[];\n"
                "layout(location = 2) in vec2 tcUV[];\n"
@@ -1220,7 +1225,8 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::tessEval(
         if (out.ok) out.source += "\n" + hlslDomainShell();
     }
     else
-        out = toCompiled(compile(assembleDomain(DomainInput::TessEval, t, decls, stmts),
+        out = toCompiled(compile(assembleDomain(DomainInput::TessEval, t, decls, stmts,
+                                                /*upperLeft=*/backend == Backend::SpirV),
                                  Stage::TessEval, toTarget(backend)));
     return m_tessCache.emplace(key, std::move(out)).first->second;
 }

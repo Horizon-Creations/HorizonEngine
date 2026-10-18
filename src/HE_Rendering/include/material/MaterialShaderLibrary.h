@@ -499,7 +499,8 @@ public:
     // Bindings are the FRAGMENT's: HeLighting 0, U 1, heTex0 2, HeParams 3,
     // heTexP0..3 4..7, heLandscapeWeights 14 — one table serves both stages.
     // GLSL410/GLSL430/SpirV: real tesc/tese (triangles, ccw = the input winding in
-    // GL's lower-left domain; Vulkan must chain a LOWER_LEFT domain origin).
+    // GL's lower-left domain; SpirV says cw, the same winding in Vulkan's default
+    // upper-left domain).
     // HLSL: hand-written shells (SPIRV-Cross has no HLSL tessellation): the control
     // source is an hs_5_0 unit with entry kHlslHullEntry, the eval source the
     // statements as a kernel (compileHlslKernel) plus a ds_5_0 shell with entry

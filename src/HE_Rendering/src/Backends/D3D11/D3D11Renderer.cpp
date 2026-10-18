@@ -1392,7 +1392,26 @@ struct D3D11RendererImpl
         ComPtr<ID3D11VertexShader> vs;
         ComPtr<ID3D11PixelShader>  ps;
         ComPtr<ID3D11InputLayout>  il;
+        // Displacement pin (Thema 207): both set → the draw binds them and draws
+        // 3-control-point patches; null → the plain VS/PS pair (the fallback).
+        ComPtr<ID3D11HullShader>   hs;
+        ComPtr<ID3D11DomainShader> ds;
     };
+    // GL's scheme (OpenGLRenderer::foldDisplacement): with tessellation (feature level
+    // 11_0, HE_TESSELLATION not 0) the material's displacement body is folded into the
+    // shader hash right after resolveShaders and filed under the folded hash, where
+    // GetOrBuildMaterialShaders picks it up. Without it the key stays the unconnected
+    // pin's — same shaders, same draw.
+    bool m_tessSupported = false;
+    std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+    void foldDisplacement(const ContentManager& cm, const HE::UUID& materialId, uint64_t& hash)
+    {
+        if (!m_tessSupported) return;
+        const MaterialAsset* ma = cm.getMaterial(materialId);
+        if (!ma || ma->customShaderDispGlsl.empty()) return;
+        hash ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+        m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
+    }
     std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = shader hash (opaque + blended share one entry)
     ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (full Lighting struct) — b0 PS / b8 WPO VS, filled once/frame
     ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
@@ -4636,6 +4655,41 @@ struct D3D11RendererImpl
         m_skyEnvValid  = true;
     }
 
+    // Displacement (Thema 207): the hull + domain shells for one body, FXC hs_5_0 /
+    // ds_5_0. Cross-compiled even next to a baked pair (a pak carries no
+    // tessellation stages yet), so without shaderc the material draws untessellated.
+    // Any failure leaves both null and logs once per shader set — the fallback,
+    // never a missing draw.
+    void buildTessStages(const std::string& disp, UINT cflags, MatShaders& sh)
+    {
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const uint64_t dh = std::hash<std::string>{}(disp);
+        const HE::MaterialShaderLibrary::Compiled& hc = m_matShaderLib.tessControl(dh, disp, Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& dc = m_matShaderLib.tessEval(dh, disp, Backend::HLSL);
+        std::string why = hc.log + dc.log;
+        ComPtr<ID3DBlob> hsb, dsb, err;
+        if (hc.ok && dc.ok)
+        {
+            if (FAILED(D3DCompile(hc.source.c_str(), hc.source.size(), "matHS", nullptr, nullptr,
+                                  HE::MaterialShaderLibrary::kHlslHullEntry, "hs_5_0", cflags, 0, &hsb, &err)))
+                why += std::string("hs_5_0: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "");
+            else if (FAILED(D3DCompile(dc.source.c_str(), dc.source.size(), "matDS", nullptr, nullptr,
+                                       HE::MaterialShaderLibrary::kHlslDomainEntry, "ds_5_0", cflags, 0, &dsb, &err)))
+                why += std::string("ds_5_0: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "");
+            else if (FAILED(device->CreateHullShader(hsb->GetBufferPointer(), hsb->GetBufferSize(), nullptr, &sh.hs))
+                  || FAILED(device->CreateDomainShader(dsb->GetBufferPointer(), dsb->GetBufferSize(), nullptr, &sh.ds)))
+                why += "shader-object creation failed";
+        }
+        if (sh.hs && sh.ds)
+        {
+            HE_LOG_INFO(RHI, "%s", "D3D11Renderer: built a tessellated material shader set (Displacement pin)");
+            return;
+        }
+        sh.hs.Reset(); sh.ds.Reset();
+        HE_LOG_WARN(RHI, "%s", ("D3D11Renderer: displacement stages failed, drawing the material "
+                                "untessellated\n" + why).c_str());
+    }
+
     // Build (or fetch from cache) the per-material VS + PS + input layout from the
     // MaterialShaderLibrary HLSL. Cached by the shader hash ALONE: D3D11 shader objects
     // bake neither blend nor depth state (the enclosing pass binds those), so the opaque
@@ -4661,6 +4715,10 @@ struct D3D11RendererImpl
                                           bool transparent, bool gbuffer = false)
     {
         (void)transparent; // blend/depth are pass state on D3D11, not shader state
+        // Displacement: foldDisplacement filed the body under this hash (before the salt).
+        const std::string* disp = nullptr;
+        if (m_tessSupported)
+            if (auto it = m_tessDispByKey.find(hash); it != m_tessDispByKey.end()) disp = &it->second;
         if (gbuffer) precompiled = nullptr;
         const uint64_t key = gbuffer ? (hash ^ 0x6742756666657231ULL) : hash;
         if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
@@ -4785,6 +4843,7 @@ struct D3D11RendererImpl
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
+        if (disp) buildTessStages(*disp, cflags, sh);
         return &m_materialShaders.emplace(key, std::move(sh)).first->second;
     }
 
@@ -5316,12 +5375,16 @@ struct D3D11RendererImpl
         {
             uint64_t hash = 0; std::string frag, vertBody;
             if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            foldDisplacement(*cm, id, hash);
             if (deferred && deferredReady)
             {
                 uint64_t gbHash = 0; std::string gbFrag, gbVert;
-                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert)
-                    && GetOrBuildMaterialShaders(gbHash, gbFrag, gbVert, nullptr, false, /*gbuffer=*/true))
-                    ++built;
+                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert))
+                {
+                    foldDisplacement(*cm, id, gbHash);
+                    if (GetOrBuildMaterialShaders(gbHash, gbFrag, gbVert, nullptr, false, /*gbuffer=*/true))
+                        ++built;
+                }
             }
             if (m_materialShaders.count(hash)) continue; // already warm (or a cached miss)
             const MaterialShaderVariant* pre =
@@ -6073,6 +6136,16 @@ void D3D11Renderer::Initialize(HE::Window* window)
         &m_impl->device, &fl, &m_impl->context);
     if (FAILED(hr))
         throw std::runtime_error("D3D11Renderer: D3D11CreateDeviceAndSwapChain failed");
+    // Hull/domain shaders are a feature level 11_0 feature: the Displacement pin
+    // (Thema 207) tessellates from there on; HE_TESSELLATION=0 is GL's A/B switch.
+    {
+        const char* tessEnv = std::getenv("HE_TESSELLATION");
+        m_impl->m_tessSupported = fl >= D3D_FEATURE_LEVEL_11_0 && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        HE_LOG_INFO(RHI, "%s", m_impl->m_tessSupported
+            ? "D3D11Renderer: tessellation available (material Displacement pin)"
+            : "D3D11Renderer: no tessellation (feature level below 11_0 or HE_TESSELLATION=0), "
+              "displacement materials draw untessellated");
+    }
 
     m_impl->createRTV();
     m_impl->createDepth(m_impl->width, m_impl->height);
@@ -7009,6 +7082,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody))
                 {
+                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
                     // Transparent graph materials get a blend-on / depth-write-off
                     // shader variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
@@ -7029,8 +7103,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                         uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
                         if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                    gbHash, gbFrag, gbVertBody))
+                        {
+                            p.foldDisplacement(*m_contentManager, dc.materialAssetId, gbHash);
                             sh = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
                                                              false, /*gbuffer=*/true);
+                        }
                         if (!(sh && sh->vs && sh->ps && sh->il))
                         {
                             deferredForwardDCs.push_back(&dc);
@@ -7159,6 +7236,32 @@ void D3D11Renderer::DrawScene(int width, int height)
                         HE::d3d11mat::BindSkyEnvAndAO(ctx,
                             p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
                             aoSRV, p.m_matWeightSampler.Get());
+                        // Displacement (Thema 207): hull + domain between the VS and the
+                        // PS, 3-control-point patches. The domain stage runs the graph's
+                        // height statements on the PIXEL stage's registers (b0 HeLighting,
+                        // b1 U, b3 HeParams, t2/t4..t7/t14, s0/s2/s4..s7 —
+                        // MaterialShaderLibrary::tessEval), so it gets the same objects;
+                        // the hull reads only camPos from b0. U and HeParams are DISCARD-
+                        // mapped per instance below, the buffer objects stay the same.
+                        // Unbound again with the rest of the material state below.
+                        const bool matTess = sh->hs && sh->ds;
+                        if (matTess)
+                        {
+                            ctx->HSSetShader(sh->hs.Get(), nullptr, 0);
+                            ctx->DSSetShader(sh->ds.Get(), nullptr, 0);
+                            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+                            ctx->HSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+                            ctx->DSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+                            ctx->DSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());
+                            ctx->DSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf());
+                            ctx->DSSetShaderResources(2, 1, &heTex0);
+                            ctx->DSSetShaderResources(4, 4, heTexP);
+                            ctx->DSSetShaderResources(14, 1, &heWeights);
+                            ID3D11SamplerState* wSamp = p.m_matWeightSampler.Get();
+                            ctx->DSSetSamplers(0, 1, &wSamp);
+                            ctx->DSSetSamplers(2, 1, &matSamp);
+                            ctx->DSSetSamplers(4, 4, matSamp4);
+                        }
 
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
@@ -7219,6 +7322,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // cluster lights, AO point sampler and shadow sampler come back.
                         // And t15/t16: the sky cube comes off, the forward SSR result
                         // (uSSRFwd) goes back on t16.
+                        if (matTess)
+                        {
+                            ctx->HSSetShader(nullptr, nullptr, 0);
+                            ctx->DSSetShader(nullptr, nullptr, 0);
+                            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        }
                         HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
                         HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
                         {
@@ -8557,6 +8666,11 @@ void D3D11Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
     if (!m_impl) return;
     for (const HE::UUID& id : materialIds)
         if (id != HE::UUID{}) m_impl->pendingMatWarmup.push_back(id);
+}
+
+bool D3D11Renderer::SupportsTessellation() const
+{
+    return m_impl && m_impl->m_tessSupported;
 }
 
 void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)

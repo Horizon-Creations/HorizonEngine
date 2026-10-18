@@ -34,6 +34,12 @@
 // at all, so the renderer then builds it WITHOUT this one row (landscapeWeightsFit)
 // and draws a layer-blend material through the built-in path instead: losing
 // the paint there beats losing every graph material.
+//
+// Displacement (Thema 207): MaterialShaderLibrary::tessControl/tessEval (SpirV)
+// read the FRAGMENT's bindings — HeLighting 0 (both stages), U 1, heTex0 2,
+// HeParams 3, heTexP0..3 4..7, heLandscapeWeights 14 (evaluation). Those rows
+// carry the two tessellation bits; the renderer masks them out again on a device
+// without the tessellationShader feature.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <cstdint>
 
@@ -43,6 +49,9 @@ enum class DescKind : uint8_t { UniformBuffer, CombinedImageSampler, StorageBuff
 
 constexpr uint32_t kStageVertex   = 0x01; // VK_SHADER_STAGE_VERTEX_BIT
 constexpr uint32_t kStageFragment = 0x10; // VK_SHADER_STAGE_FRAGMENT_BIT
+constexpr uint32_t kStageTessControl = 0x02; // VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+constexpr uint32_t kStageTessEval    = 0x04; // VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+constexpr uint32_t kStageTess        = kStageTessControl | kStageTessEval;
 
 struct Binding
 {
@@ -57,14 +66,14 @@ constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]
 constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
 
 inline constexpr Binding kBindings[] = {
-	{  0, DescKind::UniformBuffer,        kStageFragment }, // HeLighting
-	{  1, DescKind::UniformBuffer,        kStageVertex   }, // U (per object)
-	{  2, DescKind::CombinedImageSampler, kStageFragment }, // heTex0
-	{  3, DescKind::UniformBuffer,        kStageFragment }, // HeParams
-	{  4, DescKind::CombinedImageSampler, kStageFragment }, // heTexP0
-	{  5, DescKind::CombinedImageSampler, kStageFragment }, // heTexP1
-	{  6, DescKind::CombinedImageSampler, kStageFragment }, // heTexP2
-	{  7, DescKind::CombinedImageSampler, kStageFragment }, // heTexP3
+	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
+	{  1, DescKind::UniformBuffer,        kStageVertex   | kStageTess }, // U (per object)
+	{  2, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTex0
+	{  3, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeParams
+	{  4, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP0
+	{  5, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP1
+	{  6, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP2
+	{  7, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP3
 	// 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the
 	// VERTEX stage at those slots (MaterialShaderLibrary.cpp wpoDeclarations).
 	// Harmless for the standard vertex, which references neither.
@@ -83,7 +92,7 @@ inline constexpr Binding kBindings[] = {
 	// heLandscapeWeights: only a Landscape Layer Blend graph declares it, but
 	// that SPIR-V uses it statically; without the row lavapipe crashes in the
 	// draw (Thema 143). Bound per DRAW from the terrain's weightmap.
-	{ kLandscapeWeightsBinding, DescKind::CombinedImageSampler, kStageFragment }, // heLandscapeWeights
+	{ kLandscapeWeightsBinding, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heLandscapeWeights
 	// The rest of the preamble's fixed samplers (Thema 120). Its SPIR-V uses
 	// all of them statically, so the layout declares them even where the gate
 	// never opens on this backend (a pipeline whose shader uses a binding its

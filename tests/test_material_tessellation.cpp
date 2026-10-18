@@ -9,6 +9,26 @@
 #include <MaterialGraph/MaterialGraph.h>
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include <material/MaterialShaderLibrary.h>
+#include <Backends/Vulkan/VulkanMaterialLayout.h> // the renderer's material set 0
+#include <spirv_cross.hpp>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <d3dcompiler.h>
+#include <d3d11.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
+#include <Backends/D3D12/D3D12MaterialRootSignature.h>
+#endif
 #endif
 #include <cstdlib>
 #include <filesystem>
@@ -430,4 +450,361 @@ TEST_CASE("GL tessellation stages declare the fragment's HeLighting block")
 		std::ofstream(fs::path(dir) / "material.ds.hlsl", std::ios::binary) << ds.source;
 	}
 }
+
+// ── Step 4: what the Vulkan / D3D11 / D3D12 renderers build from the stages ──
+
+namespace
+{
+// Statically used set/binding/kind of one SPIR-V stage (kind = HE::vkmat::DescKind,
+// -1 for a kind the material set never has).
+struct TessVkUse { uint32_t set, binding; int kind; };
+std::vector<TessVkUse> activeTessDescriptors(const std::vector<uint32_t>& spirv)
+{
+	std::vector<TessVkUse> out;
+	spirv_cross::Compiler comp(spirv);
+	const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
+	auto add = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, int kind) {
+		for (const spirv_cross::Resource& res : list)
+			out.push_back({ comp.get_decoration(res.id, spv::DecorationDescriptorSet),
+			                comp.get_decoration(res.id, spv::DecorationBinding), kind });
+	};
+	using K = HE::vkmat::DescKind;
+	add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
+	add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
+	add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
+	add(r.separate_images, -1);
+	add(r.separate_samplers, -1);
+	return out;
+}
+
+// The uses no row of the material table serves for `stage` (same set 0, binding,
+// kind, and the stage bit; `strip` masks bits off every row first) — empty when all bind.
+std::string uncoveredForStage(const std::vector<TessVkUse>& uses, uint32_t stage, uint32_t strip = 0)
+{
+	std::string miss;
+	for (const TessVkUse& u : uses)
+	{
+		bool ok = false;
+		for (const HE::vkmat::Binding& b : HE::vkmat::kBindings)
+			ok = ok || (u.set == 0 && b.binding == u.binding && static_cast<int>(b.kind) == u.kind
+			            && ((b.stages & ~strip) & stage));
+		if (!ok) miss += " " + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+	}
+	return miss;
+}
+} // namespace
+
+TEST_CASE("Vulkan: the tessellation stages bind only set 0 rows that carry their stage bit")
+{
+	// VulkanRenderer builds m_matSetLayout from HE::vkmat::kBindings; a tessellation
+	// stage that statically uses a binding whose row lacks its stage bit makes the
+	// four-stage pipeline invalid. CI has no Vulkan device, so the reflection is the
+	// witness, with the pre-Thema-207 table (tess bits stripped) as negative control.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	bool sawTexture = false;
+	for (const auto& [name, g] : displacementCases())
+	{
+		CAPTURE(name);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		const uint64_t h = std::hash<std::string>{}(gen.displacementBody);
+		const auto& tc = lib.tessControl(h, gen.displacementBody, B::SpirV);
+		const auto& te = lib.tessEval(h, gen.displacementBody, B::SpirV);
+		REQUIRE_MESSAGE(tc.ok, tc.log);
+		REQUIRE_MESSAGE(te.ok, te.log);
+		const std::vector<TessVkUse> uc = activeTessDescriptors(tc.spirv);
+		const std::vector<TessVkUse> ue = activeTessDescriptors(te.spirv);
+		CHECK_FALSE(uc.empty()); // camPos: HeLighting
+		CHECK_FALSE(ue.empty()); // U at least
+		CHECK_MESSAGE(uncoveredForStage(uc, HE::vkmat::kStageTessControl).empty(),
+		              "control stage uncovered:", uncoveredForStage(uc, HE::vkmat::kStageTessControl));
+		CHECK_MESSAGE(uncoveredForStage(ue, HE::vkmat::kStageTessEval).empty(),
+		              "evaluation stage uncovered:", uncoveredForStage(ue, HE::vkmat::kStageTessEval));
+		CHECK_FALSE(uncoveredForStage(ue, HE::vkmat::kStageTessEval, HE::vkmat::kStageTess).empty());
+		for (const TessVkUse& u : ue)
+			sawTexture = sawTexture || u.kind == static_cast<int>(HE::vkmat::DescKind::CombinedImageSampler);
+
+		// Vulkan's default domain origin is upper left: the input winding is `cw` there
+		// (GL's `ccw`, the test above).
+		spirv_cross::Compiler comp(te.spirv);
+		CHECK(comp.get_execution_mode_bitset().get(spv::ExecutionModeVertexOrderCw));
+		CHECK_FALSE(comp.get_execution_mode_bitset().get(spv::ExecutionModeVertexOrderCcw));
+	}
+	CHECK(sawTexture); // the texture case really samples in the evaluation stage
+}
+
+#if defined(_WIN32)
+namespace
+{
+using Microsoft::WRL::ComPtr;
+
+ComPtr<ID3DBlob> tessFxc(const std::string& src, const char* entry, const char* profile, std::string& err)
+{
+	ComPtr<ID3DBlob> code, msg;
+	err.clear();
+	if (FAILED(D3DCompile(src.c_str(), src.size(), "tess", nullptr, nullptr, entry, profile, 0, 0, &code, &msg)))
+	{
+		err = msg ? std::string(static_cast<const char*>(msg->GetBufferPointer()), msg->GetBufferSize()) : "?";
+		code.Reset();
+	}
+	return code;
+}
+
+const D3D12_INPUT_ELEMENT_DESC kTessIl12[] = {
+	{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+};
+const D3D11_INPUT_ELEMENT_DESC kTessIl11[] = {
+	{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+};
+} // namespace
+
+TEST_CASE("D3D12 on WARP: hull + domain shells pass FXC and build the four-stage material PSO")
+{
+	// What D3D12Renderer::GetOrBuildMaterialPSO builds for a Displacement material:
+	// VS (standard) → HS → DS → PS (the material fragment), PATCH topology, against
+	// the material root signature. PSO creation holds every stage's registers against
+	// the signature AND the stages' signatures against each other, so a mismatch in
+	// the hand-written control point (HeTessCP) shows here, not first on a GPU.
+	using LB = HE::MaterialShaderLibrary::Backend;
+	namespace m12 = HE::d3d12mat;
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	REQUIRE(tessFxc("float4 main() : SV_Position { return nonsense; }", "main", "ds_5_0", err).Get() == nullptr);
+
+	ComPtr<IDXGIFactory4> factory;
+	ComPtr<IDXGIAdapter> warp;
+	ComPtr<ID3D12Device> dev;
+	REQUIRE(SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))));
+	REQUIRE(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))));
+	REQUIRE(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))));
+	auto rootSig = [&](const m12::MaterialRootSignature& d) {
+		ComPtr<ID3DBlob> sig, e;
+		ComPtr<ID3D12RootSignature> rs;
+		if (SUCCEEDED(D3D12SerializeRootSignature(&d.desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)))
+			dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&rs));
+		return rs;
+	};
+	m12::MaterialRootSignature full, pixelOnly;
+	m12::DescribeMaterialRootSignature(full);
+	m12::DescribeMaterialRootSignature(pixelOnly, m12::kRangeCount, m12::kSamplerCount, m12::kParamCount,
+	                                   D3D12_SHADER_VISIBILITY_PIXEL);
+	ComPtr<ID3D12RootSignature> fullRs = rootSig(full), pixelRs = rootSig(pixelOnly);
+	REQUIRE(fullRs.Get() != nullptr);
+	REQUIRE(pixelRs.Get() != nullptr);
+
+	ComPtr<ID3DBlob> vs = tessFxc(lib.standardVertex(LB::HLSL).source, "main", "vs_5_0", err);
+	REQUIRE_MESSAGE(vs.Get() != nullptr, "standard vertex: ", err);
+
+	bool texturePixelOnlyRefused = false;
+	for (const auto& [name, g] : displacementCases())
+	{
+		CAPTURE(name);
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		const uint64_t h = std::hash<std::string>{}(gen.displacementBody);
+		const auto& hc = lib.tessControl(h, gen.displacementBody, LB::HLSL);
+		const auto& dc = lib.tessEval(h, gen.displacementBody, LB::HLSL);
+		REQUIRE_MESSAGE(hc.ok, hc.log);
+		REQUIRE_MESSAGE(dc.ok, dc.log);
+		ComPtr<ID3DBlob> hs = tessFxc(hc.source, HE::MaterialShaderLibrary::kHlslHullEntry, "hs_5_0", err);
+		REQUIRE_MESSAGE(hs.Get() != nullptr, "hs_5_0: ", err);
+		ComPtr<ID3DBlob> ds = tessFxc(dc.source, HE::MaterialShaderLibrary::kHlslDomainEntry, "ds_5_0", err);
+		REQUIRE_MESSAGE(ds.Get() != nullptr, "ds_5_0: ", err);
+		const auto& fc = lib.fragment(std::hash<std::string>{}(gen.glsl), gen.glsl, LB::HLSL);
+		REQUIRE_MESSAGE(fc.ok, fc.log);
+		ComPtr<ID3DBlob> ps = tessFxc(fc.source, "main", "ps_5_0", err);
+		REQUIRE_MESSAGE(ps.Get() != nullptr, "ps_5_0: ", err);
+
+		auto pso = [&](ID3D12RootSignature* rs, bool withTess, D3D12_PRIMITIVE_TOPOLOGY_TYPE topo) -> HRESULT {
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+			pd.pRootSignature = rs;
+			pd.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+			if (withTess)
+			{
+				pd.HS = { hs->GetBufferPointer(), hs->GetBufferSize() };
+				pd.DS = { ds->GetBufferPointer(), ds->GetBufferSize() };
+			}
+			pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+			pd.InputLayout           = { kTessIl12, 3 };
+			pd.PrimitiveTopologyType = topo;
+			pd.NumRenderTargets      = 1;
+			pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+			pd.SampleDesc.Count      = 1;
+			pd.SampleMask            = UINT_MAX;
+			pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+			pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+			pd.RasterizerState.DepthClipEnable = TRUE;
+			pd.DepthStencilState.DepthEnable    = TRUE;
+			pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+			pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+			pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			ComPtr<ID3D12PipelineState> p;
+			return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p));
+		};
+		CHECK_MESSAGE(SUCCEEDED(pso(fullRs.Get(), true, D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)),
+		              "four-stage material PSO refused on WARP");
+		CHECK(SUCCEEDED(pso(fullRs.Get(), false, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE))); // the fallback
+		// Negative control: the device does judge the stages (HS/DS need PATCH).
+		CHECK(FAILED(pso(fullRs.Get(), true, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)));
+		// The pre-Thema-207 signature hid the SRV table from the domain shader.
+		if (gen.displacementBody.find("textureLod") != std::string::npos)
+			texturePixelOnlyRefused = texturePixelOnlyRefused
+			                       || FAILED(pso(pixelRs.Get(), true, D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH));
+	}
+	CHECK(texturePixelOnlyRefused);
+
+	// D3D11 creates the same bytecode as hull/domain shader objects (WARP).
+	ComPtr<ID3D11Device> d11;
+	REQUIRE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+	                                    D3D11_SDK_VERSION, &d11, nullptr, nullptr)));
+	const HE::MatShaderGen gen = HE::generateFragment(displacementCases()[1].second); // texture
+	const uint64_t h = std::hash<std::string>{}(gen.displacementBody);
+	ComPtr<ID3DBlob> hs = tessFxc(lib.tessControl(h, gen.displacementBody, LB::HLSL).source,
+	                              HE::MaterialShaderLibrary::kHlslHullEntry, "hs_5_0", err);
+	ComPtr<ID3DBlob> ds = tessFxc(lib.tessEval(h, gen.displacementBody, LB::HLSL).source,
+	                              HE::MaterialShaderLibrary::kHlslDomainEntry, "ds_5_0", err);
+	REQUIRE(hs.Get() != nullptr);
+	REQUIRE(ds.Get() != nullptr);
+	ComPtr<ID3D11HullShader> h11;
+	ComPtr<ID3D11DomainShader> d11s;
+	CHECK(SUCCEEDED(d11->CreateHullShader(hs->GetBufferPointer(), hs->GetBufferSize(), nullptr, &h11)));
+	CHECK(SUCCEEDED(d11->CreateDomainShader(ds->GetBufferPointer(), ds->GetBufferSize(), nullptr, &d11s)));
+}
+
+TEST_CASE("D3D11 on WARP: a constant height moves the tessellated triangle along its normal")
+{
+	// The draw D3D11Renderer issues for a Displacement material, minus the lighting:
+	// standard VS → hull → domain on 3-control-point patches, U at b1 for the VS and
+	// the DS. One triangle in the NDC square (identity mvp/model) whose normals all
+	// point along +x: the domain stage must move it right by the height in NDC, and
+	// clamp the height to maxDisplacement (0.1, the default). Coverage is read from
+	// the depth buffer (no pixel shader: the triangle's x extent is the witness).
+	using LB = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3D11Device> dev;
+	ComPtr<ID3D11DeviceContext> ctx;
+	D3D_FEATURE_LEVEL fl{};
+	REQUIRE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+	                                    D3D11_SDK_VERSION, &dev, &fl, &ctx)));
+	REQUIRE(fl >= D3D_FEATURE_LEVEL_11_0);
+
+	ComPtr<ID3DBlob> vsb = tessFxc(lib.standardVertex(LB::HLSL).source, "main", "vs_5_0", err);
+	REQUIRE_MESSAGE(vsb.Get() != nullptr, err);
+	ComPtr<ID3D11VertexShader> vs;
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &vs)));
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(kTessIl11, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &il)));
+
+	// pos, normal (+x), uv — the material vertex layout (32 B).
+	const float verts[] = {
+		-0.5f, -0.5f, 0.5f,  1.0f, 0.0f, 0.0f,  0.0f, 0.0f,
+		 0.0f,  0.5f, 0.5f,  1.0f, 0.0f, 0.0f,  0.5f, 1.0f,
+		 0.5f, -0.5f, 0.5f,  1.0f, 0.0f, 0.0f,  1.0f, 0.0f,
+	};
+	ComPtr<ID3D11Buffer> vb, ucb, zeroCb;
+	{
+		D3D11_BUFFER_DESC bd{ sizeof(verts), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+		D3D11_SUBRESOURCE_DATA sd{ verts, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &sd, &vb)));
+		float u[44] = {}; // std140 U: mvp, model, color, flags, pbr (176 B)
+		for (int i = 0; i < 4; ++i) { u[i * 5] = 1.0f; u[16 + i * 5] = 1.0f; }
+		D3D11_BUFFER_DESC cd{ sizeof(u), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+		D3D11_SUBRESOURCE_DATA cs{ u, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&cd, &cs, &ucb)));
+		std::vector<float> zeros(1024, 0.0f); // HeLighting / HeParams: all zero
+		D3D11_BUFFER_DESC zd{ static_cast<UINT>(zeros.size() * sizeof(float)), D3D11_USAGE_DEFAULT,
+		                      D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+		D3D11_SUBRESOURCE_DATA zs{ zeros.data(), 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&zd, &zs, &zeroCb)));
+	}
+	constexpr UINT kSize = 64;
+	ComPtr<ID3D11Texture2D> depth, staging;
+	ComPtr<ID3D11DepthStencilView> dsv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = kSize; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_D32_FLOAT; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &depth)));
+		REQUIRE(SUCCEEDED(dev->CreateDepthStencilView(depth.Get(), nullptr, &dsv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+	ComPtr<ID3D11RasterizerState> rast;
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rast)));
+	}
+
+	// Mean x (pixels) of the covered depth texels after one draw; < 0 = nothing drawn.
+	auto centroidX = [&](ID3D11HullShader* hs, ID3D11DomainShader* ds) -> double {
+		ctx->ClearState();
+		ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		ctx->OMSetRenderTargets(0, nullptr, dsv.Get());
+		D3D11_VIEWPORT vp{ 0.0f, 0.0f, float(kSize), float(kSize), 0.0f, 1.0f };
+		ctx->RSSetViewports(1, &vp);
+		ctx->RSSetState(rast.Get());
+		const UINT stride = 32, offset = 0;
+		ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+		ctx->IASetInputLayout(il.Get());
+		ctx->IASetPrimitiveTopology(hs ? D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
+		                               : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		ctx->VSSetShader(vs.Get(), nullptr, 0);
+		ctx->VSSetConstantBuffers(1, 1, ucb.GetAddressOf());
+		ctx->HSSetShader(hs, nullptr, 0);
+		ctx->DSSetShader(ds, nullptr, 0);
+		ctx->HSSetConstantBuffers(0, 1, zeroCb.GetAddressOf());
+		ctx->DSSetConstantBuffers(0, 1, zeroCb.GetAddressOf());
+		ctx->DSSetConstantBuffers(1, 1, ucb.GetAddressOf());
+		ctx->DSSetConstantBuffers(3, 1, zeroCb.GetAddressOf());
+		ctx->PSSetShader(nullptr, nullptr, 0);
+		ctx->Draw(3, 0);
+		ctx->CopyResource(staging.Get(), depth.Get());
+		D3D11_MAPPED_SUBRESOURCE m{};
+		if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) return -2.0;
+		double sum = 0.0; size_t n = 0;
+		for (UINT y = 0; y < kSize; ++y)
+		{
+			const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(m.pData) + y * m.RowPitch);
+			for (UINT x = 0; x < kSize; ++x)
+				if (row[x] < 0.75f) { sum += x + 0.5; ++n; }
+		}
+		ctx->Unmap(staging.Get(), 0);
+		return n ? sum / double(n) : -1.0;
+	};
+
+	const double base = centroidX(nullptr, nullptr);
+	REQUIRE(base > 0.0);
+	CHECK(base == doctest::Approx(kSize / 2.0).epsilon(0.02));
+	// Pixels per NDC unit along x: the viewport spans 2 units.
+	const double pxPerNdc = kSize / 2.0;
+	for (const float height : { 0.0f, 0.08f, 0.3f })
+	{
+		CAPTURE(height);
+		const HE::MatShaderGen gen = HE::generateFragment(withConstDisplacement(height));
+		const uint64_t h = std::hash<std::string>{}(gen.displacementBody);
+		ComPtr<ID3DBlob> hsb = tessFxc(lib.tessControl(h, gen.displacementBody, LB::HLSL).source,
+		                               HE::MaterialShaderLibrary::kHlslHullEntry, "hs_5_0", err);
+		REQUIRE_MESSAGE(hsb.Get() != nullptr, err);
+		ComPtr<ID3DBlob> dsb = tessFxc(lib.tessEval(h, gen.displacementBody, LB::HLSL).source,
+		                               HE::MaterialShaderLibrary::kHlslDomainEntry, "ds_5_0", err);
+		REQUIRE_MESSAGE(dsb.Get() != nullptr, err);
+		ComPtr<ID3D11HullShader> hs;
+		ComPtr<ID3D11DomainShader> ds;
+		REQUIRE(SUCCEEDED(dev->CreateHullShader(hsb->GetBufferPointer(), hsb->GetBufferSize(), nullptr, &hs)));
+		REQUIRE(SUCCEEDED(dev->CreateDomainShader(dsb->GetBufferPointer(), dsb->GetBufferSize(), nullptr, &ds)));
+		const double moved = centroidX(hs.Get(), ds.Get());
+		REQUIRE(moved > 0.0);
+		const double expected = std::min(height, HE::MatTessSettings{}.maxDisplacement) * pxPerNdc;
+		CHECK_MESSAGE(std::abs((moved - base) - expected) < 0.35,
+		              "moved ", moved - base, " px, expected ", expected, " px");
+	}
+}
+#endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC
