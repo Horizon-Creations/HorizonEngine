@@ -70,11 +70,57 @@ std::string writeBuildConfigFromExport(const std::filesystem::path& dataDir,
 std::filesystem::path exportDataDir(const std::filesystem::path& exportedExe);
 std::filesystem::path exportEngineDir(const std::filesystem::path& exportedExe);
 
+// The lib set an export profile builds against: Development (devTools on) the
+// dev set, Shipping (devTools off) the release set without any dev code.
+inline const char* sdkProfileFor(bool devTools) { return devTools ? "dev" : "release"; }
+
 // The cmake run: the SDK's template as source, <workDir>/build as build dir,
 // the header compiled in, the executable named like the runtime's (HorizonGame;
-// installBuiltGame copies it over the export's, whatever that is called).
+// installBuiltGame copies it over the export's, whatever that is called), linked
+// with the relative rpath only (HE_GAME_PORTABLE), so no path of this machine's
+// SDK ships in the game.
 HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem::path& workDir,
                                        const std::filesystem::path& header);
+
+// ── Build cache (topic 211 step 11) ─────────────────────────────────────────
+// A project + profile keeps its work dir, and in it the cmake build tree, across
+// exports: the next export compiles only what changed (the compiled-in header's
+// one source file and the link, a few seconds) instead of configuring and
+// compiling the game afresh (~45 s). A tree is reused only while everything it
+// was configured from is unchanged; that is the key, one "name=value" line per
+// input:
+//   sdk        the SDK root
+//   version    the package version (HorizonEngineConfigVersion.cmake)
+//   headers    the header stamp of the lib set (HorizonEngineHeaders-<profile>.txt)
+//   libs       SHA-256 over name, size and time of every file in the lib set
+//   profile    dev | release
+//   toolchain  cmake version and compiler (the editor's toolchain probe)
+//   define     every -D of the build (game name, profile, rpath, header path)
+// The export's settings reach the game only through those defines and the
+// compiled-in header, whose content the build tool tracks itself.
+//
+// Work dirs: <cacheRoot>/<project>-<profile>, cacheRoot = <user data>/SdkGameBuilds
+// (beside the EngineContentCache; private to the user, like the key in the header).
+std::filesystem::path buildWorkDir(const std::filesystem::path& cacheRoot,
+                                   const std::string& project, const std::string& profile);
+
+std::string buildCacheKey(const GameSdk& sdk, const HE::hccg::DylibBuildSpec& spec,
+                          const std::string& toolchain);
+
+struct CacheCheck
+{
+    bool        hit = false;   // the tree of the same key is there and is reused
+    std::string changed;       // on a miss: the first input that differs, or why there is no tree
+};
+// Compares `key` with <workDir>/cache-key.txt. On a miss the old build tree goes
+// (a CMakeCache pinned to another compiler or SDK fails the configure or links
+// the wrong set) and `key` is written for the build that follows.
+CacheCheck prepareBuildCache(const std::filesystem::path& workDir, const std::string& key);
+
+// After a failed build: the key goes, so the next export starts from a fresh
+// tree instead of the one a broken configure left behind. (A cancelled build
+// keeps it: what it compiled is valid for the same key.)
+void forgetBuildCache(const std::filesystem::path& workDir);
 
 // Swaps the built game in: `builtExe` over `exportedExe`, plus every engine
 // library of the SDK's lib set (lib/<profile>/*.dylib|*.so*, bin/<profile>/*.dll) into

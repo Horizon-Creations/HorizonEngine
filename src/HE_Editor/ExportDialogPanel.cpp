@@ -418,6 +418,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportAppBundle    = p.appBundle;
 	s_exportCompileHC    = p.compileHorizonCode;
 	s_exportHcStop       = p.hcStopOnFailure;
+	s_exportSdkGame      = p.compileGameFromSdk;
 	s_exportTextureFormat  = p.textureFormat;
 	s_exportTextureQuality = p.textureQuality;
 	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
@@ -467,6 +468,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.shaderBackends   = s_exportShaderBackends;
 	p.compileHorizonCode = s_exportCompileHC;
 	p.hcStopOnFailure    = s_exportHcStop;
+	p.compileGameFromSdk = s_exportSdkGame;
 	p.textureFormat      = s_exportTextureFormat;
 	p.textureQuality     = s_exportTextureQuality;
 }
@@ -554,7 +556,7 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 // returned text is appended to the result line.
 static std::string compileGameFromSdk(const ExportResult& res, const std::filesystem::path& editorBase,
                                       const std::string& profile, bool cmakeOk, bool compilerOk,
-                                      const std::string& projName, int step)
+                                      const std::string& toolchain, const std::string& projName, int step)
 {
 	namespace fs = std::filesystem;
 	Build::stepBegin(step);
@@ -575,21 +577,36 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	Build::log(0, "Engine SDK (" + profile + "): " + sdk.root.string(), step);
 
 	// The header holds the pak key: it goes to a private work dir, never into the
-	// export folder. The work dir is kept, so the next export builds incrementally.
+	// export folder. The work dir is the build cache: kept per project and
+	// profile, reused while its key (SDK, profile, toolchain, defines) holds.
 	const fs::path exe = res.executablePath;
 	const fs::path dataDir = HE::ExportSdk::exportDataDir(exe);
 	std::error_code ec;
-	const fs::path workDir = fs::temp_directory_path(ec) / "HorizonSdkGame" / (projName + "-" + profile);
+	fs::path cacheRoot = GlobalState::userDataDir();
+	cacheRoot = cacheRoot.empty() ? fs::temp_directory_path(ec) / "HorizonSdkGame"
+	                              : cacheRoot / "SdkGameBuilds";
+	const fs::path workDir = HE::ExportSdk::buildWorkDir(cacheRoot, projName, profile);
 	fs::create_directories(workDir, ec);
 	const fs::path header = workDir / "HEGameBuildConfig.h";
+	auto spec = HE::ExportSdk::makeBuildSpec(sdk, workDir, header);
+
+	Build::setActivity("Checking the build cache\xe2\x80\xa6");
+	const auto cache = HE::ExportSdk::prepareBuildCache(
+		workDir, HE::ExportSdk::buildCacheKey(sdk, spec, toolchain));
+	if (cache.hit)
+		Build::log(0, "Build cache hit (" + profile + "): reusing " + workDir.string() +
+		              ", only what changed is compiled", step);
+	else
+		Build::log(0, "Build cache miss (" + cache.changed + "): fresh build in " + workDir.string(), step);
+
 	Build::setActivity("Writing the compiled-in configuration\xe2\x80\xa6");
 	if (const std::string why = HE::ExportSdk::writeBuildConfigFromExport(dataDir, exe, profile, header);
 	    !why.empty())
 		return fallBack(why);
 
-	Build::setActivity("Compiling the game against the engine SDK\xe2\x80\xa6");
+	Build::setActivity(cache.hit ? "Compiling what changed against the engine SDK\xe2\x80\xa6"
+	                             : "Compiling the game against the engine SDK\xe2\x80\xa6");
 	Build::stepProgress(0.1f);
-	auto spec = HE::ExportSdk::makeBuildSpec(sdk, workDir, header);
 	spec.cancel = Build::cancelFlag();
 	Build::setCancelable(true);
 	const auto built = HE::hccg::buildDylib(spec,
@@ -602,7 +619,11 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 				Build::stepProgress(0.1f + 0.8f * *p);
 		});
 	Build::setCancelable(false);
-	if (!built.ok) return fallBack(built.message);
+	if (!built.ok)
+	{
+		if (!(spec.cancel && spec.cancel->load())) HE::ExportSdk::forgetBuildCache(workDir);
+		return fallBack(built.message);
+	}
 
 	std::vector<std::string> copied;
 	if (const std::string why = HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied);
@@ -624,7 +645,8 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	Build::stepProgress(1.0f);
 	Build::log(0, "Game compiled from the SDK (" + profile + "), " + std::to_string(copied.size()) +
 	              " file(s) replaced; configuration and pak key compiled in", step);
-	return " — game compiled from the " + profile + " SDK";
+	return std::string(" — game compiled from the ") + profile + " SDK" +
+	       (cache.hit ? " (build cache hit)" : "");
 }
 
 // ─── The modal itself (drawn every frame; also reaps a finished worker) ──────
@@ -1161,7 +1183,7 @@ void render(AppContext& ctx)
             // the prebuilt export, so whatever stops it leaves that export as it is;
             // the line below says beforehand why it would not run at all.
             {
-                const std::string sdkProfile = s_exportDevTools ? "dev" : "release";
+                const std::string sdkProfile = HE::ExportSdk::sdkProfileFor(s_exportDevTools);
                 const char* sdkEnv = std::getenv("HE_GAME_SDK_DIR");
                 const auto sdk = HE::ExportSdk::findGameSdk(
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
@@ -1596,9 +1618,13 @@ void startExport(AppContext& ctx)
                 const int stepPackage = hasBuild ? 2 : 1;
                 const int stepCleanup = stepPackage + 1;
                 const int stepSdkGame = sdkGame ? stepCleanup + 1 : -1;
-                const std::string sdkProfile = s_exportDevTools ? "dev" : "release";
+                const std::string sdkProfile = HE::ExportSdk::sdkProfileFor(s_exportDevTools);
                 const bool sdkCmakeOk    = !ctx.toolchainProbe || ctx.toolchainProbe->cmakeFound;
                 const bool sdkCompilerOk = !ctx.toolchainProbe || ctx.toolchainProbe->compilerFound;
+                // Part of the build cache key: another cmake or compiler gets a fresh tree.
+                const std::string sdkToolchain = ctx.toolchainProbe
+                    ? "cmake " + ctx.toolchainProbe->cmakeVersion + ", " + ctx.toolchainProbe->compilerId
+                    : std::string();
 
                 Build::begin(stepNames);
                 Build::stepBegin(stepSetup);
@@ -1833,7 +1859,7 @@ void startExport(AppContext& ctx)
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
                                               hcBase = base, stepBuild, stepPackage, hostTarget,
-                                              stepSdkGame, sdkProfile, sdkCmakeOk, sdkCompilerOk]()
+                                              stepSdkGame, sdkProfile, sdkCmakeOk, sdkCompilerOk, sdkToolchain]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -2093,7 +2119,8 @@ void startExport(AppContext& ctx)
                         if (res.success) msg += hcMsg;
                         if (res.success && stepSdkGame >= 0)
                             msg += compileGameFromSdk(res, hcBase, sdkProfile, sdkCmakeOk,
-                                                      sdkCompilerOk, projName, stepSdkGame);
+                                                      sdkCompilerOk, sdkToolchain, projName,
+                                                      stepSdkGame);
                     }
                     catch (const std::exception& e)
                     {

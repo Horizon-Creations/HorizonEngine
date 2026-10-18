@@ -7537,7 +7537,10 @@ namespace
 	  "holding the libraries of that profile, and only runs for a Host target. "
 	  "Whatever is missing, or a "
 	  "build that fails, leaves the prebuilt game in the export; the line under the "
-	  "checkbox and the Compile game step say why.",
+	  "checkbox and the Compile game step say why. The choice is saved with the export "
+	  "profile. The build is cached per project and profile: the next export compiles "
+	  "only what changed, as long as the SDK, the profile and cmake and the compiler "
+	  "stay the same (the build log says cache hit or miss, and why).",
 	  "", "" },
 	{ "Export/Compile HorizonCode", "",
 	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "

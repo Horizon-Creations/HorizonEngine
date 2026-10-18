@@ -152,8 +152,99 @@ TEST_CASE("makeBuildSpec: SDK template, private build dir, header compiled in")
     CHECK(has("HE_BUILD_PROFILE=release"));   // which lib set of the one SDK
     CHECK(has("HE_GAME_BUILD_CONFIG=/work/HEGameBuildConfig.h"));
     CHECK(has("HE_GAME_NAME=HorizonGame"));
+    CHECK(has("HE_GAME_PORTABLE=ON"));        // no absolute rpath to the SDK in the game
     CHECK(std::find(spec.artifactNames.begin(), spec.artifactNames.end(), "HorizonGame")
           != spec.artifactNames.end());
+}
+
+TEST_CASE("Export profile picks the lib set: Development dev, Shipping release")
+{
+    CHECK(std::string(HE::ExportSdk::sdkProfileFor(true)) == "dev");
+    CHECK(std::string(HE::ExportSdk::sdkProfileFor(false)) == "release");
+}
+
+TEST_CASE("buildWorkDir: one folder per project and profile, a safe name")
+{
+    CHECK(HE::ExportSdk::buildWorkDir("/c", "My Game", "dev") == fs::path("/c") / "My_Game-dev");
+    CHECK(HE::ExportSdk::buildWorkDir("/c", "a/b:c", "release") == fs::path("/c") / "a_b_c-release");
+    CHECK(HE::ExportSdk::buildWorkDir("/c", "", "dev") == fs::path("/c") / "Game-dev");
+}
+
+TEST_CASE("Build cache: the key follows SDK, lib set, profile and toolchain; a miss clears the tree")
+{
+    TempDir t;
+    const fs::path root = t.path / "sdk";
+    makeSdk(root, { "dev", "release" });
+    const fs::path pkg = root / "lib" / "cmake" / "HorizonEngine";
+    touchFile(pkg / "HorizonEngineConfigVersion.cmake", "set(PACKAGE_VERSION \"0.7.0\")\n");
+    touchFile(pkg / "HorizonEngineHeaders-dev.txt", "aaaa\n");
+    touchFile(pkg / "HorizonEngineHeaders-release.txt", "aaaa\n");
+    touchFile(root / "lib" / "dev" / "libHorizonEngine.dylib", "dev-engine");
+    touchFile(root / "lib" / "release" / "libHorizonEngine.dylib", "release-engine");
+    const auto dev = HE::ExportSdk::findGameSdk({}, "dev", root);
+    const auto rel = HE::ExportSdk::findGameSdk({}, "release", root);
+    REQUIRE(dev.valid());
+    REQUIRE(rel.valid());
+    const fs::path work = t.path / "work";
+    const auto spec = HE::ExportSdk::makeBuildSpec(dev, work, work / "HEGameBuildConfig.h");
+    const std::string tc = "cmake 3.31.0, AppleClang 17.0.0";
+    const std::string key = HE::ExportSdk::buildCacheKey(dev, spec, tc);
+
+    CHECK(key == HE::ExportSdk::buildCacheKey(dev, spec, tc));          // stable
+    CHECK(key.find("version=0.7.0\n") != std::string::npos);
+    CHECK(key.find("headers=aaaa\n") != std::string::npos);
+    CHECK(key.find("profile=dev\n") != std::string::npos);
+    CHECK(key.find("define=HE_GAME_PORTABLE=ON\n") != std::string::npos);
+    CHECK(key != HE::ExportSdk::buildCacheKey(dev, spec, "cmake 3.31.0, AppleClang 18.0.0"));
+    CHECK(key != HE::ExportSdk::buildCacheKey(
+                     rel, HE::ExportSdk::makeBuildSpec(rel, work, work / "HEGameBuildConfig.h"), tc));
+
+    // No tree yet: a miss, and the key is written for the build that follows.
+    auto c = HE::ExportSdk::prepareBuildCache(work, key);
+    CHECK_FALSE(c.hit);
+    CHECK(c.changed == "no earlier build");
+    CHECK(readFile(work / "cache-key.txt") == key);
+    touchFile(work / "build" / "CMakeCache.txt");   // what a configure leaves
+    touchFile(work / "build" / "game.o");
+
+    // Same key, tree there: a hit, the tree stays.
+    c = HE::ExportSdk::prepareBuildCache(work, key);
+    CHECK(c.hit);
+    CHECK(c.changed.empty());
+    CHECK(fs::exists(work / "build" / "game.o"));
+
+    // Another compiler: a miss that names it, and the tree goes.
+    const std::string otherTc = HE::ExportSdk::buildCacheKey(dev, spec, "cmake 3.31.0, AppleClang 18.0.0");
+    c = HE::ExportSdk::prepareBuildCache(work, otherTc);
+    CHECK_FALSE(c.hit);
+    CHECK(c.changed == "toolchain");
+    CHECK_FALSE(fs::exists(work / "build"));
+
+    // New headers in the SDK (a newer engine): miss on "headers".
+    touchFile(work / "build" / "CMakeCache.txt");
+    touchFile(pkg / "HorizonEngineHeaders-dev.txt", "bbbb\n");
+    c = HE::ExportSdk::prepareBuildCache(work, HE::ExportSdk::buildCacheKey(dev, spec, "cmake 3.31.0, AppleClang 18.0.0"));
+    CHECK_FALSE(c.hit);
+    CHECK(c.changed == "headers");
+
+    // A reinstalled lib set with the same headers: miss on "libs".
+    touchFile(work / "build" / "CMakeCache.txt");
+    const std::string before = HE::ExportSdk::buildCacheKey(dev, spec, tc);
+    touchFile(root / "lib" / "dev" / "libHorizonEngine.dylib", "dev-engine, rebuilt");
+    const std::string after = HE::ExportSdk::buildCacheKey(dev, spec, tc);
+    CHECK(before != after);
+    HE::ExportSdk::prepareBuildCache(work, before);
+    touchFile(work / "build" / "CMakeCache.txt");
+    c = HE::ExportSdk::prepareBuildCache(work, after);
+    CHECK(c.changed == "libs");
+
+    // A failed build forgets the key: the next export starts afresh.
+    touchFile(work / "build" / "CMakeCache.txt");
+    REQUIRE(HE::ExportSdk::prepareBuildCache(work, after).hit);
+    HE::ExportSdk::forgetBuildCache(work);
+    c = HE::ExportSdk::prepareBuildCache(work, after);
+    CHECK_FALSE(c.hit);
+    CHECK(c.changed == "no earlier build");
 }
 
 TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries in")
@@ -278,9 +369,42 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
         CHECK_FALSE(cancelled.ok);
         CHECK(cancelled.message == "cancelled");
     }
-    const auto built = HE::hccg::buildDylib(HE::ExportSdk::makeBuildSpec(sdk, t.path / "work", header));
+    // Through the build cache, as the export does: the first build misses, the
+    // second one (a re-export, header rewritten) hits and reuses the tree.
+    const auto spec = HE::ExportSdk::makeBuildSpec(sdk, t.path / "work", header);
+    const std::string key = HE::ExportSdk::buildCacheKey(sdk, spec, "e2e toolchain");
+    CHECK_FALSE(HE::ExportSdk::prepareBuildCache(t.path / "work", key).hit);
+    const auto built = HE::hccg::buildDylib(spec);
     INFO(built.message);
     REQUIRE(built.ok);
+    {
+        REQUIRE(HE::ExportSdk::writeBuildConfigFromExport(HE::ExportSdk::exportDataDir(exe), exe,
+                                                          profile, header).empty());
+        const auto again = HE::ExportSdk::prepareBuildCache(t.path / "work", key);
+        CHECK(again.hit);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto rebuilt = HE::hccg::buildDylib(spec);
+        const auto secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        MESSAGE("cache-hit rebuild took " << secs << " s");
+        INFO(rebuilt.message);
+        REQUIRE(rebuilt.ok);
+        // Only the compiled-in configuration's source was compiled again.
+        const std::string log = readFile(t.path / "work" / "build.log");
+        CHECK(log.find("CompiledBuildConfig.cpp") != std::string::npos);
+        CHECK(log.find("GameApplication.cpp") == std::string::npos);
+    }
+#if defined(__APPLE__)
+    {
+        // Linked PORTABLE: only the relative rpaths, no path of this machine's SDK.
+        const std::string out = (t.path / "rpath.txt").string();
+        std::system(("otool -l '" + built.artifact.string() + "' > '" + out + "'").c_str());
+        const std::string loads = readFile(out);
+        INFO(loads.substr(0, 4000));
+        CHECK(loads.find("@executable_path/HorizonEngine") != std::string::npos);
+        CHECK(loads.find(sdk.root.string()) == std::string::npos);
+        CHECK(loads.find("path /") == std::string::npos);   // LC_RPATH "path /abs/..."
+    }
+#endif
     std::vector<std::string> copied;
     REQUIRE(HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied).empty());
     const fs::path engineDir = HE::ExportSdk::exportEngineDir(exe);

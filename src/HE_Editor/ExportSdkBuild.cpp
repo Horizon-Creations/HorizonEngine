@@ -1,5 +1,6 @@
 #include "ExportSdkBuild.h"
 
+#include <Crypto/Sha256.h>
 #include <Hpak/GameBuildConfig.h>
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/ProjectExporter.h>     // readEmbeddedPakKey
@@ -7,8 +8,11 @@
 #include <Project/ProjectSettings.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <system_error>
 
 namespace HE::ExportSdk
@@ -129,8 +133,136 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workD
         "HE_BUILD_PROFILE=" + sdk.profile,
         "HE_GAME_NAME=HorizonGame",
         "HE_GAME_BUILD_CONFIG=" + header.generic_string(),
+        "HE_GAME_PORTABLE=ON",
     };
     return spec;
+}
+
+fs::path buildWorkDir(const fs::path& cacheRoot, const std::string& project, const std::string& profile)
+{
+    // A folder name on every platform, whatever the project is called.
+    std::string name = project.empty() ? std::string("Game") : project;
+    for (char& c : name)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    return cacheRoot / (name + "-" + profile);
+}
+
+namespace
+{
+std::string readText(const fs::path& p)
+{
+    std::ifstream in(p, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+std::string trimmed(std::string s)
+{
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    s.erase(0, s.find_first_not_of(" \t\r\n"));
+    return s;
+}
+
+// set(PACKAGE_VERSION "0.7.0") in the package's version file.
+std::string packageVersion(const fs::path& packageDir)
+{
+    const std::string text = readText(packageDir / "HorizonEngineConfigVersion.cmake");
+    const std::string tag = "set(PACKAGE_VERSION \"";
+    const size_t at = text.find(tag);
+    if (at == std::string::npos) return "unknown";
+    const size_t from = at + tag.size();
+    const size_t to = text.find('"', from);
+    return to == std::string::npos ? "unknown" : text.substr(from, to - from);
+}
+
+// Name, size and modification time of every file in the lib set, hashed: a
+// reinstalled set with new libraries but the same headers still misses.
+std::string libSetDigest(const GameSdk& sdk)
+{
+    std::vector<std::string> lines;
+    std::error_code ec;
+    for (const char* sub : { "lib", "bin" })
+    {
+        const fs::path dir = sdk.root / sub / sdk.profile;
+        if (!fs::is_directory(dir, ec)) continue;
+        for (const auto& e : fs::directory_iterator(dir, ec))
+        {
+            if (!e.is_regular_file(ec)) continue;
+            const auto size = static_cast<unsigned long long>(e.file_size(ec));
+            const auto time = static_cast<long long>(e.last_write_time(ec).time_since_epoch().count());
+            lines.push_back(std::string(sub) + "/" + e.path().filename().string() + " " +
+                            std::to_string(size) + " " + std::to_string(time));
+        }
+    }
+    std::sort(lines.begin(), lines.end());
+    HE::Crypto::Sha256 h;
+    for (const std::string& l : lines) { h.update(l.data(), l.size()); h.update("\n", 1); }
+    std::uint8_t d[HE::Crypto::Sha256::kDigestSize];
+    h.finish(d);
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    for (std::uint8_t b : d) { out += hex[b >> 4]; out += hex[b & 15]; }
+    return out;
+}
+} // namespace
+
+std::string buildCacheKey(const GameSdk& sdk, const HE::hccg::DylibBuildSpec& spec,
+                          const std::string& toolchain)
+{
+    std::string key;
+    const auto line = [&key](const std::string& name, const std::string& value)
+    {
+        key += name + "=" + value + "\n";
+    };
+    line("sdk", sdk.root.generic_string());
+    line("version", packageVersion(sdk.packageDir));
+    line("headers", trimmed(readText(sdk.packageDir / ("HorizonEngineHeaders-" + sdk.profile + ".txt"))));
+    line("libs", libSetDigest(sdk));
+    line("profile", sdk.profile);
+    line("toolchain", toolchain.empty() ? std::string("unknown") : toolchain);
+    for (const std::string& d : spec.defines) line("define", d);
+    return key;
+}
+
+CacheCheck prepareBuildCache(const fs::path& workDir, const std::string& key)
+{
+    std::error_code ec;
+    const fs::path keyFile = workDir / "cache-key.txt";
+    const fs::path tree    = workDir / "build";
+    CacheCheck c;
+    if (!fs::is_regular_file(keyFile, ec) || !fs::is_regular_file(tree / "CMakeCache.txt", ec))
+        c.changed = "no earlier build";
+    else
+    {
+        // The first line that differs names the input that changed.
+        std::istringstream was(readText(keyFile)), now(key);
+        std::string a, b;
+        while (true)
+        {
+            const bool moreA = static_cast<bool>(std::getline(was, a));
+            const bool moreB = static_cast<bool>(std::getline(now, b));
+            if (!moreA && !moreB) break;
+            if (!moreA || !moreB || a != b)
+            {
+                const std::string& l = moreB ? b : a;
+                c.changed = l.substr(0, l.find('='));
+                break;
+            }
+        }
+        c.hit = c.changed.empty();
+    }
+    if (c.hit) return c;
+    fs::remove_all(tree, ec);
+    fs::create_directories(workDir, ec);
+    std::ofstream(keyFile, std::ios::binary | std::ios::trunc) << key;
+    return c;
+}
+
+void forgetBuildCache(const fs::path& workDir)
+{
+    std::error_code ec;
+    fs::remove(workDir / "cache-key.txt", ec);
 }
 
 std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,

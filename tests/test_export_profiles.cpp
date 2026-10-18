@@ -361,6 +361,7 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].appBundle       = true;
     proj.exportProfiles[1].textureFormat   = "None";
     proj.exportProfiles[1].textureQuality  = 2;
+    proj.exportProfiles[1].compileGameFromSdk = true;
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -383,6 +384,8 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].appBundle);
     CHECK(p2.exportProfiles[1].textureFormat == "None");
     CHECK(p2.exportProfiles[1].textureQuality == 2);
+    CHECK(p2.exportProfiles[1].compileGameFromSdk);
+    CHECK_FALSE(p2.exportProfiles[2].compileGameFromSdk); // default: the prebuilt game
     CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true

@@ -4,7 +4,8 @@
 #   horizon_add_game(<target>
 #       [OUTPUT_NAME <name>]                    executable name (default: <target>)
 #       [BUILD_CONFIG <dir>/HEGameBuildConfig.h] compile the project configuration in
-#       [SOURCES <file>...])                    more sources, e.g. generated HorizonCode
+#       [SOURCES <file>...]                     more sources, e.g. generated HorizonCode
+#       [PORTABLE])                             only the relative rpath, for shipping
 #
 # Builds the HorizonGame runtime from the sources in the SDK
 # (share/HorizonEngine/game) against the lib set of the profile the project chose
@@ -15,13 +16,19 @@
 # game reads no project.hcfg / ProjectSettings.json, without it it does (the
 # prebuilt runtime's behaviour).
 #
+# PORTABLE links the executable with its install rpath only
+# (@executable_path/HorizonEngine, @executable_path; $ORIGIN on Linux): no absolute
+# path to the SDK's lib/<profile> ends up in a binary that leaves this machine. It
+# then only runs where its engine libraries sit beside it, as in an export folder,
+# not from the build folder. The editor's export builds with it.
+#
 # On macOS the calling project must enable OBJCXX (the menu bar and notifications
 # are Objective-C++): project(<name> LANGUAGES CXX OBJCXX).
 
 include_guard(GLOBAL)
 
 function(horizon_add_game target)
-    cmake_parse_arguments(PARSE_ARGV 1 _hag "" "OUTPUT_NAME;BUILD_CONFIG" "SOURCES")
+    cmake_parse_arguments(PARSE_ARGV 1 _hag "PORTABLE" "OUTPUT_NAME;BUILD_CONFIG" "SOURCES")
     if(_hag_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "horizon_add_game(${target}): unexpected arguments "
                             "'${_hag_UNPARSED_ARGUMENTS}'")
@@ -78,6 +85,9 @@ function(horizon_add_game target)
     elseif(UNIX)
         set_target_properties(${target} PROPERTIES
             BUILD_RPATH "$ORIGIN/HorizonEngine;$ORIGIN" INSTALL_RPATH "$ORIGIN/HorizonEngine;$ORIGIN")
+    endif()
+    if(_hag_PORTABLE)
+        set_target_properties(${target} PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
     endif()
     # Windows: the engine and SDL3 delay-loaded from HorizonEngine\ beside the
     # executable (EngineDllDir.cpp), as in the engine tree's HE_Game.
