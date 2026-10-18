@@ -1,4 +1,5 @@
 #include "Backends/Vulkan/VulkanRenderer.h"
+#include <chrono>
 #include <cstdint>
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
@@ -12,6 +13,7 @@
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +30,7 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/LightPacking.h>
 #include <Backends/Vulkan/VulkanMaterialLayout.h> // graph-material set 0 (shared with he_tests)
+#include <Backends/Vulkan/VulkanPipelineCacheFile.h> // on-disk VkPipelineCache (REN-808)
 #include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/SkyFrameParams.h>
@@ -179,11 +182,13 @@ VulkanRenderer::~VulkanRenderer() = default;
 void VulkanRenderer::Initialize(HE::Window* window)
 {
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: initializing");
+    const auto initT0 = std::chrono::steady_clock::now();
     m_sdlWindow = window->GetNativeWindow();
     createInstance();       HE_LOG_INFO(RHI, "%s", "VulkanRenderer: instance created");
     createSurface();        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: surface created");
     pickPhysicalDevice();   HE_LOG_INFO(RHI, "%s", "VulkanRenderer: physical device selected");
     createDevice();         HE_LOG_INFO(RHI, "%s", "VulkanRenderer: logical device created");
+    createPipelineCache();  // before the first vkCreate*Pipelines (REN-808)
     gpuTimerInit();
     createSwapchain(window->GetWidth(), window->GetHeight()); HE_LOG_INFO(RHI, "%s", "VulkanRenderer: swapchain created");
     createRenderPass();     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: render pass created");
@@ -215,12 +220,17 @@ void VulkanRenderer::Initialize(HE::Window* window)
             m_viewMode = static_cast<HE::ViewMode>(
                 static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
 	m_shaderManager = VulkanShaderManager();
+    // The built-in pipelines are all made by now; graph materials follow at their
+    // first draw (or in the warm-up) and only show up in the shutdown line.
+    HE_LOG_INFO(RHI, "[startup] Vulkan Initialize: ms=%.1f pipelines=%u pipelineMs=%.1f cache=%s",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - initT0).count(),
+                m_pipelinesCreated, m_pipelineMs, m_pipelineCacheState);
 }
 
 void VulkanRenderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: shutdown — waiting for GPU");
-    if (m_device) vkDeviceWaitIdle(m_device);
+    if (m_device) deviceWaitIdle();
     // ImGui editor textures (logo + content-browser icons): destroy the GPU
     // resources we retained for them. The ImGui descriptor sets are freed by
     // ImGui's own shutdown, which the editor runs before tearing down the renderer.
@@ -351,20 +361,16 @@ void VulkanRenderer::Shutdown()
     // Scene resources
     for (auto& [id, mesh] : m_meshCache)
     {
-        if (mesh.vbuf) vkDestroyBuffer(m_device, mesh.vbuf, nullptr);
-        if (mesh.vmem) vkFreeMemory   (m_device, mesh.vmem, nullptr);
-        if (mesh.ibuf) vkDestroyBuffer(m_device, mesh.ibuf, nullptr);
-        if (mesh.imem) vkFreeMemory   (m_device, mesh.imem, nullptr);
+        destroyPooledBuffer(mesh.vbuf, mesh.valloc);
+        destroyPooledBuffer(mesh.ibuf, mesh.ialloc);
         // Base-color texture (descriptor set is freed with m_albedoPool in destroyScenePipeline).
         if (mesh.albedoView)  vkDestroyImageView(m_device, mesh.albedoView,  nullptr);
         if (mesh.albedoImage) vkDestroyImage    (m_device, mesh.albedoImage, nullptr);
         if (mesh.albedoMem)   vkFreeMemory      (m_device, mesh.albedoMem,   nullptr);
     }
     m_meshCache.clear();
-    if (m_cube.vbuf) vkDestroyBuffer(m_device, m_cube.vbuf, nullptr);
-    if (m_cube.vmem) vkFreeMemory   (m_device, m_cube.vmem, nullptr);
-    if (m_cube.ibuf) vkDestroyBuffer(m_device, m_cube.ibuf, nullptr);
-    if (m_cube.imem) vkFreeMemory   (m_device, m_cube.imem, nullptr);
+    destroyPooledBuffer(m_cube.vbuf, m_cube.valloc);
+    destroyPooledBuffer(m_cube.ibuf, m_cube.ialloc);
     m_cube = {};
     // Override-material textures (before destroyScenePipeline destroys m_albedoPool, since
     // destroyMaterialTex frees descriptor sets from it). Device is already idle here.
@@ -392,9 +398,11 @@ void VulkanRenderer::Shutdown()
     }
     m_retiredViewports.clear();
     destroyShadowResources();
+    destroyUploadResources(); // after every pooled mesh buffer is gone, before the device
     if (m_cmdPool)     vkDestroyCommandPool(m_device,   m_cmdPool,     nullptr);
     if (m_renderPass)  vkDestroyRenderPass (m_device,   m_renderPass,  nullptr);
     destroySwapchain();
+    savePipelineCache();     // every pipeline is built by now; ImGui shut down before us
     if (m_device)   vkDestroyDevice    (m_device,              nullptr);
     if (m_surface)  vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
     if (m_debugMessenger)
@@ -487,7 +495,7 @@ void VulkanRenderer::Render()
         if (m_swapExtent.width > 0 && m_swapExtent.height > 0
             && (!m_gameViewport || m_viewportW != m_swapExtent.width || m_viewportH != m_swapExtent.height))
         {
-            vkDeviceWaitIdle(m_device);
+            deviceWaitIdle();
             createViewportResources(m_swapExtent.width, m_swapExtent.height);
             m_gameViewport = true;
             if (m_viewportImage && m_viewportW == m_swapExtent.width && m_viewportH == m_swapExtent.height)
@@ -502,7 +510,7 @@ void VulkanRenderer::Render()
         // pointed at the SSAO blur target that goes with it, and the temporal
         // histories would blend a stale world when the chain returns. One wait,
         // on the switch only.
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         destroyViewportResources();
         pointSceneAoAtWhite();
         m_gameViewport      = false;
@@ -524,7 +532,7 @@ void VulkanRenderer::Render()
     if (!gameChain && m_viewportReqW > 0 && m_viewportReqH > 0 &&
         (m_viewportReqW != m_viewportW || m_viewportReqH != m_viewportH))
     {
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         createViewportResources(m_viewportReqW, m_viewportReqH);
     }
     // TAA targets to the mode in force — before any command of this frame
@@ -538,7 +546,7 @@ void VulkanRenderer::Render()
     // the viewport resize above; the render pass and sampler stay.
     if (m_shadowSizeDirty && m_shadowPass)
     {
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         destroyShadowImages();
         m_shadowSize = static_cast<uint32_t>(std::clamp(m_shadowSettings.resolution, 256, 8192));
         createShadowImages();
@@ -687,7 +695,7 @@ void VulkanRenderer::Render()
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &m_renderDone[imageIndex];   // per-image present semaphore
     m_frameSerial[fi] = ++m_submitSerial;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, m_frameFence[fi]);
+    submitGraphics(si, m_frameFence[fi]);
 
     VkPresentInfoKHR pi{};
     pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1807,7 +1815,7 @@ void VulkanRenderer::recreateSwapchain()
     // later frame once it has a non-zero size again. Recreating at 0×0 is invalid.
     if (w <= 0 || h <= 0) return;
 
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
     destroySwapchain();                                  // also frees depth + framebuffers
     createSwapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
     createFramebuffers();
@@ -1948,7 +1956,7 @@ void VulkanRenderer::createWindowData(SDL_Window* sdlWin, uint32_t w, uint32_t h
 void VulkanRenderer::destroyWindowData(WindowData& wd)
 {
     if (!m_device) return;
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         if (wd.frameFence[i])  vkDestroyFence    (m_device, wd.frameFence[i],  nullptr);
@@ -2008,7 +2016,7 @@ void VulkanRenderer::renderWindowData(WindowData& wd)
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &wd.renderDone[fi];
     wd.frameSerial[fi] = ++m_submitSerial;   // same counter as the main window
-    vkQueueSubmit(m_graphicsQueue, 1, &si, wd.frameFence[fi]);
+    submitGraphics(si, wd.frameFence[fi]);
 
     VkPresentInfoKHR pi{};
     pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -2481,7 +2489,7 @@ void VulkanRenderer::createScenePipeline()
     pci.layout              = m_scenePipelineLayout;
     pci.renderPass          = m_renderPass;
     pci.subpass             = 0;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_scenePipeline) != VK_SUCCESS)
+    if (createGraphicsPipelines(1, &pci, nullptr, &m_scenePipeline) != VK_SUCCESS)
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: graphics pipeline creation failed");
 
     // A3: instanced variant — same fragment shader + states, VS reads per-instance
@@ -2516,7 +2524,7 @@ void VulkanRenderer::createScenePipeline()
         VkGraphicsPipelineCreateInfo ipci = pci;
         ipci.pStages           = istages;
         ipci.pVertexInputState = &ivi;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr, &m_sceneInstancedPipeline) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &ipci, nullptr, &m_sceneInstancedPipeline) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced scene pipeline creation failed");
         vkDestroyShaderModule(m_device, ivs, nullptr);
     }
@@ -2543,7 +2551,7 @@ void VulkanRenderer::createScenePipeline()
         VkGraphicsPipelineCreateInfo tpci = pci;
         tpci.pColorBlendState    = &tcb;
         tpci.pDepthStencilState  = &tds;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &tpci, nullptr, &m_sceneTransparentPipeline) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &tpci, nullptr, &m_sceneTransparentPipeline) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: transparent pipeline creation failed");
     }
 
@@ -2581,7 +2589,7 @@ void VulkanRenderer::createScenePipeline()
             spci.pRasterizationState = &srs;
             spci.pDynamicState   = &sdyn;
             spci.renderPass      = m_shadowPass;
-            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
+            if (createGraphicsPipelines(1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: shadow pipeline creation failed");
             vkDestroyShaderModule(m_device, svs, nullptr);
 
@@ -2597,7 +2605,7 @@ void VulkanRenderer::createScenePipeline()
                 VkGraphicsPipelineCreateInfo sipci = spci;
                 sipci.pStages           = &sistage;
                 sipci.pVertexInputState = &sin.info;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &sipci, nullptr,
+                if (createGraphicsPipelines(1, &sipci, nullptr,
                                               &m_shadowInstancedPipeline) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced shadow pipeline creation failed");
                 vkDestroyShaderModule(m_device, sivs, nullptr);
@@ -2766,7 +2774,7 @@ void VulkanRenderer::createMaterialResources()
                              0, 0, nullptr, 0, nullptr, 1, &b);
         vkEndCommandBuffer(tmp);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
@@ -3322,7 +3330,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     pci.subpass             = 0;
 
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
+    if (createGraphicsPipelines(1, &pci, nullptr, &pipe) != VK_SUCCESS)
     {
         HE_LOG_ERROR(RHI, "%s", instanced
             ? "VulkanRenderer: A4 instanced material pipeline creation failed, its batches draw per instance"
@@ -3838,7 +3846,7 @@ bool VulkanRenderer::EnsureDecalPipelines()
         pci.layout              = m_decalPipeLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+        return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
     };
 
     // Two pipelines, picked by `hdr` exactly like the scene pipelines: the
@@ -4394,7 +4402,7 @@ bool VulkanRenderer::createDeferredPipelines()
         pci.pMultisampleState   = &ms;       pci.pDepthStencilState  = &ds;
         pci.pColorBlendState    = &cb;       pci.pDynamicState       = &dyn;
         pci.layout = m_scenePipelineLayout;  pci.renderPass = m_gbufferRP; pci.subpass = 0;
-        const bool ok = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        const bool ok = createGraphicsPipelines(1, &pci, nullptr,
                                                   &m_gbufPipeline) == VK_SUCCESS;
         // Instanced twin (A3): optional — without it a batch loops per instance.
         if (ok)
@@ -4417,7 +4425,7 @@ bool VulkanRenderer::createDeferredPipelines()
                 ivi.vertexAttributeDescriptionCount = 11; ivi.pVertexAttributeDescriptions = iat;
                 VkGraphicsPipelineCreateInfo ipci = pci;
                 ipci.pStages = ist; ipci.pVertexInputState = &ivi;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+                if (createGraphicsPipelines(1, &ipci, nullptr,
                                               &m_gbufInstancedPipeline) != VK_SUCCESS)
                     m_gbufInstancedPipeline = VK_NULL_HANDLE;
                 vkDestroyShaderModule(m_device, ivs, nullptr);
@@ -4548,7 +4556,7 @@ bool VulkanRenderer::createDeferredPipelines()
             pci.pMultisampleState   = &ms;     pci.pDepthStencilState  = &ds;
             pci.pColorBlendState    = &cb;     pci.pDynamicState       = &dyn;
             pci.layout = m_resolvePipeLayout;  pci.renderPass = m_postFxSceneRP; pci.subpass = 0;
-            const bool ok = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+            const bool ok = createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
             vkDestroyShaderModule(m_device, rfs, nullptr);
             if (!ok) out = VK_NULL_HANDLE;
             return ok;
@@ -4617,7 +4625,7 @@ bool VulkanRenderer::ensureGBufferTargets(uint32_t w, uint32_t h)
     {
         // Only reachable if the viewport changed size without the PostFX
         // targets being rebuilt — frames in flight still use the old ones.
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         destroyGBufferTargets();
     }
     static const char* const kNames[k_gbTargets] = { "G-buffer 0 (base, metallic)",
@@ -4819,7 +4827,7 @@ void VulkanRenderer::createPostFXPipelines()
                              0, 0, nullptr, 0, nullptr, 1, &b);
         vkEndCommandBuffer(tmp);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
@@ -4952,7 +4960,7 @@ void VulkanRenderer::createPostFXPipelines()
         pci.pDepthStencilState = depth;
         pci.pDynamicState = &dyn; pci.layout = m_postFxPipeLayout;
         pci.renderPass = rp; pci.subpass = 0;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out), "postfx pipeline");
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr, &out), "postfx pipeline");
     };
 
     makePipe(brFS, m_postFxBlitF16, m_bloomBrightPipe);
@@ -5040,7 +5048,7 @@ void VulkanRenderer::createPostFXPipelines()
         pci.pDynamicState = &dyn; pci.layout = m_underwaterFogPipeLayout;
         pci.renderPass = m_underwaterFogRP; pci.subpass = 0;
         m_underwaterFogReady = m_underwaterFogRP && m_underwaterFogPipeLayout &&
-            vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterFogPipe) == VK_SUCCESS;
+            createGraphicsPipelines(1, &pci, nullptr, &m_underwaterFogPipe) == VK_SUCCESS;
 
         // Underwater caustics (Thema 185 Schritt 3): the fog's render pass, descriptor set
         // layout and every fixed-function state above (incl. the blend — ONE / ONE_MINUS_SRC_ALPHA
@@ -5060,7 +5068,7 @@ void VulkanRenderer::createPostFXPipelines()
             stages[1].module = ucFS;
             pci.layout = m_underwaterCausticsPipeLayout;
             m_underwaterCausticsReady = m_underwaterFogRP && m_underwaterCausticsPipeLayout &&
-                vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterCausticsPipe) == VK_SUCCESS;
+                createGraphicsPipelines(1, &pci, nullptr, &m_underwaterCausticsPipe) == VK_SUCCESS;
         }
     }
 
@@ -5108,7 +5116,7 @@ void VulkanRenderer::createPostFXPipelines()
             pci2.pViewportState=&vp2; pci2.pRasterizationState=&rs2; pci2.pMultisampleState=&ms2;
             pci2.pDepthStencilState=&ds2; pci2.pColorBlendState=&cb2; pci2.pDynamicState=&dyn2;
             pci2.layout=m_scenePipelineLayout; pci2.renderPass=m_postFxSceneRP;
-            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci2, nullptr, &m_scenePipelineHDR) != VK_SUCCESS)
+            if (createGraphicsPipelines(1, &pci2, nullptr, &m_scenePipelineHDR) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: HDR scene pipeline failed");
             // A3: instanced HDR variant (per-instance mvp+model at binding 1).
             if (VkShaderModule ivs2 = loadShaderModule("scene_instanced.vert.spv"))
@@ -5131,7 +5139,7 @@ void VulkanRenderer::createPostFXPipelines()
                 ivi2.vertexBindingDescriptionCount=2; ivi2.pVertexBindingDescriptions=ibnd;
                 ivi2.vertexAttributeDescriptionCount=11; ivi2.pVertexAttributeDescriptions=iat;
                 VkGraphicsPipelineCreateInfo ipci2=pci2; ipci2.pStages=ist; ipci2.pVertexInputState=&ivi2;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci2, nullptr, &m_sceneInstancedPipelineHDR) != VK_SUCCESS)
+                if (createGraphicsPipelines(1, &ipci2, nullptr, &m_sceneInstancedPipelineHDR) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced HDR scene pipeline failed");
                 vkDestroyShaderModule(m_device, ivs2, nullptr);
             }
@@ -5145,7 +5153,7 @@ void VulkanRenderer::createPostFXPipelines()
                 VkPipelineColorBlendStateCreateInfo tcb2=cb2; tcb2.pAttachments=&tcba2;
                 VkPipelineDepthStencilStateCreateInfo tds2=ds2; tds2.depthWriteEnable=VK_FALSE;
                 VkGraphicsPipelineCreateInfo tpci2=pci2; tpci2.pColorBlendState=&tcb2; tpci2.pDepthStencilState=&tds2;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &tpci2, nullptr, &m_sceneTransparentPipelineHDR) != VK_SUCCESS)
+                if (createGraphicsPipelines(1, &tpci2, nullptr, &m_sceneTransparentPipelineHDR) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: HDR transparent pipeline failed");
             }
             vkDestroyShaderModule(m_device, vs2, nullptr);
@@ -5294,7 +5302,7 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 
 void VulkanRenderer::destroyPostFXResources()
 {
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
     destroyTaaTargets();
     // The G-buffer framebuffer holds the viewport depth view: it goes before
     // that (destroyViewportResources) and is rebuilt lazily at the new size.
@@ -5423,7 +5431,7 @@ void VulkanRenderer::createTaaPipelines(VkShaderModule fullscreenVS)
         pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds;
         pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
         pci.layout = m_scenePipelineLayout; pci.renderPass = m_taaVelocityRP; pci.subpass = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_taaVelocityPipe) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &m_taaVelocityPipe) != VK_SUCCESS)
             m_taaVelocityPipe = VK_NULL_HANDLE;
     }
 
@@ -5496,7 +5504,7 @@ void VulkanRenderer::createTaaPipelines(VkShaderModule fullscreenVS)
         pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
         pci.pDynamicState = &dyn; pci.layout = layout;
         pci.renderPass = rp; pci.subpass = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &out) != VK_SUCCESS)
             out = VK_NULL_HANDLE;
     };
     // The resolve writes a history image through the RGBA8 blit pass (left in
@@ -5603,7 +5611,7 @@ void VulkanRenderer::createTaaTargets(uint32_t w, uint32_t h)
                              0, 0, nullptr, 0, nullptr, 3, b);
         vkEndCommandBuffer(tmp);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
@@ -5663,7 +5671,7 @@ void VulkanRenderer::syncTaaTargets()
     const bool want = taaWanted() && m_ldrView && m_viewportW > 0 && m_viewportH > 0;
     const bool have = m_taaHistoryImage[0] && m_taaW == m_viewportW && m_taaH == m_viewportH;
     if (want ? have : !m_taaHistoryImage[0]) return;
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
     if (want) createTaaTargets(m_viewportW, m_viewportH);
     else      { destroyTaaTargets(); m_taaJitter = glm::vec2(0.0f); }
 }
@@ -6004,7 +6012,7 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
     vkBindBufferMemory(m_device, stagingBuf, stagingMem, 0);
 
     // One-shot command buffer to copy image → staging
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
     VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
     cbai.commandPool        = m_cmdPool;
     cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -6049,7 +6057,7 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers    = &tmp;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    submitGraphics(si, VK_NULL_HANDLE);
     vkQueueWaitIdle(m_graphicsQueue);
     vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
 
@@ -6194,7 +6202,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
         // decal depth) are torn down and rebuilt, and the one-shot buffer below
         // records on m_currentFrame's rings.
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         createViewportResources(width, height);
 
         if (m_viewportImage && m_viewportFramebuffer && m_viewportW == width && m_viewportH == height)
@@ -6215,7 +6223,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
                 si.commandBufferCount = 1;
                 si.pCommandBuffers    = &cmd;
-                vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+                submitGraphics(si, VK_NULL_HANDLE);
                 vkQueueWaitIdle(m_graphicsQueue);
                 vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
 
@@ -6240,7 +6248,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     // editor's descriptor never pointed at it, and the device is idle). The live
     // handles go back into the members BEFORE the intermediates are rebuilt —
     // createPostFXResources builds m_hdrFB/m_fxaaFB/m_uiViewportFB on them.
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
     destroyViewportResources();
     m_viewportImage       = liveImage;
     m_viewportMemory      = liveMemory;
@@ -6428,7 +6436,7 @@ bool VulkanRenderer::ensureWorldPreviewPipeline()
             pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
             pci.layout = m_previewPipeLayout;
             pci.renderPass = m_postFxSceneRP; pci.subpass = 0;
-            return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+            return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
         };
         const VkVertexInputBindingDescription meshBind = { 0, 32u, VK_VERTEX_INPUT_RATE_VERTEX };
         const VkVertexInputAttributeDescription meshAttrs[3] = {
@@ -6622,7 +6630,7 @@ void* VulkanRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
         // Nothing of a frame or an earlier preview may still read what is
         // touched below: the shared sky/debug-line buffers, the rings, the
         // descriptor sets, a target about to be replaced.
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         if (!ensureWorldPreviewPipeline()) return nullptr;
         if (!ensureWorldPreviewTarget(wp, W, H)) return nullptr;
 
@@ -6856,7 +6864,7 @@ void* VulkanRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
         vkEndCommandBuffer(cmd);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
         si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
 
@@ -7266,34 +7274,554 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     }
 }
 
-bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
-                                       const std::vector<uint32_t>& indices)
+// ─── Asset upload path (REN-802/803) ─────────────────────────────────────────
+// See the header for the scheme. Single-threaded like the rest of the renderer:
+// every caller is the render thread.
+namespace
 {
-    auto makeBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage, const void* data,
-                       VkBuffer& buf, VkDeviceMemory& mem) -> bool
+uint64_t uploadClockNs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+bool envOn(const char* name)
+{
+    const char* v = std::getenv(name);
+    return v && *v && *v != '0';
+}
+} // namespace
+
+bool VulkanRenderer::allocPooled(const VkMemoryRequirements& req, VkMemoryPropertyFlags props,
+                                 PoolAlloc& out)
+{
+    out = PoolAlloc{};
+    const uint32_t type = findMemoryType(req.memoryTypeBits, props);
+    // Big buffers get their own allocation: a quarter block is where a free list
+    // starts losing more to fragmentation than it saves in allocations.
+    if (req.size > k_memBlockBytes / 4)
     {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = size;
-        bci.usage = usage;
-        if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
-        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, buf, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = type;
+        if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS)
+        { out.mem = VK_NULL_HANDLE; return false; }
+        out.size = req.size;
+        return true;
+    }
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        for (size_t i = 0; i < m_memBlocks.size(); ++i)
+        {
+            MemBlock& b = m_memBlocks[i];
+            if (!b.mem || b.type != type) continue;
+            const uint64_t off = b.ranges.allocate(req.size, req.alignment);
+            if (off == HE::vkup::kFail) continue;
+            out.mem = b.mem; out.offset = off; out.size = req.size; out.block = int32_t(i);
+            return true;
+        }
+        if (pass == 1) break;
+        // No block of this type has room: open a new one (reusing a freed slot).
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = k_memBlockBytes;
+        mai.memoryTypeIndex = type;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) return false;
+        auto slot = std::find_if(m_memBlocks.begin(), m_memBlocks.end(),
+                                 [](const MemBlock& b) { return b.mem == VK_NULL_HANDLE; });
+        if (slot == m_memBlocks.end()) slot = m_memBlocks.insert(m_memBlocks.end(), MemBlock{});
+        slot->mem  = mem;
+        slot->type = type;
+        slot->ranges.reset(k_memBlockBytes);
+    }
+    return false;
+}
+
+void VulkanRenderer::freePooled(PoolAlloc& a)
+{
+    if (!a.mem) { a = PoolAlloc{}; return; }
+    if (a.block < 0) vkFreeMemory(m_device, a.mem, nullptr);
+    else if (size_t(a.block) < m_memBlocks.size() && m_memBlocks[a.block].mem == a.mem)
+    {
+        MemBlock& b = m_memBlocks[a.block];
+        b.ranges.free(a.offset, a.size);
+        // An empty block goes back to the driver: a level change should not keep
+        // the last level's peak. Callers free only after a wait-idle (or with the
+        // buffer never submitted), so nothing in flight reads the block.
+        if (b.ranges.empty()) { vkFreeMemory(m_device, b.mem, nullptr); b = MemBlock{}; }
+    }
+    a = PoolAlloc{};
+}
+
+bool VulkanRenderer::createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                                             const void* data, VkBuffer& buf, PoolAlloc& alloc)
+{
+    buf = VK_NULL_HANDLE; alloc = PoolAlloc{};
+    if (size == 0 || !data) return false;
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size  = size;
+    bci.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) { buf = VK_NULL_HANDLE; return false; }
+    VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, buf, &req);
+    if (!allocPooled(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, alloc))
+    { vkDestroyBuffer(m_device, buf, nullptr); buf = VK_NULL_HANDLE; return false; }
+    vkBindBufferMemory(m_device, buf, alloc.mem, alloc.offset);
+    // Always through staging, also where DEVICE_LOCAL memory is host-visible
+    // (UMA, lavapipe): that keeps the path CI runs the one a dGPU runs.
+    VkBuffer src = VK_NULL_HANDLE; VkDeviceSize srcOff = 0;
+    if (!stageUpload(data, size, src, srcOff))
+    { destroyPooledBuffer(buf, alloc); return false; }
+    const VkBufferCopy region{ srcOff, 0, size };
+    vkCmdCopyBuffer(uploadCmd(), src, buf, 1, &region);
+    return true;
+}
+
+void VulkanRenderer::destroyPooledBuffer(VkBuffer& buf, PoolAlloc& alloc)
+{
+    if (buf) vkDestroyBuffer(m_device, buf, nullptr);
+    buf = VK_NULL_HANDLE;
+    freePooled(alloc);
+}
+
+bool VulkanRenderer::ensureUploadContext()
+{
+    if (m_uploadPool) return true;
+    if (m_upContextTried || !m_device) return false;
+    m_upContextTried = true;
+    m_upSync       = envOn("HE_VK_UPLOAD_SYNC");
+    m_upLogBatches = envOn("HE_VK_UPLOAD_STATS");
+
+    VkCommandPoolCreateInfo cpci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    cpci.queueFamilyIndex = m_graphicsFamily;
+    cpci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+                          | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    if (vkCreateCommandPool(m_device, &cpci, nullptr, &m_uploadPool) != VK_SUCCESS)
+    {
+        m_uploadPool = VK_NULL_HANDLE;
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: upload command pool creation failed");
+        return false;
+    }
+
+    // The staging ring. Without it every upload stages through a buffer of its
+    // own (still no wait), so a failure here only costs allocations.
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size  = k_stagingRingBytes;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bool ringOk = vkCreateBuffer(m_device, &bci, nullptr, &m_stageBuf) == VK_SUCCESS;
+    if (ringOk)
+    {
+        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, m_stageBuf, &req);
         VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         mai.allocationSize  = req.size;
         mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) return false;
-        vkBindBufferMemory(m_device, buf, mem, 0);
-        void* p = nullptr;
-        vkMapMemory(m_device, mem, 0, size, 0, &p);
-        std::memcpy(p, data, static_cast<size_t>(size));
-        vkUnmapMemory(m_device, mem);
+        void* mapped = nullptr;
+        ringOk = vkAllocateMemory(m_device, &mai, nullptr, &m_stageMem) == VK_SUCCESS
+              && vkBindBufferMemory(m_device, m_stageBuf, m_stageMem, 0) == VK_SUCCESS
+              && vkMapMemory(m_device, m_stageMem, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS;
+        m_stageMapped = static_cast<uint8_t*>(mapped);
+    }
+    if (!ringOk)
+    {
+        if (m_stageMem) vkFreeMemory(m_device, m_stageMem, nullptr);
+        if (m_stageBuf) vkDestroyBuffer(m_device, m_stageBuf, nullptr);
+        m_stageMem = VK_NULL_HANDLE; m_stageBuf = VK_NULL_HANDLE; m_stageMapped = nullptr;
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: staging ring unavailable — uploads stage one buffer each");
+    }
+    m_stageRing.reset(ringOk ? k_stagingRingBytes : 0);
+    if (m_upSync)
+        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: HE_VK_UPLOAD_SYNC — waiting for the queue after every upload");
+    return true;
+}
+
+VkCommandBuffer VulkanRenderer::uploadCmd()
+{
+    if (m_upRecording) return m_upOpen.cb;
+    if (!ensureUploadContext()) return VK_NULL_HANDLE;
+    retireUploads();
+    UploadBatch b;
+    if (!m_upSpare.empty()) { b = std::move(m_upSpare.back()); m_upSpare.pop_back(); }
+    if (!b.cb)
+    {
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool        = m_uploadPool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkAllocateCommandBuffers(m_device, &cbai, &b.cb) != VK_SUCCESS
+            || vkCreateFence(m_device, &fci, nullptr, &b.fence) != VK_SUCCESS)
+        {
+            if (b.cb) vkFreeCommandBuffers(m_device, m_uploadPool, 1, &b.cb);
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: upload command buffer allocation failed");
+            return VK_NULL_HANDLE;
+        }
+    }
+    else
+    {
+        vkResetFences(m_device, 1, &b.fence);
+        vkResetCommandBuffer(b.cb, 0);
+    }
+    VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(b.cb, &cbbi);
+    b.ticket  = ++m_upTicket;
+    b.uploads = 0;
+    b.bytes   = 0;
+    m_upOpen      = std::move(b);
+    m_upRecording = true;
+    return m_upOpen.cb;
+}
+
+bool VulkanRenderer::stageUpload(const void* data, VkDeviceSize size, VkBuffer& src, VkDeviceSize& srcOffset)
+{
+    src = VK_NULL_HANDLE; srcOffset = 0;
+    if (!data || size == 0 || !uploadCmd()) return false;
+    // 16: a BC block, and a multiple of 4 for vkCmdCopyBufferToImage's offset rule.
+    uint64_t off = m_stageRing.allocate(size, 16, m_upOpen.ticket);
+    if (off == HE::vkup::kFail && !m_upInFlight.empty())
+    {
+        retireUploads();
+        off = m_stageRing.allocate(size, 16, m_upOpen.ticket);
+    }
+    m_upOpen.uploads += 1;
+    m_upOpen.bytes   += size;
+    if (off != HE::vkup::kFail)
+    {
+        std::memcpy(m_stageMapped + off, data, static_cast<size_t>(size));
+        src = m_stageBuf; srcOffset = off;
         return true;
-    };
+    }
+    // Bigger than the ring, or the ring is full of copies the GPU has not done
+    // yet: a staging buffer of its own, freed with the batch — never a wait.
+    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size  = size;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, buf, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    void* p = nullptr;
+    if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS)
+    { vkDestroyBuffer(m_device, buf, nullptr); return false; }
+    if (vkBindBufferMemory(m_device, buf, mem, 0) != VK_SUCCESS
+        || vkMapMemory(m_device, mem, 0, size, 0, &p) != VK_SUCCESS)
+    { vkDestroyBuffer(m_device, buf, nullptr); vkFreeMemory(m_device, mem, nullptr); return false; }
+    std::memcpy(p, data, static_cast<size_t>(size));
+    vkUnmapMemory(m_device, mem);
+    m_upOpen.ownStaging.emplace_back(buf, mem);
+    m_upStats.ownStaging += 1;
+    src = buf;
+    return true;
+}
+
+void VulkanRenderer::flushUploads()
+{
+    if (!m_upRecording) return;
+    m_upRecording = false;
+    // One barrier closes the batch: every copy (buffers and images) visible to
+    // every later stage — vertex/index fetch, any shader, the AS builds. The
+    // images' own barriers did the layout transitions.
+    VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT
+                     | VK_ACCESS_INDEX_READ_BIT  | VK_ACCESS_SHADER_READ_BIT
+                     | VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(m_upOpen.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 1, &mb, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(m_upOpen.cb);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &m_upOpen.cb;
+    vkCheck(vkQueueSubmit(m_graphicsQueue, 1, &si, m_upOpen.fence), "upload batch submit");
+    m_upStats.batches += 1;
+    if (m_upLogBatches)
+        HE_LOG_INFO(RHI, "VulkanRenderer: upload batch %llu — %u uploads, %.2f MB, %zu own staging buffers",
+                    static_cast<unsigned long long>(m_upOpen.ticket), m_upOpen.uploads,
+                    double(m_upOpen.bytes) / (1024.0 * 1024.0), m_upOpen.ownStaging.size());
+    m_upInFlight.push_back(std::move(m_upOpen));
+    m_upOpen = UploadBatch{};
+}
+
+void VulkanRenderer::retireUploads()
+{
+    while (!m_upInFlight.empty()
+           && vkGetFenceStatus(m_device, m_upInFlight.front().fence) == VK_SUCCESS)
+    {
+        UploadBatch b = std::move(m_upInFlight.front());
+        m_upInFlight.pop_front();
+        for (auto& [buf, mem] : b.ownStaging)
+        {
+            vkDestroyBuffer(m_device, buf, nullptr);
+            vkFreeMemory(m_device, mem, nullptr);
+        }
+        b.ownStaging.clear();
+        m_stageRing.retire(b.ticket);
+        m_upSpare.push_back(std::move(b));
+    }
+}
+
+void VulkanRenderer::noteUpload(bool mesh, VkDeviceSize bytes, uint64_t startNs)
+{
+    (mesh ? m_upStats.meshes : m_upStats.textures) += 1;
+    m_upStats.bytes += bytes;
+    if (m_upSync)
+    {
+        // The old behaviour, for the A/B: submit and wait for the queue to drain.
+        const uint64_t w0 = uploadClockNs();
+        flushUploads();
+        vkQueueWaitIdle(m_graphicsQueue);
+        retireUploads();
+        m_upStats.syncWaits += 1;
+        m_upStats.waitMs += double(uploadClockNs() - w0) * 1e-6;
+    }
+    m_upStats.cpuMs += double(uploadClockNs() - startNs) * 1e-6;
+}
+
+VkResult VulkanRenderer::submitGraphics(const VkSubmitInfo& si, VkFence fence)
+{
+    flushUploads();
+    return vkQueueSubmit(m_graphicsQueue, 1, &si, fence);
+}
+
+void VulkanRenderer::deviceWaitIdle()
+{
+    if (!m_device) return;
+    flushUploads();
+    vkDeviceWaitIdle(m_device);
+    retireUploads();
+}
+
+void VulkanRenderer::destroyUploadResources()
+{
+    if (!m_device) return;
+    // Shutdown already waited for the device; an upload recorded since then is
+    // dropped unsubmitted.
+    if (m_upRecording) { m_upInFlight.push_back(std::move(m_upOpen)); m_upOpen = UploadBatch{}; m_upRecording = false; }
+    for (UploadBatch& b : m_upInFlight)  m_upSpare.push_back(std::move(b));
+    m_upInFlight.clear();
+    for (UploadBatch& b : m_upSpare)
+    {
+        for (auto& [buf, mem] : b.ownStaging)
+        {
+            vkDestroyBuffer(m_device, buf, nullptr);
+            vkFreeMemory(m_device, mem, nullptr);
+        }
+        if (b.fence) vkDestroyFence(m_device, b.fence, nullptr);
+    }
+    m_upSpare.clear();
+    if (m_uploadPool) vkDestroyCommandPool(m_device, m_uploadPool, nullptr); // frees the CBs
+    m_uploadPool = VK_NULL_HANDLE;
+    if (m_stageMapped) vkUnmapMemory(m_device, m_stageMem);
+    if (m_stageBuf)    vkDestroyBuffer(m_device, m_stageBuf, nullptr);
+    if (m_stageMem)    vkFreeMemory(m_device, m_stageMem, nullptr);
+    m_stageMapped = nullptr; m_stageBuf = VK_NULL_HANDLE; m_stageMem = VK_NULL_HANDLE;
+    m_stageRing.reset(0);
+    // Whatever is still in a block was never freed by its owner; the device goes
+    // next, so release the memory rather than leak it.
+    size_t leftover = 0;
+    for (MemBlock& b : m_memBlocks)
+        if (b.mem) { leftover += b.ranges.used() ? 1 : 0; vkFreeMemory(m_device, b.mem, nullptr); }
+    m_memBlocks.clear();
+    if (leftover)
+        HE_LOG_WARN(RHI, "VulkanRenderer: %zu mesh memory blocks still held buffers at shutdown", leftover);
+    HE_LOG_INFO(RHI,
+        "VulkanRenderer: uploads — %llu meshes, %llu textures, %.1f MB in %llu batches "
+        "(%llu oversize staging buffers); %.1f ms CPU in upload calls, %llu waits / %.1f ms waiting%s",
+        static_cast<unsigned long long>(m_upStats.meshes), static_cast<unsigned long long>(m_upStats.textures),
+        double(m_upStats.bytes) / (1024.0 * 1024.0), static_cast<unsigned long long>(m_upStats.batches),
+        static_cast<unsigned long long>(m_upStats.ownStaging), m_upStats.cpuMs,
+        static_cast<unsigned long long>(m_upStats.syncWaits), m_upStats.waitMs,
+        m_upSync ? " (HE_VK_UPLOAD_SYNC)" : "");
+}
+
+// ─── Pipeline cache (REN-808) ────────────────────────────────────────────────
+// See the header. The file lives beside the GL program-binary and D3D bytecode
+// caches; SDL_GetPrefPath asks the shell for the roaming folder and ignores
+// %APPDATA%, so a scratch APPDATA does not isolate it — HE_VK_PIPELINE_CACHE_DIR does.
+VkResult VulkanRenderer::createGraphicsPipelines(uint32_t n, const VkGraphicsPipelineCreateInfo* ci,
+                                                 const VkAllocationCallbacks* alloc, VkPipeline* out)
+{
+    const uint64_t t0 = uploadClockNs();
+    const VkResult r = vkCreateGraphicsPipelines(m_device, m_pipelineCache, n, ci, alloc, out);
+    m_pipelineMs += double(uploadClockNs() - t0) * 1e-6;
+    m_pipelinesCreated += n;
+    return r;
+}
+
+VkResult VulkanRenderer::createComputePipelines(uint32_t n, const VkComputePipelineCreateInfo* ci,
+                                                const VkAllocationCallbacks* alloc, VkPipeline* out)
+{
+    const uint64_t t0 = uploadClockNs();
+    const VkResult r = vkCreateComputePipelines(m_device, m_pipelineCache, n, ci, alloc, out);
+    m_pipelineMs += double(uploadClockNs() - t0) * 1e-6;
+    m_pipelinesCreated += n;
+    return r;
+}
+
+uint64_t VulkanRenderer::GetPipelineCache() const
+{
+    uint64_t v = 0;
+    static_assert(sizeof(m_pipelineCache) == sizeof(v), "VkPipelineCache size mismatch");
+    std::memcpy(&v, &m_pipelineCache, sizeof(v));
+    return v;
+}
+
+void VulkanRenderer::createPipelineCache()
+{
+    if (const char* v = std::getenv("HE_VK_PIPELINE_CACHE"); v && v[0] == '0')
+    {
+        m_pipelineCacheState = "off (HE_VK_PIPELINE_CACHE=0)";
+        HE_LOG_INFO(RHI, "%s", "[startup] Vulkan pipeline cache: off (HE_VK_PIPELINE_CACHE=0)");
+        return;
+    }
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    HE::vkpc::DeviceId dev;
+    dev.vendorID      = props.vendorID;
+    dev.deviceID      = props.deviceID;
+    dev.driverVersion = props.driverVersion;
+    std::memcpy(dev.uuid, props.pipelineCacheUUID, sizeof(dev.uuid));
+
+    namespace fs = std::filesystem;
+    fs::path dir;
+    if (const char* over = std::getenv("HE_VK_PIPELINE_CACHE_DIR"); over && *over)
+        dir = over;
+    else if (char* pref = SDL_GetPrefPath("HorizonCreations", "HorizonEngine"))
+    {
+        dir = fs::path(pref) / "vkpipelinecache"; SDL_free(pref);
+    }
+    else
+        dir = fs::temp_directory_path() / "HorizonEngine" / "vkpipelinecache";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    // One file per GPU: switching between an iGPU and a dGPU keeps both caches.
+    char name[32];
+    std::snprintf(name, sizeof(name), "%04x_%04x.bin", props.vendorID, props.deviceID);
+    m_pipelineCachePath = (dir / name).string();
+
+    std::vector<uint8_t> file;
+    if (std::ifstream in(m_pipelineCachePath, std::ios::binary | std::ios::ate); in)
+    {
+        const std::streamoff size = in.tellg();
+        if (size > 0)
+        {
+            file.resize(static_cast<size_t>(size));
+            in.seekg(0);
+            if (!in.read(reinterpret_cast<char*>(file.data()), size)) file.clear();
+        }
+    }
+    const uint8_t* blob = nullptr;
+    size_t blobSize = 0;
+    const HE::vkpc::Verdict verdict = HE::vkpc::unwrap(dev, file.data(), file.size(), blob, blobSize);
+
+    VkPipelineCacheCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    if (verdict == HE::vkpc::Verdict::Ok)
+    {
+        ci.initialDataSize = blobSize;
+        ci.pInitialData    = blob;
+    }
+    VkResult r = vkCreatePipelineCache(m_device, &ci, nullptr, &m_pipelineCache);
+    if (r != VK_SUCCESS && ci.initialDataSize)
+    {
+        // The driver refused the data after all: start empty, the file is rewritten at shutdown.
+        ci.initialDataSize = 0; ci.pInitialData = nullptr;
+        r = vkCreatePipelineCache(m_device, &ci, nullptr, &m_pipelineCache);
+        m_pipelineCacheState = "rejected by driver";
+    }
+    else
+    {
+        m_pipelineCacheState = verdict == HE::vkpc::Verdict::Ok ? "loaded" : HE::vkpc::verdictName(verdict);
+    }
+    if (r != VK_SUCCESS)
+    {
+        m_pipelineCache = VK_NULL_HANDLE;
+        m_pipelineCacheState = "vkCreatePipelineCache failed";
+    }
+    else if (ci.initialDataSize)
+    {
+        m_pipelineCacheInBytes = blobSize;
+        m_pipelineCacheInHash  = HE::vkpc::blobHash(blob, blobSize);
+    }
+    HE_LOG_INFO(RHI, "[startup] Vulkan pipeline cache: %s, %zu KB from %s",
+                m_pipelineCacheState, m_pipelineCacheInBytes / 1024, m_pipelineCachePath.c_str());
+}
+
+void VulkanRenderer::savePipelineCache()
+{
+    // The totals are logged with the cache off too: they are the A/B's other side.
+    size_t size = 0;
+    std::vector<uint8_t> blob;
+    if (m_pipelineCache)
+    {
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, nullptr) == VK_SUCCESS && size)
+        {
+            blob.resize(size);
+            if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, blob.data()) != VK_SUCCESS) blob.clear();
+            blob.resize(std::min(size, blob.size()));
+        }
+        vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
+        m_pipelineCache = VK_NULL_HANDLE;
+    }
+
+    const char* what = "unchanged";
+    if (m_pipelineCachePath.empty())
+        what = "not saved";
+    else if (blob.empty())
+        what = "no data";
+    else if (blob.size() != m_pipelineCacheInBytes ||
+             HE::vkpc::blobHash(blob.data(), blob.size()) != m_pipelineCacheInHash)
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        HE::vkpc::DeviceId dev;
+        dev.vendorID      = props.vendorID;
+        dev.deviceID      = props.deviceID;
+        dev.driverVersion = props.driverVersion;
+        std::memcpy(dev.uuid, props.pipelineCacheUUID, sizeof(dev.uuid));
+        const std::vector<uint8_t> file = HE::vkpc::wrap(dev, blob.data(), blob.size());
+        // Write beside it and rename over: a second editor reading it at that
+        // moment, or a crash mid-write, never sees half a file.
+        std::filesystem::path tmp = m_pipelineCachePath;
+        tmp += ".tmp" + std::to_string(static_cast<unsigned long long>(uploadClockNs() & 0xFFFFFF));
+        bool ok = false;
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            ok = out && out.write(reinterpret_cast<const char*>(file.data()),
+                                  static_cast<std::streamsize>(file.size())).good();
+        }
+        std::error_code ec;
+        if (ok) std::filesystem::rename(tmp, m_pipelineCachePath, ec);
+        if (!ok || ec) { std::filesystem::remove(tmp, ec); what = "write failed"; }
+        else what = "written";
+    }
+    HE_LOG_INFO(RHI, "VulkanRenderer: pipelines — %u created, %.1f ms in vkCreate*Pipelines; "
+                "cache %s (in %zu KB, out %zu KB, %s)",
+                m_pipelinesCreated, m_pipelineMs, m_pipelineCacheState,
+                m_pipelineCacheInBytes / 1024, blob.size() / 1024, what);
+}
+
+bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
+                                       const std::vector<uint32_t>& indices)
+{
+    const uint64_t t0 = uploadClockNs();
     const VkDeviceSize vsize = interleaved.size() * sizeof(float);
     const VkDeviceSize isize = indices.size() * sizeof(uint32_t);
-    if (!makeBuf(vsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, interleaved.data(), mesh.vbuf, mesh.vmem)) return false;
-    if (!makeBuf(isize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,  indices.data(),     mesh.ibuf, mesh.imem)) return false;
+    if (!createDeviceLocalBuffer(vsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, interleaved.data(),
+                                 mesh.vbuf, mesh.valloc))
+        return false;
+    if (!createDeviceLocalBuffer(isize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(),
+                                 mesh.ibuf, mesh.ialloc))
+    {
+        // The vertex copy is already recorded: the buffer must outlive the batch.
+        // Rare enough (out of device memory) to settle with a wait.
+        deviceWaitIdle();
+        destroyPooledBuffer(mesh.vbuf, mesh.valloc);
+        return false;
+    }
     mesh.indexCount = static_cast<uint32_t>(indices.size());
+    noteUpload(true, vsize + isize, t0);
     return true;
 }
 
@@ -7379,30 +7907,10 @@ void VulkanRenderer::destroyRibbonMeshes()
 bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint32_t height,
                                       VkImage& image, VkDeviceMemory& memory, VkImageView& view)
 {
+    image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
     if (!rgba || width == 0 || height == 0) return false;
+    const uint64_t t0 = uploadClockNs();
     const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width) * height * 4u;
-
-    // Staging buffer (tightly packed — vkCmdCopyBufferToImage handles the row layout).
-    VkBuffer       stageBuf = VK_NULL_HANDLE;
-    VkDeviceMemory stageMem = VK_NULL_HANDLE;
-    {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = dataSize;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        if (vkCreateBuffer(m_device, &bci, nullptr, &stageBuf) != VK_SUCCESS) return false;
-        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, stageBuf, &req);
-        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(m_device, &mai, nullptr, &stageMem) != VK_SUCCESS)
-        { vkDestroyBuffer(m_device, stageBuf, nullptr); return false; }
-        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
-        void* ptr = nullptr;
-        vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
-        std::memcpy(ptr, rgba, static_cast<size_t>(dataSize));
-        vkUnmapMemory(m_device, stageMem);
-    }
 
     VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ici.imageType     = VK_IMAGE_TYPE_2D;
@@ -7415,29 +7923,40 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
     ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(m_device, &ici, nullptr, &image) != VK_SUCCESS)
-    { image = VK_NULL_HANDLE; vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr); return false; }
+    { image = VK_NULL_HANDLE; return false; }
     VkMemoryRequirements imr{}; vkGetImageMemoryRequirements(m_device, image, &imr);
     VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     imal.allocationSize  = imr.size;
     imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (vkAllocateMemory(m_device, &imal, nullptr, &memory) != VK_SUCCESS)
     {
-        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
-        vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr);
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE;
         return false;
     }
     vkBindImageMemory(m_device, image, memory, 0);
 
-    // One-shot command buffer: UNDEFINED → TRANSFER_DST → copy → SHADER_READ_ONLY.
-    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool        = m_cmdPool;
-    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
-    VkCommandBuffer oneCB = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
-    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(oneCB, &oneBI);
+    // View and staging first: every failure exit lies before the copy is recorded,
+    // so nothing destroyed here is referenced by the open upload batch.
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = image;
+    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkBuffer stageBuf = VK_NULL_HANDLE; VkDeviceSize stageOff = 0;
+    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS
+        || !stageUpload(rgba, dataSize, stageBuf, stageOff))
+    {
+        if (view) vkDestroyImageView(m_device, view, nullptr);
+        view = VK_NULL_HANDLE;
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // Into the upload batch: UNDEFINED → TRANSFER_DST → copy → SHADER_READ_ONLY.
+    // The read side is ALL_COMMANDS: the batch is submitted ahead of whatever
+    // samples the image next, and that may be a vertex or compute stage.
+    VkCommandBuffer oneCB = uploadCmd();
     {
         VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -7452,6 +7971,7 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
     VkBufferImageCopy region{};
+    region.bufferOffset     = stageOff;
     region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     region.imageExtent      = { width, height, 1 };
     vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -7465,31 +7985,10 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
         bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         bar.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
         bar.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
-    vkEndCommandBuffer(oneCB);
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &oneCB;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_graphicsQueue);
-    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
-    vkDestroyBuffer(m_device, stageBuf, nullptr);
-    vkFreeMemory(m_device, stageMem, nullptr);
-
-    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    ivci.image            = image;
-    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
-    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS)
-    {
-        view = VK_NULL_HANDLE;
-        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
-        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
-        return false;
-    }
+    noteUpload(false, dataSize, t0);
     return true;
 }
 
@@ -7550,28 +8049,7 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     const VkDeviceSize sliceBytes = total;     // one slice's chain
     total *= layers;
     if (tex->data.size() < total) return false; // truncated payload
-
-    // Staging buffer holding the whole (already tightly packed) mip chain.
-    VkBuffer       stageBuf = VK_NULL_HANDLE;
-    VkDeviceMemory stageMem = VK_NULL_HANDLE;
-    {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = total;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        if (vkCreateBuffer(m_device, &bci, nullptr, &stageBuf) != VK_SUCCESS) return false;
-        VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, stageBuf, &req);
-        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(m_device, &mai, nullptr, &stageMem) != VK_SUCCESS)
-        { vkDestroyBuffer(m_device, stageBuf, nullptr); return false; }
-        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
-        void* ptr = nullptr;
-        vkMapMemory(m_device, stageMem, 0, total, 0, &ptr);
-        std::memcpy(ptr, tex->data.data(), static_cast<size_t>(total));
-        vkUnmapMemory(m_device, stageMem);
-    }
+    const uint64_t t0 = uploadClockNs();
 
     VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ici.imageType     = VK_IMAGE_TYPE_2D;
@@ -7584,29 +8062,39 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(m_device, &ici, nullptr, &image) != VK_SUCCESS)
-    { image = VK_NULL_HANDLE; vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr); return false; }
+    { image = VK_NULL_HANDLE; return false; }
     VkMemoryRequirements imr{}; vkGetImageMemoryRequirements(m_device, image, &imr);
     VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     imal.allocationSize  = imr.size;
     imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (vkAllocateMemory(m_device, &imal, nullptr, &memory) != VK_SUCCESS)
     {
-        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
-        vkDestroyBuffer(m_device, stageBuf, nullptr); vkFreeMemory(m_device, stageMem, nullptr);
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE;
         return false;
     }
     vkBindImageMemory(m_device, image, memory, 0);
 
-    // One-shot command buffer: UNDEFINED → TRANSFER_DST → copy every mip → SHADER_READ.
-    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool        = m_cmdPool;
-    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
-    VkCommandBuffer oneCB = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
-    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(oneCB, &oneBI);
+    // View and staging (the whole, already tightly packed chain) before anything
+    // is recorded, so a failure destroys nothing the upload batch references.
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image            = image;
+    ivci.viewType         = asArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format           = vkFmt;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
+    VkBuffer stageBuf = VK_NULL_HANDLE; VkDeviceSize stageOff = 0;
+    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS
+        || !stageUpload(tex->data.data(), total, stageBuf, stageOff))
+    {
+        if (view) vkDestroyImageView(m_device, view, nullptr);
+        view = VK_NULL_HANDLE;
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // Into the upload batch: UNDEFINED → TRANSFER_DST → copy every mip → SHADER_READ
+    // (ALL_COMMANDS on the read side, see uploadRGBA8Image).
+    VkCommandBuffer oneCB = uploadCmd();
     {
         VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -7620,18 +8108,24 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
         vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
+    // One copy command for the whole chain (all slices, all levels).
+    std::vector<VkBufferImageCopy> regions;
+    regions.reserve(size_t(layers) * mips);
     for (uint32_t s = 0; s < layers; ++s)
     { uint32_t lw = width, lh = height;
       for (uint32_t l = 0; l < mips; ++l)
       {
         VkBufferImageCopy region{};
-        // Multiple of 16 for blocks; a multiple of 4 for RGBA8 (the only array format).
-        region.bufferOffset     = s * sliceBytes + offsets[l];
+        // Multiple of 16 for blocks; a multiple of 4 for RGBA8 (the only array
+        // format). stageOff is 16-aligned, so the sum keeps both.
+        region.bufferOffset     = stageOff + s * sliceBytes + offsets[l];
         region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, s, 1 };
         region.imageExtent      = { lw, lh, 1 };
-        vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        regions.push_back(region);
         lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
       } }
+    vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<uint32_t>(regions.size()), regions.data());
     {
         VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -7642,31 +8136,10 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
         bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
         bar.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
         bar.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
-    vkEndCommandBuffer(oneCB);
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &oneCB;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_graphicsQueue);
-    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
-    vkDestroyBuffer(m_device, stageBuf, nullptr);
-    vkFreeMemory(m_device, stageMem, nullptr);
-
-    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    ivci.image            = image;
-    ivci.viewType         = asArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format           = vkFmt;
-    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
-    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS)
-    {
-        view = VK_NULL_HANDLE;
-        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
-        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
-        return false;
-    }
+    noteUpload(false, total, t0);
     return true;
 }
 
@@ -7681,12 +8154,10 @@ bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const st
     const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
     const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
     const TextureAsset* tex = m_contentManager->resolveTextureRef(texId0, texPath0);
+    if (!tex) return false;
 
-    // RGBA8 + cooked BC7/BC3 (full pre-baked mip chain); uploadTextureImage returns
-    // false when this device can't sample the shipped format → untextured fallback.
-    if (!uploadTextureImage(tex, image, memory, view))
-        return false;
-
+    // The set first: the upload only records into the open upload batch, so an
+    // image dropped after it (pool full) would be one a pending copy still writes.
     VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dsai.descriptorPool     = m_albedoPool;
     dsai.descriptorSetCount = 1;
@@ -7694,9 +8165,14 @@ bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const st
     if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS)
     {
         // Pool exhausted (> k_maxMeshTextures unique textured meshes) — drop to flat.
-        vkDestroyImageView(m_device, view, nullptr);  view = VK_NULL_HANDLE;
-        vkDestroyImage(m_device, image, nullptr);     image = VK_NULL_HANDLE;
-        vkFreeMemory(m_device, memory, nullptr);      memory = VK_NULL_HANDLE;
+        set = VK_NULL_HANDLE;
+        return false;
+    }
+    // RGBA8 + cooked BC7/BC3 (full pre-baked mip chain); uploadTextureImage returns
+    // false when this device can't sample the shipped format → untextured fallback.
+    if (!uploadTextureImage(tex, image, memory, view))
+    {
+        vkFreeDescriptorSets(m_device, m_albedoPool, 1, &set); // pool has the FREE bit
         set = VK_NULL_HANDLE;
         return false;
     }
@@ -7743,7 +8219,7 @@ void VulkanRenderer::processPendingInvalidations()
     // Editor-only path; a full device idle keeps the frees below trivially safe (no in-flight
     // frame references the dropped resources). The idle is a stall, but invalidation is rare
     // outside a terrain-sculpt drag — a documented follow-up (D3D12 uses a per-frame retire list).
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
 
     for (const HE::UUID& id : m_pendingMatInval)
         if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
@@ -7765,10 +8241,8 @@ void VulkanRenderer::processPendingInvalidations()
         if (auto it = m_meshCache.find(id); it != m_meshCache.end())
         {
             GpuMesh& m = it->second;
-            if (m.vbuf)       vkDestroyBuffer(m_device, m.vbuf, nullptr);
-            if (m.vmem)       vkFreeMemory(m_device, m.vmem, nullptr);
-            if (m.ibuf)       vkDestroyBuffer(m_device, m.ibuf, nullptr);
-            if (m.imem)       vkFreeMemory(m_device, m.imem, nullptr);
+            destroyPooledBuffer(m.vbuf, m.valloc);
+            destroyPooledBuffer(m.ibuf, m.ialloc);
             if (m.albedoSet)  vkFreeDescriptorSets(m_device, m_albedoPool, 1, &m.albedoSet);
             if (m.albedoView) vkDestroyImageView(m_device, m.albedoView, nullptr);
             if (m.albedoImage)vkDestroyImage(m_device, m.albedoImage, nullptr);
@@ -7789,10 +8263,10 @@ void VulkanRenderer::processPendingInvalidations()
         if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
         {
             GpuSkeletalMesh& m = it->second;
-            if (m.vb)         { vkDestroyBuffer(m_device, m.vb, nullptr);        vkFreeMemory(m_device, m.vbMem, nullptr); }
-            if (m.boneIdVb)   { vkDestroyBuffer(m_device, m.boneIdVb, nullptr);  vkFreeMemory(m_device, m.boneIdMem, nullptr); }
-            if (m.boneWgtVb)  { vkDestroyBuffer(m_device, m.boneWgtVb, nullptr); vkFreeMemory(m_device, m.boneWgtMem, nullptr); }
-            if (m.ib)         { vkDestroyBuffer(m_device, m.ib, nullptr);        vkFreeMemory(m_device, m.ibMem, nullptr); }
+            destroyPooledBuffer(m.vb,        m.vbAlloc);
+            destroyPooledBuffer(m.boneIdVb,  m.boneIdAlloc);
+            destroyPooledBuffer(m.boneWgtVb, m.boneWgtAlloc);
+            destroyPooledBuffer(m.ib,        m.ibAlloc);
             if (m.albedoSet)  vkFreeDescriptorSets(m_device, m_albedoPool, 1, &m.albedoSet);
             if (m.texView)    vkDestroyImageView(m_device, m.texView, nullptr);
             if (m.texImage)   vkDestroyImage(m_device, m.texImage, nullptr);
@@ -7914,8 +8388,8 @@ const VulkanRenderer::GpuMesh* VulkanRenderer::resolveMesh(const HE::UUID& asset
     const std::vector<float>& interleaved = *vtx;
     if (!createMeshBuffers(mesh, interleaved, asset->indices)) return nullptr;
     // Upload the mesh's baked base-color texture (if any) up front, so the cache entry is
-    // fully resolved on insert. NOTE: this uses a blocking one-shot submit + vkQueueWaitIdle
-    // (see uploadRGBA8Image), a one-time GPU stall on first sight of each textured mesh.
+    // fully resolved on insert. Both uploads only record into the open upload batch
+    // (no stall); it is submitted ahead of the command buffer that draws the mesh.
     resolveAndUploadAlbedo(asset->materialId, asset->materialPath,
                            mesh.albedoImage, mesh.albedoMem, mesh.albedoView, mesh.albedoSet);
     return &m_meshCache.emplace(assetId, mesh).first->second;
@@ -9435,7 +9909,7 @@ void VulkanRenderer::createSkyPipeline()
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &oneCB;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
         vkDestroyBuffer(m_device, stageBuf, nullptr);
@@ -9630,7 +10104,7 @@ void VulkanRenderer::createSkyPipeline()
         pci.layout              = m_skyPipelineLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &out) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: sky pipeline creation failed");
     };
 
@@ -9900,7 +10374,7 @@ void VulkanRenderer::createDebugLinePipeline()
         pci.layout              = m_debugPipelineLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &out) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: debug line pipeline creation failed");
     };
 
@@ -9989,7 +10463,7 @@ void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heig
 {
     if (!rgba8Pixels || width <= 0 || height <= 0) return;
 
-    vkDeviceWaitIdle(m_device);
+    deviceWaitIdle();
 
     // Destroy any previous moon texture.
     if (m_moonView)   { vkDestroyImageView(m_device, m_moonView, nullptr);  m_moonView   = VK_NULL_HANDLE; }
@@ -10093,7 +10567,7 @@ void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heig
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers    = &oneCB;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    submitGraphics(si, VK_NULL_HANDLE);
     vkQueueWaitIdle(m_graphicsQueue);
     vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
 
@@ -10130,10 +10604,9 @@ void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heig
 // ─────────────────────────────────────────────────────────────────────────────
 // ImGui editor textures (content-browser icons + logo)
 // ─────────────────────────────────────────────────────────────────────────────
-// Mirrors SetMoonTexture's upload path (staging buffer → device-local
-// R8G8B8A8_UNORM image, UNDEFINED→TRANSFER_DST copy → SHADER_READ_ONLY, one-shot
-// command buffer + vkQueueWaitIdle) but creates its OWN linear sampler (the moon
-// path reuses m_moonSampler) and does NOT touch any scene descriptor sets. The
+// A device-local R8G8B8A8_UNORM image through uploadRGBA8Image (the upload
+// batch), plus its OWN linear sampler (the moon path reuses m_moonSampler); it
+// does NOT touch any scene descriptor sets. The
 // image/view/memory/sampler are retained in m_imguiTextures so they outlive the
 // VkDescriptorSet ImGui samples from; the editor's registrar (which links ImGui)
 // calls ImGui_ImplVulkan_AddTexture to build that descriptor set.
@@ -10141,123 +10614,18 @@ void* VulkanRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int
 {
     if (!rgba8Pixels || width <= 0 || height <= 0 || !m_device) return nullptr;
 
-    vkDeviceWaitIdle(m_device);
-
-    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width * height * 4);
-
-    // ── Staging buffer ───────────────────────────────────────────────────────
-    VkBuffer       stageBuf  = VK_NULL_HANDLE;
-    VkDeviceMemory stageMem  = VK_NULL_HANDLE;
-    {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = dataSize;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        vkCreateBuffer(m_device, &bci, nullptr, &stageBuf);
-        VkMemoryRequirements mr;
-        vkGetBufferMemoryRequirements(m_device, stageBuf, &mr);
-        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = mr.size;
-        mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vkAllocateMemory(m_device, &mai, nullptr, &stageMem);
-        vkBindBufferMemory(m_device, stageBuf, stageMem, 0);
-        void* ptr = nullptr;
-        vkMapMemory(m_device, stageMem, 0, dataSize, 0, &ptr);
-        std::memcpy(ptr, rgba8Pixels, static_cast<size_t>(dataSize));
-        vkUnmapMemory(m_device, stageMem);
-    }
-
-    // ── Device-local RGBA8 image ─────────────────────────────────────────────
+    // Through the upload batch like every other texture (REN-802): no device
+    // idle and no queue wait per icon. Submitted right away, though: with
+    // multi-viewport on, imgui_impl_vulkan submits the platform windows itself
+    // (RenderPlatformWindowsDefault), past submitGraphics, and may draw the
+    // icon there first.
     VkImage        image  = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    ici.imageType     = VK_IMAGE_TYPE_2D;
-    ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
-    ici.extent        = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
-    ici.mipLevels     = 1;
-    ici.arrayLayers   = 1;
-    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    vkCreateImage(m_device, &ici, nullptr, &image);
-    VkMemoryRequirements imr;
-    vkGetImageMemoryRequirements(m_device, image, &imr);
-    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    imal.allocationSize  = imr.size;
-    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkAllocateMemory(m_device, &imal, nullptr, &memory);
-    vkBindImageMemory(m_device, image, memory, 0);
-
-    // ── One-shot command buffer: transition + copy ───────────────────────────
-    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool        = m_cmdPool;
-    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
-    VkCommandBuffer oneCB = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
-    VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(oneCB, &oneBI);
-
-    // UNDEFINED → TRANSFER_DST
-    {
-        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        bar.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
-        bar.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar.image               = image;
-        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        bar.srcAccessMask       = 0;
-        bar.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(oneCB,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &bar);
-    }
-
-    VkBufferImageCopy region{};
-    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    region.imageExtent      = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
-    vkCmdCopyBufferToImage(oneCB, stageBuf, image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    // TRANSFER_DST → SHADER_READ_ONLY
-    {
-        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-        bar.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        bar.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar.image               = image;
-        bar.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        bar.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bar.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(oneCB,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &bar);
-    }
-
-    vkEndCommandBuffer(oneCB);
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &oneCB;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_graphicsQueue);
-    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
-
-    // Destroy staging resources.
-    vkDestroyBuffer(m_device, stageBuf, nullptr);
-    vkFreeMemory(m_device, stageMem, nullptr);
-
-    // ── Image view ───────────────────────────────────────────────────────────
-    VkImageView view = VK_NULL_HANDLE;
-    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    ivci.image            = image;
-    ivci.viewType         = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format           = VK_FORMAT_R8G8B8A8_UNORM;
-    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCreateImageView(m_device, &ivci, nullptr, &view);
+    VkImageView    view   = VK_NULL_HANDLE;
+    if (!uploadRGBA8Image(static_cast<const uint8_t*>(rgba8Pixels), static_cast<uint32_t>(width),
+                          static_cast<uint32_t>(height), image, memory, view))
+        return nullptr;
+    flushUploads();
 
     // ── Linear sampler (mirrors the moon sampler creation) ───────────────────
     VkSampler sampler = VK_NULL_HANDLE;
@@ -10521,7 +10889,7 @@ void VulkanRenderer::updateGiAccel()
         const VkDeviceSize triFrom   = m_giBlas.uploadFromTris()  * sizeof(HE::GiBvhTriangle);
         if ((m_giNodeBuf.buf || m_giTriBuf.buf) &&
             (nodeFrom == 0 || triFrom == 0 || nodeBytes > m_giNodeBuf.size || triBytes > m_giTriBuf.size))
-            vkDeviceWaitIdle(m_device);
+            deviceWaitIdle();
         const bool nodesOk = uploadGiBuffer(m_giNodeBuf, m_giBlas.nodes().data(), nodeBytes,
                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, nodeFrom,
                                             nodeBytes + nodeBytes / 2);
@@ -10750,7 +11118,7 @@ VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
             vkEndCommandBuffer(tmp);
             VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
             si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-            ok = vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS;
+            ok = submitGraphics(si, VK_NULL_HANDLE) == VK_SUCCESS;
             vkQueueWaitIdle(m_graphicsQueue);
             vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
         }
@@ -11144,7 +11512,7 @@ void VulkanRenderer::createGiPipelines()
         pci.pMultisampleState = &ms;  pci.pDepthStencilState = &ds;
         pci.pColorBlendState = &cb2;  pci.pDynamicState = &dyn;
         pci.layout = m_giGBufPL;      pci.renderPass = m_giGBufRP;
-        pipesOk = pipesOk && vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        pipesOk = pipesOk && createGraphicsPipelines(1, &pci, nullptr,
                                                        &m_giGBufPipe) == VK_SUCCESS;
         // Instanced twin for same-mesh runs, VS swapped. Kept out of pipesOk on
         // purpose: a failure here must not take GI down with it — every run
@@ -11158,7 +11526,7 @@ void VulkanRenderer::createGiPipelines()
                 VkGraphicsPipelineCreateInfo ipci = pci;
                 ipci.pStages           = istages;
                 ipci.pVertexInputState = &iin.info;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+                if (createGraphicsPipelines(1, &ipci, nullptr,
                                               &m_giGBufInstancedPipe) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced GI G-buffer pipeline creation failed");
                 vkDestroyShaderModule(m_device, gbufIVS, nullptr);
@@ -11182,7 +11550,7 @@ void VulkanRenderer::createGiPipelines()
         pci.pMultisampleState = &ms;   pci.pDepthStencilState = &nods;
         pci.pColorBlendState = &cb1;   pci.pDynamicState = &dyn;
         pci.layout = layout;           pci.renderPass = rp;
-        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+        return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
     };
     pipesOk = pipesOk && makeFsPipe(tempFS,   m_giTemporalRP, m_giTemporalPipe, m_giFsPL);
     pipesOk = pipesOk && makeFsPipe(atrousFS, m_giAtrousRP,   m_giAtrousPipe,   m_giAtrousPL);
@@ -11195,7 +11563,7 @@ void VulkanRenderer::createGiPipelines()
         cpi.stage.module = cs;
         cpi.stage.pName  = "main";
         cpi.layout       = pl;
-        return vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpi, nullptr, &out) == VK_SUCCESS;
+        return createComputePipelines(1, &cpi, nullptr, &out) == VK_SUCCESS;
     };
     pipesOk = pipesOk && makeCompute(shadowCS, m_giShadowPL, m_giShadowPipe);
     pipesOk = pipesOk && makeCompute(probeCS,  m_giProbePL,  m_giProbePipe);
@@ -11332,7 +11700,7 @@ void VulkanRenderer::createGiHwPipelines()
         cpi.stage.module = cs;
         cpi.stage.pName  = "main";
         cpi.layout       = pl;
-        return vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpi, nullptr, &out) == VK_SUCCESS;
+        return createComputePipelines(1, &cpi, nullptr, &out) == VK_SUCCESS;
     };
     ok = makeCompute(shadowCS, m_giShadowHwPL, m_giShadowHwPipe)
       && makeCompute(probeCS,  m_giProbeHwPL,  m_giProbeHwPipe);
@@ -11490,7 +11858,7 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
         barrier(m_giHist[1].img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         vkEndCommandBuffer(tmp);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
     }
@@ -11544,7 +11912,7 @@ void VulkanRenderer::ensureGiProbeGrid()
         // rare), free it, and park bindings 5/6 on the white fallback until
         // runGi() rewrites them for the slot it records. This frame's command
         // buffer has not touched the atlas yet — runGi() calls us first.
-        vkDeviceWaitIdle(m_device);
+        deviceWaitIdle();
         destroyGiProbeAtlas();
         VkDescriptorImageInfo white{ m_ssaoSampler, m_ssaoWhiteView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
@@ -11647,7 +12015,7 @@ void VulkanRenderer::ensureGiProbeAtlas()
     }
     vkEndCommandBuffer(tmp);
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    submitGraphics(si, VK_NULL_HANDLE);
     vkQueueWaitIdle(m_graphicsQueue);
     vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
 }
@@ -12247,7 +12615,7 @@ void VulkanRenderer::createSSAOPipeline()
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
         vkEndCommandBuffer(tmp);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
         vkDestroyBuffer(m_device, stagingBuf, nullptr);
@@ -12353,7 +12721,7 @@ void VulkanRenderer::createSSAOPipeline()
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
         vkEndCommandBuffer(tmp);
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        submitGraphics(si, VK_NULL_HANDLE);
         vkQueueWaitIdle(m_graphicsQueue);
         vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
         vkDestroyBuffer(m_device, stagingBuf, nullptr);
@@ -12649,7 +13017,7 @@ void VulkanRenderer::createSSAOPipeline()
         pci.pDynamicState       = &dyn;
         pci.layout              = m_scenePipelineLayout; // push constants: mvp(64) + modelView(64)
         pci.renderPass          = m_ssaoPosRenderPass;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr,
                                           &m_ssaoPosGfxPipeline), "ssao pos pipeline");
         // Instanced twin for same-mesh runs, VS swapped. Optional — without it
         // every run loops through m_ssaoPosGfxPipeline.
@@ -12661,7 +13029,7 @@ void VulkanRenderer::createSSAOPipeline()
             VkGraphicsPipelineCreateInfo ipci = pci;
             ipci.pStages           = istages;
             ipci.pVertexInputState = &iin.info;
-            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+            if (createGraphicsPipelines(1, &ipci, nullptr,
                                           &m_ssaoPosInstancedPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced SSAO pos pipeline creation failed");
             vkDestroyShaderModule(m_device, posIVS, nullptr);
@@ -12694,7 +13062,7 @@ void VulkanRenderer::createSSAOPipeline()
         pci.pDynamicState       = &dyn;
         pci.layout              = m_ssaoPipeLayout;
         pci.renderPass          = m_ssaoRenderPass;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr,
                                           &m_ssaoGfxPipeline), "ssao pipeline");
     }
 
@@ -12718,7 +13086,7 @@ void VulkanRenderer::createSSAOPipeline()
         pci.pDynamicState       = &dyn;
         pci.layout              = m_ssaoBlurPipeLayout;
         pci.renderPass          = m_ssaoBlurRenderPass;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr,
                                           &m_ssaoBlurGfxPipeline), "ssao blur pipeline");
     }
 
@@ -13126,7 +13494,7 @@ void VulkanRenderer::primeShaderReadLayout(VkImage img)
     vkEndCommandBuffer(tmp);
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    submitGraphics(si, VK_NULL_HANDLE);
     vkQueueWaitIdle(m_graphicsQueue);
     vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
 }
@@ -13447,7 +13815,7 @@ bool VulkanRenderer::EnsureSSRPipelines()
             vkEndCommandBuffer(tmp);
             VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
             si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-            vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+            submitGraphics(si, VK_NULL_HANDLE);
             vkQueueWaitIdle(m_graphicsQueue);
             vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
         }
@@ -13554,7 +13922,7 @@ bool VulkanRenderer::EnsureSSRPipelines()
         pci.pDynamicState       = &dyn;
         pci.layout              = layout;
         pci.renderPass          = rp;
-        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+        return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
     };
     const bool okPrepass = buildPipeline(mPV, mPF, /*geometry=*/true,  3,
                                          m_reflPrepassPipeLayout, m_reflPrepassRP, m_reflPrepassPipeline);
@@ -14207,7 +14575,7 @@ void VulkanRenderer::createSkinnedPipeline()
     pci.layout              = m_skinnedPipeLayout;
     pci.renderPass          = m_renderPass;
     pci.subpass             = 0;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_skinnedPipeline) != VK_SUCCESS)
+    if (createGraphicsPipelines(1, &pci, nullptr, &m_skinnedPipeline) != VK_SUCCESS)
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned pipeline creation failed");
 
     // ── HDR variant (renderPass = m_postFxSceneRP, RGBA16F) ──────────────────
@@ -14215,7 +14583,7 @@ void VulkanRenderer::createSkinnedPipeline()
     {
         VkGraphicsPipelineCreateInfo hdrPci = pci;
         hdrPci.renderPass = m_postFxSceneRP;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &hdrPci, nullptr, &m_skinnedPipelineHDR) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &hdrPci, nullptr, &m_skinnedPipelineHDR) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned HDR pipeline creation failed");
     }
 
@@ -14268,49 +14636,36 @@ VulkanRenderer::resolveSkeletalMesh(const HE::UUID& id)
         std::copy_n(asset->boneWeights.begin(), copy, boneWgts.begin());
     }
 
-    // Helper: create a host-visible/coherent buffer and memcpy data into it.
-    auto makeHostBuf = [&](VkDeviceSize size, VkBufferUsageFlags usage,
-                            const void* data, VkBuffer& buf, VkDeviceMemory& mem) -> bool
-    {
-        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = size;
-        bci.usage = usage;
-        if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
-        VkMemoryRequirements req{};
-        vkGetBufferMemoryRequirements(m_device, buf, &req);
-        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        mai.allocationSize  = req.size;
-        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) return false;
-        vkBindBufferMemory(m_device, buf, mem, 0);
-        void* p = nullptr;
-        vkMapMemory(m_device, mem, 0, size, 0, &p);
-        std::memcpy(p, data, static_cast<size_t>(size));
-        vkUnmapMemory(m_device, mem);
-        return true;
-    };
-
+    // Device-local, filled through the upload batch (REN-803): the GPU skins
+    // from these, the CPU never writes them again.
+    const uint64_t t0 = uploadClockNs();
+    const VkDeviceSize vbBytes  = interleaved.size() * sizeof(float);
+    const VkDeviceSize idBytes  = boneIds.size()  * sizeof(uint32_t);
+    const VkDeviceSize wgtBytes = boneWgts.size() * sizeof(float);
+    const VkDeviceSize ibBytes  = asset->indices.size() * sizeof(uint32_t);
     GpuSkeletalMesh sm;
     bool ok = true;
-    ok = ok && makeHostBuf(interleaved.size() * sizeof(float), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                           interleaved.data(), sm.vb, sm.vbMem);
-    ok = ok && makeHostBuf(boneIds.size()  * sizeof(uint32_t), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                           boneIds.data(),  sm.boneIdVb, sm.boneIdMem);
-    ok = ok && makeHostBuf(boneWgts.size() * sizeof(float),    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                           boneWgts.data(), sm.boneWgtVb, sm.boneWgtMem);
-    ok = ok && makeHostBuf(asset->indices.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                           asset->indices.data(), sm.ib, sm.ibMem);
+    ok = ok && createDeviceLocalBuffer(vbBytes,  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                       interleaved.data(), sm.vb, sm.vbAlloc);
+    ok = ok && createDeviceLocalBuffer(idBytes,  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                       boneIds.data(),  sm.boneIdVb, sm.boneIdAlloc);
+    ok = ok && createDeviceLocalBuffer(wgtBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                       boneWgts.data(), sm.boneWgtVb, sm.boneWgtAlloc);
+    ok = ok && createDeviceLocalBuffer(ibBytes,  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                       asset->indices.data(), sm.ib, sm.ibAlloc);
     if (!ok)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: resolveSkeletalMesh buffer creation failed");
-        // Partial cleanup: destroy whatever was created before the failure.
-        if (sm.vb)       { vkDestroyBuffer(m_device, sm.vb,       nullptr); vkFreeMemory(m_device, sm.vbMem,      nullptr); }
-        if (sm.boneIdVb) { vkDestroyBuffer(m_device, sm.boneIdVb, nullptr); vkFreeMemory(m_device, sm.boneIdMem,  nullptr); }
-        if (sm.boneWgtVb){ vkDestroyBuffer(m_device, sm.boneWgtVb,nullptr); vkFreeMemory(m_device, sm.boneWgtMem, nullptr); }
-        if (sm.ib)       { vkDestroyBuffer(m_device, sm.ib,       nullptr); vkFreeMemory(m_device, sm.ibMem,      nullptr); }
+        // Partial cleanup: the copies of whatever was created are recorded in the
+        // open upload batch, so let that finish first (rare: out of memory).
+        deviceWaitIdle();
+        destroyPooledBuffer(sm.vb,        sm.vbAlloc);
+        destroyPooledBuffer(sm.boneIdVb,  sm.boneIdAlloc);
+        destroyPooledBuffer(sm.boneWgtVb, sm.boneWgtAlloc);
+        destroyPooledBuffer(sm.ib,        sm.ibAlloc);
         return nullptr;
     }
+    noteUpload(true, vbBytes + idBytes + wgtBytes + ibBytes, t0);
 
     sm.indexCount = static_cast<int>(asset->indices.size());
     // Upload the skeletal mesh's baked base-color texture (if any), same as static meshes.
@@ -14323,10 +14678,10 @@ void VulkanRenderer::destroySkeletalMeshCache()
 {
     for (auto& [id, sm] : m_skeletalMeshCache)
     {
-        if (sm.vb)        { vkDestroyBuffer(m_device, sm.vb,        nullptr); vkFreeMemory(m_device, sm.vbMem,       nullptr); }
-        if (sm.boneIdVb)  { vkDestroyBuffer(m_device, sm.boneIdVb,  nullptr); vkFreeMemory(m_device, sm.boneIdMem,   nullptr); }
-        if (sm.boneWgtVb) { vkDestroyBuffer(m_device, sm.boneWgtVb, nullptr); vkFreeMemory(m_device, sm.boneWgtMem,  nullptr); }
-        if (sm.ib)        { vkDestroyBuffer(m_device, sm.ib,        nullptr); vkFreeMemory(m_device, sm.ibMem,        nullptr); }
+        destroyPooledBuffer(sm.vb,        sm.vbAlloc);
+        destroyPooledBuffer(sm.boneIdVb,  sm.boneIdAlloc);
+        destroyPooledBuffer(sm.boneWgtVb, sm.boneWgtAlloc);
+        destroyPooledBuffer(sm.ib,        sm.ibAlloc);
         // Base-color texture (descriptor set freed with m_albedoPool in destroyScenePipeline).
         if (sm.texView)   vkDestroyImageView(m_device, sm.texView,  nullptr);
         if (sm.texImage)  vkDestroyImage    (m_device, sm.texImage, nullptr);
@@ -14522,7 +14877,7 @@ void VulkanRenderer::createUIPipeline()
         pci.layout              = m_uiPipeLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out), "ui pipeline");
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr, &out), "ui pipeline");
     };
 
     // Swapchain pipeline: m_renderPass (swapchain format, has depth attachment).
@@ -14775,7 +15130,7 @@ VkDescriptorSet VulkanRenderer::uiFontAtlasSet(uint32_t key)
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers    = &oneCB;
-    vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+    submitGraphics(si, VK_NULL_HANDLE);
     vkQueueWaitIdle(m_graphicsQueue);
     vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
 

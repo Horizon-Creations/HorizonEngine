@@ -95,7 +95,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] REN-903/908/401: Cluster-Build ohne Heap, SSAO-Kernel einmalig, Sky-Bake gemeinsam und gedrosselt
 
 **Stufe 3 – Backend-spezifisch (je Backend eigene PRs, unabhängig parallelisierbar)**
-- [ ] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache`
+- [x] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache` (Thema 215, `docs/audit-vulkan-backend-2026-10-18.md`: Upload-Batch ohne Wartepunkt, Mesh-Pool, persistenter Pipeline-Cache für alle 34 Create-Stellen + ImGui; RTX 4070: 284 Waits/212 ms → 0, Pipelines bei kaltem Treiber-Cache 1,7 s → 43 ms; offen aus REN-808: Sky-SPIR-V und Rauschvolumen pro Start, Pipeline-Bau im Job; Staging-Ring zu klein für 61 MB im ersten Frame)
 - [ ] Metal: REN-302/402 `FrameUploadRing` benutzen, REN-405/404 TLAS/BLAS-Dirty, REN-406 asynchroner BLAS-Build
 - [ ] D3D12: REN-202 Meshes in DEFAULT-Heap; D3D11/GL: Material-Draw-Zustand (REN-103/601), UI-Batching (REN-603)
 - [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
