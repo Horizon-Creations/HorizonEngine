@@ -292,9 +292,56 @@ files written once by the base: the fixture scene re-saved, the subtree blob, an
 the prefab scene saved after syncing to asset v1 and v2. All four are identical
 under `cmp`, and the `PrefabSyncReport` counters are identical too.
 
+## Step 6: CI regression in `test_lod.cpp` (Linux only)
+
+The boundary test "LODSystem's world position is worldPositionOf's to the bit"
+(added with SCN-402 in 926e71cc, step 2) failed on the Linux job only, with
+`wrong == 37` of 800. It was blamed on the terrain gates, but step 3 touches neither
+LODSystem nor TransformHierarchy: step 2's own CI run (400370dd) was cancelled, so
+63055532 was simply the first completed run that contained the test.
+
+A diagnostic (52498422) split the count. On Linux `twinDiffers == 0` (both twins
+stand at the same bits), `wrongOn == 20`, `wrongBelow == 17`, all in the sibling-run
+range. So LODSystem's memo product `parentWorld * local` did not round like
+`worldMatrixOf`'s walk.
+
+Cause: Jolt (`Jolt.cmake`, x86 branch) adds `-mavx2 … -mfma` as **PUBLIC** compile
+options, so HorizonScene and he_tests are compiled with FMA. GCC's default for GNU
+C++ is `-ffp-contract=fast`, which fuses a multiply and an add across statements
+after inlining, so the same glm product ends up fused differently in two
+functions. Jolt builds itself with `-ffp-contract=off` for exactly this reason.
+MSVC does not contract. Clang's default (`on`) fuses within one expression only;
+even `-ffp-contract=fast` on the three TUs did not reproduce it on the Mac.
+
+Fix (2ab47e5d): `add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>)`
+in the top-level `CMakeLists.txt`. It applies to GCC C++ only, so the Mac and
+Windows builds compile exactly as before. Linux numerics now follow the
+non-contracting path that Windows already takes.
+
 ## Handoff
 
-### Step 4 (latest)
+### Step 6 (latest)
+
+- **Topic / step:** 218, step 6 (CI regression `test_lod.cpp:358`).
+- **Commits:** 52498422 (split diagnostic in the test), 2ab47e5d (GCC flag + labels),
+  and this doc.
+- **Verified:** the Linux log of run 39114816200 (diagnostic readout above).
+  On the Mac, `test_lod` passed 3/3 before and after the fix. The full local
+  `ctest -j4` (private HOME, without `test_material_graph`) passed 300/302, with 2
+  skipped. AppleClang command lines carry no new flag (`ninja -t commands`).
+- **Verified in CI:** run 39117440266 at 2ab47e5d is green on all four jobs. On
+  Linux, `test_lod` passed and ctest passed 303/303. GCC was not run locally
+  (there is no Linux machine or container here).
+- **Decision:** project-wide for GCC C++, not only `LODSystem.cpp`. Every "same
+  maths, same bits" contract (`propagateTransforms` vs `worldPositionOf`, the LOD
+  memo) is exposed the same way. The cost is a little FMA throughput on Linux
+  builds.
+- **Pitfall:** doctest under GCC streams a string literal coming out of `?:` as `1`.
+  Wrap it in `std::string`.
+- **Next steps:** none for this step. Whether clang on Linux should get the flag
+  too is open; its default `on` was exact on the Mac.
+
+### Step 4
 
 - **Topic / step:** 218, step 4 of 4 (Hive step 1076).
 - **Commits:** 3954c38b (SCN-701/702), 8900df40 (SCN-302), and this doc.
