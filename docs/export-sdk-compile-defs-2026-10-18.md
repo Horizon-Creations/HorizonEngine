@@ -418,7 +418,8 @@ body or move behind a macro is open. They are needed for parity with the interpr
   compiled in", "pak key from HEGameBuildConfig.h", build profile 'dev', clean exit at frame 30. Release tree `out/build/release-profile`
   (HE_BUILD_TESTS=OFF, driver run by hand with `-DHE_PROFILE=release`): `--target HorizonSDK` OK, probe `profile=release features=0000`,
   `dev` refused, template game builds; `build_profile_strings.py --profile release <game> <sdk>/lib` OK (33/33 gone); dev SDK with
-  `--profile dev` all present, with `--profile release` FAILED 33 (negative control). Full ctest: see the result post.
+  `--profile dev` all present, with `--profile release` FAILED 33 (negative control). Full ctest (dev tree, `-j4`, private `HOME`,
+  `HE_CONFIG_DIR` unset): 306/306, the two `runtime_size_app_*` skipped (flavour-only).
 - **Not verified:** Windows/Linux (CI): DLL/import-lib names, `$ORIGIN` INSTALL_RPATH on the installed .so, the nested Ninja configure
   with cl.exe. The release game was not launched (no hidden mode in release). Tracy (`HE_ENABLE_TRACY`) SDKs: warning only, no Tracy headers.
 - **Decisions taken:** hand-written imported targets, not `install(EXPORT)` (PUBLIC deps glm/SDL3/nlohmann/lua_static are in no export
