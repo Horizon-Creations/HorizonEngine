@@ -3533,3 +3533,123 @@ TEST_CASE("ui shot: the category list names what has logged")
 	INFO("changed pixels under the Category button: " << changed);
 	CHECK(changed > 1500);
 }
+
+// ── The reader draws only the sections in view (EDT-302) ─────────────────────
+// A page as long as the Node Reference, opened in its middle: with the sections
+// above and below the body skipped, the frame must be the same picture as with
+// every section drawn, the scroll range the same, and a jump to another section
+// must still land where it lands without the skipping.
+namespace
+{
+	HE::Ed::Docs::Page longPage()
+	{
+		using namespace HE::Ed::Docs;
+		Page page;
+		page.id      = "longpage";
+		page.file    = "longpage.html";
+		page.title   = "Long Page Fixture";
+		page.summary = "Many sections of different heights.";
+		for (int i = 0; i < 120; ++i)
+		{
+			Section sec;
+			sec.id    = "s" + std::to_string(i);
+			sec.title = "Section " + std::to_string(i);
+			Block lead;
+			lead.kind = BlockKind::Lead;
+			lead.runs.push_back({ "The opening sentence of section " + std::to_string(i) + ".",
+			                      Style::Body, "" });
+			sec.blocks.push_back(lead);
+			// Paragraphs of different lengths, so the sections differ in height
+			// and a skipped run has to add up exactly.
+			Block para;
+			para.kind = BlockKind::Paragraph;
+			std::string text;
+			for (int w = 0; w < 12 + (i * 7) % 60; ++w) text += "word" + std::to_string(w) + " ";
+			para.runs.push_back({ text, Style::Body, "" });
+			sec.blocks.push_back(para);
+			if (i % 4 == 0)
+			{
+				Block code;
+				code.kind = BlockKind::Code;
+				code.title = "example.lua";
+				code.text  = "local a = " + std::to_string(i) + "\nprint(a)";
+				sec.blocks.push_back(code);
+			}
+			page.sections.push_back(sec);
+		}
+		return page;
+	}
+
+	ImGuiWindow* docsBodyWindow()
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (std::strstr(w->Name, "##docsBody")) return w;
+		return nullptr;
+	}
+
+	int differingPixels(const he_ui::Image& a, const he_ui::Image& b)
+	{
+		int differ = 0;
+		for (int y = 0; y < a.height; ++y)
+			for (int x = 0; x < a.width; ++x)
+			{
+				std::uint8_t r0, g0, b0, a0, r1, g1, b1, a1;
+				a.pixel(x, y, r0, g0, b0, a0);
+				b.pixel(x, y, r1, g1, b1, a1);
+				if (r0 != r1 || g0 != g1 || b0 != b1) ++differ;
+			}
+		return differ;
+	}
+}
+
+TEST_CASE("ui shot: the documentation reader skips sections out of view")
+{
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	REQUIRE(lib.loaded());
+	lib.appendPage(longPage());
+	const auto draw = [&](int) { DocsPanel::draw(host); };
+
+	// The reference: every section drawn, after a jump into the middle has landed.
+	DocsPanel::setSectionClipping(false);
+	DocsPanel::openTopic("longpage#s60");
+	REQUIRE(DocsPanel::isOpen());
+	const he_ui::Image all = shoot("docs-long-all", W, H, 8, draw);
+	REQUIRE(all.valid());
+	CHECK(DocsPanel::sectionsDrawn() == 120);
+	ImGuiWindow* body = docsBodyWindow();
+	REQUIRE(body);
+	const float scrollAll    = body->Scroll.y;
+	const float scrollMaxAll = body->ScrollMax.y;
+	CHECK(scrollAll > 1000.0f);
+
+	// Same place, skipping on: the same picture from a handful of sections.
+	DocsPanel::setSectionClipping(true);
+	const he_ui::Image clipped = shoot("docs-long-clipped", W, H, 3, draw);
+	REQUIRE(clipped.valid());
+	INFO("sections drawn with clipping: " << DocsPanel::sectionsDrawn());
+	CHECK(DocsPanel::sectionsDrawn() > 0);
+	CHECK(DocsPanel::sectionsDrawn() < 12);
+	CHECK(body->Scroll.y == doctest::Approx(scrollAll));
+	CHECK(body->ScrollMax.y == doctest::Approx(scrollMaxAll));
+	CHECK(differingPixels(all, clipped) == 0);
+
+	// A jump with skipping on lands where it lands without.
+	DocsPanel::openTopic("longpage#s25");
+	const he_ui::Image jumped = shoot("docs-long-jumped", W, H, 8, draw);
+	const float scrollJumped = body->Scroll.y;
+	DocsPanel::setSectionClipping(false);
+	DocsPanel::openTopic("longpage#s25");
+	const he_ui::Image jumpedAll = shoot("docs-long-jumped-all", W, H, 8, draw);
+	CHECK(body->Scroll.y == doctest::Approx(scrollJumped));
+	CHECK(differingPixels(jumped, jumpedAll) == 0);
+
+	DocsPanel::setSectionClipping(true);
+	DocsPanel::close();
+}
