@@ -1876,13 +1876,13 @@ namespace
 		reg.emplace<TerrainComponent>(land, a.terrain);
 
 		a.foliage.visible         = false;
-		a.foliage.meshAssetId     = HE::UUID::generate();
-		a.foliage.materialAssetId = HE::UUID::generate();
-		a.foliage.density         = 0.45f;
-		a.foliage.seed            = 1234;
-		a.foliage.minScale        = 0.55f;
-		a.foliage.maxScale        = 1.85f;
-		a.foliage.drawDistance    = 140.0f;
+		a.foliage.layers[0].meshAssetId     = HE::UUID::generate();
+		a.foliage.layers[0].materialAssetId = HE::UUID::generate();
+		a.foliage.layers[0].density         = 0.45f;
+		a.foliage.layers[0].seed            = 1234;
+		a.foliage.layers[0].minScale        = 0.55f;
+		a.foliage.layers[0].maxScale        = 1.85f;
+		a.foliage.layers[0].drawDistance    = 140.0f;
 		reg.emplace<FoliageComponent>(land, a.foliage);
 
 		// ── "Weather": its own entity since Forts. (addWeather), like Sky ─────
@@ -2260,13 +2260,13 @@ namespace
 			const auto* f = reg.try_get<FoliageComponent>(land);
 			REQUIRE(f != nullptr);
 			CHECK(f->visible         == a.foliage.visible);
-			CHECK(f->meshAssetId     == a.foliage.meshAssetId);
-			CHECK(f->materialAssetId == a.foliage.materialAssetId);
-			CHECK(f->density         == doctest::Approx(a.foliage.density));
-			CHECK(f->seed            == a.foliage.seed);
-			CHECK(f->minScale        == doctest::Approx(a.foliage.minScale));
-			CHECK(f->maxScale        == doctest::Approx(a.foliage.maxScale));
-			CHECK(f->drawDistance    == doctest::Approx(a.foliage.drawDistance));
+			CHECK(f->layers[0].meshAssetId     == a.foliage.layers[0].meshAssetId);
+			CHECK(f->layers[0].materialAssetId == a.foliage.layers[0].materialAssetId);
+			CHECK(f->layers[0].density         == doctest::Approx(a.foliage.layers[0].density));
+			CHECK(f->layers[0].seed            == a.foliage.layers[0].seed);
+			CHECK(f->layers[0].minScale        == doctest::Approx(a.foliage.layers[0].minScale));
+			CHECK(f->layers[0].maxScale        == doctest::Approx(a.foliage.layers[0].maxScale));
+			CHECK(f->layers[0].drawDistance    == doctest::Approx(a.foliage.layers[0].drawDistance));
 		}
 
 		const Entity weather = world.weatherEntity();

@@ -101,9 +101,9 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
 
 **Stufe 4 – Scene-Systeme**
-- [ ] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound`
-- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out)
-- [ ] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung
+- [x] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound` (Thema 218 Schritt 1, `docs/audit-scene-systeme-2026-10-18.md`; offen aus SCN-102: Sichtbarkeits-/Distanz-LOD und `playing`-Flag der State Machine)
+- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out) (SCN-301/401/501/402/601 und SCN-604 erledigt in Thema 218 Schritt 2, SCN-801/802 in Schritt 3, `docs/audit-scene-systeme-2026-10-18.md`; offen: Welt-Skip des LOD-Systems, Änderungs-Gate des Chunk-Material-Syncs)
+- [x] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung (Thema 218 Schritt 4, `docs/audit-scene-systeme-2026-10-18.md`: State-Machine-Graph und Blend-Spaces pro Asset-Text geteilt, Moves im Serializer, Prefab-Sync parst jedes Asset einmal; offen: Überspringen unveränderter Platzierungen und Asset-Revision statt Textvergleich, Params als Index, LegacyConfig, Partikel-Config)
 
 **Stufe 5 – Netz, Tools, Randmodule**
 - [ ] NET-101 Byte-aligned Fast Path im BitStream (Wire-Format unverändert, Test!), NET-102/103 Frame einmal bauen, NET-201/202 POD-Adresse und Lesekopf

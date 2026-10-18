@@ -870,6 +870,82 @@ namespace
 	  "Which scatter pattern is generated. The same seed always produces the same "
 	  "layout, so nothing is saved per instance.",
 	  "", "scenes#foliage" },
+	{ "Foliage/Layer", "Foliage Layer",
+	  "One kind of plant on this landscape — grass, a bush, a tree — with its own "
+	  "mesh, density, seed and painted mask. Click a layer to edit it below; the "
+	  "Landscape panel's Foliage brush paints the same layer. The number is how "
+	  "many instances it scattered.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Layer Visible", "Show Layer",
+	  "Draws this layer or hides it. The scatter is kept, so turning it back on "
+	  "is instant; nothing about where it grows changes.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Layer", "",
+	  "Adds an empty layer for another kind of plant and selects it. Give it a "
+	  "mesh to make it grow; it gets a seed of its own, so it does not grow in "
+	  "the same spots as the others.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Layer", "",
+	  "Removes the selected layer, its painted mask included (one undo step). "
+	  "The last layer cannot be removed — remove the component instead.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Name", "Layer Name",
+	  "What the layer is called in this list and in the Landscape panel. Empty "
+	  "shows it as \"Layer N\".",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cast Shadows", "",
+	  "Whether the layer casts shadows. Off saves a lot for short grass, whose "
+	  "shadow nobody sees.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Ambient Occlusion", "",
+	  "Whether the layer darkens the ground around it through screen-space "
+	  "ambient occlusion. Off for thin grass that would only add noise.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Shadow Distance", "",
+	  "Beyond this distance the layer stops casting shadows, in metres. 0 casts "
+	  "as far as it is drawn (Draw Distance).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Detail Levels", "",
+	  "What the layer turns into farther away: a simpler mesh, fewer plants, a "
+	  "cross card at the far end. The mesh above is drawn near the camera; each "
+	  "level takes over from its distance. Each plant picks its level by its own "
+	  "distance, so a whole patch never changes at once.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Level", "Add Detail Level",
+	  "Adds a farther detail level, halfway between the last one and the Draw "
+	  "Distance. Without a mesh of its own it draws the layer's mesh, so it can "
+	  "simply thin the layer out.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Level", "Remove Detail Level",
+	  "Removes this detail level; the level before it is then drawn out to the "
+	  "next one, or to the Draw Distance.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cross Card", "",
+	  "Uses the engine's cross card for this level: two crossed upright quads that "
+	  "show a picture of the plant. Give the level a material with that picture "
+	  "(alpha cut out) — it costs four quads per plant instead of the whole mesh.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Mesh", "Detail Level Mesh",
+	  "The mesh this level draws. Empty draws the layer's own mesh, which makes "
+	  "the level only thin the layer out (Level Density).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Material", "Detail Level Material",
+	  "The material for this level's mesh. Empty takes the LAYER's material (not "
+	  "the mesh's own), which is what a simpler mesh of the same plant wants.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Distance", "",
+	  "Where this level starts, in metres from the camera along the ground. A "
+	  "level that starts beyond the Draw Distance is never drawn.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Density", "",
+	  "Share of the layer's plants this level still draws: 1 all, 0.25 every "
+	  "fourth, 0 none. The plants kept are spread evenly over the landscape.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Hysteresis", "",
+	  "How far past a level boundary a plant keeps the level it had, in metres, "
+	  "so a camera that hovers on a boundary does not make plants flicker "
+	  "between two levels. The Draw Distance edge is not affected.",
+	  "", "scenes#foliage" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
 	{ "Nav Mesh/Cell Size", "",
@@ -7193,15 +7269,22 @@ namespace
 
 	// ── Landscape: the foliage brush ─────────────────────────────────────────
 	{ "Landscape/Foliage", "Foliage",
-	  "Paints where the landscape's foliage layer grows and where it must not. "
-	  "The brush writes a density mask over the ground: Grow lets the layer "
-	  "come up under the cursor, Erase clears it — a yard, a road, a lake. The "
-	  "instances follow the stroke while you drag.",
+	  "Paints where a foliage layer grows and where it must not. The brush "
+	  "writes the selected layer's density mask over the ground: Grow lets the "
+	  "layer come up under the cursor, Erase clears it — a yard, a road, a "
+	  "lake. The instances follow the stroke while you drag.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Add Foliage Layer", "",
 	  "Puts a Foliage component on the landscape, the same one Details' Add "
-	  "Component would. Give it a mesh next, or the brush paints a mask nobody "
-	  "can see.",
+	  "Component would, or — when it has one — another layer for another kind "
+	  "of plant, selected straight away. Give it a mesh next, or the brush "
+	  "paints a mask nobody can see.",
+	  "", "scenes#foliage" },
+	{ "Landscape/Foliage Layer", "Foliage Layer",
+	  "One kind of plant on this landscape — grass, a bush, a tree — each with "
+	  "its own mesh, density and mask. Click one to paint it; the brush, Density "
+	  "and the mask resets below act on the selected layer only. The number is "
+	  "how many instances it scattered; a dimmed name is a hidden layer.",
 	  "", "scenes#foliage" },
 	{ "Landscape/Density", "Foliage Density",
 	  "Instances per square metre for the layer, the same number as Density on "
@@ -7225,18 +7308,18 @@ namespace
 	  "than full is what makes a meadow thin out toward its edge.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Mask", "Mask Resolution",
-	  "How many texels per side the density mask has, from 32 to 2048, "
+	  "How many texels per side the selected layer's density mask has, from 32 to 2048, "
 	  "stretched over the whole landscape — the finer it is, the sharper an "
 	  "erased edge can be. Locked as soon as anything is painted, because "
 	  "changing it would throw the mask away; Reset Mask unlocks it again.",
 	  "", "scenes#foliage" },
 	{ "Landscape/Erase Everywhere", "",
-	  "Clears the whole mask, so the layer scatters nothing anywhere until you "
+	  "Clears the selected foliage layer's whole mask, so it scatters nothing anywhere until you "
 	  "Grow it back in. The way to start from bare ground and paint the meadows "
 	  "in, rather than erase the paths out. One undo step.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Reset Mask", "",
-	  "Throws the painted mask away entirely: the layer goes back to an even "
+	  "Throws the selected foliage layer's painted mask away entirely: it goes back to an even "
 	  "scatter over the whole landscape, as if nothing had been painted, and "
 	  "the mask resolution unlocks. One undo step, the whole mask.",
 	  "", "editor#landscape-mode" },

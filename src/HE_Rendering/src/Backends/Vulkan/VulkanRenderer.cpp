@@ -423,7 +423,7 @@ void VulkanRenderer::Render()
     m_ssrRanThisFrame  = false;  // cleared each frame; set true only by RenderForwardSSR()
     m_ssrResultView    = VK_NULL_HANDLE;
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
-    m_instCursor = 0; // this frame's instance-buffer slots start from the top
+    beginInstanceFrame(); // this frame's instance-buffer slots start from the top
     m_sceneMatCursor = 0; m_sceneMatOffset = 0; // ...and its built-in material-ring slots
 
     // This frame's sun, once, before the first extraction. The cascades, the
@@ -449,6 +449,16 @@ void VulkanRenderer::Render()
             if (it->img)  vkDestroyImage    (m_device, it->img,  nullptr);
             if (it->mem)  vkFreeMemory       (m_device, it->mem,  nullptr);
             it = m_retiredViewports.erase(it);
+        }
+        else ++it;
+    }
+    // The instance arena's overflow chunks and replaced buffers, the same way.
+    for (auto it = m_instRetired.begin(); it != m_instRetired.end(); )
+    {
+        if (--it->frames <= 0)
+        {
+            destroyInstanceBuf(it->b);
+            it = m_instRetired.erase(it);
         }
         else ++it;
     }
@@ -710,10 +720,10 @@ void VulkanRenderer::Render()
 void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
     // The shadow, GI and SSAO depth passes and the geometry pass below all take
-    // instance-buffer slots from this frame's m_instCursor. Reset here too, not
+    // instance-buffer slots from this frame's arena (beginInstanceFrame). Reset here too, not
     // only in Render(): RenderSceneImage records this frame on its own. Same for
     // the built-in material ring (m_sceneMatBuf) the geometry pass fills.
-    m_instCursor = 0;
+    beginInstanceFrame();
     m_sceneMatCursor = 0;
     m_sceneMatOffset = 0;
 
@@ -2383,21 +2393,13 @@ void VulkanRenderer::createScenePipeline()
     }
 
     // A3: per-frame instance-transform vertex buffer (host-visible + mapped), used by
-    // the instanced scene pipeline at binding 1.
+    // the instanced scene pipeline at binding 1. The main chunk of the instance arena.
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
-        VkBufferCreateInfo ibci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        ibci.size  = static_cast<VkDeviceSize>(k_maxInstances) * k_instStride;
-        ibci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        vkCheck(vkCreateBuffer(m_device, &ibci, nullptr, &m_instanceBuf[i].buf), "instance buffer");
-        VkMemoryRequirements ireq{}; vkGetBufferMemoryRequirements(m_device, m_instanceBuf[i].buf, &ireq);
-        VkMemoryAllocateInfo imai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        imai.allocationSize  = ireq.size;
-        imai.memoryTypeIndex = findMemoryType(ireq.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vkCheck(vkAllocateMemory(m_device, &imai, nullptr, &m_instanceBuf[i].mem), "instance memory");
-        vkBindBufferMemory(m_device, m_instanceBuf[i].buf, m_instanceBuf[i].mem, 0);
-        vkMapMemory(m_device, m_instanceBuf[i].mem, 0, ibci.size, 0, &m_instanceBuf[i].mapped);
+        if (createInstanceBuf(k_maxInstances, m_instanceBuf[i]))
+            m_instMainCap[i] = k_maxInstances;
+        else
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instance buffer failed — instanced batches draw per object");
     }
 
     VkShaderModule vs = loadShaderModule("scene.vert.spv");
@@ -2617,10 +2619,14 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_frameUBO[i].buf) vkDestroyBuffer(m_device, m_frameUBO[i].buf, nullptr);
         if (m_frameUBO[i].mem) vkFreeMemory   (m_device, m_frameUBO[i].mem, nullptr);
         m_frameUBO[i] = {};
-        if (m_instanceBuf[i].mem)    vkUnmapMemory(m_device, m_instanceBuf[i].mem);
-        if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
-        if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
-        m_instanceBuf[i] = {};
+        destroyInstanceBuf(m_instanceBuf[i]);
+        m_instMainCap[i] = 0;
+        if (i == 0) // the arena's overflow chunks and replaced buffers (m_instCur only borrows)
+        {
+            for (RetiredInstBuf& r : m_instRetired) destroyInstanceBuf(r.b);
+            m_instRetired.clear();
+            m_instCur = {};
+        }
         if (m_sceneMatBuf[i].mapped) vkUnmapMemory(m_device, m_sceneMatBuf[i].mem);
         if (m_sceneMatBuf[i].buf)    vkDestroyBuffer(m_device, m_sceneMatBuf[i].buf, nullptr);
         if (m_sceneMatBuf[i].mem)    vkFreeMemory   (m_device, m_sceneMatBuf[i].mem, nullptr);
@@ -3076,7 +3082,8 @@ void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
 VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
                                                       const std::string& vertBody,
                                                       const MaterialShaderVariant* precompiled,
-                                                      bool hdr, bool transparent, bool gbuffer)
+                                                      bool hdr, bool transparent, bool gbuffer,
+                                                      bool instanced)
 {
     // `gbuffer` (Thema 150): `frag` is the material's G-BUFFER tail
     // (resolveGBufferShaders), drawn into m_gbufferRP's four targets. Its own
@@ -3090,6 +3097,15 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         precompiled = nullptr; transparent = false; hdr = true;
         hash ^= 0x6742756666657231ULL;
     }
+    // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
+    // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
+    // batch in ONE call, the model per instance at locations 4..7 from the instance
+    // buffer at binding 1. Its own pipeline key; the fragment is the plain one, so
+    // the library's fragment caches keep the unsalted `libHash`. The pak bakes no
+    // instanced vertex: no twin, the caller loops (as on GL).
+    if (instanced && precompiled) return VK_NULL_HANDLE;
+    const uint64_t libHash = hash;
+    if (instanced) hash ^= 0x1D57A9CEDB0B1E55ULL;
     // A layer-blend graph samples heLandscapeWeights; on a device whose layout had to
     // leave binding 14 out (createMaterialResources) its pipeline would be invalid. No
     // pipeline then — drawDCVk draws it built-in PBR, the warm-up skips it. Checked
@@ -3169,10 +3185,14 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     }
     if (!built)
     {
-        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to SPIR-V.
-        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-            ? m_matShaderLib.standardVertex(Backend::SpirV)
-            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::SpirV);
+        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to
+        // SPIR-V — or their instanced twins.
+        const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+        const HE::MaterialShaderLibrary::Compiled& vc = instanced
+            ? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::SpirV)
+                                : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::SpirV))
+            : (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::SpirV)
+                                : m_matShaderLib.customVertex(vh, vertBody, Backend::SpirV));
         // Thema 117: the clustered twin while the cluster SSBOs exist and the A/B
         // guard is not set — the draw loop then writes them at set 0 bindings
         // 24..26 and DrawScene opens the gate (FillMaterialClusterParams). A
@@ -3182,7 +3202,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         const HE::MaterialShaderLibrary::Compiled* fcp = nullptr;
         if (!gbuffer && m_forwardClustered && m_clusterReady)
         {
-            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.fragmentClustered(hash, frag, Backend::SpirV);
+            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.fragmentClustered(libHash, frag, Backend::SpirV);
             if (cc.ok && !cc.spirv.empty())
                 fcp = &cc;
             else
@@ -3190,7 +3210,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
                                                     "using the 8-light window: ") + cc.log).c_str());
         }
         const HE::MaterialShaderLibrary::Compiled& fc =
-            fcp ? *fcp : m_matShaderLib.fragment(hash, frag, Backend::SpirV);
+            fcp ? *fcp : m_matShaderLib.fragment(libHash, frag, Backend::SpirV);
         if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
         {
             HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: A4 material shader cross-compile failed: ")
@@ -3213,17 +3233,28 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
 
     // Vertex input identical to the scene pipeline (binding 0 = interleaved pos/normal/uv,
-    // 32 B; the standard/custom vertex reads attribute locations 0/1/2).
-    VkVertexInputBindingDescription bind{ 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription attrs[3] = {
+    // 32 B; the standard/custom vertex reads attribute locations 0/1/2). The instanced
+    // twin adds the model at locations 4..7 from binding 1: the 128-byte {mvp, model}
+    // slots of m_instanceBuf, the model half at +64 (the twin forms heMvp = U.mvp *
+    // model itself, the mvp half stays unread).
+    static_assert(k_instStride == 2 * sizeof(glm::mat4), "the twin reads the model half of {mvp, model}");
+    const VkVertexInputBindingDescription binds[2] = {
+        { 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+        { 1, k_instStride,       VK_VERTEX_INPUT_RATE_INSTANCE },
+    };
+    const VkVertexInputAttributeDescription attrs[7] = {
         { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 },
         { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 },
         { 2, 0, VK_FORMAT_R32G32_SFLOAT,    24 },
+        { 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  64 },
+        { 5, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  80 },
+        { 6, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  96 },
+        { 7, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 112 },
     };
     VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vi.vertexBindingDescriptionCount   = 1;
-    vi.pVertexBindingDescriptions      = &bind;
-    vi.vertexAttributeDescriptionCount = 3;
+    vi.vertexBindingDescriptionCount   = instanced ? 2u : 1u;
+    vi.pVertexBindingDescriptions      = binds;
+    vi.vertexAttributeDescriptionCount = instanced ? 7u : 3u;
     vi.pVertexAttributeDescriptions    = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
@@ -3292,9 +3323,15 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     VkPipeline pipe = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
     {
-        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material pipeline creation failed");
+        HE_LOG_ERROR(RHI, "%s", instanced
+            ? "VulkanRenderer: A4 instanced material pipeline creation failed, its batches draw per instance"
+            : "VulkanRenderer: A4 material pipeline creation failed");
         pipe = VK_NULL_HANDLE;
     }
+    else if (instanced)
+        HE_LOG_INFO(RHI, "%s", gbuffer
+            ? "VulkanRenderer: built an INSTANCED G-buffer material twin (one draw per batch)"
+            : "VulkanRenderer: built an INSTANCED material twin (one draw per batch)");
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
@@ -3934,12 +3971,34 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
         // Opaque only. Transparent geometry does not write depth in the scene
         // pass either, so including it would project decals onto glass.
         if (obj.opacity < 1.0f) continue;
-        // A foliage cluster is one plant's transform with a whole bucket's worth of
-        // instances: it leaves no decal depth yet. Windows track: unfold it.
-        if (obj.isCluster()) continue;
         const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
         const GpuMesh& m    = mesh ? *mesh : m_cube;
         if (!m.indexCount) continue;
+        // A foliage cluster stands for a bucket of plants (Thema 182, 2f): all of them
+        // leave depth, in one draw through the shadow pipeline's instanced twin (same
+        // pass, same dynamic zero bias), else one push-constant draw per plant.
+        if (obj.isCluster())
+        {
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
+            vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+            m_clusterScratch.clear();
+            m_renderWorld.appendInstances(obj, m_clusterScratch);
+            const uint32_t n = static_cast<uint32_t>(m_clusterScratch.size());
+            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount, n,
+                    [&](uint32_t k, glm::mat4* pair) {
+                        pair[0] = camClip * m_clusterScratch[k];
+                        pair[1] = m_clusterScratch[k];
+                    }))
+                continue;
+            for (const glm::mat4& model : m_clusterScratch)
+            {
+                PushConstants ipc{ camClip * model, model };
+                vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ipc), &ipc);
+                vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+            }
+            continue;
+        }
         PushConstants pc{ camClip * obj.transform, obj.transform };
         vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
         VkDeviceSize offset = 0;
@@ -5648,12 +5707,26 @@ void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
         for (const uint32_t idx : m_sortedIndices)
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
-            // A foliage cluster is one plant's transform with a whole bucket's worth
-            // of instances: it writes no velocity here yet (Metal and GL draw each
-            // plant, static). Windows track: unfold it like they do.
-            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
             if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+            // A foliage cluster stands for a bucket of plants: draw every one of them,
+            // static (previous pose = this pose, so the velocity is the camera's own
+            // motion), as GL and Metal do (Thema 182, 2f). The entity-keyed history
+            // below holds ONE pose per entity, which a cluster must not use: every
+            // plant of a layer shares the terrain's id.
+            if (obj.isCluster())
+            {
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vbuf, &offset);
+                vkCmdBindIndexBuffer(cmd, mesh->ibuf, 0, VK_INDEX_TYPE_UINT32);
+                m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
+                    const PushConstants pc{ m_taaViewProjJit * model, prevJit * model };
+                    vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                    vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, 0);
+                });
+                continue;
+            }
 
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
@@ -6828,33 +6901,121 @@ uint64_t VulkanRenderer::GetCompletedFrameSerial()
     return m_completedSerial;
 }
 
+// One host-visible, host-coherent, persistently mapped vertex buffer of `instances`
+// {mvp, model} slots: a chunk of the instance arena (binding 1 of every instanced pipeline).
+bool VulkanRenderer::createInstanceBuf(uint32_t instances, InstanceBuf& out)
+{
+    out = {};
+    VkBufferCreateInfo ibci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    ibci.size  = static_cast<VkDeviceSize>(instances) * k_instStride;
+    ibci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (vkCreateBuffer(m_device, &ibci, nullptr, &out.buf) != VK_SUCCESS) { out = {}; return false; }
+    VkMemoryRequirements ireq{}; vkGetBufferMemoryRequirements(m_device, out.buf, &ireq);
+    VkMemoryAllocateInfo imai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imai.allocationSize  = ireq.size;
+    imai.memoryTypeIndex = findMemoryType(ireq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(m_device, &imai, nullptr, &out.mem) != VK_SUCCESS
+        || vkBindBufferMemory(m_device, out.buf, out.mem, 0) != VK_SUCCESS
+        || vkMapMemory(m_device, out.mem, 0, ibci.size, 0, &out.mapped) != VK_SUCCESS)
+    {
+        destroyInstanceBuf(out);
+        return false;
+    }
+    return true;
+}
+
+void VulkanRenderer::destroyInstanceBuf(InstanceBuf& b)
+{
+    if (b.mapped) vkUnmapMemory(m_device, b.mem);
+    if (b.buf)    vkDestroyBuffer(m_device, b.buf, nullptr);
+    if (b.mem)    vkFreeMemory   (m_device, b.mem, nullptr);
+    b = {};
+}
+
+// Where a frame's instance slots start (Render() and DrawViewportFrame()): the main
+// buffer of m_currentFrame, which grows to what the largest frame before asked
+// (m_instArena still holds the last one). The replaced buffer may still be read by
+// its last frame — it ages out in m_instRetired like every overflow chunk.
+void VulkanRenderer::beginInstanceFrame()
+{
+    if (m_instArena.overflowed())
+    {
+        m_instWant = std::max(m_instWant, m_instArena.nextMainCapacity());
+        if (m_instArena.refused() && !m_instArenaWarned)
+        {
+            m_instArenaWarned = true;
+            HE_LOG_WARN(RHI, "VulkanRenderer: instance arena full — a frame asked %u instances, %u drew "
+                        "per object (budget %u per frame, HE_INST_ARENA_MIB)",
+                        m_instArena.asked(), m_instArena.refused(), m_instArena.budget());
+        }
+    }
+    InstanceBuf& main = m_instanceBuf[m_currentFrame];
+    uint32_t&    cap  = m_instMainCap[m_currentFrame];
+    if (m_instWant > cap && main.buf)
+    {
+        InstanceBuf grown;
+        if (createInstanceBuf(m_instWant, grown))
+        {
+            HE_LOG_INFO(RHI, "VulkanRenderer: instance buffer of frame slot %u grows from %u to %u instances",
+                        m_currentFrame, cap, m_instWant);
+            m_instRetired.push_back({ main, static_cast<int>(k_maxFramesInFlight) + 1 });
+            main = grown;
+            cap  = m_instWant;
+        }
+    }
+    m_instCur = main;
+    m_instArena.beginFrame(main.mapped ? cap : 0);
+}
+
+// `count` consecutive {mvp, model} slots of this frame: the buffer to bind at binding 1,
+// the byte offset, and where the CPU writes them. false = no arena, or the frame would
+// pass the arena's budget: the caller draws per object.
+bool VulkanRenderer::allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu)
+{
+    if (!m_instCur.mapped || count == 0) return false;
+    const uint32_t chunkCap = m_instArena.chunkFor(count);
+    if (chunkCap == HE::InstanceArena::kRefused) { m_instArena.refuse(count); return false; }
+    if (chunkCap)
+    {
+        InstanceBuf chunk;
+        if (!createInstanceBuf(chunkCap, chunk)) { m_instArena.refuse(count); return false; }
+        // In use from now until this frame retired: ages out like a replaced main buffer.
+        m_instRetired.push_back({ chunk, static_cast<int>(k_maxFramesInFlight) + 1 });
+        m_instCur = chunk;
+        m_instArena.openChunk(chunkCap);
+    }
+    const uint32_t first = m_instArena.take(count);
+    buf    = m_instCur.buf;
+    offset = static_cast<VkDeviceSize>(first) * k_instStride;
+    cpu    = static_cast<uint8_t*>(m_instCur.mapped) + offset;
+    return true;
+}
+
 // The Vulkan twin of D3D11/D3D12's drawDepthInstanced: every caller writes the
 // products its per-object loop pushes as constants, so the instanced frame is
 // the loop's frame. The buffer is host-coherent and read at submit, which is
-// why the slots come from the frame-wide m_instCursor and never get reused
-// inside one frame.
+// why the slots come from the frame's arena (allocInstances) and never get
+// reused inside one frame.
 template <class Fill>
 bool VulkanRenderer::drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
                                         uint32_t indexCount, uint32_t count, Fill&& fill)
 {
     static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
-    InstanceBuf& ib = m_instanceBuf[m_currentFrame];
-    if (!instPipe || !ib.mapped || count < 2 || !RenderSorter::depthInstancingEnabled()
-        || static_cast<uint64_t>(m_instCursor) + count > k_maxInstances)
+    VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize off = 0; uint8_t* dst = nullptr;
+    if (!instPipe || count < 2 || !RenderSorter::depthInstancingEnabled()
+        || !allocInstances(count, ibuf, off, dst))
         return false;
-    auto* dst = static_cast<uint8_t*>(ib.mapped) + static_cast<size_t>(m_instCursor) * k_instStride;
     for (uint32_t k = 0; k < count; ++k)
     {
         glm::mat4 pair[2];
         fill(k, pair);
         std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
     }
-    const VkDeviceSize off = static_cast<VkDeviceSize>(m_instCursor) * k_instStride;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
-    vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &off);
+    vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &off);
     vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, 0);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, restorePipe);
-    m_instCursor += count;
     return true;
 }
 
@@ -8205,13 +8366,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         RenderSorter::sortBackToFront(transparentDCs, camPos);
 
         // A3: real instancing applies to the opaque pass only (transparent keeps the
-        // per-instance loop for blend + depth sort). instCursor sub-allocates the
-        // per-frame instance buffer across the frame's instanced batches — the
-        // frame-wide cursor, because the instanced depth draws of the shadow
-        // pass, runGi and runSSAO already hold the slots below it and the GPU
-        // reads all of them only at submit.
+        // per-instance loop for blend + depth sort). allocInstances sub-allocates the
+        // frame's instance arena across the frame's instanced batches — frame-wide,
+        // because the instanced depth draws of the shadow pass, runGi and runSSAO
+        // already hold the slots below and the GPU reads all of them only at submit.
         bool allowInstancing = true;
-        uint32_t& instCursor = m_instCursor;
         // A4: the scene pipeline the CURRENT pass expects bound on entry to drawDCVk. A
         // graph-material draw binds its own per-material pipeline, so it restores THIS after
         // itself — otherwise the next built-in draw would inherit the material pipeline.
@@ -8266,6 +8425,14 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::Vulkan);
                     VkPipeline matPipe = VK_NULL_HANDLE;
+                    // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
+                    // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
+                    // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
+                    // build failed) sends it back to the per-instance loop.
+                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                                       && m_instCur.mapped
+                                       && RenderSorter::graphInstancingEnabled();
+                    VkPipeline matInstPipe = VK_NULL_HANDLE;
                     if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
@@ -8281,10 +8448,20 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
+                        if (wantTwin)
+                            matInstPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                     true, false, /*gbuffer=*/true,
+                                                                     /*instanced=*/true);
                     }
                     else
+                    {
                         matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
                                                              matPre, hdr, matTransp);
+                        if (matPipe != VK_NULL_HANDLE && wantTwin)
+                            matInstPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
+                                                                     matPre, hdr, false,
+                                                                     /*gbuffer=*/false, /*instanced=*/true);
+                    }
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
                     // A full ring is a silent optics change (built-in look, or a skipped
                     // instance tail) — say so once per session instead of never.
@@ -8361,15 +8538,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &voff);
                         vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
 
-                        auto drawMatInstance = [&](const glm::mat4& model) {
-                            if (cursor >= k_matMaxDraws) { noteRingFull(); return; }
+                        // One U/HeParams ring slot and its descriptor set, bound with
+                        // `pipe`: the per-draw half of every material draw. false =
+                        // the ring is full (noted once) or the pool ran dry.
+                        auto bindMatSlot = [&](VkPipeline pipe, const glm::mat4& mvp, const glm::mat4& model) -> bool {
+                            if (cursor >= k_matMaxDraws) { noteRingFull(); return false; }
                             const uint32_t i = cursor++;
 
                             // std140 U block (176 B) into ring slot i (256-B stride).
                             struct UBlock { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
                             static_assert(sizeof(UBlock) == 176, "U block must be std140 176 B");
                             UBlock ub;
-                            ub.mvp   = viewProj * model;
+                            ub.mvp   = mvp;
                             ub.model = model;
                             // Per-instance tint (RenderObject::instanceTint), as Metal and GL
                             // multiply it in: a graph reads it through Vertex Color (the editor
@@ -8394,7 +8574,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             dsai.descriptorSetCount = 1;
                             dsai.pSetLayouts        = &m_matSetLayout;
                             VkDescriptorSet set = VK_NULL_HANDLE;
-                            if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return;
+                            if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return false;
 
                             const VkDeviceSize slot = static_cast<VkDeviceSize>(i) * k_matSlotStride;
                             VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0,
@@ -8558,16 +8738,39 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             }
                             vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
 
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                     m_matPipelineLayout, 0, 1, &set, 0, nullptr);
+                            return true;
+                        };
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            if (!bindMatSlot(matPipe, viewProj * model, model)) return;
                             vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
                             ++m_statDraws;
                             m_statTris += range.count / 3;
                         };
-                        // Instanced graph materials: draw each instance via the material path
-                        // (this increment does NOT combine graph materials with A3 instancing).
-                        if (!dc.instanceTransforms.empty())
+                        const uint32_t instCount = static_cast<uint32_t>(dc.instanceTransforms.size());
+                        VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize instOff = 0; uint8_t* dst = nullptr;
+                        if (matInstPipe != VK_NULL_HANDLE && allocInstances(instCount, ibuf, instOff, dst))
+                        {
+                            // The batch: every model into the model half of its slot in the
+                            // frame's instance arena, ONE U slot + descriptor set with the
+                            // batch-constant half (U.mvp = viewProj, the twin multiplies the
+                            // model in), one instanced draw.
+                            if (bindMatSlot(matInstPipe, viewProj, glm::mat4(1.0f)))
+                            {
+                                for (uint32_t k = 0; k < instCount; ++k)
+                                    std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
+                                                &dc.instanceTransforms[k], sizeof(glm::mat4));
+                                vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &instOff);
+                                vkCmdDrawIndexed(cmd, range.count, instCount, range.start, 0, 0);
+                                ++m_statDraws;
+                                m_statTris += (range.count / 3) * instCount;
+                            }
+                        }
+                        else if (!dc.instanceTransforms.empty())
+                            // No twin (or the instance buffer is full): each instance through
+                            // the material path, one ring slot apiece.
                             for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
                         else
                             drawMatInstance(dc.transform);
@@ -8649,28 +8852,24 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 // instance's {mvp,model}, bind the instanced pipeline + binding 1, ONE draw.
                 static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
                 const uint32_t count = static_cast<uint32_t>(dc.instanceTransforms.size());
-                InstanceBuf& ib = m_instanceBuf[m_currentFrame];
                 // Match the instanced pipeline to the active scene target (= what the
                 // non-instanced bind resolves to). Null → fits=false → per-instance fallback
                 // (never bind an LDR pipeline to the HDR render pass).
                 VkPipeline instPipe = gbufferPass ? m_gbufInstancedPipeline      // 4 targets (Thema 150)
                                     : (hdr && m_scenePipelineHDR)
                                     ? m_sceneInstancedPipelineHDR : m_sceneInstancedPipeline;
-                const bool fits = allowInstancing && instPipe && ib.mapped
-                                  && (static_cast<uint64_t>(instCursor) + count) <= k_maxInstances;
+                VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize instOff = 0; uint8_t* dst = nullptr;
+                const bool fits = allowInstancing && instPipe && allocInstances(count, ibuf, instOff, dst);
                 if (fits)
                 {
-                    auto* dst = static_cast<uint8_t*>(ib.mapped)
-                              + static_cast<size_t>(instCursor) * k_instStride;
                     for (uint32_t k = 0; k < count; ++k)
                     {
                         const glm::mat4& t = dc.instanceTransforms[k];
                         const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major)
                         std::memcpy(dst + static_cast<size_t>(k) * k_instStride, xf, sizeof(xf));
                     }
-                    const VkDeviceSize instOff = static_cast<VkDeviceSize>(instCursor) * k_instStride;
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
-                    vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &instOff);
+                    vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &instOff);
                     vkCmdDrawIndexed(cmd, range.count, count, range.start, 0, 0);
                     // Restore the pass's non-instanced pipeline for subsequent draws
                     // (instancing runs in the opaque and G-buffer passes only —
@@ -8678,7 +8877,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
                     ++m_statDraws;
                     m_statTris += (range.count / 3) * count;
-                    instCursor += count;
                 }
                 else
                 {
@@ -11886,6 +12084,13 @@ void VulkanRenderer::InvalidateTexture(const HE::UUID& textureId)
 // SSAO — screen-space ambient occlusion
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The position pre-pass's own depth, D32 like m_depthFormat (Thema 182 step 6,
+// decision 110): as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at 50 m),
+// so at 50-90 m a plant and the ground rounded to one value and the draw order
+// decided which landed in the position target. The image, m_ssaoPosRenderPass
+// and m_reflPrepassRP (which attaches the same image) use this constant.
+static constexpr VkFormat kSsaoPosDepthFormat = VK_FORMAT_D32_SFLOAT;
+
 // Helper: allocate + bind device-local image, create image view.
 // Aspect is COLOR for regular images, DEPTH_BIT for depth images.
 static void ssaoMakeImage(VkDevice dev, uint32_t memTypeBits,
@@ -12185,7 +12390,7 @@ void VulkanRenderer::createSSAOPipeline()
     }
 
     // ── Render passes ─────────────────────────────────────────────────────────
-    // Position prepass: RGBA16F color + D16_UNORM depth.
+    // Position prepass: RGBA16F color + D32 depth (kSsaoPosDepthFormat).
     {
         VkAttachmentDescription atts[2]{};
         atts[0].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -12196,7 +12401,7 @@ void VulkanRenderer::createSSAOPipeline()
         atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[0].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
         atts[0].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        atts[1].format         = VK_FORMAT_D16_UNORM;
+        atts[1].format         = kSsaoPosDepthFormat;
         atts[1].samples        = VK_SAMPLE_COUNT_1_BIT;
         atts[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -12536,8 +12741,8 @@ void VulkanRenderer::createSSAOTargets(uint32_t w, uint32_t h)
     // Position prepass color: RGBA16F
     ssaoMakeImage(m_device, 0, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, colorRT,
                   VK_IMAGE_ASPECT_COLOR_BIT, m_ssaoPosRT.image, m_ssaoPosRT.memory, m_ssaoPosRT.view, fmem);
-    // Position prepass depth: D16_UNORM
-    ssaoMakeImage(m_device, 0, VK_FORMAT_D16_UNORM, w, h, depthRT,
+    // Position prepass depth: D32 (kSsaoPosDepthFormat, not D16)
+    ssaoMakeImage(m_device, 0, kSsaoPosDepthFormat, w, h, depthRT,
                   VK_IMAGE_ASPECT_DEPTH_BIT, m_ssaoPosDepth.image, m_ssaoPosDepth.memory, m_ssaoPosDepth.view, fmem);
     // SSAO raw AO: R8_UNORM
     ssaoMakeImage(m_device, 0, VK_FORMAT_R8_UNORM, w, h, colorRT,
@@ -12766,9 +12971,6 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
             if (!obj.contributesAO) continue;   // skip particles/precipitation
-            // A foliage cluster is one plant's transform with a whole bucket's worth of
-            // instances (and this loop spends a prepass slot per draw): it does not reflect yet.
-            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
             const GpuMesh& gm   = mesh ? *mesh : m_cube;
             if (!gm.indexCount) continue;
@@ -12780,25 +12982,69 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
                     "the rest are skipped (they will not reflect)", k_ssrMaxPrepassDraws);
                 break;
             }
-            const glm::mat4 modelView = view * obj.transform;
-            HE::MaterialShaderLibrary::ReflPrepassUniforms ru;
-            const glm::mat4 mvp = vp * obj.transform;
-            std::memcpy(ru.mvp,       &mvp[0][0],           16 * sizeof(float));
-            std::memcpy(ru.modelView, &modelView[0][0],     16 * sizeof(float));
-            std::memcpy(ru.model,     &obj.transform[0][0], 16 * sizeof(float));
-            const uint32_t off = prepassSlot * k_ssrPrepassStride;
-            std::memcpy(static_cast<uint8_t*>(m_reflPrepassUBO[prepassFrame].mapped) + off,
-                        &ru, sizeof(ru));
-            // One descriptor set for the whole pass, re-aimed per draw through a
-            // DYNAMIC offset — the shader sees a plain uniform block either way.
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_reflPrepassPipeLayout, 0, 1, &m_reflPrepassSet[prepassFrame], 1, &off);
-            ++prepassSlot;
-
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
             vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+
+            // One slot of the pre-pass ring, the descriptor set re-aimed at it through
+            // a DYNAMIC offset — the shader sees a plain uniform block either way.
+            auto bindSlot = [&](const void* block, size_t bytes) {
+                const uint32_t off = prepassSlot * k_ssrPrepassStride;
+                std::memcpy(static_cast<uint8_t*>(m_reflPrepassUBO[prepassFrame].mapped) + off, block, bytes);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_reflPrepassPipeLayout, 0, 1, &m_reflPrepassSet[prepassFrame], 1, &off);
+                ++prepassSlot;
+            };
+            auto drawOne = [&](const glm::mat4& model) {
+                const glm::mat4 modelView = view * model;
+                HE::MaterialShaderLibrary::ReflPrepassUniforms ru;
+                const glm::mat4 mvp = vp * model;
+                std::memcpy(ru.mvp,       &mvp[0][0],       16 * sizeof(float));
+                std::memcpy(ru.modelView, &modelView[0][0], 16 * sizeof(float));
+                std::memcpy(ru.model,     &model[0][0],     16 * sizeof(float));
+                bindSlot(&ru, sizeof(ru));
+                vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+            };
+
+            // A foliage cluster stands for a bucket of plants (Thema 182, 2f): ONE draw
+            // through the instanced twin, the models in the frame's instance arena and
+            // {viewProj, view} in the slot; without the twin, plant by plant (one slot
+            // each, up to the ring's end).
+            if (obj.isCluster())
+            {
+                m_clusterScratch.clear();
+                m_renderWorld.appendInstances(obj, m_clusterScratch);
+                const uint32_t n = static_cast<uint32_t>(m_clusterScratch.size());
+                VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize ioff = 0; uint8_t* dst = nullptr;
+                if (m_reflPrepassInstPipeline && n > 1 && allocInstances(n, ibuf, ioff, dst))
+                {
+                    for (uint32_t k = 0; k < n; ++k)
+                        std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
+                                    &m_clusterScratch[k], sizeof(glm::mat4));
+                    HE::MaterialShaderLibrary::ReflPrepassInstUniforms iu;
+                    std::memcpy(iu.viewProj, &vp[0][0],   16 * sizeof(float));
+                    std::memcpy(iu.view,     &view[0][0], 16 * sizeof(float));
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_reflPrepassInstPipeline);
+                    bindSlot(&iu, sizeof(iu));
+                    vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &ioff);
+                    vkCmdDrawIndexed(cmd, gm.indexCount, n, 0, 0, 0);
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_reflPrepassPipeline);
+                    static bool loggedOnce = false; // the runtime witness
+                    if (!loggedOnce)
+                    {
+                        loggedOnce = true;
+                        HE_LOG_INFO(RHI, "VulkanRenderer: reflection pre-pass instanced (first cluster: %u plants)", n);
+                    }
+                    continue;
+                }
+                for (const glm::mat4& model : m_clusterScratch)
+                {
+                    if (prepassSlot >= k_ssrMaxPrepassDraws) break; // said once above, at the next object
+                    drawOne(model);
+                }
+                continue;
+            }
+            drawOne(obj.transform);
         }
     }
     vkCmdEndRenderPass(cmd);
@@ -12950,7 +13196,7 @@ bool VulkanRenderer::EnsureSSRPipelines()
         atts[0] = colorAtt(VK_FORMAT_R16G16B16A16_SFLOAT); // view-space position (SSAO's)
         atts[1] = colorAtt(VK_FORMAT_R16G16B16A16_SFLOAT); // GB1: oct normal + roughness
         atts[2] = colorAtt(VK_FORMAT_R32_SFLOAT);          // NDC depth
-        atts[3].format         = VK_FORMAT_D16_UNORM;
+        atts[3].format         = kSsaoPosDepthFormat;   // = m_ssaoPosDepth
         atts[3].samples        = VK_SAMPLE_COUNT_1_BIT;
         atts[3].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
         atts[3].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -13244,7 +13490,7 @@ bool VulkanRenderer::EnsureSSRPipelines()
 
     auto buildPipeline = [&](VkShaderModule vsm, VkShaderModule fsm, bool geometry,
                              uint32_t colorCount, VkPipelineLayout layout,
-                             VkRenderPass rp, VkPipeline& out) -> bool {
+                             VkRenderPass rp, VkPipeline& out, bool instanced = false) -> bool {
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vsm; stages[0].pName = "main";
@@ -13263,6 +13509,27 @@ bool VulkanRenderer::EnsureSSRPipelines()
         {
             vi.vertexBindingDescriptionCount   = 1; vi.pVertexBindingDescriptions   = &bind;
             vi.vertexAttributeDescriptionCount = 3; vi.pVertexAttributeDescriptions = attrs;
+        }
+        // The instanced pre-pass (Thema 182, 2f): position + normal (it reads no UV,
+        // and an attribute the shader does not consume is a validation warning) and
+        // the model at locations 4..7 from binding 1: the arena's 128-byte
+        // {mvp, model} slots, the model half at +64, as for the graph-material twin.
+        const VkVertexInputBindingDescription ibinds[2] = {
+            { 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX },
+            { 1, k_instStride,       VK_VERTEX_INPUT_RATE_INSTANCE },
+        };
+        const VkVertexInputAttributeDescription iattrs[6] = {
+            { 0, 0, VK_FORMAT_R32G32B32_SFLOAT,       0 },
+            { 1, 0, VK_FORMAT_R32G32B32_SFLOAT,      12 },
+            { 4, 1, VK_FORMAT_R32G32B32A32_SFLOAT,   64 },
+            { 5, 1, VK_FORMAT_R32G32B32A32_SFLOAT,   80 },
+            { 6, 1, VK_FORMAT_R32G32B32A32_SFLOAT,   96 },
+            { 7, 1, VK_FORMAT_R32G32B32A32_SFLOAT,  112 },
+        };
+        if (instanced)
+        {
+            vi.vertexBindingDescriptionCount   = 2; vi.pVertexBindingDescriptions   = ibinds;
+            vi.vertexAttributeDescriptionCount = 6; vi.pVertexAttributeDescriptions = iattrs;
         }
         VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
         ds.depthTestEnable  = geometry ? VK_TRUE : VK_FALSE;
@@ -13291,6 +13558,19 @@ bool VulkanRenderer::EnsureSSRPipelines()
                                          m_ssrTracePipeLayout, m_ssrTraceRP, m_ssrTracePipeline);
     const bool okBlur    = buildPipeline(mFV, mBF, /*geometry=*/false, 1,
                                          m_ssrBlurPipeLayout, m_ssrBlurRP, m_ssrBlurPipeline);
+    // The instanced pre-pass twin for foliage clusters, optional (none: plant by plant).
+    {
+        const auto& piv = m_matShaderLib.reflPrepassVertexInstanced(Backend::SpirV);
+        VkShaderModule mPIV = (piv.ok && !piv.spirv.empty()) ? makeModule(piv.spirv) : VK_NULL_HANDLE;
+        if (!mPIV || !buildPipeline(mPIV, mPF, /*geometry=*/true, 3, m_reflPrepassPipeLayout,
+                                    m_reflPrepassRP, m_reflPrepassInstPipeline, /*instanced=*/true))
+        {
+            m_reflPrepassInstPipeline = VK_NULL_HANDLE;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: no instanced reflection pre-pass, foliage "
+                                   "clusters enter it plant by plant");
+        }
+        if (mPIV) vkDestroyShaderModule(m_device, mPIV, nullptr);
+    }
     dropModules();
     if (!okPrepass || !okTrace || !okBlur)
     {
@@ -13330,6 +13610,7 @@ void VulkanRenderer::destroySSRPipelines()
     }
     if (m_reflPrepassPool)   { vkDestroyDescriptorPool(m_device, m_reflPrepassPool, nullptr); m_reflPrepassPool = VK_NULL_HANDLE; }
     if (m_reflPrepassPipeline) { vkDestroyPipeline(m_device, m_reflPrepassPipeline, nullptr); m_reflPrepassPipeline = VK_NULL_HANDLE; }
+    if (m_reflPrepassInstPipeline) { vkDestroyPipeline(m_device, m_reflPrepassInstPipeline, nullptr); m_reflPrepassInstPipeline = VK_NULL_HANDLE; }
     if (m_ssrTracePipeline)  { vkDestroyPipeline(m_device, m_ssrTracePipeline, nullptr); m_ssrTracePipeline = VK_NULL_HANDLE; }
     if (m_ssrBlurPipeline)   { vkDestroyPipeline(m_device, m_ssrBlurPipeline,  nullptr); m_ssrBlurPipeline  = VK_NULL_HANDLE; }
     if (m_reflPrepassPipeLayout) { vkDestroyPipelineLayout(m_device, m_reflPrepassPipeLayout, nullptr); m_reflPrepassPipeLayout = VK_NULL_HANDLE; }

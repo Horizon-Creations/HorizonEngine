@@ -11,7 +11,8 @@
 
 // ── Landscape sync over a collab session ─────────────────────────────────────
 // A landscape keeps its shape, its paint and its foliage mask inline, as grids of
-// up to 1025² floats and 512² RGBA bytes (TerrainComponent, FoliageComponent).
+// up to 1025² floats and 512² RGBA bytes (TerrainComponent, FoliageComponent:
+// one mask per foliage layer).
 // The component blob cannot carry them: it is the whole entity, serialized and
 // hashed every frame, megabytes of base64 for one brush dab, and only for the
 // entity the user has selected — which the Landscape mode never does.
@@ -50,10 +51,18 @@ public:
 		Heights     = 1,   // TerrainComponent::sculptHeights, float, side = resolution
 		Weights     = 2,   // layerWeights,  RGBA8, side = weightRes
 		Weights2    = 3,   // layerWeights2, RGBA8, side = weightRes
-		FoliageMask = 4,   // FoliageComponent::densityMask, 1 byte, side = maskRes
 		Settings    = 5,   // settingsBlob(): both components without their grids
+		// FoliageLayer::densityMask of layer i is field FoliageMask + i, 1 byte,
+		// side = maskRes. Layers are matched by index; a mask that moved to another
+		// index with a removed layer arrives there as an ordinary patch.
+		FoliageMask = 16,
 	};
 	static constexpr std::uint8_t kWholeGrid = 0x80;
+	// One mask field per layer, FoliageComponent::kMaxLayers of them (checked in
+	// the .cpp); the ids must stay below kWholeGrid.
+	static constexpr std::uint8_t kMaxFoliageMasks = 32;
+	static constexpr std::uint8_t kFieldCount = FoliageMask + kMaxFoliageMasks;
+	static_assert(kFieldCount <= kWholeGrid, "a field id would collide with kWholeGrid");
 
 	static constexpr std::uint64_t kMinIntervalMs      = 33;
 	static constexpr std::uint64_t kSettingsIntervalMs = 200;
@@ -101,10 +110,15 @@ public:
 private:
 	struct Mirror
 	{
-		std::vector<std::uint8_t> grid[5];   // indexed by Field (0 unused)
-		std::uint32_t             res[5]{};
+		std::vector<std::uint8_t> grid[kFieldCount];   // indexed by field id (unused ids stay empty)
+		std::uint32_t             res[kFieldCount]{};
 		std::uint64_t             settingsHash = 0;
-		std::uint64_t             nextAt[6]{};
+		std::uint64_t             nextAt[kFieldCount]{};
+		// How many foliage layers the peers know of: the settings blob creates a
+		// layer on their side, so a layer's mask must not overtake it (it would be
+		// dropped there, and the mirror would think it arrived). A mask of a layer
+		// at or past this index waits; a new count sends the settings out of turn.
+		std::size_t               foliageLayers = 0;
 	};
 	struct Pending
 	{
@@ -113,7 +127,7 @@ private:
 	};
 
 	void baseline(entt::registry& reg, Entity e, Mirror& m);
-	void collectGrid(entt::registry& reg, Entity e, Mirror& m, Field f,
+	void collectGrid(entt::registry& reg, Entity e, Mirror& m, std::uint8_t f,
 	                 std::uint64_t nowMs, const Send& send);
 	bool emit(Entity e, Patch& p, const Send& send);
 	bool applyOne(HorizonWorld& world, Entity e, const Patch& patch);

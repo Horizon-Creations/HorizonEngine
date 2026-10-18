@@ -188,11 +188,20 @@ add_executable(he_tests
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
     test_foliage_cluster.cpp
+    # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
+    test_foliage_layers.cpp
+    # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
+    # hysteresis per view, the cross-card file.
+    test_foliage_lod.cpp
+    # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
+    test_graph_instancing.cpp
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp
     # Metal's per-frame upload ring (perf audit B6): slices, recycling, threads.
     test_frame_upload_ring.cpp
+    # D3D12/Vulkan instance-arena sizing (Thema 182 step 8): 500k plants in range replayed.
+    test_instance_arena.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
     test_profiler_layout.cpp
