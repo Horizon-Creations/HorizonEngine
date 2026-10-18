@@ -112,6 +112,9 @@ split between the two was measured.
 - **Not verified:**
   - No editor run by hand: the Cinematic preview bracket, and a hot reload with a
     paused animator.
+  - The `HorizonEditor` target was not built locally. Only `he_tests` was, and it
+    compiles `CinematicPreview.cpp`. `SkeletalMeshComponent.h` reaches the editor and
+    the renderer, and CI covers them.
   - Linux and Windows only through CI.
 - **Decisions taken:**
   - Gate on exact inputs, not on `playbackSpeed == 0`.
