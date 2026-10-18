@@ -6063,7 +6063,9 @@ void OpenGLRenderer::UpdateGIAccel()
 	if (!(m_giEnabled || m_giReflEnabled) || !m_giSupported) return;
 
 	// Before any instance reads an offset: a compaction moves the ranges.
-	m_giBlas.compactIfWasteful();
+	if (m_giBlas.compactIfWasteful())
+		HE_LOG_INFO(RHI, "OpenGLRenderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+		            m_giBlas.entries(), m_giBlas.tris().size());
 
 	// Same caster filter as the shadow pass / Metal's TLAS: castsShadow only,
 	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in

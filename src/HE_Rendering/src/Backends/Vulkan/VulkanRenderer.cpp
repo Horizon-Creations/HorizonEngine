@@ -10422,7 +10422,9 @@ void VulkanRenderer::updateGiAccel()
     if (!m_giEnabled) return;
 
     // Before any instance reads an offset: a compaction moves the ranges.
-    m_giBlas.compactIfWasteful();
+    if (m_giBlas.compactIfWasteful())
+        HE_LOG_INFO(RHI, "VulkanRenderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+                    m_giBlas.entries(), m_giBlas.tris().size());
 
     // Same caster filter as the shadow pass / the other backends' TLAS builds:
     // castsShadow only, UNculled (rays go in arbitrary directions).

@@ -1,6 +1,7 @@
 // The software GI's per-mesh BLAS cache, shared by the compute-GI backends
-// (OpenGL, D3D11, D3D12, Vulkan; Metal keeps one MTLAccelerationStructure per
-// mesh and needs none of this). Every mesh's GiBvh lives in two concatenated
+// (OpenGL, D3D11, D3D12, Vulkan; Metal's hardware path keeps one
+// MTLAccelerationStructure per mesh, its software fallback in MetalRenderer.mm
+// still has its own map + arrays). Every mesh's GiBvh lives in two concatenated
 // arrays, the layout the kernels read: an instance carries its BLAS's node and
 // triangle offsets, and a BVH's own indices are relative to them.
 //

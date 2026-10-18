@@ -3223,7 +3223,9 @@ struct D3D11RendererImpl
         if (!giEnabled || !giSupported) return;
 
         // Before any instance reads an offset: a compaction moves the ranges.
-        giBlas.compactIfWasteful();
+        if (giBlas.compactIfWasteful())
+            HE_LOG_INFO(RHI, "D3D11Renderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+                        giBlas.entries(), giBlas.tris().size());
 
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
