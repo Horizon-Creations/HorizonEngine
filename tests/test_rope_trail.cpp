@@ -1057,3 +1057,32 @@ TEST_CASE("Removing the component in the Details panel gives the mesh back too")
     CHECK(world.registry().valid(e));
     CHECK(cm.getStaticMesh(mesh) == nullptr);
 }
+
+TEST_CASE("A rope that goes while another arrives in the same frame still gives its mesh back")
+{
+    // The give-back sweep is skipped when every mesh is still held by its rope
+    // (SCN-604). A swap keeps the NUMBER of ropes, which is exactly the case a
+    // count of ropes would get wrong; the skip counts ropes holding their entry.
+    HorizonWorld world;
+    ContentManager cm;
+
+    const Entity a = world.createEntity("RopeA");
+    world.registry().emplace<RopeComponent>(a, RopeComponent{});
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+    const HE::UUID meshA = world.registry().get<RopeComponent>(a).runtimeMeshId;
+    REQUIRE(cm.getStaticMesh(meshA) != nullptr);
+
+    world.registry().remove<RopeComponent>(a);
+    const Entity b = world.createEntity("RopeB");
+    world.registry().emplace<RopeComponent>(b, RopeComponent{});
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+
+    CHECK(cm.getStaticMesh(meshA) == nullptr);
+    const HE::UUID meshB = world.registry().get<RopeComponent>(b).runtimeMeshId;
+    CHECK(cm.getStaticMesh(meshB) != nullptr);
+
+    // And a quiet frame after that keeps B's mesh.
+    RopeTrailSystem::update(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+    CHECK(cm.getStaticMesh(meshB) != nullptr);
+    CHECK(world.registry().get<RopeComponent>(b).runtimeMeshId == meshB);
+}
