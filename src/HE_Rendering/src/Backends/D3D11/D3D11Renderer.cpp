@@ -54,6 +54,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <stdexcept>
 #include <unordered_map>
@@ -1425,6 +1426,12 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
     ComPtr<ID3D11SamplerState> m_matSampler;  // linear-wrap, bound at s2 + s4..s7
     ComPtr<ID3D11SamplerState> m_matWeightSampler; // linear-clamp, bound at s0 for the draw (heLandscapeWeights)
+    // HE_D3D11_MAT_STATE_EAGER=1: end every graph-material run after its one
+    // draw — the pre-REN-103 bind/restore per draw, for a same-binary A/B.
+    const bool matStateEager = [] {
+        const char* v = std::getenv("HE_D3D11_MAT_STATE_EAGER");
+        return v && *v && std::atoi(v) != 0;
+    }();
     // Image-based-ambient sky cube for graph materials (heSkyEnv, t15/s15 per
     // draw, D3D11MaterialBindings.h): the SAME HE::BuildSkyEnvFaceRow bake GL,
     // Metal and Vulkan sample, re-baked on the CPU when the sun moves
@@ -7215,6 +7222,113 @@ void D3D11Renderer::DrawScene(int width, int height)
         bool gbufferPass = false;
         ID3D11PixelShader* builtinPS = p.ps.Get();
         std::vector<const DrawCall*> deferredForwardDCs;
+
+        // ── Graph-material runs (REN-103) ─────────────────────────────────────
+        // A graph-material draw needs ~20 registers that the built-in scene
+        // shader uses for something else (D3D11MaterialBindings.h): HeLighting on
+        // b0/b8, U and HeParams on b1/b3/b9, the material samplers on s0/s2/
+        // s4..s7, the DDGI atlases on t17/t18/s1/s3, sky cube + AO on t15/t16/s15.
+        // Every one of them is a frame constant. They used to go on before EVERY
+        // material draw and come off right after it, also between two material
+        // draws in a row (> 45 context calls per draw). Now they go on at the
+        // first material draw of a run (bindMatRunState) and come off when the
+        // run ends (endMatRun): at the next built-in draw, and after EVERY drawDC
+        // loop, because what follows a loop (skinned pass, TAA velocity, decals,
+        // the deferred resolve, debug lines) assumes the built-in state.
+        bool matRunBound = false;
+        const D3D11RendererImpl::MatShaders* boundMatSh = nullptr; // VS/PS/IL on the context
+        uint32_t matDrawsFrame = 0, matRunsFrame = 0;               // the witness line below
+        auto bindMatRunState = [&]() {
+            // HeLighting (b0 PS, b8 WPO VS) — same CB, filled once per frame.
+            ctx->PSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+            ctx->VSSetConstantBuffers(8, 1, p.m_matLightCB.GetAddressOf());
+            // U (b1 VS) and HeParams (b3 PS / b9 WPO VS): the buffers stay, each
+            // draw refills them with MAP_WRITE_DISCARD.
+            ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());
+            ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf());
+            ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf());
+            // heTex0 / heTexP0..3's linear-wrap samplers (s2 + s4..s7).
+            ID3D11SamplerState* matSamp = p.m_matSampler.Get();
+            ctx->PSSetSamplers(2, 1, &matSamp);
+            ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
+            ctx->PSSetSamplers(4, 4, matSamp4);
+            // heLandscapeWeights' linear-CLAMP sampler on s0 — explicitly, because
+            // s0 is where the enclosing built-in pass keeps its albedo sampler
+            // (p.sampler, linear-wrap): without this the weightmap is filtered
+            // with whatever the last built-in pass left on s0. The weightmap
+            // itself (t14) is per draw. (D3D11MaterialBindings.h, Thema 57)
+            ID3D11SamplerState* weightSamp = p.m_matWeightSampler.Get();
+            ctx->PSSetSamplers(HE::d3d11mat::kWeightmapSamplerSlot, 1, &weightSamp);
+            // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
+            // (Thema 120): the live probe atlases while GI shades — the gate
+            // fillMatLight raised — the white dummy otherwise, so the 2D slots
+            // never hold the built-in pass's array / structured buffer during
+            // the draw. m_matWeightSampler is the same linear-clamp description
+            // as giLinearClamp and, unlike it, exists without the GI path.
+            HE::d3d11mat::BindDDGIAtlases(ctx,
+                giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                p.m_matWeightSampler.Get());
+            // heSkyEnv (t15/s15) + heAO (t16) (Thema 126): the baked sky cube
+            // under the same flag fillMatLight raised fog.z with, and the AO
+            // SRV the built-in shader reads at t2 (white when SSAO did not
+            // run, fog.w is 0 then). t16 is the built-in pass's forward SSR
+            // result — endMatRun puts it back, with t15.
+            HE::d3d11mat::BindSkyEnvAndAO(ctx,
+                p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
+                aoSRV, p.m_matWeightSampler.Get());
+            matRunBound = true;
+            boundMatSh  = nullptr;
+            ++matRunsFrame;
+        };
+        auto endMatRun = [&]() {
+            if (!matRunBound) return;
+            // ── CRITICAL: restore scene state for subsequent built-in draws ───
+            // The material run clobbered: VS/PS/IL, VS b1 (was perFrameCB, overwritten
+            // by U), PS b0 (was perObjectCB, overwritten by HeLighting), PS t2 (was
+            // aoSRV, overwritten by heTex0), and — since the GI port — PS t4..t6 +
+            // s2, which the built-in scene shader now reads (GI mask + probe
+            // atlases + linear-clamp sampler). VS b0 / PS b0 (perObject) and t0
+            // (albedo) are re-bound per draw by the built-in path, but PS b0 is
+            // restored here too since HeLighting overwrote it. And PS s0: the
+            // weightmap's clamp sampler sat there for the run, the built-in
+            // shader's albedo sampler (p.sampler, set once per pass) goes back;
+            // t14 (heLandscapeWeights) comes off with it. And t17/t18/s1/s3:
+            // the DDGI atlases go, the built-in pass's local shadow atlas,
+            // cluster lights, AO point sampler and shadow sampler come back.
+            // And t15/t16: the sky cube comes off, the forward SSR result
+            // (uSSRFwd) goes back on t16.
+            HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
+            HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
+            {
+                HE::d3d11mat::BuiltinGISlots builtin;
+                builtin.localShadowArray = localShadowSrv_;
+                builtin.clusterLights    = clustered ? p.clusterLightSRV.Get() : nullptr;
+                builtin.pointSampler     = p.pointSampler.Get();
+                builtin.shadowSampler    = p.shadowSampler.Get();
+                HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
+            }
+            ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+            ctx->PSSetShader(builtinPS, nullptr, 0); // PSMain, or GBufPS in the G-buffer pass
+            ctx->IASetInputLayout(p.inputLayout.Get());
+            ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+            ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+            ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
+            {
+                ID3D11ShaderResourceView* giSrvs[4] = {
+                    giShadingActive ? giShadowSRV      : p.whiteSRV.Get(),
+                    giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                    giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                    (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get()
+                                                          : p.whiteSRV.Get() };
+                ctx->PSSetShaderResources(4, 4, giSrvs);
+                if (p.giLinearClamp)
+                    ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
+            }
+            matRunBound = false;
+            boundMatSh  = nullptr;
+        };
+
         auto drawDC = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in the ribbon
             // pool, looked up by the DrawCall that was synthesised for it.
@@ -7370,51 +7484,48 @@ void D3D11Renderer::DrawScene(int width, int height)
                             : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 
                         // ── Bind material pipeline state ──────────────────────────────────
-                        ctx->VSSetShader(sh->vs.Get(), nullptr, 0);
-                        ctx->PSSetShader(sh->ps.Get(), nullptr, 0);
-                        ctx->IASetInputLayout(sh->il.Get());
+                        // The frame-constant half goes on once per run of material
+                        // draws (bindMatRunState, above drawDC); what follows is
+                        // what differs from one material draw to the next.
+                        if (!matRunBound) bindMatRunState();
+                        ++matDrawsFrame;
+                        if (boundMatSh != sh)
+                        {
+                            ctx->VSSetShader(sh->vs.Get(), nullptr, 0);
+                            ctx->PSSetShader(sh->ps.Get(), nullptr, 0);
+                            ctx->IASetInputLayout(sh->il.Get());
+                            boundMatSh = sh;
+                        }
                         ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
                         ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-                        // HeLighting (b0 PS, b8 WPO VS) — same CB, filled once per frame.
-                        ctx->PSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
-                        ctx->VSSetConstantBuffers(8, 1, p.m_matLightCB.GetAddressOf());
-                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS) + linear-wrap samplers
-                        // (s2 + s4..s7). t3 is intentionally unused by the mesh path.
+                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS); their linear-wrap
+                        // samplers (s2 + s4..s7) are part of the run state. t3 is
+                        // intentionally unused by the mesh path.
                         ctx->PSSetShaderResources(2, 1, &heTex0);
                         static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy t4..t7");
                         ctx->PSSetShaderResources(4, 4, heTexP);
-                        ID3D11SamplerState* matSamp = p.m_matSampler.Get();
-                        ctx->PSSetSamplers(2, 1, &matSamp);
-                        ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
-                        ctx->PSSetSamplers(4, 4, matSamp4);
-                        // heLandscapeWeights (t14 PS) + its linear-CLAMP sampler on s0 —
-                        // explicitly, because s0 is where the enclosing built-in pass keeps
-                        // its albedo sampler (p.sampler, linear-wrap): without this the
-                        // weightmap is filtered with whatever the last built-in pass left
-                        // on s0. Restored below. (D3D11MaterialBindings.h, Thema 57)
-                        HE::d3d11mat::BindLandscapeWeights(ctx, heWeights, p.m_matWeightSampler.Get());
-                        // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
-                        // (Thema 120): the live probe atlases while GI shades — the gate
-                        // fillMatLight raised — the white dummy otherwise, so the 2D slots
-                        // never hold the built-in pass's array / structured buffer during
-                        // the draw. m_matWeightSampler is the same linear-clamp description
-                        // as giLinearClamp and, unlike it, exists without the GI path.
-                        // Restored below.
-                        HE::d3d11mat::BindDDGIAtlases(ctx,
-                            giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
-                            giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
-                            p.m_matWeightSampler.Get());
-                        // heSkyEnv (t15/s15) + heAO (t16) (Thema 126): the baked sky cube
-                        // under the same flag fillMatLight raised fog.z with, and the AO
-                        // SRV the built-in shader reads at t2 (white when SSAO did not
-                        // run, fog.w is 0 then). t16 is the built-in pass's forward SSR
-                        // result — restored below, with t15.
-                        HE::d3d11mat::BindSkyEnvAndAO(ctx,
-                            p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
-                            aoSRV, p.m_matWeightSampler.Get());
+                        // heLandscapeWeights (t14 PS), per draw; its linear-CLAMP sampler
+                        // on s0 came with the run state (D3D11MaterialBindings.h, Thema 57).
+                        ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &heWeights);
 
-                        // The per-draw half of every material draw: U at b1 VS,
-                        // HeParams at b3 PS / b9 WPO VS.
+                        // HeParams (16 vec4 = 64 floats = 256 B) at b3 PS / b9 WPO VS,
+                        // zero-padded: the same block for every instance of this
+                        // DrawCall, so once per DrawCall, not once per instance.
+                        {
+                            float padded[64] = { 0.0f };
+                            if (params)
+                                std::memcpy(padded, params->data(),
+                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                            D3D11_MAPPED_SUBRESOURCE mp{};
+                            if (SUCCEEDED(ctx->Map(p.m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
+                            {
+                                std::memcpy(mp.pData, padded, sizeof(padded));
+                                ctx->Unmap(p.m_matParamCB.Get(), 0);
+                            }
+                        }
+
+                        // The per-instance half of every material draw: U at b1 VS
+                        // (bound with the run state, refilled here).
                         auto uploadMatDraw = [&](const glm::mat4& mvp, const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
                             struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
@@ -7434,20 +7545,6 @@ void D3D11Renderer::DrawScene(int width, int height)
                                 std::memcpy(mu.pData, &u, sizeof(u));
                                 ctx->Unmap(p.m_matObjCB.Get(), 0);
                             }
-                            // HeParams (16 vec4 = 64 floats = 256 B) at b3 PS / b9 WPO VS, zero-padded.
-                            float padded[64] = { 0.0f };
-                            if (params)
-                                std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
-                            D3D11_MAPPED_SUBRESOURCE mp{};
-                            if (SUCCEEDED(ctx->Map(p.m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
-                            {
-                                std::memcpy(mp.pData, padded, sizeof(padded));
-                                ctx->Unmap(p.m_matParamCB.Get(), 0);
-                            }
-                            ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());   // b1 U (VS)
-                            ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
-                            ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
                         };
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             uploadMatDraw(viewProj * model, model);
@@ -7462,8 +7559,9 @@ void D3D11Renderer::DrawScene(int width, int height)
                             // The batch: every model into m_matInstVB, ONE U with the
                             // batch-constant half (U.mvp = viewProj, the twin multiplies
                             // the model in), one instanced draw. The twin's VS/IL replace
-                            // the plain ones bound above; the restore below puts the
-                            // built-in pass's back, and vertex buffer 1 comes off.
+                            // the plain ones bound above (and are what boundMatSh says
+                            // now); the run's restore puts the built-in pass's back,
+                            // and vertex buffer 1 comes off right here.
                             const UINT instCount = static_cast<UINT>(dc.instanceTransforms.size());
                             std::memcpy(im.pData, dc.instanceTransforms.data(), instCount * sizeof(glm::mat4));
                             ctx->Unmap(p.m_matInstVB.Get(), 0);
@@ -7472,6 +7570,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ctx->VSSetShader(shInst->vs.Get(), nullptr, 0);
                             ctx->PSSetShader(shInst->ps.Get(), nullptr, 0);
                             ctx->IASetInputLayout(shInst->il.Get());
+                            boundMatSh = shInst;
                             uploadMatDraw(viewProj, glm::mat4(1.0f));
                             ctx->DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);
                             ++p.counters.draws;
@@ -7486,52 +7585,17 @@ void D3D11Renderer::DrawScene(int width, int height)
                         else
                             drawMatInstance(dc.transform);
 
-                        // ── CRITICAL: restore scene state for subsequent built-in draws ───
-                        // The material path clobbered: VS/PS/IL, VS b1 (was perFrameCB, overwritten
-                        // by U), PS b0 (was perObjectCB, overwritten by HeLighting), PS t2 (was
-                        // aoSRV, overwritten by heTex0), and — since the GI port — PS t4..t6 +
-                        // s2, which the built-in scene shader now reads (GI mask + probe
-                        // atlases + linear-clamp sampler). VS b0 / PS b0 (perObject) and t0
-                        // (albedo) are re-bound per draw by the built-in path, but PS b0 is
-                        // restored here too since HeLighting overwrote it. And PS s0: the
-                        // weightmap's clamp sampler sat there for the draw, the built-in
-                        // shader's albedo sampler (p.sampler, set once per pass) goes back;
-                        // t14 (heLandscapeWeights) comes off with it. And t17/t18/s1/s3:
-                        // the DDGI atlases go, the built-in pass's local shadow atlas,
-                        // cluster lights, AO point sampler and shadow sampler come back.
-                        // And t15/t16: the sky cube comes off, the forward SSR result
-                        // (uSSRFwd) goes back on t16.
-                        HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
-                        HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
-                        {
-                            HE::d3d11mat::BuiltinGISlots builtin;
-                            builtin.localShadowArray = localShadowSrv_;
-                            builtin.clusterLights    = clustered ? p.clusterLightSRV.Get() : nullptr;
-                            builtin.pointSampler     = p.pointSampler.Get();
-                            builtin.shadowSampler    = p.shadowSampler.Get();
-                            HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
-                        }
-                        ctx->VSSetShader(p.vs.Get(), nullptr, 0);
-                        ctx->PSSetShader(builtinPS, nullptr, 0); // PSMain, or GBufPS in the G-buffer pass
-                        ctx->IASetInputLayout(p.inputLayout.Get());
-                        ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
-                        ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
-                        ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
-                        {
-                            ID3D11ShaderResourceView* giSrvs[4] = {
-                                giShadingActive ? giShadowSRV      : p.whiteSRV.Get(),
-                                giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
-                                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
-                                (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get()
-                                                                      : p.whiteSRV.Get() };
-                            ctx->PSSetShaderResources(4, 4, giSrvs);
-                            if (p.giLinearClamp)
-                                ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
-                        }
+                        // The scene state the built-in draws expect comes back when
+                        // the run ends: at the next built-in draw (below) or at the
+                        // end of the drawDC loop (endMatRun). HE_D3D11_MAT_STATE_EAGER=1
+                        // ends it after every draw, which is the pre-REN-103 sequence.
+                        if (p.matStateEager) endMatRun();
                         return;
                     }
                 }
             }
+            // A built-in draw: the material run before it (if any) ends here.
+            endMatRun();
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             ID3D11ShaderResourceView* albedo = m.texture.Get(); // baked (may be null)
@@ -7618,12 +7682,28 @@ void D3D11Renderer::DrawScene(int width, int height)
             }
         };
 
+        // Every pass over a DrawCall list goes through here, so no loop can
+        // forget to end the material run it leaves open. The CPU time of the
+        // loops is the cost REN-103 cuts (context calls); HE_D3D11_MAT_STATE_TIMING
+        // =<frames> logs its median once that many frames were timed, the
+        // GPU-independent half of the A/B (a busy GPU stretches whole frames).
+        double drawLoopMs = 0.0;
+        auto drawLoop = [&](const std::vector<const DrawCall*>& list) {
+            const auto t0 = std::chrono::steady_clock::now();
+            for (const DrawCall* dc : list) drawDC(*dc);
+            endMatRun();
+            drawLoopMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+        };
+
         // Decals into GB0 when this frame is deferred and the variant built;
         // otherwise the forward decal over the lit colour, as before.
         const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
                            && p.EnsureDecalPipeline() && p.decalGBufPS;
         if (!deferredActive)
-            for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+        {
+            drawLoop(opaqueDCs);
+        }
         else
         {
             // ── Deferred (Thema 150): G-buffer pass → lighting resolve → forward
@@ -7648,7 +7728,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             builtinPS   = p.gbufferPS.Get();
             gbufferPass = true;
             ctx->PSSetShader(builtinPS, nullptr, 0);
-            for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+            drawLoop(opaqueDCs); // ends the run while builtinPS is still GBufPS: the restore binds it
             gbufferPass = false;
             builtinPS   = p.ps.Get();
 
@@ -7810,7 +7890,7 @@ void D3D11Renderer::DrawScene(int width, int height)
 
             // Forward replay: graph materials without a G-buffer variant, lit by
             // their own forward shader against the G-buffer depth (test + write).
-            for (const DrawCall* dc : deferredForwardDCs) drawDC(*dc);
+            drawLoop(deferredForwardDCs);
         }
 
         // ── Skinned mesh pass ─────────────────────────────────────────────────
@@ -7898,9 +7978,47 @@ void D3D11Renderer::DrawScene(int width, int height)
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthReadOnlyState.Get(), 0);
-            for (const DrawCall* dc : transparentDCs) drawDC(*dc);
+            drawLoop(transparentDCs);
             ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
+        }
+        // The runtime witness of the runs: how many graph-material draws shared
+        // how many bind/restore pairs this frame. Logged when the pair changes,
+        // at most eight times a session (eager mode: draws == runs).
+        {
+            static uint32_t s_lastDraws = 0, s_lastRuns = 0;
+            static int      s_runLines  = 0;
+            if (matDrawsFrame && s_runLines < 8
+                && (matDrawsFrame != s_lastDraws || matRunsFrame != s_lastRuns))
+            {
+                ++s_runLines;
+                s_lastDraws = matDrawsFrame; s_lastRuns = matRunsFrame;
+                HE_LOG_INFO(RHI, "D3D11Renderer: graph-material draws %u in %u state runs%s",
+                            matDrawsFrame, matRunsFrame, p.matStateEager ? " (eager)" : "");
+            }
+        }
+        static const int s_loopTimingFrames = [] {
+            const char* v = std::getenv("HE_D3D11_MAT_STATE_TIMING");
+            return v && *v ? std::max(0, std::atoi(v)) : 0;
+        }();
+        if (s_loopTimingFrames > 0)
+        {
+            static std::vector<double> s_loopMs;
+            static bool s_loopLogged = false;
+            if (!s_loopLogged && matDrawsFrame)
+            {
+                s_loopMs.push_back(drawLoopMs);
+                if (static_cast<int>(s_loopMs.size()) >= s_loopTimingFrames)
+                {
+                    s_loopLogged = true;
+                    std::sort(s_loopMs.begin(), s_loopMs.end());
+                    HE_LOG_INFO(RHI, "D3D11Renderer: draw loops cpu ms median=%.4f p10=%.4f p90=%.4f "
+                                "over %zu frames (%u graph-material draws, %u state runs%s)",
+                                s_loopMs[s_loopMs.size() / 2], s_loopMs[s_loopMs.size() / 10],
+                                s_loopMs[(s_loopMs.size() * 9) / 10], s_loopMs.size(),
+                                matDrawsFrame, matRunsFrame, p.matStateEager ? ", eager" : "");
+                }
+            }
         }
         // Debug lines on top of geometry, before post-process
         if (!p.m_debugLines.empty())

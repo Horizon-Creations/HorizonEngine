@@ -902,22 +902,28 @@ private:
 
 	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
 	unsigned int m_uiProgram     = 0;
-	int          m_uUIRect       = -1;
 	int          m_uUIViewport   = -1;
-	int          m_uUIColor      = -1;
-	int          m_uUIUVRect     = -1;  // glyph quads: atlas UV rect
-	int          m_uUIRotation   = -1;  // { angle(rad), pivotX, pivotY, _ }
-	int          m_uUIMode       = -1;  // 0 = solid color, 1 = font-atlas glyph
-	int          m_uUICornerRadius = -1; // px; min(w,h)/2 → circle (rounded rects)
-	int          m_uUIBorderWidth = -1;  // px, inside the quad; 0 = no border
-	int          m_uUIBorderColor = -1;
-	int          m_uUIGradient      = -1; // 0 = solid, 1 = linear fade
-	int          m_uUIGradientColor = -1;
-	int          m_uUIGradientAngle = -1; // degrees, clockwise from "down"
-	int          m_uUIGradientShape = -1; // 0 = linear, 1 = radial from the centre
-	int          m_uUIBlur       = -1;    // px; > 0 = this quad is a drop shadow
-	int          m_uUIInnerBlur  = -1;    // px; > 0 = shadow cast inwards from the edge
-	int          m_uUIInnerColor = -1;
+	// One solid/glyph/image quad as kUIVS reads it: ten vec4 instance attributes
+	// (locations 0..9), the values that were per-draw uniforms before REN-603.
+	struct UIQuadGL
+	{
+		glm::vec4 rect;          // x, y, w, h (px)
+		glm::vec4 color;
+		glm::vec4 uvRect;        // glyph quads: atlas UV rect
+		glm::vec4 rotation;      // { angle(rad), pivotX, pivotY, _ }
+		glm::vec4 cornerRadius;  // px per corner; min(w,h)/2 → circle
+		glm::vec4 borderColor;
+		glm::vec4 gradientColor;
+		glm::vec4 innerColor;
+		glm::vec4 style0;        // { mode (0 solid, 1 glyph, 2 image), borderWidth, gradient, gradientAngle }
+		glm::vec4 style1;        // { gradientShape, blur, innerBlur, _ }
+	};
+	unsigned int m_uiInstVAO     = 0;   // kUIVS' instance attributes on m_uiInstVBO
+	unsigned int m_uiInstVBO     = 0;   // one batch of UIQuadGL, refilled per draw
+	// RenderUIPass scratch, kept across frames so the pass does not allocate.
+	struct UIResolvedGL { unsigned int matProg = 0; unsigned int tex = 0; float mode = 0.0f; bool backdrop = false; };
+	std::vector<UIResolvedGL> m_uiResolved;
+	std::vector<UIQuadGL>     m_uiBatch;
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;

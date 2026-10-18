@@ -3111,35 +3111,64 @@ void main()
 )GLSL";
 
 // ── In-Game UI (2D canvas) ──────────────────────────────────────────────────
-// Attribute-less: position is derived from gl_VertexID (0-3 for TRIANGLE_STRIP)
-// and the per-quad uniforms uRect (x,y,w,h pixels) + uViewport (vpW,vpH pixels).
-// uUVRect = {u0, v0, u1, v1} into the font atlas (glyph quads); uMode: 0 = solid
-// color, 1 = font-atlas glyph (alpha from the atlas R channel). Mirrors kUIMSL.
+// Attribute-less corners: position is derived from gl_VertexID (0-3 for
+// TRIANGLE_STRIP). Everything else is per QUAD and arrives as instanced
+// attributes (divisor 1), one UIQuadGL record each (RenderUIPass): a run of
+// consecutive quads under one clip and one unit-0 texture is ONE instanced draw
+// (REN-603; it used to be a draw + 15 glUniform calls per quad, per glyph).
+// aRect = {x,y,w,h} pixels, uViewport = (vpW,vpH) pixels, aUVRect = {u0,v0,u1,v1}
+// into the font atlas (glyph quads). Mirrors kUIMSL.
 static const char* kUIVS = R"GLSL(
 #version 410 core
-uniform vec4 uRect;
-uniform vec2 uViewport;
-uniform vec4 uUVRect;
+layout(location = 0) in vec4 aRect;
+layout(location = 1) in vec4 aColor;
+layout(location = 2) in vec4 aUVRect;
 // { angle(radians), pivotX(px), pivotY(px), unused }; angle 0 = upright.
-uniform vec4 uRotation;
+layout(location = 3) in vec4 aRotation;
+layout(location = 4) in vec4 aCornerRadius;
+layout(location = 5) in vec4 aBorderColor;
+layout(location = 6) in vec4 aGradientColor;
+layout(location = 7) in vec4 aInnerColor;
+// { mode, borderWidth, gradient, gradientAngle } and { gradientShape, blur, innerBlur, _ }
+layout(location = 8) in vec4 aStyle0;
+layout(location = 9) in vec4 aStyle1;
+uniform vec2 uViewport;
 out vec2 vUV;
 out vec2 vLocal;
+// The quad's constants for the fragment stage, flat: never interpolated, so
+// they reach every pixel bit-exact, as the uniforms did.
+flat out vec4 vRect;
+flat out vec4 vColor;
+flat out vec4 vCornerRadius;
+flat out vec4 vBorderColor;
+flat out vec4 vGradientColor;
+flat out vec4 vInnerColor;
+flat out vec4 vStyle0;
+flat out vec4 vStyle1;
 void main()
 {
     const vec2 c[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
     vec2 uv = c[gl_VertexID];
-    vec2 sp = uRect.xy + uv * uRect.zw;
-    if (uRotation.x != 0.0)
+    vec2 sp = aRect.xy + uv * aRect.zw;
+    if (aRotation.x != 0.0)
     {
-        float sa = sin(uRotation.x), ca = cos(uRotation.x);
-        vec2 d = sp - uRotation.yz;
-        sp = uRotation.yz + vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+        float sa = sin(aRotation.x), ca = cos(aRotation.x);
+        vec2 d = sp - aRotation.yz;
+        sp = aRotation.yz + vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
     }
-    vUV = mix(uUVRect.xy, uUVRect.zw, uv);
+    vUV = mix(aUVRect.xy, aUVRect.zw, uv);
     vLocal = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     gl_Position = vec4(sp.x / uViewport.x * 2.0 - 1.0,
                        1.0 - sp.y / uViewport.y * 2.0,
                        0.0, 1.0);
+    vRect = aRect;
+    vColor = aColor;
+    vCornerRadius = aCornerRadius;
+    vBorderColor = aBorderColor;
+    vGradientColor = aGradientColor;
+    vInnerColor = aInnerColor;
+    vStyle0 = aStyle0;
+    vStyle1 = aStyle1;
 }
 )GLSL";
 
@@ -3147,19 +3176,29 @@ static const char* kUIFS = R"GLSL(
 #version 410 core
 in vec2 vUV;
 in vec2 vLocal;
-uniform vec4 uColor;
-uniform float uMode;
-uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
-uniform vec4  uCornerRadius; // px per corner: TL, TR, BR, BL; all at min(w,h)/2 → circle
-uniform float uBorderWidth;  // px, drawn INSIDE the quad; 0 = none
-uniform vec4  uBorderColor;
-uniform float uGradient;      // 0 = solid, 1 = linear fade to uGradientColor
-uniform vec4  uGradientColor;
-uniform float uGradientAngle; // degrees, clockwise from "down"
-uniform float uGradientShape; // 0 = linear along the angle, 1 = radial from the centre
-uniform float uBlur;          // px: > 0 = this quad IS a drop shadow (soft edge)
-uniform float uInnerBlur;     // px: > 0 = a shadow cast inwards from the edge
-uniform vec4  uInnerColor;
+flat in vec4 vRect;
+flat in vec4 vColor;
+flat in vec4 vCornerRadius;
+flat in vec4 vBorderColor;
+flat in vec4 vGradientColor;
+flat in vec4 vInnerColor;
+flat in vec4 vStyle0;
+flat in vec4 vStyle1;
+// The names the body below (and the D3D/Vulkan/Metal/software ports of it)
+// reads; they were uniforms before the quads were batched.
+#define uColor         vColor
+#define uMode          vStyle0.x
+#define uRect          vRect          // xy=pos, zw=size (px) — for the SDF
+#define uCornerRadius  vCornerRadius  // px per corner: TL, TR, BR, BL; all at min(w,h)/2 → circle
+#define uBorderWidth   vStyle0.y      // px, drawn INSIDE the quad; 0 = none
+#define uBorderColor   vBorderColor
+#define uGradient      vStyle0.z      // 0 = solid, 1 = linear fade to uGradientColor
+#define uGradientColor vGradientColor
+#define uGradientAngle vStyle0.w      // degrees, clockwise from "down"
+#define uGradientShape vStyle1.x      // 0 = linear along the angle, 1 = radial from the centre
+#define uBlur          vStyle1.y      // px: > 0 = this quad IS a drop shadow (soft edge)
+#define uInnerBlur     vStyle1.z      // px: > 0 = a shadow cast inwards from the edge
+#define uInnerColor    vInnerColor
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
 // One rounded box, four radii. `p` is relative to the box's centre (y down),
@@ -4571,26 +4610,28 @@ void OpenGLRenderer::CreateTonemapPipeline()
 			glGetProgramInfoLog(m_uiProgram, sizeof(log), nullptr, log);
 			throw std::runtime_error(std::string("OpenGLRenderer: UI program link failed: ") + log);
 		}
-		m_uUIRect     = glGetUniformLocation(m_uiProgram, "uRect");
 		m_uUIViewport = glGetUniformLocation(m_uiProgram, "uViewport");
-		m_uUIColor    = glGetUniformLocation(m_uiProgram, "uColor");
-		m_uUIUVRect   = glGetUniformLocation(m_uiProgram, "uUVRect");
-		m_uUIRotation = glGetUniformLocation(m_uiProgram, "uRotation");
-		m_uUIMode     = glGetUniformLocation(m_uiProgram, "uMode");
-		m_uUICornerRadius = glGetUniformLocation(m_uiProgram, "uCornerRadius");
-		m_uUIBorderWidth  = glGetUniformLocation(m_uiProgram, "uBorderWidth");
-		m_uUIBorderColor  = glGetUniformLocation(m_uiProgram, "uBorderColor");
-		m_uUIGradient      = glGetUniformLocation(m_uiProgram, "uGradient");
-		m_uUIGradientColor = glGetUniformLocation(m_uiProgram, "uGradientColor");
-		m_uUIGradientAngle = glGetUniformLocation(m_uiProgram, "uGradientAngle");
-		m_uUIGradientShape = glGetUniformLocation(m_uiProgram, "uGradientShape");
-		m_uUIBlur       = glGetUniformLocation(m_uiProgram, "uBlur");
-		m_uUIInnerBlur  = glGetUniformLocation(m_uiProgram, "uInnerBlur");
-		m_uUIInnerColor = glGetUniformLocation(m_uiProgram, "uInnerColor");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
 		glUseProgram(m_uiProgram);
 		if (GLint l = glGetUniformLocation(m_uiProgram, "uFontAtlas"); l >= 0) glUniform1i(l, 0);
 		glUseProgram(0);
+
+		// The per-quad stream: ten vec4 attributes (kUIVS locations 0..9), one
+		// UIQuadGL per instance, refilled for every batch (RenderUIPass).
+		static_assert(sizeof(UIQuadGL) == 10 * sizeof(glm::vec4), "UIQuadGL is kUIVS' ten vec4 attributes");
+		glGenVertexArrays(1, &m_uiInstVAO);
+		glGenBuffers(1, &m_uiInstVBO);
+		glBindVertexArray(m_uiInstVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, m_uiInstVBO);
+		for (GLuint a = 0; a < 10; ++a)
+		{
+			glEnableVertexAttribArray(a);
+			glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, sizeof(UIQuadGL),
+			                      reinterpret_cast<const void*>(static_cast<uintptr_t>(a * sizeof(glm::vec4))));
+			glVertexAttribDivisor(a, 1);
+		}
+		glBindVertexArray(0);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
 	}
 }
 
@@ -7922,11 +7963,70 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glBindVertexArray(m_fsVAO);
+	unsigned int boundVAO = m_fsVAO;
+
+	// ── Resolve first, draw second (REN-603) ──────────────────────────────────
+	// Every lookup that may create something GL-side — a material program, an
+	// imported font's atlas, a UI image (UIFontAtlasTexture / ResolveUITexture
+	// bind the new texture on the ACTIVE unit while they upload it) — runs here,
+	// before the first draw. The batches below hold quads that are not drawn
+	// yet; an upload in the middle of one would rebind the texture they sample.
+	const size_t nUI = m_renderWorld.uiObjects.size();
+	m_uiResolved.assign(nUI, UIResolvedGL{});
+	for (size_t i = 0; i < nUI; ++i)
+	{
+		const UIRenderObject& obj = m_renderWorld.uiObjects[i];
+		UIResolvedGL& r = m_uiResolved[i];
+		// Custom material on an image quad → material program (the solid path
+		// stays the fallback when the material has no custom shader / failed).
+		if (obj.type == 0 && obj.materialAssetId != HE::UUID{})
+			r.matProg = GetOrBuildUIMaterialProgram(obj.materialAssetId, &r.backdrop);
+		if (r.matProg) continue;
+		if (obj.type == 2)
+		{
+			// A glyph quad may use an imported font's atlas.
+			r.tex  = UIFontAtlasTexture(obj.fontAtlasKey);
+			r.mode = 1.0f;
+		}
+		else if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+		{
+			if (const unsigned int t = ResolveUITexture(obj.textureAssetId, std::string()))
+			{
+				r.tex  = t;
+				r.mode = 2.0f;
+			}
+		}
+	}
 
 	bool         basicBound    = false; // solid/glyph program currently active?
-	uint32_t     boundAtlasKey = 0;     // font atlas currently bound on unit 0
+	unsigned int boundTex0     = 0;     // what unit 0 holds for the solid/glyph program
+	bool         tex0Known     = false; // ... and whether boundTex0 is still true
 	unsigned int boundMaterial = 0;     // material program currently active
 	bool uiLightUploaded = false;       // HeLighting uploaded once per UI pass
+
+	// The pending batch: consecutive solid/glyph/image quads under one clip and
+	// one unit-0 texture, drawn as ONE instanced strip when anything would
+	// change under them (a clip, a texture, a material quad, the pass end).
+	// Painter's order is kept: a batch only ever holds neighbours.
+	// HE_GL_UI_BATCH=0 draws every quad on its own (same path, one instance per
+	// draw) — the pre-REN-603 draw count, for a same-binary A/B.
+	static const bool s_uiBatch = [] {
+		const char* v = std::getenv("HE_GL_UI_BATCH");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	m_uiBatch.clear();
+	uint32_t uiDraws = 0;
+	auto flushBatch = [&]()
+	{
+		if (m_uiBatch.empty()) return;
+		glBindBuffer(GL_ARRAY_BUFFER, m_uiInstVBO);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_uiBatch.size() * sizeof(UIQuadGL)),
+		             m_uiBatch.data(), GL_STREAM_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, static_cast<GLsizei>(m_uiBatch.size()));
+		++uiDraws;
+		m_uiBatch.clear();
+	};
 	// Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
 	// emits its quads in tree order, so equally-clipped quads arrive in runs.
 	// GL's origin is bottom-left, the UI's is top-left, hence the flip.
@@ -7983,22 +8083,26 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		backdropStale = false;
 	};
 
-	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
+	for (size_t oi = 0; oi < nUI; ++oi)
 	{
-		// Custom material on an image quad → material program (the solid path below
-		// stays the fallback when the material has no custom shader / failed).
-		bool wantsBackdrop = false;
-		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? GetOrBuildUIMaterialProgram(obj.materialAssetId, &wantsBackdrop) : 0;
-		if (matProg && wantsBackdrop && backdropStale) snapshotBackdrop();
-		applyClip(obj.clipRect);
+		const UIRenderObject& obj = m_renderWorld.uiObjects[oi];
+		const UIResolvedGL&   res = m_uiResolved[oi];
+		const unsigned int matProg = res.matProg;
 		if (matProg)
 		{
+			// Everything queued so far lies UNDER this quad: drawn before the
+			// backdrop snapshot reads the framebuffer, and before the program,
+			// VAO and units change.
+			flushBatch();
+			if (res.backdrop && backdropStale) snapshotBackdrop();
+			applyClip(obj.clipRect);
 			if (boundMaterial != matProg)
 			{
 				glUseProgram(matProg);
 				boundMaterial = matProg; basicBound = false;
 			}
+			if (boundVAO != m_fsVAO) { glBindVertexArray(m_fsVAO); boundVAO = m_fsVAO; }
+			tex0Known = false; // the snapshot and the white heTex0 below rebind unit 0
 			// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
 			struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } u{};
 			u.model[0] = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
@@ -8086,62 +8190,66 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			backdropStale = true; // this quad is now part of what is "behind"
 			continue;
 		}
+		// A solid quad samples nothing; a glyph or an image needs ITS texture on
+		// unit 0. Either a new clip or a different texture closes the batch.
+		const bool needsTex = res.mode != 0.0f;
+		if (!m_uiBatch.empty()
+		    && (obj.clipRect != appliedClip || (needsTex && (!tex0Known || res.tex != boundTex0))))
+			flushBatch();
+		applyClip(obj.clipRect);
 		if (!basicBound)
 		{
 			glUseProgram(m_uiProgram);
 			glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
-			// Font atlas on unit 0 (uFontAtlas); glyphs sample it, solid quads ignore it.
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(0));
-			boundAtlasKey = 0;
 			basicBound = true; boundMaterial = 0;
 		}
-		// A glyph quad may use an imported font's atlas — bind it on unit 0.
-		if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
+		if (boundVAO != m_uiInstVAO) { glBindVertexArray(m_uiInstVAO); boundVAO = m_uiInstVAO; }
+		if (needsTex && (!tex0Known || res.tex != boundTex0))
 		{
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(obj.fontAtlasKey));
-			boundAtlasKey = obj.fontAtlasKey;
+			glBindTexture(GL_TEXTURE_2D, res.tex);
+			boundTex0 = res.tex; tex0Known = true;
 		}
-		// A textured quad borrows the same unit; the next glyph rebinds its
-		// atlas because boundAtlasKey is invalidated here.
-		bool textured = false;
-		if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
-		{
-			if (const unsigned int t = ResolveUITexture(obj.textureAssetId, std::string()))
-			{
-				glActiveTexture(GL_TEXTURE0);
-				glBindTexture(GL_TEXTURE_2D, t);
-				boundAtlasKey = 0xFFFFFFFFu;   // not a font atlas any more
-				textured = true;
-			}
-		}
-		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
-		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
-		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
-		glUniform4f(m_uUIRotation, obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
-		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
-		glUniform4f(m_uUICornerRadius, obj.cornerRadius.x, obj.cornerRadius.y,
-		            obj.cornerRadius.z, obj.cornerRadius.w);
-		glUniform1f(m_uUIBorderWidth, obj.borderWidth);
-		glUniform4f(m_uUIBorderColor, obj.borderColor.r, obj.borderColor.g,
-		            obj.borderColor.b, obj.borderColor.a);
-		glUniform1f(m_uUIGradient, obj.gradient ? 1.0f : 0.0f);
-		glUniform4f(m_uUIGradientColor, obj.gradientColor.r, obj.gradientColor.g,
-		            obj.gradientColor.b, obj.gradientColor.a);
-		glUniform1f(m_uUIGradientAngle, obj.gradientAngleDeg);
-		glUniform1f(m_uUIGradientShape, obj.gradientShape == 1 ? 1.0f : 0.0f);
-		glUniform1f(m_uUIBlur, obj.blur);
-		glUniform1f(m_uUIInnerBlur, obj.innerShadowBlur);
-		glUniform4f(m_uUIInnerColor, obj.innerShadowColor.r, obj.innerShadowColor.g,
-		            obj.innerShadowColor.b, obj.innerShadowColor.a);
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		UIQuadGL q;
+		q.rect          = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
+		q.color         = obj.color;
+		q.uvRect        = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
+		q.rotation      = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
+		q.cornerRadius  = obj.cornerRadius;
+		q.borderColor   = obj.borderColor;
+		q.gradientColor = obj.gradientColor;
+		q.innerColor    = obj.innerShadowColor;
+		q.style0        = glm::vec4(res.mode, obj.borderWidth, obj.gradient ? 1.0f : 0.0f, obj.gradientAngleDeg);
+		q.style1        = glm::vec4(obj.gradientShape == 1 ? 1.0f : 0.0f, obj.blur, obj.innerShadowBlur, 0.0f);
+		m_uiBatch.push_back(q);
+		if (!s_uiBatch) flushBatch();
 		backdropStale = true; // this quad is now part of what is "behind"
+	}
+	flushBatch();
+
+	// The runtime witness of the batching: quads in, draws out (material quads
+	// draw on their own and are not counted). Logged when the pair changes, at
+	// most eight times a session.
+	{
+		static size_t   s_lastQuads = 0;
+		static uint32_t s_lastDraws = 0;
+		static int      s_uiLines   = 0;
+		size_t basicQuads = 0;
+		for (const UIResolvedGL& r : m_uiResolved) basicQuads += r.matProg ? 0 : 1;
+		if (basicQuads && s_uiLines < 8 && (basicQuads != s_lastQuads || uiDraws != s_lastDraws))
+		{
+			++s_uiLines;
+			s_lastQuads = basicQuads; s_lastDraws = uiDraws;
+			HE_LOG_INFO(RHI, "OpenGLRenderer: UI pass %zu quads in %u draws%s",
+			            basicQuads, uiDraws, s_uiBatch ? "" : " (HE_GL_UI_BATCH=0)");
+		}
 	}
 
 	// Leave the state as it was found: the scissor test is global and nothing
-	// after this pass asked for one.
+	// after this pass asked for one. The VAO goes back to the empty one the
+	// pass found bound (fullscreen passes rely on it).
 	if (scissorOn) glDisable(GL_SCISSOR_TEST);
+	if (boundVAO != m_fsVAO) glBindVertexArray(m_fsVAO);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glDisable(GL_BLEND);
@@ -10473,6 +10581,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_mbBlurProgram)       { glDeleteProgram(m_mbBlurProgram);       m_mbBlurProgram = 0; }
 	m_mbHasPrev = false;
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
+	if (m_uiInstVAO)      { glDeleteVertexArrays(1, &m_uiInstVAO); m_uiInstVAO = 0; }
+	if (m_uiInstVBO)      { glDeleteBuffers(1, &m_uiInstVBO);   m_uiInstVBO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
 	if (m_localShadowDepthTex) { glDeleteTextures(1, &m_localShadowDepthTex); m_localShadowDepthTex = 0; }
@@ -12079,6 +12189,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		else
 		{
 		GLWireScope _fwdWire(WireframeViewActive());
+		// Units 14..17 (sky cube, AO, DDGI atlases) hold per-FRAME inputs that
+		// only material programs read, and nothing in this loop binds them
+		// otherwise: the first graph-material draw puts them on, the rest
+		// find them there (REN-103/601).
+		bool matUnitsBound = false;
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			// An explicit MaterialComponent override wins over the mesh's own
@@ -12247,11 +12362,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				if (matProg)
 				{
 					glUseProgram(matProg);
-					HE::MaterialShaderLibrary::Lighting lit{};
-					fillMatLight(lit); // shared heLitP ABI fill (see the lambda above)
-					// Lighting is identical for every material draw this frame → upload once.
+					// Lighting is identical for every material draw this frame → fill
+					// and upload once (the fill alone is > 2 KB plus up to 16 matrix
+					// products, REN-601).
 					if (!m_matLightUploadedThisFrame)
 					{
+						HE::MaterialShaderLibrary::Lighting lit{};
+						fillMatLight(lit); // shared heLitP ABI fill (see the lambda above)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
@@ -12308,19 +12425,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					}
 					// Shared material inputs: sky env cubemap (14) for image-based
 					// ambient + the fog colour, screen-space AO (15). Per-FRAME state,
-					// re-asserted here because the units are only ever used by these
-					// material programs. Gated by heLight.fog.z/.w.
-					glActiveTexture(GL_TEXTURE14);
-					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
-					glActiveTexture(GL_TEXTURE15);
-					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
-					// DDGI probe atlases on 16/17 (white fallbacks keep the samplers
-					// valid when GI is off; heLight.giProbe.y gates the reads).
-					glActiveTexture(GL_TEXTURE16);
-					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
-					glActiveTexture(GL_TEXTURE17);
-					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
-					glActiveTexture(GL_TEXTURE0);
+					// asserted at the first material draw of the loop because the units
+					// are only ever used by these material programs. Gated by
+					// heLight.fog.z/.w.
+					if (!matUnitsBound)
+					{
+						glActiveTexture(GL_TEXTURE14);
+						glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+						glActiveTexture(GL_TEXTURE15);
+						glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+						// DDGI probe atlases on 16/17 (white fallbacks keep the samplers
+						// valid when GI is off; heLight.giProbe.y gates the reads).
+						glActiveTexture(GL_TEXTURE16);
+						glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+						glActiveTexture(GL_TEXTURE17);
+						glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+						glActiveTexture(GL_TEXTURE0);
+						matUnitsBound = true;
+					}
 					// Landscape layer weightmap on unit 13 — PER DRAW (it belongs to
 					// the terrain the chunk is part of, not to the material). Objects
 					// that aren't landscape chunks get the 1x1 (1,0,0,0) default, so a
@@ -12881,6 +13003,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDepthMask(GL_FALSE);
 			glActiveTexture(GL_TEXTURE0);
 			GLWireScope _tpWire(WireframeViewActive());
+			bool tpMatUnitsBound = false;
 			for (const TPDraw& t : transparent)
 			{
 				if (t.matProg)
@@ -12936,19 +13059,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// cube (14, gated by heLight.fog.z), the AO (15, fog.w) and the DDGI
 					// atlases (16/17, giProbe.y). Forward, nothing else binds them when no
 					// opaque graph material is in view.
+					// 14..17 are per-frame: once per pass, at its first material draw.
 					if (t.wmTex)
 					{
 						glActiveTexture(GL_TEXTURE13);
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
-					glActiveTexture(GL_TEXTURE14);
-					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
-					glActiveTexture(GL_TEXTURE15);
-					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
-					glActiveTexture(GL_TEXTURE16);
-					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
-					glActiveTexture(GL_TEXTURE17);
-					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+					if (!tpMatUnitsBound)
+					{
+						glActiveTexture(GL_TEXTURE14);
+						glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+						glActiveTexture(GL_TEXTURE15);
+						glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+						glActiveTexture(GL_TEXTURE16);
+						glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+						glActiveTexture(GL_TEXTURE17);
+						glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+						tpMatUnitsBound = true;
+					}
 					glActiveTexture(GL_TEXTURE0);
 					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program

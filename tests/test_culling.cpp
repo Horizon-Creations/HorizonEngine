@@ -4147,3 +4147,87 @@ TEST_CASE("D3D12 static geometry lives in the DEFAULT heap, copied before every 
 	CHECK(sweep != std::string::npos);
 	CHECK(sweep < slot);
 }
+
+TEST_CASE("D3D11/GL material draw state once per run, UI quads batched (REN-103/601/603)")
+{
+	// No GPU under ctest; this pins the wiring the pixel A/B in
+	// docs/audit-ren103-601-603-d3d11-gl-draw-state-2026-10-18.md verified.
+	//  - D3D11: the frame-constant material bindings go on at the first
+	//    material draw of a run (bindMatRunState) and come off in ONE place
+	//    (endMatRun), called at every built-in draw and, through drawLoop,
+	//    after every pass over a DrawCall list. A loop that called drawDC on
+	//    its own could leave a run open into the skinned pass, the decals or
+	//    the deferred resolve: material shaders on built-in geometry.
+	//  - GL: the lighting block is filled only when it is uploaded (REN-601).
+	//  - GL UI: the per-quad values are instance attributes, a batch is drawn
+	//    before anything changes under it (REN-603).
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - draw state pin skipped");
+		return;
+	}
+	auto count = [](const std::string& s, const std::string& needle) {
+		size_t n = 0;
+		for (size_t at = s.find(needle); at != std::string::npos; at = s.find(needle, at + 1)) ++n;
+		return n;
+	};
+	auto between = [](const std::string& s, const std::string& a, const std::string& b, size_t from = 0) {
+		const size_t i = s.find(a, from);
+		REQUIRE_MESSAGE(i != std::string::npos, a);
+		const size_t j = s.find(b, i + a.size());
+		REQUIRE_MESSAGE(j != std::string::npos, b);
+		return s.substr(i, j - i);
+	};
+	const fs::path backends = root / "src" / "HE_Rendering" / "src" / "Backends";
+
+	const std::string d3d = stripLineComments(readFile(backends / "D3D11" / "D3D11Renderer.cpp"));
+	REQUIRE(!d3d.empty());
+	CHECK(count(d3d, "drawDC(*dc)") == 1);
+	const std::string loop = between(d3d, "auto drawLoop = [&](const std::vector<const DrawCall*>& list) {", "};");
+	const size_t call = loop.find("drawDC(*dc)");
+	const size_t end  = loop.find("endMatRun();");
+	CHECK(call != std::string::npos);
+	CHECK(end != std::string::npos);
+	CHECK(call < end);
+	CHECK(count(d3d, "drawLoop(") == 4); // forward, G-buffer, replay, transparent
+	const std::string draw = between(d3d, "auto drawDC = [&](const DrawCall& dc) {", "auto drawLoop = [&]");
+	CHECK(count(draw, "if (!matRunBound) bindMatRunState();") == 1);
+	CHECK(count(draw, "RestoreBuiltinGISlots(") == 0);
+	CHECK(count(draw, "RestoreAfterMaterialDraw(") == 0);
+	CHECK(count(draw, "BindDDGIAtlases(") == 0);
+	CHECK(count(draw, "BindSkyEnvAndAO(") == 0);
+	// The built-in half of drawDC starts by ending the run.
+	const std::string tail = between(draw, "if (p.matStateEager) endMatRun();", "ID3D11ShaderResourceView* albedo = m.texture.Get();");
+	CHECK(count(tail, "endMatRun();") == 2);
+	const std::string restore = between(d3d, "auto endMatRun = [&]() {", "auto drawDC = [&]");
+	CHECK(count(restore, "RestoreAfterMaterialDraw(ctx, p.sampler.Get());") == 1);
+	CHECK(count(restore, "RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);") == 1);
+	CHECK(count(restore, "RestoreBuiltinGISlots(ctx, builtin);") == 1);
+	CHECK(count(restore, "ctx->PSSetShader(builtinPS, nullptr, 0);") == 1);
+	// HeParams once per DrawCall, not inside the per-instance upload.
+	const std::string perInst = between(draw, "auto uploadMatDraw = [&]", "auto drawMatInstance = [&]");
+	CHECK(count(perInst, "m_matParamCB") == 0);
+
+	const std::string gl = stripLineComments(readFile(backends / "OpenGL" / "OpenGLRenderer.cpp"));
+	REQUIRE(!gl.empty());
+	const std::string fwd = between(gl, "bool matUnitsBound = false;", "if (deferredActive && !m_renderWorld.decals.empty() && EnsureDecalProgram())");
+	const std::string lit = between(fwd, "glUseProgram(matProg);", "glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);");
+	const size_t gate = lit.find("if (!m_matLightUploadedThisFrame)");
+	const size_t fill = lit.find("fillMatLight(lit);");
+	CHECK(gate != std::string::npos);
+	CHECK(fill != std::string::npos);
+	CHECK(gate < fill);
+	CHECK(count(fwd, "GL_TEXTURE14") == 1);
+
+	const std::string ui = between(gl, "void OpenGLRenderer::RenderUIPass(int pw, int ph)", "\n}\n");
+	CHECK(count(ui, "glUniform4f(") == 0);
+	CHECK(count(ui, "glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4,") == 1);
+	const std::string matQuad = between(ui, "if (matProg)", "snapshotBackdrop();");
+	CHECK(count(matQuad, "flushBatch();") == 1);
+	const std::string fs = between(gl, "static const char* kUIFS = R\"GLSL(", ")GLSL\";");
+	CHECK(count(fs, "uniform vec4 uColor") == 0);
+	CHECK(count(fs, "flat in vec4 vColor;") == 1);
+}
+

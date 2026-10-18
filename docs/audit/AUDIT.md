@@ -97,7 +97,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 **Stufe 3 – Backend-spezifisch (je Backend eigene PRs, unabhängig parallelisierbar)**
 - [ ] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache`
 - [ ] Metal: REN-302/402 `FrameUploadRing` benutzen, REN-405/404 TLAS/BLAS-Dirty, REN-406 asynchroner BLAS-Build
-- [ ] D3D12: REN-202 Meshes in DEFAULT-Heap; D3D11/GL: Material-Draw-Zustand (REN-103/601), UI-Batching (REN-603)
+- [x] D3D12: REN-202 Meshes in DEFAULT-Heap; D3D11/GL: Material-Draw-Zustand (REN-103/601), UI-Batching (REN-603) (Thema 217, `docs/audit-ren202-d3d12-default-heap-2026-10-18.md`, `docs/audit-ren103-601-603-d3d11-gl-draw-state-2026-10-18.md`; offen: REN-103 Punkt 3 Material-Sortierung, UI-Batching in D3D11/D3D12/Vulkan)
 - [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
 
 **Stufe 4 – Scene-Systeme**

@@ -5766,9 +5766,47 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					sphere.indices.insert(sphere.indices.end(), { a, b, a + 1, a + 1, b, b + 1 });
 				}
 		}
+		// HE_DUMP_MATGRID=<n>: n more graph-material spheres in a grid behind the
+		// test sphere, each with a mesh of its own so GeometryPass cannot fold
+		// them into one instanced draw — the many-material-draws frame the
+		// REN-103 bind/restore change and HE_DUMP_GPUTIME's CPU line measure.
+		// "<n>,mix" leaves every other sphere without a material: the opaque
+		// list is sorted by mesh id, and with a random id per sphere the
+		// built-in draws land BETWEEN the material draws, so every material
+		// run has to end at a built-in draw (not only at the end of the loop).
+		int matGrid = 0;
+		bool matGridMix = false;
+		if (const char* mg = std::getenv("HE_DUMP_MATGRID"); mg && *mg)
+		{
+			matGrid = std::clamp(std::atoi(mg), 0, 4096);
+			matGridMix = std::strstr(mg, ",mix") != nullptr;
+		}
+		std::vector<HE::UUID> gridMeshes;
+		for (int i = 0; i < matGrid; ++i)
+		{
+			StaticMeshAsset copy = sphere;
+			copy.id = HE::UUID{};
+			gridMeshes.push_back(contentManager().registerStaticMesh(std::move(copy)));
+		}
 		const HE::UUID meshId = contentManager().registerStaticMesh(std::move(sphere));
 
 		auto& reg = m_editorWorld->registry();
+		for (int i = 0; i < matGrid; ++i)
+		{
+			auto ge = m_editorWorld->createEntity("MatGridSphere" + std::to_string(i));
+			TransformComponent gt;
+			gt.position = glm::vec3(-15.0f + static_cast<float>(i % 16) * 2.0f,
+			                        0.5f + static_cast<float>((i / 16) % 8) * 1.6f,
+			                        -14.0f - static_cast<float>(i / 128) * 3.0f);
+			gt.scale = glm::vec3(0.3f);
+			reg.emplace<TransformComponent>(ge, gt);
+			reg.emplace<MeshComponent>(ge, MeshComponent{ gridMeshes[static_cast<size_t>(i)] });
+			if (!(matGridMix && (i & 1)))
+				reg.emplace<MaterialComponent>(ge, MaterialComponent{ matId });
+		}
+		if (matGrid)
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_MATGRID %d spheres added (%s)", matGrid,
+			            matGridMix ? "every other one built-in" : "all graph-material");
 		auto  e   = m_editorWorld->createEntity("MatTestSphere");
 		// Camera forward from public yaw/pitch (EditorCamera::forward is private) — same
 		// convention: yaw=0,pitch=0 looks down -Z; +pitch up; +yaw right.
@@ -9272,7 +9310,13 @@ void EditorApplication::dumpFrameHeadless()
 		// Kept off the plain "=1" sheet so the Thema-133 baselines stay as measured.
 		// The widget refers to its picture by path and the manager resolves it
 		// again on instantiation, so the texture is registered under that path.
-		if (std::string_view(ui) == "image")
+		// HE_DUMP_UITEST=text is "image" plus glyphs and a clip (REN-603): a
+		// heading over the sheet, a label after the image (font atlas after the
+		// picture on the same unit), and a clipping panel whose children
+		// alternate text and solid quads, the long line cut at the panel's edge.
+		// Every place where a batch of UI quads has to end is in this frame.
+		const bool uiText = std::string_view(ui) == "text";
+		if (std::string_view(ui) == "image" || uiText)
 		{
 			constexpr uint32_t kSz = 64;
 			TextureAsset ta;
@@ -9306,6 +9350,49 @@ void EditorApplication::dumpFrameHeadless()
 			e.sizeX = 240.0f; e.sizeY = 110.0f;
 			e.texture = "__uiImageWitness.hasset";
 			e.setProp("Tint", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+		}
+		if (uiText)
+		{
+			auto text = [&](int parent, float x, float y, float w, float h, const char* s, float size)
+			{
+				const int id = t.add(HE::UIWidgetType::Text);
+				HE::UIElement& e = *t.find(id);
+				HE::uiSetAnchorPreset(e, 0);
+				e.parentId = parent;
+				e.pivotX = e.pivotY = 0.0f;
+				e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+				e.setProp("Text", HE::UIPropValue::ofString(s));
+				e.setProp("FontSize", HE::UIPropValue::ofFloat(size));
+				e.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+				return id;
+			};
+			text(0, 60.0f, 20.0f, 1100.0f, 40.0f, "Schicht 0 - UI style witness (REN-603 batching)", 28.0f);
+			text(0, 60.0f, 700.0f, 240.0f, 18.0f, "image above, label below", 14.0f);
+			const int clip = t.add(HE::UIWidgetType::Panel);
+			{
+				HE::UIElement& e = *t.find(clip);
+				HE::uiSetAnchorPreset(e, 0);
+				e.pivotX = e.pivotY = 0.0f;
+				e.posX = 360.0f; e.posY = 590.0f; e.sizeX = 840.0f; e.sizeY = 110.0f;
+				e.clipChildren = true;
+				e.cornerRadius = glm::vec4(10.0f);
+				e.setProp("Color", HE::UIPropValue::ofColor({ 0.14f, 0.16f, 0.22f, 1.0f }));
+			}
+			text(clip, 16.0f, 10.0f, 1400.0f, 36.0f,
+			     "A clipped line of text that runs well past the right edge of its panel and stops there", 26.0f);
+			for (int i = 0; i < 6; ++i)
+			{
+				const int sw = t.add(HE::UIWidgetType::Panel);
+				HE::UIElement& e = *t.find(sw);
+				HE::uiSetAnchorPreset(e, 0);
+				e.parentId = clip;
+				e.pivotX = e.pivotY = 0.0f;
+				e.posX = 16.0f + static_cast<float>(i) * 150.0f; e.posY = 60.0f;
+				e.sizeX = 40.0f; e.sizeY = 36.0f;
+				e.cornerRadius = glm::vec4(6.0f);
+				e.setProp("Color", HE::UIPropValue::ofColor({ 0.2f + 0.12f * i, 0.5f, 0.8f - 0.1f * i, 1.0f }));
+				text(clip, 62.0f + static_cast<float>(i) * 150.0f, 64.0f, 90.0f, 28.0f, "label", 20.0f);
+			}
 		}
 
 		UIWidgetAsset wa;
@@ -10079,13 +10166,20 @@ void EditorApplication::dumpFrameHeadless()
 		EngineProfiler& prof = EngineProfiler::instance();
 		const bool liveBefore = prof.liveEnabled();
 		prof.setLiveEnabled(true);
-		std::vector<double> ms;
+		std::vector<double> ms, cpuMs;
 		ms.reserve(static_cast<size_t>(frames));
+		cpuMs.reserve(static_cast<size_t>(frames));
 		const int skip = 16;
 		for (int i = 0; i < frames + skip; ++i)
 		{
+			// The CPU side too: how long Render() itself took to record and
+			// submit the frame (REN-103/603 cut driver calls, not GPU work).
+			const auto t0 = std::chrono::steady_clock::now();
 			r->Render();
+			const double c = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - t0).count();
 			const double g = r->GetFrameGpuStats().gpuFrameMs;
+			if (i >= skip) cpuMs.push_back(c);
 			if (i >= skip && g > 0.0)
 				ms.push_back(g);
 		}
@@ -10108,6 +10202,15 @@ void EditorApplication::dumpFrameHeadless()
 				s[(s.size() * 9) / 10], s.back());
 		}
 		HE_LOG_INFO(Editor, "%s", line);
+		if (!cpuMs.empty())
+		{
+			std::sort(cpuMs.begin(), cpuMs.end());
+			HE_LOG_INFO(Editor,
+				"EditorApplication: HE_DUMP_GPUTIME %ux%u frames=%zu cpu Render() ms median=%.4f "
+				"min=%.4f p90=%.4f max=%.4f",
+				tw, th, cpuMs.size(), cpuMs[cpuMs.size() / 2], cpuMs.front(),
+				cpuMs[(cpuMs.size() * 9) / 10], cpuMs.back());
+		}
 	}
 
 	// Witness the MCP screenshot path (HE_DUMP_SCENEIMAGE=<file.png>): the same
