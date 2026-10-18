@@ -776,7 +776,7 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s",
 			("GameApplication: mounted " + m_config.hpakFilename).c_str());
 
-		// Mod overlays: every .hpak in Mods/ next to the executable, mounted on
+		// Mod overlays: every .hpak in Mods/ of the data folder (data/Mods), mounted on
 		// top of the base pak in alphabetical order. Same UUID = replacement,
 		// new UUID = addition — this also lets a mod override the packed startup
 		// scene, which is why mods mount BEFORE the scene is read below.

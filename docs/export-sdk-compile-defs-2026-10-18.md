@@ -617,16 +617,20 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Topic / step:** Thema 211, step 10 of 13. Branch claude/export-sdk-compile-horizoncode-codegen: 0f30c102 (bundle, game layout,
   profile check), 7cd0e989 (exporter layout, SDK lib set), d1759278 (plugin rule). Follows the human's posts 1521/1522.
 - **Done:** `HorizonEngine` (`cmake/HorizonEngineBundle.cmake`, included in the root after HE_Rendering) is ONE shared library linked
-  from `$<TARGET_OBJECTS>` of Core/Net/Scene/Rendering (no second compile, one link), plus `HorizonPythonEngine` (the plugin's objects
-  against it). Editor, tests, tools keep the four libs. `HorizonGame` links the bundle; deploy `out/deploy/Game` = exe + Python runtime
+  from `$<TARGET_OBJECTS>` of Core/Net/Scene/Rendering and of every in-tree static lib that links one of them (renderer backends,
+  he_materialshader, he_shadercompiler), so no part library is ever on its link line (no second compile, one link), plus
+  `HorizonPythonEngine` (the plugin's objects against it). Editor, tests, tools keep the four libs. `HorizonGame` links the bundle; deploy `out/deploy/Game` = exe + Python runtime
   (zip, `_pth`, lib-dynload) + `HorizonEngine/` (engine, SDL3, plugin, bundled lz4/zstd/crypto/libpython, Shaders/). Export of such a
   runtime = `<ProjectName>(.exe)` + `data/` + `HorizonEngine/` (`ProjectExporter.cpp` prepareOutputLayout/copyRuntimeBinaries,
   `exportedExecutableName`, `runtimeHasEngineDir`); a runtime without `HorizonEngine/` keeps the flat layout and `HorizonGame`. Shared
   names + `dataDir()` in `Platform/GameLayout.h`; game data reads go through it. `HorizonEngine_BuildProfile()` (`Platform/EngineProfile.h`,
   extern "C", in Core so in the bundle too); `HE_Game/src/main.cpp` refuses a library of another profile (stderr + message box, exit 3).
   SDK `lib/<profile>` = libHorizonEngine + SDL3 + plugin (set wiped on install); `HorizonEngine::HorizonEngine`, `::Core/::Net/::Scene/
-  ::Rendering` are INTERFACE forwards. `installBuiltGame` swaps into `HorizonEngine/`.
-- **Windows (written, NOT run):** engine + SDL3 are `/DELAYLOAD`ed, `HE_Game/src/EngineDllDir.cpp`'s `__pfnDliNotifyHook2` loads them
+  ::Rendering` are INTERFACE forwards. `installBuiltGame` swaps into `HorizonEngine/`. User-visible: mod overlays now live in
+  `data/Mods/` (the game's data dir), no longer beside the executable.
+- **Windows (written, NOT run):** the static libs above are absorbed because otherwise MSVC resolves Scene's `__imp_` refs to Core
+  against HorizonCore.lib (transitively linked) and the DLL imports HorizonCore.dll: two engines. Check on Windows:
+  `dumpbin /dependents HorizonEngine.dll` must not list HorizonCore/Scene/Net/Rendering. Engine + SDL3 are `/DELAYLOAD`ed, `HE_Game/src/EngineDllDir.cpp`'s `__pfnDliNotifyHook2` loads them
   from `<exe>\HorizonEngine\` (LOAD_WITH_ALTERED_SEARCH_PATH). Risk: LNK1194 if the exe imports engine DATA; LNK4217 warnings in the
   bundle link (Scene/Net/Rendering objects dllimport Core). Export-all on the bundle: ~13k symbols on macOS, far below 65535.
 - **Verified (Mac, dev tree out/build/release + release tree out/build/release-profile):** full ctest on the step 9 state 311/311
@@ -647,7 +651,9 @@ body or move behind a macro is open. They are needed for parity with the interpr
   like its folder unverifiable here); Python interpreter files stay beside the exe on Windows/Linux (stdlib bootstrap), libpython goes
   into `HorizonEngine/` on macOS (bundled as the plugin's dependency); Shaders in `HorizonEngine/Shaders` (backends try it before
   `<base>/Shaders`), in a .app in Resources/Shaders; layout follows the runtime, so old cross-platform bundles still export.
-- **Traps:** release games ignore HE_HIDDEN_WINDOW/HE_EXIT_AFTER_FRAMES (lesson 458): never start one without a kill deadline. The SDK
+- **Traps:** imported targets found in a subdirectory (OpenGL::GL, Vulkan::Vulkan, CURL::libcurl) are re-found at root scope by the
+  bundle file; a missing one fails the configure (a failed generate leaves a STALE build.ninja behind, check `Generate step failed`).
+  Release games ignore HE_HIDDEN_WINDOW/HE_EXIT_AFTER_FRAMES (lesson 458): never start one without a kill deadline. The SDK
   e2e test now runs the game only for dev. `-dead_strip_dylibs`/`--as-needed` on the bundle are what keep libHorizonCore off its deps
   (the backend static libs link HorizonCore). bundle_native_deps.sh takes `<engine dir> <exe dir>` and removes stale top-level copies.
 - **Next steps:** 1. Step 11: export builds from `EngineSDK` with profile + cache (key: `HorizonEngineHeaders.txt` + profile + settings);

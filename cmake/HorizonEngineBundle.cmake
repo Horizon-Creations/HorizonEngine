@@ -61,27 +61,107 @@ function(_he_bundle_union out_var prop)
     set(${out_var} "${_all}" PARENT_SCOPE)
 endfunction()
 
+# Does <tgt> reach one of the four parts through LINK_LIBRARIES?
+function(_he_bundle_reaches_part out_var tgt)
+    set(${out_var} FALSE PARENT_SCOPE)
+    get_property(_seen GLOBAL PROPERTY _HE_BUNDLE_WALKED)
+    if(tgt IN_LIST _seen)
+        get_property(_r GLOBAL PROPERTY _HE_BUNDLE_REACH_${tgt})
+        set(${out_var} ${_r} PARENT_SCOPE)
+        return()
+    endif()
+    set_property(GLOBAL APPEND PROPERTY _HE_BUNDLE_WALKED ${tgt})
+    set_property(GLOBAL PROPERTY _HE_BUNDLE_REACH_${tgt} FALSE)
+    get_target_property(_libs ${tgt} LINK_LIBRARIES)
+    if(NOT _libs)
+        return()
+    endif()
+    foreach(_l IN LISTS _libs)
+        if(_l IN_LIST HE_ENGINE_BUNDLE_PARTS)
+            set(_hit TRUE)
+        elseif(TARGET ${_l})
+            _he_bundle_reaches_part(_hit ${_l})
+        else()
+            set(_hit FALSE)
+        endif()
+        if(_hit)
+            set_property(GLOBAL PROPERTY _HE_BUNDLE_REACH_${tgt} TRUE)
+            set(${out_var} TRUE PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+endfunction()
+
+# What goes into the bundle: the four parts, and every static library of this
+# tree they link that itself links one of them (the renderer backends,
+# he_materialshader, he_shadercompiler all link HorizonCore for its headers).
+# Those come in as OBJECTS too, so no part library is ever on the bundle's link
+# line. Linked as libraries they would bring HorizonCore along, and on Windows
+# Scene's __imp_ references to Core would then resolve against HorizonCore.lib:
+# HorizonEngine.dll would import HorizonCore.dll, the game would run two copies
+# of the engine's state, and TARGET_RUNTIME_DLLS would ship the parts beside it.
 set(_he_bundle_objects "")
-foreach(_t IN LISTS HE_ENGINE_BUNDLE_PARTS)
+set(_he_bundle_absorbed "")
+set(_he_link "")
+set(_he_queue ${HE_ENGINE_BUNDLE_PARTS})
+while(_he_queue)
+    list(POP_FRONT _he_queue _t)
     if(NOT TARGET ${_t})
         message(FATAL_ERROR "HorizonEngine bundle: ${_t} does not exist in this tree")
     endif()
     list(APPEND _he_bundle_objects "$<TARGET_OBJECTS:${_t}>")
+    list(APPEND _he_bundle_absorbed ${_t})
+    get_target_property(_libs ${_t} LINK_LIBRARIES)
+    if(NOT _libs)
+        continue()
+    endif()
+    foreach(_l IN LISTS _libs)
+        if(_l IN_LIST HE_ENGINE_BUNDLE_PARTS OR _l IN_LIST _he_bundle_absorbed
+           OR _l IN_LIST _he_queue)
+            continue()
+        endif()
+        set(_absorb FALSE)
+        if(TARGET ${_l})
+            get_target_property(_type ${_l} TYPE)
+            get_target_property(_imported ${_l} IMPORTED)
+            get_target_property(_aliased ${_l} ALIASED_TARGET)
+            if(_type STREQUAL "STATIC_LIBRARY" AND NOT _imported AND NOT _aliased)
+                _he_bundle_reaches_part(_absorb ${_l})
+            endif()
+        endif()
+        if(_absorb)
+            list(APPEND _he_queue ${_l})
+        else()
+            list(APPEND _he_link ${_l})
+        endif()
+    endforeach()
+endwhile()
+list(REMOVE_ITEM _he_link ${_he_bundle_absorbed})
+list(REMOVE_DUPLICATES _he_link)
+list(REMOVE_ITEM _he_bundle_absorbed ${HE_ENGINE_BUNDLE_PARTS})
+
+# Imported targets are directory-scoped: OpenGL::GL (HE_Rendering), Vulkan::Vulkan,
+# CURL::libcurl (HE_Net) were found in a subdirectory and are not visible here.
+# Found again at this scope; a package that still has no target is an error,
+# not a silently dropped library.
+foreach(_l IN LISTS _he_link)
+    if(_l MATCHES "^([A-Za-z0-9_]+)::" AND NOT TARGET ${_l})
+        find_package(${CMAKE_MATCH_1} QUIET)
+        if(NOT TARGET ${_l})
+            message(FATAL_ERROR "HorizonEngine bundle: ${_l} (linked by an engine library) "
+                                "is not a target at the root scope")
+        endif()
+    endif()
 endforeach()
 
 add_library(HorizonEngine SHARED ${_he_bundle_objects})
-add_dependencies(HorizonEngine ${HE_ENGINE_BUNDLE_PARTS})
+add_dependencies(HorizonEngine ${HE_ENGINE_BUNDLE_PARTS} ${_he_bundle_absorbed})
 
-# Link side: whatever any of the four links, PRIVATE or PUBLIC.
-_he_bundle_union(_he_link LINK_LIBRARIES ${HE_ENGINE_BUNDLE_PARTS})
-_he_bundle_without_parts(_he_link ${_he_link})
+# Link side: whatever the parts and the absorbed static libraries link, PRIVATE
+# or PUBLIC, but none of them.
 target_link_libraries(HorizonEngine PRIVATE ${_he_link})
-# The backend static libraries link HorizonCore for its include dirs and
-# definitions, so HorizonCore's own shared library comes along on the link line.
-# Every symbol it would provide is defined by the objects above, so nothing is
-# resolved against it, and the linker is told to drop a library nothing uses
-# (MSVC records no import for an unused import library on its own). The game
-# deploy checks that no part library is left among the bundle's dependencies.
+# Belt and braces on top of the above: drop a shared library nothing resolves
+# against, should one reach the link line some other way.
 if(APPLE)
     target_link_options(HorizonEngine PRIVATE "LINKER:-dead_strip_dylibs")
 elseif(UNIX)
@@ -150,4 +230,4 @@ if(TARGET HorizonPython)
     endif()
 endif()
 
-message(STATUS "HorizonEngine: bundle target HorizonEngine (${HE_ENGINE_BUNDLE_PARTS}) for the game and the SDK")
+message(STATUS "HorizonEngine: bundle target HorizonEngine (${HE_ENGINE_BUNDLE_PARTS}; as objects too: ${_he_bundle_absorbed}) for the game and the SDK")

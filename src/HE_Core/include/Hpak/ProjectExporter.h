@@ -36,7 +36,7 @@ enum class RuntimeFlavor : uint8_t { Game = 0, AppAdvanced, AppBasic };
 struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
-    // When set, the shipped game scans a Mods/ folder next to the executable and
+    // When set, the shipped game scans a Mods/ folder in its data folder (data/Mods) and
     // mounts every .hpak there as an overlay on the base pak (same UUID replaces,
     // new UUID adds — including the packed startup scene).
     bool    enableModSupport = false;
