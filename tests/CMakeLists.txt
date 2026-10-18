@@ -296,6 +296,10 @@ add_executable(he_tests
     # Topic 219 step 2: the importers' lean asset writer (TLS-101) and the pack
     # manifest the packer CLI now shares with the export (TLS-203).
     test_tools_writer_cache.cpp
+    # The export lock (Platform/ProjectWriteGate.h). Was only in the HE_IMGUI_ENABLED
+    # property list below, so it never ran, and the gate's state being one copy per
+    # Windows DLL went unseen.
+    test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
     # Assigning, posting updates and notices between two editors over a fake
@@ -973,7 +977,6 @@ set_source_files_properties(
     test_editor_rewards.cpp
     test_notification_popups_ui.cpp
     test_build_footer_ui.cpp
-    test_project_write_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp

@@ -15,44 +15,26 @@
 // under the project; true means "do not", and the user has been told. Nothing is
 // installed in the tools and the game, so there locked() is simply false.
 //
-// Header-only on purpose (inline state), so HE_Tools' importer can use it without
-// a new link dependency.
+// Not header-only: the state is defined once, in HorizonCore (ProjectWriteGate.cpp).
+// An inline variable in a header is one copy per DLL/exe on Windows, so the probe
+// the editor exe installed was never seen by ContentManager::saveAsset in the DLL.
 
-#include <atomic>
+#include "Types/Defines.h"
 
 namespace HE::ProjectWriteGate
 {
 	using Probe   = bool (*)();
 	using Handler = void (*)(const char* what);
 
-	namespace detail
-	{
-		inline std::atomic<Probe>   probe{ nullptr };
-		inline std::atomic<Handler> handler{ nullptr };
-	}
-
 	// Editor only, once at start. Either may be null.
-	inline void install(Probe probe, Handler handler)
-	{
-		detail::probe.store(probe, std::memory_order_release);
-		detail::handler.store(handler, std::memory_order_release);
-	}
+	HE_API void install(Probe probe, Handler handler);
 
 	// Safe from any thread (the probe must be).
-	inline bool locked()
-	{
-		const Probe p = detail::probe.load(std::memory_order_acquire);
-		return p && p();
-	}
+	HE_API bool locked();
 
 	// For a writer about to change a file under the project. `what` completes
 	// "You tried to ...": a short phrase such as "save this asset". Returns true
 	// when the write must not happen. The handler runs on the calling thread and
 	// decides how loud to be (it rate-limits, a save loop calls this per attempt).
-	inline bool refuse(const char* what)
-	{
-		if (!locked()) return false;
-		if (const Handler h = detail::handler.load(std::memory_order_acquire)) h(what);
-		return true;
-	}
+	HE_API bool refuse(const char* what);
 }

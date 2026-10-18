@@ -229,3 +229,36 @@ configured in this build, and the shared library must not be written to from a t
   still open. Benches: `/tmp/he_scm103/bench.cpp`, `/tmp/he_scm101/bench.sh`.
 - **Next steps:** CSY-102 (`libssh2_session_set_timeout`), SUP-101 option A (unpack in the
   download worker), SCM-104 (one scan per sync cycle). Stufe 5 is done after CI.
+
+## Step 4: Windows CI red in `test_tools_writer_cache.cpp:115/116` (export gate)
+
+CI 39108625600 (Windows): `saveAssetFile is refused while an export reads the project`
+saved `T_Locked.hasset` anyway. Not TLS-101: `HE::saveAssetFile` asks the gate
+(`saveRefusedByExport`, shared with `ContentManager::saveAsset`). The gate itself was
+broken on Windows since 5319767b: `Platform/ProjectWriteGate.h` kept probe and handler
+in header `inline` atomics, and on Windows every DLL/exe has its own copy of those. The
+test (exe) installed the probe in its copy, `HorizonCore.dll` read its own null one. The
+same held in the editor: `HorizonEditor.exe` installs, `ContentManager::saveAsset` in the
+DLL asks, so on Windows an export never refused an asset save (the importer and editor
+checks in the exe/static libs did work). macOS/Linux merge the copies, so they were green.
+`test_project_write_gate.cpp`, which tests `cm.saveAsset` under the lock, would have shown
+it, but 5319767b listed it only in the `HE_IMGUI_ENABLED` property block, never in
+`add_executable(he_tests)`; it had never been compiled.
+
+Fix: the state moves into `src/HE_Core/src/Platform/ProjectWriteGate.cpp`; the header
+declares `install`/`locked`/`refuse` as `HE_API` functions. `test_project_write_gate.cpp`
+is now part of `he_tests`.
+
+## Handoff (step 4)
+
+- **Commit:** see `git log` on the branch, "ProjectWriteGate: one copy of the state, in
+  HorizonCore" (header, new .cpp, `src/HE_Core/CMakeLists.txt`, `tests/CMakeLists.txt`).
+- **Verified (NN-WS03, Windows, MSVC Release, `C:/hw219`):** before the fix
+  `he_tests --source-file=*test_tools_writer_cache.cpp` red at 115/116, as on CI; after it
+  `test_tools_writer_cache` + `test_project_write_gate` 7/7. Full `he_tests` (scratch
+  APPDATA, `HE_NET_LOOPBACK_ONLY=1`): 5460 cases, 5 failed, all known noise (3 gamepad
+  cases, a real pad is attached; EngineProfiler `test_profiler.cpp:107/:215`).
+- **Not verified:** `HorizonEditor` was not built locally (CI builds it); the editor's
+  export lock was not driven by hand. No negative control of `test_project_write_gate`
+  against the old header (same code path as the writer-cache case, which was).
+- **Next steps:** CI on the branch; then Stufe 5 is done.
