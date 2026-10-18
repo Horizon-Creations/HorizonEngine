@@ -249,4 +249,22 @@ ToolResult failEngineReadOnly(const std::string& rel)
 		"the project's own content instead.");
 }
 
+std::optional<ToolResult> refuseAssetWrite(const PathCheck& p,
+                                           const std::function<bool()>& isPlaying,
+                                           const std::function<bool(const std::string&)>& lockedByOther,
+                                           const std::function<bool(const std::string&)>& isDirty,
+                                           const WriteGateText& text)
+{
+	if (p.engine) return failEngineReadOnly(p.rel);
+	if (isPlaying && isPlaying())
+		return ToolResult::fail("play_mode", text.playMode);
+	if (lockedByOther && lockedByOther(p.rel))
+		return ToolResult::fail("locked_by_other",
+			"Another participant in the collaboration session holds '" + p.rel +
+			"' right now. Wait until they let go, or work on something else.");
+	if (text.dirty && isDirty && isDirty(p.rel))
+		return ToolResult::fail("dirty", "'" + p.rel + "' " + text.dirty);
+	return std::nullopt;
+}
+
 } // namespace HE::Ed

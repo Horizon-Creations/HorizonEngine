@@ -176,30 +176,18 @@ Clip openClip(ContentManager& content, const McpClipHooks& h, const json& args, 
 
 	if (forWrite)
 	{
-		if (p.engine) { c.failure = failEngineReadOnly(p.rel); return c; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and a notify that moves under a playhead fires "
+			"or fails to fire depending on where that playhead happens to be. The edit "
+			"is refused rather than landed mid-sweep. Ask the user to stop play mode.",
+			"has unsaved notify or root-motion edits in the Skeletal "
+			"Mesh Editor — the clip is scrubbed in a mesh's tab and that tab's edits "
+			"go straight into the loaded clip. Writing now would mix this edit into "
+			"theirs under one Save. Ask the user to save or discard first, then call "
+			"again." };
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther, h.isDirty, kGate))
 		{
-			c.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and a notify that moves under a playhead fires "
-				"or fails to fire depending on where that playhead happens to be. The edit "
-				"is refused rather than landed mid-sweep. Ask the user to stop play mode.");
-			return c;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			c.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return c;
-		}
-		if (h.isDirty && h.isDirty(p.rel))
-		{
-			c.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' has unsaved notify or root-motion edits in the Skeletal "
-				"Mesh Editor — the clip is scrubbed in a mesh's tab and that tab's edits "
-				"go straight into the loaded clip. Writing now would mix this edit into "
-				"theirs under one Save. Ask the user to save or discard first, then call "
-				"again.");
+			c.failure = std::move(*refused);
 			return c;
 		}
 	}

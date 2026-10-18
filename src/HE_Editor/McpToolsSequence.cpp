@@ -538,27 +538,15 @@ Seq openSequence(ContentManager& content, const McpSequenceHooks& h, const json&
 
 	if (forWrite)
 	{
-		if (p.engine) { s.failure = failEngineReadOnly(p.rel); return s; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and a sequence rewritten under a running player "
+			"changes a cutscene mid-shot. Ask the user to stop play mode.",
+			"has unsaved edits in an open Cinematic tab. Writing now would "
+			"throw them away or be thrown away by their Save. Ask the user to save or "
+			"discard first, then call again." };
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther, h.isDirty, kGate))
 		{
-			s.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and a sequence rewritten under a running player "
-				"changes a cutscene mid-shot. Ask the user to stop play mode.");
-			return s;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			s.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return s;
-		}
-		if (h.isDirty && h.isDirty(p.rel))
-		{
-			s.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' has unsaved edits in an open Cinematic tab. Writing now would "
-				"throw them away or be thrown away by their Save. Ask the user to save or "
-				"discard first, then call again.");
+			s.failure = std::move(*refused);
 			return s;
 		}
 	}
