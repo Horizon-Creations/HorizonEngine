@@ -202,9 +202,17 @@ LIMITS = {
         # executable), CellState, the per-cell script start/stop (CellScripts),
         # the streaming API group and StreamingComponent (Thema 183 steps 1-3).
         # New limits: measured plus 10 percent, the rule the other rows follow.
+        #
+        # app-advanced/app-basic: (56.0, 31.0) and (55.0, 30.0) until
+        # 17.10.2026, raised on the same cell-streaming growth as the game row
+        # above (Thema 183 steps 1-3). Run 39037311399 (ubuntu-latest) weighed
+        # app-advanced at 53.9/31.1 MB and app-basic at 52.9/30.1 MB; the same
+        # two rows were red on Thema 183 (zellstreaming) within 0.1 MB. Already
+        # at the limit on release/0.7.0 itself, not specific to either branch.
+        # Measured plus 10 percent again.
         "game":         (67.0, 42.0),
-        "app-advanced": (56.0, 31.0),
-        "app-basic":    (55.0, 30.0),
+        "app-advanced": (59.0, 34.5),
+        "app-basic":    (58.0, 33.5),
     },
 }
 # ── On the headroom in the two tables above ─────────────────────────────────
