@@ -76,6 +76,8 @@ The 660 ms is inflated by the load. The ratio is the point.
 - **Suggested, not taken:**
   - `discoverAssets` (PlayerHost calls it 3x) could use the index too. It is not done because game/tests write files without bumping the epoch.
   - The `test_hpak:1188` HOME dependency deserves its own fix (point `engineContentCacheDir` at a temp dir in the test).
+  - Each refresh now costs two main-thread walks: `scanDirInto` (META) and, on the next picker query, the index build (header). Folding the index into `scanDirInto` would make it one. `EditorUI.cpp` quotes ~9 ms warm for the registry scan, so this is a tidy-up, not a hitch. It is also why the palette rebuilds once after every poll.
+  - `docs/audit/AUDIT.md` got a one-line tick here outside my claim; expect a trivial merge with the metal-backend branch's edit of the same file.
 - **Pending:** steps 2-5 of the plan.
 - **Traps:**
   - A tool that writes `.hasset` files without `saveAsset` and without a content refresh is invisible to pickers until the next refresh/poll. Call `noteContentChanged()` there.
