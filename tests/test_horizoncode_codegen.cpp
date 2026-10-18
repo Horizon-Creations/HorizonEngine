@@ -1685,17 +1685,17 @@ TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes"
 		std::string all;
 		for (const auto& f : r.files) all += f.contents;
 
-		CHECK(all.find("class C_inherit_derived final : public C_inherit_base") != std::string::npos);
+		CHECK(all.find("class InheritDerived final : public InheritBase") != std::string::npos);
 		// The base cannot be final — something derives from it.
-		CHECK(all.find("class C_inherit_base : public HorizonCode::CompiledInstance") != std::string::npos);
+		CHECK(all.find("class InheritBase : public HorizonCode::CompiledInstance") != std::string::npos);
 		// One table for the chain, and the unhandled cases passed upward.
-		CHECK(all.find("hc::concatSlots(C_inherit_base::slots()") != std::string::npos);
-		CHECK(all.find("C_inherit_base::fireEvent(name, elem, arg)") != std::string::npos);
-		CHECK(all.find("C_inherit_base::reseedVariables()") != std::string::npos);
+		CHECK(all.find("hc::concatSlots(InheritBase::slots()") != std::string::npos);
+		CHECK(all.find("InheritBase::fireEvent(name, elem, arg)") != std::string::npos);
+		CHECK(all.find("InheritBase::reseedVariables()") != std::string::npos);
 		// The inherited members are reachable from the derived bodies: a direct
 		// member write, and a direct qualified call.
-		CHECK(all.find("v_hits = 99.0f") != std::string::npos);
-		CHECK(all.find("C_inherit_base::Damage(") != std::string::npos);
+		CHECK(all.find("    hits = 99.0f") != std::string::npos);
+		CHECK(all.find("InheritBase::Damage(") != std::string::npos);
 		CHECK(all.find("\nprotected:") != std::string::npos);
 		// The direct-call surface follows the Runtime: the base declares its
 		// public methods virtual because something derives from it, and the
@@ -1713,7 +1713,7 @@ TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes"
 
 TEST_CASE("codegen: a class whose base did not compile ships interpreted with it")
 {
-	// `C_Goblin : public C_Enemy` cannot exist without C_Enemy. Handing in the
+	// `Goblin : public Enemy` cannot exist without Enemy. Handing in the
 	// derived class alone must not produce a class with a missing base — it has
 	// to fall back, which is the answer that keeps ONE object per instance.
 	HE::hccg::ClassSource derived;

@@ -1092,17 +1092,19 @@ endif()
 # emits the compiled classes at BUILD time; they are compiled INTO he_tests so
 # no compiler is needed at test runtime.
 set(HCGEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/hcgen_fixtures)
+# The generated class names: each fixture's file stem in PascalCase (fix/math_ops
+# → MathOps, see classNameFor in HcCodegen.cpp), one hcgen_<Class>.h/.cpp each.
 set(HCGEN_CLASSES
-    flow_branch_sequence coerce_matrix math_ops bitwise_ops vector_ops variables functions_basic
-    functions_recursive foreach_arrays events_multi widget_props limits_smoke
-    functions_locals engine_pure_multiout engine_exec_cached animator_sync
-    ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
-    latent_flow enums structs GameInstance gi_caller engine_events
-    cast_target casts inherit_base inherit_derived
-    inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
-    pull_construct pull_spawner bind_to
-    extract_destruct extract_derived extract_listener
+    FlowBranchSequence CoerceMatrix MathOps BitwiseOps VectorOps Variables FunctionsBasic
+    FunctionsRecursive ForeachArrays EventsMulti WidgetProps LimitsSmoke
+    FunctionsLocals EnginePureMultiout EngineExecCached AnimatorSync
+    RefTarget RefsObjects DispatchOwner DispatchListener DispatchSink
+    LatentFlow Enums Structs GameInstance GiCaller EngineEvents
+    CastTarget Casts InheritBase InheritDerived
+    InheritNovarsBase InheritNovars InputActions Containers Reroutes
+    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings PlayerSlots
+    PullConstruct PullSpawner BindTo
+    ExtractDestruct ExtractDerived ExtractListener
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs
@@ -1115,8 +1117,8 @@ foreach(t E_FixMood E_FixDup S_FixInner S_FixStats)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_type_${t}.h)
 endforeach()
 foreach(c ${HCGEN_CLASSES})
-    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
-    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_C_${c}.h)
+    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_${c}.cpp)
+    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_${c}.h)
 endforeach()
 add_custom_command(OUTPUT ${HCGEN_SOURCES} ${HCGEN_HEADERS}
     COMMAND hc_codegen --fixtures --out ${HCGEN_DIR}

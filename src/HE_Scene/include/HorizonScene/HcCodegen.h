@@ -35,7 +35,7 @@ struct ClassSource
     //
     // It is also the INHERITANCE the generator emits: chain.front() must appear
     // in the same run as its own source, and the class comes out as
-    // `C_Goblin : public C_Enemy`. `graph` is therefore this class's OWN level
+    // `Goblin : public Enemy`. `graph` is therefore this class's OWN level
     // (ResolvedClass::levels.back()) — NOT the flattened chain. Handing in a
     // flattened graph together with a chain would compile every inherited member
     // twice: once in the base's class and once more here.

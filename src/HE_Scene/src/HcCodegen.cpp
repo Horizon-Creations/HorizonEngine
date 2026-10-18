@@ -516,11 +516,11 @@ std::string sanitize(const std::string& s)
     return out;
 }
 
-// Struct members are the only user-authored identifiers that reach the output
-// WITHOUT a prefix (variables get v_, functions f_, events ev_, classes C_,
-// struct types S_), because the generated struct is meant to be readable. Field
-// names are free text in the type panel, so a field called `class` or `int`
-// would otherwise emit a header that does not compile — those get a trailing _.
+// Every user-authored identifier reaches the output under its own name —
+// variables, functions, events, parameters, struct members, classes (only the
+// struct and enum TYPES keep S_/E_) — because the generated code is meant to be
+// read. The names are free text in the editor, so one called `class` or `int`
+// would otherwise emit a file that does not compile — those get a trailing _.
 bool isCppKeyword(const std::string& s)
 {
     static const std::unordered_set<std::string> kKeywords = {
@@ -927,7 +927,7 @@ struct CompiledClass
     // (they are uniquified against that class's whole scope), so the probe pass
     // records them.
     std::unordered_map<std::string, std::string> publicFn;    // graph function → method
-    std::unordered_map<std::string, std::string> publicVar;   // graph variable → accessor
+    std::unordered_map<std::string, std::string> publicVar;   // graph variable → public member
     // Every public C++ method this class exposes for its events and functions,
     // with its parameter list — what a derived class compares against to know
     // whether its same-named member OVERRIDES one or merely shares a name.
@@ -936,7 +936,10 @@ struct CompiledClass
     // reads and writes an inherited variable as a plain member (the members are
     // protected, and the name resolves through the base) — but only if it knows
     // what that member is called.
-    std::unordered_map<std::string, std::string> varMember;   // graph variable → v_*
+    std::unordered_map<std::string, std::string> varMember;   // graph variable → member
+    // Every name the class declares. A derived class keeps clear of them (a
+    // member of its own would hide the base's), its overrides excepted.
+    std::unordered_set<std::string> names;
 };
 struct ClassTable
 {
@@ -1055,14 +1058,16 @@ public:
     const std::unordered_map<std::string, std::string>& publicFunctions() const { return m_publicFn; }
     const std::unordered_map<std::string, std::string>& publicVariables()  const { return m_publicVar; }
     const std::unordered_map<std::string, std::string>& variableMembers()  const { return m_varMember; }
-    // Valid after run(): the public surface a derived class matches against.
+    const std::unordered_set<std::string>&              usedNames()        const { return m_usedNames; }
+    // Valid after run(): the public surface a derived class matches against —
+    // the parameter TYPES, since the names are each class's own business.
     std::unordered_map<std::string, std::string> publicMethodSigs() const
     {
         std::unordered_map<std::string, std::string> out;
         for (const auto& [id, name] : m_publicEv) out.emplace(name, std::string());
         for (const Node& n : m_g.nodes)
             if (n.type == NT::FunctionEntry && m_publicFn.count(n.s))
-                out.emplace(m_publicFn.at(n.s), publicFnParams(n));
+                out.emplace(m_publicFn.at(n.s), publicFnTypes(n));
         return out;
     }
 
@@ -1128,16 +1133,21 @@ private:
     TypeRef ctrType(const Node& n, HorizonCode::ContainerKind k) const
     { return trOf(n.propType, true, n.typeName, k, n.keyType, n.keyTypeName); }
 
-    std::unordered_map<std::string, std::string> m_varMember;  // instance var → v_*
-    std::unordered_map<std::string, std::string> m_localName;  // local var → l_* (names graph-unique)
-    std::unordered_map<std::string, std::string> m_fnName;     // function → f_*
-    std::unordered_map<int, std::string>         m_evName;     // Event node id → ev_*
+    std::unordered_map<std::string, std::string> m_varMember;  // instance var → member
+    std::unordered_map<std::string, std::string> m_localName;  // local var → its name (graph-unique)
+    std::unordered_map<std::string, std::string> m_fnName;     // function → body (= public method)
+    std::unordered_map<int, std::string>         m_evName;     // Event node id → body
+    // A function's parameter and result names, as its body and public method
+    // both spell them.
+    std::unordered_map<std::string, std::vector<std::string>> m_fnParams, m_fnResults;
+    std::unordered_map<int, std::string>         m_stateName;  // DoOnce/FlipFlop node → bool member
+    std::unordered_map<int, std::string>         m_resumeName; // Delay node → its continuation
     // InputAction node id → one body method per exec-out (Pressed, Released),
     // or a single one for an axis action.
     std::unordered_map<int, std::vector<std::string>> m_iaName;
     std::unordered_map<int, std::string>         m_publicEv;   // Event node id → public method
     std::unordered_map<std::string, std::string> m_publicFn;   // function → public method
-    std::unordered_map<std::string, std::string> m_publicVar;  // public variable → accessor
+    std::unordered_map<std::string, std::string> m_publicVar;  // public variable → its (public) member
     std::unordered_map<std::string, std::string> m_evtConst;   // event name → EventId constant
     // Other compiled classes this one calls directly — its .cpp includes exactly
     // these headers. Sorted, so the emitted include list is deterministic and an
@@ -1148,6 +1158,12 @@ private:
     // Every identifier the class itself declares (buildNames): a name a body
     // adds for itself (hoisted arguments, a taken-apart result) avoids these.
     std::unordered_set<std::string>              m_usedNames;
+    // The names of the body being translated: the class's, its function's
+    // parameters, and every temporary a statement declared so far. A temporary
+    // takes a fresh one (temp()), so it never shadows anything — not a member
+    // its own initializer reads, not a temporary of an enclosing block.
+    std::unordered_set<std::string>              m_bodyNames;
+    std::string temp(const std::string& base) { return uniqueName(base, m_bodyNames); }
     bool m_apiUsed    = false;   // this body calls a Ctx row → `HE::api::Scope api(m_ctx);`
     bool m_directUsed = false;   // this class calls the engine directly → includes the API header
 
@@ -1352,7 +1368,7 @@ private:
         HorizonCode::inferUserTypeNames(m_g);
 
         // 0. Inheritance. A class whose base did not reach C++ cannot either:
-        //    `C_Goblin : public C_Enemy` needs C_Enemy to exist. Falling back
+        //    `Goblin : public Enemy` needs Enemy to exist. Falling back
         //    with it is not a loss — the interpreted pair behaves identically —
         //    and it is the only answer that keeps ONE object per instance.
         if (!parentKey().empty() && !parent())
@@ -1532,29 +1548,17 @@ private:
             "api", "rs", "hc", "HE", "glm", "std", "HorizonCode",
         };
         auto unique = [&used](const std::string& base) { return uniqueName(base, used); };
-        for (const auto& v : m_g.variables)
+        // The base classes' names are taken too — a member here would hide
+        // theirs — except their public methods: re-using one of those names is
+        // what an override IS. They are claimed right after this class's own
+        // public methods had their chance to match them.
+        std::unordered_set<std::string> inheritedMethods;
+        for (const CompiledClass* a = parent(); a;
+             a = a->parentKey.empty() ? nullptr : m_ct.find(a->parentKey))
         {
-            if (v.scope == 0) m_varMember[v.name] = unique("v_" + sanitize(v.name));
-            else              m_localName[v.name] = unique("l_" + sanitize(v.name));
-        }
-        for (const auto& n : m_g.nodes)
-        {
-            if (n.type == NT::FunctionEntry && !m_fnName.count(n.s))
-                m_fnName[n.s] = unique("f_" + sanitize(n.s));
-            if (n.type == NT::Event)
-                m_evName[n.id] = unique("ev_" + sanitize(n.s) + "_" + std::to_string(n.id));
-            // An Input Action node is TWO entry points (Pressed and Released),
-            // or one for an axis — so it gets one body method per exec-out,
-            // named after the event it answers to rather than the pin.
-            if (n.type == NT::InputAction)
-            {
-                std::vector<std::string> names;
-                for (const std::string& ev : HorizonCode::inputActionEventNames(n))
-                    names.push_back(unique("ia_" + sanitize(ev) + "_" + std::to_string(n.id)));
-                m_iaName[n.id] = std::move(names);
-            }
-            if (n.type == NT::DoOnce || n.type == NT::FlipFlop) used.insert(stateMember(n.id));
-            if (n.type == NT::Delay) used.insert("resume_" + std::to_string(n.id));
+            for (const auto& [method, sig] : a->publicMethods) inheritedMethods.insert(method);
+            for (const std::string& name : a->names)
+                if (!a->publicMethods.count(name)) used.insert(name);
         }
         // Public, authored-name methods. An event only gets one when it is
         // unambiguous — several nodes on one name, or an element filter, is a
@@ -1565,6 +1569,59 @@ private:
                                                                      // get the hook instead
         for (const Node* fn : functionEntries())
             m_publicFn[fn->s] = unique(cppIdent(fn->s));
+        used.insert(inheritedMethods.begin(), inheritedMethods.end());
+
+        // The graph's variables are members under their own names; a function's
+        // locals too (they live in the function, but one name per graph keeps
+        // a local from shadowing a member it sits next to).
+        for (const auto& v : m_g.variables)
+        {
+            if (v.scope == 0) m_varMember[v.name] = unique(cppIdent(v.name));
+            else              m_localName[v.name] = unique(cppIdent(v.name));
+        }
+        // The bodies. A function's or a public event's body carries the public
+        // method's name: the same function when the class needs no RunState,
+        // an overload taking it first otherwise. The others are named after
+        // the event they answer, an element filter spelled out.
+        for (const Node* fn : functionEntries()) m_fnName[fn->s] = m_publicFn.at(fn->s);
+        for (const auto& n : m_g.nodes)
+        {
+            if (n.type == NT::Event)
+                m_evName[n.id] = m_publicEv.count(n.id)
+                    ? m_publicEv.at(n.id)
+                    : unique(cppIdent(n.s) +
+                             (n.elem != 0 ? "_element" + std::to_string(n.elem) : std::string()));
+            // An Input Action node is TWO entry points (Pressed and Released),
+            // or one for an axis — so it gets one body method per exec-out,
+            // named after the event it answers to rather than the pin.
+            if (n.type == NT::InputAction)
+            {
+                std::vector<std::string> names;
+                for (const std::string& ev : HorizonCode::inputActionEventNames(n))
+                    names.push_back(unique(cppIdent(ev)));
+                m_iaName[n.id] = std::move(names);
+            }
+            if (n.type == NT::DoOnce)   m_stateName[n.id] = unique("doOnceDone");
+            if (n.type == NT::FlipFlop) m_stateName[n.id] = unique("flipFlopIsA");
+            if (n.type == NT::Delay)    m_resumeName[n.id] = unique("afterDelay");
+        }
+        // A function's parameters and results keep the names the graph gives
+        // them, clear of every class-level name (a parameter must not shadow a
+        // member the body reads), of each other, and of callFunction's own
+        // parameters, where they are declared as locals.
+        for (const Node* fn : functionEntries())
+        {
+            std::unordered_set<std::string> scope = used;
+            scope.insert({ "function", "requirePublic", "args", "results" });
+            std::vector<std::string>& ps = m_fnParams[fn->s];
+            std::vector<std::string>& rn = m_fnResults[fn->s];
+            for (size_t i = 0; i < fn->params.size(); ++i)
+                ps.push_back(uniqueName(cppIdent(fn->params[i].name.empty()
+                    ? "p" + std::to_string(i) : fn->params[i].name), scope));
+            for (size_t i = 0; i < fn->results.size(); ++i)
+                rn.push_back(uniqueName(cppIdent(fn->results[i].name.empty()
+                    ? "r" + std::to_string(i) : fn->results[i].name), scope));
+        }
         // One EventId constant per event this class names in an Emit or a Bind.
         // The constant carries the meaning, so the generated code has no magic
         // numbers — and the id itself is interned at load, never baked.
@@ -1578,54 +1635,68 @@ private:
             for (const std::string& e : sorted)
                 m_evtConst[e] = unique("kEvt_" + sanitize(e));
         }
-        // A public variable gets a typed accessor: it is how another compiled
+        // A public variable is a public member: it is how another compiled
         // class reads and writes it without going through the name seam.
         for (const auto& v : m_g.variables)
             if (v.scope == 0 && v.access == 0)
-                m_publicVar[v.name] = unique(cppIdent(v.name));
+                m_publicVar[v.name] = m_varMember.at(v.name);
         m_usedNames = used;
     }
 
     // ── RunState slots: one field per exec-cached data-out (plan §5.4) ───────
     void buildSlots()
     {
+        // The fields are named after their node and pin ("raycast_hit",
+        // "forEach_index"), in graph order, unique within the RunState.
+        std::unordered_set<std::string> fields = { "steps", "depth", "aborted", "eventArg" };
+        auto resultName = [](const std::vector<HorizonCode::FuncParam>& rs, size_t k)
+        { return rs[k].name.empty() ? "result" + std::to_string(k) : camelIdent(rs[k].name, false); };
         for (const Node& n : m_g.nodes)
         {
             std::vector<Slot> s;
-            auto field = [&n](int k) { return "n" + std::to_string(n.id) + "_o" + std::to_string(k); };
+            auto field = [&fields](const std::string& node, const std::string& pin)
+            { return uniqueName(node + (pin.empty() ? std::string() : "_" + pin), fields); };
             switch (n.type)
             {
                 case NT::CreateWidget:
+                    s.push_back({ field("createdWidget", {}), { PT::Ref, false } });
+                    break;
                 case NT::CreateObject:
-                    s.push_back({ field(0), { PT::Ref, false } });
+                    s.push_back({ field("createdObject", {}), { PT::Ref, false } });
                     break;
                 case NT::FunctionCall:
                 case NT::CallExternal:
                     for (size_t k = 0; k < n.results.size(); ++k)
-                        s.push_back({ field((int)k), trOf(n.results[k]) });
+                        s.push_back({ field(camelIdent(n.s, false), resultName(n.results, k)),
+                                      trOf(n.results[k]) });
                     break;
                 case NT::EngineCall:
                     if (n.hasArg)
+                    {
+                        const HE::api::ApiFn* fn = HE::api::find(n.s);
+                        const std::string title = camelIdent(fn && fn->displayName ? fn->displayName
+                                                                                   : n.s, false);
                         for (size_t k = 0; k < n.results.size(); ++k)
-                            s.push_back({ field((int)k), trOf(n.results[k]) });
+                            s.push_back({ field(title, resultName(n.results, k)), trOf(n.results[k]) });
+                    }
                     break;
                 case NT::ForEachMap:
                     // Key + Value + Index, in pin order (the Key is data-out 0).
-                    s.push_back({ field(0), trOf(n.keyType, false, n.keyTypeName) });
-                    s.push_back({ field(1), trOf(n.propType, false, n.typeName) });
-                    s.push_back({ field(2), { PT::Int, false } });
+                    s.push_back({ field("forEach", "key"), trOf(n.keyType, false, n.keyTypeName) });
+                    s.push_back({ field("forEach", "value"), trOf(n.propType, false, n.typeName) });
+                    s.push_back({ field("forEach", "index"), { PT::Int, false } });
                     break;
                 case NT::ForEach:
                 case NT::ForEachSet:
-                    s.push_back({ field(0), trOf(n.propType, false, n.typeName) });
-                    s.push_back({ field(1), { PT::Int, false } });
+                    s.push_back({ field("forEach", "element"), trOf(n.propType, false, n.typeName) });
+                    s.push_back({ field("forEach", "index"), { PT::Int, false } });
                     break;
                 // The cast result, cached exactly like the interpreter's: the
                 // branch condition and the "As <Class>" output are one value,
                 // so the check runs once no matter how often the Success chain
                 // reads it.
                 case NT::Cast:
-                    s.push_back({ field(0), { PT::Ref, false } });
+                    s.push_back({ field("castResult", {}), { PT::Ref, false } });
                     break;
                 default: break;
             }
@@ -1776,8 +1847,7 @@ private:
     }
 
     // Per-instance node state (DoOnce fired?, FlipFlop side) → a bool member.
-    static std::string stateMember(int nodeId)
-    { return "n" + std::to_string(nodeId) + "_state"; }
+    std::string stateMember(int nodeId) const { return m_stateName.at(nodeId); }
     std::vector<int> stateNodeIds() const
     {
         std::vector<int> ids;
@@ -1826,7 +1896,11 @@ private:
             // owning function has no equivalent symbol → interpreted fallback.
             if (n.id != fnCtx)
                 throw FallbackError{ "function parameter of '" + n.s + "' read outside its function", n.id };
-            return "p_" + std::to_string(outIdx);
+            const std::vector<std::string>& ps = m_fnParams.at(n.s);
+            if (outIdx < 0 || outIdx >= (int)ps.size())
+                throw FallbackError{ "function parameter " + std::to_string(outIdx) + " of '" + n.s +
+                                     "' does not exist", n.id };
+            return ps[(size_t)outIdx];
         }
         case NT::ConstFloat:  return floatLit(n.f[0]);
         case NT::ConstBool:   return n.f[0] != 0.0f ? "true" : "false";
@@ -1885,7 +1959,7 @@ private:
             {
                 // `this`: no handle to resolve, no class to check.
                 const std::string acc = selfVar(n.s, have);
-                return acc.empty() ? seam : convertExpr(acc + "()", have, want);
+                return acc.empty() ? seam : convertExpr(acc, have, want);
             }
             if (t.gi && t.cls)
             {
@@ -1895,7 +1969,7 @@ private:
                     // for the fallback, and reading it has no observable effect.
                     return "([&]() -> " + cppType(want) + " {\n"
                            "        if (" + t.cls->cpp + "* o__ = hc::gameInstanceAs<" + t.cls->cpp + ">(m_ctx)) return " +
-                           convertExpr("o__->" + acc + "()", have, want) + ";\n"
+                           convertExpr("o__->" + acc, have, want) + ";\n"
                            "        return " + coerceCall("hc::getExternal(m_ctx, hc::gameInstance(m_ctx), " +
                                                           strLit(n.s) + ")", want) + "; }())";
             }
@@ -1909,7 +1983,7 @@ private:
                     const std::string ref = input(n, 0, fnCtx);
                     return "([&]() -> " + cppType(want) + " { const uint32_t t__ = " + ref + ";\n"
                            "        if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t__)) return " +
-                           convertExpr("o__->" + acc + "()", have, want) + ";\n"
+                           convertExpr("o__->" + acc, have, want) + ";\n"
                            "        return " + coerceCall("hc::getExternal(m_ctx, t__, " + strLit(n.s) + ")", want) +
                            "; }())";
                 }
@@ -2302,10 +2376,9 @@ private:
     // type — unless two or more of them call something: then they are named
     // first, in pin order, into `hoisted` (one declaration each), because the
     // interpreter evaluates its inputs left to right and a C++ argument list
-    // does not. The names are the parameters', kept clear of every name the
-    // class already uses.
+    // does not. The names are the parameters' (temp()).
     std::string directCall(const Node& n, const HE::api::ApiFn& fn, int fnCtx,
-                           std::vector<std::string>& hoisted, std::unordered_set<std::string>& used)
+                           std::vector<std::string>& hoisted)
     {
         std::vector<std::string> args;
         int calling = 0;
@@ -2319,7 +2392,7 @@ private:
             for (size_t i = 0; i < args.size(); ++i)
             {
                 const HE::api::ApiParam& p = fn.params[i];
-                const std::string name = uniqueName(cppIdent(p.name ? p.name : "arg"), used);
+                const std::string name = temp(cppIdent(p.name ? p.name : "arg"));
                 hoisted.push_back("const " + HE::api::cpp::valueType(p.type, p.isArray) + " " +
                                   name + " = " + args[i] + ";");
                 args[i] = name;
@@ -2338,8 +2411,7 @@ private:
     std::string directRead(const Node& n, const HE::api::ApiFn& fn, int outIdx, int fnCtx)
     {
         std::vector<std::string> hoisted;
-        std::unordered_set<std::string> used = m_usedNames;
-        std::string call = directCall(n, fn, fnCtx, hoisted, used);
+        std::string call = directCall(n, fn, fnCtx, hoisted);
         if (fn.results.size() > 1) call += "." + HE::api::cpp::resultMember(fn, (size_t)outIdx);
         call = asPin(fn, (size_t)outIdx, call);
         if (hoisted.empty()) return call;
@@ -2354,8 +2426,7 @@ private:
     void directStmt(const Node& n, const HE::api::ApiFn& fn, int fnCtx, Body& b)
     {
         std::vector<std::string> hoisted;
-        std::unordered_set<std::string> used = m_usedNames;
-        const std::string call = directCall(n, fn, fnCtx, hoisted, used);
+        const std::string call = directCall(n, fn, fnCtx, hoisted);
         const auto it = m_slots.find(n.id);
         const bool keep = it != m_slots.end() && !fn.results.empty();
         const bool block = !hoisted.empty() || (keep && fn.results.size() > 1);
@@ -2371,8 +2442,7 @@ private:
         else
         {
             m_rsTouched = true;
-            const std::string r = uniqueName(camelIdent(fn.displayName ? fn.displayName : fn.id,
-                                                        false), used);
+            const std::string r = temp(camelIdent(fn.displayName ? fn.displayName : fn.id, false));
             b.line("const auto " + r + " = " + call + ";");
             for (size_t k = 0; k < it->second.size() && k < fn.results.size(); ++k)
                 b.line("rs." + it->second[k].field + " = " +
@@ -2390,8 +2460,7 @@ private:
     void emitValueCall(const Node& n, int fnCtx, Body& b, int firstArgPin,
                        const std::function<std::string(const std::string&)>& makeCall)
     {
-        const std::string av = "a" + std::to_string(n.id);
-        const std::string rv = "r" + std::to_string(n.id);
+        const std::string av = temp("args");
         b.line("{");
         ++b.indent;
         b.line("std::vector<hc::Value> " + av + ";");
@@ -2402,10 +2471,14 @@ private:
             b.line(av + ".push_back(" +
                    toValueCall(input(n, pin, fnCtx), dataInType(n, pin), m_opt.namespaceName) + ");");
         }
-        b.line("const std::vector<hc::Value> " + rv + " = " + makeCall(av) + ";");
         const auto it = m_slots.find(n.id);
-        if (it != m_slots.end())
+        // The answer is only named when something keeps it.
+        if (it == m_slots.end() || it->second.empty())
+            b.line(makeCall(av) + ";");
+        else
         {
+            const std::string rv = temp("results");
+            b.line("const std::vector<hc::Value> " + rv + " = " + makeCall(av) + ";");
             m_rsTouched = true;
             for (size_t k = 0; k < it->second.size(); ++k)
                 b.line("rs." + it->second[k].field + " = " +
@@ -2445,7 +2518,7 @@ private:
             // The Object input is read ONCE into a local: a pure Engine Call
             // feeding it would otherwise dispatch again for every place the
             // expression is spelled, and the interpreter evaluates it once.
-            const std::string rv = "c" + std::to_string(n.id);
+            const std::string rv = temp("object");
             b.line("{");
             ++b.indent;
             b.line("const uint32_t " + rv + " = " + input(n, 0, fnCtx) + ";");
@@ -2476,8 +2549,8 @@ private:
                 n.type == NT::ForEach ? HorizonCode::ContainerKind::Array
                 : isMap               ? HorizonCode::ContainerKind::Map
                                       : HorizonCode::ContainerKind::Set;
-            const std::string arr = "arr" + std::to_string(n.id);
-            const std::string idx = "i" + std::to_string(n.id);
+            const std::string arr = temp("items");
+            const std::string idx = temp("i");
             const std::string span = n.type == NT::ForEach ? arr + ".size()"
                                    : isMap                 ? arr + ".keys.size()"
                                                            : arr + ".items.size()";
@@ -2567,7 +2640,7 @@ private:
                 b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ");");
                 break;
             }
-            const std::string sv = "s" + std::to_string(n.id);
+            const std::string sv = temp("spawn");
             b.line("{");
             ++b.indent;
             b.line("hc::SpawnValues " + sv + ";");
@@ -2605,16 +2678,17 @@ private:
             }
             // Wired: the host takes `const float*`, and you cannot take the
             // address of a prvalue — the vectors need names that outlive the
-            // call. Node-scoped names inside a block so two Create Objects in
-            // one scope cannot collide.
-            const std::string nid = std::to_string(n.id);
+            // call. Fresh names (temp()) inside a block, so two Create Objects
+            // in one body cannot collide.
+            const std::string pos = hasPos ? temp("position") : std::string();
+            const std::string rot = hasRot ? temp("rotation") : std::string();
             b.line("{");
             ++b.indent;
-            if (hasPos) b.line("const glm::vec3 n" + nid + "_pos = " + input(n, 0, fnCtx) + ";");
-            if (hasRot) b.line("const glm::vec3 n" + nid + "_rot = " + input(n, 1, fnCtx) + ";");
+            if (hasPos) b.line("const glm::vec3 " + pos + " = " + input(n, 0, fnCtx) + ";");
+            if (hasRot) b.line("const glm::vec3 " + rot + " = " + input(n, 1, fnCtx) + ";");
             b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ", "
-                   + (hasPos ? "&n" + nid + "_pos.x" : "nullptr") + ", "
-                   + (hasRot ? "&n" + nid + "_rot.x" : "nullptr") + ");");
+                   + (hasPos ? "&" + pos + ".x" : "nullptr") + ", "
+                   + (hasRot ? "&" + rot + ".x" : "nullptr") + ");");
             --b.indent;
             b.line("}");
             break;
@@ -2632,7 +2706,7 @@ private:
             else if (t.cls)  acc = directVar(n.s, *t.cls, have);
             if (t.self && !acc.empty())
             {
-                b.line(acc + "() = " + convertExpr(input(n, 1, fnCtx), vt, have) + ";");
+                b.line(acc + " = " + convertExpr(input(n, 1, fnCtx), vt, have) + ";");
                 break;
             }
             if (acc.empty())
@@ -2641,19 +2715,20 @@ private:
                        toValueCall(input(n, 1, fnCtx), vt, m_opt.namespaceName) + ");");
                 break;
             }
+            const std::string tv = t.gi ? std::string() : temp("target");
+            const std::string vv = temp("value");
             b.line("{");
             ++b.indent;
             if (!t.gi)
-                b.line("const uint32_t t" + std::to_string(n.id) + " = " + input(n, 0, fnCtx) + ";");
-            b.line("const " + cppType(vt) + " v" + std::to_string(n.id) + " = " + input(n, 1, fnCtx) + ";");
-            b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, "t" + std::to_string(n.id)) + ")");
-            b.line("    o__->" + acc + "() = " +
-                   convertExpr("v" + std::to_string(n.id), vt, have) + ";");
+                b.line("const uint32_t " + tv + " = " + input(n, 0, fnCtx) + ";");
+            b.line("const " + cppType(vt) + " " + vv + " = " + input(n, 1, fnCtx) + ";");
+            b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, tv) + ")");
+            b.line("    o__->" + acc + " = " + convertExpr(vv, vt, have) + ";");
             b.line("else");
             b.line("    hc::setExternal(m_ctx, " +
-                   (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + std::to_string(n.id)) +
+                   (t.gi ? std::string("hc::gameInstance(m_ctx)") : tv) +
                    ", " + strLit(n.s) + ", " +
-                   toValueCall("v" + std::to_string(n.id), vt, m_opt.namespaceName) + ");");
+                   toValueCall(vv, vt, m_opt.namespaceName) + ");");
             --b.indent;
             b.line("}");
             break;
@@ -2693,20 +2768,20 @@ private:
             // come back in typed out-params, so neither side needs a
             // std::vector<Value>. The public method makes a FRESH RunState,
             // which is what callExternal's own per-call Runner does (§3.1).
-            const std::string id = std::to_string(n.id);
             b.line("{");
             ++b.indent;
             std::vector<std::string> argNames, resNames;
             for (size_t i = 0; i < n.params.size(); ++i)   // args first (§3.4)
             {
-                const std::string a = "a" + id + "_" + std::to_string(i);
+                const std::string a = temp(cppIdent(n.params[i].name.empty() ? "arg" : n.params[i].name));
                 const TypeRef tr = trOf(n.params[i]);
                 b.line("const " + cppType(tr) + " " + a + " = " + input(n, (int)i + 1, fnCtx) + ";");
                 argNames.push_back(a);
             }
             for (size_t i = 0; i < n.results.size(); ++i)
             {
-                const std::string r = "r" + id + "_" + std::to_string(i);
+                const std::string r = temp(cppIdent(n.results[i].name.empty() ? "result"
+                                                                               : n.results[i].name));
                 const TypeRef tr = trOf(n.results[i]);
                 b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
                 resNames.push_back(r);
@@ -2721,26 +2796,32 @@ private:
             }
             else
             {
-                if (!t.gi) b.line("const uint32_t t" + id + " = " + input(n, 0, fnCtx) + ";");
-                b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, "t" + id) + ")");
+                const std::string tv = t.gi ? std::string() : temp("target");
+                if (!t.gi) b.line("const uint32_t " + tv + " = " + input(n, 0, fnCtx) + ";");
+                b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, tv) + ")");
                 b.line("    o__->" + method + "(" + args + ");");
                 b.line("else");
                 b.line("{");
                 ++b.indent;
-                const std::string av = "a" + id;
+                const std::string av = temp("args");
                 b.line("std::vector<hc::Value> " + av + ";");
                 if (!argNames.empty()) b.line(av + ".reserve(" + std::to_string(argNames.size()) + ");");
                 for (size_t i = 0; i < argNames.size(); ++i)
                     b.line(av + ".push_back(" +
                            toValueCall(argNames[i],
                                        trOf(n.params[i]), m_opt.namespaceName) + ");");
-                b.line("const std::vector<hc::Value> rr" + id + " = hc::callExternal(m_ctx, " +
-                       (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + id) +
-                       ", " + strLit(n.s) + ", " + av + ");");
-                for (size_t i = 0; i < resNames.size(); ++i)
-                    b.line(resNames[i] + " = " +
-                           fromValueCall("rr" + id, i,
-                                         trOf(n.results[i])) + ";");
+                const std::string call = "hc::callExternal(m_ctx, " +
+                    (t.gi ? std::string("hc::gameInstance(m_ctx)") : tv) + ", " + strLit(n.s) +
+                    ", " + av + ")";
+                if (resNames.empty())
+                    b.line(call + ";");
+                else
+                {
+                    const std::string rv = temp("results");
+                    b.line("const std::vector<hc::Value> " + rv + " = " + call + ";");
+                    for (size_t i = 0; i < resNames.size(); ++i)
+                        b.line(resNames[i] + " = " + fromValueCall(rv, i, trOf(n.results[i])) + ";");
+                }
                 --b.indent;
                 b.line("}");
             }
@@ -2774,7 +2855,7 @@ private:
             std::vector<std::string> argNames, resNames;
             for (size_t i = 0; i < entry->params.size(); ++i)
             {
-                const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
+                const std::string a = temp(cppIdent(entry->params[i].name.empty() ? "arg" : entry->params[i].name));
                 const TypeRef tr = trOf(entry->params[i]);
                 // The call node mirrors the entry (synced) — pin type == param type.
                 b.line("const " + cppType(tr) + " " + a + " = " +
@@ -2783,7 +2864,7 @@ private:
             }
             for (size_t i = 0; i < entry->results.size(); ++i)
             {
-                const std::string rn = "r" + std::to_string(n.id) + "_" + std::to_string(i);
+                const std::string rn = temp(cppIdent(entry->results[i].name.empty() ? "result" : entry->results[i].name));
                 const TypeRef tr = trOf(entry->results[i]);
                 b.line(cppType(tr) + " " + rn + " = " + zeroLit(tr) + ";");   // typed default results
                 resNames.push_back(rn);
@@ -2831,7 +2912,7 @@ private:
             {
                 const size_t count = std::min(n.results.size(), fn->results.size());
                 for (size_t i = 0; i < count; ++i)
-                    b.line("r_" + std::to_string(i) + " = " +
+                    b.line(m_fnResults.at(fn->s)[i] + " = " +
                            convertExpr(input(n, (int)i, fnCtx), dataInType(n, (int)i),
                                        trOf(fn->results[i])) + ";");
             }
@@ -2861,7 +2942,7 @@ private:
             b.line("hc::print(" + input(n, 0, fnCtx) + ");");
             break;
         case NT::Delay:
-            // Latent: schedule the continuation (resume_<id> via resumeFrom)
+            // Latent: schedule the continuation (afterDelay via resumeFrom)
             // and stop the chain — like the interpreter's runExecChain break.
             b.line("hc::scheduleResume(m_ctx, " + std::to_string(resumeId(n.id)) + ", " +
                    input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ");");
@@ -2991,14 +3072,9 @@ private:
     std::string fnParamList(const Node& fn, bool rsUsed) const
     {
         std::string sig = rsParam(rsUsed);
-        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
-        for (size_t i = 0; i < fn.params.size(); ++i)
-            add(cppType(trOf(fn.params[i])) +
-                " p_" + std::to_string(i));
-        for (size_t i = 0; i < fn.results.size(); ++i)
-            add(cppType(trOf(fn.results[i])) +
-                "& r_" + std::to_string(i));
-        return sig;
+        const std::string rest = publicFnParams(fn);
+        if (!sig.empty() && !rest.empty()) sig += ", ";
+        return sig + rest;
     }
 
     std::vector<std::pair<std::string, std::string>> sortedEvtConsts() const
@@ -3032,6 +3108,7 @@ private:
         std::string prelude;   // function locals
         std::string body;
         bool        rsUsed  = false;
+        bool        pub     = false;   // shares its name with a public method
     };
 
     std::vector<Fragment> translateBodies()
@@ -3048,6 +3125,8 @@ private:
         {
             Fragment f;
             f.name = name;
+            f.pub  = fn != nullptr ||
+                     (start && start->type == NT::Event && m_publicEv.count(start->id));
             f.fn   = fn;
             if (fn)
                 for (const auto& v : m_g.variables)
@@ -3058,6 +3137,12 @@ private:
             b.indent = 2;   // inside a member function inside the class
             m_rsTouched = false;
             m_apiUsed   = false;
+            m_bodyNames = m_usedNames;
+            if (fn)
+            {
+                for (const std::string& p : m_fnParams.at(fn->s))  m_bodyNames.insert(p);
+                for (const std::string& r : m_fnResults.at(fn->s)) m_bodyNames.insert(r);
+            }
             if (start) chain(*start, pinRanges(*start).execOut0 + outPin, fnCtx, b);
             // The engine calls of this body all run against one Ctx: the one
             // the host builds for this instance (HorizonEngineApi.h, Scope).
@@ -3077,7 +3162,7 @@ private:
             translate(m_fnName.at(fn->s), fn, fn, fn->id);
         // Delay continuations (Runner::resumeFrom's mirror): a FRESH run.
         for (const int id : delayNodeIds())
-            translate("resume_" + std::to_string(id), m_g.findNode(id), nullptr, 0);
+            translate(m_resumeName.at(id), m_g.findNode(id), nullptr, 0);
         return out;
     }
 
@@ -3086,32 +3171,32 @@ private:
     std::string publicFnParams(const Node& fn) const
     {
         std::string sig;
-        std::unordered_set<std::string> used;
-        auto add = [&](const std::string& type, const std::string& name)
-        { if (!sig.empty()) sig += ", "; sig += type + " " + uniqueName(cppIdent(name), used); };
-        for (size_t i = 0; i < fn.params.size(); ++i)
-            add(cppType(trOf(fn.params[i])),
-                fn.params[i].name.empty() ? "p" + std::to_string(i) : fn.params[i].name);
-        for (size_t i = 0; i < fn.results.size(); ++i)
-            add(cppType(trOf(fn.results[i])) + "&",
-                fn.results[i].name.empty() ? "r" + std::to_string(i) : fn.results[i].name);
+        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
+        const std::vector<std::string>& ps = m_fnParams.at(fn.s);
+        const std::vector<std::string>& rn = m_fnResults.at(fn.s);
+        for (size_t i = 0; i < fn.params.size() && i < ps.size(); ++i)
+            add(cppType(trOf(fn.params[i])) + " " + ps[i]);
+        for (size_t i = 0; i < fn.results.size() && i < rn.size(); ++i)
+            add(cppType(trOf(fn.results[i])) + "& " + rn[i]);
         return sig;
     }
-    // Its forwarding body: names in declaration order, straight into the
-    // internal body function.
+    // The same without the names: what decides whether a derived class's
+    // method of the same name overrides this one.
+    std::string publicFnTypes(const Node& fn) const
+    {
+        std::string sig;
+        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
+        for (const auto& p : fn.params)  add(cppType(trOf(p)));
+        for (const auto& r : fn.results) add(cppType(trOf(r)) + "&");
+        return sig;
+    }
+    // The public method's body when the class has a RunState: a fresh one,
+    // into the body overload, the arguments by name.
     std::string publicFnForward(const Node& fn) const
     {
-        std::vector<std::string> names;
-        std::unordered_set<std::string> used;
-        for (size_t i = 0; i < fn.params.size(); ++i)
-            names.push_back(uniqueName(cppIdent(fn.params[i].name.empty()
-                ? "p" + std::to_string(i) : fn.params[i].name), used));
-        for (size_t i = 0; i < fn.results.size(); ++i)
-            names.push_back(uniqueName(cppIdent(fn.results[i].name.empty()
-                ? "r" + std::to_string(i) : fn.results[i].name), used));
-        std::string call = m_fnName.at(fn.s) + "(" + rsArg();
-        for (size_t i = 0; i < names.size(); ++i)
-            call += (i || useRunState() ? ", " : "") + names[i];
+        std::string call = m_fnName.at(fn.s) + "(rs";
+        for (const std::string& p : m_fnParams.at(fn.s))  call += ", " + p;
+        for (const std::string& r : m_fnResults.at(fn.s)) call += ", " + r;
         return call + ");";
     }
 
@@ -3141,7 +3226,7 @@ private:
         std::vector<std::string> argNames, resNames;
         for (size_t i = 0; i < entry->params.size(); ++i)
         {
-            const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
+            const std::string a = temp(cppIdent(entry->params[i].name.empty() ? "arg" : entry->params[i].name));
             const TypeRef tr = trOf(entry->params[i].type, entry->params[i].isArray,
                                     entry->params[i].typeName);
             b.line("const " + cppType(tr) + " " + a + " = " +
@@ -3150,7 +3235,7 @@ private:
         }
         for (size_t i = 0; i < entry->results.size(); ++i)
         {
-            const std::string r = "r" + std::to_string(n.id) + "_" + std::to_string(i);
+            const std::string r = temp(cppIdent(entry->results[i].name.empty() ? "result" : entry->results[i].name));
             const TypeRef tr = trOf(entry->results[i].type, entry->results[i].isArray,
                                     entry->results[i].typeName);
             b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
@@ -3330,7 +3415,7 @@ private:
                 if (m_publicFn.count(fn->s))
                 {
                     const std::string params = publicFnParams(*fn);
-                    const MethodDecl d = methodDecl(m_publicFn.at(fn->s), params);
+                    const MethodDecl d = methodDecl(m_publicFn.at(fn->s), publicFnTypes(*fn));
                     h += "    " + d.prefix + "void " + m_publicFn.at(fn->s) + "(" + params + ")" +
                          d.suffix + ";\n";
                 }
@@ -3357,10 +3442,11 @@ private:
         }
         if (!m_publicVar.empty())
         {
-            h += "    // Its public variables, by reference — read and write them directly.\n";
+            h += "    // Its public variables — read and write them directly.\n";
             for (const auto& v : m_g.variables)
                 if (v.scope == 0 && v.access == 0)
-                    h += "    " + cppType(varType(v)) + "& " + m_publicVar.at(v.name) + "();\n";
+                    h += "    " + cppType(varType(v)) + " " + m_varMember.at(v.name) +
+                         " = " + memberDefault(v) + ";\n";
             h += "\n";
         }
 
@@ -3396,7 +3482,7 @@ private:
         if (!fns.empty())
         {
             h += "    const std::vector<HorizonCode::CompiledFuncInfo>& funcInfos() const override;\n";
-            h += "    bool callFunction(const std::string& name, bool requirePublic,\n";
+            h += "    bool callFunction(const std::string& function, bool requirePublic,\n";
             h += "                      const std::vector<hc::Value>& args,\n";
             h += "                      std::vector<hc::Value>* results) override;\n";
         }
@@ -3415,6 +3501,7 @@ private:
         // writes the inherited members directly — that is what keeps ONE C++
         // member per graph variable, matching the interpreter's one store.
         h += "\nprotected:\n";
+        const size_t protectedStart = h.size();
         if (rsOn)
         {
             // Per-run state: mirrors the Runner exactly (§3.3/§5.4) — and only the
@@ -3434,18 +3521,27 @@ private:
                     h += "        " + cppType(s.tr) + " " + s.field + " = " + zeroLit(s.tr) + ";\n";
             h += "    };\n\n";
         }
+        // The bodies. A public event's or function's body IS its public method
+        // when there is no RunState to hand in, and is declared up there.
+        bool anyBody = false;
         for (const Fragment& f : frags)
+        {
+            if (f.pub && !rsOn) continue;
             h += "    void " + f.name + "(" +
                  (f.fn ? fnParamList(*f.fn, true) : rsParam(true)) + ");\n";
-        if (!frags.empty()) h += "\n";
+            anyBody = true;
+        }
+        if (anyBody) h += "\n";
         for (const auto& v : m_g.variables)
-            if (v.scope == 0)
+            if (v.scope == 0 && v.access != 0)
                 h += "    " + cppType(varType(v)) + " " + m_varMember.at(v.name) +
                      " = " + memberDefault(v) + ";\n";
         // Per-instance node state (DoOnce/FlipFlop) — persists like variables,
         // reset by reseedVariables, never part of the public surface.
         for (const int id : states)
             h += "    bool " + stateMember(id) + " = false;\n";
+        if (h.size() == protectedStart) h.resize(protectedStart - std::string("\nprotected:\n").size());
+        else if (h.size() >= 2 && h.compare(h.size() - 2, 2, "\n\n") == 0) h.pop_back();
         h += "};\n\n} // namespace " + ns + "\n";
 
         // ── the implementation ──────────────────────────────────────────────
@@ -3462,20 +3558,18 @@ private:
             if (other != m_cls) c += "#include \"hcgen_" + other + ".h\"\n";
         c += "\nnamespace " + ns + " {\n\n";
 
-        for (const auto& [id, name] : sortedPublicEv())
-            c += "void " + m_cls + "::" + name + "() { " + (rsOn ? "RunState rs; " : "") +
-                 m_evName.at(id) + "(" + rsArg() + "); }\n";
-        for (const Node* fn : fns)
-            if (m_publicFn.count(fn->s))
-                c += "void " + m_cls + "::" + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) +
-                     ") { " + (rsOn ? "RunState rs; " : "") + publicFnForward(*fn) + " }\n";
-        if (!m_publicEv.empty() || !m_publicFn.empty()) c += "\n";
-
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0 && v.access == 0)
-                c += cppType(varType(v)) + "& " + m_cls + "::" + m_publicVar.at(v.name) +
-                     "() { return " + m_varMember.at(v.name) + "; }\n";
-        if (!m_publicVar.empty()) c += "\n";
+        // With a RunState, the public methods open one and enter the body
+        // overload of the same name. Without, they are the bodies (below).
+        if (rsOn && (!m_publicEv.empty() || !m_publicFn.empty()))
+        {
+            for (const auto& [id, name] : sortedPublicEv())
+                c += "void " + m_cls + "::" + name + "() { RunState rs; " + name + "(rs); }\n";
+            for (const Node* fn : fns)
+                if (m_publicFn.count(fn->s))
+                    c += "void " + m_cls + "::" + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) +
+                         ") { RunState rs; " + publicFnForward(*fn) + " }\n";
+            c += "\n";
+        }
 
         // The interned ids this class names. One constant per event, so the code
         // below reads the event, not a number — the id is assigned at load and
@@ -3785,46 +3879,50 @@ private:
         // callFunction: coerced args, typed default results (§3.1).
         if (!fns.empty())
         {
-            c += "bool " + m_cls + "::callFunction(const std::string& name, " +
+            c += "bool " + m_cls + "::callFunction(const std::string& function, " +
                  p("bool", "requirePublic", anyPrivateFn) + ",\n                  " +
                  p("const std::vector<hc::Value>&", "args", anyFnParams) + ", " +
                  "std::vector<hc::Value>* results)\n{\n";
             for (const Node* fn : fns)
             {
-                c += "    if (name == " + strLit(fn->s) + ")\n    {\n";
+                c += "    if (function == " + strLit(fn->s) + ")\n    {\n";
                 if (fn->access != 0)
                     c += "        if (requirePublic) return false;   // private function\n";
                 if (rsOn) c += "        RunState rs;\n";
+                // The function's own parameter names (buildNames keeps them
+                // clear of this function's `function`, `args` and `results`).
+                const std::vector<std::string>& pn = m_fnParams.at(fn->s);
+                const std::vector<std::string>& rn = m_fnResults.at(fn->s);
                 for (size_t i = 0; i < fn->params.size(); ++i)
                 {
                     const TypeRef tr = trOf(fn->params[i]);
-                    c += "        " + cppType(tr) + " p" + std::to_string(i) + " = " +
+                    c += "        " + cppType(tr) + " " + pn[i] + " = " +
                          coerceCall("hc::arg(args, " + std::to_string(i) + ")", tr) + ";\n";
                 }
                 std::vector<TypeRef> resTypes;
                 for (size_t i = 0; i < fn->results.size(); ++i)
                 {
                     resTypes.push_back(trOf(fn->results[i]));
-                    c += "        " + cppType(resTypes[i]) + " r" + std::to_string(i) + " = " +
+                    c += "        " + cppType(resTypes[i]) + " " + rn[i] + " = " +
                          zeroLit(resTypes[i]) + ";\n";
                 }
                 std::vector<std::string> callArgs;
                 if (rsOn) callArgs.push_back("rs");
-                for (size_t i = 0; i < fn->params.size(); ++i)  callArgs.push_back("p" + std::to_string(i));
-                for (size_t i = 0; i < fn->results.size(); ++i) callArgs.push_back("r" + std::to_string(i));
+                for (size_t i = 0; i < fn->params.size(); ++i)  callArgs.push_back(pn[i]);
+                for (size_t i = 0; i < fn->results.size(); ++i) callArgs.push_back(rn[i]);
                 c += "        " + m_fnName.at(fn->s) + "(";
                 for (size_t i = 0; i < callArgs.size(); ++i) c += (i ? ", " : "") + callArgs[i];
                 c += ");\n";
                 c += "        if (results)\n        {\n            results->clear();\n";
                 for (size_t i = 0; i < fn->results.size(); ++i)
                     c += "            results->push_back(" +
-                         toValueCall("r" + std::to_string(i), resTypes[i], ns) + ");\n";
+                         toValueCall(rn[i], resTypes[i], ns) + ");\n";
                 c += "        }\n        return true;\n    }\n";
             }
             // An inherited function is the base's to run — and only if it is
             // public, which is the base's own check, not something to repeat.
             if (par)
-                c += "    return " + par->cpp + "::callFunction(name, " +
+                c += "    return " + par->cpp + "::callFunction(function, " +
                      (anyPrivateFn ? "requirePublic" : "true") + ", " +
                      (anyFnParams ? "args" : "{}") + ", results);\n}\n\n";
             else
@@ -3865,8 +3963,8 @@ private:
             c += "void " + m_cls + "::resumeFrom(int nodeId)\n{\n";
             if (rsOn) c += "    RunState rs;\n";
             for (const int id : delays)
-                c += "    if (nodeId == " + std::to_string(resumeId(id)) + ") { resume_" +
-                     std::to_string(id) + "(" + rsArg() + "); return; }\n";
+                c += "    if (nodeId == " + std::to_string(resumeId(id)) + ") { " +
+                     m_resumeName.at(id) + "(" + rsArg() + "); return; }\n";
             // A Delay in a base class schedules a resume by ITS node id; the id
             // means nothing here, so the lookup has to continue up the chain.
             if (par) c += "    " + par->cpp + "::resumeFrom(nodeId);\n";
@@ -3927,6 +4025,10 @@ private:
     }
 };
 
+// The class's C++ name: its asset's file stem in PascalCase ("enemy_goblin.hasset"
+// → EnemyGoblin, a level script → LevelMain). Never S_/E_-shaped (the words are
+// joined without underscores), so it cannot meet a struct or enum type; the
+// names the namespace already has are claimed before any class (generateInto).
 std::string classNameFor(const std::string& key, std::unordered_set<std::string>& used)
 {
     std::string stem = key;
@@ -3934,14 +4036,22 @@ std::string classNameFor(const std::string& key, std::unordered_set<std::string>
     else
     {
         std::string prefix;
-        if (stem.rfind("level:", 0) == 0) { prefix = "Level_"; stem = stem.substr(6); }
+        if (stem.rfind("level:", 0) == 0) { prefix = "Level "; stem = stem.substr(6); }
         if (const size_t slash = stem.find_last_of('/'); slash != std::string::npos)
             stem = stem.substr(slash + 1);
         if (const size_t dot = stem.find_last_of('.'); dot != std::string::npos && dot > 0)
             stem = stem.substr(0, dot);
         stem = prefix + stem;
     }
-    return uniqueName("C_" + sanitize(stem), used);
+    std::string name = camelIdent(stem, true);
+    if (name.empty()) name = "Graph";
+    return uniqueName(name, used);
+}
+
+// What namespace hcgen (and every generated body) already means by a name.
+std::unordered_set<std::string> reservedClassNames()
+{
+    return { "HE", "HorizonCode", "hc", "glm", "std", "classes", "engineVersion" };
 }
 
 } // namespace
@@ -3950,7 +4060,7 @@ std::string classNameFor(const std::string& key, std::unordered_set<std::string>
 // nothing thrown in here reaches a caller.
 static void generateInto(const std::vector<ClassSource>& sources, const Options& opt, Result& res)
 {
-    std::unordered_set<std::string> usedNames;
+    std::unordered_set<std::string> usedNames = reservedClassNames();
 
     // The project's Struct and Enum assets, as C++ types — one header each, so
     // a class depends on the definitions it uses and not on the others. Built
@@ -3972,7 +4082,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     std::vector<Entry> compiled;
 
     // ── base classes first ───────────────────────────────────────────────────
-    // `C_Goblin : public C_Enemy` needs C_Enemy's emitter to have run: its C++
+    // `Goblin : public Enemy` needs Enemy's emitter to have run: its C++
     // name, its member names and its public methods are all things the child
     // asks the ClassTable for. Sorting by how deep a class sits in its chain
     // does that in one pass — the chain is already resolved, so no graph walk is
@@ -3994,7 +4104,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     for (const ClassSource& s : sources)
         if (!s.chain.empty()) classes.isBase.insert(s.chain.front());
     {
-        std::unordered_set<std::string> probeNames;
+        std::unordered_set<std::string> probeNames = reservedClassNames();
         const size_t warningsBefore = res.warnings.size();
         for (const ClassSource* srcp : order)
         {
@@ -4008,7 +4118,8 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
                 classes.byKey[src.key] = { src.key, className, &src.graph,
                                            src.chain.empty() ? std::string() : src.chain.front(),
                                            em.publicFunctions(), em.publicVariables(),
-                                           em.publicMethodSigs(), em.variableMembers() };
+                                           em.publicMethodSigs(), em.variableMembers(),
+                                           em.usedNames() };
             }
             catch (...) { probeNames.erase(className); }
         }
