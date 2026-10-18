@@ -11,6 +11,7 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GiBlasStore.h>
 #include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
@@ -1286,11 +1287,7 @@ private:
 	// which is why GetCapabilities still reports supportsGlobalIllumination
 	// = false: flipping it on is the LAST step, once the full pipeline exists.
 	// Compute is core Vulkan, so no extension/feature gate is needed.
-	struct GIBlasRange
-	{
-		int32_t nodeOffset = 0, triOffset = 0;
-		bool    valid      = false;
-	};
+	using GIBlasRange = HE::GiBlasRange;
 	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
@@ -1304,7 +1301,7 @@ private:
 		void*          mapped = nullptr;
 		VkDeviceSize   size   = 0;
 	};
-	GIBlasRange  BuildGIBlas(const HE::UUID& meshId);
+	HE::GiBvh    BuildGIBvh(const HE::UUID& meshId);
 	void         updateGiAccel();  // lazy BLAS append + per-frame instance upload
 	void         destroyGiAccel();
 
@@ -1383,13 +1380,13 @@ private:
 	GiBuffer m_giTemporalUBO[3];
 	VkSampler m_giPointSampler = VK_NULL_HANDLE; // NEAREST clamp (G-buffer/raw/history reads)
 	// (Re)creates a host-visible STORAGE_BUFFER of at least `size` bytes and
-	// memcpys `data` into it. Grows by recreation; never shrinks.
+	// memcpys `data` into it. Grows by recreation (to `reserve` bytes when that
+	// is larger: headroom for an array that keeps growing); never shrinks.
+	// `from` > 0 copies only [from, size) — the rest is on the GPU already.
 	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
-	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
-	std::vector<HE::GiBvhNode>     m_giNodesCpu;
-	std::vector<HE::GiBvhTriangle> m_giTrisCpu;
-	bool     m_giBlasDirty = false;
+	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+	                            VkDeviceSize from = 0, VkDeviceSize reserve = 0);
+	HE::GiBlasStore m_giBlas;   // per-mesh BLASes, concatenated (GiBlasStore.h)
 	GiBuffer m_giNodeBuf;
 	GiBuffer m_giTriBuf;
 	// Instance data changes every frame while earlier frames may still be in

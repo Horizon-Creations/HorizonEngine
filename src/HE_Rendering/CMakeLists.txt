@@ -320,6 +320,7 @@ add_library(HorizonRendering SHARED
     src/RenderPass.cpp
     src/CommandBuffer.cpp
     src/GiBvh.cpp
+    src/GiBlasStore.cpp
     src/GiInstanceSurface.cpp
     src/GiAutoLandscape.cpp
     src/MaterialScalars.cpp

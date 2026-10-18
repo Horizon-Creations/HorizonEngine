@@ -13,6 +13,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/D3D11/Vulkan/Metal-SW)
+#include <HorizonRendering/GiBlasStore.h>    // GI: per-mesh BLAS cache in the concatenated arrays
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
@@ -40,6 +41,7 @@
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
 #include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
+#include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
 #include <SDL3/SDL.h>
@@ -4400,6 +4402,7 @@ struct D3D12RendererImpl
     // (monotonic allocator), a bounded leak acceptable for edit-time invalidation.
     void processPendingInvalidations()
     {
+        HE_PROFILE_SCOPE_N("D3D12::DrainInvalidations");
         const int retireN = static_cast<int>(k_frameCount) + 2;
         auto retire     = [&](ComPtr<ID3D12Resource>&& r) { if (r) m_retiredTextures.emplace_back(std::move(r), retireN); };
         auto freeSlot   = [&](int slot) { if (slot >= 0) m_freeSlotPending.emplace_back(static_cast<UINT>(slot), retireN); };
@@ -4454,11 +4457,10 @@ struct D3D12RendererImpl
                 retire(std::move(m.ibuf));
                 m_skeletalMeshCache.erase(it);
             }
-            // GI BLAS ranges live in CONCATENATED buffers — no splice, so an
-            // edited mesh drops the whole cache and it rebuilds lazily (same
-            // policy as the GL/D3D11 ports' InvalidateMesh handling).
-            if (giBlasCache.count(id))
-                destroyGiAccel();
+            // Just this mesh's BLAS: its range turns into dead space and it
+            // rebuilds lazily. Dropping the whole cache here cost every BVH of
+            // the scene per re-stitched terrain chunk (Thema 221, GiBlasStore.h).
+            giBlas.erase(id);
             // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
             // scene box without changing which objects exist → re-check the fit.
             giGridTrack.meshRebuilt = true;
@@ -6861,12 +6863,7 @@ struct D3D12RendererImpl
     // ROOT SRVs, textures/UAVs in a dedicated shader-visible descriptor heap
     // (giSrvHeap) that is bound during the GI passes and swapped back to
     // sceneSrvHeap afterwards.
-    struct GIBlasRange
-    {
-        int32_t nodeOffset = 0, nodeCount = 0;
-        int32_t triOffset  = 0, triCount  = 0;
-        bool    valid      = false;
-    };
+    using GIBlasRange = HE::GiBlasRange;
     struct GIInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
     {
         glm::mat4 invTransform;
@@ -6906,16 +6903,16 @@ struct D3D12RendererImpl
     // may be reused by SSAO in the same frame when GI fails mid-frame).
     ComPtr<ID3D12Resource> giGBufObjRing[k_frameCount]; uint8_t* giGBufObjPtr[k_frameCount]{};
 
-    // Acceleration structures: shared node/tri upload buffers (rebuilt when a
-    // new BLAS is appended), per-frame instance upload buffers (rewritten every
-    // frame — transforms move).
-    std::unordered_map<HE::UUID, GIBlasRange> giBlasCache;
-    std::vector<HE::GiBvhNode>     giNodesCpu;
-    std::vector<HE::GiBvhTriangle> giTrisCpu;
+    // Acceleration structures: shared node/tri upload buffers (persistently
+    // mapped; appended BLASes go into their tail, see uploadGiBlasArray),
+    // per-frame instance upload buffers (rewritten every frame — transforms move).
+    HE::GiBlasStore                giBlas;
     std::vector<GIInstanceGpu>     giInstancesCpu;
-    bool giBlasDirty     = false;
     int  giInstanceCount = 0;
     ComPtr<ID3D12Resource> giNodeSB, giTriSB;
+    uint8_t*               giNodePtr = nullptr;
+    uint8_t*               giTriPtr  = nullptr;
+    size_t                 giNodeCap = 0, giTriCap = 0;   // elements
     ComPtr<ID3D12Resource> giInstanceSB[k_frameCount];
     uint8_t*               giInstancePtr[k_frameCount]{};
     UINT                   giInstanceCapacity[k_frameCount]{};
@@ -7022,50 +7019,69 @@ struct D3D12RendererImpl
         return h;
     }
 
-    GIBlasRange BuildGIBlas(ContentManager* cm, const HE::UUID& meshId)
+    HE::GiBvh BuildGIBvh(ContentManager* cm, const HE::UUID& meshId)
     {
-        GIBlasRange range;
-        if (!cm) return range;
+        HE_PROFILE_SCOPE_N("D3D12::GiBuildBlas");
+        HE::GiBvh bvh;
+        if (!cm) return bvh;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
-        if (!asset || asset->indices.empty()) return range;
+        if (!asset || asset->indices.empty()) return bvh;
 
         // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
         // (position at offset 0), loose = tightly packed 3-float positions.
-        HE::GiBvh bvh;
         if (asset->cooked && !asset->interleaved.empty())
             bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
                                  asset->indices.data(), asset->indices.size());
         else if (!asset->vertices.empty())
             bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
                                  asset->indices.data(), asset->indices.size());
-        if (!bvh.valid()) return range;
+        return bvh;
+    }
 
-        range.nodeOffset = static_cast<int32_t>(giNodesCpu.size());
-        range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
-        range.triOffset  = static_cast<int32_t>(giTrisCpu.size());
-        range.triCount   = static_cast<int32_t>(bvh.triangles.size());
-        range.valid      = true;
-        giNodesCpu.insert(giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
-        giTrisCpu.insert(giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
-        giBlasDirty = true;
-        return range;
+    // Writes the store's nodes or triangles into `sb` (a persistently mapped
+    // upload buffer, `cap` elements). Between rewrites only the tail [from, n)
+    // is new, and frames in flight read only [0, from): it goes straight into
+    // the live buffer. A rewrite (compaction moved every range) or growth gets a
+    // fresh buffer with headroom and retires the old one past those frames.
+    template <class T>
+    void uploadGiBlasArray(ComPtr<ID3D12Resource>& sb, uint8_t*& ptr, size_t& cap,
+                           const std::vector<T>& src, size_t from)
+    {
+        const size_t n = src.size();
+        if (n == 0) return; // keep the old buffer bound; no instance points into it
+        if (sb && ptr && from > 0 && n <= cap)
+        {
+            std::memcpy(ptr + from * sizeof(T), src.data() + from, (n - from) * sizeof(T));
+            return;
+        }
+        const int retireN = static_cast<int>(k_frameCount) + 2;
+        if (sb) m_retiredTextures.emplace_back(std::move(sb), retireN);
+        ptr = nullptr;
+        cap = n + n / 2;
+        sb  = createUploadBuffer(static_cast<UINT64>(cap) * sizeof(T), reinterpret_cast<void**>(&ptr));
+        if (!sb || !ptr) { sb.Reset(); ptr = nullptr; cap = 0; return; }
+        std::memcpy(ptr, src.data(), n * sizeof(T));
     }
 
     void updateGiAccel(ContentManager* cm, const RenderWorld& rw, UINT fi)
     {
+        HE_PROFILE_SCOPE_N("D3D12::GiUpdateAccel");
         giInstanceCount   = 0;
         giUseHwThisFrame  = false; // decided by buildGiTlas() during the GI passes
         if (!giEnabled || !giSupported) return;
+
+        // Before any instance reads an offset: a compaction moves the ranges.
+        if (giBlas.compactIfWasteful())
+            HE_LOG_INFO(RHI, "D3D12Renderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+                        giBlas.entries(), giBlas.tris().size());
 
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
-            auto it = giBlasCache.find(id);
-            if (it == giBlasCache.end())
-                it = giBlasCache.emplace(id, BuildGIBlas(cm, id)).first;
-            return it->second;
+            if (const GIBlasRange* r = giBlas.find(id)) return *r;
+            return giBlas.add(id, BuildGIBvh(cm, id));
         };
 #if HE_D3D12_DXR
         // HW path: build a D3D12_RAYTRACING_INSTANCE_DESC array in EXACTLY the
@@ -7133,20 +7149,15 @@ struct D3D12RendererImpl
         giInstanceCount = static_cast<int>(giInstancesCpu.size());
         if (giInstanceCount == 0) return;
 
-        // Nodes/tris only when a new BLAS was appended. The GPU may still be
-        // reading the old buffers (frames in flight) — retire, don't reset.
+        // Nodes/tris only when a BLAS was appended (or a compaction moved them):
+        // the new tail, or a fresh buffer — see uploadGiBlasArray.
         const int retireN = static_cast<int>(k_frameCount) + 2;
-        if (giBlasDirty)
+        if (giBlas.dirty())
         {
-            if (giNodeSB) m_retiredTextures.emplace_back(std::move(giNodeSB), retireN);
-            if (giTriSB)  m_retiredTextures.emplace_back(std::move(giTriSB),  retireN);
-            giNodeSB = giNodesCpu.empty() ? nullptr
-                : createUploadBuffer(giNodesCpu.size() * sizeof(HE::GiBvhNode),
-                                     nullptr, giNodesCpu.data());
-            giTriSB = giTrisCpu.empty() ? nullptr
-                : createUploadBuffer(giTrisCpu.size() * sizeof(HE::GiBvhTriangle),
-                                     nullptr, giTrisCpu.data());
-            giBlasDirty = false;
+            HE_PROFILE_SCOPE_N("D3D12::GiUploadBlas");
+            uploadGiBlasArray(giNodeSB, giNodePtr, giNodeCap, giBlas.nodes(), giBlas.uploadFromNodes());
+            uploadGiBlasArray(giTriSB,  giTriPtr,  giTriCap,  giBlas.tris(),  giBlas.uploadFromTris());
+            giBlas.markUploaded();
         }
         // Instances change every frame → per-frame upload buffer, grown on
         // demand. This slot's fence was waited in Render(), so replacing the
@@ -7199,11 +7210,14 @@ struct D3D12RendererImpl
 
     void destroyGiAccel()
     {
+        HE_PROFILE_SCOPE_N("D3D12::GiDropAccel");
         // Buffers may be referenced by frames in flight (edit-time invalidation)
         // — retire them like hot-reloaded textures instead of dropping directly.
         const int retireN = static_cast<int>(k_frameCount) + 2;
         if (giNodeSB) m_retiredTextures.emplace_back(std::move(giNodeSB), retireN);
         if (giTriSB)  m_retiredTextures.emplace_back(std::move(giTriSB),  retireN);
+        giNodePtr = giTriPtr = nullptr;
+        giNodeCap = giTriCap = 0;
         for (UINT f = 0; f < k_frameCount; ++f)
         {
             if (giInstanceSB[f])
@@ -7211,12 +7225,9 @@ struct D3D12RendererImpl
             giInstancePtr[f]      = nullptr;
             giInstanceCapacity[f] = 0;
         }
-        giBlasCache.clear();
-        giNodesCpu.clear();
-        giTrisCpu.clear();
+        giBlas.clear();
         giInstancesCpu.clear();
         giInstanceCount = 0;
-        giBlasDirty     = false;
     }
 
     // Builds the GI pipelines. Called eagerly from Initialize (so the compile cost
@@ -8336,13 +8347,14 @@ struct D3D12RendererImpl
     }
 
     // One-shot BLAS build for a mesh, cached by asset id (parallel to the SW
-    // giBlasCache). Geometry source is the same data BuildGIBlas consumes:
+    // giBlas store). Geometry source is the same data BuildGIBvh consumes:
     // cooked interleaved 8-float (position at offset 0 → 32-B stride feeds
     // VertexBuffer.StrideInBytes directly, no repack) or loose tight 3-float
     // positions. Builds on the dedicated one-shot list + full GPU sync — rare
     // (once per distinct mesh), mirroring Vulkan's QueueWaitIdle approach.
     GiHwBlas buildGiHwBlas(ContentManager* cm, const HE::UUID& meshId)
     {
+        HE_PROFILE_SCOPE_N("D3D12::GiBuildHwBlas");
         GiHwBlas out;
         if (!giHwPipesReady || !cm) return out;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);

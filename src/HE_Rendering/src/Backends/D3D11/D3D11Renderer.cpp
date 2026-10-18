@@ -16,6 +16,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
+#include <HorizonRendering/GiBlasStore.h>    // GI: per-mesh BLAS cache in the concatenated arrays
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
@@ -41,6 +42,7 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D12/Vulkan)
+#include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
@@ -3097,12 +3099,7 @@ struct D3D11RendererImpl
     // concatenated into structured buffers + a flat per-frame instance array;
     // compute shadow rays + DDGI probe gather, temporal + blur as fullscreen
     // pixel passes. Mirrors OpenGLRenderer's kGi* stages 1:1.
-    struct GIBlasRange
-    {
-        int32_t nodeOffset = 0, nodeCount = 0;
-        int32_t triOffset  = 0, triCount  = 0;
-        bool    valid      = false;
-    };
+    using GIBlasRange = HE::GiBlasRange;
     struct GIInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
     {
         glm::mat4 invTransform;
@@ -3131,14 +3128,12 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>        giShadowCB, giCountCB, giTemporalCB, giAtrousCB, giProbeCB;
     ComPtr<ID3D11SamplerState>  giLinearClamp;
 
-    std::unordered_map<HE::UUID, GIBlasRange> giBlasCache;
-    std::vector<HE::GiBvhNode>     giNodesCpu;
-    std::vector<HE::GiBvhTriangle> giTrisCpu;
+    HE::GiBlasStore                giBlas;   // per-mesh BLASes, concatenated (GiBlasStore.h)
     std::vector<GIInstanceGpu>     giInstancesCpu;
-    bool giBlasDirty     = false;
     int  giInstanceCount = 0;
     ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB;
     ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV;
+    size_t giNodeCap = 0, giTriCap = 0;   // node/tri buffer capacities in elements
 
     int giShadowW = 0, giShadowH = 0;
     ComPtr<ID3D11Texture2D> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
@@ -3166,49 +3161,79 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView>  giIrrSRV, giVisSRV, giIrrPrevSRV, giVisPrevSRV;
     ComPtr<ID3D11UnorderedAccessView> giIrrUAV, giVisUAV;
 
-    GIBlasRange BuildGIBlas(ContentManager* cm, const HE::UUID& meshId)
+    HE::GiBvh BuildGIBvh(ContentManager* cm, const HE::UUID& meshId)
     {
-        GIBlasRange range;
-        if (!cm) return range;
+        HE_PROFILE_SCOPE_N("D3D11::GiBuildBlas");
+        HE::GiBvh bvh;
+        if (!cm) return bvh;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
-        if (!asset || asset->indices.empty()) return range;
+        if (!asset || asset->indices.empty()) return bvh;
 
         // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
         // (position at offset 0), loose = tightly packed 3-float positions.
-        HE::GiBvh bvh;
         if (asset->cooked && !asset->interleaved.empty())
             bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
                                  asset->indices.data(), asset->indices.size());
         else if (!asset->vertices.empty())
             bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
                                  asset->indices.data(), asset->indices.size());
-        if (!bvh.valid()) return range;
+        return bvh;
+    }
 
-        range.nodeOffset = static_cast<int32_t>(giNodesCpu.size());
-        range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
-        range.triOffset  = static_cast<int32_t>(giTrisCpu.size());
-        range.triCount   = static_cast<int32_t>(bvh.triangles.size());
-        range.valid      = true;
-        giNodesCpu.insert(giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
-        giTrisCpu.insert(giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
-        giBlasDirty = true;
-        return range;
+    // One of the store's two arrays into its structured buffer (`cap`
+    // elements, DEFAULT usage). Between rewrites only the tail [from, n) is
+    // new: UpdateSubresource of just that byte range. A rewrite (compaction
+    // moved every range) or growth makes a fresh buffer with headroom; the
+    // runtime keeps the old one alive for work already submitted.
+    template <class T>
+    void uploadGiBlasSB(ComPtr<ID3D11Buffer>& buf, ComPtr<ID3D11ShaderResourceView>& srv,
+                        size_t& cap, const std::vector<T>& src, size_t from)
+    {
+        const size_t n = src.size();
+        if (n == 0) return; // no instance points into it
+        if (!buf || !srv || from == 0 || n > cap)
+        {
+            buf.Reset(); srv.Reset();
+            cap = n + n / 2;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth           = static_cast<UINT>(cap * sizeof(T));
+            bd.Usage               = D3D11_USAGE_DEFAULT;
+            bd.BindFlags           = D3D11_BIND_SHADER_RESOURCE;
+            bd.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            bd.StructureByteStride = sizeof(T);
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &buf))) { buf.Reset(); cap = 0; return; }
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Format              = DXGI_FORMAT_UNKNOWN; // required for structured SRVs
+            sd.ViewDimension       = D3D11_SRV_DIMENSION_BUFFER;
+            sd.Buffer.FirstElement = 0;
+            sd.Buffer.NumElements  = static_cast<UINT>(cap);
+            if (FAILED(device->CreateShaderResourceView(buf.Get(), &sd, &srv))) { buf.Reset(); cap = 0; return; }
+            from = 0;
+        }
+        const D3D11_BOX box{ static_cast<UINT>(from * sizeof(T)), 0, 0,
+                             static_cast<UINT>(n * sizeof(T)), 1, 1 };
+        if (box.right > box.left)
+            context->UpdateSubresource(buf.Get(), 0, &box, src.data() + from, 0, 0);
     }
 
     void updateGiAccel(ContentManager* cm, const RenderWorld& rw)
     {
+        HE_PROFILE_SCOPE_N("D3D11::GiUpdateAccel");
         giInstanceCount = 0;
         if (!giEnabled || !giSupported) return;
+
+        // Before any instance reads an offset: a compaction moves the ranges.
+        if (giBlas.compactIfWasteful())
+            HE_LOG_INFO(RHI, "D3D11Renderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+                        giBlas.entries(), giBlas.tris().size());
 
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
-            auto it = giBlasCache.find(id);
-            if (it == giBlasCache.end())
-                it = giBlasCache.emplace(id, BuildGIBlas(cm, id)).first;
-            return it->second;
+            if (const GIBlasRange* r = giBlas.find(id)) return *r;
+            return giBlas.add(id, BuildGIBvh(cm, id));
         };
         // HE_GI_LOG_INSTANCES=N: same one-shot instance-colour log as Vulkan's.
         static const int s_giLogAt = [] {
@@ -3262,15 +3287,15 @@ struct D3D11RendererImpl
             sd.Buffer.NumElements  = count;
             device->CreateShaderResourceView(buf.Get(), &sd, &srv);
         };
-        // Nodes/tris only when a new BLAS was appended, instances every frame
-        // (transforms move; counts are small → IMMUTABLE re-create is fine).
-        if (giBlasDirty)
+        // Nodes/tris only when a BLAS was appended (or a compaction moved them),
+        // see uploadGiBlasSB; instances every frame (transforms move; counts are
+        // small → IMMUTABLE re-create is fine).
+        if (giBlas.dirty())
         {
-            makeSB(giNodesCpu.data(), static_cast<UINT>(giNodesCpu.size()),
-                   sizeof(HE::GiBvhNode), giNodeSB, giNodeSRV);
-            makeSB(giTrisCpu.data(), static_cast<UINT>(giTrisCpu.size()),
-                   sizeof(HE::GiBvhTriangle), giTriSB, giTriSRV);
-            giBlasDirty = false;
+            HE_PROFILE_SCOPE_N("D3D11::GiUploadBlas");
+            uploadGiBlasSB(giNodeSB, giNodeSRV, giNodeCap, giBlas.nodes(), giBlas.uploadFromNodes());
+            uploadGiBlasSB(giTriSB,  giTriSRV,  giTriCap,  giBlas.tris(),  giBlas.uploadFromTris());
+            giBlas.markUploaded();
         }
         makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
                sizeof(GIInstanceGpu), giInstanceSB, giInstanceSRV);
@@ -3279,14 +3304,13 @@ struct D3D11RendererImpl
 
     void destroyGiAccel()
     {
+        HE_PROFILE_SCOPE_N("D3D11::GiDropAccel");
         giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset();
         giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset();
-        giBlasCache.clear();
-        giNodesCpu.clear();
-        giTrisCpu.clear();
+        giNodeCap = giTriCap = 0;
+        giBlas.clear();
         giInstancesCpu.clear();
         giInstanceCount = 0;
-        giBlasDirty     = false;
     }
 
     // Builds the GI pipelines. Called eagerly from Initialize (so the compile cost
@@ -5354,11 +5378,10 @@ struct D3D11RendererImpl
         {
             meshCache.erase(id);
             skeletalMeshCache.erase(id);
-            // GI BLAS ranges live in CONCATENATED buffers — no splice, so an
-            // edited mesh drops the whole cache and it rebuilds lazily (same
-            // policy as the GL port's InvalidateMesh).
-            if (giBlasCache.count(id))
-                destroyGiAccel();
+            // Just this mesh's BLAS: its range turns into dead space and it
+            // rebuilds lazily. Dropping the whole cache here cost every BVH of
+            // the scene per re-stitched terrain chunk (Thema 221, GiBlasStore.h).
+            giBlas.erase(id);
         }
         // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
         // box without changing which objects exist → re-check the probe grid fit.

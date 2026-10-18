@@ -20,6 +20,7 @@
 #include <memory>
 #include <functional>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <HorizonRendering/ClipSpace.h>
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D11/D3D12)
@@ -7738,6 +7739,7 @@ bool VulkanRenderer::resolveMaterialOverride(const HE::UUID& materialId, const M
 void VulkanRenderer::processPendingInvalidations()
 {
     if (m_pendingMatInval.empty() && m_pendingMeshInval.empty() && m_pendingTexInval.empty()) return;
+    HE_PROFILE_SCOPE_N("Vulkan::DrainInvalidations");
     // Editor-only path; a full device idle keeps the frees below trivially safe (no in-flight
     // frame references the dropped resources). The idle is a stall, but invalidation is rare
     // outside a terrain-sculpt drag — a documented follow-up (D3D12 uses a per-frame retire list).
@@ -7773,16 +7775,10 @@ void VulkanRenderer::processPendingInvalidations()
             if (m.albedoMem)  vkFreeMemory(m_device, m.albedoMem, nullptr);
             m_meshCache.erase(it);
         }
-        // GI BLAS ranges live in concatenated arrays — no single-mesh splice, an
-        // edited mesh drops the whole cache (rebuilds lazily; same convention
-        // as the GL/Metal-SW ports).
-        if (m_giBlasCache.count(id))
-        {
-            m_giBlasCache.clear();
-            m_giNodesCpu.clear();
-            m_giTrisCpu.clear();
-            m_giBlasDirty = true;
-        }
+        // Just this mesh's SW BLAS: its range turns into dead space and it
+        // rebuilds lazily. Dropping the whole cache here cost every BVH of the
+        // scene per re-stitched terrain chunk (Thema 221, GiBlasStore.h).
+        m_giBlas.erase(id);
         // HW BLAS is per-mesh (no concatenated arrays) — drop just this one;
         // it rebuilds lazily on the next updateGiAccel. Device is idle here.
         if (auto it = m_giHwBlasCache.find(id); it != m_giHwBlasCache.end())
@@ -10349,35 +10345,27 @@ void VulkanRenderer::SetSSRSettings(const SSRSettings& s)
 // VK-B/C — until then this is inert (GI-off rendering byte-identical) and
 // GetCapabilities keeps supportsGlobalIllumination = false.
 
-VulkanRenderer::GIBlasRange VulkanRenderer::BuildGIBlas(const HE::UUID& meshId)
+HE::GiBvh VulkanRenderer::BuildGIBvh(const HE::UUID& meshId)
 {
-    GIBlasRange range;
-    if (!m_contentManager) return range;
+    HE_PROFILE_SCOPE_N("Vulkan::GiBuildBlas");
+    HE::GiBvh bvh;
+    if (!m_contentManager) return bvh;
     const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
-    if (!asset || asset->indices.empty()) return range;
+    if (!asset || asset->indices.empty()) return bvh;
 
     // Same two layouts the mesh upload path consumes: cooked interleaved
     // 8-float (position at offset 0) or loose tightly-packed 3-float positions.
-    HE::GiBvh bvh;
     if (asset->cooked && !asset->interleaved.empty())
         bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
                              asset->indices.data(), asset->indices.size());
     else if (!asset->vertices.empty())
         bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
                              asset->indices.data(), asset->indices.size());
-    if (!bvh.valid()) return range;
-
-    range.nodeOffset = static_cast<int32_t>(m_giNodesCpu.size());
-    range.triOffset  = static_cast<int32_t>(m_giTrisCpu.size());
-    range.valid      = true;
-    m_giNodesCpu.insert(m_giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
-    m_giTrisCpu.insert(m_giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
-    m_giBlasDirty = true;
-    return range;
+    return bvh;
 }
 
 bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
-                                    VkBufferUsageFlags usage)
+                                    VkBufferUsageFlags usage, VkDeviceSize from, VkDeviceSize reserve)
 {
     if (size == 0) return false;
     if (b.size < size)
@@ -10386,9 +10374,11 @@ bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize 
         if (b.buf)    { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
         if (b.mem)    { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
         b.size = 0;
+        from   = 0;                      // a fresh buffer holds nothing yet
+        const VkDeviceSize alloc = std::max(size, reserve);
 
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size  = size;
+        bci.size  = alloc;
         bci.usage = usage;
         if (vkCreateBuffer(m_device, &bci, nullptr, &b.buf) != VK_SUCCESS) return false;
         VkMemoryRequirements req{};
@@ -10409,24 +10399,32 @@ bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize 
         if (vkAllocateMemory(m_device, &mai, nullptr, &b.mem) != VK_SUCCESS)
         { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; return false; }
         vkBindBufferMemory(m_device, b.buf, b.mem, 0);
-        if (vkMapMemory(m_device, b.mem, 0, size, 0, &b.mapped) != VK_SUCCESS)
+        if (vkMapMemory(m_device, b.mem, 0, alloc, 0, &b.mapped) != VK_SUCCESS)
         {
             vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE;
             vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE;
             return false;
         }
-        b.size = size;
+        b.size = alloc;
     }
-    std::memcpy(b.mapped, data, static_cast<size_t>(size));
+    if (from < size)
+        std::memcpy(static_cast<uint8_t*>(b.mapped) + from, static_cast<const uint8_t*>(data) + from,
+                    static_cast<size_t>(size - from));
     return true;
 }
 
 void VulkanRenderer::updateGiAccel()
 {
+    HE_PROFILE_SCOPE_N("Vulkan::GiUpdateAccel");
     m_giInstanceCount = 0;
     m_giHwInstOk      = false;
     m_giHwInstancesCpu.clear();
     if (!m_giEnabled) return;
+
+    // Before any instance reads an offset: a compaction moves the ranges.
+    if (m_giBlas.compactIfWasteful())
+        HE_LOG_INFO(RHI, "VulkanRenderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+                    m_giBlas.entries(), m_giBlas.tris().size());
 
     // Same caster filter as the shadow pass / the other backends' TLAS builds:
     // castsShadow only, UNculled (rays go in arbitrary directions).
@@ -10434,10 +10432,8 @@ void VulkanRenderer::updateGiAccel()
     instances.reserve(m_renderWorld.objects.size());
     auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
     {
-        auto it = m_giBlasCache.find(id);
-        if (it == m_giBlasCache.end())
-            it = m_giBlasCache.emplace(id, BuildGIBlas(id)).first;
-        return it->second;
+        if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
+        return m_giBlas.add(id, BuildGIBvh(id));
     };
     // HW path: build a VkAccelerationStructureInstanceKHR array in EXACTLY the
     // giInsts order (the kernels index giInsts by InstanceId). Any mesh whose
@@ -10512,18 +10508,28 @@ void VulkanRenderer::updateGiAccel()
     }
     if (instances.empty()) return;
 
-    if (m_giBlasDirty && !m_giNodesCpu.empty())
+    if (m_giBlas.dirty() && !m_giBlas.nodes().empty())
     {
-        // Node/tri concatenation only ever grows (new mesh joined). The buffers
-        // may still be read by an in-flight frame — but the appended layout
-        // keeps all existing offsets valid, and VK-A has no readers yet anyway;
-        // VK-B revisits this with a proper retire if growth-in-use shows up.
-        const bool nodesOk = uploadGiBuffer(m_giNodeBuf, m_giNodesCpu.data(),
-                                            m_giNodesCpu.size() * sizeof(HE::GiBvhNode));
-        const bool trisOk  = uploadGiBuffer(m_giTriBuf, m_giTrisCpu.data(),
-                                            m_giTrisCpu.size() * sizeof(HE::GiBvhTriangle));
+        HE_PROFILE_SCOPE_N("Vulkan::GiUploadBlas");
+        // Between rewrites the store only appends: frames in flight read the
+        // unchanged [0, from) while the new tail goes in behind it. A rewrite
+        // (compaction moved every range) or a grown buffer would pull bytes out
+        // from under them, so those (rare) cases wait for the device first.
+        const VkDeviceSize nodeBytes = m_giBlas.nodes().size() * sizeof(HE::GiBvhNode);
+        const VkDeviceSize triBytes  = m_giBlas.tris().size()  * sizeof(HE::GiBvhTriangle);
+        const VkDeviceSize nodeFrom  = m_giBlas.uploadFromNodes() * sizeof(HE::GiBvhNode);
+        const VkDeviceSize triFrom   = m_giBlas.uploadFromTris()  * sizeof(HE::GiBvhTriangle);
+        if ((m_giNodeBuf.buf || m_giTriBuf.buf) &&
+            (nodeFrom == 0 || triFrom == 0 || nodeBytes > m_giNodeBuf.size || triBytes > m_giTriBuf.size))
+            vkDeviceWaitIdle(m_device);
+        const bool nodesOk = uploadGiBuffer(m_giNodeBuf, m_giBlas.nodes().data(), nodeBytes,
+                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, nodeFrom,
+                                            nodeBytes + nodeBytes / 2);
+        const bool trisOk  = uploadGiBuffer(m_giTriBuf, m_giBlas.tris().data(), triBytes,
+                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, triFrom,
+                                            triBytes + triBytes / 2);
         if (!nodesOk || !trisOk) return;
-        m_giBlasDirty = false;
+        m_giBlas.markUploaded();
     }
     // Instances change every frame while earlier frames are in flight — ring
     // slot per in-flight frame, same convention as the bones UBO ring.
@@ -10561,11 +10567,8 @@ void VulkanRenderer::destroyGiAccel()
     destroy(m_giNodeBuf);
     destroy(m_giTriBuf);
     for (GiBuffer& b : m_giInstanceBuf) destroy(b);
-    m_giBlasCache.clear();
-    m_giNodesCpu.clear();
-    m_giTrisCpu.clear();
+    m_giBlas.clear();
     m_giInstanceCount = 0;
-    m_giBlasDirty     = false;
 
     // HW-RT acceleration structures (BLAS cache + per-frame TLAS ring +
     // instance upload ring). Callers guarantee the GPU is idle (Shutdown waits).
@@ -10634,11 +10637,12 @@ void VulkanRenderer::destroyGiHwBlas(GiHwBlas& b)
 // address input buffer, query build sizes, build on a one-time command buffer
 // (QueueWaitIdle — BLAS builds are rare: once per distinct mesh), then free
 // input + scratch (a built BLAS references neither). Geometry source is the
-// same data BuildGIBlas consumes: cooked interleaved 8-float (position at
+// same data BuildGIBvh consumes: cooked interleaved 8-float (position at
 // offset 0 → stride 32 B feeds vertexStride directly, no repack) or loose
 // tight 3-float positions.
 VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
 {
+    HE_PROFILE_SCOPE_N("Vulkan::GiBuildHwBlas");
     GiHwBlas out;
     if (!m_giHwRt || !m_contentManager) return out;
     const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
