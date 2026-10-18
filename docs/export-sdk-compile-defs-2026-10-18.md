@@ -660,3 +660,42 @@ body or move behind a macro is open. They are needed for parity with the interpr
   `makeBuildSpec` still names the exe HorizonGame, the swap renames. 2. Step 12: HorizonCodeGen against `HorizonEngine::HorizonEngine`
   (`HcCodegen.cpp` generateCMakeLists ~4374 uses `HorizonEngine::Scene`, now a forward; pass HE_BUILD_PROFILE), shipped into
   `HorizonEngine/` (game loads it from `data/` today, `GameApplication.cpp` compiledClasses().load). 3. Windows run of an export on NN-WS03.
+
+## Handoff (step 11: export builds from the SDK with profile and cache)
+
+- **Topic / step:** Thema 211, step 11 of 13. Branch claude/export-sdk-compile-horizoncode-codegen: 59c4b01d (cache, profile field,
+  PORTABLE rpath, MCP, help, tests), dfad4bd0 (OBJECT_DEPENDS fix) + this doc.
+- **Profile:** `ExportSdk::sdkProfileFor(devTools)` (`ExportSdkBuild.h`): devTools on = `dev` lib set, off = `release`. With the
+  seeded profiles that is exactly Development->dev, Shipping->release (`profileFromJson` defaults devTools from the name), so no
+  name-based mapping was added. Only the game is compiled (template: main, GameApplication, EmbeddedPakKey, CompiledBuildConfig +
+  the header), against `lib/<profile>` with that set's definitions (Targets-<profile>.cmake).
+- **Cache** (`ExportSdkBuild.cpp:141-266`, used at `ExportDialogPanel.cpp:557-640`): work dir per project + profile in
+  `GlobalState::userDataDir()/SdkGameBuilds/<project>-<profile>` (beside EngineContentCache; TMPDIR only when there is no user dir;
+  macOS purges TMPDIR, so the old `$TMPDIR/HorizonSdkGame` was no cache). `cache-key.txt` = one line per input: sdk root, package
+  version, header stamp of the set, SHA-256 over name/size/mtime of the set's files, profile, toolchain (`cmake <ver>, <compilerId>`
+  from the editor's ToolchainProbe, "unknown" without one), every -D. Miss -> the log names the first differing input, the build
+  tree is removed, key written. Hit -> tree reused, only what changed builds. Failed build -> key forgotten; cancel keeps it. Export
+  settings reach the binary only via the defines and the header, whose content the build tracks (see the fix below).
+- **Rpath:** `horizon_add_game(... PORTABLE)` / template `-DHE_GAME_PORTABLE=ON` = `BUILD_WITH_INSTALL_RPATH ON`; `makeBuildSpec`
+  passes it, so the game carries only `@executable_path/HorizonEngine;@executable_path` (`$ORIGIN` on Linux). Opt-in: the template
+  run from its own build dir (sdk_example) still needs the SDK rpath.
+- **Checkbox persisted:** `ExportProfile::compileGameFromSdk` (`ProjectManager.h`), json key `compileGameFromSdk` (default false),
+  dialog load/save, MCP `project_export` argument + result, profile listing in McpToolsSettings. Help text extended (audit 1206/1206).
+- **Bug found and fixed (dfad4bd0):** a rewritten `HEGameBuildConfig.h` did NOT recompile anything in a kept tree (per-source include
+  dir, invisible to Make's dependency scan) -> the old config/key stayed compiled in. Since step 8 the work dir was kept, so this was
+  live before the cache. `OBJECT_DEPENDS` in `cmake/sdk/HorizonEngineGame.cmake:61` and `src/HE_Game/CMakeLists.txt:123`. Lesson 459.
+- **Verified (Mac, dev tree out/build/release, release tree out/build/release-profile, SDK out/deploy/EngineSDK, both sets stamp
+  59151f..):** `test_export_sdk_build` 10 cases / 86 assertions (key per input, miss names toolchain/headers/libs, hit keeps tree,
+  forget); `test_export_profiles` 50/50 (round trip); `test_mcp_tools_build` green. Gated e2e: dev and release each: first build miss,
+  rewrite header, second build hit 3.6-3.9 s (vs ~35 s) and its build.log compiles `CompiledBuildConfig.cpp` and not
+  `GameApplication.cpp`; `otool -l` has no absolute LC_RPATH. Over a real TodoApp export (`HE_EXPORT_SDK_E2E_EXPORT=<copy>
+  HE_EXPORT_SDK_E2E_EXE=TodoApp`, dev): swap, game 30 frames hidden, "project configuration compiled in", profile 'dev', no Homebrew
+  links (23/23). HorizonEditor + all targets build. Full ctest (-j4, private HOME, HE_CONFIG_DIR unset): 311/311, rc 0, runtime_size_app_* skipped.
+- **Not verified:** a GUI click-through (dialog progress lines "Build cache hit/miss" are only seen in code + e2e equivalents); the MCP
+  path live; Windows/Linux (CI compiles only; `BUILD_WITH_INSTALL_RPATH` on Linux links against libHorizonEngine.so whose SDL3 dep
+  must be found at link time, SDL3 is on the link line directly). Release game not started (lesson 458).
+- **Traps:** the SDK install in out/deploy was older than HEAD (1d53f47f changed ProjectExporter.h after it): reinstall BOTH sets
+  (`--target HorizonSDK` in both trees) or the package refuses the stale set. ctest/he_tests from the build dir only.
+- **Next steps:** 1. Step 12: HorizonCodeGen against `HorizonEngine::HorizonEngine` + `HE_BUILD_PROFILE`, into `HorizonEngine/`;
+  give it the same cache key/work-dir helpers (`buildCacheKey` takes any DylibBuildSpec). 2. Step 13: GUI export twice per profile,
+  second one logs "Build cache hit"; `build_profile_strings.py --profile release` on the swapped Shipping game.
