@@ -438,7 +438,7 @@ body or move behind a macro is open. They are needed for parity with the interpr
 
 ## Handoff (step 6: engine API header for generated code)
 
-- **Topic / step:** Thema 211, step 6 of 9. Branch claude/export-sdk-compile-horizoncode-codegen (commit: see the Hive post).
+- **Topic / step:** Thema 211, step 6 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, code e790638d (+ this sha line).
 - **Done:** `src/HE_Scene/include/HorizonEngine/HorizonEngineApi.h` (`#include <HorizonEngine/HorizonEngineApi.h>`, installed with
   the SDK's flat include/). No second function list: it includes `EngineApi.h` (the functions, named by `ApiFn::cppCall`) and adds
   `HE::api::Scope` (the Ctx of one compiled instance + its creator push), `HE::api::pin::type<P>` / `toPin` / `toPinArray` (pin shapes,
