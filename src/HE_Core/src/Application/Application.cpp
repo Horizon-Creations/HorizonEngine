@@ -679,6 +679,73 @@ namespace HE
 				}
 			}
 
+			// ── HE_PERF_KEY_HOLD=<key name>: a held key (perf audit) ────────
+			// The keyboard half of the synthetic load: from frame 50 on, the key
+			// goes down once and then repeats every frame, the event stream a
+			// held key delivers (macOS repeats at up to ~30 Hz). Only ImGui and
+			// Input see it; SDL's own keyboard state is not touched by a pushed
+			// event. Read once; off unless set. HE_PERF_KEY_RMB=1 first moves
+			// the pointer to the window's centre (frame 45) and presses the right
+			// button there (frame 49), so a W lands in the editor's fly-look the
+			// way a hand on mouse and keyboard delivers it.
+			{
+				static const SDL_Scancode kHeldKey = []
+				{
+					const char* v = std::getenv("HE_PERF_KEY_HOLD");
+					return (v && *v) ? SDL_GetScancodeFromName(v) : SDL_SCANCODE_UNKNOWN;
+				}();
+				static const bool kHoldRmb = []
+				{
+					const char* v = std::getenv("HE_PERF_KEY_RMB");
+					return v && std::atoi(v) > 0;
+				}();
+				SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr;
+				if (kHoldRmb && sw && (m_frameIndex == 45 || m_frameIndex == 49))
+				{
+					int w = 0, h = 0;
+					SDL_GetWindowSize(sw, &w, &h);
+					SDL_Event e{};
+					if (m_frameIndex == 45)
+					{
+						e.type            = SDL_EVENT_MOUSE_MOTION;
+						e.motion.windowID = SDL_GetWindowID(sw);
+						e.motion.which    = 1;
+						e.motion.x        = 0.5f * static_cast<float>(w);
+						e.motion.y        = 0.45f * static_cast<float>(h);
+					}
+					else
+					{
+						e.type             = SDL_EVENT_MOUSE_BUTTON_DOWN;
+						e.button.windowID  = SDL_GetWindowID(sw);
+						e.button.which     = 1;
+						e.button.button    = SDL_BUTTON_RIGHT;
+						e.button.down      = true;
+						e.button.clicks    = 1;
+						e.button.x         = 0.5f * static_cast<float>(w);
+						e.button.y         = 0.45f * static_cast<float>(h);
+						HE_LOG_INFO(Core, "HE_PERF_KEY_RMB: right button down at %d,%d", w / 2, h * 45 / 100);
+					}
+					SDL_PushEvent(&e);
+				}
+				if (kHeldKey != SDL_SCANCODE_UNKNOWN && sw && m_frameIndex >= 50)
+				{
+					static bool s_down = false;
+					SDL_Event e{};
+					e.type         = SDL_EVENT_KEY_DOWN;
+					e.key.windowID = SDL_GetWindowID(sw);
+					e.key.scancode = kHeldKey;
+					e.key.key      = SDL_GetKeyFromScancode(kHeldKey, SDL_KMOD_NONE, false);
+					e.key.down     = true;
+					e.key.repeat   = s_down;
+					if (!s_down)
+						HE_LOG_INFO(Core, "HE_PERF_KEY_HOLD: holding %s from frame %llu",
+						            SDL_GetScancodeName(kHeldKey),
+						            static_cast<unsigned long long>(m_frameIndex));
+					s_down = true;
+					SDL_PushEvent(&e);
+				}
+			}
+
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");
 				m_window->PollEvents();
