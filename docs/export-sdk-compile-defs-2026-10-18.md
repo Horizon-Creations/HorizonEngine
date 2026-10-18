@@ -720,6 +720,8 @@ body or move behind a macro is open. They are needed for parity with the interpr
   libcurl's libssl/libcrypto through HorizonNet; libHorizonCore.so, the old reference, never did. Now only direct NEEDED
   (readelf -d, objdump -p, closure as fallback) of the wanted sonames are copied. Expected: about 37.0 MB without python, threshold
   unchanged at 42. `runtime_size.py`: bucket `engine` (HorizonEngine), shaders also under `HorizonEngine/Shaders/`.
+  Runtime flavours 39170502233 had app-advanced (35.5 > 31) and app-basic (34.5 > 30) red for the same 5.3 MB; without it they
+  are 30.2 and 29.2, so the fix covers them too, with only ~0.8 MB headroom.
 - **Found in passing:** `Editor/Game` (editor POST_BUILD `copy_directory`, which never deletes) kept the four flat libs from before
   step 10 in an upgraded tree, so exports shipped them. It is now emptied before the copy (`src/HE_Editor/CMakeLists.txt:611`).
 - **Verified (Mac, out/build/release, dev):** the .def mechanics in a throwaway CMake project (file(GENERATE) of TARGET_OBJECTS,
@@ -731,5 +733,6 @@ body or move behind a macro is open. They are needed for parity with the interpr
   still resolve every Scene symbol on Windows, Linux without libcrypto at about 37 MB. The Windows code path never ran on the Mac.
 - **Risk:** if the Scene def count + Core/Net/Rendering dllexports still pass 65535, the next step is filtering COMDAT
   inline/template symbols out of the def (consumers instantiate their own); the logged count tells how close it is.
+  The .def step has fixed paths, so a multi-config generator (Visual Studio) is not supported; CI and NN-WS03 use Ninja.
 - **Next steps:** 1. Read the "HorizonEngine.def: N symbols" line and runtime_size in 39172175638. 2. Step 13 (HorizonCodeGen against
   the bundle).
