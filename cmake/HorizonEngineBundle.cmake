@@ -12,7 +12,7 @@
 # of Scene/Net/Rendering reference Core's symbols as dllimport; inside one DLL
 # the linker resolves those locally (LNK4217, a warning), and Scene's symbols,
 # which carry no dllexport, are exported the way HorizonScene exports them
-# (WINDOWS_EXPORT_ALL_SYMBOLS).
+# (export-all over Scene's objects, through a generated .def; see below).
 #
 # What the four link (lz4, Jolt, the backend static libraries, frameworks, ...)
 # the bundle links, read from the targets below. Included from the root
@@ -187,11 +187,38 @@ endforeach()
 
 set_target_properties(HorizonEngine PROPERTIES
     LINKER_LANGUAGE CXX
-    WINDOWS_EXPORT_ALL_SYMBOLS ON
     RUNTIME_OUTPUT_DIRECTORY "${HE_ENGINE_BUNDLE_OUT}"
     LIBRARY_OUTPUT_DIRECTORY "${HE_ENGINE_BUNDLE_OUT}"
     ARCHIVE_OUTPUT_DIRECTORY "${HE_ENGINE_BUNDLE_OUT}")
-if(APPLE)
+if(WIN32)
+    # Export-all over Scene's objects only, NOT WINDOWS_EXPORT_ALL_SYMBOLS on the
+    # bundle. Over every object (the four plus the absorbed backends and shader
+    # compilers) it put each external symbol of the engine, inline and template
+    # instantiations included, into HorizonEngine.lib, one import-library member
+    # per symbol, and the import library holds 65535: LNK1189 (CI 39168157588).
+    # Of the four only HorizonScene relies on export-all; Core, Net and Rendering
+    # export through HE_*_BUILD_DLL dllexport, which their objects carry into the
+    # bundle unchanged. So the bundle exports the union the four export one by
+    # one, each of which links under the limit. Linking the four as static
+    # archives instead does not help: export-all never walks archive members,
+    # and the linker would drop every Scene object nothing in the link uses.
+    # Must stay OFF: with it ON CMake folds a .def source into its own all-
+    # objects .def, which is the failure again.
+    set_target_properties(HorizonEngine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+    set(_he_def_dir "${CMAKE_BINARY_DIR}/CMakeFiles/HorizonEngine.def.dir")
+    set(_he_def_objs "${_he_def_dir}/scene_objects.txt")
+    set(_he_def "${_he_def_dir}/HorizonEngine.def")
+    file(GENERATE OUTPUT "${_he_def_objs}"
+         CONTENT "$<JOIN:$<TARGET_OBJECTS:HorizonScene>,\n>\n")
+    add_custom_command(OUTPUT "${_he_def}"
+        COMMAND "${CMAKE_COMMAND}" "-DOBJS=${_he_def_objs}" "-DDEF=${_he_def}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/HorizonEngineBundleDef.cmake"
+        DEPENDS "${_he_def_objs}" "$<TARGET_OBJECTS:HorizonScene>"
+                "${CMAKE_SOURCE_DIR}/cmake/HorizonEngineBundleDef.cmake"
+        COMMENT "Exports of HorizonEngine.dll (HorizonScene's objects)"
+        VERBATIM)
+    target_sources(HorizonEngine PRIVATE "${_he_def}")
+elseif(APPLE)
     # The siblings in HorizonEngine/ (SDL3, the bundled deps) are found through
     # the loader's own directory; the game adds @executable_path/HorizonEngine.
     set_target_properties(HorizonEngine PROPERTIES
