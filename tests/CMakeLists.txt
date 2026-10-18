@@ -1143,6 +1143,25 @@ target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
 
+# ─── Engine API for generated code (Thema 211 step 6) ─────────────────────────
+# hc_codegen spells every HE::api registry row as a direct C++ call through
+# HorizonEngine/HorizonEngineApi.h; the file is compiled INTO he_tests, so a row
+# whose cppCall/cppForm/params do not match its function fails this build, and
+# test_engine_api_direct.cpp compares each call with the row's invoke. Depends on
+# HorizonScene as well: the rows live there, and a changed registry must
+# regenerate even if the hc_codegen binary itself comes out unchanged.
+# Not named test_*, so the ctest loop does not register it.
+set(HE_API_DIRECT_SRC ${CMAKE_CURRENT_BINARY_DIR}/engine_api_direct/engine_api_direct_gen.cpp)
+add_custom_command(OUTPUT ${HE_API_DIRECT_SRC}
+    COMMAND hc_codegen --api-direct ${HE_API_DIRECT_SRC}
+    DEPENDS hc_codegen HorizonScene
+    COMMENT "hc_codegen: generating the engine-API direct-call parity source")
+target_sources(he_tests PRIVATE ${HE_API_DIRECT_SRC}
+    test_engine_api_direct.cpp test_engine_api_header.cpp)
+# engine_api_direct.h, which the generated file (in the build tree) includes.
+set_source_files_properties(${HE_API_DIRECT_SRC} PROPERTIES
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Build profile probes (Thema 211 step 2): he_tests has one profile, so the same
 # probe source is compiled once per profile into its own static library and
 # test_build_profile.cpp compares what each copy saw. "default" deliberately

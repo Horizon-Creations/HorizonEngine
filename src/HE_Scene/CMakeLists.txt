@@ -76,6 +76,7 @@ add_library(HorizonScene SHARED
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
+    src/EngineApiCpp.cpp
     src/PlayerSettings.cpp
     src/HcCodegen.cpp
     src/HiddenShell.cpp

@@ -3,6 +3,7 @@
 #include <Types/TypeRegistry.h>   // enum defs at generation time
 #include <cstdint>
 #include "HorizonScene/EngineApi.h"
+#include "HorizonScene/EngineApiCpp.h"   // hook signatures, shared with the API parity source
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -965,32 +966,15 @@ using EngineEvent = HorizonCode::EngineEventDesc;
 const EngineEvent* engineEventFor(const std::string& name)
 { return HorizonCode::findEngineEvent(name); }
 
-// The C++ type of a hook's argument. It has to match CompiledInstance's hook
-// signatures exactly, or the generated `override` overrides nothing and the
-// build stops there. Vec2 (OnDragMoved) and Color (OnColorChanged) take the
-// glm types by const reference, like the hooks do. One function for the
-// declaration and the definition, so the two cannot drift.
-const char* hookArgType(PT arg)
-{
-    return arg == PT::String ? "const std::string&"
-         : arg == PT::Float  ? "float"
-         : arg == PT::Bool   ? "bool"
-         : arg == PT::Vec2   ? "const glm::vec2&"
-         : arg == PT::Color  ? "const glm::vec4&" : "int";
-}
-
-// The hook's parameter list, and how the typed argument reaches rs.eventArg.
+// The C++ type of a hook's argument and the hook's parameter list. They have
+// to match CompiledInstance's hook signatures exactly, or the generated
+// `override` overrides nothing and the build stops there. Both live in
+// EngineApiCpp so that test_engine_api_direct.cpp overrides every engine event
+// with the very parameter list written here, and a hook that disagrees with
+// engineEvents() fails that build instead of a user's export.
+const char* hookArgType(PT arg) { return HE::api::cpp::hookArgType(arg); }
 std::string hookParams(const EngineEvent& e, bool argUsed)
-{
-    std::string p;
-    if (e.elem) p = "int elem";
-    if (e.arg != PT::Exec)
-    {
-        if (!p.empty()) p += ", ";
-        p += std::string(hookArgType(e.arg)) + (argUsed ? " arg" : "");
-    }
-    return p;
-}
+{ return HE::api::cpp::hookParams(e, argUsed); }
 
 // ── the per-class emitter ─────────────────────────────────────────────────────
 class ClassEmitter

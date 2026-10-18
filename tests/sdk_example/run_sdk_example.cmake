@@ -86,7 +86,7 @@ endif()
 list(GET _probe_exe 0 _probe_exe)
 execute_process(COMMAND "${_probe_exe}" RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _out)
 message(STATUS "sdk_probe: ${_out}")
-if(NOT _rc EQUAL 0 OR NOT _out MATCHES "profile=${HE_PROFILE} " OR NOT _out MATCHES "core=1 net=1 scene=1 rendering=1")
+if(NOT _rc EQUAL 0 OR NOT _out MATCHES "profile=${HE_PROFILE} " OR NOT _out MATCHES "core=1 net=1 scene=1 rendering=1 api=1")
     message(FATAL_ERROR "sdk_probe failed (${_rc}):\n${_out}")
 endif()
 

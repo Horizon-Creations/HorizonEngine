@@ -5,12 +5,16 @@
 //   --require-all                            a graph that cannot be compiled is
 //                                            an error, not an interpreted
 //                                            fallback (the export's Stop mode)
+//   hc_codegen --api-direct FILE             write the engine-API parity source:
+//                                            every registry row called directly
+//                                            (HE::api::cpp::directCallsSource)
 //
 // Used at build time to compile the test fixtures into he_tests, and handy for
 // eyeballing emission during development. The editor export worker calls the
 // HE::hccg library in-process instead.
 
 #include <HorizonScene/HcCodegen.h>
+#include <HorizonScene/EngineApiCpp.h>
 #include "fixtures.h"   // tests/fixtures/hcodegen (target include dir)
 #include <filesystem>
 #include <fstream>
@@ -50,6 +54,16 @@ int main(int argc, char** argv)
         if (a == "--fixtures") fixtures = true;
         else if (a == "--require-all") requireAll = true;
         else if (a == "--out" && i + 1 < argc) outDir = argv[++i];
+        else if (a == "--api-direct" && i + 1 < argc)
+        {
+            // A mode of its own: no graphs, just the registry spelled as calls.
+            const fs::path file = argv[++i];
+            std::error_code ec;
+            if (file.has_parent_path()) fs::create_directories(file.parent_path(), ec);
+            if (!writeIfChanged(file, HE::api::cpp::directCallsSource()))
+            { std::fprintf(stderr, "hc_codegen: cannot write %s\n", file.string().c_str()); return 1; }
+            return 0;
+        }
         else inputs.push_back(a);
     }
     if (outDir.empty() || (!fixtures && inputs.empty()))

@@ -1308,6 +1308,12 @@ void GameApplication::OnInit()
 			                        &contentManager(), self);
 			return fn->invoke(c, args);
 		};
+		// Compiled HorizonCode calling HE::api directly gets the Ctx the
+		// dispatcher above would have built, from the same builder and resolved
+		// at the same moment (when its HE::api::Scope opens).
+		svc.apiCtx = [this](HorizonCode::InstanceId self, HE::api::Ctx& out) {
+			out = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager(), self);
+		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 

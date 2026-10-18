@@ -1501,6 +1501,14 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         CreatorScope creating(m_creatorStack, id);
         return m_services.callApi(id, apiId, args);
     };
+    // No CreatorScope here: the Ctx is handed out, the calls come later, and
+    // HE::api::Scope pushes the creator for as long as they run.
+    ctx.apiCtx        = [this, id](HE::api::Ctx& out) -> bool
+    {
+        if (!m_services.apiCtx) return false;
+        m_services.apiCtx(id, out);
+        return true;
+    };
     // Multiplayer: the Call Function node asks this before running anything
     // whose entry has Run On set (plan §7.2). Unbound = false = run it here,
     // which is what every runtime without a session answers.

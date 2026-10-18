@@ -435,3 +435,48 @@ body or move behind a macro is open. They are needed for parity with the interpr
   template with `-DHorizonEngine_DIR=<sdk>/lib/cmake/HorizonEngine -DHE_GAME_BUILD_CONFIG=<private dir>/HEGameBuildConfig.h
   -DHE_GAME_NAME=<game>`, `horizon_add_game(... SOURCES <generated HorizonCode>)`, then copy runtime files from the SDK + bundle deps.
   Decide how the editor package carries a release SDK (second tree in CI packaging).
+
+## Handoff (step 6: engine API header for generated code)
+
+- **Topic / step:** Thema 211, step 6 of 9. Branch claude/export-sdk-compile-horizoncode-codegen (commit: see the Hive post).
+- **Done:** `src/HE_Scene/include/HorizonEngine/HorizonEngineApi.h` (`#include <HorizonEngine/HorizonEngineApi.h>`, installed with
+  the SDK's flat include/). No second function list: it includes `EngineApi.h` (the functions, named by `ApiFn::cppCall`) and adds
+  `HE::api::Scope` (the Ctx of one compiled instance + its creator push), `HE::api::pin::type<P>` / `toPin` / `toPinArray` (pin shapes,
+  the thunks' result conversions). Engine events = the `CompiledInstance` hooks (header includes them).
+  Registry: `enum class CppForm { Ctx, Free, Thunk }` + trailing `ApiFn::cppForm` (`EngineApi.h:3089,3113`), set in a fourth post-pass
+  (`EngineApi.cpp:8679`: `kFreeGroups` 11 groups, `kFreeRows` 18, `kThunkRows` 10). `entityOrSelf`/`widgetOrSelf` (`EngineApi.cpp:8732,8752`)
+  are now THE "0 means me" rule; the two selfDefault wrappers call them (same logs, same throttle site).
+  Seam: `Context::apiCtx` (`HorizonCode.h:1297`, forward-declared `HE::api::Ctx`), `Services::apiCtx` (`HorizonCodeRuntime.h:536`),
+  `Runtime::pushCreator/popCreator` (`:544`), bound in `HorizonCodeRuntime.cpp:1506`. Game (`GameApplication.cpp:1314`) and editor
+  (`EditorApplication.cpp:2033`, one `callCtx` lambda now shared with callApi, sandbox + perm refresh included) fill it from the
+  same builder as callApi.
+  Emitter helpers `HorizonScene/EngineApiCpp.h` (`HE::api::cpp::valueType`, `callExpr`, `hookArgType`, `hookParams`,
+  `directCallsSource`); HcCodegen's hook signature functions forward to them. `hc_codegen --api-direct FILE`.
+- **Fixed on the way:** `engineEvents()` said `OnClipFinished` has an element (`HorizonCode.cpp:2816`), the hook and the fire site
+  say no: a compiled class handling it would have emitted a non-compiling override. Only HcCodegen reads `elem`.
+- **Tests:** `tests/CMakeLists.txt:1146` generates `engine_api_direct_gen.cpp` (637 direct calls, every non-Thunk row, + one override
+  per engine event) INTO he_tests: a wrong cppCall/cppForm/params is a build error at the row's line (the first build failed exactly
+  on OnClipFinished, nothing else). `test_engine_api_direct.cpp` (9 cases): table = non-Thunk rows in order, Thunk list pinned;
+  426 rows run directly vs `invoke`, field-by-field Value compare, on a null Ctx and on two twin worlds in lockstep (two rounds,
+  destroy rows last); negative control (desynced worlds must differ); `entityOrSelf`/`callExpr`; creator parity (`Scope` + direct
+  `entity::spawnClass` names the same creator as `hc::callApi`); unbound Context. `test_engine_api_header.cpp`: the header as
+  first include + `::hc` stays unambiguous. `sdk_example` probe includes the header from the installed SDK and calls a Free and a Ctx row (`api=1`).
+- **Verified (Mac, dev tree out/build/release):** he_tests, HorizonGame, HorizonEditor build; test_engine_api_direct 9/9,
+  _header 1/1, test_engine_api 130/130, test_horizoncode_codegen 53/53, hccompiled_loader, hc_bind_to, hc_pull_on_construct green;
+  sdk_example_project passed. Full ctest (`-j4`, private `HOME`, `HE_CONFIG_DIR` unset):
+  308/308, the two `runtime_size_app_*` skipped (flavour-only), 339 s.
+- **Not verified / limits:** Windows/Linux only in CI. Not RUN (compiled only), asserted list `kNotRun`: anticheat, app, clipboard,
+  cursor, datetime, db, dialog, fs, http, log, net, prefs, print, process, random, save, scene, settings, streaming, time, timer,
+  window. The world pass reaches real state on 23 calls (entity, transform, camera, theme getters); the other rows compare their
+  null-Ctx tolerance answers or, for the Free math/string/json rows, real computations. Physics/content/audio/widget rows ran
+  without those services (null handles).
+- **Decisions taken:** the header is a thin layer over EngineApi.h, not a copy; `cppForm` in the registry instead of a list in the
+  emitter; Thunk rows stay on `hc::callApi` (no wrappers written); Scope takes the Ctx once (the interpreter takes it per call:
+  same unless the host's world changes mid-body); the parity source is generated in C++ at build time (no Python in CI).
+- **Traps:** do not `using namespace HE::api;` in generated code: `HE::api::hc` makes every `hc::` ambiguous. A bare
+  `createEntity` has no TransformComponent: a world test on it compares defaults (the control test caught this). The design-time
+  runtime (UIEditorPanel) binds no `apiCtx`: compiled code never runs there, but a direct call would bypass `designTimeAllows`.
+- **Next steps:** 1. Step 7: emit `HE::api::cpp::callExpr(fn, "api", args)` for `cppForm != Thunk` with one `HE::api::Scope api(m_ctx);`
+  per body, typed locals of `valueType(...)`, results via `pin::toPin`, multi-result rows as `auto [a_, b_] = …` (struct members are the
+  results in order, proven by the generated file); keep `hc::callApi` for Thunk rows. 2. Link the generated library against
+  HorizonScene (today only HorizonCore). 3. Optionally write direct wrappers for the 10 Thunk rows.
