@@ -105,7 +105,7 @@ the render thread, not in a job.
 
 ### Load time on NN-WS03 (RTX 4070, driver 610.88, Release)
 
-Harness: `scripts/vulkan-startup/measure.ps1`, a sibling of the D3D one. The
+Harness: `scripts/vulkan-startup/series.ps1` (calls `measure.ps1`, a sibling of the D3D one). The
 editor runs hidden, quits after 300 frames, and uses a private `-CacheDir`. The
 project is a copy of HEProject: 257 meshes, 27 textures, 61 MB, 38 pipelines.
 There are 3 runs per condition, interleaved, and the tables give the median.
@@ -128,7 +128,9 @@ are noisy, but the ratios held in every run.
 
 "Driver cold" means a fresh copy of the exe under a new name: NVIDIA keys its
 Vulkan cache (`%LOCALAPPDATA%\NVIDIA\DXCache\*.nvph`) by exe **name**. The
-harness deletes the new files afterwards. `__GL_SHADER_DISK_CACHE=0` does
+series deletes the copies and every DXCache file that appeared during it. On 2026-10-18 that
+was 18 files per series; new files of another process from those minutes (a D3D bee, the game) may have gone
+too. `__GL_SHADER_DISK_CACHE=0` does
 **not** switch that cache off on Windows: a run with it set was just as fast
 and still updated the `.nvph`.
 
@@ -164,12 +166,14 @@ the AMD iGPU.
 - **Done:** REN-808 pipeline half: persisted `VkPipelineCache` for all 34 create sites + ImGui. dGPU numbers for steps 1 and 2 are above.
 - **Files touched:** `src/HE_Rendering/include/Backends/Vulkan/VulkanPipelineCacheFile.h` (new); `VulkanRenderer.h:51,741`;
   `VulkanRenderer.cpp:191,225,405,7643-7800`, 34 call sites (sed: `vkCreate*Pipelines(m_device, VK_NULL_HANDLE,` → wrapper);
-  `src/HE_Editor/EditorApplication.cpp:1363`; `tests/test_vulkan_pipeline_cache.cpp` + `tests/CMakeLists.txt`; `scripts/vulkan-startup/measure.ps1`.
+  `src/HE_Editor/EditorApplication.cpp:1363`; `tests/test_vulkan_pipeline_cache.cpp` + `tests/CMakeLists.txt`; `scripts/vulkan-startup/measure.ps1` + `series.ps1`.
 - **Verified:** Windows Release build (MSVC, `F:/hw215`), no new warnings. `he_tests --source-file='*test_vulkan_pipeline_cache.cpp'` passes 4/4 (21 assertions).
   Negative control (standalone `cl` build against a header without the driverVersion and hash checks): 2/4 fail, as expected.
   `test_vulkan_upload_alloc` passes 6/6. Full `he_tests` (scratch APPDATA): 5532/5537. Red are the 3 `test_input_gamepad` cases (known on NN-WS03, a real pad is attached) and 2 `test_profiler` cases, which pass on their own (18/18), so they are flaky under load. Runtime on the RTX 4070 as above, every run exit 0.
   Validation messages (layer on, 7-8 per run, all at shutdown after "shutting down ImGui": vkDestroyBuffer/Pipeline/Sampler in use)
-  are the same set with cache off, on, and `HE_VK_UPLOAD_SYNC=1`, so they do not come from steps 1/2. Not bisected.
+  are the same set with cache off and on, so they do not come from step 2. They are ImGui's own objects:
+  `OnShutdown` calls `ImGui_ImplVulkan_Shutdown()` with no device wait before it. `HE_VK_UPLOAD_SYNC=1` still runs the
+  step-1 code, so the series says nothing about step 1. Not checked against the pre-step-1 base; step 1's lavapipe CI job was green.
 - **Not verified:** Linux/macOS/lavapipe runtime of step 2 (CI). AMD/Intel drivers. The exported game (HorizonGame has no ImGui; the renderer path is the same).
 - **Decisions taken:** one file per GPU (vendor_device), last writer wins when two editors run (costs warm-up, never correctness);
   the cache is saved only at shutdown (a crash loses that session's new pipelines); ImGui shares the cache.
@@ -177,4 +181,4 @@ the AMD iGPU.
 - **Traps:** a new `vkCreate*Pipelines` must use the wrappers, otherwise it bypasses the cache and the timing. `__GL_SHADER_DISK_CACHE` is ignored on Windows.
   The validation layer is forced on until Thema 212 (REN-804) is merged, so timings without `-NoValidation` include it. Drive C: on NN-WS03 was full; build on F:.
 - **Next steps:** 1. CI on this branch (lavapipe exercises the cache with Mesa). 2. Staging ring: flush the batch when the ring is full, or size it to the frame's uploads
-  (104 oversize buffers on HEProject). 3. REN-808 rest: sky SPIR-V + `BuildSkyNoise3D` disk cache. 4. After Thema 212 merges, re-run `measure.ps1` without `-NoValidation`.
+  (104 oversize buffers on HEProject). 3. REN-808 rest: sky SPIR-V + `BuildSkyNoise3D` disk cache. 4. After Thema 212 merges, re-run `series.ps1` without `-NoValidation`. 5. Editor: `deviceWaitIdle` before `ImGui_ImplVulkan_Shutdown` (the shutdown validation messages).

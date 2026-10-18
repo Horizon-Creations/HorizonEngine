@@ -13,9 +13,13 @@
 # without it the run reads and writes the real roaming cache); -Cold empties that
 # dir first. -NoCache sets HE_VK_PIPELINE_CACHE=0: no VkPipelineCache, the pre-
 # REN-808 path, same binary. -UploadSync sets HE_VK_UPLOAD_SYNC=1: a wait after
-# every upload, the pre-REN-802 path. -NoDriverCache sets __GL_SHADER_DISK_CACHE=0,
-# which switches NVIDIA's own on-disk shader cache off, so the run shows what the
-# driver compiles when nothing at all is cached.
+# every upload (the waits of the pre-REN-802 path; the rest of the step-1 code stays).
+# -NoValidation sets VK_LOADER_LAYERS_DISABLE=*validation*: until REN-804 (Thema 212)
+# is merged, createInstance forces the validation layer on, and timings include it.
+# NVIDIA keeps its own Vulkan cache in %LOCALAPPDATA%\NVIDIA\DXCache, keyed by the
+# exe NAME; __GL_SHADER_DISK_CACHE=0 does NOT switch it off on Windows (checked
+# 2026-10-18). For a driver-cold run start a copy of the exe under a new name, as
+# series.ps1 does.
 param(
     [Parameter(Mandatory)] [string]$Exe,
     [Parameter(Mandatory)] [string]$OutDir,
@@ -26,11 +30,10 @@ param(
     [switch]$Cold,
     [switch]$NoCache,
     [switch]$UploadSync,
-    [switch]$NoDriverCache,
     [switch]$NoValidation
 )
 $ErrorActionPreference = "Stop"
-Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' -or $_.Name -like '__GL_*' -or $_.Name -like 'VK_LOADER_*' } |
+Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' -or $_.Name -like 'VK_LOADER_*' } |
     ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null) }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
@@ -55,7 +58,6 @@ $env:HE_HIDDEN_WINDOW = "1"; $env:HE_BACKGROUND_FPS = "0"
 $env:HE_EXIT_AFTER_FRAMES = "$Frames"; $env:HE_COLLAB_OFFLINE = "1"
 if ($NoCache) { $env:HE_VK_PIPELINE_CACHE = "0" }
 if ($UploadSync) { $env:HE_VK_UPLOAD_SYNC = "1" }
-if ($NoDriverCache) { $env:__GL_SHADER_DISK_CACHE = "0" }
 if ($NoValidation) { $env:VK_LOADER_LAYERS_DISABLE = "*validation*" }
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
