@@ -66,9 +66,10 @@ A = c9e7d522 + scopes only, B = + fix. Script: `C:\hw221\cap.sh` (wraps `scripts
 | Vulkan, GI on (ray query) | 140.6 | **34.3** | 155.0 | **128.3** | 15130 / 59 → 71 / 0 | 154.9 → 14.2 ms |
 | D3D11, GI on | 201.5 | **42.1** | 261.0 | **249.3** | 15130 / 59 → 71 / 0 | 142.2 → 5.6 ms |
 | GL, GI off + GI reflections on | 98.0 | **29.3** | 87.1 | **86.1** | 15130 / 59 → 71 / 0 | 170.5 → 16.5 ms |
-| GL, GI on + GI reflections on | | **27.6** | | **78.3** | 15130 / 59 → 71 / 0 | 171.2 → 17.1 ms |
+| GL, GI on + GI reflections on | | **27.6** | 82.7 | **78.3** | 15130 / 59 → 71 / 0 | 171.2 → 17.1 ms |
 | GL, GI + reflections off (control) | | 116.1 | | 118.2 | – | 11.4 → 10.8 ms |
 | D3D12, GI off (control) | | | | 267.0 | – | 5.5 ms |
+| Vulkan, GI off (control) | | | 154.4 | 141.6 | – (`DrainInvalidations` 59× 3.6 ms) | 11.0 ms |
 
 Still frames move ±15 % between runs on this shared machine (other bees build); compare FLY
 with the still of the same side. What is left while flying, per backend (B):
@@ -115,7 +116,8 @@ negative control (compaction without the node-offset update) fails it.
   A/B, unit test + negative control). Full he_tests (Release, scratch APPDATA): 5519/5524; the
   5 failures are the 3 gamepad cases (real pad on NN-WS03) and 2 `test_profiler.cpp` asserts
   (107, 215) that pass alone and fail in the full run with or without `test_gi_blas_store.cpp`
-  (no backend is compiled into he_tests): pre-existing and order-dependent, not from this step.
+  (no backend is compiled into he_tests): not from this step, order-dependent in one monolithic
+  he_tests run; not checked on release/0.7.0 itself (CI runs one ctest per file).
 - **Not verified:** Metal-SW (same whole-cache drop in `MetalRenderer.mm` ~16695, not ported: no
   Mac compiler here); the human's own 120 Hz screen (all runs hidden window, vsync off); Linux.
 - **Decisions taken:** fix the renderer policy, not the stitching (GI needs the stitched geometry,
@@ -127,6 +129,9 @@ negative control (compaction without the node-offset update) fails it.
   `vkDeviceWaitIdle` per invalidation frame (3-4 ms, 59 of 400 flying frames, GI on or off);
   LOD hysteresis for terrain chunks (fewer re-stitches at all).
 - **Pending:** the two sync items above (own A/B each); Metal-SW port of GiBlasStore (Mac).
+- **Tools on NN-WS03 (not in the repo):** `C:\hw221\deployA` = before-fix deploy, `deployB`/`deployC`
+  = fix; `C:\hw221\cap.sh` (one capture), `long.sh` (long flights + images), `ppmdiff.py`, `sc.py`
+  (scope summary); private project copy `C:\hw221\proj`. Follow-ups can A/B from there without a rebuild.
 - **Traps:** `he_perf_capture` runs at different FPS = different wall time → time-driven sky and
   clouds differ; pin `HE_SKY_TIME` before any image A/B. A killed `long.sh` keeps spawning
   `cap.sh` children — kill the bash tree. he_tests: scratch `APPDATA`.
