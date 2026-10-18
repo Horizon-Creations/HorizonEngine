@@ -960,15 +960,240 @@ void EditorUI::render(AppContext& ctx, float dt)
 
 
 
+// ── The asset panels, one row each (EDT-801) ─────────────────────────────────
+// Every asset editor tab is one row of kAssetPanels, and every question the
+// editor asks "all the panels" is a loop over it: the dirty mark, the list of
+// unsaved files, Save, the crash-recovery copies, collaboration's documents,
+// forgetting a deleted asset, a peer's reload and the tab's render dispatch.
+// These used to be eight hand-written lists, and they had drifted (Cinematic was
+// missing from the recovery copies without a word, the comment counted fourteen
+// panels where there were fifteen). A new panel is now added in one place, and an
+// operation it does not have is a visible nullptr in its row.
+//
+// The ROW ORDER is the render dispatch order, and that order means something:
+// the first row whose isAsset() says yes draws the tab. The raw-file rows (audio,
+// texture, C++ source: extension checks) must come before the script editor, the
+// last row, which takes whatever is left (isAsset == nullptr) and would show a
+// .wav or a .cpp as HAsset text. Every other operation asks every row, so for
+// them the order is only the order the panels are asked in: each panel answers
+// for the paths it holds and ignores the rest (save() of a path it does not hold
+// reports success), collabDocs takes the first non-empty answer, and the dirty
+// paths are sorted afterwards.
+namespace
+{
+using AssetPanelRenderFn = void (*)(AppContext&, const std::string&, const ImVec2&, const ImVec2&);
+
+struct AssetPanelOps
+{
+	const char* name;   // for a reader of the table; nothing looks it up
+	// Draws the tab when this is the first row to say yes. nullptr: the
+	// fallthrough row, which takes every path no row above claimed.
+	bool (*isAsset)(const std::string& path);
+	AssetPanelRenderFn render;
+	bool (*isDirty)(const std::string& path);
+	void (*appendDirtyPaths)(std::vector<std::string>& out);
+	bool (*save)(AppContext& ctx, const std::string& path);
+	void (*appendSnapshots)(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
+	CollabDocSync::DocBindings (*collabDocs)(const std::string& path);
+	void (*forget)(const std::string& path);
+	bool (*reloadFromDisk)(const std::string& path);
+};
+
+// Advanced Shader Effects off = this project does not author materials
+// (docs/he-apps-plan.md E1b). An existing one can still be opened — the file is
+// right there in the browser — but it says why it is inert rather than showing
+// an editor whose result nothing would draw.
+void renderMaterialTab(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
+{
+	const bool allowMaterials = !ctx.projectManager ||
+		ctx.projectManager->currentProject().advancedShaderEffects;
+	if (allowMaterials)
+	{
+		MaterialEditorPanel::render(ctx, path, pos, size);
+		return;
+	}
+#ifdef HE_IMGUI_ENABLED
+	ImGui::SetNextWindowPos(pos);
+	ImGui::SetNextWindowSize(size);
+	ImGui::Begin("##MaterialsDisabled", nullptr,
+	             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+	             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+	ImGui::TextWrapped(
+		"Advanced Shader Effects are switched off for this project, so materials "
+		"are not used. Widgets are styled with corner radius, borders, gradients "
+		"and shadows instead.");
+	ImGui::Spacing();
+	ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
+	ImGui::End();
+#endif
+}
+
+// Panels whose save() needs no context.
+template <bool (*Save)(const std::string&)>
+bool saveWithoutCtx(AppContext&, const std::string& path) { return Save(path); }
+
+constexpr AssetPanelOps kAssetPanels[] = {
+	{ "Material",
+	  [](const std::string& p) { return MaterialEditorPanel::isMaterialAsset(p) ||
+	                                    MaterialEditorPanel::isMaterialFunctionAsset(p); },
+	  renderMaterialTab,
+	  MaterialEditorPanel::isDirty, MaterialEditorPanel::appendDirtyPaths,
+	  MaterialEditorPanel::save, MaterialEditorPanel::appendSnapshots,
+	  MaterialEditorPanel::collabDocs, MaterialEditorPanel::forget,
+	  MaterialEditorPanel::reloadFromDisk },
+	{ "Widget",
+	  UIEditorPanel::isWidgetAsset, UIEditorPanel::render,
+	  UIEditorPanel::isDirty, UIEditorPanel::appendDirtyPaths,
+	  UIEditorPanel::save, UIEditorPanel::appendSnapshots,
+	  UIEditorPanel::collabDocs, UIEditorPanel::forget,
+	  UIEditorPanel::reloadFromDisk },
+	{ "HorizonCode Class",
+	  HorizonCodeClassPanel::isClassAsset, HorizonCodeClassPanel::render,
+	  HorizonCodeClassPanel::isDirty, HorizonCodeClassPanel::appendDirtyPaths,
+	  HorizonCodeClassPanel::save, HorizonCodeClassPanel::appendSnapshots,
+	  HorizonCodeClassPanel::collabDocs, HorizonCodeClassPanel::forget,
+	  HorizonCodeClassPanel::reloadFromDisk },
+	{ "Input",
+	  InputAssetPanel::isInputAsset, InputAssetPanel::render,
+	  InputAssetPanel::isDirty, InputAssetPanel::appendDirtyPaths,
+	  InputAssetPanel::save, InputAssetPanel::appendSnapshots,
+	  nullptr, InputAssetPanel::forget,
+	  InputAssetPanel::reloadFromDisk },
+	{ "Theme",
+	  ThemeAssetPanel::isThemeAsset, ThemeAssetPanel::render,
+	  ThemeAssetPanel::isDirty, ThemeAssetPanel::appendDirtyPaths,
+	  ThemeAssetPanel::save, ThemeAssetPanel::appendSnapshots,
+	  nullptr, ThemeAssetPanel::forget,
+	  ThemeAssetPanel::reloadFromDisk },
+	{ "Bone Mask",
+	  BoneMaskPanel::isBoneMaskAsset, BoneMaskPanel::render,
+	  BoneMaskPanel::isDirty, BoneMaskPanel::appendDirtyPaths,
+	  BoneMaskPanel::save, BoneMaskPanel::appendSnapshots,
+	  nullptr, BoneMaskPanel::forget,
+	  BoneMaskPanel::reloadFromDisk },
+	{ "Blend Space",
+	  BlendSpacePanel::isBlendSpaceAsset, BlendSpacePanel::render,
+	  BlendSpacePanel::isDirty, BlendSpacePanel::appendDirtyPaths,
+	  BlendSpacePanel::save, BlendSpacePanel::appendSnapshots,
+	  nullptr, BlendSpacePanel::forget,
+	  BlendSpacePanel::reloadFromDisk },
+	{ "Sequence",
+	  SequencerPanel::isSequencerAsset, SequencerPanel::render,
+	  SequencerPanel::isDirty, SequencerPanel::appendDirtyPaths,
+	  SequencerPanel::save, SequencerPanel::appendSnapshots,
+	  nullptr, SequencerPanel::forget,
+	  SequencerPanel::reloadFromDisk },
+	// No crash-recovery copy: CinematicPanel has no appendSnapshots, so an
+	// unsaved cinematic is not in Saved/Autosave/Assets. Open question from the
+	// audit (EDT-801), kept as it was.
+	{ "Cinematic",
+	  CinematicPanel::isCinematicAsset, CinematicPanel::render,
+	  CinematicPanel::isDirty, CinematicPanel::appendDirtyPaths,
+	  CinematicPanel::save, nullptr,
+	  nullptr, CinematicPanel::forget,
+	  CinematicPanel::reloadFromDisk },
+	{ "Type",
+	  TypeAssetPanel::isTypeAsset, TypeAssetPanel::render,
+	  TypeAssetPanel::isDirty, TypeAssetPanel::appendDirtyPaths,
+	  TypeAssetPanel::save, TypeAssetPanel::appendSnapshots,
+	  nullptr, TypeAssetPanel::forget,
+	  TypeAssetPanel::reloadFromDisk },
+	// Dirty under a DIFFERENT path than the tab's: what it edits is the clip
+	// scrubbed in it, so isDirty/save answer for clip paths, never for the mesh.
+	// No reloadFromDisk: a peer's change to the mesh or the clip does not
+	// refresh this tab (as before; nothing caches the mesh's file here).
+	{ "Skeletal Mesh",
+	  SkeletalMeshEditorPanel::isSkeletalMeshAsset, SkeletalMeshEditorPanel::render,
+	  SkeletalMeshEditorPanel::isDirty, SkeletalMeshEditorPanel::appendDirtyPaths,
+	  SkeletalMeshEditorPanel::save, SkeletalMeshEditorPanel::appendSnapshots,
+	  nullptr, SkeletalMeshEditorPanel::forget,
+	  nullptr },
+	// A viewer: nothing to lose, nothing to save.
+	{ "Static Mesh",
+	  StaticMeshEditorPanel::isStaticMeshAsset, StaticMeshEditorPanel::render,
+	  nullptr, nullptr, nullptr, nullptr, nullptr,
+	  StaticMeshEditorPanel::forget, nullptr },
+	{ "Particle Graph",
+	  ParticleGraphEditorPanel::isParticleAsset, ParticleGraphEditorPanel::render,
+	  ParticleGraphEditorPanel::isDirty, ParticleGraphEditorPanel::appendDirtyPaths,
+	  ParticleGraphEditorPanel::save, ParticleGraphEditorPanel::appendSnapshots,
+	  ParticleGraphEditorPanel::collabDocs, ParticleGraphEditorPanel::forget,
+	  ParticleGraphEditorPanel::reloadFromDisk },
+	{ "Animator State Machine",
+	  AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset,
+	  AnimatorStateMachineEditorPanel::render,
+	  AnimatorStateMachineEditorPanel::isDirty, AnimatorStateMachineEditorPanel::appendDirtyPaths,
+	  AnimatorStateMachineEditorPanel::save, AnimatorStateMachineEditorPanel::appendSnapshots,
+	  AnimatorStateMachineEditorPanel::collabDocs, AnimatorStateMachineEditorPanel::forget,
+	  AnimatorStateMachineEditorPanel::reloadFromDisk },
+	// Audio .hasset AND raw .wav/.ogg. Like the C++ viewer below it, the raw-file
+	// half is an extension check, so it has to beat the script editor fallthrough
+	// — which would render megabytes of PCM as text.
+	{ "Audio",
+	  AudioEditorPanel::isAudioAsset, AudioEditorPanel::render,
+	  AudioEditorPanel::isDirty, AudioEditorPanel::appendDirtyPaths,
+	  AudioEditorPanel::save, AudioEditorPanel::appendSnapshots,
+	  nullptr, AudioEditorPanel::forget,
+	  AudioEditorPanel::reloadFromDisk },
+	// Texture .hasset AND raw .png/.jpg/… — the raw half is an extension check
+	// too. A viewer, like the static mesh one.
+	{ "Texture",
+	  TextureViewerPanel::isTextureAsset, TextureViewerPanel::render,
+	  nullptr, nullptr, nullptr, nullptr, nullptr,
+	  TextureViewerPanel::forget, nullptr },
+	// C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
+	// come before the script editor fallthrough, which assumes an HAsset.
+	{ "C++ Class",
+	  CppClassEditorPanel::isCppSourceAsset, CppClassEditorPanel::render,
+	  CppClassEditorPanel::isDirty, CppClassEditorPanel::appendDirtyPaths,
+	  saveWithoutCtx<CppClassEditorPanel::save>, CppClassEditorPanel::appendSnapshots,
+	  nullptr, CppClassEditorPanel::forget,
+	  CppClassEditorPanel::reloadFromDisk },
+	// Last, and the fallthrough: whatever no row above claimed opens here.
+	{ "Script",
+	  nullptr, ScriptEditorPanel::render,
+	  ScriptEditorPanel::isDirty, ScriptEditorPanel::appendDirtyPaths,
+	  saveWithoutCtx<ScriptEditorPanel::save>, ScriptEditorPanel::appendSnapshots,
+	  nullptr, ScriptEditorPanel::forget,
+	  ScriptEditorPanel::reloadFromDisk },
+};
+
+// The row that draws the tab at `path`: the first that claims it, else the
+// fallthrough (the last row).
+const AssetPanelOps& assetPanelFor(const std::string& path)
+{
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.isAsset && row.isAsset(path)) return row;
+	return kAssetPanels[std::size(kAssetPanels) - 1];
+}
+
+// The pairs that only make sense together. A row with a dirty flag but no
+// appendDirtyPaths would hide a closed dirty tab from the quit guard; one with
+// no save would let the prompt claim to have saved it. Checked by the compiler,
+// so a half-filled new row does not build.
+constexpr bool assetPanelsConsistent()
+{
+	for (const AssetPanelOps& row : kAssetPanels)
+	{
+		if (!row.render || !row.forget) return false;
+		if (!row.isDirty != !row.appendDirtyPaths) return false;
+		if (!row.isDirty != !row.save) return false;
+	}
+	return kAssetPanels[std::size(kAssetPanels) - 1].isAsset == nullptr;
+}
+static_assert(assetPanelsConsistent(),
+              "kAssetPanels: every row renders and forgets, isDirty comes with "
+              "appendDirtyPaths and save, and the last row is the fallthrough");
+} // namespace
+
 // True if the editor tab for `assetPath` holds edits that were never written to disk.
-// EVERY panel that can modify its asset has to be listed here — this one predicate
-// gates the tab's dirty mark, forgetTabState (a panel missing from the list has its
-// unsaved graph dropped when the tab closes) and the Quit/Close-Project guard. That
-// is exactly how the Particle and Animator-State-Machine graphs used to be lost.
-// The Static Mesh viewer has nothing to lose and stays out. The Skeletal Mesh tab
-// is in, but under a DIFFERENT path than the tab's: what it edits is the clip
-// scrubbed in it (notifies, the per-clip root-motion switch), so it answers for
-// clip paths and never for the mesh it is named after.
+// EVERY panel that can modify its asset needs isDirty in its kAssetPanels row —
+// this one predicate gates the tab's dirty mark, forgetTabState (a panel without
+// it has its unsaved graph dropped when the tab closes) and the Quit/Close-Project
+// guard. That is exactly how the Particle and Animator-State-Machine graphs used
+// to be lost. The Static Mesh and Texture viewers have nothing to lose. The
+// Skeletal Mesh tab answers under a DIFFERENT path than the tab's (its row says
+// why), so the question is put to every row, not just to the one drawing the tab.
 // The virtual tabs (Level Script / Game Instance) edit the world, so their dirty
 // state is the scene's (ctx.sceneDirty) and is guarded separately.
 // Public (declared in EditorUI.h) because the OS-level quit veto in
@@ -978,22 +1203,9 @@ void EditorUI::render(AppContext& ctx, float dt)
 bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
-	return ScriptEditorPanel::isDirty(assetPath)        ||
-	       CppClassEditorPanel::isDirty(assetPath)      ||
-	       MaterialEditorPanel::isDirty(assetPath)      ||
-	       UIEditorPanel::isDirty(assetPath)            ||
-	       HorizonCodeClassPanel::isDirty(assetPath)    ||
-	       InputAssetPanel::isDirty(assetPath)          ||
-	       TypeAssetPanel::isDirty(assetPath)           ||
-	       ThemeAssetPanel::isDirty(assetPath)          ||
-	       BoneMaskPanel::isDirty(assetPath)            ||
-	       BlendSpacePanel::isDirty(assetPath)          ||
-	       SequencerPanel::isDirty(assetPath)           ||
-       CinematicPanel::isDirty(assetPath)           ||
-	       AudioEditorPanel::isDirty(assetPath)         ||
-	       ParticleGraphEditorPanel::isDirty(assetPath) ||
-	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
-	       SkeletalMeshEditorPanel::isDirty(assetPath);
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.isDirty && row.isDirty(assetPath)) return true;
+	return false;
 }
 
 // Every unsaved asset, INCLUDING ones whose tab the user already closed.
@@ -1004,77 +1216,35 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 std::vector<std::string> EditorUI::unsavedAssetPaths()
 {
 	std::vector<std::string> out;
-	ScriptEditorPanel::appendDirtyPaths(out);
-	CppClassEditorPanel::appendDirtyPaths(out);
-	MaterialEditorPanel::appendDirtyPaths(out);
-	UIEditorPanel::appendDirtyPaths(out);
-	HorizonCodeClassPanel::appendDirtyPaths(out);
-	InputAssetPanel::appendDirtyPaths(out);
-	TypeAssetPanel::appendDirtyPaths(out);
-	ThemeAssetPanel::appendDirtyPaths(out);
-	BoneMaskPanel::appendDirtyPaths(out);
-	BlendSpacePanel::appendDirtyPaths(out);
-	SequencerPanel::appendDirtyPaths(out);
-	CinematicPanel::appendDirtyPaths(out);
-	AudioEditorPanel::appendDirtyPaths(out);
-	ParticleGraphEditorPanel::appendDirtyPaths(out);
-	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
-	SkeletalMeshEditorPanel::appendDirtyPaths(out);
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.appendDirtyPaths) row.appendDirtyPaths(out);
 	std::sort(out.begin(), out.end());
 	out.erase(std::unique(out.begin(), out.end()), out.end());
 	return out;
 }
 
 // Save one asset through whichever panel owns its edits — the write half of
-// tabHasUnsavedEdits, and it must list exactly the same panels (a panel missing
-// here silently keeps its edits after the prompt claimed to have saved them).
+// tabHasUnsavedEdits (the table refuses a row with isDirty but no save).
 // Every panel's save() answers true for a path it isn't holding, so asking all of
 // them is the whole dispatch: there is no path→panel map to keep in sync.
 bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
 	bool ok = true;
-	ok = ScriptEditorPanel::save(assetPath)                          && ok;
-	ok = CppClassEditorPanel::save(assetPath)                        && ok;
-	ok = MaterialEditorPanel::save(ctx, assetPath)                   && ok;
-	ok = UIEditorPanel::save(ctx, assetPath)                         && ok;
-	ok = HorizonCodeClassPanel::save(ctx, assetPath)                 && ok;
-	ok = InputAssetPanel::save(ctx, assetPath)                       && ok;
-	ok = TypeAssetPanel::save(ctx, assetPath)                        && ok;
-	ok = ThemeAssetPanel::save(ctx, assetPath)                       && ok;
-	ok = BoneMaskPanel::save(ctx, assetPath)                         && ok;
-	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
-	ok = SequencerPanel::save(ctx, assetPath)                        && ok;
-	ok = CinematicPanel::save(ctx, assetPath)                        && ok;
-	ok = AudioEditorPanel::save(ctx, assetPath)                      && ok;
-	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
-	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
-	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.save) ok = row.save(ctx, assetPath) && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
 	// a save that reported success but left the state dirty.
 	return ok && !tabHasUnsavedEdits(assetPath);
 }
 
-// The recovery half of saveAsset: the same fourteen panels, each reporting its
+// The recovery half of saveAsset: every row that can write a copy reports its
 // dirty files and how to write what a Save would write to another path.
 // AssetAutosave does the rest (EditorApplication::updateAssetAutosave).
 void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
 {
-	ScriptEditorPanel::appendSnapshots(ctx, out);
-	CppClassEditorPanel::appendSnapshots(ctx, out);
-	MaterialEditorPanel::appendSnapshots(ctx, out);
-	UIEditorPanel::appendSnapshots(ctx, out);
-	HorizonCodeClassPanel::appendSnapshots(ctx, out);
-	InputAssetPanel::appendSnapshots(ctx, out);
-	TypeAssetPanel::appendSnapshots(ctx, out);
-	ThemeAssetPanel::appendSnapshots(ctx, out);
-	BoneMaskPanel::appendSnapshots(ctx, out);
-	BlendSpacePanel::appendSnapshots(ctx, out);
-	SequencerPanel::appendSnapshots(ctx, out);
-	AudioEditorPanel::appendSnapshots(ctx, out);
-	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
-	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
-	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.appendSnapshots) row.appendSnapshots(ctx, out);
 }
 
 // The live documents behind an open tab, for collaboration's item-level sync.
@@ -1084,11 +1254,11 @@ void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 CollabDocSync::DocBindings EditorUI::collabDocsFor(const std::string& assetPath)
 {
 	if (assetPath.empty()) return {};
-	if (auto d = MaterialEditorPanel::collabDocs(assetPath);            !d.empty()) return d;
-	if (auto d = UIEditorPanel::collabDocs(assetPath);                  !d.empty()) return d;
-	if (auto d = HorizonCodeClassPanel::collabDocs(assetPath);          !d.empty()) return d;
-	if (auto d = ParticleGraphEditorPanel::collabDocs(assetPath);       !d.empty()) return d;
-	if (auto d = AnimatorStateMachineEditorPanel::collabDocs(assetPath); !d.empty()) return d;
+	for (const AssetPanelOps& row : kAssetPanels)
+	{
+		if (!row.collabDocs) continue;
+		if (auto d = row.collabDocs(assetPath); !d.empty()) return d;
+	}
 	return {};
 }
 
@@ -1103,24 +1273,7 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 {
 	if (assetPath.empty()) return;
 	MaterialEditorPanel::releasePreviewAssets(ctx, assetPath);
-	ScriptEditorPanel::forget(assetPath);
-	CppClassEditorPanel::forget(assetPath);
-	MaterialEditorPanel::forget(assetPath);
-	UIEditorPanel::forget(assetPath);
-	HorizonCodeClassPanel::forget(assetPath);
-	InputAssetPanel::forget(assetPath);
-	TypeAssetPanel::forget(assetPath);
-	ThemeAssetPanel::forget(assetPath);
-	BoneMaskPanel::forget(assetPath);
-	BlendSpacePanel::forget(assetPath);
-	SequencerPanel::forget(assetPath);
-	CinematicPanel::forget(assetPath);
-	ParticleGraphEditorPanel::forget(assetPath);
-	AnimatorStateMachineEditorPanel::forget(assetPath);
-	StaticMeshEditorPanel::forget(assetPath);
-	SkeletalMeshEditorPanel::forget(assetPath);
-	AudioEditorPanel::forget(assetPath);
-	TextureViewerPanel::forget(assetPath);
+	for (const AssetPanelOps& row : kAssetPanels) row.forget(assetPath);
 }
 
 // ── Leaving a project ────────────────────────────────────────────────────────
@@ -1197,21 +1350,8 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
 	bool any = false;
-	any = ScriptEditorPanel::reloadFromDisk(assetPath)                    || any;
-	any = CppClassEditorPanel::reloadFromDisk(assetPath)                  || any;
-	any = MaterialEditorPanel::reloadFromDisk(assetPath)                  || any;
-	any = UIEditorPanel::reloadFromDisk(assetPath)                        || any;
-	any = HorizonCodeClassPanel::reloadFromDisk(assetPath)                || any;
-	any = InputAssetPanel::reloadFromDisk(assetPath)                      || any;
-	any = TypeAssetPanel::reloadFromDisk(assetPath)                       || any;
-	any = ThemeAssetPanel::reloadFromDisk(assetPath)                      || any;
-	any = BoneMaskPanel::reloadFromDisk(assetPath)                        || any;
-	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
-	any = SequencerPanel::reloadFromDisk(assetPath)                       || any;
-	any = CinematicPanel::reloadFromDisk(assetPath)                       || any;
-	any = AudioEditorPanel::reloadFromDisk(assetPath)                     || any;
-	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
-	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.reloadFromDisk) any = row.reloadFromDisk(assetPath) || any;
 	return any;
 }
 
@@ -4105,9 +4245,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ImGui::BeginDisabled(true);
             }
         }
-        // Dispatch by asset type: material assets get the node-graph editor, script
-        // assets the code editor. (Cheap header sniff; both panels cache their state.)
-        // The Level Script + Game Instance are virtual tabs (no backing .hasset).
+        // Dispatch by asset type: the first kAssetPanels row that claims the path
+        // draws it (cheap header sniffs, cached per path; the row order is the
+        // dispatch order, see the table). The Settings tabs, Level Script and Game
+        // Instance are virtual tabs (no backing .hasset) and come first.
         if (tabPath == EditorSettingsPanel::kTabPath)
             EditorSettingsPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == ProjectSettingsPanel::kTabPath)
@@ -4116,74 +4257,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)
             GameInstancePanel::render(ctx, tabPos, tabSize);
-        else if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
-            MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
-        {
-            // Advanced Shader Effects off = this project does not author
-            // materials (docs/he-apps-plan.md E1b). An existing one can still be
-            // opened — the file is right there in the browser — but it says why
-            // it is inert rather than showing an editor whose result nothing
-            // would draw.
-            const bool allowMaterials = !ctx.projectManager ||
-                ctx.projectManager->currentProject().advancedShaderEffects;
-            if (allowMaterials)
-                MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-            else
-            {
-                ImGui::SetNextWindowPos(tabPos);
-                ImGui::SetNextWindowSize(tabSize);
-                ImGui::Begin("##MaterialsDisabled", nullptr,
-                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-                ImGui::TextWrapped(
-                    "Advanced Shader Effects are switched off for this project, so materials "
-                    "are not used. Widgets are styled with corner radius, borders, gradients "
-                    "and shadows instead.");
-                ImGui::Spacing();
-                ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
-                ImGui::End();
-            }
-        }
-        else if (UIEditorPanel::isWidgetAsset(tabPath))
-            UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (HorizonCodeClassPanel::isClassAsset(tabPath))
-            HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (InputAssetPanel::isInputAsset(tabPath))
-            InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (ThemeAssetPanel::isThemeAsset(tabPath))
-            ThemeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (BoneMaskPanel::isBoneMaskAsset(tabPath))
-            BoneMaskPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (BlendSpacePanel::isBlendSpaceAsset(tabPath))
-            BlendSpacePanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (SequencerPanel::isSequencerAsset(tabPath))
-            SequencerPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (CinematicPanel::isCinematicAsset(tabPath))
-            CinematicPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (TypeAssetPanel::isTypeAsset(tabPath))
-            TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
-            SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (StaticMeshEditorPanel::isStaticMeshAsset(tabPath))
-            StaticMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
-            ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
-            AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        // Audio .hasset AND raw .wav/.ogg. Like the C++ viewer below it, the raw-file half
-        // is an extension check, so it has to beat the ScriptEditorPanel fallthrough —
-        // which would render megabytes of PCM as text.
-        else if (AudioEditorPanel::isAudioAsset(tabPath))
-            AudioEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        // Texture .hasset AND raw .png/.jpg/… — the raw half is an extension check too.
-        else if (TextureViewerPanel::isTextureAsset(tabPath))
-            TextureViewerPanel::render(ctx, tabPath, tabPos, tabSize);
-        // C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
-        // come before the ScriptEditorPanel fallthrough, which assumes an HAsset.
-        else if (CppClassEditorPanel::isCppSourceAsset(tabPath))
-            CppClassEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
-            ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+            assetPanelFor(tabPath).render(ctx, tabPath, tabPos, tabSize);
 
         if (tabReadOnly) ImGui::EndDisabled();
         return;
