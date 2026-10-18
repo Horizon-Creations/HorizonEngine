@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <string_view>
+#include <unordered_map>
 
 namespace HE {
 
@@ -870,326 +872,302 @@ void UIElement::setProp(const std::string& name, const UIPropValue& v)
         if (s.desc.name == name) { s.set(*this, v); return; }
 }
 
-// ── Shared base properties ────────────────────────────────────────────────────
-// Get/set of the base fields by name. Kept in one place so allProperties/
-// getPropAny/setPropAny stay in step; returns false for non-base names.
+// ── Shared base properties (CORE-603) ─────────────────────────────────────────
+// Every property all elements share, ONE row each: its descriptor, how to read
+// it, how to write it, and on which elements allProperties() offers it. These
+// used to be four lists (a getter if-chain, a setter if-chain, uiBaseProperties
+// and allProperties' own push_backs), and they had drifted: allProperties did
+// not offer Accepts Drop / Draggable / Drag Payload, so WidgetManager's "is
+// this a property at all?" test said no to them, and it gave Gradient Angle /
+// Gradient Shape ranges the shared list did not have.
+// The row order is uiBaseProperties' order and, apart from the asset slots,
+// allProperties' order too; test_ui_widgets pins that every row reads back with
+// the type its descriptor promises.
 namespace
 {
-bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
+enum class BaseOffer : std::uint8_t
 {
-    if (n == "Visible")      { out = UIPropValue::ofBool(e.visible);            return true; }
-    if (n == "Hit Testable") { out = UIPropValue::ofBool(e.hitTestable);        return true; }
-    if (n == "Window Drag")  { out = UIPropValue::ofBool(e.windowDrag);         return true; }
-    if (n == "Clip Children"){ out = UIPropValue::ofBool(e.clipChildren);       return true; }
-    if (n == "Focus Frame")  { out = UIPropValue::ofBool(e.focusFrame);         return true; }
-    if (n == "Accepts Drop") { out = UIPropValue::ofBool(e.acceptsDrop);        return true; }
-    if (n == "Draggable")    { out = UIPropValue::ofBool(e.draggable);          return true; }
-    if (n == "Drag Payload") { out = UIPropValue::ofString(e.dragPayload);      return true; }
-    if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
-    if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
-    if (n == "Transition")   { out = UIPropValue::ofFloat(e.transition);        return true; }
-    if (n == "Tab Index")    { out = UIPropValue::ofInt(e.tabIndex);            return true; }
-    if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
-    if (n == "Slot Align H") { out = UIPropValue::ofInt((int)e.slotHAlign);     return true; }
-    if (n == "Slot Align V") { out = UIPropValue::ofInt((int)e.slotVAlign);     return true; }
-    // "Slot Padding" is all four sides as ONE number, the way "Corner Radius"
-    // is all four corners: reading it back gives the left side, so a graph
-    // that set it reads its own value. The four named rows are the per-side
-    // form the audit asked for.
-    if (n == "Slot Padding") { out = UIPropValue::ofFloat(e.slotPadLeft);       return true; }
-    if (n == "Slot Padding Left")   { out = UIPropValue::ofFloat(e.slotPadLeft);   return true; }
-    if (n == "Slot Padding Top")    { out = UIPropValue::ofFloat(e.slotPadTop);    return true; }
-    if (n == "Slot Padding Right")  { out = UIPropValue::ofFloat(e.slotPadRight);  return true; }
-    if (n == "Slot Padding Bottom") { out = UIPropValue::ofFloat(e.slotPadBottom); return true; }
-    if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
-    if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
-    if (n == "Column Span")  { out = UIPropValue::ofInt(e.gridColumnSpan);      return true; }
-    if (n == "Row Span")     { out = UIPropValue::ofInt(e.gridRowSpan);         return true; }
-    if (n == "Rotation")     { out = UIPropValue::ofFloat(e.rotation);          return true; }
-    if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
-    if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
-    // Beside Size, and shaped like it: what an author sets here is one pair,
-    // and two scalar rows for one idea is how somebody ends up with a floor on
-    // the width and none on the height without meaning to. 0 on an axis = no
-    // bound on that axis.
-    if (n == "Min Size")     { out = UIPropValue::ofVec2({ e.minSizeX, e.minSizeY }); return true; }
-    if (n == "Max Size")     { out = UIPropValue::ofVec2({ e.maxSizeX, e.maxSizeY }); return true; }
-    if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
-    if (n == "Hover Cursor") { out = UIPropValue::ofInt((int)e.hoverCursor);    return true; }
-    if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
-    if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
-    if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
-    if (n == "Tooltip")      { out = UIPropValue::ofString(e.tooltip);          return true; }
-    // "Corner Radius" is the whole rounding as ONE number, which is what it has
-    // always been and what nearly every element wants. Reading it back gives the
-    // top-left corner, so a graph that set it reads its own value; the four
-    // named rows below are for the elements that round their corners differently.
-    if (n == "Corner Radius"){ out = UIPropValue::ofFloat(e.cornerRadius.x);    return true; }
-    if (n == "Corner TL")    { out = UIPropValue::ofFloat(e.cornerRadius.x);    return true; }
-    if (n == "Corner TR")    { out = UIPropValue::ofFloat(e.cornerRadius.y);    return true; }
-    if (n == "Corner BR")    { out = UIPropValue::ofFloat(e.cornerRadius.z);    return true; }
-    if (n == "Corner BL")    { out = UIPropValue::ofFloat(e.cornerRadius.w);    return true; }
-    if (n == "Border Width") { out = UIPropValue::ofFloat(e.borderWidth);       return true; }
-    if (n == "Border Color") { out = UIPropValue::ofColor(e.borderColor);       return true; }
-    if (n == "Gradient")     { out = UIPropValue::ofBool(e.gradient);           return true; }
-    if (n == "Gradient Color"){out = UIPropValue::ofColor(e.gradientColor);     return true; }
-    if (n == "Gradient Angle"){out = UIPropValue::ofFloat(e.gradientAngle);     return true; }
-    if (n == "Gradient Shape"){out = UIPropValue::ofInt(e.gradientShape);       return true; }
-    if (n == "Shadow")       { out = UIPropValue::ofBool(e.shadow);             return true; }
-    if (n == "Shadow Color") { out = UIPropValue::ofColor(e.shadowColor);       return true; }
-    if (n == "Shadow Blur")  { out = UIPropValue::ofFloat(e.shadowBlur);        return true; }
-    if (n == "Shadow Offset"){ out = UIPropValue::ofVec2({ e.shadowOffsetX, e.shadowOffsetY });
-                               return true; }
-    if (n == "Inner Shadow") { out = UIPropValue::ofBool(e.innerShadow);        return true; }
-    if (n == "Inner Shadow Color"){ out = UIPropValue::ofColor(e.innerShadowColor); return true; }
-    if (n == "Inner Shadow Blur") { out = UIPropValue::ofFloat(e.innerShadowBlur);  return true; }
-    return false;
+    Always,         // every element
+    Surface,        // hasSurfaceStyle(): a Text label does not grow a border that outlines nothing
+    MaterialSlot,   // hasMaterialSlot()
+    TextureSlot,    // hasTextureSlot()
+    FontSlot,       // types whose own table has "FontSize" (the heuristic the details panel uses)
+};
+
+struct BaseProp
+{
+    UIPropDesc  desc;
+    BaseOffer   offer;
+    UIPropValue (*get)(const UIElement&);
+    void        (*set)(UIElement&, const UIPropValue&);
+};
+
+const std::vector<BaseProp>& baseProps()
+{
+    using V = UIPropValue;
+    using T = UIPropType;
+    static const std::vector<BaseProp> rows = {
+        { { "Visible", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.visible); },
+          [](UIElement& e, const V& v) { e.visible = v.b; } },
+        { { "Hit Testable", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.hitTestable); },
+          [](UIElement& e, const V& v) { e.hitTestable = v.b; } },
+        { { "Window Drag", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.windowDrag); },
+          [](UIElement& e, const V& v) { e.windowDrag = v.b; } },
+        { { "Clip Children", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.clipChildren); },
+          [](UIElement& e, const V& v) { e.clipChildren = v.b; } },
+        { { "Focus Frame", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.focusFrame); },
+          [](UIElement& e, const V& v) { e.focusFrame = v.b; } },
+        { { "Accepts Drop", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.acceptsDrop); },
+          [](UIElement& e, const V& v) { e.acceptsDrop = v.b; } },
+        { { "Draggable", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.draggable); },
+          [](UIElement& e, const V& v) { e.draggable = v.b; } },
+        // Beside Draggable rather than down with the other strings: the two
+        // are one feature.
+        { { "Drag Payload", T::String }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofString(e.dragPayload); },
+          [](UIElement& e, const V& v) { e.dragPayload = v.s; } },
+        { { "Enabled", T::Bool }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofBool(e.enabled); },
+          [](UIElement& e, const V& v) { e.enabled = v.b; } },
+        { { "Render Opacity", T::Float, 0.0f, 1.0f }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.renderOpacity); },
+          [](UIElement& e, const V& v) { e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); } },
+        // Offered on every type, not only the ones that blend today: it is a
+        // property of the ELEMENT, a theme sets it once for a whole application,
+        // and a row that appears and disappears depending on the widget type is a
+        // row nobody trusts. What each type does with it is the renderer's business.
+        // A negative transition is a state change running backwards, which is
+        // nothing; it lands on 0, the value that means "at once".
+        { { "Transition", T::Float, 0.0f, 2.0f }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.transition); },
+          [](UIElement& e, const V& v) { e.transition = v.f < 0.0f ? 0.0f : v.f; } },
+        // No clamp: all three ranges mean something (see UIElement::tabIndex).
+        { { "Tab Index", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt(e.tabIndex); },
+          [](UIElement& e, const V& v) { e.tabIndex = v.i; } },
+        { { "Slot Fill", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.slotFill); },
+          [](UIElement& e, const V& v) { e.slotFill = v.f < 0.0f ? 0.0f : v.f; } },
+        // A number outside the enum lands on Fill, the value that means "as before".
+        { { "Slot Align H", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt((int)e.slotHAlign); },
+          [](UIElement& e, const V& v) {
+              e.slotHAlign = (v.i >= 0 && v.i < (int)UISlotHAlign::COUNT) ? (UISlotHAlign)v.i : UISlotHAlign::Fill; } },
+        { { "Slot Align V", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt((int)e.slotVAlign); },
+          [](UIElement& e, const V& v) {
+              e.slotVAlign = (v.i >= 0 && v.i < (int)UISlotVAlign::COUNT) ? (UISlotVAlign)v.i : UISlotVAlign::Fill; } },
+        // "Slot Padding" is all four sides as ONE number, the way "Corner Radius"
+        // is all four corners: reading it back gives the left side, so a graph
+        // that set it reads its own value. The four named rows are the per-side
+        // form the audit asked for. Floored at 0: a negative margin would be a
+        // slot that overlaps its neighbour, and the box walk assumes it never
+        // has to subtract.
+        { { "Slot Padding", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.slotPadLeft); },
+          [](UIElement& e, const V& v) {
+              e.slotPadLeft = e.slotPadTop = e.slotPadRight = e.slotPadBottom = std::max(0.0f, v.f); } },
+        { { "Slot Padding Left", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.slotPadLeft); },
+          [](UIElement& e, const V& v) { e.slotPadLeft = std::max(0.0f, v.f); } },
+        { { "Slot Padding Top", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.slotPadTop); },
+          [](UIElement& e, const V& v) { e.slotPadTop = std::max(0.0f, v.f); } },
+        { { "Slot Padding Right", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.slotPadRight); },
+          [](UIElement& e, const V& v) { e.slotPadRight = std::max(0.0f, v.f); } },
+        { { "Slot Padding Bottom", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.slotPadBottom); },
+          [](UIElement& e, const V& v) { e.slotPadBottom = std::max(0.0f, v.f); } },
+        // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
+        { { "Grid Column", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt(e.gridColumn); },
+          [](UIElement& e, const V& v) { e.gridColumn = v.i < -1 ? -1 : v.i; } },
+        { { "Grid Row", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt(e.gridRow); },
+          [](UIElement& e, const V& v) { e.gridRow = v.i < -1 ? -1 : v.i; } },
+        { { "Column Span", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt(e.gridColumnSpan); },
+          [](UIElement& e, const V& v) { e.gridColumnSpan = v.i < 1 ? 1 : v.i; } },
+        { { "Row Span", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt(e.gridRowSpan); },
+          [](UIElement& e, const V& v) { e.gridRowSpan = v.i < 1 ? 1 : v.i; } },
+        { { "Rotation", T::Float }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofFloat(e.rotation); },
+          [](UIElement& e, const V& v) { e.rotation = v.f; } },
+        { { "Position", T::Vec2 }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofVec2({ e.posX, e.posY }); },
+          [](UIElement& e, const V& v) { e.posX = v.v2.x; e.posY = v.v2.y; } },
+        { { "Size", T::Vec2 }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofVec2({ e.sizeX, e.sizeY }); },
+          [](UIElement& e, const V& v) { e.sizeX = v.v2.x; e.sizeY = v.v2.y; } },
+        // Beside Size, and shaped like it: what an author sets here is one pair,
+        // and two scalar rows for one idea is how somebody ends up with a floor on
+        // the width and none on the height without meaning to. 0 on an axis = no
+        // bound on that axis. Floored at 0, which is the value that means "no
+        // bound": a negative one would be a third meaning nobody could name, and
+        // clamping it here keeps uiElementRect from having to ask.
+        { { "Min Size", T::Vec2 }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofVec2({ e.minSizeX, e.minSizeY }); },
+          [](UIElement& e, const V& v) { e.minSizeX = std::max(0.0f, v.v2.x); e.minSizeY = std::max(0.0f, v.v2.y); } },
+        { { "Max Size", T::Vec2 }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofVec2({ e.maxSizeX, e.maxSizeY }); },
+          [](UIElement& e, const V& v) { e.maxSizeX = std::max(0.0f, v.v2.x); e.maxSizeY = std::max(0.0f, v.v2.y); } },
+        { { "Layer", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt(e.layer); },
+          [](UIElement& e, const V& v) { e.layer = v.i; } },
+        { { "Hover Cursor", T::Int }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofInt((int)e.hoverCursor); },
+          [](UIElement& e, const V& v) {
+              e.hoverCursor = (v.i >= 0 && v.i < (int)UICursor::COUNT) ? (UICursor)v.i : UICursor::Default; } },
+        // Asset slots only where the editor exposes them; allProperties lists
+        // these three after everything else.
+        { { "Material", T::String }, BaseOffer::MaterialSlot,
+          [](const UIElement& e) { return V::ofString(e.material); },
+          [](UIElement& e, const V& v) { e.material = v.s; } },
+        // The path is the authored value; the resolved id is transient and the
+        // runtime re-resolves it when this changes (WidgetManager watches both).
+        { { "Texture", T::String }, BaseOffer::TextureSlot,
+          [](const UIElement& e) { return V::ofString(e.texture); },
+          [](UIElement& e, const V& v) { e.texture = v.s; } },
+        { { "Font", T::String }, BaseOffer::FontSlot,
+          [](const UIElement& e) { return V::ofString(e.font); },
+          [](UIElement& e, const V& v) { e.font = v.s; } },
+        { { "Tooltip", T::String }, BaseOffer::Always,
+          [](const UIElement& e) { return V::ofString(e.tooltip); },
+          [](UIElement& e, const V& v) { e.tooltip = v.s; } },
+        // Border ("Schicht 0"): a style on the element's own surface.
+        // "Corner Radius" is the whole rounding as ONE number, which is what it has
+        // always been and what nearly every element wants. Reading it back gives the
+        // top-left corner, so a graph that set it reads its own value; writing it
+        // rounds ALL FOUR corners — the property a script or a theme sets when it
+        // means "round this thing". The four named rows address a single corner;
+        // both are real properties a graph can set.
+        { { "Corner Radius", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.cornerRadius.x); },
+          [](UIElement& e, const V& v) { e.cornerRadius = glm::vec4(std::max(0.0f, v.f)); } },
+        { { "Corner TL", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.cornerRadius.x); },
+          [](UIElement& e, const V& v) { e.cornerRadius.x = std::max(0.0f, v.f); } },
+        { { "Corner TR", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.cornerRadius.y); },
+          [](UIElement& e, const V& v) { e.cornerRadius.y = std::max(0.0f, v.f); } },
+        { { "Corner BR", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.cornerRadius.z); },
+          [](UIElement& e, const V& v) { e.cornerRadius.z = std::max(0.0f, v.f); } },
+        { { "Corner BL", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.cornerRadius.w); },
+          [](UIElement& e, const V& v) { e.cornerRadius.w = std::max(0.0f, v.f); } },
+        { { "Border Width", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.borderWidth); },
+          [](UIElement& e, const V& v) { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; } },
+        { { "Border Color", T::Color }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofColor(e.borderColor); },
+          [](UIElement& e, const V& v) { e.borderColor = v.col; } },
+        // Split into three plain properties rather than one gradient object:
+        // the designer's property editor is generic over UIPropType, so anything
+        // expressed in the existing kinds gets its editor for free.
+        { { "Gradient", T::Bool }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofBool(e.gradient); },
+          [](UIElement& e, const V& v) { e.gradient = v.b; } },
+        { { "Gradient Color", T::Color }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofColor(e.gradientColor); },
+          [](UIElement& e, const V& v) { e.gradientColor = v.col; } },
+        { { "Gradient Angle", T::Float, 0.0f, 360.0f }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.gradientAngle); },
+          [](UIElement& e, const V& v) { e.gradientAngle = v.f; } },
+        { { "Gradient Shape", T::Int, 0.0f, 1.0f }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofInt(e.gradientShape); },
+          [](UIElement& e, const V& v) { e.gradientShape = (v.i == 1) ? 1 : 0; } },
+        { { "Shadow", T::Bool }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofBool(e.shadow); },
+          [](UIElement& e, const V& v) { e.shadow = v.b; } },
+        { { "Shadow Color", T::Color }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofColor(e.shadowColor); },
+          [](UIElement& e, const V& v) { e.shadowColor = v.col; } },
+        { { "Shadow Blur", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.shadowBlur); },
+          [](UIElement& e, const V& v) { e.shadowBlur = std::max(0.0f, v.f); } },
+        { { "Shadow Offset", T::Vec2 }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofVec2({ e.shadowOffsetX, e.shadowOffsetY }); },
+          [](UIElement& e, const V& v) { e.shadowOffsetX = v.v2.x; e.shadowOffsetY = v.v2.y; } },
+        { { "Inner Shadow", T::Bool }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofBool(e.innerShadow); },
+          [](UIElement& e, const V& v) { e.innerShadow = v.b; } },
+        { { "Inner Shadow Color", T::Color }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofColor(e.innerShadowColor); },
+          [](UIElement& e, const V& v) { e.innerShadowColor = v.col; } },
+        { { "Inner Shadow Blur", T::Float }, BaseOffer::Surface,
+          [](const UIElement& e) { return V::ofFloat(e.innerShadowBlur); },
+          [](UIElement& e, const V& v) { e.innerShadowBlur = std::max(0.0f, v.f); } },
+    };
+    return rows;
+}
+
+// getPropAny/setPropAny run per sample of every running UI animation clip
+// (WidgetManager::applyClipAt), so the name is hashed once instead of compared
+// against up to fifty rows. nullptr: not a base name, the type's table decides.
+const BaseProp* findBaseProp(const std::string& name)
+{
+    static const std::unordered_map<std::string_view, const BaseProp*> index = [] {
+        std::unordered_map<std::string_view, const BaseProp*> m;
+        for (const BaseProp& row : baseProps()) m.emplace(row.desc.name, &row);
+        return m;
+    }();
+    const auto it = index.find(std::string_view(name));
+    return it == index.end() ? nullptr : it->second;
 }
 
 } // namespace
 
 const std::vector<UIPropDesc>& uiBaseProperties()
 {
-    // Same names, same types, same ORDER as getBaseProp above — read together,
-    // they are one list written twice, and test_ui_widgets pins that.
-    static const std::vector<UIPropDesc> t = {
-        { "Visible",             UIPropType::Bool },
-        { "Hit Testable",        UIPropType::Bool },
-        { "Window Drag",         UIPropType::Bool },
-        { "Clip Children",       UIPropType::Bool },
-        { "Focus Frame",         UIPropType::Bool },
-        { "Accepts Drop",        UIPropType::Bool },
-        { "Draggable",           UIPropType::Bool },
-        // Beside Draggable rather than down with the other strings: this list is
-        // getBaseProp written a second time, and the two are read together.
-        { "Drag Payload",        UIPropType::String },
-        { "Enabled",             UIPropType::Bool },
-        { "Render Opacity",      UIPropType::Float, 0.0f, 1.0f },
-        { "Transition",          UIPropType::Float, 0.0f, 2.0f },
-        { "Tab Index",           UIPropType::Int },
-        { "Slot Fill",           UIPropType::Float },
-        { "Slot Align H",        UIPropType::Int },
-        { "Slot Align V",        UIPropType::Int },
-        { "Slot Padding",        UIPropType::Float },
-        { "Slot Padding Left",   UIPropType::Float },
-        { "Slot Padding Top",    UIPropType::Float },
-        { "Slot Padding Right",  UIPropType::Float },
-        { "Slot Padding Bottom", UIPropType::Float },
-        { "Grid Column",         UIPropType::Int },
-        { "Grid Row",            UIPropType::Int },
-        { "Column Span",         UIPropType::Int },
-        { "Row Span",            UIPropType::Int },
-        { "Rotation",            UIPropType::Float },
-        { "Position",            UIPropType::Vec2 },
-        { "Size",                UIPropType::Vec2 },
-        { "Min Size",            UIPropType::Vec2 },
-        { "Max Size",            UIPropType::Vec2 },
-        { "Layer",               UIPropType::Int },
-        { "Hover Cursor",        UIPropType::Int },
-        { "Material",            UIPropType::String },
-        { "Texture",             UIPropType::String },
-        { "Font",                UIPropType::String },
-        { "Tooltip",             UIPropType::String },
-        { "Corner Radius",       UIPropType::Float },
-        { "Corner TL",           UIPropType::Float },
-        { "Corner TR",           UIPropType::Float },
-        { "Corner BR",           UIPropType::Float },
-        { "Corner BL",           UIPropType::Float },
-        { "Border Width",        UIPropType::Float },
-        { "Border Color",        UIPropType::Color },
-        { "Gradient",            UIPropType::Bool },
-        { "Gradient Color",      UIPropType::Color },
-        { "Gradient Angle",      UIPropType::Float },
-        { "Gradient Shape",      UIPropType::Int },
-        { "Shadow",              UIPropType::Bool },
-        { "Shadow Color",        UIPropType::Color },
-        { "Shadow Blur",         UIPropType::Float },
-        { "Shadow Offset",       UIPropType::Vec2 },
-        { "Inner Shadow",        UIPropType::Bool },
-        { "Inner Shadow Color",  UIPropType::Color },
-        { "Inner Shadow Blur",   UIPropType::Float },
-    };
+    static const std::vector<UIPropDesc> t = [] {
+        std::vector<UIPropDesc> out;
+        for (const BaseProp& row : baseProps()) out.push_back(row.desc);
+        return out;
+    }();
     return t;
 }
 
-namespace
-{
-bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
-{
-    if (n == "Visible")      { e.visible     = v.b; return true; }
-    if (n == "Hit Testable") { e.hitTestable = v.b; return true; }
-    if (n == "Window Drag")  { e.windowDrag = v.b; return true; }
-    if (n == "Clip Children"){ e.clipChildren = v.b; return true; }
-    if (n == "Focus Frame")  { e.focusFrame = v.b; return true; }
-    if (n == "Accepts Drop") { e.acceptsDrop = v.b; return true; }
-    if (n == "Draggable")    { e.draggable = v.b; return true; }
-    if (n == "Drag Payload") { e.dragPayload = v.s; return true; }
-    if (n == "Enabled")      { e.enabled = v.b; return true; }
-    if (n == "Render Opacity"){ e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); return true; }
-    // A negative transition is a state change running backwards, which is
-    // nothing; it lands on 0, the value that means "at once".
-    if (n == "Transition")   { e.transition = v.f < 0.0f ? 0.0f : v.f; return true; }
-    // No clamp: all three ranges mean something (see UIElement::tabIndex).
-    if (n == "Tab Index")    { e.tabIndex = v.i; return true; }
-    if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
-    // A number outside the enum lands on Fill, the value that means "as before".
-    if (n == "Slot Align H")
-    { e.slotHAlign = (v.i >= 0 && v.i < (int)UISlotHAlign::COUNT) ? (UISlotHAlign)v.i : UISlotHAlign::Fill; return true; }
-    if (n == "Slot Align V")
-    { e.slotVAlign = (v.i >= 0 && v.i < (int)UISlotVAlign::COUNT) ? (UISlotVAlign)v.i : UISlotVAlign::Fill; return true; }
-    // Floored at 0: a negative margin would be a slot that overlaps its
-    // neighbour, and the box walk assumes it never has to subtract.
-    if (n == "Slot Padding")
-    { e.slotPadLeft = e.slotPadTop = e.slotPadRight = e.slotPadBottom = std::max(0.0f, v.f); return true; }
-    if (n == "Slot Padding Left")   { e.slotPadLeft   = std::max(0.0f, v.f); return true; }
-    if (n == "Slot Padding Top")    { e.slotPadTop    = std::max(0.0f, v.f); return true; }
-    if (n == "Slot Padding Right")  { e.slotPadRight  = std::max(0.0f, v.f); return true; }
-    if (n == "Slot Padding Bottom") { e.slotPadBottom = std::max(0.0f, v.f); return true; }
-    // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
-    if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
-    if (n == "Grid Row")     { e.gridRow    = v.i < -1 ? -1 : v.i; return true; }
-    if (n == "Column Span")  { e.gridColumnSpan = v.i < 1 ? 1 : v.i; return true; }
-    if (n == "Row Span")     { e.gridRowSpan    = v.i < 1 ? 1 : v.i; return true; }
-    if (n == "Rotation")     { e.rotation = v.f; return true; }
-    if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
-    if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
-    // Floored at 0, which is the value that means "no bound": a negative one
-    // would be a third meaning nobody could name, and clamping it here keeps
-    // uiElementRect from having to ask.
-    if (n == "Min Size")
-    { e.minSizeX = std::max(0.0f, v.v2.x); e.minSizeY = std::max(0.0f, v.v2.y); return true; }
-    if (n == "Max Size")
-    { e.maxSizeX = std::max(0.0f, v.v2.x); e.maxSizeY = std::max(0.0f, v.v2.y); return true; }
-    if (n == "Layer")        { e.layer = v.i; return true; }
-    if (n == "Hover Cursor")
-    {
-        const int c = v.i;
-        e.hoverCursor = (c >= 0 && c < (int)UICursor::COUNT)
-            ? (UICursor)c : UICursor::Default;
-        return true;
-    }
-    if (n == "Material")     { e.material = v.s; return true; }
-    // The path is the authored value; the resolved id is transient and the
-    // runtime re-resolves it when this changes (WidgetManager watches both).
-    if (n == "Texture")      { e.texture = v.s; return true; }
-    if (n == "Font")         { e.font = v.s; return true; }
-    if (n == "Tooltip")      { e.tooltip = v.s; return true; }
-    // Writing the single name rounds ALL FOUR corners — the property a script or
-    // a theme sets when it means "round this thing".
-    if (n == "Corner Radius"){ e.cornerRadius = glm::vec4(std::max(0.0f, v.f)); return true; }
-    if (n == "Corner TL")    { e.cornerRadius.x = std::max(0.0f, v.f); return true; }
-    if (n == "Corner TR")    { e.cornerRadius.y = std::max(0.0f, v.f); return true; }
-    if (n == "Corner BR")    { e.cornerRadius.z = std::max(0.0f, v.f); return true; }
-    if (n == "Corner BL")    { e.cornerRadius.w = std::max(0.0f, v.f); return true; }
-    if (n == "Border Width") { e.borderWidth = v.f < 0.0f ? 0.0f : v.f; return true; }
-    if (n == "Border Color") { e.borderColor = v.col; return true; }
-    if (n == "Gradient")     { e.gradient = v.b; return true; }
-    if (n == "Gradient Color"){ e.gradientColor = v.col; return true; }
-    if (n == "Gradient Angle"){ e.gradientAngle = v.f; return true; }
-    if (n == "Gradient Shape"){ e.gradientShape = (v.i == 1) ? 1 : 0; return true; }
-    if (n == "Shadow")       { e.shadow = v.b; return true; }
-    if (n == "Shadow Color") { e.shadowColor = v.col; return true; }
-    if (n == "Shadow Blur")  { e.shadowBlur = std::max(0.0f, v.f); return true; }
-    if (n == "Shadow Offset"){ e.shadowOffsetX = v.v2.x; e.shadowOffsetY = v.v2.y; return true; }
-    if (n == "Inner Shadow") { e.innerShadow = v.b; return true; }
-    if (n == "Inner Shadow Color"){ e.innerShadowColor = v.col; return true; }
-    if (n == "Inner Shadow Blur") { e.innerShadowBlur = std::max(0.0f, v.f); return true; }
-    return false;
-}
-} // namespace
-
+// The type's own properties first, then the shared rows this element offers,
+// in table order, and the asset slots last.
 std::vector<UIPropDesc> UIElement::allProperties() const
 {
     std::vector<UIPropDesc> out = properties();
-    out.push_back({ "Visible",      UIPropType::Bool });
-    out.push_back({ "Hit Testable", UIPropType::Bool });
-    out.push_back({ "Window Drag",  UIPropType::Bool });
-    out.push_back({ "Clip Children",UIPropType::Bool });
-    out.push_back({ "Focus Frame",  UIPropType::Bool });
-    out.push_back({ "Enabled",      UIPropType::Bool });
-    out.push_back({ "Render Opacity", UIPropType::Float, 0.0f, 1.0f });
-    // Offered on every type, not only the ones that blend today: it is a
-    // property of the ELEMENT, a theme sets it once for a whole application,
-    // and a row that appears and disappears depending on the widget type is a
-    // row nobody trusts. What each type does with it is the renderer's business.
-    out.push_back({ "Transition",   UIPropType::Float, 0.0f, 2.0f });
-    out.push_back({ "Tab Index",    UIPropType::Int });
-    out.push_back({ "Slot Fill",    UIPropType::Float });
-    out.push_back({ "Slot Align H", UIPropType::Int });
-    out.push_back({ "Slot Align V", UIPropType::Int });
-    out.push_back({ "Slot Padding", UIPropType::Float });
-    out.push_back({ "Slot Padding Left",   UIPropType::Float });
-    out.push_back({ "Slot Padding Top",    UIPropType::Float });
-    out.push_back({ "Slot Padding Right",  UIPropType::Float });
-    out.push_back({ "Slot Padding Bottom", UIPropType::Float });
-    out.push_back({ "Grid Column",  UIPropType::Int });
-    out.push_back({ "Grid Row",     UIPropType::Int });
-    out.push_back({ "Column Span",  UIPropType::Int });
-    out.push_back({ "Row Span",     UIPropType::Int });
-    out.push_back({ "Rotation",     UIPropType::Float });
-    out.push_back({ "Position",     UIPropType::Vec2 });
-    out.push_back({ "Size",         UIPropType::Vec2 });
-    out.push_back({ "Min Size",     UIPropType::Vec2 });
-    out.push_back({ "Max Size",     UIPropType::Vec2 });
-    out.push_back({ "Layer",        UIPropType::Int });
-    out.push_back({ "Hover Cursor", UIPropType::Int });
-    out.push_back({ "Tooltip",      UIPropType::String });
-    // Border ("Schicht 0"): a style on the element's own surface. Offered only
-    // where there IS a surface — the same test the material slot uses — so a
-    // Text label does not grow a border property that outlines nothing.
-    if (hasSurfaceStyle())
-    {
-        out.push_back({ "Corner Radius", UIPropType::Float });
-        // The four on top of the one: "Corner Radius" is all of them at once,
-        // these address a single corner. Both are real properties a graph can
-        // set, which is why they are listed and not just editor state.
-        out.push_back({ "Corner TL", UIPropType::Float });
-        out.push_back({ "Corner TR", UIPropType::Float });
-        out.push_back({ "Corner BR", UIPropType::Float });
-        out.push_back({ "Corner BL", UIPropType::Float });
-        out.push_back({ "Border Width", UIPropType::Float });
-        out.push_back({ "Border Color", UIPropType::Color });
-        // Split into three plain properties rather than one gradient object:
-        // the designer's property editor is generic over UIPropType, so anything
-        // expressed in the existing kinds gets its editor for free.
-        out.push_back({ "Gradient",       UIPropType::Bool });
-        out.push_back({ "Gradient Color", UIPropType::Color });
-        out.push_back({ "Gradient Angle", UIPropType::Float, 0.0f, 360.0f });
-        out.push_back({ "Gradient Shape", UIPropType::Int, 0.0f, 1.0f });
-        out.push_back({ "Shadow",         UIPropType::Bool });
-        out.push_back({ "Shadow Color",   UIPropType::Color });
-        out.push_back({ "Shadow Blur",    UIPropType::Float });
-        out.push_back({ "Shadow Offset",  UIPropType::Vec2 });
-        out.push_back({ "Inner Shadow",       UIPropType::Bool });
-        out.push_back({ "Inner Shadow Color", UIPropType::Color });
-        out.push_back({ "Inner Shadow Blur",  UIPropType::Float });
-    }
-    // Asset slots only where the editor exposes them: Material behind
-    // hasMaterialSlot(), Font on text-bearing types (same FontSize heuristic
-    // the details panel uses).
-    if (hasMaterialSlot())
-        out.push_back({ "Material", UIPropType::String });
-    if (hasTextureSlot())
-        out.push_back({ "Texture", UIPropType::String });
+    const bool surface = hasSurfaceStyle();
+    for (const BaseProp& row : baseProps())
+        if (row.offer == BaseOffer::Always || (row.offer == BaseOffer::Surface && surface))
+            out.push_back(row.desc);
+    bool hasFontSize = false;
     for (const UIPropSlot& s : propTable())
-        if (s.desc.name == "FontSize")
-        {
-            out.push_back({ "Font", UIPropType::String });
-            break;
-        }
+        if (s.desc.name == "FontSize") { hasFontSize = true; break; }
+    for (const BaseProp& row : baseProps())
+    {
+        if ((row.offer == BaseOffer::MaterialSlot && hasMaterialSlot()) ||
+            (row.offer == BaseOffer::TextureSlot  && hasTextureSlot())  ||
+            (row.offer == BaseOffer::FontSlot     && hasFontSize))
+            out.push_back(row.desc);
+    }
     return out;
 }
 
 UIPropValue UIElement::getPropAny(const std::string& name) const
 {
-    UIPropValue v;
-    if (getBaseProp(*this, name, v)) return v;
+    if (const BaseProp* row = findBaseProp(name)) return row->get(*this);
     return getProp(name);
 }
 
 void UIElement::setPropAny(const std::string& name, const UIPropValue& v)
 {
-    if (setBaseProp(*this, name, v)) return;
+    if (const BaseProp* row = findBaseProp(name)) { row->set(*this, v); return; }
     setProp(name, v);
 }
 
