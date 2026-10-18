@@ -171,7 +171,10 @@ explain; the claim is the build count (static: 0 per frame), not the per-build t
 - **Verified:** build green (Release). Shots under Metal API + shader validation, before
   = step-1 deploy copy: static HW/SW/reflections build once then keep; GIMOVE rebuilds ×6
   then keeps, receiver shadow follows (GI on agrees with CSM, HW and SW); before/after
-  within the run-to-run noise (no pixel > 8 levels); GI off md5-identical. Probe numbers
+  within the run-to-run noise (no pixel > 8 levels); GI off md5-identical.
+  `MOUNTAINTEST=1 GI=1 GIREFL=1 RENDERPATH=1`: 16 chunk BLAS built in one batched frame,
+  then kept, validation clean (the chunks were out of view, so the image proves nothing;
+  whether its land table had entries was not checked). Probe numbers
   above. Full `he_tests` (Release, from the build dir): 5431 cases, 3 red, the known ones
   (`test_hpak` scanContentDirectory green with an empty HOME 59/59, `test_profiler` green
   alone 18/18); he_tests does not link the Metal backend.
@@ -182,8 +185,9 @@ explain; the claim is the build count (static: 0 per frame), not the per-build t
 - **Decisions:** no refit and no persistent scratch (in-flight race, see above);
   material lookup per object stays (live Param slots); byte compares, a -0.0/NaN mismatch
   only costs a rebuild.
-- **Traps:** `HE_DUMP_GIBLEED` only adds geometry inside `MATERIALTEST=1`. The headless
-  dump never calls the renderer's `Shutdown()` log path reliably; use `HE_DUMP_GIACCEL=1`.
-  `CAMX/CAMY` do not move the `MATERIALTEST` camera. Metal validation goes to stderr.
+- **Traps:** `HE_DUMP_GIBLEED` only adds geometry inside `MATERIALTEST=1`; without it the
+  scene is empty and the Shutdown summary line (printed only after a GI frame) is absent.
+  `HE_DUMP_GIACCEL=1` gives the per-frame proof. `CAMX/CAMY` do not move the
+  `MATERIALTEST` camera. Metal validation goes to the process's stderr, not the engine log.
 - **Next steps:** 1. Step 3 (REN-301 Pimpl). 2. Optional: refit for moving scenes behind a
   completion-handler fence, measured with the probe's `moved` case.
