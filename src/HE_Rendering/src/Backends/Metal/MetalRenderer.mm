@@ -6828,13 +6828,15 @@ void MetalRenderer::Shutdown()
 	DestroyGIShadowTargets();
 	DestroyGIProbeAtlas();
 	DrainRetiredTextures();
+	if (m_giAccelBuilds || m_giAccelReuses || m_giBlasBuilds)
+		HE_LOG_INFO(RHI, "MetalRenderer: GI accel %u builds, %u frames reused, %u BLAS builds",
+		            m_giAccelBuilds, m_giAccelReuses, m_giBlasBuilds);
+	// The live TLAS, its tables and the BLAS/mesh references it holds go through
+	// the retire list, then everything on it is released at once.
+	ReleaseGIAccel();
+	RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
+	m_giLandLast.clear();
 	DrainRetiredGIObjects();
-	if (m_giTlas)                { CFBridgingRelease(m_giTlas);                m_giTlas = nullptr; }
-	if (m_giInstanceBuffer)      { CFBridgingRelease(m_giInstanceBuffer);      m_giInstanceBuffer = nullptr; }
-	if (m_giInstanceColorBuffer) { CFBridgingRelease(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr; }
-	if (m_giLandBuf)         { CFBridgingRelease(m_giLandBuf);         m_giLandBuf         = nullptr; }
-	if (m_giInstanceLandBuf) { CFBridgingRelease(m_giInstanceLandBuf); m_giInstanceLandBuf = nullptr; }
-	m_giUniqueBlas.clear();
 	if (m_giGBufPipeline)           { CFBridgingRelease(m_giGBufPipeline);           m_giGBufPipeline = nullptr; }
 	if (m_giGBufInstancedPipeline)  { CFBridgingRelease(m_giGBufInstancedPipeline);  m_giGBufInstancedPipeline = nullptr; }
 	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
@@ -8182,9 +8184,9 @@ void MetalRenderer::EnsureRaytracingSupport()
 		: "MetalRenderer: MetalFX temporal scaling unavailable — the TAA mode covers it");
 }
 
-void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
+void* MetalRenderer::BuildBLAS(const GpuMesh& mesh, void* encoder)
 {
-	if (!mesh.vertexBuf || !mesh.indexBuf || mesh.indexCount <= 0) return nullptr;
+	if (!mesh.vertexBuf || !mesh.indexBuf || mesh.indexCount <= 0 || !encoder) return nullptr;
 
 	void* result = nullptr;
 	if (@available(macOS 12.0, *))
@@ -8210,21 +8212,24 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 		MTLAccelerationStructureSizes sizes = [device accelerationStructureSizesWithDescriptor:accelDesc];
 		id<MTLAccelerationStructure> blas =
 			[device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
-		if (blas)
+		id<MTLBuffer> scratch = blas
+			? [device newBufferWithLength:std::max((NSUInteger)1, sizes.buildScratchBufferSize)
+			                      options:MTLResourceStorageModePrivate]
+			: nil;
+		if (blas && scratch)
 		{
-			id<MTLBuffer> scratch = [device newBufferWithLength:std::max((NSUInteger)1, sizes.buildScratchBufferSize)
-			                                              options:MTLResourceStorageModePrivate];
-			id<MTLCommandQueue>  queue  = (__bridge id<MTLCommandQueue>)m_commandQueue;
-			id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
-			id<MTLAccelerationStructureCommandEncoder> enc = [cmdBuf accelerationStructureCommandEncoder];
+			// Encoded on the frame's command buffer, not committed and waited for
+			// on a command buffer of its own (REN-406): that cost one CPU-GPU round
+			// trip per new mesh, N of them in the frame a scene loads. The TLAS
+			// build is a LATER encoder of the same command buffer and declares the
+			// BLAS used, so Metal orders it after this build. Builds inside one
+			// encoder may run concurrently: each gets its own scratch, which the
+			// command buffer keeps alive until it completes.
+			id<MTLAccelerationStructureCommandEncoder> enc =
+				(__bridge id<MTLAccelerationStructureCommandEncoder>)encoder;
 			[enc buildAccelerationStructure:blas descriptor:accelDesc
 			                  scratchBuffer:scratch scratchBufferOffset:0];
-			[enc endEncoding];
-			[cmdBuf commit];
-			// One-shot, lazy (first-sight-only) build — a small hitch on the frame a
-			// new mesh first participates in GI is acceptable; waiting here keeps the
-			// BLAS fully built before any TLAS references it, no extra bookkeeping.
-			[cmdBuf waitUntilCompleted];
+			++m_giBlasBuilds;
 			result = (void*)CFBridgingRetain(blas);
 		}
 	}
@@ -8257,6 +8262,19 @@ static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
 	roughnessOut = s.roughness;
 }
 
+// HE_DUMP_GIACCEL=1: one log line per GI-active frame saying whether the TLAS
+// (SW: the instance buffer) was rebuilt or kept, with the running counters —
+// the witness for the dirty check (REN-405), which no image can show: a kept
+// and a rebuilt TLAS of the same scene trace the same picture. Read once.
+static bool giAccelLogEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_DUMP_GIACCEL");
+		return v && *v && std::atoi(v) != 0;
+	}();
+	return on;
+}
+
 MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId)
 {
 	GISwBlasRange range;
@@ -8287,8 +8305,12 @@ MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId
 void MetalRenderer::EncodeGISwAccelBuild()
 {
 	// Same caster filter as the HW TLAS: castsShadow, unculled.
-	std::vector<GISwInstanceCPU> instances;
+	std::vector<GISwInstanceCPU>& instances = m_giSwInstCur;
+	std::vector<glm::mat4>&       xforms    = m_giSwXformCur;
+	instances.clear();
+	xforms.clear();
 	instances.reserve(m_renderWorld.objects.size());
+	xforms.reserve(m_renderWorld.objects.size());
 	auto resolveSwRange = [&](const HE::UUID& id) -> GISwBlasRange
 	{
 		auto it = m_giSwBlasCache.find(id);
@@ -8305,7 +8327,13 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
 		if (!range.valid) continue;
 		GISwInstanceCPU inst;
-		inst.invTransform = glm::inverse(obj.transform);
+		// The 4x4 inverse only for a transform that moved since the live buffer
+		// (same slot, same matrix → same inverse); a static scene inverts nothing.
+		const size_t slot = instances.size();
+		inst.invTransform = (slot < m_giSwXformLast.size() && m_giSwXformLast[slot] == obj.transform)
+			? m_giSwInstLast[slot].invTransform
+			: glm::inverse(obj.transform);
+		xforms.push_back(obj.transform);
 		glm::vec3 albedo, emissive;
 		float metallic, roughness;
 		giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
@@ -8317,7 +8345,13 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		instances.push_back(inst);
 	}
 	m_giSwInstanceCount = static_cast<int>(instances.size());
-	if (m_giSwInstanceCount == 0) return;
+	if (m_giSwInstanceCount == 0)
+	{
+		RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
+		m_giSwInstLast.clear();
+		m_giSwXformLast.clear();
+		return;
+	}
 
 	@autoreleasepool
 	{
@@ -8336,13 +8370,35 @@ void MetalRenderer::EncodeGISwAccelBuild()
 			if (tb) m_giSwTriBuf  = (void*)CFBridgingRetain(tb);
 			m_giSwBlasDirty = false;
 		}
-		// Instance buffer is rebuilt FRESH every frame (same in-flight-GPU-race
-		// reasoning as the HW TLAS instance buffer — see the member comment).
-		RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
-		id<MTLBuffer> ib = [device newBufferWithBytes:instances.data()
-		                                       length:instances.size() * sizeof(GISwInstanceCPU)
-		                                      options:MTLResourceStorageModeShared];
-		if (ib) m_giSwInstanceBuf = (void*)CFBridgingRetain(ib);
+		// Unchanged instances (bytes equal, the struct has no implicit padding) keep
+		// the live buffer. A change gets a FRESH one, never an in-place write: the
+		// previous frame's trace may still be reading it (see m_giTlas).
+		const bool same = m_giSwInstanceBuf && !m_giAccelDirty
+			&& instances.size() == m_giSwInstLast.size()
+			&& std::memcmp(instances.data(), m_giSwInstLast.data(),
+			               instances.size() * sizeof(GISwInstanceCPU)) == 0;
+		if (same)
+		{
+			++m_giAccelReuses;
+			if (giAccelLogEnabled())
+				HE_LOG_INFO(RHI, "GI accel (SW): kept, %d instances (builds %u, kept %u)",
+				            m_giSwInstanceCount, m_giAccelBuilds, m_giAccelReuses);
+		}
+		else
+		{
+			RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
+			id<MTLBuffer> ib = [device newBufferWithBytes:instances.data()
+			                                       length:instances.size() * sizeof(GISwInstanceCPU)
+			                                      options:MTLResourceStorageModeShared];
+			if (ib) m_giSwInstanceBuf = (void*)CFBridgingRetain(ib);
+			instances.swap(m_giSwInstLast);
+			xforms.swap(m_giSwXformLast);
+			m_giAccelDirty = false;
+			++m_giAccelBuilds;
+			if (giAccelLogEnabled())
+				HE_LOG_INFO(RHI, "GI accel (SW): rebuilt, %d instances (builds %u, kept %u)",
+				            m_giSwInstanceCount, m_giAccelBuilds, m_giAccelReuses);
+		}
 	}
 }
 
@@ -8352,16 +8408,22 @@ void MetalRenderer::EncodeGISwAccelBuild()
 // for the kernel's texture array. Without this a landscape hit can only be one
 // flat colour for the whole terrain — a red ridge on a green hillside mirrors as
 // the average of the two, which is visibly not what the terrain looks like.
-// Rebuilt per frame: it is a handful of 192-byte entries, and the weightmap
-// TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
-// once, re-uploaded only when the paint changes).
+// Gathered per frame (a handful of 192-byte entries), uploaded only when the
+// entries differ from the live buffer's. The weightmap TEXTURES come from the
+// same UUID-keyed cache the raster path uses (uploaded once, re-uploaded only
+// when the paint changes) and are not part of the buffer.
 int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 {
 	outWeightTex.clear();
-	RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
-	if (m_renderWorld.landscapes.empty() || !m_device) return 0;
+	std::vector<GILandGpu>& gpu = m_giLandCur;
+	gpu.clear();
+	auto dropTable = [&]
+	{
+		RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
+		m_giLandLast.clear();
+	};
+	if (m_renderWorld.landscapes.empty() || !m_device) { dropTable(); return 0; }
 
-	std::vector<GILandGpu> gpu;
 	gpu.reserve(m_renderWorld.landscapes.size());
 	for (const HE::GiLandscape& ls : m_renderWorld.landscapes)
 	{
@@ -8385,14 +8447,39 @@ int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
 		gpu.push_back(g);
 		outWeightTex.push_back(wm);
 	}
-	if (gpu.empty()) return 0;
+	if (gpu.empty()) { dropTable(); return 0; }
+	// GILandGpu is all float4/mat4: no padding, bytes equal = entries equal.
+	if (m_giLandBuf && gpu.size() == m_giLandLast.size()
+	    && std::memcmp(gpu.data(), m_giLandLast.data(), gpu.size() * sizeof(GILandGpu)) == 0)
+		return static_cast<int>(gpu.size());
+	dropTable();
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLBuffer> buf = [device newBufferWithBytes:gpu.data()
 	                                        length:gpu.size() * sizeof(GILandGpu)
 	                                       options:MTLResourceStorageModeShared];
 	if (!buf) return 0;
 	m_giLandBuf = (void*)CFBridgingRetain(buf);
-	return static_cast<int>(gpu.size());
+	gpu.swap(m_giLandLast);
+	return static_cast<int>(m_giLandLast.size());
+}
+
+void MetalRenderer::ReleaseGIAccel()
+{
+	RetireGIObject(m_giTlas);                m_giTlas                = nullptr;
+	RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
+	RetireGIObject(m_giInstanceLandBuf);     m_giInstanceLandBuf     = nullptr;
+	RetireGIObject(m_giMeshPtrBuf);          m_giMeshPtrBuf          = nullptr;
+	RetireGIObject(m_giInstanceMeshBuf);     m_giInstanceMeshBuf     = nullptr;
+	for (void* p : m_giAccelLast.blas)     RetireGIObject(p);
+	for (void* p : m_giAccelLast.meshBufs) RetireGIObject(p);
+	m_giAccelLast.clear();
+	m_giUniqueBlas.clear();
+	m_giMeshResources.clear();
+	RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
+	m_giSwInstLast.clear();
+	m_giSwXformLast.clear();
+	m_giSwInstanceCount = 0;
+	m_giAccelDirty      = true;
 }
 
 void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
@@ -8406,20 +8493,12 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		// GI just turned off (or was never on this run): release any TLAS/instance
 		// buffer left over from the last GI-active frame instead of holding them
 		// until Shutdown(). No-op (RetireGIObject ignores null) once already clear.
-		RetireGIObject(m_giTlas);              m_giTlas               = nullptr;
-		RetireGIObject(m_giInstanceBuffer);    m_giInstanceBuffer     = nullptr;
-		RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
-		RetireGIObject(m_giLandBuf);           m_giLandBuf            = nullptr;
-		RetireGIObject(m_giInstanceLandBuf);   m_giInstanceLandBuf    = nullptr;
-		RetireGIObject(m_giMeshPtrBuf);        m_giMeshPtrBuf         = nullptr;
-		RetireGIObject(m_giInstanceMeshBuf);   m_giInstanceMeshBuf    = nullptr;
-		m_giMeshResources.clear();
-		m_giUniqueBlas.clear();
-		RetireGIObject(m_giSwNodeBuf);     m_giSwNodeBuf     = nullptr;
-		RetireGIObject(m_giSwTriBuf);      m_giSwTriBuf      = nullptr;
-		RetireGIObject(m_giSwInstanceBuf); m_giSwInstanceBuf = nullptr;
-		m_giSwInstanceCount = 0;
-		m_giSwBlasDirty     = true; // node/tri buffers gone → re-upload on next GI-on
+		ReleaseGIAccel();
+		RetireGIObject(m_giLandBuf);  m_giLandBuf  = nullptr;
+		m_giLandLast.clear();
+		RetireGIObject(m_giSwNodeBuf); m_giSwNodeBuf = nullptr;
+		RetireGIObject(m_giSwTriBuf);  m_giSwTriBuf  = nullptr;
+		m_giSwBlasDirty = true; // node/tri buffers gone → re-upload on next GI-on
 		return;
 	}
 
@@ -8442,14 +8521,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
 
-	RetireGIObject(m_giTlas);                m_giTlas                 = nullptr;
-	RetireGIObject(m_giInstanceBuffer);      m_giInstanceBuffer       = nullptr;
-	RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer  = nullptr;
-	RetireGIObject(m_giMeshPtrBuf);          m_giMeshPtrBuf           = nullptr;
-	RetireGIObject(m_giInstanceMeshBuf);     m_giInstanceMeshBuf      = nullptr;
-	m_giMeshResources.clear();
-	m_giUniqueBlas.clear();
-	if (m_renderWorld.objects.empty()) return;
+	// Every exit below that builds nothing drops the live build: a TLAS kept from
+	// an earlier frame would hand the trace passes casters the scene no longer has.
+	if (m_renderWorld.objects.empty()) { ReleaseGIAccel(); return; }
 
 	// Software path (no HW inline ray tracing, or HE_GI_FORCE_SW): CPU BVH into
 	// plain buffers, no command encoding needed — everything downstream is
@@ -8462,30 +8536,31 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 	if (@available(macOS 12.0, *))
 	{
-		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		id<MTLDevice>        device = (__bridge id<MTLDevice>)m_device;
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 
 		// Same caster filter as EncodeShadowMap's cascade loop (castsShadow flag;
 		// skinned objects are never in m_renderWorld.objects, so they're already
 		// excluded — matching the existing "skinned meshes are shaded but never
 		// cast shadows" behaviour).
-		std::vector<id<MTLAccelerationStructure>> uniqueBlas;
-		// Per-unique-BLAS vertex/index buffers, same order as uniqueBlas — the
-		// reflection kernel's true-hit-normal fetch (P4) reads them through a
-		// tier-2 argument buffer of raw GPU addresses.
-		std::vector<std::pair<id<MTLBuffer>, id<MTLBuffer>>> uniqueMeshBufs;
-		std::vector<uint32_t> instanceBlasIndex;
-		std::vector<glm::mat4> instanceTransform;
-		// Bounce tint + reflection shading: TWO float4 per instance
-		// (albedo, emissive) — see giInstanceShading.
-		std::vector<glm::vec4> instanceBaseColor;
-		// Parallel to the instance array: index into m_giLandBuf, -1 = not a
-		// landscape chunk. Kept OUT of instanceBaseColor so the hot 2-float4
-		// stride stays what it is.
-		std::vector<int32_t> instanceLandIndex;
-		instanceBlasIndex.reserve(m_renderWorld.objects.size());
-		instanceTransform.reserve(m_renderWorld.objects.size());
-		instanceBaseColor.reserve(m_renderWorld.objects.size() * 2);
-		instanceLandIndex.reserve(m_renderWorld.objects.size());
+		// cur.blas: unique BLAS in first-seen order; cur.meshBufs: their vertex/
+		// index buffers, same order — the reflection kernel's true-hit-normal fetch
+		// (P4) reads them through a tier-2 argument buffer of raw GPU addresses.
+		// cur.color: bounce tint + reflection shading, TWO float4 per instance
+		// (albedo, emissive) — see giInstanceShading. cur.landIndex: parallel to
+		// the instance array, index into m_giLandBuf, -1 = not a landscape chunk;
+		// kept OUT of the colours so the hot 2-float4 stride stays what it is.
+		GIAccelSnapshot& cur = m_giAccelCur;
+		cur.clear();
+		cur.blasIndex.reserve(m_renderWorld.objects.size());
+		cur.transform.reserve(m_renderWorld.objects.size());
+		cur.color.reserve(m_renderWorld.objects.size() * 2);
+		cur.landIndex.reserve(m_renderWorld.objects.size());
+		// BLAS → slot instead of a linear search over the unique list (REN-404:
+		// that was O(objects × unique meshes) per frame).
+		m_giBlasSlot.clear();
+		// Opened on the first mesh without a BLAS; a frame without one encodes nothing.
+		id<MTLAccelerationStructureCommandEncoder> blasEnc = nil;
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
@@ -8499,56 +8574,77 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			if (!resolved) resolved = ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!resolved) continue;
 			GpuMesh& mesh = const_cast<GpuMesh&>(*resolved); // m_meshCache entry; safe, owned by this class
-			if (!mesh.blas) mesh.blas = BuildBLAS(mesh);
+			if (!mesh.blas)
+			{
+				if (!blasEnc) blasEnc = [cmdBuf accelerationStructureCommandEncoder];
+				mesh.blas = BuildBLAS(mesh, (__bridge void*)blasEnc);
+				m_giAccelDirty = true;
+			}
 			if (!mesh.blas) continue;
 
-			id<MTLAccelerationStructure> blas = (__bridge id<MTLAccelerationStructure>)mesh.blas;
-			int idx = -1;
-			for (size_t u = 0; u < uniqueBlas.size(); ++u)
-				if (uniqueBlas[u] == blas) { idx = (int)u; break; }
-			if (idx < 0)
+			const auto [slot, added] = m_giBlasSlot.try_emplace(mesh.blas, static_cast<uint32_t>(cur.blas.size()));
+			if (added)
 			{
-				idx = (int)uniqueBlas.size();
-				uniqueBlas.push_back(blas);
-				uniqueMeshBufs.emplace_back((__bridge id<MTLBuffer>)mesh.vertexBuf,
-				                            (__bridge id<MTLBuffer>)mesh.indexBuf);
+				cur.blas.push_back(mesh.blas);
+				cur.meshBufs.push_back(mesh.vertexBuf);
+				cur.meshBufs.push_back(mesh.indexBuf);
 			}
 
-			instanceBlasIndex.push_back((uint32_t)idx);
-			instanceTransform.push_back(obj.transform);
+			cur.blasIndex.push_back(slot->second);
+			cur.transform.push_back(obj.transform);
 			// TWO float4 per instance — the kernels index instanceColors
 			// [instId * 2 (+ 1)]: (albedo.rgb, metallic) + (emissive.rgb,
 			// roughness). Metallic/roughness drive the bounce loop's mirror-ness.
+			// Resolved every frame, not cached: Param-driven pins read live slot
+			// values (editor slider drags), which no revision counter covers.
 			glm::vec3 albedo, emissive;
 			float metallic, roughness;
 			giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
-			instanceBaseColor.push_back(glm::vec4(albedo, metallic));
-			instanceBaseColor.push_back(glm::vec4(emissive, roughness));
-			instanceLandIndex.push_back(obj.landscapeIndex); // paint sampling at the hit
+			cur.color.push_back(glm::vec4(albedo, metallic));
+			cur.color.push_back(glm::vec4(emissive, roughness));
+			cur.landIndex.push_back(obj.landscapeIndex); // paint sampling at the hit
 		}
-		if (uniqueBlas.empty()) return;
+		if (blasEnc) [blasEnc endEncoding];
+		if (cur.blas.empty()) { ReleaseGIAccel(); return; }
 
-		const NSUInteger count = (NSUInteger)instanceBlasIndex.size();
-		id<MTLBuffer> instanceBuf = [device
-			newBufferWithLength:sizeof(MTLAccelerationStructureInstanceDescriptor) * count
-			            options:MTLResourceStorageModeShared];
-		auto* instances = (MTLAccelerationStructureInstanceDescriptor*)instanceBuf.contents;
-		// Parallel per-instance shading buffer (2 float4 each), SAME index order —
-		// see the header comment on m_giInstanceColorBuffer for why
-		// get_committed_instance_id() reliably matches this array's position.
-		id<MTLBuffer> colorBuf = [device newBufferWithBytes:instanceBaseColor.data()
-		                                              length:sizeof(glm::vec4) * count * 2
-		                                             options:MTLResourceStorageModeShared];
-		id<MTLBuffer> landIdxBuf = [device newBufferWithBytes:instanceLandIndex.data()
-		                                               length:sizeof(int32_t) * count
-		                                              options:MTLResourceStorageModeShared];
+		// REN-405: compare against what the live TLAS was built from. Byte
+		// compares: the arrays are plain floats/ints, and a -0.0 vs 0.0 or NaN
+		// mismatch only costs a rebuild, as every frame did before.
+		const GIAccelSnapshot& last = m_giAccelLast;
+		auto sameBytes = [](const auto& a, const auto& b)
+		{
+			return a.size() == b.size()
+			    && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(a[0])) == 0);
+		};
+		const bool sameRefs   = sameBytes(cur.blas, last.blas) && sameBytes(cur.meshBufs, last.meshBufs);
+		const bool sameTables = m_giTlas && !m_giAccelDirty && sameRefs
+		                     && sameBytes(cur.blasIndex, last.blasIndex)
+		                     && sameBytes(cur.color, last.color)
+		                     && sameBytes(cur.landIndex, last.landIndex);
+		if (sameTables && sameBytes(cur.transform, last.transform))
+		{
+			++m_giAccelReuses;
+			if (giAccelLogEnabled())
+				HE_LOG_INFO(RHI, "GI accel: kept, %zu instances, %zu BLAS (builds %u, kept %u, BLAS builds %u)",
+				            cur.blasIndex.size(), cur.blas.size(), m_giAccelBuilds, m_giAccelReuses, m_giBlasBuilds);
+			return; // the live TLAS, tables and m_giUniqueBlas stay as they are
+		}
+
+		const NSUInteger count = (NSUInteger)cur.blasIndex.size();
+		// The instance descriptors are read by THIS frame's build only (the TLAS
+		// copies them), so they are a slice of the frame's upload ring.
+		void*  instBuf = nullptr;
+		size_t instOff = 0;
+		auto* instances = static_cast<MTLAccelerationStructureInstanceDescriptor*>(
+			UploadTransient(sizeof(MTLAccelerationStructureInstanceDescriptor) * count, instBuf, instOff));
+		if (!instances) { ReleaseGIAccel(); return; }
 		for (NSUInteger i = 0; i < count; ++i)
 		{
-			instances[i].accelerationStructureIndex        = instanceBlasIndex[i];
+			instances[i].accelerationStructureIndex        = cur.blasIndex[i];
 			instances[i].options                            = MTLAccelerationStructureInstanceOptionOpaque;
 			instances[i].mask                               = 0xFF;
 			instances[i].intersectionFunctionTableOffset    = 0;
-			const glm::mat4& t = instanceTransform[i];
+			const glm::mat4& t = cur.transform[i];
 			// MTLPackedFloat4x3: 3 rows x 4 columns (Metal's instance-transform
 			// convention), filled from our column-major glm::mat4.
 			for (int r = 0; r < 3; ++r)
@@ -8557,84 +8653,109 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		}
 
 		NSMutableArray<id<MTLAccelerationStructure>>* accelArray =
-			[NSMutableArray arrayWithCapacity:uniqueBlas.size()];
-		for (id<MTLAccelerationStructure> b : uniqueBlas) [accelArray addObject:b];
+			[NSMutableArray arrayWithCapacity:cur.blas.size()];
+		for (void* b : cur.blas) [accelArray addObject:(__bridge id<MTLAccelerationStructure>)b];
 
 		MTLInstanceAccelerationStructureDescriptor* tlasDesc =
 			[MTLInstanceAccelerationStructureDescriptor descriptor];
 		tlasDesc.instancedAccelerationStructures = accelArray;
 		tlasDesc.instanceCount                   = count;
-		tlasDesc.instanceDescriptorBuffer        = instanceBuf;
+		tlasDesc.instanceDescriptorBuffer        = (__bridge id<MTLBuffer>)instBuf;
+		tlasDesc.instanceDescriptorBufferOffset  = instOff;
 		tlasDesc.instanceDescriptorType          = MTLAccelerationStructureInstanceDescriptorTypeDefault;
 
 		MTLAccelerationStructureSizes sizes = [device accelerationStructureSizesWithDescriptor:tlasDesc];
+		// A fresh TLAS, never a refit of the live one: the previous frame's trace
+		// may still be reading it, and a refit needs the refit usage flag and a
+		// scratch that is not in flight either. Not done; see the audit record.
 		id<MTLAccelerationStructure> tlas =
 			[device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
-		if (!tlas) return;
+		if (!tlas) { ReleaseGIAccel(); return; }
 
 		id<MTLBuffer> scratch = [device newBufferWithLength:std::max((NSUInteger)1, sizes.buildScratchBufferSize)
 		                                              options:MTLResourceStorageModePrivate];
-		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 		id<MTLAccelerationStructureCommandEncoder> enc = [cmdBuf accelerationStructureCommandEncoder];
 		// The TLAS build reads every referenced BLAS; Metal does not auto-track
 		// residency through acceleration structures the way it does for directly
-		// bound buffers, so each one must be explicitly declared used.
-		for (id<MTLAccelerationStructure> b : uniqueBlas)
-			[enc useResource:b usage:MTLResourceUsageRead];
+		// bound buffers, so each one must be explicitly declared used. It also
+		// orders this build after the BLAS builds encoded above.
+		for (void* b : cur.blas)
+			[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
 		[enc buildAccelerationStructure:tlas descriptor:tlasDesc
 		                  scratchBuffer:scratch scratchBufferOffset:0];
 		[enc endEncoding];
+		++m_giAccelBuilds;
+		if (giAccelLogEnabled())
+			HE_LOG_INFO(RHI, "GI accel: rebuilt (%s), %zu instances, %zu BLAS (builds %u, kept %u, BLAS builds %u)",
+			            sameTables ? "transforms" : "tables", cur.blasIndex.size(), cur.blas.size(),
+			            m_giAccelBuilds, m_giAccelReuses, m_giBlasBuilds);
 
-		m_giTlas                = (void*)CFBridgingRetain(tlas);
-		m_giInstanceBuffer      = (void*)CFBridgingRetain(instanceBuf);
-		m_giInstanceColorBuffer = (void*)CFBridgingRetain(colorBuf);
-		RetireGIObject(m_giInstanceLandBuf);
-		m_giInstanceLandBuf     = landIdxBuf ? (void*)CFBridgingRetain(landIdxBuf) : nullptr;
-		// Cache the unique-BLAS set for EncodeGIShadowRays/EncodeGIProbeUpdate — every
-		// compute encoder that traces against m_giTlas must useResource: each of
-		// these too (same residency requirement as the build encoder above).
-		m_giUniqueBlas.clear();
-		m_giUniqueBlas.reserve(uniqueBlas.size());
-		for (id<MTLAccelerationStructure> b : uniqueBlas)
-			m_giUniqueBlas.push_back((__bridge void*)b);
+		RetireGIObject(m_giTlas);
+		m_giTlas = (void*)CFBridgingRetain(tlas);
 
-		// P4: mesh-pointer argument buffer for the reflection kernel's true
-		// hit normals — raw gpuAddress values (tier-2 argument buffers are
-		// plain GPU VAs; guaranteed on the Apple-Silicon devices m_giHwRt
-		// implies). gpuAddress needs macOS 13; older OSes simply keep the
-		// -rayDir fallback (m_giMeshPtrBuf stays null).
-		if (@available(macOS 13.0, *))
+		// The tables the trace kernels read are only replaced when their content
+		// changed: moving casters keep them (same instance order, same colours).
+		if (!sameTables)
 		{
-			struct MeshPtrGPU { uint64_t vtx; uint64_t idx; };
-			std::vector<MeshPtrGPU> ptrs;
-			ptrs.reserve(uniqueMeshBufs.size());
-			bool complete = true;
-			for (const auto& [vb, ib] : uniqueMeshBufs)
+			RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
+			RetireGIObject(m_giInstanceLandBuf);     m_giInstanceLandBuf     = nullptr;
+			RetireGIObject(m_giMeshPtrBuf);          m_giMeshPtrBuf          = nullptr;
+			RetireGIObject(m_giInstanceMeshBuf);     m_giInstanceMeshBuf     = nullptr;
+			// Parallel per-instance shading buffer (2 float4 each), SAME index order —
+			// see the header comment on m_giInstanceColorBuffer for why
+			// get_committed_instance_id() reliably matches this array's position.
+			id<MTLBuffer> colorBuf = [device newBufferWithBytes:cur.color.data()
+			                                              length:sizeof(glm::vec4) * count * 2
+			                                             options:MTLResourceStorageModeShared];
+			id<MTLBuffer> landIdxBuf = [device newBufferWithBytes:cur.landIndex.data()
+			                                               length:sizeof(int32_t) * count
+			                                              options:MTLResourceStorageModeShared];
+			m_giInstanceColorBuffer = colorBuf   ? (void*)CFBridgingRetain(colorBuf)   : nullptr;
+			m_giInstanceLandBuf     = landIdxBuf ? (void*)CFBridgingRetain(landIdxBuf) : nullptr;
+
+			// P4: mesh-pointer argument buffer for the reflection kernel's true
+			// hit normals — raw gpuAddress values (tier-2 argument buffers are
+			// plain GPU VAs; guaranteed on the Apple-Silicon devices m_giHwRt
+			// implies). gpuAddress needs macOS 13; older OSes simply keep the
+			// -rayDir fallback (m_giMeshPtrBuf stays null).
+			if (@available(macOS 13.0, *))
 			{
-				if (!vb || !ib) { complete = false; break; }
-				ptrs.push_back({ vb.gpuAddress, ib.gpuAddress });
-			}
-			if (complete && !ptrs.empty())
-			{
+				struct MeshPtrGPU { uint64_t vtx; uint64_t idx; };
+				std::vector<MeshPtrGPU> ptrs;
+				ptrs.reserve(cur.blas.size());
+				for (size_t u = 0; u < cur.blas.size(); ++u)
+					ptrs.push_back({ ((__bridge id<MTLBuffer>)cur.meshBufs[u * 2]).gpuAddress,
+					                 ((__bridge id<MTLBuffer>)cur.meshBufs[u * 2 + 1]).gpuAddress });
 				id<MTLBuffer> pb = [device newBufferWithBytes:ptrs.data()
 				                                       length:ptrs.size() * sizeof(MeshPtrGPU)
 				                                      options:MTLResourceStorageModeShared];
-				id<MTLBuffer> imb = [device newBufferWithBytes:instanceBlasIndex.data()
-				                                        length:instanceBlasIndex.size() * sizeof(uint32_t)
+				id<MTLBuffer> imb = [device newBufferWithBytes:cur.blasIndex.data()
+				                                        length:cur.blasIndex.size() * sizeof(uint32_t)
 				                                       options:MTLResourceStorageModeShared];
 				if (pb && imb)
 				{
 					m_giMeshPtrBuf      = (void*)CFBridgingRetain(pb);
 					m_giInstanceMeshBuf = (void*)CFBridgingRetain(imb);
-					m_giMeshResources.reserve(uniqueMeshBufs.size() * 2);
-					for (const auto& [vb, ib] : uniqueMeshBufs)
-					{
-						m_giMeshResources.push_back((__bridge void*)vb);
-						m_giMeshResources.push_back((__bridge void*)ib);
-					}
 				}
 			}
 		}
+
+		// The live build holds its BLAS and mesh buffers (see GIAccelSnapshot).
+		// An unchanged set keeps the references it already has.
+		if (!sameRefs)
+		{
+			for (void* p : cur.blas)     CFRetain((CFTypeRef)p);
+			for (void* p : cur.meshBufs) CFRetain((CFTypeRef)p);
+			for (void* p : last.blas)     RetireGIObject(p);
+			for (void* p : last.meshBufs) RetireGIObject(p);
+		}
+		std::swap(m_giAccelLast, m_giAccelCur);
+		m_giAccelDirty = false;
+		// Every compute encoder that traces against m_giTlas must useResource: each
+		// BLAS (same residency requirement as the build encoder above), and the
+		// mesh buffers the pointer table reaches.
+		m_giUniqueBlas    = m_giAccelLast.blas;
+		m_giMeshResources = m_giAccelLast.meshBufs;
 	}
 }
 
@@ -11460,8 +11581,8 @@ void MetalRenderer::DrainRetiredTextures()
 
 // Same deferred-release problem as RetireTexture above (GPU work may still
 // reference the object this frame's build just replaced), generalised to any
-// retained Objective-C object — used for the GI TLAS/instance buffer, which are
-// reallocated fresh every GI-active frame rather than mutated in place.
+// retained Objective-C object — used for the GI TLAS and its tables, which are
+// replaced by fresh objects when the caster set changes, never mutated in place.
 void MetalRenderer::RetireGIObject(void* obj)
 {
 	if (!obj) return;
@@ -15911,6 +16032,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// for the whole landscape (see GiLandscape.h).
 		std::vector<void*> landTex;
 		const int landCount = BuildGILandscapeTable(landTex);
+		const GILandGpu noLand{}; // the table's placeholder when there is no terrain
 		// The real sky (clouds, weather) for rays that miss — see EncodeSkyReflCube.
 		// Baked on this command buffer ahead of the trace encoder below.
 		EncodeSkyReflCube((__bridge void*)cmdBuf);
@@ -15959,9 +16081,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			// Landscape table + per-instance index. Both are declared by the
 			// pipeline, so bind a harmless placeholder when there is no terrain —
 			// rp.land.x = 0 then keeps the kernel from ever dereferencing them.
-			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giLandBuf ? m_giLandBuf
-			                                                    : m_giInstanceColorBuffer)
-			        offset:0 atIndex:5];
+			// The table's placeholder must hold one whole GILand: the colour
+			// buffer used to stand in, and with fewer than six casters it is
+			// shorter than 192 bytes, which API validation rejects.
+			if (m_giLandBuf)
+				[enc setBuffer:(__bridge id<MTLBuffer>)m_giLandBuf offset:0 atIndex:5];
+			else
+				[enc setBytes:&noLand length:sizeof(noLand) atIndex:5];
 			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giInstanceLandBuf ? m_giInstanceLandBuf
 			                                                           : m_giInstanceColorBuffer)
 			        offset:0 atIndex:6];
@@ -15983,10 +16109,11 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwInstanceBuf offset:0 atIndex:2];
 			[enc setBytes:&rp length:sizeof(rp) atIndex:3];
 			// SW instances carry their landscape index in offsets.z; the table
-			// itself binds here (placeholder when there is no terrain).
-			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giLandBuf ? m_giLandBuf
-			                                                    : m_giSwInstanceBuf)
-			        offset:0 atIndex:4];
+			// itself binds here (placeholder of one GILand when there is no terrain).
+			if (m_giLandBuf)
+				[enc setBuffer:(__bridge id<MTLBuffer>)m_giLandBuf offset:0 atIndex:4];
+			else
+				[enc setBytes:&noLand length:sizeof(noLand) atIndex:4];
 		}
 		// Weightmap per landscape, slots 9..9+kGiMaxLandscapes-1. Unused slots
 		// take the 1x1 dummy: the pipeline declares the whole array, and an
@@ -16576,6 +16703,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					if (it->second.indexBuf)  CFBridgingRelease(it->second.indexBuf);
 					if (it->second.blas)      CFBridgingRelease(it->second.blas);
 					m_meshCache.erase(it);
+					// A cached GI TLAS still holds the old BLAS (alive through its own
+					// reference); the rebuilt mesh gets a new one, which the pointer
+					// compare sees anyway. The flag makes the rebuild explicit.
+					m_giAccelDirty = true;
 				}
 				// SW-RT BLAS ranges live in concatenated arrays — a single mesh
 				// can't be spliced out, so an edited mesh drops the whole SW cache;
@@ -16793,15 +16924,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		flushPass("GIAccel");   // detailed: commit the Shadow (+ particle sim) command buffer
 
 		// Ray-traced GI acceleration structures (BLAS/TLAS): lazy per-mesh BLAS +
-		// a full TLAS rebuild from this frame's caster set. No-op (early return)
+		// a TLAS rebuild when this frame's caster set differs from the live
+		// build's (a static scene builds once). No-op (early return)
 		// unless GI is enabled and the device/OS supports ray tracing — CSM/AO stay
 		// byte-identical to today in that case. Same aspect as EncodeShadowMap/the
 		// scene pass — EncodeGIShadowRays rasterizes its G-buffer with THIS
 		// extraction's camera, and a mismatched aspect misaligns the shadow mask
 		// against the scene pass's screen-space sampling.
 		if (isPrimary)
+		{
+			HE_PROFILE_SCOPE_N("Metal::EncodeGIAccelBuild");
 			EncodeGIAccelBuild((__bridge void*)cmdBuf,
 			                   shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+		}
 		flushPass("GIShadow");   // detailed: commit the GIAccel command buffer (empty if GI off)
 
 		// Ray-traced shadows (replaces CSM's shadowFactor() sampling when GI is

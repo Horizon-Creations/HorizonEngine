@@ -9129,6 +9129,35 @@ void EditorApplication::dumpFrameHeadless()
 			 + "° -> " + std::to_string(endDeg) + "°").c_str());
 	}
 
+	// HE_DUMP_GIMOVE=<metres> (with HE_DUMP_GIBLEED=1|2): the witness for the GI
+	// TLAS dirty check (Thema 216, REN-405). Metal keeps the TLAS while the caster
+	// set is unchanged, so a moving caster is the case it must not miss: the
+	// receiver sphere steps <metres> along +z for six frames, then the ordinary
+	// settle frames hold it still. The ray-traced shadow of the captured frame
+	// must sit under the sphere's FINAL position (a stale TLAS leaves it at the
+	// start; compare with GI=0, whose CSM shadow is rasterized), and
+	// HE_DUMP_GIACCEL=1 logs six "rebuilt (transforms)" frames, then "kept".
+	if (const char* mv = std::getenv("HE_DUMP_GIMOVE"); mv && *mv && m_editorWorld)
+	{
+		const float step = static_cast<float>(std::atof(mv));
+		auto& reg = m_editorWorld->registry();
+		Entity receiver = entt::null;
+		for (auto [e, name] : reg.view<NameComponent>().each())
+			if (name.name == "GIBleedReceiver" && reg.all_of<TransformComponent>(e)) { receiver = e; break; }
+		if (receiver != entt::null)
+		{
+			for (int i = 0; i < 6; ++i)
+			{
+				reg.get<TransformComponent>(receiver).position.z += step;
+				r->Render();
+			}
+			HE_LOG_INFO(Editor, "%s", ("EditorApplication: HE_DUMP_GIMOVE moved the receiver by "
+				+ std::to_string(step * 6.0f) + " m over 6 frames").c_str());
+		}
+		else
+			HE_LOG_WARN(Editor, "%s", "EditorApplication: HE_DUMP_GIMOVE needs HE_DUMP_GIBLEED=1|2");
+	}
+
 	// HE_DUMP_UITEST: put a sheet of "Schicht 0" samples on screen, so the UI
 	// style vocabulary can be LOOKED AT headless instead of only asserted about.
 	// Everything here goes through the ordinary path — a widget asset, the

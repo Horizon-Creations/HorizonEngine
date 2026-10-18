@@ -381,13 +381,14 @@ private:
 	float m_giReflFrameSeed  = 0.0f;
 	int   m_giReflW = 0, m_giReflH = 0;
 	// P4 (HW only): per-unique-BLAS vertex/index buffer GPU addresses (tier-2
-	// argument buffer, macOS 13+) + per-TLAS-instance BLAS index, rebuilt with
-	// the TLAS each frame; m_giMeshResources lists the raw MTLBuffers for the
+	// argument buffer, macOS 13+) + per-TLAS-instance BLAS index, replaced with
+	// the TLAS's other tables when the caster set changes (see m_giTlas);
+	// m_giMeshResources lists the raw MTLBuffers for the
 	// mandatory useResource: declarations (argument-buffer indirection is not
 	// residency-tracked). Null when unavailable → kernel falls back to -rayDir.
 	void* m_giMeshPtrBuf      = nullptr; // id<MTLBuffer> (retained)
 	void* m_giInstanceMeshBuf = nullptr; // id<MTLBuffer> (retained), uint per instance
-	std::vector<void*> m_giMeshResources; // __bridge id<MTLBuffer>, not retained
+	std::vector<void*> m_giMeshResources; // __bridge id<MTLBuffer>; m_giAccelLast holds the references
 	bool  EnsureGIReflPipeline();
 	void  EnsureGIReflTarget(int width, int height);
 	void  DestroyGIReflTarget();
@@ -1148,14 +1149,17 @@ private:
 	int   m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
 	float m_giShadowHistoryWeight = 0.9f;  // shadow-mask temporal history weight
 	bool  m_giShadowFilter        = true;  // edge-aware a-trous on the mask
-	// TLAS + its instance-descriptor buffer are reallocated FRESH every GI-active
-	// frame (never mutated/resized in place): the previous frame's build may still
-	// be executing on the GPU when this frame starts encoding a new one, and
-	// MTLResourceStorageModeShared buffers have no automatic CPU/GPU sync, so
-	// overwriting one in place would race an in-flight build. Simpler and safer
-	// than tracking capacity/growth; instance buffers are tiny (tens of KB).
-	void* m_giTlas           = nullptr; // id<MTLAccelerationStructure> (retained), this frame's build
-	void* m_giInstanceBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+	// The TLAS and the per-instance tables the trace kernels read (colour, land
+	// index, mesh index, mesh pointers) are KEPT across frames while the caster
+	// set is unchanged: EncodeGIAccelBuild gathers this frame's instance arrays
+	// (m_giAccelCur) and compares them with the ones the live TLAS was built from
+	// (m_giAccelLast). Equal → nothing is allocated, built or uploaded. Different
+	// → a fresh TLAS (never mutated or refitted in place: the previous frame's
+	// trace may still be reading it), and fresh tables only when their own
+	// content changed, so moving casters cost a TLAS build but no table uploads.
+	// Replaced objects go through RetireGIObject. The instance descriptors are
+	// read by the build alone and come from the frame's upload ring.
+	void* m_giTlas           = nullptr; // id<MTLAccelerationStructure> (retained), live build
 	// Per-instance flat baseColor (float4), SAME index order as the TLAS instance
 	// array — get_committed_instance_id() in a ray hit returns that array index
 	// (confirmed: MTLAccelerationStructureInstanceDescriptorTypeDefault has no
@@ -1166,14 +1170,44 @@ private:
 	// emissive (giInstanceShading: graph materials via matGraphApproxSurface,
 	// Param-driven pins resolved live). The probe bounce reads the albedo, the
 	// reflection kernel both.
-	void* m_giInstanceColorBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
+	void* m_giInstanceColorBuffer = nullptr; // id<MTLBuffer> (retained), live build
+	// What the live TLAS and tables were built from (m_giAccelLast) and this
+	// frame's gather (m_giAccelCur, swapped in on a rebuild; both keep capacity).
+	// blas/meshBufs hold +1 references (CFBridgingRetain) for as long as the
+	// snapshot is m_giAccelLast: a mesh invalidated or evicted while the TLAS is
+	// cached cannot free the BLAS or vertex/index buffers the TLAS and the mesh
+	// pointer table point at, and a new BLAS can never reuse a cached one's
+	// address and fake an unchanged set.
+	struct GIAccelSnapshot
+	{
+		std::vector<void*>     blas;       // unique BLAS, TLAS instancedAccelerationStructures order
+		std::vector<void*>     meshBufs;   // per unique BLAS: vertex, index (id<MTLBuffer>)
+		std::vector<uint32_t>  blasIndex;  // per instance
+		std::vector<glm::mat4> transform;  // per instance
+		std::vector<glm::vec4> color;      // per instance: albedo+metallic, emissive+roughness
+		std::vector<int32_t>   landIndex;  // per instance
+		void clear() { blas.clear(); meshBufs.clear(); blasIndex.clear(); transform.clear();
+		               color.clear(); landIndex.clear(); }
+	};
+	GIAccelSnapshot m_giAccelLast;
+	GIAccelSnapshot m_giAccelCur;
+	std::unordered_map<void*, uint32_t> m_giBlasSlot; // BLAS → index in m_giAccelCur.blas
+	// Forces the next EncodeGIAccelBuild to rebuild (mesh invalidation, GI off).
+	bool m_giAccelDirty = true;
+	// Frames that rebuilt the TLAS (SW: uploaded the instance buffer), frames
+	// that kept it, BLAS builds encoded. Logged at Shutdown, and per frame with
+	// HE_DUMP_GIACCEL=1.
+	uint32_t m_giAccelBuilds = 0, m_giAccelReuses = 0, m_giBlasBuilds = 0;
+	// Drops the live TLAS, its tables and m_giAccelLast's references (retired).
+	void  ReleaseGIAccel();
 
 	// ── Software ray tracing (no-HW-RT fallback, or HE_GI_FORCE_SW) ──────────
 	// The CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port) in
 	// plain MTLBuffers, traversed by base compute kernels (kGISWMSL) that
 	// mirror GiBvh.cpp::giBvhIntersect 1:1. Node/tri buffers are concatenated
 	// BLASes (append-only, re-uploaded when a new mesh joins); the instance
-	// buffer (invTransform + baseColor + BLAS offsets) is rebuilt every frame
+	// buffer (invTransform + baseColor + BLAS offsets) is gathered every frame
+	// and uploaded only when it differs from the live one (m_giSwInstLast),
 	// like the HW TLAS. Everything downstream (G-buffer, temporal, blur,
 	// shading, probe atlases) is IDENTICAL to the HW path — only the ray
 	// dispatch kernel differs.
@@ -1202,7 +1236,9 @@ private:
 		glm::vec4 autoSnow{0.0f};
 	};
 	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the MSL GILand layout");
-	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
+	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), replaced when m_giLandLast changes
+	std::vector<GILandGpu> m_giLandLast; // what m_giLandBuf holds
+	std::vector<GILandGpu> m_giLandCur;  // this frame's gather (capacity kept)
 	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
 	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it
 	// (capped at HE::kGiMaxLandscapes); `outWeightTex` receives each one's
@@ -1214,7 +1250,9 @@ private:
 	bool  m_giSwBlasDirty     = false;
 	void* m_giSwNodeBuf       = nullptr; // id<MTLBuffer> (retained)
 	void* m_giSwTriBuf        = nullptr; // id<MTLBuffer> (retained)
-	void* m_giSwInstanceBuf   = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
+	void* m_giSwInstanceBuf   = nullptr; // id<MTLBuffer> (retained), replaced when m_giSwInstLast changes
+	std::vector<GISwInstanceCPU> m_giSwInstLast, m_giSwInstCur; // live buffer's content / this frame's
+	std::vector<glm::mat4>       m_giSwXformLast, m_giSwXformCur; // forward transforms of the same (inverse reuse)
 	int   m_giSwInstanceCount = 0;
 	void* m_giShadowRaySwPipeline  = nullptr; // id<MTLComputePipelineState>
 	void* m_giProbeUpdateSwPipeline = nullptr; // id<MTLComputePipelineState>
@@ -1231,14 +1269,18 @@ private:
 	void  AgeRetiredGIObjects();          // called once per frame
 	void  DrainRetiredGIObjects();        // immediate release (shutdown only)
 	void  EnsureRaytracingSupport();          // probes + caches m_giSupported, called once from Initialize()
-	void* BuildBLAS(const GpuMesh& mesh);     // one-shot; returns a retained id<MTLAccelerationStructure> or null
+	// Allocates a BLAS for a not-yet-seen mesh and encodes its build on `encoder`
+	// (an id<MTLAccelerationStructureCommandEncoder> on the frame's command buffer;
+	// no CPU wait, later encoders of the frame see it built). Returns a retained
+	// id<MTLAccelerationStructure> or null.
+	void* BuildBLAS(const GpuMesh& mesh, void* encoder);
 	// Lazily builds a BLAS for any not-yet-seen caster mesh, then rebuilds the TLAS
-	// from the current frame's caster set. No-op (early return) unless GI is
-	// enabled and supported. Shares cmdBuf with EncodeShadowMap/SimulateGpuParticles.
+	// when the caster set differs from the live build's (see m_giTlas). No-op
+	// (early return) unless GI is enabled and supported. Shares cmdBuf with EncodeShadowMap/SimulateGpuParticles.
 	// aspect MUST be the scene pass's aspect: this call's extract() seeds the
 	// m_renderWorld.camera that EncodeGIShadowRays rasterizes its G-buffer with.
 	void  EncodeGIAccelBuild(void* cmdBuf, float aspect);
-	// Unique BLAS instances the TLAS built this frame actually references (set by
+	// Unique BLAS instances the live TLAS actually references (set by
 	// EncodeGIAccelBuild, consumed by EncodeGIShadowRays/EncodeGIProbeUpdate) — every
 	// compute encoder that traces against m_giTlas must useResource: each of these,
 	// since Metal doesn't auto-track residency through an acceleration structure.
