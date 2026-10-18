@@ -1143,6 +1143,27 @@ target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
 
+# Build profile probes (Thema 211 step 2): he_tests has one profile, so the same
+# probe source is compiled once per profile into its own static library and
+# test_build_profile.cpp compares what each copy saw. "default" deliberately
+# skips he_target_build_profile to pin the header's fallback. Not named test_*,
+# so the ctest loop below does not register them as tests of their own.
+foreach(_probe dev release default override)
+    set(_lib he_build_profile_probe_${_probe})
+    add_library(${_lib} STATIC build_profile_probe.cpp)
+    string(SUBSTRING "${_probe}" 0 1 _head)
+    string(SUBSTRING "${_probe}" 1 -1 _tail)
+    string(TOUPPER "${_head}" _head)
+    target_compile_definitions(${_lib} PRIVATE HE_PROBE_FN=buildProfileProbe${_head}${_tail})
+    target_include_directories(${_lib} PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+    target_link_libraries(he_tests PRIVATE ${_lib})
+endforeach()
+he_target_build_profile(he_build_profile_probe_dev PROFILE dev)
+he_target_build_profile(he_build_profile_probe_release PROFILE release)
+he_target_build_profile(he_build_profile_probe_override PRIVATE PROFILE release
+                        FEATURES TEST_HOOKS=1)
+target_sources(he_tests PRIVATE test_build_profile.cpp)
+
 # ─── Process-runner fixture ────────────────────────────────────────────────────
 # A real child process, because every bug HE::Proc exists to avoid is invisible
 # to a mock: exit codes mangled into wait statuses, streams merged, pipes

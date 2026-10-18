@@ -329,3 +329,60 @@ This is the part that repeatedly went wrong. Work the list.
    *that one rename* and record it as deferred with the reason. A partially applied
    rename — some call sites updated, some not, or the symbol renamed but its serialised
    twin left behind — is the worst possible outcome, worse than not starting.
+
+---
+
+## 9. Build profile and developer features: `HE_BUILD_PROFILE_*`, `HE_FEATURE_*`
+
+Settled 2026-10-18 (Thema 211 step 2, survey `docs/export-sdk-compile-defs-2026-10-18.md` A.1).
+An exported game built from the SDK must not *contain* developer code; a runtime flag can
+only hide it. So the profile is a compile definition.
+
+| Name | Where | Meaning |
+|---|---|---|
+| `HE_BUILD_PROFILE` = `dev` \| `release` | CMake cache, `cmake/HorizonBuildProfile.cmake` | the tree's profile, default `dev` |
+| `he_target_build_profile(<t> [PUBLIC\|PRIVATE\|INTERFACE] [PROFILE p] [FEATURES N=0\|1 ...])` | same file | gives a target the definitions below |
+| `HE_BUILD_PROFILE_DEV`, `HE_BUILD_PROFILE_RELEASE` | `src/HE_Core/include/Platform/BuildProfile.h` | always both defined, one is 1 |
+| `HE_FEATURE_<NAME>` | same header | one switch per developer feature, 0 or 1 |
+| `HE_DEV_ONLY(...)`, `HE_RELEASE_ONLY(...)` | same header | one statement only in that profile |
+| `HE::kDevBuild`, `HE::kReleaseBuild`, `HE::kBuildProfileName` | same header | values, e.g. the start-up log |
+
+**Why not `HE_PROFILE_DEV`** (the placeholder in the topic): `HE_PROFILE_*` already is the
+profiler's family, as macros (`HE_PROFILE_SCOPE_N`, 92 uses) and as environment variables
+(`HE_PROFILE_CAPTURE`). A grep for one would keep finding the other.
+
+The features (default: 1 in dev, 0 in release), from survey A.1:
+
+| Switch | Covers |
+|---|---|
+| `HE_FEATURE_DEV_HOTKEYS` | the game's V and F10 (today `HE_GAME_DEV_HOTKEYS` OR hcfg `devTools`) |
+| `HE_FEATURE_PROFILER_CAPTURE` | F9 capture, `HE_PROFILE_*` / `HE_CAPTURE_*` / `HE_PERF_*` automation |
+| `HE_FEATURE_TEST_HOOKS` | `HE_HIDDEN_WINDOW`, `HE_EXIT_AFTER_FRAMES`, `HE_DUMP_*`, `HE_BACKGROUND_FPS`, `HE_NO_SPLASH`, `HE_SPLASH_DUMP` |
+| `HE_FEATURE_ENV_OVERRIDES` | `HE_CONFIG_DIR`, `HE_LOG`, `HE_PHYSICS_*`, `HE_PROPAGATE_FULL` |
+
+Rules:
+
+- **`#if`, never `#ifdef`.** Every macro is defined as 0 or 1; `#ifdef HE_BUILD_PROFILE_RELEASE`
+  is true in dev too. A block uses `#if HE_FEATURE_X` when one feature covers it and
+  `#if HE_BUILD_PROFILE_DEV` only for dev code no switch describes. `if constexpr (HE::kDevBuild)`
+  does not remove code: the discarded branch still has to compile.
+- **One profile per link unit.** Dev code also lives in the engine libraries (F9 in
+  `Application.cpp`, `HE_HIDDEN_WINDOW` in `Window.cpp`), so a release game needs
+  release-built libraries. Decision: the SDK ships **one library set per profile**, each
+  from its own build tree with `-DHE_BUILD_PROFILE=...` (like `HE_RUNTIME_FLAVOR`), not a
+  runtime switch. An engine library gets the definitions `PUBLIC`, so whatever links it
+  compiles its headers the same way. `PROFILE` other than the tree's is for isolated
+  probes only (`tests/build_profile_probe.cpp`); with shared inline code it breaks the ODR.
+- **No definitions means dev.** A target CMake never gave a profile compiles as a dev
+  build and sets `HE_BUILD_PROFILE_DEFAULTED 1`. That keeps every tree from before the
+  profile unchanged; the prebuilt runtimes, the editor, `he_tests` and the perf scripts
+  that drive release-*optimised* binaries with `HE_HIDDEN_WINDOW` all stay dev builds.
+- **A feature's default lives only in the header.** CMake only overrides
+  (`FEATURES TEST_HOOKS=1`, e.g. a release build for image tests). A new switch: add it to
+  `BuildProfile.h` *and* to `HE_BUILD_FEATURES` in the CMake module, which rejects
+  unknown names at configure time.
+- Not folded in yet: `HE_PROFILING` (the scope macros, a tree-wide option of its own
+  today; whether release forces it off is step 3's call) and `HE_GAME_DEV_HOTKEYS`. Step 3
+  replaces the latter and puts the existing dev code behind these switches.
+
+Test: `tests/test_build_profile.cpp` (probes for dev, release, no call, and an override).

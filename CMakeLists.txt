@@ -806,6 +806,11 @@ else()
     message(STATUS "HorizonEngine: in-engine profiler compiled OUT (zero overhead)")
 endif()
 
+# ── Build profile: dev | release (HE_BUILD_PROFILE, he_target_build_profile) ──
+# Only defines the option and the function; no engine target calls it yet, so
+# every target compiles as before (the header's fallback is dev).
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonBuildProfile.cmake")
+
 # ─── Deploy directories ────────────────────────────────────────────────────────
 # Overridable with -DDEPLOY_DIR=... (CI packaging points it at the workspace; the
 # default is the local dev deploy layout).
