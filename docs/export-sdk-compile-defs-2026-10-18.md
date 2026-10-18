@@ -569,3 +569,45 @@ body or move behind a macro is open. They are needed for parity with the interpr
   the SDK tree or fail the swap when the folder holds one of another build. 3. Persist the checkbox in the export profile (.heproj).
   4. Build the generated HorizonCode against the same SDK as the game (its `packageDir` branch in `generateCMakeLists`), or link the
   sources into the exe (`horizon_add_game SOURCES` + a static registration hook). 5. Strip the absolute rpath (`install_name_tool -delete_rpath`).
+
+## Handoff (step 9: one SDK, headers + lib sets only)
+
+- **Topic / step:** Thema 211, step 9 of 12. Branch claude/export-sdk-compile-horizoncode-codegen, commits ae5c9e6f (cmake), 0a57ad76
+  (editor) + this doc, pushed. Follows the human's posts 1518/1519 (headers + libs only, no repo/sources, one SDK). The board title
+  still says "Quell-SDK: gesamter Engine-Code", which post 1519 replaced. Open question #35 (how dev code stays out of a release game
+  with ONE SDK) was not answered, so the queen's interim option 2 is built: one package, a lib set per profile.
+- **Layout** (`cmake/HorizonSDK.cmake`, header comment): `include/` (shared), `lib/<profile>/` (Windows: `bin/<profile>/` DLLs),
+  `lib/cmake/HorizonEngine/` = neutral `HorizonEngineConfig.cmake` (plain `configure_file`, no genex) + `HorizonEngineTargets-<profile>.cmake`
+  (from `cmake/sdk/HorizonEngineTargets.cmake.in`, `file(GENERATE)`, imported targets + that set's definitions) + `HorizonEngineGame.cmake`
+  + header stamps, `share/HorizonEngine/{game,template}`. Each tree installs its own set: `--target HorizonSDK` into
+  `HE_ENGINE_SDK_DIR` (renamed from `HE_SDK_DIR` so old caches don't keep installing into `SDK-<profile>`; default `${DEPLOY_DIR}/EngineSDK`).
+- **Profile choice** (`cmake/sdk/HorizonEngineConfig.cmake.in`): `COMPONENTS dev|release`, else the consumer's `HE_BUILD_PROFILE`, else
+  the only installed set; none/two-without-choice/missing set = "not found" with the reason. Header stamp: every install hashes
+  `include/` (without the generated `SDL3/SDL_revision.h`, which differs per tree's SDL fetch) into `HorizonEngineHeaders.txt` and
+  `HorizonEngineHeaders-<profile>.txt`; a set whose stamp differs is refused (prebuilt fallback instead of a crash on an ABI mix).
+- **Pruned** (no compiler input; a grep of every public header + `src/HE_Game/src` found only comments naming them): `HE_Core/vendor`
+  (stb, fonts, bc7enc), `miniaudio.h`, loose `entt.hpp`/`fwd.hpp`, SDL `SDL_test*`/`SDL_opengl*`/`SDL_egl.h`, `share/HorizonEngine/Shaders`
+  (runtime data; the prebuilt export folder has it), SDL namelink. Size (macOS, Release): before `SDK-dev` 47 MB (include 19, lib 28,
+  share 0.25), so two SDKs would be 94 MB; after one set 39 MB, both sets 68 MB (include 11, lib/dev 28, lib/release 28). `strip -x`
+  would take a set from 28 to 23 MB; not done (arm64 code signature, and the stripped libs ship in the game).
+- **Editor** (`src/HE_Editor/ExportSdkBuild.{h,cpp}`): `kGameSdkDirName = "EngineSDK"`; `findGameSdk` needs the profile's Targets file;
+  `makeBuildSpec` adds `HE_BUILD_PROFILE=<profile>`; `installBuiltGame` copies `lib/<profile>`, `bin/<profile>`. Template takes
+  `-DHE_BUILD_PROFILE`. Help text `Export/Compile game from SDK` updated (audit OK).
+- **Verified (Mac):** driver by hand with both trees (`-DHE_BUILD_DIR_2=out/build/release-profile -DHE_PROFILE_2=release`, 35 s): both
+  probes run (`profile=dev features=1111`, `profile=release features=0000`), refusals (no choice with two sets, stale stamp), template
+  game built per set; `build_profile_strings.py --profile release` on the release game + `lib/release`: OK 33/33 gone, dev set fails it
+  (negative control). ctest `sdk_example_project` (one set: default choice, missing set refused, stale stamp) green. Both trees wrote
+  the same stamp into `out/deploy/EngineSDK`. `he_tests --source-file='*test_export_sdk_build.cpp'` 6/6; e2e against that SDK:
+  dev with `HE_EXPORT_SDK_E2E_EXPORT` (game ran 30 frames, "project configuration compiled in", profile 'dev'), release (build + swap).
+  Full ctest (dev tree `out/build/release`, `-j4`, private HOME, HE_CONFIG_DIR unset): 311/311, `runtime_size_app_*` skipped.
+- **Not verified:** Windows/Linux (bin/<profile> DLL copy, `$ORIGIN` in lib/<profile>, SDL soname without namelink): CI only. Release game
+  not started (no hidden mode). GUI click-through.
+- **Decisions taken:** one package with lib sets (option 2, cheap to change: only the Targets/lib dirs are per profile); refusal, not
+  warning, on a stamp mismatch; old `SDK-<profile>` folders are no longer found (no release shipped them).
+- **Traps:** the two trees have different `DEPLOY_DIR`s (`out/deploy` vs `out/deploy-release-profile`): pass the same
+  `-DHE_ENGINE_SDK_DIR` to both. Messages through the config's `_he_not_found` macro lose every `;` (macro ARGN). A `cmake --install`
+  uses the last configure's `cmake_install.cmake`: re-run `cmake <tree>` after editing `HorizonSDK.cmake`.
+- **Next steps:** 1. Step 10: the editor builds from `EngineSDK` with the chosen profile and caches by SDK stamp + profile + settings
+  (`HorizonEngineHeaders.txt` is a ready key part). 2. Step 11: `generateCMakeLists`' package branch (`HcCodegen.cpp:4374`) calls
+  `find_package(HorizonEngine)` without a profile; with two sets that is refused (interpreted fallback), so pass `HE_BUILD_PROFILE`
+  (and `sdkFromRoot`'s `libDir = root/lib` has no libs any more in this layout). 3. Ship `EngineSDK` (both sets) in the editor package (CI).
