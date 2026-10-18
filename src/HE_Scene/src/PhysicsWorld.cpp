@@ -675,6 +675,23 @@ struct PhysicsWorld::Impl
     std::vector<std::pair<uint32_t, JPH::BodyID>> stepBodies;   // entity, its body
     std::vector<uint32_t>                         stepCharacters;
 
+    // What the write-back last put into a TOP-LEVEL body's transform, and the
+    // Jolt pose it came from (SCN-601). For a top-level entity the written pose
+    // is a function of the Jolt pose alone, so when Jolt still reports that pose
+    // and the transform still holds what was written, writing again would only
+    // repeat the values and set dirty: a body at rest (asleep, or a kinematic
+    // one nobody moves) was a changed transform on every step. The skip is exact
+    // whatever this holds: a stale entry can only match when the transform
+    // already has the right values. Erased with the body, so it does not grow.
+    struct WriteBackMemo
+    {
+        glm::vec3 worldPos { 0.0f };
+        glm::quat worldRot { 1.0f, 0.0f, 0.0f, 0.0f };
+        glm::vec3 position { 0.0f };   // what the transform was given
+        glm::vec3 rotation { 0.0f };
+    };
+    std::unordered_map<uint32_t, WriteBackMemo> writeBackMemo;
+
     // ── Time budget (Thema 178 step 3) ────────────────────────────────────────
     // See HE::PhysicsBudgetConfig. The budget is spent on the work around Update():
     // what queries and body work charged since the previous step comes off first,
@@ -3046,6 +3063,7 @@ void PhysicsWorld::destroyBodyFor(uint32_t entityId, JointFate fate)
     m_impl->entityToBody.erase(it);
     m_impl->dynamicBodies.erase(entityId);
     m_impl->heldBodies.erase(entityId);
+    m_impl->writeBackMemo.erase(entityId);
 
     // And forget its contacts. Jolt fires OnContactRemoved for a destroyed body's
     // cached contacts during the NEXT Update(); without this the listener would
@@ -3398,11 +3416,32 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         // snapshot by hierarchy depth would fix it and cost every scene a sort
         // per step for a case (rigid bodies parented to rigid bodies) the engine
         // does not otherwise support.
-        writeBackWorldPose(world, entity, *transform,
-                           glm::vec3(static_cast<float>(pos.GetX()),
-                                     static_cast<float>(pos.GetY()),
-                                     static_cast<float>(pos.GetZ())),
-                           glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ()));
+        const glm::vec3 worldPos(static_cast<float>(pos.GetX()),
+                                 static_cast<float>(pos.GetY()),
+                                 static_cast<float>(pos.GetZ()));
+        const glm::quat worldRot(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
+
+        // Top level, the ordinary case: the pose written is a function of the
+        // Jolt pose alone (writeBackWorldPose's own test for "nothing above it").
+        // A child's local pose also depends on where its parent is now, so it
+        // always takes the full path.
+        const auto*  h      = reg.try_get<HierarchyComponent>(entity);
+        const Entity parent = h ? h->parent : entt::null;
+        const bool   topLevel = parent == entt::null || parent == world.rootEntity() || !reg.valid(parent);
+        if (topLevel)
+        {
+            const auto memo = m_impl->writeBackMemo.find(entityId);
+            if (memo != m_impl->writeBackMemo.end() &&
+                memo->second.worldPos == worldPos && memo->second.worldRot == worldRot &&
+                transform->position == memo->second.position &&
+                transform->rotation == memo->second.rotation)
+                continue;   // the same values again, and a dirty flag for nothing (SCN-601)
+        }
+
+        writeBackWorldPose(world, entity, *transform, worldPos, worldRot);
+
+        if (topLevel)
+            m_impl->writeBackMemo[entityId] = { worldPos, worldRot, transform->position, transform->rotation };
     }
 
     // ── Character controller update ────────────────────────────────────────────
@@ -5006,6 +5045,7 @@ void PhysicsWorld::clear()
         bodyInterface.DestroyBody(bodyId);
     }
     m_impl->entityToBody.clear();
+    m_impl->writeBackMemo.clear();
     m_impl->entityToCharacter.clear();
     m_impl->characterLayer.clear();
     // What the hold knew about those bodies goes with them. The TEST stays: it is
