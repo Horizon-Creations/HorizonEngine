@@ -1251,7 +1251,12 @@ TEST_CASE("SCN-103: the binary keyframe search samples exactly what the linear w
     uint32_t seed = 0x2545F491u;
     auto next = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
 
-    for (size_t n = 0; n <= 40; ++n)
+    // Both sides of the walk/binary-search cutoff (64 keys, AnimationEval.cpp).
+    std::vector<size_t> sizes;
+    for (size_t n = 0; n <= 40; ++n) sizes.push_back(n);
+    for (size_t n : { 63u, 64u, 65u, 100u, 300u }) sizes.push_back(n);
+
+    for (size_t n : sizes)
     {
         AnimationClipAsset clip;
         clip.duration = 1.0f;

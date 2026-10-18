@@ -101,7 +101,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
 
 **Stufe 4 – Scene-Systeme**
-- [ ] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound`
+- [x] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound` (Thema 218 Schritt 1, `docs/audit-scene-systeme-2026-10-18.md`; offen aus SCN-102: Sichtbarkeits-/Distanz-LOD und `playing`-Flag der State Machine)
 - [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out)
 - [ ] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung
 
