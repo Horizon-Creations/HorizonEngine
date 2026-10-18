@@ -29,6 +29,7 @@
 #include <fstream>
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/EngineProfiler.h>
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <JobSystem/JobSystem.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -6012,42 +6013,57 @@ void OpenGLRenderer::SetSSRSettings(const SSRSettings& s)
 // SSBOs; instances are a flat per-frame array referencing BLAS ranges. In
 // GL-A nothing samples these yet — upload only, zero visual change.
 
-OpenGLRenderer::GIBlasRange OpenGLRenderer::BuildGIBlas(const HE::UUID& meshId)
+HE::GiBvh OpenGLRenderer::BuildGIBvh(const HE::UUID& meshId)
 {
-	GIBlasRange range;
-	if (!m_contentManager) return range;
+	HE_PROFILE_SCOPE_N("GL::GiBuildBlas");
+	HE::GiBvh bvh;
+	if (!m_contentManager) return bvh;
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
-	if (!asset || asset->indices.empty()) return range;
+	if (!asset || asset->indices.empty()) return bvh;
 
 	// Same two layouts ResolveMesh uploads: cooked = interleaved 8-float
 	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
 	// tightly packed 3-float positions.
-	HE::GiBvh bvh;
 	if (asset->cooked && !asset->interleaved.empty())
 		bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
 		                     asset->indices.data(), asset->indices.size());
 	else if (!asset->vertices.empty())
 		bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
 		                     asset->indices.data(), asset->indices.size());
-	if (!bvh.valid()) return range;
+	return bvh;
+}
 
-	range.nodeOffset = static_cast<int32_t>(m_giNodesCpu.size());
-	range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
-	range.triOffset  = static_cast<int32_t>(m_giTrisCpu.size());
-	range.triCount   = static_cast<int32_t>(bvh.triangles.size());
-	range.valid      = true;
-	m_giNodesCpu.insert(m_giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
-	m_giTrisCpu.insert(m_giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
-	m_giBlasDirty = true;
-	return range;
+// One of the store's two arrays into its SSBO (`cap` elements). Between
+// rewrites only the tail [from, n) is new: glBufferSubData of just that. A
+// rewrite (compaction moved every range) or growth re-specifies the buffer with
+// headroom — GL orphans the old storage for draws still in flight.
+template <class T>
+static void uploadGiBlasSSBO(unsigned int ssbo, size_t& cap, const std::vector<T>& src, size_t from)
+{
+	const size_t n = src.size();
+	if (n == 0) return; // no instance points into it
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+	if (from > 0 && n <= cap)
+	{
+		glBufferSubData(GL_SHADER_STORAGE_BUFFER, static_cast<GLintptr>(from * sizeof(T)),
+		                static_cast<GLsizeiptr>((n - from) * sizeof(T)), src.data() + from);
+		return;
+	}
+	cap = n + n / 2;
+	glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(cap * sizeof(T)), nullptr, GL_STATIC_DRAW);
+	glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(n * sizeof(T)), src.data());
 }
 
 void OpenGLRenderer::UpdateGIAccel()
 {
+	HE_PROFILE_SCOPE_N("GL::GiUpdateAccel");
 	m_giInstanceCount = 0;
 	// Reflections reuse the acceleration structures without the probe/shadow
 	// passes, so the build also runs when ONLY they are enabled.
 	if (!(m_giEnabled || m_giReflEnabled) || !m_giSupported) return;
+
+	// Before any instance reads an offset: a compaction moves the ranges.
+	m_giBlas.compactIfWasteful();
 
 	// Same caster filter as the shadow pass / Metal's TLAS: castsShadow only,
 	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
@@ -6055,10 +6071,8 @@ void OpenGLRenderer::UpdateGIAccel()
 	m_giInstancesCpu.clear();
 	auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
 	{
-		auto it = m_giBlasCache.find(id);
-		if (it == m_giBlasCache.end())
-			it = m_giBlasCache.emplace(id, BuildGIBlas(id)).first;
-		return it->second;
+		if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
+		return m_giBlas.add(id, BuildGIBvh(id));
 	};
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
@@ -6129,17 +6143,12 @@ void OpenGLRenderer::UpdateGIAccel()
 	if (!m_giNodeSSBO)     glGenBuffers(1, &m_giNodeSSBO);
 	if (!m_giTriSSBO)      glGenBuffers(1, &m_giTriSSBO);
 	if (!m_giInstanceSSBO) glGenBuffers(1, &m_giInstanceSSBO);
-	if (m_giBlasDirty)
+	if (m_giBlas.dirty())
 	{
-		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giNodeSSBO);
-		glBufferData(GL_SHADER_STORAGE_BUFFER,
-		             static_cast<GLsizeiptr>(m_giNodesCpu.size() * sizeof(HE::GiBvhNode)),
-		             m_giNodesCpu.data(), GL_STATIC_DRAW);
-		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giTriSSBO);
-		glBufferData(GL_SHADER_STORAGE_BUFFER,
-		             static_cast<GLsizeiptr>(m_giTrisCpu.size() * sizeof(HE::GiBvhTriangle)),
-		             m_giTrisCpu.data(), GL_STATIC_DRAW);
-		m_giBlasDirty = false;
+		HE_PROFILE_SCOPE_N("GL::GiUploadBlas");
+		uploadGiBlasSSBO(m_giNodeSSBO, m_giNodeCap, m_giBlas.nodes(), m_giBlas.uploadFromNodes());
+		uploadGiBlasSSBO(m_giTriSSBO,  m_giTriCap,  m_giBlas.tris(),  m_giBlas.uploadFromTris());
+		m_giBlas.markUploaded();
 	}
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giInstanceSSBO);
 	glBufferData(GL_SHADER_STORAGE_BUFFER,
@@ -6156,12 +6165,10 @@ void OpenGLRenderer::DestroyGIAccel()
 	if (m_giLandSSBO)     { glDeleteBuffers(1, &m_giLandSSBO);     m_giLandSSBO     = 0; }
 	m_giLandWeightTex.clear();
 	m_giLandCount = 0;
-	m_giBlasCache.clear();
-	m_giNodesCpu.clear();
-	m_giTrisCpu.clear();
+	m_giNodeCap = m_giTriCap = 0;
+	m_giBlas.clear();
 	m_giInstancesCpu.clear();
 	m_giInstanceCount = 0;
-	m_giBlasDirty     = false;
 }
 
 OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int program) const
@@ -10908,17 +10915,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (m.ebo) glDeleteBuffers(1, &m.ebo);
 			m_meshCache.erase(it);
 		}
-		// GI BLAS ranges live in concatenated arrays — a single mesh can't be
-		// spliced out cheaply, so an edited mesh drops the whole cache; it
-		// rebuilds lazily on the next GI-active frame (mirrors Metal's per-mesh
-		// BLAS release, just coarser).
-		if (m_giBlasCache.count(id))
-		{
-			m_giBlasCache.clear();
-			m_giNodesCpu.clear();
-			m_giTrisCpu.clear();
-			m_giBlasDirty = true;
-		}
+		// Just this mesh's BLAS (mirrors Metal's per-mesh release): its range
+		// turns into dead space and it rebuilds lazily on the next GI-active
+		// frame. Dropping the whole cache here cost every BVH of the scene per
+		// re-stitched terrain chunk (Thema 221, GiBlasStore.h).
+		m_giBlas.erase(id);
 	}
 	// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
 	// box without changing which objects exist → re-check the probe grid fit.

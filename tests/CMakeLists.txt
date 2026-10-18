@@ -66,6 +66,7 @@ add_executable(he_tests
     # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
     test_temporal_aa.cpp
     test_gi_bvh.cpp
+    test_gi_blas_store.cpp
     test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
@@ -461,6 +462,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBlasStore.cpp
     # The software UI rasterizer, compiled in for the same reason as the culler:
     # it is quads-in-pixels-out with no SDL, no window and no IRenderer, so what
     # the UI style vocabulary ACTUALLY draws is answerable headless — the one
