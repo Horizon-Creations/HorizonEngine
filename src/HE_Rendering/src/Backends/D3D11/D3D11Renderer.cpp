@@ -6229,6 +6229,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
     using HE::d3dtiming::Phase;
     s_startupClock.begin();
     Phase initPhase("D3D11", "Initialize");
+    HE::d3dprefetch::DrainOnFailure drainOnThrow;
     {
         Phase phase("D3D11", "prefetchSkyShaders");
         D3D11RendererImpl::prefetchSkyShaders();
@@ -6301,6 +6302,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
         if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
             m_viewMode = static_cast<HE::ViewMode>(
                 static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
+    drainOnThrow.dismiss();
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initialized successfully");
 }
 

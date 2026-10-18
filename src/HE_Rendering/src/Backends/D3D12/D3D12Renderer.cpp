@@ -10057,6 +10057,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
     s_startupClock.begin();
     const HE::d3dtiming::Clock::time_point initStart = HE::d3dtiming::Clock::now();
     HE::d3dtiming::Laps laps("D3D12");
+    HE::d3dprefetch::DrainOnFailure drainOnThrow;
     D3D12RendererImpl::prefetchSkyShaders();
     laps.mark("prefetchSkyShaders");
     SDL_PropertiesID props = SDL_GetWindowProperties(window->GetNativeWindow());
@@ -10248,6 +10249,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
     HE_LOG_INFO(RHI, "[startup] D3D12 phase=Initialize ms=%.1f compiles=%u compileMs=%.1f",
                 HE::d3dtiming::msSince(initStart), HE::d3dtiming::compileStats().calls,
                 HE::d3dtiming::compileStats().ms);
+    drainOnThrow.dismiss();
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: initialized successfully");
 }
 

@@ -247,4 +247,15 @@ inline void drain()
     }
 }
 
+// Initialize throws after the sky is queued when there is no device or
+// swapchain; Application then reports and returns without Shutdown, and a job
+// still running would outlive the renderer DLL. Drains unless dismissed on
+// Initialize's last line.
+struct DrainOnFailure
+{
+    bool armed = true;
+    ~DrainOnFailure() { if (armed) drain(); }
+    void dismiss() { armed = false; }
+};
+
 } // namespace HE::d3dprefetch
