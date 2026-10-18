@@ -44,10 +44,25 @@ Beobachtung, nicht dieser Fehler: auf dem **Schnee** sind auch beim Erstladen sc
 Hex-Zellen zu sehen (`present-OpenGL.png`, rechte Hälfte). Das ist das Bombing über der echten
 Schnee-Textur, gehört zu Thema 180 (Auto-Landscape-Material 2.0).
 
+## CI-Regression auf Linux (Schritt 4, `10996b64`)
+
+CI-Lauf 39135752135 (Linux): `test_landscape_reload.cpp:217 REQUIRE_FALSE(cm.isLoaded(id))`
+rot, auf Mac/Windows nie. Ursache ist ein Wettlauf in `ContentManager::pollAsyncResults`
+(`ContentManager.cpp:1329`): der Remote-Ready-Abfluss ruft `loadAssetAsync` und reiht das echte
+Lesen der angekommenen Datei ein, und **erst danach** wurde gezählt, wie viele fertige Jobs dieser
+Aufruf registriert. Ein schneller Worker liest das 1×1-Array dazwischen fertig, das Ergebnis wird
+mitgezählt und im selben Aufruf registriert, entgegen dem Kommentar ("surfaces on a LATER call").
+Der Test hatte recht, der Code nicht. Fix: die Zählung steht jetzt am Anfang des Aufrufs, vor dem
+Abfluss; die Budget-Uhr startet weiter erst an der Registrier-Schleife (der Abfluss kostet kein
+Registrier-Budget).
+
 ## Handoff
 
-- **Topic / step:** 210, Schritt 3 von 3
-- **Branch / commit:** `claude/landscape-sechseckige-muster-nach-texturarray-nachladen` @ dieser Doku-Commit (gepusht: ja)
+- **Topic / step:** 210, Schritt 4 (CI-Regression Linux)
+- **Branch / commit:** `claude/landscape-sechseckige-muster-nach-texturarray-nachladen` @ `10996b64` + dieser Doku-Commit (gepusht: ja)
+- **Schritt 4 verified:** `cl /Zs` von `ContentManager.cpp` mit den ninja-Flags des Haupt-Build-Baums, Pfade auf diesen Worktree umgebogen: exit 0; Negativkontrolle mit `/FI` auf ein `static_assert(false)`: exit 2.
+- **Schritt 4 NOT verified:** kein lokaler Testlauf. Die Platte C: von NN-WS03 lief schon beim Konfigurieren eines frischen Baums voll (0 Byte frei, erstes Objekt scheiterte); meinen Baum `C:/hw210` wieder gelöscht, danach ca. 1,2 GB frei. Beweis ist allein CI-Lauf https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39152069738 (lief beim Abschluss noch). Die geplante Gegenprobe (Sleep nach dem Abfluss: mit Fix grün, alte Reihenfolge rot an :217) ist nicht gelaufen.
+- **Schritt 3 (unverändert gültig):** Nachladen md5-gleich zum Erstladen auf Metal `016e8e05` und GL `6bad630c` (Tabelle oben); `test_landscape_reload` 5/5, `test_contentmanager` 91/91 auf dem Mac.
 - **Done:** Abnahme: Nachladen ist auf Metal und OpenGL pixelgleich (md5) zum Erstladen, Tests grün, siehe oben
 - **Files touched:** nur diese Doku; Code unverändert seit `a97157b3`
 - **Verified:** `cmake --build out/build/release --target HorizonEditor he_tests -j 8` (ninja: no work to do, Binaries von Schritt 2 auf `a97157b3`; Deploy-dylibs per `cmp` gleich dem Build); `cap210.sh` present/mid/absent auf Metal + GL (Tabelle); `ctest -R "^(test_landscape_reload|test_contentmanager)$"` 2/2 (5/5 und 91/91 Fälle); voller `he_tests` (aus dem Build-Ordner): 5514/5517, rot `test_hpak:1188` und 2× `test_profiler` (dieselben drei wie Schritt 2); allein: `test_profiler` 18/18, `test_hpak` mit privatem HOME 59/59 (gefüllter Per-User-Cache bzw. Reihenfolge, nicht dieser Fix)
@@ -55,4 +70,5 @@ Schnee-Textur, gehört zu Thema 180 (Auto-Landscape-Material 2.0).
 - **Decisions taken:** Vorher aus Schritt 1 übernommen statt altes Binary neu zu bauen, weil `present` md5-gleich ist und `absent` das alte `mid` bitgleich nachstellt
 - **Pending:** CI grün inkl. Windows (D3D11/D3D12 werden nur dort kompiliert); D3D/Vulkan-Befund: gleiche Ursache lag dort vor und ist mit demselben Helfer behoben, aber nur kompiliert, nie gelaufen
 - **Traps:** Build-Ordner dieses Worktrees ist `out/build/release`, nicht `cmake-build-release`; `he_tests` aus dem Build-Ordner starten; der Deploy darf die Arrays nicht in `EngineContent` haben (`cap210.sh` bricht sonst ab); `test_hpak:1188` rot bei gefülltem Per-User-Cache
-- **Next steps:** 1. Queen: nach grüner CI nach `release/0.7.0` mergen. 2. Außerhalb dieses Themas (Ursache-Doku §4): Hot-Reload einer schon geladenen Pfad-Textur und `m_uiTexCache` haben dieselbe Pfad-Lücke. 3. Schwache Hex-Zellen im Schnee beim Erstladen an Thema 180 geben
+- **Trap (Schritt 4):** `pollAsyncResults` darf nur registrieren, was **vor** dem Remote-Abfluss fertig war; ein neuer Schritt vor der Schleife, der Lesen einreiht, muss hinter der Zählung stehen.
+- **Next steps:** 1. Queen: CI-Lauf 39152069738 prüfen (Linux `test_landscape_reload` + `test_contentmanager`); grün → nach `release/0.7.0` mergen, rot an :217 → die Sleep-Gegenprobe oben lokal fahren (braucht Platz für einen Build-Baum). 2. Außerhalb dieses Themas (Ursache-Doku §4): Hot-Reload einer schon geladenen Pfad-Textur und `m_uiTexCache` haben dieselbe Pfad-Lücke. 3. Schwache Hex-Zellen im Schnee beim Erstladen an Thema 180 geben
