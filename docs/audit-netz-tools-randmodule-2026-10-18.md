@@ -160,3 +160,72 @@ Measured (Release, M-series, load 4-7, no `yes` hogs, low-power off):
   INCLUDES from `build.ninja`.
 - **Next steps:** step 3 (SCM/CSY/SUP). Optional: `landscape_tex_gen`/`MatGen` could use
   `saveAssetFile` too (TLS-117, not in scope).
+
+## Step 3: SCM-101/102/103, SUP-101, CSY-101 (source control, self-update, SFTP)
+
+**SCM-101 (GitService refresh).** 8 git processes per refresh became 4 when nothing is
+ahead: `GitCli::listLocalAndRemoteBranches` (one `for-each-ref --format=%(refname)
+refs/heads refs/remotes`, split on the prefix, same remote filters; `switchBranch` uses it
+too), no discarded `branch --show-current`, `log(..., checkUnpushed)` runs the `rev-list`
+only when status reports an upstream with `ahead > 0`, origin's URL cached worker-side
+(re-read after `Open` and every user command, and once it is 60 s old). Not done:
+`status --show-stash` (needs git ≥ 2.35, absence is ambiguous). Only difference to
+`%(refname:short)`: a local branch whose name also exists as a tag now lists as `x`, not
+`heads/x` (which `git switch` takes either way).
+**SCM-102 (branch dialog).** `GitService::requestCheckBranchName` / `branchNameCheck(name)`:
+the worker runs the same `check-ref-format` + `rev-parse` as before; the panel asks once
+per change of the text, shows a verdict only for the current text, Create waits for it.
+Queued checks collapse, the answer is not "work" and leaves `lastError`/`lastInfo` alone.
+**SCM-103 (TeamSync `scan()`).** `lexically_relative` against the root the walk starts at
+(trailing separator dropped), `fs::relative` only as fallback for a `..`/empty result.
+**SUP-101 (self-update takeover).** Option B of the audit: `Session::install()` runs
+`beginTakeover` through `runWorker` (returns `bool started`), new phase `Installed`;
+`SelfUpdateDialog::finishInstall()` is polled next to `Draw` (`EditorUI.cpp`) and quits on
+`Installed`, reopens the dialog on failure. The modal shows "Preparing version ..." without
+Close and comes back if dismissed. Option A (unpack in the download worker) not done.
+**CSY-101 (SFTP).** `HE::Cs::SftpConnection` (pimpl, `SftpClient.h`): one session across
+operations; the free functions are one-shot wrappers. Publish, rebuild and `drainQueue`
+hold one per run; publish ensures each remote directory once. A connection fault (libssh2
+errno other than `LIBSSH2_ERROR_SFTP_PROTOCOL`) drops the session and, if it had carried
+an earlier operation, retries once on a fresh one. A listing cut short by a connection
+fault now fails instead of returning a smaller tree.
+
+Measured (Release, M-series, load ~2):
+
+| | before | after |
+|---|---|---|
+| git refresh, 200-file repo with upstream, mean of 20, 3 rounds | 278-282 ms (8 procs) | 145-148 ms (4) |
+| git refresh, this repository, mean of 5, 3 rounds | 403-420 ms | 232-249 ms |
+| branch dialog open, per frame on the UI thread | 2 git procs (~70 ms) | 0 |
+| `scan()` walk, 20,000 files depth 4 under `/tmp` (symlinked), 5 rounds | 2.34-2.44 s | 0.52-0.59 s |
+| 20 SFTP downloads, local paramiko server, loopback | 4.34 s (20 sessions) | 0.60 s (1 session) |
+
+The SFTP numbers are a loopback Python server (~200 ms per handshake, mostly key
+exchange in Python); the hoster's real handshake was not measured (no endpoint is
+configured in this build, and the shared library must not be written to from a test).
+
+## Handoff (step 3)
+
+- **Commits:** bf10eb8a (SCM-101/102), 3e7c6864 (SCM-103), 4083435b (SUP-101),
+  db20ee95 (CSY-101), plus this doc.
+- **Verified:** `he_tests` and `HorizonEditor` build green; `editor_help_audit --check` ok.
+  `test_git_roundtrip` 42/42 (new: refresh lists, unpushed only when ahead, URL cache
+  re-read after a user command, name check answers per text, does not clear lastError,
+  burst collapses), `test_git_panel_ops`, `test_git_status_parse`, `test_team_sync` 12/12
+  (new: root via symlink and with trailing slash), `test_editor_selfupdate` 7/7 (new: begin
+  runs on the worker, Installing while held, no second install), new `test_sftp_connection`
+  4/4 (no endpoint; missing local file = no handshake; dropped handshake = one transient
+  failure, no retry). Live: `HE_TEST_SFTP=127.0.0.1:2222:tester:pw123:/content` against
+  `/tmp/he_sftp_scripts/sftp_server.py` (paramiko 5.1 in `/tmp/he_sftpsrv/venv`): 127
+  assertions, 22 sessions for 1 batch + 20 one-shot + 1 connection; server restarted
+  mid-connection → one reconnect, success (`/tmp/he_csy101/reconnect.cpp`). Full
+  `he_tests` (private HOME/TMPDIR, without `test_material_graph`): 5347 cases, 2 failed,
+  the known order-dependent EngineProfiler pair (`test_profiler.cpp:107`, `:215`).
+- **Not verified:** the editor's update dialog by hand (no GUI driving; the e2e script
+  `selfupdate_editor_e2e.py` was not run, it needs a staged server). Windows/Linux only via
+  CI. Real hoster timing.
+- **Traps:** the paramiko server must keep the channel from `Transport.accept()` or the
+  client hangs in `libssh2_sftp_init` forever: CSY-102 (no libssh2 timeout) is real and
+  still open. Benches: `/tmp/he_scm103/bench.cpp`, `/tmp/he_scm101/bench.sh`.
+- **Next steps:** CSY-102 (`libssh2_session_set_timeout`), SUP-101 option A (unpack in the
+  download worker), SCM-104 (one scan per sync cycle). Stufe 5 is done after CI.
