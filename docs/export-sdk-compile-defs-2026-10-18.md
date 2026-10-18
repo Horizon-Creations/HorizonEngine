@@ -347,7 +347,8 @@ body or move behind a macro is open. They are needed for parity with the interpr
 
 ## Handoff (step 4: compiled-in project configuration)
 
-- **Topic / step:** Thema 211, step 4 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, one code commit + this doc.
+- **Topic / step:** Thema 211, step 4 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, code 9320c26c (+ the `#if` fallback after it) and this doc.
+  `CopilotDocs/HorizonGame.md:58,371` still describes the removed `HE_PROJECT_SECRET` as a design.
 - **Done:** an exporter-side generator writes `HEGameBuildConfig.h`. It is one `constexpr HE::GameBuildConfig` aggregate with
   designated initializers, holding every `ProjectConfig` field (the A.1 hcfg row: names, flags, startup scene, save template, theme,
   bundle id, collision layers and audio buses as JSON) plus `Config/ProjectSettings.json` as JSON and the pak key XOR-masked
