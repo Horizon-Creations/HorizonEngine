@@ -1379,6 +1379,8 @@ private:
 	bool          m_dumpQuit = true;
 	bool          m_dumpDone = false;
 	void dumpFrameHeadless();
+	// The HE_DUMP_* witness scenes dumpFrameHeadless builds before its capture.
+	void buildDumpWitnessScenes(IRenderer* r, HE::UUID& matTestId, HE::UUID& layerMatId);
 	// Live-frame witness (HE_DUMP_LIVE=<file.bmp> + HE_DUMP_LIVE_TRIGGER=<file>):
 	// the running editor's viewport, captured whenever the trigger file appears,
 	// so an outside driver can look at what the viewport draws AFTER its MCP

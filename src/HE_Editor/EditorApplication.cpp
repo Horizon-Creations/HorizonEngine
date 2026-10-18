@@ -5344,186 +5344,16 @@ void EditorApplication::captureLiveFrameIfAsked()
 			("EditorApplication: live frame capture failed → " + std::string(s_out)).c_str());
 }
 
-void EditorApplication::dumpFrameHeadless()
+// ── The witness scenes of the headless dump ─────────────────────────────────
+// Every HE_DUMP_* block that builds a scene for one capture (sky, material,
+// water, landscape, lights, …), in the order dumpFrameHeadless ran them inline;
+// pulled out of that function unchanged (audit M9). Each is a no-op unless its
+// variable is set. Two ids leave it: the material-test material, which the
+// preview-path witness reuses, and the landscape layer material, which
+// HE_DUMP_LAYEREDIT and the GI refit witness edit after the warmup.
+void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTestId,
+                                               HE::UUID& s_layerMatId)
 {
-	if (m_dumpPath.empty() || m_dumpDone) return;
-	IRenderer* r = renderer();
-	if (!r)
-	{
-		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
-		m_dumpDone = true;
-		return;
-	}
-
-	// Render the scene into a fixed offscreen target a few times, bypassing the
-	// ImGui overlay and the window swap. Doing this here (before the paced main
-	// loop) means it works even when the window is occluded / App-Napped on
-	// macOS — where the normal loop throttles to a near-frozen frame rate and a
-	// loop-driven capture never fires.
-	r->SetOverlayCallback(nullptr);
-	{
-		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
-		// shot that proves a bloom A/B has any bloom in it to compare.
-		IRenderer::BloomSettings bloom{
-			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
-		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
-		r->SetBloomSettings(bloom);
-	}
-	{
-		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
-		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
-		// not depend on the Preferences state of whoever ran the editor last.
-		const bool dumpSSAO = [&]{
-			const char* v = std::getenv("HE_DUMP_SSAO");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
-		}();
-		r->SetSSAOSettings(IRenderer::SSAOSettings{
-			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
-			m_editorConfig.SSAOMethod});
-	}
-	{
-		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
-		// depth-of-field settings for this capture only, so he_shot.py can A/B
-		// the pass and move the focus plane without touching config.json.
-		IRenderer::DepthOfFieldSettings dof{
-			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
-			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
-		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
-		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
-		r->SetDepthOfFieldSettings(dof);
-	}
-	{
-		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
-		// settings for this capture only. The camera motion itself comes from
-		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
-		IRenderer::MotionBlurSettings mb{
-			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
-			m_editorConfig.MotionBlurMax};
-		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
-		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
-		r->SetMotionBlurSettings(mb);
-	}
-	r->SetShadowSettings(projectShadowSettings());
-	{
-		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
-		// the render scale and the specular-AA toggle for this capture only, so
-		// he_shot.py can A/B the modes without touching config.json.
-		IRenderer::AntiAliasingSettings aa;
-		aa.method             = m_editorConfig.AntiAliasing;
-		aa.sharpness          = m_editorConfig.AASharpness;
-		aa.renderScale        = m_editorConfig.RenderScale;
-		aa.specularAA         = m_editorConfig.SpecularAA;
-		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
-		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
-		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
-		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
-		// The effect is a fraction of a roughness unit at normal strength, so an
-		// A/B that can only toggle it proves nothing headless — being able to
-		// exaggerate is what makes "does this reach the shader at all?" answerable.
-		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
-		{
-			const float s = static_cast<float>(std::atof(v));
-			aa.specularAA         = s > 0.0f;
-			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
-		}
-		r->SetAntiAliasingSettings(aa);
-	}
-	{
-		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
-		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
-		// the editor's Preferences state leaking between captures.
-		const bool dumpGI = [&]{
-			const char* v = std::getenv("HE_DUMP_GI");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
-		}();
-		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
-		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
-		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
-		// mask's rays per pixel and its edge-aware filter on any backend.
-		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
-		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
-		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
-		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
-		// history 0.98, no spatial filter. Every backend renders its own.
-		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
-		{
-			gi.shadowRays    = 256;
-			gi.shadowHistory = 0.98f;
-			gi.shadowFilter  = false;
-		}
-		r->SetGISettings(gi);
-	}
-	{
-		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
-		// this capture only, so he_shot.py can A/B the culler: the two captures
-		// must be pixel-identical, only "dump counters" (visible=, occluded=)
-		// may differ.
-		const bool dumpOcc = [&]{
-			const char* v = std::getenv("HE_DUMP_OCCLUSION");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
-		}();
-		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
-	}
-	{
-		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
-		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
-		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
-		const bool dumpSSR = [&]{
-			const char* v = std::getenv("HE_DUMP_SSR");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
-		}();
-		IRenderer::SSRSettings ssr{
-			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
-		ssr.quality = m_editorConfig.SSRQuality;
-		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
-			ssr.quality = std::atoi(q);
-		r->SetSSRSettings(ssr);
-	}
-	{
-		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
-		// capture only (ray-traced-reflections A/B without touching config.json).
-		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
-		const bool dumpGR = [&]{
-			const char* v = std::getenv("HE_DUMP_GIREFL");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
-		}();
-		IRenderer::GIReflectionSettings gr;
-		gr.enabled      = dumpGR;
-		gr.intensity    = m_editorConfig.GIReflIntensity;
-		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
-		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
-		gr.blur         = m_editorConfig.GIReflBlur;
-		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
-			gr.blur = std::atof(b) > 0.5;
-		gr.quality      = m_editorConfig.GIReflQuality;
-		gr.bounces      = m_editorConfig.GIReflBounces;
-		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
-			gr.quality = std::atoi(q);
-		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
-		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
-			gr.bounces = std::atoi(bc);
-		r->SetGIReflectionSettings(gr);
-	}
-	{
-		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
-		// only (he_shot Forward/Deferred A/B without touching config.json).
-		int path = m_editorConfig.RenderPath;
-		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
-			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
-		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
-			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
-	}
-	{
-		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
-		// the viewport's view mode for this capture. Explicitly Lit otherwise —
-		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
-		// is the same answer, but a capture should not depend on that.
-		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
-	}
-
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
 	// the scene environment so a headless dump exercises the sky features (stars /
 	// nebula / 3D clouds / contrails) that the default down-looking editor camera and
@@ -5637,7 +5467,6 @@ void EditorApplication::dumpFrameHeadless()
 	// scene whose MaterialAsset carries a custom shader, so the NORMAL render path
 	// (extractor → RenderObject.materialAssetId → ResolveMaterialShader → cross-compiled
 	// pipeline) draws it — witnessing the full asset→pixel path, not just an inline demo.
-	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
 	if (const char* mt = std::getenv("HE_DUMP_MATERIALTEST"); mt && *mt && m_editorWorld)
 	{
 		MaterialAsset mat;
@@ -7166,7 +6995,6 @@ void EditorApplication::dumpFrameHeadless()
 	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
 	// orange (7) — the last three on the weightmap's SECOND page, which the
 	// renderer uploads as the right half of the one heLandscapeWeights texture.
-	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -8683,6 +8511,193 @@ void EditorApplication::dumpFrameHeadless()
 			"LOD3=%d refined=%d stitched=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1],
 			perLevel[2], perLevel[3], perLevel[4], stitched, camPos.x, camPos.y, camPos.z);
 	}
+}
+
+void EditorApplication::dumpFrameHeadless()
+{
+	if (m_dumpPath.empty() || m_dumpDone) return;
+	IRenderer* r = renderer();
+	if (!r)
+	{
+		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
+		m_dumpDone = true;
+		return;
+	}
+
+	// Render the scene into a fixed offscreen target a few times, bypassing the
+	// ImGui overlay and the window swap. Doing this here (before the paced main
+	// loop) means it works even when the window is occluded / App-Napped on
+	// macOS — where the normal loop throttles to a near-frozen frame rate and a
+	// loop-driven capture never fires.
+	r->SetOverlayCallback(nullptr);
+	{
+		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
+		// shot that proves a bloom A/B has any bloom in it to compare.
+		IRenderer::BloomSettings bloom{
+			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
+		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
+		r->SetBloomSettings(bloom);
+	}
+	{
+		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
+		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
+		// not depend on the Preferences state of whoever ran the editor last.
+		const bool dumpSSAO = [&]{
+			const char* v = std::getenv("HE_DUMP_SSAO");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
+		}();
+		r->SetSSAOSettings(IRenderer::SSAOSettings{
+			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
+	}
+	{
+		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
+		// depth-of-field settings for this capture only, so he_shot.py can A/B
+		// the pass and move the focus plane without touching config.json.
+		IRenderer::DepthOfFieldSettings dof{
+			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
+		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
+		r->SetDepthOfFieldSettings(dof);
+	}
+	{
+		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
+		// settings for this capture only. The camera motion itself comes from
+		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
+		IRenderer::MotionBlurSettings mb{
+			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax};
+		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
+		r->SetMotionBlurSettings(mb);
+	}
+	r->SetShadowSettings(projectShadowSettings());
+	{
+		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
+		// the render scale and the specular-AA toggle for this capture only, so
+		// he_shot.py can A/B the modes without touching config.json.
+		IRenderer::AntiAliasingSettings aa;
+		aa.method             = m_editorConfig.AntiAliasing;
+		aa.sharpness          = m_editorConfig.AASharpness;
+		aa.renderScale        = m_editorConfig.RenderScale;
+		aa.specularAA         = m_editorConfig.SpecularAA;
+		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
+		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
+		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
+		// The effect is a fraction of a roughness unit at normal strength, so an
+		// A/B that can only toggle it proves nothing headless — being able to
+		// exaggerate is what makes "does this reach the shader at all?" answerable.
+		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
+		{
+			const float s = static_cast<float>(std::atof(v));
+			aa.specularAA         = s > 0.0f;
+			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
+		}
+		r->SetAntiAliasingSettings(aa);
+	}
+	{
+		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
+		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
+		// the editor's Preferences state leaking between captures.
+		const bool dumpGI = [&]{
+			const char* v = std::getenv("HE_DUMP_GI");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
+		}();
+		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
+		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
+		// mask's rays per pixel and its edge-aware filter on any backend.
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
+		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
+		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
+		// history 0.98, no spatial filter. Every backend renders its own.
+		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
+		{
+			gi.shadowRays    = 256;
+			gi.shadowHistory = 0.98f;
+			gi.shadowFilter  = false;
+		}
+		r->SetGISettings(gi);
+	}
+	{
+		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
+		// this capture only, so he_shot.py can A/B the culler: the two captures
+		// must be pixel-identical, only "dump counters" (visible=, occluded=)
+		// may differ.
+		const bool dumpOcc = [&]{
+			const char* v = std::getenv("HE_DUMP_OCCLUSION");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
+		}();
+		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
+	}
+	{
+		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
+		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
+		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
+		const bool dumpSSR = [&]{
+			const char* v = std::getenv("HE_DUMP_SSR");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
+		}();
+		IRenderer::SSRSettings ssr{
+			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
+		ssr.quality = m_editorConfig.SSRQuality;
+		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
+			ssr.quality = std::atoi(q);
+		r->SetSSRSettings(ssr);
+	}
+	{
+		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
+		// capture only (ray-traced-reflections A/B without touching config.json).
+		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
+		const bool dumpGR = [&]{
+			const char* v = std::getenv("HE_DUMP_GIREFL");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
+		}();
+		IRenderer::GIReflectionSettings gr;
+		gr.enabled      = dumpGR;
+		gr.intensity    = m_editorConfig.GIReflIntensity;
+		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
+		gr.blur         = m_editorConfig.GIReflBlur;
+		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
+			gr.blur = std::atof(b) > 0.5;
+		gr.quality      = m_editorConfig.GIReflQuality;
+		gr.bounces      = m_editorConfig.GIReflBounces;
+		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
+			gr.quality = std::atoi(q);
+		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
+		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
+			gr.bounces = std::atoi(bc);
+		r->SetGIReflectionSettings(gr);
+	}
+	{
+		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
+		// only (he_shot Forward/Deferred A/B without touching config.json).
+		int path = m_editorConfig.RenderPath;
+		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
+			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
+		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+	}
+	{
+		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
+		// the viewport's view mode for this capture. Explicitly Lit otherwise —
+		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
+		// is the same answer, but a capture should not depend on that.
+		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
+	}
+
+	// The witness scenes (HE_DUMP_SKYTEST … HE_DUMP_TERRAINTICK): what this
+	// capture shows, built before the environment push and the warmup below.
+	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
+	HE::UUID s_layerMatId{}; // landscape layer material, re-authored after the warmup
+	buildDumpWitnessScenes(r, s_matTestId, s_layerMatId);
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
