@@ -389,3 +389,48 @@ body or move behind a macro is open. They are needed for parity with the interpr
   into a function), call `HE::writeGameBuildConfigHeader` into the private build dir, configure with `-DHE_GAME_BUILD_CONFIG`, skip the
   key patch and the hcfg; incremental key reuse reads `HE::readGameBuildConfigPakKey` from the previous build dir. 2. Step 5: ship
   `Hpak/GameBuildConfig.h` among the SDK's public headers.
+
+## Handoff (step 5: engine SDK)
+
+- **Topic / step:** Thema 211, step 5 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, code f42b15c5 (+ this doc).
+  Also 4b0038d2: `.gitattributes` keeps `tests/fixtures/game_build_config/*` LF (step 4's Windows CI red: CRLF checkout of the golden header).
+- **Done:** `cmake/HorizonSDK.cmake` (included at the end of the root `CMakeLists.txt:964`) installs the component `HorizonSDK`:
+  `lib/` (HorizonCore/Net/Scene/Rendering + SDL3; Windows: DLLs in `bin/`, import libs in `lib/`), one flat `include/` (engine
+  include + vendor dirs, glm, nlohmann, SDL3 + the generated `SDL_revision.h`, `HorizonVersion.h`), `share/HorizonEngine/game/`
+  (the HorizonGame sources), `share/HorizonEngine/template/CMakeLists.txt` (from `cmake/sdk/template/`), `Shaders/` when the tree
+  has Vulkan/D3D12 GI kernels, and `lib/cmake/HorizonEngine/` with `HorizonEngineConfig.cmake` (generated from
+  `cmake/sdk/HorizonEngineConfig.cmake.in`), `…ConfigVersion.cmake` (ExactVersion) and `HorizonEngineGame.cmake` (`horizon_add_game`).
+  Target `HorizonSDK` (not ALL) installs into `HE_SDK_DIR`, default `${DEPLOY_DIR}/SDK-<profile>` (never `<editor>/SDK`, which the
+  editor's POST_BUILD wipes). `cmake --install <tree> --component HorizonSDK --prefix <dir>` does the same by hand.
+- **Package:** imported targets `HorizonEngine::Core/Net/Scene/Rendering` + `SDL3::SDL3`, link chain as in the tree. Definitions
+  per target = that library's `INTERFACE_COMPILE_DEFINITIONS` read at configure time (DLL macros, `HE_BUILD_PROFILE_*`, any
+  `FEATURES` override; a generator expression there is a configure error), plus the directory-level `NOMINMAX`/`WIN32_LEAN_AND_MEAN`
+  and `HE_PROFILING_ENABLED` on Core. File names come from `$<TARGET_FILE_NAME>`/`$<TARGET_LINKER_FILE_NAME>`. All paths relative
+  to the config file. `find_package(HorizonEngine COMPONENTS dev|release)`: the other profile is "not found" with a reason.
+  `horizon_add_game(<t> [OUTPUT_NAME] [BUILD_CONFIG <HEGameBuildConfig.h>] [SOURCES …])` mirrors `src/HE_Game/CMakeLists.txt`
+  (cross-referenced in both); BUILD_CONFIG compiles a per-target copy of `CompiledBuildConfig.cpp`; Windows copies the DLLs beside the exe.
+- **Test:** ctest `sdk_example_project` (`tests/CMakeLists.txt:1523`, driver `tests/sdk_example/run_sdk_example.cmake`): install,
+  `file(RENAME)` the SDK, no tree path in the package files, required headers present; probe project (`tests/sdk_example/probe`, one
+  exported call per library, prints profile + features, run); asking for the other profile must fail; the shipped template builds
+  `SdkExampleGame` with the golden `HEGameBuildConfig.h`. Same generator/compilers as the tree, work dir `<build>/sdk-test`.
+- **Verified (Mac, both trees):** dev tree `out/build/release`: test passes (29 s); the built game runs hidden
+  (`HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=30`), dyld loads all five libs from the moved SDK's `lib/`, log says "project configuration
+  compiled in", "pak key from HEGameBuildConfig.h", build profile 'dev', clean exit at frame 30. Release tree `out/build/release-profile`
+  (HE_BUILD_TESTS=OFF, driver run by hand with `-DHE_PROFILE=release`): `--target HorizonSDK` OK, probe `profile=release features=0000`,
+  `dev` refused, template game builds; `build_profile_strings.py --profile release <game> <sdk>/lib` OK (33/33 gone); dev SDK with
+  `--profile dev` all present, with `--profile release` FAILED 33 (negative control). Full ctest: see the result post.
+- **Not verified:** Windows/Linux (CI): DLL/import-lib names, `$ORIGIN` INSTALL_RPATH on the installed .so, the nested Ninja configure
+  with cl.exe. The release game was not launched (no hidden mode in release). Tracy (`HE_ENABLE_TRACY`) SDKs: warning only, no Tracy headers.
+- **Decisions taken:** hand-written imported targets, not `install(EXPORT)` (PUBLIC deps glm/SDL3/nlohmann/lua_static are in no export
+  set); one SDK per tree and profile; game shipped as source (its HE_FEATURE_* sites and the compiled-in config are decided at game
+  compile time), not as a static lib; `HE_PROFILING` propagated as built (forcing it off in release stays open); flat `include/` so
+  `<sdk>` is also a valid `HE_HCGEN_SDK` root (not wired; `resolveSdk` untouched).
+- **Traps:** macOS SDK libs still reference Homebrew lz4/zstd/openssl by absolute path; a shipped game needs `scripts/bundle_native_deps.sh`
+  on its folder (step 8). The Python plugin is not in the SDK: the game looks for it beside libHorizonScene (`<sdk>/lib`) and runs Lua-only.
+  The config text goes through `file(GENERATE)`: a literal `$<` in `HorizonEngineConfig.cmake.in` is evaluated; genex code belongs in
+  `HorizonEngineGame.cmake`. `set(X "a" "b")` makes a list, so `NOT_FOUND_MESSAGE` is one string.
+- **Next steps:** 1. Step 6: put the unified engine-API header under an installed include dir (any of the six in `HorizonSDK.cmake`
+  is picked up) and add one call to the probe. 2. Step 8: build the release SDK (release tree, `--target HorizonSDK`), configure the
+  template with `-DHorizonEngine_DIR=<sdk>/lib/cmake/HorizonEngine -DHE_GAME_BUILD_CONFIG=<private dir>/HEGameBuildConfig.h
+  -DHE_GAME_NAME=<game>`, `horizon_add_game(... SOURCES <generated HorizonCode>)`, then copy runtime files from the SDK + bundle deps.
+  Decide how the editor package carries a release SDK (second tree in CI packaging).
