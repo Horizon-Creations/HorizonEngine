@@ -1,3 +1,8 @@
+# The engine SDK builds the same game from these sources outside this tree:
+# horizon_add_game() in cmake/sdk/HorizonEngineGame.cmake mirrors the target
+# setup below (sources, .mm flags, frameworks, rpath, HE_VULKAN_ENABLED, dev
+# hotkeys, HE_GAME_BUILD_CONFIG). A change here belongs there too; ctest
+# sdk_example_project builds that copy.
 add_executable(HorizonGame WIN32
 	src/main.cpp
 	src/GameApplication.cpp

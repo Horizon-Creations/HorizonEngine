@@ -1513,6 +1513,28 @@ if(Python3_Interpreter_FOUND)
     endforeach()
 endif()
 
+# ── "Does a game build against the engine SDK?" (Thema 211 step 5) ───────────
+# Installs this tree's HorizonSDK component, moves it, and builds two projects
+# that see nothing of this tree: a probe (one call into each library, the profile
+# it was handed, the other profile refused) and the shipped template, i.e.
+# HorizonGame from the SDK with the golden HEGameBuildConfig.h compiled in. Same
+# generator and compilers as this tree; the work dir sits in the build tree, not
+# in /tmp. Needs the engine libraries built (an ordinary full build).
+add_test(NAME sdk_example_project
+         COMMAND ${CMAKE_COMMAND}
+                 "-DHE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                 "-DHE_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                 "-DHE_WORK_DIR=${CMAKE_BINARY_DIR}/sdk-test"
+                 "-DHE_PROFILE=${HE_BUILD_PROFILE}"
+                 "-DHE_CONFIG=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,Release>"
+                 "-DHE_GENERATOR=${CMAKE_GENERATOR}"
+                 "-DHE_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+                 "-DHE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                 "-DHE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+                 "-DHE_OBJCXX_COMPILER=${CMAKE_OBJCXX_COMPILER}"
+                 -P "${CMAKE_SOURCE_DIR}/tests/sdk_example/run_sdk_example.cmake")
+set_tests_properties(sdk_example_project PROPERTIES TIMEOUT 1500 LABELS sdk)
+
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP
 # multicast) and hand sessions between two live endpoints. Letting two of them
 # run at the same instant makes a failure depend on the scheduler, which is the

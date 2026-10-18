@@ -961,6 +961,10 @@ if(TARGET HorizonEditor AND TARGET HorizonGame)
     add_dependencies(HorizonEditor HorizonGame)
 endif()
 
+# ─── Engine SDK (install component HorizonSDK, target HorizonSDK) ─────────────
+# After every library: it reads their final interface definitions.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonSDK.cmake")
+
 # ─── Tests ─────────────────────────────────────────────────────────────────────
 option(HE_BUILD_TESTS "Build the doctest unit tests" ON)
 if(HE_BUILD_TESTS)
