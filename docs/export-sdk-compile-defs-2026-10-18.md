@@ -481,10 +481,10 @@ body or move behind a macro is open. They are needed for parity with the interpr
   results in order, proven by the generated file); keep `hc::callApi` for Thunk rows. 2. Link the generated library against
   HorizonScene (today only HorizonCore). 3. Optionally write direct wrappers for the 10 Thunk rows.
 
-## Handoff (step 7: readable codegen with direct engine calls) — PARTIAL, stopped by the queen
+## Handoff (step 7: readable codegen with direct engine calls)
 
 - **Topic / step:** Thema 211, step 7 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, commits d509aa5b, 05f9111c,
-  e576882d, 3a4f7099 (WIP fixture). Stopped on the queen's request before the link/SDK half.
+  e576882d, 3a4f7099, 18b13b53 (link gap). First run was stopped by the queen; the resumed run closed the link gap.
 - **Done (emitter, `src/HE_Scene/src/HcCodegen.cpp`):** Engine Call nodes on Ctx/Free rows are direct `HE::api::<group>::<fn>(api, …)`
   calls (`directRow`, `directCall`/`directRead`/`directStmt`), one `HE::api::Scope api(m_ctx);` per body that needs the Ctx, the API
   header included only by classes that call it. Thunk and Struct-pin rows keep `hc::callApi` (none left in the fixtures). Arguments
@@ -503,17 +503,19 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Tests:** `test_hc_codegen_readable.cpp` (golden files `tests/fixtures/hcodegen_golden/`, LF via .gitattributes; update with
   `HE_UPDATE_HCGEN_GOLDEN=1`; old cryptic forms banned; every callApi has no direct form). `directCallsSource` static_asserts the
   "used as returned" result types. Parity harness: `checkParity` drops direct rows' `callApi` trace lines on both sides (lesson 452).
-- **Verified (Mac, out/build/release, dev):** he_tests builds; `test_horizoncode*`, `test_engine_api*`, `test_hccompiled_loader`,
-  `test_hc_*` 507/507. Full ctest NOT run in this step. CI not started.
-- **NOT done / broken until fixed:** (1) `generateCMakeLists` still links only `HorizonCore`, and the editor's staged codegen SDK
-  (`src/HE_Editor/CMakeLists.txt:615-655`, `he_sdk_config.json`) has no HE_Scene headers/lib: an in-editor "Compile HorizonCode"
-  export of a graph with an Engine Call now fails to compile and ships INTERPRETED (fallback works, compiled path does not).
-  `test_hcgen` already links HorizonScene. (2) the twin-world test: fixture `engine_world` exists, `world_parity.h` +
-  `test_hc_codegen_world.cpp` do not. (3) the SDK-compiled parity test (hc_codegen `--cmake`, build against the installed SDK
-  package, probe loads it via `CompiledClassTable`, compare on twin worlds) not started.
-- **Next steps:** 1. `generateCMakeLists`: `find_package(HorizonEngine)` → `HorizonEngine::Scene` when `HorizonEngine_DIR`/`HE_SDK_DIR`
-  has the package, else include+lib dirs linking `HorizonScene HorizonCore`; `SdkInfo` + package dir and extra lib dirs; stage
-  `src/HE_Scene/include` + HorizonScene linker file into `<editor>/SDK`, add both to `he_sdk_config.json`. 2. `world_parity.h`
-  (twin `HorizonWorld`s, probe entity with TransformComponent owned via `Runtime::setOwnedEntity`, `Services::callApi` = invoke and
-  `Services::apiCtx` from one Ctx builder; compare variables + probe/spawned transforms) used by he_tests and the probe. 3. SDK probe
-  next to `tests/sdk_example`. 4. Full ctest, push, `gh workflow run CI`.
+- **Link (18b13b53):** `generateCMakeLists` uses the engine SDK package (`HorizonEngine::Scene`) when `HorizonEngine_DIR` or
+  `HE_SDK_DIR/lib/cmake/HorizonEngine` exists, else the explicit dirs, linking `HorizonScene HorizonCore` (`HE_SDK_LIB_DIR` may be a
+  list). `SdkInfo` + `extraLibDirs` (JSON `libDirs`) + `packageDir`; `sdkFromRoot` adds `src/HE_Scene/include`; `buildDylib` passes
+  both. The editor stages `src/HE_Scene/include` and HorizonScene's linker file into `<editor>/SDK`; `he_sdk_config.json` lists them.
+  `hc_codegen --cmake` writes the export's CMakeLists. `test_hc_codegen_export_build.cpp`: dev `he_sdk_config.json` → `resolveSdk`
+  → `generate` (engine_world + animator_sync) → `buildDylib` → `CompiledClassTable` → engine_world against the interpreter on twin
+  real worlds (owner entity via `setOwnedEntity`, one Ctx builder for callApi and apiCtx): variables and transforms equal.
+- **Verified (Mac, out/build/release, dev):** HorizonEditor + all targets build; full ctest 310/310 (2 flavour skips, private HOME,
+  `HE_CONFIG_DIR` unset). By hand: all 50 fixture classes built through `hc_codegen --cmake` against ONLY the staged
+  `out/deploy/Editor/SDK` (include dirs + lib); the same without HE_Scene fails ("HorizonEngineApi.h not found").
+- **Not verified:** Windows/Linux (CI, see the run in the result post); the package branch of `generateCMakeLists`
+  (`HorizonEngine_DIR`) was not built — no test installs the SDK and builds generated code against it (the export in step 8 will).
+  `entity.spawn` makes a bare entity, so the fixture's setPosition on it is a no-op on both sides (the test compares that, too).
+- **Next steps (step 8):** point the export at the installed SDK (`HE_HCGEN_SDK` = `SDK-<profile>` → `packageDir`) and build the
+  game with the generated classes; extend `tests/sdk_example/run_sdk_example.cmake` to build `hc_codegen --fixtures --cmake`
+  output against the installed SDK. Optional: wrappers for the 10 Thunk rows.
