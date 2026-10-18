@@ -106,6 +106,7 @@ Script: `scripts/mat-state-ab/cap103.ps1`, diffed with `scripts/d3d12-static-hea
 | GL `UITEST=image` | pre vs new | md5-identical | — |
 | GL `UITEST=text` | new vs `HE_GL_UI_BATCH=0` | md5-identical (209 quads, 4 vs 209 draws) | — |
 | GL MATERIALTEST, forward / translucent / GI | pre vs new | 0.0000 / 0.0000 / ≤ 0.0007 | 0.0000 / 0.0000 / ≤ 0.0006 |
+| GL MATERIALTEST translucent, deferred (`RENDERPATH=1`) | pre vs new | 0.0000 | 0.0000 |
 | D3D11 MATERIALTEST, forward / deferred / translucent | pre vs new | ≤ 0.0001 in every non-sky band | ≤ 0.0002 |
 | D3D11 LANDSCAPELAYERS, GI off / on | pre vs new | 0.17–0.21 / 0.009 | pre vs pre 0.23 / 0.018 |
 | D3D11 MATGRID 256 | eager vs new | 0.0000 | — |
@@ -119,7 +120,7 @@ the `mix` scene has a built-in draw after an open run, so use it for any later c
 ## Handoff
 
 - **Topic / step:** 217, step 2 of 2
-- **Branch / commit:** claude/audit-optimierung-d3d11-d3d12-opengl-backend-stufe-3 (see the post for sha; pushed)
+- **Branch / commit:** claude/audit-optimierung-d3d11-d3d12-opengl-backend-stufe-3 @ 877887ec + this doc update (pushed; the CI link is in the Hive post)
 - **Done:** D3D11 binds graph-material frame state once per run of material draws and restores it once. HeParams is mapped once per DrawCall. GL fills the material lighting once per frame and binds units 14..17 once per loop. GL UI quads are instanced in batches.
 - **Files touched:**
   - `D3D11Renderer.cpp`: `bindMatRunState`/`endMatRun`/`drawLoop` above `drawDC`; the witness and timing lines after the transparent pass.
@@ -130,11 +131,15 @@ the `mix` scene has a built-in draw after an open run, so use it for any later c
 - **Verified:**
   - The pixel A/B tables above, including the negative control.
   - Witness lines: N draws in M runs; UI quads in draws.
-  - `he_tests` full run, scratch APPDATA (result in the post).
+  - `he_tests` full Release run, scratch APPDATA: 5524 of 5529 cases pass. The 5 failures are not caused by this step:
+    - 3 are `test_input_gamepad` (the real Xbox pad on NN-WS03, known noise).
+    - 2 are `test_profiler` (`isRecording`, `recordedFrames`). They pass 3/3 when run alone (`--source-file=*test_profiler.cpp`), so they are order-dependent in the full run; this step does not touch EngineProfiler.
   - The pin test: 47 assertions.
+  - `scripts/validate_embedded_shaders.py --glsl-only`: 58/58, `kUIVS`/`kUIFS` included.
 - **Not verified:**
+  - **GL with more than one graph-material draw was never compared against pre.** That is exactly the case REN-601 and "units once" affect, so state it plainly. Pre has no MATGRID and REN-601 has no switch. Both are proven only on single-draw scenes (forward, translucent, GI, deferred translucent: identical), plus a visual check of the GL `MATGRID=256,mix` frame.
   - Vulkan/D3D12/Metal are untouched by design.
-  - GL on macOS (GLSL 4.10 `flat` + `layout(location)`) was not run there. Both are core 4.10, but CI's Mac GL is not exercised.
+  - GL on macOS / Mesa was not run. `scripts/validate_embedded_shaders.py --glsl-only` (glslangValidator) accepts the new `kUIVS`/`kUIFS`; no driver other than NVIDIA ran them.
   - GL REN-601 CPU timing: no same-binary switch.
   - A clean GPU-time number: the GPU was busy with the human's game.
 - **Decisions taken:**
