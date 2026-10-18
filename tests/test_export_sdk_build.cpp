@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <initializer_list>
 #include <fstream>
 #include <string>
 
@@ -39,10 +40,13 @@ void touchFile(const fs::path& p, const std::string& text = "x")
     std::ofstream(p, std::ios::binary) << text;
 }
 
-// The two files that make a directory an SDK for findGameSdk.
-void makeSdk(const fs::path& root)
+// The files that make a directory an SDK holding these lib sets for findGameSdk.
+void makeSdk(const fs::path& root, std::initializer_list<const char*> profiles)
 {
     touchFile(root / "lib" / "cmake" / "HorizonEngine" / "HorizonEngineConfig.cmake");
+    for (const char* p : profiles)
+        touchFile(root / "lib" / "cmake" / "HorizonEngine" /
+                  (std::string("HorizonEngineTargets-") + p + ".cmake"));
     touchFile(root / "share" / "HorizonEngine" / "template" / "CMakeLists.txt");
 }
 
@@ -53,7 +57,7 @@ std::string readFile(const fs::path& p)
 }
 } // namespace
 
-TEST_CASE("findGameSdk: beside the editor, then beside its folder, profile must match")
+TEST_CASE("findGameSdk: beside the editor, then beside its folder, lib set must be there")
 {
     TempDir t;
     const fs::path editor = t.path / "Editor";
@@ -61,26 +65,34 @@ TEST_CASE("findGameSdk: beside the editor, then beside its folder, profile must 
 
     CHECK_FALSE(HE::ExportSdk::findGameSdk(editor, "release").valid());
 
-    makeSdk(t.path / "SDK-release");   // DEPLOY_DIR layout of a dev tree
+    makeSdk(t.path / "EngineSDK", { "release" });   // DEPLOY_DIR layout of a dev tree
     // SDL_GetBasePath style (trailing separator) and plain both reach the parent.
     auto s = HE::ExportSdk::findGameSdk(editor / "", "release");
     REQUIRE(s.valid());
-    CHECK(s.root == t.path / "SDK-release");
+    CHECK(s.root == t.path / "EngineSDK");
     CHECK(s.profile == "release");
     CHECK(HE::ExportSdk::findGameSdk(editor, "release").valid());
-    // The dev SDK is not a stand-in for the release one.
+    // Only the release lib set is installed: no dev SDK there.
     CHECK_FALSE(HE::ExportSdk::findGameSdk(editor, "dev").valid());
 
-    makeSdk(editor / "SDK-release");   // the editor package wins
-    CHECK(HE::ExportSdk::findGameSdk(editor, "release").root == editor / "SDK-release");
+    // One SDK, both lib sets: either profile finds it; the editor package wins.
+    makeSdk(editor / "EngineSDK", { "dev", "release" });
+    CHECK(HE::ExportSdk::findGameSdk(editor, "release").root == editor / "EngineSDK");
+    CHECK(HE::ExportSdk::findGameSdk(editor, "dev").root == editor / "EngineSDK");
+    CHECK(HE::ExportSdk::findGameSdk(editor, "dev").profile == "dev");
 
-    // An incomplete SDK (no template) does not count.
-    touchFile(editor / "SDK-dev" / "lib" / "cmake" / "HorizonEngine" / "HorizonEngineConfig.cmake");
-    CHECK_FALSE(HE::ExportSdk::findGameSdk(editor, "dev").valid());
+    // An incomplete SDK (no template) does not count; neither does the old
+    // one-folder-per-profile layout.
+    touchFile(t.path / "Other" / "EngineSDK" / "lib" / "cmake" / "HorizonEngine" / "HorizonEngineConfig.cmake");
+    touchFile(t.path / "Other" / "EngineSDK" / "lib" / "cmake" / "HorizonEngine" / "HorizonEngineTargets-dev.cmake");
+    CHECK_FALSE(HE::ExportSdk::findGameSdk(t.path / "Other", "dev").valid());
+    makeSdk(t.path / "Old" / "SDK-dev", {});
+    CHECK_FALSE(HE::ExportSdk::findGameSdk(t.path / "Old", "dev").valid());
 
     // An override is used as given, never replaced by another SDK.
-    makeSdk(t.path / "Mine");
+    makeSdk(t.path / "Mine", { "release" });
     CHECK(HE::ExportSdk::findGameSdk(editor, "release", t.path / "Mine").root == t.path / "Mine");
+    CHECK_FALSE(HE::ExportSdk::findGameSdk(editor, "dev", t.path / "Mine").valid());
     CHECK_FALSE(HE::ExportSdk::findGameSdk(editor, "release", t.path / "Nope").valid());
 }
 
@@ -130,12 +142,14 @@ TEST_CASE("makeBuildSpec: SDK template, private build dir, header compiled in")
     sdk.root        = "/sdk";
     sdk.packageDir  = "/sdk/lib/cmake/HorizonEngine";
     sdk.templateDir = "/sdk/share/HorizonEngine/template";
+    sdk.profile     = "release";
     const auto spec = HE::ExportSdk::makeBuildSpec(sdk, "/work", "/work/HEGameBuildConfig.h");
     CHECK(spec.sourceDir == sdk.templateDir);
     CHECK(spec.buildDir == fs::path("/work") / "build");
     const auto has = [&](const std::string& d)
     { return std::find(spec.defines.begin(), spec.defines.end(), d) != spec.defines.end(); };
     CHECK(has("HorizonEngine_DIR=/sdk/lib/cmake/HorizonEngine"));
+    CHECK(has("HE_BUILD_PROFILE=release"));   // which lib set of the one SDK
     CHECK(has("HE_GAME_BUILD_CONFIG=/work/HEGameBuildConfig.h"));
     CHECK(has("HE_GAME_NAME=HorizonGame"));
     CHECK(std::find(spec.artifactNames.begin(), spec.artifactNames.end(), "HorizonGame")
@@ -146,11 +160,14 @@ TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries 
 {
     TempDir t;
     HE::ExportSdk::GameSdk sdk;
-    sdk.root = t.path / "sdk";
-    touchFile(sdk.root / "lib" / "libHorizonCore.dylib", "sdk-core");
-    touchFile(sdk.root / "lib" / "libHorizonCore.so", "sdk-core-so");
-    touchFile(sdk.root / "lib" / "HorizonCore.lib", "import-lib");
-    touchFile(sdk.root / "bin" / "HorizonCore.dll", "sdk-dll");
+    sdk.root    = t.path / "sdk";
+    sdk.profile = "release";
+    touchFile(sdk.root / "lib" / "release" / "libHorizonCore.dylib", "sdk-core");
+    touchFile(sdk.root / "lib" / "release" / "libHorizonCore.so", "sdk-core-so");
+    touchFile(sdk.root / "lib" / "release" / "HorizonCore.lib", "import-lib");
+    touchFile(sdk.root / "bin" / "release" / "HorizonCore.dll", "sdk-dll");
+    // The other lib set of the same SDK stays where it is.
+    touchFile(sdk.root / "lib" / "dev" / "libHorizonNet.dylib", "dev-net");
     const fs::path built = t.path / "build" / "HorizonGame";
     touchFile(built, "compiled-game");
     const fs::path exe = t.path / "export" / "HorizonGame";
@@ -164,6 +181,7 @@ TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries 
     CHECK(fs::exists(exe.parent_path() / "libHorizonCore.so"));
     CHECK(fs::exists(exe.parent_path() / "HorizonCore.dll"));
     CHECK_FALSE(fs::exists(exe.parent_path() / "HorizonCore.lib"));   // link-time only
+    CHECK_FALSE(fs::exists(exe.parent_path() / "libHorizonNet.dylib"));
     CHECK(copied.size() == 4);
 
     CHECK_FALSE(HE::ExportSdk::installBuiltGame(sdk, built, {}).empty());
@@ -172,14 +190,15 @@ TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries 
 // The real chain against an installed SDK: export-folder hcfg + key -> header ->
 // cmake build of the SDK template -> swap over a stand-in prebuilt game. Needs a
 // toolchain and an SDK (cmake --build <tree> --target HorizonSDK), so it only runs
-// with HE_EXPORT_SDK_E2E=<sdk root>; takes about a minute.
+// with HE_EXPORT_SDK_E2E=<sdk root> [HE_EXPORT_SDK_E2E_PROFILE=dev|release, default
+// dev]; takes about a minute.
 TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
 {
     const char* root = std::getenv("HE_EXPORT_SDK_E2E");
     if (!root || !*root) return;
     const fs::path sdkRoot = root;
-    const std::string profile =
-        sdkRoot.filename().string().find("release") != std::string::npos ? "release" : "dev";
+    const char* wanted = std::getenv("HE_EXPORT_SDK_E2E_PROFILE");
+    const std::string profile = wanted && *wanted ? wanted : "dev";
     const auto sdk = HE::ExportSdk::findGameSdk({}, profile, sdkRoot);
     REQUIRE(sdk.valid());
 

@@ -23,7 +23,12 @@ GameSdk sdkAt(const fs::path& root, const std::string& profile)
     GameSdk sdk;
     sdk.packageDir  = root / "lib" / "cmake" / "HorizonEngine";
     sdk.templateDir = root / "share" / "HorizonEngine" / "template";
+    // One SDK holds a lib set per profile (cmake/HorizonSDK.cmake); the one
+    // asked for must be installed. Whether its header stamp still matches is
+    // the package's call: a refusal there fails the configure, and the
+    // prebuilt game stays.
     if (!fs::is_regular_file(sdk.packageDir / "HorizonEngineConfig.cmake", ec) ||
+        !fs::is_regular_file(sdk.packageDir / ("HorizonEngineTargets-" + profile + ".cmake"), ec) ||
         !fs::is_regular_file(sdk.templateDir / "CMakeLists.txt", ec))
         return {};
     sdk.root    = root;
@@ -46,7 +51,7 @@ GameSdk findGameSdk(const fs::path& editorBase, const std::string& profile,
                     const fs::path& overrideRoot)
 {
     if (!overrideRoot.empty()) return sdkAt(overrideRoot, profile);
-    const std::string dir = "SDK-" + profile;
+    const char* dir = kGameSdkDirName;
     if (GameSdk s = sdkAt(editorBase / dir, profile); s.valid()) return s;
     if (!editorBase.empty())
     {
@@ -63,7 +68,7 @@ std::string unavailableReason(const GameSdk& sdk, const std::string& profile,
                               bool cmakeFound, bool compilerFound)
 {
     if (!sdk.valid())
-        return "no engine SDK for the '" + profile + "' profile (SDK-" + profile +
+        return "no engine SDK with the '" + profile + "' lib set (" + kGameSdkDirName +
                " beside the editor, or HE_GAME_SDK_DIR)";
     if (!cmakeFound)    return "cmake not found";
     if (!compilerFound) return "no working C++ compiler found";
@@ -103,6 +108,7 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workD
     spec.what          = "game executable";
     spec.defines       = {
         "HorizonEngine_DIR=" + sdk.packageDir.generic_string(),
+        "HE_BUILD_PROFILE=" + sdk.profile,
         "HE_GAME_NAME=HorizonGame",
         "HE_GAME_BUILD_CONFIG=" + header.generic_string(),
     };
@@ -120,7 +126,7 @@ std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
     if (copied) copied->push_back(exportedExe.filename().string());
     for (const char* sub : { "lib", "bin" })
     {
-        const fs::path dir = sdk.root / sub;
+        const fs::path dir = sdk.root / sub / sdk.profile;
         if (!fs::is_directory(dir, ec)) continue;
         for (const auto& e : fs::directory_iterator(dir, ec))
         {

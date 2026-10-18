@@ -18,24 +18,32 @@
 namespace HE::ExportSdk
 {
 // An installed engine SDK (cmake/HorizonSDK.cmake): <root>/lib/cmake/HorizonEngine
-// holds the package, <root>/share/HorizonEngine/template the game project.
+// holds the package, <root>/share/HorizonEngine/template the game project,
+// <root>/lib/<profile> (Windows: also bin/<profile>) one lib set per profile.
 struct GameSdk
 {
     std::filesystem::path root;
     std::filesystem::path packageDir;    // HorizonEngine_DIR
     std::filesystem::path templateDir;   // the game's CMakeLists.txt
-    std::string           profile;       // "dev" | "release", as asked for
+    std::string           profile;       // "dev" | "release": the lib set built against
     bool valid() const { return !root.empty(); }
 };
 
-// Looks for the SDK of `profile` ("dev" or "release"), first match wins:
+// The SDK folder's name beside the editor (HorizonSDK's default install dir is
+// ${DEPLOY_DIR}/EngineSDK). Not "SDK": that one is the HorizonCode codegen SDK
+// the editor stages into its own folder.
+inline constexpr const char* kGameSdkDirName = "EngineSDK";
+
+// Looks for an SDK holding the lib set of `profile` ("dev" or "release"), first
+// match wins:
 //   1. `overrideRoot` (the HE_GAME_SDK_DIR environment variable in the editor),
 //      used only when it is a complete SDK — a wrong path is not silently
 //      replaced by another SDK, it yields "not found" and the reason says so;
-//   2. <editorBase>/SDK-<profile> (the editor package);
-//   3. <editorBase>/../SDK-<profile> (DEPLOY_DIR beside the editor in a dev tree,
+//   2. <editorBase>/EngineSDK (the editor package);
+//   3. <editorBase>/../EngineSDK (DEPLOY_DIR beside the editor in a dev tree,
 //      where HorizonSDK installs by default).
-// Complete = package config AND template present.
+// Complete = package config, that profile's HorizonEngineTargets-<profile>.cmake
+// AND the template present.
 GameSdk findGameSdk(const std::filesystem::path& editorBase, const std::string& profile,
                     const std::filesystem::path& overrideRoot = {});
 
@@ -61,7 +69,7 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem
                                        const std::filesystem::path& header);
 
 // Swaps the built game in: `builtExe` over `exportedExe`, plus every engine
-// library of the SDK (lib/*.dylib|*.so*, bin/*.dll) into the executable's folder,
+// library of the SDK's lib set (lib/<profile>/*.dylib|*.so*, bin/<profile>/*.dll) into the executable's folder,
 // overwriting the prebuilt runtime's copies. Empty string = done.
 std::string installBuiltGame(const GameSdk& sdk, const std::filesystem::path& builtExe,
                              const std::filesystem::path& exportedExe,
