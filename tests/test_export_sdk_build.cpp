@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -165,4 +166,45 @@ TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries 
     CHECK(copied.size() == 4);
 
     CHECK_FALSE(HE::ExportSdk::installBuiltGame(sdk, built, {}).empty());
+}
+
+// The real chain against an installed SDK: export-folder hcfg + key -> header ->
+// cmake build of the SDK template -> swap over a stand-in prebuilt game. Needs a
+// toolchain and an SDK (cmake --build <tree> --target HorizonSDK), so it only runs
+// with HE_EXPORT_SDK_E2E=<sdk root>; takes about a minute.
+TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
+{
+    const char* root = std::getenv("HE_EXPORT_SDK_E2E");
+    if (!root || !*root) return;
+    const fs::path sdkRoot = root;
+    const std::string profile =
+        sdkRoot.filename().string().find("release") != std::string::npos ? "release" : "dev";
+    const auto sdk = HE::ExportSdk::findGameSdk({}, profile, sdkRoot);
+    REQUIRE(sdk.valid());
+
+    TempDir t;
+    ProjectConfig cfg;
+    cfg.projectName = "SdkE2E";
+    cfg.encrypted   = true;
+    for (int i = 0; i < 32; ++i) cfg.encKey[i] = (uint8_t)(0xA0 + i);
+    const fs::path exportDir = t.path / "export";
+    fs::create_directories(exportDir);
+    REQUIRE(ProjectConfigLoader::save(exportDir, cfg));
+    const fs::path exe = exportDir / "HorizonGame";
+    touchFile(exe, "prebuilt-game");
+
+    const fs::path header = t.path / "work" / "HEGameBuildConfig.h";
+    REQUIRE(HE::ExportSdk::writeBuildConfigFromExport(exportDir, exe, profile, header).empty());
+    const auto built = HE::hccg::buildDylib(HE::ExportSdk::makeBuildSpec(sdk, t.path / "work", header));
+    INFO(built.message);
+    REQUIRE(built.ok);
+    REQUIRE(HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe).empty());
+    CHECK(readFile(exe) != "prebuilt-game");
+    CHECK(fs::file_size(exe) > 100000);
+    // The key went into the binary masked, never as one plain run.
+    const std::string bin = readFile(exe);
+    CHECK(bin.find(std::string(reinterpret_cast<const char*>(cfg.encKey), 8)) == std::string::npos);
+    std::error_code ec;
+    fs::copy(t.path / "work" / "build.log", fs::temp_directory_path() / "he_export_sdk_e2e_build.log",
+             fs::copy_options::overwrite_existing, ec);
 }
