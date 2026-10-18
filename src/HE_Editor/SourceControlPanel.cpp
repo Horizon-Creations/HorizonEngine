@@ -1748,15 +1748,27 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			                         s_branchName, sizeof(s_branchName));
 
 			// Validate while typing: git's own rules, asked of git, so the answer
-			// cannot drift from what the command will accept.
+			// cannot drift from what the command will accept. Asked on the git
+			// worker once per change of the text (never per frame, never on this
+			// thread); until the answer for exactly this text is in, nothing is
+			// claimed either way and Create waits for it.
+			static std::string s_branchNameAsked;
+			if (ImGui::IsWindowAppearing()) s_branchNameAsked.clear();   // branches may have changed since
 			const bool empty = s_branchName[0] == '\0';
 			bool nameOk = false, taken = false;
+			const HE::Sc::GitService::BranchNameCheck* check = nullptr;
 			if (!empty && !git->projectRoot().empty())
 			{
-				nameOk = HE::Sc::GitCli::isValidBranchName(git->projectRoot(), s_branchName);
-				taken  = nameOk && HE::Sc::GitCli::branchExists(git->projectRoot(), s_branchName);
+				if (s_branchNameAsked != s_branchName)
+				{
+					s_branchNameAsked = s_branchName;
+					git->requestCheckBranchName(s_branchNameAsked);
+				}
+				check = git->branchNameCheck(s_branchName);
+				nameOk = check && check->valid;
+				taken  = check && check->taken;
 			}
-			if (!empty && !nameOk)
+			if (!empty && check && !nameOk)
 				ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
 				                   "Not a usable branch name.");
 			else if (taken)
