@@ -6,10 +6,20 @@
 // archive back needs that same 32-byte key: the runtime hands it to
 // ContentManager::mountPak() (GameApplication does the mounting for a packaged
 // game); loadPak() is the eager tools/tests variant.
+//
+// --cache <manifest> makes a re-pack incremental, like the editor's export: the
+// previous <output.hpak> plus the manifest written next to it after the last
+// pack let every unchanged asset be copied over as stored (no cook, no texture
+// encode, no compression or encryption). The manifest is only trusted for
+// exactly that pak and the same settings (codec, key, ...); anything else, or a
+// missing file, packs from scratch. Hpak/PackManifest.h has the rules.
 
 #include "HpakWriter.h"
 #include <cstdint>
 #include "KeyDerivation.h"
+#include <Hpak/HpakReader.h>
+#include <Hpak/PackManifest.h>
+#include <memory>
 #include <iostream>
 #include <string>
 #include <filesystem>
@@ -27,7 +37,7 @@ int usage(const std::string& problem = {})
         std::cerr << "hpak_packer: " << problem << "\n";
     std::cerr << "Usage: hpak_packer <project_root> <output.hpak> "
                  "[--codec store|lz4|zstd] [--secret <passphrase>] "
-                 "[--engine-content <dir>] [--exclude <glob>]...\n";
+                 "[--engine-content <dir>] [--exclude <glob>]... [--cache <manifest>]\n";
     return 1;
 }
 } // namespace
@@ -44,6 +54,7 @@ int main(int argc, char** argv)
     std::string   engineContent;  // EditorDeps/EngineContent → packed as "Engine/…"
     Hpak::Codec   codec = Hpak::Codec::Zstd; // sensible ship default
     std::vector<std::string> excludes;
+    std::string   cachePath;      // incremental-pack manifest (read, then rewritten)
     for (int i = 3; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -91,6 +102,11 @@ int main(int argc, char** argv)
                 return usage("--exclude needs a glob");
             excludes.emplace_back(std::move(glob));
         }
+        else if (arg == "--cache")
+        {
+            if (!takeValue(cachePath))
+                return usage("--cache needs a manifest file");
+        }
         else
         {
             return usage("unknown argument '" + arg + "'");
@@ -117,10 +133,22 @@ int main(int argc, char** argv)
     if (!engineContent.empty())
         roots.push_back({ engineContent, "Engine/" });
 
+    // The previous pak stays open while the entries it can donate are read out
+    // of it, and is closed before the file is replaced below.
+    auto prevPak = std::make_unique<HpakReader>();
+    Hpak::IncrementalCache cache;
+    const bool haveCache = !cachePath.empty()
+        && HE::openIncrementalCache(outputFile, cachePath, settings, *prevPak, cache);
+    if (!cachePath.empty() && !haveCache)
+        std::cout << "No usable cache (" << cachePath << ") for " << outputFile
+                  << ": packing everything\n";
+
     HpakWriter packer;
-    const int added = packer.addDirectories(roots, settings);
+    const int added = packer.addDirectories(roots, settings, {}, haveCache ? &cache : nullptr);
+    prevPak.reset();
     std::cout << "Packed " << added << " asset(s) from: " << inputPath;
     if (!engineContent.empty()) std::cout << " (+ engine defaults from " << engineContent << ")";
+    if (haveCache) std::cout << ", " << packer.reusedCount() << " reused from the cache";
     std::cout << "\n";
 
     if (std::filesystem::exists(outputFile))
@@ -133,5 +161,10 @@ int main(int argc, char** argv)
     }
 
     std::cout << "Written: " << outputFile << "\n";
+
+    // Best effort: without a manifest the next --cache run just packs everything.
+    if (!cachePath.empty()
+        && !HE::writeIncrementalManifest(outputFile, cachePath, settings, packer.entryInfos()))
+        std::cerr << "hpak_packer: could not write the cache manifest " << cachePath << "\n";
     return 0;
 }

@@ -32,6 +32,7 @@ add_library(HorizonCore SHARED
 	src/Integrity/IntegrityProbe.cpp
 	src/Hpak/ProjectConfig.cpp
 	src/Hpak/ProjectExporter.cpp
+	src/Hpak/PackManifest.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
