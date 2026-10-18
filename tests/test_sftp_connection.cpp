@@ -26,6 +26,7 @@
 // last case at a real SFTP account (a throwaway local one, never the shared
 // EngineContent library: the case writes files). It checks that a whole batch
 // runs on one session and prints the time against the one-shot functions.
+// scripts/sftp_test_server.py is such a server (paramiko, local, password auth).
 
 namespace fs = std::filesystem;
 using namespace HE::Cs;

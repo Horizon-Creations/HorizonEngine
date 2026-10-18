@@ -196,7 +196,7 @@ Measured (Release, M-series, load ~2):
 |---|---|---|
 | git refresh, 200-file repo with upstream, mean of 20, 3 rounds | 278-282 ms (8 procs) | 145-148 ms (4) |
 | git refresh, this repository, mean of 5, 3 rounds | 403-420 ms | 232-249 ms |
-| branch dialog open, per frame on the UI thread | 2 git procs (~70 ms) | 0 |
+| branch dialog open, per frame on the UI thread (derived: 2 × ~35 ms) | 2 git procs (~70 ms) | 0 |
 | `scan()` walk, 20,000 files depth 4 under `/tmp` (symlinked), 5 rounds | 2.34-2.44 s | 0.52-0.59 s |
 | 20 SFTP downloads, local paramiko server, loopback | 4.34 s (20 sessions) | 0.60 s (1 session) |
 
@@ -216,7 +216,7 @@ configured in this build, and the shared library must not be written to from a t
   runs on the worker, Installing while held, no second install), new `test_sftp_connection`
   4/4 (no endpoint; missing local file = no handshake; dropped handshake = one transient
   failure, no retry). Live: `HE_TEST_SFTP=127.0.0.1:2222:tester:pw123:/content` against
-  `/tmp/he_sftp_scripts/sftp_server.py` (paramiko 5.1 in `/tmp/he_sftpsrv/venv`): 127
+  `scripts/sftp_test_server.py` (paramiko 5.1): 127
   assertions, 22 sessions for 1 batch + 20 one-shot + 1 connection; server restarted
   mid-connection → one reconnect, success (`/tmp/he_csy101/reconnect.cpp`). Full
   `he_tests` (private HOME/TMPDIR, without `test_material_graph`): 5347 cases, 2 failed,
@@ -224,7 +224,7 @@ configured in this build, and the shared library must not be written to from a t
 - **Not verified:** the editor's update dialog by hand (no GUI driving; the e2e script
   `selfupdate_editor_e2e.py` was not run, it needs a staged server). Windows/Linux only via
   CI. Real hoster timing.
-- **Traps:** the paramiko server must keep the channel from `Transport.accept()` or the
+- **Traps:** the paramiko server (`scripts/sftp_test_server.py`) must keep the channel from `Transport.accept()` or the
   client hangs in `libssh2_sftp_init` forever: CSY-102 (no libssh2 timeout) is real and
   still open. Benches: `/tmp/he_scm103/bench.cpp`, `/tmp/he_scm101/bench.sh`.
 - **Next steps:** CSY-102 (`libssh2_session_set_timeout`), SUP-101 option A (unpack in the
