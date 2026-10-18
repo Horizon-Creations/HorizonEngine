@@ -231,17 +231,50 @@ Full `he_tests` without `test_material_graph`: 5348/5351, the same three as step
 (`test_hpak:1188`, `test_profiler` 107/215, profiler green alone). `editor_help_audit.py
 --check` green.
 
+## Step 7: extract-method at the two biggest monoliths (M9, EDT-303, EDT-802)
+
+| Function | Before → after | Moved out (same order, same call site) |
+|---|---|---|
+| `ContentBrowserPanel::render` (ab52a424) | 4444 → 3117 lines | `drawRenameDialog` (incl. the created-asset announcement after it), `drawDeleteAssetDialog`, `drawPatternRenameDialog`, `drawEngineImportDialog`, `drawReferencesDialog`, `drawDeleteFolderDialog`, `drawRemoteDownloadDialog` + `drawRemoveCacheDialog` (`HE_HAVE_LIBSSH2`), `drawCppClassDialog`. ~50 statics they share with render() (selection, rename, delete, pattern, import, references, download, C++ class) now sit at namespace scope above them. Passed in: `sourceFolder`, `contentFolder`, and the lambdas `isReadOnlyGround`, `deleteAssetNow`, `deleteFolderNow`, `removeCachedCopyNow` as `const auto&` (the lambda object itself, captures unchanged). |
+| `EditorUI::renderEditor` (b951b961) | 2970 → 2102 lines | `drawJoinSessionDialog`, `drawAboutPopup(bool)`, `drawHostingConfirmation(requestGuardedInner)`, `drawNewProjectPopup`, `drawFooterBar`, `drawEditorTabBar`. The guard statics, `s_tabSelectRequest`, `kFooterH`/`kTabBarH` moved to namespace scope. |
+| `dumpFrameHeadless` | step 5 (0d409490) | Not touched again: the 3157 witness lines left in step 5; the rest is the dump sequence itself. |
+
+Only two text changes inside moved code: the tab bar calls `EditorUI::tabHasUnsavedEdits` /
+`EditorUI::discardPanelState` qualified (same public statics, a free function has to), and the
+pattern-rename popup pushes its own `Help::Scope("Content Browser")`. That scope is for
+`editor_help_audit.py`, which reads scopes line by line: inline, the dialog borrowed the
+context menu's scope from ~600 lines up, and above render() it had none ("Number them" /
+"starting at" went open). At run time its two buttons have no `Content Browser/…` key and
+resolve to the same bare entries as before.
+
+**Verified:** a throwaway script per file put each moved block back and compared with the
+parent commit's file: every body equals its original block after whitespace (CB: exactly one
+tab shallower; EditorUI: braced blocks one level shallower, the rest unchanged); the state
+blocks equal; `render()`/`renderEditor` outside the moves byte-identical; and no other local
+of the old function (nor, for EditorUI, an `EditorUI` member) is named in a moved block, so no
+name can bind to a different entity. The scripts are attached to the Hive topic. Help audit
+green (interface 200/200). Pixel A/B, old vs new `HorizonEditor` on a Catania copy (two
+throwaway builds per file, differing only in that file, plus one identical env hook): plain
+frame and the forced pattern-rename dialog differ only in the FPS digits (97/46 px vs 136/86
+px between two old runs); plain frame and the forced File ▸ New Project modal differ in the
+same tab-bar/footer cells and counts as two old runs (16 px; 6/14/4 px), plus FPS.
+`HorizonEditor` and `he_tests` build green from the committed source. Full `he_tests` without
+`test_material_graph`: 5348/5351, the same three as steps 5 and 6 (`test_hpak:1188`,
+`test_profiler` 107/215); neither changed file is compiled into `he_tests`.
+
+**Not verified:** the other seven CB dialogs and the Join/About/Hosting popups were not
+opened on screen (the text witness covers them); Windows/Linux only through CI.
+
 ## Handoff
 
-- **Topic / step:** 220, step 6 (steps 1-5: records above)
-- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 1023b16a (EDT-1209), then this record.
-- **Done:** table above. CORE-603 was already complete in 5ce314cd; this step only re-ran its tests.
-- **Verified:** see "Verified" above. Windows/Linux only through CI.
-- **Not verified:** no live MCP client was connected to the editor (the hidden run `HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=120 HE_MCP=1`, private HOME, logged "MCP: listening on 127.0.0.1:…" at frame 1 and "listener stopped" at shutdown, rc 0, endpoint file gone; the socket handshake itself is `test_mcp_bridge`). MSVC: only CI sees the `unique_ptr` of a forward-declared class with the out-of-line ctor/dtor.
-- **Decisions taken:** the light header keeps the name `McpToolRegistry.h` (its class), the hooks get the new name, so `McpBridge.h` needed no change. Prose blocks in the headers stay (the audit's item 3; the code base keeps its why-comments there). No `McpAssetGate` base: it would move three fields out of eight hook structs, and with a base class those structs stop being aggregates, which breaks their designated initialisation.
-- **Not done:** EDT-703/704 (product question still open on the topic), `McpAssetGate` (above), CORE-603 follow-ups from the audit (`allProperties()` copies ~50 descriptors per call in `UIEditorPanel.cpp` per frame; `applyClipAt` resolves each track by name per frame, a slot could be cached at clip start), M9 for `ContentBrowserPanel::render` and `EditorUI::renderEditor` (step 7), Cinematic recovery copy (EDT-801).
+- **Topic / step:** 220, step 7 (steps 1-6: records above)
+- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: ab52a424 (Content Browser), b951b961 (renderEditor), then this record.
+- **Done:** step 7 table above. Plan step 5's M9 item is complete as extract-method.
+- **Decisions taken:** pure moves only. Not done because they are redesigns, not extractions: EDT-303's `ModalDialog` helper and moving the dialogs out of the folder lock, EDT-802's menu table (`{Cmd, label, shortcut, enabled, action}`), `EditorGuard` class and merging the three scene-dialog lambdas. Left inline in renderEditor: both menu bars, the unsaved-changes modal, save shortcuts, entity gestures and the file-dialog result handler (they share the guard lambdas; each would need 6+ of them passed in). Witness scripts not committed: their line ranges only mean something against the parent commits.
+- **Not done:** EDT-703/704 (product question #1464 still open), `McpAssetGate`, CORE-603 follow-ups, Cinematic recovery copy (see step 6 list).
 - **Traps:**
-  - The real `json.hpp` source for every editor TU is `Diagnostics/GlobalState.h:11`, pulled in by `Application/Application.h`. A json-free editor header chain starts there, not in the editor.
-  - Compile timing under other bees' builds: wall time swung 11-37 s for the same TU. Alternate A/B and compare user CPU or preprocessed size, or count objects in `ninja -t deps`.
-  - `restoreOpenTabs` / witness traps from step 5 still apply.
-- **Next steps:** 1. Step 7: M9 `ContentBrowserPanel::render`, then `renderEditor` (UI-shot A/B; ~70 px noise in the Content Browser region). 2. EDT-703/704 once the question is answered. 3. Optionally, survey first: GlobalState.h without json would take json.hpp out of every editor TU, but it also exports a global `using json = nlohmann::json;` (`GlobalState.h:13`) that other files may lean on, so count those before promising anything.
+  - The help audit follows `Help::Scope` by LINE: any block moved inside a file changes the scope the scanner assigns to it and to whatever follows. Run `--check` after each move; fix only with a scope that is right at run time (the dialog's own), and check `"<Scope>/<label>"` keys exist before adding it.
+  - A free function extracted from a member function loses unqualified access to the class's statics (compile error, good), but a same-named entity at namespace scope would bind silently: check member and local names, not just compile.
+  - EditorUI.cpp mixes tab and 4-space indentation; ContentBrowserPanel.cpp has a few 1-tab lines inside 2-tab code.
+  - The UI-shot noise between two runs of the same editor binary varied from 86 px to 49 000 px (a run whose first shot came at frame 3). Compare against a second old run in the same session.
+- **Next steps:** 1. EDT-703/704 once the question is answered. 2. If more M9 is wanted: the renderEditor menu table (EDT-802) as its own step with its own A/B per menu, Mac menu included (only on a Mac). 3. CI for b951b961 + this record.
