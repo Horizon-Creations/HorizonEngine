@@ -57,8 +57,7 @@ function(horizon_add_game target)
         "${_config_cpp}"
         ${_hag_SOURCES})
     target_include_directories(${target} PRIVATE "${_src}")
-    target_link_libraries(${target} PRIVATE
-        HorizonEngine::Core HorizonEngine::Scene HorizonEngine::Rendering SDL3::SDL3)
+    target_link_libraries(${target} PRIVATE HorizonEngine::HorizonEngine SDL3::SDL3)
     set_target_properties(${target} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
     if(_hag_OUTPUT_NAME)
         set_target_properties(${target} PROPERTIES OUTPUT_NAME "${_hag_OUTPUT_NAME}")
@@ -70,12 +69,24 @@ function(horizon_add_game target)
         set_source_files_properties("${_src}/AppMacMenu.mm" "${_src}/AppNotify.mm"
             PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(${target} PRIVATE "-framework Cocoa" "-framework UserNotifications")
+        # HorizonEngine/ beside the executable (the export layout), then the
+        # executable's own folder; the build rpath adds the SDK's lib/<profile>.
         set_target_properties(${target} PROPERTIES
             OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON
-            BUILD_RPATH "@executable_path" INSTALL_RPATH "@executable_path")
+            BUILD_RPATH "@executable_path/HorizonEngine;@executable_path"
+            INSTALL_RPATH "@executable_path/HorizonEngine;@executable_path")
     elseif(UNIX)
         set_target_properties(${target} PROPERTIES
-            BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+            BUILD_RPATH "$ORIGIN/HorizonEngine;$ORIGIN" INSTALL_RPATH "$ORIGIN/HorizonEngine;$ORIGIN")
+    endif()
+    # Windows: the engine and SDL3 delay-loaded from HorizonEngine\ beside the
+    # executable (EngineDllDir.cpp), as in the engine tree's HE_Game.
+    if(MSVC)
+        target_sources(${target} PRIVATE "${_src}/EngineDllDir.cpp")
+        target_link_options(${target} PRIVATE
+            "/DELAYLOAD:$<TARGET_FILE_NAME:HorizonEngine::HorizonEngine>"
+            "/DELAYLOAD:$<TARGET_FILE_NAME:SDL3::SDL3>")
+        target_link_libraries(${target} PRIVATE delayimp)
     endif()
 
     if(HorizonEngine_VULKAN_ENABLED)
@@ -88,10 +99,11 @@ function(horizon_add_game target)
             $<$<CONFIG:Debug,RelWithDebInfo>:HE_GAME_DEV_HOTKEYS>)
     endif()
 
-    # Windows has no rpath: the DLLs go beside the executable. Elsewhere the
-    # build rpath reaches the SDK's lib/<profile> (and the exporter copies the
-    # libraries beside the shipped executable, where @executable_path / $ORIGIN
-    # finds them). Runtime data (Shaders/) is not in the SDK: it comes with the
+    # Windows has no rpath: the DLLs go beside the executable for a run from the
+    # build folder (the delay-load hook falls back to the normal search when there
+    # is no HorizonEngine\). Elsewhere the build rpath reaches the SDK's
+    # lib/<profile> (and the export swaps the libraries into its HorizonEngine/
+    # folder, where the rpath above finds them). Runtime data (Shaders/) is not in the SDK: it comes with the
     # prebuilt runtime's export folder the built game is swapped into.
     if(WIN32)
         foreach(_dep IN LISTS HorizonEngine_RUNTIME_TARGETS)

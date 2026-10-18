@@ -97,6 +97,16 @@ set(_need include/Platform/BuildProfile.h include/Hpak/GameBuildConfig.h include
           share/HorizonEngine/template/CMakeLists.txt)
 foreach(_p IN LISTS _profiles)
     list(APPEND _need lib/${_p})
+    # The engine as one library (step 10), none of the four it is made of.
+    file(GLOB _engine "${_sdk}/lib/${_p}/*HorizonEngine*" "${_sdk}/bin/${_p}/*HorizonEngine*")
+    file(GLOB _parts "${_sdk}/lib/${_p}/*HorizonCore*" "${_sdk}/bin/${_p}/*HorizonCore*"
+                     "${_sdk}/lib/${_p}/*HorizonScene*" "${_sdk}/bin/${_p}/*HorizonScene*")
+    if(NOT _engine)
+        message(FATAL_ERROR "SDK lib set '${_p}' has no HorizonEngine library")
+    endif()
+    if(_parts)
+        message(FATAL_ERROR "SDK lib set '${_p}' ships the separate engine libraries: ${_parts}")
+    endif()
 endforeach()
 foreach(_f IN LISTS _need)
     if(NOT EXISTS "${_sdk}/${_f}")

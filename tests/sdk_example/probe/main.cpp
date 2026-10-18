@@ -1,8 +1,10 @@
 // SDK probe (Thema 211 step 5): compiled OUTSIDE the engine tree against an
 // installed SDK by tests/sdk_example/run_sdk_example.cmake. One exported call
 // into each engine library (so every import really resolves at link and load
-// time), and the profile the SDK's imported targets handed this TU.
+// time), and the profile the SDK's imported targets handed this TU. Since step 10
+// all of them are the one HorizonEngine library behind HorizonEngine::Core etc.
 #include <Platform/BuildProfile.h>
+#include <Platform/EngineProfile.h>        // the library's own answer (step 10)
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/GameBuildConfig.h>
 #include <Net/HttpClient.h>
@@ -47,7 +49,11 @@ int main()
                 cmake.find("HorizonCodeGen") != std::string::npos ? 1 : 0, kernel.size() == 4 ? 1 : 0,
                 apiOk ? 1 : 0);
 
-    const bool profileOk = std::string(HE::kBuildProfileName) == HE_EXPECT_PROFILE;
+    // Compile time (the imported targets' definitions) and run time (what the
+    // HorizonEngine library loaded beside it was compiled with) must agree.
+    std::printf("library profile=%s\n", HorizonEngine_BuildProfile());
+    const bool profileOk = std::string(HE::kBuildProfileName) == HE_EXPECT_PROFILE &&
+                           std::string(HorizonEngine_BuildProfile()) == HE_EXPECT_PROFILE;
     return (profileOk && !header.empty() && urlOk && !cmake.empty() && kernel.size() == 4 && apiOk)
         ? 0 : 1;
 }

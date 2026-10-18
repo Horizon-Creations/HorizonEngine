@@ -257,7 +257,7 @@ struct HE_API ExportResult {
     // block (legacy runtime) — then the key ships in the hcfg as before.
     bool        keyEmbedded      = false;
     // The game executable this export produced, for a caller that wants to run
-    // it. Inside the .app it is the binary itself (Contents/MacOS/HorizonGame),
+    // it. Inside the .app it is the binary itself (Contents/MacOS/<name>),
     // not the bundle directory — a bundle cannot be exec'd. Empty when no
     // runtime was shipped, and, for a cross-platform target, a binary this
     // machine cannot run: the caller decides whether launching makes sense.
@@ -297,6 +297,19 @@ HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& edit
                                                ExportPlatform p,
                                                RuntimeFlavor  f = RuntimeFlavor::Game,
                                                RuntimeFlavor* outFlavor = nullptr);
+
+// ─── Export layout (Platform/GameLayout.h) ────────────────────────────────────
+// A runtime bundle with the engine in HorizonEngine/ (the HorizonEngine library,
+// Thema 211 step 10) exports as <ProjectName>(.exe) + data/ + HorizonEngine/.
+// A runtime without that folder (built before it, e.g. a GameRuntimes/<platform>
+// bundle from another machine) keeps the flat layout and the name HorizonGame:
+// its executable looks for the pak beside itself.
+HE_API bool runtimeHasEngineDir(const std::filesystem::path& runtimeDir);
+// The executable's file name in that layout: the project name without the
+// characters no file system takes (/ \ : * ? " < > | and control characters,
+// trailing dots and spaces), "Game" when nothing is left, plus ".exe" for a
+// Windows runtime.
+HE_API std::string exportedExecutableName(const std::string& projectName, bool windowsExe);
 
 // ─── Embedded pak key ─────────────────────────────────────────────────────────
 // The game executable carries a 64-byte patchable key block (see

@@ -62,15 +62,24 @@ std::string writeBuildConfigFromExport(const std::filesystem::path& dataDir,
                                        const std::string&           profile,
                                        const std::filesystem::path& header);
 
+// Where an export keeps its data (project.hcfg, the pak) and its engine
+// libraries, from its executable (Platform/GameLayout.h): Contents/Resources of
+// a .app, else data/ beside the executable when the export has one; the engine
+// in HorizonEngine/ beside the executable when there is one. An export of an
+// old flat runtime has both beside the executable.
+std::filesystem::path exportDataDir(const std::filesystem::path& exportedExe);
+std::filesystem::path exportEngineDir(const std::filesystem::path& exportedExe);
+
 // The cmake run: the SDK's template as source, <workDir>/build as build dir,
-// the header compiled in, the executable named like the prebuilt one
-// (HorizonGame, which the exporter's bundle and launch code key on).
+// the header compiled in, the executable named like the runtime's (HorizonGame;
+// installBuiltGame copies it over the export's, whatever that is called).
 HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem::path& workDir,
                                        const std::filesystem::path& header);
 
 // Swaps the built game in: `builtExe` over `exportedExe`, plus every engine
-// library of the SDK's lib set (lib/<profile>/*.dylib|*.so*, bin/<profile>/*.dll) into the executable's folder,
-// overwriting the prebuilt runtime's copies. Empty string = done.
+// library of the SDK's lib set (lib/<profile>/*.dylib|*.so*, bin/<profile>/*.dll) into
+// exportEngineDir(exportedExe), overwriting the prebuilt runtime's copies. Empty
+// string = done.
 std::string installBuiltGame(const GameSdk& sdk, const std::filesystem::path& builtExe,
                              const std::filesystem::path& exportedExe,
                              std::vector<std::string>* copied = nullptr);

@@ -1,4 +1,5 @@
 #include <Hpak/ProjectExporter.h>
+#include <Platform/GameLayout.h>        // data/ + HorizonEngine/ of the export layout
 #include <Types/Enums.h>            // HE::AssetType (the packed type indices)
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
@@ -139,6 +140,27 @@ std::filesystem::path findRuntimeBundle(const std::filesystem::path& editorBaseD
         }
     }
     return {};
+}
+
+bool runtimeHasEngineDir(const std::filesystem::path& runtimeDir)
+{
+    std::error_code ec;
+    return std::filesystem::is_directory(runtimeDir / HE::GameLayout::kEngineDirName, ec);
+}
+
+std::string exportedExecutableName(const std::string& projectName, bool windowsExe)
+{
+    std::string name;
+    for (const char c : projectName)
+    {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F || std::strchr("/\\:*?\"<>|", c)) continue;
+        name += c;
+    }
+    while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
+    while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+    if (name.empty()) name = "Game";
+    return windowsExe ? name + ".exe" : name;
 }
 
 // ─── Embedded pak key ─────────────────────────────────────────────────────────
@@ -433,7 +455,24 @@ static std::string bundleIdentifier(const std::string& projectName)
     return "com.horizonengine." + s;
 }
 
+static std::string xmlEscape(const std::string& in)
+{
+    std::string out;
+    for (char c : in)
+        switch (c)
+        {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&apos;"; break;
+        default: out += c;
+        }
+    return out;
+}
+
 static bool writeInfoPlist(const std::filesystem::path& contentsDir,
+                           const std::string& exeName,
                            const std::string& projectName,
                            const std::string& displayName,
                            const std::string& bundleId,
@@ -444,17 +483,7 @@ static bool writeInfoPlist(const std::filesystem::path& contentsDir,
     // XML-escape the display name (titles can contain & < > " '). The title
     // is what the Dock and Finder show; the identifier below still derives
     // from the PROJECT name, so retitling a game does not change its identity.
-    std::string name;
-    for (char c : displayName.empty() ? projectName : displayName)
-        switch (c)
-        {
-        case '&': name += "&amp;"; break;
-        case '<': name += "&lt;"; break;
-        case '>': name += "&gt;"; break;
-        case '"': name += "&quot;"; break;
-        case '\'': name += "&apos;"; break;
-        default: name += c;
-        }
+    const std::string name = xmlEscape(displayName.empty() ? projectName : displayName);
 
     // An empty identifier means "derive it", which is what every export did
     // before the field existed; a version that is empty means the same for 1.0.
@@ -466,7 +495,7 @@ static bool writeInfoPlist(const std::filesystem::path& contentsDir,
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
         "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         "<plist version=\"1.0\">\n<dict>\n"
-        "  <key>CFBundleExecutable</key><string>HorizonGame</string>\n"
+        "  <key>CFBundleExecutable</key><string>" + xmlEscape(exeName) + "</string>\n"
         "  <key>CFBundleIdentifier</key><string>" + ident + "</string>\n"
         "  <key>CFBundleName</key><string>" + name + "</string>\n"
         "  <key>CFBundleDisplayName</key><string>" + name + "</string>\n"
@@ -559,6 +588,13 @@ struct ExportContext
     std::filesystem::path binDir;       // game executable + engine dylibs
     std::filesystem::path dataDir;      // pak, project.hcfg, loose scene, GameLogic
 
+    // The runtime has HorizonEngine/ (runtimeHasEngineDir): the export gets
+    // <exeName> + data/ + HorizonEngine/ (GameLayout.h). Otherwise the old flat
+    // layout, executable named as the runtime names it.
+    bool                  engineLayout = false;
+    std::filesystem::path engineDir;    // HorizonEngine/ beside the executable
+    std::string           exeName = "HorizonGame";
+
     Hpak::PackSettings    packSettings;
     std::string           hpakFilename;
     std::string           sceneFile;    // loose startup-scene copy (empty when packed)
@@ -588,11 +624,33 @@ static std::optional<ExportResult> prepareOutputLayout(
     ctx.appPath = ctx.app ? outputDir / (projectName + ".app") : std::filesystem::path{};
     ctx.binDir  = ctx.app ? ctx.appPath / "Contents" / "MacOS"     : outputDir;
     ctx.dataDir = ctx.app ? ctx.appPath / "Contents" / "Resources" : outputDir;
-    if (ctx.app)
+
+    // The layout follows the runtime: one with HorizonEngine/ finds its data in
+    // data/ (a .app keeps Contents/Resources, which is its base path), one
+    // without looks beside its executable and must get the flat layout.
+    const bool windowsExe = !settings.gameRuntimeDir.empty()
+        && std::filesystem::is_regular_file(settings.gameRuntimeDir / "HorizonGame.exe", ec);
+    ec.clear();
+    ctx.engineLayout = !settings.gameRuntimeDir.empty()
+                    && runtimeHasEngineDir(settings.gameRuntimeDir);
+    if (ctx.engineLayout)
+    {
+        ctx.exeName   = exportedExecutableName(projectName, windowsExe);
+        ctx.engineDir = ctx.binDir / HE::GameLayout::kEngineDirName;
+        if (!ctx.app) ctx.dataDir = outputDir / HE::GameLayout::kDataDirName;
+    }
+    else if (windowsExe)
+    {
+        ctx.exeName = "HorizonGame.exe";
+    }
+
+    if (ctx.app || ctx.engineLayout)
     {
         std::filesystem::create_directories(ctx.binDir, ec);
         std::filesystem::create_directories(ctx.dataDir, ec);
-        if (ec) return ExportResult{false, "Cannot create .app bundle: " + ec.message(), 0};
+        if (ec) return ExportResult{false, (ctx.app ? "Cannot create .app bundle: "
+                                                    : "Cannot create the data folder: ")
+                                           + ec.message(), 0};
     }
     return std::nullopt;
 }
@@ -643,7 +701,8 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
             }
             if (!haveKey)
             {
-                for (const char* exe : { "HorizonGame", "HorizonGame.exe" })
+                for (const std::string& exe : { ctx.exeName, std::string("HorizonGame"),
+                                                std::string("HorizonGame.exe") })
                     if (readEmbeddedPakKey(ctx.binDir / exe, packSettings.key))
                     { haveKey = true; break; }
             }
@@ -897,27 +956,61 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             return ExportResult{false, "Game runtime dir not found: "
                                        + settings.gameRuntimeDir.string(), ctx.assetsPacked};
 
+        const auto isRuntimeExe = [](const std::string& n) {
+            return n == "HorizonGame" || n == "HorizonGame.exe";
+        };
+        // The POSIX stdlib path file is named after the executable
+        // (HorizonGame._pth), so it is renamed along with it.
+        const auto isExePth = [](const std::string& n) { return n == "HorizonGame._pth"; };
+
         // Route each runtime file to the right place for the .app layout: the
         // executable and engine dylibs go next to the exe (binDir); GameLogic and
         // anything else (config.json) goes with the data (dataDir) so the running
-        // game finds it via SDL_GetBasePath. Flat exports collapse both to
-        // outputDir, so the routing is a no-op there.
+        // game finds it via HE::GameLayout::dataDir. Flat exports of an old runtime
+        // collapse both to outputDir, so the routing is a no-op there.
         auto routeRuntime = [&](const std::string& n) -> std::filesystem::path {
+            if (isRuntimeExe(n)) return ctx.binDir / ctx.exeName;
+            if (isExePth(n))
+                return ctx.binDir / (std::filesystem::path(ctx.exeName).stem().string() + "._pth");
             const bool gameLogic = n.rfind("GameLogic.", 0) == 0; // loaded from base path
             // The bundled CPython runtime (python3XY.dll/.zip + python3XY._pth) must sit next
             // to the executable so embedded Python's isolated-path lookup finds it; route any
             // "python*" file to binDir. (Flat exports collapse binDir==dataDir, so this only
-            // matters for the macOS .app split.)
+            // matters for the macOS .app split and the data/ folder.)
             const bool pythonRuntime = n.rfind("python", 0) == 0;
-            // The POSIX stdlib path file is named after the executable (HorizonGame._pth), so
-            // it doesn't match the "python*" rule — but it too must sit next to the exe.
             const bool pthFile = n.size() > 5 && n.compare(n.size() - 5, 5, "._pth") == 0;
             const bool engineBin = !gameLogic
-                && (n == "HorizonGame" || n == "HorizonGame.exe" || pythonRuntime || pthFile
+                && (pythonRuntime || pthFile
                     || n.size() > 4 && (n.compare(n.size() - 4, 4, ".dll") == 0)
                     || n.size() > 3 && (n.compare(n.size() - 3, 3, ".so") == 0)
                     || n.size() > 6 && (n.compare(n.size() - 6, 6, ".dylib") == 0));
             return (engineBin ? ctx.binDir : ctx.dataDir) / n;
+        };
+
+        // Everything Python ships only for Python-language projects: the
+        // stdlib (pythonXY.zip + <Exe>._pth), the interpreter itself
+        // (python3XY.dll / libpython3.X.so / .dylib) AND the backend
+        // plugin that loads it.
+        //
+        // The interpreter can be skipped now, which it could not before.
+        // It used to be a LOAD-TIME dependency of HorizonScene, so a game
+        // without it did not start at all — every non-Python game carried
+        // 5-9 MB of CPython to satisfy a link it never used. The backend
+        // is a runtime-loaded plugin now (HorizonPython), so leaving both
+        // out costs exactly the feature the project does not use.
+        const auto skippedPython = [&settings](const std::string& fname) {
+            if (settings.bundlePython) return false;
+            const auto endsWith = [&fname](const char* suf) {
+                const size_t n = std::strlen(suf);
+                return fname.size() > n && fname.compare(fname.size() - n, n, suf) == 0;
+            };
+            const bool isZip    = endsWith(".zip");
+            const bool isPth    = endsWith("._pth");
+            // "python314.dll", "libpython3.14.dylib", "libpython3.12.so.1.0"
+            const bool isPyLib  = fname.find("python") != std::string::npos
+                               && fname.find("Horizon") == std::string::npos;
+            const bool isPlugin = fname.find("HorizonPython") != std::string::npos;
+            return isZip || isPth || isPyLib || isPlugin;
         };
 
         // Clear STALE code before copying fresh binaries. Re-signing over a
@@ -928,12 +1021,24 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
         // from Contents/Resources, so wiping it does NOT touch the pak/hcfg the
         // incremental cache already read above — recreate it empty. (Flat
         // exports share one dir with the just-written pak, so they only remove
-        // each destination individually, below.)
+        // each destination individually, below; HorizonEngine/ holds nothing
+        // but runtime files and is replaced as a whole.)
         if (ctx.app)
         {
             std::filesystem::remove_all(ctx.appPath / "Contents" / "_CodeSignature", ec); ec.clear();
             std::filesystem::remove_all(ctx.binDir, ec); ec.clear();
             std::filesystem::create_directories(ctx.binDir, ec); ec.clear();
+        }
+        if (ctx.engineLayout)
+        {
+            std::filesystem::remove_all(ctx.engineDir, ec); ec.clear();
+            // A previous export of the old flat layout into the same folder left
+            // its executable there; two games side by side, one of them stale.
+            if (ctx.exeName != "HorizonGame" && ctx.exeName != "HorizonGame.exe")
+                for (const char* old : { "HorizonGame", "HorizonGame.exe" })
+                {
+                    std::filesystem::remove(ctx.binDir / old, ec); ec.clear();
+                }
         }
 
         // Every file in the bundle is required (executable AND its libraries):
@@ -941,6 +1046,59 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
         // the worst case — the output would keep a STALE previously-exported
         // exe whose embedded key no longer matches this pak.
         std::vector<std::filesystem::path> copied;
+        const auto shipFile = [&](const std::filesystem::path& src,
+                                  const std::filesystem::path& dst) -> std::optional<ExportResult>
+        {
+            std::error_code fec;
+            // Delete any existing file first (fresh inode): copying over a
+            // code-signed / currently-mapped binary in place can leave a
+            // stale signature or a busy-file error on re-export.
+            std::filesystem::remove(dst, fec); fec.clear();
+            std::filesystem::copy_file(src, dst,
+                std::filesystem::copy_options::overwrite_existing, fec);
+            if (fec)
+                return ExportResult{false, "Failed to copy runtime binary "
+                                           + src.filename().string() + ": "
+                                           + fec.message(), ctx.assetsPacked};
+            // Symbols the shipped build has no use for, dropped from the
+            // COPY (the developer's own binaries keep theirs). Only the
+            // file-local half — see stripLocalSymbols.
+#if defined(__APPLE__) || defined(__linux__)
+            {
+                // Four bytes, not the whole file: the biggest thing here is
+                // a 14 MB interpreter and all this asks is the magic.
+                std::vector<uint8_t> head(4, 0);
+                {
+                    std::ifstream f(dst, std::ios::binary);
+                    f.read(reinterpret_cast<char*>(head.data()), 4);
+                    if (!f) head.clear();
+                }
+                const bool machO = looksMachO(head);
+                if (stripLocalSymbols(dst))
+                {
+#ifdef __APPLE__
+                    // Stripping invalidates the signature, and arm64 kills a
+                    // binary with a broken one on launch — so a re-sign that
+                    // fails has to fail the export, exactly like the key
+                    // patch's does. The .app's later --deep sign would cover
+                    // the bundle case, but a plain-folder export has no such
+                    // second chance.
+                    if (machO && !resignMachO(dst))
+                        return ExportResult{false, "Failed to re-sign "
+                                                   + dst.filename().string()
+                                                   + " after stripping symbols",
+                                            ctx.assetsPacked};
+#else
+                    (void)machO;
+#endif
+                }
+            }
+#endif
+            ++ctx.binaryCopied;
+            copied.push_back(dst);
+            return std::nullopt;
+        };
+
         std::filesystem::directory_iterator dit(settings.gameRuntimeDir, ec);
         const std::filesystem::directory_iterator dend;
         while (!ec && dit != dend)
@@ -950,82 +1108,62 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             if (regular)
             {
                 const std::string fname = dit->path().filename().string();
-                // Everything Python ships only for Python-language projects: the
-                // stdlib (pythonXY.zip + <Exe>._pth), the interpreter itself
-                // (python3XY.dll / libpython3.X.so / .dylib) AND the backend
-                // plugin that loads it.
-                //
-                // The interpreter can be skipped now, which it could not before.
-                // It used to be a LOAD-TIME dependency of HorizonScene, so a game
-                // without it did not start at all — every non-Python game carried
-                // 5-9 MB of CPython to satisfy a link it never used. The backend
-                // is a runtime-loaded plugin now (HorizonPython), so leaving both
-                // out costs exactly the feature the project does not use.
-                if (!settings.bundlePython)
-                {
-                    const auto endsWith = [&fname](const char* suf) {
-                        const size_t n = std::strlen(suf);
-                        return fname.size() > n && fname.compare(fname.size() - n, n, suf) == 0;
-                    };
-                    const bool isZip    = endsWith(".zip");
-                    const bool isPth    = endsWith("._pth");
-                    // "python314.dll", "libpython3.14.dylib", "libpython3.12.so.1.0"
-                    const bool isPyLib  = fname.find("python") != std::string::npos
-                                       && fname.find("Horizon") == std::string::npos;
-                    const bool isPlugin = fname.find("HorizonPython") != std::string::npos;
-                    if (isZip || isPth || isPyLib || isPlugin) { dit.increment(ec); continue; }
-                }
-                const auto dst = routeRuntime(fname);
-                // Delete any existing file first (fresh inode): copying over a
-                // code-signed / currently-mapped binary in place can leave a
-                // stale signature or a busy-file error on re-export.
-                std::filesystem::remove(dst, ec); ec.clear();
-                std::filesystem::copy_file(dit->path(), dst,
-                    std::filesystem::copy_options::overwrite_existing, ec);
-                if (ec)
-                    return ExportResult{false, "Failed to copy runtime binary "
-                                               + dit->path().filename().string() + ": "
-                                               + ec.message(), ctx.assetsPacked};
-                // Symbols the shipped build has no use for, dropped from the
-                // COPY (the developer's own binaries keep theirs). Only the
-                // file-local half — see stripLocalSymbols.
-#if defined(__APPLE__) || defined(__linux__)
-                {
-                    // Four bytes, not the whole file: the biggest thing here is
-                    // a 14 MB interpreter and all this asks is the magic.
-                    std::vector<uint8_t> head(4, 0);
-                    {
-                        std::ifstream f(dst, std::ios::binary);
-                        f.read(reinterpret_cast<char*>(head.data()), 4);
-                        if (!f) head.clear();
-                    }
-                    const bool machO = looksMachO(head);
-                    if (stripLocalSymbols(dst))
-                    {
-#ifdef __APPLE__
-                        // Stripping invalidates the signature, and arm64 kills a
-                        // binary with a broken one on launch — so a re-sign that
-                        // fails has to fail the export, exactly like the key
-                        // patch's does. The .app's later --deep sign would cover
-                        // the bundle case, but a plain-folder export has no such
-                        // second chance.
-                        if (machO && !resignMachO(dst))
-                            return ExportResult{false, "Failed to re-sign "
-                                                       + dst.filename().string()
-                                                       + " after stripping symbols",
-                                                ctx.assetsPacked};
-#else
-                        (void)machO;
-#endif
-                    }
-                }
-#endif
-                ++ctx.binaryCopied;
-                copied.push_back(dst);
+                // The log of a run from the deploy folder is not part of the runtime.
+                const bool runLog = fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".log") == 0;
+                if (runLog || skippedPython(fname)) { dit.increment(ec); continue; }
+                if (auto fail = shipFile(dit->path(), routeRuntime(fname))) return fail;
             }
             dit.increment(ec);
         }
         ec.clear();
+
+        // The engine folder: the HorizonEngine library, SDL3, the bundled native
+        // deps, the Python plugin, Shaders/. Shipped as it is, Python filtered
+        // like above. Inside a .app the runtime shaders go to Resources/Shaders,
+        // where the backends look from SDL_GetBasePath.
+        if (ctx.engineLayout)
+        {
+            const auto srcEngine = settings.gameRuntimeDir / HE::GameLayout::kEngineDirName;
+            std::filesystem::create_directories(ctx.engineDir, ec);
+            if (ec)
+                return ExportResult{false, "Cannot create " + ctx.engineDir.string() + ": "
+                                           + ec.message(), ctx.assetsPacked};
+            std::filesystem::recursive_directory_iterator rit(srcEngine, ec);
+            const std::filesystem::recursive_directory_iterator rend;
+            while (!ec && rit != rend)
+            {
+                const auto rel = rit->path().lexically_relative(srcEngine);
+                const bool shader = !rel.empty() && *rel.begin() == "Shaders";
+                const auto dst = (shader && ctx.app ? ctx.dataDir : ctx.engineDir) / rel;
+                std::error_code fec;
+                if (rit->is_directory(fec))
+                {
+                    std::filesystem::create_directories(dst, fec);
+                }
+                else if (!fec && rit->is_regular_file(fec))
+                {
+                    const std::string fname = rit->path().filename().string();
+                    if (shader)
+                    {
+                        std::filesystem::create_directories(dst.parent_path(), fec);
+                        std::filesystem::copy_file(rit->path(), dst,
+                            std::filesystem::copy_options::overwrite_existing, fec);
+                        if (fec)
+                            return ExportResult{false, "Failed to copy runtime shader "
+                                                       + fname + ": " + fec.message(),
+                                                ctx.assetsPacked};
+                    }
+                    else if (!skippedPython(fname))
+                    {
+                        if (auto fail = shipFile(rit->path(), dst)) return fail;
+                    }
+                }
+                rit.increment(ec);
+            }
+            if (ec)
+                return ExportResult{false, "Failed to read " + srcEngine.string() + ": "
+                                           + ec.message(), ctx.assetsPacked};
+        }
 
         // A runtime dir that yields nothing is a broken export (data without an
         // executable) — the exact failure mode this parameter exists to prevent.
@@ -1044,7 +1182,7 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             for (const auto& dst : copied)
             {
                 const auto name = dst.filename().string();
-                if (name != "HorizonGame" && name != "HorizonGame.exe") continue;
+                if (dst != ctx.binDir / ctx.exeName) continue;
                 const int patched = patchEmbeddedPakKey(dst, ctx.packSettings.key);
                 if (patched == -1)
                     return ExportResult{false, "Failed to embed the pak key into " + name
@@ -1057,8 +1195,9 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             }
         }
 
-        // Offline-compiled GPU shaders live in a Shaders/ SUBDIRECTORY too, which the
-        // flat file loop above skipped: Vulkan's SPIR-V (*.spv) and D3D12's DXR
+        // Offline-compiled GPU shaders of a runtime from before HorizonEngine/
+        // live in a Shaders/ SUBDIRECTORY beside the executable, which the flat
+        // file loop above skipped: Vulkan's SPIR-V (*.spv) and D3D12's DXR
         // kernels (*.cso). Both backends load them from <base path>/Shaders/, so a
         // Vulkan game without it drew nothing at all ("scene shaders missing") and
         // D3D12 lost hardware GI. Routed like every non-binary runtime file (dataDir
@@ -1423,13 +1562,13 @@ static void writeDocumentTypeFiles(const std::string& projectName,
     if (target == ExportPlatform::Windows)
     {
         write(ctx.binDir / "RegisterFileTypes.reg",
-              HE::heWindowsRegistration(shown, "HorizonGame.exe", ident,
+              HE::heWindowsRegistration(shown, ctx.exeName, ident,
                                         settings.documentTypes));
     }
     else if (target == ExportPlatform::Linux)
     {
         write(ctx.binDir / (ident + ".desktop"),
-              HE::heDesktopEntry(shown, "HorizonGame", ident, settings.documentTypes));
+              HE::heDesktopEntry(shown, ctx.exeName, ident, settings.documentTypes));
         write(ctx.binDir / (ident + ".xml"),
               HE::heSharedMimeInfo(ident, settings.documentTypes));
     }
@@ -1446,7 +1585,7 @@ static std::optional<ExportResult> finalizeAppBundle(const std::string&    proje
 {
     if (ctx.app)
     {
-        if (!writeInfoPlist(ctx.appPath / "Contents", projectName, settings.displayName,
+        if (!writeInfoPlist(ctx.appPath / "Contents", ctx.exeName, projectName, settings.displayName,
                             settings.bundleId, settings.appVersion, hasIcon,
                             settings.documentTypes))
             return ExportResult{false, "Failed to write Info.plist", ctx.assetsPacked};
@@ -1499,12 +1638,11 @@ ExportResult ProjectExporter::exportProject(
     stage("bundle");
     if (auto fail = finalizeAppBundle(projectName, settings, hasIcon, ctx))     return *fail;
 
-    // The runtime always ships under this name (routeRuntime above keys on it),
-    // so the executable is derived, not searched for. Reported only if it is
+    // The runtime ships under ctx.exeName (routeRuntime above renames it), so
+    // the executable is derived, not searched for. Reported only if it is
     // really there — a data-only export (no gameRuntimeDir) has none.
     std::error_code exeEc;
-    std::filesystem::path exe = ctx.binDir / "HorizonGame";
-    if (!std::filesystem::exists(exe, exeEc)) exe = ctx.binDir / "HorizonGame.exe";
+    std::filesystem::path exe = ctx.binDir / ctx.exeName;
     if (!std::filesystem::exists(exe, exeEc)) exe.clear();
 
     return {true, "", ctx.assetsPacked, ctx.binaryCopied, ctx.assetsReused, ctx.keyEmbedded,

@@ -2,7 +2,7 @@
 # from cmake/sdk/HorizonEngineConfig.cmake.in). Do not edit; rebuild HorizonSDK.
 #
 #   find_package(HorizonEngine @PROJECT_VERSION@ EXACT REQUIRED [COMPONENTS dev|release])
-#   target_link_libraries(<t> PRIVATE HorizonEngine::Scene HorizonEngine::Rendering)
+#   target_link_libraries(<t> PRIVATE HorizonEngine::HorizonEngine)   (::Core, ::Scene, ... forward to it)
 #   horizon_add_game(<name> [BUILD_CONFIG <HEGameBuildConfig.h>])   (HorizonEngineGame.cmake)
 #
 # One SDK, one shared include/, a lib set per build profile (lib/dev, lib/release),
@@ -110,9 +110,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/HorizonEngineTargets-${_he_want}.cmake")
 
 # The runtime files a game needs beside its executable (Windows DLLs; elsewhere
 # the shared libs, which the executable finds through its rpath otherwise).
-set(HorizonEngine_RUNTIME_TARGETS
-    HorizonEngine::Core HorizonEngine::Net HorizonEngine::Scene
-    HorizonEngine::Rendering SDL3::SDL3)
+set(HorizonEngine_RUNTIME_TARGETS HorizonEngine::HorizonEngine SDL3::SDL3)
 
 include("${CMAKE_CURRENT_LIST_DIR}/HorizonEngineGame.cmake")
 

@@ -577,9 +577,7 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	// The header holds the pak key: it goes to a private work dir, never into the
 	// export folder. The work dir is kept, so the next export builds incrementally.
 	const fs::path exe = res.executablePath;
-	const fs::path dataDir =
-	    (exe.parent_path().filename() == "MacOS" && exe.parent_path().parent_path().filename() == "Contents")
-	        ? exe.parent_path().parent_path() / "Resources" : exe.parent_path();
+	const fs::path dataDir = HE::ExportSdk::exportDataDir(exe);
 	std::error_code ec;
 	const fs::path workDir = fs::temp_directory_path(ec) / "HorizonSdkGame" / (projName + "-" + profile);
 	fs::create_directories(workDir, ec);
@@ -611,7 +609,7 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	    !why.empty())
 		// A half-done copy is not a prebuilt game any more: say it loudly.
 		return fallBack(why + "; the export folder may be mixed, export again");
-	if (const int n = HE::ExportSdk::relinkToBundledDeps(exe.parent_path(), copied); n > 0)
+	if (const int n = HE::ExportSdk::relinkToBundledDeps(HE::ExportSdk::exportEngineDir(exe), copied); n > 0)
 		Build::log(0, std::to_string(n) + " library link(s) moved to the bundled copies", step);
 #if defined(__APPLE__)
 	// Replacing Contents/MacOS/* broke the bundle's signature; sign it again the

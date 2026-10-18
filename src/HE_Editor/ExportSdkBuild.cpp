@@ -3,6 +3,7 @@
 #include <Hpak/GameBuildConfig.h>
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/ProjectExporter.h>     // readEmbeddedPakKey
+#include <Platform/GameLayout.h>
 #include <Project/ProjectSettings.h>
 
 #include <algorithm>
@@ -97,6 +98,23 @@ std::string writeBuildConfigFromExport(const fs::path& dataDir, const fs::path& 
     return {};
 }
 
+fs::path exportDataDir(const fs::path& exportedExe)
+{
+    const fs::path dir = exportedExe.parent_path();
+    if (dir.filename() == "MacOS" && dir.parent_path().filename() == "Contents")
+        return dir.parent_path() / "Resources";
+    std::error_code ec;
+    const fs::path data = dir / GameLayout::kDataDirName;
+    return fs::is_directory(data, ec) ? data : dir;
+}
+
+fs::path exportEngineDir(const fs::path& exportedExe)
+{
+    std::error_code ec;
+    const fs::path engine = exportedExe.parent_path() / GameLayout::kEngineDirName;
+    return fs::is_directory(engine, ec) ? engine : exportedExe.parent_path();
+}
+
 HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workDir,
                                        const fs::path& header)
 {
@@ -120,7 +138,7 @@ std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
 {
     std::error_code ec;
     if (exportedExe.empty()) return "the export shipped no game executable to replace";
-    const fs::path dstDir = exportedExe.parent_path();
+    const fs::path dstDir = exportEngineDir(exportedExe);
     fs::copy_file(builtExe, exportedExe, fs::copy_options::overwrite_existing, ec);
     if (ec) return "cannot copy " + builtExe.string() + ": " + ec.message();
     if (copied) copied->push_back(exportedExe.filename().string());

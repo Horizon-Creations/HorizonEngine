@@ -17,7 +17,10 @@
 #
 #   include/                       shared by both profiles: engine include dirs,
 #                                  entt, glm, nlohmann, SDL3, HorizonVersion.h
-#   lib/<profile>/                 engine + SDL3 shared libs (Windows: import libs)
+#   lib/<profile>/                 the HorizonEngine library (the four engine
+#                                  libraries as one, cmake/HorizonEngineBundle.cmake),
+#                                  SDL3, the Python plugin built against it
+#                                  (Windows: import libs)
 #   bin/<profile>/                 Windows: the DLLs
 #   lib/cmake/HorizonEngine/       HorizonEngineConfig(+Version).cmake (profile-neutral),
 #                                  HorizonEngineTargets-<profile>.cmake (one per lib set),
@@ -47,12 +50,20 @@ include(CMakePackageConfigHelpers)
 set(HE_ENGINE_SDK_DIR "${DEPLOY_DIR}/EngineSDK" CACHE PATH
     "Where the HorizonSDK target installs this tree's lib set of the engine SDK (never <editor>/SDK: the editor's POST_BUILD wipes that)")
 
-set(_he_sdk_libs HorizonCore HorizonNet HorizonScene HorizonRendering)
-foreach(_t IN LISTS _he_sdk_libs)
-    if(NOT TARGET ${_t})
-        message(FATAL_ERROR "HorizonSDK: engine library ${_t} does not exist in this tree")
-    endif()
-endforeach()
+# The engine as ONE library (step 10): what the exported game loads from its
+# HorizonEngine/ folder. The editor keeps the four libraries it is made of; the
+# SDK and the game only know this one.
+set(_he_sdk_libs HorizonEngine)
+if(NOT TARGET HorizonEngine)
+    message(FATAL_ERROR "HorizonSDK: the HorizonEngine bundle does not exist in this tree "
+                        "(cmake/HorizonEngineBundle.cmake is included before this file)")
+endif()
+# Runtime only, no imported target: the game's script context loads it from
+# beside the engine library. Built against HorizonEngine, so it matches this set.
+set(_he_sdk_runtime_only "")
+if(TARGET HorizonPythonEngine)
+    set(_he_sdk_runtime_only HorizonPythonEngine)
+endif()
 get_target_property(_he_sdl SDL3::SDL3 ALIASED_TARGET)
 if(NOT _he_sdl)
     set(_he_sdl SDL3::SDL3)
@@ -75,7 +86,12 @@ set(_he_sdk_profile "${HE_BUILD_PROFILE}")
 if(UNIX AND NOT APPLE)
     set_property(TARGET ${_he_sdk_libs} PROPERTY INSTALL_RPATH "$ORIGIN")
 endif()
-install(TARGETS ${_he_sdk_libs} ${_he_sdl}
+# A lib set is replaced as a whole: a file of an older set (the four separate
+# libraries of step 9, a plugin this tree no longer builds) would otherwise be
+# swapped into every export built against it.
+install(CODE "file(REMOVE_RECURSE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/lib/${_he_sdk_profile}\" \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/bin/${_he_sdk_profile}\")"
+    COMPONENT ${_he_sdk_component})
+install(TARGETS ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sdl}
     COMPONENT ${_he_sdk_component}
     RUNTIME DESTINATION bin/${_he_sdk_profile}
     LIBRARY DESTINATION lib/${_he_sdk_profile} NAMELINK_SKIP
@@ -223,5 +239,5 @@ add_custom_target(HorizonSDK
             --component ${_he_sdk_component} --prefix "${HE_ENGINE_SDK_DIR}"
     COMMENT "Installing the engine SDK's ${HE_BUILD_PROFILE} lib set into ${HE_ENGINE_SDK_DIR}"
     VERBATIM)
-add_dependencies(HorizonSDK ${_he_sdk_libs} ${_he_sdl})
+add_dependencies(HorizonSDK ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sdl})
 message(STATUS "HorizonEngine: SDK target HorizonSDK (${HE_BUILD_PROFILE} lib set) -> ${HE_ENGINE_SDK_DIR}")

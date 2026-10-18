@@ -187,11 +187,52 @@ TEST_CASE("installBuiltGame swaps the executable and the SDK's engine libraries 
     CHECK_FALSE(HE::ExportSdk::installBuiltGame(sdk, built, {}).empty());
 }
 
+// Thema 211 step 10: an export with data/ and HorizonEngine/ beside a renamed
+// executable gets the engine libraries into HorizonEngine/, and the configuration
+// is read from data/.
+TEST_CASE("installBuiltGame puts the libraries into the export's HorizonEngine/ folder")
+{
+    TempDir t;
+    HE::ExportSdk::GameSdk sdk;
+    sdk.root    = t.path / "sdk";
+    sdk.profile = "dev";
+    touchFile(sdk.root / "lib" / "dev" / "libHorizonEngine.dylib", "sdk-engine");
+    touchFile(sdk.root / "lib" / "dev" / "libHorizonPython.dylib", "sdk-plugin");
+    const fs::path built = t.path / "build" / "HorizonGame";
+    touchFile(built, "compiled-game");
+    const fs::path exe = t.path / "export" / "Space Game";
+    touchFile(exe, "prebuilt-game");
+    touchFile(exe.parent_path() / "HorizonEngine" / "libHorizonEngine.dylib", "prebuilt-engine");
+    touchFile(exe.parent_path() / "data" / "project.hcfg", "hcfg");
+
+    CHECK(HE::ExportSdk::exportDataDir(exe) == exe.parent_path() / "data");
+    CHECK(HE::ExportSdk::exportEngineDir(exe) == exe.parent_path() / "HorizonEngine");
+    CHECK(HE::ExportSdk::installBuiltGame(sdk, built, exe).empty());
+    CHECK(readFile(exe) == "compiled-game");
+    CHECK(readFile(exe.parent_path() / "HorizonEngine" / "libHorizonEngine.dylib") == "sdk-engine");
+    CHECK_FALSE(fs::exists(exe.parent_path() / "libHorizonEngine.dylib"));
+    // A non-Python export shipped no plugin, and still has none.
+    CHECK_FALSE(fs::exists(exe.parent_path() / "HorizonEngine" / "libHorizonPython.dylib"));
+    touchFile(exe.parent_path() / "HorizonEngine" / "libHorizonPython.dylib", "prebuilt-plugin");
+    CHECK(HE::ExportSdk::installBuiltGame(sdk, built, exe).empty());
+    CHECK(readFile(exe.parent_path() / "HorizonEngine" / "libHorizonPython.dylib") == "sdk-plugin");
+
+    // The old flat layout: both beside the executable; a .app: Resources.
+    const fs::path flat = t.path / "flat" / "HorizonGame";
+    touchFile(flat, "x");
+    CHECK(HE::ExportSdk::exportDataDir(flat) == flat.parent_path());
+    CHECK(HE::ExportSdk::exportEngineDir(flat) == flat.parent_path());
+    const fs::path app = t.path / "G.app" / "Contents" / "MacOS" / "G";
+    CHECK(HE::ExportSdk::exportDataDir(app) == t.path / "G.app" / "Contents" / "Resources");
+}
+
 // The real chain against an installed SDK: export-folder hcfg + key -> header ->
 // cmake build of the SDK template -> swap over a stand-in prebuilt game. Needs a
 // toolchain and an SDK (cmake --build <tree> --target HorizonSDK), so it only runs
 // with HE_EXPORT_SDK_E2E=<sdk root> [HE_EXPORT_SDK_E2E_PROFILE=dev|release, default
-// dev]; takes about a minute.
+// dev]; takes about a minute. HE_EXPORT_SDK_E2E_EXPORT=<export folder> works on a
+// copy of a real export, whose executable HE_EXPORT_SDK_E2E_EXE names (default
+// HorizonGame; an export with HorizonEngine/ carries the project's name).
 TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
 {
     const char* root = std::getenv("HE_EXPORT_SDK_E2E");
@@ -209,14 +250,15 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     for (int i = 0; i < 32; ++i) cfg.encKey[i] = (uint8_t)(0xA0 + i);
     const fs::path exportDir = t.path / "export";
     fs::create_directories(exportDir);
-    const fs::path exe = exportDir / "HorizonGame";
+    const char* exeName = std::getenv("HE_EXPORT_SDK_E2E_EXE");
+    const fs::path exe = exportDir / (exeName && *exeName ? exeName : "HorizonGame");
     // HE_EXPORT_SDK_E2E_EXPORT=<a real prebuilt export folder>: work on a copy of
     // it, and start the swapped game afterwards.
     const char* realExport = std::getenv("HE_EXPORT_SDK_E2E_EXPORT");
     if (realExport && *realExport)
     {
         fs::copy(realExport, exportDir, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
-        REQUIRE(ProjectConfigLoader::load(exportDir, cfg));
+        REQUIRE(ProjectConfigLoader::load(HE::ExportSdk::exportDataDir(exe), cfg));
     }
     else
     {
@@ -225,7 +267,8 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     }
 
     const fs::path header = t.path / "work" / "HEGameBuildConfig.h";
-    REQUIRE(HE::ExportSdk::writeBuildConfigFromExport(exportDir, exe, profile, header).empty());
+    REQUIRE(HE::ExportSdk::writeBuildConfigFromExport(HE::ExportSdk::exportDataDir(exe), exe,
+                                                      profile, header).empty());
     {
         // Cancel: the first toolchain line stops the run, nothing is built.
         std::atomic<bool> stop{true};
@@ -240,13 +283,17 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     REQUIRE(built.ok);
     std::vector<std::string> copied;
     REQUIRE(HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied).empty());
-    HE::ExportSdk::relinkToBundledDeps(exportDir, copied);
+    const fs::path engineDir = HE::ExportSdk::exportEngineDir(exe);
+    HE::ExportSdk::relinkToBundledDeps(engineDir, copied);
     CHECK(readFile(exe) != "prebuilt-game");
 #if !defined(_WIN32)
-    if (realExport && *realExport)
+    // Started only in the dev profile: a release game has no hidden mode and no
+    // frame budget (HE_FEATURE_ENV_OVERRIDES=0), so it would open a window on the
+    // desktop and run until someone closes it.
+    if (realExport && *realExport && profile == "dev")
     {
         const std::string cmd = "cd \"" + exportDir.string() + "\" && HE_HIDDEN_WINDOW=1 "
-                                "HE_EXIT_AFTER_FRAMES=30 ./HorizonGame > run.out 2>&1";
+                                "HE_EXIT_AFTER_FRAMES=30 \"./" + exe.filename().string() + "\" > run.out 2>&1";
         CHECK(std::system(cmd.c_str()) == 0);
         const std::string log = readFile(exportDir / "HorizonEngine.log") + readFile(exportDir / "run.out");
         INFO(log.substr(0, 4000));
@@ -256,7 +303,8 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
         for (const std::string& f : copied)
         {
             const std::string out = exportDir.string() + "/otool.txt";
-            std::system(("otool -L '" + (exportDir / f).string() + "' > '" + out + "'").c_str());
+            const fs::path file = f == exe.filename().string() ? exe : engineDir / f;
+            std::system(("otool -L '" + file.string() + "' > '" + out + "'").c_str());
             INFO(f);
             CHECK(readFile(out).find("/opt/homebrew/") == std::string::npos);
         }
@@ -266,9 +314,13 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     }
 #endif
     CHECK(fs::file_size(exe) > 100000);
-    // The key went into the binary masked, never as one plain run.
-    const std::string bin = readFile(exe);
-    CHECK(bin.find(std::string(reinterpret_cast<const char*>(cfg.encKey), 8)) == std::string::npos);
+    // The key went into the binary masked, never as one plain run. (A real export
+    // may be unencrypted: no key, and eight zero bytes are in every binary.)
+    if (cfg.encrypted)
+    {
+        const std::string bin = readFile(exe);
+        CHECK(bin.find(std::string(reinterpret_cast<const char*>(cfg.encKey), 8)) == std::string::npos);
+    }
     std::error_code ec;
     fs::copy(t.path / "work" / "build.log", fs::temp_directory_path() / "he_export_sdk_e2e_build.log",
              fs::copy_options::overwrite_existing, ec);

@@ -2,12 +2,15 @@
 # (cmake/HorizonSDK.cmake from cmake/sdk/HorizonEngineTargets.cmake.in). Do not
 # edit; rebuild HorizonSDK in a HE_BUILD_PROFILE=@HE_BUILD_PROFILE@ engine tree.
 #
-# The '@HE_BUILD_PROFILE@' lib set of the engine SDK: imported targets
-# HorizonEngine::Core, ::Net, ::Scene, ::Rendering and SDL3::SDL3 on
-# lib/@HE_BUILD_PROFILE@ (Windows: DLLs in bin/@HE_BUILD_PROFILE@). Their interface definitions are those
-# of these libraries: the DLL import macros and the build profile
-# (HE_BUILD_PROFILE_DEV/RELEASE), so everything compiled against them sees the
-# Platform/BuildProfile.h switches the libraries were compiled with.
+# The '@HE_BUILD_PROFILE@' lib set of the engine SDK: the imported target
+# HorizonEngine::HorizonEngine (the engine as one library, Thema 211 step 10) and
+# SDL3::SDL3 on lib/@HE_BUILD_PROFILE@ (Windows: DLLs in bin/@HE_BUILD_PROFILE@).
+# HorizonEngine::Core, ::Net, ::Scene and ::Rendering, the names of the four
+# libraries it is made of, stay as forwards to it, so a project written against
+# them links the one library. Its interface definitions are those of the four:
+# the DLL import macros and the build profile (HE_BUILD_PROFILE_DEV/RELEASE), so
+# everything compiled against it sees the Platform/BuildProfile.h switches the
+# library was compiled with.
 # Included by HorizonEngineConfig.cmake once the consumer's profile is chosen;
 # _HE_PREFIX and _horizon_engine_import come from there.
 
@@ -40,31 +43,22 @@ if(NOT TARGET HorizonEngine::Core)
     endif()
 
     # NOMINMAX / WIN32_LEAN_AND_MEAN / HE_PROFILING_ENABLED: directory-level
-    # definitions of the engine build, on every engine target there. On Core,
-    # which every other target links.
-    set(_he_core_defs "@HE_SDK_DEFS_HorizonCore@")
+    # definitions of the engine build, on every engine target there.
+    set(_he_core_defs "@HE_SDK_DEFS_HorizonEngine@")
     list(APPEND _he_core_defs @HE_SDK_GLOBAL_DEFINITIONS@)
 
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonCore>")
-    _horizon_engine_import(HorizonEngine::Core
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonCore>" "${_he_imp}"
+    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonEngine>")
+    _horizon_engine_import(HorizonEngine::HorizonEngine
+        "${_he_rt}/$<TARGET_FILE_NAME:HorizonEngine>" "${_he_imp}"
         "${_he_core_defs}" "SDL3::SDL3")
-    set_property(TARGET HorizonEngine::Core PROPERTY INTERFACE_COMPILE_FEATURES cxx_std_20)
+    set_property(TARGET HorizonEngine::HorizonEngine PROPERTY INTERFACE_COMPILE_FEATURES cxx_std_20)
 
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonNet>")
-    _horizon_engine_import(HorizonEngine::Net
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonNet>" "${_he_imp}"
-        "@HE_SDK_DEFS_HorizonNet@" "HorizonEngine::Core")
-
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonScene>")
-    _horizon_engine_import(HorizonEngine::Scene
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonScene>" "${_he_imp}"
-        "@HE_SDK_DEFS_HorizonScene@" "HorizonEngine::Core;HorizonEngine::Net")
-
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonRendering>")
-    _horizon_engine_import(HorizonEngine::Rendering
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonRendering>" "${_he_imp}"
-        "@HE_SDK_DEFS_HorizonRendering@" "HorizonEngine::Core")
+    foreach(_he_part Core Net Scene Rendering)
+        add_library(HorizonEngine::${_he_part} INTERFACE IMPORTED)
+        set_property(TARGET HorizonEngine::${_he_part}
+            PROPERTY INTERFACE_LINK_LIBRARIES HorizonEngine::HorizonEngine)
+    endforeach()
+    unset(_he_part)
 
     unset(_he_rt)
     unset(_he_lib)

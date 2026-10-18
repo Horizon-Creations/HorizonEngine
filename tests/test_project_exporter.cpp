@@ -1236,6 +1236,124 @@ TEST_CASE("ProjectExporter ships the runtime Shaders/ subdirectory and replaces 
     he_test::removeAllQuiet(outputDir);
 }
 
+// Thema 211 step 10: a runtime with HorizonEngine/ (the engine as one library)
+// exports as <ProjectName> + data/ + HorizonEngine/ (Platform/GameLayout.h).
+TEST_CASE("exportedExecutableName keeps what every file system takes")
+{
+    CHECK(exportedExecutableName("Space Game", false) == "Space Game");
+    CHECK(exportedExecutableName("Space Game", true) == "Space Game.exe");
+    CHECK(exportedExecutableName(" a/b\\c:d*e?f\"g<h>i|j. .", false) == "abcdefghij");
+    CHECK(exportedExecutableName(std::string("x\ty\x7f"), false) == "xy");
+    CHECK(exportedExecutableName("", false) == "Game");
+    CHECK(exportedExecutableName("...", true) == "Game.exe");
+}
+
+namespace
+{
+std::filesystem::path makeEngineDirRuntime(const std::filesystem::path& runtimeDir)
+{
+    he_test::removeAllQuiet(runtimeDir);
+    std::filesystem::create_directories(runtimeDir / "HorizonEngine" / "Shaders");
+    { std::ofstream f(runtimeDir / "HorizonGame"); f << "ELF"; }
+    { std::ofstream f(runtimeDir / "HorizonGame._pth"); f << "python314.zip\n"; }
+    { std::ofstream f(runtimeDir / "python314.zip"); f << "ZIP"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libHorizonEngine.dylib"); f << "ENGINE"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libSDL3.0.dylib"); f << "SDL"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libHorizonPython.dylib"); f << "PLUGIN"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libpython3.14.dylib"); f << "CPYTHON"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "Shaders" / "ui.vert.spv"); f << "SPV"; }
+    return runtimeDir;
+}
+} // namespace
+
+TEST_CASE("ProjectExporter: a HorizonEngine/ runtime exports as <ProjectName>, data/ and HorizonEngine/")
+{
+    const auto tmp        = std::filesystem::temp_directory_path();
+    const auto runtimeDir = makeEngineDirRuntime(tmp / "he_test_export_layout_runtime");
+    const auto contentDir = tmp / "he_test_export_layout_content";
+    const auto outputDir  = tmp / "he_test_export_layout_out";
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(outputDir);
+    // A previous export of the old flat layout into the same folder.
+    { std::ofstream f(outputDir / "HorizonGame"); f << "OLD"; }
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = runtimeDir;
+    REQUIRE(runtimeHasEngineDir(runtimeDir));
+
+    SUBCASE("no Python: neither the plugin nor the interpreter nor the stdlib ship")
+    {
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(result.executablePath == outputDir / "Space Game");
+        CHECK(std::filesystem::is_regular_file(outputDir / "Space Game"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonGame"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "data" / "project.hcfg"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "project.hcfg"));
+        bool pakInData = false;
+        for (const auto& e : std::filesystem::directory_iterator(outputDir / "data"))
+            pakInData |= e.path().extension() == ".hpak";
+        CHECK(pakInData);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libHorizonEngine.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libSDL3.0.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "Shaders" / "ui.vert.spv"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine" / "libHorizonPython.dylib"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine" / "libpython3.14.dylib"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "python314.zip"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "Space Game._pth"));
+    }
+    SUBCASE("Python: plugin and interpreter beside the engine, the _pth renamed with the executable")
+    {
+        settings.bundlePython = true;
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libHorizonPython.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libpython3.14.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "python314.zip"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "Space Game._pth"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonGame._pth"));
+    }
+
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+TEST_CASE("ProjectExporter: a runtime without HorizonEngine/ keeps the flat layout and its name")
+{
+    const auto tmp        = std::filesystem::temp_directory_path();
+    const auto runtimeDir = tmp / "he_test_export_flat_runtime";
+    const auto contentDir = tmp / "he_test_export_flat_content";
+    const auto outputDir  = tmp / "he_test_export_flat_out";
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(runtimeDir);
+    std::filesystem::create_directories(contentDir);
+    { std::ofstream f(runtimeDir / "HorizonGame.exe"); f << "PE"; }
+    { std::ofstream f(runtimeDir / "HorizonCore.dll"); f << "DLL"; }
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = runtimeDir;
+    CHECK_FALSE(runtimeHasEngineDir(runtimeDir));
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "Space Game", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.executablePath == outputDir / "HorizonGame.exe");
+    CHECK(std::filesystem::is_regular_file(outputDir / "HorizonCore.dll"));
+    CHECK(std::filesystem::is_regular_file(outputDir / "project.hcfg"));
+    CHECK_FALSE(std::filesystem::exists(outputDir / "data"));
+    CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine"));
+
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way)")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_err_content";

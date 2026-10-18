@@ -12,7 +12,7 @@ the release check proves nothing).
     scripts/build_profile_strings.py --profile dev     <dir-or-file>...
 
 A directory stands for the HorizonGame executable plus the HorizonCore,
-HorizonScene and HorizonNet libraries found under it (a build tree or a
+HorizonScene, HorizonNet and HorizonEngine libraries found under it (a build tree or a
 deploy folder). Exit 1 if a release binary still has something, or a dev
 binary set lacks something.
 
@@ -63,7 +63,8 @@ FEATURES: dict[str, dict[str, list[str]]] = {
 }
 
 GAME_NAMES = ("HorizonGame", "HorizonGame.exe")
-LIB_STEMS = ("HorizonCore", "HorizonScene", "HorizonNet")
+# HorizonEngine: the four as one library, what an exported game loads (Thema 211 step 10).
+LIB_STEMS = ("HorizonCore", "HorizonScene", "HorizonNet", "HorizonEngine")
 
 
 def binaries_in(path: Path) -> list[Path]:
@@ -117,7 +118,7 @@ def main() -> int:
 
     files = [b for p in args.paths for b in binaries_in(p)]
     if not files:
-        print("no HorizonGame / HorizonCore / HorizonScene / HorizonNet binary found", file=sys.stderr)
+        print("no HorizonGame / HorizonCore / HorizonScene / HorizonNet / HorizonEngine binary found", file=sys.stderr)
         return 2
     print("binaries:", ", ".join(str(f) for f in files))
     if not shutil.which("nm"):
