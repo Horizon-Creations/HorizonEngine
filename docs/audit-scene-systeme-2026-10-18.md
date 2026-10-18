@@ -153,9 +153,90 @@ taken at load 10 (for example "0.64 -> 0.11" for SCN-301). The table above is th
 valid one. The interleaved LOD case is the worst case; TerrainSystem creates a
 terrain's chunks in one loop (`TerrainSystem.cpp:577`), so they come in runs.
 
+## Step 3: SCN-801, SCN-802 (terrain gates)
+
+Same rule as step 2: skip only what would have written what is already there.
+
+- **SCN-801** (`TerrainSystem.cpp` `updateTessellation`): the landscapes are
+  classified first: Off (factor 1 or no distance), Busy (not built, `dirty`,
+  `regionDirty`: `updateTerrains` owns the tick) and Refine. Only chunks of a
+  Refine landscape get the `worldPositionOf` walk and a bucket entry. Chunks of an
+  Off landscape give a refined level back inline (`emptyTessLevel` adds or removes no
+  storage, so this is safe inside the view). Chunks of a Busy or gone landscape are
+  left alone, as before. The buckets are `thread_local` and keep their capacity.
+  The audit's "nothing active -> return" was **not** taken: the cleanup of a copied
+  component (a chunk that carries another world's refined mesh, hooked into its
+  `LODComponent`) runs for every chunk, and it can be needed while no landscape
+  refines and this world owns no mesh. An early return would leave LODSystem drawing
+  the other world's mesh. What is left with tessellation off is one pass over the
+  chunk pool reading three fields.
+  One deliberate difference: the build budget (2 per tick, shared) now goes to the
+  landscapes in view order. Before, it went in `unordered_map` order, which was
+  unspecified.
+- **SCN-802** (`TerrainSystem.cpp` chunk material sync in `updateTerrains`): first
+  the parents' default-material emplaces (the only emplace that can move the pool),
+  then one pass over the chunks for all landscapes with a small (landscape, source
+  pointer) lookup, and the parent's material is read in place instead of copied per
+  landscape and tick. `same()` is unchanged. A chunk without a MaterialComponent
+  gets a copy taken fresh per emplace, because each emplace can move the pool.
+  The audit's part (3), a change gate on the source material, was **not** done:
+  the Inspector, MCP and scripts write `materialAssetId` and the overrides straight
+  into the component (the existing test in `test_terrain.cpp` does exactly that),
+  so a revision would miss them. Left per tick: one `try_get` and compare per chunk.
+
+Tests (all new cases are red under a mutation, each built and run):
+- `test_terrain_tessellation.cpp`, three cases: a copied chunk component with
+  tessellation off (unhooked, the other world's mesh not emptied), tessellation
+  switched off without a rebuild, and four landscapes in the four states.
+  - M1, the audit's early return: both of the first two are red.
+  - M2, Busy treated as Refine: red at :544.
+  - M3, a gone landscape treated as Off: red at :545.
+- `test_terrain.cpp`, one case: two landscapes with different materials and
+  overrides, plus a chunk without a MaterialComponent.
+  - M4, the lookup pinned to the first landscape: red.
+
+Measurement: the same recipe as step 2 (temporary doctest case, not committed; a copy
+is in `/tmp/scn218_s3/bench_test_terrain_tessellation.cpp` on the Mac it ran on).
+The base is `400370dd`, run with its own `libHorizonScene.dylib`. Release, M5, load
+2.9-3.5, no `yes` hogs, low-power mode off, three alternating runs per side, median
+ms per call over 300 calls. The landscapes are parented under a root entity.
+Resolution 2049 still gives 16×16 chunks, so the large case is four landscapes.
+
+| case | base | this step |
+|---|---:|---:|
+| SCN-801: `updateTessellation`, tessellation off, 1 landscape, 256 chunks | 0.042-0.045 | 0.0005 |
+| SCN-801: same, 4 landscapes, 1024 chunks | 0.174-0.186 | 0.0031-0.0033 |
+| SCN-802: idle `updateTerrains`, 1 landscape, 256 chunks | 0.0070-0.0072 | 0.0069-0.0072 |
+| SCN-802: idle `updateTerrains`, 4 landscapes, 1024 chunks | 0.032-0.035 | 0.027-0.029 |
+
+Idle `updateTerrains` includes the weightmap check and `syncSplines`. That is what
+`SceneSystems.cpp:113` ticks. The material sync was already cheap, and with one
+landscape there is no factor to remove. The refining case (tessellation on) was
+not measured: it does the same work, with a lookup in place of the hash map.
+
 ## Handoff
 
-### Step 2 (latest)
+### Step 3 (latest)
+
+- **Topic / step:** 218, step 3 of 4 (Hive step 1075).
+- **Commits:** 07a42442 (SCN-801/802), and this doc.
+- **Files:** `src/HE_Scene/src/TerrainSystem.cpp` (`updateTessellation`, chunk
+  material sync in `updateTerrains`). Tests: 3 new cases in
+  `test_terrain_tessellation.cpp`, 1 in `test_terrain.cpp`.
+- **Verified:** the four mutations above were each built and turned red. Terrain
+  and tessellation suites are green. Full `ctest -j4` (Release, without the
+  temporary benchmark): 302/303, 2 skipped. The one failure is `test_hpak` "Disk
+  registry" (6 == 2), the same environment failure as in steps 1 and 2.
+- **Not verified:** no editor or game run, and the `HorizonEditor` target was not
+  built (only `he_tests`). Refining case not timed. Linux and Windows only through CI.
+- **Decisions taken:** no early return in `updateTessellation` (copied components),
+  and no change gate on the material sync (direct writers).
+- **For the queen to decide:** a material change gate would need every writer of
+  `MaterialComponent` (Inspector, MCP, HE::api, Lua/Python) to bump a revision.
+- **Merge risk:** topics 180/182 touch `TerrainSystem.cpp` on their own branches.
+- **Next steps:** step 4 (SCN-302 shared asset cache, SCN-701/702).
+
+### Step 2
 
 - **Topic / step:** 218, step 2 of 4 (Hive step 1092).
 - **Commits:** 5680e2b4 (SCN-301), 2bfdbee0 (SCN-401/501), 8b62df9e (SCN-604),
