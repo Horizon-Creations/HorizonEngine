@@ -52,9 +52,13 @@ function(horizon_add_game target)
         # not leak to another game of the same project through the shared source.
         set(_config_cpp "${CMAKE_CURRENT_BINARY_DIR}/${target}_build_config/CompiledBuildConfig.cpp")
         configure_file("${_src}/CompiledBuildConfig.cpp" "${_config_cpp}" COPYONLY)
+        # OBJECT_DEPENDS: Make's dependency scan does not follow a per-source
+        # include dir, and the export rewrites the header into a kept build tree
+        # (its build cache): without it the old configuration stayed compiled in.
         set_source_files_properties("${_config_cpp}" PROPERTIES
             INCLUDE_DIRECTORIES "${_bc_dir}"
-            COMPILE_DEFINITIONS HE_GAME_BUILD_CONFIG=1)
+            COMPILE_DEFINITIONS HE_GAME_BUILD_CONFIG=1
+            OBJECT_DEPENDS "${_bc}")
     endif()
 
     add_executable(${target} WIN32

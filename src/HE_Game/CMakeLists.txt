@@ -114,9 +114,13 @@ if(HE_GAME_BUILD_CONFIG)
 	endif()
 	get_filename_component(_he_bc_dir "${HE_GAME_BUILD_CONFIG}" DIRECTORY)
 	# On the one source file only: the other game TUs keep their command line.
+	# OBJECT_DEPENDS because Make's dependency scan does not follow a per-source
+	# include dir: without it a rewritten header (every export writes one) left
+	# the old configuration compiled in.
 	set_source_files_properties(src/CompiledBuildConfig.cpp PROPERTIES
 		INCLUDE_DIRECTORIES "${_he_bc_dir}"
-		COMPILE_DEFINITIONS HE_GAME_BUILD_CONFIG=1)
+		COMPILE_DEFINITIONS HE_GAME_BUILD_CONFIG=1
+		OBJECT_DEPENDS "${HE_GAME_BUILD_CONFIG}")
 	message(STATUS "HorizonGame: project configuration compiled in from ${HE_GAME_BUILD_CONFIG}")
 endif()
 
