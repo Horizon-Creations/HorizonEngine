@@ -310,6 +310,35 @@ before vs after, and differ from the Metal shots. A static sun bakes on the firs
 under every policy, so no witness can show the dead bands. Only a moving sun can, and
 the bench above is that evidence.
 
+## Step 5: Windows CI C2512 (D3D11/D3D12 do not compile)
+
+**Cause.** The break did not come from step 1, as the board said; it came from step 4
+(`cdfc33a7`). Step 3's CI run 39080059803 was green on Windows. Step 4 gave
+`HE::SkyEnvBaker` an `explicit SkyEnvBaker(int faceN = kSkyEnvFaceSize)`. D3D11 and D3D12
+hold the baker in their aggregate Impl, and both build it with `new Impl{}`
+(D3D11Renderer.cpp:6032, D3D12Renderer.cpp:9798). Aggregate init copy-list-initialises
+every member that has no initializer from `{}`, and an explicit default constructor makes
+that ill-formed (MSVC: C2512 plus "Constructor for class 'HE::SkyEnvBaker' is declared
+'explicit'"). CI only showed D3D11 because ninja stopped at the first error. GL, Vulkan
+and Metal hold the baker as a plain class member, so the Mac/Linux jobs stayed green.
+
+**Fix** (`f7e8b3a0`, `SkyEnvBake.h:263`): a defaulted, non-explicit default constructor
+(`m_faceN` defaults to `kSkyEnvFaceSize`) and an explicit `SkyEnvBaker(int)`. No
+behaviour change: every call site constructs the same face size as before. A grep showed
+that no other new Impl member of steps 1-4 (`ClusterLightBuild`, `FrameVisibility`, ...)
+has an explicit constructor.
+
+**Verified on NN-WS03 (MSVC 14.51, Release, own tree `F:/hw214`, own deploy).**
+Negative control: with the old header, `RendererD3D11` + `RendererD3D12` (`-k 0`) fail
+with C2512 at exactly `:6032` and `:9798`. With the fix both build. Then all targets with
+`-k 0`: 0 errors, "All 113 embedded shaders compile". `test_culling` 78/78 (17906
+assertions).
+
+**Not this step:** the "Runtime flavours" workflow's Linux job is red on this branch
+because of size thresholds (app-advanced 31.3 > 31.0 MB, app-basic 30.3 > 30.0 MB), and
+was already red at step 3. `release/0.7.0` raised those thresholds in `6d789a8c` (34.5 /
+33.5 MB), so it goes away with the merge. Its Windows job failed on the same C2512.
+
 ## Handoff (step 1)
 
 - **Topic / step:** 214, step 1 of 4
@@ -471,7 +500,7 @@ the bench above is that evidence.
   3. Later, its own step: the faster sort and the single-pass multi-frustum cull from
      "suggested" above.
 
-## Handoff
+## Handoff (step 4)
 
 - **Topic / step:** 214, step 4 of 4 (REN-903/908/401, M8)
 - **Branch / commit:** `claude/audit-optimierung-rendering-frontend-stufe-2`, code
@@ -530,3 +559,31 @@ the bench above is that evidence.
   2. Its own step: take the sky bake off the render thread or onto the GPU (above). That
      is where the day-night stall is.
   3. Metal: one cluster build per frame (above), together with topic 216's Metal work.
+
+## Handoff
+
+- **Topic / step:** 214, step 5 (Windows CI C2512), see "Step 5" above.
+- **Branch / commit:** `claude/audit-optimierung-rendering-frontend-stufe-2`, fix
+  `f7e8b3a0` plus this doc commit, pushed.
+- **Done:** `HE::SkyEnvBaker` has a non-explicit default constructor
+  (`SkyEnvBake.h:263`), so `new D3D11RendererImpl{}` / `new D3D12RendererImpl{}` compile.
+- **Verified (NN-WS03, MSVC 14.51, Release, `F:/hw214`, deploy `F:/hw214/deploy`):**
+  - negative control: the old header gives C2512 at D3D11 `:6032` and D3D12 `:9798`;
+  - the fix builds both;
+  - all targets with `-k 0`: 0 errors, 113/113 embedded shaders;
+  - `test_culling` 78/78;
+  - full `he_tests` without `test_material_graph`: 5338/5343. The 5 failures are 3
+    known gamepad cases (real Xbox pad on this machine) and 2 `test_profiler` cases
+    (`:107`, `:215`); `test_profiler` alone is 18/18, so the 2 depend on test order.
+    Scratch APPDATA, `HE_NET_LOOPBACK_ONLY=1`.
+- **Not verified:** that the `test_profiler` order dependency exists on `release/0.7.0`
+  (no base build here; the change is one HE_Rendering header and cannot reach the
+  profiler). D3D11/D3D12 not rendered, only compiled. Windows CI for this commit is
+  still running at handoff.
+- **Decisions taken:** fix the type, not the two `new Impl{}` sites (`Impl()` would also
+  work but leaves the trap for the next aggregate member).
+- **Traps:** an `explicit` default constructor on any member type of D3D11/D3D12's Impl
+  breaks the Windows build only. "Runtime flavours" Linux stays red until the merge
+  brings `6d789a8c` (thresholds).
+- **Next steps:** 1. Check the Windows job of the CI run (link in the Hive result).
+  2. Merge into `release/0.7.0` (queen).
