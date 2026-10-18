@@ -544,10 +544,10 @@ namespace
 					{
 						// Linked while its scene had never been saved: found in the
 						// open world is found; not found says nothing (another scene).
-						return HE::Ed::entityByUuid(*ctx.world, HE::uuidToHex(l.id)) == entt::null ? C::Unknown : C::Present;
+						return HE::Ed::entityByUuid(*ctx.world, l.id) == entt::null ? C::Unknown : C::Present;
 					}
 					if (!isCurrentScene(ctx, l.scene)) return C::Unknown;
-					return HE::Ed::entityByUuid(*ctx.world, HE::uuidToHex(l.id)) == entt::null ? C::Missing : C::Present;
+					return HE::Ed::entityByUuid(*ctx.world, l.id) == entt::null ? C::Missing : C::Present;
 				case TaskLinkKind::Panel:
 					for (const char* p : kPanels) if (l.panel == p) return C::Present;
 					return C::Missing;
@@ -576,7 +576,7 @@ namespace
 				// open world is the only place it can be.
 				if (ctx.world && (l.scene.empty() || isCurrentScene(ctx, l.scene)))
 				{
-					const Entity e = HE::Ed::entityByUuid(*ctx.world, HE::uuidToHex(l.id));
+					const Entity e = HE::Ed::entityByUuid(*ctx.world, l.id);
 					if (e != entt::null) ctx.selection.set(e);
 					s_jump = Jump{ Jump::Kind::Entity, {} };
 				}
@@ -600,7 +600,7 @@ namespace
 		if (!ctx.world || ctx.currentScenePath.empty() ||
 		    !EditorTabs::sameAsset(ctx.currentScenePath, s_pendingSelect.sceneAbs))
 			return;
-		const Entity e = HE::Ed::entityByUuid(*ctx.world, HE::uuidToHex(s_pendingSelect.entity));
+		const Entity e = HE::Ed::entityByUuid(*ctx.world, s_pendingSelect.entity);
 		if (e != entt::null)
 		{
 			ctx.selection.set(e);

@@ -309,11 +309,17 @@ private:
 };
 
 // ── Addressing an entity from outside ────────────────────────────────────────
-// A linear scan over EntityIdComponent. No index, on purpose: an index has to be
-// kept honest across load, undo (which remaps every handle) and prefab
-// instantiation, and the only caller is a tool handler running once per request
-// on a world of a few thousand entities.
+// O(1) through the world's own id index (HorizonWorld::findByEntityId), which the
+// registry's signals keep honest across load, undo and prefab instantiation. It
+// is no longer only a tool handler's question: the task board asks it per entity
+// link every second and the MCP `batch` up to a hundred times per request.
+//
+// The string form takes exactly what uuidOf writes — 32 lowercase hex digits —
+// and nothing else, as strict as the string compare it replaced. The zero id is
+// "no identity" and never matches. Two holders of one id (a damaged merge):
+// one of them, as findByEntityId documents.
 Entity entityByUuid(HorizonWorld& world, const std::string& uuid);
+Entity entityByUuid(HorizonWorld& world, const HE::UUID& id);
 std::string uuidOf(HorizonWorld& world, Entity e);
 
 } // namespace HE::Ed
