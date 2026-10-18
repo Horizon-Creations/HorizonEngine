@@ -114,7 +114,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [x] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug (`docs/audit-editor-2026-10-18.md`)
 - [x] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set (beides erledigt, `docs/audit-editor-2026-10-18.md` Step 2); Row-Clipping-Pass (M12) erledigt (Step 3: EDT-301/302/1503/1802/910 geclippt, 909 ohne Clipper nur allokationsfrei, 1404 Stufe 1; Stufe 2 von 1404 offen)
 - [x] Collab: EDT-402/1601/201/202 Signale+Revisionen (`docs/audit-editor-2026-10-18.md` Step 4: Struktur-Pass per structureEpoch + 1-s-Netz, Net-IDs als Hash-Maps mit Fehltreffer-Cache, LS/GI-Diff per Signal + 250 ms)
-- [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9) — teilweise (`docs/audit-editor-2026-10-18.md` Step 5): EDT-801 `kAssetPanels`, EDT-1208 `refuseAssetWrite`, CORE-603 Basis-Property-Tabelle, M9 `dumpFrameHeadless`-Zeugenszenen erledigt; offen EDT-703/704 (Produktentscheidung), EDT-1209, M9 `ContentBrowserPanel::render`/`renderEditor`
+- [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9) — teilweise (`docs/audit-editor-2026-10-18.md` Step 5): EDT-801 `kAssetPanels`, EDT-1208 `refuseAssetWrite`, CORE-603 Basis-Property-Tabelle, M9 `dumpFrameHeadless`-Zeugenszenen erledigt; EDT-1209 (Step 6: `McpToolHooks.h` abgetrennt, `unique_ptr<McpBridge>`; Hook-Änderung baut 23+44 statt 101+94 Objekte neu, json.hpp kommt weiter über `GlobalState.h`); offen EDT-703/704 (Produktentscheidung), M9 `ContentBrowserPanel::render`/`renderEditor`
 
 ## 5. Nicht beurteilbar / Messung nötig
 

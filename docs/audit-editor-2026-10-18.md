@@ -207,16 +207,41 @@ byte-identical old vs new: `frame_pixel_ab.sh frame` (16), sky, material, SSR, w
 landscape layers, many lights, LAYEREDIT (sensitive: differs from layers alone) and the
 preview stress loop (runs only if the material-test id came back).
 
+## Step 6: MCP hooks out of EditorApplication.h (EDT-1209), CORE-603 re-checked
+
+| Finding | Where | What changed |
+|---|---|---|
+| EDT-1209 header split | `McpToolRegistry.h` (179 lines: ToolResult, McpCallContext, McpTool, McpToolRegistry, `mcpBase64Encode`; json only), new `McpToolHooks.h` (the per-family hook structs, register functions, screenshot limits, `kMcpDoc*`; moved verbatim) | The 20 `McpTools*.cpp`, `McpToolRegistry.cpp`, `McpToolsApi.h` and 21 `test_mcp_*` include the hooks header; `McpBridge.h` and `McpToolCommon.h` keep the light one (`McpToolCommon.h` now names `Types/Enums.h` itself). |
+| EDT-1209 ownership | `EditorApplication.h` (forward declaration after the includes, `std::unique_ptr<HE::Ed::McpBridge> m_mcp` in the old slot), `EditorApplication.cpp` (constructor out of line, `make_unique`) | Never null, never reset; same slot, so `m_mcpCameras` still outlives the bridge. `m_mcp.` → `m_mcp->` (38), `.mcp = m_mcp.get()`. `EditorSettingsPanel.cpp` and `McpStatusBar.cpp` include `McpBridge.h` for `AppContext::mcp`. |
+| CORE-603 | `UIElement.cpp` `baseProps()` / `findBaseProp` (5ce314cd, step 5) | Nothing new: the table is the step 5 commit. Re-verified by `test_ui_widgets`. |
+
+**Measured** (OutlinerPanel.cpp, Release flags, M5): before, `-ftime-trace` put the
+`McpBridge.h` subtree at 177 ms of the 4958 ms `EditorApplication.h` parse. The audit's premise
+does not hold: `json.hpp` (538 ms) and `IRenderer.h` reach every editor file anyway, through
+`Application.h:9-11` → `GlobalState.h:11`. After: `-H` no longer lists `McpBridge.h`/
+`McpToolRegistry.h`. The preprocessed TU loses 391 of 152 758 lines, and user CPU is within
+noise (old 12.75-13.36 s, new 12.66-13.02 s, alternated, load 10-12). The win is the rebuild
+fan-out, from `ninja -t deps` (old = today's users of the two headers plus every
+`EditorApplication.h` user): editing the hooks now recompiles **23 editor + 44 test objects
+instead of 101 + 94**, editing `McpBridge.h` **4 + 3 instead of 78 + 52**.
+
+**Verified:** `HorizonEditor` and `he_tests` build green (first try red on the two includes
+named above). `test_mcp_*` 412/412, `test_ui_widgets` 428/428, widget designer + theme 33/33.
+Full `he_tests` without `test_material_graph`: 5348/5351, the same three as step 5
+(`test_hpak:1188`, `test_profiler` 107/215, profiler green alone). `editor_help_audit.py
+--check` green.
+
 ## Handoff
 
-- **Topic / step:** 220, step 5 of 5 (steps 1-4: records above)
-- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 89315c79 (EDT-801), 82456582 (EDT-1208), 5ce314cd (CORE-603), 0d409490 (M9 dump), then this record.
-- **Done:** table above.
-- **Verified:** `HorizonEditor` + `he_tests` build green. Full `he_tests` without `test_material_graph`: 5348/5351; red: `test_hpak:1188` (known, EngineContentCache in this HOME) and two `test_profiler` cases (107, 215) that pass alone 3/3, together with the two changed test files and under `ctest -R test_profiler` (one process per file, as CI runs it): red only in a single-process full run, order-dependent on the `EngineProfiler` singleton; not checked against the base commit. `editor_help_audit.py --check` green.
-- **Not verified:** EDT-801 save/forget/reload/snapshot loops only compiled (EditorUI.cpp is not in he_tests); no manual save/close/quit session. Windows/Linux only via CI.
-- **Decisions taken:** EDT-801 table order = render dispatch order (the other loops are order-free: each panel answers for its own paths). No per-tab panel-index cache: Skeletal Mesh answers isDirty for clip paths, not its tab's path, so caching by the drawing row would change the dirty mark. EDT-1208 as a function, not a hook base struct (header churn belongs to EDT-1209).
-- **Not done (decision or own step needed):** EDT-703/704 (which ranges win, what Restore Defaults resets: question posted on the topic), EDT-1209 (split `McpToolRegistry.h`, `unique_ptr<McpBridge>`; with it the `McpAssetGate` base), M9 for `ContentBrowserPanel::render` (~4400 lines) and `EditorUI::renderEditor` (~3000, EDT-802), Cinematic recovery copy (open question, EDT-801).
+- **Topic / step:** 220, step 6 (steps 1-5: records above)
+- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 1023b16a (EDT-1209), then this record.
+- **Done:** table above. CORE-603 was already complete in 5ce314cd; this step only re-ran its tests.
+- **Verified:** see "Verified" above. Windows/Linux only through CI.
+- **Not verified:** no live MCP client was connected to the editor (the hidden run `HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=120 HE_MCP=1`, private HOME, logged "MCP: listening on 127.0.0.1:…" at frame 1 and "listener stopped" at shutdown, rc 0, endpoint file gone; the socket handshake itself is `test_mcp_bridge`). MSVC: only CI sees the `unique_ptr` of a forward-declared class with the out-of-line ctor/dtor.
+- **Decisions taken:** the light header keeps the name `McpToolRegistry.h` (its class), the hooks get the new name, so `McpBridge.h` needed no change. Prose blocks in the headers stay (the audit's item 3; the code base keeps its why-comments there). No `McpAssetGate` base: it would move three fields out of eight hook structs, and with a base class those structs stop being aggregates, which breaks their designated initialisation.
+- **Not done:** EDT-703/704 (product question still open on the topic), `McpAssetGate` (above), CORE-603 follow-ups from the audit (`allProperties()` copies ~50 descriptors per call in `UIEditorPanel.cpp` per frame; `applyClipAt` resolves each track by name per frame, a slot could be cached at clip start), M9 for `ContentBrowserPanel::render` and `EditorUI::renderEditor` (step 7), Cinematic recovery copy (EDT-801).
 - **Traps:**
-  - `restoreOpenTabs` sets `m_activeTab` but the tab bar only selects on `s_tabSelectRequest`, so a restored session always shows the Viewport tab (seen in the A/B, left as it was). Headless tab A/B needs a forced select request.
-  - A witness that does not show its subject proves nothing: LANDSCAPELAYERS needs `CAMY=392 PITCH=-89`; HE_DUMP_PREVIEW draws offscreen (prove it by log).
-- **Next steps:** 1. EDT-703/704 once the question is answered. 2. EDT-1209 + McpAssetGate base. 3. M9 `ContentBrowserPanel::render`, then `renderEditor` (UI-shot A/B; the Content Browser region has ~70 px run-to-run noise).
+  - The real `json.hpp` source for every editor TU is `Diagnostics/GlobalState.h:11`, pulled in by `Application/Application.h`. A json-free editor header chain starts there, not in the editor.
+  - Compile timing under other bees' builds: wall time swung 11-37 s for the same TU. Alternate A/B and compare user CPU or preprocessed size, or count objects in `ninja -t deps`.
+  - `restoreOpenTabs` / witness traps from step 5 still apply.
+- **Next steps:** 1. Step 7: M9 `ContentBrowserPanel::render`, then `renderEditor` (UI-shot A/B; ~70 px noise in the Content Browser region). 2. EDT-703/704 once the question is answered. 3. Optionally, survey first: GlobalState.h without json would take json.hpp out of every editor TU, but it also exports a global `using json = nlohmann::json;` (`GlobalState.h:13`) that other files may lean on, so count those before promising anything.
