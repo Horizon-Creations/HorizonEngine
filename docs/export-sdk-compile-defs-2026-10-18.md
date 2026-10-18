@@ -38,13 +38,13 @@ called `HEGameConfig.h` here). Nothing of it is decided or built yet.
 | Build profile | none at runtime; export profile → separate switches (`ExportDialogPanel.cpp:405/453`, `es.devTools = s_exportDevTools && !es.appProject`) | `HE_PROFILE_DEV` or `HE_PROFILE_RELEASE` as a compile definition of the game build; logged at start like the flavour (`:587`) |
 | Dev hotkeys V (VSync) and F10 (stats card) | `HE_GAME_DEV_HOTKEYS` from `$<CONFIG:Debug,RelWithDebInfo>` or `option` (`HE_Game/CMakeLists.txt:48-59`) **OR** hcfg `devTools` at runtime (`GameApplication.cpp:601-603, 657`); keys at `:2890-2916`, card `:2963-2972` | `#if HE_PROFILE_DEV` only; the hcfg bit and the runtime OR go away in the SDK path (they stay for the prebuilt path) |
 | Pak key (AES-256-GCM) | `g_hePakKeyBlock` (`EmbeddedPakKey.h/.cpp`, magic `HE_EMBEDDED_PAKKEY_V1`) patched into the copied exe (`ProjectExporter.cpp:148-154, 220, 1036-1056`), ad-hoc codesign `:207-215`; fallback plain key in hcfg `encKey` (`:1175-1178`); read `GameApplication.cpp:735-737` | `constexpr` key in `HEGameConfig.h`, no patching and no re-signing; the patch path stays for the prebuilt fallback. Key reuse across exports (`ProjectExporter.cpp:622-647`) must read the previous key from the export folder, not from the exe |
-| `HE_PROJECT_SECRET` | defined in `HE_Game/CMakeLists.txt:61-64`, **used nowhere** | remove, or take over its role in `HEGameConfig.h` |
+| `HE_PROJECT_SECRET` | defined in `HE_Game/CMakeLists.txt:61-64`. No source file reads it; only `CopilotDocs/HorizonGame.md:58,371` describes it as a design (a secret for the pak key) | remove, or take over its role in `HEGameConfig.h` |
 | Startup scene UUID, hpak file name, project name, main scene name | `project.hcfg` (binary, `HCFG`, `k_version=7`, `ProjectConfig.cpp:8,22`; written `ProjectExporter.cpp:1134-1189`); read `GameApplication.cpp:656`, scene `:746-749, :1317` | `constexpr` in `HEGameConfig.h`. Then the lesson trap "foreign hcfg → black frame" goes away too |
 | hcfg flags: modSupport 1, encrypted 2, hasPackedScene 4, horizonCodeCompiled 8, appMode 16, !advancedShaderEffects 32, allowFiles/Processes/Network 64/128/256, fontScripts 512-1024, !fontBold 2048, devTools 4096 (`ProjectConfig.cpp:61-85`) | runtime `if` at each use: mods `:761-763`, permissions `:935-937`, fonts `:944-945`, theme `:859-872`, HC compiled warning `:835` | `constexpr bool` in the header (permissions, appMode, mods); `if constexpr` lets the compiler drop unused paths. `advancedShaderEffects` is not read by the game at all (only the flavour choice uses it) |
 | hcfg tails: save template, theme, bundleId, collision layers JSON, audio buses JSON (v3-v7) | read at `:949, :859, :1076, :2107, :1396` | JSON as a string constant or as a generated table in the header; low priority (data, not a dev feature) |
 | `config.json` (window size/mode, VSync, backend, PauseOnFocusLoss, Bloom/SSAO/DoF/MotionBlur, GI*, SSR*, AA, RenderScale, RenderPath, GpuParticles) | `GlobalState::useShippedConfig(SDL_GetBasePath())` (`main.cpp:22-23`, `GlobalState.cpp:150-157`); keys `GameApplication.cpp:489-536, 3328-3529`; written `buildGameConfigJson` (`ExportDialogPanel.cpp:148-232`) + `writeGameConfig` (`ProjectExporter.cpp:1191-1250`) | **Defaults** go into the header (so the game starts without the file). The file stays as an optional player override, because these are player settings (`HE::api::settings`) and must remain changeable |
 | `Config/ProjectSettings.json` (title, splash, deadzones, shadows, physics Hz/gravity/threads/budget, anti-cheat telemetry URL) | `HE::loadProjectSettings` (`GameApplication.cpp:477`), copied verbatim (`ProjectExporter.cpp:1256-1283`) | into the header as constants (author settings, not player settings) |
-| Splash (`Splash.png` + `splashEnabled`) | `GameApplication.cpp:561-578`; the "logo intro" in the lessons is this splash, not a separate Development feature (none found) | `constexpr bool kSplash`; image stays a file or is embedded (open) |
+| Splash (`Splash.png` + `splashEnabled`) | `GameApplication.cpp:555-578`, with no profile branch. The SplashScreen's built-in engine branding (no logo) is deliberately unreachable from the game. The lessons tie a ~10 s logo intro to Development exports, but the code shows no profile dependence and this step did not reproduce it | `constexpr bool kSplash`; image stays a file or is embedded (open) |
 | `logVerbosity` / `HE_LOG` / `HE_LOG_NO_CONSOLE` | `GlobalState.cpp:76-83, 314-317`; `buildGameConfigJson` does not write `logVerbosity` | default verbosity per profile in the header; `HE_LOG` only in DEV |
 | `HE_CONFIG_DIR` | `GlobalState.cpp:174`, outranks the shipped pin on purpose | DEV only |
 | F9 profiler capture, `HE_PROFILE_*`, `HE_CAPTURE_*`, `HE_PERF_*` | `Application.cpp:294-298, 475-590, 77, 407`; **engine-wide, not gated**. `HE_PROFILING` (root `:801`) only removes scope macros | `#if HE_PROFILE_DEV` around the F9 key and the env automation. This sits in HE_Core, so the SDK needs a DEV and a RELEASE variant of the lib, or the check moves to the game (open, step 2) |
@@ -58,7 +58,7 @@ called `HEGameConfig.h` here). Nothing of it is decided or built yet.
 | GameLogic native lib | loaded if the file exists `:1421-1432` | in the SDK path, link it into the game directly; the dylib stays for the prebuilt path |
 | Lua/Python | Python plugin shipped per project (`HE_Game/CMakeLists.txt:96-108`, `ProjectExporter.cpp:902-962`) | unchanged (decided by the files that ship, not by the profile) |
 | Integrity probe / anti-cheat | `:783-797` runs whenever a pak is mounted | unchanged |
-| `HE_EDITOR` on `HorizonCore` | `HE_Editor/CMakeLists.txt:490` adds it PRIVATE to the **shared** `HorizonCore` the game also uses (contradicts the comments at `HE_Game/CMakeLists.txt:70` and root `:898`); no effect today (0 `#ifdef HE_EDITOR` in Core/Scene/Rendering) | the SDK needs a `HorizonCore` without `HE_EDITOR`; step 5 must build it separately or remove the line |
+| `HE_EDITOR` on `HorizonCore` | `HE_Editor/CMakeLists.txt:490` adds it PRIVATE to `HorizonCore`. The comments at `HE_Game/CMakeLists.txt:68-70` and root `:896-898` say the game DLLs come from a separate build without `HE_EDITOR`. Whether the game-flavour tree (which also builds HE_Editor, root `:948-949`) really keeps it out was **not checked**. No effect today (0 `#ifdef HE_EDITOR` in Core/Scene/Rendering) | open question for step 5: the SDK's `HorizonCore` must come from a tree without `HE_EDITOR` |
 
 ### A.2 Export pipeline today (where the SDK path will branch)
 
@@ -121,7 +121,7 @@ move to a generated `*_reflect.cpp` next to the class instead of sitting between
 
 Every engine node goes through `hc::callApi(m_ctx, "<id>", std::vector<hc::Value>{…})`
 (pure: `HcCodegen.cpp:1885-1898`, re-dispatched on every read; exec: `:2707-2712` via
-`emitValueCall` `:2248-2274`). 82 such calls are in the fixture output. The path at runtime:
+`emitValueCall` `:2248-2274`). The fixture output has 87 such calls on 82 lines. The path at runtime:
 
 1. `hc::callApi` (`HorizonCodeGenSupport.h:712`) → `Context::callApi` (std::function, `HorizonCodeRuntime.cpp:1498`)
 2. → `Services::callApi` (std::function, `GameApplication.cpp:1275`; the editor has a twin)
@@ -245,7 +245,7 @@ body or move behind a macro is open. They are needed for parity with the interpr
 ## Handoff
 
 - **Topic / step:** Thema 211, step 1 of 9 (survey)
-- **Branch / commit:** claude/export-sdk-compile-horizoncode-codegen (see the git log; this doc is the only change)
+- **Branch / commit:** claude/export-sdk-compile-horizoncode-codegen @ 11dabde1 + the fix-up commit after it (pushed: yes)
 - **Done:** inventory of everything the game reads at runtime (profile, pak key, hcfg, config.json,
   ProjectSettings, env) with a target per value (A.1), the export pipeline's branch point (A.2), the
   codegen output and its cryptic parts (B.2), the engine-API call chain (B.3), what in `EngineApi.h`
@@ -253,7 +253,8 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Files touched:** this doc only. No code.
 - **Verified:** `hc_codegen --fixtures` (main checkout `cmake-build-release`, Oct 15; no codegen commits
   since) produced the B.6 example and 82 `callApi` sites. Counts were checked by grep: 510 registry rows,
-  47 `HE::api` namespaces, 0 `#ifdef HE_EDITOR` in Core/Scene/Rendering, `HE_PROJECT_SECRET` unused.
+  47 `HE::api` namespaces, 0 `#ifdef HE_EDITOR` in Core/Scene/Rendering, no source file reads `HE_PROJECT_SECRET`, and F9/`HE_PROFILE_CAPTURE` have no enclosing `#if`
+  (`Application.cpp:294-298, 475-590`). The splash has no profile branch (`GameApplication.cpp:555-578`).
   `HE_GAME_DEV_HOTKEYS`, the key choice (`GameApplication.cpp:735-737`) and `callApi` (`:1275`) were read at the source.
 - **Not verified:** the parity tests (`test_horizoncode_codegen.cpp`) were not run. Per-site `#ifdef`s around the
   renderer env variables were not checked. Whether players need `HE_NET_RELAY` is unknown. The B.6 target is a
@@ -269,7 +270,8 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Traps:**
   - Dev features in HE_Core (F9, `HE_PROFILE_*`, the headless hooks) cannot be stripped by a game-only define. Step 2 must
     decide between a define on the SDK libs (two lib variants) and a runtime switch that the game sets once.
-  - `HorizonCore` currently gets `HE_EDITOR` from the editor's CMake (`HE_Editor/CMakeLists.txt:490`).
+  - The editor's CMake adds `HE_EDITOR` to `HorizonCore` (`HE_Editor/CMakeLists.txt:490`); whether the
+    game tree stays clean is open (A.1, last row).
   - Generated code links only `HorizonCore`; `HE::api` lives in `HorizonScene`.
   - `hc_codegen` CLI writes no CMakeLists; the export does (`generateCMakeLists`).
 - **Next steps:**
