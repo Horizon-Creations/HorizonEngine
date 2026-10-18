@@ -81,7 +81,112 @@ The moving case shows the effect of SCN-101 and SCN-103 together. 300 keys is th
 favourable case for SCN-103, and a hand-keyed clip gains only the SCN-101 part. No
 split between the two was measured.
 
+## Step 2: SCN-301, SCN-401/501, SCN-402, SCN-601, SCN-604 (dirty and settled gates)
+
+The rule for every gate in this step: skip only when the skipped work would write
+exactly the values that are already there. Every change that the audit itself
+flagged as a behaviour change was left out, or replaced by an exact form of it.
+
+- **SCN-301** (`GameReplication.cpp` `advanceInterpolation`, `InterpState`): an entry
+  settles when its path is a single point (`previous == current`) or the
+  interpolation has arrived (`t == 1`). It is then skipped while the transform still
+  holds the pose it wrote (`writtenPosition/Rotation`). The audit's `t >= 1` alone
+  would never fire: the server sends every relevant entity on every tick (30 Hz),
+  and the default delay of 0.1 s is longer than a tick. A new sample, a baseline, a
+  re-bound net id (`unsettle`) and a new `structureEpoch` (a reparent changes
+  `wireOrigin`) unsettle the entry. A script write is still overwritten.
+  Deliberate difference: a resting entity now gets the sample itself, not
+  `mix(x, x, t)`. That expression can land an ulp beside x, so the old code made a
+  resting entity jitter by up to one ulp per frame. Dead entries are still not
+  erased (a re-adopted id keeps its buffer, as before).
+- **SCN-401/501** (`PropertyReplicator.cpp`): `declarationMatches` compares the
+  declaration with the table's names in place, with the same order and duplicate
+  rule as `collect`. Values are compared by index, straight out of the runtime or
+  `ReplicatedVarsComponent`, with no `std::find`. A mismatch takes the old
+  `broadcastTableFor` path. Left: `Runtime::replicatedVariablesOf` still returns a
+  fresh vector per entity and frame (HE_Core). `joinedConnections()` and the table
+  reap still run every frame (one vector and one hash lookup per table).
+- **SCN-604** (`RopeTrailSystem.cpp`): no point copy without an attachment; the
+  rebuilt MeshData is moved into the asset. The give-back sweep runs only when an
+  owned entry was not matched by its rope this frame, using the sweep's own keep
+  condition, so a swap of one rope for another still sweeps. The FNV hash is
+  unchanged.
+- **SCN-601** (`PhysicsWorld.cpp` step write-back): `writeBackMemo` holds, for a
+  top-level body, the last Jolt pose and the transform it produced. When both still
+  match, the body is skipped. This is exact even with a stale memo, because a
+  top-level pose depends on the Jolt pose alone. Children keep the full path. The
+  audit's active-body list was not used: it would let a script's write to a
+  sleeping body stand. Statics are still visited every step for the reap.
+- **SCN-402** (`LODSystem.cpp`): a parent's world matrix is composed once when a
+  second sibling follows, and a top-level entity's single product is written out.
+  These are the same products, in the same order, as `worldMatrixOf`. A new test
+  pins bit identity on a level boundary. The audit's translation-only variant
+  (`parentWorld * local[3]`) failed that test with 86 of 800 boundary decisions
+  wrong. The world-level skip (still camera, nothing moved) was not done: before
+  propagate there is no exact signal that a transform moved, because LOD runs
+  before any propagate in the tick and many writers never set `dirty`.
+
+Measurement: a temporary doctest file (not committed, a copy is in
+`/tmp/scn218_ab/bench_scn218_tmp.cpp` on the Mac it ran on). Release, M5, load 2.5-3,
+no `yes` hogs, three alternating runs per side, median ms per call. The base side is
+this branch with the step's source files from `a6c52f6b`, and it was run with its own
+`libHorizonScene.dylib` through `DYLD_LIBRARY_PATH`: `he_tests` loads the library
+from the build tree, so a copied binary alone runs the new code.
+
+| case | base | this step |
+|---|---:|---:|
+| SCN-301: client update + propagate, 2000 resting entities | 0.152 | 0.038 |
+| SCN-401/501: `PropertyReplicator::update`, 500 idle entities, 4 vars | 0.33-0.35 | 0.13-0.15 |
+| SCN-601: step + propagate, 3000 sleeping and 3000 static bodies | 0.32-0.33 | 0.15-0.16 |
+| SCN-604: `RopeTrailSystem::update`, 500 unchanged ropes | 0.127-0.135 | 0.111-0.114 |
+| SCN-402: 10000 chunks, runs of 250 per parent | 0.64-0.65 | 0.36-0.37 |
+| SCN-402: 10000 top-level props | 0.44 | 0.36-0.37 |
+| SCN-402: 10000 chunks, 40 parents interleaved one by one | 0.65 | 0.71 (+8%) |
+
+propagate recomputed 2000 (SCN-301) and 3000 (SCN-601) matrices per frame on the
+base side, and 0 on this step's. **The figures in the commit messages of 5680e2b4,
+2bfdbee0, 8b62df9e and a1acf993 are too high**: they compare against a first baseline
+taken at load 10 (for example "0.64 -> 0.11" for SCN-301). The table above is the
+valid one. The interleaved LOD case is the worst case; TerrainSystem creates a
+terrain's chunks in one loop (`TerrainSystem.cpp:577`), so they come in runs.
+
 ## Handoff
+
+### Step 2 (latest)
+
+- **Topic / step:** 218, step 2 of 4 (Hive step 1092).
+- **Commits:** 5680e2b4 (SCN-301), 2bfdbee0 (SCN-401/501), 8b62df9e (SCN-604),
+  a1acf993 (SCN-601), 926e71cc (SCN-402), and this doc.
+- **Files:** `GameReplication.h/.cpp`, `Net/PropertyReplicator.h/.cpp`,
+  `RopeTrailSystem.cpp`, `PhysicsWorld.cpp` (Impl `writeBackMemo`, step write-back,
+  `removeEntity`, `clear`), `LODSystem.cpp`. Tests: 2 new cases in
+  `test_game_replication.cpp`, 1 in `test_net_property_replication.cpp`, 1 in
+  `test_rope_trail.cpp`, 2 in `test_physics.cpp`, 1 in `test_lod.cpp`.
+- **Verified:**
+  - Every new test fails on base or under a mutation:
+    - SCN-301's new test is red on the base binary.
+    - PropertyReplicator with the duplicate rule removed: red (`tablesSent`).
+    - Physics with every body treated as top-level: red (child test).
+    - LOD with the translation-only path: red (86 wrong).
+  - Touched suites green: replication, net_*, anticheat, cell_*, integrity, physics*,
+    character, collider, raycast, rope_trail, lod, terrain_tessellation,
+    transform_propagation.
+  - Full ctest: see the line below.
+- **Not verified:** no editor or game run, and the `HorizonEditor` target was not
+  built (only `he_tests`). Multiplayer was checked with the loopback rigs only, not
+  over real UDP. Linux and Windows only through CI.
+- **Decisions taken:** exact gates only. Not the audit's active-body list (SCN-601),
+  not `t >= 1` alone (SCN-301), not the translation-only LOD position, and no
+  world-level LOD skip.
+- **For the queen to decide:**
+  - SCN-402 world-level skip: it needs a transform write revision, and the writers
+    that never set `dirty` make that a Transform-slice change (see `modul_scene.md`
+    cross-module note on `worldMatrixOf`).
+  - SCN-501 rest: `Runtime::replicatedVariablesOf` into a caller's buffer, or a
+    revision counter (HE_Core).
+- **Next steps:** step 3 (SCN-801/802 terrain gates). Then step 4.
+
+### Step 1
 
 - **Topic / step:** 218, step 1 of 4
 - **Branch / commit:** `claude/audit-optimierung-scene-systeme-stufe-4` @ 4d85fc83

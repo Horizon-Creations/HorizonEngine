@@ -102,7 +102,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 
 **Stufe 4 – Scene-Systeme**
 - [x] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound` (Thema 218 Schritt 1, `docs/audit-scene-systeme-2026-10-18.md`; offen aus SCN-102: Sichtbarkeits-/Distanz-LOD und `playing`-Flag der State Machine)
-- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out)
+- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out) (SCN-301/401/501/402/601 und SCN-604 erledigt in Thema 218 Schritt 2, `docs/audit-scene-systeme-2026-10-18.md`; offen: SCN-801/802, Welt-Skip des LOD-Systems)
 - [ ] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung
 
 **Stufe 5 – Netz, Tools, Randmodule**
