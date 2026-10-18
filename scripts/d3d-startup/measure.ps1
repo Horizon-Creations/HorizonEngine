@@ -35,7 +35,8 @@ Get-ChildItem env: | Where-Object { $_.Name -like 'HE_*' } |
     ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null) }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
-# NVIDIA keeps one DXCache file per exe path; the first run records which one is ours.
+# NVIDIA keeps its DXCache files per exe NAME (any HorizonEditor.exe shares them,
+# the user's own editor included); the first run records which ones are ours.
 $dx = "$env:LOCALAPPDATA\NVIDIA\DXCache"
 $mineList = Join-Path $OutDir "dxcache_mine.txt"
 if ($Cold -and (Test-Path $mineList)) {

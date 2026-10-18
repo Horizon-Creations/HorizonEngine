@@ -147,12 +147,14 @@ Binary (Tabelle oben). Byte-Gleichheit 18/18, Shader-Änderungs- und Fehlerprobe
 Neu: `scripts/d3d-startup/measure_ab.ps1`. `measure.ps1 -Cold` übersteht gesperrte DXCache-Dateien.
 **Ergebnis:** Erststart ruhig D3D11 9,2 → 6,4 s, D3D12 11,1 → 8,4 s. Warm unverändert (0,8 / 0,9 s). Keine
 Regression bei Shader-Änderung: Nur der geänderte Shader wird neu übersetzt, ein Fehler verhält sich wie seriell.
-**Nicht verifiziert:** HorizonGame (exportiertes Spiel), Debug-Build, Metal/Linux-Build (nur D3D-Dateien geändert;
-CI 39131821097 lief noch), Profiler-Fehler gegen einen `release/0.7.0`-Build.
+**CI:** 39131821097 (CI, alle Plattformen) und 39131821283 (Runtime flavours) auf 191eda02 grün. Danach nur Doku/Skripte.
+**Nicht verifiziert:** HorizonGame (exportiertes Spiel), Debug-Build, Profiler-Fehler gegen einen `release/0.7.0`-Build.
 **Entscheidungen:** Siehe Schritt 1. Kein Code geändert in Schritt 2, nur Skripte und Doku. Die Probe in `HlslSources.h`
 wurde zurückgesetzt (`git status` sauber, Deploy wieder auf HEAD).
 **Fallen:** Gerätelast prüfen, und `measure_ab.ps1` schreibt sie in jede Zeile. Ein OutDir ohne `dxcache_mine.txt` macht
-`-Cold` treiber-warm. DXCache-Namen teilt man mit jedem `HorizonEditor.exe`. `unused=1` nach einem Compile-Fehler ist
+`-Cold` treiber-warm. DXCache-Namen teilt man mit jedem `HorizonEditor.exe`: Ist der Editor des Menschen zu, löscht
+`-Cold` weiter auch seinen Treiber-Cache (die ruhigen Läufe haben das getan). Vorschlag, nicht geprüft: Den privaten
+Deploy unter anderem Exe-Namen starten. `unused=1` nach einem Compile-Fehler ist
 kein Drift. Der Bytecode-Cache räumt alte Einträge nie weg und wächst mit jeder Shader-Änderung.
 **Nächste Schritte:**
 1. Merge mit Thema 196 zusammen (b0872e6f bringt 196 mit).
