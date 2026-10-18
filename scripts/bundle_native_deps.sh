@@ -188,12 +188,27 @@ bundle_linux() {
     # Copy the specific third-party sonames the engine links from system dirs. We do
     # NOT sweep everything ldd reports — the GL/X11/Wayland/audio/glibc stack must stay
     # system. lz4/zstd are always linked (hpak); libcrypto only when not static mbedTLS.
+    #
+    # Only what the reference binary NEEDS itself: ldd prints the whole closure, and
+    # libHorizonEngine.so carries HorizonNet's link to the system libcurl, whose own
+    # libssl/libcrypto would otherwise be copied (5.3 MB) into a mbedTLS game that
+    # never loads them (runtime_size, CI 39168157588). libcurl itself stays system,
+    # and so does what it brings. No readelf/objdump: fall back to the closure.
+    local needed=""
+    if command -v readelf >/dev/null 2>&1; then
+        needed="$(readelf -d "$ref" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')"
+    elif command -v objdump >/dev/null 2>&1; then
+        needed="$(objdump -p "$ref" 2>/dev/null | awk '$1 == "NEEDED" {print $2}')"
+    fi
     local want soname real
     for want in liblz4.so libzstd.so libcrypto.so; do
         # Match the actual versioned soname (liblz4.so.1, libcrypto.so.3, …) that ldd resolved.
         while IFS= read -r line; do
             soname="$(printf '%s' "$line" | awk '{print $1}')"
             real="$(printf '%s' "$line" | awk '{print $3}')"
+            if [ -n "$needed" ] && ! printf '%s\n' "$needed" | grep -qxF "$soname"; then
+                continue
+            fi
             case "$soname" in
                 ${want}*)
                     if [ -n "$real" ] && [ -f "$real" ] && [ ! -e "$DIR/$soname" ]; then
