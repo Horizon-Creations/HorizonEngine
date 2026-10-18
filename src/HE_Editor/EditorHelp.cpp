@@ -7528,6 +7528,16 @@ namespace
 	  "whenever that pak or sidecar is missing, does not match, or the packing "
 	  "settings changed, so it cannot quietly ship a stale archive.",
 	  "", "export#incremental" },
+	{ "Export/Compile game from SDK", "",
+	  "Compiles the game executable itself from the engine SDK instead of shipping "
+	  "the prebuilt one. The project configuration and the pak key are compiled "
+	  "into the binary, and a Shipping export (Dev Tools off) uses the release SDK, "
+	  "so development features do not exist in it at all. It needs cmake, a C++ "
+	  "compiler and an SDK-dev or SDK-release folder beside the editor (or "
+	  "HE_GAME_SDK_DIR) and only runs for a Host target. Whatever is missing, or a "
+	  "build that fails, leaves the prebuilt game in the export; the line under the "
+	  "checkbox and the Compile game step say why.",
+	  "", "" },
 	{ "Export/Compile HorizonCode", "",
 	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "
 	  "GameInstance — into C++ and ships them as a compiled library. It needs "
