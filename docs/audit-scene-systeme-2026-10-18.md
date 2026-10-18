@@ -171,7 +171,10 @@ terrain's chunks in one loop (`TerrainSystem.cpp:577`), so they come in runs.
   - Touched suites green: replication, net_*, anticheat, cell_*, integrity, physics*,
     character, collider, raycast, rope_trail, lod, terrain_tessellation,
     transform_propagation.
-  - Full ctest: see the line below.
+  - Full `ctest -j4` (Release, without the temporary benchmark): 302/303, 2 skipped.
+    The one failure is `test_hpak` "Disk registry" (6 == 2): 4 `.hasset` files in the
+    user's EngineContentCache, and it passes with an empty `HOME`. This is the same
+    environment failure as in step 1.
 - **Not verified:** no editor or game run, and the `HorizonEditor` target was not
   built (only `he_tests`). Multiplayer was checked with the loopback rigs only, not
   over real UDP. Linux and Windows only through CI.
