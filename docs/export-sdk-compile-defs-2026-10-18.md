@@ -611,3 +611,46 @@ body or move behind a macro is open. They are needed for parity with the interpr
   (`HorizonEngineHeaders.txt` is a ready key part). 2. Step 11: `generateCMakeLists`' package branch (`HcCodegen.cpp:4374`) calls
   `find_package(HorizonEngine)` without a profile; with two sets that is refused (interpreted fallback), so pass `HE_BUILD_PROFILE`
   (and `sdkFromRoot`'s `libDir = root/lib` has no libs any more in this layout). 3. Ship `EngineSDK` (both sets) in the editor package (CI).
+
+## Handoff (step 10: one HorizonEngine library, export layout, profile check)
+
+- **Topic / step:** Thema 211, step 10 of 13. Branch claude/export-sdk-compile-horizoncode-codegen: 0f30c102 (bundle, game layout,
+  profile check), 7cd0e989 (exporter layout, SDK lib set), d1759278 (plugin rule). Follows the human's posts 1521/1522.
+- **Done:** `HorizonEngine` (`cmake/HorizonEngineBundle.cmake`, included in the root after HE_Rendering) is ONE shared library linked
+  from `$<TARGET_OBJECTS>` of Core/Net/Scene/Rendering (no second compile, one link), plus `HorizonPythonEngine` (the plugin's objects
+  against it). Editor, tests, tools keep the four libs. `HorizonGame` links the bundle; deploy `out/deploy/Game` = exe + Python runtime
+  (zip, `_pth`, lib-dynload) + `HorizonEngine/` (engine, SDL3, plugin, bundled lz4/zstd/crypto/libpython, Shaders/). Export of such a
+  runtime = `<ProjectName>(.exe)` + `data/` + `HorizonEngine/` (`ProjectExporter.cpp` prepareOutputLayout/copyRuntimeBinaries,
+  `exportedExecutableName`, `runtimeHasEngineDir`); a runtime without `HorizonEngine/` keeps the flat layout and `HorizonGame`. Shared
+  names + `dataDir()` in `Platform/GameLayout.h`; game data reads go through it. `HorizonEngine_BuildProfile()` (`Platform/EngineProfile.h`,
+  extern "C", in Core so in the bundle too); `HE_Game/src/main.cpp` refuses a library of another profile (stderr + message box, exit 3).
+  SDK `lib/<profile>` = libHorizonEngine + SDL3 + plugin (set wiped on install); `HorizonEngine::HorizonEngine`, `::Core/::Net/::Scene/
+  ::Rendering` are INTERFACE forwards. `installBuiltGame` swaps into `HorizonEngine/`.
+- **Windows (written, NOT run):** engine + SDL3 are `/DELAYLOAD`ed, `HE_Game/src/EngineDllDir.cpp`'s `__pfnDliNotifyHook2` loads them
+  from `<exe>\HorizonEngine\` (LOAD_WITH_ALTERED_SEARCH_PATH). Risk: LNK1194 if the exe imports engine DATA; LNK4217 warnings in the
+  bundle link (Scene/Net/Rendering objects dllimport Core). Export-all on the bundle: ~13k symbols on macOS, far below 65535.
+- **Verified (Mac, dev tree out/build/release + release tree out/build/release-profile):** full ctest on the step 9 state 311/311
+  (posted, 1524). Bundle links with no part library (`otool -L`); `stbtt` collided (Core UIFont.cpp + Scene UISystem.cpp), Scene's copy
+  now `STBTT_STATIC`. Deployed game 30 frames hidden, all dylibs from `HorizonEngine/` (DYLD_PRINT_LIBRARIES). Mismatch: dev exe +
+  release lib -> dyld refuses before main (`DevStatsTile::toggle` missing, 134); release exe + dev lib -> main's check message.
+  Exporter tests (new layout, flat fallback, names, Python filter) + `installBuiltGame` into `HorizonEngine/`; `test_app_todo` exports
+  `TodoApp` + `data/` + `HorizonEngine/` and boots it 30 frames. Two-set SDK driver (`-DHE_BUILD_DIR_2=out/build/release-profile
+  -DHE_PROFILE_2=release`): probes print `library profile=dev|release`, refusals, template per set. `build_profile_strings.py --profile
+  release` on SDK lib/release and the release Game folder: 33/33 gone; dev set fails it. SDK e2e on the todo export (`HE_EXPORT_SDK_E2E_EXE
+  =TodoApp`) dev + release: release game ran with 'release' profile, config compiled in, pak from data/. Plugin variant dlopens from
+  `HorizonEngine/` with libpython beside it. Full ctest at the end: see the result post.
+- **Not verified:** Windows/Linux start (CI compiles only). A Python project running scripts in the new layout. .app export with the
+  bundle. GUI click-through. The message box path's exit code 3 (needs a click).
+- **Known regression:** compiled HorizonCode (`libHorizonCodeGen`, links the separate Scene/Core, rpath `@loader_path`) does not load in
+  the new layout -> the game logs it and runs INTERPRETED. Step 12 builds it against the bundle.
+- **Decisions taken:** objects bundle, not a re-compile; delay-load hook instead of an SxS private assembly (probe order with a DLL named
+  like its folder unverifiable here); Python interpreter files stay beside the exe on Windows/Linux (stdlib bootstrap), libpython goes
+  into `HorizonEngine/` on macOS (bundled as the plugin's dependency); Shaders in `HorizonEngine/Shaders` (backends try it before
+  `<base>/Shaders`), in a .app in Resources/Shaders; layout follows the runtime, so old cross-platform bundles still export.
+- **Traps:** release games ignore HE_HIDDEN_WINDOW/HE_EXIT_AFTER_FRAMES (lesson 458): never start one without a kill deadline. The SDK
+  e2e test now runs the game only for dev. `-dead_strip_dylibs`/`--as-needed` on the bundle are what keep libHorizonCore off its deps
+  (the backend static libs link HorizonCore). bundle_native_deps.sh takes `<engine dir> <exe dir>` and removes stale top-level copies.
+- **Next steps:** 1. Step 11: export builds from `EngineSDK` with profile + cache (key: `HorizonEngineHeaders.txt` + profile + settings);
+  `makeBuildSpec` still names the exe HorizonGame, the swap renames. 2. Step 12: HorizonCodeGen against `HorizonEngine::HorizonEngine`
+  (`HcCodegen.cpp` generateCMakeLists ~4374 uses `HorizonEngine::Scene`, now a forward; pass HE_BUILD_PROFILE), shipped into
+  `HorizonEngine/` (game loads it from `data/` today, `GameApplication.cpp` compiledClasses().load). 3. Windows run of an export on NN-WS03.
