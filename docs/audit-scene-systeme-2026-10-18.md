@@ -116,7 +116,10 @@ flagged as a behaviour change was left out, or replaced by an exact form of it.
   match, the body is skipped. This is exact even with a stale memo, because a
   top-level pose depends on the Jolt pose alone. Children keep the full path. The
   audit's active-body list was not used: it would let a script's write to a
-  sleeping body stand. Statics are still visited every step for the reap.
+  sleeping body stand. Statics are still visited every step for the reap. The memo
+  is used only for bodies Jolt reports inactive (`!IsActive()`). Applied to every
+  body, it cost 7% of a step with 3000 falling bodies (0.69 -> 0.74 ms); with the
+  gate that case is within noise of no memo at all (0.70-0.73 vs 0.71-0.72).
 - **SCN-402** (`LODSystem.cpp`): a parent's world matrix is composed once when a
   second sibling follows, and a top-level entity's single product is written out.
   These are the same products, in the same order, as `worldMatrixOf`. A new test
