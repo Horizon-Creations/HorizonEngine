@@ -2,7 +2,7 @@
 
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "TestFsUtil.h"
 
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>

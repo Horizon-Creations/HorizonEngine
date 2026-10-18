@@ -2368,3 +2368,105 @@ TEST_CASE("widget designer: undo keeps a parameter that names no property yet (T
 	UIEditorPanel::forget(d.assetPath);
 	fs::remove_all(root, ec);
 }
+
+// ── The hierarchy column draws only the rows in view (EDT-1802) ──────────────
+// A page of a few hundred elements, scrolled into its middle, with a container
+// folded above the view: the clipped column must be the same picture as the one
+// with every row submitted, and submit only about a screenful of rows.
+TEST_CASE("ui shot: widget designer — the hierarchy clips rows out of view")
+{
+	Harness harness;
+
+	const std::filesystem::path root = tempRoot();
+	std::filesystem::create_directories(root / "UI");
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+
+	HE::UIWidgetTree page;
+	page.canvasWidth = 1280.0f; page.canvasHeight = 720.0f;
+	auto add = [&](HE::UIWidgetType type, const std::string& name, int parent) -> int
+	{
+		const int id = page.add(type);
+		HE::UIElement& e = *page.find(id);
+		e.name = name;
+		e.parentId = parent;
+		return id;
+	};
+	add(HE::UIWidgetType::Panel, "Header", 0);
+	const int folded = add(HE::UIWidgetType::VerticalBox, "Folded", 0);
+	for (int i = 0; i < 40; ++i) add(HE::UIWidgetType::Text, "Hidden " + std::to_string(i), folded);
+	const int list = add(HE::UIWidgetType::VerticalBox, "List", 0);
+	int total = 2 + 40 + 1;
+	for (int i = 0; i < 300; ++i)
+	{
+		const int row = add(i % 10 == 0 ? HE::UIWidgetType::Panel : HE::UIWidgetType::Text,
+		                    "Row " + std::to_string(i), list);
+		++total;
+		if (i % 10 == 0)
+			for (int k = 0; k < 2; ++k) { add(HE::UIWidgetType::Text, "Cell " + std::to_string(i) + "." + std::to_string(k), row); ++total; }
+	}
+	add(HE::UIWidgetType::Panel, "Footer", 0);
+	++total;
+
+	UIWidgetAsset asset;
+	asset.name     = "LongList";
+	asset.path     = "UI/LongList.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(page);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+
+	Designer d{ ctx, (root / "UI" / "LongList.hasset").string() };
+	d.height = 900;
+
+	const auto treeWindow = []() -> ImGuiWindow*
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (std::strstr(w->Name, "##uiw_tree")) return w;
+		return nullptr;
+	};
+	UIEditorPanel::setHierarchyRowClipping(false);
+	d.shoot("widget-designer-long-warmup");
+	ImGuiWindow* tw = treeWindow();
+	REQUIRE(tw);
+	// Fold the first box (a root, so its id is its label under the column's own).
+	tw->StateStorage.SetInt(d.hierarchyRowId("Folded##hn" + std::to_string(folded)), 0);
+	d.shoot("widget-designer-long-folded");
+	CHECK(UIEditorPanel::hierarchyRowsDrawn() == total - 40);
+	ImGui::SetScrollY(tw, tw->ScrollMax.y * 0.5f);
+	const he_ui::Image all = d.shoot("widget-designer-long-all");
+	REQUIRE(all.valid());
+	CHECK(tw->Scroll.y > 1000.0f);
+
+	UIEditorPanel::setHierarchyRowClipping(true);
+	const he_ui::Image clipped = d.shoot("widget-designer-long-clipped");
+	REQUIRE(clipped.valid());
+	const int drawn = UIEditorPanel::hierarchyRowsDrawn();
+	INFO("rows submitted with clipping: " << drawn << " of " << total - 40);
+	CHECK(drawn > 10);
+	CHECK(drawn < 120);
+	int differ = 0;
+	for (int y = 0; y < all.height; ++y)
+		for (int x = 0; x < all.width; ++x)
+		{
+			std::uint8_t r0, g0, b0, a0, r1, g1, b1, a1;
+			all.pixel(x, y, r0, g0, b0, a0);
+			clipped.pixel(x, y, r1, g1, b1, a1);
+			if (r0 != r1 || g0 != g1 || b0 != b1) ++differ;
+		}
+	CHECK(differ == 0);
+	// The scroll range is the same as with every row laid out.
+	const float maxClipped = tw->ScrollMax.y;
+	UIEditorPanel::setHierarchyRowClipping(false);
+	d.shoot("widget-designer-long-all-again");
+	CHECK(tw->ScrollMax.y == doctest::Approx(maxClipped));
+
+	UIEditorPanel::setHierarchyRowClipping(true);
+	UIEditorPanel::forget(d.assetPath);
+	std::error_code ec;
+	std::filesystem::remove(root / "UI" / "LongList.hasset", ec);
+}

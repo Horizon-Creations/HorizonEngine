@@ -701,7 +701,6 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		return true;
 	};
 
-	const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 	int removeEntry = -1;
 
 	// Column rails shared by every card, so a Bind button in entry three sits
@@ -741,6 +740,9 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::GetContentRegionAvail().x - 100.0f - ImGui::GetStyle().ItemSpacing.x));
 		if (ImGui::BeginCombo("##action", shown.c_str()))
 		{
+			// Fetched here, with the dropdown open, not once per frame for a
+			// list nobody is looking at (EDT-1001).
+			const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 			for (const auto& a : actions)
 				if (ImGui::Selectable(a.label.c_str(), a.path == e.actionPath))
 				{ e.actionPath = a.path; e.valueType = -1; st.dirty = true; }

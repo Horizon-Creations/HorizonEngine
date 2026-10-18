@@ -3322,7 +3322,90 @@ size_t ContentManager::scanContentDirectory()
 	// scanDirInto calls' comment): resolveAbsolutePath() re-derives the actual
 	// override/default/cache precedence from the filesystem every time anyway.
 	scanDirInto(GlobalState::engineContentCacheDir().string(), std::string(kEnginePrefix));
+	// A rescan is what the editor does after every refresh of its folder trees,
+	// so this is where "the files may have changed" reaches the file index and
+	// everything else that keys on the epoch.
+	noteContentChanged();
 	return m_diskRegistry.size();
+}
+
+ContentManager::AssetFileList ContentManager::assetFiles(HE::AssetType type) const
+{
+	FileIndex& ix = m_assetFileIndex;
+	if (ix.epoch != m_contentEpoch || ix.contentRoot != m_contentRoot ||
+	    ix.engineRoot != m_engineContentRoot)
+	{
+		// Every type in one pass: a header sniff costs the same whichever type
+		// is wanted, and the next picker asks for another one.
+		std::unordered_map<uint16_t, std::vector<AssetFileEntry>> fresh;
+		auto walk = [&](const std::string& rootStr, const std::string& pathPrefix)
+		{
+			if (rootStr.empty()) return;
+			std::error_code ec;
+			std::filesystem::recursive_directory_iterator it(rootStr, ec), end;
+			for (; it != end; it.increment(ec))
+			{
+				if (ec) break;
+				if (!it->is_regular_file(ec)) continue;
+				if (it->path().extension() != ".hasset") continue;
+				const HE::AssetType t = sniffAssetTypeFromFile(it->path().string());
+				if (t == HE::AssetType::Unknown) continue;
+				AssetFileEntry e;
+				e.label = it->path().stem().string();
+				e.path  = pathPrefix + std::filesystem::relative(it->path(), rootStr, ec).generic_string();
+				std::error_code sec;
+				const auto sz = it->file_size(sec);
+				e.bytes = sec ? 0 : static_cast<std::uint64_t>(sz);
+				fresh[static_cast<uint16_t>(t)].push_back(std::move(e));
+			}
+		};
+		walk(m_contentRoot, "");
+		walk(m_engineContentRoot, std::string(kEnginePrefix));
+
+		ix.byType.clear();
+		for (auto& [t, list] : fresh)
+			ix.byType.emplace(t, std::make_shared<const std::vector<AssetFileEntry>>(std::move(list)));
+		ix.epoch       = m_contentEpoch;
+		ix.contentRoot = m_contentRoot;
+		ix.engineRoot  = m_engineContentRoot;
+	}
+	static const AssetFileList kNone = std::make_shared<const std::vector<AssetFileEntry>>();
+	const auto it = ix.byType.find(static_cast<uint16_t>(type));
+	return it != ix.byType.end() ? it->second : kNone;
+}
+
+ContentManager::AssetFileList ContentManager::sceneFiles() const
+{
+	FileIndex& ix = m_sceneFileIndex;
+	if (ix.scenes && ix.epoch == m_contentEpoch && ix.contentRoot == m_contentRoot)
+		return ix.scenes;
+
+	std::vector<AssetFileEntry> out;
+	if (!m_contentRoot.empty())
+	{
+		// Scenes live anywhere under the PROJECT root, not just Content/, and the
+		// path a scene.load pin stores is project-relative ("Content/123.hescene")
+		// because that is what the exporter packs it under and what the game's
+		// loadSceneInto resolves.
+		const std::filesystem::path projectRoot = std::filesystem::path(m_contentRoot).parent_path();
+		std::error_code ec;
+		std::filesystem::recursive_directory_iterator it(
+			projectRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") { ec.clear(); continue; }
+			AssetFileEntry e;
+			e.label = it->path().stem().string();
+			e.path  = it->path().lexically_relative(projectRoot).generic_string();
+			out.push_back(std::move(e));
+		}
+		std::sort(out.begin(), out.end(),
+		          [](const AssetFileEntry& a, const AssetFileEntry& b) { return a.path < b.path; });
+	}
+	ix.scenes      = std::make_shared<const std::vector<AssetFileEntry>>(std::move(out));
+	ix.epoch       = m_contentEpoch;
+	ix.contentRoot = m_contentRoot;
+	return ix.scenes;
 }
 
 bool ContentManager::ensureResident(HE::UUID id)

@@ -6,7 +6,7 @@
 #include "EditorCommands.h"
 #include "EditorUndo.h"
 #include "StructuralSync.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "TestFsUtil.h"
 
 #include <ContentManager/AssetRefScan.h>

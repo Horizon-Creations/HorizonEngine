@@ -1160,7 +1160,7 @@ void CollabController::wireCallbacks()
 			const std::uint32_t created = m_onRemoteCreate(parent, c.blob);
 			// instantiatePrefab mints a FRESH local handle — recording it here is
 			// exactly what makes handle-stable instantiation unnecessary.
-			if (created != 0) m_netIds.emplace_back(c.netId, created);
+			if (created != 0) rememberNetId(c.netId, created);
 			break;
 		}
 		case Kind::Destroyed:
@@ -1765,7 +1765,9 @@ void CollabController::teardown()
 	m_snapshotGot   = 0;
 	m_snapshotTotal = 0;
 	m_heldSubject   = 0;
-	m_netIds.clear();
+	m_netByHandle.clear();
+	m_handleByNet.clear();
+	m_netMisses.clear();
 	m_lastComponentHashes.clear();
 	m_heldAssetLocks.clear();
 	// Revisions are numbered per session: participant ids are minted afresh by
@@ -2699,12 +2701,31 @@ bool CollabController::publishTerrainPatch(std::uint32_t entityHandle,
 
 // ─── Structural replication ──────────────────────────────────────────────────
 
+namespace
+{
+// low64 of the uuid, top bit cleared: a v4 uuid's variant bits force lo's top
+// bit to 1, which would land every entity in the asset-subject space
+// (assetSubject sets the top bit precisely to keep the two apart). Zero would
+// collide with "no subject", so fold hi in as the escape hatch.
+std::uint64_t netIdOf(const EntityIdComponent& idc)
+{
+	std::uint64_t net = idc.id.lo & ~(1ull << 63);
+	if (net == 0) net = (idc.id.hi | 1ull) & ~(1ull << 63);
+	return net;
+}
+} // namespace
+
+void CollabController::rememberNetId(std::uint64_t netId, std::uint32_t entityHandle)
+{
+	m_netByHandle.emplace(entityHandle, netId);
+	m_handleByNet.emplace(netId, entityHandle);
+	m_netMisses.erase(netId);
+}
+
 std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
 {
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (handle == entityHandle) return net;
-	}
+	if (const auto it = m_netByHandle.find(entityHandle); it != m_netByHandle.end())
+		return it->second;
 
 	// The wire identity is derived from the entity's stable UUID — the one the
 	// scene format already carries — so every peer computes the SAME id from its
@@ -2728,43 +2749,54 @@ std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
 		idc = &reg.emplace<EntityIdComponent>(e,
 			EntityIdComponent{ HE::UUID::generate() });
 	}
-	// low64 of the uuid, top bit cleared: a v4 uuid's variant bits force lo's
-	// top bit to 1, which would land every entity in the asset-subject space
-	// (assetSubject sets the top bit precisely to keep the two apart). Zero
-	// would collide with "no subject", so fold hi in as the escape hatch.
-	std::uint64_t net = idc->id.lo & ~(1ull << 63);
-	if (net == 0) net = (idc->id.hi | 1ull) & ~(1ull << 63);
-
-	m_netIds.emplace_back(net, entityHandle);
+	const std::uint64_t net = netIdOf(*idc);
+	rememberNetId(net, entityHandle);
 	return net;
 }
 
 std::uint32_t CollabController::entityForNetId(std::uint64_t netId)
 {
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (net == netId) return handle;
-	}
+	if (const auto it = m_handleByNet.find(netId); it != m_handleByNet.end())
+		return it->second;
 
 	// Cache miss: resolve against the world. Linear over the id pool, but only
-	// on the first sighting of a subject — every later lookup hits the cache.
+	// on the first sighting of a subject — every later lookup hits the cache —
+	// and a subject nobody here has is scanned for once per change of the
+	// world's ids, not once per frame it is asked about.
 	if (!m_world) return 0;
+	const std::uint64_t revision = m_world->entityIdRevision();
+	if (const auto miss = m_netMisses.find(netId);
+	    miss != m_netMisses.end() && miss->second == revision)
+		return 0;
+
 	auto& reg = m_world->registry();
 	std::uint32_t found = 0;
 	reg.view<EntityIdComponent>().each([&](auto e, const EntityIdComponent& idc) {
-		std::uint64_t net = idc.id.lo & ~(1ull << 63);
-		if (net == 0) net = (idc.id.hi | 1ull) & ~(1ull << 63);
-		if (net == netId) found = static_cast<std::uint32_t>(entt::to_integral(e));
+		if (netIdOf(idc) == netId) found = static_cast<std::uint32_t>(entt::to_integral(e));
 	});
-	if (found != 0) m_netIds.emplace_back(netId, found);
-	return found;
+	if (found != 0)
+	{
+		rememberNetId(netId, found);
+		return found;
+	}
+	// Bounded: ids asked about and never found are few in practice (a peer's
+	// selection of something not here yet), but nothing else ever trims this.
+	if (m_netMisses.size() >= 4096) m_netMisses.clear();
+	m_netMisses[netId] = revision;
+	return 0;
 }
 
 void CollabController::forgetNetId(std::uint64_t netId)
 {
-	m_netIds.erase(std::remove_if(m_netIds.begin(), m_netIds.end(),
-	                              [netId](const auto& e) { return e.first == netId; }),
-	               m_netIds.end());
+	m_netMisses.erase(netId);
+	const auto it = m_handleByNet.find(netId);
+	if (it == m_handleByNet.end()) return;
+	// The handle's entry only if it names this id: a handle that was cached
+	// under another id first keeps that one, as it did in the vector.
+	if (const auto h = m_netByHandle.find(it->second);
+	    h != m_netByHandle.end() && h->second == netId)
+		m_netByHandle.erase(h);
+	m_handleByNet.erase(it);
 }
 
 void CollabController::seedNetIds()
@@ -2775,9 +2807,15 @@ void CollabController::seedNetIds()
 	// uuid can no longer be read from the registry, so the cache built here is
 	// the only place its wire identity survives. Runs on the client after the
 	// snapshot replaced its world, and on the host when it starts hosting.
-	m_netIds.clear();
+	m_netByHandle.clear();
+	m_handleByNet.clear();
+	m_netMisses.clear();
 	if (!m_world) return;
-	m_world->registry().view<entt::entity>().each([&](auto e) {
+	auto& reg = m_world->registry();
+	const std::size_t count = reg.storage<entt::entity>().size();
+	m_netByHandle.reserve(count);
+	m_handleByNet.reserve(count);
+	reg.view<entt::entity>().each([&](auto e) {
 		netIdFor(static_cast<std::uint32_t>(entt::to_integral(e)));
 	});
 }
@@ -2804,12 +2842,9 @@ bool CollabController::publishDestroy(std::uint32_t entityHandle)
 
 	// Look the id up WITHOUT minting one: an entity nobody ever knew about does
 	// not need a deletion broadcast.
-	std::uint64_t netId = 0;
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (handle == entityHandle) { netId = net; break; }
-	}
-	if (netId == 0) return false;
+	const auto known = m_netByHandle.find(entityHandle);
+	if (known == m_netByHandle.end()) return false;
+	const std::uint64_t netId = known->second;
 
 	HE::Net::CollabSession::StructuralChange c;
 	c.kind  = HE::Net::CollabSession::StructuralChange::Kind::Destroyed;

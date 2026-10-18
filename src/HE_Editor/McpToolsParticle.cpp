@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // what a path holds, without loading it
 #include "McpToolCommon.h"            // the argument readers, the confinement rule, the walk
@@ -168,30 +168,18 @@ Emitter openEmitter(ContentManager& content, const McpParticleHooks& h, const js
 
 	if (forWrite)
 	{
-		if (p.engine) { e.failure = failEngineReadOnly(p.rel); return e; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and the running session's emitters have "
+			"already resolved this graph. A change now would be half in effect, so it "
+			"is refused rather than half-applied. Ask the user to stop play mode.",
+			"is open in the Particle Graph Editor with unsaved "
+			"changes. That tab's own copy is the truth while it is dirty: writing the "
+			"file would be reverted by the human's next Save, and there is no way to "
+			"land an edit in the tab that they could take back. Ask the user to save "
+			"or close that tab, then call again." };
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther, h.isDirty, kGate))
 		{
-			e.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and the running session's emitters have "
-				"already resolved this graph. A change now would be half in effect, so it "
-				"is refused rather than half-applied. Ask the user to stop play mode.");
-			return e;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			e.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return e;
-		}
-		if (h.isDirty && h.isDirty(p.rel))
-		{
-			e.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' is open in the Particle Graph Editor with unsaved "
-				"changes. That tab's own copy is the truth while it is dirty: writing the "
-				"file would be reverted by the human's next Save, and there is no way to "
-				"land an edit in the tab that they could take back. Ask the user to save "
-				"or close that tab, then call again.");
+			e.failure = std::move(*refused);
 			return e;
 		}
 	}

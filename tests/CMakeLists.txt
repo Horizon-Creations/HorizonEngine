@@ -418,6 +418,7 @@ add_executable(he_tests
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
     test_git_panel_ops.cpp
+    test_sourcecontrol_tree.cpp
     test_scene_file_stamp.cpp
     test_github_oauth.cpp
     test_game_replication.cpp

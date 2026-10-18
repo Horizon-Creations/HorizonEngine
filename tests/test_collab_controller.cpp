@@ -3961,3 +3961,166 @@ TEST_CASE("Collab failure: the large-assets question is announced without a retr
     s.client.leave();
     s.host.leave();
 }
+
+// ─── Audit 220 step 4: the net-id table and the structure gate ───────────────
+// EDT-202: m_netIds was a vector searched linearly, so seeding a world was
+// quadratic and every per-frame lookup grew with the scene. Now two maps and a
+// cache of misses keyed on the world's entityIdRevision. EDT-402/1601: the
+// structure diff runs when the world's structure epoch moved, while something
+// waits for a retry, or once a second.
+
+TEST_CASE("Net ids: a seeded world resolves every entity both ways")
+{
+    HorizonWorld world;
+    std::vector<Entity> made;
+    made.reserve(20000);
+    for (int i = 0; i < 20000; ++i) made.push_back(world.createEntity("E"));
+
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    std::size_t both = 0;
+    for (const Entity e : made)
+    {
+        const auto handle = static_cast<std::uint32_t>(entt::to_integral(e));
+        const std::uint64_t net = c.netIdFor(handle);
+        REQUIRE(net != 0);
+        // The wire id is the uuid's low half, top bit cleared — the same value
+        // every peer derives from its own copy.
+        CHECK(net == (world.entityId(e).lo & ~(1ull << 63)));
+        if (c.entityForNetId(net) == handle) ++both;
+    }
+    CHECK(both == made.size());
+}
+
+TEST_CASE("Net ids: an id nobody has is not found until an entity takes it")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Late");
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    // A peer's selection of something this machine does not have (yet).
+    const HE::UUID theirs{ 0x1234, 0x0000'0000'00C0'FFEEull };
+    const std::uint64_t net = theirs.lo & ~(1ull << 63);
+    CHECK(c.entityForNetId(net) == 0);
+    CHECK(c.entityForNetId(net) == 0);   // the cached miss answers the same
+
+    // The entity arrives (a create from that peer, a load): setEntityId goes
+    // through the registry's signals, the world's id revision moves, and the
+    // cached miss must not outlive it.
+    world.setEntityId(e, theirs);
+    CHECK(c.entityForNetId(net) == static_cast<std::uint32_t>(entt::to_integral(e)));
+}
+
+TEST_CASE("Net ids: a cached miss also yields to a raw emplace of the id")
+{
+    HorizonWorld world;
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    const HE::UUID id{ 7, 0x0000'0000'0000'BEEFull };
+    const std::uint64_t net = id.lo;
+    CHECK(c.entityForNetId(net) == 0);
+    // Not through createEntity/setEntityId: a raw create plus emplace, the way
+    // a deserializer or a test might. The id signal still fires.
+    auto& reg = world.registry();
+    const Entity raw = reg.create();
+    reg.emplace<EntityIdComponent>(raw, EntityIdComponent{ id });
+    CHECK(c.entityForNetId(net) == static_cast<std::uint32_t>(entt::to_integral(raw)));
+}
+
+TEST_CASE("Net ids: forgetting an id drops it both ways, and a recycled handle gets its own")
+{
+    HorizonWorld world;
+    const Entity a = world.createEntity("A");
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    const auto ha = static_cast<std::uint32_t>(entt::to_integral(a));
+    const std::uint64_t na = c.netIdFor(ha);
+    REQUIRE(c.entityForNetId(na) == ha);
+
+    world.destroyEntity(a);
+    c.forgetNetId(na);
+    CHECK(c.entityForNetId(na) == 0);
+    // The destroyed handle is not answered from the cache any more either.
+    CHECK(c.netIdFor(ha) == 0);
+
+    const Entity b = world.createEntity("B");   // reuses A's slot, new version
+    const auto hb = static_cast<std::uint32_t>(entt::to_integral(b));
+    const std::uint64_t nb = c.netIdFor(hb);
+    CHECK(nb != 0);
+    CHECK(nb != na);
+    CHECK(c.entityForNetId(nb) == hb);
+    CHECK(c.entityForNetId(na) == 0);
+}
+
+TEST_CASE("Structure gate: a fresh gate runs, an unchanged world does not")
+{
+    HorizonWorld world;
+    HE::Ed::StructPassGate gate;
+    std::uint64_t now = 5000;
+    REQUIRE(gate.due(world.structureEpoch(), false, now));
+    gate.ran(world.structureEpoch(), now);
+
+    // Sixty quiet frames: not one pass.
+    int passes = 0;
+    for (int f = 0; f < 60; ++f)
+    {
+        now += 16;
+        if (gate.due(world.structureEpoch(), false, now)) { ++passes; gate.ran(world.structureEpoch(), now); }
+    }
+    CHECK(passes == 0);
+}
+
+TEST_CASE("Structure gate: create, destroy, re-parent and sibling order each wake it")
+{
+    HorizonWorld world;
+    const Entity a = world.createEntity("A");
+    const Entity b = world.createEntity("B");
+    world.createEntity("S1");
+    const Entity s2 = world.createEntity("S2");
+    HE::Ed::StructPassGate gate;
+    const std::uint64_t now = 1000;
+    gate.ran(world.structureEpoch(), now);
+
+    const auto wakes = [&](auto&& change) {
+        change();
+        const bool due = gate.due(world.structureEpoch(), false, now + 16);
+        gate.ran(world.structureEpoch(), now + 16);
+        return due;
+    };
+    CHECK(wakes([&] { world.createEntity("C"); }));
+    CHECK(wakes([&] { REQUIRE(world.reparentEntity(b, a)); }));
+    CHECK(wakes([&] { REQUIRE(world.moveChild(s2, -1)); }));
+    CHECK(wakes([&] { world.destroyEntity(b); }));
+    CHECK(wakes([&] { world.clear(); }));
+    // And nothing more after the last one was seen.
+    CHECK_FALSE(gate.due(world.structureEpoch(), false, now + 32));
+}
+
+TEST_CASE("Structure gate: pending retries run every frame, the fallback once a second")
+{
+    HorizonWorld world;
+    HE::Ed::StructPassGate gate;
+    gate.ran(world.structureEpoch(), 1000);
+
+    // A create, re-parent or destroy waiting for a retry: kSendRetryFrames
+    // counts passes, so the pass has to keep running per frame.
+    CHECK(gate.due(world.structureEpoch(), /*pendingWork=*/true, 1016));
+
+    // What the epoch cannot see — a raw registry().create() — is the
+    // fallback's: not before the interval, and surely after it.
+    world.registry().create();
+    CHECK_FALSE(gate.due(world.structureEpoch(), false, 1000 + HE::Ed::StructPassGate::kFallbackMs - 1));
+    CHECK(gate.due(world.structureEpoch(), false, 1000 + HE::Ed::StructPassGate::kFallbackMs));
+
+    // A reset (session ended, world replaced) runs at once.
+    gate.reset();
+    CHECK(gate.due(world.structureEpoch(), false, 1001));
+}

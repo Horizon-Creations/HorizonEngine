@@ -48,6 +48,12 @@ namespace DocsPanel
 	// and it cannot be opened by hand at all.
 	bool navigatingGroups();
 
+	// Test hooks for the page's section clipping (only the sections in view are
+	// drawn). Off draws every section, the reference a clipped frame is compared
+	// against; the count is how many sections the last page draw submitted.
+	void setSectionClipping(bool on);
+	int  sectionsDrawn();
+
 	// ── What the reader needs from the editor ────────────────────────────────
 	// Four fonts and a renderer — not an AppContext. The panel used to take one,
 	// which meant it could only be drawn by something that had a project, a
