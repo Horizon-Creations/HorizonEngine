@@ -4,7 +4,11 @@
 # a system CPython, …). Called from the HorizonGame POST_BUILD on macOS + Linux; the
 # exporter copies the whole Game/ dir into an export, so fixing Game/ fixes exports too.
 #
-#   Usage: bundle_native_deps.sh <dir>
+#   Usage: bundle_native_deps.sh <dir> [<exe dir>]
+#
+# <exe dir>: the game deploy since the engine moved into HorizonEngine/ (Thema 211
+# step 10): <dir> is HorizonEngine/, the executable and lib-dynload/ sit one level up.
+# The deps are copied into <dir>; the executable's links are rewritten to them too.
 #
 # macOS: BFS every Mach-O's non-system deps, copy them in next to the binaries, rewrite
 #        the links to @rpath, and ad-hoc re-sign (install_name_tool invalidates the
@@ -17,7 +21,8 @@
 #        (set globally at build) finds the copied libs next to the binaries.
 set -eo pipefail
 
-DIR="${1:?usage: bundle_native_deps.sh <dir>}"
+DIR="${1:?usage: bundle_native_deps.sh <dir> [<exe dir>]}"
+EXE_DIR="${2:-$DIR}"
 [ -d "$DIR" ] || { echo "bundle_native_deps: '$DIR' is not a directory"; exit 1; }
 
 # ── System-path predicate: deps we must NOT bundle (OS-provided) ────────────────
@@ -51,7 +56,7 @@ bundled_name() {  # $1 = dep path -> echoes bundle basename
 bundle_macos() {
     local seen="|" items=() f dep name id
     # Seed the work list + seen-set with the binaries already in the dir.
-    for f in "$DIR"/HorizonGame "$DIR"/HorizonEditor "$DIR"/*.dylib; do
+    for f in "$EXE_DIR"/HorizonGame "$EXE_DIR"/HorizonEditor "$DIR"/*.dylib; do
         [ -f "$f" ] || continue
         items+=("$f"); seen="${seen}$(basename "$f")|"
     done
@@ -76,7 +81,7 @@ bundle_macos() {
     done
 
     # ── Rewrite install names: own id + every reference to a now-bundled lib ─────
-    for f in "$DIR"/HorizonGame "$DIR"/HorizonEditor "$DIR"/*.dylib; do
+    for f in "$EXE_DIR"/HorizonGame "$EXE_DIR"/HorizonEditor "$DIR"/*.dylib; do
         [ -f "$f" ] || continue
         # Every bundled dylib gets a @rpath id (a no-op for engine dylibs that
         # already have it; fixes the copied third-party libs' absolute ids).
@@ -92,7 +97,7 @@ bundle_macos() {
 
     # ── Verify no stray absolute references remain ──────────────────────────────
     local bad=0
-    for f in "$DIR"/HorizonGame "$DIR"/HorizonEditor "$DIR"/*.dylib; do
+    for f in "$EXE_DIR"/HorizonGame "$EXE_DIR"/HorizonEditor "$DIR"/*.dylib; do
         [ -f "$f" ] || continue
         while IFS= read -r dep; do
             is_system_macho "$dep" && continue
@@ -104,7 +109,7 @@ bundle_macos() {
     # ── Ad-hoc re-sign (dylibs first, then the executable) ──────────────────────
     if command -v codesign >/dev/null 2>&1; then
         for f in "$DIR"/*.dylib; do [ -f "$f" ] && codesign --force --sign - "$f" 2>/dev/null || true; done
-        for f in "$DIR"/HorizonGame "$DIR"/HorizonEditor; do [ -f "$f" ] && codesign --force --sign - "$f" 2>/dev/null || true; done
+        for f in "$EXE_DIR"/HorizonGame "$EXE_DIR"/HorizonEditor; do [ -f "$f" ] && codesign --force --sign - "$f" 2>/dev/null || true; done
     fi
 
     # Relocate the Python C-extension modules' own non-system deps (only _ssl/_hashlib
@@ -119,7 +124,7 @@ bundle_macos() {
 # loading .so). Only _ssl/_hashlib actually pull anything in (libssl + libcrypto); the
 # other ~70 modules are libSystem-only and are left untouched.
 bundle_macos_dynload() {
-    local dyndir="$DIR/lib-dynload"
+    local dyndir="$EXE_DIR/lib-dynload"
     [ -d "$dyndir" ] || return 0
     local seen="|" items=() f dep name touched=()
 
@@ -175,7 +180,7 @@ bundle_macos_dynload() {
 bundle_linux() {
     # Reference binary to read the resolved dep paths from.
     local ref=""
-    for cand in "$DIR/libHorizonCore.so" "$DIR/HorizonGame" "$DIR/HorizonEditor"; do
+    for cand in "$DIR/libHorizonEngine.so" "$DIR/libHorizonCore.so" "$EXE_DIR/HorizonGame" "$EXE_DIR/HorizonEditor"; do
         [ -f "$cand" ] && ref="$cand" && break
     done
     [ -n "$ref" ] || { echo "bundle_native_deps: no reference binary in $DIR"; return 0; }
@@ -206,4 +211,16 @@ case "$(uname -s)" in
     Linux)  bundle_linux ;;
     *)      echo "    (no-op on $(uname -s))" ;;
 esac
+# A deploy from before HorizonEngine/ kept these libraries beside the executable;
+# the exporter ships that folder as it is, so a copy left there would ship twice.
+if [ "$EXE_DIR" != "$DIR" ]; then
+    for f in "$DIR"/*; do
+        [ -f "$f" ] || continue
+        stale="$EXE_DIR/$(basename "$f")"
+        if [ -f "$stale" ]; then
+            rm -f "$stale"
+            echo "    - $(basename "$f")  (stale copy beside the executable)"
+        fi
+    done
+fi
 echo "==> bundle_native_deps: done"

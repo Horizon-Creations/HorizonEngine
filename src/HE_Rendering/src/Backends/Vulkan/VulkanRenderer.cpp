@@ -2055,13 +2055,22 @@ void VulkanRenderer::RenderWindow(HE::Window* window)
 
 VkShaderModule VulkanRenderer::loadShaderModule(const char* spvFileName)
 {
-    // SPIR-V is loaded from <exe dir>/Shaders/<name>.spv. The .spv files are
+    // SPIR-V is loaded from <exe dir>/HorizonEngine/Shaders/<name>.spv (an
+    // exported game, Platform/GameLayout.h), else <exe dir>/Shaders/ (the editor
+    // deploy, older exports, a .app's Resources). The .spv files are
     // produced from src/HE_Rendering/shaders/*.{vert,frag} by glslc at build
     // time (see CMakeLists) — they cannot be generated on a machine without a
     // Vulkan/glslc toolchain, which is also why this backend isn't built there.
     const char* base = SDL_GetBasePath();
-    std::string path = std::string(base ? base : "") + "Shaders/" + spvFileName;
+    const std::string baseDir = base ? base : "";
+    std::string path = baseDir + "HorizonEngine/Shaders/" + spvFileName;
     std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f)
+    {
+        path = baseDir + "Shaders/" + spvFileName;
+        f.clear();
+        f.open(path, std::ios::binary | std::ios::ate);
+    }
     if (!f)
     {
         HE_LOG_WARN(RHI, "%s", ("VulkanRenderer: shader not found — " + path).c_str());

@@ -1,4 +1,8 @@
+// This library's own copy of the rasterizer: HorizonCore compiles one too
+// (UIFont.cpp). STATIC so the two do not collide where both libraries are
+// linked into one (the HorizonEngine bundle of an exported game).
 #define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
 #include <stb_truetype.h>
 #include <cstdint>
 

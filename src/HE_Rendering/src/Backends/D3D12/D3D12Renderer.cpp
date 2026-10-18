@@ -8115,14 +8115,22 @@ struct D3D12RendererImpl
 #if HE_D3D12_DXR
     // ── GI hardware ray tracing (DXR 1.1) — acceleration-structure plumbing ──
 
-    // Loads an offline-compiled DXIL blob from <exe dir>/Shaders/<name> (dxc
-    // output deployed next to the executable, same convention as the Vulkan
-    // .spv files). Empty vector = not found → SW kernels.
+    // Loads an offline-compiled DXIL blob from <exe dir>/HorizonEngine/Shaders/<name>
+    // (an exported game), else <exe dir>/Shaders/<name> (the editor deploy, older
+    // exports): dxc output, same convention as the Vulkan .spv files. Empty
+    // vector = not found → SW kernels.
     std::vector<uint8_t> loadGiShaderBlob(const char* name)
     {
         const char* base = SDL_GetBasePath();
-        const std::string path = std::string(base ? base : "") + "Shaders/" + name;
+        const std::string baseDir = base ? base : "";
+        std::string path = baseDir + "HorizonEngine/Shaders/" + name;
         std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f)
+        {
+            path = baseDir + "Shaders/" + name;
+            f.clear();
+            f.open(path, std::ios::binary | std::ios::ate);
+        }
         if (!f)
         {
             HE_LOG_INFO(RHI, "%s",

@@ -36,6 +36,7 @@
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <Integrity/IntegrityProbe.h> // exe/dylib/pak hashes for the join check (anti-cheat plan §3.5)
+#include <Platform/GameLayout.h>      // data/ and HorizonEngine/ beside the executable
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
 #include <HorizonCode/HcClassResolve.h>
 #include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
@@ -238,15 +239,16 @@ bool notifyShow(const std::string& title, const std::string& body)
 // THAT does nothing, so the bundle itself is what macOS is told to open.
 std::filesystem::path executablePathForAutostart()
 {
-    const char* base = SDL_GetBasePath();
-    if (!base) return {};
-    std::filesystem::path p(base);
+    // The executable carries the project's name since the export renames it.
+    const std::filesystem::path exe = HE::Integrity::currentExecutablePath();
+    if (exe.empty()) return {};
 #ifdef __APPLE__
+    const std::filesystem::path p = exe.parent_path();
     // …/Foo.app/Contents/Resources/ → …/Foo.app
     for (std::filesystem::path up = p; !up.empty() && up != up.root_path(); up = up.parent_path())
         if (up.extension() == ".app") return up;
 #endif
-    return p / "HorizonGame";
+    return exe;
 }
 
 void destroyTray()
@@ -271,8 +273,8 @@ void trayShow(const std::string& tooltip)
     SDL_Surface* icon = nullptr;
     std::vector<std::uint8_t> rgba;
     int w = 0, h = 0;
-    if (const char* base = SDL_GetBasePath())
-        if (HE::heLoadPngRGBA(std::filesystem::path(base) / "AppIcon.png", rgba, w, h))
+    if (const std::filesystem::path data = HE::GameLayout::dataDir(); !data.empty())
+        if (HE::heLoadPngRGBA(data / "AppIcon.png", rgba, w, h))
             icon = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, rgba.data(), w * 4);
 
     g_tray = SDL_CreateTray(icon, tooltip.empty() ? nullptr : tooltip.c_str());
@@ -437,9 +439,10 @@ void GameApplication::applyShippedConfig()
 
 	// SDL_GetBasePath needs no SDL_Init, and inside a macOS .app it resolves to
 	// Contents/Resources — the same directory OnInit reads project.hcfg and the
-	// pak from, and where the exporter puts config.json.
-	const char* baseRaw = SDL_GetBasePath();
-	if (!baseRaw)
+	// pak from, and where the exporter puts config.json. In the export layout
+	// that is data/ beside the executable (GameLayout::dataDir).
+	const fs::path dataDir = HE::GameLayout::dataDir();
+	if (dataDir.empty())
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: SDL_GetBasePath returned null — the shipped project "
 			"configuration cannot be located");
@@ -460,10 +463,10 @@ void GameApplication::applyShippedConfig()
 	// FPS-style mouse grab at the top of OnInit is the other one (plan E6).
 	// OnInit overwrites the member from the same file a moment later, so this is
 	// the same answer arriving earlier, not a second source of truth.
-	if (baseRaw)
+	if (!dataDir.empty())
 	{
 		ProjectConfig peek;
-		if (HE::resolveProjectConfig(compiledGameBuildConfig(), fs::path(baseRaw), peek)
+		if (HE::resolveProjectConfig(compiledGameBuildConfig(), dataDir, peek)
 		        != HE::ProjectConfigSource::None
 		    && peek.appMode)
 		{
@@ -479,10 +482,10 @@ void GameApplication::applyShippedConfig()
 		// game must start either way.
 		// A game built with HEGameBuildConfig.h carries them compiled in and does
 		// not look for the file.
-		if (!HE::resolveProjectSettings(compiledGameBuildConfig(), fs::path(baseRaw), m_projectSettings))
+		if (!HE::resolveProjectSettings(compiledGameBuildConfig(), dataDir, m_projectSettings))
 		{
 			HE_LOG_WARN(Core, "GameApplication: %s is unreadable — using default project settings",
-			            HE::projectSettingsPath(fs::path(baseRaw)).string().c_str());
+			            HE::projectSettingsPath(dataDir).string().c_str());
 			m_projectSettings = HE::ProjectSettings{};
 		}
 	}
@@ -565,9 +568,9 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 	// advertising itself inside somebody else's product. No picture, no splash.
 	if (m_projectSettings.game.splashEnabled)
 	{
-		if (const char* baseRaw = SDL_GetBasePath())
+		if (const fs::path data = HE::GameLayout::dataDir(); !data.empty())
 		{
-			const fs::path logo = fs::path(baseRaw) / "Splash.png";
+			const fs::path logo = data / "Splash.png";
 			std::error_code ec;
 			if (fs::is_regular_file(logo, ec))
 			{
@@ -641,13 +644,14 @@ void GameApplication::OnInit()
 	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
 		SDL_StartTextInput(w);
 
-	const char* baseRaw = SDL_GetBasePath();
-	if (!baseRaw)
+	// The shipped data: <exe dir>/data, or the base path itself (.app, old flat
+	// exports). Named exeDir from the time both were the same folder.
+	const std::filesystem::path exeDir = HE::GameLayout::dataDir();
+	if (exeDir.empty())
 	{
 		HE_LOG_WARN(Core, "%s", "GameApplication: SDL_GetBasePath returned null");
 		return;
 	}
-	const std::filesystem::path exeDir(baseRaw);
 
 	// ── The window icon (plan A7) ────────────────────────────────────────────
 	// AppIcon.png sits beside the data because the exporter generated it there.
@@ -803,7 +807,10 @@ void GameApplication::OnInit()
 		HE::Integrity::Inputs in;
 		in.executable = HE::Integrity::currentExecutablePath();
 		if (!in.executable.empty())
+		{
 			in.libraryDirs.push_back(in.executable.parent_path());
+			in.libraryDirs.push_back(in.executable.parent_path() / HE::GameLayout::kEngineDirName);
+		}
 		in.libraryDirs.push_back(exeDir);
 		for (const auto& pak : contentManager().mountedPakIds())
 			in.paks.push_back({ std::filesystem::path(pak.path).filename().string(), pak.tocHash });
@@ -1553,7 +1560,7 @@ std::function<bool(std::vector<uint8_t>&)> GameApplication::openCellFile(const s
 	std::vector<std::filesystem::path> candidates;
 	if (!contentManager().contentRoot().empty())
 		candidates.push_back(std::filesystem::path(contentManager().contentRoot()).parent_path() / path);
-	if (const char* base = SDL_GetBasePath()) candidates.push_back(std::filesystem::path(base) / path);
+	if (const auto data = HE::GameLayout::dataDir(); !data.empty()) candidates.push_back(data / path);
 	std::error_code ec;
 	for (const auto& file : candidates)
 		if (std::filesystem::exists(file, ec))
@@ -1631,8 +1638,8 @@ bool GameApplication::loadSceneInto(HorizonWorld& world, const std::string& scen
 	int n = 0;
 	if (!contentManager().contentRoot().empty())
 		candidates[n++] = std::filesystem::path(contentManager().contentRoot()).parent_path() / scenePath;
-	if (const char* base = SDL_GetBasePath())
-		candidates[n++] = std::filesystem::path(base) / scenePath;
+	if (const auto data = HE::GameLayout::dataDir(); !data.empty())
+		candidates[n++] = data / scenePath;
 	std::error_code ec;
 	for (int i = 0; i < n; ++i)
 		if (std::filesystem::exists(candidates[i], ec))
