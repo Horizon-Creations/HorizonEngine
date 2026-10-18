@@ -465,7 +465,7 @@ namespace
 			for (const glm::vec3& p : rope->controlPoints) pts.push_back(vec3ToJson(p));
 			comps["rope"] = {
 				{ "visible",        rope->visible },
-				{ "points",         pts },
+				{ "points",         std::move(pts) },
 				{ "attachStart",    uuidToJson(rope->attachStart) },
 				{ "attachEnd",      uuidToJson(rope->attachEnd) },
 				{ "sag",            rope->sag },
@@ -488,7 +488,7 @@ namespace
 			json pts = json::array();
 			for (const glm::vec3& p : spline->controlPoints) pts.push_back(vec3ToJson(p));
 			comps["spline"] = {
-				{ "points", pts },
+				{ "points", std::move(pts) },
 				{ "closed", spline->closed },
 			};
 		}
@@ -579,7 +579,7 @@ namespace
 				{ "asset",      uuidToJson(s->scriptAssetId) },
 				{ "moduleName", s->moduleName },
 				{ "enabled",    s->enabled },
-				{ "properties", props },
+				{ "properties", std::move(props) },
 			};
 		}
 		if (auto* ss = registry.try_get<SaveStateComponent>(entity))
@@ -816,7 +816,7 @@ namespace
 				if (!cells.empty())
 					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
 			}
-			comps["terrain"] = tc;
+			comps["terrain"] = std::move(tc);
 		}
 		if (auto* a = registry.try_get<AudioSourceComponent>(entity))
 		{
@@ -1043,7 +1043,7 @@ namespace
 			comps["animstatemachine"] = {
 				{ "stateMachineAsset", uuidToJson(sm->stateMachineAssetId) },
 				{ "currentStateName",  sm->currentStateName },
-				{ "params",            params },
+				{ "params",            std::move(params) },
 			};
 		}
 		if (auto* lod = registry.try_get<LODComponent>(entity))
@@ -1052,7 +1052,7 @@ namespace
 			for (const auto& lvl : lod->levels)
 				levels.push_back({ { "meshId", uuidToJson(lvl.meshId) },
 				                   { "maxDistance", lvl.maxDistance } });
-			comps["lod"] = { { "levels", levels } };
+			comps["lod"] = { { "levels", std::move(levels) } };
 		}
 		if (auto* fol = registry.try_get<FoliageComponent>(entity))
 		{
@@ -1176,16 +1176,16 @@ namespace
 					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
 					    !HE::isTerrainGenerated(registry, child))                // + chunks, water
 						children.push_back(uuidToJson(entityUuid(registry, child)));
-				eJson["children"] = children;
+				eJson["children"] = std::move(children);
 			}
 
 			json comps = serializeComponents(registry, entity);
 			if (!comps.is_null())
-				eJson["components"] = comps;
+				eJson["components"] = std::move(comps);
 
-			entities.push_back(eJson);
+			entities.push_back(std::move(eJson));
 		}
-		scene["entities"] = entities;
+		scene["entities"] = std::move(entities);
 
 		// Level script (HorizonCode graph, one per scene). Stored as a nested
 		// object so the scene file stays readable; omitted when empty.
@@ -2697,16 +2697,16 @@ namespace
 					children.push_back(uuidToJson(entityUuid(registry, child)));
 				}
 				if (!children.empty())
-					eJson["children"] = children;
+					eJson["children"] = std::move(children);
 			}
 
 			json comps = serializeComponents(registry, entity);
 			if (!comps.is_null())
-				eJson["components"] = comps;
+				eJson["components"] = std::move(comps);
 
-			entArray.push_back(eJson);
+			entArray.push_back(std::move(eJson));
 		}
-		scene["entities"] = entArray;
+		scene["entities"] = std::move(entArray);
 		return scene;
 	}
 
@@ -3753,21 +3753,21 @@ bool SceneSerializer::importComponentText(HorizonWorld& world, Entity entity, co
     return true;
 }
 
-bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
-                                         const std::vector<uint8_t>& assetBlob,
-                                         PrefabSyncReport* report)
+// The sync proper, on a blob already parsed. syncPrefabInstances parses each
+// asset ONCE and hands the same tree to every placement of it: a thousand
+// placements of one prefab were a thousand identical CBOR parses (SCN-702).
+// `blobBytes` is only for the log line.
+static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const json& scene,
+                                     size_t blobBytes, SceneSerializer::PrefabSyncReport& rep)
 {
-    PrefabSyncReport  local;
-    PrefabSyncReport& rep = report ? *report : local;
     auto& registry = world.registry();
     if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
 
-    const json scene = json::from_cbor(assetBlob, /*strict=*/true, /*allow_exceptions=*/false);
     auto entities = scene.is_object() ? scene.find("entities") : scene.end();
     if (scene.is_discarded() || entities == scene.end() || !entities->is_array())
     {
         HE_LOG_ERROR(Serialize, "Prefab sync: the asset payload is not a readable subtree "
-                                "(%zu bytes) — instance left as it is", assetBlob.size());
+                                "(%zu bytes) — instance left as it is", blobBytes);
         return false;
     }
 
@@ -3846,17 +3846,17 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
     // root's own record can be "lost" only when the asset was rebuilt under a
     // new root id, and the root is the placement — it is never destroyed.
     {
-        auto recordPresent = [&](const HE::UUID& key)
-        {
-            for (const json* r : records)
-                if (entityKeyOf(*r) == key) return true;
-            return false;
-        };
+        // Asked per binding and per entity under it: a set, not a walk over
+        // the records that looks each one's uuid up again (SCN-702).
+        std::unordered_set<HE::UUID> recordKeys;
+        recordKeys.reserve(records.size());
+        for (const json* r : records) recordKeys.insert(entityKeyOf(*r));
+        auto recordPresent = [&](const HE::UUID& key) { return recordKeys.count(key) != 0; };
         // Bound by a placement other than this one and other than itself —
         // i.e. a record of a nested placement, not that placement's root.
         auto insideNestedPlacement = [&](Entity s)
         {
-            for (Entity r : prefabInstancesBinding(world, s))
+            for (Entity r : SceneSerializer::prefabInstancesBinding(world, s))
                 if (r != root && r != s) return true;
             return false;
         };
@@ -4152,6 +4152,19 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             std::vector<std::string> nestedProps;
             const NestedWrite mode = writeOf(k, &nestedProps);
             if (mode == NestedWrite::None) continue;
+            // The usual case — the template's block whole, no property kept
+            // from the instance — is compared as it stands; the deep copy below
+            // is only for a block that gets merged (or written).
+            const bool propOverride = std::any_of(work.overrides.begin(), work.overrides.end(),
+                [&](const PrefabInstanceComponent::Override& o)
+                { return o.templateEntity == key && o.component == k && !o.property.empty(); });
+            if (mode == NestedWrite::Full && !propOverride)
+            {
+                auto cur = iComps.find(k);
+                if (cur != iComps.end() && *cur == block) continue;
+                toApply[k] = block;
+                continue;
+            }
             json merged = block;
             if (mode == NestedWrite::Props)
             {
@@ -4228,6 +4241,19 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
     return true;
 }
 
+bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
+                                         const std::vector<uint8_t>& assetBlob,
+                                         PrefabSyncReport* report)
+{
+    PrefabSyncReport  local;
+    PrefabSyncReport& rep = report ? *report : local;
+    auto& registry = world.registry();
+    if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+
+    const json scene = json::from_cbor(assetBlob, /*strict=*/true, /*allow_exceptions=*/false);
+    return syncPrefabInstanceParsed(world, root, scene, assetBlob.size(), rep);
+}
+
 size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager& content,
                                             PrefabSyncReport* report)
 {
@@ -4237,22 +4263,32 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
 
     // Roots first, then blobs, then the sync: the pass creates entities, and
     // walking a view while creating would be walking a moving list. The blob
-    // is COPIED out of the content manager at once — getPrefab hands out a
+    // is PARSED out of the content manager at once — getPrefab hands out a
     // pointer into a dense vector that the next loadAsset (which ensureResident
-    // for the next asset may well be) invalidates together with the bytes.
+    // for the next asset may well be) invalidates together with the bytes —
+    // and once per asset, not once per placement of it. An empty blob stays
+    // "not in the content manager"; one that does not parse is refused by
+    // each placement's sync, with its log line, as before.
     std::vector<Entity> roots;
     for (auto e : registry.view<PrefabInstanceComponent>()) roots.push_back(e);
 
-    std::unordered_map<HE::UUID, std::vector<uint8_t>> blobs;
+    struct ParsedBlob
+    {
+        size_t bytes = 0;
+        json   scene;
+    };
+    std::unordered_map<HE::UUID, ParsedBlob> blobs;
     for (Entity e : roots)
     {
         const HE::UUID id = registry.get<PrefabInstanceComponent>(e).asset;
         if (id == HE::UUID{} || blobs.count(id)) continue;
         content.ensureResident(id);
-        if (const PrefabAsset* p = content.getPrefab(id))
-            blobs[id] = p->data;
-        else
-            blobs[id] = {};
+        ParsedBlob& b = blobs[id];
+        if (const PrefabAsset* p = content.getPrefab(id); p && !p->data.empty())
+        {
+            b.bytes = p->data.size();
+            b.scene = json::from_cbor(p->data, /*strict=*/true, /*allow_exceptions=*/false);
+        }
     }
 
     size_t synced = 0;
@@ -4261,7 +4297,7 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
         if (!registry.valid(e)) continue;
         const HE::UUID id = registry.get<PrefabInstanceComponent>(e).asset;
         auto it = blobs.find(id);
-        if (it == blobs.end() || it->second.empty())
+        if (it == blobs.end() || it->second.bytes == 0)
         {
             const auto* n = registry.try_get<NameComponent>(e);
             HE_LOG_WARN(Serialize, "Prefab sync: '%s' points at prefab {%016llx-%016llx}, which is "
@@ -4271,7 +4307,7 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
             ++rep.unresolvedAssets;
             continue;
         }
-        if (syncPrefabInstance(world, e, it->second, &rep)) ++synced;
+        if (syncPrefabInstanceParsed(world, e, it->second.scene, it->second.bytes, rep)) ++synced;
     }
     if (synced)
         HE_LOG_INFO(Serialize, "Prefab sync: %zu instance(s) — %zu component(s) applied, %zu removed, "

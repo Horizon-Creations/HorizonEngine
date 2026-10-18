@@ -254,6 +254,7 @@ std::uint32_t GameReplication::registerEntity(Entity entity, std::uint32_t owner
 	nc.owner = owner;
 
 	m_byNetId[nc.netId] = entity;
+	unsettle(nc.netId);
 	return nc.netId;
 }
 
@@ -267,6 +268,7 @@ bool GameReplication::adoptEntity(Entity entity, std::uint32_t netId, std::uint3
 	nc.netId = netId;
 	nc.owner = owner;
 	m_byNetId[netId] = entity;
+	unsettle(netId);
 	return true;
 }
 
@@ -659,6 +661,7 @@ void GameReplication::applyBaseline(BitReader& r)
 		// snapshot ordering, and claiming a tick here would make the next real
 		// snapshot look like a duplicate of it.
 		st.hasTick     = false;
+		st.settled     = false;
 
 		// Place it NOW rather than waiting for the next update(): a client that
 		// asks where something is between the baseline and its first frame must
@@ -817,6 +820,11 @@ void GameReplication::applySnapshot(BitReader& r)
 			continue;
 		}
 
+		// A resting entity is sent every tick with the same sample. Shifting
+		// that in leaves a constant path, so a settled entry stays settled and
+		// keeps being skipped; any other sample starts a new interpolation.
+		const bool samePath = st.settled && samePose(st.current, s);
+
 		// Shift the buffer: what was current becomes the interpolation origin.
 		st.previous    = st.current;
 		st.current     = s;
@@ -824,6 +832,7 @@ void GameReplication::applySnapshot(BitReader& r)
 		st.elapsed     = 0.0f;
 		st.tick        = tick;
 		st.hasTick     = true;
+		st.settled     = samePath;
 	}
 }
 
@@ -934,6 +943,16 @@ void GameReplication::advanceInterpolation(float dt)
 	auto& reg = m_world->registry();
 	const float span = std::max(0.001f, m_cfg.interpolationDelaySec);
 
+	// A reparent moves an entity between "relative to the world origin" and
+	// "relative to its parent" (wireOrigin) without changing its transform, so
+	// the settled comparison below could not see it. Rare; everything is
+	// recomputed once.
+	if (m_interpEpoch != m_world->structureEpoch())
+	{
+		m_interpEpoch = m_world->structureEpoch();
+		for (auto& entry : m_interp) entry.second.settled = false;
+	}
+
 	for (auto& [netId, st] : m_interp)
 	{
 		// The controlled entity is predicted; interpolating it too would fight
@@ -946,12 +965,25 @@ void GameReplication::advanceInterpolation(float dt)
 		auto* tc = reg.try_get<TransformComponent>(it->second);
 		if (!tc) continue;
 
+		// Arrived, and nothing has touched the transform since: this frame would
+		// write the same pose and mark the entity dirty for nothing, which made
+		// every resting replicated entity a changed subtree for propagateTransforms
+		// on every frame (SCN-301).
+		if (st.settled && tc->position == st.writtenPosition && tc->rotation == st.writtenRotation)
+			continue;
+
 		st.elapsed += dt;
 		// Without this the entity would step once per snapshot — visibly chunky
 		// at 30 Hz on a 60 Hz display.
 		const float t = st.hasPrevious ? std::min(1.0f, st.elapsed / span) : 1.0f;
+		// Both samples the same (an entity at rest, sent every tick): the path is
+		// one point and the pose is that sample. Written as it is rather than
+		// through mix, whose x*(1-t) + x*t can land an ulp beside x and would
+		// otherwise make a resting entity jitter by that ulp from frame to frame.
+		const bool still = st.hasPrevious && samePose(st.previous, st.current);
 
-		tc->position = fromWire(glm::mix(st.previous.position, st.current.position, t),
+		tc->position = fromWire(still ? st.current.position
+		                              : glm::mix(st.previous.position, st.current.position, t),
 		                        wireOrigin(m_world, it->second));
 
 		// Rotation is interpolated per component along the SHORTER arc: the delta
@@ -977,5 +1009,15 @@ void GameReplication::advanceInterpolation(float dt)
 			shortestLerp(st.previous.rotation.y, st.current.rotation.y, t),
 			shortestLerp(st.previous.rotation.z, st.current.rotation.z, t));
 		tc->dirty    = true;
+
+		st.settled         = t >= 1.0f || still;
+		st.writtenPosition = tc->position;
+		st.writtenRotation = tc->rotation;
 	}
+}
+
+void GameReplication::unsettle(std::uint32_t netId)
+{
+	if (const auto it = m_interp.find(netId); it != m_interp.end())
+		it->second.settled = false;
 }
