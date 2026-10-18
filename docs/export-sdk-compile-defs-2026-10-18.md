@@ -278,3 +278,32 @@ body or move behind a macro is open. They are needed for parity with the interpr
   1. Step 2: define the profile defines in root CMake and settle the "dev code in HE_Core" question (A.1, F9 row).
   2. Step 4: list the `HEGameConfig.h` fields from A.1 (hcfg fields + ProjectSettings + config.json defaults).
   3. Steps 6/7: add a `Context` → `HE::api::Ctx` resolver (B.4 gap 2) and a per-param marshal rule (gap 3), then emit `cppCall`.
+
+## Handoff (step 2: profile definitions)
+
+- **Topic / step:** Thema 211, step 2 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, commits ee7a583a, e5f8355b + the doc commit after them.
+- **Done:** `cmake/HorizonBuildProfile.cmake` (cache `HE_BUILD_PROFILE=dev|release`, `he_target_build_profile(<t> [scope] [PROFILE p] [FEATURES N=0|1])`,
+  feature-name list `HE_BUILD_FEATURES`), included from root `CMakeLists.txt` after the `HE_PROFILING` block.
+  `src/HE_Core/include/Platform/BuildProfile.h`: `HE_BUILD_PROFILE_DEV/RELEASE` (both always defined), four `HE_FEATURE_*`
+  switches with their per-profile defaults, `HE_DEV_ONLY`/`HE_RELEASE_ONLY`, `HE::kDevBuild/kReleaseBuild/kBuildProfileName`.
+  Rules: `docs/coding-conventions.md` section 9. Test: `tests/test_build_profile.cpp` + `tests/build_profile_probe.{h,cpp}`,
+  compiled into four static probe libs (dev, release, no call, release + `TEST_HOOKS=1`) in `tests/CMakeLists.txt`.
+- **Decisions taken:** names `HE_BUILD_PROFILE_*` instead of the placeholder `HE_PROFILE_*` (that is the profiler's family);
+  dev code in the engine libs is stripped at compile time with one library set per profile (one build tree each), applied
+  `PUBLIC` on the libs, no runtime switch; no definitions = dev (`HE_BUILD_PROFILE_DEFAULTED 1`); feature defaults live only
+  in the header, CMake only overrides. No engine target calls the function yet.
+- **Verified:** `he_tests --source-file='*test_build_profile.cpp'` 4 cases / 42 assertions (also via ctest). Mutation
+  (`HE_DEV_ONLY` passing through in release) turns 2 cases red. `clang++ -fsyntax-only -Wundef` of the probe under six
+  definition sets, `#error` for both-1 and both-0, C mode. Scratch CMake project: defaults, `PUBLIC`, overrides, and the
+  five configure errors (bad cache value, bad `PROFILE`, unknown feature, value not 0/1, stray argument). The incremental
+  rebuild after the change compiled only the probes and the test (13 steps). Full `ctest -j4`: 303/304; the one red,
+  `test_hpak` (`:1188`, 6 == 2), comes from the 4 assets in this Mac's real `EngineContentCache` and passes with a private
+  `HOME` (Hive lesson 415), not from this step.
+- **Not verified:** MSVC and Linux compile (CI started at the end of the step). No target compiles with `-Wundef`, so a misspelt
+  `#if HE_FEATURE_X` is silently 0.
+- **Traps:** do not apply the profile with `add_compile_definitions` (the `HE_PROFILING` pattern): the "default" probe must
+  receive no definitions. The probes mix profiles in one binary; that is safe only because they include the macro header alone.
+- **Next steps (step 3):** call `he_target_build_profile(<lib> PUBLIC)` on HorizonCore/Scene/Rendering/Net and the game;
+  replace `HE_GAME_DEV_HOTKEYS` + hcfg `devTools` (prebuilt path keeps the hcfg bit) with `HE_FEATURE_DEV_HOTKEYS`; put F9 /
+  `HE_PROFILE_*` behind `HE_FEATURE_PROFILER_CAPTURE`, the A.1 headless hooks behind `HE_FEATURE_TEST_HOOKS`, `HE_CONFIG_DIR`/`HE_LOG`/physics
+  env behind `HE_FEATURE_ENV_OVERRIDES`; decide whether release forces `HE_PROFILING` off; consider `-Wundef` on the gated targets.

@@ -363,7 +363,8 @@ The features (default: 1 in dev, 0 in release), from survey A.1:
 Rules:
 
 - **`#if`, never `#ifdef`.** Every macro is defined as 0 or 1; `#ifdef HE_BUILD_PROFILE_RELEASE`
-  is true in dev too. A block uses `#if HE_FEATURE_X` when one feature covers it and
+  is true in dev too. A misspelt `#if HE_FEATURE_X` is silently 0 unless the target
+  compiles with `-Wundef` (no target does yet). A block uses `#if HE_FEATURE_X` when one feature covers it and
   `#if HE_BUILD_PROFILE_DEV` only for dev code no switch describes. `if constexpr (HE::kDevBuild)`
   does not remove code: the discarded branch still has to compile.
 - **One profile per link unit.** Dev code also lives in the engine libraries (F9 in
@@ -377,6 +378,9 @@ Rules:
   build and sets `HE_BUILD_PROFILE_DEFAULTED 1`. That keeps every tree from before the
   profile unchanged; the prebuilt runtimes, the editor, `he_tests` and the perf scripts
   that drive release-*optimised* binaries with `HE_HIDDEN_WINDOW` all stay dev builds.
+  Apply the profile per target with `he_target_build_profile`, never with
+  `add_compile_definitions` like `HE_PROFILING`: `tests/test_build_profile.cpp` pins this
+  fallback with a probe that must receive no definitions.
 - **A feature's default lives only in the header.** CMake only overrides
   (`FEATURES TEST_HOOKS=1`, e.g. a release build for image tests). A new switch: add it to
   `BuildProfile.h` *and* to `HE_BUILD_FEATURES` in the CMake module, which rejects

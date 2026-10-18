@@ -14,7 +14,8 @@
 //   HE_DEV_ONLY(statement;)                    one line that only dev builds have
 //
 // Always `#if`, never `#ifdef`: every macro here is defined, as 0 or 1, so a
-// misspelt name is a -Wundef warning instead of a silently missing feature.
+// target compiled with -Wundef (not on by default) gets a warning for a
+// misspelt name instead of a silently missing feature.
 //
 // Macros only, no engine includes: tests compile this header under several
 // profiles in one binary (tests/build_profile_probe.cpp), and step 5's SDK
