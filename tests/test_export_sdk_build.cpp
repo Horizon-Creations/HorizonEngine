@@ -219,7 +219,9 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     const auto built = HE::hccg::buildDylib(HE::ExportSdk::makeBuildSpec(sdk, t.path / "work", header));
     INFO(built.message);
     REQUIRE(built.ok);
-    REQUIRE(HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe).empty());
+    std::vector<std::string> copied;
+    REQUIRE(HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied).empty());
+    HE::ExportSdk::relinkToBundledDeps(exportDir, copied);
     CHECK(readFile(exe) != "prebuilt-game");
 #if !defined(_WIN32)
     if (realExport && *realExport)
@@ -230,6 +232,16 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
         const std::string log = readFile(exportDir / "HorizonEngine.log") + readFile(exportDir / "run.out");
         INFO(log.substr(0, 4000));
         CHECK(log.find("compiled in") != std::string::npos);
+#if defined(__APPLE__)
+        // No swapped file may still load a library from Homebrew.
+        for (const std::string& f : copied)
+        {
+            const std::string out = exportDir.string() + "/otool.txt";
+            std::system(("otool -L '" + (exportDir / f).string() + "' > '" + out + "'").c_str());
+            INFO(f);
+            CHECK(readFile(out).find("/opt/homebrew/") == std::string::npos);
+        }
+#endif
         fs::copy(exportDir / "run.out", fs::temp_directory_path() / "he_export_sdk_e2e_run.out",
                  fs::copy_options::overwrite_existing);
     }

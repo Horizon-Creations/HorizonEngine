@@ -66,4 +66,12 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem
 std::string installBuiltGame(const GameSdk& sdk, const std::filesystem::path& builtExe,
                              const std::filesystem::path& exportedExe,
                              std::vector<std::string>* copied = nullptr);
+
+// macOS: the SDK's libraries name Homebrew lz4/zstd/openssl by absolute path,
+// where the prebuilt runtime's copies were rewritten to the bundled ones
+// (scripts/bundle_native_deps.sh). Does the same to `files` in `dir`: every
+// /opt/homebrew or /usr/local dependency whose file sits in `dir` becomes
+// @rpath/<name>, then the file is signed ad hoc again. Returns how many links
+// were rewritten; elsewhere a no-op returning 0.
+int relinkToBundledDeps(const std::filesystem::path& dir, const std::vector<std::string>& files);
 } // namespace HE::ExportSdk

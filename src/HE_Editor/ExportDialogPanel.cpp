@@ -553,7 +553,7 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 // and installed game leaves the prebuilt export untouched and says so; the
 // returned text is appended to the result line.
 static std::string compileGameFromSdk(const ExportResult& res, const std::filesystem::path& editorBase,
-                                      const std::string& profile, bool toolsOk,
+                                      const std::string& profile, bool cmakeOk, bool compilerOk,
                                       const std::string& projName, int step)
 {
 	namespace fs = std::filesystem;
@@ -569,7 +569,7 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	const char* env = std::getenv("HE_GAME_SDK_DIR");
 	const auto sdk = HE::ExportSdk::findGameSdk(editorBase, profile,
 	                                             env ? fs::path(env) : fs::path{});
-	if (const std::string why = HE::ExportSdk::unavailableReason(sdk, profile, toolsOk, toolsOk);
+	if (const std::string why = HE::ExportSdk::unavailableReason(sdk, profile, cmakeOk, compilerOk);
 	    !why.empty())
 		return fallBack(why);
 	Build::log(0, "Engine SDK (" + profile + "): " + sdk.root.string(), step);
@@ -611,6 +611,8 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	    !why.empty())
 		// A half-done copy is not a prebuilt game any more: say it loudly.
 		return fallBack(why + "; the export folder may be mixed, export again");
+	if (const int n = HE::ExportSdk::relinkToBundledDeps(exe.parent_path(), copied); n > 0)
+		Build::log(0, std::to_string(n) + " library link(s) moved to the bundled copies", step);
 #if defined(__APPLE__)
 	// Replacing Contents/MacOS/* broke the bundle's signature; sign it again the
 	// way the exporter does for a local run (ad hoc).
@@ -1597,8 +1599,8 @@ void startExport(AppContext& ctx)
                 const int stepCleanup = stepPackage + 1;
                 const int stepSdkGame = sdkGame ? stepCleanup + 1 : -1;
                 const std::string sdkProfile = s_exportDevTools ? "dev" : "release";
-                const bool sdkToolsOk = !ctx.toolchainProbe ||
-                    (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
+                const bool sdkCmakeOk    = !ctx.toolchainProbe || ctx.toolchainProbe->cmakeFound;
+                const bool sdkCompilerOk = !ctx.toolchainProbe || ctx.toolchainProbe->compilerFound;
 
                 Build::begin(stepNames);
                 Build::stepBegin(stepSetup);
@@ -1833,7 +1835,7 @@ void startExport(AppContext& ctx)
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
                                               hcBase = base, stepBuild, stepPackage, hostTarget,
-                                              stepSdkGame, sdkProfile, sdkToolsOk]()
+                                              stepSdkGame, sdkProfile, sdkCmakeOk, sdkCompilerOk]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -2092,8 +2094,8 @@ void startExport(AppContext& ctx)
                                 : " — key in project.hcfg (runtime has no key block)";
                         if (res.success) msg += hcMsg;
                         if (res.success && stepSdkGame >= 0)
-                            msg += compileGameFromSdk(res, hcBase, sdkProfile, sdkToolsOk,
-                                                      projName, stepSdkGame);
+                            msg += compileGameFromSdk(res, hcBase, sdkProfile, sdkCmakeOk,
+                                                      sdkCompilerOk, projName, stepSdkGame);
                     }
                     catch (const std::exception& e)
                     {

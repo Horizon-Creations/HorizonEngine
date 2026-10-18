@@ -6,6 +6,8 @@
 #include <Project/ProjectSettings.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <system_error>
 
 namespace HE::ExportSdk
@@ -132,5 +134,45 @@ std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
         }
     }
     return {};
+}
+int relinkToBundledDeps(const fs::path& dir, const std::vector<std::string>& files)
+{
+    int rewritten = 0;
+#if defined(__APPLE__)
+    const auto q = [](const fs::path& p) { return "'" + p.string() + "'"; };
+    for (const std::string& name : files)
+    {
+        const fs::path f = dir / name;
+        FILE* pipe = popen(("otool -L " + q(f) + " 2>/dev/null").c_str(), "r");
+        if (!pipe) continue;
+        std::vector<std::string> deps;
+        char buf[1024];
+        while (std::fgets(buf, sizeof buf, pipe))
+        {
+            std::string line(buf);
+            if (line.empty() || (line[0] != '\t' && line[0] != ' ')) continue;   // "<file>:" header
+            line.erase(0, line.find_first_not_of(" \t"));
+            line = line.substr(0, line.find(" ("));
+            if (line.rfind("/opt/homebrew/", 0) == 0 || line.rfind("/usr/local/", 0) == 0)
+                deps.push_back(line);
+        }
+        pclose(pipe);
+        bool changed = false;
+        for (const std::string& dep : deps)
+        {
+            const std::string base = fs::path(dep).filename().string();
+            std::error_code ec;
+            if (!fs::is_regular_file(dir / base, ec)) continue;
+            const std::string cmd = "install_name_tool -change '" + dep + "' '@rpath/" + base + "' " +
+                                    q(f) + " 2>/dev/null";
+            if (std::system(cmd.c_str()) == 0) { ++rewritten; changed = true; }
+        }
+        if (changed)
+            std::system(("codesign --force --sign - " + q(f) + " >/dev/null 2>&1").c_str());
+    }
+#else
+    (void)dir; (void)files;
+#endif
+    return rewritten;
 }
 } // namespace HE::ExportSdk
