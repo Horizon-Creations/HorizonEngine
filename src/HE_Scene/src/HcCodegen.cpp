@@ -4358,14 +4358,6 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
     s += "project(HorizonCodeGen CXX)\n";
     s += "set(CMAKE_CXX_STANDARD 20)\n";
     s += "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
-    s += "# SDK layout: either a staged HE_SDK_DIR (include/ + lib/) or explicit\n";
-    s += "# dirs (development builds pass the source tree + build dir directly).\n";
-    s += "if(NOT DEFINED HE_SDK_INCLUDE_DIRS)\n";
-    s += "    set(HE_SDK_INCLUDE_DIRS \"${HE_SDK_DIR}/include\")\n";
-    s += "endif()\n";
-    s += "if(NOT DEFINED HE_SDK_LIB_DIR)\n";
-    s += "    set(HE_SDK_LIB_DIR \"${HE_SDK_DIR}/lib\")\n";
-    s += "endif()\n";
     s += "add_library(HorizonCodeGen SHARED\n";
     for (const auto& f : cppFiles) s += "    " + f + "\n";
     s += ")\n";
@@ -4373,9 +4365,30 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
     s += "# Only HE_HorizonCodeGenClasses leaves this library — see hc_registry.cpp.\n";
     s += "set_target_properties(HorizonCodeGen PROPERTIES\n";
     s += "    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)\n";
-    s += "target_include_directories(HorizonCodeGen PRIVATE ${HE_SDK_INCLUDE_DIRS})\n";
-    s += "target_link_directories(HorizonCodeGen PRIVATE \"${HE_SDK_LIB_DIR}\")\n";
-    s += "target_link_libraries(HorizonCodeGen PRIVATE HorizonCore)\n";
+    s += "# The engine: Engine Call nodes are direct HE::api calls\n";
+    s += "# (HorizonEngine/HorizonEngineApi.h), so the classes link HorizonScene too.\n";
+    s += "# An installed engine SDK is used through its package (HorizonEngine_DIR, or\n";
+    s += "# HE_SDK_DIR holding lib/cmake/HorizonEngine); otherwise explicit dirs — a\n";
+    s += "# staged HE_SDK_DIR (include/ + lib/), or the source tree + build dirs a\n";
+    s += "# development build passes (HE_SDK_LIB_DIR may list several).\n";
+    s += "if(NOT DEFINED HorizonEngine_DIR AND DEFINED HE_SDK_DIR AND\n";
+    s += "   EXISTS \"${HE_SDK_DIR}/lib/cmake/HorizonEngine/HorizonEngineConfig.cmake\")\n";
+    s += "    set(HorizonEngine_DIR \"${HE_SDK_DIR}/lib/cmake/HorizonEngine\")\n";
+    s += "endif()\n";
+    s += "if(DEFINED HorizonEngine_DIR)\n";
+    s += "    find_package(HorizonEngine REQUIRED CONFIG)\n";
+    s += "    target_link_libraries(HorizonCodeGen PRIVATE HorizonEngine::Scene)\n";
+    s += "else()\n";
+    s += "    if(NOT DEFINED HE_SDK_INCLUDE_DIRS)\n";
+    s += "        set(HE_SDK_INCLUDE_DIRS \"${HE_SDK_DIR}/include\")\n";
+    s += "    endif()\n";
+    s += "    if(NOT DEFINED HE_SDK_LIB_DIR)\n";
+    s += "        set(HE_SDK_LIB_DIR \"${HE_SDK_DIR}/lib\")\n";
+    s += "    endif()\n";
+    s += "    target_include_directories(HorizonCodeGen PRIVATE ${HE_SDK_INCLUDE_DIRS})\n";
+    s += "    target_link_directories(HorizonCodeGen PRIVATE ${HE_SDK_LIB_DIR})\n";
+    s += "    target_link_libraries(HorizonCodeGen PRIVATE HorizonScene HorizonCore)\n";
+    s += "endif()\n";
     s += "if(APPLE)\n";
     s += "    set_target_properties(HorizonCodeGen PROPERTIES INSTALL_RPATH \"@loader_path\" BUILD_WITH_INSTALL_RPATH ON)\n";
     s += "endif()\n";
@@ -4399,8 +4412,15 @@ SdkInfo sdkFromRoot(const std::filesystem::path& root)
     SdkInfo info;
     if (const fs::path core = root / "src" / "HE_Core" / "include"; fs::is_directory(core, ec))
         info.includeDirs.push_back(core);
+    // HorizonEngine/HorizonEngineApi.h and HE::api, which every Engine Call
+    // node of the generated code calls directly.
+    if (const fs::path scene = root / "src" / "HE_Scene" / "include"; fs::is_directory(scene, ec))
+        info.includeDirs.push_back(scene);
     info.includeDirs.push_back(root / "include");
     info.libDir = root / "lib";
+    if (const fs::path pkg = root / "lib" / "cmake" / "HorizonEngine";
+        fs::exists(pkg / "HorizonEngineConfig.cmake", ec))
+        info.packageDir = pkg;
     return info;
 }
 } // namespace
@@ -4429,6 +4449,8 @@ SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir)
             for (const auto& d : j.value("includeDirs", nlohmann::json::array()))
                 if (d.is_string()) info.includeDirs.push_back(fs::path(d.get<std::string>()));
             info.libDir = fs::path(j.value("libDir", std::string()));
+            for (const auto& d : j.value("libDirs", nlohmann::json::array()))
+                if (d.is_string()) info.extraLibDirs.push_back(fs::path(d.get<std::string>()));
             if (info.valid()) return info;
         }
     }
@@ -5132,10 +5154,16 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
         if (i) includes += ";";
         includes += sdk.includeDirs[i].string();
     }
+    std::string libDirs = sdk.libDir.string();
+    for (const std::filesystem::path& d : sdk.extraLibDirs) libDirs += ";" + d.string();
     DylibBuildSpec spec;
     spec.sourceDir = genDir;
     spec.defines   = { "HE_SDK_INCLUDE_DIRS=" + includes,
-                       "HE_SDK_LIB_DIR=" + sdk.libDir.string() };
+                       "HE_SDK_LIB_DIR=" + libDirs };
+    // An installed engine SDK: its package knows the libraries, their
+    // definitions and the profile — generateCMakeLists prefers it.
+    if (!sdk.packageDir.empty())
+        spec.defines.push_back("HorizonEngine_DIR=" + sdk.packageDir.string());
     return buildDylib(spec, onLine);
 }
 

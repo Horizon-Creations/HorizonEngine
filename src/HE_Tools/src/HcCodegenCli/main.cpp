@@ -47,12 +47,14 @@ int main(int argc, char** argv)
     std::string outDir;
     bool fixtures = false;
     bool requireAll = false;
+    bool cmake = false;   // also write the export's CMakeLists.txt (generateCMakeLists)
     std::vector<std::string> inputs;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
         if (a == "--fixtures") fixtures = true;
         else if (a == "--require-all") requireAll = true;
+        else if (a == "--cmake") cmake = true;
         else if (a == "--out" && i + 1 < argc) outDir = argv[++i];
         else if (a == "--api-direct" && i + 1 < argc)
         {
@@ -68,7 +70,7 @@ int main(int argc, char** argv)
     }
     if (outDir.empty() || (!fixtures && inputs.empty()))
     {
-        std::fprintf(stderr, "usage: hc_codegen [--fixtures] --out DIR [graph.json...]\n");
+        std::fprintf(stderr, "usage: hc_codegen [--fixtures] [--cmake] --out DIR [graph.json...]\n");
         return 2;
     }
 
@@ -102,8 +104,17 @@ int main(int argc, char** argv)
 
     std::error_code ec;
     fs::create_directories(outDir, ec);
+    std::vector<std::string> cppFiles;
     for (const auto& f : res.files)
+    {
         if (!writeIfChanged(fs::path(outDir) / f.name, f.contents))
         { std::fprintf(stderr, "hc_codegen: cannot write %s\n", f.name.c_str()); return 1; }
+        if (fs::path(f.name).extension() == ".cpp") cppFiles.push_back(f.name);
+    }
+    // The project the export builds the library with (ExportDialogPanel does the
+    // same in-process), so the generated code can be built against an SDK by hand.
+    if (cmake && !writeIfChanged(fs::path(outDir) / "CMakeLists.txt",
+                                 HE::hccg::generateCMakeLists(opt, cppFiles)))
+    { std::fprintf(stderr, "hc_codegen: cannot write CMakeLists.txt\n"); return 1; }
     return 0;
 }

@@ -1255,6 +1255,13 @@ target_compile_definitions(he_tests PRIVATE
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_ENGINE_ROOT="${CMAKE_SOURCE_DIR}")
 
+# The "Compile HorizonCode" export with a real compiler (Thema 211 step 7): the
+# test writes the he_sdk_config.json a development editor writes beside itself
+# (src/HE_Editor/CMakeLists.txt), so it needs the same three values.
+target_sources(he_tests PRIVATE test_hc_codegen_export_build.cpp)
+set_source_files_properties(test_hc_codegen_export_build.cpp PROPERTIES
+    COMPILE_DEFINITIONS "HE_TEST_GLM_DIR=\"${glm_SOURCE_DIR}\";HE_TEST_CORE_LIB_DIR=\"$<TARGET_FILE_DIR:HorizonCore>\";HE_TEST_SCENE_LIB_DIR=\"$<TARGET_LINKER_FILE_DIR:HorizonScene>\"")
+
 add_library(test_gamelogic_services SHARED fixtures/test_gamelogic_services.cpp)
 target_include_directories(test_gamelogic_services PRIVATE
     "${CMAKE_SOURCE_DIR}/src/HE_Core/include")
