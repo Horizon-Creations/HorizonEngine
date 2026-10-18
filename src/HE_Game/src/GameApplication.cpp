@@ -849,14 +849,18 @@ void GameApplication::OnInit()
 	}
 
 	// Compiled HorizonCode classes: the export may have translated the project's
-	// graphs to native C++ (HorizonCodeGen library beside the executable). Loaded
-	// once for process lifetime; every host below (GameInstance, createObject,
+	// graphs to native C++ (HorizonCodeGen library in HorizonEngine/, beside the
+	// engine library it was built against; in the flat layout beside the data).
+	// The loader refuses a library of another engine version or build profile.
+	// Loaded once for process lifetime; every host below (GameInstance, createObject,
 	// widgets, level scripts) consults the table and falls back to the
 	// interpreter on a miss. A misconfiguration (hcfg says compiled, library
 	// missing/rejected) is loud, not a silent slowdown.
 	{
-		HorizonCode::compiledClasses().load(exeDir / HorizonCode::compiledLibraryName(),
-		                                    HE_VERSION_STRING);
+		const std::filesystem::path engineDir = HE::GameLayout::engineDir();
+		HorizonCode::compiledClasses().load(
+			(engineDir.empty() ? exeDir : engineDir) / HorizonCode::compiledLibraryName(),
+			HE_VERSION_STRING);
 		if (m_config.horizonCodeCompiled && !HorizonCode::compiledClasses().loaded())
 			HE_LOG_WARN(Core, "%s",
 				"GameApplication: project.hcfg says HorizonCode is compiled, but the "

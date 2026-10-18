@@ -45,4 +45,19 @@ inline std::filesystem::path dataDir()
     return std::filesystem::is_directory(data, ec) ? data : base;
 }
 
+// HorizonEngine/ beside the executable: <base>/HorizonEngine, or
+// Contents/MacOS/HorizonEngine inside a .app (base is Contents/Resources there).
+// Empty for a game in the old flat layout, which has no such folder.
+inline std::filesystem::path engineDir()
+{
+    std::filesystem::path base = baseDir();
+    if (base.empty()) return base;
+    if (!base.has_filename()) base = base.parent_path();   // SDL's trailing separator
+    std::error_code ec;
+    for (const std::filesystem::path& dir :
+         { base / kEngineDirName, base.parent_path() / "MacOS" / kEngineDirName })
+        if (std::filesystem::is_directory(dir, ec)) return dir;
+    return {};
+}
+
 } // namespace HE::GameLayout

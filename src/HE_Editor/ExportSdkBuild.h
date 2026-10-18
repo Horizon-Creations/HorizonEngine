@@ -82,6 +82,28 @@ inline const char* sdkProfileFor(bool devTools) { return devTools ? "dev" : "rel
 HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem::path& workDir,
                                        const std::filesystem::path& header);
 
+// ── Compiled HorizonCode (topic 211 step 13) ────────────────────────────────
+// The HorizonCodeGen library is built against the same SDK and lib set as the
+// game, through its package: it links the one HorizonEngine library of that
+// profile, bakes the profile in (the game refuses another) and ships in the
+// export's HorizonEngine/ beside that library.
+// `gameFromSdk` = the export compiles the game AND unavailableReason(gameSdk) was
+// empty, so the game will be built from exactly that SDK.
+//   game compiled from a usable SDK -> that SDK (codegen SDK info with its profile)
+//   otherwise, runtime with HorizonEngine/ -> nothing: the prebuilt game's engine
+//       library is not the SDK's, and a library linked against another build of
+//       it is an ABI mix nobody can check at load; `why` says so, the classes ship
+//       interpreted
+//   otherwise (flat runtime) -> `legacy`, the editor's codegen SDK (separate libraries)
+struct CodegenSdkChoice
+{
+    HE::hccg::SdkInfo sdk;   // invalid = ship interpreted
+    std::string       why;   // set when sdk is invalid
+    bool              fromGameSdk = false;
+};
+CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool runtimeHasEngineDir,
+                                  const HE::hccg::SdkInfo& legacy);
+
 // ── Build cache (topic 211 step 11) ─────────────────────────────────────────
 // A project + profile keeps its work dir, and in it the cmake build tree, across
 // exports: the next export compiles only what changed (the compiled-in header's

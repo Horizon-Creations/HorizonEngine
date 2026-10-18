@@ -150,6 +150,14 @@ TEST_CASE("Codegen export build: classes with Engine Calls build against the SDK
 	INFO("build message: " << out.message << "  |  last error line: " << lastError);
 	REQUIRE(out.ok);
 
+	// The library bakes the profile it was compiled with (this tree's, dev) and
+	// the loader refuses it for an engine of the other one (Thema 211 step 13).
+	{
+		HorizonCode::CompiledClassTable refused;
+		CHECK_FALSE(refused.load(out.artifact, opt.engineVersion, "release"));
+		CHECK_FALSE(refused.loaded());
+		CHECK(refused.size() == 0);
+	}
 	HorizonCode::CompiledClassTable table;
 	REQUIRE(table.load(out.artifact, opt.engineVersion));
 	CHECK(table.find("fix/animator_sync") != nullptr);

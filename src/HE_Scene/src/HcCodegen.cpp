@@ -4309,11 +4309,18 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     rc += "// visible would let a host binary that compiled the same headers share\n";
     rc += "// their inline statics with this library — and lose them on unload.\n";
     rc += "#if defined(HCGEN_BUILD_DYLIB)\n";
+    rc += "#include <Platform/BuildProfile.h>\n\n";
     rc += "extern \"C\"\n";
     rc += "#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\n";
     rc += "const HorizonCode::CompiledClassEntry* HE_HorizonCodeGenClasses(int* count, const char** engineVersion)\n";
     rc += "{\n    if (engineVersion) *engineVersion = " + ns + "::engineVersion();\n";
-    rc += "    return " + ns + "::classes(count);\n}\n";
+    rc += "    return " + ns + "::classes(count);\n}\n\n";
+    rc += "// The build profile of the engine SDK this library was compiled against\n";
+    rc += "// (its lib set's HE_BUILD_PROFILE_DEV/RELEASE). The game refuses a library\n";
+    rc += "// of another profile than its engine: no dev classes on a release engine.\n";
+    rc += "extern \"C\"\n";
+    rc += "#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\n";
+    rc += "const char* HE_HorizonCodeGenProfile() { return HE::kBuildProfileName; }\n";
     rc += "#endif\n";
     res.files.push_back({ "hc_registry.cpp", std::move(rc) });
 }
@@ -4376,8 +4383,18 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
     s += "    set(HorizonEngine_DIR \"${HE_SDK_DIR}/lib/cmake/HorizonEngine\")\n";
     s += "endif()\n";
     s += "if(DEFINED HorizonEngine_DIR)\n";
+    s += "    # HE_BUILD_PROFILE picks the SDK's lib set (dev or release), the same one\n";
+    s += "    # the game is built against; its definitions make the classes that profile.\n";
+    s += "    # The library goes into the game's HorizonEngine/ folder, beside the\n";
+    s += "    # engine library it links, and finds it there and nowhere else.\n";
     s += "    find_package(HorizonEngine REQUIRED CONFIG)\n";
-    s += "    target_link_libraries(HorizonCodeGen PRIVATE HorizonEngine::Scene)\n";
+    s += "    target_link_libraries(HorizonCodeGen PRIVATE HorizonEngine::HorizonEngine)\n";
+    s += "    if(APPLE)\n";
+    s += "        set_target_properties(HorizonCodeGen PROPERTIES INSTALL_RPATH \"@loader_path\")\n";
+    s += "    else()\n";
+    s += "        set_target_properties(HorizonCodeGen PROPERTIES INSTALL_RPATH \"$ORIGIN\")\n";
+    s += "    endif()\n";
+    s += "    set_target_properties(HorizonCodeGen PROPERTIES BUILD_WITH_INSTALL_RPATH ON)\n";
     s += "else()\n";
     s += "    if(NOT DEFINED HE_SDK_INCLUDE_DIRS)\n";
     s += "        set(HE_SDK_INCLUDE_DIRS \"${HE_SDK_DIR}/include\")\n";
@@ -5174,6 +5191,13 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
     // definitions and the profile — generateCMakeLists prefers it.
     if (!sdk.packageDir.empty())
         spec.defines.push_back("HorizonEngine_DIR=" + sdk.packageDir.string());
+    // One build folder per lib set: a tree configured against dev and then
+    // reconfigured against release would be a dev/release mix in one cache.
+    if (!sdk.profile.empty())
+    {
+        spec.defines.push_back("HE_BUILD_PROFILE=" + sdk.profile);
+        spec.buildDir = genDir / ("build-" + sdk.profile);
+    }
     return buildDylib(spec, onLine);
 }
 

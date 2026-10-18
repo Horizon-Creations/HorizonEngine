@@ -4,6 +4,9 @@
 // the sdk_example_project ctest's business; this covers the decisions around it.
 #include "doctest.h"
 #include "ExportSdkBuild.h"
+#include "HorizonVersion.h"
+#include "fixtures.h"   // tests/fixtures/hcodegen — the shared graphs (e2e HorizonCode build)
+#include <HorizonCode/HcCompiledLoader.h>
 #include <Hpak/GameBuildConfig.h>
 #include <Hpak/ProjectConfig.h>
 
@@ -155,6 +158,46 @@ TEST_CASE("makeBuildSpec: SDK template, private build dir, header compiled in")
     CHECK(has("HE_GAME_PORTABLE=ON"));        // no absolute rpath to the SDK in the game
     CHECK(std::find(spec.artifactNames.begin(), spec.artifactNames.end(), "HorizonGame")
           != spec.artifactNames.end());
+}
+
+// Topic 211 step 13: compiled HorizonCode links the engine the game ships with.
+TEST_CASE("chooseCodegenSdk: the game's SDK and lib set, never the prebuilt game's engine")
+{
+    HE::ExportSdk::GameSdk sdk;
+    sdk.root       = "/sdk";
+    sdk.packageDir = "/sdk/lib/cmake/HorizonEngine";
+    sdk.profile    = "release";
+    HE::hccg::SdkInfo legacy;
+    legacy.includeDirs = { "/editor/SDK/include" };
+    legacy.libDir      = "/editor/SDK/lib";
+
+    // Game compiled from the SDK: the same package and lib set, nothing else.
+    auto c = HE::ExportSdk::chooseCodegenSdk(sdk, true, true, legacy);
+    REQUIRE(c.sdk.valid());
+    CHECK(c.fromGameSdk);
+    CHECK(c.why.empty());
+    CHECK(c.sdk.packageDir == sdk.packageDir);
+    CHECK(c.sdk.profile == "release");
+    CHECK(c.sdk.includeDirs.empty());
+    CHECK(c.sdk.libDir.empty());
+
+    // Prebuilt game with HorizonEngine/: no library at all, and why.
+    for (const bool gameFromSdk : { false, true })
+    {
+        c = HE::ExportSdk::chooseCodegenSdk(gameFromSdk ? HE::ExportSdk::GameSdk{} : sdk,
+                                            gameFromSdk, true, legacy);
+        CHECK_FALSE(c.sdk.valid());
+        CHECK_FALSE(c.fromGameSdk);
+        CHECK(c.why.find("Compile game from SDK") != std::string::npos);
+    }
+
+    // A flat runtime (no HorizonEngine/) keeps the editor's codegen SDK.
+    c = HE::ExportSdk::chooseCodegenSdk(sdk, false, false, legacy);
+    REQUIRE(c.sdk.valid());
+    CHECK_FALSE(c.fromGameSdk);
+    CHECK(c.sdk.libDir == legacy.libDir);
+    CHECK(c.sdk.profile.empty());
+    CHECK_FALSE(HE::ExportSdk::chooseCodegenSdk(sdk, false, false, {}).why.empty());
 }
 
 TEST_CASE("Export profile picks the lib set: Development dev, Shipping release")
@@ -410,6 +453,53 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     const fs::path engineDir = HE::ExportSdk::exportEngineDir(exe);
     HE::ExportSdk::relinkToBundledDeps(engineDir, copied);
     CHECK(readFile(exe) != "prebuilt-game");
+
+    // Compiled HorizonCode (topic 211 step 13), the export's way: generated
+    // classes built against the same SDK and lib set as the game, through its
+    // package, into build-<profile>, shipped in the export's HorizonEngine/.
+    const auto hcSdk = HE::ExportSdk::chooseCodegenSdk(sdk, true, true, {});
+    REQUIRE(hcSdk.fromGameSdk);
+    const fs::path genDir = t.path / "hcgen";
+    {
+        HE::hccg::Options opt;
+        opt.engineVersion = HE_VERSION_STRING;
+        opt.onFailure     = HE::hccg::OnFailure::Stop;
+        const auto gen = HE::hccg::generate({ hcfix::fxEngineWorld(), hcfix::fxAnimatorSync() }, opt);
+        REQUIRE(gen.ok);
+        std::vector<std::string> cppFiles;
+        for (const auto& f : gen.files)
+        {
+            touchFile(genDir / f.name, f.contents);
+            if (fs::path(f.name).extension() == ".cpp") cppFiles.push_back(f.name);
+        }
+        touchFile(genDir / "CMakeLists.txt", HE::hccg::generateCMakeLists(opt, cppFiles));
+    }
+    const auto hc = HE::hccg::buildDylib(genDir, hcSdk.sdk);
+    INFO(hc.message);
+    REQUIRE(hc.ok);
+    CHECK(hc.artifact.parent_path() == genDir / ("build-" + profile));
+    CHECK(readFile(genDir / ("build-" + profile) / "CMakeCache.txt")
+              .find("HE_BUILD_PROFILE:UNINITIALIZED=" + profile) != std::string::npos);
+#if defined(__APPLE__)
+    {
+        // The one engine library of the lib set, found beside the library; no
+        // part library, no path of this machine.
+        const std::string out = (t.path / "hc_otool.txt").string();
+        std::system(("otool -L '" + hc.artifact.string() + "' > '" + out + "'").c_str());
+        std::system(("otool -l '" + hc.artifact.string() + "' >> '" + out + "'").c_str());
+        const std::string loads = readFile(out);
+        INFO(loads.substr(0, 4000));
+        CHECK(loads.find("@rpath/libHorizonEngine.dylib") != std::string::npos);
+        CHECK(loads.find("libHorizonScene") == std::string::npos);
+        CHECK(loads.find("libHorizonCore") == std::string::npos);
+        CHECK(loads.find("@loader_path") != std::string::npos);
+        CHECK(loads.find("path /") == std::string::npos);
+    }
+#endif
+    // Not loaded here: it finds its engine only beside itself, and he_tests
+    // already holds the four separate libraries. The game below loads it.
+    fs::copy_file(hc.artifact, engineDir / HorizonCode::compiledLibraryName(),
+                  fs::copy_options::overwrite_existing);
 #if !defined(_WIN32)
     // Started only in the dev profile: a release game has no hidden mode and no
     // frame budget (HE_FEATURE_ENV_OVERRIDES=0), so it would open a window on the
@@ -422,6 +512,9 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
         const std::string log = readFile(exportDir / "HorizonEngine.log") + readFile(exportDir / "run.out");
         INFO(log.substr(0, 4000));
         CHECK(log.find("compiled in") != std::string::npos);
+        // The HorizonCode library of the same lib set, taken from HorizonEngine/.
+        CHECK(log.find("HorizonCode: 2 compiled classes") != std::string::npos);
+        CHECK(log.find("profile but this engine is") == std::string::npos);
 #if defined(__APPLE__)
         // No swapped file may still load a library from Homebrew.
         for (const std::string& f : copied)

@@ -1246,18 +1246,28 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
     return std::nullopt;
 }
 
-// Phase 6: compiled HorizonCode classes — ship the generated library with the data
-// (base path — same load location as GameLogic), under the canonical name the
-// runtime loader probes. A copy failure is a hard error: hcfg would otherwise
-// claim "compiled" for a library that never shipped.
+// Phase 6: compiled HorizonCode classes — ship the generated library under the
+// canonical name the runtime loader probes. In the engine layout it goes into
+// HorizonEngine/, beside the engine library it links (Thema 211 step 13); the
+// flat layout keeps it with the data (base path, same place as GameLogic).
+// A copy failure is a hard error: hcfg would otherwise claim "compiled" for a
+// library that never shipped.
 static std::optional<ExportResult> copyHorizonCodeLib(const ExportSettings& settings,
                                                       ExportContext&        ctx)
 {
     std::error_code ec;
 
+    // data/ is not wiped between exports: a copy an earlier export left there
+    // would be hashed by the integrity probe and is never loaded.
+    if (ctx.engineLayout)
+    {
+        std::filesystem::remove(ctx.dataDir / HorizonCode::compiledLibraryName(), ec);
+        ec.clear();
+    }
     if (!settings.horizonCodeGenLib.empty())
     {
-        const auto dst = ctx.dataDir / HorizonCode::compiledLibraryName();
+        const auto dst = (ctx.engineLayout ? ctx.engineDir : ctx.dataDir)
+                       / HorizonCode::compiledLibraryName();
         std::filesystem::remove(dst, ec); ec.clear();
         std::filesystem::copy_file(settings.horizonCodeGenLib, dst,
             std::filesystem::copy_options::overwrite_existing, ec);

@@ -7546,8 +7546,12 @@ namespace
 	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "
 	  "GameInstance — into C++ and ships them as a compiled library. It needs "
 	  "cmake and a C++ toolchain on this machine and only runs for a Host target. "
-	  "The graphs ship as well either way, so by default anything that fails to "
-	  "translate simply runs interpreted.",
+	  "The library is built against the same engine SDK and profile as the game, "
+	  "so it needs \"Compile game from SDK\" as well; it ships in the HorizonEngine "
+	  "folder beside the engine library, and the game refuses a library of another "
+	  "profile. The graphs ship as well either way, so by default anything that "
+	  "fails to translate, or a game that is not compiled from the SDK, simply runs "
+	  "interpreted.",
 	  "", "horizoncode#compiler" },
 	{ "Export/Interpret on failure", "",
 	  "A graph that cannot be translated ships interpreted. The build always "

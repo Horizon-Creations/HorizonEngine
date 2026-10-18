@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <system_error>
@@ -136,6 +137,28 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workD
         "HE_GAME_PORTABLE=ON",
     };
     return spec;
+}
+
+CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool runtimeHasEngineDir,
+                                  const HE::hccg::SdkInfo& legacy)
+{
+    CodegenSdkChoice c;
+    if (gameFromSdk && gameSdk.valid())
+    {
+        c.sdk.packageDir = gameSdk.packageDir;
+        c.sdk.profile    = gameSdk.profile;
+        c.fromGameSdk    = true;
+        return c;
+    }
+    if (runtimeHasEngineDir)
+    {
+        c.why = "compiled HorizonCode is built with the game from the engine SDK; "
+                "turn on \"Compile game from SDK\"";
+        return c;
+    }
+    c.sdk = legacy;
+    if (!c.sdk.valid()) c.why = "no codegen SDK found (HE_HCGEN_SDK, <editor>/SDK, he_sdk_config.json)";
+    return c;
 }
 
 fs::path buildWorkDir(const fs::path& cacheRoot, const std::string& project, const std::string& profile)
@@ -321,7 +344,16 @@ int relinkToBundledDeps(const fs::path& dir, const std::vector<std::string>& fil
         bool changed = false;
         for (const std::string& dep : deps)
         {
-            const std::string base = fs::path(dep).filename().string();
+            std::string base = fs::path(dep).filename().string();
+            // The plugin's CPython is a framework binary (…/Python.framework/
+            // Versions/3.14/Python); the folder bundles it as libpython3.14.dylib
+            // (scripts/bundle_native_deps.sh, bundled_name).
+            if (const auto v = dep.find("/Python.framework/Versions/");
+                v != std::string::npos && base == "Python")
+            {
+                const auto from = v + std::strlen("/Python.framework/Versions/");
+                base = "libpython" + dep.substr(from, dep.find('/', from) - from) + ".dylib";
+            }
             std::error_code ec;
             if (!fs::is_regular_file(dir / base, ec)) continue;
             const std::string cmd = "install_name_tool -change '" + dep + "' '@rpath/" + base + "' " +

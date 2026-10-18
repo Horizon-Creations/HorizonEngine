@@ -4,6 +4,7 @@
 #include <Hpak/ProjectExporter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakWriter.h>
+#include <HorizonCode/HcCompiledLoader.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -1317,6 +1318,23 @@ TEST_CASE("ProjectExporter: a HorizonEngine/ runtime exports as <ProjectName>, d
         CHECK(std::filesystem::is_regular_file(outputDir / "Space Game._pth"));
         CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonGame._pth"));
     }
+    // Thema 211 step 13: compiled HorizonCode links the engine library, so it
+    // ships beside it; a copy an earlier export left in data/ goes.
+    SUBCASE("compiled HorizonCode goes into HorizonEngine/, not data/")
+    {
+        const auto hcLib = tmp / "he_test_export_layout_hclib";
+        { std::ofstream f(hcLib); f << "HCGEN"; }
+        std::filesystem::create_directories(outputDir / "data");
+        { std::ofstream f(outputDir / "data" / HorizonCode::compiledLibraryName()); f << "STALE"; }
+        settings.horizonCodeGenLib = hcLib;
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / HorizonCode::compiledLibraryName()));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "data" / HorizonCode::compiledLibraryName()));
+        CHECK_FALSE(std::filesystem::exists(outputDir / HorizonCode::compiledLibraryName()));
+        std::filesystem::remove(hcLib);
+    }
 
     he_test::removeAllQuiet(runtimeDir);
     he_test::removeAllQuiet(contentDir);
@@ -1336,9 +1354,13 @@ TEST_CASE("ProjectExporter: a runtime without HorizonEngine/ keeps the flat layo
     { std::ofstream f(runtimeDir / "HorizonGame.exe"); f << "PE"; }
     { std::ofstream f(runtimeDir / "HorizonCore.dll"); f << "DLL"; }
 
+    const auto hcLib = tmp / "he_test_export_flat_hclib";
+    { std::ofstream f(hcLib); f << "HCGEN"; }
+
     ExportSettings settings;
-    settings.compress       = false;
-    settings.gameRuntimeDir = runtimeDir;
+    settings.compress          = false;
+    settings.gameRuntimeDir    = runtimeDir;
+    settings.horizonCodeGenLib = hcLib;
     CHECK_FALSE(runtimeHasEngineDir(runtimeDir));
     const auto result = ProjectExporter::exportProject(
         contentDir, "Space Game", "", outputDir, settings);
@@ -1346,6 +1368,9 @@ TEST_CASE("ProjectExporter: a runtime without HorizonEngine/ keeps the flat layo
     CHECK(result.executablePath == outputDir / "HorizonGame.exe");
     CHECK(std::filesystem::is_regular_file(outputDir / "HorizonCore.dll"));
     CHECK(std::filesystem::is_regular_file(outputDir / "project.hcfg"));
+    // The flat layout keeps compiled HorizonCode beside the data, as before.
+    CHECK(std::filesystem::is_regular_file(outputDir / HorizonCode::compiledLibraryName()));
+    std::filesystem::remove(hcLib);
     CHECK_FALSE(std::filesystem::exists(outputDir / "data"));
     CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine"));
 

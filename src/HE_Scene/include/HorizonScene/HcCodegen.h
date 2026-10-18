@@ -121,13 +121,17 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
 // second library directory under "libDirs". An engine SDK as the HorizonSDK
 // target installs it (<root>/lib/cmake/HorizonEngine) is used through its CMake
 // package instead — `packageDir`, handed to the project as HorizonEngine_DIR.
+// `profile` (dev/release) picks the package's lib set, the one the game is built
+// against (Thema 211 step 13): the library then links the one HorizonEngine
+// library, carries that profile and builds in its own build-<profile> folder.
 struct SdkInfo
 {
     std::vector<std::filesystem::path> includeDirs;
     std::filesystem::path              libDir;
     std::vector<std::filesystem::path> extraLibDirs;   // more library dirs (dev builds: HorizonScene's)
     std::filesystem::path              packageDir;     // <root>/lib/cmake/HorizonEngine, when present
-    bool valid() const { return !includeDirs.empty() && !libDir.empty(); }
+    std::string                        profile;        // HE_BUILD_PROFILE for the package; empty = its default
+    bool valid() const { return !packageDir.empty() || (!includeDirs.empty() && !libDir.empty()); }
 };
 SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir);
 
