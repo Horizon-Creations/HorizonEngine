@@ -480,3 +480,40 @@ body or move behind a macro is open. They are needed for parity with the interpr
   per body, typed locals of `valueType(...)`, results via `pin::toPin`, multi-result rows as `auto [a_, b_] = …` (struct members are the
   results in order, proven by the generated file); keep `hc::callApi` for Thunk rows. 2. Link the generated library against
   HorizonScene (today only HorizonCore). 3. Optionally write direct wrappers for the 10 Thunk rows.
+
+## Handoff (step 7: readable codegen with direct engine calls) — PARTIAL, stopped by the queen
+
+- **Topic / step:** Thema 211, step 7 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, commits d509aa5b, 05f9111c,
+  e576882d, 3a4f7099 (WIP fixture). Stopped on the queen's request before the link/SDK half.
+- **Done (emitter, `src/HE_Scene/src/HcCodegen.cpp`):** Engine Call nodes on Ctx/Free rows are direct `HE::api::<group>::<fn>(api, …)`
+  calls (`directRow`, `directCall`/`directRead`/`directStmt`), one `HE::api::Scope api(m_ctx);` per body that needs the Ctx, the API
+  header included only by classes that call it. Thunk and Struct-pin rows keep `hc::callApi` (none left in the fixtures). Arguments
+  are hoisted in pin order when two or more of them call something (`callsSomething`; value constructors do not count): C++ argument
+  order is unspecified. Results go through `HE::api::pin::asInt/asRef/asColor/asVec4/asFloat` (`EngineApiCpp.cpp asPinHelper`) only
+  where the C++ type can differ; multi-result rows are read by pin name (`resultMember`).
+  Names: classes = asset stem in PascalCase (`AnimatorSync`; `classNameFor`, `reservedClassNames`), members/locals/parameters/results
+  = authored names, public variables are public members (accessors gone), a body has its public method's name (same function
+  without RunState, `Name(RunState& rs, …)` overload otherwise), other bodies `Tick`, `OnClicked_element3`, `Jump_Pressed`,
+  `afterDelay`; node state `doOnceDone`/`flipFlopIsA`; RunState fields `<node>_<pin>` (`rs.sum_total`); temporaries via `temp()`
+  (unique per body: `items`, `target`, `args`). Base-chain names are claimed (`CompiledClass::names`), overrides keep theirs.
+  `hcgen_<Class>.cpp` = logic, `hcgen_<Class>.reflect.cpp` = identity, slots, dispatchers, factory.
+- **Removed (what step 1, B.2/B.3, called in the way):** the `f_`/`ev_<id>` body + forwarding-wrapper split, the per-call
+  `std::vector<hc::Value>` boxing + string dispatch for direct rows, the `r<id>` result vector nobody read, the accessors.
+  Kept on purpose: `fireEvent`/hooks (the Runtime fires by name AND by hook), `slots()`/`callFunction` (savegames, Bind To, RPC).
+- **Tests:** `test_hc_codegen_readable.cpp` (golden files `tests/fixtures/hcodegen_golden/`, LF via .gitattributes; update with
+  `HE_UPDATE_HCGEN_GOLDEN=1`; old cryptic forms banned; every callApi has no direct form). `directCallsSource` static_asserts the
+  "used as returned" result types. Parity harness: `checkParity` drops direct rows' `callApi` trace lines on both sides (lesson 452).
+- **Verified (Mac, out/build/release, dev):** he_tests builds; `test_horizoncode*`, `test_engine_api*`, `test_hccompiled_loader`,
+  `test_hc_*` 507/507. Full ctest NOT run in this step. CI not started.
+- **NOT done / broken until fixed:** (1) `generateCMakeLists` still links only `HorizonCore`, and the editor's staged codegen SDK
+  (`src/HE_Editor/CMakeLists.txt:615-655`, `he_sdk_config.json`) has no HE_Scene headers/lib: an in-editor "Compile HorizonCode"
+  export of a graph with an Engine Call now fails to compile and ships INTERPRETED (fallback works, compiled path does not).
+  `test_hcgen` already links HorizonScene. (2) the twin-world test: fixture `engine_world` exists, `world_parity.h` +
+  `test_hc_codegen_world.cpp` do not. (3) the SDK-compiled parity test (hc_codegen `--cmake`, build against the installed SDK
+  package, probe loads it via `CompiledClassTable`, compare on twin worlds) not started.
+- **Next steps:** 1. `generateCMakeLists`: `find_package(HorizonEngine)` → `HorizonEngine::Scene` when `HorizonEngine_DIR`/`HE_SDK_DIR`
+  has the package, else include+lib dirs linking `HorizonScene HorizonCore`; `SdkInfo` + package dir and extra lib dirs; stage
+  `src/HE_Scene/include` + HorizonScene linker file into `<editor>/SDK`, add both to `he_sdk_config.json`. 2. `world_parity.h`
+  (twin `HorizonWorld`s, probe entity with TransformComponent owned via `Runtime::setOwnedEntity`, `Services::callApi` = invoke and
+  `Services::apiCtx` from one Ctx builder; compare variables + probe/spawned transforms) used by he_tests and the probe. 3. SDK probe
+  next to `tests/sdk_example`. 4. Full ctest, push, `gh workflow run CI`.
