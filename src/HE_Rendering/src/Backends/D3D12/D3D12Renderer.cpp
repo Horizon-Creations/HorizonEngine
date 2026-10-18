@@ -8964,8 +8964,8 @@ void D3D12RendererImpl::createSkyEnvCube()
 // Recorded on the frame's command list before its first material draw. The
 // upload buffer is this frame slot's own, so the frame fence that guards the
 // HeLighting/U/HeParams rings guards it too. When to rebake is the shared
-// HE::SkyEnvBaker's call (GL's 2e-3 ≈ 0.11° dead band plus its throttle): a
-// static sun bakes once, a moving one at most HE::kSkyEnvMinInterval apart.
+// HE::SkyEnvBaker's call (dead bands by sun elevation, 0.11° through
+// twilight): a static sun bakes once.
 void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir)
 {
     if (!cl || !m_skyEnvCube || !m_skyEnvUploadPtr[frameIndex]) return;

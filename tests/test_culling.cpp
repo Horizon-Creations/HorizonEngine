@@ -1000,17 +1000,17 @@ TEST_CASE("SkyEnvBaker: the shared bake is the face function's texels, as floats
 		const std::vector<float> face = HE::BuildSkyEnvFace(N, f, sun);
 		want.insert(want.end(), face.begin(), face.end());
 	}
-	const float* px = baker.bakeFloat(sun, 0.0);
+	const float* px = baker.bakeFloat(sun);
 	CHECK(std::vector<float>(px, px + baker.channels()) == want);
 	CHECK(baker.bakeCount() == 1u);
 	CHECK(baker.bakedSun() == sun);
 
 	std::vector<uint16_t> wantHalf(want.size());
 	for (size_t i = 0; i < want.size(); ++i) wantHalf[i] = glm::packHalf1x16(want[i]);
-	const uint16_t* own = baker.bakeHalf(sun, 0.0);                 // the baker's scratch
+	const uint16_t* own = baker.bakeHalf(sun);                 // the baker's scratch
 	CHECK(std::vector<uint16_t>(own, own + baker.channels()) == wantHalf);
 	std::vector<uint16_t> mapped(baker.channels(), 0xFFFFu);       // a caller's staging buffer
-	CHECK(baker.bakeHalf(sun, 0.0, mapped.data()) == mapped.data());
+	CHECK(baker.bakeHalf(sun, mapped.data()) == mapped.data());
 	CHECK(mapped == wantHalf);
 	CHECK(baker.bakeCount() == 3u);
 
@@ -1019,48 +1019,67 @@ TEST_CASE("SkyEnvBaker: the shared bake is the face function's texels, as floats
 	CHECK(HE::kSkyEnvCubeChannels == HE::SkyEnvBaker().channels());
 }
 
-TEST_CASE("SkyEnvBaker: dead band, throttle and jump decide when to rebake")
+TEST_CASE("SkyEnvBaker: the dead band follows the sun's elevation")
 {
-	HE::SkyEnvBaker baker(2);
+	// The extractor's sun path (RenderExtractor.cpp, day-night cycle): angle a
+	// from the +X horizon, y = sin(a) / |(cos a, sin a, 0.45)|.
 	auto sunAt = [](float a) { return glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f)); };
 	const float chord = 1.0f / std::sqrt(1.0f + 0.45f * 0.45f); // |d sun / d a|
-	const glm::vec3 s0 = sunAt(1.0f);
+	auto past = [&](float a, float band, float times) { return sunAt(a + times * band / chord); };
 
-	CHECK(baker.due(s0, 0.0));                                      // never baked
-	baker.bakeFloat(s0, 10.0);
-	CHECK_FALSE(baker.due(s0, 10.0));
-	CHECK_FALSE(baker.due(s0, 1000.0));                             // a static sun bakes once
+	// The bands themselves.
+	const float day = 1.0f, twilight = 0.0f, night = -1.2f;
+	REQUIRE(sunAt(day).y      > HE::kSkyEnvTwilightHigh);
+	REQUIRE(sunAt(twilight).y > HE::kSkyEnvTwilightLow);
+	REQUIRE(sunAt(twilight).y < HE::kSkyEnvTwilightHigh);
+	REQUIRE(sunAt(night).y    < HE::kSkyEnvTwilightLow);
+	CHECK(HE::SkyEnvSunTolerance(sunAt(day), sunAt(day + 0.01f))         == HE::kSkyEnvSunToleranceDay);
+	CHECK(HE::SkyEnvSunTolerance(sunAt(night), sunAt(night + 0.01f))     == HE::kSkyEnvSunToleranceNight);
+	CHECK(HE::SkyEnvSunTolerance(sunAt(twilight), sunAt(twilight + 0.01f)) == HE::kSkyEnvSunTolerance);
+	// Either sun in twilight is enough for the fine band (entering and leaving it).
+	CHECK(HE::SkyEnvSunTolerance(sunAt(day), sunAt(twilight))   == HE::kSkyEnvSunTolerance);
+	CHECK(HE::SkyEnvSunTolerance(sunAt(twilight), sunAt(night)) == HE::kSkyEnvSunTolerance);
 
-	// Inside the dead band: never, however long ago the bake was.
-	const glm::vec3 tiny = sunAt(1.0f + 0.5f * HE::kSkyEnvSunTolerance / chord);
-	CHECK_FALSE(baker.due(tiny, 1000.0));
-
-	// Past the dead band: only once the interval since the BAKE has passed.
-	const glm::vec3 moved = sunAt(1.0f + 2.0f * HE::kSkyEnvSunTolerance / chord);
-	CHECK_FALSE(baker.due(moved, 10.0 + 0.5 * HE::kSkyEnvMinInterval));
-	CHECK(baker.due(moved, 10.0 + HE::kSkyEnvMinInterval));
-
-	// A jump (script, slider, the headless HE_SKY_TIME frame) bakes at once.
-	const glm::vec3 jump = sunAt(1.0f + 1.5f * HE::kSkyEnvSunJump / chord);
-	CHECK(baker.due(jump, 10.0));
-
-	// A sun that creeps in steps smaller than the dead band and then stops is
-	// measured against the LAST BAKE, not the last frame: it gets its bake.
-	double t = 10.0;
-	float  a = 1.0f;
-	for (int i = 0; i < 10; ++i)
+	SUBCASE("full day: coarse")
 	{
-		a += 0.6f * HE::kSkyEnvSunTolerance / chord;
-		t += 0.001;
-		if (baker.due(sunAt(a), t)) baker.bakeFloat(sunAt(a), t);
+		HE::SkyEnvBaker baker(2);
+		CHECK(baker.due(sunAt(day)));                                // never baked
+		baker.bakeFloat(sunAt(day));
+		CHECK_FALSE(baker.due(sunAt(day)));                          // a static sun bakes once
+		CHECK_FALSE(baker.due(past(day, HE::kSkyEnvSunTolerance, 2.0f)));
+		CHECK_FALSE(baker.due(past(day, HE::kSkyEnvSunToleranceDay, 0.9f)));
+		CHECK(baker.due(past(day, HE::kSkyEnvSunToleranceDay, 1.1f)));
+		baker.invalidate();                                          // device reset
+		CHECK(baker.due(sunAt(day)));
 	}
-	CHECK(baker.bakeCount() == 1u);                                 // throttled the whole way
-	CHECK(baker.due(sunAt(a), t + HE::kSkyEnvMinInterval));         // ... and baked once it stops
-	baker.bakeFloat(sunAt(a), t + HE::kSkyEnvMinInterval);
-	CHECK_FALSE(baker.due(sunAt(a), t + 1000.0));
-
-	baker.invalidate();                                             // device reset
-	CHECK(baker.due(sunAt(a), t + 1000.0));
+	SUBCASE("twilight: GL's old 2e-3")
+	{
+		HE::SkyEnvBaker baker(2);
+		baker.bakeFloat(sunAt(twilight));
+		CHECK_FALSE(baker.due(past(twilight, HE::kSkyEnvSunTolerance, 0.9f)));
+		CHECK(baker.due(past(twilight, HE::kSkyEnvSunTolerance, 1.1f)));
+	}
+	SUBCASE("deep night: coarsest")
+	{
+		HE::SkyEnvBaker baker(2);
+		baker.bakeFloat(sunAt(night));
+		CHECK_FALSE(baker.due(past(night, HE::kSkyEnvSunToleranceDay, 2.0f)));
+		CHECK_FALSE(baker.due(past(night, HE::kSkyEnvSunToleranceNight, 0.9f)));
+		CHECK(baker.due(past(night, HE::kSkyEnvSunToleranceNight, 1.1f)));
+	}
+	SUBCASE("a sun that creeps is measured against the LAST BAKE, not the last frame")
+	{
+		HE::SkyEnvBaker baker(2);
+		float a = twilight;
+		baker.bakeFloat(sunAt(a));
+		for (int i = 0; i < 10; ++i)
+		{
+			a += 0.6f * HE::kSkyEnvSunTolerance / chord;             // each step inside the band
+			if (baker.due(sunAt(a))) baker.bakeFloat(sunAt(a));
+		}
+		CHECK(baker.bakeCount() == 6u);                              // the first plus every 2nd step
+		CHECK(glm::distance(baker.bakedSun(), sunAt(a)) < HE::kSkyEnvSunTolerance);
+	}
 }
 
 // Off unless HE_SKYENV_BENCH is set (REN-401 / REN-908 measurement): how often the
@@ -1098,8 +1117,8 @@ TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
 		for (int r = 0; r < 15; ++r)
 		{
 			const glm::vec3 s = sunAt(0.30 + 0.01 * r);
-			baker.bakeFloat(s, 0.0); f32.push_back(baker.lastBakeMs());
-			baker.bakeHalf(s, 0.0);  f16.push_back(baker.lastBakeMs());
+			baker.bakeFloat(s); f32.push_back(baker.lastBakeMs());
+			baker.bakeHalf(s); f16.push_back(baker.lastBakeMs());
 		}
 		std::sort(f32.begin(), f32.end()); std::sort(f16.begin(), f16.end());
 		// The old D3D/Vulkan drivers: float bake + a fresh vector + serial conversion.
@@ -1107,7 +1126,7 @@ TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
 		for (int r = 0; r < 15; ++r)
 		{
 			const auto t0 = std::chrono::steady_clock::now();
-			const float* px = baker.bakeFloat(sunAt(0.30 + 0.01 * r), 0.0);
+			const float* px = baker.bakeFloat(sunAt(0.30 + 0.01 * r));
 			std::vector<uint16_t> half(baker.channels());
 			for (size_t i = 0; i < half.size(); ++i) half[i] = glm::packHalf1x16(px[i]);
 			old16.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
@@ -1134,7 +1153,7 @@ TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
 		std::vector<glm::dvec3> truth(frames);
 		HE::SkyEnvBaker probe(16);
 		for (int i = 0; i < frames; ++i)
-			truth[i] = meanOf(probe.bakeFloat(sunAt(0.25 + i * dt / cycle), 0.0), probe.channels());
+			truth[i] = meanOf(probe.bakeFloat(sunAt(0.25 + i * dt / cycle)), probe.channels());
 
 		// Where in the day the cube changes: the largest frame-to-frame change of the
 		// mean colour per 1/24 of the day, relative.
@@ -1151,12 +1170,24 @@ TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
 				profile += cell;
 			}
 			MESSAGE("day 120 s @ 60 fps, per-frame change of the cube's mean colour by time of day:" << profile);
+			// The sun elevations where it changes faster than 0.2 % a frame — what
+			// HE::kSkyEnvTwilight* are read off.
+			float lo = 1.0f, hi = -1.0f;
+			for (int i = 1; i < frames; ++i)
+				if (glm::length(truth[i] - truth[i - 1]) / std::max(1e-3, glm::length(truth[i])) > 0.002)
+				{
+					const float y = sunAt(0.25 + i * dt / cycle).y;
+					lo = std::min(lo, y); hi = std::max(hi, y);
+				}
+			MESSAGE("day 120 s @ 60 fps: the cube changes > 0.2 % per frame for sun y in [" << lo << ", " << hi
+			        << "]; the baker's full-rate band is [" << HE::kSkyEnvTwilightLow << ", "
+			        << HE::kSkyEnvTwilightHigh << "]");
 		}
 
 		auto simulate = [&](const std::string& name, auto&& due, auto&& bake)
 		{
 			int bakes = 0, used = 0;
-			double worst = 0.0, worstAt = 0.0;
+			double worst = 0.0, worstAt = 0.0, lagDeg = 0.0;
 			for (int i = 0; i < frames; ++i)
 			{
 				const double now = i * dt;
@@ -1164,11 +1195,13 @@ TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
 				if (due(s, now)) { bake(s, now); ++bakes; used = i; }
 				const double err = glm::length(truth[used] - truth[i]) / std::max(1e-3, glm::length(truth[i]));
 				if (err > worst) { worst = err; worstAt = 0.25 + now / cycle; }
+				const float c = glm::clamp(glm::dot(sunAt(0.25 + used * dt / cycle), s), -1.0f, 1.0f);
+				lagDeg = std::max(lagDeg, std::acos(static_cast<double>(c)) * 57.29577951);
 			}
 			MESSAGE("day " << cycle << " s @ 60 fps, " << name << ": " << bakes / cycle
 			        << " bakes per s (every " << static_cast<double>(frames) / bakes
 			        << " frames); cube off by <= " << worst * 100.0 << " % (time of day "
-			        << std::fmod(worstAt, 1.0) << ")");
+			        << std::fmod(worstAt, 1.0) << "), its sun trails by <= " << lagDeg << " deg");
 		};
 		for (const float tol : { 1.0e-4f, 2.0e-3f })
 		{
@@ -1180,8 +1213,8 @@ TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
 		}
 		HE::SkyEnvBaker real(1);
 		simulate("shared baker",
-		         [&](const glm::vec3& s, double now) { return real.due(s, now); },
-		         [&](const glm::vec3& s, double now) { real.bakeFloat(s, now); });
+		         [&](const glm::vec3& s, double) { return real.due(s); },
+		         [&](const glm::vec3& s, double) { real.bakeFloat(s); });
 	}
 }
 

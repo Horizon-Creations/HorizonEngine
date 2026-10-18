@@ -4197,9 +4197,9 @@ void OpenGLRenderer::CreateInstancedPipeline()
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 {
-	// The baked sky only changes with the sun direction. When to rebake — the dead
-	// band, the throttle under day-night auto-advance, the jump that bakes at once —
-	// is the shared HE::SkyEnvBaker's call, the same on every backend.
+	// The baked sky only changes with the sun direction. When to rebake — dead
+	// bands that follow the sun's elevation — is the shared HE::SkyEnvBaker's
+	// call, the same on every backend.
 	if (m_skyEnvValid && !m_skyEnvBaker.due(sunDir))
 		return;
 	m_skyEnvValid = true;

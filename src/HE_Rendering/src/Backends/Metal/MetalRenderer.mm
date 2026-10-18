@@ -13745,8 +13745,8 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc setFragmentBytes:&m_prepassViewProj[0][0] length:sizeof(glm::mat4) atIndex:1]; // low-res cloud reprojection
 	// Sky-View LUT on 3/4, read only when it was baked for THIS sun (within 1e-4 —
-	// its own, tighter tolerance; the IBL cube's dead band and throttle are
-	// HE::SkyEnvBaker's and much coarser). Otherwise — LUT off,
+	// its own, tighter tolerance; the IBL cube's dead bands are HE::SkyEnvBaker's
+	// and much coarser). Otherwise — LUT off,
 	// not baked yet, or baked for another sun — the shader integrates per pixel.
 	const bool lutOn = useSkyLut && skyViewLutEnabled() && m_skyLutValid
 	                && m_skyLutRayleigh && m_skyLutMie
@@ -13855,10 +13855,10 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 {
 	if (!m_skyEnvCube) return;
-	// The baked sky only changes with the sun direction. When to rebake (dead band,
-	// throttle under day-night auto-advance, a jump bakes at once) and the parallel
-	// bake itself are the shared HE::SkyEnvBaker's — this backend used to rebake on
-	// every frame the sun moved (a 1e-4 dead band, the others 2e-3).
+	// The baked sky only changes with the sun direction. When to rebake (dead bands
+	// by sun elevation) and the parallel bake itself are the shared
+	// HE::SkyEnvBaker's — this backend used to rebake on every frame the sun moved
+	// (a 1e-4 dead band, the others 2e-3).
 	if (m_skyEnvValid && !m_skyEnvBaker.due(sunDir)) return;
 	m_skyEnvValid = true;
 	id<MTLTexture> cube = (__bridge id<MTLTexture>)m_skyEnvCube;

@@ -7,26 +7,34 @@
 namespace HE
 {
 
-double SkyEnvBaker::clockSeconds()
+namespace
+{
+double clockSeconds()
 {
 	using clk = std::chrono::steady_clock;
 	return std::chrono::duration<double>(clk::now().time_since_epoch()).count();
 }
+} // namespace
 
-bool SkyEnvBaker::due(const glm::vec3& sunDir, double now) const
+float SkyEnvSunTolerance(const glm::vec3& bakedSun, const glm::vec3& sunDir)
+{
+	const float a = glm::normalize(bakedSun).y;
+	const float b = glm::normalize(sunDir).y;
+	if (a > kSkyEnvTwilightHigh && b > kSkyEnvTwilightHigh) return kSkyEnvSunToleranceDay;
+	if (a < kSkyEnvTwilightLow  && b < kSkyEnvTwilightLow)  return kSkyEnvSunToleranceNight;
+	return kSkyEnvSunTolerance;
+}
+
+bool SkyEnvBaker::due(const glm::vec3& sunDir) const
 {
 	if (!m_baked) return true;
-	const float moved = glm::distance(sunDir, m_sunDir);
-	if (moved < kSkyEnvSunTolerance) return false;
-	if (moved >= kSkyEnvSunJump) return true;
-	return now >= m_bakedAt + kSkyEnvMinInterval;
+	return glm::distance(sunDir, m_sunDir) >= SkyEnvSunTolerance(m_sunDir, sunDir);
 }
 
 // Rows are independent and SkyColorCPU is pure, so a (face, row) fan-out is
 // data-race-free. Grain 1: a row is tens of µs of work, far above the default
-// grain's assumption of a cheap per-index body. Serially the 128² cube was
-// ~47-60 ms (GL and Metal measured it); parallel it is a few ms.
-const float* SkyEnvBaker::bakeFloat(const glm::vec3& sunDir, double now)
+// grain's assumption of a cheap per-index body.
+const float* SkyEnvBaker::bakeFloat(const glm::vec3& sunDir)
 {
 	HE_PROFILE_SCOPE_N("SkyEnvBaker::bake");
 	const double start = clockSeconds();
@@ -39,11 +47,11 @@ const float* SkyEnvBaker::bakeFloat(const glm::vec3& sunDir, double now)
 		const int t = static_cast<int>(idx % N);
 		BuildSkyEnvFaceRow(N, f, t, sunDir, px + ((static_cast<size_t>(f) * N + t) * N) * 4);
 	}, "SkyEnvBake", 1);
-	finish(sunDir, now, start);
+	finish(sunDir, start);
 	return px;
 }
 
-const uint16_t* SkyEnvBaker::bakeHalf(const glm::vec3& sunDir, double now, uint16_t* dst)
+const uint16_t* SkyEnvBaker::bakeHalf(const glm::vec3& sunDir, uint16_t* dst)
 {
 	HE_PROFILE_SCOPE_N("SkyEnvBaker::bake");
 	const double start = clockSeconds();
@@ -69,14 +77,13 @@ const uint16_t* SkyEnvBaker::bakeHalf(const glm::vec3& sunDir, double now, uint1
 		for (int i = 0; i < N * 4; ++i)
 			o[i] = glm::packHalf1x16(rowPx[i]);
 	}, "SkyEnvBake", 1);
-	finish(sunDir, now, start);
+	finish(sunDir, start);
 	return out;
 }
 
-void SkyEnvBaker::finish(const glm::vec3& sunDir, double now, double startSeconds)
+void SkyEnvBaker::finish(const glm::vec3& sunDir, double startSeconds)
 {
 	m_sunDir     = sunDir;
-	m_bakedAt    = now;
 	m_baked      = true;
 	++m_bakeCount;
 	m_lastBakeMs = (clockSeconds() - startSeconds) * 1000.0;

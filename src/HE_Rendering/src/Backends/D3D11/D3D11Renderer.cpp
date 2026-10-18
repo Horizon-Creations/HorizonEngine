@@ -4610,7 +4610,7 @@ struct D3D11RendererImpl
     }
 
     // Re-bake the heSkyEnv cube when the sun moved — the shared HE::SkyEnvBaker
-    // decides when (GL's 2e-3 dead band plus its throttle) and bakes in parallel
+    // decides when (dead bands by sun elevation) and bakes in parallel
     // over (face, row), halves packed in the row task, into its own scratch; the
     // upload is one UpdateSubresource per face. Runs on the immediate context
     // before the frame's first material draw, so no draw of this frame can see a

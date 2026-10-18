@@ -3014,9 +3014,8 @@ void VulkanRenderer::destroySkyEnvCube()
 // backend the extractor runs inside DrawScene, i.e. AFTER this point, so the
 // bake can trail the sun by one frame (EncodeShadowMap re-extracts first when
 // shadows are on). For a low-frequency ambient cube under the shared baker's
-// 0.11° dead band and throttle that is invisible; a static sun is exact from the
-// second frame (a first-frame jump of 2.9° or more bakes at once, a smaller one
-// within HE::kSkyEnvMinInterval).
+// dead bands (0.11° through twilight) that is invisible; a static sun is exact
+// from the second frame.
 void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
 {
     if (!m_skyEnvView || !m_skyEnvStaging[m_currentFrame].mapped) return;
