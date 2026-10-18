@@ -1056,6 +1056,7 @@ void EditorApplication::OnInit()
 		// the snapshot left, which is exactly the parentage the peers share.
 		m_structureParent.clear();
 		m_structureUndeletable.clear();
+		m_structureUnsendable.clear();
 		// The records were just rebuilt: the next frame diffs against them.
 		m_structureGate.reset();
 		m_structureReparentPending = false;
@@ -4990,7 +4991,15 @@ void EditorApplication::OnRender(float dt)
 		// Out of a session the gate forgets what it saw, so the first pass of the
 		// next one runs whatever the epoch says.
 		if (m_collab.inSession()) syncStructuralChanges(nowMs);
-		else                      m_structureGate.reset();
+		else
+		{
+			// Nobody left to retry for: an entry carried into the next session
+			// would only keep its pass running on every frame.
+			m_structureGate.reset();
+			m_structureUnsendable.clear();
+			m_structureUndeletable.clear();
+			m_structureReparentPending = false;
+		}
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
 		// Landscapes, after the structural diff so a landscape created this frame
@@ -11602,6 +11611,11 @@ void EditorApplication::syncStructuralChanges(std::uint64_t nowMs)
 	if (!m_structureGate.due(epoch, pendingWork, nowMs)) return;
 	m_structureGate.ran(epoch, nowMs);
 	m_structureReparentPending = false;
+	// A create still retrying for an entity that is gone by now (undone, a
+	// peer's destroy) never comes up in newSubtreeRoots again, so its entry
+	// would never leave — and would keep this pass running on every frame.
+	for (auto it = m_structureUnsendable.begin(); it != m_structureUnsendable.end(); )
+		it = reg.valid(it->first) ? std::next(it) : m_structureUnsendable.erase(it);
 
 	// Entities the engine generates per machine — terrain chunks regenerate from
 	// the TerrainComponent, environment lights belong to the Sky entity — must
@@ -11748,7 +11762,10 @@ void EditorApplication::syncStructuralChanges(std::uint64_t nowMs)
 		// "the world root". Wait for it; the record stays, so this comes up again.
 		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
 		{
-			m_structureReparentPending = true;
+			// Looked at again next frame only if that parent can still become
+			// known: one that is local-only never will, and would pin the pass
+			// to every frame (the fallback still looks once a second).
+			if (current.count(m.to)) m_structureReparentPending = true;
 			continue;
 		}
 

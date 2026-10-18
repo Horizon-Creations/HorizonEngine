@@ -186,7 +186,7 @@ fallback diff.
 ## Handoff
 
 - **Topic / step:** 220, step 4 of 5 (steps 1-3: records above)
-- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 70440211 (code + tests), then this record.
+- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 70440211 (code + tests), 93f96ef0 (this record), then the retry-map fix (the commit after it).
 - **Done:** EDT-402/1601 (structure pass gated), EDT-202 (net-id maps + miss cache), EDT-201 (Level Script / Game Instance diff gate). Table in "Step 4" above.
 - **Files touched:** `StructuralSync.h` (`StructPassGate`), `EditorApplication.h/.cpp` (`syncStructuralChanges(nowMs)` ~11570, caller ~4990, `onWorldReplaced` ~1058, `editorDocDiffDue` before `publishDocDeltas`, the two loops of `updateAssetCollabSync`, `hc.endEdit`, `commitGameInstance`), `CollabController.h/.cpp` (net-id section ~2700, remote create ~1163, session reset ~1768, `setWorld`), `CollabDocSync.h` (`DiffGate`), `HorizonWorld.h/.cpp` (`entityIdRevision`); tests: `test_collab_controller.cpp` (+7), `test_collab_docsync.cpp` (+2).
 - **Verified:**
@@ -204,5 +204,6 @@ fallback diff.
 - **Traps:**
   - `onWorldReplaced` marks EVERY entity known, local-only ones included. The first pass then sends destroys for this machine's terrain chunks and lights, which receivers ignore. Found by reading the code, not tested. This was there before the step and was left as it is.
   - A cached net-id miss is only valid for one world: `setWorld` clears it.
+  - Anything left in the retry maps (`m_structureUnsendable`, `m_structureUndeletable`, `m_structureReparentPending`) forces the pass on every frame. So dead entities are pruned from `m_structureUnsendable` at the start of each pass, both maps are cleared at session end and in `onWorldReplaced`, and a re-parent under a parent that is local-only is not marked pending (that parent will never be known).
 - **Pending:** plan step 5.
 - **Next steps:** 1. Step 5: tables instead of parallel lists (EDT-801, 1208/1209, 703/704, AssetPanelOps/UIPropTable), then Extract Method on the big monoliths.
