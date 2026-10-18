@@ -46,6 +46,9 @@ public:
 	void*    GetDevice()         const;
 	void*    GetQueue()          const;
 	uint64_t GetRenderPass()     const;
+	// The renderer's VkPipelineCache (REN-808), for ImGui_ImplVulkan_InitInfo::PipelineCache;
+	// 0 with HE_VK_PIPELINE_CACHE=0.
+	uint64_t GetPipelineCache()  const;
 	uint32_t GetQueueFamily()    const;
 	uint32_t GetImageCount()     const;
 
@@ -735,6 +738,31 @@ private:
 	// after a wait-idle is still referenced by an unsubmitted copy.
 	VkResult        submitGraphics(const VkSubmitInfo& si, VkFence fence);
 	void            deviceWaitIdle();
+	// ── Pipeline cache (REN-808) ────────────────────────────────────────────
+	// One VkPipelineCache for every vkCreate*Pipelines of this file (and ImGui's,
+	// GetPipelineCache()), read from <pref path>/vkpipelinecache/<vendor>_<device>.bin
+	// after createDevice() and written back at shutdown when it changed
+	// (VulkanPipelineCacheFile.h: header + driver blob, checked against the device).
+	// Before, the driver compiled every built-in pipeline at every start and every
+	// graph-material pipeline at its first draw, unless it kept a disk cache of its
+	// own. HE_VK_PIPELINE_CACHE=0 creates no cache (the old path, same binary, for
+	// A/B); HE_VK_PIPELINE_CACHE_DIR=<dir> moves the file. Every create goes through
+	// the two wrappers below, which time it: "[startup] Vulkan Initialize" and the
+	// shutdown line carry the totals.
+	VkResult        createGraphicsPipelines(uint32_t n, const VkGraphicsPipelineCreateInfo* ci,
+	                                        const VkAllocationCallbacks* alloc, VkPipeline* out);
+	VkResult        createComputePipelines(uint32_t n, const VkComputePipelineCreateInfo* ci,
+	                                       const VkAllocationCallbacks* alloc, VkPipeline* out);
+	void            createPipelineCache();
+	void            savePipelineCache();          // and destroy it
+	VkPipelineCache m_pipelineCache        = VK_NULL_HANDLE;
+	std::string     m_pipelineCachePath;
+	const char*     m_pipelineCacheState   = "off"; // what createPipelineCache found
+	size_t          m_pipelineCacheInBytes = 0;
+	uint64_t        m_pipelineCacheInHash  = 0;
+	uint32_t        m_pipelinesCreated     = 0;
+	double          m_pipelineMs           = 0.0;   // CPU time in vkCreate*Pipelines
+
 	std::vector<MemBlock>   m_memBlocks;
 	VkCommandPool           m_uploadPool     = VK_NULL_HANDLE;
 	VkBuffer                m_stageBuf       = VK_NULL_HANDLE;

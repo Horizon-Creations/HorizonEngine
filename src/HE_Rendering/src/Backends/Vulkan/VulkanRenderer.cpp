@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <cstdio>
 #include <cstring>
@@ -29,6 +30,7 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/LightPacking.h>
 #include <Backends/Vulkan/VulkanMaterialLayout.h> // graph-material set 0 (shared with he_tests)
+#include <Backends/Vulkan/VulkanPipelineCacheFile.h> // on-disk VkPipelineCache (REN-808)
 #include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/SkyFrameParams.h>
@@ -180,11 +182,13 @@ VulkanRenderer::~VulkanRenderer() = default;
 void VulkanRenderer::Initialize(HE::Window* window)
 {
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: initializing");
+    const auto initT0 = std::chrono::steady_clock::now();
     m_sdlWindow = window->GetNativeWindow();
     createInstance();       HE_LOG_INFO(RHI, "%s", "VulkanRenderer: instance created");
     createSurface();        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: surface created");
     pickPhysicalDevice();   HE_LOG_INFO(RHI, "%s", "VulkanRenderer: physical device selected");
     createDevice();         HE_LOG_INFO(RHI, "%s", "VulkanRenderer: logical device created");
+    createPipelineCache();  // before the first vkCreate*Pipelines (REN-808)
     gpuTimerInit();
     createSwapchain(window->GetWidth(), window->GetHeight()); HE_LOG_INFO(RHI, "%s", "VulkanRenderer: swapchain created");
     createRenderPass();     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: render pass created");
@@ -216,6 +220,11 @@ void VulkanRenderer::Initialize(HE::Window* window)
             m_viewMode = static_cast<HE::ViewMode>(
                 static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
 	m_shaderManager = VulkanShaderManager();
+    // The built-in pipelines are all made by now; graph materials follow at their
+    // first draw (or in the warm-up) and only show up in the shutdown line.
+    HE_LOG_INFO(RHI, "[startup] Vulkan Initialize: ms=%.1f pipelines=%u pipelineMs=%.1f cache=%s",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - initT0).count(),
+                m_pipelinesCreated, m_pipelineMs, m_pipelineCacheState);
 }
 
 void VulkanRenderer::Shutdown()
@@ -393,6 +402,7 @@ void VulkanRenderer::Shutdown()
     if (m_cmdPool)     vkDestroyCommandPool(m_device,   m_cmdPool,     nullptr);
     if (m_renderPass)  vkDestroyRenderPass (m_device,   m_renderPass,  nullptr);
     destroySwapchain();
+    savePipelineCache();     // every pipeline is built by now; ImGui shut down before us
     if (m_device)   vkDestroyDevice    (m_device,              nullptr);
     if (m_surface)  vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
     if (m_debugMessenger)
@@ -2479,7 +2489,7 @@ void VulkanRenderer::createScenePipeline()
     pci.layout              = m_scenePipelineLayout;
     pci.renderPass          = m_renderPass;
     pci.subpass             = 0;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_scenePipeline) != VK_SUCCESS)
+    if (createGraphicsPipelines(1, &pci, nullptr, &m_scenePipeline) != VK_SUCCESS)
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: graphics pipeline creation failed");
 
     // A3: instanced variant — same fragment shader + states, VS reads per-instance
@@ -2514,7 +2524,7 @@ void VulkanRenderer::createScenePipeline()
         VkGraphicsPipelineCreateInfo ipci = pci;
         ipci.pStages           = istages;
         ipci.pVertexInputState = &ivi;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr, &m_sceneInstancedPipeline) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &ipci, nullptr, &m_sceneInstancedPipeline) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced scene pipeline creation failed");
         vkDestroyShaderModule(m_device, ivs, nullptr);
     }
@@ -2541,7 +2551,7 @@ void VulkanRenderer::createScenePipeline()
         VkGraphicsPipelineCreateInfo tpci = pci;
         tpci.pColorBlendState    = &tcb;
         tpci.pDepthStencilState  = &tds;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &tpci, nullptr, &m_sceneTransparentPipeline) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &tpci, nullptr, &m_sceneTransparentPipeline) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: transparent pipeline creation failed");
     }
 
@@ -2579,7 +2589,7 @@ void VulkanRenderer::createScenePipeline()
             spci.pRasterizationState = &srs;
             spci.pDynamicState   = &sdyn;
             spci.renderPass      = m_shadowPass;
-            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
+            if (createGraphicsPipelines(1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: shadow pipeline creation failed");
             vkDestroyShaderModule(m_device, svs, nullptr);
 
@@ -2595,7 +2605,7 @@ void VulkanRenderer::createScenePipeline()
                 VkGraphicsPipelineCreateInfo sipci = spci;
                 sipci.pStages           = &sistage;
                 sipci.pVertexInputState = &sin.info;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &sipci, nullptr,
+                if (createGraphicsPipelines(1, &sipci, nullptr,
                                               &m_shadowInstancedPipeline) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced shadow pipeline creation failed");
                 vkDestroyShaderModule(m_device, sivs, nullptr);
@@ -3320,7 +3330,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     pci.subpass             = 0;
 
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
+    if (createGraphicsPipelines(1, &pci, nullptr, &pipe) != VK_SUCCESS)
     {
         HE_LOG_ERROR(RHI, "%s", instanced
             ? "VulkanRenderer: A4 instanced material pipeline creation failed, its batches draw per instance"
@@ -3836,7 +3846,7 @@ bool VulkanRenderer::EnsureDecalPipelines()
         pci.layout              = m_decalPipeLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+        return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
     };
 
     // Two pipelines, picked by `hdr` exactly like the scene pipelines: the
@@ -4392,7 +4402,7 @@ bool VulkanRenderer::createDeferredPipelines()
         pci.pMultisampleState   = &ms;       pci.pDepthStencilState  = &ds;
         pci.pColorBlendState    = &cb;       pci.pDynamicState       = &dyn;
         pci.layout = m_scenePipelineLayout;  pci.renderPass = m_gbufferRP; pci.subpass = 0;
-        const bool ok = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        const bool ok = createGraphicsPipelines(1, &pci, nullptr,
                                                   &m_gbufPipeline) == VK_SUCCESS;
         // Instanced twin (A3): optional — without it a batch loops per instance.
         if (ok)
@@ -4415,7 +4425,7 @@ bool VulkanRenderer::createDeferredPipelines()
                 ivi.vertexAttributeDescriptionCount = 11; ivi.pVertexAttributeDescriptions = iat;
                 VkGraphicsPipelineCreateInfo ipci = pci;
                 ipci.pStages = ist; ipci.pVertexInputState = &ivi;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+                if (createGraphicsPipelines(1, &ipci, nullptr,
                                               &m_gbufInstancedPipeline) != VK_SUCCESS)
                     m_gbufInstancedPipeline = VK_NULL_HANDLE;
                 vkDestroyShaderModule(m_device, ivs, nullptr);
@@ -4546,7 +4556,7 @@ bool VulkanRenderer::createDeferredPipelines()
             pci.pMultisampleState   = &ms;     pci.pDepthStencilState  = &ds;
             pci.pColorBlendState    = &cb;     pci.pDynamicState       = &dyn;
             pci.layout = m_resolvePipeLayout;  pci.renderPass = m_postFxSceneRP; pci.subpass = 0;
-            const bool ok = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+            const bool ok = createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
             vkDestroyShaderModule(m_device, rfs, nullptr);
             if (!ok) out = VK_NULL_HANDLE;
             return ok;
@@ -4950,7 +4960,7 @@ void VulkanRenderer::createPostFXPipelines()
         pci.pDepthStencilState = depth;
         pci.pDynamicState = &dyn; pci.layout = m_postFxPipeLayout;
         pci.renderPass = rp; pci.subpass = 0;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out), "postfx pipeline");
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr, &out), "postfx pipeline");
     };
 
     makePipe(brFS, m_postFxBlitF16, m_bloomBrightPipe);
@@ -5038,7 +5048,7 @@ void VulkanRenderer::createPostFXPipelines()
         pci.pDynamicState = &dyn; pci.layout = m_underwaterFogPipeLayout;
         pci.renderPass = m_underwaterFogRP; pci.subpass = 0;
         m_underwaterFogReady = m_underwaterFogRP && m_underwaterFogPipeLayout &&
-            vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterFogPipe) == VK_SUCCESS;
+            createGraphicsPipelines(1, &pci, nullptr, &m_underwaterFogPipe) == VK_SUCCESS;
 
         // Underwater caustics (Thema 185 Schritt 3): the fog's render pass, descriptor set
         // layout and every fixed-function state above (incl. the blend — ONE / ONE_MINUS_SRC_ALPHA
@@ -5058,7 +5068,7 @@ void VulkanRenderer::createPostFXPipelines()
             stages[1].module = ucFS;
             pci.layout = m_underwaterCausticsPipeLayout;
             m_underwaterCausticsReady = m_underwaterFogRP && m_underwaterCausticsPipeLayout &&
-                vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_underwaterCausticsPipe) == VK_SUCCESS;
+                createGraphicsPipelines(1, &pci, nullptr, &m_underwaterCausticsPipe) == VK_SUCCESS;
         }
     }
 
@@ -5106,7 +5116,7 @@ void VulkanRenderer::createPostFXPipelines()
             pci2.pViewportState=&vp2; pci2.pRasterizationState=&rs2; pci2.pMultisampleState=&ms2;
             pci2.pDepthStencilState=&ds2; pci2.pColorBlendState=&cb2; pci2.pDynamicState=&dyn2;
             pci2.layout=m_scenePipelineLayout; pci2.renderPass=m_postFxSceneRP;
-            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci2, nullptr, &m_scenePipelineHDR) != VK_SUCCESS)
+            if (createGraphicsPipelines(1, &pci2, nullptr, &m_scenePipelineHDR) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: HDR scene pipeline failed");
             // A3: instanced HDR variant (per-instance mvp+model at binding 1).
             if (VkShaderModule ivs2 = loadShaderModule("scene_instanced.vert.spv"))
@@ -5129,7 +5139,7 @@ void VulkanRenderer::createPostFXPipelines()
                 ivi2.vertexBindingDescriptionCount=2; ivi2.pVertexBindingDescriptions=ibnd;
                 ivi2.vertexAttributeDescriptionCount=11; ivi2.pVertexAttributeDescriptions=iat;
                 VkGraphicsPipelineCreateInfo ipci2=pci2; ipci2.pStages=ist; ipci2.pVertexInputState=&ivi2;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci2, nullptr, &m_sceneInstancedPipelineHDR) != VK_SUCCESS)
+                if (createGraphicsPipelines(1, &ipci2, nullptr, &m_sceneInstancedPipelineHDR) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced HDR scene pipeline failed");
                 vkDestroyShaderModule(m_device, ivs2, nullptr);
             }
@@ -5143,7 +5153,7 @@ void VulkanRenderer::createPostFXPipelines()
                 VkPipelineColorBlendStateCreateInfo tcb2=cb2; tcb2.pAttachments=&tcba2;
                 VkPipelineDepthStencilStateCreateInfo tds2=ds2; tds2.depthWriteEnable=VK_FALSE;
                 VkGraphicsPipelineCreateInfo tpci2=pci2; tpci2.pColorBlendState=&tcb2; tpci2.pDepthStencilState=&tds2;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &tpci2, nullptr, &m_sceneTransparentPipelineHDR) != VK_SUCCESS)
+                if (createGraphicsPipelines(1, &tpci2, nullptr, &m_sceneTransparentPipelineHDR) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: HDR transparent pipeline failed");
             }
             vkDestroyShaderModule(m_device, vs2, nullptr);
@@ -5421,7 +5431,7 @@ void VulkanRenderer::createTaaPipelines(VkShaderModule fullscreenVS)
         pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds;
         pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
         pci.layout = m_scenePipelineLayout; pci.renderPass = m_taaVelocityRP; pci.subpass = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_taaVelocityPipe) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &m_taaVelocityPipe) != VK_SUCCESS)
             m_taaVelocityPipe = VK_NULL_HANDLE;
     }
 
@@ -5494,7 +5504,7 @@ void VulkanRenderer::createTaaPipelines(VkShaderModule fullscreenVS)
         pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
         pci.pDynamicState = &dyn; pci.layout = layout;
         pci.renderPass = rp; pci.subpass = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &out) != VK_SUCCESS)
             out = VK_NULL_HANDLE;
     };
     // The resolve writes a history image through the RGBA8 blit pass (left in
@@ -6426,7 +6436,7 @@ bool VulkanRenderer::ensureWorldPreviewPipeline()
             pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
             pci.layout = m_previewPipeLayout;
             pci.renderPass = m_postFxSceneRP; pci.subpass = 0;
-            return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+            return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
         };
         const VkVertexInputBindingDescription meshBind = { 0, 32u, VK_VERTEX_INPUT_RATE_VERTEX };
         const VkVertexInputAttributeDescription meshAttrs[3] = {
@@ -7624,6 +7634,172 @@ void VulkanRenderer::destroyUploadResources()
         static_cast<unsigned long long>(m_upStats.ownStaging), m_upStats.cpuMs,
         static_cast<unsigned long long>(m_upStats.syncWaits), m_upStats.waitMs,
         m_upSync ? " (HE_VK_UPLOAD_SYNC)" : "");
+}
+
+// ─── Pipeline cache (REN-808) ────────────────────────────────────────────────
+// See the header. The file lives beside the GL program-binary and D3D bytecode
+// caches; SDL_GetPrefPath asks the shell for the roaming folder and ignores
+// %APPDATA%, so a scratch APPDATA does not isolate it — HE_VK_PIPELINE_CACHE_DIR does.
+VkResult VulkanRenderer::createGraphicsPipelines(uint32_t n, const VkGraphicsPipelineCreateInfo* ci,
+                                                 const VkAllocationCallbacks* alloc, VkPipeline* out)
+{
+    const uint64_t t0 = uploadClockNs();
+    const VkResult r = vkCreateGraphicsPipelines(m_device, m_pipelineCache, n, ci, alloc, out);
+    m_pipelineMs += double(uploadClockNs() - t0) * 1e-6;
+    m_pipelinesCreated += n;
+    return r;
+}
+
+VkResult VulkanRenderer::createComputePipelines(uint32_t n, const VkComputePipelineCreateInfo* ci,
+                                                const VkAllocationCallbacks* alloc, VkPipeline* out)
+{
+    const uint64_t t0 = uploadClockNs();
+    const VkResult r = vkCreateComputePipelines(m_device, m_pipelineCache, n, ci, alloc, out);
+    m_pipelineMs += double(uploadClockNs() - t0) * 1e-6;
+    m_pipelinesCreated += n;
+    return r;
+}
+
+uint64_t VulkanRenderer::GetPipelineCache() const
+{
+    uint64_t v = 0;
+    static_assert(sizeof(m_pipelineCache) == sizeof(v), "VkPipelineCache size mismatch");
+    std::memcpy(&v, &m_pipelineCache, sizeof(v));
+    return v;
+}
+
+void VulkanRenderer::createPipelineCache()
+{
+    if (const char* v = std::getenv("HE_VK_PIPELINE_CACHE"); v && v[0] == '0')
+    {
+        m_pipelineCacheState = "off (HE_VK_PIPELINE_CACHE=0)";
+        HE_LOG_INFO(RHI, "%s", "[startup] Vulkan pipeline cache: off (HE_VK_PIPELINE_CACHE=0)");
+        return;
+    }
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    HE::vkpc::DeviceId dev;
+    dev.vendorID      = props.vendorID;
+    dev.deviceID      = props.deviceID;
+    dev.driverVersion = props.driverVersion;
+    std::memcpy(dev.uuid, props.pipelineCacheUUID, sizeof(dev.uuid));
+
+    namespace fs = std::filesystem;
+    fs::path dir;
+    if (const char* over = std::getenv("HE_VK_PIPELINE_CACHE_DIR"); over && *over)
+        dir = over;
+    else if (char* pref = SDL_GetPrefPath("HorizonCreations", "HorizonEngine"))
+    {
+        dir = fs::path(pref) / "vkpipelinecache"; SDL_free(pref);
+    }
+    else
+        dir = fs::temp_directory_path() / "HorizonEngine" / "vkpipelinecache";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    // One file per GPU: switching between an iGPU and a dGPU keeps both caches.
+    char name[32];
+    std::snprintf(name, sizeof(name), "%04x_%04x.bin", props.vendorID, props.deviceID);
+    m_pipelineCachePath = (dir / name).string();
+
+    std::vector<uint8_t> file;
+    if (std::ifstream in(m_pipelineCachePath, std::ios::binary | std::ios::ate); in)
+    {
+        const std::streamoff size = in.tellg();
+        if (size > 0)
+        {
+            file.resize(static_cast<size_t>(size));
+            in.seekg(0);
+            if (!in.read(reinterpret_cast<char*>(file.data()), size)) file.clear();
+        }
+    }
+    const uint8_t* blob = nullptr;
+    size_t blobSize = 0;
+    const HE::vkpc::Verdict verdict = HE::vkpc::unwrap(dev, file.data(), file.size(), blob, blobSize);
+
+    VkPipelineCacheCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    if (verdict == HE::vkpc::Verdict::Ok)
+    {
+        ci.initialDataSize = blobSize;
+        ci.pInitialData    = blob;
+    }
+    VkResult r = vkCreatePipelineCache(m_device, &ci, nullptr, &m_pipelineCache);
+    if (r != VK_SUCCESS && ci.initialDataSize)
+    {
+        // The driver refused the data after all: start empty, the file is rewritten at shutdown.
+        ci.initialDataSize = 0; ci.pInitialData = nullptr;
+        r = vkCreatePipelineCache(m_device, &ci, nullptr, &m_pipelineCache);
+        m_pipelineCacheState = "rejected by driver";
+    }
+    else
+    {
+        m_pipelineCacheState = verdict == HE::vkpc::Verdict::Ok ? "loaded" : HE::vkpc::verdictName(verdict);
+    }
+    if (r != VK_SUCCESS)
+    {
+        m_pipelineCache = VK_NULL_HANDLE;
+        m_pipelineCacheState = "vkCreatePipelineCache failed";
+    }
+    else if (ci.initialDataSize)
+    {
+        m_pipelineCacheInBytes = blobSize;
+        m_pipelineCacheInHash  = HE::vkpc::blobHash(blob, blobSize);
+    }
+    HE_LOG_INFO(RHI, "[startup] Vulkan pipeline cache: %s, %zu KB from %s",
+                m_pipelineCacheState, m_pipelineCacheInBytes / 1024, m_pipelineCachePath.c_str());
+}
+
+void VulkanRenderer::savePipelineCache()
+{
+    // The totals are logged with the cache off too: they are the A/B's other side.
+    size_t size = 0;
+    std::vector<uint8_t> blob;
+    if (m_pipelineCache)
+    {
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, nullptr) == VK_SUCCESS && size)
+        {
+            blob.resize(size);
+            if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, blob.data()) != VK_SUCCESS) blob.clear();
+            blob.resize(std::min(size, blob.size()));
+        }
+        vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
+        m_pipelineCache = VK_NULL_HANDLE;
+    }
+
+    const char* what = "unchanged";
+    if (m_pipelineCachePath.empty())
+        what = "not saved";
+    else if (blob.empty())
+        what = "no data";
+    else if (blob.size() != m_pipelineCacheInBytes ||
+             HE::vkpc::blobHash(blob.data(), blob.size()) != m_pipelineCacheInHash)
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        HE::vkpc::DeviceId dev;
+        dev.vendorID      = props.vendorID;
+        dev.deviceID      = props.deviceID;
+        dev.driverVersion = props.driverVersion;
+        std::memcpy(dev.uuid, props.pipelineCacheUUID, sizeof(dev.uuid));
+        const std::vector<uint8_t> file = HE::vkpc::wrap(dev, blob.data(), blob.size());
+        // Write beside it and rename over: a second editor reading it at that
+        // moment, or a crash mid-write, never sees half a file.
+        std::filesystem::path tmp = m_pipelineCachePath;
+        tmp += ".tmp" + std::to_string(static_cast<unsigned long long>(uploadClockNs() & 0xFFFFFF));
+        bool ok = false;
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            ok = out && out.write(reinterpret_cast<const char*>(file.data()),
+                                  static_cast<std::streamsize>(file.size())).good();
+        }
+        std::error_code ec;
+        if (ok) std::filesystem::rename(tmp, m_pipelineCachePath, ec);
+        if (!ok || ec) { std::filesystem::remove(tmp, ec); what = "write failed"; }
+        else what = "written";
+    }
+    HE_LOG_INFO(RHI, "VulkanRenderer: pipelines — %u created, %.1f ms in vkCreate*Pipelines; "
+                "cache %s (in %zu KB, out %zu KB, %s)",
+                m_pipelinesCreated, m_pipelineMs, m_pipelineCacheState,
+                m_pipelineCacheInBytes / 1024, blob.size() / 1024, what);
 }
 
 bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
@@ -9928,7 +10104,7 @@ void VulkanRenderer::createSkyPipeline()
         pci.layout              = m_skyPipelineLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &out) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: sky pipeline creation failed");
     };
 
@@ -10198,7 +10374,7 @@ void VulkanRenderer::createDebugLinePipeline()
         pci.layout              = m_debugPipelineLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &pci, nullptr, &out) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: debug line pipeline creation failed");
     };
 
@@ -11336,7 +11512,7 @@ void VulkanRenderer::createGiPipelines()
         pci.pMultisampleState = &ms;  pci.pDepthStencilState = &ds;
         pci.pColorBlendState = &cb2;  pci.pDynamicState = &dyn;
         pci.layout = m_giGBufPL;      pci.renderPass = m_giGBufRP;
-        pipesOk = pipesOk && vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        pipesOk = pipesOk && createGraphicsPipelines(1, &pci, nullptr,
                                                        &m_giGBufPipe) == VK_SUCCESS;
         // Instanced twin for same-mesh runs, VS swapped. Kept out of pipesOk on
         // purpose: a failure here must not take GI down with it — every run
@@ -11350,7 +11526,7 @@ void VulkanRenderer::createGiPipelines()
                 VkGraphicsPipelineCreateInfo ipci = pci;
                 ipci.pStages           = istages;
                 ipci.pVertexInputState = &iin.info;
-                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+                if (createGraphicsPipelines(1, &ipci, nullptr,
                                               &m_giGBufInstancedPipe) != VK_SUCCESS)
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced GI G-buffer pipeline creation failed");
                 vkDestroyShaderModule(m_device, gbufIVS, nullptr);
@@ -11374,7 +11550,7 @@ void VulkanRenderer::createGiPipelines()
         pci.pMultisampleState = &ms;   pci.pDepthStencilState = &nods;
         pci.pColorBlendState = &cb1;   pci.pDynamicState = &dyn;
         pci.layout = layout;           pci.renderPass = rp;
-        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+        return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
     };
     pipesOk = pipesOk && makeFsPipe(tempFS,   m_giTemporalRP, m_giTemporalPipe, m_giFsPL);
     pipesOk = pipesOk && makeFsPipe(atrousFS, m_giAtrousRP,   m_giAtrousPipe,   m_giAtrousPL);
@@ -11387,7 +11563,7 @@ void VulkanRenderer::createGiPipelines()
         cpi.stage.module = cs;
         cpi.stage.pName  = "main";
         cpi.layout       = pl;
-        return vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpi, nullptr, &out) == VK_SUCCESS;
+        return createComputePipelines(1, &cpi, nullptr, &out) == VK_SUCCESS;
     };
     pipesOk = pipesOk && makeCompute(shadowCS, m_giShadowPL, m_giShadowPipe);
     pipesOk = pipesOk && makeCompute(probeCS,  m_giProbePL,  m_giProbePipe);
@@ -11524,7 +11700,7 @@ void VulkanRenderer::createGiHwPipelines()
         cpi.stage.module = cs;
         cpi.stage.pName  = "main";
         cpi.layout       = pl;
-        return vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpi, nullptr, &out) == VK_SUCCESS;
+        return createComputePipelines(1, &cpi, nullptr, &out) == VK_SUCCESS;
     };
     ok = makeCompute(shadowCS, m_giShadowHwPL, m_giShadowHwPipe)
       && makeCompute(probeCS,  m_giProbeHwPL,  m_giProbeHwPipe);
@@ -12841,7 +13017,7 @@ void VulkanRenderer::createSSAOPipeline()
         pci.pDynamicState       = &dyn;
         pci.layout              = m_scenePipelineLayout; // push constants: mvp(64) + modelView(64)
         pci.renderPass          = m_ssaoPosRenderPass;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr,
                                           &m_ssaoPosGfxPipeline), "ssao pos pipeline");
         // Instanced twin for same-mesh runs, VS swapped. Optional — without it
         // every run loops through m_ssaoPosGfxPipeline.
@@ -12853,7 +13029,7 @@ void VulkanRenderer::createSSAOPipeline()
             VkGraphicsPipelineCreateInfo ipci = pci;
             ipci.pStages           = istages;
             ipci.pVertexInputState = &iin.info;
-            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+            if (createGraphicsPipelines(1, &ipci, nullptr,
                                           &m_ssaoPosInstancedPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced SSAO pos pipeline creation failed");
             vkDestroyShaderModule(m_device, posIVS, nullptr);
@@ -12886,7 +13062,7 @@ void VulkanRenderer::createSSAOPipeline()
         pci.pDynamicState       = &dyn;
         pci.layout              = m_ssaoPipeLayout;
         pci.renderPass          = m_ssaoRenderPass;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr,
                                           &m_ssaoGfxPipeline), "ssao pipeline");
     }
 
@@ -12910,7 +13086,7 @@ void VulkanRenderer::createSSAOPipeline()
         pci.pDynamicState       = &dyn;
         pci.layout              = m_ssaoBlurPipeLayout;
         pci.renderPass          = m_ssaoBlurRenderPass;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr,
                                           &m_ssaoBlurGfxPipeline), "ssao blur pipeline");
     }
 
@@ -13746,7 +13922,7 @@ bool VulkanRenderer::EnsureSSRPipelines()
         pci.pDynamicState       = &dyn;
         pci.layout              = layout;
         pci.renderPass          = rp;
-        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) == VK_SUCCESS;
+        return createGraphicsPipelines(1, &pci, nullptr, &out) == VK_SUCCESS;
     };
     const bool okPrepass = buildPipeline(mPV, mPF, /*geometry=*/true,  3,
                                          m_reflPrepassPipeLayout, m_reflPrepassRP, m_reflPrepassPipeline);
@@ -14399,7 +14575,7 @@ void VulkanRenderer::createSkinnedPipeline()
     pci.layout              = m_skinnedPipeLayout;
     pci.renderPass          = m_renderPass;
     pci.subpass             = 0;
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_skinnedPipeline) != VK_SUCCESS)
+    if (createGraphicsPipelines(1, &pci, nullptr, &m_skinnedPipeline) != VK_SUCCESS)
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned pipeline creation failed");
 
     // ── HDR variant (renderPass = m_postFxSceneRP, RGBA16F) ──────────────────
@@ -14407,7 +14583,7 @@ void VulkanRenderer::createSkinnedPipeline()
     {
         VkGraphicsPipelineCreateInfo hdrPci = pci;
         hdrPci.renderPass = m_postFxSceneRP;
-        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &hdrPci, nullptr, &m_skinnedPipelineHDR) != VK_SUCCESS)
+        if (createGraphicsPipelines(1, &hdrPci, nullptr, &m_skinnedPipelineHDR) != VK_SUCCESS)
             HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned HDR pipeline creation failed");
     }
 
@@ -14701,7 +14877,7 @@ void VulkanRenderer::createUIPipeline()
         pci.layout              = m_uiPipeLayout;
         pci.renderPass          = rp;
         pci.subpass             = 0;
-        vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out), "ui pipeline");
+        vkCheck(createGraphicsPipelines(1, &pci, nullptr, &out), "ui pipeline");
     };
 
     // Swapchain pipeline: m_renderPass (swapchain format, has depth attachment).

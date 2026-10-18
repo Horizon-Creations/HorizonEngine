@@ -69,6 +69,8 @@ add_executable(he_tests
     test_gi_blas_store.cpp
     # Staging ring + mesh-memory free list of the Vulkan upload path (REN-802/803).
     test_vulkan_upload_alloc.cpp
+    # Accept/reject rules of the on-disk VkPipelineCache file (REN-808).
+    test_vulkan_pipeline_cache.cpp
     test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
