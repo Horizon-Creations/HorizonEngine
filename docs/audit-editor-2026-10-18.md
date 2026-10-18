@@ -55,31 +55,80 @@ assets and 2000 other files, load average ~4-7 from other bees.
 
 The 660 ms is inflated by the load. The ratio is the point.
 
+## Step 2: entityByUuid through the id index, a member set in EditorSelection
+
+**`HE::Ed::entityByUuid` (EDT-1201, 1602, 503).** It walked every `EntityIdComponent`,
+formatted each id with `snprintf` into a `std::string` and compared text, with no early
+exit. Now the string form parses the 32 hex digits once and asks
+`HorizonWorld::findByEntityId`, the O(1) index the registry's signals feed. A new
+`entityByUuid(world, const HE::UUID&)` overload skips the text. The task board's
+orphan check (every second, per entity link), its jump and its pending select used to
+format the id with `uuidToHex` and parse it straight back. They now pass the `UUID`
+directly (`TaskBoardPanel.cpp` ~547, 550, 579, 603). The MCP callers (`McpToolsEntity`,
+`McpToolsApi` via the `EditorApplication` hook, prefab, terrain) keep the string form.
+
+Behaviour kept on purpose:
+- Lowercase only. The parser in `EditorCommands.cpp` is `uuidFromHex` (`TaskBoard.h`)
+  minus upper case, because upper case never equalled `uuidOf`'s text. Do not "dedup" it
+  into accepting upper case without deciding that.
+- The zero id never matches; `findByEntityId` treats it as "no identity". The old scan
+  could match an entity whose id was zero; `createEntity` never makes one.
+- With two holders of one id (a damaged merge) you get one of them, not "the first in
+  view order".
+
+The audit's second idea for EDT-1602 (one world pass per orphan refresh) is not needed:
+links × O(1) is already less than one pass.
+
+**`EditorSelection` (EDT-701, 1805).** It now keeps an `unordered_set<Entity>` beside the
+ordered vector, maintained by every mutator. `contains()` is O(1), so `roots()` is
+O(S·depth), and `addMany`/`setMany` are O(n). Order, primary, anchor, the revision bumps
+(including `setMany`'s double one) and the `kMaxDepth` cycle cap are unchanged. Every
+`contains()` caller benefits too: the outliner (per visible row) and
+`ViewportOverlays::appendSplineGuides` (per spline). The viewport still calls `roots()`
+every frame. Caching it per selection revision was **not** done: a reparent does not
+move the revision, and at 1.25 ms for 20k members it is no longer the hitch.
+
+**Measured** (standalone, built with the engine's own compile flags: old files from
+HEAD against new, `-O2`, M5 MacBook Air, mains power, low-power mode off, `pgrep yes` = 0,
+the `he_tests` build ran in parallel):
+
+| Call | old | new |
+|---|---|---|
+| `roots()`, Select All of 5 000 (chains of 4) | 10.3 ms | 0.28 ms |
+| `roots()`, Select All of 20 000 | 162 ms | 1.25 ms |
+| `setMany`, 20 000 | 225 ms | 3.5 ms |
+| one `entityByUuid`, 5 000 entities | 1.5 ms | ~µs (index find) |
+| one `entityByUuid`, 50 000 entities | 15 ms | ~µs |
+
+The `entityByUuid` row compares the old loop with the same `unordered_multimap` lookup
+(the "new" column includes a `substr`/`strtoull` parse the real code does not allocate).
+
+**Tests:** `test_editor_selection.cpp` gained "roots over a Select All of thousands,
+chains and a cycle" (5 000 members, a parent cycle above a member) and "contains agrees
+with entities after every change". `test_editor_commands.cpp` gained "entityByUuid follows
+the world" (same-frame create, `setEntityId`, a hand-emplaced component, destroy), the
+strictness checks (length, non-hex, upper case, UUID overload), and a resolve after a
+**snapshot** undo/redo. That is the path the old header comment named as the reason not
+to use an index.
+
 ## Handoff
 
-- **Topic / step:** 220, step 1 of 5
-- **Branch / commit:** `claude/audit-optimierung-editor-stufe-6` @ 0b702211 + this doc (pushed: see the Hive post)
-- **Done:** every picker/palette call of `listAssets`/`listScenes` reads one epoch-keyed index; the dropdowns fetch only when open.
-- **Files touched:** `ContentManager.h` (~92-130 API, ~905 `FileIndex`), `ContentManager.cpp` (after `scanContentDirectory`), `HcEditorUtil.cpp/.h`, `HcGraphHost.cpp`, the five panels above, `HcRenameSweep.cpp`, `ExportDialogPanel.cpp`.
+- **Topic / step:** 220, step 2 of 5 (step 1: 0b702211, its record above)
+- **Branch / commit:** `claude/audit-optimierung-editor-stufe-6`, the step-2 commit after 004a8530 (hash in the Hive post)
+- **Done:** `entityByUuid` answers from `findByEntityId` (+ `UUID` overload, used by the task board); `EditorSelection` keeps a member set, `contains` O(1), `roots` O(S·depth).
+- **Files touched:** `EditorCommands.h` (~312-325), `EditorCommands.cpp` (`entityByUuid`, end of file), `EditorSelection.h/.cpp`, `TaskBoardPanel.cpp` (547, 550, 579, 603), `tests/test_editor_selection.cpp` (+2 cases), `tests/test_editor_commands.cpp` (+1 case, +checks in two).
 - **Verified:**
-  - Release build of `he_tests` + `HorizonEditor` is green; all edited panels compiled.
-  - Targeted tests are green: `test_contentmanager` (91, incl. 2 new), `test_horizoncode_shortcuts` (6, incl. new has==list), `test_inspector_ui`, `test_engine_weather_sounds`, `test_hc_rename`, `test_culling`, `test_ui_shot`.
-  - Full `he_tests`: 5431/5434. The 3 red are the `test_hpak:1188` case and two `test_profiler` cases.
-  - `test_hpak:1188` counts the SFTP cache in `$HOME`; it is green with an empty HOME and pre-existing.
-  - `test_profiler` was red under the parallel editor build and is 18/18 three times alone.
-  - `editor_help_audit.py --check` reports 1205/1205.
-- **Not verified:** no manual editor session (combo open/close, palette after creating a widget); no Windows/Linux build (CI).
-- **Decisions taken:**
-  - The epoch is the revision, not a second counter.
-  - The type picker's Objects list now includes widgets/classes whose graph is empty. listClasses dropped them, but a widget without logic is still a valid object type.
-  - `listClasses` stays (public, now unused by the picker).
+  - Release `he_tests` + `HorizonEditor` are green; `EditorApplication`, `TaskBoardPanel`, `EditorCommands` and `EditorSelection` all compiled.
+  - Targeted tests are green: `test_editor_selection`, `test_editor_commands`, and `test_mcp_tools_{entity,scene,prefab,terrain,taskboard}`, `test_mcp_api`.
+  - Full `ctest -j4`: 302/303. The red one is `test_hpak:1188` (6 == 2): 4 `.hasset` in this Mac's EngineContentCache. It is 59/59 with an empty HOME and pre-existing.
+  - `editor_help_audit.py --check` exits 0; no new controls.
+- **Not verified:** no manual editor session (Ctrl+A in a big scene, task-board jump); no Windows/Linux (CI).
+- **Decisions taken:** lowercase-only parse (old string-compare semantics); zero id never matches; no per-revision `roots()` cache in the viewport (a reparent does not bump the revision); `setMany`'s double revision bump left as it was; no single-pass orphan check (O(1) lookups make it moot).
 - **Suggested, not taken:**
-  - `discoverAssets` (PlayerHost calls it 3x) could use the index too. It is not done because game/tests write files without bumping the epoch.
-  - The `test_hpak:1188` HOME dependency deserves its own fix (point `engineContentCacheDir` at a temp dir in the test).
-  - Each refresh now costs two main-thread walks: `scanDirInto` (META) and, on the next picker query, the index build (header). Folding the index into `scanDirInto` would make it one. `EditorUI.cpp` quotes ~9 ms warm for the registry scan, so this is a tidy-up, not a hitch. It is also why the palette rebuilds once after every poll.
-  - `docs/audit/AUDIT.md` got a one-line tick here outside my claim; expect a trivial merge with the metal-backend branch's edit of the same file.
-- **Pending:** steps 2-5 of the plan.
+  - EDT-702 (group gizmo rebuilds `worldMatrixOf` per member per frame) is the next cost in the same viewport path after `roots()`.
+  - Step 1's open points stand: `discoverAssets` on the index, the `test_hpak` HOME fix, and folding the index walk into `scanDirInto`.
 - **Traps:**
-  - A tool that writes `.hasset` files without `saveAsset` and without a content refresh is invisible to pickers until the next refresh/poll. Call `noteContentChanged()` there.
-  - `drawTypePicker`/LevelScript/Material snapshots are function statics keyed on popup open (ImGui marks a popup "appearing" again when its id changes).
-- **Next steps:** 1. Step 2: `entityByUuid` → `HorizonWorld::findByEntityId` (EDT-1201, 1602, 503), `EditorSelection::roots()` with a set (EDT-701, 1805).
+  - `findByEntityId` cannot see `registry.get<EntityIdComponent>(e).id = x` (no signal). A grep of `src/` found no such write; write through `setEntityId`/`patch`.
+  - Step 1's still apply: write `.hasset` without `saveAsset` → `noteContentChanged()`; pickers snapshot on popup open.
+- **Pending:** plan steps 3-5.
+- **Next steps:** 1. Step 3: row clipping (M12) where it is missing: EDT-301, 302, 1503, 1802, 909, 910, 1404; check the UI-test frame-time budget.

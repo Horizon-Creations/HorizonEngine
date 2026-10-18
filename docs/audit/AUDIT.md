@@ -112,7 +112,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 
 **Stufe 6 – Editor (viele kleine, voneinander unabhängige PRs)**
 - [x] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug (`docs/audit-editor-2026-10-18.md`)
-- [ ] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set; Row-Clipping-Pass (M12)
+- [ ] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set (beides erledigt, `docs/audit-editor-2026-10-18.md` Step 2); Row-Clipping-Pass (M12) offen
 - [ ] Collab: EDT-402/1601/201/202 Signale+Revisionen
 - [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9)
 
