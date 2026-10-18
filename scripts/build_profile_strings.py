@@ -41,13 +41,15 @@ FEATURES: dict[str, dict[str, list[str]]] = {
     },
     "HE_FEATURE_PROFILER_CAPTURE": {
         "env": ["HE_PROFILE_CAPTURE", "HE_PROFILE_WARMUP", "HE_PROFILE_NOTE",
-                "HE_CAPTURE_PATH", "HE_PERF_INPUT_EVENTS", "HE_PERF_INPUT_LATENCY_HZ"],
+                "HE_CAPTURE_FRAME", "HE_CAPTURE_PATH", "HE_PERF_INPUT_EVENTS",
+                "HE_PERF_INPUT_LATENCY_HZ"],
         "text": ["F9 benchmark capture", "Profiler: stop requested (F9)"],
         "symbols": ["HE::Application::toggleProfilerCapture", "InputLatencyProbe"],
     },
     "HE_FEATURE_TEST_HOOKS": {
-        "env": ["HE_HIDDEN_WINDOW", "HE_BACKGROUND_FPS", "HE_NO_SPLASH",
-                "HE_SPLASH_DUMP", "HE_CONFIG_FALLBACK_DIR"],
+        "env": ["HE_HIDDEN_WINDOW", "HE_EXIT_AFTER_FRAMES", "HE_DUMP_PATH",
+                "HE_BACKGROUND_FPS", "HE_NO_SPLASH", "HE_SPLASH_DUMP",
+                "HE_CONFIG_FALLBACK_DIR"],
         "text": ["HE_EXIT_AFTER_FRAMES=%llu reached", "Hidden mode on ("],
         "symbols": [],
     },

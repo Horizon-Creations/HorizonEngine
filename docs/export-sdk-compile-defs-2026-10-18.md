@@ -328,7 +328,8 @@ body or move behind a macro is open. They are needed for parity with the interpr
   HorizonGame + he_tests build; `test_hidden_window` 9, `test_dev_stats_tile` 8, `test_build_profile` 5 (new case: he_tests gets the profile
   from HorizonCore, not the fallback), `test_physics_budget` 15, `test_physics_threading` 12, all green. Release tree
   (`out/build/release-profile`, `-DHE_BUILD_PROFILE=release -DHE_BUILD_TESTS=OFF`): HorizonGame builds, 733/733.
-  Strings script: release tree 30/30 gone, dev tree 30/30 present; release mode against the dev tree fails with 30 (negative control).
+  Strings script: release tree 33/33 gone, dev tree 33/33 present; release mode against the dev tree failed on every item
+  (negative control, run with the first 30-item list).
   By hand: `strings`/`nm -C` on libHorizonCore + HorizonGame agree. Dev smoke run (`HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=30`, deploy/Game):
   hidden, exits at frame 30, hotkeys OFF as before for a Release-config runtime, log says `build profile 'dev'`.
   Full ctest (`-j4`, private `HOME`, `HE_CONFIG_DIR` unset): 304/304 passed, the two `runtime_size_app_*` skipped (flavour-only).
