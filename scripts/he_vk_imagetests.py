@@ -80,9 +80,16 @@ CASES = {
         "variants": {
             "window":    {"env": {"HE_FORWARD_CLUSTER": "0"}},
             "clustered": {},
+            # REN-802/803: the old wait after every upload. The meshes now copy
+            # through the deferred upload batch into device-local memory; drawn
+            # with the batch submitted in front of the frame, the picture must
+            # be the one the blocking path draws (this scene is bit-identical
+            # from run to run, so the bound is near zero).
+            "sync":      {"env": {"HE_VK_UPLOAD_SYNC": "1"}},
         },
-        "pairs": [("window", "clustered", 1.5)],
-        "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"]},
+        "pairs": [("window", "clustered", 1.5), ("sync", "clustered", None, 0.05)],
+        "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"],
+                    "sync":      ["HE_VK_UPLOAD_SYNC"]},
     },
     # Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10.11):
     # G-buffer pass → resolve (heLitP, the same code graph materials shade with)
@@ -371,8 +378,11 @@ CASES = {
     # scripts/ui-image-repro/ana157.py's job on hardware.
     "ui_image": {
         "base": {"UITEST": "image", "FRAMES": "16"},
-        "variants": {"image": {}},
-        "pairs": [],
+        # "sync": the texture through the old blocking upload (REN-802), the
+        # same picture as the deferred upload batch draws.
+        "variants": {"image": {}, "sync": {"env": {"HE_VK_UPLOAD_SYNC": "1"}}},
+        "pairs": [("sync", "image", None, 0.05)],
+        "require": {"sync": ["HE_VK_UPLOAD_SYNC"]},
         "probes": {"image": [("red TL", 0.09375, 0.857, "r"), ("green TR", 0.1875, 0.857, "g"),
                              ("blue BL", 0.09375, 0.933, "b")]},
         # The witness texture is flagged sRGB; sampled through an _SRGB view it

@@ -10439,14 +10439,17 @@ void* VulkanRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int
     if (!rgba8Pixels || width <= 0 || height <= 0 || !m_device) return nullptr;
 
     // Through the upload batch like every other texture (REN-802): no device
-    // idle and no queue wait per icon — the batch is submitted ahead of the
-    // frame whose ImGui overlay first draws it.
+    // idle and no queue wait per icon. Submitted right away, though: with
+    // multi-viewport on, imgui_impl_vulkan submits the platform windows itself
+    // (RenderPlatformWindowsDefault), past submitGraphics, and may draw the
+    // icon there first.
     VkImage        image  = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView    view   = VK_NULL_HANDLE;
     if (!uploadRGBA8Image(static_cast<const uint8_t*>(rgba8Pixels), static_cast<uint32_t>(width),
                           static_cast<uint32_t>(height), image, memory, view))
         return nullptr;
+    flushUploads();
 
     // ── Linear sampler (mirrors the moon sampler creation) ───────────────────
     VkSampler sampler = VK_NULL_HANDLE;
