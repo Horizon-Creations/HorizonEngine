@@ -1344,6 +1344,10 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D11/D3D11ShaderManager.cpp
         ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D12/D3D12ShaderManager.cpp)
     target_link_libraries(he_tests PRIVATE d3dcompiler d3d11)
+    # The FXC bytecode cache both renderers start from (Thema 196): header-only
+    # under src/Backends/D3D_Shared, driven through timedD3DCompile.
+    target_sources(he_tests PRIVATE test_d3d_shader_cache.cpp)
+    target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src)
 endif()
 
 # One ctest entry per test SOURCE FILE, not one for the whole binary.

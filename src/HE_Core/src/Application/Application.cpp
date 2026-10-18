@@ -258,6 +258,18 @@ namespace HE
 
 		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
+		// Startup timeline, every backend alike (Thema 196: D3D started far
+		// slower than Metal/Vulkan). "[startup]" lines, one grep away in the log;
+		// the D3D backends add their own phases under the same prefix.
+		using StartupClock = std::chrono::steady_clock;
+		const StartupClock::time_point startupT0 = StartupClock::now();
+		auto startupMs = [](StartupClock::time_point t0) {
+			return std::chrono::duration<double, std::milli>(StartupClock::now() - t0).count();
+		};
+		constexpr uint64_t kStartupFrameWatch  = 300;   // early frames that are watched
+		constexpr double   kStartupSlowFrameMs = 250.0; // and logged when this slow
+		bool firstPresentLogged = false;
+
 		// ── Hidden mode (see hiddenWindowRequested) ─────────────────────────
 		// Before ANY SDL_Init(VIDEO), which the splash below may already do: on
 		// macOS SDL registers the application right there, gives it a Dock icon
@@ -348,6 +360,8 @@ namespace HE
 		}
 
 		m_splash.setStatus("Initialising renderer", 0.15f);
+		HE_LOG_INFO(Core, "[startup] app phase=window+splash ms=%.1f", startupMs(startupT0));
+		const StartupClock::time_point rendererT0 = StartupClock::now();
 		m_renderer = CreateRenderer();
 		try
 		{
@@ -360,6 +374,8 @@ namespace HE
 				// the right present mode.
 				m_renderer->SetVSync(cfg.windowprops.vsync);
 				HE_LOG_INFO(Core, "%s", "Renderer initialized");
+				HE_LOG_INFO(Core, "[startup] app phase=renderer backend=%s ms=%.1f",
+				            rhiName(cfg.backend), startupMs(rendererT0));
 			}
 			else
 			{
@@ -378,7 +394,9 @@ namespace HE
 		}
 
 		m_splash.setStatus("Starting up", 0.35f);
+		const StartupClock::time_point onInitT0 = StartupClock::now();
 		OnInit();
+		HE_LOG_INFO(Core, "[startup] app phase=OnInit ms=%.1f", startupMs(onInitT0));
 		HE_LOG_INFO(Core, "%s", "OnInit complete — entering main loop");
 
 		m_splash.setStatus("Ready", 1.0f);
@@ -867,6 +885,26 @@ namespace HE
 				// in the swap): whatever input it polled is as old as it gets
 				// on the CPU side.
 				g_inputLatency.committed(m_frameIndex);
+			}
+
+			// Startup timeline, continued: when the first frame reached the
+			// screen, and which of the early frames were slow. Busy time only
+			// (from the end of the idle wait), so an event-driven sleep does not
+			// read as a slow frame. Lazy work lands here — material warmup, a
+			// project opened from the first frames.
+			if (m_frameIndex <= kStartupFrameWatch)
+			{
+				const double busyMs = static_cast<double>(SDL_GetTicksNS() - nowTick) * 1e-6;
+				if (present && !firstPresentLogged)
+				{
+					firstPresentLogged = true;
+					HE_LOG_INFO(Core, "[startup] app first frame presented: frame=%llu ms=%.1f since Run, "
+					                  "frameBusyMs=%.1f",
+					            static_cast<unsigned long long>(m_frameIndex), startupMs(startupT0), busyMs);
+				}
+				else if (busyMs >= kStartupSlowFrameMs)
+					HE_LOG_INFO(Core, "[startup] app slow frame=%llu busyMs=%.1f (%.1f since Run)",
+					            static_cast<unsigned long long>(m_frameIndex), busyMs, startupMs(startupT0));
 			}
 
 			// Pull per-frame GPU timing + render counters from the backend while a
