@@ -1553,11 +1553,14 @@ if(Python3_Interpreter_FOUND)
     endforeach()
 endif()
 
-# ── "Does a game build against the engine SDK?" (Thema 211 step 5) ───────────
-# Installs this tree's HorizonSDK component, moves it, and builds two projects
-# that see nothing of this tree: a probe (one call into each library, the profile
-# it was handed, the other profile refused) and the shipped template, i.e.
-# HorizonGame from the SDK with the golden HEGameBuildConfig.h compiled in. Same
+# ── "Does a game build against the engine SDK?" (Thema 211 steps 5 and 9) ───
+# Installs this tree's HorizonSDK component (its lib set of the one SDK), moves
+# it, checks that only compiler input is in it, and builds two projects that see
+# nothing of this tree: a probe (one call into each library, the profile it was
+# handed, a missing lib set and a stale header stamp refused) and the shipped
+# template, i.e. HorizonGame from the SDK with the golden HEGameBuildConfig.h
+# compiled in. Both lib sets in one SDK: run the driver by hand with
+# -DHE_BUILD_DIR_2=<release tree> -DHE_PROFILE_2=release. Same
 # generator and compilers as this tree; the work dir sits in the build tree, not
 # in /tmp. Needs the engine libraries built (an ordinary full build).
 add_test(NAME sdk_example_project

@@ -5,12 +5,15 @@
 #   target_link_libraries(<t> PRIVATE HorizonEngine::Scene HorizonEngine::Rendering)
 #   horizon_add_game(<name> [BUILD_CONFIG <HEGameBuildConfig.h>])   (HorizonEngineGame.cmake)
 #
-# Imported targets: HorizonEngine::Core, ::Net, ::Scene, ::Rendering, SDL3::SDL3.
-# Their interface definitions are those of the engine libraries in this package:
-# the DLL import macros and the build profile (HE_BUILD_PROFILE_DEV/RELEASE), so
-# everything compiled against it sees the same Platform/BuildProfile.h switches
-# the libraries were compiled with. A profile is a property of the package: ask
-# for one with COMPONENTS, and a package of the other profile reports not found.
+# One SDK, one shared include/, a lib set per build profile (lib/dev, lib/release),
+# each described by its HorizonEngineTargets-<profile>.cmake. The profile is the
+# consumer's choice, first match wins:
+#   1. COMPONENTS dev | release;
+#   2. the consumer's HE_BUILD_PROFILE variable (-DHE_BUILD_PROFILE=release);
+#   3. the only lib set this SDK holds.
+# A profile whose lib set is not installed, or was installed with other headers
+# than include/ now holds, is "not found" with the reason. HorizonEngine_PROFILES
+# lists the installed ones, HorizonEngine_BUILD_PROFILE is the chosen one.
 # Every path is relative to this file; the SDK can be moved as a whole.
 
 cmake_policy(PUSH)
@@ -18,35 +21,77 @@ cmake_policy(VERSION 3.20)
 
 get_filename_component(_HE_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
-set(HorizonEngine_BUILD_PROFILE   "@HE_BUILD_PROFILE@")
-set(HorizonEngine_RUNTIME_FLAVOR  "@HE_RUNTIME_FLAVOR@")
-set(HorizonEngine_VULKAN_ENABLED  @HE_SDK_VULKAN_ENABLED@)
-set(HorizonEngine_HAS_SHADERS     @HE_SDK_SHADERS@)
-set(HorizonEngine_PROFILING       @HE_PROFILING@)
 set(HorizonEngine_INCLUDE_DIR     "${_HE_PREFIX}/include")
-set(HorizonEngine_LIBRARY_DIR     "${_HE_PREFIX}/lib")
-set(HorizonEngine_RUNTIME_DIR     "${_HE_PREFIX}/@HE_SDK_RUNTIME_SUBDIR@")
 set(HorizonEngine_GAME_SOURCE_DIR "${_HE_PREFIX}/share/HorizonEngine/game")
 set(HorizonEngine_TEMPLATE_DIR    "${_HE_PREFIX}/share/HorizonEngine/template")
-set(HorizonEngine_SHADER_DIR      "${_HE_PREFIX}/share/HorizonEngine/Shaders")
 
-# ── Profile components ───────────────────────────────────────────────────────
-foreach(_he_comp IN LISTS HorizonEngine_FIND_COMPONENTS)
-    if(_he_comp STREQUAL "dev" OR _he_comp STREQUAL "release")
-        if(NOT _he_comp STREQUAL HorizonEngine_BUILD_PROFILE)
-            set(HorizonEngine_FOUND FALSE)
-            set(HorizonEngine_NOT_FOUND_MESSAGE "this SDK (${_HE_PREFIX}) was built with the '${HorizonEngine_BUILD_PROFILE}' profile, '${_he_comp}' was asked for")
-            cmake_policy(POP)
-            return()
-        endif()
-        set(HorizonEngine_${_he_comp}_FOUND TRUE)
-    elseif(HorizonEngine_FIND_REQUIRED_${_he_comp})
-        set(HorizonEngine_FOUND FALSE)
-        set(HorizonEngine_NOT_FOUND_MESSAGE "unknown component '${_he_comp}' (the components are the profiles: dev, release)")
-        cmake_policy(POP)
-        return()
+set(HorizonEngine_PROFILES "")
+foreach(_he_p dev release)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/HorizonEngineTargets-${_he_p}.cmake")
+        list(APPEND HorizonEngine_PROFILES ${_he_p})
     endif()
 endforeach()
+# For the messages: a list passed through a macro argument loses its ';'.
+list(JOIN HorizonEngine_PROFILES ", " _he_installed)
+if(_he_installed STREQUAL "")
+    set(_he_installed "none")
+endif()
+
+macro(_he_not_found)
+    set(HorizonEngine_FOUND FALSE)
+    string(CONCAT HorizonEngine_NOT_FOUND_MESSAGE ${ARGN})
+    cmake_policy(POP)
+    return()
+endmacro()
+
+# ── Which profile ────────────────────────────────────────────────────────────
+set(_he_want "")
+foreach(_he_comp IN LISTS HorizonEngine_FIND_COMPONENTS)
+    if(_he_comp STREQUAL "dev" OR _he_comp STREQUAL "release")
+        if(_he_want AND NOT _he_want STREQUAL _he_comp)
+            _he_not_found("one profile per project: both 'dev' and 'release' were asked for")
+        endif()
+        set(_he_want ${_he_comp})
+    elseif(HorizonEngine_FIND_REQUIRED_${_he_comp})
+        _he_not_found("unknown component '${_he_comp}' (the components are the profiles: dev, release)")
+    endif()
+endforeach()
+if(NOT _he_want AND NOT "${HE_BUILD_PROFILE}" STREQUAL "")
+    set(_he_want "${HE_BUILD_PROFILE}")
+endif()
+if(NOT _he_want)
+    list(LENGTH HorizonEngine_PROFILES _he_n)
+    if(_he_n EQUAL 0)
+        _he_not_found("this SDK (${_HE_PREFIX}) holds no engine lib set")
+    elseif(NOT _he_n EQUAL 1)
+        _he_not_found("this SDK (${_HE_PREFIX}) holds the lib sets ${_he_installed}. "
+                      "Choose one: COMPONENTS dev|release or -DHE_BUILD_PROFILE=dev|release")
+    endif()
+    set(_he_want ${HorizonEngine_PROFILES})
+endif()
+if(NOT _he_want IN_LIST HorizonEngine_PROFILES)
+    _he_not_found("this SDK (${_HE_PREFIX}) has no '${_he_want}' lib set (installed: "
+                  "${_he_installed}). Build the HorizonSDK target of a "
+                  "HE_BUILD_PROFILE=${_he_want} engine tree into it")
+endif()
+
+# ── Same headers as the lib set ──────────────────────────────────────────────
+set(_he_stamp_now "")
+set(_he_stamp_set "")
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/HorizonEngineHeaders.txt")
+    file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/HorizonEngineHeaders.txt" _he_stamp_now LIMIT_COUNT 1)
+endif()
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/HorizonEngineHeaders-${_he_want}.txt")
+    file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/HorizonEngineHeaders-${_he_want}.txt" _he_stamp_set LIMIT_COUNT 1)
+endif()
+if(_he_stamp_now STREQUAL "" OR NOT _he_stamp_now STREQUAL _he_stamp_set)
+    _he_not_found("this SDK's '${_he_want}' lib set (${_HE_PREFIX}) was installed with other "
+                  "headers than include/ holds now (another engine build installed over it). "
+                  "Install both lib sets from the same engine sources.")
+endif()
+
+set(HorizonEngine_BUILD_PROFILE "${_he_want}")
+set(HorizonEngine_${_he_want}_FOUND TRUE)
 
 # ── Imported targets ─────────────────────────────────────────────────────────
 function(_horizon_engine_import target location implib definitions dependencies)
@@ -61,61 +106,7 @@ function(_horizon_engine_import target location implib definitions dependencies)
     endif()
 endfunction()
 
-if(NOT TARGET HorizonEngine::Core)
-    set(_he_rt "${HorizonEngine_RUNTIME_DIR}")
-    set(_he_lib "${HorizonEngine_LIBRARY_DIR}")
-    if(@HE_SDK_IMPLIB@)
-        set(_he_win TRUE)
-    else()
-        set(_he_win FALSE)
-    endif()
-    macro(_he_implib var name)
-        if(_he_win)
-            set(${var} "${_he_lib}/${name}")
-        else()
-            set(${var} "")
-        endif()
-    endmacro()
-
-    if(NOT TARGET SDL3::SDL3)
-        _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:@HE_SDK_SDL_TARGET@>")
-        _horizon_engine_import(SDL3::SDL3
-            "${_he_rt}/$<TARGET_FILE_NAME:@HE_SDK_SDL_TARGET@>" "${_he_imp}" "" "")
-    endif()
-
-    # NOMINMAX / WIN32_LEAN_AND_MEAN / HE_PROFILING_ENABLED: directory-level
-    # definitions of the engine build, on every engine target there. On Core,
-    # which every other target links.
-    set(_he_core_defs "@HE_SDK_DEFS_HorizonCore@")
-    list(APPEND _he_core_defs @HE_SDK_GLOBAL_DEFINITIONS@)
-
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonCore>")
-    _horizon_engine_import(HorizonEngine::Core
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonCore>" "${_he_imp}"
-        "${_he_core_defs}" "SDL3::SDL3")
-    set_property(TARGET HorizonEngine::Core PROPERTY INTERFACE_COMPILE_FEATURES cxx_std_20)
-
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonNet>")
-    _horizon_engine_import(HorizonEngine::Net
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonNet>" "${_he_imp}"
-        "@HE_SDK_DEFS_HorizonNet@" "HorizonEngine::Core")
-
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonScene>")
-    _horizon_engine_import(HorizonEngine::Scene
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonScene>" "${_he_imp}"
-        "@HE_SDK_DEFS_HorizonScene@" "HorizonEngine::Core;HorizonEngine::Net")
-
-    _he_implib(_he_imp "$<TARGET_LINKER_FILE_NAME:HorizonRendering>")
-    _horizon_engine_import(HorizonEngine::Rendering
-        "${_he_rt}/$<TARGET_FILE_NAME:HorizonRendering>" "${_he_imp}"
-        "@HE_SDK_DEFS_HorizonRendering@" "HorizonEngine::Core")
-
-    unset(_he_rt)
-    unset(_he_lib)
-    unset(_he_win)
-    unset(_he_imp)
-    unset(_he_core_defs)
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/HorizonEngineTargets-${_he_want}.cmake")
 
 # The runtime files a game needs beside its executable (Windows DLLs; elsewhere
 # the shared libs, which the executable finds through its rpath otherwise).
@@ -125,5 +116,10 @@ set(HorizonEngine_RUNTIME_TARGETS
 
 include("${CMAKE_CURRENT_LIST_DIR}/HorizonEngineGame.cmake")
 
+unset(_he_want)
+unset(_he_installed)
+unset(_he_n)
+unset(_he_stamp_now)
+unset(_he_stamp_set)
 set(HorizonEngine_FOUND TRUE)
 cmake_policy(POP)

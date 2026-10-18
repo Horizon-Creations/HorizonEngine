@@ -7,7 +7,8 @@
 #       [SOURCES <file>...])                    more sources, e.g. generated HorizonCode
 #
 # Builds the HorizonGame runtime from the sources in the SDK
-# (share/HorizonEngine/game) against the SDK's libraries. The target setup mirrors
+# (share/HorizonEngine/game) against the lib set of the profile the project chose
+# (HorizonEngine_BUILD_PROFILE, see HorizonEngineConfig.cmake). The target setup mirrors
 # src/HE_Game/CMakeLists.txt, which builds the prebuilt runtime in the engine tree;
 # a change to one belongs in the other. BUILD_CONFIG is the header
 # HE::writeGameBuildConfigHeader generates (Hpak/GameBuildConfig.h): with it the
@@ -80,7 +81,7 @@ function(horizon_add_game target)
     if(HorizonEngine_VULKAN_ENABLED)
         target_compile_definitions(${target} PRIVATE HE_VULKAN_ENABLED)
     endif()
-    # The dev profile's runtime choice, as in the engine tree; a release package
+    # The dev profile's runtime choice, as in the engine tree; a release lib set
     # has no hotkey code at all (HE_FEATURE_DEV_HOTKEYS=0), whatever is defined.
     if(HorizonEngine_BUILD_PROFILE STREQUAL "dev")
         target_compile_definitions(${target} PRIVATE
@@ -88,8 +89,10 @@ function(horizon_add_game target)
     endif()
 
     # Windows has no rpath: the DLLs go beside the executable. Elsewhere the
-    # build rpath reaches the SDK's lib/ (and the exporter copies the libraries
-    # beside the shipped executable, where @executable_path / $ORIGIN finds them).
+    # build rpath reaches the SDK's lib/<profile> (and the exporter copies the
+    # libraries beside the shipped executable, where @executable_path / $ORIGIN
+    # finds them). Runtime data (Shaders/) is not in the SDK: it comes with the
+    # prebuilt runtime's export folder the built game is swapped into.
     if(WIN32)
         foreach(_dep IN LISTS HorizonEngine_RUNTIME_TARGETS)
             add_custom_command(TARGET ${target} POST_BUILD
@@ -97,11 +100,5 @@ function(horizon_add_game target)
                         "$<TARGET_FILE:${_dep}>" "$<TARGET_FILE_DIR:${target}>"
                 VERBATIM)
         endforeach()
-    endif()
-    if(HorizonEngine_HAS_SHADERS)
-        add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${HorizonEngine_SHADER_DIR}" "$<TARGET_FILE_DIR:${target}>/Shaders"
-            VERBATIM)
     endif()
 endfunction()
