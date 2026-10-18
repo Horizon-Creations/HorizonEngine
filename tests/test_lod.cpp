@@ -283,7 +283,9 @@ TEST_CASE("LODComponent serializes and deserializes correctly")
 // position, to the bit, that worldPositionOf gives: a level boundary is a <=
 // on the distance, and a position an ulp off flips an entity standing on one.
 // So every entity here gets two thresholds, exactly its distance and the next
-// float below it, and must land on the first and miss the second.
+// float below it, and must land on the first and miss the second. Only holds
+// while the compiler fuses no multiply-add across statements: GCC with Jolt's
+// -mfma did (-ffp-contract=fast), see the top-level CMakeLists.txt.
 TEST_CASE("LODSystem's world position is worldPositionOf's to the bit, on a level boundary")
 {
     HorizonWorld world;
@@ -363,6 +365,10 @@ TEST_CASE("LODSystem's world position is worldPositionOf's to the bit, on a leve
         std::snprintf(s, sizeof(s), "%08x %08x %08x", b[0], b[1], b[2]);
         return std::string(s);
     };
+    // Strings, not literals out of a ?: : doctest under GCC streamed those as "1".
+    auto kindOf = [](size_t i) {
+        return std::string(i < 240 ? "run" : i < 380 ? "alternating" : "top") + (i % 2 == 0 ? ", moved" : ", cached");
+    };
     size_t twinDiffers = 0;
     for (size_t i = 0; i < onEdge.size(); ++i)
     {
@@ -370,8 +376,7 @@ TEST_CASE("LODSystem's world position is worldPositionOf's to the bit, on a leve
         const glm::vec3 b = HE::worldPositionOf(world, belowEdge[i]);
         if (std::memcmp(&a, &b, sizeof(a)) == 0) continue;
         if (++twinDiffers <= 3)
-            MESSAGE("twin " << i << " (" << (i < 240 ? "run" : i < 380 ? "alternating" : "top")
-                    << (i % 2 == 0 ? ", moved" : ", cached") << "): " << bitsOf(a) << " vs " << bitsOf(b));
+            MESSAGE("twin " << i << " (" << kindOf(i) << "): " << bitsOf(a) << " vs " << bitsOf(b));
     }
 
     LODSystem::update(world, cam);
@@ -381,9 +386,8 @@ TEST_CASE("LODSystem's world position is worldPositionOf's to the bit, on a leve
         const bool on    = reg.get<LODComponent>(onEdge[i]).current != 0;
         const bool below = reg.get<LODComponent>(belowEdge[i]).current != 1;
         if ((on || below) && wrongOn + wrongBelow < 3)
-            MESSAGE("wrong " << i << (on ? " onEdge" : "") << (below ? " belowEdge" : "") << " ("
-                    << (i < 240 ? "run" : i < 380 ? "alternating" : "top")
-                    << (i % 2 == 0 ? ", moved" : ", cached") << ")");
+            MESSAGE("wrong " << i << std::string(on ? " onEdge" : "") << std::string(below ? " belowEdge" : "")
+                    << " (" << kindOf(i) << ")");
         wrongOn    += on;
         wrongBelow += below;
     }
