@@ -543,6 +543,26 @@ std::string cppIdent(const std::string& raw)
     return isCppKeyword(s) ? s + "_" : s;
 }
 
+// A node title as an identifier: "Set Param" → setParam (or SetParam). Words
+// are split at anything that is not a letter or digit; a title that is already
+// one word keeps its own casing after the first letter ("isGrounded").
+std::string camelIdent(const std::string& title, bool upperFirst)
+{
+    std::string out;
+    bool startWord = true;
+    for (const char c : title)
+    {
+        if (!std::isalnum((unsigned char)c)) { startWord = true; continue; }
+        if (out.empty())
+            out += upperFirst ? (char)std::toupper((unsigned char)c)
+                              : (char)std::tolower((unsigned char)c);
+        else
+            out += startWord ? (char)std::toupper((unsigned char)c) : c;
+        startWord = false;
+    }
+    return cppIdent(out);
+}
+
 // Claim `base` in `used`, suffixing _2, _3 … until it is free. Every generated
 // C++ identifier (member/local vars, functions, events, class names) goes through
 // this so name mangling stays deterministic and collision-free in one place.
@@ -976,6 +996,46 @@ const char* hookArgType(PT arg) { return HE::api::cpp::hookArgType(arg); }
 std::string hookParams(const EngineEvent& e, bool argUsed)
 { return HE::api::cpp::hookParams(e, argUsed); }
 
+// ── engine calls: the row an Engine Call node calls directly ─────────────────
+// A row whose cppForm is Ctx or Free comes out as the C++ function it names
+// (ApiFn::cppCall), through HorizonEngine/HorizonEngineApi.h. A Thunk row (its
+// invoke does more than forward) keeps hc::callApi, and so does a row with a
+// Struct pin: a generated struct is its own C++ type, the API's is a Value.
+const HE::api::ApiFn* directRow(const std::string& id)
+{
+    const HE::api::ApiFn* fn = HE::api::find(id);
+    if (!fn || fn->cppForm == HE::api::CppForm::Thunk) return nullptr;
+    for (const HE::api::ApiParam& p : fn->params)
+        if (p.type == PT::Struct) return nullptr;
+    for (const HE::api::ApiParam& r : fn->results)
+        if (r.type == PT::Struct) return nullptr;
+    return fn;
+}
+
+// A direct call's answer in its result pin's C++ type. Only four pin types can
+// differ from what the function returns (an Entity on an Int pin, an RGB colour
+// on a Color pin, …); the rest are used as returned, which the API parity
+// source pins per row with a static_assert.
+std::string asPin(const HE::api::ApiFn& fn, size_t k, const std::string& e)
+{
+    const char* helper = HE::api::cpp::asPinHelper(fn, k);
+    return helper ? "HE::api::pin::" + std::string(helper) + "(" + e + ")" : e;
+}
+
+// Does this C++ expression call anything? Two arguments that do have to be
+// evaluated in the graph's order, which a C++ argument list does not promise
+// (MSVC evaluates right to left). A '(' after a name or a template argument
+// list is a call; one after an operator or another parenthesis is grouping
+// or a cast.
+bool callsSomething(const std::string& e)
+{
+    for (size_t i = 1; i < e.size(); ++i)
+        if (e[i] == '(' && (std::isalnum((unsigned char)e[i - 1]) || e[i - 1] == '_' ||
+                            e[i - 1] == '>'))
+            return true;
+    return false;
+}
+
 // ── the per-class emitter ─────────────────────────────────────────────────────
 class ClassEmitter
 {
@@ -1085,6 +1145,11 @@ private:
     std::set<std::string>                        m_usedClasses;
     struct Slot { std::string field; TypeRef tr; };
     std::unordered_map<int, std::vector<Slot>>   m_slots;      // exec-cached node → RunState fields
+    // Every identifier the class itself declares (buildNames): a name a body
+    // adds for itself (hoisted arguments, a taken-apart result) avoids these.
+    std::unordered_set<std::string>              m_usedNames;
+    bool m_apiUsed    = false;   // this body calls a Ctx row → `HE::api::Scope api(m_ctx);`
+    bool m_directUsed = false;   // this class calls the engine directly → includes the API header
 
     // ── what this class actually needs from the per-run scaffolding ─────────
     // A small graph carries none of it, and then none of it is emitted: no
@@ -1462,6 +1527,9 @@ private:
             "varInfos", "eventInfos", "fireEvent", "callFunction",
             "getVariable", "setVariable", "reseedVariables", "collectRefs",
             "resumeFrom", "bindContext", "slots", "RunState", "m_ctx",
+            // What a body names for itself: the engine Scope, the RunState,
+            // and the namespaces its calls are spelled through.
+            "api", "rs", "hc", "HE", "glm", "std", "HorizonCode",
         };
         auto unique = [&used](const std::string& base) { return uniqueName(base, used); };
         for (const auto& v : m_g.variables)
@@ -1515,6 +1583,7 @@ private:
         for (const auto& v : m_g.variables)
             if (v.scope == 0 && v.access == 0)
                 m_publicVar[v.name] = unique(cppIdent(v.name));
+        m_usedNames = used;
     }
 
     // ── RunState slots: one field per exec-cached data-out (plan §5.4) ───────
@@ -1870,6 +1939,9 @@ private:
         {
             if (n.hasArg) return slotRef(n, outIdx);
             // Pure engine call: dispatched on EVERY data-out read (§3.4).
+            if (const HE::api::ApiFn* fn = directRow(n.s);
+                fn && outIdx >= 0 && outIdx < (int)fn->results.size())
+                return directRead(n, *fn, outIdx, fnCtx);
             std::string args = "std::vector<hc::Value>{";
             for (size_t i = 0; i < n.params.size(); ++i)
             {
@@ -2221,6 +2293,92 @@ private:
             // fall back rather than fail the build.
         }
         return "hc::castRef(m_ctx, " + ref + ", " + strLit(n.s) + ")";
+    }
+
+    // ── direct engine calls ──────────────────────────────────────────────────
+    // The call of `fn` with this node's inputs, against the body's `api` Scope
+    // (opened at the top of the body when anything in it needs the Ctx). The
+    // arguments are the input expressions themselves, already in the pin's C++
+    // type — unless two or more of them call something: then they are named
+    // first, in pin order, into `hoisted` (one declaration each), because the
+    // interpreter evaluates its inputs left to right and a C++ argument list
+    // does not. The names are the parameters', kept clear of every name the
+    // class already uses.
+    std::string directCall(const Node& n, const HE::api::ApiFn& fn, int fnCtx,
+                           std::vector<std::string>& hoisted, std::unordered_set<std::string>& used)
+    {
+        std::vector<std::string> args;
+        int calling = 0;
+        for (size_t i = 0; i < n.params.size(); ++i)
+        {
+            args.push_back(input(n, (int)i, fnCtx));
+            if (callsSomething(args.back())) ++calling;
+        }
+        if (calling >= 2)
+        {
+            for (size_t i = 0; i < args.size(); ++i)
+            {
+                const HE::api::ApiParam& p = fn.params[i];
+                const std::string name = uniqueName(cppIdent(p.name ? p.name : "arg"), used);
+                hoisted.push_back("const " + HE::api::cpp::valueType(p.type, p.isArray) + " " +
+                                  name + " = " + args[i] + ";");
+                args[i] = name;
+            }
+        }
+        bool needsCtx = fn.cppForm == HE::api::CppForm::Ctx;
+        for (const HE::api::ApiParam& p : fn.params) needsCtx = needsCtx || p.selfDefault;
+        if (needsCtx) m_apiUsed = true;
+        m_directUsed = true;
+        return HE::api::cpp::callExpr(fn, "api", args);
+    }
+
+    // A pure Engine Call read at output `outIdx`: dispatched at every read, like
+    // the interpreter's (§3.4). Hoisted arguments need statements, so that
+    // rarer form is a lambda run in place.
+    std::string directRead(const Node& n, const HE::api::ApiFn& fn, int outIdx, int fnCtx)
+    {
+        std::vector<std::string> hoisted;
+        std::unordered_set<std::string> used = m_usedNames;
+        std::string call = directCall(n, fn, fnCtx, hoisted, used);
+        if (fn.results.size() > 1) call += "." + HE::api::cpp::resultMember(fn, (size_t)outIdx);
+        call = asPin(fn, (size_t)outIdx, call);
+        if (hoisted.empty()) return call;
+        std::string s = "[&] { ";
+        for (const std::string& h : hoisted) s += h + " ";
+        return s + "return " + call + "; }()";
+    }
+
+    // An exec Engine Call: the call, and its results into the node's RunState
+    // fields (read later by whatever wires them). Several results are taken
+    // apart from the returned struct, member by member.
+    void directStmt(const Node& n, const HE::api::ApiFn& fn, int fnCtx, Body& b)
+    {
+        std::vector<std::string> hoisted;
+        std::unordered_set<std::string> used = m_usedNames;
+        const std::string call = directCall(n, fn, fnCtx, hoisted, used);
+        const auto it = m_slots.find(n.id);
+        const bool keep = it != m_slots.end() && !fn.results.empty();
+        const bool block = !hoisted.empty() || (keep && fn.results.size() > 1);
+        if (block) { b.line("{"); ++b.indent; }
+        for (const std::string& h : hoisted) b.line(h);
+        if (!keep)
+            b.line(call + ";");
+        else if (fn.results.size() == 1)
+        {
+            m_rsTouched = true;
+            b.line("rs." + it->second[0].field + " = " + asPin(fn, 0, call) + ";");
+        }
+        else
+        {
+            m_rsTouched = true;
+            const std::string r = uniqueName(camelIdent(fn.displayName ? fn.displayName : fn.id,
+                                                        false), used);
+            b.line("const auto " + r + " = " + call + ";");
+            for (size_t k = 0; k < it->second.size() && k < fn.results.size(); ++k)
+                b.line("rs." + it->second[k].field + " = " +
+                       asPin(fn, k, r + "." + HE::api::cpp::resultMember(fn, k)) + ";");
+        }
+        if (block) { --b.indent; b.line("}"); }
     }
 
     // The exec emission shared by CallExternal and EngineCall: pack the data-in
@@ -2689,6 +2847,11 @@ private:
             break;
         }
         case NT::EngineCall:
+            if (const HE::api::ApiFn* fn = directRow(n.s))
+            {
+                directStmt(n, *fn, fnCtx, b);
+                break;
+            }
             emitValueCall(n, fnCtx, b, /*firstArgPin=*/0, [&](const std::string& av)
             {
                 return "hc::callApi(m_ctx, " + strLit(n.s) + ", " + av + ")";
@@ -2873,7 +3036,8 @@ private:
 
     std::vector<Fragment> translateBodies()
     {
-        m_stmtCount = 0;
+        m_stmtCount  = 0;
+        m_directUsed = false;
         std::vector<Fragment> out;
         // `outPin` is the exec-out to enter from, counted off execOut0 — 0 for
         // everything with one chain, and 0/1 for an Input Action's Pressed and
@@ -2893,7 +3057,11 @@ private:
             Body b;
             b.indent = 2;   // inside a member function inside the class
             m_rsTouched = false;
+            m_apiUsed   = false;
             if (start) chain(*start, pinRanges(*start).execOut0 + outPin, fnCtx, b);
+            // The engine calls of this body all run against one Ctx: the one
+            // the host builds for this instance (HorizonEngineApi.h, Scope).
+            if (m_apiUsed) b.text = "        HE::api::Scope api(m_ctx);\n" + b.text;
             f.body   = std::move(b.text);
             f.rsUsed = m_rsTouched;
             out.push_back(std::move(f));
@@ -3288,6 +3456,8 @@ private:
         // translation unit, so editing one graph would rebuild all of them.
         // hcgen.h stays for YOUR code, which wants the whole surface at once.
         c += "#include \"hcgen_" + m_cls + ".h\"\n";
+        // The engine functions its Engine Call nodes name, called directly.
+        if (m_directUsed) c += "#include <HorizonEngine/HorizonEngineApi.h>\n";
         for (const std::string& other : m_usedClasses)
             if (other != m_cls) c += "#include \"hcgen_" + other + ".h\"\n";
         c += "\nnamespace " + ns + " {\n\n";
@@ -4042,6 +4212,8 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
     }
     return res;
 }
+
+bool callsDirectly(const std::string& apiId) { return directRow(apiId) != nullptr; }
 
 std::string generateCMakeLists(const Options& opt, const std::vector<std::string>& cppFiles)
 {

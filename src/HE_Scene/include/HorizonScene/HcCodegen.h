@@ -92,6 +92,14 @@ struct Result
 
 Result generate(const std::vector<ClassSource>& sources, const Options& opt);
 
+// Whether an Engine Call node on this registry row comes out as a direct C++
+// call (HE::api::animator::setParam(api, …), through HorizonEngine/
+// HorizonEngineApi.h) instead of the hc::callApi dispatch. False for a Thunk row
+// (its invoke does more than forward), a row with a Struct pin, and an unknown id.
+// The direct call never passes Services::callApi, so a host that records that
+// seam (the parity tests) sees only the dispatched rows.
+bool callsDirectly(const std::string& apiId);
+
 // The CMake project that builds the generated files into HorizonCodeGen.<dylib>
 // (export packaging, plan §8.2). cppFiles = the .cpp names from Result::files.
 std::string generateCMakeLists(const Options& opt, const std::vector<std::string>& cppFiles);

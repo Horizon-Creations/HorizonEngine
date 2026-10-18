@@ -347,14 +347,39 @@ namespace
 			REQUIRE(comp.id != 0);
 		}
 
+		// A trace without the rows generated code calls DIRECTLY: those never
+		// pass Services::callApi on the compiled side (HE::api::<group>::<fn>
+		// through HorizonEngineApi.h), so only the interpreter would record
+		// them. What they did is compared through their effects instead (the
+		// variables below, and test_hc_codegen_world.cpp against a real world).
+		// Rows still dispatched (Thunk rows) stay in, on both sides.
+		static std::vector<std::string> dispatchedOnly(const std::vector<std::string>& trace)
+		{
+			std::vector<std::string> out;
+			for (const std::string& t : trace)
+			{
+				if (t.rfind("callApi ", 0) == 0)
+				{
+					const size_t open = t.find('(');
+					if (HE::hccg::callsDirectly(t.substr(8, open == std::string::npos
+					                                            ? std::string::npos : open - 8)))
+						continue;
+				}
+				out.push_back(t);
+			}
+			return out;
+		}
+
 		void checkParity()
 		{
 			// Host-call traces: order and count must match exactly.
-			REQUIRE(interp.trace.size() == comp.trace.size());
-			for (size_t i = 0; i < interp.trace.size(); ++i)
+			const std::vector<std::string> ti = dispatchedOnly(interp.trace);
+			const std::vector<std::string> tc = dispatchedOnly(comp.trace);
+			REQUIRE(ti.size() == tc.size());
+			for (size_t i = 0; i < ti.size(); ++i)
 			{
 				INFO("trace entry ", i);
-				CHECK(interp.trace[i] == comp.trace[i]);
+				CHECK(ti[i] == tc[i]);
 			}
 			// Variable stores.
 			const auto si = interp.rt.variablesSnapshot(interp.id);

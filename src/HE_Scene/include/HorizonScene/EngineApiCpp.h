@@ -29,6 +29,17 @@ std::string valueType(PinType t, bool isArray);
 std::string callExpr(const ApiFn& fn, const std::string& ctx,
                      const std::vector<std::string>& args);
 
+// The HE::api::pin helper ("asInt", "asRef", "asColor", "asVec4", "asFloat")
+// that turns result k of `fn` into its pin's C++ type, or nullptr where the
+// answer is used as returned. directCallsSource() static_asserts the nullptr
+// cases row by row: a function returning anything else there stops the build.
+const char* asPinHelper(const ApiFn& fn, size_t k);
+
+// For a row with several results: the member of the returned struct that holds
+// result k. It is the result pin's name; directCallsSource() reads every
+// multi-result row through these members, so the he_tests build proves it.
+std::string resultMember(const ApiFn& fn, size_t k);
+
 // The C++ type of an engine event hook's argument, as CompiledInstance declares
 // it: the glm types and strings by const reference, the rest by value.
 const char* hookArgType(PinType arg);

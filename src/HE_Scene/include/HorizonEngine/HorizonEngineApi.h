@@ -138,5 +138,24 @@ std::vector<type<P>> toPinArray(const std::vector<X>& xs)
     return out;
 }
 
+// The same, by the pin's name, for generated code: the pin types whose C++
+// shape a function's answer may not already have (asFloat only for the rows
+// that keep a number as double). `asInt(entity::self(api))` reads as what it
+// is; every other result is used as returned (the parity source static_asserts
+// that, row by row).
+template <typename X> float asFloat(const X& x) { return toPin<PinType::Float>(x); }
+template <typename X> int asInt(const X& x) { return toPin<PinType::Int>(x); }
+template <typename X> std::vector<int> asInt(const std::vector<X>& xs)
+{ return toPinArray<PinType::Int>(xs); }
+template <typename X> uint32_t asRef(const X& x) { return toPin<PinType::Ref>(x); }
+template <typename X> std::vector<uint32_t> asRef(const std::vector<X>& xs)
+{ return toPinArray<PinType::Ref>(xs); }
+template <typename X> glm::vec4 asColor(const X& x) { return toPin<PinType::Color>(x); }
+template <typename X> std::vector<glm::vec4> asColor(const std::vector<X>& xs)
+{ return toPinArray<PinType::Color>(xs); }
+template <typename X> ::hc::Vec4 asVec4(const X& x) { return toPin<PinType::Vec4>(x); }
+template <typename X> std::vector<::hc::Vec4> asVec4(const std::vector<X>& xs)
+{ return toPinArray<PinType::Vec4>(xs); }
+
 } // namespace pin
 } // namespace HE::api

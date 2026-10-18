@@ -75,6 +75,36 @@ std::string callExpr(const ApiFn& fn, const std::string& ctx,
     return s + ")";
 }
 
+const char* asPinHelper(const ApiFn& fn, size_t k)
+{
+    if (k >= fn.results.size()) return nullptr;
+    switch (fn.results[k].type)
+    {
+        case P::Int:
+        case P::Enum:  return "asInt";
+        case P::Ref:   return "asRef";
+        case P::Color: return "asColor";
+        case P::Vec4:  return "asVec4";
+        case P::Float:
+        {
+            // The rows that store a number as double and hand it to a Float
+            // pin. The static_assert in directCallsSource() is what keeps this
+            // list complete: a new one fails the he_tests build at its row.
+            static const char* const kDoubleOnFloat[] = { "json.getNumber", "prefs.getNumber" };
+            for (const char* id : kDoubleOnFloat)
+                if (std::string(fn.id) == id) return "asFloat";
+            return nullptr;
+        }
+        default:       return nullptr;
+    }
+}
+
+std::string resultMember(const ApiFn& fn, size_t k)
+{
+    return k < fn.results.size() && fn.results[k].name ? std::string(fn.results[k].name)
+                                                       : std::string();
+}
+
 const char* hookArgType(PinType arg)
 {
     return arg == P::String ? "const std::string&"
@@ -167,6 +197,18 @@ std::string directCallsSource()
         s += "// " + std::string(fn.id) + " (" + (fn.displayName ? fn.displayName : fn.id) + ")\n";
         s += "VV " + name + "(HE::api::Ctx& ctx, const VV& a)\n{\n";
         if (fn.params.empty()) s += "    (void)a;\n";
+        // The HorizonCode emitter uses these answers as returned (no pin::as*
+        // around them), so they have to BE the pin's C++ type already.
+        for (size_t i = 0; i < fn.results.size(); ++i)
+        {
+            const ApiParam& r = fn.results[i];
+            if (asPinHelper(fn, i) || r.type == P::Struct) continue;
+            const std::string of = fn.results.size() == 1 ? call
+                                                          : "(" + call + ")." + resultMember(fn, i);
+            s += "    static_assert(std::is_same_v<std::decay_t<decltype(" + of + ")>, " +
+                 valueType(r.type, r.isArray) + ">, \"" + fn.id + ": result '" +
+                 (r.name ? r.name : "") + "' is used as returned\");\n";
+        }
         if (fn.results.empty())
         {
             s += "    " + call + ";\n    return {};\n";
@@ -177,16 +219,13 @@ std::string directCallsSource()
         }
         else
         {
-            // A struct whose members are the results in order: the names are
-            // the result pins', which is what generated code would call them.
-            std::string bind, ret;
+            // A struct whose members ARE the result pins, by name: generated
+            // code reads `raycast(…).point`, so a member named differently
+            // from its pin stops this build at the row's line.
+            std::string ret;
             for (size_t i = 0; i < fn.results.size(); ++i)
-            {
-                const std::string n = std::string(fn.results[i].name) + "_";
-                bind += (i ? ", " : "") + n;
-                ret  += (i ? ", " : "") + boxed(fn.results[i], n);
-            }
-            s += "    auto [" + bind + "] = " + call + ";\n";
+                ret += (i ? ", " : "") + boxed(fn.results[i], "r." + resultMember(fn, i));
+            s += "    const auto r = " + call + ";\n";
             s += "    return { " + ret + " };\n";
         }
         s += "}\n\n";

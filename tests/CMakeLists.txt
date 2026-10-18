@@ -1136,7 +1136,9 @@ target_compile_definitions(test_hcgen PRIVATE HCGEN_BUILD_DYLIB)
 # project generateCMakeLists() writes does exactly this too.
 set_target_properties(test_hcgen PROPERTIES
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
-target_link_libraries(test_hcgen PRIVATE HorizonCore)
+# HorizonScene, like generateCMakeLists' project: an Engine Call node is a direct
+# HE::api call (HorizonEngine/HorizonEngineApi.h), and HE::api lives there.
+target_link_libraries(test_hcgen PRIVATE HorizonScene)
 target_include_directories(test_hcgen PRIVATE ${HCGEN_DIR})
 add_dependencies(he_tests test_hcgen)
 target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
