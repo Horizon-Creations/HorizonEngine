@@ -6,7 +6,11 @@
 #include <HorizonScene/TransformHierarchy.h>
 #include <glm/glm.hpp>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 static HE::UUID makeId(uint64_t hi, uint64_t lo) { return {hi, lo}; }
@@ -348,12 +352,42 @@ TEST_CASE("LODSystem's world position is worldPositionOf's to the bit, on a leve
         reg.emplace<LODComponent>(belowEdge[i], below);
     }
 
-    LODSystem::update(world, cam);
-    size_t wrong = 0;
+    // Which side went wrong tells the cause apart: twins at different positions
+    // (a fresh local matrix against propagateTransforms' cached one) put the
+    // below threshold on the wrong twin; a wrong onEdge with equal twins means
+    // LODSystem's position is not worldPositionOf's.
+    auto bitsOf = [](const glm::vec3& v) {
+        uint32_t b[3];
+        std::memcpy(b, &v, sizeof(b));
+        char s[40];
+        std::snprintf(s, sizeof(s), "%08x %08x %08x", b[0], b[1], b[2]);
+        return std::string(s);
+    };
+    size_t twinDiffers = 0;
     for (size_t i = 0; i < onEdge.size(); ++i)
     {
-        wrong += reg.get<LODComponent>(onEdge[i]).current != 0;
-        wrong += reg.get<LODComponent>(belowEdge[i]).current != 1;
+        const glm::vec3 a = HE::worldPositionOf(world, onEdge[i]);
+        const glm::vec3 b = HE::worldPositionOf(world, belowEdge[i]);
+        if (std::memcmp(&a, &b, sizeof(a)) == 0) continue;
+        if (++twinDiffers <= 3)
+            MESSAGE("twin " << i << " (" << (i < 240 ? "run" : i < 380 ? "alternating" : "top")
+                    << (i % 2 == 0 ? ", moved" : ", cached") << "): " << bitsOf(a) << " vs " << bitsOf(b));
     }
-    CHECK(wrong == 0);
+
+    LODSystem::update(world, cam);
+    size_t wrongOn = 0, wrongBelow = 0;
+    for (size_t i = 0; i < onEdge.size(); ++i)
+    {
+        const bool on    = reg.get<LODComponent>(onEdge[i]).current != 0;
+        const bool below = reg.get<LODComponent>(belowEdge[i]).current != 1;
+        if ((on || below) && wrongOn + wrongBelow < 3)
+            MESSAGE("wrong " << i << (on ? " onEdge" : "") << (below ? " belowEdge" : "") << " ("
+                    << (i < 240 ? "run" : i < 380 ? "alternating" : "top")
+                    << (i % 2 == 0 ? ", moved" : ", cached") << ")");
+        wrongOn    += on;
+        wrongBelow += below;
+    }
+    CHECK(twinDiffers == 0);
+    CHECK(wrongOn == 0);
+    CHECK(wrongBelow == 0);
 }
