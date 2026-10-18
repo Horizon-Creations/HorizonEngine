@@ -4067,3 +4067,74 @@ TEST_CASE("GI auto landscape: the three kernel copies carry the reference's mask
 	CHECK(count(mtl, "if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }") == 2);
 	CHECK(count(gl, "albedo = giAutoLandAlbedo(li, hitPos, hitN);") == 1);
 }
+
+TEST_CASE("D3D12 static geometry lives in the DEFAULT heap, copied before every submit (REN-202)")
+{
+	// Mesh vertex/index buffers and the GI BVH arrays used to be UPLOAD-heap
+	// buffers for their whole life (host RAM on a discrete GPU, read over PCIe
+	// per vertex fetch / ray step). They are DEFAULT-heap buffers now, filled by
+	// copies on a dedicated upload list that submitToQueue() executes ahead of
+	// every list it submits. There is no GPU under ctest; this pins the wiring:
+	//  - uploadMesh, the skeletal upload and uploadGiBlasArray go through
+	//    createStaticBuffer, never createUploadBuffer,
+	//  - createStaticBuffer makes a DEFAULT buffer in COMMON (buffers promote and
+	//    decay implicitly; no barrier, no tracked state),
+	//  - ExecuteCommandLists has exactly two call sites, the upload flush and
+	//    submitToQueue, and submitToQueue flushes first. A third site would let a
+	//    draw run before its mesh copy: garbage geometry, no error.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("D3D12 renderer source not found - static geometry pin skipped");
+		return;
+	}
+	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "D3D12" / "D3D12Renderer.cpp"));
+	REQUIRE(!src.empty());
+	auto body = [&](const std::string& head) {
+		const size_t at = src.find(head);
+		REQUIRE_MESSAGE(at != std::string::npos, std::string(head));
+		const size_t end = src.find("\n    }\n", at);
+		REQUIRE_MESSAGE(end != std::string::npos, std::string(head));
+		return src.substr(at, end - at);
+	};
+	auto count = [](const std::string& s, const std::string& needle) {
+		size_t n = 0;
+		for (size_t at = s.find(needle); at != std::string::npos; at = s.find(needle, at + 1)) ++n;
+		return n;
+	};
+
+	const std::string mesh = body("void uploadMesh(GpuMesh& mesh");
+	CHECK(count(mesh, "createStaticBuffer(") == 2);
+	CHECK(count(mesh, "createUploadBuffer(") == 0);
+	const std::string skel = body("GpuSkeletalMesh12* resolveSkeletalMesh12(");
+	CHECK(count(skel, "createStaticBuffer(") == 4);
+	CHECK(count(skel, "createUploadBuffer(") == 0);
+	const std::string gi = body("void uploadGiBlasArray(");
+	CHECK(count(gi, "createStaticBuffer(") == 1);
+	CHECK(count(gi, "queueBufferUpload(") == 1);
+	CHECK(count(gi, "createUploadBuffer(") == 0);
+
+	const std::string make = body("ComPtr<ID3D12Resource> createStaticBuffer(");
+	const size_t heap  = make.find("hp.Type = D3D12_HEAP_TYPE_DEFAULT;");
+	const size_t state = make.find("D3D12_RESOURCE_STATE_COMMON, nullptr");
+	const size_t copy  = make.find("queueBufferUpload(buf.Get(), 0, data, dataBytes)");
+	CHECK(heap != std::string::npos);
+	CHECK(state != std::string::npos);
+	CHECK(copy != std::string::npos);
+	CHECK(heap < state);
+	CHECK(state < copy);
+
+	CHECK(count(src, "ExecuteCommandLists(") == 2);
+	const std::string flush = body("void flushUploads()");
+	CHECK(count(flush, "ExecuteCommandLists(") == 1);
+	CHECK(count(flush, "->Signal(fence.Get(), f.fence)") == 1);
+	const std::string submit = body("void submitToQueue(ID3D12CommandList* list)");
+	const size_t f = submit.find("flushUploads();");
+	const size_t e = submit.find("ExecuteCommandLists(");
+	REQUIRE(f != std::string::npos);
+	REQUIRE(e != std::string::npos);
+	CHECK(f < e);
+	CHECK(count(src, "submitToQueue(") >= 10);
+}

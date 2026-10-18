@@ -40,6 +40,7 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
 #include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
+#include <HorizonRendering/FrameUploadRing.h> // staging chunks for the DEFAULT-heap mesh copies (REN-202)
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
@@ -60,6 +61,7 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
+#include <optional>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -2782,8 +2784,7 @@ struct D3D12RendererImpl
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cmdList->ResourceBarrier(1, &b);
         cmdList->Close();
-        ID3D12CommandList* lists[] = { cmdList.Get() };
-        cmdQueue->ExecuteCommandLists(1, lists);
+        submitToQueue(cmdList.Get());
         waitForAllFrames();
 
         // SRV in skyEnvHeap slot 1 (t1).
@@ -4875,6 +4876,270 @@ struct D3D12RendererImpl
         return res;
     }
 
+    // ── Static geometry in the DEFAULT heap (REN-202) ───────────────────────────
+    // Mesh vertex/index buffers (static and skeletal) and the GI BVH node/triangle
+    // arrays used to sit in the UPLOAD heap for their whole life: on a discrete GPU
+    // that is host RAM, read over PCIe on every vertex fetch and every ray step.
+    // They are DEFAULT-heap buffers now, filled by a GPU copy.
+    //
+    // The copies go on a command list of their own: resolveMesh / updateGiAccel run
+    // while some other list is mid-recording (frame, preview, capture), or while none
+    // is (createCube in Initialize). submitToQueue() executes that list ahead of every list
+    // it submits, on the same queue, so the copies are done before anything that
+    // reads the buffers. Every cmdQueue->ExecuteCommandLists in this file goes
+    // through submitToQueue(); ImGui's own multi-viewport submits on the shared queue never
+    // read meshes and need no flush.
+    //
+    // No barriers and no tracked state: the buffers are created in COMMON, the copy
+    // promotes them to COPY_DEST, they decay back to COMMON when the upload list's
+    // ExecuteCommandLists ends, and the first draw/dispatch promotes them to the read
+    // state it needs (buffers always promote and decay implicitly).
+    //
+    // Staging comes from HE::FrameUploadRing chunks, recycled by the fence value of the
+    // batch that read them. A copy bigger than a chunk, or one past the batch's ring
+    // budget (a level load uploads hundreds of MB in one frame), gets a staging buffer
+    // of its own that dies with the same fence, so the ring stays bounded at roughly
+    // budget × batches in flight. HE_D3D12_STATIC_UPLOAD_HEAP=1 brings back the old
+    // upload-heap buffers (same-binary A/B); they are also the fallback when the
+    // upload list or a DEFAULT buffer cannot be created.
+    static constexpr size_t k_stagingChunk       = size_t(4) << 20;
+    static constexpr size_t k_stagingBatchBudget = size_t(16) << 20;
+    struct UploadAllocator { ComPtr<ID3D12CommandAllocator> alloc; UINT64 fence = 0; };
+    struct UploadInFlight
+    {
+        UINT64                              fence = 0;
+        HE::FrameUploadRing::Ticket         ticket;
+        std::vector<ComPtr<ID3D12Resource>> keep;   // destinations + dedicated staging
+    };
+    std::vector<UploadAllocator>        m_uploadAllocs;    // reused once their fence passed
+    size_t                              m_uploadAllocSlot = 0;
+    ComPtr<ID3D12GraphicsCommandList>   m_uploadCmdList;
+    bool                                m_uploadOpen   = false;
+    bool                                m_uploadBroken = false; // list creation failed → upload heap
+    int                                 m_staticUploadHeap = -1; // HE_D3D12_STATIC_UPLOAD_HEAP, -1 = unread
+    std::optional<HE::FrameUploadRing>  m_stagingRing;
+    std::vector<ComPtr<ID3D12Resource>> m_stagingChunks;   // ↔ ring chunk index
+    std::vector<uint8_t*>               m_stagingChunkPtr;
+    size_t                              m_batchRingBytes = 0;
+    std::vector<ComPtr<ID3D12Resource>> m_batchKeep;
+    std::vector<UploadInFlight>         m_uploadsInFlight;
+    // Engagement witness, logged at the first batch and at Shutdown.
+    uint64_t m_staticBufs = 0, m_staticBytes = 0, m_staticFallbacks = 0;
+    uint64_t m_uploadBatches = 0, m_ringCopies = 0, m_dedicatedCopies = 0, m_tailCopies = 0;
+
+    bool staticUploadHeap()
+    {
+        if (m_staticUploadHeap < 0)
+        {
+            const char* e = std::getenv("HE_D3D12_STATIC_UPLOAD_HEAP");
+            m_staticUploadHeap = (e && *e && *e != '0') ? 1 : 0;
+            if (m_staticUploadHeap)
+                HE_LOG_INFO(RHI, "%s", "D3D12Renderer: HE_D3D12_STATIC_UPLOAD_HEAP set — "
+                                       "static geometry stays in the UPLOAD heap");
+        }
+        return m_staticUploadHeap == 1;
+    }
+
+    void retireCompletedUploads()
+    {
+        if (!fence || m_uploadsInFlight.empty()) return;
+        const UINT64 done = fence->GetCompletedValue();
+        auto keep = m_uploadsInFlight.begin();
+        for (auto it = m_uploadsInFlight.begin(); it != m_uploadsInFlight.end(); ++it)
+        {
+            if (it->fence <= done) { if (m_stagingRing) m_stagingRing->release(it->ticket); }
+            else if (keep != it)   *keep++ = std::move(*it);
+            else                   ++keep;
+        }
+        m_uploadsInFlight.erase(keep, m_uploadsInFlight.end());
+    }
+
+    bool beginUploadBatch()
+    {
+        if (m_uploadOpen) return true;
+        if (m_uploadBroken || !device || !cmdQueue || !fence) return false;
+        retireCompletedUploads();
+        const UINT64 done = fence->GetCompletedValue();
+        size_t slot = m_uploadAllocs.size();
+        for (size_t i = 0; i < m_uploadAllocs.size(); ++i)
+            if (m_uploadAllocs[i].fence <= done) { slot = i; break; }
+        if (slot == m_uploadAllocs.size())
+        {
+            UploadAllocator a;
+            if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a.alloc))))
+            { m_uploadBroken = true; return false; }
+            m_uploadAllocs.push_back(std::move(a));
+        }
+        ID3D12CommandAllocator* alloc = m_uploadAllocs[slot].alloc.Get();
+        const bool ok = SUCCEEDED(alloc->Reset()) &&
+            (m_uploadCmdList
+                ? SUCCEEDED(m_uploadCmdList->Reset(alloc, nullptr))
+                : SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, nullptr,
+                                                      IID_PPV_ARGS(&m_uploadCmdList))));
+        if (!ok)
+        {
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: static-geometry upload list unavailable — "
+                                   "meshes stay in the UPLOAD heap");
+            m_uploadBroken = true;
+            return false;
+        }
+        if (!m_stagingRing) m_stagingRing.emplace(k_stagingChunk, 16);
+        m_stagingRing->beginFrame();
+        m_uploadAllocSlot = slot;
+        m_batchRingBytes  = 0;
+        m_uploadOpen      = true;
+        return true;
+    }
+
+    // Records a copy of `bytes` from `data` into dst[dstOffset..] on the open batch.
+    bool queueBufferUpload(ID3D12Resource* dst, UINT64 dstOffset, const void* data, UINT64 bytes)
+    {
+        if (bytes == 0) return true;
+        if (!dst || !data || !beginUploadBatch()) return false;
+        ID3D12Resource* src    = nullptr;
+        UINT64          srcOfs = 0;
+        uint8_t*        srcPtr = nullptr;
+        if (bytes <= k_stagingChunk && m_batchRingBytes + bytes <= k_stagingBatchBudget)
+        {
+            const HE::FrameUploadRing::Slice s = m_stagingRing->allocate(static_cast<size_t>(bytes));
+            if (s.valid())
+            {
+                if (m_stagingChunks.size() <= s.chunk)
+                {
+                    m_stagingChunks.resize(s.chunk + 1);
+                    m_stagingChunkPtr.resize(s.chunk + 1, nullptr);
+                }
+                if (!m_stagingChunks[s.chunk])
+                    m_stagingChunks[s.chunk] = createUploadBuffer(m_stagingRing->chunkCapacity(s.chunk),
+                        reinterpret_cast<void**>(&m_stagingChunkPtr[s.chunk]));
+                if (m_stagingChunks[s.chunk] && m_stagingChunkPtr[s.chunk])
+                {
+                    src    = m_stagingChunks[s.chunk].Get();
+                    srcOfs = s.offset;
+                    srcPtr = m_stagingChunkPtr[s.chunk] + s.offset;
+                    m_batchRingBytes += static_cast<size_t>(bytes);
+                    ++m_ringCopies;
+                }
+            }
+        }
+        if (!src)
+        {
+            void* p = nullptr;
+            ComPtr<ID3D12Resource> own = createUploadBuffer(bytes, &p);
+            if (!own || !p) return false;
+            src    = own.Get();
+            srcPtr = static_cast<uint8_t*>(p);
+            m_batchKeep.push_back(std::move(own));
+            ++m_dedicatedCopies;
+        }
+        std::memcpy(srcPtr, data, static_cast<size_t>(bytes));
+        m_uploadCmdList->CopyBufferRegion(dst, dstOffset, src, srcOfs, bytes);
+        m_batchKeep.emplace_back(dst);
+        if (dstOffset > 0) ++m_tailCopies; // GI BVH appended into the live buffer
+        return true;
+    }
+
+    // Executes the open batch (if any) and tags its staging with a fresh fence value.
+    void flushUploads()
+    {
+        if (!m_uploadOpen) return;
+        m_uploadOpen = false;
+        UploadInFlight f;
+        f.ticket = m_stagingRing->endFrame();
+        f.keep.swap(m_batchKeep);
+        if (FAILED(m_uploadCmdList->Close()))
+        {
+            // Nothing of it reaches the GPU: the buffers of this batch stay unfilled.
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: static-geometry upload list failed to close");
+            m_stagingRing->release(f.ticket);
+            return;
+        }
+        ID3D12CommandList* lists[] = { m_uploadCmdList.Get() };
+        cmdQueue->ExecuteCommandLists(1, lists);
+        f.fence = ++fenceValue;
+        cmdQueue->Signal(fence.Get(), f.fence);
+        m_uploadAllocs[m_uploadAllocSlot].fence = f.fence;
+        m_uploadsInFlight.push_back(std::move(f));
+        if (m_uploadBatches++ == 0)
+            HE_LOG_INFO(RHI, "D3D12Renderer: static geometry in the DEFAULT heap — first upload batch "
+                             "(%llu buffers, %.2f MB so far)",
+                        static_cast<unsigned long long>(m_staticBufs), m_staticBytes / (1024.0 * 1024.0));
+    }
+
+    // The one way a list reaches cmdQueue: pending static-geometry copies first.
+    void submitToQueue(ID3D12CommandList* list)
+    {
+        flushUploads();
+        ID3D12CommandList* lists[] = { list };
+        cmdQueue->ExecuteCommandLists(1, lists);
+    }
+
+    // A DEFAULT-heap buffer of `capacity` bytes whose first `dataBytes` are `data`
+    // once the pending batch has run. Falls back to a mapped upload-heap buffer;
+    // `uploadHeapMapped` then receives its pointer (left mapped), else nullptr.
+    ComPtr<ID3D12Resource> createStaticBuffer(UINT64 capacity, const void* data, UINT64 dataBytes,
+                                              void** uploadHeapMapped = nullptr)
+    {
+        if (uploadHeapMapped) *uploadHeapMapped = nullptr;
+        if (capacity == 0) return nullptr;
+        if (!staticUploadHeap())
+        {
+            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width            = capacity;
+            rd.Height           = 1;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels        = 1;
+            rd.Format           = DXGI_FORMAT_UNKNOWN;
+            rd.SampleDesc.Count = 1;
+            rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> buf;
+            if (SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                              D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buf)))
+                && queueBufferUpload(buf.Get(), 0, data, dataBytes))
+            {
+                ++m_staticBufs;
+                m_staticBytes += capacity;
+                return buf;
+            }
+            ++m_staticFallbacks;
+        }
+        void* p = nullptr;
+        ComPtr<ID3D12Resource> buf = createUploadBuffer(capacity, &p);
+        if (!buf || !p) return nullptr;
+        if (data && dataBytes) std::memcpy(p, data, static_cast<size_t>(dataBytes));
+        if (uploadHeapMapped) *uploadHeapMapped = p; else buf->Unmap(0, nullptr);
+        return buf;
+    }
+
+    // Shutdown, after the GPU is idle: drops the upload path (a re-Initialize rebuilds it).
+    void releaseStaticUploads()
+    {
+        if (m_staticBufs || m_staticFallbacks)
+            HE_LOG_INFO(RHI, "D3D12Renderer: static geometry — %llu buffers (%.2f MB) in the DEFAULT heap, "
+                             "%llu batches, %llu ring / %llu dedicated staging copies (%llu into a live buffer), "
+                             "%llu upload-heap fallbacks",
+                        static_cast<unsigned long long>(m_staticBufs), m_staticBytes / (1024.0 * 1024.0),
+                        static_cast<unsigned long long>(m_uploadBatches),
+                        static_cast<unsigned long long>(m_ringCopies),
+                        static_cast<unsigned long long>(m_dedicatedCopies),
+                        static_cast<unsigned long long>(m_tailCopies),
+                        static_cast<unsigned long long>(m_staticFallbacks));
+        if (m_uploadOpen && m_uploadCmdList) m_uploadCmdList->Close(); // recorded, never submitted
+        m_uploadOpen = false;
+        m_uploadsInFlight.clear();
+        m_batchKeep.clear();
+        m_stagingChunks.clear();
+        m_stagingChunkPtr.clear();
+        m_stagingRing.reset();
+        m_uploadCmdList.Reset();
+        m_uploadAllocs.clear();
+        m_uploadBroken = false;
+        m_staticBufs = m_staticBytes = m_staticFallbacks = 0;
+        m_uploadBatches = m_ringCopies = m_dedicatedCopies = m_tailCopies = 0;
+    }
+
     // Checkpoint C2 of docs/decals-cross-backend-plan.md: the scene depth has to be
     // readable as a texture, not just writable as a depth target — the screen-space
     // decal pass reconstructs world positions from it. A DEPTH format carries no SRV,
@@ -5916,8 +6181,7 @@ struct D3D12RendererImpl
                 b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                 cmdList->ResourceBarrier(1, &b);
                 cmdList->Close();
-                ID3D12CommandList* lists[] = { cmdList.Get() };
-                cmdQueue->ExecuteCommandLists(1, lists);
+                submitToQueue(cmdList.Get());
                 waitForAllFrames();
 
                 // Create SRV for noise in ssaoSrvHeap[1]
@@ -5985,8 +6249,7 @@ struct D3D12RendererImpl
                 b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                 cmdList->ResourceBarrier(1, &b);
                 cmdList->Close();
-                ID3D12CommandList* lists[] = { cmdList.Get() };
-                cmdQueue->ExecuteCommandLists(1, lists);
+                submitToQueue(cmdList.Get());
                 waitForAllFrames();
 
                 // Fill sceneSrvHeap[2] (white fallback for t2 when SSAO disabled)
@@ -7013,8 +7276,8 @@ struct D3D12RendererImpl
     // may be reused by SSAO in the same frame when GI fails mid-frame).
     ComPtr<ID3D12Resource> giGBufObjRing[k_frameCount]; uint8_t* giGBufObjPtr[k_frameCount]{};
 
-    // Acceleration structures: shared node/tri upload buffers (persistently
-    // mapped; appended BLASes go into their tail, see uploadGiBlasArray),
+    // Acceleration structures: shared node/tri buffers (DEFAULT heap, REN-202;
+    // appended BLASes go into their tail, see uploadGiBlasArray),
     // per-frame instance upload buffers (rewritten every frame — transforms move).
     HE::GiBlasStore                giBlas;
     std::vector<GIInstanceGpu>     giInstancesCpu;
@@ -7148,29 +7411,33 @@ struct D3D12RendererImpl
         return bvh;
     }
 
-    // Writes the store's nodes or triangles into `sb` (a persistently mapped
-    // upload buffer, `cap` elements). Between rewrites only the tail [from, n)
+    // Writes the store's nodes or triangles into `sb` (`cap` elements, a DEFAULT-
+    // heap buffer since REN-202; `ptr` is only set for the upload-heap fallback,
+    // which stays persistently mapped). Between rewrites only the tail [from, n)
     // is new, and frames in flight read only [0, from): it goes straight into
-    // the live buffer. A rewrite (compaction moved every range) or growth gets a
-    // fresh buffer with headroom and retires the old one past those frames.
+    // the live buffer (a queued copy, or a memcpy into the mapped fallback). A
+    // rewrite (compaction moved every range) or growth gets a fresh buffer with
+    // headroom and retires the old one past those frames.
     template <class T>
     void uploadGiBlasArray(ComPtr<ID3D12Resource>& sb, uint8_t*& ptr, size_t& cap,
                            const std::vector<T>& src, size_t from)
     {
         const size_t n = src.size();
         if (n == 0) return; // keep the old buffer bound; no instance points into it
-        if (sb && ptr && from > 0 && n <= cap)
+        if (sb && from > 0 && n <= cap)
         {
-            std::memcpy(ptr + from * sizeof(T), src.data() + from, (n - from) * sizeof(T));
-            return;
+            const size_t bytes = (n - from) * sizeof(T);
+            if (ptr) { std::memcpy(ptr + from * sizeof(T), src.data() + from, bytes); return; }
+            if (queueBufferUpload(sb.Get(), static_cast<UINT64>(from) * sizeof(T), src.data() + from, bytes))
+                return;
+            // No copy possible → rewrite the whole array into a fresh buffer below.
         }
         const int retireN = static_cast<int>(k_frameCount) + 2;
         if (sb) m_retiredTextures.emplace_back(std::move(sb), retireN);
-        ptr = nullptr;
         cap = n + n / 2;
-        sb  = createUploadBuffer(static_cast<UINT64>(cap) * sizeof(T), reinterpret_cast<void**>(&ptr));
-        if (!sb || !ptr) { sb.Reset(); ptr = nullptr; cap = 0; return; }
-        std::memcpy(ptr, src.data(), n * sizeof(T));
+        sb  = createStaticBuffer(static_cast<UINT64>(cap) * sizeof(T), src.data(), n * sizeof(T),
+                                 reinterpret_cast<void**>(&ptr));
+        if (!sb) { ptr = nullptr; cap = 0; }
     }
 
     void updateGiAccel(ContentManager* cm, const RenderWorld& rw, UINT fi)
@@ -8560,8 +8827,7 @@ struct D3D12RendererImpl
         uav.UAV.pResource = out.as.Get();
         giBuildCmdList->ResourceBarrier(1, &uav);
         giBuildCmdList->Close();
-        ID3D12CommandList* lists[] = { giBuildCmdList.Get() };
-        cmdQueue->ExecuteCommandLists(1, lists);
+        submitToQueue(giBuildCmdList.Get());
         waitForAllFrames(); // scratch + geo (locals) may be released after this
 
         out.valid = true;
@@ -8631,8 +8897,8 @@ struct D3D12RendererImpl
     {
         const UINT vbytes = static_cast<UINT>(interleaved.size() * sizeof(float));
         const UINT ibytes = static_cast<UINT>(indices.size() * sizeof(uint32_t));
-        mesh.vbuf = createUploadBuffer(vbytes, nullptr, interleaved.data());
-        mesh.ibuf = createUploadBuffer(ibytes, nullptr, indices.data());
+        mesh.vbuf = createStaticBuffer(vbytes, interleaved.data(), vbytes);
+        mesh.ibuf = createStaticBuffer(ibytes, indices.data(), ibytes);
         mesh.vbv  = { mesh.vbuf->GetGPUVirtualAddress(), vbytes, 8u * sizeof(float) };
         mesh.ibv  = { mesh.ibuf->GetGPUVirtualAddress(), ibytes, DXGI_FORMAT_R32_UINT };
         mesh.indexCount = static_cast<UINT>(indices.size());
@@ -8947,7 +9213,7 @@ struct D3D12RendererImpl
         // Slot 0: interleaved VB (stride 32).
         {
             const UINT64 bytes = static_cast<UINT64>(interleaved.size()) * sizeof(float);
-            skm.vbuf = createUploadBuffer(bytes, nullptr, interleaved.data());
+            skm.vbuf = createStaticBuffer(bytes, interleaved.data(), bytes);
             skm.vbv.BufferLocation = skm.vbuf->GetGPUVirtualAddress();
             skm.vbv.SizeInBytes    = static_cast<UINT>(bytes);
             skm.vbv.StrideInBytes  = 8 * sizeof(float); // pos3+norm3+uv2
@@ -8955,7 +9221,7 @@ struct D3D12RendererImpl
         // Slot 1: boneIds (uint32 × 4 per vertex, stride 16).
         {
             const UINT64 bytes = static_cast<UINT64>(vertexCount) * 4 * sizeof(uint32_t);
-            skm.boneIdVb = createUploadBuffer(bytes, nullptr, asset->boneIDs.data());
+            skm.boneIdVb = createStaticBuffer(bytes, asset->boneIDs.data(), bytes);
             skm.boneIdVbv.BufferLocation = skm.boneIdVb->GetGPUVirtualAddress();
             skm.boneIdVbv.SizeInBytes    = static_cast<UINT>(bytes);
             skm.boneIdVbv.StrideInBytes  = 4 * sizeof(uint32_t);
@@ -8963,7 +9229,7 @@ struct D3D12RendererImpl
         // Slot 2: boneWeights (float × 4 per vertex, stride 16).
         {
             const UINT64 bytes = static_cast<UINT64>(vertexCount) * 4 * sizeof(float);
-            skm.boneWgtVb = createUploadBuffer(bytes, nullptr, asset->boneWeights.data());
+            skm.boneWgtVb = createStaticBuffer(bytes, asset->boneWeights.data(), bytes);
             skm.boneWgtVbv.BufferLocation = skm.boneWgtVb->GetGPUVirtualAddress();
             skm.boneWgtVbv.SizeInBytes    = static_cast<UINT>(bytes);
             skm.boneWgtVbv.StrideInBytes  = 4 * sizeof(float);
@@ -8971,7 +9237,7 @@ struct D3D12RendererImpl
         // Index buffer.
         {
             const UINT64 bytes = static_cast<UINT64>(asset->indices.size()) * sizeof(uint32_t);
-            skm.ibuf = createUploadBuffer(bytes, nullptr, asset->indices.data());
+            skm.ibuf = createStaticBuffer(bytes, asset->indices.data(), bytes);
             skm.ibv.BufferLocation = skm.ibuf->GetGPUVirtualAddress();
             skm.ibv.SizeInBytes    = static_cast<UINT>(bytes);
             skm.ibv.Format         = DXGI_FORMAT_R32_UINT;
@@ -10275,6 +10541,7 @@ void D3D12Renderer::Shutdown()
     m_impl->meshCache.clear();
     m_impl->m_skeletalMeshCache.clear();
     m_impl->cube = {};
+    m_impl->releaseStaticUploads(); // REN-202 upload list + staging ring (GPU is idle)
     m_impl->viewportRT.Reset();
     m_impl->viewportDepth.Reset();
     m_impl->viewportReadback.Reset();
@@ -12411,8 +12678,7 @@ void D3D12Renderer::Render()
     }
     p.cmdList->Close();
 
-    ID3D12CommandList* lists[] = { p.cmdList.Get() };
-    p.cmdQueue->ExecuteCommandLists(1, lists);
+    p.submitToQueue(p.cmdList.Get());
     // PRESENT_ALLOW_TEARING is only valid on a swapchain created with the matching
     // flag AND when unsynced (sync interval 0). Gate it on the queried capability.
     HRESULT prHr;
@@ -12606,8 +12872,7 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
     p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     p.cmdList->Close();
-    ID3D12CommandList* lists[] = { p.cmdList.Get() };
-    p.cmdQueue->ExecuteCommandLists(1, lists);
+    p.submitToQueue(p.cmdList.Get());
     p.waitForAllFrames();
 
     void* mapped = nullptr;
@@ -12717,8 +12982,7 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
         p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
         DrawViewportFrame();
         p.cmdList->Close();
-        ID3D12CommandList* lists[] = { p.cmdList.Get() };
-        p.cmdQueue->ExecuteCommandLists(1, lists);
+        p.submitToQueue(p.cmdList.Get());
         // CaptureViewport flushes, copies to the readback buffer, flushes again
         // and maps; no world → the cleared target, honestly black, which is what
         // the viewport would show too.
@@ -13002,8 +13266,7 @@ void* D3D12Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
     wp.ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     cl->Close();
-    ID3D12CommandList* lists[] = { cl };
-    p.cmdQueue->ExecuteCommandLists(1, lists);
+    p.submitToQueue(cl);
     p.waitForAllFrames();
 
     if (readback)
@@ -13095,8 +13358,7 @@ void D3D12Renderer::SetMoonTexture(const void* rgba8Pixels, int width, int heigh
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     p.cmdList->ResourceBarrier(1, &b);
     p.cmdList->Close();
-    ID3D12CommandList* lists[] = { p.cmdList.Get() };
-    p.cmdQueue->ExecuteCommandLists(1, lists);
+    p.submitToQueue(p.cmdList.Get());
     p.waitForAllFrames();
 
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -13182,8 +13444,7 @@ void* D3D12Renderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int 
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     p.cmdList->ResourceBarrier(1, &b);
     p.cmdList->Close();
-    ID3D12CommandList* lists[] = { p.cmdList.Get() };
-    p.cmdQueue->ExecuteCommandLists(1, lists);
+    p.submitToQueue(p.cmdList.Get());
     p.waitForAllFrames();
 
     // Retain the resource so it outlives ImGui's SRV; the editor builds the SRV.
