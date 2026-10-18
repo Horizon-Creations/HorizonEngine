@@ -162,6 +162,7 @@ TEST_CASE("project_package: overrides reach the RUN and never the stored profile
 		{ "incremental",        !before.incremental },
 		{ "compileHorizonCode", !before.compileHorizonCode },
 		{ "hcStopOnFailure",    !before.hcStopOnFailure },
+		{ "compileGameFromSdk", !before.compileGameFromSdk },
 		{ "outputDir",          "/tmp/he_test_build/out" },
 		{ "excludePatterns",    json::array({ "Debug/*", "*_test.hasset" }) },
 	});
@@ -175,6 +176,7 @@ TEST_CASE("project_package: overrides reach the RUN and never the stored profile
 	CHECK(f.started.incremental     == !before.incremental);
 	CHECK(f.started.compileHorizonCode == !before.compileHorizonCode);
 	CHECK(f.started.hcStopOnFailure    == !before.hcStopOnFailure);
+	CHECK(f.started.compileGameFromSdk == !before.compileGameFromSdk);
 	CHECK(f.started.outputDir       == "/tmp/he_test_build/out");
 	REQUIRE(f.started.excludePatterns.size() == 2);
 	CHECK(f.started.excludePatterns[0] == "Debug/*");

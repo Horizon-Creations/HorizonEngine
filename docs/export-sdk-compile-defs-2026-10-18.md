@@ -684,6 +684,7 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Bug found and fixed (dfad4bd0):** a rewritten `HEGameBuildConfig.h` did NOT recompile anything in a kept tree (per-source include
   dir, invisible to Make's dependency scan) -> the old config/key stayed compiled in. Since step 8 the work dir was kept, so this was
   live before the cache. `OBJECT_DEPENDS` in `cmake/sdk/HorizonEngineGame.cmake:61` and `src/HE_Game/CMakeLists.txt:123`. Lesson 459.
+  The cause is inferred from the symptom (not confirmed in a kept tree's depend files); the fix is proven by the e2e either way.
 - **Verified (Mac, dev tree out/build/release, release tree out/build/release-profile, SDK out/deploy/EngineSDK, both sets stamp
   59151f..):** `test_export_sdk_build` 10 cases / 86 assertions (key per input, miss names toolchain/headers/libs, hit keeps tree,
   forget); `test_export_profiles` 50/50 (round trip); `test_mcp_tools_build` green. Gated e2e: dev and release each: first build miss,
@@ -696,6 +697,7 @@ body or move behind a macro is open. They are needed for parity with the interpr
   must be found at link time, SDL3 is on the link line directly). Release game not started (lesson 458).
 - **Traps:** the SDK install in out/deploy was older than HEAD (1d53f47f changed ProjectExporter.h after it): reinstall BOTH sets
   (`--target HorizonSDK` in both trees) or the package refuses the stale set. ctest/he_tests from the build dir only.
+  The cache has no eviction: one tree per project + profile stays in `SdkGameBuilds/` (with the key-bearing header), by design.
 - **Next steps:** 1. Step 12: HorizonCodeGen against `HorizonEngine::HorizonEngine` + `HE_BUILD_PROFILE`, into `HorizonEngine/`;
   give it the same cache key/work-dir helpers (`buildCacheKey` takes any DylibBuildSpec). 2. Step 13: GUI export twice per profile,
   second one logs "Build cache hit"; `build_profile_strings.py --profile release` on the swapped Shipping game.
