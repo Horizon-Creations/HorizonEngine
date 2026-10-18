@@ -1439,6 +1439,54 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		int col = 0;
 
+		// ── Rows scrolled out of the grid are not drawn (EDT-301) ─────────
+		// Every tile used to be built every frame (thumbnail and type lookups,
+		// the git badge, label truncation by measuring) for a folder of
+		// thousands with thirty on screen. A row of tiles is one height, folder
+		// and file alike: the icon button and one line of label. It is measured
+		// off two consecutive drawn rows; a row wholly outside the grid then only
+		// adds that height to a run laid out as ONE Dummy before the next row
+		// that shows (or after the last), so the scroll range stays what drawing
+		// every row gives. Until the height is known every row is drawn, and so
+		// it is while a drag is in the air (the source tile has to keep
+		// submitting its drag source, wherever it has scrolled to) or a reveal
+		// waits for its tile to scroll itself into view.
+		static float s_tileRowStep = 0.0f;
+		const bool  clipTileRows = s_tileRowStep > 0.0f && s_revealScrollPath.empty() &&
+		                           !ImGui::GetDragDropPayload();
+		const float gridTop      = ImGui::GetWindowPos().y;
+		const float gridBottom   = gridTop + ImGui::GetWindowHeight();
+		float tileRowsSkipped    = 0.0f;    // clipped rows not laid out yet
+		float tileRowFrom        = -1.0f;   // where the last drawn row started
+		bool  tileRowDrawn       = true;    // the row the current tile is in
+		const auto flushSkippedTileRows = [&tileRowsSkipped]
+		{
+			if (tileRowsSkipped <= 0.0f) return;
+			// A Dummy adds the item spacing itself.
+			ImGui::Dummy(ImVec2(1.0f, (std::max)(0.0f, tileRowsSkipped - ImGui::GetStyle().ItemSpacing.y)));
+			tileRowsSkipped = 0.0f;
+		};
+		// Asked first thing for every tile, with its column: false means its row
+		// is out of view and the tile is skipped (the column still counts).
+		const auto tileInView = [&](int column) -> bool
+		{
+			if (column != 0) return tileRowDrawn;
+			const float y = ImGui::GetCursorScreenPos().y;
+			if (tileRowFrom >= 0.0f && tileRowsSkipped == 0.0f && y > tileRowFrom)
+				s_tileRowStep = y - tileRowFrom;
+			tileRowFrom = -1.0f;
+			const float top = y + tileRowsSkipped;
+			tileRowDrawn = !(clipTileRows && (top + s_tileRowStep < gridTop || top > gridBottom));
+			if (!tileRowDrawn)
+			{
+				tileRowsSkipped += s_tileRowStep;
+				return false;
+			}
+			flushSkippedTileRows();
+			tileRowFrom = ImGui::GetCursorScreenPos().y;
+			return true;
+		};
+
 		// ── Shared selection/rename/context state ────────────────────────
 		// (The four above are declared before the tree, which raises the same
 		// context menu the grid does.)
@@ -1643,8 +1691,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static const std::vector<HE::Folder*> kNoFolders;
 		for (auto* sub : filterActive ? kNoFolders : displayFolder->subfolders)
 		{
-			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
+			if (!tileInView(col)) { ++col; continue; }
+			if (col > 0) ImGui::SameLine();
 
 			const bool isSel = isSelected(sub->fullPath);
 
@@ -1894,8 +1943,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		for (auto* file : gridFiles)
 		{
-			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
+			if (!tileInView(col)) { ++col; continue; }
+			if (col > 0) ImGui::SameLine();
 
 			const bool isSel = isSelected(file->fullPath);
 
@@ -2325,6 +2375,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::EndGroup();
 			++col;
 		}
+		flushSkippedTileRows();
 
 		ImGui::PopStyleVar();
 
