@@ -4137,4 +4137,13 @@ TEST_CASE("D3D12 static geometry lives in the DEFAULT heap, copied before every 
 	REQUIRE(e != std::string::npos);
 	CHECK(f < e);
 	CHECK(count(src, "submitToQueue(") >= 10);
+
+	// Finished batches are swept every frame, not only when the next one opens:
+	// a scene that uploads nothing more must not keep a level load's staging.
+	const size_t render = src.find("void D3D12Renderer::Render()");
+	REQUIRE(render != std::string::npos);
+	const size_t sweep = src.find("p.retireCompletedUploads();", render);
+	const size_t slot  = src.find("p.waitForFrame(p.frameIndex)", render);
+	CHECK(sweep != std::string::npos);
+	CHECK(sweep < slot);
 }

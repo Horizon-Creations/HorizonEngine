@@ -28,6 +28,8 @@ All of it is in `src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp`, in the 
   the ring stays bounded.
 * Kill-switch `HE_D3D12_STATIC_UPLOAD_HEAP=1`: the old upload-heap buffers, same binary. It is
   also the fallback when the upload list or a DEFAULT buffer cannot be created.
+* Completed batches are swept at the top of every `Render()` (`retireCompletedUploads`), so a
+  scene that uploads nothing more does not keep a level load's staging alive.
 * Witness: `D3D12Renderer: static geometry in the DEFAULT heap — first upload batch ...` at the
   first flush, and a totals line at Shutdown (buffers, MB, batches, ring/dedicated copies,
   copies into a live buffer, fallbacks).
@@ -49,8 +51,8 @@ DEFAULT = this change, UPLOAD = same binary with `HE_D3D12_STATIC_UPLOAD_HEAP=1`
 | GI, hardware (DXR 1.1) path, same scene | DEFAULT vs UPLOAD 0.116, DEFAULT vs DEFAULT 0.116. Debug layer: 3 pre-existing `InitialState UNORDERED_ACCESS ignored` notes (DXR scratch), identical on both sides. |
 | GI tail append (`from > 0`) | temporary build with 4× headroom (reverted): 2 copies into a live buffer, DEFAULT vs UPLOAD 0.084. **Negative control**: same build with the tail copy skipped: 4.42 mean\|d\|, 315 310 px > 8, so the witness does see the tail data. |
 | Negative control, static meshes | temporary build whose flush never executes the upload list: the sphere is gone (11.8 mean\|d\|), and **the debug layer reports nothing**. Only the pixels and the source pin catch a missing copy. |
-| Skeletal | **not verified at run time.** `HE_DUMP_SECTIONTEST=skinned` draws nothing on D3D12 on BOTH sides (`draws=0`), and the same on D3D11 and Vulkan; only GL draws it. That is pre-existing; the skeletal buffers are covered by build + pin only. |
-| `tests/test_culling.cpp` "D3D12 static geometry lives in the DEFAULT heap ..." | passes; it fails (3 ≠ 2) when one raw `ExecuteCommandLists` is put back (checked). |
+| Skeletal | **not verified at run time.** `HE_DUMP_SECTIONTEST=skinned` draws nothing on D3D12 on BOTH sides (`draws=0`), and the same on D3D11 and Vulkan; only GL draws it. That is pre-existing. `HE_DUMP_SECONDARY=1` + `HE_WORLD_PREVIEW_DUMP` (RenderWorldPreview, which also resolves skeletal meshes) uploads no skeletal mesh either (2 buffers = the cube). The skeletal buffers are covered by build + pin only. |
+| `tests/test_culling.cpp` "D3D12 static geometry lives in the DEFAULT heap ..." | passes (35 assertions, incl. the per-frame sweep in `Render()`); it fails (3 ≠ 2) when one raw `ExecuteCommandLists` is put back (checked). |
 | full `he_tests` (Release, scratch APPDATA, `HE_NET_LOOPBACK_ONLY`) | 5523/5528 passed. Failures: 3 gamepad E2E (real Xbox pad, known), 2 `EngineProfiler` cases that pass alone (9/9) and fail only in the full run (shared singleton state). |
 
 ## Measurement (inconclusive under load)
@@ -83,7 +85,7 @@ or a dense landscape, plus GI SW traversal for the BVH part.
   per batch, larger copies get their own staging buffer; kill-switch env kept for A/B.
 - **Not done (audit REN-202 point 2):** sub-allocation of meshes from one DEFAULT pool
   (each mesh is still two committed resources). REN-212 texture staging could share the ring.
-- **Traps:** the D3D12 debug layer does NOT flag an unfilled DEFAULT buffer (negative control).
+- **Traps:** C: on NN-WS03 ran full (0 bytes) during this step; check free disk before builds/captures. The D3D12 debug layer does NOT flag an unfilled DEFAULT buffer (negative control).
   `Copy-Item` of a backup keeps its old mtime: ninja then says "no work to do" and the deploy
   keeps the experiment binary; touch the restored file.
 - **Next steps:** 1. Step 2 of the topic (REN-103/601, REN-603). 2. When the GPU is idle,

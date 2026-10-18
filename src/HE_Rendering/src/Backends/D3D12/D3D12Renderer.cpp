@@ -12491,6 +12491,10 @@ void D3D12Renderer::Render()
         if (--it->second <= 0) it = p.meshTexUploads.erase(it);
         else                   ++it;
     }
+    // Static-geometry upload batches the GPU has finished: ring chunks back, dedicated
+    // staging freed (REN-202). Otherwise only the next batch would sweep them, and a
+    // scene that uploads nothing more would keep a level load's staging forever.
+    p.retireCompletedUploads();
     // GPU resources retired by material/mesh hot-reload — free once past frames in flight.
     for (auto it = p.m_retiredTextures.begin(); it != p.m_retiredTextures.end(); )
     {

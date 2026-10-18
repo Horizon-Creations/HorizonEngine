@@ -1,4 +1,4 @@
-# D3D12 static geometry A/B (REN-202, docs/audit/ren202-d3d12-default-heap-2026-10-18.md).
+# D3D12 static geometry A/B (REN-202, docs/audit-ren202-d3d12-default-heap-2026-10-18.md).
 #
 # One HE_DUMP capture of the editor on D3D12 from a PRIVATE deploy, with a scratch
 # APPDATA and a private FXC cache. -UploadHeap sets HE_D3D12_STATIC_UPLOAD_HEAP=1:
