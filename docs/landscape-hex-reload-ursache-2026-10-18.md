@@ -84,10 +84,13 @@ Zwei Hälften, beide nötig:
 Der Negativ-Cache bleibt: ein nie ladbarer Pfad wird je Epoche einmal gefragt, nicht pro Frame.
 Keine Daten oder Formate berührt.
 
-**Test** `tests/test_landscape_reload.cpp` (4 Fälle): Epoche bewegt sich beim Eintreffen; "mid"
+**Test** `tests/test_landscape_reload.cpp` (5 Fälle): Epoche bewegt sich beim Eintreffen; "mid"
 (Backend fragt, Fehlschlag gecacht, Download landet) liefert dieselben Pixel und Layer wie "present";
-ein fehlender Pfad wird in 16 Frames einmal geladen; Quell-Pin, dass alle fünf Backends den Helfer
-**vor** `resolveTextureRef` rufen. Ohne Korrektur (Stand `337ccd7f` + Test + Helfer) 3 von 4 rot.
+die Reihenfolge des echten Editors (Download landet in `pollAsyncResults`, der async Read ist erst
+eingereiht, das Backend fragt im selben Frame per Sync-Load, der async Read landet später darüber):
+gleiche id, gleiche Pixel, kein zweiter Download; ein fehlender Pfad wird in 16 Frames einmal geladen;
+Quell-Pin, dass alle fünf Backends den Helfer **vor** `resolveTextureRef` rufen. Ohne Korrektur
+(Stand `337ccd7f` + Test + Helfer) 3 von 4 rot; ohne nur die `ContentManager`-Zeile 3 von 5 rot.
 
 **Gegenprobe mit dem behobenen Editor** (`cap210.sh`, Release-Deploy dieses Worktrees):
 
@@ -103,8 +106,8 @@ ein fehlender Pfad wird in 16 Frames einmal geladen; Quell-Pin, dass alle fünf 
 
 - **Topic / step:** 210, Schritt 2 von 3; Zweig `claude/landscape-sechseckige-muster-nach-texturarray-nachladen`, Fix `d4f6eff9`, Doku danach, gepusht
 - **Done:** Ursache in allen fünf Backends + `ContentManager` behoben, Test geschrieben (Abschnitt 5)
-- **Verified:** `he_tests --source-file='*test_landscape_reload.cpp'` 4/4 grün, mit Test + Helfer aber ohne Backend-/CM-Änderung 3/4 rot (gebaut, gelaufen); `test_contentmanager` 91/91; voller `he_tests`-Lauf 5513/5516, rot nur `test_hpak:1188` (bekannt, gefüllter Per-User-Cache) und 2× `test_profiler` (allein 2× grün, reihenfolgeabhängig, berührt nichts hiervon); `cap210.sh` present/mid/absent auf Metal + GL mit dem neuen Deploy (Tabelle §5); Vulkan `-fsyntax-only` gegen MoltenVK rc 0, Negativkontrolle (Helfer vertippt) schlägt fehl
-- **Not verified:** D3D11/D3D12 kompiliert (nur Windows-CI); Vulkan/D3D zur Laufzeit; echter SFTP-Download im Live-Editor (der Unit-Test fährt den `registerRemoteAsset`-Weg mit Fake-Materializer, `cap210.sh` den Zeugen, der die Epoche selbst bewegt)
+- **Verified:** `he_tests --source-file='*test_landscape_reload.cpp'` 5/5 grün (3× gelaufen), mit Test + Helfer aber ohne Backend-/CM-Änderung 3/4 rot, ohne nur die CM-Zeile 3/5 rot (gebaut, gelaufen); `test_contentmanager` 91/91; voller `he_tests`-Lauf 5513/5516, rot nur `test_hpak:1188` (bekannt, gefüllter Per-User-Cache) und 2× `test_profiler` (allein 2× grün, reihenfolgeabhängig, berührt nichts hiervon); `cap210.sh` present/mid/absent auf Metal + GL mit dem neuen Deploy (Tabelle §5); Vulkan `-fsyntax-only` gegen MoltenVK rc 0, Negativkontrolle (Helfer vertippt) schlägt fehl
+- **Not verified:** D3D11/D3D12 kompiliert (nur Windows-CI); Vulkan/D3D zur Laufzeit; echter SFTP-Download im Live-Editor (der Unit-Test fährt den `registerRemoteAsset`-Weg mit Fake-Materializer in der Reihenfolge des Editors, `cap210.sh` den Zeugen, der die Epoche selbst bewegt; Server und Manifest liefen nicht)
 - **Decisions taken:** Epoche statt `isRemoteAssetPending` (das gibt es nicht; Frame 1 zeichnet vor dem Manifest); Negativ-Cache behalten, nur je Epoche vergessen; Helfer header-only in HorizonRendering, damit der Test ihn ohne GPU benutzt; Quell-Pin statt Renderer-Instanz im Test
 - **Traps:** doctest-`*_MESSAGE` mit `std::string(a) + b` kompiliert nicht (Operator-Vorrang im Makro), vorher in eine Variable; `ninja` liegt nicht im PATH (`CMAKE_MAKE_PROGRAM` aus der CMakeCache, CLion-ninja); `compile_commands.json` im Release-Baum ist unvollständig, Flags für den Vulkan-Check per `ninja -t commands` vom GL-Objekt
 - **Next steps:** 1. Schritt 3 Abnahme: Vorher/Nachher-Bilder (Schritt-1-Binary vs. dieses), CI grün inkl. Windows (D3D11/D3D12/Vulkan kompilieren). 2. Nicht in diesem Thema, nur notiert: Hot-Reload einer schon geladenen Pfad-Textur (§4) und `m_uiTexCache` haben dieselbe Pfad-Lücke

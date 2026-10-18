@@ -193,6 +193,48 @@ TEST_CASE("Landscape reload: an array that arrives after the first resolve rende
 	}
 }
 
+TEST_CASE("Landscape reload: the backend asking in the frame the download lands gets the array (Thema 210)")
+{
+	// The live editor's order: pollAsyncResults sees the download (epoch moves, the
+	// async read of the file is only QUEUED), and the renderer resolves in the same
+	// frame, so its loadAsset(path) opens the file while that read is in flight.
+	const std::string rel = "Textures/Landscape/T_He210_Late_Array.hasset";
+	const std::string path = "Engine/" + rel;
+	TempDir project("he_test_l210_project"), engine("he_test_l210_engine"), stage("he_test_l210_stage");
+	const HE::UUID id = writeArray(stage.path, "T_He210_Late_Array.hasset");
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engine.path.string());
+	LateArray late;
+	late.from = stage.path / "T_He210_Late_Array.hasset";
+	late.to   = engine.path / rel;
+	cm.registerRemoteAsset(id, path, [&late](std::function<void(bool)> done) {
+		++late.calls; late.done = std::move(done); });
+	FakeBackend be; be.cm = &cm;
+
+	CHECK(be.resolve(path) == HE::UUID{});
+	late.arrive();
+	cm.pollAsyncResults(16);                 // this frame's poll: the download is in
+	REQUIRE_FALSE(cm.isLoaded(id));          // the async registration is still to come
+	CHECK(be.resolve(path) == id);          // ... and this frame's draw already samples it
+	CHECK(be.loads == 2);
+
+	// The queued async read lands later on top of the asset the sync load registered:
+	// still one asset under the manifest's id, same pixels, nothing re-requested.
+	for (int i = 0; i < 50; ++i)
+	{
+		cm.pollAsyncResults(16);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	CHECK(cm.loadAsset(path) == id);
+	const TextureAsset* t = cm.getTexture(id);
+	REQUIRE(t != nullptr);
+	CHECK(t->layers == 2);
+	CHECK(t->data == std::vector<uint8_t>{ 10, 20, 30, 255, 40, 50, 60, 255 });
+	CHECK(be.resolve(path) == id);
+	CHECK(be.loads == 2);
+	CHECK(late.calls == 1);
+}
+
 TEST_CASE("Landscape reload: a texture that never loads is not reopened every frame (Thema 210)")
 {
 	TempDir project("he_test_l210_project");
