@@ -189,9 +189,20 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     for (int i = 0; i < 32; ++i) cfg.encKey[i] = (uint8_t)(0xA0 + i);
     const fs::path exportDir = t.path / "export";
     fs::create_directories(exportDir);
-    REQUIRE(ProjectConfigLoader::save(exportDir, cfg));
     const fs::path exe = exportDir / "HorizonGame";
-    touchFile(exe, "prebuilt-game");
+    // HE_EXPORT_SDK_E2E_EXPORT=<a real prebuilt export folder>: work on a copy of
+    // it, and start the swapped game afterwards.
+    const char* realExport = std::getenv("HE_EXPORT_SDK_E2E_EXPORT");
+    if (realExport && *realExport)
+    {
+        fs::copy(realExport, exportDir, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+        REQUIRE(ProjectConfigLoader::load(exportDir, cfg));
+    }
+    else
+    {
+        REQUIRE(ProjectConfigLoader::save(exportDir, cfg));
+        touchFile(exe, "prebuilt-game");
+    }
 
     const fs::path header = t.path / "work" / "HEGameBuildConfig.h";
     REQUIRE(HE::ExportSdk::writeBuildConfigFromExport(exportDir, exe, profile, header).empty());
@@ -200,6 +211,19 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     REQUIRE(built.ok);
     REQUIRE(HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe).empty());
     CHECK(readFile(exe) != "prebuilt-game");
+#if !defined(_WIN32)
+    if (realExport && *realExport)
+    {
+        const std::string cmd = "cd \"" + exportDir.string() + "\" && HE_HIDDEN_WINDOW=1 "
+                                "HE_EXIT_AFTER_FRAMES=30 ./HorizonGame > run.out 2>&1";
+        CHECK(std::system(cmd.c_str()) == 0);
+        const std::string log = readFile(exportDir / "HorizonEngine.log") + readFile(exportDir / "run.out");
+        INFO(log.substr(0, 4000));
+        CHECK(log.find("compiled in") != std::string::npos);
+        fs::copy(exportDir / "run.out", fs::temp_directory_path() / "he_export_sdk_e2e_run.out",
+                 fs::copy_options::overwrite_existing);
+    }
+#endif
     CHECK(fs::file_size(exe) > 100000);
     // The key went into the binary masked, never as one plain run.
     const std::string bin = readFile(exe);
