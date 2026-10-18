@@ -1151,6 +1151,7 @@ target_compile_definitions(he_tests PRIVATE
 foreach(_probe dev release default override)
     set(_lib he_build_profile_probe_${_probe})
     add_library(${_lib} STATIC build_profile_probe.cpp)
+    target_compile_features(${_lib} PRIVATE cxx_std_20)
     string(SUBSTRING "${_probe}" 0 1 _head)
     string(SUBSTRING "${_probe}" 1 -1 _tail)
     string(TOUPPER "${_head}" _head)
