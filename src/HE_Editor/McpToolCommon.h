@@ -16,6 +16,8 @@
 
 #include "McpToolRegistry.h"
 
+#include <Types/Enums.h>   // AssetType, for the per-type listing below
+
 #include <nlohmann/json.hpp>
 #include <functional>
 #include <optional>

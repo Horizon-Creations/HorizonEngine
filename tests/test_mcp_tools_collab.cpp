@@ -1,7 +1,7 @@
 #include "doctest.h"
 #include "FakeTeamServer.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "../src/HE_Editor/CollabController.h"
 #include "../src/HE_Editor/TeamController.h"
 

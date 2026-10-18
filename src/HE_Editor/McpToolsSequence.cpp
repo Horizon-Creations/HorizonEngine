@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "CinematicTimeline.h"        // lastContentTime — the Cinematic tab's length rule
 #include "EditorAssetTypeCache.h"     // what a path holds, without loading it

@@ -44,7 +44,6 @@
 #include <Net/RouterProbe.h>
 #include "GitController.h"
 #include "TeamSyncController.h"
-#include "McpBridge.h"
 #include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
 #include "McpLockBook.h"         // external locks, per MCP client
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
@@ -64,6 +63,11 @@
 #include <imgui.h>
 #include <cstdint>
 #endif
+
+// The MCP listener is held by pointer, so the 78 files that include this one
+// do not parse McpBridge.h and the tool registry behind it (EDT-1209). Who
+// calls into the bridge includes McpBridge.h itself.
+namespace HE::Ed { class McpBridge; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.
@@ -593,9 +597,9 @@ struct AppContext
 class EditorApplication : public HE::Application
 {
 public:
-	explicit EditorApplication(std::string startupPath)
-		: HE::Application(std::move(startupPath)) {}
-	~EditorApplication() override; // defined in .cpp where ScriptEngine is complete
+	// Both defined in .cpp, where ScriptEngine and McpBridge are complete.
+	explicit EditorApplication(std::string startupPath);
+	~EditorApplication() override;
 
 public:
 	// Logger sink target: appends a play-session warning/error (any thread).
@@ -867,7 +871,10 @@ private:
 	DebugDrawBuffer m_debugDraw;
 	std::size_t m_mcpGizmoLineBegin = 0;
 	std::size_t m_mcpGizmoLineEnd   = 0;
-	HE::Ed::McpBridge m_mcp;
+	// Made in the constructor and never reset, so it is never null. A pointer
+	// only to keep McpBridge.h out of this header; it stays in this slot for
+	// the destruction order above.
+	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.

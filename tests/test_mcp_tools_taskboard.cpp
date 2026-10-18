@@ -1,7 +1,7 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "TaskBoardPanel.h"
 #include "TaskBoard.h"
 #include "TaskBoardTeam.h"

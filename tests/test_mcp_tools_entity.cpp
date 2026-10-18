@@ -1,6 +1,6 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "EditorCommands.h"
 #include "EditorUndo.h"
 #include "CollabUndo.h"

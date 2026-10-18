@@ -1,6 +1,6 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "McpToolCommon.h"
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"

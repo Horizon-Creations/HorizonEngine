@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // the cached header sniff — what a path holds
 #include "InputMappingModel.h"        // the decoded mapping + its JSON codec

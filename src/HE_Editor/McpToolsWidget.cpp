@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "McpToolCommon.h"            // the argument readers and the ONE confinement rule
 

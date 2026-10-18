@@ -1,5 +1,5 @@
 #include "McpToolCommon.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include <Diagnostics/Logger.h>
 

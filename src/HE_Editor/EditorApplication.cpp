@@ -39,6 +39,7 @@
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "EditorBackendChoice.h"   // HE_DUMP_RHI against the config's RHI
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
+#include "McpBridge.h"             // the listener m_mcp points at
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
@@ -370,13 +371,19 @@ std::string getRHIName(HE::RendererBackend backend)
 	}
 }
 
+EditorApplication::EditorApplication(std::string startupPath)
+	: HE::Application(std::move(startupPath))
+	, m_mcp(std::make_unique<HE::Ed::McpBridge>())
+{
+}
+
 EditorApplication::~EditorApplication()
 {
 	// Before any member goes: stopping the bridge reports every connection to
 	// the client-gone hooks, and the lock hook reaches m_mcpLocks and m_collab,
 	// which are not all declared before m_mcp. OnShutdown normally did this
 	// already, and stop() is then a no-op.
-	m_mcp.stop();
+	m_mcp->stop();
 }
 
 HE::ApplicationConfig EditorApplication::GetConfig() const
@@ -2363,12 +2370,12 @@ void EditorApplication::startClaudeProbe()
 	m_claudeSettleFrames = 0;
 	// Read HERE, on the frame thread, before anything can connect. The worker may
 	// not touch the bridge at all.
-	m_claudeAuthBaseline = m_mcp.authCount();
+	m_claudeAuthBaseline = m_mcp->authCount();
 
 	const char* basePtr = SDL_GetBasePath();
 	const std::filesystem::path base     = basePtr ? std::filesystem::path(basePtr)
 	                                               : std::filesystem::path();
-	const std::filesystem::path endpoint = m_mcp.endpointFile();
+	const std::filesystem::path endpoint = m_mcp->endpointFile();
 
 	m_claudeThread = std::thread([this, base, endpoint]
 	{
@@ -2395,8 +2402,8 @@ void EditorApplication::pollClaudeProbe()
 	// nothing else was invited during those seconds, and if a second client did
 	// authenticate in the same window, the honest reading of that is still "a
 	// client reached this editor while the check ran".
-	m_claudeResult.authSeen   = m_mcp.authCount() > m_claudeAuthBaseline;
-	m_claudeResult.authClient = m_mcp.lastAuthClient();
+	m_claudeResult.authSeen   = m_mcp->authCount() > m_claudeAuthBaseline;
+	m_claudeResult.authClient = m_mcp->lastAuthClient();
 	m_claudeState = 2;
 }
 
@@ -4957,13 +4964,13 @@ void EditorApplication::OnRender(float dt)
 		// that forgets to update it is a handler writing into a destroyed world.
 		// Set here, one line before the tools that read it can run.
 		m_commands.setWorld(m_editorWorld.get());
-		m_mcp.setPort(static_cast<std::uint16_t>(
+		m_mcp->setPort(static_cast<std::uint16_t>(
 			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
 		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
 		// Preferences panel then only ever writes the config, and setEnabled
 		// ignores a value that has not changed, so this costs nothing.
-		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
-		m_mcp.update(nowMs);
+		m_mcp->setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
+		m_mcp->update(nowMs);
 		// After the pump, because it is the pump that notices a client has gone —
 		// and a client going is what hands its locks back.
 		updateMcpLocks(nowMs);
@@ -10157,7 +10164,7 @@ void EditorApplication::dumpFrameHeadless()
 	{
 		if (!m_mcpToolsRegistered) setupMcpTools();
 		m_commands.setWorld(m_editorWorld.get());
-		const HE::Ed::McpTool* tool = m_mcp.registry().find("scene_screenshot");
+		const HE::Ed::McpTool* tool = m_mcp->registry().find("scene_screenshot");
 
 		auto diffPercent = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 			if (a.size() != b.size() || a.empty()) return 100.0;
@@ -10632,7 +10639,7 @@ void EditorApplication::setupMcpTools()
 	// The endpoint file goes into the per-user data directory, NEVER into the
 	// project: a project directory is what ends up in git, and this file carries
 	// the token that authorises editing the scene.
-	m_mcp.setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
+	m_mcp->setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
 
 	HE::Ed::McpEditorHooks hooks;
 	hooks.projectName = [this] { return m_projectManager.currentProject().name; };
@@ -10652,18 +10659,18 @@ void EditorApplication::setupMcpTools()
 		return n;
 	};
 
-	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+	HE::Ed::registerCoreTools(m_mcp->registry(), std::move(hooks));
 
 	// A client going hands back the session locks IT took, and only those
 	// (plan §20.3) — not when the editor happens to have no client left.
-	m_mcp.registry().addClientGoneHook(
+	m_mcp->registry().addClientGoneHook(
 		[this](HE::Ed::McpClientId client) { releaseMcpLocksOf(client); });
 
 	// Placing and moving objects. Registered after the gateway is wired, because
 	// the tools capture a reference to it and the first `tools/call` may arrive
 	// in the same frame.
 	setupEditorCommands();
-	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+	HE::Ed::registerEntityTools(m_mcp->registry(), m_commands);
 
 	// Authoring HorizonCode. The tools take the documents as hooks rather than
 	// a pointer to this object for the same reason the two above do: a graph is
@@ -10807,7 +10814,7 @@ void EditorApplication::setupMcpTools()
 		return m_collab.assetLockedByOther(subject);
 	};
 
-	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
+	HE::Ed::registerHcTools(m_mcp->registry(), std::move(hc));
 
 	// The engine's own API, one tool per pure row of HE::api::registry(). No
 	// list here: what the engine registers is what a client can call, and the
@@ -10837,7 +10844,7 @@ void EditorApplication::setupMcpTools()
 		if (!m_editorWorld->registry().valid(e)) return {};
 		return HE::Ed::uuidOf(*m_editorWorld, e);
 	};
-	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
+	HE::Ed::registerApiTools(m_mcp->registry(), std::move(api));
 
 	// ── The files a project is made of ───────────────────────────────────────
 	// Resolve, list, create, delete, move. Hooks rather than a pointer to this
@@ -10953,7 +10960,7 @@ void EditorApplication::setupMcpTools()
 	};
 	assets.contentDirName = [] { return std::string("Content"); };
 
-	HE::Ed::registerAssetTools(m_mcp.registry(), contentManager(), std::move(assets));
+	HE::Ed::registerAssetTools(m_mcp->registry(), contentManager(), std::move(assets));
 
 	// ── The scene as a file ─────────────────────────────────────────────────
 	// The save/create/open half of the entity tools: without it a client could
@@ -10986,7 +10993,7 @@ void EditorApplication::setupMcpTools()
 	};
 	scene.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
 
-	HE::Ed::registerSceneTools(m_mcp.registry(), contentManager(), std::move(scene));
+	HE::Ed::registerSceneTools(m_mcp->registry(), contentManager(), std::move(scene));
 
 	// ── Shaping the ground ──────────────────────────────────────────────────
 	// Everything else about a terrain edit — undo, the publish to a session, the
@@ -10998,7 +11005,7 @@ void EditorApplication::setupMcpTools()
 		if (!m_editorWorld) return;
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 	};
-	HE::Ed::registerTerrainTools(m_mcp.registry(), m_commands, std::move(terrain));
+	HE::Ed::registerTerrainTools(m_mcp->registry(), m_commands, std::move(terrain));
 
 	// ── The widget tree of a UI Widget asset ────────────────────────────────
 	// The one hook worth reading twice is `liveTree`. A widget open in the
@@ -11025,7 +11032,7 @@ void EditorApplication::setupMcpTools()
 	widget.isDirty = [](const std::string& rel) {
 		return UIEditorPanel::isDirtyByContentPath(rel);
 	};
-	HE::Ed::registerWidgetTools(m_mcp.registry(), contentManager(), std::move(widget));
+	HE::Ed::registerWidgetTools(m_mcp->registry(), contentManager(), std::move(widget));
 
 	// ── What the game is played with ────────────────────────────────────────
 	// The opposite decision from the widget hooks above, and McpInputHooks says
@@ -11044,7 +11051,7 @@ void EditorApplication::setupMcpTools()
 	input.reloadFromDisk = [](const std::string& rel) {
 		return InputAssetPanel::reloadByContentPath(rel);
 	};
-	HE::Ed::registerInputTools(m_mcp.registry(), contentManager(), std::move(input));
+	HE::Ed::registerInputTools(m_mcp->registry(), contentManager(), std::move(input));
 
 	// ── What a surface looks like ───────────────────────────────────────────
 	// The same decision as the input tools above — an open tab with unsaved
@@ -11073,7 +11080,7 @@ void EditorApplication::setupMcpTools()
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
 	};
 	material.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
-	HE::Ed::registerMaterialTools(m_mcp.registry(), contentManager(), std::move(material));
+	HE::Ed::registerMaterialTools(m_mcp->registry(), contentManager(), std::move(material));
 
 	// ── The editor's unit of reuse ──────────────────────────────────────────
 	// The only tool family that takes both halves of the editor: the gateway,
@@ -11090,7 +11097,7 @@ void EditorApplication::setupMcpTools()
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
 	};
 	prefab.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
-	HE::Ed::registerPrefabTools(m_mcp.registry(), contentManager(), m_commands,
+	HE::Ed::registerPrefabTools(m_mcp->registry(), contentManager(), m_commands,
 	                            std::move(prefab));
 
 	// ── A project's own types ────────────────────────────────────────────────
@@ -11118,7 +11125,7 @@ void EditorApplication::setupMcpTools()
 			projectPath = projectPath.parent_path();
 		if (!projectPath.empty()) HE::writeCppTypesHeader(projectPath);
 	};
-	HE::Ed::registerTypeTools(m_mcp.registry(), contentManager(), std::move(types));
+	HE::Ed::registerTypeTools(m_mcp->registry(), contentManager(), std::move(types));
 
 	// ── An emitter's values ──────────────────────────────────────────────────
 	// The same four gates as material and types, plus the one thing a particle
@@ -11146,7 +11153,7 @@ void EditorApplication::setupMcpTools()
 		for (auto [e, ps] : m_editorWorld->registry().view<ParticleSystemComponent>().each())
 			if (ps.particleAssetId == id) ParticleSystem::markConfigDirty(ps);
 	};
-	HE::Ed::registerParticleTools(m_mcp.registry(), contentManager(), std::move(particles));
+	HE::Ed::registerParticleTools(m_mcp->registry(), contentManager(), std::move(particles));
 
 	// ── The animation assets ─────────────────────────────────────────────────
 	// Two panels behind one family, so the two tab questions dispatch on which
@@ -11174,7 +11181,7 @@ void EditorApplication::setupMcpTools()
 		for (auto [e, sm] : m_editorWorld->registry().view<AnimatorStateMachineComponent>().each())
 			if (sm.stateMachineAssetId == id) AnimationStateMachineSystem::markConfigDirty(sm);
 	};
-	HE::Ed::registerAnimatorTools(m_mcp.registry(), contentManager(), std::move(anim));
+	HE::Ed::registerAnimatorTools(m_mcp->registry(), contentManager(), std::move(anim));
 
 	// ── What a clip announces ────────────────────────────────────────────────
 	// Three gates instead of four, and the dirty one is asked differently: the
@@ -11192,7 +11199,7 @@ void EditorApplication::setupMcpTools()
 	clips.isDirty = [](const std::string& rel) {
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
-	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+	HE::Ed::registerClipTools(m_mcp->registry(), contentManager(), std::move(clips));
 
 	// ── A cutscene ───────────────────────────────────────────────────────────
 	// The four gates of the particle family, plus the one question only a
@@ -11218,7 +11225,7 @@ void EditorApplication::setupMcpTools()
 		isCamera = reg.all_of<CameraComponent>(e);
 		return true;
 	};
-	HE::Ed::registerSequenceTools(m_mcp.registry(), contentManager(), std::move(seq));
+	HE::Ed::registerSequenceTools(m_mcp->registry(), contentManager(), std::move(seq));
 
 	// ── Making the project run ───────────────────────────────────────────────
 	// The two Build menu actions and the window they both report into. Neither
@@ -11288,7 +11295,7 @@ void EditorApplication::setupMcpTools()
 			out.log.push_back(HE::Ed::McpBuildLogLine{ l.step, l.severity, l.text });
 		return out;
 	};
-	HE::Ed::registerBuildTools(m_mcp.registry(), std::move(build));
+	HE::Ed::registerBuildTools(m_mcp->registry(), std::move(build));
 
 	// ── The knobs ────────────────────────────────────────────────────────────
 	// Three of these hooks are the whole reason the settings tools are not just
@@ -11345,7 +11352,7 @@ void EditorApplication::setupMcpTools()
 		// pacer, the same call AppContext::setMaxFps makes.
 		if (what == "maxfps") setMaxFps(cfg.MaxFps);
 	};
-	HE::Ed::registerSettingsTools(m_mcp.registry(), std::move(settings));
+	HE::Ed::registerSettingsTools(m_mcp->registry(), std::move(settings));
 
 	// A picture of the scene. The renderer's still-on-request path is the hook,
 	// so the tool file never sees IRenderer beyond the camera struct — and the
@@ -11397,7 +11404,7 @@ void EditorApplication::setupMcpTools()
 	shot.screenshotDir = [] {
 		return (GlobalState::userDataDir() / "mcp-screenshots").string();
 	};
-	HE::Ed::registerScreenshotTools(m_mcp.registry(), std::move(shot));
+	HE::Ed::registerScreenshotTools(m_mcp->registry(), std::move(shot));
 
 	// The session. Reading it is always allowed; hosting, joining and leaving
 	// only when whoever started this editor said so for this run — see
@@ -11408,8 +11415,8 @@ void EditorApplication::setupMcpTools()
 	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
 		collab.controlAllowed = env[0] == '1';
 	// The team server is the way into a team session; same gate, same hooks.
-	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
-	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
+	HE::Ed::registerTeamTools(m_mcp->registry(), m_team, collab);
+	HE::Ed::registerCollabTools(m_mcp->registry(), m_collab, std::move(collab));
 
 	// The task board. Its one copy and its one writer are the panel's
 	// (TaskBoardPanel.h, "Who owns the board"), so every hook goes there — a
@@ -11428,13 +11435,13 @@ void EditorApplication::setupMcpTools()
 	tasks.lastError = [] { return TaskBoardPanel::lastError(); };
 	tasks.author    = [] { return TaskBoardPanel::author(); };
 	tasks.team      = [] { return TaskBoardPanel::team(); };
-	HE::Ed::registerTaskBoardTools(m_mcp.registry(), std::move(tasks));
+	HE::Ed::registerTaskBoardTools(m_mcp->registry(), std::move(tasks));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not
 	// for correctness — but a meta-tool listed before the tools it drives reads
 	// backwards.
-	HE::Ed::registerBatchTool(m_mcp.registry());
+	HE::Ed::registerBatchTool(m_mcp->registry());
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
@@ -11525,11 +11532,11 @@ void EditorApplication::rememberMcpLock(std::uint64_t subject)
 	const auto nowMs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
-	m_mcpLocks.take(subject, m_mcp.registry().callingClient(), nowMs);
+	m_mcpLocks.take(subject, m_mcp->registry().callingClient(), nowMs);
 }
 
 // A client's connection is gone: its share goes back, and nobody else's. Runs
-// inside m_mcp.update(), where the bridge sees the close.
+// inside m_mcp->update(), where the bridge sees the close.
 void EditorApplication::releaseMcpLocksOf(HE::Ed::McpClientId client)
 {
 	for (const std::uint64_t subject : m_mcpLocks.clientGone(client))
@@ -11577,7 +11584,7 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 		m_mcpLocks.clear();
 		return;
 	}
-	if (m_mcp.clientCount() == 0)
+	if (m_mcp->clientCount() == 0)
 	{
 		// What is still booked here belongs to nobody who can disconnect: the
 		// anonymous caller (a tool invoked without the bridge). Every real
@@ -12657,7 +12664,7 @@ AppContext EditorApplication::makeContext()
 #endif
 		.collab              = &m_collab,
 		.team                = &m_team,
-		.mcp                 = &m_mcp,
+		.mcp                 = m_mcp.get(),
 		.mcpCameras          = &m_mcpCameras,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
@@ -14372,7 +14379,7 @@ void EditorApplication::OnShutdown()
 	// reads a stale one connects to whatever the OS handed that port to next.
 	// The destructor would do it too — this is so it happens before the long
 	// teardown below rather than after it.
-	m_mcp.stop();
+	m_mcp->stop();
 
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process). Same rule
