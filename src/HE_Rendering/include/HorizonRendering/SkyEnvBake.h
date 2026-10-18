@@ -260,7 +260,13 @@ HE_RENDERING_API float SkyEnvSunTolerance(const glm::vec3& bakedSun, const glm::
 class HE_RENDERING_API SkyEnvBaker
 {
 public:
-	explicit SkyEnvBaker(int faceN = kSkyEnvFaceSize) : m_faceN(faceN) {}
+	// The default constructor is deliberately not explicit: the D3D11/D3D12
+	// renderers hold the baker in an aggregate Impl built with `new Impl{}`,
+	// which copy-list-initialises every member from {} — an explicit default
+	// constructor makes that C2512 (Windows CI only; the other backends hold
+	// it as a plain class member).
+	SkyEnvBaker() = default;
+	explicit SkyEnvBaker(int faceN) : m_faceN(faceN) {}
 
 	// Must the cube be (re)baked for `sunDir`? Always true before the first bake
 	// and after invalidate().
@@ -289,7 +295,7 @@ public:
 private:
 	void finish(const glm::vec3& sunDir, double startSeconds);
 
-	int                   m_faceN;
+	int                   m_faceN      = kSkyEnvFaceSize;
 	bool                  m_baked      = false;
 	glm::vec3             m_sunDir     = glm::vec3(0.0f);
 	uint64_t              m_bakeCount  = 0;
