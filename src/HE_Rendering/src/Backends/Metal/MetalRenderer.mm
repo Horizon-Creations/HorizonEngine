@@ -7681,7 +7681,7 @@ void MetalRenderer::CreateScenePipeline()
 		// analytic skyColor (HE::SkyColorCPU) when the sun direction changes. The
 		// existing clamp+linear sampler (m_linearSampler) samples it.
 		MTLTextureDescriptor* envDesc = [MTLTextureDescriptor
-			textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float size:128 mipmapped:NO];
+			textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float size:HE::kSkyEnvFaceSize mipmapped:NO];
 		envDesc.usage = MTLTextureUsageShaderRead;
 		envDesc.storageMode = MTLStorageModeShared;
 		m_skyEnvCube = (void*)CFBridgingRetain([device newTextureWithDescriptor:envDesc]);
@@ -12590,8 +12590,8 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		params.cfg  = glm::vec4(static_cast<float>(width) / 4.0f, static_cast<float>(height) / 4.0f,
 		                        m_ssaoRadius, 0.025f);
 		params.cfg2 = glm::vec4(m_ssaoIntensity, static_cast<float>(m_ssaoMethod), 0.0f, 0.0f);
-		const std::vector<glm::vec3> kernel = HE::BuildSSAOKernel(32);
-		for (int i = 0; i < 32; ++i) params.samples[i] = glm::vec4(kernel[i], 0.0f);
+		static_assert(sizeof(params.samples) == sizeof(HE::SsaoKernelVec4()), "samples = the shared kernel");
+		std::copy(HE::SsaoKernelVec4().begin(), HE::SsaoKernelVec4().end(), params.samples);
 		{
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
 			sp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoTex;
@@ -13744,8 +13744,9 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc setFragmentBytes:&m_prepassViewProj[0][0] length:sizeof(glm::mat4) atIndex:1]; // low-res cloud reprojection
-	// Sky-View LUT on 3/4, read only when it was baked for THIS sun (within the
-	// tolerance UpdateSkyEnvCube also treats as unchanged). Otherwise — LUT off,
+	// Sky-View LUT on 3/4, read only when it was baked for THIS sun (within 1e-4 —
+	// its own, tighter tolerance; the IBL cube's dead band and throttle are
+	// HE::SkyEnvBaker's and much coarser). Otherwise — LUT off,
 	// not baked yet, or baked for another sun — the shader integrates per pixel.
 	const bool lutOn = useSkyLut && skyViewLutEnabled() && m_skyLutValid
 	                && m_skyLutRayleigh && m_skyLutMie
@@ -13854,31 +13855,18 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 {
 	if (!m_skyEnvCube) return;
-	// The baked sky only changes with the sun direction — skip the rebuild + upload
-	// when it hasn't moved.
-	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 1e-4f) return;
-	m_skyEnvSunDir = sunDir; m_skyEnvValid = true;
+	// The baked sky only changes with the sun direction. When to rebake (dead band,
+	// throttle under day-night auto-advance, a jump bakes at once) and the parallel
+	// bake itself are the shared HE::SkyEnvBaker's — this backend used to rebake on
+	// every frame the sun moved (a 1e-4 dead band, the others 2e-3).
+	if (m_skyEnvValid && !m_skyEnvBaker.due(sunDir)) return;
+	m_skyEnvValid = true;
 	id<MTLTexture> cube = (__bridge id<MTLTexture>)m_skyEnvCube;
-	constexpr int N = 128;
-	// Parallel over rows, like the GL backend: each row is independent and
-	// HE::SkyColorCPU is pure. This runs on EVERY frame the sun moves (day-night
-	// auto-advance), and serially it was ~60 ms — a hard per-frame stall. It used
-	// to be cheap at night only because the atmosphere integral was wrongly
-	// short-circuiting there (see atmoRaySphere); with that fixed, twilight costs
-	// what daylight always did, so the parallelisation is no longer optional.
-	// Grain 1: a row is tens of µs of work, far above the default grain's
-	// assumption of a cheap per-index body.
-	std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
-	parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
-	{
-		const int f = static_cast<int>(idx / N);
-		const int t = static_cast<int>(idx % N);
-		HE::BuildSkyEnvFaceRow(N, f, t, sunDir,
-		                       &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
-	}, "SkyEnvBake", 1);
+	constexpr int N = HE::kSkyEnvFaceSize;
+	const float* px = m_skyEnvBaker.bakeFloat(sunDir);
 	for (int f = 0; f < 6; ++f)
 		[cube replaceRegion:MTLRegionMake2D(0, 0, N, N) mipmapLevel:0 slice:f
-		          withBytes:&px[(static_cast<size_t>(f) * N * N) * 4]
+		          withBytes:px + (static_cast<size_t>(f) * N * N) * 4
 		        bytesPerRow:N * 4 * sizeof(float) bytesPerImage:0];
 }
 

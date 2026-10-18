@@ -33,6 +33,21 @@ std::vector<glm::vec3> BuildSSAOKernel(int n)
 	return k;
 }
 
+const std::array<glm::vec4, kSsaoKernelSize>& SsaoKernelVec4()
+{
+	// A function-local static: built on first use (thread-safe), then shared by
+	// every renderer instance of the process.
+	static const std::array<glm::vec4, kSsaoKernelSize> packed = []
+	{
+		const std::vector<glm::vec3> k = BuildSSAOKernel(kSsaoKernelSize);
+		std::array<glm::vec4, kSsaoKernelSize> out{};
+		for (int i = 0; i < kSsaoKernelSize; ++i)
+			out[i] = glm::vec4(k[i], 0.0f);
+		return out;
+	}();
+	return packed;
+}
+
 std::vector<glm::vec3> BuildSSAONoise(int n)
 {
 	SsaoRng rng{ 0x2545F491u };

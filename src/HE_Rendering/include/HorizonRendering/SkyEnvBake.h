@@ -1,8 +1,10 @@
 #pragma once
+#include "../HE_RENDERING_API.h"
 #include <Math/Math.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 // ─── CPU sky bake for the image-based ambient cubemap ────────────────────────
@@ -19,9 +21,9 @@
 // any constant below changes the lighting on every platform at once; re-pin the
 // test consciously.
 //
-// Header-only: pure functions with no state, and the test executable compiles a
-// fixed list of shared HE_Rendering sources, so a new .cpp here would not reach
-// it without a build-file change.
+// The maths is header-only (pure functions with no state). The rebake driver at
+// the bottom (SkyEnvBaker) lives in SkyEnvBake.cpp, which the test executable's
+// fixed list of shared HE_Rendering sources names as well.
 namespace HE
 {
 
@@ -218,5 +220,79 @@ inline std::vector<float> BuildSkyEnvFace(int faceN, int face, const glm::vec3& 
 		BuildSkyEnvFaceRow(faceN, face, t, sunDir, &px[static_cast<size_t>(t) * faceN * 4]);
 	return px;
 }
+
+// ─── The rebake driver every backend shares (REN-401 / REN-908) ──────────────
+// All five backends bake the same cube: kSkyEnvFaceSize² per face, the six faces
+// back to back in GL order (+X,-X,+Y,-Y,+Z,-Z), row 0 = t 0, as RGBA32F (GL,
+// Metal) or RGBA16F (Vulkan, D3D11, D3D12). Each used to carry its own copy of
+// "fresh 1.5 MiB vector + parallel_for + serial half conversion" behind its own
+// dead band (Metal 1e-4, the others 2e-3). The baker owns that once:
+//
+//  * When: the sun moved at least kSkyEnvSunTolerance from the sun of the LAST
+//    BAKE, and kSkyEnvMinInterval has passed since that bake — a day-night cycle
+//    rebakes at most that often, whatever the frame rate. A jump of
+//    kSkyEnvSunJump or more (time set by a script or a slider, the headless
+//    HE_SKY_TIME frame) bakes at once. Because the test is against the last
+//    bake, a sun that moves and stops is always baked for where it stopped, one
+//    interval later at the latest; a sun that never moves bakes exactly once.
+//  * How: one parallel_for over the 6 * faceN rows into a scratch the baker
+//    keeps, the half conversion inside the row task. The half form can write
+//    straight into the caller's mapped upload memory.
+//
+// The texels are BuildSkyEnvFaceRow's, untouched (the pins in test_culling.cpp).
+inline constexpr int    kSkyEnvFaceSize     = 128;
+inline constexpr size_t kSkyEnvCubeChannels = static_cast<size_t>(kSkyEnvFaceSize) * kSkyEnvFaceSize * 6 * 4;
+inline constexpr float  kSkyEnvSunTolerance = 2.0e-3f;  // chord of the unit sun vector, ≈ 0.11°
+inline constexpr float  kSkyEnvSunJump      = 5.0e-2f;  // ≈ 2.9°: no throttle above this
+inline constexpr double kSkyEnvMinInterval  = 1.0 / 15.0; // seconds between two throttled bakes
+
+class HE_RENDERING_API SkyEnvBaker
+{
+public:
+	explicit SkyEnvBaker(int faceN = kSkyEnvFaceSize) : m_faceN(faceN) {}
+
+	// A steady clock in seconds (any origin) — the `now` the backends pass.
+	static double clockSeconds();
+
+	// Must the cube be (re)baked for `sunDir` at `now`? Always true before the
+	// first bake and after invalidate().
+	bool due(const glm::vec3& sunDir, double now) const;
+	bool due(const glm::vec3& sunDir) const { return due(sunDir, clockSeconds()); }
+
+	// Bakes all six faces for `sunDir` and records it as the baked sun.
+	// RGBA32F into the baker's scratch (faceN² * 6 * 4 floats), valid until the
+	// next bake.
+	const float* bakeFloat(const glm::vec3& sunDir, double now);
+	const float* bakeFloat(const glm::vec3& sunDir) { return bakeFloat(sunDir, clockSeconds()); }
+	// RGBA16F (glm::packHalf1x16 of the same floats) into `dst` when given —
+	// faceN² * 6 * 4 halves, e.g. a mapped staging buffer — else into the
+	// baker's scratch. Returns where it wrote.
+	const uint16_t* bakeHalf(const glm::vec3& sunDir, double now, uint16_t* dst = nullptr);
+	const uint16_t* bakeHalf(const glm::vec3& sunDir, uint16_t* dst = nullptr)
+	{ return bakeHalf(sunDir, clockSeconds(), dst); }
+
+	// The texture lost its contents (device reset, recreated cube): bake on
+	// the next due().
+	void invalidate() { m_baked = false; }
+
+	int              faceSize()   const { return m_faceN; }
+	size_t           channels()   const { return static_cast<size_t>(m_faceN) * m_faceN * 6 * 4; }
+	bool             baked()      const { return m_baked; }
+	const glm::vec3& bakedSun()   const { return m_sunDir; }
+	uint64_t         bakeCount()  const { return m_bakeCount; }   // since construction
+	double           lastBakeMs() const { return m_lastBakeMs; }  // wall time of the last bake
+
+private:
+	void finish(const glm::vec3& sunDir, double now, double startSeconds);
+
+	int                   m_faceN;
+	bool                  m_baked      = false;
+	glm::vec3             m_sunDir     = glm::vec3(0.0f);
+	double                m_bakedAt    = 0.0;
+	uint64_t              m_bakeCount  = 0;
+	double                m_lastBakeMs = 0.0;
+	std::vector<float>    m_float;
+	std::vector<uint16_t> m_half;
+};
 
 } // namespace HE

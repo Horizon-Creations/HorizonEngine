@@ -34,7 +34,6 @@
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, compiled to SPIR-V for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>             // parallel_for for that bake
-#include <glm/gtc/packing.hpp>               // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compile (sky pass)
 #endif
@@ -3014,27 +3013,20 @@ void VulkanRenderer::destroySkyEnvCube()
 // is m_renderWorld.sunDirection — what GL and Metal bake from — but on this
 // backend the extractor runs inside DrawScene, i.e. AFTER this point, so the
 // bake can trail the sun by one frame (EncodeShadowMap re-extracts first when
-// shadows are on). For a low-frequency ambient cube under GL's own 0.11°
-// dead-band that is invisible; a static sun is exact from the second frame.
+// shadows are on). For a low-frequency ambient cube under the shared baker's
+// 0.11° dead band and throttle that is invisible; a static sun is exact from the
+// second frame (a first-frame jump of 2.9° or more bakes at once, a smaller one
+// within HE::kSkyEnvMinInterval).
 void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
 {
     if (!m_skyEnvView || !m_skyEnvStaging[m_currentFrame].mapped) return;
     const glm::vec3 sunDir = m_renderWorld.sunDirection;
-    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+    if (m_skyEnvValid && !m_skyEnvBaker.due(sunDir)) return;
 
     constexpr int N = k_skyEnvFace;
-    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
-    // Parallel over (face, row) like GL/Metal: rows are independent and
-    // HE::SkyColorCPU is pure. Grain 1 — a row is tens of µs.
-    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
-    {
-        const int f = static_cast<int>(idx / N);
-        const int t = static_cast<int>(idx % N);
-        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
-    }, "SkyEnvBake", 1);
-    uint16_t* dst = static_cast<uint16_t*>(m_skyEnvStaging[m_currentFrame].mapped);
-    for (size_t i = 0; i < px.size(); ++i)
-        dst[i] = glm::packHalf1x16(px[i]);
+    // The shared bake (parallel over face rows, halves packed in the row task)
+    // straight into this slot's mapped staging buffer.
+    m_skyEnvBaker.bakeHalf(sunDir, static_cast<uint16_t*>(m_skyEnvStaging[m_currentFrame].mapped));
 
     // Vulkan cube faces are +X,-X,+Y,-Y,+Z,-Z with GL's (s,t) table, and row 0 of
     // the upload is t = 0 in both APIs — the bake's face order and texel layout
@@ -3065,7 +3057,6 @@ void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
     b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &b);
-    m_skyEnvSunDir = sunDir;
     m_skyEnvValid  = true;
 }
 
@@ -7867,9 +7858,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // Thema 117) — both read the same three SSBOs.
     const bool clustered = m_forwardClustered && m_clusterReady
                         && !m_renderWorld.lights.empty();
-    HE::ClusterLightBuild frameClusters;
+    HE::ClusterLightBuild& frameClusters = m_frameClusters;
+    frameClusters.clear();
     if (clustered)
-        frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows, m_giRanThisFrame);
+        HE::BuildClusterLights(frameClusters, m_renderWorld, localShadows, m_giRanThisFrame);
 
     // Per-frame UBO for this in-flight slot.
     {
@@ -12165,19 +12157,12 @@ void VulkanRenderer::createSSAOPipeline()
         vkBindBufferMemory(m_device, m_ssaoUBO, m_ssaoUBOMem, 0);
         vkMapMemory(m_device, m_ssaoUBOMem, 0, kSSAOUBOSize, 0, &m_ssaoUBOPtr);
         // Pre-fill the kernel (static, never changes).
-        const auto kernel = HE::BuildSSAOKernel(HE::kSsaoKernelSize);
         // Layout: [mat4 proj(64)] [vec4 noiseScale(16)] [vec4 params(16)] [vec4 kernel[32](512)]
-        // We set params/noiseScale at runtime; fill kernel now.
+        // We set params/noiseScale at runtime; fill kernel now (std140 vec4, w = 0).
         uint8_t* base = static_cast<uint8_t*>(m_ssaoUBOPtr);
-        std::memcpy(base + 64 + 16 + 16, kernel.data(), HE::kSsaoKernelSize * sizeof(glm::vec3));
-        // Note: kernel elements are vec3 but the shader expects vec4 (w unused).
-        // Expand them to vec4 with w=0.
-        // Re-copy as vec4 array.
-        for (int k = HE::kSsaoKernelSize - 1; k >= 0; --k)
-        {
-            glm::vec4 kv4(kernel[k], 0.0f);
-            std::memcpy(base + 64 + 16 + 16 + k * 16, &kv4, 16);
-        }
+        const auto& kernel = HE::SsaoKernelVec4();
+        static_assert(sizeof(kernel) == 32 * 16, "SSAOCB kernel[32] as vec4");
+        std::memcpy(base + 64 + 16 + 16, kernel.data(), sizeof(kernel));
     }
 
     // ── Render passes ─────────────────────────────────────────────────────────

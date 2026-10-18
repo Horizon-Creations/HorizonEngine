@@ -52,34 +52,6 @@ static inline GlIndexRange DrawIndexRange(const DrawCall& dc, int meshIndexCount
 	         reinterpret_cast<const void*>(static_cast<uintptr_t>(off) * sizeof(uint32_t)) };
 }
 
-// Builds the six cube faces of the image-based-ambient environment map for the
-// given sun direction (face = +X,-X,+Y,-Y,+Z,-Z in GL order). Returns tightly
-// packed RGBA32F, faces back to back, faceN texels each.
-//
-// The maths (AtmoRaySphereCPU / AtmoScatterCPU / SkyColorCPU and the face
-// direction switch) used to be an 88-line verbatim copy of the Metal backend's;
-// it now lives in HorizonRendering/SkyEnvBake.h and both backends call it. What
-// stays here is only the PARALLELISATION, which is GL-side on purpose: Metal
-// bakes one face at a time on demand, this backend bakes all six at once.
-static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
-{
-	std::vector<float> px(static_cast<size_t>(faceN) * faceN * 6 * 4);
-	// Parallelize over the 6*faceN rows (face,row): each row is independent and
-	// HE::SkyColorCPU is a pure function, so this is data-race-free. Uses the engine's
-	// portable thread pool — NOT std::execution::par (which libc++/macOS lacks). At
-	// 128² this serial bake was ~47 ms (a per-frame stall under day-night auto-advance);
-	// parallel it is a few ms. Grain 1: a row is tens of µs of work, far above the
-	// default grain's assumption of a cheap per-index body.
-	parallel_for(static_cast<size_t>(6) * faceN, [&](size_t idx)
-	{
-		const int f = static_cast<int>(idx / faceN);
-		const int t = static_cast<int>(idx % faceN);
-		HE::BuildSkyEnvFaceRow(faceN, f, t, sunDir,
-		                       &px[((static_cast<size_t>(f) * faceN + t) * faceN) * 4]);
-	}, "SkyEnvBake", 1);
-	return px;
-}
-
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // GLSL 410: the macOS Core Profile ceiling — works everywhere we run.
 static const char* kUnlitVS = R"GLSL(
@@ -3434,7 +3406,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: initialized successfully");
 }
 
-static constexpr int kSkyEnvFace = 128; // image-based-ambient cubemap face size
+static constexpr int kSkyEnvFace = HE::kSkyEnvFaceSize; // image-based-ambient cubemap face size
 
 // Cascaded shadow maps: number of depth-array layers / cascades. MUST match the
 // shader's CSM_CASCADES (kUnlitFS) and stay ≤ ShadowData::kMaxCascades. The
@@ -4225,21 +4197,19 @@ void OpenGLRenderer::CreateInstancedPipeline()
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 {
-	// The baked sky only changes with the sun direction — skip the CPU rebuild + upload
-	// when it has barely moved. The IBL ambient is very low-frequency, so a small dead-
-	// band (≈0.11°) is imperceptible but, under day-night auto-advance, cuts the rebuild
-	// rate to roughly every other frame instead of every frame.
-	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f)
+	// The baked sky only changes with the sun direction. When to rebake — the dead
+	// band, the throttle under day-night auto-advance, the jump that bakes at once —
+	// is the shared HE::SkyEnvBaker's call, the same on every backend.
+	if (m_skyEnvValid && !m_skyEnvBaker.due(sunDir))
 		return;
-	m_skyEnvSunDir = sunDir;
-	m_skyEnvValid  = true;
-	const std::vector<float> px = BuildSkyEnvCube(kSkyEnvFace, sunDir);
+	m_skyEnvValid = true;
+	const float* px = m_skyEnvBaker.bakeFloat(sunDir);
 	const size_t faceFloats = static_cast<size_t>(kSkyEnvFace) * kSkyEnvFace * 4;
 	glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
 	for (int f = 0; f < 6; ++f)
 		glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, 0, 0,
 		                kSkyEnvFace, kSkyEnvFace, GL_RGBA, GL_FLOAT,
-		                px.data() + f * faceFloats);
+		                px + f * faceFloats);
 	glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
 }
 
@@ -11474,12 +11444,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// G-buffer at (0,0,pw,ph), so the build skips the v-flip. Atlas layers
 		// and GI mask channels ride the same gates as the textures on units
 		// 8/10 and 11/12. Off → params stay 0 = window only everywhere.
-		HE::ClusterLightBuild frameClusters;
+		HE::ClusterLightBuild& frameClusters = m_frameClusters;
+		frameClusters.clear();
 		if (m_forwardClustered)
 		{
-			frameClusters = HE::BuildClusterLights(m_renderWorld, localShadows,
-			                                       giShadingActive && m_giLocalMaskTex != 0,
-			                                       /*bottomLeftOrigin=*/true);
+			HE::BuildClusterLights(frameClusters, m_renderWorld, localShadows,
+			                       giShadingActive && m_giLocalMaskTex != 0,
+			                       /*bottomLeftOrigin=*/true);
 			UploadClusterLists(frameClusters);
 		}
 

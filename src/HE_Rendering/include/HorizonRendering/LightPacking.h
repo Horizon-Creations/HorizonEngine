@@ -192,6 +192,16 @@ struct ClusterLightBuild
 	glm::vec4 camFwd  = glm::vec4(0.0f); // xyz camera forward, w near
 	int       lightCount   = 0;          // lights admitted to the lists
 	int       droppedLights = 0;         // over kMaxClusteredLights or kMaxClusterIndices
+
+	// Back to a default-constructed build (clustering off) but KEEPING the three
+	// vectors' capacity — what a backend's per-frame scratch calls on a frame it
+	// does not cluster.
+	void clear()
+	{
+		lights.clear(); grid.clear(); indices.clear();
+		params = glm::vec4(0.0f); camFwd = glm::vec4(0.0f);
+		lightCount = 0; droppedLights = 0;
+	}
 };
 
 // localShadowsActive: the local atlas is rendered + bound this frame (else the
@@ -203,6 +213,17 @@ HE_RENDERING_API ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
                                                       bool               localShadowsActive,
                                                       bool               giMasksValid,
                                                       bool               bottomLeftOrigin = false);
+
+// The same build into `out`, reusing its vectors (REN-903). The scatter itself
+// allocates nothing: a counting pass sizes every cluster on the stack, a second
+// pass writes the indices straight into place. A backend that keeps one `out`
+// across frames builds without touching the heap once the capacity has grown.
+// The result is element for element what the by-value form returns.
+HE_RENDERING_API void BuildClusterLights(ClusterLightBuild& out,
+                                         const RenderWorld& rw,
+                                         bool               localShadowsActive,
+                                         bool               giMasksValid,
+                                         bool               bottomLeftOrigin = false);
 
 // Hands a cluster build's grid to the graph-material lighting block — the
 // gate + grid of MaterialShaderLibrary::fragmentClustered's heLitP

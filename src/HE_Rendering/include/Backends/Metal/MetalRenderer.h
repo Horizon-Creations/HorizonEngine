@@ -15,6 +15,7 @@
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
+#include <HorizonRendering/SkyEnvBake.h> // HE::SkyEnvBaker (the IBL ambient cube)
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -638,7 +639,7 @@ private:
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 	void* m_skyEnvCube      = nullptr; // id<MTLTexture>, baked skyColor IBL cubemap
-	glm::vec3 m_skyEnvSunDir = glm::vec3(0.0f); // sun dir the cubemap was baked for
+	HE::SkyEnvBaker m_skyEnvBaker; // the sun the cubemap was baked for + when to rebake
 	bool  m_skyEnvValid     = false;
 	void  UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 

@@ -444,6 +444,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SsaoKernel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyNoise3D.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyEnvBake.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SkyFrameParams.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/LightPacking.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderGraph.cpp

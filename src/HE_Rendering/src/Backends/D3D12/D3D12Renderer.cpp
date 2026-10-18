@@ -29,7 +29,6 @@
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>              // parallel_for for that bake
-#include <glm/gtc/packing.hpp>                // packHalf1x16 (RGBA16F cube upload)
 #if defined(HE_HAVE_SHADERC)
 #include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
 #endif
@@ -3457,6 +3456,9 @@ struct D3D12RendererImpl
     bool                         clusterRootValid = false;
     bool                         forwardClustered = true;  // HE_FORWARD_CLUSTER=0 → 8-light A/B guard
     bool                         clusterCapWarned = false;
+    // The frame's cluster build, kept so its vectors keep their capacity and the
+    // per-frame builds allocate nothing (REN-903). Valid for one frame only.
+    HE::ClusterLightBuild        frameClusterScratch;
     static constexpr UINT        k_clusterRootLights = 6; // root parameter indices (all three root sigs)
     static constexpr UINT        k_clusterRootGrid   = 7;
     static constexpr UINT        k_clusterRootIdx    = 8;
@@ -3627,18 +3629,18 @@ struct D3D12RendererImpl
 
     // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
     // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
-    // HE::BuildSkyEnvFaceRow bake GL, Metal, Vulkan and D3D11 sample, re-baked on
+    // HE::SkyEnvBaker bake GL, Metal, Vulkan and D3D11 sample, re-baked on
     // the CPU when the sun moves and copied in from this frame slot's upload
     // buffer on the frame's own command list (updateSkyEnvCube), like Vulkan.
     // RGBA16F; a row is 128 × 8 B = 1024 B and a face 128 KiB, so the tightly
     // packed bake already meets D3D12's 256-B pitch / 512-B placement rules.
     // m_skyEnvValid gates heLight.fog.z AND the per-draw view write.
-    static constexpr int         k_skyEnvFace    = 128;              // GL/Metal/Vulkan face size
+    static constexpr int         k_skyEnvFace    = HE::kSkyEnvFaceSize; // GL/Metal/Vulkan face size
     ComPtr<ID3D12Resource>       m_skyEnvCube;                       // DEFAULT, 6 slices, 1 mip
     ComPtr<ID3D12Resource>       m_skyEnvUpload[k_frameCount]; uint8_t* m_skyEnvUploadPtr[k_frameCount]{};
     D3D12_RESOURCE_STATES        m_skyEnvState   = D3D12_RESOURCE_STATE_COPY_DEST;
     bool                         m_skyEnvValid   = false;            // the cube holds a bake (fog.z may be raised)
-    glm::vec3                    m_skyEnvSunDir  = glm::vec3(0.0f);
+    HE::SkyEnvBaker              m_skyEnvBaker;                      // the baked sun + when to rebake
     void createSkyEnvCube();
     void updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir);
     // A TextureCube view of m_skyEnvCube into `h` (a material draw block's
@@ -5791,19 +5793,14 @@ struct D3D12RendererImpl
         }
 
         // Kernel seeds
-        auto kernel = HE::BuildSSAOKernel(HE::kSsaoKernelSize);
-
         // Pre-fill ssaoCBPtr[*] kernel section (proj, noiseScale, params come from runSSAO each frame)
+        const auto& kernel = HE::SsaoKernelVec4();
         for (UINT f = 0; f < k_frameCount; ++f)
         {
             if (!ssaoCBPtr[f]) continue;
             // Kernel: starts at offset 64+16+16 = 96 bytes (after proj(64)+noiseScale(16)+params(16))
             uint8_t* kptr = static_cast<uint8_t*>(ssaoCBPtr[f]) + 96;
-            for (int i = 0; i < 32; ++i)
-            {
-                glm::vec4 k4(kernel[i], 0.0f);
-                std::memcpy(kptr + i * 16, &k4, sizeof(k4));
-            }
+            std::memcpy(kptr, kernel.data(), sizeof(kernel));
         }
 
         ssaoReady = true;
@@ -8966,24 +8963,18 @@ void D3D12RendererImpl::createSkyEnvCube()
 
 // Recorded on the frame's command list before its first material draw. The
 // upload buffer is this frame slot's own, so the frame fence that guards the
-// HeLighting/U/HeParams rings guards it too. GL's dead-band (2e-3 ≈ 0.11°): a
-// static sun bakes once, a moving one roughly every other frame.
+// HeLighting/U/HeParams rings guards it too. When to rebake is the shared
+// HE::SkyEnvBaker's call (GL's 2e-3 ≈ 0.11° dead band plus its throttle): a
+// static sun bakes once, a moving one at most HE::kSkyEnvMinInterval apart.
 void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const glm::vec3& sunDir)
 {
     if (!cl || !m_skyEnvCube || !m_skyEnvUploadPtr[frameIndex]) return;
-    if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
+    if (m_skyEnvValid && !m_skyEnvBaker.due(sunDir)) return;
 
     constexpr int N = k_skyEnvFace;
-    std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
-    parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
-    {
-        const int f = static_cast<int>(idx / N);
-        const int t = static_cast<int>(idx % N);
-        HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
-    }, "SkyEnvBake", 1);
-    uint16_t* dst = reinterpret_cast<uint16_t*>(m_skyEnvUploadPtr[frameIndex]);
-    for (size_t i = 0; i < px.size(); ++i)
-        dst[i] = glm::packHalf1x16(px[i]);
+    // Parallel bake, halves packed in the row task, straight into this slot's
+    // mapped upload buffer.
+    m_skyEnvBaker.bakeHalf(sunDir, reinterpret_cast<uint16_t*>(m_skyEnvUploadPtr[frameIndex]));
 
     // D3D cube faces are array slices 0..5 = +X,-X,+Y,-Y,+Z,-Z with GL's (s,t)
     // table, row 0 = t 0 — the bake goes in unchanged (SkyEnvBake.h). The
@@ -9012,7 +9003,6 @@ void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const gl
     }
     barrier12(cl, m_skyEnvCube.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     m_skyEnvState  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    m_skyEnvSunDir = sunDir;
     m_skyEnvValid  = true;
 }
 
@@ -10314,10 +10304,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // fillPerFrame always runs right before it with the same GI flag.
     const bool clustered = p.forwardClustered && p.clusterRootValid
                         && !p.m_renderWorld.lights.empty();
-    HE::ClusterLightBuild frameClusters;
+    HE::ClusterLightBuild& frameClusters = p.frameClusterScratch;
+    frameClusters.clear();
     auto uploadClusters = [&](bool giActive) -> std::pair<glm::vec4, glm::vec4>
     {
-        frameClusters = HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskTex);
+        HE::BuildClusterLights(frameClusters, p.m_renderWorld, localShadows, giActive && p.giLocalMaskTex);
         const HE::ClusterLightBuild& cb = frameClusters;
         if (cb.droppedLights > 0 && !p.clusterCapWarned)
         {

@@ -313,6 +313,7 @@ add_library(HorizonRendering SHARED
     # CommandBuffer already do.
     src/SsaoKernel.cpp
     src/SkyNoise3D.cpp
+    src/SkyEnvBake.cpp
     src/SkyFrameParams.cpp
     src/LightPacking.cpp
     src/RenderResourceManager.cpp

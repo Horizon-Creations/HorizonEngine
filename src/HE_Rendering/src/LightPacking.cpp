@@ -134,16 +134,36 @@ ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
                                      bool               bottomLeftOrigin)
 {
 	ClusterLightBuild out;
-	out.grid.assign(kClusterCount, glm::uvec2(0u, 0u));
+	BuildClusterLights(out, rw, localShadowsActive, giMasksValid, bottomLeftOrigin);
+	return out;
+}
+
+void BuildClusterLights(ClusterLightBuild& out,
+                        const RenderWorld& rw,
+                        bool               localShadowsActive,
+                        bool               giMasksValid,
+                        bool               bottomLeftOrigin)
+{
+	out.clear();
+	out.grid.resize(kClusterCount);
 
 	const glm::mat4 viewProj = rw.camera.projection * rw.camera.view;
 	const glm::vec3 camPos   = rw.camera.position;
+	// Kept as the inverse on purpose: reading the view matrix's third row is the
+	// same direction but not the same floats, and camFwd feeds both the slice
+	// pick here and the shaders' (REN-903 left that alone).
 	const glm::vec3 camFwd   = -glm::normalize(glm::vec3(glm::inverse(rw.camera.view)[2]));
 	const float sliceScale   = static_cast<float>(kClusterGridZ) / std::log(kClusterFar / kClusterNear);
 
-	// Per-cell light lists, flattened below. A few hundred lights × a few
-	// touched cells each — rebuilt fresh every frame, no GPU sync hazards.
-	std::vector<std::vector<uint32_t>> cells(kClusterCount);
+	// Counting sort instead of one std::vector per cell (3456 of them, refilled
+	// by push_back every frame — REN-903). Pass 1 below admits the lights exactly
+	// as before and only COUNTS per cell, remembering each admitted light's cell
+	// box; the prefix sum then gives every cell its offset, and pass 2 writes the
+	// indices in light order, so a cell's list stays ascending by light index
+	// like the per-cell push_back made it. Both tables live on the stack (~15 KB).
+	struct CellBox { int16_t z0, z1, y0, y1, x0, x1; };
+	CellBox boxes[kMaxClusteredLights];
+	uint32_t cellCursor[kClusterCount] = {};
 	size_t indexTotal = 0;
 
 	// GI local-mask channel bookkeeping: the mask covers the first
@@ -221,19 +241,35 @@ ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
 			(localShadowsActive && l.shadowLayer >= 0) ? static_cast<float>(l.shadowLayer + 1) : 0.0f,
 			static_cast<float>(maskChannel + 1),
 			0.0f));
+		boxes[li] = { static_cast<int16_t>(z0), static_cast<int16_t>(z1),
+		              static_cast<int16_t>(y0), static_cast<int16_t>(y1),
+		              static_cast<int16_t>(x0), static_cast<int16_t>(x1) };
 		for (int z = z0; z <= z1; ++z)
 			for (int y = y0; y <= y1; ++y)
 				for (int x = x0; x <= x1; ++x)
-					cells[(z * kClusterGridY + y) * kClusterGridX + x].push_back(li);
+					++cellCursor[(z * kClusterGridY + y) * kClusterGridX + x];
 	}
 
-	// Flatten: per-cluster {offset, count} + one index list.
-	out.indices.reserve(indexTotal);
+	// Per-cluster {offset, count}; the count table turns into each cell's write
+	// cursor on the way.
+	uint32_t offset = 0;
 	for (int cIdx = 0; cIdx < kClusterCount; ++cIdx)
 	{
-		out.grid[cIdx] = glm::uvec2(static_cast<uint32_t>(out.indices.size()),
-		                            static_cast<uint32_t>(cells[cIdx].size()));
-		out.indices.insert(out.indices.end(), cells[cIdx].begin(), cells[cIdx].end());
+		const uint32_t n = cellCursor[cIdx];
+		out.grid[cIdx]   = glm::uvec2(offset, n);
+		cellCursor[cIdx] = offset;
+		offset += n;
+	}
+	// Pass 2: the index list, cluster after cluster (indexTotal == offset).
+	out.indices.resize(indexTotal);
+	uint32_t* const indices = out.indices.data();
+	for (int li = 0; li < out.lightCount; ++li)
+	{
+		const CellBox& b = boxes[li];
+		for (int z = b.z0; z <= b.z1; ++z)
+			for (int y = b.y0; y <= b.y1; ++y)
+				for (int x = b.x0; x <= b.x1; ++x)
+					indices[cellCursor[(z * kClusterGridY + y) * kClusterGridX + x]++] = static_cast<uint32_t>(li);
 	}
 	if (out.lights.empty())  out.lights.push_back(glm::vec4(0.0f)); // never a 0-byte buffer
 	if (out.indices.empty()) out.indices.push_back(0u);
@@ -241,7 +277,6 @@ ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
 	out.params = glm::vec4(static_cast<float>(kClusterGridX), static_cast<float>(kClusterGridY),
 	                       static_cast<float>(kClusterGridZ), sliceScale);
 	out.camFwd = glm::vec4(camFwd, kClusterNear);
-	return out;
 }
 
 DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw)

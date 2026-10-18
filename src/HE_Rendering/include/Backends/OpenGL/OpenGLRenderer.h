@@ -13,6 +13,8 @@
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
+#include <HorizonRendering/LightPacking.h> // HE::ClusterLightBuild (the per-frame scratch below)
+#include <HorizonRendering/SkyEnvBake.h>   // HE::SkyEnvBaker (the IBL ambient cube)
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -23,7 +25,6 @@
 struct SDL_Window;
 struct MaterialShaderVariant; // ContentManager/Assets.h — baked per-backend material shader
 struct ParticleShaderVariant; // ContentManager/Assets.h — baked per-backend particle shader
-namespace HE { struct ClusterLightBuild; } // HorizonRendering/LightPacking.h
 
 class OpenGLRenderer : public IRenderer
 {
@@ -441,6 +442,9 @@ private:
 	unsigned int m_clusterSSBO[3]   = { 0, 0, 0 }; // lights, grid, index list
 	void         CreateClusterSSBOs();
 	void         UploadClusterLists(const HE::ClusterLightBuild& build);
+	// The frame's cluster build, kept so its vectors keep their capacity and the
+	// per-frame build allocates nothing (REN-903). Valid for one DrawScene only.
+	HE::ClusterLightBuild m_frameClusters;
 	// Create the three UBOs every material program draws through (U / HeLighting /
 	// HeParams) unless they already exist. Called by BOTH material-program getters
 	// before they can return — including via a memo hit or the on-disk program
@@ -735,7 +739,7 @@ private:
 	unsigned int m_noiseTex        = 0;   // GL_TEXTURE_3D, R16 value noise
 	int          m_uSkyEnv         = -1;  // image-based-ambient cubemap sampler
 	unsigned int m_skyEnvCube      = 0;   // GL_TEXTURE_CUBE_MAP, baked skyColor
-	glm::vec3    m_skyEnvSunDir    = glm::vec3(0.0f); // sun dir the cubemap was baked for
+	HE::SkyEnvBaker m_skyEnvBaker;                      // the sun it was baked for + when to rebake
 	bool         m_skyEnvValid     = false;
 	unsigned int m_moonTex        = 0;    // night-sky moon texture (or 0)
 	void CreateSkyPipeline();

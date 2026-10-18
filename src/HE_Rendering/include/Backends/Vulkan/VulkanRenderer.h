@@ -8,6 +8,8 @@
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/FrameVisibility.h>
+#include <HorizonRendering/LightPacking.h> // HE::ClusterLightBuild (the per-frame scratch)
+#include <HorizonRendering/SkyEnvBake.h>   // HE::SkyEnvBaker (the heSkyEnv cube)
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
@@ -433,6 +435,9 @@ private:
 	bool m_clusterReady      = false;
 	bool m_forwardClustered  = true;
 	bool m_clusterCapWarned  = false;
+	// The frame's cluster build, kept so its vectors keep their capacity and the
+	// per-frame build allocates nothing (REN-903). Valid for one DrawScene only.
+	HE::ClusterLightBuild m_frameClusters;
 
 	// ── A4: node-graph material pipelines ────────────────────────────────────
 	// Graph materials (Material-Node editor) render through per-material VkPipelines
@@ -572,18 +577,18 @@ private:
 	VkDeviceMemory  m_whiteCubeMem     = VK_NULL_HANDLE;
 	VkImageView     m_whiteCubeView    = VK_NULL_HANDLE;
 	// Image-based-ambient sky cube for graph materials (heSkyEnv, binding 15):
-	// the SAME HE::BuildSkyEnvFaceRow bake GL and Metal sample, re-baked on the
+	// the SAME HE::SkyEnvBaker bake GL and Metal sample, re-baked on the
 	// CPU when the sun moves and copied in from a per-frame staging buffer at
 	// the top of the frame (updateSkyEnvCube). RGBA16F, not GL's RGBA32F:
 	// linear filtering of R32G32B32A32_SFLOAT is optional in Vulkan, of
 	// R16G16B16A16_SFLOAT mandatory. m_skyEnvValid gates heLight.fog.z.
-	static constexpr int k_skyEnvFace = 128; // GL/Metal face size
+	static constexpr int k_skyEnvFace = HE::kSkyEnvFaceSize; // GL/Metal face size
 	VkImage         m_skyEnvImage      = VK_NULL_HANDLE;
 	VkDeviceMemory  m_skyEnvMem        = VK_NULL_HANDLE;
 	VkImageView     m_skyEnvView       = VK_NULL_HANDLE;
 	MatFrameBuf     m_skyEnvStaging[2];        // k_maxFramesInFlight, host-visible
 	bool            m_skyEnvValid      = false; // the image holds a bake (fog.z may be raised)
-	glm::vec3       m_skyEnvSunDir     = glm::vec3(0.0f);
+	HE::SkyEnvBaker m_skyEnvBaker;              // the baked sun + when to rebake
 	void createSkyEnvCube();
 	void destroySkyEnvCube();
 	void updateSkyEnvCube(VkCommandBuffer cmd);

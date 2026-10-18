@@ -1,6 +1,7 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include <Math/Math.h>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -35,6 +36,13 @@ inline constexpr int kSsaoNoiseCount    = kSsaoNoiseTileSize * kSsaoNoiseTileSiz
 // Cosine-ish hemisphere kernel oriented to +Z, packed toward the origin so close
 // occluders dominate.
 HE_RENDERING_API std::vector<glm::vec3> BuildSSAOKernel(int n);
+
+// The kSsaoKernelSize kernel, built ONCE per process and pre-padded to vec4 —
+// the layout every SSAO constant block uploads (HLSL float4[32], std140
+// vec4[32], Metal float4). BuildSSAOKernel(kSsaoKernelSize)[i] == xyz, w = 0.
+// Metal and D3D11 used to rebuild the kernel and expand it every frame they ran
+// SSAO, and each backend kept its own vec3 -> vec4 loop (M8).
+HE_RENDERING_API const std::array<glm::vec4, kSsaoKernelSize>& SsaoKernelVec4();
 
 // 4x4 tile of random rotation vectors in the tangent plane (z = 0). Returned as
 // vec3 so a GL_RGB / vec3-array upload matches directly.

@@ -13,6 +13,7 @@
 #include <HorizonRendering/SsaoKernel.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SkyEnvBake.h>
+#include <JobSystem/JobSystem.h>
 #include <HorizonRendering/WeatherParticleSeed.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
@@ -30,6 +31,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/packing.hpp>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -826,6 +828,13 @@ TEST_CASE("SsaoKernel: deterministic and inside the +Z unit hemisphere")
 	CHECK(a[0].x == doctest::Approx(-0.0183749106f));
 	CHECK(a[0].y == doctest::Approx( 0.0315782912f));
 	CHECK(a[0].z == doctest::Approx( 0.0095498776f));
+
+	// The once-built packed form every backend uploads is the same numbers, w = 0,
+	// and it really is built once (one object for the whole process).
+	const auto& packed = HE::SsaoKernelVec4();
+	for (size_t i = 0; i < a.size(); ++i)
+		CHECK(packed[i] == glm::vec4(a[i], 0.0f));
+	CHECK(&HE::SsaoKernelVec4() == &packed);
 }
 
 TEST_CASE("SsaoKernel: rotation noise lies in the tangent plane; RGBA variant matches")
@@ -973,6 +982,207 @@ TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independe
 	CHECK(atOff.r == doctest::Approx(9.899f).epsilon(0.01));
 	// Deterministic across calls (pure functions, no cached state).
 	CHECK(HE::BuildSkyEnvFace(4, 0, sun) == HE::BuildSkyEnvFace(4, 0, sun));
+}
+
+// The shared rebake driver (REN-401 / REN-908) bakes the very texels the face
+// function does — RGBA32F for GL/Metal, the same floats as halves for
+// Vulkan/D3D — so swapping five hand-kept drivers for it changes no pixel.
+TEST_CASE("SkyEnvBaker: the shared bake is the face function's texels, as floats and as halves")
+{
+	const glm::vec3 sun = glm::normalize(glm::vec3(0.3f, 0.6f, 0.2f));
+	constexpr int N = 8;
+	HE::SkyEnvBaker baker(N);
+	REQUIRE(baker.channels() == static_cast<size_t>(N) * N * 6 * 4);
+
+	std::vector<float> want;
+	for (int f = 0; f < 6; ++f)
+	{
+		const std::vector<float> face = HE::BuildSkyEnvFace(N, f, sun);
+		want.insert(want.end(), face.begin(), face.end());
+	}
+	const float* px = baker.bakeFloat(sun, 0.0);
+	CHECK(std::vector<float>(px, px + baker.channels()) == want);
+	CHECK(baker.bakeCount() == 1u);
+	CHECK(baker.bakedSun() == sun);
+
+	std::vector<uint16_t> wantHalf(want.size());
+	for (size_t i = 0; i < want.size(); ++i) wantHalf[i] = glm::packHalf1x16(want[i]);
+	const uint16_t* own = baker.bakeHalf(sun, 0.0);                 // the baker's scratch
+	CHECK(std::vector<uint16_t>(own, own + baker.channels()) == wantHalf);
+	std::vector<uint16_t> mapped(baker.channels(), 0xFFFFu);       // a caller's staging buffer
+	CHECK(baker.bakeHalf(sun, 0.0, mapped.data()) == mapped.data());
+	CHECK(mapped == wantHalf);
+	CHECK(baker.bakeCount() == 3u);
+
+	// The engine size is what every backend's cube is created with.
+	CHECK(HE::SkyEnvBaker().faceSize() == HE::kSkyEnvFaceSize);
+	CHECK(HE::kSkyEnvCubeChannels == HE::SkyEnvBaker().channels());
+}
+
+TEST_CASE("SkyEnvBaker: dead band, throttle and jump decide when to rebake")
+{
+	HE::SkyEnvBaker baker(2);
+	auto sunAt = [](float a) { return glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f)); };
+	const float chord = 1.0f / std::sqrt(1.0f + 0.45f * 0.45f); // |d sun / d a|
+	const glm::vec3 s0 = sunAt(1.0f);
+
+	CHECK(baker.due(s0, 0.0));                                      // never baked
+	baker.bakeFloat(s0, 10.0);
+	CHECK_FALSE(baker.due(s0, 10.0));
+	CHECK_FALSE(baker.due(s0, 1000.0));                             // a static sun bakes once
+
+	// Inside the dead band: never, however long ago the bake was.
+	const glm::vec3 tiny = sunAt(1.0f + 0.5f * HE::kSkyEnvSunTolerance / chord);
+	CHECK_FALSE(baker.due(tiny, 1000.0));
+
+	// Past the dead band: only once the interval since the BAKE has passed.
+	const glm::vec3 moved = sunAt(1.0f + 2.0f * HE::kSkyEnvSunTolerance / chord);
+	CHECK_FALSE(baker.due(moved, 10.0 + 0.5 * HE::kSkyEnvMinInterval));
+	CHECK(baker.due(moved, 10.0 + HE::kSkyEnvMinInterval));
+
+	// A jump (script, slider, the headless HE_SKY_TIME frame) bakes at once.
+	const glm::vec3 jump = sunAt(1.0f + 1.5f * HE::kSkyEnvSunJump / chord);
+	CHECK(baker.due(jump, 10.0));
+
+	// A sun that creeps in steps smaller than the dead band and then stops is
+	// measured against the LAST BAKE, not the last frame: it gets its bake.
+	double t = 10.0;
+	float  a = 1.0f;
+	for (int i = 0; i < 10; ++i)
+	{
+		a += 0.6f * HE::kSkyEnvSunTolerance / chord;
+		t += 0.001;
+		if (baker.due(sunAt(a), t)) baker.bakeFloat(sunAt(a), t);
+	}
+	CHECK(baker.bakeCount() == 1u);                                 // throttled the whole way
+	CHECK(baker.due(sunAt(a), t + HE::kSkyEnvMinInterval));         // ... and baked once it stops
+	baker.bakeFloat(sunAt(a), t + HE::kSkyEnvMinInterval);
+	CHECK_FALSE(baker.due(sunAt(a), t + 1000.0));
+
+	baker.invalidate();                                             // device reset
+	CHECK(baker.due(sunAt(a), t + 1000.0));
+}
+
+// Off unless HE_SKYENV_BENCH is set (REN-401 / REN-908 measurement): how often the
+// IBL cube is rebaked under the day-night cycle, per policy, at 60 and 144 fps for
+// the default 120 s day and a 20 s time-lapse; what one 128² bake costs; and how far
+// the cube can trail the sun (the largest sun step between two bakes, in degrees,
+// plus the largest change of the cube's mean colour between two consecutive bakes).
+TEST_CASE("SkyEnvBaker bench (HE_SKYENV_BENCH)")
+{
+	if (!std::getenv("HE_SKYENV_BENCH")) return;
+	auto sunAt = [](double tod) {
+		const float a = static_cast<float>((tod - 0.25) * 6.28318530718);
+		return glm::normalize(glm::vec3(std::cos(a), std::sin(a), 0.45f));
+	};
+	// 1. One 128² bake: serially (the rows in a plain loop, what the comments of
+	// the old drivers quoted), then through the baker in both forms, median of 15.
+	{
+		std::vector<double> serial;
+		std::vector<float>  rowsPx(HE::kSkyEnvCubeChannels);
+		for (int r = 0; r < 3; ++r)
+		{
+			const auto t0 = std::chrono::steady_clock::now();
+			const int N = HE::kSkyEnvFaceSize;
+			for (int f = 0; f < 6; ++f)
+				for (int t = 0; t < N; ++t)
+					HE::BuildSkyEnvFaceRow(N, f, t, sunAt(0.30 + 0.01 * r),
+					                       &rowsPx[((static_cast<size_t>(f) * N + t) * N) * 4]);
+			serial.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+		}
+		std::sort(serial.begin(), serial.end());
+		MESSAGE("128^2 cube bake, serial: " << serial[1] << " ms (median of 3), pool threads "
+		        << globalPool().threadCount());
+		HE::SkyEnvBaker baker;
+		std::vector<double> f32, f16;
+		for (int r = 0; r < 15; ++r)
+		{
+			const glm::vec3 s = sunAt(0.30 + 0.01 * r);
+			baker.bakeFloat(s, 0.0); f32.push_back(baker.lastBakeMs());
+			baker.bakeHalf(s, 0.0);  f16.push_back(baker.lastBakeMs());
+		}
+		std::sort(f32.begin(), f32.end()); std::sort(f16.begin(), f16.end());
+		// The old D3D/Vulkan drivers: float bake + a fresh vector + serial conversion.
+		std::vector<double> old16;
+		for (int r = 0; r < 15; ++r)
+		{
+			const auto t0 = std::chrono::steady_clock::now();
+			const float* px = baker.bakeFloat(sunAt(0.30 + 0.01 * r), 0.0);
+			std::vector<uint16_t> half(baker.channels());
+			for (size_t i = 0; i < half.size(); ++i) half[i] = glm::packHalf1x16(px[i]);
+			old16.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+		}
+		std::sort(old16.begin(), old16.end());
+		MESSAGE("128^2 cube bake, median of 15: RGBA32F " << f32[7] << " ms, RGBA16F in-task "
+		        << f16[7] << " ms, RGBA16F old way (float + serial pack) " << old16[7] << " ms");
+	}
+	// 2. Per policy over one full day at 60 fps: bakes per second, and how wrong the
+	// cube is on screen — the largest gap, over every frame, between the mean colour
+	// of the cube in use and the mean colour of a cube baked for that frame's sun
+	// (relative). The truth table is one 16² bake per frame. "shared baker" runs
+	// the real HE::SkyEnvBaker::due() (face size 1, so its bakes cost nothing).
+	auto meanOf = [](const float* px, size_t channels) {
+		glm::dvec3 m(0.0);
+		for (size_t i = 0; i < channels; i += 4) m += glm::dvec3(px[i], px[i + 1], px[i + 2]);
+		return m / static_cast<double>(channels / 4);
+	};
+	for (const double cycle : { 120.0, 20.0 })
+	{
+		constexpr int fps = 60;
+		const int frames = static_cast<int>(cycle * fps);
+		const double dt = 1.0 / fps;
+		std::vector<glm::dvec3> truth(frames);
+		HE::SkyEnvBaker probe(16);
+		for (int i = 0; i < frames; ++i)
+			truth[i] = meanOf(probe.bakeFloat(sunAt(0.25 + i * dt / cycle), 0.0), probe.channels());
+
+		// Where in the day the cube changes: the largest frame-to-frame change of the
+		// mean colour per 1/24 of the day, relative.
+		if (cycle == 120.0)
+		{
+			std::string profile;
+			for (int b = 0; b < 24; ++b)
+			{
+				double worst = 0.0;
+				for (int i = std::max(1, b * frames / 24); i < (b + 1) * frames / 24; ++i)
+					worst = std::max(worst, glm::length(truth[i] - truth[i - 1]) / std::max(1e-3, glm::length(truth[i])));
+				char cell[64];
+				std::snprintf(cell, sizeof(cell), " %.2f:%.2f%%", 0.25 + (b + 0.5) / 24.0, worst * 100.0);
+				profile += cell;
+			}
+			MESSAGE("day 120 s @ 60 fps, per-frame change of the cube's mean colour by time of day:" << profile);
+		}
+
+		auto simulate = [&](const std::string& name, auto&& due, auto&& bake)
+		{
+			int bakes = 0, used = 0;
+			double worst = 0.0, worstAt = 0.0;
+			for (int i = 0; i < frames; ++i)
+			{
+				const double now = i * dt;
+				const glm::vec3 s = sunAt(0.25 + now / cycle);
+				if (due(s, now)) { bake(s, now); ++bakes; used = i; }
+				const double err = glm::length(truth[used] - truth[i]) / std::max(1e-3, glm::length(truth[i]));
+				if (err > worst) { worst = err; worstAt = 0.25 + now / cycle; }
+			}
+			MESSAGE("day " << cycle << " s @ 60 fps, " << name << ": " << bakes / cycle
+			        << " bakes per s (every " << static_cast<double>(frames) / bakes
+			        << " frames); cube off by <= " << worst * 100.0 << " % (time of day "
+			        << std::fmod(worstAt, 1.0) << ")");
+		};
+		for (const float tol : { 1.0e-4f, 2.0e-3f })
+		{
+			glm::vec3 baked(0.0f);
+			bool any = false;
+			simulate(tol < 1e-3f ? "Metal before (dead band 1e-4)" : "GL/Vk/D3D before (dead band 2e-3)",
+			         [&](const glm::vec3& s, double) { return !any || glm::distance(s, baked) >= tol; },
+			         [&](const glm::vec3& s, double) { baked = s; any = true; });
+		}
+		HE::SkyEnvBaker real(1);
+		simulate("shared baker",
+		         [&](const glm::vec3& s, double now) { return real.due(s, now); },
+		         [&](const glm::vec3& s, double now) { real.bakeFloat(s, now); });
+	}
 }
 
 // The GI-reflection sky cube (topic 173) is the sky PASS rasterised into six
@@ -1499,6 +1709,237 @@ TEST_CASE("BuildClusterLights: scatter, window split, mask channels and caps are
 		CHECK(b.lights.size() == 1);
 		CHECK(b.indices.size() == 1);
 		for (const glm::uvec2& g : b.grid) CHECK(g.y == 0u);
+	}
+}
+
+// The builder as it was before REN-903 (one std::vector per cell, push_back,
+// then flattened), kept verbatim as the reference the counting sort must match
+// element for element — and as the "before" side of the bench below.
+namespace clusterref
+{
+static HE::ClusterLightBuild build(const RenderWorld& rw, bool localShadowsActive,
+                                   bool giMasksValid, bool bottomLeftOrigin)
+{
+	using namespace HE;
+	ClusterLightBuild out;
+	out.grid.assign(kClusterCount, glm::uvec2(0u, 0u));
+
+	const glm::mat4 viewProj = rw.camera.projection * rw.camera.view;
+	const glm::vec3 camPos   = rw.camera.position;
+	const glm::vec3 camFwd   = -glm::normalize(glm::vec3(glm::inverse(rw.camera.view)[2]));
+	const float sliceScale   = static_cast<float>(kClusterGridZ) / std::log(kClusterFar / kClusterNear);
+
+	std::vector<std::vector<uint32_t>> cells(kClusterCount);
+	size_t indexTotal = 0;
+
+	int extractorIndex = -1;
+	int windowLocalIdx = 0;
+	for (const LightData& l : rw.lights)
+	{
+		++extractorIndex;
+		int maskChannel = -1;
+		if (l.type != 0 && extractorIndex < kMaxLightWindow)
+		{
+			if (giMasksValid && windowLocalIdx < kMaxMaskedLocalLights) maskChannel = windowLocalIdx;
+			++windowLocalIdx;
+		}
+		if (l.type == 0) continue;
+		if (out.lightCount >= kMaxClusteredLights) { ++out.droppedLights; continue; }
+
+		const float range = std::max(l.range, 1e-4f);
+		const float viewZ = glm::dot(l.position - camPos, camFwd);
+		const float zMin  = viewZ - range, zMax = viewZ + range;
+		if (zMax < kClusterNear || zMin > kClusterFar) continue;
+		auto slice = [&](float z) {
+			return std::clamp(static_cast<int>(std::log(std::max(z, kClusterNear) / kClusterNear)
+			                                   * sliceScale), 0, kClusterGridZ - 1);
+		};
+		const int z0 = slice(zMin), z1 = slice(zMax);
+
+		float u0 = 1e9f, u1 = -1e9f, v0 = 1e9f, v1 = -1e9f;
+		bool fullRect = false;
+		for (int c = 0; c < 8 && !fullRect; ++c)
+		{
+			const glm::vec3 corner = l.position + range * glm::vec3(
+				(c & 1) ? 1.0f : -1.0f, (c & 2) ? 1.0f : -1.0f, (c & 4) ? 1.0f : -1.0f);
+			const glm::vec4 clip = viewProj * glm::vec4(corner, 1.0f);
+			if (clip.w <= kClusterNear) { fullRect = true; break; }
+			const float u = clip.x / clip.w * 0.5f + 0.5f;
+			const float vUp = clip.y / clip.w * 0.5f + 0.5f;
+			const float v = bottomLeftOrigin ? vUp : 1.0f - vUp;
+			u0 = std::min(u0, u); u1 = std::max(u1, u);
+			v0 = std::min(v0, v); v1 = std::max(v1, v);
+		}
+		int x0 = 0, x1 = kClusterGridX - 1, y0 = 0, y1 = kClusterGridY - 1;
+		if (!fullRect)
+		{
+			if (u1 < 0.0f || u0 > 1.0f || v1 < 0.0f || v0 > 1.0f) continue;
+			x0 = std::clamp(static_cast<int>(u0 * kClusterGridX), 0, kClusterGridX - 1);
+			x1 = std::clamp(static_cast<int>(u1 * kClusterGridX), 0, kClusterGridX - 1);
+			y0 = std::clamp(static_cast<int>(v0 * kClusterGridY), 0, kClusterGridY - 1);
+			y1 = std::clamp(static_cast<int>(v1 * kClusterGridY), 0, kClusterGridY - 1);
+		}
+		const size_t touched = static_cast<size_t>(z1 - z0 + 1)
+		                     * static_cast<size_t>(y1 - y0 + 1)
+		                     * static_cast<size_t>(x1 - x0 + 1);
+		if (indexTotal + touched > static_cast<size_t>(kMaxClusterIndices))
+		{
+			++out.droppedLights;
+			continue;
+		}
+		indexTotal += touched;
+
+		const uint32_t li = static_cast<uint32_t>(out.lightCount++);
+		out.lights.push_back(glm::vec4(l.position, static_cast<float>(l.type)));
+		out.lights.push_back(glm::vec4(l.direction, l.spotAngleCos));
+		out.lights.push_back(glm::vec4(l.color, l.intensity));
+		out.lights.push_back(glm::vec4(range,
+			(localShadowsActive && l.shadowLayer >= 0) ? static_cast<float>(l.shadowLayer + 1) : 0.0f,
+			static_cast<float>(maskChannel + 1),
+			0.0f));
+		for (int z = z0; z <= z1; ++z)
+			for (int y = y0; y <= y1; ++y)
+				for (int x = x0; x <= x1; ++x)
+					cells[(z * kClusterGridY + y) * kClusterGridX + x].push_back(li);
+	}
+
+	out.indices.reserve(indexTotal);
+	for (int cIdx = 0; cIdx < kClusterCount; ++cIdx)
+	{
+		out.grid[cIdx] = glm::uvec2(static_cast<uint32_t>(out.indices.size()),
+		                            static_cast<uint32_t>(cells[cIdx].size()));
+		out.indices.insert(out.indices.end(), cells[cIdx].begin(), cells[cIdx].end());
+	}
+	if (out.lights.empty())  out.lights.push_back(glm::vec4(0.0f));
+	if (out.indices.empty()) out.indices.push_back(0u);
+
+	out.params = glm::vec4(static_cast<float>(kClusterGridX), static_cast<float>(kClusterGridY),
+	                       static_cast<float>(kClusterGridZ), sliceScale);
+	out.camFwd = glm::vec4(camFwd, kClusterNear);
+	return out;
+}
+
+// Seeded light soup around a camera that looks somewhere off-axis: points and
+// spots in front of, behind and right next to the camera (the near-plane
+// full-rect case), directional lights in between, some huge ones that cover
+// the whole grid and run into the index cap.
+static RenderWorld world(uint32_t seed, int count, float hugeShare)
+{
+	RenderWorld rw;
+	const glm::vec3 eye(3.0f, 2.0f, 5.0f);
+	rw.camera.position   = eye;
+	rw.camera.view       = glm::lookAt(eye, eye + glm::vec3(0.3f, -0.2f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	rw.camera.projection = glm::perspective(glm::radians(70.0f), 16.0f / 9.0f, 0.1f, 1000.0f);
+	uint32_t s = seed;
+	auto rnd = [&s]() { s = s * 1664525u + 1013904223u; return float(s >> 8) * (1.0f / 16777216.0f); };
+	for (int i = 0; i < count; ++i)
+	{
+		LightData l;
+		const float kind = rnd();
+		l.type        = kind < 0.1f ? 0 : (kind < 0.6f ? 1 : 2);
+		l.intensity   = 0.5f + rnd();
+		l.color       = glm::vec3(rnd(), rnd(), rnd());
+		l.direction   = glm::normalize(glm::vec3(rnd() - 0.5f, -1.0f, rnd() - 0.5f));
+		l.spotAngleCos = 0.5f + 0.5f * rnd();
+		l.shadowLayer = rnd() < 0.3f ? static_cast<int>(rnd() * 16.0f) : -1;
+		const float where = rnd();
+		if (where < 0.05f)      l.position = eye + glm::vec3(rnd(), rnd(), rnd()) * 0.5f;   // at the camera
+		else if (where < 0.15f) l.position = eye + glm::vec3(0.0f, 0.0f, 40.0f + rnd() * 50.0f); // behind it
+		else l.position = eye + glm::vec3((rnd() - 0.5f) * 120.0f, (rnd() - 0.5f) * 40.0f, -rnd() * 200.0f);
+		l.range = rnd() < hugeShare ? 2000.0f : 0.5f + rnd() * 12.0f;
+		rw.lights.push_back(l);
+	}
+	return rw;
+}
+
+static void requireSame(const HE::ClusterLightBuild& a, const HE::ClusterLightBuild& ref)
+{
+	CHECK(a.lightCount == ref.lightCount);
+	CHECK(a.droppedLights == ref.droppedLights);
+	CHECK(a.params == ref.params);
+	CHECK(a.camFwd == ref.camFwd);
+	CHECK(a.lights == ref.lights);
+	CHECK(a.grid == ref.grid);
+	CHECK(a.indices == ref.indices);
+}
+} // namespace clusterref
+
+TEST_CASE("BuildClusterLights: the counting sort matches the per-cell build element for element (REN-903)")
+{
+	struct Case { uint32_t seed; int count; float huge; };
+	const Case cases[] = {
+		{ 1u,   0, 0.0f },  // no light: the one-element fallbacks
+		{ 2u,   1, 0.0f },
+		{ 3u,  12, 0.0f },
+		{ 4u,  50, 0.02f },
+		{ 5u, 256, 0.0f },
+		{ 6u, 400, 0.0f },  // over kMaxClusteredLights
+		{ 7u, 120, 0.3f },  // many full-grid lights: the index cap drops some
+	};
+	// One scratch across every case and flag combination: what a backend's
+	// member does frame after frame, from big to small and back.
+	HE::ClusterLightBuild scratch;
+	int droppedSeen = 0, fullGridSeen = 0;
+	for (const Case& c : cases)
+	{
+		const RenderWorld rw = clusterref::world(c.seed, c.count, c.huge);
+		for (int flags = 0; flags < 8; ++flags)
+		{
+			const bool shadows = flags & 1, gi = flags & 2, bottomLeft = flags & 4;
+			CAPTURE(c.seed); CAPTURE(flags);
+			const HE::ClusterLightBuild ref = clusterref::build(rw, shadows, gi, bottomLeft);
+			clusterref::requireSame(HE::BuildClusterLights(rw, shadows, gi, bottomLeft), ref);
+			HE::BuildClusterLights(scratch, rw, shadows, gi, bottomLeft);
+			clusterref::requireSame(scratch, ref);
+			droppedSeen += ref.droppedLights;
+			for (const glm::uvec2& g : ref.grid) fullGridSeen += (g.y > 20u) ? 1 : 0;
+		}
+	}
+	// The soup really reaches the caps and the crowded cells it is meant to.
+	CHECK(droppedSeen > 0);
+	CHECK(fullGridSeen > 0);
+
+	// clear() is "clustering off" with the capacity kept.
+	const size_t capacity = scratch.indices.capacity();
+	scratch.clear();
+	CHECK(scratch.params == glm::vec4(0.0f));
+	CHECK(scratch.lightCount == 0);
+	CHECK(scratch.indices.empty());
+	CHECK(scratch.indices.capacity() == capacity);
+}
+
+// Off unless HE_CLUSTER_BENCH is set: the per-frame cluster build before REN-903
+// (the reference above), the by-value counting sort and the in-place one into a
+// kept scratch. Median of 31.
+TEST_CASE("BuildClusterLights bench (HE_CLUSTER_BENCH)")
+{
+	if (!std::getenv("HE_CLUSTER_BENCH")) return;
+	using clk = std::chrono::steady_clock;
+	auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+	for (const int count : { 8, 50, 256 })
+	{
+		const RenderWorld rw = clusterref::world(42u, count, 0.0f);
+		HE::ClusterLightBuild scratch;
+		std::vector<double> before, byValue, inPlace;
+		size_t sink = 0;
+		for (int r = 0; r < 31; ++r)
+		{
+			auto t0 = clk::now();
+			sink += clusterref::build(rw, true, true, false).indices.size();
+			auto t1 = clk::now();
+			sink += HE::BuildClusterLights(rw, true, true, false).indices.size();
+			auto t2 = clk::now();
+			HE::BuildClusterLights(scratch, rw, true, true, false);
+			sink += scratch.indices.size();
+			auto t3 = clk::now();
+			before .push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+			byValue.push_back(std::chrono::duration<double, std::micro>(t2 - t1).count());
+			inPlace.push_back(std::chrono::duration<double, std::micro>(t3 - t2).count());
+		}
+		MESSAGE("cluster build, " << count << " lights (" << scratch.lightCount << " admitted, "
+		        << scratch.indices.size() << " indices): before " << median(before)
+		        << " us, by value " << median(byValue) << " us, in place " << median(inPlace)
+		        << " us (sink " << sink << ")");
 	}
 }
 
@@ -2522,7 +2963,7 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		CHECK(vk.find("wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);") != std::string::npos);
 		CHECK(vk.find("wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);") != std::string::npos);
 		// And the cube is the SHARED bake, not a fourth hand-kept sky.
-		CHECK(vk.find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+		CHECK(vk.find("m_skyEnvBaker.bakeHalf(sunDir,") != std::string::npos);
 	}
 
 	SUBCASE("D3D11 and D3D12 bind exactly what their gates promise")
@@ -2536,7 +2977,7 @@ TEST_CASE("heLitP: the reflection stages hang off their own gates, not the sky c
 		const std::string bind = stripLineComments(readFile(inc / "D3D11" / "D3D11MaterialBindings.h"));
 		for (const std::string* src : { &d11, &d12 })
 		{
-			CHECK(src->find("HE::BuildSkyEnvFaceRow(") != std::string::npos);
+			CHECK(src->find("m_skyEnvBaker.bakeHalf(sunDir") != std::string::npos);
 			CHECK(src->find("const bool skyEnvBound = p.m_skyEnvValid;") != std::string::npos);
 			CHECK(src->find("lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;") != std::string::npos);
 			CHECK(src->find("lit.fog[3] = aoActive    ? 1.0f : 0.0f;") != std::string::npos);
@@ -4487,4 +4928,35 @@ TEST_CASE("FrameVisibility bench (HE_FRAMEVIS_BENCH)")
 	}
 	std::printf("[framevis-bench] one sort of 50k objects (sizeof(RenderObject) %zu): key build %.3f ms, std::sort %.3f ms\n",
 	            sizeof(RenderObject), median(build), median(srt));
+}
+
+// M8 (REN-401/903/908): the sky cube's rebake, the SSAO kernel and the cluster
+// scratch are the frontend's, once. A backend that grows its own bake loop, dead
+// band or per-frame kernel build again goes back to drifting from the other four.
+TEST_CASE("Every backend rebakes the sky cube through HE::SkyEnvBaker and uploads the shared SSAO kernel")
+{
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	const fs::path be   = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::vector<std::pair<const char*, std::string>> backends = {
+		{ "OpenGLRenderer.cpp", stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")) },
+		{ "MetalRenderer.mm",   stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")) },
+		{ "VulkanRenderer.cpp", stripLineComments(readFile(be / "Vulkan" / "VulkanRenderer.cpp")) },
+		{ "D3D11Renderer.cpp",  stripLineComments(readFile(be / "D3D11" / "D3D11Renderer.cpp")) },
+		{ "D3D12Renderer.cpp",  stripLineComments(readFile(be / "D3D12" / "D3D12Renderer.cpp")) },
+	};
+	for (const auto& [file, text] : backends)
+	{
+		CAPTURE(file);
+		REQUIRE(!text.empty());
+		CHECK(text.find("m_skyEnvBaker.due(sunDir)") != std::string::npos);
+		CHECK(text.find("HE::BuildSkyEnvFaceRow(") == std::string::npos);  // no private bake loop
+		CHECK(text.find("\"SkyEnvBake\"") == std::string::npos);            // ... or parallel_for of it
+		CHECK(text.find("glm::distance(sunDir, m_skyEnv") == std::string::npos); // ... or dead band
+		// GL uploads its vec3 uniform array ONCE at init; everyone else takes the
+		// packed kernel instead of building and expanding one.
+		if (std::string(file) == "OpenGLRenderer.cpp") continue;
+		CHECK(text.find("HE::SsaoKernelVec4()") != std::string::npos);
+		CHECK(text.find("HE::BuildSSAOKernel(") == std::string::npos);
+	}
 }
