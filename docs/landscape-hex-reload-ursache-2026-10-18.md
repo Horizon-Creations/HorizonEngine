@@ -71,7 +71,45 @@ nicht blind pro Frame.
   `D3D11Renderer.cpp:5017-5031`, D3D12 `D3D12Renderer.cpp:3681-3695`, Vulkan `VulkanRenderer.cpp:3645-3660`
   cachen den Fehlschlag ebenso unter dem Pfad-Schlüssel.
 
+## 5. Schritt 2: Behebung
+
+Zwei Hälften, beide nötig:
+
+| Stelle | Änderung |
+|---|---|
+| `src/HE_Rendering/include/HorizonRendering/GraphTextureMisses.h` (neu) | `HE::forgetGraphTextureMisses(cache, seenEpoch, epoch, isMiss)`: einmal je Epoche fliegen die Fehlschläge raus, geladene Texturen bleiben unberührt |
+| `ResolveGraphTexture` in Metal (`MetalRenderer.mm:9561`), GL (`OpenGLRenderer.cpp:8938`), Vulkan (`VulkanRenderer.cpp:3657`, gibt halb gebaute Reste per `destroyMaterialTex` frei), D3D11 (`D3D11Renderer.cpp:5027`), D3D12 (`D3D12Renderer.cpp:3693`) | ruft den Helfer vor dem Cache-Lookup; je Backend ein `…MissEpoch`-Member neben dem Cache |
+| `ContentManager.cpp:1359` (`pollAsyncResults`, Remote-Zweig) | `noteContentChanged()`, wenn ein Download gelandet ist. Vorher bewegte nur der Zeuge die Epoche von Hand (`EditorApplication.cpp:8794`), der echte SFTP-Weg nie |
+
+Der Negativ-Cache bleibt: ein nie ladbarer Pfad wird je Epoche einmal gefragt, nicht pro Frame.
+Keine Daten oder Formate berührt.
+
+**Test** `tests/test_landscape_reload.cpp` (4 Fälle): Epoche bewegt sich beim Eintreffen; "mid"
+(Backend fragt, Fehlschlag gecacht, Download landet) liefert dieselben Pixel und Layer wie "present";
+ein fehlender Pfad wird in 16 Frames einmal geladen; Quell-Pin, dass alle fünf Backends den Helfer
+**vor** `resolveTextureRef` rufen. Ohne Korrektur (Stand `337ccd7f` + Test + Helfer) 3 von 4 rot.
+
+**Gegenprobe mit dem behobenen Editor** (`cap210.sh`, Release-Deploy dieses Worktrees):
+
+| Fall | Metal md5 | OpenGL md5 | `Cannot load`-Zeilen |
+|---|---|---|---|
+| present | `016e8e05` (= Schritt 1) | `6bad630c` (= Schritt 1) | 0 |
+| **mid** | **`016e8e05`** | **`6bad630c`** | 5 |
+| absent | `0fc72535` | `3a99e27d` | 5 (keine Flut wie bei der Probe: 25/97) |
+
 ## Handoff
+
+### Schritt 2 (neuester)
+
+- **Topic / step:** 210, Schritt 2 von 3; Zweig `claude/landscape-sechseckige-muster-nach-texturarray-nachladen`, Fix `d4f6eff9`, Doku danach, gepusht
+- **Done:** Ursache in allen fünf Backends + `ContentManager` behoben, Test geschrieben (Abschnitt 5)
+- **Verified:** `he_tests --source-file='*test_landscape_reload.cpp'` 4/4 grün, mit Test + Helfer aber ohne Backend-/CM-Änderung 3/4 rot (gebaut, gelaufen); `test_contentmanager` 91/91; voller `he_tests`-Lauf 5513/5516, rot nur `test_hpak:1188` (bekannt, gefüllter Per-User-Cache) und 2× `test_profiler` (allein 2× grün, reihenfolgeabhängig, berührt nichts hiervon); `cap210.sh` present/mid/absent auf Metal + GL mit dem neuen Deploy (Tabelle §5); Vulkan `-fsyntax-only` gegen MoltenVK rc 0, Negativkontrolle (Helfer vertippt) schlägt fehl
+- **Not verified:** D3D11/D3D12 kompiliert (nur Windows-CI); Vulkan/D3D zur Laufzeit; echter SFTP-Download im Live-Editor (der Unit-Test fährt den `registerRemoteAsset`-Weg mit Fake-Materializer, `cap210.sh` den Zeugen, der die Epoche selbst bewegt)
+- **Decisions taken:** Epoche statt `isRemoteAssetPending` (das gibt es nicht; Frame 1 zeichnet vor dem Manifest); Negativ-Cache behalten, nur je Epoche vergessen; Helfer header-only in HorizonRendering, damit der Test ihn ohne GPU benutzt; Quell-Pin statt Renderer-Instanz im Test
+- **Traps:** doctest-`*_MESSAGE` mit `std::string(a) + b` kompiliert nicht (Operator-Vorrang im Makro), vorher in eine Variable; `ninja` liegt nicht im PATH (`CMAKE_MAKE_PROGRAM` aus der CMakeCache, CLion-ninja); `compile_commands.json` im Release-Baum ist unvollständig, Flags für den Vulkan-Check per `ninja -t commands` vom GL-Objekt
+- **Next steps:** 1. Schritt 3 Abnahme: Vorher/Nachher-Bilder (Schritt-1-Binary vs. dieses), CI grün inkl. Windows (D3D11/D3D12/Vulkan kompilieren). 2. Nicht in diesem Thema, nur notiert: Hot-Reload einer schon geladenen Pfad-Textur (§4) und `m_uiTexCache` haben dieselbe Pfad-Lücke
+
+### Schritt 1
 
 - **Topic / step:** 210, Schritt 1 von 3
 - **Branch / commit:** `claude/landscape-sechseckige-muster-nach-texturarray-nachladen` @ siehe `git log` (Zeuge `374a3072`, Doku danach), gepusht

@@ -2235,6 +2235,10 @@ Gemessen (macOS Release, Apple M5, `out/build/macos-release`, `-DHE_BUILD_TESTS=
    `cm->isRemoteAssetPending(Pfad)` gilt (das ist der Zweck der neuen Abfrage). Das ist hier **nicht**
    gemacht: D3D11, D3D12 und Vulkan lassen sich auf dem Mac nicht ausführen, und ein halb eingeführtes Verhalten
    (Metal anders als die anderen) wäre schlechter als ein einheitlich dokumentiertes.
+   **Behoben in Thema 210** (`docs/landscape-hex-reload-ursache-2026-10-18.md` §5): das war das gemeldete
+   Sechseck-Muster. Statt `isRemoteAssetPending` vergessen alle fünf Backends ihre `null`-Einträge, sobald
+   `contentEpoch()` sich bewegt (`HE::forgetGraphTextureMisses`), und der `ContentManager` bewegt sie beim
+   Eintreffen eines Downloads.
 2. **Ein exportiertes Spiel hat keine Landschaftstexturen.** Der Exporter packt nur das ausgelieferte Verzeichnis
    (`ProjectExporter.cpp:782`, §18.2), nie den SFTP-Cache, und das Spiel hat keinen SFTP. Das war die zweite Hälfte
    der Zeile "Editor holt on demand, Exporter muss den Cache zusätzlich packen" in §18.4 und ist **nicht umgesetzt**:
