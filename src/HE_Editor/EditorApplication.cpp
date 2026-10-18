@@ -8751,6 +8751,50 @@ void EditorApplication::dumpFrameHeadless()
 	// capture shows, built before the environment push and the warmup below.
 	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
 	HE::UUID s_layerMatId{}; // landscape layer material, re-authored after the warmup
+
+	// HE_DUMP_AUTOLANDARRIVE=<dir> (Thema 210): the auto material's three texture
+	// arrays arrive LATE, the way an EngineContent download lands them in the
+	// per-user cache while the editor runs. The three T_Landscape_*_Array.hasset
+	// are copied from <dir> into GlobalState::engineContentCacheDir() and loaded,
+	// either before the scene is built (HE_DUMP_AUTOLANDARRIVEAT=early) or halfway
+	// through the settle frames (=mid, the default), after the backend has
+	// already resolved the material's array slots once. Same files, same binary,
+	// only the moment differs: early is the first-load picture, mid is the
+	// "after the arrays were (re)loaded" one. Needs a private HOME whose cache
+	// lacks them and a deploy without them in EngineContent; it never overwrites
+	// a file that is already there.
+	const char* arriveDir = std::getenv("HE_DUMP_AUTOLANDARRIVE");
+	const char* arriveAt  = std::getenv("HE_DUMP_AUTOLANDARRIVEAT");
+	const bool  arriveWitness = arriveDir && *arriveDir;
+	const bool  arriveEarly   = arriveWitness && arriveAt && std::string_view(arriveAt) == "early";
+	auto arriveArrays = [&](const char* when)
+	{
+		namespace fs = std::filesystem;
+		for (const char* rel : { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
+		                         HE::kAutoLandscapeMaskArray })
+		{
+			const std::string relPath(rel);
+			const std::string leaf = fs::path(relPath).filename().string();
+			const fs::path dst = GlobalState::engineContentCacheDir()
+			                   / fs::path(relPath.substr(std::strlen("Engine/")));
+			std::error_code ec;
+			const bool before = fs::exists(contentManager().resolveAbsolutePath(relPath), ec);
+			if (!before)
+			{
+				fs::create_directories(dst.parent_path(), ec);
+				fs::copy_file(fs::path(arriveDir) / leaf, dst, fs::copy_options::skip_existing, ec);
+			}
+			const TextureAsset* t = contentManager().getTexture(contentManager().loadAsset(relPath));
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDARRIVE (%s) %s: %s, loaded %s "
+				"(%ux%u, %u layers, %u mips)", when, leaf.c_str(),
+				before ? "WAS ALREADY THERE" : (ec ? "copy FAILED" : "copied"),
+				t ? "yes" : "NO", t ? t->width : 0u, t ? t->height : 0u,
+				t ? t->layers : 0u, t ? t->mipLevels : 0u);
+		}
+		contentManager().noteContentChanged();
+	};
+	if (arriveEarly) arriveArrays("early, before the scene");
+
 	buildDumpWitnessScenes(r, s_matTestId, s_layerMatId);
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
@@ -9993,6 +10037,8 @@ void EditorApplication::dumpFrameHeadless()
 	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (arriveWitness && !arriveEarly && i == settleFrames / 2)
+			arriveArrays(("mid, before settle frame " + std::to_string(i)).c_str());
 		if (repaintMidWitness && i == settleFrames / 2)
 		{
 			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
