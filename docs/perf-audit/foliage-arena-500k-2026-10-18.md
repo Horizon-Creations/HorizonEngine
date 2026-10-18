@@ -14,8 +14,9 @@ Arena-/Wachstums-/Capture-Zeilen aus jedem Log, `binaries.txt`, `img/arena_500k_
   300 Warmup + 300 Frames, vsync aus, vorher/nachher abwechselnd, 2 Wiederholungen, D3D12 und Vulkan × 100k/500k × alle/100 m.
 - **Bild:** `he_perf_capture.py` mit derselben Kamera und `HE_CAPTURE_FRAME=100` (Editor-Viewport als PPM). Der Dump-Zeuge (`HE_DUMP_*`) taugt hier
   nicht: seine Kamera sieht weniger Pflanzen, der Überlauf tritt dort nicht auf.
-- **Fremdlast:** die ersten beiden Vulkan-100k/100-m-Läufe „nachher“ liefen unter 34 `cl.exe` (CPU 100 %, Frame-Hitches 250-350 ms), verworfen
-  (`discarded-under-load/`) und in Ruhe wiederholt. Alle übrigen Läufe: CPU ≤ 10 %, keine Compiler.
+- **Fremdlast:** der Vulkan-100k/100-m-Block lief in einen fremden Build (bis 34 `cl.exe`, CPU 100 %, Frame-Hitches 250-350 ms bei „nachher“).
+  Alle vier Läufe (beide Seiten) verworfen (`discarded-under-load/`) und in Ruhe wiederholt. In den behaltenen Läufen kein Compiler, CPU-Momentaufnahme
+  meist ≤ 10 %, vereinzelt 20-50 % (`*.conditions.txt`).
 
 ## 2. Ergebnis 500k „alle in Reichweite“
 

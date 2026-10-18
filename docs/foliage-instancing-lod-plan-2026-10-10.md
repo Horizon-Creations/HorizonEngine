@@ -1076,16 +1076,18 @@ Rohdaten `perf-audit/raw-foliage-arena-500k/`.
 
 - **Topic / step:** Thema 182, Schritt 9 (Laufzeitprüfung des Arena-Fixes `e96e60df` auf D3D12/Vulkan, NN-WS03); Schritte 1-8 in 14-20, dieser in 21
 - **Branch / commit:** `claude/foliage-2-wind-instancing-schichten-lod-windows-abnahme`, Doku-Commit dieses Schritts (siehe `git log`), gepusht; kein Code geändert
-- **Done:** Leiter vorher/nachher (32 Läufe + 4 verworfene unter Fremdlast, in Ruhe wiederholt), Bildzeuge aus der Leiter-Kamera mit Rauschboden,
+- **Done:** Leiter vorher/nachher (32 Läufe; 4 Vulkan-100k/100-m-Läufe unter fremdem Build verworfen, in Ruhe wiederholt), Bildzeuge aus der Leiter-Kamera mit Rauschboden,
   RSS gegen Vorgänger und Merge-Basis. Bericht `docs/perf-audit/foliage-arena-500k-2026-10-18.md`, Rohdaten `docs/perf-audit/raw-foliage-arena-500k/`.
 - **Verified:** keine „arena full“-Zeile nachher (`arena-lines.txt`), 3 bzw. 2 Wachstumszeilen je Lauf, D3D12-Bild vollständig (Differenz zu Vulkan
   0,52 % < Rauschboden 1,57 % bei 100k), Vulkan pixelgleich zur Schleife. Binär-Identität: alter Warntext in den Vorher-Logs, DLL-Hashes in `binaries.txt`.
 - **Not verified:** Budgetpfad `HE_INST_ARENA_MIB` auf Hardware, 1 M Pflanzen, Metal, GI an, exportiertes Spiel; die Zuordnung der 31/5 Draws je Pass.
 - **Decisions taken:** Vorher = Schritt-6-Deploy (direkter Vorgänger) statt Merge-Basis; die Merge-Basis nur als RSS-Basis (2 Läufe D3D12).
   Bild über `HE_CAPTURE_FRAME` im Editor statt Dump-Zeuge (der sieht den Überlauf nicht).
-- **Decisions suggested, not taken:** gemeinsamer 64-B-Modellpuffer je Frame (Speicher ÷6-12, Abschnitt 20).
+- **Decisions suggested, not taken:** gemeinsamer 64-B-Modellpuffer je Frame (Speicher ÷6-12, Abschnitt 20); D3D12-Schattenschleife soll den
+  `k_maxDraws`-Ring nicht vor der Szene leeren (greift erst über dem Budget, aus Schritt 8 übernommen).
 - **Traps:** `rssMB.max` ist die Anlaufspitze (Chunks der Frames 1-6), für den eingeschwungenen Stand `last` lesen. Fremde Builds auf NN-WS03
   verfälschen einzelne Läufe: `*.conditions.txt` prüfen und wiederholen (`foliage_ladder_win.py` überspringt vorhandene Summaries).
   Vulkan-Vorher 500k „alle“ braucht ~3 min je Lauf: eine Wiederholung je Tool-Aufruf.
-- **Next steps:** 1. Metal-Lauf (Anfrage 105). 2. Optional `HE_INST_ARENA_MIB=64` auf D3D12/Vulkan (Warntext, Schleife) und 1 M Pflanzen.
+- **Next steps:** 1. Metal-Lauf (Anfrage 105). 2. Optional `HE_INST_ARENA_MIB=64` auf D3D12/Vulkan (Warntext, Schleife) und 1 M Pflanzen; D3D12 zeichnet
+  dann absichtlich unvollständig (Schattenschleife leert den Draw-Ring), keine Regression von `e96e60df`.
   3. Queen: Thema 182 ist aus Windows-Sicht abnahmebereit.
