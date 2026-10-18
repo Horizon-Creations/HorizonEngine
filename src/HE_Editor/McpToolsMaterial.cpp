@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // what a path holds, without loading it
 #include "McpToolCommon.h"            // the argument readers, the confinement rule, the walk
@@ -267,31 +267,22 @@ Mat openMat(ContentManager& content, const McpMaterialHooks& h, const json& args
 
 	if (forWrite)
 	{
-		if (p.engine) { m.failure = failEngineReadOnly(p.rel); return m; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and it draws from this very asset — a "
+			"parameter changed now would be in effect in a session whose state is "
+			"thrown away when it stops, and on disk afterwards. It is refused rather "
+			"than half-applied. Ask the user to stop play mode.",
+			"is open in the Material Editor with unsaved changes. "
+			"That tab holds its own copy of the graph and rebuilds the parameter "
+			"block from it on every edit, so a write to the file would be reverted "
+			"the moment the human touches a node. Ask the user to save or close that "
+			"tab, then call again." };
+		const bool openDirty = m.openDirty;
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther,
+		                                    [openDirty](const std::string&) { return openDirty; },
+		                                    kGate))
 		{
-			m.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and it draws from this very asset — a "
-				"parameter changed now would be in effect in a session whose state is "
-				"thrown away when it stops, and on disk afterwards. It is refused rather "
-				"than half-applied. Ask the user to stop play mode.");
-			return m;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			m.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return m;
-		}
-		if (m.openDirty)
-		{
-			m.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' is open in the Material Editor with unsaved changes. "
-				"That tab holds its own copy of the graph and rebuilds the parameter "
-				"block from it on every edit, so a write to the file would be reverted "
-				"the moment the human touches a node. Ask the user to save or close that "
-				"tab, then call again.");
+			m.failure = std::move(*refused);
 			return m;
 		}
 	}
@@ -664,6 +655,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::CameraPos:           return "CameraPos";
 	case T::CameraDistance:      return "CameraDistance";
 	case T::ScreenPos:           return "ScreenPos";
+	case T::Weather:             return "Weather";
 	case T::ConstBool:           return "ConstBool";
 	case T::ParamVec2:           return "ParamVec2";
 	case T::ParamVec4:           return "ParamVec4";
@@ -688,6 +680,9 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::NormalMapBombSample: return "NormalMapBombSample";
 	case T::TextureArrayBombSample:   return "TextureArrayBombSample";
 	case T::NormalMapArrayBombSample: return "NormalMapArrayBombSample";
+	case T::BombCells:           return "BombCells";
+	case T::WaterRipple:         return "WaterRipple";
+	case T::Sun:                 return "Sun";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
@@ -1609,6 +1604,15 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 				                "Give the Albedo/Normal/Mask reads of one texture the same uv, "
 				                "Cell source, rotation, sharpness and seed: they then share one "
 				                "hex grid.";
+				break;
+			case HE::MatNodeType::BombCells:
+				j["requires"] = "p[0] = seed. Reads no texture: its outputs are the weights "
+				                "of the three hexes under the pixel (x,y,z, sum 1) and three "
+				                "random numbers in [0,1) per hex (Random A/B/C, x,y,z = the "
+				                "hexes). Evaluate a procedural pattern once per hex with that "
+				                "hex's number and blend the results by the weights. Inputs: "
+				                "UV (the grid lives on it), Cell (hex spacing in UV units), "
+				                "Blend (weight exponent 1..32, 7 unwired).";
 				break;
 			case HE::MatNodeType::StaticSwitch:
 				j["requires"] = "s = switch name; p[0] = default (1 = true).";

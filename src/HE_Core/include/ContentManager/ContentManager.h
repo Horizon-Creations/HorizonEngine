@@ -63,6 +63,21 @@ public:
 	// this?" cannot accidentally load it. That is what lets the scripting API
 	// unload or type-name an asset by the only handle a script has, its path.
 	HE::UUID idForPath(const std::string& relativePath) const;
+	// The other direction: the content-relative path ("Engine/…" for an engine
+	// default) an asset UUID is known under, or empty when nothing here knows it.
+	// The disk registry first (scanContentDirectory — every loose asset, loaded
+	// or not), then what was loaded or saved since that scan, which only the
+	// path index holds. Also a pure lookup; a linear scan over the loaded ones,
+	// so a caller asking every frame caches the answer. For the editor's
+	// task-board chips, which address an asset by UUID and jump to its file.
+	std::string pathForId(HE::UUID id) const
+	{
+		if (id == HE::UUID{}) return {};
+		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end()) return d->second;
+		for (const auto& [path, uuid] : m_pathToUUID)
+			if (uuid == id) return path;
+		return {};
+	}
 	bool saveAsset(RuntimeAsset& asset);
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
@@ -74,13 +89,48 @@ public:
 	bool writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const;
 
 	// A counter that moves whenever files may have appeared under the content
-	// root: every successful saveAsset, and every noteContentChanged() — the
-	// editor calls that after its content refresh (an import, a file copied in,
-	// a pull). For readers that remember a path as "not there" so they do not
-	// retry it every frame (RenderExtractor's section materials): when it
-	// moved, they forget and look once more. Never goes back, starts at 0.
+	// root: every successful saveAsset, every scanContentDirectory() (which the
+	// editor runs after each content refresh — an import, a file copied in, a
+	// pull, the periodic external-change poll) and every noteContentChanged().
+	// For readers that
+	// remember a path as "not there" so they do not retry it every frame
+	// (RenderExtractor's section materials) and for the file index below: when
+	// it moved, they forget and look once more. Never goes back, starts at 0.
 	uint64_t contentEpoch() const { return m_contentEpoch; }
 	void     noteContentChanged() { ++m_contentEpoch; }
+
+	// ── Loose-file index (the editor's asset pickers) ─────────────────────
+	// One file on disk: its stem (what a picker shows), the path a reference
+	// stores (content-relative, "Engine/<rest>" for the engine content root —
+	// what loadAsset takes) and its size, the only thing a picker can say about
+	// an asset's weight before loading it.
+	struct AssetFileEntry
+	{
+		std::string   label;
+		std::string   path;
+		std::uint64_t bytes = 0;
+	};
+	using AssetFileList = std::shared_ptr<const std::vector<AssetFileEntry>>;
+
+	// Every loose .hasset of `type`: the content root's first, then the engine
+	// content root's, each in directory-walk order (a project override of an
+	// engine asset is listed once per root). ONE header-only walk sorts every
+	// file of both roots into its type, and the result stands until
+	// contentEpoch() moves or a root changes. The editor used to walk both trees
+	// and open every .hasset for each open dropdown, every frame — and the
+	// widget palette, which is always open (EDT-901..1801).
+	//
+	// So it is as fresh as the last epoch bump, which is as fresh as the Content
+	// Browser. Code that wrote files behind the manager's back and has to see
+	// them NOW (a rename sweep, an export) calls noteContentChanged() first. The
+	// list is a snapshot: it survives a rebuild and any loadAsset, so holding it
+	// across a call that loads is fine. Main thread only (no locking), like
+	// every other editor-facing query here.
+	AssetFileList assetFiles(HE::AssetType type) const;
+	// Every .hescene under the PROJECT root (the content root's parent) as a
+	// project-relative path ("Content/Levels/A.hescene") — the key the exporter
+	// packs a scene under. Sorted by path, bytes left 0; same cache rules.
+	AssetFileList sceneFiles() const;
 
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
 	// A pure notification: ContentManager knows nothing about who listens or why.
@@ -683,6 +733,22 @@ private:
 	                    std::function<void(HE::UUID)> callback,
 	                    std::shared_ptr<LoadInterest> interest);
 	// False when `id` is in no mount any more.
+	// ── Remote references ───────────────────────────────────────────────────────
+	// Asks for the download of the remote-only EngineContent asset behind `path` if there is
+	// one and no local file (real, override or cached) already answers it. Cheap and
+	// idempotent — the download itself is coalesced. True when `path` is, or has just
+	// become, a pending remote asset. Main thread.
+	bool requestRemotePath(const std::string& path);
+	// Every asset a freshly registered one points at — by path and by baked id — gets its
+	// download kicked now instead of when something first draws with it: a material pulls
+	// its textures, texture arrays, parent, shader and node-graph functions; a mesh its
+	// materials. No-op while nothing is remote (every packaged game, every offline editor).
+	void prefetchRemoteReferences(HE::UUID id);
+	// A material regenerates its GLSL from its graph on load; a graph that calls a function
+	// not on this machine yet must not bake the "missing function" placeholder into it. False
+	// (and the downloads requested) while a called function is still remote.
+	bool graphFunctionsReady(const std::string& nodeGraphJson);
+
 	bool launchPakLoad(HE::UUID id, const std::string& coalesceKey,
 	                   std::function<void(HE::UUID)> callback,
 	                   std::shared_ptr<LoadInterest> interest);
@@ -724,6 +790,14 @@ private:
 		std::function<void(std::function<void(bool)>)> materialize;
 	};
 	std::unordered_map<HE::UUID, RemoteAssetEntry> m_remoteAssets;
+	// The same entries by PATH ("Engine/Textures/…"): a reference stored as a path — a
+	// material's texture, parent, function; a mesh's material — is resolved by
+	// loadAsset(path), which has no UUID to look a remote entry up by. Kept in step with
+	// m_remoteAssets (added by registerRemoteAsset, dropped when the download lands).
+	std::unordered_map<std::string, HE::UUID> m_remoteByPath;
+	// Paths whose download just landed, so the arrival can re-sync the material instances
+	// that were waiting on them as their parent (see pollAsyncResults).
+	std::unordered_set<std::string> m_remoteArrived;
 
 	struct PendingRemoteReady {
 		HE::UUID                      id;
@@ -774,6 +848,38 @@ private:
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 	SlotMap<SequenceAsset>           m_sequenceAssets;
 
+	// The ONE list of every SlotMap above. A new pool goes here as well, nowhere
+	// else: unloadAsset, forgetProjectContent and retargetAssetReferencesInMemory
+	// all walk the pools through it. They used to keep three hand-written copies,
+	// and each copy missed different types — unloadAsset returned false for
+	// struct/enum/save-template/theme (so hot reload could never replace them),
+	// a project switch kept the old theme/bone-mask/blend-space pools, and a
+	// rename left six types with their old `path` (CORE-201).
+	// anyPool stops at the first visitor that returns true.
+	template<typename F>
+	bool anyPool(F&& f)
+	{
+		return f(m_staticMeshAssets)       || f(m_skeletalMeshAssets)  ||
+		       f(m_textureAssets)          || f(m_materialAssets)      ||
+		       f(m_sceneAssets)            || f(m_scriptAssets)        ||
+		       f(m_materialFunctionAssets) || f(m_widgetAssets)        ||
+		       f(m_hcClassAssets)          || f(m_inputActionAssets)   ||
+		       f(m_inputMappingAssets)     || f(m_particleGraphAssets) ||
+		       f(m_animatorStateMachineAssets) ||
+		       f(m_audioAssets)            || f(m_fontAssets)          ||
+		       f(m_shaderAssets)           || f(m_prefabAssets)        ||
+		       f(m_animClipAssets)         || f(m_propAnimClipAssets)  ||
+		       f(m_structTypeAssets)       || f(m_enumTypeAssets)      ||
+		       f(m_saveTemplateAssets)     || f(m_themeAssets)         ||
+		       f(m_boneMaskAssets)         || f(m_blendSpaceAssets)    ||
+		       f(m_sequenceAssets);
+	}
+	template<typename F>
+	void forEachPool(F&& f)
+	{
+		anyPool([&](auto& pool) { f(pool); return false; });
+	}
+
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {
 		std::unique_ptr<HpakReader> reader;   // main-thread synchronous reads (ensureResident)
@@ -801,6 +907,17 @@ private:
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
 	uint64_t                                                             m_contentEpoch = 0; // see contentEpoch()
+	// assetFiles()/sceneFiles() caches, built lazily by const queries. A fresh
+	// manager starts at epoch 0, so "never built" has to be a different value.
+	struct FileIndex
+	{
+		uint64_t    epoch = ~0ull;
+		std::string contentRoot, engineRoot;
+		std::unordered_map<uint16_t, AssetFileList> byType;   // assetFiles
+		AssetFileList                               scenes;   // sceneFiles
+	};
+	mutable FileIndex m_assetFileIndex;
+	mutable FileIndex m_sceneFileIndex;
 	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset
 
 	// Drop everything that belonged to the project we were pointing at, then

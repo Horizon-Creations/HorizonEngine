@@ -29,6 +29,12 @@ struct SftpResult
 {
 	bool        ok = false;
 	std::string error;   // human-readable, already scrubbed of the password — empty when ok
+	// True only when the failure was the CONNECTION itself (TCP connect timed
+	// out on every address, or the SSH handshake did not complete) — the kind a
+	// second try a moment later can plausibly fix. Never set for a refused or
+	// unresolvable host, a rejected password, or a missing remote file: retrying
+	// those only repeats the same answer, slower.
+	bool        transient = false;
 };
 
 // One file found by sftpListRemoteTree — deliberately NOT the manifest entry
@@ -40,6 +46,15 @@ struct RemoteFileInfo
 	std::uint64_t size  = 0;
 	std::uint64_t mtime = 0;    // Unix timestamp, as SFTP reports it — no download needed for either field
 };
+
+// Runs `op` and, while it fails with SftpResult::transient set, runs it again —
+// up to `attempts` times in all, pausing 1 s and then 2 s between tries. For the
+// callers whose single failure is expensive: the startup probe and the manifest
+// fetch decide whether the Engine library exists at all for the whole session,
+// and a hoster that drops one new connection right after the previous one
+// (a rate limit, a flaky route) would otherwise cost the user that session.
+// Blocking, so worker threads only. A non-transient failure is returned at once.
+HE_CS_API SftpResult sftpWithConnectRetry(const std::function<SftpResult()>& op, int attempts = 3);
 
 // Connect, authenticate, disconnect. Used for the startup connectivity probe
 // and the "Test Connection" affordance — never touches the filesystem.

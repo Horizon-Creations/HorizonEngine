@@ -1864,6 +1864,15 @@ namespace
 		a.terrain.layerWeights.resize(a.terrain.weightRes * a.terrain.weightRes * 4);
 		for (size_t i = 0; i < a.terrain.layerWeights.size(); ++i)
 			a.terrain.layerWeights[i] = static_cast<uint8_t>(i * 7 + 1);
+		// Water (WaterField.h): a lake from a spline and a brush pond, at a
+		// resolution of their own, so every key of the water block is written.
+		a.terrain.water.res = 16;
+		{
+			const uint16_t lake = a.terrain.water.createBody(3.5f, HE::UUID::generate());
+			const uint16_t pond = a.terrain.water.createBody(-0.75f);
+			HE::water::addCircle(a.terrain, lake, -40.0f, 10.0f, 30.0f, 10.0f);
+			HE::water::addCircle(a.terrain, pond, 80.0f, -30.0f, 20.0f, 15.0f, 0.7f);
+		}
 		reg.emplace<TerrainComponent>(land, a.terrain);
 
 		a.foliage.visible         = false;
@@ -1881,10 +1890,21 @@ namespace
 		a.weather.currentKind        = WeatherKind::Rain;
 		a.weather.targetKind         = WeatherKind::Storm;
 		a.weather.intensity          = 0.85f;
+		a.weather.puddleAmount       = 0.27f;
+		a.weather.snowCover          = 0.58f;
+		a.weather.puddleSize         = 37.5f;
+		a.weather.thunder            = 0.42f;
 		a.weather.transitionDuration = 14.0f;
 		a.weather.autoCycle          = true;
 		a.weather.cycleSeconds       = 95.0f;
 		a.weather.thunderSound       = HE::UUID::generate();
+		a.weather.rainSound          = HE::UUID::generate();
+		a.weather.windSound          = HE::UUID::generate();
+		a.weather.snowSound          = HE::UUID::generate();
+		a.weather.stormSound         = HE::UUID::generate();
+		a.weather.soundEnabled       = false;
+		a.weather.soundVolume        = 0.35f;
+		a.weather.soundBus           = "Ambience";
 		a.weather.maxRainParticles   = 1500;
 		a.weather.maxSnowParticles   = 900;
 		a.weather.groundLevel        = -3.5f;
@@ -2230,6 +2250,11 @@ namespace
 			REQUIRE(t->sculptHeights.size() == a.terrain.sculptHeights.size());
 			for (size_t i = 0; i < a.terrain.sculptHeights.size(); ++i)
 				CHECK(t->sculptHeights[i] == doctest::Approx(a.terrain.sculptHeights[i]));
+			// The water: bodies (level, source), counter and every cell.
+			REQUIRE(a.terrain.water.wetCells() > 0);
+			CHECK(HE::water::sameContent(t->water, a.terrain.water));
+			CHECK(t->water.bodies.size() == 2);
+			CHECK(t->water.bodies[0].fromSpline());
 		}
 		{
 			const auto* f = reg.try_get<FoliageComponent>(land);
@@ -2252,10 +2277,21 @@ namespace
 			CHECK(w->currentKind        == a.weather.currentKind);
 			CHECK(w->targetKind         == a.weather.targetKind);
 			CHECK(w->intensity          == doctest::Approx(a.weather.intensity));
+			CHECK(w->puddleAmount       == doctest::Approx(a.weather.puddleAmount));
+			CHECK(w->snowCover          == doctest::Approx(a.weather.snowCover));
+			CHECK(w->puddleSize         == doctest::Approx(a.weather.puddleSize));
+			CHECK(w->thunder            == doctest::Approx(a.weather.thunder));
 			CHECK(w->transitionDuration == doctest::Approx(a.weather.transitionDuration));
 			CHECK(w->autoCycle          == a.weather.autoCycle);
 			CHECK(w->cycleSeconds       == doctest::Approx(a.weather.cycleSeconds));
 			CHECK(w->thunderSound       == a.weather.thunderSound);
+			CHECK(w->rainSound          == a.weather.rainSound);
+			CHECK(w->windSound          == a.weather.windSound);
+			CHECK(w->snowSound          == a.weather.snowSound);
+			CHECK(w->stormSound         == a.weather.stormSound);
+			CHECK(w->soundEnabled       == a.weather.soundEnabled);
+			CHECK(w->soundVolume        == doctest::Approx(a.weather.soundVolume));
+			CHECK(w->soundBus           == a.weather.soundBus);
 			CHECK(w->maxRainParticles   == a.weather.maxRainParticles);
 			CHECK(w->maxSnowParticles   == a.weather.maxSnowParticles);
 			CHECK(w->groundLevel        == doctest::Approx(a.weather.groundLevel));

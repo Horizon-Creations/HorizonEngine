@@ -77,14 +77,14 @@ void start(AppContext& ctx)
 	// steps would be worse than saying no.
 	if (Build::running())
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+		HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			"A build is already running",
 			"Wait for the Build window to finish before building the game logic.");
 		return;
 	}
 	if (!available(ctx))
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+		HE::Ed::notify(HE::Ed::NoteLevel::Important,
 			"No C++ game logic in this project",
 			"Build and Reload compiles a C++ project's Source/ folder. This project "
 			"scripts its gameplay in another language.");
@@ -96,7 +96,7 @@ void start(AppContext& ctx)
 	const std::filesystem::path engineRoot = HE::hccg::engineRootFromSdk(sdk);
 	if (engineRoot.empty())
 	{
-		HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+		HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			"Cannot build the game logic",
 			"The engine headers this editor would compile against could not be "
 			"located (no <editor>/SDK and no he_sdk_config.json with a "
@@ -181,7 +181,15 @@ void render(AppContext& ctx)
 		{
 			Build::log(2, message);
 			Build::finish(false, message.empty() ? "Build failed" : message);
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem, "Game logic build failed", message);
+			// "Show Build" opens the window with the compiler output — the sentence
+			// here is only the last line of it.
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Important;
+			note.title  = "Game logic build failed";
+			note.text   = message.empty() ? std::string("The build failed.") : message;
+			note.key    = "build.finished";
+			note.actions.push_back({ "Show Build", [] { BuildProgressDialog::requestOpen(); }, true });
+			HE::Ed::notify(std::move(note));
 			return;
 		}
 

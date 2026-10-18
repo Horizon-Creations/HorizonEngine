@@ -83,6 +83,17 @@ namespace HE::Ed::Theme
 	// heading that teaches people to ignore warnings.
 	inline constexpr ImVec4 TextHeading { 0.950f, 0.880f, 0.680f, 1.0f };
 
+	// ── Status ───────────────────────────────────────────────────────────────
+	// What a line of feedback means, as a colour. Panels used to carry their own
+	// greens and ambers (a dozen slightly different triples across the Collab
+	// window and Preferences), so the same verdict looked different from page to
+	// page. Warn is EditorToolbar's kWarn (230,176,86) for the reason given above
+	// TextHeading; Ok and Bad are kept at a similar lightness so none of the
+	// three shouts louder than the others on the dark surface.
+	inline constexpr ImVec4 Ok   { 0.450f, 0.800f, 0.500f, 1.0f };
+	inline constexpr ImVec4 Warn { 0.902f, 0.690f, 0.337f, 1.0f };
+	inline constexpr ImVec4 Bad  { 0.950f, 0.460f, 0.400f, 1.0f };
+
 	// ── ImU32 mirrors, for the hand-drawn chrome (toolbars, list markers) ─────
 	inline ImU32 u32(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }
 }

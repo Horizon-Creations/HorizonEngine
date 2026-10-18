@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorCommands.h"
 #include "StructuralSync.h"

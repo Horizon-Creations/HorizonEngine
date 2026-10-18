@@ -1,4 +1,6 @@
 #include "GitController.h"
+#include <Platform/ProjectWriteGate.h>
+#include "NotificationStore.h"   // errors go to the footer bell
 #include "CollabController.h"
 
 #include <Diagnostics/Log.h>
@@ -141,6 +143,7 @@ void GitController::closeProject()
 	// the old lastInfo, which must not answer for it.
 	m_syncWatch  = {};
 	m_syncMoment = 0;
+	setTeamServer(false, {}, {});
 }
 
 void GitController::requestRefresh()
@@ -154,23 +157,86 @@ void GitController::requestInit(bool lfsAvailable)
 	m_service.requestInit(m_projectRoot, lfsAvailable);
 }
 
-void GitController::requestCommitAll(const std::string& message)
+void GitController::requestCommitAll(const std::string& message, bool forcePush)
 {
 	if (!mayModify() || message.empty()) return;
-	m_service.requestCommitAll(message, autoPushAfterCommit);
+	const bool push = autoPushAfterCommit || forcePush;
+	m_service.requestCommitAll(message, push);
 	// Reward moment (EditorRewards.h): armed only if the service queued it
 	// (busy at once) — without a worker the request vanishes, and an old
 	// "Committed." in lastInfo must not answer for it. The service pushes
 	// after the commit only where there is a remote.
 	if (m_service.busy())
 		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
-		                      | (autoPushAfterCommit && !m_service.remoteUrl().empty()
+		                      | (push && !m_service.remoteUrl().empty()
 		                             ? HE::Ed::Rewards::kSyncPush : 0));
+}
+
+void GitController::requestStage(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestStage(std::move(paths));
+}
+
+void GitController::requestUnstage(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	m_service.requestUnstage(std::move(paths));
+}
+
+void GitController::requestDiscard(std::vector<std::string> paths)
+{
+	if (!mayModify() || paths.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("discard changes")) return;
+	m_service.requestDiscard(std::move(paths));
+}
+
+void GitController::requestCommitStaged(const std::string& message, bool push, bool amend)
+{
+	if (!mayModify() || (message.empty() && !amend)) return;
+	m_service.requestCommitStaged(message, push, amend);
+	// Reward moment, as in requestCommitAll.
+	if (m_service.busy())
+		m_syncWatch.requested(HE::Ed::Rewards::kSyncCommit
+		                      | (push && !m_service.remoteUrl().empty()
+		                             ? HE::Ed::Rewards::kSyncPush : 0));
+}
+
+void GitController::requestResolveConflict(const std::string& path, bool keepMine)
+{
+	if (!mayModify() || path.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("resolve a conflict")) return;
+	m_service.requestResolveConflict(path, keepMine);
+}
+
+void GitController::requestSwitchBranch(const std::string& name, bool stashFirst)
+{
+	if (!mayModify() || name.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("switch branches")) return;
+	m_service.requestSwitchBranch(name, stashFirst);
+}
+
+void GitController::requestStashPop()
+{
+	if (!mayModify()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("restore stashed changes")) return;
+	m_service.requestStashPop();
+}
+
+void GitController::requestCommitFiles(const std::string& commit)
+{
+	m_service.requestCommitFiles(commit);
 }
 
 void GitController::requestRestoreTo(const std::string& commit, const std::string& shortOid)
 {
 	if (!mayModify() || commit.empty()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("restore an earlier version")) return;
 	m_service.requestRestoreTo(commit, shortOid);
 }
 
@@ -208,6 +274,8 @@ void GitController::requestPush()
 void GitController::requestPull()
 {
 	if (!mayModify()) return;
+	// These rewrite files under the project; an export is reading them (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("pull changes")) return;
 	m_service.requestPull();
 }
 
@@ -215,6 +283,48 @@ void GitController::requestSetRemote(const std::string& url)
 {
 	if (!mayModify() || url.empty()) return;
 	m_service.requestSetRemote(url);
+}
+
+// An operation failed: say so where the user looks for such things (the footer bell,
+// ringing for a Problem), not as red text inside the panel. The panel used to print
+// lastError() itself, and a message that lives in a window nobody has open is a
+// message nobody read. One notification per distinct error: the service keeps the
+// text until the next operation succeeds, so without the memory below every frame
+// would post it again.
+void GitController::reportNewError()
+{
+	const std::string& err = m_service.lastError();
+	if (err.empty()) { m_notifiedError.clear(); return; }
+	if (err == m_notifiedError) return;
+	m_notifiedError = err;
+
+	// First line as the sentence, everything as the detail.
+	std::string first = err.substr(0, err.find('\n'));
+	if (first.size() > 160) first = first.substr(0, 157) + "...";
+	// Keyed, so a second failure replaces the first instead of stacking a toast per
+	// attempt; nothing here is the user's last word, so it is a toast, not a dialog.
+	HE::Ed::NoteSpec note;
+	note.level  = HE::Ed::NoteLevel::Important;
+	note.title  = "Source control";
+	note.text   = first;
+	note.detail = err == first ? std::string() : err;
+	note.key    = "git.error";
+	HE::Ed::notify(std::move(note));
+}
+
+// The other half of the same contract: "Fetched: 3 new commits" and "Pushed" used to
+// be dim text inside the Source Control panel, which is exactly where nobody is
+// looking while the push runs in the background. Info — the centre keeps it, nothing
+// pops up for something that worked.
+void GitController::reportNewInfo()
+{
+	const std::string& info = m_service.lastInfo();
+	if (info.empty()) { m_notifiedInfo.clear(); return; }
+	if (info == m_notifiedInfo) return;
+	m_notifiedInfo = info;
+	HE::Ed::notify(HE::Ed::NoteLevel::Info, "Source control: " + info);
+	// The failure it follows (if any) is over.
+	HE::Ed::resolveNotification("git.error");
 }
 
 void GitController::update(std::uint64_t nowMs)
@@ -227,6 +337,8 @@ void GitController::update(std::uint64_t nowMs)
 	// pump collects its result (see m_cloneBusy).
 	const bool serviceIdle = !m_service.busy();
 	m_service.pump();
+	reportNewError();
+	reportNewInfo();
 	if (const int f = m_syncWatch.poll(serviceIdle, m_service.lastError(), m_service.lastInfo()))
 		m_syncMoment |= f;
 	// The clone and the repository list run before any project is open, so
@@ -235,6 +347,8 @@ void GitController::update(std::uint64_t nowMs)
 	m_cloneService.pump();
 	if (cloneIdle) m_cloneBusy = false;
 	collectRepoList();
+	// Keys handed over before the team server's upload was there go now.
+	flushTeamServerPending(nowMs);
 
 	// One filesystem probe per status refresh, never per tile: when the repo
 	// root and the project root are the same directory under two spellings
@@ -274,7 +388,11 @@ void GitController::update(std::uint64_t nowMs)
 	//
 	// Checked before the status poll, since a fetch queues its own refresh and
 	// doing both would be one whole-tree walk too many.
-	if (autoFetch && autoFetchMinutes > 0 && m_service.isRepo() &&
+	//
+	// Not with the team server keeping the history: the local .git is dormant
+	// then, nobody pushes to its origin, and an expired token for it would
+	// still raise a notification every interval.
+	if (autoFetch && autoFetchMinutes > 0 && !m_teamServer && m_service.isRepo() &&
 	    !m_service.remoteUrl().empty())
 	{
 		// Floored rather than trusted. The preference offers sane values, but it
@@ -370,5 +488,41 @@ bool GitController::blockedByCollabSession() const
 
 bool GitController::mayModify() const
 {
-	return !blockedByCollabSession();
+	return !blockedByCollabSession() && !blockedByTeamServer();
+}
+
+void GitController::setTeamServer(bool on, const std::string& team, const std::string& project)
+{
+	m_teamServer        = on;
+	m_teamServerTeam    = on ? team : std::string();
+	m_teamServerProject = on ? project : std::string();
+	// Keys waiting for a server this project no longer uses would be uploaded
+	// to it the moment an upload appears.
+	if (!on) m_teamPending.clear();
+}
+
+void GitController::setTeamServerUpload(TeamUpload upload)
+{
+	m_teamUpload = std::move(upload);
+}
+
+void GitController::handOverToTeamServer(const std::vector<std::string>& keys, std::uint64_t nowMs)
+{
+	if (!m_teamServer) return;
+	for (const std::string& key : keys)
+	{
+		if (key.empty()) continue;
+		if (std::find(m_teamPending.begin(), m_teamPending.end(), key) == m_teamPending.end())
+			m_teamPending.push_back(key);
+	}
+	flushTeamServerPending(nowMs);
+}
+
+void GitController::flushTeamServerPending(std::uint64_t nowMs)
+{
+	if (!m_teamServer || !m_teamUpload || m_teamPending.empty()) return;
+	if (!m_teamUpload(m_teamPending)) return;
+	m_teamLastHandedMs    = nowMs;
+	m_teamLastHandedCount = m_teamPending.size();
+	m_teamPending.clear();
 }

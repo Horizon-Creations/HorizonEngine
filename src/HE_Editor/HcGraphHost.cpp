@@ -903,6 +903,14 @@ GraphEditor::Model buildModel(const Host& h)
 				if (h.paramChoices) c = h.paramChoices(node, param);
 				if (c.empty()) c = HcEditorUtil::engineParamChoices(node, param, h.content);
 				return c;
+			},
+			// …and the per-frame question, answered without building either list
+			// (the host's lists are in-memory and small; the engine's can be every
+			// asset of a type in the project).
+			[&h](const HC::Node& node, const std::string& param)
+			{
+				return (h.paramChoices && !h.paramChoices(node, param).empty()) ||
+				       HcEditorUtil::engineParamHasChoices(node, param, h.content);
 			});
 		if (committed) h.onEdit(true); };
 	// Hovering a node shows what it does + its inputs/outputs, and F1 while it is
@@ -2473,6 +2481,21 @@ bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
 		return n && n->type == HC::NodeType::FunctionEntry;
 	};
 
+	// The tabs the editor had open last time, and the graph it was on — adopted once
+	// the graph is loaded (an empty graph has no functions to validate against, and
+	// would wipe what is remembered). A host that already chose a graph (a jump to
+	// a node) keeps its choice.
+	if (!tabs.restored && !graph.nodes.empty())
+	{
+		tabs.restored = true;
+		GraphViewStore::OpenTabs remembered;
+		if (GraphViewStore::getTabs(viewKeyBase, remembered))
+		{
+			tabs.open = remembered.open;
+			if (currentGraph == 0) currentGraph = remembered.active;
+		}
+	}
+
 	// Functions that no longer exist lose their tab.
 	tabs.open.erase(std::remove_if(tabs.open.begin(), tabs.open.end(),
 		[&](int id) { return !isFunction(id); }), tabs.open.end());
@@ -2559,6 +2582,9 @@ bool drawGraphTabs(GraphTabs& tabs, const HC::Graph& graph, int& currentGraph,
 	// nodes from appearing for one frame in the previous graph's view and then
 	// jumping to their own.
 	if (currentGraph != tabs.lastShown) enterGraph();
+	// Remembered for next time — no save prompt, nothing about the asset changes.
+	if (tabs.restored)
+		GraphViewStore::putTabs(viewKeyBase, currentGraph, tabs.open, ImGui::GetTime());
 	return userSwitched;
 }
 

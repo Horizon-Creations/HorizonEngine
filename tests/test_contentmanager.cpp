@@ -9,6 +9,7 @@
 #include "ImporterCommon.h"   // import provenance: writeAsset / sourceFileOf / reimport
 #include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -510,6 +512,86 @@ TEST_CASE("ContentManager unload works for every asset type it can load")
 
 	// A second unload of an already-evicted asset stays false.
 	CHECK_FALSE(cm.unloadAsset(actionId));
+}
+
+// CORE-201: the pools used to be listed by hand three times, and each copy
+// missed different types. unloadAsset knew no struct/enum/save-template/theme
+// (false, so pollHotReload could never replace them) and the in-memory half of
+// a rename left struct/enum/save-template/theme/bone-mask/blend-space with
+// their old `path`, so a later saveAsset wrote to the vacated location. Both
+// now walk ContentManager::anyPool; these are the types that were missing.
+TEST_CASE("ContentManager unload and rename reach the late-added asset pools")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	struct Probe { HE::AssetType type; const char* stem; };
+	// Struct/enum JSON stays empty on purpose: a parsable one would be mirrored
+	// into the process-wide TypeRegistry and outlive this test.
+	const Probe probes[] = {
+		{ HE::AssetType::StructType,       "ST_Probe" },
+		{ HE::AssetType::EnumType,         "E_Probe" },
+		{ HE::AssetType::SaveGameTemplate, "SG_Probe" },
+		{ HE::AssetType::Theme,            "TH_Probe" },
+		{ HE::AssetType::BoneMask,         "BM_Probe" },
+		{ HE::AssetType::BlendSpace,       "BS_Probe" },
+	};
+	auto save = [&](auto asset, const Probe& p)
+	{
+		asset.type = p.type;
+		asset.name = p.stem;
+		asset.path = std::string("Old/") + p.stem + ".hasset";
+		if (p.type != HE::AssetType::StructType && p.type != HE::AssetType::EnumType)
+			asset.json = "{}";
+		return cm.saveAsset(asset);
+	};
+	fs::create_directories(dir.path / "Old");
+	REQUIRE(save(StructTypeAsset{},       probes[0]));
+	REQUIRE(save(EnumTypeAsset{},         probes[1]));
+	REQUIRE(save(SaveGameTemplateAsset{}, probes[2]));
+	REQUIRE(save(ThemeAsset{},            probes[3]));
+	REQUIRE(save(BoneMaskAsset{},         probes[4]));
+	REQUIRE(save(BlendSpaceAsset{},       probes[5]));
+
+	std::vector<HE::UUID> ids;
+	for (const Probe& p : probes)
+	{
+		const HE::UUID id = cm.loadAsset(std::string("Old/") + p.stem + ".hasset");
+		REQUIRE_MESSAGE(id != HE::UUID{}, std::string(p.stem));
+		REQUIRE(cm.assetType(id) == p.type);
+		ids.push_back(id);
+	}
+
+	// The folder moves on disk, then the in-memory half follows it.
+	fs::rename(dir.path / "Old", dir.path / "New");
+	cm.retargetAssetReferencesInMemory("Old", "New", /*folder=*/true);
+
+	auto pathOf = [&](HE::UUID id) -> std::string
+	{
+		switch (cm.assetType(id))
+		{
+		case HE::AssetType::StructType:       return cm.getStructType(id)->path;
+		case HE::AssetType::EnumType:         return cm.getEnumType(id)->path;
+		case HE::AssetType::SaveGameTemplate: return cm.getSaveGameTemplate(id)->path;
+		case HE::AssetType::Theme:            return cm.getTheme(id)->path;
+		case HE::AssetType::BoneMask:         return cm.getBoneMask(id)->path;
+		case HE::AssetType::BlendSpace:       return cm.getBlendSpace(id)->path;
+		default:                              return {};
+		}
+	};
+	for (size_t i = 0; i < ids.size(); ++i)
+	{
+		CAPTURE(std::string(probes[i].stem));
+		CHECK(pathOf(ids[i]) == std::string("New/") + probes[i].stem + ".hasset");
+		CHECK(cm.isLoaded(std::string("New/") + probes[i].stem + ".hasset"));
+	}
+
+	for (size_t i = 0; i < ids.size(); ++i)
+	{
+		CAPTURE(std::string(probes[i].stem));
+		CHECK(cm.unloadAsset(ids[i]));
+		CHECK_FALSE(cm.isLoaded(ids[i]));
+	}
 }
 
 TEST_CASE("ContentManager round-trips a material's custom shader (and defaults empty)")
@@ -1160,6 +1242,132 @@ TEST_CASE("ContentManager pollHotReload detects a changed file and reloads it")
 
 	// Second poll with no further changes is quiet.
 	CHECK(cm.pollHotReload().empty());
+}
+
+// CORE-204: saveAsset wrote the file but left the mtime of the load in
+// m_pathMtime, so the editor's next poll took its OWN save for an outside edit
+// and unloaded, re-parsed and re-invalidated the asset it had just written.
+TEST_CASE("ContentManager pollHotReload does not report the manager's own save")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type     = HE::AssetType::Material;
+	mat.name     = "selfsave";
+	mat.path     = "selfsave.hasset";
+	mat.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat));
+
+	// Load from a file that is clearly older than the save below; otherwise the
+	// load and the save can share one filesystem tick and the poll is quiet for
+	// the wrong reason.
+	const fs::path diskPath = dir.path / "selfsave.hasset";
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) - std::chrono::seconds(10));
+	const HE::UUID id = cm.loadAsset("selfsave.hasset");
+	REQUIRE(cm.getMaterialMutable(id) != nullptr);
+	CHECK(cm.pollHotReload().empty());
+
+	MaterialAsset* live = cm.getMaterialMutable(id);
+	live->metallic = 0.7f;
+	REQUIRE(cm.saveAsset(*live));
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.getMaterial(id)->metallic == doctest::Approx(0.7f));
+
+	// A change from outside is still seen, exactly once.
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) + std::chrono::seconds(2));
+	const auto changed = cm.pollHotReload();
+	REQUIRE(changed.size() == 1);
+	CHECK(changed[0] == id);
+	CHECK(cm.pollHotReload().empty());
+}
+
+// CORE-204: an asset that cannot be unloaded (a live AssetRef pins it) used to
+// come back from every poll: unloadAsset refused, loadAsset handed back the old
+// copy without recording the new mtime, and the next poll found the same
+// "change" again — every 1.5 s for as long as the pin lived.
+TEST_CASE("ContentManager pollHotReload reports a pinned asset's change at most once")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset mat;
+	mat.type     = HE::AssetType::Material;
+	mat.name     = "pinned";
+	mat.path     = "pinned.hasset";
+	mat.metallic = 0.1f;
+	REQUIRE(cm.saveAsset(mat));
+	const HE::UUID id = cm.loadAsset("pinned.hasset");
+	REQUIRE(id != HE::UUID{});
+
+	auto pin = cm.acquireMaterial(id);
+	REQUIRE(cm.isPinned(id));
+
+	const fs::path diskPath = dir.path / "pinned.hasset";
+	fs::last_write_time(diskPath, fs::last_write_time(diskPath) + std::chrono::seconds(2));
+	// The loaded copy has to stay while it is pinned, so there is nothing new to
+	// report — and above all not the same file again on the next poll.
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.pollHotReload().empty());
+	CHECK(cm.getMaterial(id) != nullptr);
+}
+
+// What a collaboration peer's whole-file update relies on (EditorApplication::
+// applyAssetBytes, docs/collab-sync-audit-materials-2026-10-14.md). The file is
+// written under a LOADED asset: loadAsset alone keeps answering with the old copy,
+// which is what an open tab re-read and then kept. Unload + load replaces it under
+// the same UUID, and the master's instances follow only once they are re-derived.
+TEST_CASE("ContentManager: a peer's file over a loaded material needs unload + load")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+
+	MaterialAsset master;
+	master.type = HE::AssetType::Material;
+	master.name = "Master";
+	master.path = "mats/master.hasset";
+	master.customShaderFragGlsl = "// v1";
+	REQUIRE(cm.saveAsset(master));
+	MaterialAsset inst;
+	inst.type = HE::AssetType::Material;
+	inst.name = "Inst";
+	inst.path = "mats/inst.hasset";
+	inst.parentMaterialPath = "mats/master.hasset";
+	REQUIRE(cm.saveAsset(inst));
+
+	const HE::UUID masterId = cm.loadAsset("mats/master.hasset");
+	const HE::UUID instId   = cm.loadAsset("mats/inst.hasset");
+	REQUIRE_FALSE(masterId == HE::UUID{});
+	REQUIRE_FALSE(instId == HE::UUID{});
+	cm.syncMaterialInstance(instId);
+	REQUIRE(cm.getMaterial(instId)->customShaderFragGlsl == "// v1");
+
+	// The peer's save, written by another editor into the same file.
+	{
+		ContentManager peer(dir.path.string());
+		const HE::UUID pid = peer.loadAsset("mats/master.hasset");
+		REQUIRE(pid == masterId);
+		MaterialAsset edited = *peer.getMaterial(pid);
+		edited.customShaderFragGlsl = "// v2";
+		REQUIRE(peer.saveAsset(edited));
+	}
+
+	// The trap: the path is loaded, so this is a lookup and nothing is read.
+	CHECK(cm.loadAsset("mats/master.hasset") == masterId);
+	CHECK(cm.getMaterial(masterId)->customShaderFragGlsl == "// v1");
+
+	// What applyAssetBytes does now.
+	REQUIRE(cm.isLoaded(std::string("mats/master.hasset")));
+	CHECK(cm.unloadAsset(cm.idForPath("mats/master.hasset")));
+	const HE::UUID reloaded = cm.loadAsset("mats/master.hasset");
+	CHECK(reloaded == masterId);                          // every reference stays valid
+	CHECK(cm.getMaterial(masterId)->customShaderFragGlsl == "// v2");
+
+	// The instance still carries the derived copy of the old parent until the
+	// hot-reload follow-up re-derives it.
+	CHECK(cm.getMaterial(instId)->customShaderFragGlsl == "// v1");
+	cm.syncMaterialInstancesOf(cm.getMaterial(masterId)->path);
+	CHECK(cm.getMaterial(instId)->customShaderFragGlsl == "// v2");
 }
 
 // Regression: pollHotReload() unloads before reloading, so an asset type that
@@ -2416,7 +2624,7 @@ TEST_CASE("Importer::isImportableSource covers every extension the editor offers
 #ifdef HE_HAVE_ASSIMP
 	// The Assimp-backed mesh formats join the list only when Assimp is built in
 	// — offering them without it would be an import that can only fail.
-	for (const char* ext : { ".fbx", ".obj", ".dae" })
+	for (const char* ext : { ".fbx", ".obj", ".dae", ".blend" })
 		CHECK(Importer::isImportableSource(fs::path("Some/Model") += ext));
 #else
 	CHECK_FALSE(Importer::isImportableSource("Some/Model.fbx"));
@@ -3244,4 +3452,330 @@ TEST_CASE("A section table that does not cover the index buffer falls back to on
 	whole.resize(whole.size() - 5);
 	std::vector<MeshSection> out;
 	CHECK_FALSE(HE::decodeMeshSections(whole, out));
+}
+
+// ─── Remote EngineContent: references download on demand ─────────────────────
+// registerRemoteAsset (HE_ContentSync's manifest registers one per asset) used to serve
+// UUID references only. A reference stored as a PATH — a material's texture, its parent,
+// its node-graph function, a mesh's material — goes through loadAsset(path), which found
+// no file and gave up. These tests drive the whole route with a fake "server": a
+// materialize that copies a staged file into the engine root when the test says so.
+
+namespace
+{
+struct FakeRemote
+{
+	// A deferred download: the test decides when the file "arrives".
+	int                             calls = 0;
+	std::function<void(bool)>       done;
+	std::filesystem::path           from, to;
+	void arrive(bool ok = true)
+	{
+		if (ok)
+		{
+			fs::create_directories(to.parent_path());
+			fs::copy_file(from, to, fs::copy_options::overwrite_existing);
+		}
+		auto d = std::move(done);
+		done = nullptr;
+		if (d) d(ok);
+	}
+};
+
+void registerFake(ContentManager& cm, FakeRemote& f, HE::UUID id, const std::string& enginePath,
+                  const fs::path& staged, const fs::path& engineRoot, const std::string& rel)
+{
+	f.from = staged;
+	f.to   = engineRoot / rel;
+	cm.registerRemoteAsset(id, enginePath, [&f](std::function<void(bool)> done) {
+		++f.calls;
+		f.done = std::move(done);
+	});
+}
+
+// Drain the async pipeline until `pred` holds (downloads land, then loads decode, then
+// registrations happen — each on a later poll).
+template<class Pred>
+bool pumpUntil(ContentManager& cm, Pred pred)
+{
+	for (int i = 0; i < 400 && !pred(); ++i)
+	{
+		cm.pollAsyncResults(16);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	return pred();
+}
+} // namespace
+
+TEST_CASE("Remote EngineContent: a PATH reference asks for the download once and resolves after it lands")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 255, 255, 255, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock;
+	const std::string path = "Engine/Textures/Rock.hasset";
+	registerFake(cm, rock, texId, path, staging.path / "Rock.hasset", engineDir.path, "Textures/Rock.hasset");
+
+	// Nothing local: the load is "not there yet" — and starts the download, once, however
+	// often the caller asks while it is under way (a renderer asks every frame).
+	CHECK(cm.loadAsset(path) == HE::UUID{});
+	CHECK(cm.loadAsset(path) == HE::UUID{});
+	CHECK(cm.loadAsset(path) == HE::UUID{});
+	CHECK(rock.calls == 1);
+	CHECK(cm.getTexture(texId) == nullptr);
+
+	// The file lands: the next ask gets the asset, under the very id the manifest promised.
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+	CHECK(cm.loadAsset(path) == texId);
+	CHECK(cm.getTexture(texId) != nullptr);
+	CHECK(rock.calls == 1);   // nothing asked again
+}
+
+TEST_CASE("Remote EngineContent: a local file is never shadowed by the remote entry")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 1, 2, 3, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+	// The same file is already in the engine root (an earlier download, a dev checkout).
+	fs::create_directories(engineDir.path / "Textures");
+	fs::copy_file(staging.path / "Rock.hasset", engineDir.path / "Textures" / "Rock.hasset");
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock;
+	registerFake(cm, rock, texId, "Engine/Textures/Rock.hasset", staging.path / "Rock.hasset",
+	             engineDir.path, "Textures/Rock.hasset");
+
+	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == texId);   // read from disk, at once
+	CHECK(rock.calls == 0);                                         // no download asked for
+}
+
+TEST_CASE("Remote EngineContent: an arriving material pulls its textures and its parent")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId, matId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 255, 255, 255, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+
+		MaterialAsset m;
+		m.type = HE::AssetType::Material; m.name = "Ground"; m.path = "Ground.hasset";
+		m.texturePaths = { "Engine/Textures/Rock.hasset" };
+		m.id = matId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(m));
+	}
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock, ground;
+	registerFake(cm, rock,   texId, "Engine/Textures/Rock.hasset",   staging.path / "Rock.hasset",
+	             engineDir.path, "Textures/Rock.hasset");
+	registerFake(cm, ground, matId, "Engine/Materials/Ground.hasset", staging.path / "Ground.hasset",
+	             engineDir.path, "Materials/Ground.hasset");
+
+	// Only the MATERIAL is asked for (by UUID, as a scene would).
+	cm.loadAssetAsync(matId);
+	CHECK(ground.calls == 1);
+	CHECK(rock.calls == 0);
+	ground.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(matId); }));
+
+	// Registering it asked for what it references — before anything drew with it.
+	CHECK(rock.calls == 1);
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+	CHECK(cm.getTexture(texId) != nullptr);
+}
+
+TEST_CASE("Remote EngineContent: a failed download leaves the asset pending, not wedged")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	HE::UUID texId;
+	{
+		ContentManager src(staging.path.string());
+		TextureAsset t;
+		t.type = HE::AssetType::Texture; t.name = "Rock"; t.path = "Rock.hasset";
+		t.width = t.height = 1; t.channels = 4; t.data = { 255, 255, 255, 255 };
+		t.id = texId = HE::UUID::generate();
+		REQUIRE(src.saveAsset(t));
+	}
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote rock;
+	registerFake(cm, rock, texId, "Engine/Textures/Rock.hasset", staging.path / "Rock.hasset",
+	             engineDir.path, "Textures/Rock.hasset");
+
+	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == HE::UUID{});
+	rock.arrive(/*ok=*/false);
+	cm.pollAsyncResults(16);
+	CHECK_FALSE(cm.isLoaded(texId));
+
+	// The entry is still registered: a later ask tries again and, this time, succeeds.
+	CHECK(cm.loadAsset("Engine/Textures/Rock.hasset") == HE::UUID{});
+	CHECK(rock.calls == 2);
+	rock.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(texId); }));
+}
+
+TEST_CASE("Remote EngineContent: a material whose graph calls a remote function waits for it instead of baking the placeholder")
+{
+	TempContentDir project, engineDir("he_test_remote_engine"), staging("he_test_remote_stage");
+	const std::string fnPath = HE::kWeatherSnowFunctionPath;   // "Engine/MaterialFunctions/Weather/…"
+	{
+		// The function, as the server holds it.
+		ContentManager src(staging.path.string());
+		MaterialFunctionAsset f;
+		f.type = HE::AssetType::MaterialFunction; f.name = "MF_WeatherSnow"; f.path = "MF_WeatherSnow.hasset";
+		f.id = HE::kWeatherSnowFunctionId;
+		f.nodeGraphJson = HE::materialGraphToJson(HE::buildWeatherSnowFunction());
+		REQUIRE(src.saveAsset(f));
+	}
+	HE::UUID matId;
+	{
+		// A project material that calls it.
+		HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == HE::MatNodeType::Output) out = n.id;
+		const int call = g.addNode(HE::MatNodeType::FunctionCall);
+		g.findNode(call)->s = fnPath;
+		REQUIRE(g.connect(call, 0, out, HE::kMatOutputRoughnessPin));
+		ContentManager author(project.path.string());
+		MaterialAsset m;
+		m.type = HE::AssetType::Material; m.name = "Snowy"; m.path = "Snowy.hasset";
+		m.nodeGraphJson = HE::materialGraphToJson(g);
+		m.id = matId = HE::UUID::generate();
+		REQUIRE(author.saveAsset(m));
+	}
+
+	ContentManager cm(project.path.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	FakeRemote fn;
+	registerFake(cm, fn, HE::kWeatherSnowFunctionId, fnPath, staging.path / "MF_WeatherSnow.hasset",
+	             engineDir.path, "MaterialFunctions/Weather/MF_WeatherSnow.hasset");
+
+	// Loading the material asks for the function and does NOT regenerate around its absence.
+	REQUIRE(cm.loadAsset("Snowy.hasset") == matId);
+	CHECK(fn.calls == 1);
+	CHECK(cm.getMaterial(matId)->customShaderFragGlsl.find("missing function") == std::string::npos);
+
+	// Once the function is here, regenerating compiles real code.
+	fn.arrive();
+	REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(fnPath); }));
+	cm.regenerateMaterialFromGraph(matId);
+	const std::string& glsl = cm.getMaterial(matId)->customShaderFragGlsl;
+	CHECK(glsl.find("missing function") == std::string::npos);
+	CHECK(glsl.find("heLight.weather") != std::string::npos);
+}
+
+// ── Loose-file index (assetFiles / sceneFiles) ───────────────────────────────
+// The editor's pickers used to walk both content roots and open every .hasset
+// for each open dropdown, every frame. The index walks once per content change,
+// which is only right if "content change" is every way a file can arrive.
+TEST_CASE("ContentManager assetFiles: one walk per epoch, content root first, typed")
+{
+	TempContentDir proj("he_test_asset_index_proj");
+	TempContentDir engineDir("he_test_asset_index_engine");
+	const fs::path content = proj.path / "Content";
+	fs::create_directories(content / "Meshes");
+	fs::create_directories(engineDir.path / "Meshes");
+
+	auto mesh = [](const char* name, const char* path)
+	{
+		StaticMeshAsset m;
+		m.type     = HE::AssetType::StaticMesh;
+		m.name     = name;
+		m.path     = path;
+		m.vertices = { 0,0,0, 1,0,0, 0,1,0 };
+		m.indices  = { 0, 1, 2 };
+		m.normals  = { 0,0,1, 0,0,1, 0,0,1 };
+		return m;
+	};
+	{
+		ContentManager gen(engineDir.path.string());
+		StaticMeshAsset sphere = mesh("Sphere", "Meshes/Sphere.hasset");
+		REQUIRE(gen.saveAsset(sphere));
+	}
+
+	ContentManager cm(content.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	StaticMeshAsset rock = mesh("Rock", "Meshes/Rock.hasset");
+	REQUIRE(cm.saveAsset(rock));
+
+	const ContentManager::AssetFileList first = cm.assetFiles(HE::AssetType::StaticMesh);
+	REQUIRE(first->size() == 2);
+	CHECK((*first)[0].path  == "Meshes/Rock.hasset");          // the project's own first…
+	CHECK((*first)[0].label == "Rock");
+	CHECK((*first)[0].bytes > 0);
+	CHECK((*first)[1].path  == "Engine/Meshes/Sphere.hasset"); // …then the engine's
+	CHECK(cm.assetFiles(HE::AssetType::Material)->empty());
+
+	// A file that arrives behind the manager's back is not seen until the epoch
+	// moves — that is the whole saving: no walk while nothing changed.
+	fs::copy_file(content / "Meshes/Rock.hasset", content / "Meshes/Rock2.hasset");
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh) == first);
+
+	cm.noteContentChanged();
+	const ContentManager::AssetFileList second = cm.assetFiles(HE::AssetType::StaticMesh);
+	CHECK(second->size() == 3);
+	CHECK(first->size() == 2);   // a snapshot: the rebuild did not touch what was handed out
+
+	// scanContentDirectory is what the editor runs after every content refresh,
+	// the periodic external-change poll included, so it has to move the epoch.
+	fs::copy_file(content / "Meshes/Rock.hasset", content / "Meshes/Rock3.hasset");
+	cm.scanContentDirectory();
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh)->size() == 4);
+
+	// …and so does every save.
+	StaticMeshAsset pebble = mesh("Pebble", "Meshes/Pebble.hasset");
+	REQUIRE(cm.saveAsset(pebble));
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh)->size() == 5);
+
+	// A different engine root is a different index, epoch or not.
+	cm.setEngineContentRoot(std::string());
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh)->size() == 4);
+}
+
+TEST_CASE("ContentManager sceneFiles: project-relative, sorted, refreshed with the epoch")
+{
+	TempContentDir proj("he_test_scene_index_proj");
+	const fs::path content = proj.path / "Content";
+	fs::create_directories(content / "Maps");
+	fs::create_directories(proj.path / "Levels");
+	std::ofstream(proj.path / "Levels/A.hescene") << "{}";
+	std::ofstream(content / "Maps/B.hescene") << "{}";
+	std::ofstream(content / "Maps/notes.txt") << "not a scene";
+
+	ContentManager cm(content.string());
+	const ContentManager::AssetFileList scenes = cm.sceneFiles();
+	REQUIRE(scenes->size() == 2);
+	CHECK((*scenes)[0].path  == "Content/Maps/B.hescene");
+	CHECK((*scenes)[0].label == "B");
+	CHECK((*scenes)[1].path  == "Levels/A.hescene");
+
+	std::ofstream(proj.path / "Levels/C.hescene") << "{}";
+	CHECK(cm.sceneFiles()->size() == 2);
+	cm.noteContentChanged();
+	CHECK(cm.sceneFiles()->size() == 3);
 }

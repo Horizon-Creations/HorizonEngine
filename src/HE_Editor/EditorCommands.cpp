@@ -202,6 +202,30 @@ Result EditorCommands::execute(const Command& cmd, Origin origin)
 		return res;
 	}
 
+	// A destroy takes the whole subtree, and the host only checks the lock of the
+	// entity the message names: a child another participant is editing would die
+	// with an unheld parent here and stay alive everywhere else.
+	if (cmd.kind == CommandKind::DestroySubtree && origin != Origin::Remote &&
+	    m_hooks.inSession && m_hooks.inSession() && m_hooks.lockedByOther)
+	{
+		std::vector<Entity> stack;
+		if (const auto* h = reg.try_get<HierarchyComponent>(cmd.target))
+			stack.assign(h->children.begin(), h->children.end());
+		while (!stack.empty())
+		{
+			const Entity e = stack.back();
+			stack.pop_back();
+			if (!reg.valid(e)) continue;
+			if (const std::uint64_t s = subjectOf(e); s != 0 && m_hooks.lockedByOther(s))
+			{
+				res.error = CmdError::LockedByOther;
+				return res;
+			}
+			if (const auto* h = reg.try_get<HierarchyComponent>(e))
+				stack.insert(stack.end(), h->children.begin(), h->children.end());
+		}
+	}
+
 	// Which stack this change belongs on. A peer's edit belongs on neither:
 	// putting it on ours would let us "undo" their work.
 	IUndoSink* sink = nullptr;
@@ -353,7 +377,9 @@ Result EditorCommands::applyComponents(const Command& cmd, Origin origin, Record
 		res.error = CmdError::InvalidPayload;
 		return res;
 	}
-	rec.afterComponents = cmd.blob;
+	// The whole state after, like the before: a session undo applies these as a
+	// replacement (both directions), and a patch would strip everything it omits.
+	rec.afterComponents = serializer.serializeEntityComponents(*m_world, cmd.target);
 
 	// A patch can plant a fresh asset UUID the same way a create can — see the
 	// hook's own comment.
@@ -362,11 +388,15 @@ Result EditorCommands::applyComponents(const Command& cmd, Origin origin, Record
 	if (auto* tc = m_world->registry().try_get<TransformComponent>(cmd.target))
 		tc->dirty = true;
 
+	// The entity's whole state after the write, not the patch: peers apply what
+	// arrives as a replacement (SceneSerializer::replaceEntityComponents), so a
+	// client's one-key patch sent as-is would strip every other component there.
 	if (origin != Origin::Remote && m_hooks.publishComponents &&
 	    m_hooks.inSession && m_hooks.inSession())
 	{
 		m_hooks.publishComponents(
-			static_cast<std::uint32_t>(entt::to_integral(cmd.target)), cmd.blob);
+			static_cast<std::uint32_t>(entt::to_integral(cmd.target)),
+			serializer.serializeEntityComponents(*m_world, cmd.target));
 	}
 	return res;
 }
@@ -388,14 +418,28 @@ std::string uuidOf(HorizonWorld& world, Entity e)
 
 Entity entityByUuid(HorizonWorld& world, const std::string& uuid)
 {
-	if (uuid.empty()) return entt::null;
-	auto& reg = world.registry();
-	Entity found = entt::null;
-	reg.view<const EntityIdComponent>().each([&](auto e, const EntityIdComponent&) {
-		if (found != entt::null) return;
-		if (uuidOf(world, e) == uuid) found = e;
-	});
-	return found;
+	// The inverse of uuidOf's "%016llx%016llx", lowercase only: an upper-case
+	// digit never equalled uuidOf's text, so it does not resolve here either.
+	if (uuid.size() != 32) return entt::null;
+	std::uint64_t parts[2] = { 0, 0 };
+	for (std::size_t i = 0; i < 32; ++i)
+	{
+		const char c = uuid[i];
+		unsigned v;
+		if (c >= '0' && c <= '9')      v = static_cast<unsigned>(c - '0');
+		else if (c >= 'a' && c <= 'f') v = static_cast<unsigned>(c - 'a' + 10);
+		else return entt::null;
+		parts[i / 16] = (parts[i / 16] << 4) | v;
+	}
+	HE::UUID id;
+	id.hi = parts[0];
+	id.lo = parts[1];
+	return entityByUuid(world, id);
+}
+
+Entity entityByUuid(HorizonWorld& world, const HE::UUID& id)
+{
+	return world.findByEntityId(id);
 }
 
 } // namespace HE::Ed

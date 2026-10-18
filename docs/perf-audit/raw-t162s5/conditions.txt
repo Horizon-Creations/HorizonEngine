@@ -1,0 +1,66 @@
+### r1old (old) 03:54:52  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 1.88 4.02 4.60
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=19  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 12.5% clion; 11.3% Python; 9.8% claude; 
+### r1new (new) 03:55:30  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 3.15 4.11 4.61
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=36  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 10.3% clion; 8.6% claude; 4.3% com.apple.WebKit.Networking; 
+### r1old (old) 03:56:00  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 2.87 3.97 4.54
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=42  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 10.2% clion; 10.2% loginwindow; 7.4% claude; 
+### r1new (new) 03:57:24  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 3.54 3.87 4.44
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=48  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 13.1% clion; 7.8% claude; 2.7% zsh; 
+### r2new (new) 03:58:23  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 2.41 3.49 4.26
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=53  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 14.0% clion; 13.2% claude; 2.9% zsh; 
+### r2old (old) 03:59:37  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 3.07 3.39 4.15
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=49  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 14.5% Dock; 8.3% clion; 7.8% Python; 
+### r3full (new) 04:01:18  HE_PROPAGATE_FULL=1
+   uptime: load averages: 2.74 3.24 4.01
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=44  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 23.0% Python; 15.7% claude; 12.9% clion; 
+### r3new (new) 04:02:41  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 2.92 3.13 3.89
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=47  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 14.5% Dock; 11.7% clion; 6.0% WindowServer; 
+### r3old (old) 04:04:02  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 2.90 3.13 3.82
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=53  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 44.4% Hive; 17.1% claude; 8.4% clion; 
+### r4new (new) 04:05:39  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 3.76 3.45 3.87
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=47  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 22.0% Python; 16.8% launchd; 16.0% Dock; 
+### r4old (old) 04:05:51  HE_PROPAGATE_FULL=unset
+   uptime: load averages: 3.37 3.38 3.84
+   battery: Now drawing from 'Battery Power' / 57%; discharging; 20:00 remaining presen
+   gpu util: "Device Utilization %"=39  lowpower: lowpowermode 0
+   therm: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been rec
+   top: 15.8% clion; 13.9% Dock; 5.5% coreaudiod; 

@@ -49,4 +49,10 @@ namespace NotificationBar
 	// editor has paths (the project hub) where the footer never draws at all, and
 	// a flyout anchored to last frame's rectangle would hang in empty space.
 	void DrawOverlay(AppContext& ctx);
+
+	// Where the footer is, for the toasts that stack above it
+	// (NotificationPopups.h): the y of its top edge, in screen space. False when
+	// the footer did not draw this frame (the project hub), in which case the
+	// toasts fall back to the bottom of the work area.
+	bool FooterTop(float& topY);
 }

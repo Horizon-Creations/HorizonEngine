@@ -356,8 +356,11 @@ SocketResult socketConnect(SocketHandle h, const std::string& host,
 }
 
 SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t port,
-                                       SocketHandle& outSocket) {
+                                       SocketHandle& outSocket,
+                                       unsigned skipCandidates,
+                                       unsigned* outCandidateCount) {
     outSocket = kInvalidSocket;
+    if (outCandidateCount) *outCandidateCount = 0;
     if (!socketSystemInit()) return SocketResult::Error;
 
     // AF_UNSPEC: let the resolver decide. A session directory records whichever
@@ -374,8 +377,14 @@ SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t po
         return SocketResult::Error;
     }
 
+    unsigned candidateCount = 0;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) ++candidateCount;
+    if (outCandidateCount) *outCandidateCount = candidateCount;
+
     SocketResult result = SocketResult::Error;
-    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+    unsigned candidateIndex = 0;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next, ++candidateIndex) {
+        if (candidateIndex < skipCandidates) continue;
 #ifdef _WIN32
         SOCKET s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s == INVALID_SOCKET) continue;
@@ -771,7 +780,14 @@ bool socketBindUdp6To(SocketHandle h, const std::string& localAddress, std::uint
 
 bool socketBindUdp(SocketHandle h, std::uint16_t port) {
     if (h == kInvalidSocket) return false;
-    socketSetReuseAddr(h, true);
+    // No SO_REUSEADDR here, on purpose (Thema 170). The TCP listener sets it for
+    // TIME_WAIT; UDP has no such state, so there is nothing to reuse and the
+    // option can only do harm: on Linux two sockets that both set it may bind
+    // the same port, and the ephemeral picker for port 0 does not skip a port a
+    // reuse socket holds. Every client transport bound through here then risked
+    // sharing a port with another client or a host, and the kernel delivered
+    // replies to either. A port that is meant to be shared (discovery) goes
+    // through socketBindUdpShared.
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -880,7 +896,9 @@ SocketHandle socketCreateUdpDualStack(std::uint16_t port) {
                          &readBack, &rbLen) != 0) readBack = 1;
 #endif
         if (readBack == 0) {
-            socketSetReuseAddr(h6, true);
+            // No SO_REUSEADDR on the host's UDP socket either — see socketBindUdp.
+            // A second host on the same fixed port must fail to bind, not
+            // silently share it and split the clients between two servers.
             sockaddr_in6 addr{};
             addr.sin6_family = AF_INET6;
             addr.sin6_addr   = in6addr_any;

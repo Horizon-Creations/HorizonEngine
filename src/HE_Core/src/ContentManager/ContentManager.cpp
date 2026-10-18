@@ -1,4 +1,5 @@
 #include "ContentManager/ContentManager.h"
+#include <Platform/ProjectWriteGate.h>
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
@@ -152,15 +153,9 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 // ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
 HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
-	std::ifstream f(path, std::ios::binary);
-	if (!f.is_open()) return HE::AssetType::Unknown;
-
-	HAsset::FileHeader hdr{};
-	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-	if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0)
-		return HE::AssetType::Unknown;
-
-	return static_cast<HE::AssetType>(hdr.asset_type);
+	uint16_t type = 0;
+	return HAsset::readAssetTypeFromFile(path, type) ? static_cast<HE::AssetType>(type)
+	                                                 : HE::AssetType::Unknown;
 }
 
 // ─── parseAndRegisterAsset ────────────────────────────────────────────────────
@@ -680,8 +675,17 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		// (packed builds — the blobs were compiled from the baked GLSL and must
 		// stay consistent with it).
 		else if (m && !m->nodeGraphJson.empty() && m->precompiledShaders.empty())
-			regenerateMaterialFromGraph(id);
+		{
+			// Only once every function it calls is on this machine: regenerating around a
+			// function that is still downloading would bake the "missing function" magenta
+			// into the material. The GLSL saved with the asset stays until then — it is the
+			// graph's own output, regenerating only refreshes it after a codegen upgrade.
+			if (graphFunctionsReady(m->nodeGraphJson))
+				regenerateMaterialFromGraph(id);
+		}
 	}
+	// Whatever this asset points at and has not arrived yet: start those downloads now.
+	prefetchRemoteReferences(id);
 	return id;
 }
 
@@ -1076,6 +1080,15 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 		}
 	}
 
+	// A remote-only EngineContent asset referenced BY PATH (a material's texture or texture
+	// array, its parent or node-graph function, a mesh's material …): there is no UUID here
+	// to find the remote entry by, so look it up by path. The download is asked for, in the
+	// background, and this load reports "not there yet" like every async miss — the caller
+	// asks again next frame, and gets the asset once it has landed. A file that already
+	// exists locally (real, override, cached) is never shadowed by this.
+	if (requestRemotePath(relativePath))
+		return HE::UUID{};
+
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
 	HAsset::Reader reader;
@@ -1329,6 +1342,8 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			{
 				m_diskRegistry[r.id] = r.relativePath;
 				m_remoteAssets.erase(r.id);
+				m_remoteByPath.erase(r.relativePath);
+				m_remoteArrived.insert(r.relativePath);
 				loadAssetAsync(r.id, r.callback);
 			}
 			else if (r.callback)
@@ -1453,6 +1468,12 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 			// traversal — no path lookups. No-op for loose assets (empty ref UUIDs).
 			// The dependencies are wanted by whoever wanted this asset, no longer.
 			expandFrontier(id, interest ? interest->snapshot() : LoadRequester::from({}));
+			// A material that was downloaded (not merely read from disk): the instances
+			// registered while it was still remote could not derive anything from it —
+			// their sync returned early — so they follow it now.
+			if (!m_remoteArrived.empty() && m_remoteArrived.erase(r.relativePath)
+			    && assetType(id) == HE::AssetType::Material)
+				syncMaterialInstancesOf(r.relativePath);
 		}
 		++(id != HE::UUID{} ? m_asyncPollStats.registered : m_asyncPollStats.failed);
 		if (r.callback) r.callback(id);
@@ -1674,9 +1695,78 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 	if (isLoaded(id) || m_diskRegistry.count(id)) return;
 
 	RemoteAssetEntry entry;
+	m_remoteByPath[relativePath] = id;
 	entry.relativePath = std::move(relativePath);
 	entry.materialize   = std::move(materialize);
 	m_remoteAssets[id]  = std::move(entry);
+}
+
+// ─── Remote references ───────────────────────────────────────────────────────
+bool ContentManager::requestRemotePath(const std::string& path)
+{
+	if (m_remoteByPath.empty()) return false;
+	const auto it = m_remoteByPath.find(path);
+	if (it == m_remoteByPath.end() || !m_remoteAssets.count(it->second)) return false;
+	// A real local, override or cached file always wins over the remote copy.
+	std::error_code ec;
+	if (std::filesystem::exists(resolveAbsolutePath(path), ec)) return false;
+	loadAssetAsync(it->second);   // coalesced: asking again while it downloads is a no-op
+	return true;
+}
+
+bool ContentManager::graphFunctionsReady(const std::string& nodeGraphJson)
+{
+	if (m_remoteByPath.empty()) return true;   // nothing is remote: the old behaviour exactly
+	HE::MaterialGraph g;
+	if (!HE::materialGraphFromJson(nodeGraphJson, g)) return true;
+	bool ready = true;
+	for (const HE::MatGraphNode& n : g.nodes)
+		if (n.type == HE::MatNodeType::FunctionCall && !n.s.empty() && !isLoaded(n.s))
+			if (requestRemotePath(n.s)) ready = false;
+	return ready;
+}
+
+void ContentManager::prefetchRemoteReferences(HE::UUID id)
+{
+	if (m_remoteAssets.empty()) return;
+	// Collected first, requested after: a request can touch the asset pools this reads.
+	std::vector<std::string> paths;
+	std::vector<HE::UUID>    ids;
+	auto path = [&](const std::string& p) { if (!p.empty()) paths.push_back(p); };
+	auto uid  = [&](HE::UUID u)           { if (u != HE::UUID{}) ids.push_back(u); };
+	auto sections = [&](const auto* a)
+	{
+		path(a->materialPath); uid(a->materialId);
+		for (const MeshSection& s : a->sections) { path(s.materialPath); uid(s.materialId); }
+	};
+	switch (assetType(id))
+	{
+	case HE::AssetType::Material:
+		if (const MaterialAsset* m = getMaterial(id))
+		{
+			path(m->shaderPath);          uid(m->shaderId);
+			path(m->parentMaterialPath);
+			for (const std::string& p : m->texturePaths)      path(p);
+			for (HE::UUID t : m->textureIds)                  uid(t);
+			for (const std::string& p : m->graphTexturePaths) path(p);
+			for (HE::UUID t : m->graphTextureIds)             uid(t);
+			// The functions the graph calls (a FunctionCall stores the asset's path).
+			if (!m->nodeGraphJson.empty())
+			{
+				HE::MaterialGraph g;
+				if (HE::materialGraphFromJson(m->nodeGraphJson, g))
+					for (const HE::MatGraphNode& n : g.nodes)
+						if (n.type == HE::MatNodeType::FunctionCall) path(n.s);
+			}
+		}
+		break;
+	case HE::AssetType::StaticMesh:   if (const auto* a = getStaticMesh(id))   sections(a); break;
+	case HE::AssetType::SkeletalMesh: if (const auto* a = getSkeletalMesh(id)) sections(a); break;
+	default: break;
+	}
+	for (const std::string& p : paths) requestRemotePath(p);
+	for (HE::UUID u : ids)
+		if (m_remoteAssets.count(u) && !isLoaded(u)) loadAssetAsync(u);
 }
 
 // ─── forgetDiskAsset ─────────────────────────────────────────────────────────
@@ -2193,6 +2283,13 @@ bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPa
 
 bool ContentManager::saveAsset(RuntimeAsset& asset)
 {
+	// An export is reading the project's files (ProjectWriteGate.h). The edit stays
+	// in memory — the asset is still dirty and saves once the export is over.
+	if (HE::ProjectWriteGate::refuse("save this asset"))
+	{
+		HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
+		return false;
+	}
 	const std::string fullPath = resolveSavePath(asset.path);
 	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
 	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
@@ -2209,6 +2306,19 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
 	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
 	noteContentChanged();   // may be the file somebody looked for and did not find
+
+	// What was just written IS the loaded copy, so pollHotReload must not take it
+	// for an outside edit: that unloaded, re-parsed and re-invalidated the asset
+	// after every save (CORE-204). Stat the file the poll stats, which for an
+	// "Engine/" path is not always the one written (resolveAbsolutePath vs
+	// resolveSavePath). Only paths the poll already watches: a freshly created
+	// asset was never watched, and starting now would change what it reloads.
+	if (auto watched = m_pathMtime.find(asset.path); watched != m_pathMtime.end())
+	{
+		std::error_code ec;
+		const auto mtime = std::filesystem::last_write_time(resolveAbsolutePath(asset.path), ec);
+		if (!ec) watched->second = mtime;
+	}
 
 	// Tell whoever is listening that this asset's bytes changed. Fired only on a
 	// successful write, so a collaboration session never publishes a save that
@@ -2611,33 +2721,18 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return false;
 	const SlotHandle handle = it->second;
 
-	// Remove from whichever map actually holds *this* asset. The id check guards
-	// against the same SlotHandle being valid in another map (see lookupAsset).
-	auto tryRemove = [&](auto& map) -> bool
+	// Remove from whichever pool actually holds *this* asset. The id check guards
+	// against the same SlotHandle being valid in another pool (see lookupAsset).
+	// A pool anyPool does not visit would make unloadAsset() return false for its
+	// type, which silently disables hot reload (pollHotReload unloads-then-reloads)
+	// and leaks the slot on manual delete — hence the single list in the header.
+	const bool removed = anyPool([&](auto& pool) -> bool
 	{
-		auto* a = map.get(handle);
+		auto* a = pool.get(handle);
 		if (!a || !(a->id == id)) return false;
-		map.remove(handle);
+		pool.remove(handle);
 		return true;
-	};
-
-	// This chain MUST list every SlotMap member of the class. A type missing here
-	// makes unloadAsset() return false for it, which silently disables hot reload
-	// (pollHotReload unloads-then-reloads) and leaks the slot on manual delete —
-	// exactly what happened to InputAction/InputMappingContext/ParticleGraph/
-	// AnimatorStateMachine after those maps were added.
-	const bool removed =
-		tryRemove(m_staticMeshAssets)   || tryRemove(m_skeletalMeshAssets) ||
-		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
-		tryRemove(m_sceneAssets)        || tryRemove(m_scriptAssets)       ||
-		tryRemove(m_audioAssets)        || tryRemove(m_fontAssets)         ||
-		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets) ||
-		tryRemove(m_propAnimClipAssets) || tryRemove(m_materialFunctionAssets) ||
-		tryRemove(m_widgetAssets)       || tryRemove(m_hcClassAssets)     ||
-		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
-		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
-		tryRemove(m_animatorStateMachineAssets) || tryRemove(m_boneMaskAssets) ||
-		tryRemove(m_blendSpaceAssets)   || tryRemove(m_sequenceAssets);
+	});
 	if (!removed)
 		return false;
 
@@ -2720,9 +2815,12 @@ std::vector<HE::UUID> ContentManager::discoverAssets(HE::AssetType type)
 	{
 		if (ec) break;
 		if (!it->is_regular_file(ec) || it->path().extension() != ".hasset") continue;
-		HAsset::Reader r;
-		if (!r.open(it->path().string()) ||
-		    r.assetType() != static_cast<uint16_t>(type)) continue;
+		// The 32-byte header, not Reader::open(): that pulls every chunk payload
+		// into memory, and this walk runs over the whole tree several times per
+		// play start (PlayerHost, TypeRegistry) only to throw most files away.
+		uint16_t fileType = 0;
+		if (!HAsset::readAssetTypeFromFile(it->path().string(), fileType) ||
+		    fileType != static_cast<uint16_t>(type)) continue;
 		const std::string rel =
 			std::filesystem::relative(it->path(), root, ec).generic_string();
 		const HE::UUID id = loadAsset(rel);
@@ -2768,7 +2866,17 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 		// File changed — unload old entry (removes from m_pathMtime) then reload.
 		auto pathIt = m_pathToUUID.find(relPath);
 		if (pathIt == m_pathToUUID.end()) continue;
-		unloadAsset(pathIt->second);
+		if (!unloadAsset(pathIt->second))
+		{
+			// Pinned by a live AssetRef: the old copy has to stay. loadAsset would
+			// only hand that copy back (the path is still loaded), and without the
+			// new mtime every later poll would report the same file again. Take
+			// the change as seen; a later edit of the file is picked up as usual.
+			HE_LOG_INFO(Asset, "Hot reload: '%s' changed on disk but is in use — kept the loaded copy",
+			            relPath.c_str());
+			storedIt->second = mtime;
+			continue;
+		}
 
 		const HE::UUID newId = loadAsset(relPath); // re-records mtime
 		if (!(newId == HE::UUID{}))
@@ -2924,21 +3032,10 @@ void ContentManager::retargetAssetReferencesInMemory(const std::string& oldRel,
 
 	// …and the `path` an already-loaded asset carries, which is where saveAsset()
 	// writes it back to.
-	auto rekeyAssetPaths = [&](auto& slotMap)
+	forEachPool([&](auto& pool)
 	{
-		for (auto& asset : slotMap) HE::AssetRefs::retargetValue(asset.path, rules);
-	};
-	rekeyAssetPaths(m_staticMeshAssets);   rekeyAssetPaths(m_skeletalMeshAssets);
-	rekeyAssetPaths(m_textureAssets);      rekeyAssetPaths(m_materialAssets);
-	rekeyAssetPaths(m_sceneAssets);        rekeyAssetPaths(m_scriptAssets);
-	rekeyAssetPaths(m_materialFunctionAssets); rekeyAssetPaths(m_widgetAssets);
-	rekeyAssetPaths(m_hcClassAssets);      rekeyAssetPaths(m_inputActionAssets);
-	rekeyAssetPaths(m_inputMappingAssets); rekeyAssetPaths(m_particleGraphAssets);
-	rekeyAssetPaths(m_animatorStateMachineAssets);
-	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
-	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
-	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
-	rekeyAssetPaths(m_sequenceAssets);
+		for (auto& asset : pool) HE::AssetRefs::retargetValue(asset.path, rules);
+	});
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────
@@ -3176,19 +3273,7 @@ void ContentManager::setContentRoot(std::string root)
 void ContentManager::forgetProjectContent()
 {
 	// Every pool, because the DATA is the old project's.
-	m_staticMeshAssets.clear();       m_skeletalMeshAssets.clear();
-	m_textureAssets.clear();          m_materialAssets.clear();
-	m_sceneAssets.clear();            m_scriptAssets.clear();
-	m_materialFunctionAssets.clear(); m_widgetAssets.clear();
-	m_hcClassAssets.clear();          m_inputActionAssets.clear();
-	m_inputMappingAssets.clear();     m_particleGraphAssets.clear();
-	m_animatorStateMachineAssets.clear();
-	m_audioAssets.clear();            m_fontAssets.clear();
-	m_shaderAssets.clear();           m_prefabAssets.clear();
-	m_animClipAssets.clear();         m_propAnimClipAssets.clear();
-	m_sequenceAssets.clear();
-	m_structTypeAssets.clear();      m_enumTypeAssets.clear();
-	m_saveTemplateAssets.clear();
+	forEachPool([](auto& pool) { pool.clear(); });
 
 	// …and every index that pointed into them. m_pathToUUID is the one that
 	// caused the bug; the rest would merely answer about assets that no longer
@@ -3237,7 +3322,90 @@ size_t ContentManager::scanContentDirectory()
 	// scanDirInto calls' comment): resolveAbsolutePath() re-derives the actual
 	// override/default/cache precedence from the filesystem every time anyway.
 	scanDirInto(GlobalState::engineContentCacheDir().string(), std::string(kEnginePrefix));
+	// A rescan is what the editor does after every refresh of its folder trees,
+	// so this is where "the files may have changed" reaches the file index and
+	// everything else that keys on the epoch.
+	noteContentChanged();
 	return m_diskRegistry.size();
+}
+
+ContentManager::AssetFileList ContentManager::assetFiles(HE::AssetType type) const
+{
+	FileIndex& ix = m_assetFileIndex;
+	if (ix.epoch != m_contentEpoch || ix.contentRoot != m_contentRoot ||
+	    ix.engineRoot != m_engineContentRoot)
+	{
+		// Every type in one pass: a header sniff costs the same whichever type
+		// is wanted, and the next picker asks for another one.
+		std::unordered_map<uint16_t, std::vector<AssetFileEntry>> fresh;
+		auto walk = [&](const std::string& rootStr, const std::string& pathPrefix)
+		{
+			if (rootStr.empty()) return;
+			std::error_code ec;
+			std::filesystem::recursive_directory_iterator it(rootStr, ec), end;
+			for (; it != end; it.increment(ec))
+			{
+				if (ec) break;
+				if (!it->is_regular_file(ec)) continue;
+				if (it->path().extension() != ".hasset") continue;
+				const HE::AssetType t = sniffAssetTypeFromFile(it->path().string());
+				if (t == HE::AssetType::Unknown) continue;
+				AssetFileEntry e;
+				e.label = it->path().stem().string();
+				e.path  = pathPrefix + std::filesystem::relative(it->path(), rootStr, ec).generic_string();
+				std::error_code sec;
+				const auto sz = it->file_size(sec);
+				e.bytes = sec ? 0 : static_cast<std::uint64_t>(sz);
+				fresh[static_cast<uint16_t>(t)].push_back(std::move(e));
+			}
+		};
+		walk(m_contentRoot, "");
+		walk(m_engineContentRoot, std::string(kEnginePrefix));
+
+		ix.byType.clear();
+		for (auto& [t, list] : fresh)
+			ix.byType.emplace(t, std::make_shared<const std::vector<AssetFileEntry>>(std::move(list)));
+		ix.epoch       = m_contentEpoch;
+		ix.contentRoot = m_contentRoot;
+		ix.engineRoot  = m_engineContentRoot;
+	}
+	static const AssetFileList kNone = std::make_shared<const std::vector<AssetFileEntry>>();
+	const auto it = ix.byType.find(static_cast<uint16_t>(type));
+	return it != ix.byType.end() ? it->second : kNone;
+}
+
+ContentManager::AssetFileList ContentManager::sceneFiles() const
+{
+	FileIndex& ix = m_sceneFileIndex;
+	if (ix.scenes && ix.epoch == m_contentEpoch && ix.contentRoot == m_contentRoot)
+		return ix.scenes;
+
+	std::vector<AssetFileEntry> out;
+	if (!m_contentRoot.empty())
+	{
+		// Scenes live anywhere under the PROJECT root, not just Content/, and the
+		// path a scene.load pin stores is project-relative ("Content/123.hescene")
+		// because that is what the exporter packs it under and what the game's
+		// loadSceneInto resolves.
+		const std::filesystem::path projectRoot = std::filesystem::path(m_contentRoot).parent_path();
+		std::error_code ec;
+		std::filesystem::recursive_directory_iterator it(
+			projectRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") { ec.clear(); continue; }
+			AssetFileEntry e;
+			e.label = it->path().stem().string();
+			e.path  = it->path().lexically_relative(projectRoot).generic_string();
+			out.push_back(std::move(e));
+		}
+		std::sort(out.begin(), out.end(),
+		          [](const AssetFileEntry& a, const AssetFileEntry& b) { return a.path < b.path; });
+	}
+	ix.scenes      = std::make_shared<const std::vector<AssetFileEntry>>(std::move(out));
+	ix.epoch       = m_contentEpoch;
+	ix.contentRoot = m_contentRoot;
+	return ix.scenes;
 }
 
 bool ContentManager::ensureResident(HE::UUID id)

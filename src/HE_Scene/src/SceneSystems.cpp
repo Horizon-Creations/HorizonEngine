@@ -149,6 +149,9 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // chunk's LOD chain, so it too has to land before LOD picks.
     { HE_PROFILE_SCOPE_N("TerrainTess");    TerrainSystem::updateTessellation(world, cm, renderer, cameraPos); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
+    // Needs the levels LOD just chose (a seam is only mixed once both sides
+    // have picked theirs), so it is the one thing that runs after it.
+    { HE_PROFILE_SCOPE_N("TerrainSeams");   TerrainSystem::stitchSeams(world, cm, renderer); }
 
     pushProfilerSceneCounters(world, cm, gpuParticles);
 }
@@ -281,7 +284,21 @@ std::vector<HE::UUID> collectAssetRefsWhere(HorizonWorld& world, Keep keep)
     // it in here and the packer would go looking for a file that was never written.
     for (auto [e, c] : reg.view<RopeComponent>().each())            if (keep(e)) add(c.materialAssetId);
     for (auto [e, c] : reg.view<TrailComponent>().each())           if (keep(e)) add(c.materialAssetId);
-    for (auto [e, c] : reg.view<WeatherComponent>().each())         if (keep(e)) add(c.thunderSound);
+    // The weather's OWN sounds, the slots that are set. A null slot plays the
+    // EngineContent default (WeatherAudio::soundFor) and is deliberately not listed:
+    // the exporter ships the whole engine content folder in the pak, WeatherAudio
+    // loads the default with ensureResident when the weather first needs it, and a
+    // project without that folder would otherwise log a missing-asset error for a
+    // sound it never asked for on every scene load.
+    for (auto [e, c] : reg.view<WeatherComponent>().each())
+    {
+        if (!keep(e)) continue;
+        add(c.thunderSound);
+        add(c.rainSound);
+        add(c.windSound);
+        add(c.snowSound);
+        add(c.stormSound);
+    }
     for (auto [e, c] : reg.view<LODComponent>().each())             if (keep(e)) for (const auto& lvl : c.levels) add(lvl.meshId);
     for (auto [e, c] : reg.view<AnimatorStateMachineComponent>().each()) if (keep(e)) add(c.stateMachineAssetId);
 

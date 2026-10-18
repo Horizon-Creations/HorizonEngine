@@ -2,7 +2,10 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Logger.h>
+#include <Types/TypeRegistry.h>
 #include <algorithm>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -316,9 +319,104 @@ ClassLoader contentLoader(ContentManager& cm)
 }
 }
 
+namespace
+{
+// ── The class cache (CORE-303) ───────────────────────────────────────────────
+// Every spawn resolved its class from scratch: a JSON parse of each class in
+// the chain with all of fromJson's passes, and the merge — about 3 ms and ten
+// thousand allocations for a two-level class of 250 nodes, per enemy, per
+// projectile. The answer depends on exactly three things: what each class
+// asset in the chain holds (graphJson and baseClass), and the struct/enum
+// definitions fromJson mirrors pins from. The cache keeps the first two as
+// the walk read them and the TypeRegistry generation for the third, and a hit
+// re-reads the chain and COMPARES — a string compare per class, no parse.
+//
+// Validating instead of invalidating is the point. A class changes through
+// saveAsset (which no longer goes through hot reload), a hot reload, a
+// registerHorizonCodeClass from memory, a project switch, a rename; a base
+// class can appear after its derived class was cached. Hooks in each of those
+// would be one more list to keep complete. A compare cannot miss one.
+//
+// Only a clean walk is kept: one that ended at an engine class or at no base.
+// A walk that stopped at a missing base or a cycle logged why, and resolving
+// it again has to say so again.
+//
+// An entry is immutable once filed and shared out, so a hit takes a reference
+// count under the lock, not a copy of every class's JSON.
+struct CachedClass
+{
+    struct Link { std::string key, graphJson, baseClass; };
+    std::vector<Link> chain;   // leaf first, as walked
+    uint64_t          types = 0;
+    ResolvedClass     resolved;
+};
+
+std::mutex& cacheMutex()
+{
+    static std::mutex m;
+    return m;
+}
+// By class path. One process may hold several ContentManagers (tests, the
+// editor's preview of another project); an entry of another one simply fails
+// the compare and is replaced.
+std::unordered_map<std::string, std::shared_ptr<const CachedClass>>& classCache()
+{
+    static std::unordered_map<std::string, std::shared_ptr<const CachedClass>> c;
+    return c;
+}
+
+// Does the content system still hold exactly what `c` was resolved from?
+// Each asset is compared the moment it is fetched: the next loadAsset may move
+// the pool it lives in.
+bool chainUnchanged(ContentManager& cm, const CachedClass& c)
+{
+    if (c.types != HE::TypeRegistry::instance().generation()) return false;
+    for (const CachedClass::Link& l : c.chain)
+    {
+        const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(cm.loadAsset(l.key));
+        if (!a || a->graphJson != l.graphJson || a->baseClass != l.baseClass) return false;
+    }
+    return true;
+}
+} // namespace
+
 ResolvedClass resolveClassAsset(ContentManager& cm, const std::string& classPath)
 {
-    return resolveClass(classPath, contentLoader(cm));
+    {
+        std::shared_ptr<const CachedClass> hit;
+        {
+            std::lock_guard<std::mutex> lk(cacheMutex());
+            auto it = classCache().find(classPath);
+            if (it != classCache().end()) hit = it->second;
+        }
+        // Checked outside the lock: the loads may log, and a log sink may well
+        // resolve a class of its own.
+        if (hit && chainUnchanged(cm, *hit)) return hit->resolved;
+    }
+
+    // A miss: walk it for real, writing down what the walk read. The
+    // generation is taken BEFORE the walk: a struct the walk's own loads
+    // register then makes the entry stale at once, which is the safe side.
+    auto entry = std::make_shared<CachedClass>();
+    entry->types = HE::TypeRegistry::instance().generation();
+    bool clean = true;
+    const ClassLoader load = contentLoader(cm);
+    ResolvedClass rc = resolveClass(classPath,
+        [&](const std::string& key, std::string& json, std::string& base)
+        {
+            if (!load(key, json, base)) { clean = false; return false; }
+            entry->chain.push_back({ key, json, base });
+            return true;
+        });
+    // Clean = it ended where a class chain is meant to end. A cycle ends on a
+    // base that is another class asset already walked.
+    if (!clean || !rc.ok || entry->chain.empty()) return rc;
+    const std::string& lastBase = entry->chain.back().baseClass;
+    if (!lastBase.empty() && !findEngineClass(lastBase)) return rc;
+    entry->resolved = rc;
+    std::lock_guard<std::mutex> lk(cacheMutex());
+    classCache()[classPath] = std::move(entry);
+    return rc;
 }
 
 std::vector<OverridableMember> overridableMembersOf(ContentManager& cm,

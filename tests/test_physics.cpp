@@ -14,6 +14,7 @@
 #include <Physics/CollisionLayers.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -3279,4 +3280,396 @@ TEST_CASE("PhysicsWorld: the broken-joint queue is bounded when nobody polls it"
 
     // And the cap left the drain-on-read contract alone.
     CHECK(phys.pollJointBroken().empty());
+}
+
+// ─── Streamed cells: a charge of bodies, joints that wait, bodies held (Thema 164, 3a) ───
+
+namespace {
+    // Ground wide enough to land on: a 40 x 1 x 40 box, its top face at y = 0.
+    Entity makeGround(HorizonWorld& world, const char* name = "Ground")
+    {
+        Entity e = world.createEntity(name);
+        TransformComponent t; t.position = { 0.0f, -0.5f, 0.0f }; t.scale = { 40.0f, 1.0f, 40.0f };
+        world.addComponent(e, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+        world.addComponent(e, rb);
+        return e;
+    }
+
+    void stepFor(PhysicsWorld& phys, HorizonWorld& world, int steps)
+    {
+        for (int i = 0; i < steps; ++i)
+            phys.step(world, kDt);
+    }
+}
+
+TEST_CASE("PhysicsWorld::addEntities: a charge builds what addEntity builds, once each, and finds its own joints")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    phys.initialize(world);
+    REQUIRE(phys.bodyCount() == 0u);
+
+    std::vector<uint32_t> ids;
+    std::vector<Entity>   crates;   // dynamic, falling
+    for (int i = 0; i < 40; ++i)
+    {
+        const Entity e = (i % 4 == 0)
+            ? makeDynamicBox(world, "Crate", { static_cast<float>(i) * 3.0f, 8.0f, 0.0f })
+            : makeStaticBox(world,  "Wall",  { static_cast<float>(i) * 3.0f, 0.0f, 0.0f });
+        if (i % 4 == 0) crates.push_back(e);
+        ids.push_back(static_cast<uint32_t>(e));
+    }
+    // A joint inside the charge, the owner BEFORE its partner: nothing else orders them.
+    const Entity hung   = makeDynamicBox(world, "Hung",   { 200.0f, 20.0f, 0.0f });
+    const Entity anchor = makeStaticBox(world,  "Anchor", { 198.0f, 20.0f, 0.0f });
+    jointTo(world, hung, anchor, JointType::Fixed);
+    ids.push_back(static_cast<uint32_t>(hung));
+    ids.push_back(static_cast<uint32_t>(anchor));
+    // Things a charge may contain and builds nothing for: an entity with no body, one that
+    // is named twice, one that is gone.
+    const Entity bare = world.createEntity("Bare");
+    { TransformComponent t; world.addComponent(bare, t); }
+    ids.push_back(static_cast<uint32_t>(bare));
+    ids.push_back(ids.front());
+    const Entity gone = world.createEntity("Gone");
+    { TransformComponent t; world.addComponent(gone, t); RigidBodyComponent rb; world.addComponent(gone, rb); }
+    const uint32_t goneId = static_cast<uint32_t>(gone);
+    world.destroyEntity(gone);
+    ids.push_back(goneId);
+
+    CHECK(phys.addEntities(world, ids) == 42);
+    CHECK(phys.bodyCount() == 42u);
+    CHECK_FALSE(phys.hasPhysics(static_cast<uint32_t>(bare)));
+    CHECK_FALSE(phys.hasPhysics(goneId));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // The same charge again replaces and leaks nothing, the way addEntity does.
+    CHECK(phys.addEntities(world, ids) == 42);
+    CHECK(phys.bodyCount() == 42u);
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // And it all simulates: the crates fall, the walls stay, the jointed one hangs.
+    stepFor(phys, world, kSteps2s);
+    for (const Entity c : crates)
+        CHECK(posOf(world, c).y < 4.0f);
+    CHECK(posOf(world, hung).y == doctest::Approx(20.0f).epsilon(0.02));
+    CHECK(phys.raycast({ 3.0f, 5.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 10.0f).hit);   // a wall, found by a query
+
+    // An empty charge, and a world that was never built.
+    CHECK(phys.addEntities(world, {}) == 0);
+    HorizonWorld other;
+    PhysicsWorld unbuilt;
+    CHECK(unbuilt.addEntities(other, {}) == 0);
+}
+
+// MUTATION: in PhysicsWorld::removeEntityTree, map requeueJoints to JointFate::Drop (the plain
+// removal): the `wait` run fails on the joint that does not come back.
+TEST_CASE("PhysicsWorld::removeEntityTree: a joint kept for a returning cell comes back, however many spawns come between")
+{
+    for (const bool wait : { true, false })
+    {
+        CAPTURE(wait);
+        HorizonWorld world;
+        const Entity anchor = makeStaticBox(world,  "Anchor", { 0.0f, 10.0f, 0.0f });
+        const Entity hung   = makeDynamicBox(world, "Hung",   { 2.0f, 10.0f, 0.0f });
+        jointTo(world, hung, anchor, JointType::Fixed);
+        PhysicsWorld phys;
+        phys.initialize(world);
+        REQUIRE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+        // The anchor's cell goes out: its physics, not its entity (which streams back with
+        // the id it had).
+        CHECK(phys.removeEntityTree(world, static_cast<uint32_t>(anchor), wait) == 1);
+        CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));
+        CHECK_FALSE(phys.hasPhysics(static_cast<uint32_t>(anchor)));
+
+        // Twenty unrelated spawns, more than the passes a spawn that is merely early gets
+        // before it is given up on (eight): another cell's load does exactly this.
+        for (int i = 0; i < 20; ++i)
+        {
+            const Entity other = makeStaticBox(world, "Other", { 100.0f + static_cast<float>(i) * 3.0f, 0.0f, 0.0f });
+            CHECK(phys.addEntity(world, static_cast<uint32_t>(other)));
+            CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));
+        }
+
+        // The anchor is back.
+        CHECK(phys.addEntity(world, static_cast<uint32_t>(anchor)));
+        CHECK(phys.hasJoint(static_cast<uint32_t>(hung)) == wait);
+        stepFor(phys, world, kSteps2s);
+        if (wait)
+            CHECK(posOf(world, hung).y == doctest::Approx(10.0f).epsilon(0.02));
+        else
+            CHECK(posOf(world, hung).y < 5.0f);   // no joint: nothing holds it up
+    }
+}
+
+TEST_CASE("PhysicsWorld::initialize: a joint to an entity that is not in the world yet is built when it arrives")
+{
+    // The base of a split scene holds the door, the frame is in a cell that has not been
+    // loaded: the partner is not late and not wrong, it is away.
+    HorizonWorld world;
+    const HE::UUID frameId = HE::UUID::generate();
+    const Entity hung = makeDynamicBox(world, "Hung", { 2.0f, 10.0f, 0.0f });
+    {
+        JointComponent j;
+        j.type   = JointType::Fixed;
+        j.target = frameId;
+        world.registry().emplace_or_replace<JointComponent>(hung, j);
+    }
+    PhysicsWorld phys;
+    phys.initialize(world);
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    for (int i = 0; i < 20; ++i)
+    {
+        const Entity other = makeStaticBox(world, "Other", { 100.0f + static_cast<float>(i) * 3.0f, 0.0f, 0.0f });
+        phys.addEntity(world, static_cast<uint32_t>(other));
+    }
+    CHECK_FALSE(phys.hasJoint(static_cast<uint32_t>(hung)));
+
+    // The partner arrives, under the id the joint names.
+    const Entity frame = makeStaticBox(world, "Frame", { 0.0f, 10.0f, 0.0f });
+    world.setEntityId(frame, frameId);
+    CHECK(phys.addEntity(world, static_cast<uint32_t>(frame)));
+    CHECK(phys.hasJoint(static_cast<uint32_t>(hung)));
+    stepFor(phys, world, kSteps2s);
+    CHECK(posOf(world, hung).y == doctest::Approx(10.0f).epsilon(0.02));
+}
+
+// MUTATION: make applyRegionHold return at once (or install no test): the control run still
+// falls, the held run falls too, and the first CHECK on the held crate fails.
+TEST_CASE("PhysicsWorld::setRegionHold: a body held where the floor is gone does not fall, and carries on when it is back")
+{
+    for (const bool hold : { true, false })
+    {
+        CAPTURE(hold);
+        HorizonWorld world;
+        const Entity ground = makeGround(world);
+        const Entity crate  = makeDynamicBox(world, "Crate", { 0.0f, 0.5f, 0.0f });   // on the ground
+        PhysicsWorld phys;
+        bool groundGone = false;
+        if (hold)
+            phys.setRegionHold([&](const glm::vec3&) { return groundGone; });
+        phys.initialize(world);
+        stepFor(phys, world, kSteps2s);
+        const float rest = posOf(world, crate).y;
+        REQUIRE(rest == doctest::Approx(0.5f).epsilon(0.1));
+        CHECK(phys.heldCount() == 0u);
+
+        // The ground goes (a cell going out); the hold test says so from the next step on.
+        phys.removeEntity(static_cast<uint32_t>(ground));
+        groundGone = true;
+        // The crate has lain still for two seconds, so it sleeps, and Jolt does not wake what
+        // lay on a body that is taken away: left alone it would hang in the air. Something
+        // touches it, as something does in a game sooner or later, and that is when the missing
+        // floor shows.
+        CHECK(phys.addImpulse(static_cast<uint32_t>(crate), { 0.0f, 0.01f, 0.0f }));
+        stepFor(phys, world, kSteps2s);
+        if (!hold)
+        {
+            // The control: nothing holds it, and it is gone through the floor that is not there.
+            CHECK(posOf(world, crate).y < -5.0f);
+            continue;
+        }
+        CHECK(posOf(world, crate).y == doctest::Approx(rest).epsilon(0.01));
+        CHECK(phys.heldCount() == 1u);
+        CHECK(phys.hasPhysics(static_cast<uint32_t>(crate)));   // held is not removed
+        // Out of the simulation means out of the queries too.
+        const auto hit = phys.raycast({ 0.0f, 5.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f);
+        CHECK_FALSE(hit.hit);
+
+        // The ground is back, and then the hold ends: the crate is where it was and stays.
+        CHECK(phys.addEntity(world, static_cast<uint32_t>(ground)));
+        groundGone = false;
+        stepFor(phys, world, kSteps2s);
+        CHECK(phys.heldCount() == 0u);
+        CHECK(posOf(world, crate).y == doctest::Approx(rest).epsilon(0.1));
+        CHECK(phys.raycast({ 0.0f, 5.0f, 0.0f }, { 0.0f, -1.0f, 0.0f }, 20.0f).hit);
+    }
+}
+
+TEST_CASE("PhysicsWorld::setRegionHold: only the dynamic bodies are asked, by their world position")
+{
+    HorizonWorld world;
+    const Entity wall  = makeStaticBox(world, "Wall", { 100.0f, 5.0f, 0.0f });
+    const Entity crate = makeDynamicBox(world, "Crate", { 100.0f, 9.0f, 0.0f });
+    const Entity near  = makeDynamicBox(world, "Near", { 0.0f, 9.0f, 0.0f });
+    PhysicsWorld phys;
+    std::vector<glm::vec3> asked;
+    phys.setRegionHold([&](const glm::vec3& p) { asked.push_back(p); return p.x > 50.0f; });
+    phys.initialize(world);
+    stepFor(phys, world, 30);
+
+    // The crate over x = 100 is held where it started; the one at x = 0 fell. The static wall is
+    // never asked about, nor is anything asked twice a step.
+    CHECK(posOf(world, crate).y == doctest::Approx(9.0f).epsilon(0.001));
+    CHECK(posOf(world, near).y < 8.5f);
+    CHECK(phys.heldCount() == 1u);
+    CHECK(asked.size() == 60u);   // two dynamic bodies, thirty steps
+    for (const glm::vec3& p : asked)
+        CHECK(p.y > 5.5f);        // the wall is at 5; every question was about a crate
+    (void)wall;
+
+    // A test that is taken away lets everything back in.
+    phys.setRegionHold(nullptr);
+    CHECK(phys.heldCount() == 0u);
+    stepFor(phys, world, 30);
+    CHECK(posOf(world, crate).y < 8.9f);   // falling again
+}
+
+TEST_CASE("PhysicsWorld::setRegionHold: a held body survives a shift of the origin, a removal, a gravity change and clear()")
+{
+    HorizonWorld world;
+    const Entity crate  = makeDynamicBox(world, "Crate", { 100.0f, 9.0f, 0.0f });
+    const Entity second = makeDynamicBox(world, "Second", { 130.0f, 9.0f, 0.0f });
+    PhysicsWorld phys;
+    phys.setRegionHold([](const glm::vec3& p) { return p.x > 50.0f; });
+    phys.initialize(world);
+    stepFor(phys, world, 5);
+    REQUIRE(phys.heldCount() == 2u);
+
+    // The world origin moves by 60: a held body moves with it (the crate's x 100 → 40, which is out
+    // of the hold; the second one's 130 → 70, which is not).
+    phys.shiftOrigin({ 60.0f, 0.0f, 0.0f });
+    // Gravity flips: a held body is not woken, and in particular not put on the active list outside
+    // the broad phase.
+    phys.setGravity({ 0.0f, 9.81f, 0.0f });
+    stepFor(phys, world, 30);
+    // The crate is outside the hold now, so it is let back in, where the shift put it, and goes UP
+    // under the flipped gravity; the second one is still held, still where it was.
+    CHECK(phys.heldCount() == 1u);
+    CHECK(posOf(world, crate).x == doctest::Approx(40.0f).epsilon(0.01));
+    CHECK(posOf(world, crate).y > 9.0f);
+    CHECK(posOf(world, second).y == doctest::Approx(9.0f).epsilon(0.001));
+    // Removing a held body, and clearing a world that holds some, does not trip over them.
+    phys.removeEntity(static_cast<uint32_t>(second));
+    CHECK(phys.heldCount() == 0u);
+    CHECK_FALSE(phys.hasPhysics(static_cast<uint32_t>(second)));
+    phys.clear();
+    CHECK(phys.bodyCount() == 0u);
+    CHECK(phys.heldCount() == 0u);
+}
+
+// Jolt activates, in the middle of the step, every dynamic body that a constraint of an active
+// body names and that is not active itself (TwoBodyConstraint::BuildIslands), without asking
+// whether it is in the broad phase. A held body with a live constraint to a free one would be
+// put back on the active list outside the tree and fall on, held in name only. So the hold
+// takes the joints of a body out with it, and they come back when it does.
+TEST_CASE("PhysicsWorld::setRegionHold: a held body does not keep its joint to a loose one, and the joint is built again when it is let go")
+{
+    HorizonWorld world;
+    const Entity loose = makeDynamicBox(world, "Loose", { 0.0f,   10.0f, 0.0f });
+    const Entity away = makeDynamicBox(world, "Away", { 100.0f, 10.0f, 0.0f });
+    jointTo(world, loose, away, JointType::Distance);   // a rod as long as they are apart: 100 m
+    PhysicsWorld phys;
+    bool hold = true;
+    phys.setRegionHold([&](const glm::vec3& p) { return hold && p.x > 50.0f; });
+    phys.initialize(world);
+    const uint32_t looseId = static_cast<uint32_t>(loose);
+    const uint32_t awayId  = static_cast<uint32_t>(away);
+    REQUIRE(phys.hasJoint(looseId));
+
+    stepFor(phys, world, kSteps2s);
+    // The one over x = 100 is out of the simulation, and so is the rod: it is not what holds it.
+    CHECK(phys.heldCount() == 1u);
+    CHECK_FALSE(phys.hasJoint(looseId));
+    CHECK(posOf(world, away).x == doctest::Approx(100.0f).epsilon(0.001));
+    CHECK(posOf(world, away).y == doctest::Approx(10.0f).epsilon(0.001));
+    // The loose one is not hanging from a body that is not there: it fell straight down.
+    CHECK(std::abs(posOf(world, loose).x) < 0.01f);
+    CHECK(posOf(world, loose).y < 0.0f);
+
+    // A joint asked for while a body is held waits for the hold too.
+    CHECK_FALSE(phys.addJoint(world, looseId, awayId, PhysicsWorld::JointDesc{ HE::JointType::Distance }));
+    CHECK_FALSE(phys.hasJoint(looseId));
+
+    // The hold ends: the rod is built again (at the distance they are apart now) and nothing blows up.
+    hold = false;
+    stepFor(phys, world, 30);
+    CHECK(phys.heldCount() == 0u);
+    CHECK(phys.hasJoint(looseId));
+    stepFor(phys, world, kSteps2s);
+    CHECK(std::isfinite(posOf(world, loose).y));
+    CHECK(std::isfinite(posOf(world, away).y));
+    CHECK(phys.hasJoint(looseId));
+}
+
+TEST_CASE("PhysicsWorld::setRegionHold: a character is not stepped while it is held, so it does not fall into the gap")
+{
+    HorizonWorld world;
+    PhysicsWorld phys;
+    bool held = true;
+    phys.setRegionHold([&](const glm::vec3&) { return held; });
+    const auto c = makeStandingCharacter(world, phys);   // initialises and steps 2 s: held the whole time
+    const float held0 = world.registry().get<TransformComponent>(c.character).position.y;
+    CHECK(held0 == doctest::Approx(4.0f).epsilon(0.001));   // it was put at 4 m and has not moved
+    CHECK(phys.heldCount() == 1u);
+
+    // Let go, and it falls to the floor and stands there.
+    held = false;
+    stepFor(phys, world, kSteps2s);
+    CHECK(phys.heldCount() == 0u);
+    CHECK(world.registry().get<TransformComponent>(c.character).position.y < 3.0f);
+    CHECK(world.registry().get<CharacterControllerComponent>(c.character).isGrounded);
+}
+
+// Run by hand (it is skipped in a normal run): he_tests --no-skip --test-case='Physics charge bench*'
+// A cell comes in a slice at a time. addEntity per entity pays, for each of them, a walk over
+// every joint in the world (the teardown that makes it idempotent), one retry of the pending
+// joints, and a broad phase insert of its own; addEntities pays the walk for nothing (a fresh
+// entity has nothing to tear down), retries once, and inserts the whole slice together.
+TEST_CASE("Physics charge bench: a slice of bodies through addEntities against addEntity one by one" * doctest::skip())
+{
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::time_point a, Clock::time_point b)
+    {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    constexpr int kSpawn = 3000;   // static boxes to bring in
+    constexpr int kSlice = 128;
+
+    for (const int jointed : { 0, 500 })   // joints already in the world: what the teardown walks over
+    for (const int mode : { 0, 1 })        // 0 = one by one, 1 = in slices of 128
+    {
+        HorizonWorld world;
+        for (int i = 0; i < jointed; ++i)
+        {
+            const float x = static_cast<float>(i) * 3.0f;
+            const Entity hook = makeStaticBox(world,  "Hook", { x, 10.0f, -50.0f });
+            const Entity load = makeDynamicBox(world, "Load", { x, 8.0f, -50.0f });
+            jointTo(world, load, hook, JointType::Distance);
+        }
+        PhysicsWorld phys;
+        phys.initialize(world);
+        REQUIRE(phys.bodyCount() == static_cast<size_t>(jointed) * 2);
+
+        std::vector<uint32_t> ids;
+        ids.reserve(kSpawn);
+        for (int i = 0; i < kSpawn; ++i)
+            ids.push_back(static_cast<uint32_t>(
+                makeStaticBox(world, "Box", { static_cast<float>(i % 60) * 2.0f, 0.0f, static_cast<float>(i / 60) * 2.0f })));
+
+        const auto t0 = Clock::now();
+        if (mode == 0)
+            for (const uint32_t id : ids)
+                phys.addEntity(world, id);
+        else
+            for (size_t at = 0; at < ids.size(); at += kSlice)
+            {
+                const size_t end = std::min(ids.size(), at + kSlice);
+                phys.addEntities(world, std::vector<uint32_t>(ids.begin() + at, ids.begin() + end));
+            }
+        const auto t1 = Clock::now();
+        REQUIRE(phys.bodyCount() == static_cast<size_t>(jointed) * 2 + kSpawn);
+
+        // A step afterwards, to see the tree each way of building it left behind.
+        const auto s0 = Clock::now();
+        for (int i = 0; i < 60; ++i) phys.step(world, kDt);
+        const auto s1 = Clock::now();
+
+        const std::string label = mode == 0 ? "addEntity one by one" : "addEntities in slices of 128";
+        MESSAGE(label << ", " << jointed << " joints in the world: " << kSpawn << " bodies in "
+                << ms(t0, t1) << " ms, then 60 steps in " << ms(s0, s1) << " ms");
+    }
 }

@@ -1,4 +1,6 @@
 #include "ThemeAssetPanel.h"
+#include <Platform/ProjectWriteGate.h>
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorApplication.h"     // AppContext
 #include "EditorAssetTypeCache.h"  // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"      // shared per-tab state map
@@ -30,7 +32,6 @@ struct PanelState
 	std::string relPath;
 	HE::UUID    assetId;
 	HE::UITheme theme;
-	std::string lastSaveError;
 	// Scratch buffer for "add a style with a name of my own". Never the theme
 	// itself: an InputText writes on every keystroke, so typing straight into
 	// the style list would leave a style called "C" behind on the way to "Card".
@@ -42,17 +43,17 @@ AssetPanelState<PanelState> s_states;
 bool saveState(PanelState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
-	st.lastSaveError.clear();
 	ThemeAsset* a = ctx.contentManager->getThemeMutable(st.assetId);
 	if (!a)
 	{
-		st.lastSaveError = "Not saved: this theme asset is no longer loaded.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "This theme asset is no longer loaded.");
 		return false;
 	}
 	a->json = HE::uiThemeToJson(st.theme);
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;
@@ -531,12 +532,6 @@ void ThemeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		bar.readout(nullptr, "Theme", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, true)) saveState(st, ctx);
-	}
-	if (!st.lastSaveError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(220, 80, 80, 255));
-		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
-		ImGui::PopStyleColor();
 	}
 
 	{

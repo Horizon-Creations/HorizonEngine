@@ -144,6 +144,11 @@ public:
     void registerStruct(StructDef def);
     void removeType(const std::string& assetPath);   // asset deleted
     void clear();                                    // project switch
+    // Counts the four writes above. Equal twice = nothing registered or
+    // removed in between, which is what lets a cache of anything parsed
+    // against the registry (resolveClassAsset's class cache) know it is
+    // still what a fresh parse would give.
+    uint64_t generation() const;
 
     // Would registering `def` (under def.assetPath) close a reference cycle
     // through the currently registered structs?

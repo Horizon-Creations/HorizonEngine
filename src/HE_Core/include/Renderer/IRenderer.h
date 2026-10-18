@@ -5,6 +5,7 @@
 #include "DebugDraw/DebugDraw.h"
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
 #include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
+#include "Renderer/WaterRipples.h"       // SetWaterRipples: the rings the water material reads
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>   // worldPreviewProjection (below)
 #include <cmath>
@@ -237,15 +238,18 @@ public:
         // the backend keeps rendering CSM shadows + AO/ambient as today.
         bool supportsGlobalIllumination = false;
         // Deferred render path (G-buffer + fullscreen lighting resolve, see
-        // docs/deferred-renderer-plan.md). Metal + OpenGL when built with the
-        // shader cross-compiler (the resolve shader is generated from the shared
-        // lighting preamble at runtime); the editor greys out the Render Path
-        // combo when false and the backend stays forward regardless of
-        // SetRenderPath.
+        // docs/deferred-renderer-plan.md). Metal, OpenGL, D3D11, D3D12 and
+        // Vulkan when built with the shader cross-compiler (the resolve shader is
+        // generated from the shared lighting preamble at runtime); the editor
+        // greys out the Render Path combo when false and the backend stays
+        // forward regardless of SetRenderPath. What each backend's deferred
+        // frame does and does not run (decals, SSR, AO) is plan §10.3/§10.12.
         bool supportsDeferredRendering = false;
-        // Screen-space reflections (docs/ssr-plan.md). v1: Metal only, and only
-        // in the DEFERRED render path's tile mode (the reflection pass reads the
-        // stored G-buffer + the resolved HDR colour — lag-free, no history).
+        // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
+        // plan.md). Metal (in the deferred tile path: lag-free, from the stored
+        // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
+        // frame's HDR; the D3D/Vulkan deferred frame composites the same trace
+        // in the resolve, GL's deferred frame runs none).
         // The editor greys out the SSR toggle when false.
         bool supportsScreenSpaceReflections = false;
         // Ray-traced GI reflections (docs/gi-reflections-plan.md): specular rays
@@ -957,6 +961,18 @@ public:
     // it. Declared last so every vtable slot before it stays where it was.
     virtual void SetSwapchainPostProcessing(bool /*enabled*/) {}
 
+    // ── Water disturbances (the rings on the water surface) ────────────────
+    // The live rings the water physics raised where a body went in or out of the
+    // surface, pushed every frame by the application loop (the scene's
+    // HE::water::RippleField::pack, Renderer/WaterRipples.h). Every graph material
+    // sees them through the Lighting ABI (HE::FillMaterialWater at the fill sites);
+    // the Water Ripple node reads them. Default: none — a frame that never calls
+    // this draws the water exactly as it always did. Plain storage, not virtual: no
+    // backend overrides it, and a new virtual would move the vtable slots of
+    // everything declared after it. The member sits after every other one.
+    void SetWaterRipples(const WaterRippleBlock& w) { m_waterRipples = w; }
+    const WaterRippleBlock& GetWaterRipples() const { return m_waterRipples; }
+
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
@@ -973,4 +989,6 @@ protected:
     // an ImGui ImTextureID. See SetImGuiTextureRegistrar above. Null on backends
     // (OpenGL/D3D11) that build the handle directly inside CreateImGuiTexture.
     std::function<void*(void*, void*)> m_imguiTexRegistrar;
+    // Last: appended after every older member so their offsets stay where they were.
+    WaterRippleBlock     m_waterRipples;
 };

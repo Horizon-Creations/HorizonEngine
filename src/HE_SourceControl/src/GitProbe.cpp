@@ -51,7 +51,7 @@ std::string firstVersionNumber(const std::string& text)
 std::string runCapture(const std::vector<std::string>& args, bool& ok)
 {
 	HE::Proc::Options o;
-	o.exe       = "git";
+	o.exe       = gitLaunchPath();
 	o.args      = args;
 	o.timeoutMs = kProbeTimeoutMs;
 	// git must never stop to ask a question during a probe: with no console to
@@ -60,10 +60,33 @@ std::string runCapture(const std::vector<std::string>& args, bool& ok)
 
 	const HE::Proc::Result r = HE::Proc::run(o);
 	ok = r.ok();
+	if (r.launchFailed && o.exe.is_absolute()) invalidateGitLocation();
 	return trimmed(r.out);
 }
 
 } // namespace
+
+// Only asked on macOS, and only about /usr/bin/git: is there a real git behind
+// the xcrun shim? The usual install folders first, then `xcode-select -p`, which
+// prints the active developer directory (also a custom Xcode location) and just
+// exits non-zero without one — unlike the shim, it never opens an installer.
+bool developerToolsPresent(const std::optional<std::filesystem::path>& found)
+{
+	if (currentPlatform() != HostPlatform::MacOS) return true;
+	if (!found || found->lexically_normal() != std::filesystem::path("/usr/bin/git")) return true;
+
+	std::error_code ec;
+	for (const char* real : { "/Library/Developer/CommandLineTools/usr/bin/git",
+	                          "/Applications/Xcode.app/Contents/Developer/usr/bin/git" })
+		if (std::filesystem::exists(real, ec)) return true;
+
+	HE::Proc::Options o;
+	o.exe       = "/usr/bin/xcode-select";
+	o.args      = { "-p" };
+	o.timeoutMs = kProbeTimeoutMs;
+	const HE::Proc::Result r = HE::Proc::run(o);
+	return r.ok() && std::filesystem::exists(trimmed(r.out) + "/usr/bin/git", ec);
+}
 
 const char* providerName(ProviderKind kind)
 {
@@ -103,23 +126,46 @@ GitProbe probeGit()
 		p.detail += '\n';
 	};
 
-	if (const auto found = HE::Proc::which("git"))
+	// The probe is what Recheck runs, so it must see a git installed since the
+	// last look rather than the cached "not found".
+	invalidateGitLocation();
+	const auto found = gitExecutable();
+	if (found)
 	{
 		p.gitPath = *found;
 		note("git found at " + found->string());
 	}
+	else
+	{
+		note("git not found on PATH or in its known install folders");
+	}
+
+	p.gitBinary = classifyGitBinary(currentPlatform(), found, developerToolsPresent(found));
+	p.install   = detectGitInstallPlan();
 
 	bool ok = false;
-	const std::string gitVer = runCapture({ "--version" }, ok);
-	p.gitFound   = ok;
-	p.gitVersion = parseGitVersion(gitVer);
-	note(ok ? ("git --version: " + gitVer) : "git --version failed — git is not runnable");
+	if (p.gitBinary == GitBinaryState::Stub)
+	{
+		// Not run on purpose: the shim may open Apple's installer, and an install
+		// starting because the editor looked is exactly what must not happen.
+		note("/usr/bin/git is the macOS shim and the Command Line Tools are missing");
+	}
+	else if (p.gitBinary == GitBinaryState::Runnable)
+	{
+		const std::string gitVer = runCapture({ "--version" }, ok);
+		p.gitFound   = ok;
+		p.gitVersion = parseGitVersion(gitVer);
+		note(ok ? ("git --version: " + gitVer) : "git --version failed — git is not runnable");
+	}
 
 	if (!p.gitFound)
 	{
+		note(std::string("install route: ") + gitInstallRouteName(p.install.route) +
+		     " — " + p.install.reason);
 		// Everything below runs git, so stop rather than emit four identical
 		// failures that all mean the same thing.
-		HE_SC_WARN("Source control unavailable: git was not found on PATH");
+		HE_SC_WARN("Source control unavailable: git is not installed (install route: %s)",
+		           gitInstallRouteName(p.install.route));
 		return p;
 	}
 

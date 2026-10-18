@@ -1,6 +1,7 @@
 #pragma once
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <functional>
 #include <memory>
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +10,10 @@
 class HorizonWorld;
 class ContentManager;
 namespace HE { struct CollisionLayerConfig; }
+namespace HE::water { class RippleField; }   // PhysicsWorld::waterRipples (HorizonScene/WaterRipples.h)
 #include <Types/Enums.h>   // HE::JointType, named by JointDesc below
+#include "HorizonScene/PhysicsTuning.h"   // HE::PhysicsLimits, named by the constructor
+#include "HorizonScene/PhysicsBudget.h"   // HE::PhysicsBudgetConfig / Stats
 
 // PIMPL wrapper around Jolt PhysicsSystem.
 // Keeps all Jolt headers out of the public API.
@@ -53,8 +57,136 @@ public:
         uint8_t   layer    = 0;
     };
 
+    // The caches Jolt sizes once, at construction (HE::PhysicsLimits has the
+    // defaults and why they are what they are). The scratch memory of a step is
+    // derived from the same numbers, so the two cannot disagree.
     PhysicsWorld();
+    explicit PhysicsWorld(const HE::PhysicsLimits& limits);
     ~PhysicsWorld();
+
+    // ── Threads (Thema 178) ──────────────────────────────────────────────────
+    // How many threads take part in one step, the one that calls step() included:
+    // 1 is single-threaded, N is the caller plus N-1 Jolt workers. 0 asks for the
+    // automatic count (HE::PhysicsTuning::autoWorkers + the caller). The world
+    // starts on the automatic count; the applications pass the project's setting
+    // (ProjectPhysicsSettings::threads) right after constructing it. The
+    // environment variable HE_PHYSICS_THREADS wins over whatever is asked for.
+    //
+    // Restarts the workers when the number changes, so it belongs between steps,
+    // not inside one; calling it with the number already in force does nothing.
+    // The simulation is deterministic whatever the count (Jolt), so this changes
+    // how fast a step is and nothing it computes.
+    void setThreadCount(int threads);
+    int  threadCount() const;
+
+    // What the step says about its own health. Jolt returns a set of flags from
+    // Update() when one of its fixed-size caches is full and it had to drop
+    // contacts; the engine used to throw that value away, so a pile of ten thousand
+    // boxes ran with a third of its contacts missing and nothing said so.
+    struct StepStats
+    {
+        uint64_t steps          = 0;   // step() calls that ran the simulation
+        uint64_t saturatedSteps = 0;   // …of which Jolt dropped contacts because a cache was full
+        uint32_t lastErrors     = 0;   // flags of the latest step: 1 manifold cache, 2 body-pair cache, 4 contact constraints
+        int      collisionSteps = 1;   // Jolt collision steps the latest step() used (PhysicsTuning::collisionStepsFor)
+    };
+    StepStats stepStats() const;
+
+    // ── Time budget (Thema 178 step 3) ───────────────────────────────────────
+    // A limit on the work AROUND Update(): the characters' ExtendedUpdate (a crowd
+    // is stepped over several steps, each character with the time it missed, in an
+    // order that serves the longest wait first), the scene queries and the body
+    // adds/removes of cell streaming (they cannot be put off, they are charged and
+    // come off the characters' share), and the contact events handed to gameplay
+    // (at most eventsPerPoll per list and poll, the rest queued in order).
+    // HE_PHYSICS_BUDGET_MS in the environment wins over the application's value.
+    // Between steps, like setThreadCount. See docs/physics-threading-budget.md.
+    void                    setBudget(const HE::PhysicsBudgetConfig& config);
+    HE::PhysicsBudgetConfig budget() const;
+    // What the latest step spent and put off.
+    HE::PhysicsBudgetStats  budgetStats() const;
+    // The newest step of any world in the process, for the profiler window, which
+    // holds no world. Zeroed until a step has run.
+    static HE::PhysicsBudgetStats lastBudgetStats();
+
+    // ── Water (Thema 179 step 2) ─────────────────────────────────────────────
+    // Bodies in water get buoyancy, drag and the current of the water they are in
+    // (the field of a landscape, WaterField.h; where its surface is, WaterQuery.h).
+    // It runs inside step(), on the stepping thread, after the region hold and before
+    // Jolt's Update, and nowhere else: no Jolt body is read or written for the water
+    // outside that window, and no query here touches one.
+    //
+    // ON by default. HE_PHYSICS_WATER=0 in the environment starts the world with it
+    // off, setWaterPhysics changes it between steps; off, or with no water in the
+    // scene, the step does what it did before water had physics, bit for bit.
+    // Which bodies it serves and how many per step: RigidBodyComponent::affectedByWater
+    // and ::density, HE::PhysicsBudgetConfig::waterBodiesPerStep; the time it takes is
+    // part of the budget (PhysicsBudgetStats::buoyancyMs).
+    void setWaterPhysics(bool on);
+    bool waterPhysics() const;
+    // The clock the waves run on: seconds of dt that step() has been given since
+    // initialize(). Never the render clock, so a paused or slowed game keeps its bodies
+    // and its waves in step.
+    double simTime() const;
+    // The share (0..1) of the body's volume under water as of the latest step it was
+    // served (a body at rest keeps the share it came to rest with: a stone on the bed
+    // stays "fully under"); 0 for a body that is not in water, was put off past
+    // waterBodiesPerStep before it was ever served, or is unknown. Game thread, between
+    // steps, like the other getters here.
+    float submergedFraction(uint32_t entityId) const;
+
+    // How hard the water lifts the body, in multiples of its own weight, as of the latest
+    // step it was served (Thema 179 step 5): the buoyancy factor times the share under
+    // water, which is what Jolt's impulse is made of. 1 is a body that floats where it is,
+    // above 1 it rises, below 1 it sinks (a stone is about 0.4 however deep it lies); 0 for
+    // a body that is not in water or unknown. A body at rest keeps the number it came to
+    // rest with, like submergedFraction. Game thread, between steps.
+    float waterLift(uint32_t entityId) const;
+
+    // A body went into the water or came out of it (Thema 179 step 5). `entered` is true
+    // when the share of its volume under water crossed RippleTriggers::kWetShare (2 %)
+    // upwards and false when it crossed back; a body that is seen in the water for the
+    // first time (a scene that starts with a crate in the lake) enters then, with whatever
+    // speed it has. `speed` is how fast it went through the surface in m/s, along the
+    // surface normal and relative to the current: down for an entry, up for an exit, never
+    // negative; an exit that was not seen at the surface (the body left over the shore, or
+    // the water dried up under it) has speed 0. `position` is where its centre of mass was.
+    //
+    // Raised by the water step for the bodies it serves, in the order it serves them, so
+    // two runs of the same scene give the same list. Independent of the rings (a water
+    // with `splash` 0 still has events). Water physics off, or no water in the scene,
+    // raises none: the step forgets what it knew of the bodies then.
+    struct WaterEvent
+    {
+        uint32_t  entity   = 0;
+        bool      entered  = true;
+        float     speed    = 0.0f;
+        glm::vec3 position = {};
+    };
+    // Every event since the last call, drained by whoever calls it (like the contact
+    // queues: ask in one place). Nobody drains this one on their own, so kMaxWaterEvents
+    // bounds it: past that the OLDEST are dropped and a throttled warning says nobody is
+    // asking. An entity that is destroyed before it is asked takes its events with it.
+    std::vector<WaterEvent> pollWaterEvents();
+    static constexpr std::size_t kMaxWaterEvents = 256;
+
+    // The rings on the water (Thema 179 step 3): a short list of disturbances of the
+    // surface that the engine water material draws (HE::water::RippleField,
+    // HorizonScene/WaterRipples.h). The step raises them where a body goes into the
+    // water at 1 m/s or more, comes out of it at 1.5 m/s or more, or moves through the
+    // surface (water::Body::physics.splash scales them, 0 turns them off for that
+    // water), and ages them by its own dt: simulation time, not the render clock. The
+    // application loop packs the list into IRenderer::SetWaterRipples every frame, and
+    // a script's water.disturb adds to it. Display only, nothing reads it back into the
+    // simulation. Cleared with the world (clear()). Game thread, between steps, like the
+    // other getters here: step() runs on that thread too, so nothing races it.
+    HE::water::RippleField&       waterRipples();
+    const HE::water::RippleField& waterRipples() const;
+
+    // The limits the world was built with, and the size of the scratch block a
+    // step allocates from (it falls back to the heap past that, never aborts).
+    HE::PhysicsLimits limits() const;
+    std::size_t       tempBytes() const;
 
     // Where triangle meshes come from. ColliderShape::Mesh and ::ConvexHull are
     // built from the entity's own mesh asset, which only the ContentManager can
@@ -141,6 +273,28 @@ public:
     // brings child entities with their own colliders.
     int addEntityTree(HorizonWorld& world, uint32_t rootEntityId);
 
+    // addEntity for a CHARGE of entities (a slice of a streamed cell), and the
+    // count that got a body, a character or a landscape. What it saves over a
+    // loop of addEntity is the per-entity work that does not depend on the
+    // entity: the bodies are created first and go into Jolt's broad phase in ONE
+    // AddBodiesPrepare/AddBodiesFinalize (the header of BodyInterface asks for
+    // exactly that for more than one body), and the pending joints are retried
+    // ONCE for the whole charge instead of after every body. Nothing else
+    // differs: the same builders, the same replace-if-present rule, the same
+    // joint handling, an entity that is not valid or has nothing to build is
+    // skipped, and one named twice is built once.
+    int addEntities(HorizonWorld& world, const std::vector<uint32_t>& entityIds);
+
+    // Jolt's body table is sized once, when the world is built; nothing past it
+    // can be created. Public so that whoever feeds the world in bulk (the cell
+    // streamer) can hold a reserve back instead of finding out from a log line.
+    static constexpr uint32_t kMaxBodies = 65536;
+
+    // How many Jolt bodies the world owns right now: rigid bodies, the proxies of
+    // characters, landscapes, and the ones a region hold has taken out of the
+    // simulation (they still count against kMaxBodies).
+    std::size_t bodyCount() const;
+
     // Destroy the entity's body and/or character. Silent no-op when it has
     // neither. Also drops the entity's pending contact bookkeeping, so a removal
     // never produces an exit event naming an entity that is already gone.
@@ -152,7 +306,59 @@ public:
     // OWNER of that joint brings it back. Anything else would leave an entry
     // waiting for a body that was deliberately deleted.
     void removeEntity(uint32_t entityId);
-    int  removeEntityTree(HorizonWorld& world, uint32_t rootEntityId);
+
+    // removeEntity for a subtree, root included, and the count that had physics.
+    //
+    // `requeueJoints` is for the one kind of removal that is NOT permanent: a
+    // streamed cell going out, to come back when the camera does. With it, every
+    // joint that named a removed body is put on a list that waits for the entity to
+    // be added again (addEntity/addEntities), and rebuilds then: a hinge from a
+    // base door to a frame that streamed out is a hinge again when the frame is
+    // back. It needs the entity to return with the same id (a cell version 2 does),
+    // since a joint names its partner by id. The entries do not run out like the
+    // ones of a spawn that is merely early, and they are dropped on the next
+    // retry once their owner is gone. Without it (the default) this is exactly
+    // removeEntity applied to each.
+    int  removeEntityTree(HorizonWorld& world, uint32_t rootEntityId, bool requeueJoints = false);
+
+    // ── Region hold ──────────────────────────────────────────────────────────
+    // Nothing may fall through a floor that is not there. A streamed cell takes
+    // its floors with it when it goes (and has not brought them yet while it is
+    // being built), and a crate of the base that stood on one would drop out of
+    // the world; so would a character that spawns, or is teleported, into a cell
+    // that is still loading.
+    //
+    // `held` is asked once per step, before the simulation runs, about every
+    // DYNAMIC body and every character, with its WORLD position (relative to the
+    // floating origin, like everything here). True takes it out of the
+    // simulation: a body is removed from Jolt's broad phase (its Body object, its
+    // velocity and its entity stay, and it is invisible to raycasts and contacts
+    // meanwhile), a character is not stepped. False puts it back, as it was.
+    // Static and kinematic bodies are not asked: nothing falls because of them.
+    //
+    // The test belongs to whoever knows where the ground is missing; the physics
+    // world only applies it. A null test (the default) holds nothing.
+    //
+    // JOINTS do not stay: a constraint to a body outside the broad phase makes Jolt
+    // activate that body in the middle of a step, which is a crash, so a body that is
+    // taken out takes its joints with it (both the ones it owns and the ones aimed at
+    // it) and they wait, like the joints of a streamed cell, until it is back in; the
+    // other end is on its own meanwhile. A joint asked for while one end is held
+    // waits as well (addJoint answers false). Jointed things belong to one cell.
+    //
+    // `mayHold` is the optional cheap half of the question: "could `held` say yes
+    // for ANY position at all right now?". Without it every step asks `held` about
+    // every dynamic body, which for a world that streams no cells is twenty
+    // thousand calls to learn "no" (19 % of a step at that size, Thema 178
+    // baseline). With it, a step whose probe says no and that has nothing held
+    // skips the pass; the moment the probe says yes, or anything is held (and has
+    // to be let go), the full pass runs as before. The contract is one way only: a
+    // probe may say yes when the test would say no, never the reverse.
+    using HoldTest  = std::function<bool(const glm::vec3& worldPosition)>;
+    using HoldProbe = std::function<bool()>;
+    void        setRegionHold(HoldTest held, HoldProbe mayHold = {});
+    // Bodies and characters the hold has out of the simulation at the moment.
+    std::size_t heldCount() const;
 
     // TELEPORT — not a movement. Sets the physics representation's position
     // outright and writes the matching LOCAL value into TransformComponent, so
@@ -625,6 +831,21 @@ public:
     void clear();
 
 private:
+    // What happens to the joints that name a body which is being taken down.
+    //   Drop     it is gone for good (removeEntity): the joints go with it and
+    //            nothing waits for it.
+    //   Rebuild  a new body goes up in the same breath (addEntity's replace): the
+    //            owners are retried right away, and an entry that cannot be built
+    //            after a few passes is given up on with a warning.
+    //   Wait     it will be back, but not now (a streamed cell going out): the
+    //            owners wait for the entity to be added again, however many
+    //            unrelated spawns come in between.
+    enum class JointFate : uint8_t { Drop, Rebuild, Wait };
+
+    // A charge of bodies that were created but are not in the broad phase yet
+    // (addEntities). Defined in the source file: its members are Jolt types.
+    struct BodyBatch;
+
     // The per-entity halves of initialize(), shared with addEntity() so the two
     // paths cannot drift — two copies of "how a body is built" is exactly the
     // kind of divergence this class was audited for. Each returns whether it
@@ -634,7 +855,10 @@ private:
     // reading TransformComponent's own fields. That walk is per BUILD — scene
     // start, or one spawn — never per frame: step() moves bodies, it does not
     // rebuild them.
-    bool buildBodyFor(HorizonWorld& world, uint32_t entityId);
+    //
+    // With a `batch` the body is created and recorded there instead of being added
+    // to Jolt; addEntities puts the whole charge in with one call.
+    bool buildBodyFor(HorizonWorld& world, uint32_t entityId, BodyBatch* batch = nullptr);
     bool buildCharacterFor(HorizonWorld& world, uint32_t entityId);
     // The implicit landscape collider: a static height field for a terrain
     // entity that carries no RigidBodyComponent of its own.
@@ -650,11 +874,12 @@ private:
     // one leaves the solver reading freed memory: this must run BEFORE the body
     // goes, from every path that destroys a body.
     //
-    // `requeue` puts the affected owners back on the pending list, which is what
-    // a REBUILD wants (addEntity tears the old body down and builds a new one,
-    // and the chain the entity was part of has to come back) and what a removal
-    // does not.
-    void destroyJointsInvolving(uint32_t entityId, bool requeue);
+    // `fate` says what becomes of the affected owners (see JointFate): back on the
+    // pending list at once for a REBUILD (addEntity tears the old body down and
+    // builds a new one, and the chain the entity was part of has to come back),
+    // back on it for good for a WAIT (a cell that will return), nowhere for a
+    // removal.
+    void destroyJointsInvolving(uint32_t entityId, JointFate fate);
 
     // Break every joint whose component names a breakForce it exceeded in the
     // step that just ran, and remember the pairs for pollJointBroken(). Runs
@@ -663,23 +888,45 @@ private:
     void breakOverloadedJoints(HorizonWorld& world, float dt);
 
     // Try to build every joint that is authored but not yet in the simulation.
-    // Run after each body is built, because "the partner does not exist yet" is
-    // the normal state halfway through a spawn. Gives up on an entry that has
-    // failed too often, so the list cannot become a leak.
+    // Run after each body (or charge of bodies) is built, because "the partner
+    // does not exist yet" is the normal state halfway through a spawn. Gives up
+    // on an entry that has failed too often, so the list cannot become a leak.
+    //
+    // The entries that WAIT for a cell (JointFate::Wait, and a joint at scene
+    // start whose partner lives in a cell that is not loaded yet) are the
+    // exception: they are not failing, the partner is simply not there, and a
+    // cell may be a long walk away. They are retried silently, only when their
+    // partner exists, never counted against and never given up on; the next pass
+    // after their owner is gone drops them.
     void resolvePendingJoints(HorizonWorld& world);
 
     // The teardown half behind removeEntityImpl(). Includes dropping the
     // entity's contact bookkeeping and every joint the body was part of.
-    // `requeueJoints` is passed straight to destroyJointsInvolving — see there
-    // for which of the two callers wants which.
-    void destroyBodyFor(uint32_t entityId, bool requeueJoints);
+    // `fate` is passed straight to destroyJointsInvolving — see there for which
+    // of the callers wants which.
+    void destroyBodyFor(uint32_t entityId, JointFate fate);
 
-    // The body of removeEntity(), with the one thing the two callers disagree
+    // The body of removeEntity(), with the one thing the callers disagree
     // about made explicit. A REBUILD (addEntity, which tears the old body down
-    // to put a new one up) wants the joints back; the public, permanent
-    // removeEntity() does not. Both used to arrive here with `true`, which put
-    // a surviving partner's joint on a list that could never resolve.
-    void removeEntityImpl(uint32_t entityId, bool requeueJoints);
+    // to put a new one up) wants the joints back at once; the public, permanent
+    // removeEntity() does not; a streamed cell wants them back whenever it
+    // returns. The first two used to be one `true`, which put a surviving
+    // partner's joint on a list that could never resolve.
+    void removeEntityImpl(uint32_t entityId, JointFate fate);
+
+    // The hold of setRegionHold, applied to the dynamic bodies. Runs at the top of
+    // step(), before the simulation: a body that has to be held leaves the broad
+    // phase now, so the step never lets it fall. (The characters are asked in
+    // their own loop, where their position is at hand.)
+    void applyRegionHold();
+
+    // The water's effect on the bodies in it (setWaterPhysics): buoyancy, drag and
+    // current as a Jolt impulse, for the active dynamic bodies over a landscape's
+    // water. Runs in step() right after applyRegionHold and before Update, on the
+    // stepping thread — the one window in which no Jolt worker is inside a body and
+    // every writer is a call on this thread. Returns the milliseconds it took, which
+    // step() books against the budget.
+    double applyWater(HorizonWorld& world, float dt);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

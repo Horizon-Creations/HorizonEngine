@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
+#include "fixtures/hpak_v2_sample.h"
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakFormat.h>
@@ -110,11 +111,12 @@ static bool orEntryFlagsInPak(const std::filesystem::path& p, uint8_t extraFlags
 
 // ─── Format layout ─────────────────────────────────────────────────────────────
 
-TEST_CASE("hpak v2 struct sizes are fixed")
+TEST_CASE("hpak struct sizes are fixed (v3 kept the v2 layout)")
 {
     CHECK(sizeof(Hpak::FileHeader) == 64);
     CHECK(sizeof(Hpak::EntryDesc)  == 56);
-    CHECK(Hpak::k_version == 2);
+    CHECK(Hpak::k_version == 3);
+    CHECK(Hpak::k_oldestVersion == 2);
 }
 
 // ─── Round-trip basics ─────────────────────────────────────────────────────────
@@ -2233,4 +2235,236 @@ TEST_CASE("SceneSystems::collectAssetRefs names each asset once, in first-seen o
     REQUIRE(refs.size() == 2);
     CHECK(refs[0] == meshId);   // meshes are gathered before materials
     CHECK(refs[1] == matId);
+}
+
+// ─── Version-2 packages (byte-wise hash) stay readable (Thema 213, CORE-403) ─
+
+// The four entries of fixtures/hpak_v2_sample.h, one per stored form. Each is a
+// material blob with a 3 KiB half-compressible pad, so LZ4/zstd really compress.
+static const HE::UUID kV2FixtureIds[4] = {
+    {0x0213000000000001ull, 0x11}, {0x0213000000000002ull, 0x22},
+    {0x0213000000000003ull, 0x33}, {0x0213000000000004ull, 0x44}};
+
+static std::vector<uint8_t> v2FixtureBlob(int i)
+{
+    const HE::UUID id = kV2FixtureIds[i];
+    HAsset::Reader base;
+    base.openData(makeMaterialBlob(id, "v2_fixture_" + std::to_string(i)));
+    std::vector<uint8_t> pad(3072);
+    uint32_t x = 0x9E3779B9u * static_cast<uint32_t>(i + 1);
+    for (size_t b = 0; b < pad.size(); ++b)
+    {
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        pad[b] = static_cast<uint8_t>((b & 0xF0) | (x & 0x0F));
+    }
+    HAsset::Writer w;
+    for (const auto& c : base.chunks()) w.addChunk(c.id, c.data.data(), c.data.size());
+    w.addChunk(HAsset::makeChunkId('P','A','D','B'), pad.data(), pad.size());
+    return w.toBytes(static_cast<uint16_t>(HE::AssetType::Material));
+}
+
+static Hpak::PackSettings v2FixtureSettings(int i)
+{
+    Hpak::PackSettings s;
+    s.codec = i == 1 ? Hpak::Codec::LZ4 : i == 2 ? Hpak::Codec::Zstd : Hpak::Codec::Store;
+    s.encrypt = (i == 3);
+    for (int k = 0; k < 32; ++k) s.key[k] = static_cast<uint8_t>(0xA0 + k);
+    return s;
+}
+
+static std::filesystem::path writeV2Fixture(const char* name)
+{
+    const auto p = std::filesystem::temp_directory_path() / name;
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(he_test::kHpakV2Sample),
+              static_cast<std::streamsize>(he_test::kHpakV2SampleSize));
+    return out.good() ? p : std::filesystem::path{};
+}
+
+// Offset of entry `i`'s stored bytes, straight from the fixture's TOC.
+static uint64_t v2FixtureDataOffset(int i)
+{
+    Hpak::EntryDesc d{};
+    std::memcpy(&d, he_test::kHpakV2Sample + sizeof(Hpak::FileHeader) + i * sizeof(d), sizeof(d));
+    return d.dataOffset;
+}
+
+TEST_CASE("Version-2 package from the old writer: every entry reads back")
+{
+    Hpak::FileHeader hdr{};
+    std::memcpy(&hdr, he_test::kHpakV2Sample, sizeof(hdr));
+    REQUIRE(hdr.version == 2);   // the fixture really is the old format
+
+    const auto pak = writeV2Fixture("he_v2_fixture.hpak");
+    REQUIRE(!pak.empty());
+    HpakReader r;
+    REQUIRE(r.open(pak.string()));
+    CHECK(r.enumerate().size() == 4);
+    // The old hashes are the byte-wise ones; the current hash would not match.
+    CHECK(hdr.tocHash == Hpak::fnv1a64Bytes(he_test::kHpakV2Sample + sizeof(hdr),
+                                             4 * sizeof(Hpak::EntryDesc)));
+    CHECK(hdr.tocHash != Hpak::hash64(he_test::kHpakV2Sample + sizeof(hdr),
+                                      4 * sizeof(Hpak::EntryDesc)));
+    for (int i = 0; i < 3; ++i)
+        CHECK(r.readEntry(kV2FixtureIds[i]) == v2FixtureBlob(i));
+#ifdef HE_HAVE_CRYPTO
+    const Hpak::PackSettings enc = v2FixtureSettings(3);
+    CHECK(r.readEntry(kV2FixtureIds[3], enc.key) == v2FixtureBlob(3));
+#endif
+
+    // A streaming job opens it through the mount's TOC.
+    HpakReader job;
+    REQUIRE(job.openShared(pak.string(), r.sharedToc()));
+    CHECK(job.readEntry(kV2FixtureIds[2]) == v2FixtureBlob(2));
+
+    // And the content system mounts it and loads from it on demand.
+    ContentManager cm;
+#ifdef HE_HAVE_CRYPTO
+    REQUIRE(cm.mountPak(pak.string(), enc.key));
+    constexpr int kReadable = 4;
+#else
+    REQUIRE(cm.mountPak(pak.string()));
+    constexpr int kReadable = 3;
+#endif
+    for (int i = 0; i < kReadable; ++i)
+    {
+        auto ref = cm.acquireMaterial(kV2FixtureIds[i]);
+        REQUIRE(ref);
+        CHECK(ref->baseColor[0] == doctest::Approx(1.f));
+    }
+    removeQuiet(pak);
+}
+
+TEST_CASE("Version-2 package: a corrupt byte is still caught by the old hash")
+{
+    const auto pak = writeV2Fixture("he_v2_corrupt.hpak");
+    REQUIRE(!pak.empty());
+    flipByteAt(pak, static_cast<std::streamoff>(v2FixtureDataOffset(1) + 100));
+    HpakReader r;
+    REQUIRE(r.open(pak.string()));
+    CHECK(r.readEntry(kV2FixtureIds[1]).empty());
+    CHECK(r.readEntry(kV2FixtureIds[0]) == v2FixtureBlob(0));   // the others are fine
+    removeQuiet(pak);
+}
+
+TEST_CASE("Version-2 entries carried verbatim into a new package get the new hash")
+{
+    const auto oldPak = writeV2Fixture("he_v2_carry_src.hpak");
+    REQUIRE(!oldPak.empty());
+    HpakReader prev;
+    REQUIRE(prev.open(oldPak.string()));
+    HpakWriter w;
+    for (int i = 0; i < 4; ++i)
+    {
+        HpakReader::StoredEntry se;
+        REQUIRE(prev.readStoredEntry(kV2FixtureIds[i], se));
+        CHECK(se.contentHash == Hpak::hash64(se.data.data(), se.data.size()));
+        w.addPackedEntry(kV2FixtureIds[i], se);
+    }
+    const auto newPak = std::filesystem::temp_directory_path() / "he_v2_carry_dst.hpak";
+    REQUIRE(w.write(newPak.string()));
+
+    std::ifstream in(newPak, std::ios::binary);
+    Hpak::FileHeader hdr{};
+    in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+    in.close();
+    CHECK(hdr.version == Hpak::k_version);
+
+    HpakReader r;
+    REQUIRE(r.open(newPak.string()));
+    for (int i = 0; i < 3; ++i)
+        CHECK(r.readEntry(kV2FixtureIds[i]) == v2FixtureBlob(i));
+#ifdef HE_HAVE_CRYPTO
+    CHECK(r.readEntry(kV2FixtureIds[3], v2FixtureSettings(3).key) == v2FixtureBlob(3));
+#endif
+    removeQuiet(oldPak);
+    removeQuiet(newPak);
+}
+
+TEST_CASE("A current package passed off as version 2 is refused, not read")
+{
+    // The reader picks the hash by the header's version: the same bytes under
+    // the other number fail the TOC check. Guards "accepts any version it knows".
+    const HE::UUID id{0x0213, 0x5};
+    HpakWriter w;
+    w.addEntry(id, makeMaterialBlob(id, "v3_as_v2"));
+    const auto pak = std::filesystem::temp_directory_path() / "he_v3_as_v2.hpak";
+    REQUIRE(w.write(pak.string()));
+    {
+        HpakReader ok;
+        REQUIRE(ok.open(pak.string()));
+    }
+    {
+        std::fstream f(pak, std::ios::binary | std::ios::in | std::ios::out);
+        const uint32_t two = 2;
+        f.seekp(offsetof(Hpak::FileHeader, version));
+        f.write(reinterpret_cast<const char*>(&two), sizeof(two));
+    }
+    HpakReader r;
+    CHECK_FALSE(r.open(pak.string()));
+    {
+        std::fstream f(pak, std::ios::binary | std::ios::in | std::ios::out);
+        const uint32_t four = Hpak::k_version + 1;
+        f.seekp(offsetof(Hpak::FileHeader, version));
+        f.write(reinterpret_cast<const char*>(&four), sizeof(four));
+    }
+    CHECK_FALSE(r.open(pak.string()));   // a newer version than this build reads
+    removeQuiet(pak);
+}
+
+TEST_CASE("hash64: pinned values, every bit counts, high bits do not cancel")
+{
+    // Pinned: hash64 IS the on-disk format of v3, a change here breaks every pak.
+    std::vector<uint8_t> buf(100);
+    for (size_t i = 0; i < buf.size(); ++i) buf[i] = static_cast<uint8_t>(i * 7 + 1);
+    CHECK(Hpak::hash64(nullptr, 0) == 0x2908BF77B5BFEE18ULL);
+    CHECK(Hpak::hash64(buf.data(), buf.size()) == 0x6E14F40A47B9DD1AULL);
+    CHECK(Hpak::fnv1a64Bytes(nullptr, 0) == 1469598103934665603ULL);
+    CHECK(Hpak::hash64ForVersion(2, buf.data(), buf.size()) == Hpak::fnv1a64Bytes(buf.data(), buf.size()));
+    CHECK(Hpak::hash64ForVersion(3, buf.data(), buf.size()) == Hpak::hash64(buf.data(), buf.size()));
+
+    // Every single-bit flip, in the lanes, the tail words and the tail bytes.
+    const uint64_t base = Hpak::hash64(buf.data(), buf.size());
+    int unchanged = 0;
+    for (size_t bit = 0; bit < buf.size() * 8; ++bit)
+    {
+        buf[bit / 8] ^= static_cast<uint8_t>(1u << (bit % 8));
+        unchanged += Hpak::hash64(buf.data(), buf.size()) == base;
+        buf[bit / 8] ^= static_cast<uint8_t>(1u << (bit % 8));
+    }
+    CHECK(unchanged == 0);
+
+    // The top bit of two words of the same lane (offsets 7 and 39 are byte 7 of
+    // words 0 and 4, both lane 0). Plain word-wise FNV loses both flips.
+    buf[7] ^= 0x80; buf[39] ^= 0x80;
+    CHECK(Hpak::hash64(buf.data(), buf.size()) != base);
+    buf[7] ^= 0x80; buf[39] ^= 0x80;
+
+    // Length counts: a trailing zero byte is not "the same data".
+    std::vector<uint8_t> longer = buf; longer.push_back(0);
+    CHECK(Hpak::hash64(longer.data(), longer.size()) != base);
+    // Unaligned input reads the same as aligned.
+    std::vector<uint8_t> shifted(buf.size() + 1);
+    std::memcpy(shifted.data() + 1, buf.data(), buf.size());
+    CHECK(Hpak::hash64(shifted.data() + 1, buf.size()) == base);
+}
+
+TEST_CASE("Hash bench: fnv1a64Bytes vs hash64 over 256 MiB" * doctest::skip())
+{
+    std::vector<uint8_t> data(256u << 20);
+    uint32_t x = 1;
+    for (auto& b : data) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; b = static_cast<uint8_t>(x); }
+    for (int run = 0; run < 3; ++run)
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        const uint64_t a = Hpak::fnv1a64Bytes(data.data(), data.size());
+        auto t1 = std::chrono::steady_clock::now();
+        const uint64_t b = Hpak::hash64(data.data(), data.size());
+        auto t2 = std::chrono::steady_clock::now();
+        const double s1 = std::chrono::duration<double>(t1 - t0).count();
+        const double s2 = std::chrono::duration<double>(t2 - t1).count();
+        MESSAGE("run " << run << " | fnv1a64Bytes " << (data.size() / s1 / 1e9) << " GB/s"
+                << " | hash64 " << (data.size() / s2 / 1e9) << " GB/s"
+                << " | (" << (a ^ b) << ")");
+    }
 }

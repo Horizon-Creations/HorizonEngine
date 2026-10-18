@@ -1,6 +1,7 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
+#include "McpToolCommon.h"
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
 #include "TestFsUtil.h"
@@ -732,4 +733,65 @@ TEST_CASE("assetTypeFromName is the exact inverse of assetTypeName")
 	}
 	CHECK(HE::Ed::assetTypeFromName("")         == HE::AssetType::Unknown);
 	CHECK(HE::Ed::assetTypeFromName("material") == HE::AssetType::Unknown);
+}
+
+TEST_CASE("refuseAssetWrite: Engine, play, lock, dirty, in that order, hooks asked lazily")
+{
+	// The one write gate the eight asset families share (EDT-1208). Its order is
+	// what a client reads when several reasons apply, and a hook behind a
+	// refusal must not run (a lock query is a session round trip's worth of
+	// state; a dirty query can look a tab up).
+	using HE::Ed::PathCheck;
+	using HE::Ed::WriteGateText;
+	using HE::Ed::refuseAssetWrite;
+	static constexpr WriteGateText kText{ "play text", "has a dirty tab." };
+
+	PathCheck p;
+	p.rel = "Materials/M.hasset";
+	p.ok  = true;
+
+	int played = 0, locked = 0, dirtied = 0;
+	bool playing = true, lockedNow = true, dirtyNow = true;
+	const std::function<bool()> isPlaying = [&] { ++played; return playing; };
+	const std::function<bool(const std::string&)> lockedByOther =
+		[&](const std::string& rel) { ++locked; CHECK(rel == p.rel); return lockedNow; };
+	const std::function<bool(const std::string&)> isDirty =
+		[&](const std::string& rel) { ++dirtied; CHECK(rel == p.rel); return dirtyNow; };
+
+	p.engine = true;
+	auto r = refuseAssetWrite(p, isPlaying, lockedByOther, isDirty, kText);
+	REQUIRE(r.has_value());
+	CHECK(r->errorCode == "read_only");
+	CHECK(played == 0);
+
+	p.engine = false;
+	r = refuseAssetWrite(p, isPlaying, lockedByOther, isDirty, kText);
+	REQUIRE(r.has_value());
+	CHECK(r->errorCode == "play_mode");
+	CHECK(r->errorMessage == "play text");
+	CHECK(locked == 0);
+
+	playing = false;
+	r = refuseAssetWrite(p, isPlaying, lockedByOther, isDirty, kText);
+	REQUIRE(r.has_value());
+	CHECK(r->errorCode == "locked_by_other");
+	CHECK(r->errorMessage.find("'Materials/M.hasset'") != std::string::npos);
+	CHECK(dirtied == 0);
+
+	lockedNow = false;
+	r = refuseAssetWrite(p, isPlaying, lockedByOther, isDirty, kText);
+	REQUIRE(r.has_value());
+	CHECK(r->errorCode == "dirty");
+	CHECK(r->errorMessage == "'Materials/M.hasset' has a dirty tab.");
+
+	dirtyNow = false;
+	CHECK_FALSE(refuseAssetWrite(p, isPlaying, lockedByOther, isDirty, kText).has_value());
+
+	// Empty hooks answer "no", and a family without a dirty text (the widget
+	// tools) never asks the dirty hook.
+	dirtyNow = true;
+	const int before = dirtied;
+	CHECK_FALSE(refuseAssetWrite(p, nullptr, nullptr, isDirty, WriteGateText{ "x", nullptr }).has_value());
+	CHECK(dirtied == before);
+	CHECK_FALSE(refuseAssetWrite(p, nullptr, nullptr, nullptr, kText).has_value());
 }

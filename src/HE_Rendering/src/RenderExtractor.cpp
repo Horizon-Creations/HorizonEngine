@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
+#include "FoliageExtract.h"                        // foliage → clusters (its own file, Thema 163)
 #include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -25,6 +26,7 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/RopeTrailSystem.h>                   // buildTrailGeometry
@@ -292,6 +294,10 @@ namespace
 		// the CPU into MaterialAsset::approxLayerColor. See GiLandscape.h for
 		// why a landscape — and only a landscape — can be sampled per texel.
 		std::unordered_map<uint32_t, int32_t> landscapeOf; // terrain entity → index
+		// The scene's Puddles slider, for the auto landscapes' GI entries (the default is the
+		// component's own, so a scene with no Sky entity keeps the old puddle share).
+		float puddleScale = EnvironmentComponent{}.puddleAmount;
+		for (auto [ee, ec] : reg.view<EnvironmentComponent>().each()) { puddleScale = ec.puddleAmount; break; }
 		for (auto [te, ttf, tc] : reg.view<TransformComponent, TerrainComponent>().each())
 		{
 			HE::GiLandscape ls;
@@ -324,7 +330,7 @@ namespace
 									if (o.name == name) { v = o.value[0]; return true; }
 								return false;
 							};
-							const int slot = HE::giAutoLandscapeParams(*ma, ov, ls);
+							const int slot = HE::giAutoLandscapeParams(*ma, ov, ls, puddleScale);
 							if (slot >= 0)
 							{
 								// Copied out: resolving may loadAsset, which moves `ma`.
@@ -607,42 +613,6 @@ namespace
 				obj.transform   = world;
 				obj.worldBounds = kUnitCube.transformed(world);
 			}, "ExtractParticles");
-		}
-	}
-
-	// ── Foliage ──────────────────────────────────────────────────────────────
-	// Each cached foliage instance is pushed as a RenderObject. Because all
-	// instances share the same meshAssetId, the geometry pass batches them into
-	// one DrawCall with instanceTransforms automatically.
-	void extractFoliage(entt::registry& reg, RenderWorld& out)
-	{
-		const HE::ActiveFilter active(reg);
-		for (auto [e, fol] : reg.view<FoliageComponent>().each())
-		{
-			if (!fol.visible) continue; // hidden (e.g. a preloaded zone)
-			if (active.off(e)) continue;
-			if (fol.meshAssetId == HE::UUID{}) continue;
-			const float dd2 = fol.drawDistance * fol.drawDistance;
-			const glm::vec3 camPos = out.camera.position;
-
-			for (const glm::mat4& inst : fol.cachedInstances)
-			{
-				const glm::vec3 wp = glm::vec3(inst[3]);
-				const float dx = wp.x - camPos.x;
-				const float dz = wp.z - camPos.z;
-				if (dx * dx + dz * dz > dd2) continue;
-
-				RenderObject obj;
-				obj.meshAssetId     = fol.meshAssetId;
-				obj.materialAssetId = fol.materialAssetId;
-				obj.transform       = inst;
-				// Real bounds are filled in by the backend mesh-resolve refine; leave them invalid
-				// here so a not-yet-resident instance stays visible instead of being culled against
-				// a unit-cube proxy smaller than the actual foliage mesh.
-				obj.worldBounds     = HE::AABB{};
-				obj.entityId        = static_cast<uint32_t>(e);
-				out.objects.push_back(obj);
-			}
 		}
 	}
 
@@ -930,8 +900,14 @@ namespace
 	// The fit parameters (shadowDistance, cascadeCount, splitLambda, mapRes)
 	// are the extractor's setShadowSettings() state: the project's word, or
 	// the historical constants for a backend that never pushed any.
+	//
+	// `sceneBox` is the one input that does not depend on the aspect: the union
+	// of the object bounds below. The first call of a walk fills it
+	// (`sceneBoxKnown` false → true); the aspect tail of a reused extract passes
+	// it back in, because by then the backends have refined the bounds in place
+	// and a refit from them would no longer be the fit the shadow pass drew with.
 	void fitDirectionalShadow(RenderWorld& out, float shadowDistance, int cascadeCount,
-	                          float splitLambda, int mapRes)
+	                          float splitLambda, int mapRes, HE::AABB& sceneBox, bool& sceneBoxKnown)
 	{
 		out.shadow.enabled = false;
 		const LightData* shadowLight = nullptr;
@@ -947,9 +923,16 @@ namespace
 		// BOTH shadow and AO) stay out of the fit: an icon hovering at a sun
 		// light's authored height would otherwise stretch the whole frustum.
 		// Authored non-casting meshes stay IN, as receivers the map must cover.
-		HE::AABB sceneBox;
-		for (const RenderObject& o : out.objects)
-			if (o.castsShadow || o.contributesAO) sceneBox.expand(o.worldBounds);
+		// A foliage cluster's box stays out too: foliage never counted here (its bounds were
+		// invalid at this point) and the cascade fit — the light's depth range included — must
+		// not move because the same plants now arrive as buckets with real boxes.
+		if (!sceneBoxKnown)
+		{
+			sceneBox = HE::AABB{};
+			for (const RenderObject& o : out.objects)
+				if ((o.castsShadow || o.contributesAO) && !o.isCluster()) sceneBox.expand(o.worldBounds);
+			sceneBoxKnown = true;
+		}
 		glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
 		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
 		radius = std::max(radius, 1.0f);
@@ -1206,6 +1189,89 @@ bool isEditorIconMaterial(const UUID& materialId)
 	    || materialId == kEditorIconAudioSourceMaterialId;
 }
 
+UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3& cameraPos)
+{
+	UnderwaterCameraData out{};
+	if (!std::isfinite(cameraPos.x) || !std::isfinite(cameraPos.y) || !std::isfinite(cameraPos.z))
+		return out;
+
+	// A fresh snapshot, like the `water.surfaceAt` script binding (EngineApi.cpp) —
+	// the one-off-question use WaterIndex::build documents itself for. `t` plays no
+	// part here (the comment above explains why), so 0.0 is as good as any value.
+	water::Surface surf;
+	const water::WaterIndex index = water::WaterIndex::build(world);
+	if (!index.surfaceAt(cameraPos.x, cameraPos.z, 0.0, surf))
+		return out;   // dry at this XZ — WaterIndex already clips the shore itself
+
+	const float signedDepth = surf.level - cameraPos.y;
+	if (signedDepth > surf.depth)
+		return out;   // under the water's own bed — not underwater, just underground
+
+	// surfaceY/signedDepth are reported whenever the camera is above the bed,
+	// even when it reads dry below (the next check) — a camera a hair above the
+	// surface still gets its real (small negative) signedDepth, not a reset-to-
+	// zero default, which is what "Underwater camera: exactly on the waterline
+	// reads a continuous ~0, not a special case" (test_underwater_camera.cpp)
+	// pins: justOver (2.001, 1 mm above a level-2 surface) must still read a
+	// small NEGATIVE signedDepth, not 0 — only `wet` has a hard edge here.
+	out.surfaceY    = surf.level;
+	out.signedDepth = signedDepth;
+	// At or below the surface, not above it (flying, a dock, a boat on top of
+	// the body). The CI regression this fixed (Thema 185 Schritt 1, commit
+	// 71df88e3): a camera far above a lake's XZ read as wet because only the
+	// lower (bed) bound above was ever checked, which among other things made
+	// the Schritt 2 post pass fog the view of a plane flying over a distant lake.
+	out.wet = signedDepth >= 0.0f;
+
+	// The post pass's tint (Thema 185 Schritt 2): a Beer-Lambert ramp of the CAMERA's
+	// own depth, reshaped by the body's falloff curve — 0 at the surface (shallowColor),
+	// asymptotic toward 1 (deepColor) the longer the camera has been submerged. Never a
+	// per-pixel scene distance, so hovering at a fixed depth gives a fixed tint. density
+	// carries through unchanged; the per-pixel view-ray fog still needs the depth buffer,
+	// which stays the shader's job. A dry camera within kFogDryBandEnd of the surface
+	// (Thema 185 Schritt 5, fogWaterlineBand) keeps shallowColor and a faded density, so
+	// the pass also fogs the floor the near plane bares where it slices the water sheet
+	// off just above the line — the waterline pop came from that floor being unfogged on
+	// one side of the line and fogged on the other (the shaders decide per pixel, see
+	// RenderExtractor.h). Further up, density stays 0 and the pass is skipped as before.
+	const water::UnderwaterFogParams& fog = surf.underwaterFog;
+	const float ramp = 1.0f - std::exp(-fog.density * std::max(signedDepth, 0.0f));
+	const float depthT = std::pow(std::clamp(ramp, 0.0f, 1.0f), fog.falloff);
+	out.tintColor = glm::mix(fog.shallowColor, fog.deepColor, depthT);
+	out.density   = fog.density * fogWaterlineBand(signedDepth);
+	if (!out.wet)
+		return out;   // above the surface: no net (causticsFadeIn is 0 there anyway)
+
+	// The caustic pass's knobs (Thema 185 Schritt 3). The net is faded IN over the
+	// first kCausticsFadeInDepth metres of the dive (smoothstep of the camera's own
+	// depth): exactly 0 with the camera on the waterline, the body's full value from
+	// half a metre down. A function of this frame's depth alone, like everything above
+	// — no state, no hysteresis — and zero on both sides of the line, so crossing it
+	// can never pop the net on or off; the pass is simply not run at 0.
+	const water::UnderwaterCausticsParams& cau = surf.underwaterCaustics;
+	out.causticsIntensity = cau.intensity * causticsFadeIn(signedDepth);
+	out.causticsScale     = cau.scale;
+	out.causticsSpeed     = cau.speed;
+	out.causticsDepth     = cau.depth;
+	return out;
+}
+
+float causticsFadeIn(float signedDepth)
+{
+	if (!std::isfinite(signedDepth)) return 0.0f;   // no depth to speak of: no net
+	const float t = std::clamp(signedDepth / kCausticsFadeInDepth, 0.0f, 1.0f);
+	return t * t * (3.0f - 2.0f * t);
+}
+
+float fogWaterlineBand(float signedDepth)
+{
+	if (!std::isfinite(signedDepth)) return 0.0f;
+	const float height = -signedDepth;                     // metres above the surface
+	const float t = std::clamp((height - kFogDryBandFull) / (kFogDryBandEnd - kFogDryBandFull),
+	                           0.0f, 1.0f);
+	return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.
@@ -1225,14 +1291,16 @@ void RenderExtractor::beginFrame()
 {
 	m_frameArmed  = true;
 	m_frameCached = false;
+	m_frameOut    = nullptr;
 }
 
 void RenderExtractor::endFrame()
 {
 	m_frameArmed  = false;
 	m_frameCached = false;
-	// Keeps its capacity for the next frame; the contents must not outlive it.
-	if (m_frameCopy) m_frameCopy->clear();
+	// The walk lives in the caller's RenderWorld: nothing here to give back or
+	// clear, and the pointer must not outlive the frame it was valid for.
+	m_frameOut    = nullptr;
 }
 
 RenderExtractor::FrameKey RenderExtractor::makeFrameKey(const HorizonWorld& world,
@@ -1240,6 +1308,7 @@ RenderExtractor::FrameKey RenderExtractor::makeFrameKey(const HorizonWorld& worl
 {
 	FrameKey k;
 	k.world          = &world;
+	k.structureEpoch = world.structureEpoch();
 	k.hasEditorCam   = editorCam != nullptr;
 	if (editorCam) k.editorCam = *editorCam;
 	k.contentManager = m_contentManager;
@@ -1271,7 +1340,8 @@ bool RenderExtractor::sameFrameKey(const FrameKey& a, const FrameKey& b)
 		    || x.orthoHalfHeight != y.orthoHalfHeight || x.editorIcons != y.editorIcons)
 			return false;
 	}
-	return a.world == b.world && a.contentManager == b.contentManager
+	return a.world == b.world && a.structureEpoch == b.structureEpoch
+	    && a.contentManager == b.contentManager
 	    && a.materialEpoch == b.materialEpoch
 	    && a.shadowDistance == b.shadowDistance && a.cascadeCount == b.cascadeCount
 	    && a.splitLambda == b.splitLambda && a.shadowMapRes == b.shadowMapRes
@@ -1281,44 +1351,77 @@ bool RenderExtractor::sameFrameKey(const FrameKey& a, const FrameKey& b)
 	    && a.cloudCoverage == b.cloudCoverage;
 }
 
+RenderExtractor::FrameShape RenderExtractor::frameShapeOf(const RenderWorld& w)
+{
+	FrameShape s;
+	s.objects        = w.objects.data();
+	s.objectCount    = w.objects.size();
+	s.skinnedCount   = w.skinnedObjects.size();
+	s.blockCount     = w.instanceBlocks.size();
+	s.lightCount     = w.lights.size();
+	s.decalCount     = w.decals.size();
+	s.particleCount  = w.particleBatches.size();
+	s.ribbonCount    = w.ribbonBatches.size();
+	s.landscapeCount = w.landscapes.size();
+	return s;
+}
+
+bool RenderExtractor::sameFrameShape(const FrameShape& a, const FrameShape& b)
+{
+	return a.objects == b.objects && a.objectCount == b.objectCount
+	    && a.skinnedCount == b.skinnedCount && a.blockCount == b.blockCount
+	    && a.lightCount == b.lightCount && a.decalCount == b.decalCount
+	    && a.particleCount == b.particleCount && a.ribbonCount == b.ribbonCount
+	    && a.landscapeCount == b.landscapeCount;
+}
+
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {
 	HE_PROFILE_SCOPE_N("RenderExtractor::extract");
 	auto& reg = world.registry();
 
-	// Second and later call of a frame with the same inputs: the copy of the
-	// first walk, see beginFrame() in the header.
-	if (m_frameArmed && m_frameCached && m_frameCopy
-	    && sameFrameKey(m_frameKey, makeFrameKey(world, editorCam)))
+	// Second and later call of a frame with the same inputs, into the RenderWorld
+	// that still holds the first walk: nothing to copy, see beginFrame() in the header.
+	if (m_frameArmed && m_frameCached && m_frameOut == &out
+	    && sameFrameKey(m_frameKey, makeFrameKey(world, editorCam))
+	    && sameFrameShape(m_frameShape, frameShapeOf(out)))
 	{
 		HE_PROFILE_SCOPE_N("RenderExtractor::reuse");
-		out = *m_frameCopy;
 		if (aspectRatio != m_frameAspect)
 		{
 			// The aspect-dependent tail of the walk, in the walk's order: the
 			// projection, then the cascade fit around it and the local layers,
-			// on a shadow block reset the way clear() resets it.
+			// on a shadow block reset the way clear() resets it. The fit gets the
+			// scene box the walk's own fit took: the bounds in `out` may have been
+			// refined since, and a fit from those would not be the one the shadow
+			// pass drew its cascades with.
 			extractCamera(reg, out, aspectRatio, editorCam);
 			out.shadow = ShadowData{};
-			fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
+			fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes,
+			                     m_frameShadowBox, m_frameShadowBoxKnown);
 			assignLocalShadowLayers(out);
+			m_frameAspect = aspectRatio;
 		}
 		++m_reusedExtracts;
 		return;
 	}
 
 	++m_fullExtracts;
+	m_frameCached         = false;   // `out` is about to be rewritten: it holds no walk until this one ends
+	m_frameShadowBox      = HE::AABB{};
+	m_frameShadowBoxKnown = false;
 	out.clear();
 
 	extractTransforms(world, reg);
 	extractCamera(reg, out, aspectRatio, editorCam);
+	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
-	extractFoliage(reg, out);
+	HE::extractFoliage(reg, out, m_contentManager);
 	extractSkinnedMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractDecals(reg, out);
 	// Ropes are ordinary mesh objects and must land in out.objects before the
@@ -1334,14 +1437,16 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	applyDayNight(out);
 	orderLightWindow(out);
 	// Shadows last: both phases read the finished object + light sets.
-	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
+	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes,
+	                     m_frameShadowBox, m_frameShadowBoxKnown);
 	assignLocalShadowLayers(out);
 
 	if (m_frameArmed)
 	{
-		if (!m_frameCopy) m_frameCopy = std::make_unique<RenderWorld>();
-		*m_frameCopy  = out;
+		// The walk stays where it is: the caller's RenderWorld IS the frame's state.
+		m_frameOut    = &out;
 		m_frameKey    = makeFrameKey(world, editorCam);
+		m_frameShape  = frameShapeOf(out);
 		m_frameAspect = aspectRatio;
 		m_frameCached = true;
 	}
@@ -1352,6 +1457,9 @@ void RenderExtractor::extractCameraOnly(HorizonWorld& world, RenderWorld& out, f
 {
 	HE_PROFILE_SCOPE_N("RenderExtractor::extractCameraOnly");
 	auto& reg = world.registry();
+	// Rewrites the camera of a RenderWorld that may hold the frame's walk: the walk no longer
+	// matches the aspect it was cached at.
+	if (m_frameOut == &out) m_frameCached = false;
 	if (!(editorCam && editorCam->active)) extractTransforms(world, reg);
 	extractCamera(reg, out, aspectRatio, editorCam);
 }

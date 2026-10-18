@@ -1,4 +1,6 @@
+#include "EditorGraphics.h"
 #include "ExportDialogPanel.h"
+#include "ToolSetupDialog.h"         // the missing cmake/compiler notice and its "Set Up…" button
 #include <algorithm>
 #include <cstdint>
 #include "BuildProgressDialog.h"         // the window a running export is watched in
@@ -67,6 +69,7 @@ static std::string s_exportOutputDir;
 static bool   s_exportCompress    = true;
 static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
+static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
@@ -144,7 +147,13 @@ static std::string effectiveExportBackend(const AppContext& ctx)
 // question waiting to happen.
 static std::string buildGameConfigJson(const AppContext& ctx)
 {
-    const EditorConfig& cfg = ctx.editorConfig;
+    // The graphics half: the project's own word when it sets one, else the editor's
+    // live values. A copy, so the project's numbers never land in the editor's
+    // config (EditorGraphics.h).
+    EditorConfig cfg = ctx.editorConfig;
+    if (ctx.projectManager && !ctx.projectManager->currentProject().path.empty() &&
+        ctx.projectManager->currentProject().settings.graphics.enabled)
+        EditorGraphics::apply(ctx.projectManager->currentProject().settings.graphics, cfg);
     json entries = json::array();
     const auto put = [&entries](const char* key, const json& value)
     {
@@ -189,8 +198,8 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GIReflBlur",                cfg.GIReflBlur);
 
     // The window half: the project's Render Defaults when it claims them, else
-    // this dialog's rows. The graphics half above is the editor's either way —
-    // the page has no say on bloom or AA, and says so.
+    // this dialog's rows. The graphics half above is the project's own when its
+    // Rendering pages set one (graphics.enabled), the editor's live values otherwise.
     if (const HE::ProjectRenderDefaults* project = projectRenderDefaults(ctx))
     {
         put("GameWindowWidth",  project->windowWidth);
@@ -401,6 +410,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportCompress     = p.compress;
 	s_exportEncrypt      = p.encrypt;
 	s_exportModSupport   = p.enableModSupport;
+	s_exportDevTools     = p.devTools;
 	s_exportStartupScene = p.startupScene;
 	s_exportIncremental  = p.incremental;
 	s_exportAppBundle    = p.appBundle;
@@ -446,6 +456,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.compress         = s_exportCompress;
 	p.encrypt          = s_exportEncrypt;
 	p.enableModSupport = s_exportModSupport;
+	p.devTools         = s_exportDevTools;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
 	p.incremental      = s_exportIncremental;
@@ -883,14 +894,14 @@ void render(AppContext& ctx)
                     settings |= AppMetadataRows::drawSplashRows(ctx, proj, /*compact=*/true);
 
                     if (heproj && !ctx.projectManager->saveProject(proj.path))
-                        HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                        HE::Ed::notify(HE::Ed::NoteLevel::Critical,
                                        "Could not save the project's application settings",
                                        proj.path);
                     if (settings)
                     {
                         proj.settings.clamp();
                         if (!ctx.projectManager->saveProjectSettings())
-                            HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                            HE::Ed::notify(HE::Ed::NoteLevel::Critical,
                                            "Could not save the project's splash settings",
                                            HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
                     }
@@ -959,6 +970,16 @@ void render(AppContext& ctx)
             }
             else
                 s_exportModSupport = false;
+            // The development hotkeys are a game's too (V, F10); an application has
+            // no frame to put a stats card on and is not tuned from the keyboard.
+            if (!exportingApp)
+            {
+                EditorWidgets::checkbox("Development hotkeys",   &s_exportDevTools);
+                if (s_exportDevTools)
+                    ImGui::TextDisabled("F10 shows the stats card with per-pass GPU times, V toggles VSync. Leave off for the build players get.");
+            }
+            else
+                s_exportDevTools = false;
             // The "(?)" marker and its tooltip are gone from the next three: the
             // sentence is the help entry now, the whole checkbox is the hover
             // target instead of a two-character mark beside it, and F1 opens it.
@@ -1039,7 +1060,15 @@ void render(AppContext& ctx)
                 // absolute column as the rest.
                 EditorWidgets::WrapText wrap(550.0f);
                 if (!hcToolchainOk)
-                    ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+                {
+                    // The notice carries the way out: "Set Up…" opens the tool
+                    // dialog on the missing row (cmake first, then the compiler).
+                    const ToolSetupDialog::Tool missing =
+                        (ctx.toolchainProbe && !ctx.toolchainProbe->cmakeFound)
+                            ? ToolSetupDialog::Tool::Cmake : ToolSetupDialog::Tool::Compiler;
+                    ToolSetupDialog::drawMissingBanner(ctx, missing,
+                        "Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+                }
                 else
                     ImGui::TextDisabled("Disabled — this editor has no HorizonCode SDK (<editor>/SDK). "
                                         "HorizonCode will ship interpreted.");
@@ -1332,6 +1361,10 @@ void startExport(AppContext& ctx)
                 // the export worker below.
                 if (hcCompile)
                 {
+                    // listAssets reads ContentManager's file index, which is as
+                    // fresh as the last content refresh. A class written since
+                    // would ship uncompiled, so the export walks the trees anew.
+                    if (ctx.contentManager) ctx.contentManager->noteContentChanged();
                     auto collectAssets = [&](HE::AssetType type)
                     {
                         for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, type))
@@ -1510,6 +1543,8 @@ void startExport(AppContext& ctx)
                     // builds a world and draws on events, advancedShaderEffects
                     // whether material graphs can appear at all.
                     es.appProject            = ctx.projectManager->currentProject().appProject;
+                    // The hotkeys are a game's: an application never ships them.
+                    es.devTools              = s_exportDevTools && !es.appProject;
                     es.advancedShaderEffects = ctx.projectManager->currentProject().advancedShaderEffects;
                     es.allowFiles     = ctx.projectManager->currentProject().allowFiles;
                     es.allowProcesses = ctx.projectManager->currentProject().allowProcesses;
@@ -1599,6 +1634,12 @@ void startExport(AppContext& ctx)
                 // built-in asset at all and every default primitive renders as the
                 // renderers' fallback cube.
                 es.engineContentDir = ctx.contentManager->engineContentRoot();
+                // …and what the editor fetched from the EngineContent server, which
+                // the resolver reads after the shipped defaults (the landscape
+                // texture arrays live nowhere else since Thema 177). Only what this
+                // machine has downloaded can ship: an "Engine/" ref to a file that
+                // was never fetched still packs as a null, now with a warning below.
+                es.engineContentCacheDir = GlobalState::engineContentCacheDir();
                 // Ship the whole Python payload — interpreter, stdlib and the
                 // HorizonPython backend plugin — only for Python-language
                 // projects. A non-Python game never starts an interpreter, and
@@ -1628,6 +1669,21 @@ void startExport(AppContext& ctx)
                 // finishing (or codesigning) the bundle are Clean up. Both are
                 // real work — an ad-hoc codesign of an .app takes seconds — which
                 // is why they are two rings and not one that sits at 100 %.
+                // The Package ring's log: every asset that went into the pak, in pack
+                // order, with "reused" for the ones carried over from the previous
+                // pak. The counter alone says how many; this says which — and is the
+                // answer to "why is my asset not in the build".
+                es.onAsset = [](const std::string& relPath, bool reused)
+                {
+                    Build::log(0, (reused ? "reused  " : "packed  ") + relPath);
+                };
+                // What the pack had to leave out (a reference to a file no root
+                // has, a UUID two assets share): the game would otherwise just
+                // draw a fallback with no explanation anywhere.
+                es.onWarning = [](const std::string& msg)
+                {
+                    Build::log(1, msg);
+                };
                 es.onStage = [stepPackage, stepCleanup](const char* what)
                 {
                     const std::string s = what;
@@ -1662,7 +1718,7 @@ void startExport(AppContext& ctx)
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              hcBase = base, stepBuild, hostTarget]()
+                                              hcBase = base, stepBuild, stepPackage, hostTarget]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -1893,10 +1949,13 @@ void startExport(AppContext& ctx)
                             std::filesystem::path(outDir), esEff, sceneBinary, extraScenes,
                             gameInstanceJson);
                         if (res.success)
+                            // Filed under Package, not under whichever step the exporter
+                            // has reached by now (Clean up) — the summary belongs at the
+                            // foot of the asset list it totals.
                             Build::log(0, "Packed " + std::to_string(res.assetsPacked) +
                                           " asset(s) (" + std::to_string(res.assetsReused) +
                                           " reused), " + std::to_string(res.binaryFilesCopied) +
-                                          " runtime file(s) copied");
+                                          " runtime file(s) copied", stepPackage);
                         else
                             Build::log(2, res.errorMessage);
                         // Only a host-target export produces a binary this machine

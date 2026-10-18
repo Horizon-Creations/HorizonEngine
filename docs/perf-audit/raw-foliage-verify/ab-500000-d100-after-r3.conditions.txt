@@ -1,0 +1,15 @@
+== ab-500000-d100-after-r3  2026-10-10 20:42:58
+before:
+  uptime:      load averages: 8.64 11.04 10.21
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=84
+  power:       Now drawing from 'Battery Power'
+  busy procs:  46.7% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 20.9% /Users/connorjansen/VSCode/HorizonEngine/out/deploy/Editor/HorizonEditor; 14.0% /Applications/CLion.app/Contents/MacOS/clion; 12.2% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 
+after (rc=0):
+  uptime:      load averages: 8.34 10.94 10.18
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=82
+  power:       Now drawing from 'Battery Power'
+  busy procs:  91.7% /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-entities-pro-zelle-streamen-nur-d/out/build/release/tests/he_tests; 43.8% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 19.7% /Users/connorjansen/VSCode/HorizonEngine/out/deploy/Editor/HorizonEditor; 16.4% /Applications/CLion.app/Contents/MacOS/clion; 

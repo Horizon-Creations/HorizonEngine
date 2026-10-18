@@ -314,15 +314,12 @@ void PropertyReplicator::sendTableFor(std::uint32_t netId, ConnectionId conn)
 	writeTable(w, netId, t);
 	if (listChanged)
 	{
-		for (const ConnectionId to : joinedConnections())
-		{
-			m_net->send(to, kMsgPropertyTable, w, SendMode::ReliableOrdered);
-			++m_stats.tablesSent;
-		}
+		const auto joined = joinedConnections();
+		m_net->sendTo(joined, kMsgPropertyTable, w, SendMode::ReliableOrdered);
+		m_stats.tablesSent += static_cast<std::uint32_t>(joined.size());
 		// The caller's own connection may not be in the roster yet (a table
 		// built for a peer mid-handshake), so it is addressed on its own if the
-		// loop above missed it.
-		const auto joined = joinedConnections();
+		// send above missed it.
 		if (std::find(joined.begin(), joined.end(), conn) == joined.end())
 		{
 			m_net->send(conn, kMsgPropertyTable, w, SendMode::ReliableOrdered);
@@ -456,8 +453,7 @@ void PropertyReplicator::update()
 			w.writeByte(idx);
 			writeValue(w, t.values[idx]);
 		}
-		for (const ConnectionId conn : conns)
-			m_net->send(conn, kMsgProperties, w, SendMode::ReliableOrdered);
+		m_net->sendTo(conns, kMsgProperties, w, SendMode::ReliableOrdered);
 
 		++m_stats.deltasSent;
 		m_stats.propertiesSent += static_cast<std::uint32_t>(changed.size());

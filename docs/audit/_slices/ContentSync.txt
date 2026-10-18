@@ -1,0 +1,16 @@
+## slice 1 loc=1922 files=15 first=ContentSync/CsCommon.h last=SftpProbe.cpp
+src/HE_ContentSync/include/ContentSync/CsCommon.h
+src/HE_ContentSync/include/ContentSync/CsLog.h
+src/HE_ContentSync/include/ContentSync/EngineContentManifest.h
+src/HE_ContentSync/include/ContentSync/EngineContentPublish.h
+src/HE_ContentSync/include/ContentSync/EngineContentSync.h
+src/HE_ContentSync/include/ContentSync/SftpClient.h
+src/HE_ContentSync/include/ContentSync/SftpCredentials.h
+src/HE_ContentSync/include/ContentSync/SftpProbe.h
+src/HE_ContentSync/src/CsRename.h
+src/HE_ContentSync/src/EngineContentManifest.cpp
+src/HE_ContentSync/src/EngineContentPublish.cpp
+src/HE_ContentSync/src/EngineContentSync.cpp
+src/HE_ContentSync/src/SftpClient.cpp
+src/HE_ContentSync/src/SftpCredentials.cpp
+src/HE_ContentSync/src/SftpProbe.cpp

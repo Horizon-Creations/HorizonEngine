@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- shared-mime-info package for Horizon Engine project files. Installed to
+     <XDG_DATA_HOME>/mime/packages by install_file_types.sh, which then runs
+     update-mime-database. Keep the type name and the glob in step with the macOS
+     UTI (scripts/package_macos.sh) and the Windows ProgID (register_heproj.cmd). -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-heproj">
+    <comment>Horizon Engine Project</comment>
+    <!-- A project file is JSON, as on macOS where the UTI conforms to public.json:
+         a text editor may still open it, but the editor is what a double-click runs. -->
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.heproj"/>
+  </mime-type>
+</mime-info>

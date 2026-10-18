@@ -53,6 +53,8 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
                 }
             }
         }
+        if (lod.stitchedMeshId != HE::UUID{} && lod.stitchedLevel == chosen)
+            chosenId = lod.stitchedMeshId;
 
         if (lod.current != chosen || mesh.meshAssetId != chosenId)
         {

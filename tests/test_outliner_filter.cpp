@@ -223,3 +223,84 @@ TEST_CASE("OutlinerFilter kinds: an entity's type is the component that makes it
 				      OutlinerFilter::kindAt(j).label);
 	}
 }
+
+// ── The icon and the chips ───────────────────────────────────────────────────
+TEST_CASE("OutlinerFilter: an entity's icon is the kind that tells it apart, a bare one has none")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	const auto make = [&](const char* name) {
+		const Entity e = world.createEntity(name);
+		reg.emplace<TransformComponent>(e);
+		return e;
+	};
+	const auto label = [&](Entity e) { return std::string(OutlinerFilter::kindAt(OutlinerFilter::primaryKind(reg, e)).label); };
+
+	const Entity group = make("Group");
+	CHECK(OutlinerFilter::primaryKind(reg, group) == OutlinerFilter::kAllKinds);
+
+	const Entity crate = make("Crate");
+	reg.emplace<MeshComponent>(crate);
+	CHECK(label(crate) == "Mesh");
+
+	// A light on a mesh is a light first; a camera outranks both.
+	const Entity lamp = make("Lamp");
+	reg.emplace<MeshComponent>(lamp);
+	reg.emplace<LightComponent>(lamp);
+	CHECK(label(lamp) == "Light");
+	reg.emplace<CameraComponent>(lamp);
+	CHECK(label(lamp) == "Camera");
+
+	// A prefab placement is shown by its chip, not by the icon.
+	const Entity placed = make("Placed");
+	reg.emplace<PrefabInstanceComponent>(placed);
+	CHECK(OutlinerFilter::primaryKind(reg, placed) == OutlinerFilter::kAllKinds);
+}
+
+TEST_CASE("OutlinerFilter: every kind has a glyph and a colour, and tally counts what the filter would show")
+{
+	for (int i = 0; i < OutlinerFilter::kindCount(); ++i)
+	{
+		CAPTURE(i);
+		CHECK(OutlinerFilter::kindGlyph(i)[0] != '\0');
+		CHECK(OutlinerFilter::kindColor(i) != 0u);
+	}
+
+	HorizonWorld world;
+	auto& reg = world.registry();
+	std::vector<Entity> es;
+	for (int i = 0; i < 3; ++i)
+	{
+		const Entity e = world.createEntity("M" + std::to_string(i));
+		reg.emplace<MeshComponent>(e);
+		es.push_back(e);
+	}
+	const Entity l = world.createEntity("L");
+	reg.emplace<LightComponent>(l);
+	es.push_back(l);
+	reg.emplace<LightComponent>(es[0]);   // a mesh that is also a light
+
+	std::vector<int> counts(static_cast<size_t>(OutlinerFilter::kindCount()), 0);
+	for (const Entity e : es) OutlinerFilter::tally(reg, e, counts.data());
+	const auto idx = [](const char* label) {
+		for (int i = 0; i < OutlinerFilter::kindCount(); ++i)
+			if (std::string(OutlinerFilter::kindAt(i).label) == label) return i;
+		return -1;
+	};
+	CHECK(counts[0] == 4);
+	CHECK(counts[static_cast<size_t>(idx("Mesh"))] == 3);
+	CHECK(counts[static_cast<size_t>(idx("Light"))] == 2);
+	CHECK(counts[static_cast<size_t>(idx("Camera"))] == 0);
+}
+
+TEST_CASE("OutlinerFilter::matchSpan says where the hit is, in any case")
+{
+	auto s = OutlinerFilter::matchSpan("Torch_01", "TORCH");
+	CHECK(s.pos == 0);
+	CHECK(s.len == 5);
+	s = OutlinerFilter::matchSpan("Big Torch", "torc");
+	CHECK(s.pos == 4);
+	CHECK(s.len == 4);
+	CHECK(OutlinerFilter::matchSpan("Crate", "torch").pos == std::string_view::npos);
+	CHECK(OutlinerFilter::matchSpan("Crate", "").pos == std::string_view::npos);
+}

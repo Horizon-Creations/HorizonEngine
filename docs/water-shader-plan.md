@@ -3,6 +3,11 @@
 Stand 2026-10-05, Schritt 1 (Bestandsaufnahme), vollständig. Nichts am Renderer geändert; Abschnitt 3 nennt Renderer-Fehler, die spätere Schritte beheben müssen.
 Schritt 2 (Material gebaut): §5a. Schritt 3 (Backend-Parität, GL-Fehler 1 behoben): §8.
 Schritt 4 (Bilder auf Metal und GL, Tooltips, Handbuch, Stand 2026-10-06): §9.
+Schritt 7 (Urteil „sieht sehr comichaft aus", realistischeres Aussehen, Stand 2026-10-09): §11. Die
+Defaults in §5a und §9.2 sind seitdem überholt; gültig ist die Tabelle in §11.2.
+Schritt 8 (Urteil „besseres Tiling mit Texture Bombing", Stand 2026-10-09): §12. Der 16. Parameter-Slot
+ist seitdem belegt (`Variation`), die Liste in §5 hat 15 Einträge und einen freien Platz nur noch auf dem
+Papier.
 
 Ziel: ein Wasser-Material als Engine-Content, gebaut als Material-Node-Graph, auf allen
 fünf Backends über die bestehende Graph-Shader-Pipeline, mit vollem Parametersatz im
@@ -620,3 +625,245 @@ Spiel** auf allen fünf Backends, und das Bedienen im laufenden Editor (alles Bi
 aus dem Headless-Zeugen). Für den GL-Fix aus §8.4 gibt es keinen CI-Test (kein GL-Kontext in
 CI), nur das lokale A/B. Offene Abstimmung: `FresnelPower`/`Reflection` wirken bei der
 Default-Trübung kaum (§9.2).
+
+---
+
+## 11. Realistischeres Aussehen (Schritt 7)
+
+Anlass: das Urteil „ich will ein realistischeres Aussehen, das sieht sehr comichaft aus"
+zum Wasser aus Schritt 4. Es gibt weiter keinen neuen Graph-Knoten, keine neue Textur, keinen
+Renderer-Eingriff und keinen neuen Knopf: dieselben 15 Namen, dieselben Typen, neue Defaults und
+ein umgebauter Graph in `mat_gen` (`src/HE_Tools/src/MatGen/main.cpp`).
+
+### 11.1 Was am alten Bild comichaft war
+
+Bild: `~/.claude/hive/artifacts/thema152-schritt7/old_*.png` gegen `new_*.png` (gleiche
+Kamera, Zeit, Backend; Zeuge wie §9.1).
+
+1. **Ein Gitter gleicher Flecken.** Drei parallele Sinus mit Steilheit 0,25/0,18/0,12 (Summe 0,55,
+   echtes Meer liegt bei 0,05 bis 0,3) kippen die Normale so weit, dass ganze Felder auf den hellen
+   Horizontstreifen des Himmels-Cubes springen. Das Ergebnis sind cremefarbene, weich begrenzte
+   Flecken in Reihen.
+2. **Kaustik-Netzlinien auf der Oberfläche** (Stärke 0,35, `×6`, `pow 5`, additiv). Eine helle
+   Linie auf dem Wasser ist das, was ein Comic zeichnet; echte Kaustik liegt auf dem Grund.
+3. **Weiße Schaumblobs** mit Deckkraft 1 auf jedem Kamm (Abdeckung 0,18, Stärke 0,8).
+4. **Gesättigter Türkiskörper** (0,10/0,42/0,45): Der Himmel trägt in `heLitP` Diffus (`ambDiff ×
+   0,35`) und Reflexion, die Körperfarbe stand dagegen und machte aus dem Cremehimmel ein
+   Graublau. Echtes Wasser ist überwiegend Spiegel, der Körper dunkel.
+5. **Glatte, scharfkantige Reflexion** (Rauheit 0,06 ohne Distanzanteil) und keinerlei kurze,
+   unregelmäßige Wellen: nichts zerlegte den Sonnenstreifen in Glitzer.
+
+### 11.2 Was geändert ist
+
+| Ursache | Änderung im Graph |
+|---|---|
+| Gitter (1) | Jeder Wellenknopf treibt zwei Züge: sich selbst und einen **Begleitzug** (um 38°/−33°/47° gedreht, Wellenlänge ×0,58/0,64/0,71, Steilheit ×0,55/0,55/0,60, Tempo ∝ √Wellenlänge wie Tiefwasser-Dispersion). Der Begleitzug fährt kein eigenes FBM, sondern **erbt das Warp-Feld** des Primärzugs (×0,9), sonst sind seine Kämme geradlinig und kreuzen die gebogenen als Rautengitter (gemessen: ohne Warp-Teilung bleibt das Gitter sichtbar, `WaveC` aus = weg). Zwei Schichten **Chop** (Steigung eines FBM-Höhenfeldes per endlicher Differenz, 2,6 m und 0,9 m, treibt mit Zug B bzw. C): ohne sie bleibt eine Summe von Sinus ein glattes Interferenzmuster. Ein **Böenfeld** (FBM, 22 m) tauscht das Gewicht zwischen Zug und Begleitzug und variiert die Helligkeit des Körpers um ±5 %. Feine Züge und Chop **blenden mit der Entfernung aus** (Sinus unter einem Pixel flimmern, es gibt keine Mips). |
+| Netzlinien (2) | Kaustik **hellt den Körper multiplikativ auf** (`body × (1 + 3·web·Stärke·Transmission·Nähe)`) statt eine weiße Linie zu addieren; Netz breiter und weicher (`×3,5`, `pow 3`). Sie hängt an der Transmission des Wassers, ist also in klarem, flachem Wasser sichtbar (Turbidity 0,1, siehe `new_clear_caustics_user_params.png`) und in tiefem, trübem nicht. Default-Stärke 0,35 → 0,2. |
+| Blobs (3) | Foam-Kamm aus der **Summe von B, seinem Begleitzug und C** statt aus allen sechs (die Summe aller sechs hat Maxima als runde Flecken, drei Sinus ergeben kammförmige Streifen). Zwei Rauschmaßstäbe (grob entscheidet wo, fein franst aus), weichere Kante, Schaumfarbe durch das Rauschen moduliert (nicht flach weiß), Deckkraft höchstens 0,85. Schwelle `0,97 − 0,9·Abdeckung`. Default-Abdeckung 0,18 → 0,06, Stärke 0,8 → 0,5, Rauschgröße 1,5 → 0,7 m. |
+| Körper (4) | Farben dunkler und entsättigt (Tabelle), Absorption 0,35 → 0,45 /m bei 4 m angenommener Tiefe. Auf den **Kämmen der Dünung** (nur Zug A und sein Begleiter, nicht alle sechs: die Summe ergab ein Fleckengitter) kommt ein Zehntel der Flachfarbe zurück (Licht scheint durch dünne Kämme). Deckkraft 0,55 → 0,5. |
+| Reflexion (5) | Rauheit 0,06 → 0,08, dazu **+0,25 mit der Entfernung** (10 m bis 160 m): was ein Pixel nicht mehr auflöst, mittelt eine rauere Fläche. Kein Horizontstreifen aus Einzelpixel-Glitzern. |
+
+Neue Defaults (alle 15 Knöpfe, Test-Tabelle `kWaterKnobs` ist nachgezogen):
+
+| Knopf | alt | neu |
+|---|---|---|
+| `ShallowColor` | 0.10, 0.42, 0.45 | 0.045, 0.20, 0.22 |
+| `DeepColor` | 0.01, 0.07, 0.12 | 0.004, 0.028, 0.052 |
+| `Turbidity` | 0.35, 3.0 | 0.45, 4.0 |
+| `WaveA` | 30, 1.2, 8, 0.25 | 20, 1.0, 14, 0.07 |
+| `WaveB` | 310, 0.8, 3.5, 0.18 | 335, 0.8, 5, 0.10 |
+| `WaveC` | 100, 0.5, 1.2, 0.12 | 70, 0.5, 1.6, 0.09 |
+| `Roughness` | 0.06 | 0.08 |
+| `Opacity` | 0.55 | 0.5 |
+| `FoamColor` | 0.92, 0.95, 0.97 | 0.82, 0.88, 0.90 |
+| `Foam` | 0.18, 0.8, 1.5, 0.3 | 0.06, 0.5, 0.7, 0.3 |
+| `Caustics` | 0.35, 2.5, 0.25, 25 | 0.2, 2.0, 0.2, 18 |
+| `FresnelPower`, `Reflection`, `Specular`, `Refraction` | unverändert | unverändert |
+
+Bedeutungsänderungen, die in Tooltips (`mat_gen`, `EditorHelp.cpp`) und im Handbuch
+(`he-docs.json`, Abschnitt Engine Water) nachgezogen sind: Die drei Wellenknöpfe treiben je zwei
+Züge, und ihre Steilheiten zusammen setzen auch die Stärke des Chops (alle drei 0 = glatt). Kaustik
+hellt den Körper auf. Foam sitzt auf den Kämmen der kürzeren Züge. Rauheit wächst mit der Entfernung.
+
+### 11.3 Messung (Mac M5, Release-Editor des Zweigs, Rezept §9.1, 1280×720)
+
+| Vergleich | Metal | OpenGL 4.1 |
+|---|---|---|
+| t = 1.0 zweimal (Rauschboden) | md5-gleich | md5-gleich |
+| t = 1.0 gegen 3.5, Wasserband | 10,60 | 10,60 |
+| forward gegen deferred, t = 1.0 | 0,01 | 0,07 |
+| Metal gegen GL, forward t = 1.0 / 3.5 | 0,06 / 0,05 | |
+| Metal gegen GL, deferred | 0,04 | |
+| Metal gegen GL, Blick zur Sonne (TOD 0,33, YAW 90) | 0,10 (Wasserband) | |
+
+Die Animation ist ruhiger als vorher (vorher 25,6), weil die Wellen flacher sind; sie ist weiter
+klar sichtbar (95 % der Pixel ändern sich). Die Metal/GL-Abweichung ist **kleiner** als vorher
+(0,07). Alle FBM-Knoten des Wassers laufen jetzt auf dem Integer-Hash (`Fbm`-Knoten,
+`p[0] = 1`, `heFbmI`), der laut Codegen auf allen Backends bitgleich dasselbe Feld liefert; der
+Float-Hash des einfachen `Fbm` rundet bei großen Weltkoordinaten je GPU anders. Dass der Gewinn
+von dieser Umstellung kommt, ist eine Vermutung, nicht gemessen (keine A/B mit dem Float-Hash).
+
+Andere Einstellungen als die Rezept-Kamera (TOD 0,27/0,33/0,4/0,5, Kamera 2,5 m bis 12 m, Blick
+5° bis 60° nach unten, Sonne im Bild und nicht): Das Gitter ist in keiner der aufgenommenen
+Einstellungen mehr sichtbar, der Sonnenglitzer erscheint, wo die Wellen zur Sonne kippen
+(`new_sun.png`), die Himmelsstreifen sind schmal statt flächig. Das ist Augenschein an etwa
+zwanzig Aufnahmen, keine Messgröße für „realistisch".
+
+### 11.4 Kosten und Grenzen
+
+- Graph: 222 → 497 Knoten, längste Leitung 45 (`mat_gen` meldet sie jetzt, Obergrenze 90: der
+  Codegen rekursiert pro Ebene, siehe `CMakeLists.txt` „MSVC main-thread stack"), 15 Parameter,
+  keine Textur, `HeParams` unverändert.
+- **FBM-Auswertungen pro Pixel 6 → 14** (3 Warps, 6 Chop, 1 Böen, 2 Kaustik, 2 Schaum), je vier
+  Oktaven. **GPU-Zeit nicht gemessen.** Auf dem M5 ist die Aufnahme unauffällig; auf einer
+  schwachen iGPU bei voller Bildschirmfläche ist das der Posten, den man als Erstes prüft. Hebel,
+  falls nötig: die zweite Chop-Schicht und die Kaustik-FBM sind auf Stärke 0 entbehrlich (heute
+  trotzdem gerechnet, weil es keine Static Switches im Inspector gibt, §5a).
+- Der Glanz hängt am Himmel: Bei Sonne im Bild glitzert es, ohne Sonne bleibt das Wasser ein dunkler
+  Spiegel mit hellen Streifen am Horizont. Das ist gewollt, ändert aber den Eindruck mit Tageszeit
+  und Wolken stärker als vorher.
+- Nicht belegt: D3D11/D3D12/Vulkan im Bild (nur Kompilat: he_tests, glslang, spirv-val,
+  spirv-cross; `fxc` und `xcrun metal` laufen in CI), AMD/Intel, das exportierte Spiel,
+  Bedienen im laufenden Editor. Der Integer-Hash-FBM ist in `test_material_graph` für alle
+  Backends geprüft, im Wasser aber nicht auf D3D im Bild gesehen.
+- Das Website-Handbuch (`HC-Website`, `materials.html#water`, Zweig
+  `claude/eigener-wasser-shader-als-engine-default-material`) nennt noch die alten Defaults und
+  zeigt das alte Bild. Anderes Repo, Deploy braucht die Bestätigung des Menschen: nicht angefasst.
+
+## 12. Tiling brechen mit Texture Bombing (Schritt 8)
+
+Anlass: das Urteil „besseres Tiling mit Texture Bombing" (der Schritt-Titel sagt „timing", der Mensch
+hat das per Rückfrage auf *Tiling* gestellt) und die Beschreibung der Queen: „helle Stellen und
+Schaum-Punkte wiederholen sich grid-artig". Es gibt weiter keine Textur im Material. Das Gitter ist
+das der Sinuszüge, nicht das einer Textur.
+
+### 12.1 Befund
+
+Bild: `~/.claude/hive/artifacts/thema152-schritt8/before_top.png` (Metal, 400 m Plane, Kamera 70 m
+über der Mitte, Blick senkrecht nach unten, TOD 0,4, Zeuge `HE_DUMP_WATERSIZE=400`). Auf der 40-m-Plane
+des Rezepts aus §9.1 ist die Wiederholung schwer zu sehen: das Muster kehrt erst nach einigen
+Wellenlängen wieder, und die Dünung ist 14 m lang.
+
+Sechs Sinuszüge sind periodisch: jeder Zug hat einen festen Kammabstand, der FBM-Warp (Phasenhub 0
+bis 2,3 rad) biegt die Kämme, ändert den Abstand aber kaum. Zwei Folgen, beide im Bild:
+
+1. Die hellen Flecken der Dünung (Kamm von Zug A *und* seinem Begleiter, §11.2 „Körper") liegen
+   als Gitter diagonaler Fladen, gleiche Form, gleicher Abstand.
+2. Die Schaumpunkte (Kammfinder: B, sein Begleiter und C zugleich auf dem Kamm) sitzen ebenfalls im
+   Gitter: dort, wo die drei Perioden zusammenfallen.
+
+Gemessen mit `~/.claude/hive/artifacts/thema152-schritt8/tilemetric.cpp` (zwei Zahlen, nur zwischen
+Bildern derselben Kamera vergleichbar). *Autokorrelation*: Luminanz minus lokales Mittel (31 px),
+größter Wert der normierten Autokorrelation außerhalb der Mitte (Lags 8 bis 120 px). *Punktepaare*:
+helle lokale Maxima (die Schaumpunkte), alle Paarabstände in 6-px-Zellen gezählt, die vollste Zelle
+durch den Mittelwert; zum Vergleich derselbe Zähler auf ebenso vielen gleichverteilt gestreuten
+Punkten (der Boden, 3,8 bis 4,4).
+
+### 12.2 Was geändert ist
+
+**Neuer Graph-Knoten `BombCells`** („Bombing Cells", Kategorie Procedural, `v15` am Ende des
+`MatNodeType`-Enums; angehängt, nichts umnummeriert, alte Graphen laden unverändert). Er ist das Hex-Gitter der vier
+`*BombSample`-Knoten (Thema 158) **ohne den Texturzugriff**: Eingänge `UV` (das Gitter liegt darauf),
+`Cell` (Abstand der Hex-Mitten in UV-Einheiten, 8 ohne Anschluss) und `Blend` (Exponent der Gewichte,
+1 bis 32, 7 ohne Anschluss), Ausgänge `Weights` (x, y, z = die drei Hexe unter dem Pixel, Summe 1) und
+`Random A`, `B`, `C` (je eine Zahl in [0,1) pro Hex, voneinander unabhängig); `p[0]` = Seed. Die
+Zahlen kommen aus `heBombHash`, dem Integer-Hash (pcg3d) der Bombing-Knoten: auf allen fünf Backends
+dieselben Bits. Die vier Textur-Knoten und ihr Shader-Text sind unverändert (`heBombHash` wird jetzt
+bei beiden Familien ausgegeben, bei reinem Textur-Bombing byte-gleich wie vorher). Die vorhandenen
+Textur-Knoten waren nicht brauchbar: sie lesen eine Textur, und `mat_gen` verbietet dem Wasser jede.
+
+**`mat_gen`: jeder Wellenzug läuft pro Hex.** Je Wellenknopf ein Gitter (`hexCells`: eigener Seed
+3/17/41, Zellgröße = `Variation.x` × Wellenlänge des Knopfes, mindestens eine halbe Wellenlänge:
+49 m, 17,5 m und 5,6 m bei den Defaults). Der Zug (und sein Begleiter) wird einmal pro Hex der drei
+unter dem Pixel ausgewertet, mit der Richtung und der Phase *dieses* Hex, die drei Ergebnisse nach den
+Hex-Gewichten gemischt. Gemischt wird das **Signal** (Steigung und Kammhöhe), nicht die Koordinate:
+eine Zeitkoordinate zu mischen verzerrt das Muster mit jeder Sekunde mehr, ein Signal nicht. Der
+**Warp-FBM bleibt ungebombt**: er ist Rauschen, kachelt nicht, und er ist der teure Teil (die
+Auswertungen bleiben bei 14). Eine **Verstärkung** `1/√Σw²` (Hex-Tiling-Paper) holt die mittlere
+Leistung zurück, die das Mischen verschiedener Phasen an den Nähten verliert; sie wirkt nur so weit,
+wie die Hexe sich unterscheiden (Phasenversatz plus Richtungsversatz/45°), ohne Unterschied ist sie 1.
+
+**Neuer Knopf `Variation`** (`ParamVec4`, Gruppe Waves, Slot 16 von 16):
+
+| Komponente | Bedeutung | Default |
+|---|---|---|
+| x | Hex-Größe in Wellenlängen (Untergrenze 0,5) | 3,5 |
+| y | Phasenversatz zwischen Hexen, 0 bis 1 Wellenlänge | 1,0 |
+| z | Richtungsversatz zwischen Hexen, ± Grad | 22 |
+| w | Nahtschärfe (Exponent der Gewichte, 1 breit bis 8 scharf) | 2,5 |
+
+`y = 0` und `z = 0` machen alle drei Hexe gleich: das Wasser von Schritt 7, **pixelgleich** (§12.3).
+Tooltip `Material/Variation` (`EditorHelp.cpp`), Handbuch-Abschnitt Engine Water (Absatz „No repeating
+pattern", Bild `water_variation.jpg`, Tabellenzeile, Hinweis unter Limits), `kWaterKnobs` und die
+Inspector-Zählung (16) in den Tests nachgezogen. Die anderen 15 Knöpfe und ihre Defaults sind
+unverändert.
+
+Zeuge: `HE_DUMP_WATERSIZE=<m>` (Seite der Plane im Wasser-Zeugen, Standard 40) für Weitwinkelbilder.
+Rezept für das Gitterbild: `SKYT=1.0 TOD=0.4 CAMY=70 CAMZ=-8 PITCH=-90 WATERSIZE=400 WATERTEST=floor
+RENDERPATH=0 AA=0` (Zsh: `${=C}`), aus: `WATERPARAMS=Variation=3.5,0,0,2.5`.
+
+### 12.3 Messung (Mac M5, Release-Editor des Zweigs, 1280×720, Zeuge wie §9.1)
+
+Wiederholung, Kamera 70 m senkrecht, 400-m-Plane (Metrik aus 12.1):
+
+| Zeit | Autokorrelation aus / an | Punktepaar-Spitze aus / an | Boden |
+|---|---|---|---|
+| t = 1,0 | 0,285 / 0,087 | 38,3 / 5,9 | 4,2 / 4,4 |
+| t = 3,5 | 0,304 / 0,088 | 33,7 / 5,8 | 4,3 / 3,8 |
+
+„Aus" sind die Schaumpunkte 8- bis 9-mal über dem Zufallsboden (77 Paare in einer 6-px-Zelle, im
+Mittel zwei), „an" liegen sie beim 1,4-fachen davon. Das Gitter ist also nicht gemildert, sondern
+im Rahmen der Metrik weg. **Nicht belegt**: die Nahaufnahme (Kamera 25 m): das Sichtfeld ist kleiner
+als eine Hex-Zelle der Dünung (49 m), und die Metrik gibt dort keine Richtung an (Autokorrelation 0,434
+aus / 0,353 an bei Lag 8 px, also in der Mitte der Spitze; Punktepaare 15,0 / 20,4 bei nur 102 Punkten,
+Boden 9,4).
+
+Rest, Standard-Kamera (Rezept §9.1, CAMY 4, CAMZ 6, PITCH −25, TOD 0,4):
+
+| Vergleich | Metal | OpenGL 4.1 |
+|---|---|---|
+| t = 1,0 zweimal (Rauschboden) | md5-gleich | md5-gleich |
+| t = 1,0 gegen 3,5, Wasserband | 7,26 | 7,26 |
+| dasselbe mit `Variation = 3.5,0,0,2.5` | 7,95 | |
+| Metal gegen GL, t = 1,0 / 3,5 | 0,05 / 0,05 | |
+| Metal gegen GL, Weitwinkel (70 m, 400 m Plane) | 0,00 (Bilder gleich) | |
+| `Variation` aus gegen das Bild von Schritt 7 (`new_default.png`, gleiche Kamera, t = 1,0) | 0,00, 0 % der Pixel anders | |
+
+Stetigkeit in der Zeit (Standard-Kamera, Wasserband, Differenz zu t = 1,0): dt = 0,05 / 0,1 / 0,2 s
+gibt 0,51 / 1,00 / 1,91 mit `Variation` und 0,46 / 0,91 / 1,74 ohne: linear in dt, kein Aufpoppen an
+den Hex-Grenzen. Die Animation ist mit `Variation` um 9 % ruhiger als ohne (7,26 gegen 7,95), weiter
+klar sichtbar (97 % der Pixel ändern sich).
+
+Backends: `scripts/water_shader_offline_check.py` 10 bestanden / 0 fehlgeschlagen / 2 übersprungen
+(GL 4.1, G-Buffer, ES 3.0, GL 4.3 geclustert: glslang; Vulkan: spirv-val vulkan1.2; MoltenVK:
+spirv-cross --msl; `fxc` und `xcrun metal` fehlen auf diesem Mac und laufen in CI). `test_material_graph`
+(der Fall „Every standard node cross-compiles with all inputs wired" läuft über die Registry und
+nimmt `BombCells` damit auf), `test_engine_materials`, `test_inspector_ui`, `test_editor_help`
+und `editor_help_audit` bestehen. Voller `ctest` (Release, `HE_ENABLE_SHADERC=ON`, `-j1`, im
+Vordergrund): 237 Tests, 100 % bestanden, 2 übersprungen (`runtime_size_app_basic|advanced`, kein
+App-Deploy), 501 s; nach dem Handbuch-Eintrag laufen `test_docs_library`, `test_editor_help`,
+`test_hc_node_docs` und `editor_help_audit` nochmals grün (der Lauf davor sah die Bündeländerung
+womöglich noch nicht). CI auf dem Zweig: noch nicht gelaufen (Eintrag unten, wenn bekannt).
+
+### 12.4 Kosten und Grenzen
+
+- Graph 497 → 1056 Knoten, längste Leitung 45 → 53 (Obergrenze 90, `mat_gen` meldet sie), 16 Parameter
+  (alle Slots der `HeParams`-Umgebung belegt), `Water.hasset` 103,5 KB → 216,9 KB. Keine Textur.
+- Pro Pixel bleibt es bei 14 FBM-Auswertungen; Sinus/Kosinus steigen von 24 auf 78 (drei Auswertungen
+  pro Zug statt einer, dazu die Richtung des ungebombten Primärzugs für den Warp), dazu neun Hashes
+  (drei pro Wellenknopf). **GPU-Zeit nicht gemessen**; auf dem M5 ist die Aufnahme unauffällig. Hebel,
+  falls nötig: `WaveC` (Rippel, 1,6 m) ungebombt lassen, das spart 18 der 78 (die Hex-Nähte der feinen
+  Züge sind ohnehin die unauffälligsten); ein Static Switch im Inspector fehlt weiter (§5a).
+- Eine Naht zwischen zwei Hexen mischt Wellen verschiedener Phase: sie ist anders als ein Hex, nicht
+  ruhiger (die Verstärkung gleicht die mittlere Leistung aus). Bei großer Nahtschärfe (w = 8) werden
+  Phasensprünge sichtbar. Hex-Nähte sieht man im Bild nicht (Nahbild 25 m, Weitwinkel), das ist
+  Augenschein an fünf Aufnahmen, kein Maß.
+- Der Slot 16 ist belegt: eine spätere Aufgabe, die einen Parameter braucht (SceneDepth, §6), muss
+  packen (zum Beispiel `Variation.w` mit einem anderen Knopf).
+- `BombCells` ist allgemein: jedes Material-Graph kann damit prozedurale Muster bomben (Weights ×
+  Auswertung je Hex), ohne Textur. Im Editor ist er unter Procedural zu finden.
+- Nicht belegt: D3D11/D3D12/Vulkan im Bild (nur Kompilat), AMD/Intel, das exportierte Spiel,
+  Bedienen im laufenden Editor.
+- Das Website-Handbuch (`HC-Website`, `materials.html#water`) kennt weder `Variation` noch die Defaults
+  und das Bild von Schritt 7. Wer `build_docs_bundle.py` neu laufen lässt, ohne den Absatz „No
+  repeating pattern" in der HTML nachzutragen, verliert ihn aus `he-docs.json`.

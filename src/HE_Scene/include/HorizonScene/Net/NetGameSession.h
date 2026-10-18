@@ -54,7 +54,7 @@
 
 class HorizonWorld;
 namespace HE { struct ProjectAntiCheatSettings; }
-namespace HE::Net { class SecureTransport; class UdpTransport; }
+namespace HE::Net { class RelayTransport; class SecureTransport; class UdpTransport; }
 
 // No HE_API — HorizonScene exports every symbol (see GameReplication.h).
 class NetGameSession
@@ -121,6 +121,13 @@ public:
 		// (UdpTransport::Config::timeoutMs). Ignored by hostOn(), which was
 		// handed a transport somebody else configured.
 		float timeoutSec = 5.0f;
+
+		// "host:port" of a relay server, or empty for the direct UDP path
+		// (ProjectMultiplayerSettings::relayAddress; HE_NET_RELAY overrides
+		// it). With one, host() opens no port: it registers the session on the
+		// relay under an id derived from the join code, and the session runs
+		// over that TCP link. Ignored by hostOn().
+		std::string relayAddress;
 	};
 
 	struct JoinOptions
@@ -130,6 +137,9 @@ public:
 		std::string projectId;                // compared by the host
 		GameReplication::Config replication;
 		float       timeoutSec = 5.0f;        // see HostOptions::timeoutSec
+		// See HostOptions::relayAddress. With one, joinDirect() ignores its
+		// address and port and finds the host on the relay by the join code.
+		std::string relayAddress;
 	};
 
 	// What happened, for the frontends step 5 will dispatch to. A queue and not
@@ -213,6 +223,8 @@ public:
 	// routinely 0 for "let the OS pick", and this is then the only way anyone —
 	// a direct join, the announcement, a diagnostics line — learns the answer.
 	std::uint16_t boundPort() const { return m_boundPort; }
+	// The session runs through a relay server rather than a port of our own.
+	bool viaRelay() const { return m_viaRelay; }
 	bool isAuthority() const { return m_role == HE::Net::NetRole::Host ||
 	                                  m_role == HE::Net::NetRole::Server; }
 	bool isClient() const { return m_role == HE::Net::NetRole::Client; }
@@ -454,6 +466,12 @@ private:
 	// answer (pingMs). Non-owning and null with an injected transport; cleared
 	// by leave() together with the chain it points into.
 	HE::Net::UdpTransport*        m_udp = nullptr;
+	// host()/joinDirect() went through a relay server (HostOptions::relayAddress).
+	bool                          m_viaRelay = false;
+	// That relay link, non-owning like m_udp, for its refusal reason: a join the
+	// relay turns down (nobody hosts that code) dies inside the secure layer
+	// before it is a connection, and would otherwise sit in Connecting for good.
+	HE::Net::RelayTransport*      m_relayLink = nullptr;
 
 	// The project's Multiplayer page, copied at the moment it was handed over.
 	// Default-constructed until somebody does, which is the behaviour every

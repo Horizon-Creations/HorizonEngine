@@ -84,6 +84,94 @@ CASES = {
         "pairs": [("window", "clustered", 1.5)],
         "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"]},
     },
+    # Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10.11):
+    # G-buffer pass → resolve (heLitP, the same code graph materials shade with)
+    # → forward tail. The graph-material sphere must look the same both ways —
+    # the first pair with a MAXIMUM (4th element): "deferred ≈ forward". The
+    # G-buffer base-colour view (GBUFFER=1) is the negative control that the
+    # resolve really ran: it replaces the lit sphere with its raw albedo.
+    # Built-in materials are NOT comparable (plan §10.6: Vulkan's built-in
+    # forward shader is a reduced copy, the resolve shades with heLitP), so the
+    # scene is the graph sphere in front of the sky alone. Measured on an RTX
+    # 4070 (Vulkan, validation on, 08.10.2026): forward vs deferred 0.0063,
+    # deferred vs gbuffer 5.16. lavapipe (run 37767066003, llvmpipe/LLVM 20.1.2,
+    # Mesa, 08.10.2026): forward vs deferred mean |Δ| 0.0223 (max 4, 0 % > 2),
+    # deferred vs gbuffer 5.1681 (max 127, 14.3 % > 2) — both well inside the
+    # bounds below, 0 validation messages; the bounds leave room for a software
+    # rasteriser's own rounding, not for a missing light term.
+    "deferred": {
+        "base": {"SKYTEST": "1", "MATERIALTEST": "matte", "TOD": "0.45", "CLOUDMODE": "0",
+                 "COVERAGE": "0", "AA": "0", "BLOOM": "0", "DOF": "0", "MOTIONBLUR": "0",
+                 "SSR": "0", "GI": "0"},
+        "variants": {
+            "forward":  {"dump": {"RENDERPATH": "0"}},
+            "deferred": {"dump": {"RENDERPATH": "1"}},
+            "gbuffer":  {"dump": {"RENDERPATH": "1", "GBUFFER": "1"}},
+        },
+        "pairs": [("forward", "deferred", None, 1.0), ("deferred", "gbuffer", 2.0)],
+        "require": {"deferred": ["HE_DUMP_MATERIALTEST sphere", "deferred path ready", "deferred frame ("],
+                    "gbuffer":  ["deferred frame (", "G-buffer view 1"]},
+        "forbid":  {"forward": ["deferred frame ("]},
+    },
+    # The clustered resolve: the 16 lights of the "clustered" case through the
+    # deferred path. deferred ≈ forward (both clustered), and the 8-light window
+    # resolve (HE_FORWARD_CLUSTER=0) must lose the pools beyond it — the same
+    # A/B as "clustered", now on the resolve. RTX 4070 (08.10.2026): forward vs
+    # deferred 0.0091, window vs deferred 2.80 ("clustered" there: 3.09). lavapipe
+    # (run 37767066003, 08.10.2026): forward vs deferred 0.0434 (max 1, 0 % > 2),
+    # window vs deferred 2.7911 (max 65, 17.8 % > 2) — both ok, 0 validation.
+    "deferred_clustered": {
+        "base": {"SKYTEST": "1", "MANYLIGHTS": "16", "TOD": "0", "CAMY": "207",
+                 "CAMZ": "2", "PITCH": "-38", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "AA": "0", "BLOOM": "0", "SSR": "0"},
+        "variants": {
+            "forward":  {"dump": {"RENDERPATH": "0"}},
+            "deferred": {"dump": {"RENDERPATH": "1"}},
+            "window":   {"dump": {"RENDERPATH": "1"}, "env": {"HE_FORWARD_CLUSTER": "0"}},
+        },
+        "pairs": [("forward", "deferred", None, 1.0), ("window", "deferred", 1.5)],
+        "require": {"deferred": ["HE_DUMP_MANYLIGHTS witness scene added", "clustered resolve"],
+                    "window":   ["deferred frame (", "8-light resolve"]},
+    },
+    # SSR inside the deferred resolve (Thema 150 Schritt 5, docs/deferred-renderer-
+    # plan.md §10.12, commit dfd1e7c2): the resolve composites the forward SSR
+    # trace through heLitP's heSSRFwd stage. Built-in SSRTEST mirror floor + red
+    # cube, no graph material, so this needs no other asset. REPORT ONLY: the
+    # §10.12 table only has an RTX 4070 number, on a different scene (chrome graph
+    # sphere, mean |Δ| 2.81-2.84) — not a bound to judge THIS scene against. Make
+    # it a judged pair once a lavapipe number exists.
+    "deferred_ssr": {
+        "base": {"SKYTEST": "1", "SSRTEST": "1", "CAMY": "3.5", "CAMZ": "6", "PITCH": "-12",
+                 "TOD": "0.45", "CLOUDMODE": "0", "COVERAGE": "0", "AA": "0", "BLOOM": "0",
+                 "GI": "0", "SSAO": "0", "RENDERPATH": "1"},
+        "variants": {
+            "off": {"dump": {"SSR": "0"}},
+            "on":  {"dump": {"SSR": "1"}},
+        },
+        "pairs": [("off", "on", None)],
+        "require": {"off": ["HE_DUMP_SSRTEST witness scene added", "deferred path ready", "deferred frame ("],
+                    "on":  ["HE_DUMP_SSRTEST witness scene added", "deferred path ready", "deferred frame ("]},
+        # The SSR reflection prepass leaves one vertex input unconsumed; §10.12
+        # saw it on the RTX 4070 forward run too, so it is not new to the deferred
+        # path or to lavapipe specifically — allow it rather than guess it away.
+        "allow": {"on": ["ssr_prepass_unconsumed"]},
+    },
+    # Decals in GB0 ahead of the deferred resolve (§10.12, commit 4c8c37ea): the
+    # red decal patch must reach the G-buffer's base colour same as the final
+    # deferred frame. REPORT ONLY, same reason as deferred_ssr: no lavapipe number
+    # yet, only the RTX 4070's shadow/sun ratio table on a different camera.
+    "deferred_decal": {
+        "base": {"SKYTEST": "1", "DECALTEST": "1", "CAMY": "13", "CAMZ": "-1", "PITCH": "-65",
+                 "TOD": "0.45", "CLOUDMODE": "0", "COVERAGE": "0", "AA": "0", "BLOOM": "0",
+                 "GI": "0", "SSAO": "0", "RENDERPATH": "1"},
+        "variants": {
+            "deferred": {},
+            "gbuffer":  {"dump": {"GBUFFER": "1"}},
+        },
+        "pairs": [("deferred", "gbuffer", None)],
+        "require": {"deferred": ["HE_DUMP_DECALTEST witness scene added", "deferred path ready", "deferred frame ("],
+                    "gbuffer":  ["deferred frame ("]},
+    },
     # DDGI diffuse on the GI-reflections witness scene (graph-material cubes, one
     # emissive, on a mirror floor), with the reflections pinned OFF so the A/B is
     # the probe irradiance alone. "sw" forces the software BVH; on lavapipe "on"
@@ -206,6 +294,73 @@ CASES = {
         "stripes": {v: [("terrain", 0.08, 0.78, 0.92, 0.98, STRIPE_MAX),
                         ("sphere",  0.37, 0.17, 0.63, 0.47, STRIPE_MAX)] for v in ("gi_off", "gi_on")},
     },
+    # Water Ripple node (Thema 179 Schritt 4, docs/water-physics-plan.md §14/§16): the
+    # shipped Engine/Materials/Water.hasset on a 40 m plane (HE_DUMP_WATERTEST), one ring
+    # of a crate's size at 0.8 s age written straight into the block (HE_DUMP_WATERRIPPLE,
+    # no physics, no time advance — the same string twice is the same image). Steps 1-3
+    # built the node and filled Metal/OpenGL; this step adds the three missing
+    # FillMaterialWater calls (D3D11Renderer.cpp:6443, D3D12Renderer.cpp:10201,
+    # VulkanRenderer.cpp:7755) — before them Vulkan bound sizeof(Lighting) bytes (the
+    # ABI tail was already there) but never copied the block in, so the ring was computed
+    # by the shader against a zeroed waterRipples.x (count 0) and the loop never ran: off
+    # and on were byte-identical. "off" (no ring) is the same picture as before Schritt 3's
+    # shader change touched this material (the branch is dead at count 0, §14.3's Mac
+    # byte-identical control).
+    #
+    # Judged at half the measured number, the convention every other case here follows.
+    # Measured on this exact case: RTX 4070 (real Vulkan, driver 1.4.341, 12.10.2026) off vs
+    # on mean |Δ| 0.2445 (max 104, 51702 px, 2.6 % of pixels off by more than 2); lavapipe
+    # (llvmpipe LLVM 20.1.2, Vulkan 1.4.318, CI run 38213877852 on ff3411bd) mean |Δ| 0.2451
+    # (max 104, 51289 px, 2.603 %). Before the three FillMaterialWater calls of Schritt 4,
+    # off and on were byte-identical (mean |Δ| 0), so 0.12 fails exactly when the ring is
+    # gone, with a factor of two of room for the backend difference (19 to 400 px).
+    "water_ripple": {
+        "base": {"WATERTEST": "1", "SKYTEST": "1", "TOD": "0.4", "CAMY": "4", "CAMZ": "6",
+                 "PITCH": "-25", "CLOUDMODE": "0", "COVERAGE": "0"},
+        "variants": {
+            "off": {},
+            "on":  {"dump": {"WATERRIPPLE": "0,-3,0.8,1,0.8"}},
+        },
+        "pairs": [("off", "on", 0.12)],
+        "require": {"off": ["HE_DUMP_WATERTEST engine water plane added"],
+                    "on":  ["HE_DUMP_WATERTEST engine water plane added",
+                            "HE_DUMP_WATERRIPPLE 1 ring(s)"]},
+    },
+    # Underwater (Thema 205 step 4, docs/underwater-look-acceptance-2026-10-15.md): the
+    # bowl lake of scripts/underwater_look_shots.py (HE_DUMP_WATERLAKE=bowl, surface at
+    # Y 302), camera 2 m under it. "floor" and "floor_off" are the view "floor" with the
+    # caustic net on and off (UWCAUSTICS=0): the net is postfx_underwatercaustics.frag,
+    # the pipeline Thema 185 step 4 added and step 2 of 205 rewrote. "up" is the view
+    # "up": the underside of the surface, drawn by the Water material's underside branch
+    # (205 step 3) — Snell's window (sky, bright) above the rim, total internal
+    # reflection (water colour, dark) below it. These are the first Vulkan pictures of
+    # either under the validation layer on CI; the hardware acceptance stays on NN-WS03.
+    #
+    # Measured on Metal (M5, 15.10.2026), not yet on lavapipe: floor on vs off mean |Δ|
+    # 11.73; up window (0.45, 0.12) rgb (171, 190, 203) vs below the rim (0.50, 0.85)
+    # (34, 99, 112). Vulkan draws this scene brighter (the floor nearly white, Thema 185
+    # §8.1) and the net saturates there: 185's net measured 0.23 on Vulkan against 0.63
+    # on GL. 1.5 is a third of 11.73 scaled by that factor — it fails when the net is
+    # silently off (0), not when it is one shade weaker. Tighten after the first run.
+    "underwater": {
+        "base": {"WATERLAKE": "bowl", "SKYTEST": "1", "TOD": "0.45", "COVERAGE": "0.2",
+                 "CLOUDMODE": "0", "AA": "0", "BLOOM": "0", "RENDERPATH": "1",
+                 "CAMX": "0", "CAMY": "300", "YAW": "180"},
+        "variants": {
+            "floor_off": {"dump": {"CAMZ": "28", "PITCH": "-20", "UWCAUSTICS": "0"},
+                          "env": {"HE_SKY_TIME": "5"}},
+            "floor":     {"dump": {"CAMZ": "28", "PITCH": "-20"}, "env": {"HE_SKY_TIME": "5"}},
+            "up":        {"dump": {"CAMZ": "20", "PITCH": "35"}, "env": {"HE_SKY_TIME": "5"}},
+        },
+        "pairs": [("floor_off", "floor", 1.5)],
+        "require": {v: ["HE_DUMP_WATERLAKE witness landscape added"]
+                    for v in ("floor_off", "floor", "up")},
+        "samples": {"up": {"window": (0.45, 0.12), "below_rim": (0.50, 0.85)}},
+        "checks": {"up": [
+            ("Snell's window is brighter than the reflection below the rim (Metal: rgb sum 557 vs 244)",
+             lambda p: sum(p["window"]) > sum(p["below_rim"]) + 90),
+        ]},
+    },
     # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
     # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
     # picture (red top-left, green top-right, blue bottom-left, yellow bottom-
@@ -253,6 +408,9 @@ COLOR_TOL = 12
 # target behind scene binding 3 stayed UNDEFINED because runSSAO never draws
 # with GI on; Thema 145 — createSSAOTargets primes it to SHADER_READ_ONLY).
 ALLOWED_VALIDATION = {
+    # §10.12: the SSR reflection prepass pipeline leaves one vertex input
+    # unconsumed; seen on the RTX 4070's forward run too, not new here.
+    "ssr_prepass_unconsumed": [r"Vertex attribute at location 2 not consumed"],
 }
 
 LOG_MARK_ARMED  = "frame dump armed"
@@ -528,7 +686,11 @@ def main():
                     problems.append(f"{vname}: stripes in '{label}', energy {e} > {mx}")
 
         pairs = []
-        for a, b, min_mean in spec["pairs"]:
+        for pair in spec["pairs"]:
+            # (a, b, min_mean) or (a, b, min_mean, max_mean): the optional 4th
+            # element is the most the pair may differ — "B looks like A".
+            a, b, min_mean = pair[0], pair[1], pair[2]
+            max_mean = pair[3] if len(pair) > 3 else None
             sa, sb = shots.get(a), shots.get(b)
             if not (sa and sb and "_pix" in sa and "_pix" in sb):
                 continue
@@ -536,13 +698,20 @@ def main():
                 problems.append(f"{a}/{b}: size differs")
                 continue
             ds = diff_stats(sa["_pix"], sb["_pix"])
-            verdict = "report" if min_mean is None else ("ok" if ds["mean_abs"] >= min_mean else "FAIL")
+            judged = min_mean is not None or max_mean is not None
+            ok = (min_mean is None or ds["mean_abs"] >= min_mean) and \
+                 (max_mean is None or ds["mean_abs"] <= max_mean)
+            verdict = "report" if not judged else ("ok" if ok else "FAIL")
             if verdict == "FAIL":
-                problems.append(f"{a} vs {b}: mean |Δ| {ds['mean_abs']} < {min_mean}")
-            pairs.append({"a": a, "b": b, "min_mean": min_mean, "verdict": verdict, **ds})
+                bound = f"< {min_mean}" if min_mean is not None and ds["mean_abs"] < min_mean else f"> {max_mean}"
+                problems.append(f"{a} vs {b}: mean |Δ| {ds['mean_abs']} {bound}")
+            pairs.append({"a": a, "b": b, "min_mean": min_mean, "max_mean": max_mean,
+                          "verdict": verdict, **ds})
+            limits = ", ".join(s for s in (f"min {min_mean}" if min_mean is not None else "",
+                                           f"max {max_mean}" if max_mean is not None else "") if s)
             print(f"  {a} vs {b}: mean |Δ| {ds['mean_abs']}, max {ds['max_abs']}, "
                   f"{ds['px_changed']} px changed, px>2 {ds['pct_px_over2']} %"
-                  f"  → {verdict}{'' if min_mean is None else f' (min {min_mean})'}")
+                  f"  → {verdict}{f' ({limits})' if limits else ''}")
 
         for p in problems:
             print(f"::error::{case}: {p}")

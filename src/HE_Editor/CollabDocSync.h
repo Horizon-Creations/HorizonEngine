@@ -49,11 +49,18 @@ enum class Kind : std::uint8_t
     Node = 0,       // graph node / animator state
     Link,           // graph link / animator transition
     Variable,       // HorizonCode graph variable
-    Comment,        // material graph comment box
+    Comment,        // material / HorizonCode graph comment box
     Element,        // UI designer element
+    // Appended, never inserted: the byte is on the wire.
+    Event,          // HorizonCode declared (custom) event, keyed by name like a variable
+    Setting,        // a per-document singleton (HorizonCode: the Extract spec), see kSettingExtract
     COUNT
 };
 inline constexpr int kKindCount = static_cast<int>(Kind::COUNT);
+
+// Item ids of Kind::Setting. A setting always exists (its empty value has a JSON
+// form of its own), so it is only ever replaced, never created or removed.
+inline constexpr std::int64_t kSettingExtract = 1;
 
 // Which document inside one asset. A UI widget file holds two: the element tree
 // the designer edits and the HorizonCode graph its Graph tab edits. They share
@@ -124,12 +131,56 @@ void seed(const IDocAdapter& doc, DocMirror& mirror, Scope scope);
 void diffInto(const IDocAdapter& doc, DocMirror& mirror, Scope scope,
               std::vector<HE::Net::CollabSession::DocDelta>& out);
 
+// Would diffInto emit anything? Read-only: the mirror is left as it is, so the
+// edit is still there to send once we may. For a document that has no dirty
+// flag to tell "the user changed something" (the Level Script, the Game
+// Instance graph), this is that flag. An unseeded mirror has nothing to compare
+// against and answers false.
+bool hasLocalChanges(const IDocAdapter& doc, const DocMirror& mirror);
+
 // Apply a peer's batch. Only deltas whose scope matches are considered, so one
 // call per document of a multi-document asset. Returns true when anything was
 // applied (the caller repaints / marks dirty). Updates the mirror, which is what
 // stops the applied edit from being diffed back out as ours.
 bool applyDeltas(IDocAdapter& doc, DocMirror& mirror, Scope scope,
                  const std::vector<HE::Net::CollabSession::DocDelta>& batch);
+
+// ── When to diff a document that has no dirty flag (EDT-201) ────────────────
+// The Level Script and the Game Instance graph have nothing that says "the user
+// changed this", so the diff itself was that flag — and ran on every frame of a
+// session the tab was open in, a full capture (every node to JSON) at 60 Hz to
+// find nothing. The editor does know when they are edited, through channels the
+// diff cannot miss for long: the scene-undo revision (every Level Script edit
+// snapshots), the Game Instance commit, an MCP client's endEdit. The caller
+// folds those into one number that only ever grows; when it moved, the lock
+// changed hands or the mirror needs its first capture, the diff runs now.
+// Otherwise it still runs every kFallbackMs, so an edit that reached the
+// document by some path nobody counted goes out late, never not at all.
+struct DiffGate
+{
+    static constexpr std::uint64_t kFallbackMs = 250;
+
+    std::uint64_t seenSignal = 0;
+    std::uint64_t lastRunMs  = 0;
+    bool          seenOwned  = false;
+    bool          primed     = false;   // false until the first run
+
+    bool due(std::uint64_t signal, bool owned, bool mirrorSeeded, std::uint64_t nowMs,
+             std::uint64_t fallbackMs = kFallbackMs) const
+    {
+        return !primed || !mirrorSeeded || signal != seenSignal || owned != seenOwned ||
+               nowMs - lastRunMs >= fallbackMs;
+    }
+    // `signal` as read before the diff: an edit later in the frame is next
+    // frame's.
+    void ran(std::uint64_t signal, bool owned, std::uint64_t nowMs)
+    {
+        seenSignal = signal;
+        seenOwned  = owned;
+        lastRunMs  = nowMs;
+        primed     = true;
+    }
+};
 
 // ── What a panel hands out ──────────────────────────────────────────────────
 // The live documents behind one open tab, each paired with the mirror tracking

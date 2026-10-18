@@ -87,8 +87,27 @@ constexpr int kEditorIconTextureSize = 64;
 // same UUID in memory as well would collide with the file.
 
 // Water: lit, translucent node-graph material with three animated wave trains,
-// depth tint, Fresnel, foam and caustics, 15 parameters for the Inspector.
+// depth tint, Fresnel, foam and caustics, 16 parameters for the Inspector (the
+// waves are bombed on a hex grid so a big surface does not tile).
 // Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
 constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
+
+// ── Engine weather sounds (FILES, not registered here) ──────────────────────
+// The sounds WeatherComponent plays when none of its sound slots is set, so a
+// project gets rain, wind, snow, storm and thunder without a file of its own.
+// Like the materials above they are .hasset files under
+// EditorDeps/EngineContent/Audio/Weather/ (content path "Engine/Audio/Weather/
+// <Name>.hasset"), PCM16 and written by a generator in the *_gen pattern, which
+// must static_assert its UUIDs against these. UUID block hi = 0x500, entry
+// index + 1, append only. The loops are seamless (they are played looping),
+// the thunder is one self-contained roll.
+//
+// Until the files exist (or when a project strips EngineContent) the weather
+// is simply silent: WeatherAudio asks the ContentManager and finds nothing.
+constexpr UUID kEngineWeatherRainSoundId    = { 0x0000000000000500ULL, 0x0000000000000001ULL };  // Rain.hasset
+constexpr UUID kEngineWeatherWindSoundId    = { 0x0000000000000501ULL, 0x0000000000000001ULL };  // Wind.hasset
+constexpr UUID kEngineWeatherSnowSoundId    = { 0x0000000000000502ULL, 0x0000000000000001ULL };  // Snow.hasset
+constexpr UUID kEngineWeatherStormSoundId   = { 0x0000000000000503ULL, 0x0000000000000001ULL };  // Storm.hasset
+constexpr UUID kEngineWeatherThunderSoundId = { 0x0000000000000504ULL, 0x0000000000000001ULL };  // Thunder.hasset
 
 } // namespace HE

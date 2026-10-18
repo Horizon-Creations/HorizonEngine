@@ -2,7 +2,7 @@
 
 #include "EditorConfig.h"
 #include "EditorSettingsCatalog.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "ProjectManager.h"
 #include "TestFsUtil.h"
 

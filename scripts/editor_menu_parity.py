@@ -56,6 +56,7 @@ OLD_ROWS = [
     ("Assets", "Import Asset..."), ("Assets", "Refresh Assets"),
     ("Assets", "Publish Engine Content to Server..."), ("Assets", "Rebuild Manifest from Server..."),
     ("Build", "Export Project..."), ("Build", "Build and Reload Game Logic"),
+    ("Build", "Show Last Build Log"),
     ("Help", "Documentation"), ("Help", "Search the Documentation..."),
     ("Help", "Documentation (Website)"), ("Help", "Interactive Tutorial"),
     ("Help", "Report Issue..."), ("Help", "About"),

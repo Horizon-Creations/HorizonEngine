@@ -1,0 +1,15 @@
+== ab-500000-d100-before-r2  2026-10-10 20:26:37
+before:
+  uptime:      load averages: 6.83 8.15 8.15
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'AC Power'
+  busy procs:  8.3% /Applications/CLion.app/Contents/MacOS/clion; 4.3% /usr/libexec/syspolicyd; 4.1% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 2.3% claude; 
+after (rc=0):
+  uptime:      load averages: 8.82 8.43 8.25
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=54
+  power:       Now drawing from 'AC Power'
+  busy procs:  58.8% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 57.9% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 57.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 57.4% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 

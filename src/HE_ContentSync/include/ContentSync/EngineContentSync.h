@@ -16,6 +16,7 @@
 
 #include "ContentSync/CsCommon.h"
 #include "ContentSync/EngineContentManifest.h"
+#include "ContentSync/SftpClient.h"
 
 #include <Types/UUID.h>
 
@@ -31,6 +32,26 @@ enum class DownloadTrigger : std::uint8_t
 {
 	Explicit,   // user confirmed a Content Browser double-click
 	Passive,    // a scene/asset reference resolved it automatically
+};
+
+// Something the sync could not do, as it happens. The library has no way to talk
+// to a user, and a failure on a worker thread used to end in a log warning and a
+// callback that most callers ignore — so a download that never arrived, or a
+// catalogue that could not be kept for offline use, was invisible. The Editor
+// installs a listener (setFailureListener) and turns these into notifications.
+enum class SyncFailureKind : std::uint8_t
+{
+	Manifest,       // fetching or parsing manifest.json failed (callers also get the bool)
+	ManifestCache,  // the catalogue could not be written next to the downloads
+	Download,       // one file did not arrive
+};
+
+struct SyncFailure
+{
+	SyncFailureKind kind = SyncFailureKind::Download;
+	std::string     relativePath;   // Download: the file; otherwise empty
+	std::string     reason;         // scrubbed of credentials, may be empty
+	DownloadTrigger trigger = DownloadTrigger::Passive;   // Download only
 };
 
 // Snapshot for UI polling (the Editor footer). Safe to call every frame — it is
@@ -71,7 +92,23 @@ public:
 	// on a worker thread (mirrors probeSftp/probeGit). Leaves the previously
 	// held manifest untouched on failure, so a transient network blip does not
 	// erase an Editor session's already-known remote catalogue.
+	// Safe to call from several threads at once (the startup probe and the
+	// project preflight both do): the calls run one after another, each with its
+	// own download.
 	bool refreshManifestBlocking();
+
+	// refreshManifestBlocking() with the download swapped out: `fetch` puts the
+	// manifest at the local path it is given (the real one is sftpGetFile), and
+	// everything after it — reading, adopting, caching, the serialization — is
+	// the real code. Lets a test drive concurrent refreshes without a server.
+	using ManifestFetchFn = std::function<SftpResult(const std::string& localPath)>;
+	bool refreshManifestWith(const ManifestFetchFn& fetch);
+
+	// Why the last refreshManifestBlocking() failed, scrubbed of the password;
+	// empty after a success. The Editor's notification quotes it — without it
+	// "the catalogue could not be read" cannot say whether the server never
+	// answered, the file is missing, or it did not parse.
+	std::string lastManifestError() const;
 
 	// The last successfully fetched manifest. Empty (not an error) before the
 	// first successful refreshManifestBlocking() or when the endpoint is not
@@ -88,9 +125,10 @@ public:
 	// the directory walk. So a user working offline could neither see nor manage
 	// their own local copies.
 	//
-	// Returns true when a cached manifest was read and adopted. Never overwrites a
-	// manifest that was fetched from the server this session — a live catalogue
-	// always wins over yesterday's copy.
+	// Returns true when a manifest is held afterwards: the cached one was read
+	// and adopted, or one was already fetched from the server this session. That
+	// live one is never overwritten — a live catalogue always wins over
+	// yesterday's copy.
 	bool loadCachedManifest();
 
 	// Record that the local copy of `relativePath` is gone, so the catalogue keeps
@@ -124,7 +162,16 @@ public:
 
 	DownloadQueueStatus status() const;
 
+	// Called for every SyncFailure, on whichever thread hit it (a worker, or the
+	// caller of refreshManifest*), with NO lock held — the listener may call back
+	// into this class. Replaces any earlier listener; an empty function removes it.
+	// Must be cheap and must not block: it runs on the download worker.
+	using FailureListener = std::function<void(const SyncFailure&)>;
+	void setFailureListener(FailureListener listener);
+
 private:
+	void reportFailure(const SyncFailure& failure);
+
 	EngineContentSync()                                     = default;
 	EngineContentSync(const EngineContentSync&)              = delete;
 	EngineContentSync& operator=(const EngineContentSync&)   = delete;
@@ -150,12 +197,19 @@ private:
 	bool                   m_draining = false;
 	DownloadQueueStatus    m_status;
 
+	// Held across a whole refresh, network included: the refreshes share one temp
+	// path (see refreshManifestWith). Never taken while holding m_manifestMutex.
+	std::mutex             m_refreshMutex;
+
+	mutable std::mutex     m_listenerMutex;
+	FailureListener        m_failureListener;     // guarded by m_listenerMutex
 	mutable std::mutex     m_manifestMutex;
 	EngineContentManifest  m_manifest;
 	// True once the server answered this session. Guards loadCachedManifest()
 	// against replacing a live catalogue with the stale one on disk — the probe
 	// and a manual refresh can both land after startup restored the cache.
 	bool                   m_manifestIsLive = false;
+	std::string            m_lastManifestError;   // guarded by m_manifestMutex
 };
 
 } // namespace HE::Cs

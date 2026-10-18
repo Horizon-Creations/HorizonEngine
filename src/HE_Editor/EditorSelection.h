@@ -2,6 +2,7 @@
 #include <HorizonScene/HorizonWorld.h> // Entity
 #include <cstddef>
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 // The editor's selection: an ORDERED set of entities, not a single handle.
@@ -51,8 +52,8 @@ public:
 	// Shift-click: keep everything selected so far and append `range`.
 	void addMany(const std::vector<Entity>& range);
 
-	// Remove every member the registry no longer knows. Cheap for a handful of
-	// entities and the only thing that keeps a peer's delete from leaving a
+	// Remove every member the registry no longer knows. Runs every frame; one
+	// pass over the members, and the only thing that keeps a peer's delete from leaving a
 	// dead handle in the inspector's hands.
 	void prune(const entt::registry& registry);
 
@@ -78,7 +79,13 @@ public:
 	std::uint64_t revision() const { return m_revision; }
 
 private:
-	std::vector<Entity> m_entities;
+	// The order lives in m_entities; m_members holds the same handles as a set,
+	// so contains() is O(1). Select All hands over every entity of the scene and
+	// the viewport asks roots() each frame, which asks contains() for every
+	// ancestor of every member: with a linear contains() that was quadratic in
+	// the selection. Every mutator keeps the two in step.
+	std::vector<Entity>        m_entities;
+	std::unordered_set<Entity> m_members;
 	Entity              m_anchor   = entt::null;
 	std::uint64_t       m_revision = 0;
 };

@@ -21,7 +21,15 @@ struct AppContext;
 // (consecutive identical lines collapse into one row with a ×N badge) rather
 // than dropped — which bounds the per-frame-error case without losing the fact
 // that it happened, and keeps the ring from being flushed by a single bad
-// shader compile.
+// shader compile. (The log folds consecutive identical records itself and
+// follows with "(previous message repeated N more times)"; the console reads
+// that note as the row's count rather than showing it as a row.)
+//
+// The window is ConsoleView (the buffer, the sink and the drawing — ImGui-only,
+// so a test can draw it) in a Begin/End from here: columns for time and
+// category, warnings and errors marked as rows, level chips that count what a
+// click would show, a category filter, and a link on every row that can lead
+// somewhere (a HorizonCode node, a script line).
 //
 // What it can NOT show: records the log filtered out upstream. Trace and Debug
 // are off for most categories by default (HE_LOG env var / logVerbosity in

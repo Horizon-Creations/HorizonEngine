@@ -2,6 +2,7 @@
 #include "ContentSync/CsLog.h"
 #include "ContentSync/SftpClient.h"
 #include "ContentSync/SftpCredentials.h"
+#include "CsRename.h"
 
 #include <Diagnostics/GlobalState.h>
 #include <JobSystem/JobSystem.h>
@@ -51,7 +52,7 @@ bool writeCachedManifest(const EngineContentManifest& manifest)
 		}
 	}
 	std::error_code ec;
-	fs::rename(tmpPath, finalPath, ec);
+	detail::renameReplacing(tmpPath, finalPath, ec);
 	if (ec)
 	{
 		fs::remove(tmpPath, ec);
@@ -76,12 +77,40 @@ bool EngineContentSync::refreshManifestBlocking()
 		return false;
 	}
 
+	// Retried on a failed CONNECTION only (see sftpWithConnectRetry): the probe
+	// that just succeeded does not make this second connection a given.
+	return refreshManifestWith([&endpoint](const std::string& localPath)
+	{
+		return sftpWithConnectRetry(
+			[&] { return sftpGetFile(endpoint, kManifestRemoteName, localPath); });
+	});
+}
+
+bool EngineContentSync::refreshManifestWith(const ManifestFetchFn& fetch)
+{
+	// One refresh at a time, from the download to the adoption (Thema 187). At
+	// startup the SFTP probe worker and the project preflight both refresh, and
+	// both download through the same fixed temp name: on Windows one's rename of
+	// .partial / onto .tmp then fails on the other's still-open fstream ("used by
+	// another process" — the other process being this editor), on POSIX one's
+	// remove() can delete the file the other just renamed into place. The second
+	// caller simply downloads again once the first is done: reusing the first's
+	// result could hand a refresh that follows a publish the catalogue from before it.
+	// NOT m_manifestMutex: that one is held by manifest() on the UI thread and must
+	// never wait for the network.
+	std::lock_guard<std::mutex> refreshLock(m_refreshMutex);
+
 	const fs::path tmpPath = GlobalState::engineContentCacheDir() / ".manifest.json.tmp";
-	const SftpResult dl = sftpGetFile(endpoint, kManifestRemoteName, tmpPath.string());
+	const SftpResult dl = fetch(tmpPath.string());
 	if (!dl.ok)
 	{
-		HE_LOG_WARN(ContentSync, "Could not fetch EngineContent manifest: %s",
-		            HE::Cs::detail::scrub(dl.error).c_str());
+		const std::string why = HE::Cs::detail::scrub(dl.error);
+		HE_LOG_WARN(ContentSync, "Could not fetch EngineContent manifest: %s", why.c_str());
+		{
+			std::lock_guard<std::mutex> lock(m_manifestMutex);
+			m_lastManifestError = why;
+		}
+		reportFailure({ SyncFailureKind::Manifest, {}, why });
 		return false;
 	}
 
@@ -96,12 +125,19 @@ bool EngineContentSync::refreshManifestBlocking()
 	if (!parseManifest(ss.str(), parsed))
 	{
 		HE_LOG_WARN(ContentSync, "%s", "EngineContent manifest failed to parse — keeping previous manifest");
+		{
+			std::lock_guard<std::mutex> lock(m_manifestMutex);
+			m_lastManifestError = "the manifest on the server could not be parsed";
+		}
+		reportFailure({ SyncFailureKind::Manifest, {}, "the manifest on the server could not be parsed" });
 		return false;
 	}
 
 	size_t entryCount = 0;
+	bool   cacheFailed = false;
 	{
 		std::lock_guard<std::mutex> lock(m_manifestMutex);
+		m_lastManifestError.clear();
 		m_manifest   = std::move(parsed);
 		m_manifestIsLive = true;
 		entryCount   = m_manifest.entries.size();
@@ -109,16 +145,33 @@ bool EngineContentSync::refreshManifestBlocking()
 		// noteLocalCopyRemoved() can never interleave and write a manifest that
 		// contradicts the one in memory.
 		if (!writeCachedManifest(m_manifest))
+		{
 			HE_LOG_WARN(ContentSync, "%s", "Could not cache the EngineContent manifest for offline use");
+			cacheFailed = true;
+		}
 	}
+	// After the lock is let go: the listener may call back into this class.
+	if (cacheFailed)
+		reportFailure({ SyncFailureKind::ManifestCache, {},
+		                "The catalogue could not be written to the cache folder." });
 	HE_LOG_INFO(ContentSync, "EngineContent manifest refreshed (%zu entries)", entryCount);
 	return true;
+}
+
+std::string EngineContentSync::lastManifestError() const
+{
+	std::lock_guard<std::mutex> lock(m_manifestMutex);
+	return m_lastManifestError;
 }
 
 bool EngineContentSync::loadCachedManifest()
 {
 	std::lock_guard<std::mutex> lock(m_manifestMutex);
-	if (m_manifestIsLive) return false;   // this session already has the real thing
+	// This session already has the real thing — which is "a manifest is there" to
+	// every caller. Answering false here told the loser of two startup refreshes
+	// that there was "no cached copy on this machine" and made it skip the Engine
+	// tree merge, with the catalogue loaded all along (Thema 187).
+	if (m_manifestIsLive) return true;
 
 	std::ifstream in(cachedManifestPath(), std::ios::binary);
 	if (!in) return false;
@@ -137,28 +190,36 @@ bool EngineContentSync::loadCachedManifest()
 void EngineContentSync::noteLocalCopyRemoved(const std::string& relativePath, HE::UUID uuid)
 {
 	if (relativePath.empty()) return;
-	std::lock_guard<std::mutex> lock(m_manifestMutex);
-
-	EngineContentManifestEntry* existing = nullptr;
-	for (auto& e : m_manifest.entries)
-		if (e.relativePath == relativePath) { existing = &e; break; }
-
-	if (!existing)
+	bool written = true;
 	{
-		// The file was downloaded, so the server has it — the catalogue simply does
-		// not say so right now (no refresh this session, or an older build fetched
-		// it). Recording it is what keeps the asset visible as remote-only instead
-		// of disappearing from the tree along with its local copy.
-		EngineContentManifestEntry entry;
-		entry.relativePath = relativePath;
-		entry.uuid         = uuid;
-		m_manifest.entries.push_back(std::move(entry));
-	}
-	else if (existing->uuid == HE::UUID{} && uuid != HE::UUID{})
-		existing->uuid = uuid;
+		std::lock_guard<std::mutex> lock(m_manifestMutex);
 
-	if (!writeCachedManifest(m_manifest))
-		HE_LOG_WARN(ContentSync, "%s", "Could not update the cached EngineContent manifest");
+		EngineContentManifestEntry* existing = nullptr;
+		for (auto& e : m_manifest.entries)
+			if (e.relativePath == relativePath) { existing = &e; break; }
+
+		if (!existing)
+		{
+			// The file was downloaded, so the server has it — the catalogue simply does
+			// not say so right now (no refresh this session, or an older build fetched
+			// it). Recording it is what keeps the asset visible as remote-only instead
+			// of disappearing from the tree along with its local copy.
+			EngineContentManifestEntry entry;
+			entry.relativePath = relativePath;
+			entry.uuid         = uuid;
+			m_manifest.entries.push_back(std::move(entry));
+		}
+		else if (existing->uuid == HE::UUID{} && uuid != HE::UUID{})
+			existing->uuid = uuid;
+
+		written = writeCachedManifest(m_manifest);
+		if (!written)
+			HE_LOG_WARN(ContentSync, "%s", "Could not update the cached EngineContent manifest");
+	}
+	// After the lock is let go: the listener may call back into this class.
+	if (!written)
+		reportFailure({ SyncFailureKind::ManifestCache, {},
+		                "The catalogue could not be updated in the cache folder." });
 }
 
 EngineContentManifest EngineContentSync::manifest() const
@@ -249,8 +310,13 @@ void EngineContentSync::drainQueue()
 			});
 
 		if (!result.ok)
-			HE_LOG_WARN(ContentSync, "Download of '%s' failed: %s",
-			            relativePath.c_str(), HE::Cs::detail::scrub(result.error).c_str());
+		{
+			const std::string why = HE::Cs::detail::scrub(result.error);
+			HE_LOG_WARN(ContentSync, "Download of '%s' failed: %s", relativePath.c_str(), why.c_str());
+			// m_current is only ever touched by this thread between here and the
+			// swap below, so reading its trigger without the queue lock is safe.
+			reportFailure({ SyncFailureKind::Download, relativePath, why, m_current.trigger });
+		}
 
 		// Take the callbacks and settle the status under ONE lock, before firing
 		// anything. Two reasons this order matters:
@@ -281,6 +347,23 @@ void EngineContentSync::drainQueue()
 		}
 		for (auto& cb : callbacks) cb(result.ok);
 	}
+}
+
+void EngineContentSync::setFailureListener(FailureListener listener)
+{
+	std::lock_guard<std::mutex> lock(m_listenerMutex);
+	m_failureListener = std::move(listener);
+}
+
+void EngineContentSync::reportFailure(const SyncFailure& failure)
+{
+	// Copied out so the listener runs with no lock of ours held.
+	FailureListener listener;
+	{
+		std::lock_guard<std::mutex> lock(m_listenerMutex);
+		listener = m_failureListener;
+	}
+	if (listener) listener(failure);
 }
 
 DownloadQueueStatus EngineContentSync::status() const

@@ -1835,7 +1835,7 @@ TEST_CASE("ui shot: a new problem rings the footer bell once")
 	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
 
 	// A new one: the ring, a few frames in — and gone after kPulseSec.
-	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Problem, "New problem."); });
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Important, "New problem."); });
 	for (int i = 0; i < 5; ++i) bellFrame(ctx);
 	const he_ui::Image ringing = bellFrame(ctx, 1.0f / 60.0f, {}, true);
 	dumpShot(ringing, "rewards_bell_problem_ring");
@@ -1843,15 +1843,16 @@ TEST_CASE("ui shot: a new problem rings the footer bell once")
 	bellFrame(ctx, 1.0f);
 	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
 
-	// A warning is not a problem: no ring.
-	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Warning, "Just a warning."); });
+	// An Info is not a problem: no ring. (Important and Critical both ring — the
+	// tiers replaced Warning/Problem; Important is the old "needs you" level.)
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Info, "Just a note."); });
 	for (int i = 0; i < 5; ++i) bellFrame(ctx);
 	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
 
 	// Problem Pulse off: none — and switching it back on does not ring for
 	// the problem that came while it was off.
 	bits.config.RewardsProblemPulse = false;
-	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Problem, "Quiet problem."); });
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Important, "Quiet problem."); });
 	for (int i = 0; i < 5; ++i) bellFrame(ctx);
 	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
 	bits.config.RewardsProblemPulse = true;
@@ -1861,7 +1862,7 @@ TEST_CASE("ui shot: a new problem rings the footer bell once")
 
 	// The master off: none either.
 	bits.config.RewardsEnabled = false;
-	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Problem, "Off problem."); });
+	bellFrame(ctx, 1.0f / 60.0f, [&] { postProblem(store, HE::Ed::NoteLevel::Important, "Off problem."); });
 	for (int i = 0; i < 5; ++i) bellFrame(ctx);
 	CHECK(ringInk(bellFrame(ctx, 1.0f / 60.0f, {}, true)) == 0);
 	bits.config.RewardsEnabled = true;
@@ -1884,7 +1885,7 @@ TEST_CASE("Rewards: the problem tone plays in the background, once per kProblemT
 	const auto foreground = [&] { pollBuild(ctx, 0, false, false, /*appFocused=*/true); };
 	const auto problem = [&](const char* text)
 	{
-		return [&, text] { background(); postProblem(store, HE::Ed::NoteLevel::Problem, text); };
+		return [&, text] { background(); postProblem(store, HE::Ed::NoteLevel::Important, text); };
 	};
 
 	// Far past any tone an earlier test booked on the shared Feed.
@@ -1915,7 +1916,7 @@ TEST_CASE("Rewards: the problem tone plays in the background, once per kProblemT
 	// In front of the editor: the bell rings, the speakers stay quiet — and a
 	// tone that did not play books no gap.
 	bellFrame(ctx, float(kProblemToneGapSec), foreground);
-	bellFrame(ctx, 1.0f / 60.0f, [&] { foreground(); postProblem(store, HE::Ed::NoteLevel::Problem, "Fourth."); });
+	bellFrame(ctx, 1.0f / 60.0f, [&] { foreground(); postProblem(store, HE::Ed::NoteLevel::Important, "Fourth."); });
 	bellFrame(ctx, 1.0f / 60.0f, foreground);
 	CHECK(loudestOut(ui) == 0.0f);
 	bellFrame(ctx, 3.0f, background);
@@ -1999,7 +2000,7 @@ TEST_CASE("Rewards: no device, no sound — nothing opens, nothing hangs, nothin
 			fire(ctx, Moment::CompiledClean);
 			sound(ctx, Tone::CompileFailed);
 			postSound(Tone::Problem);
-			postProblem(store, HE::Ed::NoteLevel::Problem, "Problem " + std::to_string(i));
+			postProblem(store, HE::Ed::NoteLevel::Important, "Problem " + std::to_string(i));
 		});
 	pollBuild(ctx, 7, true, false, false);   // a failed build
 	CHECK_FALSE(ui.isInitialized());
@@ -2013,7 +2014,7 @@ TEST_CASE("Rewards: no device, no sound — nothing opens, nothing hangs, nothin
 		for (Tone t : kAllTones) preview(ctx, t);
 		sound(ctx, Tone::CompileFailed);
 		fire(ctx, Moment::Committed, kSyncCommit);
-		postProblem(store, HE::Ed::NoteLevel::Problem, "No engine.");
+		postProblem(store, HE::Ed::NoteLevel::Important, "No engine.");
 	});
 	pollBuild(ctx, 8, true, false, false);
 	CHECK(true);   // reaching here is the check

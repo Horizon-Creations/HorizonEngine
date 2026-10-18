@@ -1,0 +1,15 @@
+== ab-500000-d100-before-r3  2026-10-10 20:42:33
+before:
+  uptime:      load averages: 10.41 11.54 10.35
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=80
+  power:       Now drawing from 'Battery Power'
+  busy procs:  44.6% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 15.5% /Applications/CLion.app/Contents/MacOS/clion; 12.0% /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock; 11.9% /Users/connorjansen/VSCode/HorizonEngine/out/deploy/Editor/HorizonEditor; 
+after (rc=0):
+  uptime:      load averages: 8.64 11.04 10.21
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=80
+  power:       Now drawing from 'Battery Power'
+  busy procs:  43.5% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 21.2% /Users/connorjansen/VSCode/HorizonEngine/out/deploy/Editor/HorizonEditor; 17.3% /usr/sbin/coreaudiod; 9.9% /Applications/CLion.app/Contents/MacOS/clion; 

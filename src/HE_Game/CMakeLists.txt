@@ -48,6 +48,15 @@ endif()
 target_compile_definitions(HorizonGame PRIVATE
 	$<$<CONFIG:Debug,RelWithDebInfo>:HE_GAME_DEV_HOTKEYS>
 )
+# …or in EVERY configuration, for looking at a Release-speed game with the F10 stats
+# card: -DHE_GAME_DEV_HOTKEYS=ON. Never for a build that is shipped to players — the
+# exporter copies whatever runtime it finds, so a game exported from such a build
+# carries the keys too. The startup log says which kind of build it is
+# ("development hotkeys compiled in" / "not compiled in").
+option(HE_GAME_DEV_HOTKEYS "Compile the development hotkeys (V = VSync, F10 = stats card) into HorizonGame in every configuration" OFF)
+if(HE_GAME_DEV_HOTKEYS)
+	target_compile_definitions(HorizonGame PRIVATE HE_GAME_DEV_HOTKEYS)
+endif()
 
 if(DEFINED HE_PROJECT_SECRET)
 	target_compile_definitions(HorizonGame
