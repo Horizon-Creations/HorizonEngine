@@ -9,15 +9,21 @@
 namespace
 {
 
+// The key k with times[k] < t <= times[k+1]: one less than the first j >= 1 with
+// times[j] >= t, or the last key when there is none. A binary search, because it
+// runs for every channel of every posed skeleton every frame, and a mocap clip has
+// hundreds of keys per channel (SCN-103). It needs `times` ascending — glTF
+// demands that and the clip loader warns when a file breaks it.
+//
+// The predicate is !(x >= t) rather than x < t on purpose: for a NaN t the two
+// differ, and this one lands on the last key, exactly where the linear walk this
+// replaced ended up.
 static size_t findBracket(const std::vector<float>& times, float t)
 {
-    size_t k = 0;
-    for (size_t i = 0; i + 1 < times.size(); ++i)
-    {
-        if (times[i + 1] >= t) { k = i; return k; }
-        k = i + 1;
-    }
-    return k;
+    if (times.size() < 2) return 0;
+    const auto it = std::lower_bound(times.begin() + 1, times.end(), t,
+                                     [](float x, float v) { return !(x >= v); });
+    return static_cast<size_t>(it - times.begin()) - 1;
 }
 
 static float bracketAlpha(const std::vector<float>& times, size_t k, float t)

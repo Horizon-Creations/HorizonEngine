@@ -553,6 +553,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			uint32_t channelCount = 0;
 			HAsset::Reader::readPOD(c->data, o, channelCount);
 			a.channels.resize(channelCount);
+			size_t unsortedChannels = 0;
 			for (auto& ch : a.channels)
 			{
 				uint8_t pathByte = 0;
@@ -561,7 +562,15 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				ch.path = static_cast<AnimPathType>(pathByte);
 				HAsset::Reader::readVec(c->data, o, ch.times);
 				HAsset::Reader::readVec(c->data, o, ch.values);
+				if (!std::is_sorted(ch.times.begin(), ch.times.end())) ++unsortedChannels;
 			}
+			// The sampler finds its keyframe by binary search, which assumes the
+			// times ascend (glTF demands it). A file that breaks that still plays,
+			// just from the wrong keys — said once here rather than never.
+			if (unsortedChannels)
+				HE_LOG_WARN(Asset, "Animation clip '%s': %zu channel(s) have keyframe times "
+				                   "out of order — those channels will sample the wrong keys",
+				            assetName.c_str(), unsortedChannels);
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANOT))
 		{

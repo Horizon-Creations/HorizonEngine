@@ -127,7 +127,14 @@ void PoseSource::evaluate(entt::entity e, const SkeletalMeshAsset& mesh, bool lo
 
     if (!space || weightedDuration <= 0.0f) return;
 
-    std::vector<size_t> order;
+    // Per thread and reused across calls (SCN-101): a blend-space state is
+    // evaluated once or twice per entity and frame, and a layer may be one too.
+    // Nothing in here calls evaluate() again, so one set per thread is enough.
+    thread_local std::vector<size_t>                order;
+    thread_local std::vector<std::vector<JointTRS>> poses;
+    thread_local std::vector<RootMotionDelta>       deltas;
+    thread_local std::vector<bool>                  haveDelta;
+
     blendSpaceEvalOrder(weights, order);
     if (order.empty()) return;
 
@@ -135,9 +142,12 @@ void PoseSource::evaluate(entt::entity e, const SkeletalMeshAsset& mesh, bool lo
     // phase times that sample's duration. This is the whole point of the phase:
     // walk (1.2 s) and run (0.8 s) at p = 0.5 are read at 0.6 s and 0.4 s, i.e.
     // both exactly halfway through their own cycle, and the feet stay in step.
-    std::vector<std::vector<JointTRS>> poses(space->samples.size());
-    std::vector<RootMotionDelta>       deltas(space->samples.size());
-    std::vector<bool>                  haveDelta(space->samples.size(), false);
+    // `poses` keeps whatever an earlier call left in samples outside `order`;
+    // blendPosesN reads only the ones in it, and every one of those is assigned
+    // below.
+    poses.resize(space->samples.size());
+    deltas.assign(space->samples.size(), RootMotionDelta{});
+    haveDelta.assign(space->samples.size(), false);
 
     for (size_t i : order)
     {

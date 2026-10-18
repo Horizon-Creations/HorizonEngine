@@ -119,6 +119,9 @@ bool evalTransition(const AnimatorStateMachineComponent& sm, const HE::Animation
     }
     return false;
 }
+
+// Which driver a PoseKey came from (see AnimationSystem.cpp).
+constexpr uint64_t kPoseKeyStateMachine = 3;
 } // namespace
 
 void AnimationStateMachineSystem::markConfigDirty(AnimatorStateMachineComponent& sm) { sm.configDirty = true; }
@@ -264,14 +267,38 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         const size_t jointCount = mesh->skeleton.size();
         auto* rmc = reg.try_get<RootMotionComponent>(e);
 
-        std::vector<JointTRS> trsOut(jointCount);
+        // The gate (SCN-102, PoseFinalize.h), for a state resting on one clip —
+        // the last frame of a non-looping clip, a playbackSpeed of 0. Never during
+        // a crossfade, and never for a blend space: its weights come from the
+        // parameters every frame, so its pose moves while its phase stands still.
+        // The notify walk is what evaluate() would have done for this clip.
+        uint64_t key = 0;
+        if (!sm.inTransition && curSrc.clip && !curSrc.space && HE::poseMayBeKept(reg, e))
+        {
+            key = HE::PoseKey(kPoseKeyStateMachine)
+                      .id(curState->clipId).ptr(curSrc.clip).ptr(curSrc.clip->channels.data())
+                      .id(smc.meshAssetId).ptr(mesh).ptr(mesh->skeleton.data()).count(jointCount)
+                      .real(sm.clipTime)
+                      .value();
+            if (key == smc.poseKey)
+            {
+                HE::notifyCollectClip(e, *curSrc.clip, outPrev, outPrev + step, curLooping,
+                                      outFires, sm.clipNotifiesPrimed, notifies);
+                continue;
+            }
+        }
+
+        // Per thread and reused across entities and frames (SCN-101). `pose`
+        // points at whichever of them holds the finished result — moving a
+        // scratch buffer into another would throw its capacity away.
+        thread_local std::vector<JointTRS> trsOut, trsIn, blended;
+        std::vector<JointTRS>* pose = &trsOut;
+
         HE::RootMotionDelta   deltaOut;
         bool                  haveOut = false;
         curSrc.evaluate(e, *mesh, curLooping, outPrev, outPrev + step, sm.clipTime,
                         rmc, outFires, sm.clipNotifiesPrimed, notifies,
                         trsOut, deltaOut, haveOut);
-
-        std::vector<JointTRS> final_trs;
 
         if (sm.inTransition)
         {
@@ -290,7 +317,7 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                 : HE::PoseSource{};
             const bool inLooping = nextState ? inSrc.looping(nextState->looping) : true;
 
-            std::vector<JointTRS> trsIn(jointCount);
+            trsIn.assign(jointCount, JointTRS{});
             HE::RootMotionDelta deltaIn;
             bool haveIn = false;
             // The incoming playhead runs at ITS OWN rate, not the outgoing one's:
@@ -331,7 +358,8 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
                 HE::rootMotionApply(world, rootMotion, e, *rmc,
                                     HE::blendRootMotion(deltaOut, deltaIn, alpha), dt);
 
-            blendTRS(trsOut, trsIn, alpha, final_trs);
+            blendTRS(trsOut, trsIn, alpha, blended);
+            pose = &blended;
 
             // Complete transition
             if (sm.transitionElapsed >= sm.transitionDuration)
@@ -370,7 +398,6 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         else
         {
             if (haveOut) HE::rootMotionApply(world, rootMotion, e, *rmc, deltaOut, dt);
-            final_trs = std::move(trsOut);
         }
 
         // Layer stack (if any) → FK → IBM. AFTER the crossfade, not before it: a
@@ -379,6 +406,8 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
         // them. A layer applied before the crossfade would be mixed straight back
         // out again. And after rootMotionApply, so it cannot write back the root
         // translation that was just taken out.
-        HE::poseFinalize(world, cm, dt, e, *mesh, final_trs, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
+        HE::poseFinalize(world, cm, dt, e, *mesh, *pose, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
+        // 0 after any crossfade frame: the key is only taken outside one.
+        smc.poseKey = key;
     }
 }
