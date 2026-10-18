@@ -11,6 +11,7 @@
 #include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "StructuralSync.h"  // StructPassGate: when the per-frame structure diff runs
 #include "TerrainSync.h"     // landscape grids and settings over the session
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "AssetAutosave.h"   // the same for dirty asset tabs
@@ -926,8 +927,9 @@ private:
 	// tool that shapes, paints or plants a landscape replicates (TerrainSync.h).
 	HE::Ed::TerrainSync m_terrainSync;
 	bool                m_terrainSyncLive = false;   // in a session last frame
-	// Entities the session already knows about. Diffed each frame so every
-	// creation and deletion path is covered without hooking any of them.
+	// Entities the session already knows about. Diffed (whenever the structure
+	// epoch moved, and once a second regardless) so every creation and deletion
+	// path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
 	// New subtrees whose create the session refused, and for how many frames.
 	// Separate from m_structureKnown because "we tried and it did not go" is not
@@ -944,7 +946,16 @@ private:
 	std::unordered_map<Entity, int> m_structureUndeletable;
 	// A peer's destroy: drop the whole subtree from both records (echo protection).
 	void forgetStructureOf(Entity root);
-	void syncStructuralChanges();
+	// Runs the diff only when the world's structure epoch moved, something is
+	// still waiting to be retried, or a second passed (StructPassGate).
+	void syncStructuralChanges(std::uint64_t nowMs);
+	HE::Ed::StructPassGate     m_structureGate;
+	// A re-parent the last pass could not send (parent not announced yet, or no
+	// connection): the next frame has to look again, like the two retry maps.
+	bool                       m_structureReparentPending = false;
+	// "Everything that exists" for one pass. A member so the buckets survive
+	// between passes; only filled on the frames the gate lets through.
+	std::unordered_set<Entity> m_structureCurrent;
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the
 	// document it is already showing), and the debounced whole-file autosave
@@ -986,6 +997,15 @@ private:
 	// Mirrors for the two editor-owned documents (panels keep their own).
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
+	// When those two are diffed (CollabDocSync::DiffGate). The signal is
+	// m_undo.revision() (every Level Script edit snapshots the scene) plus this
+	// count of Game Instance commits and MCP endEdits.
+	CollabDocSync::DiffGate m_levelScriptDiffGate;
+	CollabDocSync::DiffGate m_gameInstanceDiffGate;
+	std::uint64_t           m_editorDocEdits = 0;
+	// For the per-frame callers only: true when `key` (one of the two) is due
+	// for a diff, and the gate is then counted as run.
+	bool editorDocDiffDue(const std::string& key, std::uint64_t nowMs);
 	// Those two, edited while their tab is closed (an MCP client's hc_ tools):
 	// the tab loop never sees them, so updateAssetCollabSync sends them from here.
 	std::unordered_set<std::string> m_collabUntabbedEdits;

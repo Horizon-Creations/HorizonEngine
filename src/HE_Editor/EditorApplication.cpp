@@ -1056,6 +1056,9 @@ void EditorApplication::OnInit()
 		// the snapshot left, which is exactly the parentage the peers share.
 		m_structureParent.clear();
 		m_structureUndeletable.clear();
+		// The records were just rebuilt: the next frame diffs against them.
+		m_structureGate.reset();
+		m_structureReparentPending = false;
 		// The level script came with the new scene, so the mirror describes a
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
@@ -4984,7 +4987,10 @@ void EditorApplication::OnRender(float dt)
 	if (const int sync = m_git.takeSyncMoment())
 		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::Committed, sync);
 
-		if (m_collab.inSession()) syncStructuralChanges();
+		// Out of a session the gate forgets what it saw, so the first pass of the
+		// next one runs whatever the epoch says.
+		if (m_collab.inSession()) syncStructuralChanges(nowMs);
+		else                      m_structureGate.reset();
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
 		// Landscapes, after the structural diff so a landscape created this frame
@@ -10385,6 +10391,12 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// this is just "have we asked yet".
 		m_collab.beginAssetEditSession(key);
 
+		// The two editor-owned graphs are diffed when something says they were
+		// edited (or every quarter second regardless), not on every frame.
+		const bool editorOwned =
+			key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath;
+		if (editorOwned && !editorDocDiffDue(key, nowMs)) continue;
+
 		publishDocDeltas(tab.assetPath, key);
 
 		// The Level Script and the Game Instance graph have no panel dirty flag,
@@ -10393,7 +10405,7 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// 2026-10-14.md section 3). For them "edited" is "the document differs
 		// from what the peers have seen". The diff waits in the mirror until the
 		// grant lands, and publishDocDeltas sends it then.
-		if (key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath)
+		if (editorOwned)
 		{
 			if (!m_collab.inSession() || m_collab.ownsAssetLock(key)) continue;
 			bool edited = false;
@@ -10435,6 +10447,14 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	{
 		const std::string key = *it;
 		if (!m_collab.inSession() || openRel.count(key)) { it = m_collabUntabbedEdits.erase(it); continue; }
+		if (!editorDocDiffDue(key, nowMs))
+		{
+			// Still ours to send: keep the claim (the release loop below gives
+			// back whatever is not in openRel).
+			openRel.insert(key);
+			++it;
+			continue;
+		}
 		publishDocDeltas(key, key);
 		bool edited = false;
 		for (const CollabDocSync::DocBinding& d : collabDocsForTab(key))
@@ -10469,6 +10489,19 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	for (const std::string& rel : openRel) m_docMirrorPaths.insert(rel);
 }
 
+bool EditorApplication::editorDocDiffDue(const std::string& key, std::uint64_t nowMs)
+{
+	const bool level = key == LevelScriptPanel::kTabPath;
+	CollabDocSync::DiffGate& gate = level ? m_levelScriptDiffGate : m_gameInstanceDiffGate;
+	const CollabDocSync::DocMirror& mirror = level ? m_levelScriptMirror : m_gameInstanceMirror;
+	// Both counters only grow, so their sum moves whenever either does.
+	const std::uint64_t signal = m_undo.revision() + m_editorDocEdits;
+	const bool owned = m_collab.ownsAssetLock(key);
+	if (!gate.due(signal, owned, mirror.seeded, nowMs)) return false;
+	gate.ran(signal, owned, nowMs);
+	return true;
+}
+
 // One tab's outgoing deltas.
 //
 // A diff serializes every item in the document, so this must NOT run for every
@@ -10490,7 +10523,9 @@ void EditorApplication::publishDocDeltas(const std::string& absPath,
 	// The two editor-owned graphs have no panel dirty flag — the level script is
 	// saved with the scene and the GameInstance graph writes itself on every edit
 	// — so they are diffed whenever we hold them. The diff is what decides whether
-	// anything actually changed, and it returns nothing when nothing did.
+	// anything actually changed, and it returns nothing when nothing did. HOW
+	// often that is asked is the per-frame caller's business (editorDocDiffDue):
+	// the MCP path calls this directly, before a mutation, and must always run.
 	const bool alwaysDiff = (key == LevelScriptPanel::kTabPath ||
 	                         key == GameInstancePanel::kTabPath);
 	const bool dirty = alwaysDiff || EditorUI::tabHasUnsavedEdits(absPath);
@@ -10686,6 +10721,7 @@ void EditorApplication::setupMcpTools()
 	};
 
 	hc.endEdit = [this](const std::string& key) {
+		++m_editorDocEdits;   // the diff gate's signal (editorDocDiffDue)
 		if (m_collab.inSession())
 		{
 			if (key == HE::Ed::kMcpDocLevelScript)
@@ -11552,10 +11588,20 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 	}
 }
 
-void EditorApplication::syncStructuralChanges()
+void EditorApplication::syncStructuralChanges(std::uint64_t nowMs)
 {
 	if (!m_editorWorld) return;
 	auto& reg = m_editorWorld->registry();
+
+	// Nothing created, destroyed or moved since the last pass and nothing
+	// waiting for a retry: the diff would find nothing (StructPassGate).
+	const std::uint64_t epoch = m_editorWorld->structureEpoch();
+	const bool pendingWork = !m_structureUnsendable.empty() ||
+	                         !m_structureUndeletable.empty() ||
+	                         m_structureReparentPending;
+	if (!m_structureGate.due(epoch, pendingWork, nowMs)) return;
+	m_structureGate.ran(epoch, nowMs);
+	m_structureReparentPending = false;
 
 	// Entities the engine generates per machine — terrain chunks regenerate from
 	// the TerrainComponent, environment lights belong to the Sky entity — must
@@ -11568,7 +11614,8 @@ void EditorApplication::syncStructuralChanges()
 		       HE::isTerrainGenerated(reg, e);
 	};
 
-	std::unordered_set<Entity> current;
+	std::unordered_set<Entity>& current = m_structureCurrent;
+	current.clear();
 	reg.view<entt::entity>().each([&](auto e) {
 		if (!isLocalOnly(e)) current.insert(e);
 	});
@@ -11700,7 +11747,10 @@ void EditorApplication::syncStructuralChanges()
 		// resolve to nothing on the far side, and the receiver would read that as
 		// "the world root". Wait for it; the record stays, so this comes up again.
 		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
+		{
+			m_structureReparentPending = true;
 			continue;
+		}
 
 		const std::uint64_t subject =
 			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(m.entity)));
@@ -11741,6 +11791,8 @@ void EditorApplication::syncStructuralChanges()
 		if (m_collab.publishReparent(static_cast<std::uint32_t>(entt::to_integral(m.entity)),
 		                             wireHandle(m.to), t9))
 			m_structureParent[m.entity] = m.to;
+		else
+			m_structureReparentPending = true;
 	}
 
 	// ── Destroyed ──
@@ -12190,6 +12242,7 @@ AppContext EditorApplication::makeContext()
 		.uiAudioEngine       = &m_uiAudio,
 		.gameInstanceGraph   = &m_gameInstanceGraph,
 		.commitGameInstance  = [this]{
+			++m_editorDocEdits;   // the diff gate's signal (editorDocDiffDue)
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 			saveGameInstanceGraph();
 			// The GameInstance is what BUILDS an application's UI, so editing it

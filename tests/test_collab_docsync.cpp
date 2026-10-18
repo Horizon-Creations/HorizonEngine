@@ -770,3 +770,59 @@ TEST_CASE("DocSync: hasLocalChanges sees an edit without consuming it")
     CHECK(countOf(ds, DS::Kind::Event, kUpsert) == 1);
     CHECK_FALSE(DS::hasLocalChanges(*doc, mirror));
 }
+
+// ─── Audit 220 step 4 (EDT-201): when the editor-owned graphs are diffed ─────
+// The Level Script and the Game Instance graph used to be diffed every frame of
+// a session. DiffGate runs the diff when an edit signal moved, the lock changed
+// hands or the mirror is unseeded, and otherwise every kFallbackMs.
+
+TEST_CASE("DocSync: the diff gate runs on a signal and on the fallback, not every frame")
+{
+    CollabDocSync::DiffGate gate;
+    std::uint64_t now = 10000;
+    REQUIRE(gate.due(0, false, false, now));        // never ran
+    gate.ran(0, false, now);
+
+    // Quiet frames inside the fallback window: nothing.
+    int runs = 0;
+    for (int f = 1; f < 15; ++f)
+        if (gate.due(0, false, true, now + f * 16)) ++runs;
+    CHECK(runs == 0);
+
+    // An edit (undo revision / commit counter moved) runs it at once.
+    CHECK(gate.due(1, false, true, now + 16));
+    // So does the lock arriving: a diff waiting for the grant goes out then.
+    CHECK(gate.due(0, true, true, now + 16));
+    // And a mirror that lost its seed (scene replaced) is seeded at once.
+    CHECK(gate.due(0, false, false, now + 16));
+
+    // An edit nobody counted: found by the fallback.
+    CHECK_FALSE(gate.due(0, false, true, now + CollabDocSync::DiffGate::kFallbackMs - 1));
+    CHECK(gate.due(0, false, true, now + CollabDocSync::DiffGate::kFallbackMs));
+}
+
+TEST_CASE("DocSync: an edit nobody signalled is still sent by the fallback diff")
+{
+    // The guarantee the fallback exists for, end to end on a real graph: the
+    // signal does not move, the gate says no until the interval has passed,
+    // and the diff it then lets through carries the edit.
+    HorizonCode::Graph g;
+    CollabDocSync::DocMirror mirror;
+    const auto doc = CollabDocSync::forHorizonCodeGraph(g);
+    CollabDocSync::seed(*doc, mirror, CollabDocSync::Scope::Primary);
+
+    CollabDocSync::DiffGate gate;
+    gate.ran(5, true, 0);
+    HorizonCode::Node n;
+    n.id   = 1;
+    n.type = HorizonCode::NodeType::Print;
+    g.nodes.push_back(n);
+
+    std::vector<HE::Net::CollabSession::DocDelta> out;
+    std::uint64_t now = 0;
+    while (!gate.due(5, true, mirror.seeded, now)) now += 16;
+    CHECK(now >= CollabDocSync::DiffGate::kFallbackMs);
+    gate.ran(5, true, now);
+    CollabDocSync::diffInto(*doc, mirror, CollabDocSync::Scope::Primary, out);
+    CHECK(out.size() == 1);
+}
