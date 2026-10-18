@@ -5,6 +5,7 @@
 #include <Diagnostics/DevStatsTile.h>
 #endif
 #include <Hpak/ProjectConfig.h>
+#include <Hpak/GameBuildConfig.h>      // HE::ProjectConfigSource
 #include <Project/ProjectSettings.h>   // Config/ProjectSettings.json, shipped beside project.hcfg
 #include <Scripting/ScriptEngine.h>
 #include <memory>
@@ -145,6 +146,9 @@ private:
                              const std::vector<uint32_t>* onlyEntities = nullptr);
 
     ProjectConfig                 m_config;
+    // Where m_config came from: compiled in (HEGameBuildConfig.h) or project.hcfg.
+    // The pak key's precedence depends on it (HE::selectPakKey).
+    HE::ProjectConfigSource       m_configSource = HE::ProjectConfigSource::None;
     // The project's settings file, read from <exeDir>/Config/ProjectSettings.json
     // — the exporter copies it there VERBATIM (ProjectSettings.h explains why
     // it is not folded into project.hcfg). Missing = default-constructed =

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include "EmbeddedPakKey.h"
+#include "CompiledBuildConfig.h"   // HEGameBuildConfig.h when the export compiled one in
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -462,7 +463,9 @@ void GameApplication::applyShippedConfig()
 	if (baseRaw)
 	{
 		ProjectConfig peek;
-		if (ProjectConfigLoader::load(fs::path(baseRaw), peek) && peek.appMode)
+		if (HE::resolveProjectConfig(compiledGameBuildConfig(), fs::path(baseRaw), peek)
+		        != HE::ProjectConfigSource::None
+		    && peek.appMode)
 		{
 			m_appMode    = true;
 			m_windowMode = HE::WindowMode::Windowed;
@@ -474,7 +477,9 @@ void GameApplication::applyShippedConfig()
 		// runs. A missing file is the default (every build made before it
 		// existed); a damaged one is logged and ALSO the default, because a
 		// game must start either way.
-		if (!HE::loadProjectSettings(fs::path(baseRaw), m_projectSettings))
+		// A game built with HEGameBuildConfig.h carries them compiled in and does
+		// not look for the file.
+		if (!HE::resolveProjectSettings(compiledGameBuildConfig(), fs::path(baseRaw), m_projectSettings))
 		{
 			HE_LOG_WARN(Core, "GameApplication: %s is unreadable — using default project settings",
 			            HE::projectSettingsPath(fs::path(baseRaw)).string().c_str());
@@ -655,7 +660,10 @@ void GameApplication::OnInit()
 		HE::heSetWindowIcon(w, exeDir / "AppIcon.png");
 #endif
 
-	const bool haveConfig = ProjectConfigLoader::load(exeDir, m_config);
+	// Compiled-in values (HEGameBuildConfig.h, an SDK export) win; the prebuilt
+	// runtime has none and reads project.hcfg as it always did.
+	m_configSource = HE::resolveProjectConfig(compiledGameBuildConfig(), exeDir, m_config);
+	const bool haveConfig = m_configSource != HE::ProjectConfigSource::None;
 #if HE_FEATURE_DEV_HOTKEYS
 	if (haveConfig && m_config.devTools) m_devHotkeys = true;
 	HE_LOG_INFO(Core, "%s", m_devHotkeys
@@ -668,6 +676,8 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
+	HE_LOG_INFO(Core, "GameApplication: project configuration %s",
+	            HE::projectConfigSourceName(m_configSource));
 	// Config/ProjectSettings.json beside it is already in m_projectSettings: the
 	// constructor read it with the hcfg peek, because the window title in it is
 	// needed before OnInit (applyShippedConfig).
@@ -733,12 +743,16 @@ void GameApplication::OnInit()
 
 	const std::string pakPath = (exeDir / m_config.hpakFilename).string();
 	// AES key for an encrypted pak; nullptr for an unencrypted one. Preferred
-	// source is the key block the exporter patched into THIS executable
-	// (EmbeddedPakKey.h — no key file next to the game); the key in project.hcfg
-	// is the legacy fallback for exports made against a runtime without the block.
+	// source is the key compiled in with HEGameBuildConfig.h, then the key block
+	// the exporter patched into THIS executable (EmbeddedPakKey.h — no key file
+	// next to the game); the key in project.hcfg is the legacy fallback for
+	// exports made against a runtime without the block. Only the source is
+	// logged, never the key.
 	const uint8_t* pakKey = nullptr;
-	if (g_hePakKeyBlock.hasKey)      pakKey = g_hePakKeyBlock.key;
-	else if (m_config.encrypted)     pakKey = m_config.encKey;
+	const HE::PakKeySource keySource = HE::selectPakKey(
+		m_configSource, m_config, g_hePakKeyBlock.hasKey ? g_hePakKeyBlock.key : nullptr, pakKey);
+	if (pakKey)
+		HE_LOG_INFO(Core, "GameApplication: pak key from %s", HE::pakKeySourceName(keySource));
 	// Mount (not eager-load): open + index the archive. Assets are then streamed on
 	// background workers, seeded from what the scene actually references (below), so
 	// only the reference-graph closure loads — unused pak assets are never touched.

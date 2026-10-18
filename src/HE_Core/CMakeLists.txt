@@ -31,6 +31,7 @@ add_library(HorizonCore SHARED
 	src/Crypto/Sha256.cpp
 	src/Integrity/IntegrityProbe.cpp
 	src/Hpak/ProjectConfig.cpp
+	src/Hpak/GameBuildConfig.cpp
 	src/Hpak/ProjectExporter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp

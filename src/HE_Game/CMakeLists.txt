@@ -69,10 +69,29 @@ if(HE_GAME_DEV_HOTKEYS)
 	target_compile_definitions(HorizonGame PRIVATE HE_GAME_DEV_HOTKEYS)
 endif()
 
-if(DEFINED HE_PROJECT_SECRET)
-	target_compile_definitions(HorizonGame
-		PRIVATE HE_PROJECT_SECRET="${HE_PROJECT_SECRET}"
-	)
+# ── Compiled-in project configuration (Thema 211 step 4) ─────────────────────
+# -DHE_GAME_BUILD_CONFIG=<dir>/HEGameBuildConfig.h, the header the exporter
+# generates (HE::writeGameBuildConfigHeader, Hpak/GameBuildConfig.h): pak name,
+# startup scene, flags, ProjectSettings and the pak key become constants of this
+# executable, and it reads no project.hcfg / Config/ProjectSettings.json. Unset
+# (every engine build, the prebuilt runtime) = the files, as before. Only one TU
+# sees the header (src/CompiledBuildConfig.cpp), so switching it rebuilds that file.
+# (This replaces HE_PROJECT_SECRET, which was defined here but never read.)
+set(HE_GAME_BUILD_CONFIG "" CACHE FILEPATH
+	"Generated HEGameBuildConfig.h to compile into HorizonGame (empty = read project.hcfg at runtime)")
+target_sources(HorizonGame PRIVATE src/CompiledBuildConfig.cpp)
+if(HE_GAME_BUILD_CONFIG)
+	get_filename_component(_he_bc_name "${HE_GAME_BUILD_CONFIG}" NAME)
+	if(NOT EXISTS "${HE_GAME_BUILD_CONFIG}" OR NOT _he_bc_name STREQUAL "HEGameBuildConfig.h")
+		message(FATAL_ERROR "HE_GAME_BUILD_CONFIG must name an existing HEGameBuildConfig.h "
+		                    "(got '${HE_GAME_BUILD_CONFIG}')")
+	endif()
+	get_filename_component(_he_bc_dir "${HE_GAME_BUILD_CONFIG}" DIRECTORY)
+	# On the one source file only: the other game TUs keep their command line.
+	set_source_files_properties(src/CompiledBuildConfig.cpp PROPERTIES
+		INCLUDE_DIRECTORIES "${_he_bc_dir}"
+		COMPILE_DEFINITIONS HE_GAME_BUILD_CONFIG=1)
+	message(STATUS "HorizonGame: project configuration compiled in from ${HE_GAME_BUILD_CONFIG}")
 endif()
 
 # ── Post-build: deploy HorizonGame.exe + runtime DLLs ────────────────────────

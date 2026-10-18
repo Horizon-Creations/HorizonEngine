@@ -1165,6 +1165,13 @@ he_target_build_profile(he_build_profile_probe_override PRIVATE PROFILE release
                         FEATURES TEST_HOOKS=1)
 target_sources(he_tests PRIVATE test_build_profile.cpp)
 
+# Compiled-in project configuration (Thema 211 step 4): the test includes the
+# generator's checked-in output, so only its own TU gets the fixture directory.
+target_sources(he_tests PRIVATE test_game_build_config.cpp)
+set_source_files_properties(test_game_build_config.cpp PROPERTIES
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config
+    COMPILE_DEFINITIONS HE_TEST_GAME_BUILD_CONFIG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config/HEGameBuildConfig.h")
+
 # ─── Process-runner fixture ────────────────────────────────────────────────────
 # A real child process, because every bug HE::Proc exists to avoid is invisible
 # to a mock: exit codes mangled into wait statuses, streams merged, pipes
