@@ -1,0 +1,136 @@
+#include "ExportSdkBuild.h"
+
+#include <Hpak/GameBuildConfig.h>
+#include <Hpak/ProjectConfig.h>
+#include <Hpak/ProjectExporter.h>     // readEmbeddedPakKey
+#include <Project/ProjectSettings.h>
+
+#include <algorithm>
+#include <system_error>
+
+namespace HE::ExportSdk
+{
+namespace fs = std::filesystem;
+
+namespace
+{
+GameSdk sdkAt(const fs::path& root, const std::string& profile)
+{
+    std::error_code ec;
+    if (root.empty()) return {};
+    GameSdk sdk;
+    sdk.packageDir  = root / "lib" / "cmake" / "HorizonEngine";
+    sdk.templateDir = root / "share" / "HorizonEngine" / "template";
+    if (!fs::is_regular_file(sdk.packageDir / "HorizonEngineConfig.cmake", ec) ||
+        !fs::is_regular_file(sdk.templateDir / "CMakeLists.txt", ec))
+        return {};
+    sdk.root    = root;
+    sdk.profile = profile;
+    return sdk;
+}
+
+// What the game executable and its engine libraries are called on disk.
+bool isEngineLibrary(const fs::path& p)
+{
+    const std::string n = p.filename().string();
+    const std::string e = p.extension().string();
+    if (e == ".dylib" || e == ".dll") return true;
+    // libHorizonCore.so, libSDL3.so.0, libSDL3.so.0.2.10
+    return n.find(".so") != std::string::npos && n.rfind("lib", 0) == 0;
+}
+} // namespace
+
+GameSdk findGameSdk(const fs::path& editorBase, const std::string& profile,
+                    const fs::path& overrideRoot)
+{
+    if (!overrideRoot.empty()) return sdkAt(overrideRoot, profile);
+    const std::string dir = "SDK-" + profile;
+    if (GameSdk s = sdkAt(editorBase / dir, profile); s.valid()) return s;
+    if (!editorBase.empty())
+    {
+        // SDL_GetBasePath ends in a separator: parent_path() of ".../Editor/" is
+        // ".../Editor", so strip the empty last element first.
+        fs::path b = editorBase;
+        if (!b.has_filename()) b = b.parent_path();
+        if (GameSdk s = sdkAt(b.parent_path() / dir, profile); s.valid()) return s;
+    }
+    return {};
+}
+
+std::string unavailableReason(const GameSdk& sdk, const std::string& profile,
+                              bool cmakeFound, bool compilerFound)
+{
+    if (!sdk.valid())
+        return "no engine SDK for the '" + profile + "' profile (SDK-" + profile +
+               " beside the editor, or HE_GAME_SDK_DIR)";
+    if (!cmakeFound)    return "cmake not found";
+    if (!compilerFound) return "no working C++ compiler found";
+    return {};
+}
+
+std::string writeBuildConfigFromExport(const fs::path& dataDir, const fs::path& prebuiltExe,
+                                       const std::string& profile, const fs::path& header)
+{
+    ProjectConfig cfg;
+    if (!ProjectConfigLoader::load(dataDir, cfg))
+        return "cannot read project.hcfg in " + dataDir.string();
+    if (cfg.encrypted &&
+        std::all_of(std::begin(cfg.encKey), std::end(cfg.encKey), [](uint8_t b) { return b == 0; }))
+    {
+        // The exporter patched the key into the prebuilt executable and left the
+        // hcfg without it: the compiled game must get it from the header instead.
+        if (prebuiltExe.empty() || !readEmbeddedPakKey(prebuiltExe, cfg.encKey))
+            return "the pak key is neither in project.hcfg nor in the prebuilt game";
+    }
+    ProjectSettings settings;
+    if (!loadProjectSettings(dataDir, settings))
+        return "cannot read " + projectSettingsPath(dataDir).string();
+    if (!writeGameBuildConfigHeader(header, cfg, &settings, profile.c_str()))
+        return "cannot write " + header.string();
+    return {};
+}
+
+HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workDir,
+                                       const fs::path& header)
+{
+    HE::hccg::DylibBuildSpec spec;
+    spec.sourceDir     = sdk.templateDir;
+    spec.buildDir      = workDir / "build";
+    spec.logFile       = workDir / "build.log";
+    spec.artifactNames = { "HorizonGame", "HorizonGame.exe" };
+    spec.what          = "game executable";
+    spec.defines       = {
+        "HorizonEngine_DIR=" + sdk.packageDir.generic_string(),
+        "HE_GAME_NAME=HorizonGame",
+        "HE_GAME_BUILD_CONFIG=" + header.generic_string(),
+    };
+    return spec;
+}
+
+std::string installBuiltGame(const GameSdk& sdk, const fs::path& builtExe,
+                             const fs::path& exportedExe, std::vector<std::string>* copied)
+{
+    std::error_code ec;
+    if (exportedExe.empty()) return "the export shipped no game executable to replace";
+    const fs::path dstDir = exportedExe.parent_path();
+    fs::copy_file(builtExe, exportedExe, fs::copy_options::overwrite_existing, ec);
+    if (ec) return "cannot copy " + builtExe.string() + ": " + ec.message();
+    if (copied) copied->push_back(exportedExe.filename().string());
+    for (const char* sub : { "lib", "bin" })
+    {
+        const fs::path dir = sdk.root / sub;
+        if (!fs::is_directory(dir, ec)) continue;
+        for (const auto& e : fs::directory_iterator(dir, ec))
+        {
+            // Symlinks (libSDL3.dylib -> libSDL3.0.dylib) are copied as the file
+            // they name: the export folder holds plain files, like the prebuilt one.
+            if (!e.is_regular_file(ec) || !isEngineLibrary(e.path())) continue;
+            fs::copy_file(e.path(), dstDir / e.path().filename(),
+                          fs::copy_options::overwrite_existing, ec);
+            if (ec) return "cannot copy " + e.path().string() + ": " + ec.message();
+            if (copied) copied->push_back(e.path().filename().string());
+        }
+    }
+    return {};
+}
+} // namespace HE::ExportSdk

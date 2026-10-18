@@ -332,6 +332,7 @@ add_executable(HorizonEditor WIN32
 	UndoHistoryPanel.cpp
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
+	ExportSdkBuild.cpp
 	HcExecTrace.cpp
 	HcWatch.cpp
 	HcWatchPanel.cpp

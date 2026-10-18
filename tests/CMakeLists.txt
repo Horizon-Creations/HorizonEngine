@@ -293,6 +293,7 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    test_export_sdk_build.cpp
     test_project_settings.cpp
     test_task_board.cpp
     # Assigning, posting updates and notices between two editors over a fake
@@ -713,6 +714,9 @@ add_executable(he_tests
     # by construction, so "does a fallback reach the list with its reason" is
     # answerable without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcFallbackReport.cpp
+    # Export with the game compiled from an engine SDK: SDK lookup, the compiled-in
+    # configuration and the swap over the prebuilt runtime. ImGui-free.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkBuild.cpp
     # Renaming a HorizonCode member across assets. Deliberately free of ImGui and
     # of the content system, which is what lets the whole decision — whose call is
     # this, may it be rewritten — be asserted here instead of clicked through.
