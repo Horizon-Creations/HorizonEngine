@@ -293,6 +293,9 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    # Topic 219 step 2: the importers' lean asset writer (TLS-101) and the pack
+    # manifest the packer CLI now shares with the export (TLS-203).
+    test_tools_writer_cache.cpp
     test_project_settings.cpp
     test_task_board.cpp
     # Assigning, posting updates and notices between two editors over a fake
