@@ -426,10 +426,21 @@ private:
 
 	// `gbuffer` marks the deferred G-buffer variant: it never shades, so it stays
 	// on the plain GLSL 4.10 compile even when forward clustering is on.
+	// `instanced` (Thema 182, 2e) pairs the same fragment with the instanced vertex
+	// (model per instance at attribs 4-7, U.mvp = the batch's viewProj) for one
+	// glDrawElementsInstanced per batch; own cache slot. Returns 0 for a
+	// precompiled variant (no baked instanced vertex) or a failed build, and the
+	// caller then loops over the instances with the plain program.
 	unsigned int GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr,
-	                                       bool gbuffer = false);
+	                                       bool gbuffer = false, bool instanced = false);
+	// One glDrawElementsInstanced for a graph-material batch with the instanced
+	// program already in use and its textures/params bound: the models go to
+	// m_instanceVBO, the U block gets mvp = viewProj (model unused).
+	void DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms, const glm::mat4& viewProj,
+	                             const glm::vec3& baseColor, unsigned int tex, float metallic,
+	                             float roughness, float opacity, int indexCount, const void* indexOffset);
 	// Clustered heLitP (Thema 117, GL 4.3+): the three cluster lists of
 	// HE::BuildClusterLights as SSBOs on bindings 4/5/6
 	// (MaterialShaderLibrary::kGlCluster*SsboBinding). m_forwardClustered is

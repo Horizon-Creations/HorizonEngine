@@ -19,7 +19,8 @@ build and runs the SDK tools a developer would reach for over the files:
 
 --he-tests: the he_tests executable (default: the first of out/build/*/tests/he_tests[.exe]
             and build/tests/he_tests[.exe] that exists). It is run with
-            -tc="Engine water material: dump*" and HE_DUMP_WATER_SHADERS set.
+            -tc="Engine water material: dump*,Graph instancing: dump*" and
+            HE_DUMP_WATER_SHADERS set (the second case adds the instanced Wind Sway vertex).
 --dump-dir: use files a previous run dumped instead of running he_tests.
 
 Every tool gets a negative control first — a broken input it must REJECT — so a
@@ -55,6 +56,22 @@ SPV = ["vk_vert.spv", "vk_frag.spv", "vk_frag_clustered.spv"]
 HLSL = [("vs_5_0", "hlsl_vert.hlsl"), ("ps_5_0", "hlsl_frag.hlsl"), ("ps_5_0", "hlsl_frag_clustered.hlsl")]
 MSL = ["metal_vert.metal", "metal_frag.metal", "metal_frag_clustered.metal", "metal_gbuf.metal",
        "metal_frag_baked.metal"]
+
+# The instanced material vertex (Thema 182, 2e: foliage with a Wind Sway graph drawn as one
+# batch), dumped by tests/test_graph_instancing.cpp into the same directory. Not water, but
+# the same kind of runtime-only graph shader, and on Windows the Metal half is a text patch
+# that only this step's metal -c on the macOS runner ever compiles.
+GL_PAIRS += [
+    ("GL 4.1 instanced Wind Sway",           "wind_inst_gl410.vert", "wind_gl410.frag"),
+    ("GL 4.1 instanced Wind Sway G-buffer",  "wind_inst_gl410.vert", "wind_gl410_gbuf.frag"),
+    ("GL 4.1 instanced plain",               "inst_gl410.vert",      "wind_gl410.frag"),
+    ("ES 3.0 instanced Wind Sway",           "wind_inst_es300.vert", "wind_es300.frag"),
+    ("GL 4.3 instanced Wind Sway clustered", "wind_inst_gl430.vert", "wind_gl430_clustered.frag"),
+]
+SPV += ["wind_inst_vk_vert.spv"]
+HLSL += [("vs_5_0", "wind_inst_hlsl_vert.hlsl")]
+MSL += ["wind_inst_metal_vert.metal", "inst_metal_vert.metal"]
+DUMP_CASES = "Engine water material: dump*,Graph instancing: dump*"
 
 
 class Report:
@@ -108,7 +125,7 @@ def dump(he_tests: Path, out: Path) -> bool:
     scratch.mkdir(parents=True, exist_ok=True)
     env["APPDATA"] = str(scratch)
     env.setdefault("HE_NET_LOOPBACK_ONLY", "1")
-    r = subprocess.run([str(he_tests), "-tc=Engine water material: dump*"], env=env,
+    r = subprocess.run([str(he_tests), "-tc=" + DUMP_CASES], env=env,
                        capture_output=True, text=True, timeout=600)
     print("\n".join((r.stdout + r.stderr).strip().splitlines()[-4:]))
     missing = [f for _, v, f in GL_PAIRS for f in (v, f)] + SPV + [f for _, f in HLSL] + MSL

@@ -38,6 +38,7 @@
 #include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
+#include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
@@ -3405,17 +3406,110 @@ struct D3D12RendererImpl
     uint8_t*                     perObjectPtr[k_frameCount]{};
     ComPtr<ID3D12Resource>       perInstanceRing[k_frameCount]; // upload: instance {mvp,model} (A3)
     uint8_t*                     perInstancePtr[k_frameCount]{};
-    UINT                         instRingCursor = 0; // next free slot, reset per DrawScene
+
+    // ── Instance arena (Thema 182, plan 2f; sizing step 8) ──────────────────
+    // Every instanced run of a frame takes its own slots — each shadow cascade, the
+    // SSAO and GI pre-passes, the scene — so foliage asks for several times its visible
+    // count. A frame that outgrew the k_maxInstances ring used to fall back to the
+    // per-object loop, and that loop shares the k_maxDraws constant-buffer ring: at 100k
+    // foliage instances the shadow pass used it up and the scene pass drew NOTHING
+    // (measured on the RTX 4070, terrain included). Now a full chunk opens another
+    // (kept alive in instOverflow[slot] until the slot's fence came back), and every
+    // slot's main chunk grows to what the largest frame asked. The sizing is
+    // HE::InstanceArena (shared with Vulkan, tested in he_tests): the old capacity
+    // count refused the 1M chunk at 983 040, and 500k plants in range drew no scene.
+    // Bounded by the arena's budget (512 MiB a slot, HE_INST_ARENA_MIB); past that
+    // the loop again, said once with the numbers.
+    HE::InstanceArena            instArena{ HE::InstanceArena::budgetFromEnv(k_instStride) };
+    UINT                         instMainCap[k_frameCount]{}; // perInstanceRing[slot] size, in instances
+    UINT                         instWant = 0;          // main size the slots grow to (largest frame asked)
+    std::vector<ComPtr<ID3D12Resource>> instOverflow[k_frameCount];
+    uint8_t*                     instCurPtr = nullptr;  // current chunk, CPU side
+    D3D12_GPU_VIRTUAL_ADDRESS    instCurVA  = 0;        // current chunk, GPU side
+    bool                         instArenaWarned = false;
+    struct InstSlice { uint8_t* cpu = nullptr; D3D12_GPU_VIRTUAL_ADDRESS gpu = 0; };
+
+    // At the top of DrawScene, after Render()'s waitForFrame(fi): the slot's chunks of
+    // its previous frame are idle. instArena still holds the frame before (another
+    // slot); a slot whose main chunk is smaller than the largest frame asked gets one
+    // of that size.
+    void beginInstanceFrame(UINT fi)
+    {
+        if (instArena.overflowed())
+        {
+            instWant = std::max<UINT>(instWant, instArena.nextMainCapacity());
+            if (instArena.refused() && !instArenaWarned)
+            {
+                instArenaWarned = true;
+                HE_LOG_WARN(RHI, "D3D12Renderer: instance arena full — a frame asked %u instances, %u drew "
+                            "per object (budget %u per frame slot, HE_INST_ARENA_MIB)",
+                            instArena.asked(), instArena.refused(), instArena.budget());
+            }
+        }
+        instOverflow[fi].clear();
+        if (instWant > instMainCap[fi] && perInstanceRing[fi])
+        {
+            uint8_t* ptr = nullptr;
+            ComPtr<ID3D12Resource> buf = createUploadBuffer(static_cast<UINT64>(instWant) * k_instStride,
+                                                            reinterpret_cast<void**>(&ptr));
+            if (buf && ptr)
+            {
+                HE_LOG_INFO(RHI, "D3D12Renderer: instance ring of frame slot %u grows from %u to %u instances",
+                            fi, instMainCap[fi], instWant);
+                perInstanceRing[fi] = buf;
+                perInstancePtr[fi]  = ptr;
+                instMainCap[fi]     = instWant;
+            }
+        }
+        instArena.beginFrame(perInstancePtr[fi] ? instMainCap[fi] : 0);
+        instCurPtr = perInstancePtr[fi];
+        instCurVA  = perInstanceRing[fi] ? perInstanceRing[fi]->GetGPUVirtualAddress() : 0;
+    }
+
+    // `count` consecutive {mvp, model} slots of this frame. false = no arena, or the
+    // frame would pass the arena's budget: the caller loops per object.
+    bool allocInstances(UINT fi, UINT count, InstSlice& out)
+    {
+        if (!instCurPtr || count == 0) return false;
+        const uint32_t chunk = instArena.chunkFor(count);
+        if (chunk == HE::InstanceArena::kRefused) { instArena.refuse(count); return false; }
+        if (chunk)
+        {
+            uint8_t* ptr = nullptr;
+            ComPtr<ID3D12Resource> buf = createUploadBuffer(static_cast<UINT64>(chunk) * k_instStride,
+                                                            reinterpret_cast<void**>(&ptr));
+            if (!buf || !ptr) { instArena.refuse(count); return false; }
+            instOverflow[fi].push_back(buf);
+            instArena.openChunk(chunk);
+            instCurPtr = ptr;
+            instCurVA  = buf->GetGPUVirtualAddress();
+        }
+        const uint32_t first = instArena.take(count);
+        out.cpu = instCurPtr + static_cast<size_t>(first) * k_instStride;
+        out.gpu = instCurVA + static_cast<UINT64>(first) * k_instStride;
+        return true;
+    }
+
+    // The per-object constant-buffer ring (k_maxDraws slots per frame) ends a frame's
+    // drawing silently where it runs out; say so once.
+    bool drawRingWarned = false;
+    void noteDrawRingFull()
+    {
+        if (drawRingWarned) return;
+        drawRingWarned = true;
+        HE_LOG_WARN(RHI, "D3D12Renderer: more than %u per-object draws in one frame — the rest of "
+                    "the frame is not drawn", k_maxDraws);
+    }
 
     // One instanced draw for a depth-only batch (a shadow caster run, an SSAO
     // or GI pre-pass batch): `count` {A, B} matrix pairs from fill(k, pair) go
-    // into the next free slots of perInstanceRing[fi] — the geometry pass's
-    // 128-byte ring — and the bound PSO's instanced VS reads them through the
+    // into the next free slots of the frame's instance arena (allocInstances) —
+    // the geometry pass's 128-byte ring — and the bound PSO's instanced VS reads them through the
     // root SRV `t3Param` of instPSO's root signature (the same one restorePSO
     // uses, already bound). Every caller writes the products its per-object
     // loop puts into a constant buffer, so the instanced frame is the loop's
     // frame. Vertex/index buffers are the caller's; restorePSO is bound again
-    // afterwards. false = nothing drawn (no twin PSO, ring full, too few
+    // afterwards. false = nothing drawn (no twin PSO, arena full, too few
     // instances, HE_DEPTH_INSTANCING=0): the caller loops.
     template <class Fill>
     bool drawDepthInstanced(ID3D12GraphicsCommandList* cl, UINT fi,
@@ -3423,22 +3517,20 @@ struct D3D12RendererImpl
                             UINT t3Param, UINT indexCount, UINT startIndex, UINT count, Fill&& fill)
     {
         static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
-        if (!instPSO || !perInstancePtr[fi] || count < 2 || !RenderSorter::depthInstancingEnabled()
-            || static_cast<UINT64>(instRingCursor) + count > k_maxInstances)
+        InstSlice sl;
+        if (!instPSO || count < 2 || !RenderSorter::depthInstancingEnabled()
+            || !allocInstances(fi, count, sl))
             return false;
-        uint8_t* dst = perInstancePtr[fi] + static_cast<size_t>(instRingCursor) * k_instStride;
         for (UINT k = 0; k < count; ++k)
         {
             glm::mat4 pair[2];
             fill(k, pair);
-            std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
+            std::memcpy(sl.cpu + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
         }
         cl->SetPipelineState(instPSO);
-        cl->SetGraphicsRootShaderResourceView(t3Param,
-            perInstanceRing[fi]->GetGPUVirtualAddress() + static_cast<UINT64>(instRingCursor) * k_instStride);
+        cl->SetGraphicsRootShaderResourceView(t3Param, sl.gpu);
         cl->DrawIndexedInstanced(indexCount, count, startIndex, 0, 0);
         cl->SetPipelineState(restorePSO);
-        instRingCursor += count;
         return true;
     }
     // Clustered lighting (plan P7 on the forward path): three upload buffers
@@ -3657,7 +3749,8 @@ struct D3D12RendererImpl
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool hdr, bool transparent, bool gbuffer = false);
+                                               bool hdr, bool transparent, bool gbuffer = false,
+                                               bool instanced = false);
 
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
@@ -4437,7 +4530,13 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  ssaoRS;
     // Resources
     ComPtr<ID3D12Resource>       ssaoPosRT;          // RGBA16F positions
-    ComPtr<ID3D12Resource>       ssaoPosDepth;        // D16 depth for pos prepass
+    ComPtr<ID3D12Resource>       ssaoPosDepth;        // D32 depth for pos prepass (kSsaoPosDepthFormat)
+    // Pre-pass depth, D32 like the GI G-buffer (Thema 182 step 6, decision 110):
+    // as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at 50 m), so at
+    // 50-90 m a plant and the ground rounded to one value and the draw order
+    // decided which landed in the position target. Texture, DSV, ssaoPosPSO(+
+    // Instanced) and reflPrepassPSO (same DSV) all use this one constant.
+    static constexpr DXGI_FORMAT kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT;
     ComPtr<ID3D12Resource>       ssaoRT;              // R8 AO
     ComPtr<ID3D12Resource>       ssaoBlurRT;          // R8 blurred AO
     ComPtr<ID3D12Resource>       ssaoNoiseTex;        // 4x4 RGBA32F noise
@@ -5346,6 +5445,7 @@ struct D3D12RendererImpl
                                                   reinterpret_cast<void**>(&perObjectPtr[f]));
             perInstanceRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxInstances) * k_instStride,
                                                     reinterpret_cast<void**>(&perInstancePtr[f]));
+            instMainCap[f] = (perInstanceRing[f] && perInstancePtr[f]) ? k_maxInstances : 0;
             // Clustered-lighting lists (root SRVs t18..t20), sized from the
             // LightPacking caps: 256 lights × 4 float4, 3456 cells × uint2,
             // 65536 indices. Refilled per frame like the instance ring.
@@ -5494,7 +5594,7 @@ struct D3D12RendererImpl
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             pd.NumRenderTargets      = 1;
             pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;
+            pd.DSVFormat             = kSsaoPosDepthFormat;
             pd.SampleDesc.Count      = 1;
             pd.SampleMask            = UINT_MAX;
             pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -5845,7 +5945,7 @@ struct D3D12RendererImpl
 
         if (!makeRT(DXGI_FORMAT_R16G16B16A16_FLOAT, static_cast<UINT>(w), static_cast<UINT>(h),
                     false, ssaoPosRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
-        if (!makeRT(DXGI_FORMAT_D16_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
+        if (!makeRT(kSsaoPosDepthFormat, static_cast<UINT>(w), static_cast<UINT>(h),
                     true, ssaoPosDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE)) return;
         if (!makeRT(DXGI_FORMAT_R8_UNORM, static_cast<UINT>(w), static_cast<UINT>(h),
                     false, ssaoRT, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) return;
@@ -5863,7 +5963,7 @@ struct D3D12RendererImpl
 
         // DSV
         D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
-        dvd.Format        = DXGI_FORMAT_D16_UNORM;
+        dvd.Format        = kSsaoPosDepthFormat;
         dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         device->CreateDepthStencilView(ssaoPosDepth.Get(), &dvd, ssaoDsvCpu);
 
@@ -6131,7 +6231,7 @@ struct D3D12RendererImpl
         pd.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // view-space position (= ssaoPosRT)
         pd.RTVFormats[1]         = DXGI_FORMAT_R16G16B16A16_FLOAT; // oct normal + roughness
         pd.RTVFormats[2]         = DXGI_FORMAT_R32_FLOAT;          // NDC depth
-        pd.DSVFormat             = DXGI_FORMAT_D16_UNORM;          // the SSAO pre-pass's own depth
+        pd.DSVFormat             = kSsaoPosDepthFormat;            // the SSAO pre-pass's own depth
         pd.SampleDesc.Count      = 1;
         pd.SampleMask            = UINT_MAX;
         pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
@@ -9022,7 +9122,8 @@ void D3D12RendererImpl::updateSkyEnvCube(ID3D12GraphicsCommandList* cl, const gl
 ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
                                                               const std::string& vertBody,
                                                               const MaterialShaderVariant* precompiled,
-                                                              bool hdr, bool transparent, bool gbuffer)
+                                                              bool hdr, bool transparent, bool gbuffer,
+                                                              bool instanced)
 {
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (RGBA8) /
     // HDR (RGBA16F) / opaque / transparent PSOs never collide (same constants as Vulkan A4).
@@ -9033,6 +9134,17 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     // and never the clustered variant: the pak bakes no G-buffer HLSL, and its forward
     // variant would write LIT colour into GB0 — plausible-looking and wrong.
     if (gbuffer) { precompiled = nullptr; transparent = false; hash ^= 0x6742756666657231ULL; }
+    // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
+    // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
+    // batch in ONE call, the model per instance at TEXCOORD4..7 from the instance
+    // ring bound as vertex buffer 1. Its own key in BOTH caches: the bytecode cache
+    // is keyed by hash alone, and the PLAIN vertex behind the instanced input layout
+    // builds without a complaint and stacks every instance on one spot. The fragment
+    // is the plain one, so the library's fragment caches keep the unsalted `libHash`.
+    // The pak bakes no instanced vertex: no twin, the caller loops (as on GL).
+    if (instanced && precompiled) return nullptr;
+    const uint64_t libHash = hash;
+    if (instanced) hash ^= 0x1D57A9CEDB0B1E55ULL;
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
                               ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
     if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
@@ -9114,10 +9226,14 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         }
         if (!built)
         {
-            // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
-            const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-                ? m_matShaderLib.standardVertex(Backend::HLSL)
-                : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+            // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to
+            // HLSL — or their instanced twins.
+            const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+            const HE::MaterialShaderLibrary::Compiled& vc = instanced
+                ? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::HLSL)
+                                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::HLSL))
+                : (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::HLSL)
+                                    : m_matShaderLib.customVertex(vh, vertBody, Backend::HLSL));
             // Clustered heLitP first (Thema 117): point/spot lights from the
             // t24..t26 cluster lists instead of the 8-light window. A variant
             // that does not cross-compile or that FXC rejects falls back to the
@@ -9125,7 +9241,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             if (!gbuffer && matClustered() && vc.ok && !vc.source.empty())
             {
                 const HE::MaterialShaderLibrary::Compiled& cc =
-                    m_matShaderLib.fragmentClustered(hash, frag, Backend::HLSL);
+                    m_matShaderLib.fragmentClustered(libHash, frag, Backend::HLSL);
                 if (cc.ok && !cc.source.empty())
                     built = compilePair(vc.source, cc.source, "cross-compiled, clustered");
                 if (!built)
@@ -9134,7 +9250,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             }
             if (!built)
             {
-                const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+                const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(libHash, frag, Backend::HLSL);
                 if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
                 {
                     HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
@@ -9159,17 +9275,26 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     // (no remap_vertex_attributes is registered in ShaderCompiler.cpp), so the material
     // input layout uses TEXCOORD0/1/2 — NOT the scene's POSITION/NORMAL/TEXCOORD. Same
     // interleaved 32-B pos/normal/uv vertex buffer the scene meshes use.
+    // The instanced twin adds the model (locations 4..7 = TEXCOORD4..7) from vertex
+    // buffer 1: the 128-byte {mvp, model} slots of perInstanceRing, the model half at
+    // +64 (the twin forms heMvp = U.mvp * model itself, the mvp half stays unread).
+    static_assert(k_instStride == 2 * sizeof(glm::mat4), "the twin reads the model half of {mvp, model}");
+    constexpr auto kInst = D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
     const D3D12_INPUT_ELEMENT_DESC layout[] = {
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  64, kInst, 1 },
+        { "TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  80, kInst, 1 },
+        { "TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  96, kInst, 1 },
+        { "TEXCOORD", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 112, kInst, 1 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature        = m_matRootSig.Get();
     pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
     pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
-    pd.InputLayout           = { layout, 3 };
+    pd.InputLayout           = { layout, instanced ? 7u : 3u };
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets      = 1;
     pd.RTVFormats[0]         = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -9212,10 +9337,16 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     ComPtr<ID3D12PipelineState> pso12;
     if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12))))
     {
-        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material PSO creation failed");
+        HE_LOG_ERROR(RHI, "%s", instanced
+            ? "D3D12Renderer: A4 instanced material PSO creation failed, its batches draw per instance"
+            : "D3D12Renderer: A4 material PSO creation failed");
         m_materialPSOs.emplace(key, nullptr); // cache the failure → no per-draw retry
         return nullptr;
     }
+    if (instanced)
+        HE_LOG_INFO(RHI, "%s", gbuffer
+            ? "D3D12Renderer: built an INSTANCED G-buffer material twin (one draw per batch)"
+            : "D3D12Renderer: built an INSTANCED material twin (one draw per batch)");
     return m_materialPSOs.emplace(key, pso12).first->second.Get();
 }
 
@@ -10142,6 +10273,7 @@ void D3D12Renderer::Shutdown()
         m_impl->perFrameCB[i].Reset();
         m_impl->perObjectRing[i].Reset();
         m_impl->perInstanceRing[i].Reset();
+        m_impl->instOverflow[i].clear();
         m_impl->clusterLightRing[i].Reset();
         m_impl->clusterGridRing[i].Reset();
         m_impl->clusterIdxRing[i].Reset();
@@ -10543,15 +10675,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     const D3D12_GPU_VIRTUAL_ADDRESS ringBase = p.perObjectRing[p.frameIndex]->GetGPUVirtualAddress();
     uint8_t* ringPtr = p.perObjectPtr[p.frameIndex];
     // Instance-transform ring (A3): sub-allocated per instanced batch, one instanced draw each.
-    const D3D12_GPU_VIRTUAL_ADDRESS instRingBase = p.perInstanceRing[p.frameIndex]->GetGPUVirtualAddress();
-    uint8_t* instRingPtr = p.perInstancePtr[p.frameIndex];
-    // Next free instance slot in the ring. An impl member, not a local: the
-    // instanced depth draws of the shadow pass, runGiShadow and runSSAO take
-    // their slots from the same ring in the same command list, BEFORE the
+    // Instance slots come from the frame's arena (allocInstances), an impl member,
+    // not a local: the instanced depth draws of the shadow pass, runGiShadow and
+    // runSSAO take their slots from it in the same command list, BEFORE the
     // geometry pass — the CPU writes land now, the GPU reads them at execute
     // time, so every pass must get slots of its own.
-    p.instRingCursor = 0;
-    UINT& instCursor = p.instRingCursor;
+    p.beginInstanceFrame(p.frameIndex);
+    const bool instArena = p.perInstancePtr[p.frameIndex] != nullptr;
 
     auto transition = [&](ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
@@ -10681,7 +10811,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     }
                     for (uint32_t k = 0; k < b.count; ++k)
                     {
-                        if (drawIdx >= k_maxDraws) break;
+                        if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); break; }
                         PerObjectCB o{};
                         o.mvp = clip * xf[k]; o.model = xf[k];
                         if (ringPtr)
@@ -10948,7 +11078,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         bool gbufferPass = false;
         std::vector<const DrawCall*> deferredForwardDCs;
         auto drawDC12 = [&](const DrawCall& dc) {
-            if (drawIdx >= k_maxDraws) return;
+            if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
             // A trail carries no mesh asset — its geometry sits in this frame's
             // ribbon pool, looked up by the DrawCall that was synthesised for it.
             GpuMesh* mesh = nullptr;
@@ -10987,6 +11117,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D12);
                     ID3D12PipelineState* matPso = nullptr;
+                    // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
+                    // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
+                    // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
+                    // build failed) sends it back to the per-instance loop.
+                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                                       && instArena && RenderSorter::graphInstancingEnabled();
+                    ID3D12PipelineState* matInstPso = nullptr;
                     if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
@@ -11002,10 +11139,20 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
+                        if (wantTwin)
+                            matInstPso = p.GetOrBuildMaterialPSO(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                 p.usingHDR, false, /*gbuffer=*/true,
+                                                                 /*instanced=*/true);
                     }
                     else
+                    {
                         matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
                                                          matPre, p.usingHDR, matTransp);
+                        if (matPso && wantTwin)
+                            matInstPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
+                                                                 matPre, p.usingHDR, false,
+                                                                 /*gbuffer=*/false, /*instanced=*/true);
+                    }
                     // A full ring is a silent optics change (built-in look, or a skipped
                     // instance tail) — say so once per session instead of never.
                     auto noteRingFull = [&]() {
@@ -11139,15 +11286,17 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         const D3D12_GPU_VIRTUAL_ADDRESS objBase = p.m_matObjRing[p.frameIndex]->GetGPUVirtualAddress();
                         const D3D12_GPU_VIRTUAL_ADDRESS parBase = p.m_matParamRing[p.frameIndex]->GetGPUVirtualAddress();
 
-                        auto drawMatInstance = [&](const glm::mat4& model) {
+                        // One U/HeParams ring slot, bound: the per-draw half of every
+                        // material draw. false = the ring is full (noted once).
+                        auto bindMatSlot = [&](const glm::mat4& mvp, const glm::mat4& model) -> bool {
                             UINT& cur = p.m_matDrawCursor[p.frameIndex];
-                            if (cur >= D3D12RendererImpl::k_matMaxDraws) { noteRingFull(); return; }
+                            if (cur >= D3D12RendererImpl::k_matMaxDraws) { noteRingFull(); return false; }
                             const UINT i = cur++;
                             // std140 U block (176 B) into obj-ring slot i (256-B stride).
                             struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
                             static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
                             MatU u;
-                            u.mvp   = viewProj * model;
+                            u.mvp   = mvp;
                             u.model = model;
                             // Per-instance tint (RenderObject::instanceTint), as Metal and GL
                             // multiply it in: a graph reads it through Vertex Color (the editor
@@ -11171,12 +11320,38 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             cl->SetGraphicsRootConstantBufferView(1, objVA); // b1 U (VS)
                             cl->SetGraphicsRootConstantBufferView(2, parVA); // b3 HeParams (FS)
                             cl->SetGraphicsRootConstantBufferView(4, parVA); // b9 HeParams (WPO VS)
+                            return true;
+                        };
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            if (!bindMatSlot(viewProj * model, model)) return;
                             cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                             ++p.statDraws; p.statTris += range.count / 3;
                         };
-                        // Instanced graph materials draw each instance via the material path
-                        // (this increment does NOT combine graph materials with A3 instancing).
-                        if (!dc.instanceTransforms.empty())
+                        const UINT instCount = static_cast<UINT>(dc.instanceTransforms.size());
+                        D3D12RendererImpl::InstSlice isl;
+                        if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
+                        {
+                            // The batch: every model into the model half of its arena slot,
+                            // ONE U slot with the batch-constant half (U.mvp = viewProj, the
+                            // twin multiplies the model in), one instanced draw.
+                            if (bindMatSlot(viewProj, glm::mat4(1.0f)))
+                            {
+                                for (UINT k = 0; k < instCount; ++k)
+                                    std::memcpy(isl.cpu + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
+                                                &dc.instanceTransforms[k], sizeof(glm::mat4));
+                                D3D12_VERTEX_BUFFER_VIEW ivb{};
+                                ivb.BufferLocation = isl.gpu;
+                                ivb.SizeInBytes    = instCount * k_instStride;
+                                ivb.StrideInBytes  = k_instStride;
+                                cl->IASetVertexBuffers(1, 1, &ivb);
+                                cl->SetPipelineState(matInstPso);
+                                cl->DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);
+                                ++p.statDraws; p.statTris += (range.count / 3) * instCount;
+                            }
+                        }
+                        else if (!dc.instanceTransforms.empty())
+                            // No twin (or the instance ring is full): each instance through
+                            // the material path, one ring slot apiece.
                             for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
                         else
                             drawMatInstance(dc.transform);
@@ -11230,7 +11405,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 drawBase *= glm::vec3(dc.instanceTint);
             }
             auto drawOne = [&](const glm::mat4& model) {
-                if (drawIdx >= k_maxDraws) return;
+                if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); return; }
                 PerObjectCB o{};
                 o.mvp   = viewProj * model;
                 o.model = model;
@@ -11258,12 +11433,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 const bool useHdrInst = p.usingHDR && p.hdrPso;
                 auto* instPso = gbufferPass ? p.gbufPsoInstanced.Get()   // 3 MRTs (Thema 150)
                               : useHdrInst  ? p.hdrPsoInstanced.Get() : p.psoInstanced.Get();
-                const bool fits = allowInstancing && instPso && ringPtr && instRingPtr
-                                  && (static_cast<UINT64>(instCursor) + count) <= k_maxInstances
-                                  && drawIdx < k_maxDraws;
+                D3D12RendererImpl::InstSlice isl;
+                const bool fits = allowInstancing && instPso && ringPtr && drawIdx < k_maxDraws
+                                  && p.allocInstances(p.frameIndex, count, isl);
                 if (fits)
                 {
-                    uint8_t* dst = instRingPtr + static_cast<size_t>(instCursor) * k_instStride;
+                    uint8_t* dst = isl.cpu;
                     for (UINT k = 0; k < count; ++k)
                     {
                         const glm::mat4& t = dc.instanceTransforms[k];
@@ -11278,8 +11453,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                         dc.receivesShadow ? 0.0f : 1.0f);
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                     cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
-                    cl->SetGraphicsRootShaderResourceView(4,
-                        instRingBase + static_cast<UINT64>(instCursor) * k_instStride);
+                    cl->SetGraphicsRootShaderResourceView(4, isl.gpu);
                     cl->SetPipelineState(instPso);
                     cl->DrawIndexedInstanced(range.count, count, range.start, 0, 0);
                     // Restore the pass's scene PSO (instancing runs in the opaque and
@@ -11288,7 +11462,6 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                          : (p.usingHDR && p.hdrPso) ? p.hdrPso.Get() : p.pso.Get());
                     ++p.statDraws; p.statTris += (range.count / 3) * count;
                     ++drawIdx;
-                    instCursor += count;
                 }
                 else
                 {
@@ -11608,16 +11781,56 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(p.taaVelocityPSO.Get());
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             p.taaCurTransforms.clear();
+            // The blended tail below draws AFTER this pass from the same ring, one slot
+            // per instance: velocity stops where only its slots (and a margin) are
+            // left, so a large foliage field under TAA cannot cost the frame its
+            // water, glass and particles. The plants past that keep the clear's
+            // zero motion (said once).
+            UINT velLimit = k_maxDraws;
+            {
+                size_t tail = 64;
+                for (const DrawCall* dc : transparentDCs)
+                    tail += std::max<size_t>(1, dc->instanceTransforms.size());
+                velLimit = tail >= k_maxDraws ? 0u : static_cast<UINT>(k_maxDraws - tail);
+            }
+            auto velFull = [&]() -> bool {
+                if (drawIdx < velLimit) return false;
+                HE_LOG_ONCE(RHI, Warning, "D3D12Renderer: TAA velocity stops at %u per-object draws, the "
+                            "rest of the ring is kept for the blended pass; further plants show no motion",
+                            velLimit);
+                return true;
+            };
             for (const uint32_t idx : p.m_sortedIndices)
             {
-                if (drawIdx >= k_maxDraws) break;
+                if (velFull()) break;
                 const RenderObject& obj = p.m_renderWorld.objects[idx];
-                // A foliage cluster is one plant's transform with a whole bucket's worth
-                // of instances: it writes no velocity here yet (Metal and GL draw each
-                // plant, static). Windows track: unfold it like they do.
-                if (obj.isCluster()) continue;
                 const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
                 if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+                // A foliage cluster stands for a bucket of plants: draw every one of
+                // them, static (previous pose = this pose, so the velocity is the
+                // camera's own motion), as GL and Metal do (Thema 182, 2f). The
+                // entity-keyed history below holds ONE pose per entity, which a
+                // cluster must not use: every plant of a layer shares the terrain's id.
+                // One ring slot per plant, after the geometry's, up to velLimit.
+                if (obj.isCluster())
+                {
+                    cl->IASetVertexBuffers(0, 1, &mesh->vbv);
+                    cl->IASetIndexBuffer(&mesh->ibv);
+                    p.m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
+                        if (velFull()) return;
+                        HE::TaaVelocityConstants c;
+                        c.mvpJitter = viewProj * model;
+                        c.mvpNow    = viewProjClean * model;
+                        c.mvpPrev   = p.taaPrevViewProj * model;
+                        std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &c, sizeof(c));
+                        cl->SetGraphicsRootConstantBufferView(
+                            0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
+                        cl->DrawIndexedInstanced(mesh->indexCount, 1, 0, 0, 0);
+                        ++drawIdx;
+                    });
+                    continue;
+                }
 
                 // An object seen for the first time reports no motion — its
                 // "previous" position is where it is now.

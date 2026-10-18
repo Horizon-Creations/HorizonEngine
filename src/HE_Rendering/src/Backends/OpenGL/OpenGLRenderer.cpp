@@ -3771,10 +3771,15 @@ void OpenGLRenderer::UploadClusterLists(const HE::ClusterLightBuild& build)
 unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled,
-                                                       bool gbuffer)
+                                                       bool gbuffer, bool instanced)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
-	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
+	// The pak bakes no instanced vertex: the caller loops with the plain program.
+	if (instanced && precompiled) return 0;
+	// `key` also keys the fragment cache below, so the instanced slot gets its own
+	// program key without touching it.
+	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
+	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
@@ -3789,9 +3794,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
 	auto crossCompile = [&](Backend b, bool cl) {
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(b)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, b);
+		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+		const auto& v = instanced
+			? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(b)
+			                    : m_matShaderLib.customVertexInstanced(vh, vertBody, b))
+			: (vertBody.empty() ? m_matShaderLib.standardVertex(b)
+			                    : m_matShaderLib.customVertex(vh, vertBody, b));
 		const auto& f = cl ? m_matShaderLib.fragmentClustered(key, fragGlsl, b)
 		                   : m_matShaderLib.fragment(key, fragGlsl, b);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
@@ -3933,8 +3941,38 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
 
-	m_materialPrograms[key] = program; // cache success AND failure (0)
+	if (instanced)
+		HE_LOG_INFO(RHI, "%s", program
+			? "OpenGLRenderer: the material program above is the INSTANCED twin (one draw per batch)"
+			: "OpenGLRenderer: no instanced material program, its batches draw per instance");
+	m_materialPrograms[progKey] = program; // cache success AND failure (0)
 	return program;
+}
+
+void OpenGLRenderer::DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms,
+                                             const glm::mat4& viewProj, const glm::vec3& baseColor,
+                                             unsigned int tex, float metallic, float roughness,
+                                             float opacity, int indexCount, const void* indexOffset)
+{
+	glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(transforms.size() * sizeof(glm::mat4)),
+	             transforms.data(), GL_STREAM_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	// Same block as the per-instance loops write, with the batch-constant half:
+	// the instanced vertex forms mvp = U.mvp * model itself.
+	struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+	obj.mvp   = viewProj;
+	obj.model = glm::mat4(1.0f);
+	obj.color = glm::vec4(baseColor, 1.0f);
+	obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+	obj.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
+	                        static_cast<GLsizei>(transforms.size()));
+	++m_counters.draws;
+	m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(transforms.size());
 }
 
 // Build (or fetch) the GL program that draws GPU-instanced ParticleGraph particles
@@ -11815,7 +11853,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 				// Custom-material programs: forward (transparency + forward-routing)
 				// and, when the material has a G-buffer variant, its MRT program.
-				unsigned int matProg = 0, gbProg = 0; bool hasCustom = false;
+				unsigned int matProg = 0, gbProg = 0, gbInstProg = 0; bool hasCustom = false;
 				std::vector<float> mParams; unsigned int mGtex[4] = { 0, 0, 0, 0 }; int mGtexCount = 0;
 #if defined(HE_HAVE_SHADERC)
 				{
@@ -11834,7 +11872,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// carry no G-buffer GLSL yet).
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+						{
 							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							// A batch draws once with the instanced twin (2e); only
+							// built for batches, and 0 sends it back to the loop.
+							if (gbProg && !dc.instanceTransforms.empty() && m_instanceVBO
+							    && RenderSorter::graphInstancingEnabled())
+								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
+								                                       /*gbuffer=*/true, /*instanced=*/true);
+						}
 						if (ma)
 						{
 							mParams = !dc.paramOverride.empty() ? dc.paramOverride
@@ -11975,6 +12021,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
 					glActiveTexture(GL_TEXTURE0);
+					if (gbInstProg)
+					{
+						// The whole batch in one draw: its own program, the binds
+						// above (blocks and units are per program state, applied
+						// at link), U.mvp = viewProj, the models at attribs 4-7.
+						glUseProgram(gbInstProg);
+						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
+						glUseProgram(m_gbufferProgram);
+						continue;
+					}
 					// Only the per-object block changes between the instances of a
 					// batch; program, params and textures above stay bound.
 					auto drawGraphInstance = [&](const glm::mat4& t) {
@@ -12128,7 +12185,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// built-in instanced one would swap the look (no wind, no alpha discard,
 			// flat PBR) — such a batch is drawn instance by instance below, the rule
 			// Metal applies too (cMaterialPipeline == nullptr).
-			unsigned int matProg = 0;
+			// Since 2e (Thema 182) such a batch draws ONCE with the material's
+			// instanced twin (matInstProg); 0 (baked variant, failed build,
+			// HE_GRAPH_INSTANCING=0) keeps the loop.
+			unsigned int matProg = 0, matInstProg = 0;
 #if defined(HE_HAVE_SHADERC)
 			{
 				uint64_t shKey; std::string shFrag, shVert;
@@ -12140,6 +12200,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					if (matProg && !dc.instanceTransforms.empty() && m_instanceVBO
+					    && RenderSorter::graphInstancingEnabled())
+						matInstProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre,
+						                                        /*gbuffer=*/false, /*instanced=*/true);
 				}
 			}
 #endif
@@ -12264,6 +12328,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glActiveTexture(GL_TEXTURE13);
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
+					}
+					if (matInstProg)
+					{
+						// The whole batch in one draw (the binds above are context
+						// state; blocks and units are set per program at link).
+						glUseProgram(matInstProg);
+						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
+						glUseProgram(m_unlitProgram); // restore for the next single-draw
+						continue;
 					}
 					// Only the per-object block changes between the instances of a
 					// batch; program, lighting, params and textures stay bound.

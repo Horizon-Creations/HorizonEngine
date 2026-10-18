@@ -3,6 +3,7 @@
 #include <Renderer/IRenderer.h>
 #include "VulkanShaderManager.h"
 #include <HorizonRendering/RenderConstants.h>
+#include <HorizonRendering/InstanceArena.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -152,7 +153,8 @@ private:
 	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
 	                                           const std::string& vertBody,
 	                                           const MaterialShaderVariant* precompiled,
-	                                           bool hdr, bool transparent, bool gbuffer = false);
+	                                           bool hdr, bool transparent, bool gbuffer = false,
+	                                           bool instanced = false);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -381,12 +383,33 @@ private:
 	InstanceBuf           m_instanceBuf[2];
 	static constexpr uint32_t k_maxInstances = 65536; // instance-buffer capacity (A3)
 	static constexpr uint32_t k_instStride   = 128;   // bytes per instance = 2 × mat4 (mvp, model)
-	// Next free slot in m_instanceBuf[m_currentFrame]. A member, not a DrawScene
-	// local: the shadow pass, runGi and runSSAO record their instanced depth
-	// draws into the SAME command buffer before the geometry pass, and the GPU
-	// reads every slot only at submit — so each pass takes slots of its own.
-	// Reset at the top of Render() and DrawViewportFrame().
-	uint32_t              m_instCursor = 0;
+	// Slots of m_instanceBuf[m_currentFrame] and its overflow chunks, handed out by
+	// m_instArena. A member, not a DrawScene local: the shadow pass, runGi and runSSAO
+	// record their instanced depth draws into the SAME command buffer before the
+	// geometry pass, and the GPU reads every slot only at submit — so each pass takes
+	// slots of its own. Reset at the top of Render() and DrawViewportFrame()
+	// (beginInstanceFrame).
+	// Instance arena (Thema 182, plan 2f; sizing step 8). Every instanced run of a frame
+	// takes its own slots (each shadow cascade, the SSAO/GI pre-passes, the scene), so
+	// foliage asks for several times its visible count; past k_maxInstances every run
+	// fell back to one draw per object (complete, but 56k draws at 100k plants). A full
+	// chunk now opens a further one; every slot's main buffer grows to what the largest
+	// frame asked. The sizing is HE::InstanceArena (shared with D3D12, tested in
+	// he_tests); its budget (512 MiB a frame, HE_INST_ARENA_MIB) bounds a frame. Overflow
+	// chunks and replaced main buffers age out in m_instRetired (swept at the top of
+	// Render(), like m_retiredViewports).
+	struct RetiredInstBuf { InstanceBuf b; int frames; };
+	std::vector<RetiredInstBuf> m_instRetired;
+	uint32_t              m_instMainCap[2] = {};  // m_instanceBuf[slot] size, in instances
+	InstanceBuf           m_instCur{};            // the chunk being filled (main or overflow)
+	HE::InstanceArena     m_instArena{ HE::InstanceArena::budgetFromEnv(k_instStride) };
+	uint32_t              m_instWant     = 0;     // main size the slots grow to (largest frame asked)
+	bool                  m_instArenaWarned = false;
+	bool createInstanceBuf(uint32_t instances, InstanceBuf& out);
+	void destroyInstanceBuf(InstanceBuf& b);
+	void beginInstanceFrame();
+	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
+	std::vector<glm::mat4> m_clusterScratch; // one cluster's world matrices (decal depth)
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
 	// G-buffer); the shadow layers keep m_shadowBatches.
 	RenderSorter::DepthBatchList m_preBatches;
@@ -524,7 +547,7 @@ private:
 	// dynamic offset. The GPU reads the ring only after submit, so nothing transfers inside a
 	// render pass (Thema 144 — this used to be vkCmdUpdateBuffer + a barrier per draw, both
 	// invalid in a render pass). Consequence: EVERY bind of m_frameUBO[].set passes one
-	// dynamic offset (m_sceneMatOffset). Cursor reset with m_instCursor (Render() and
+	// dynamic offset (m_sceneMatOffset). Cursor reset with the instance arena (Render() and
 	// DrawViewportFrame); a slot is never reused within a frame.
 	struct SceneMatData { float r, g, b, met; float rough, opacity, hasTex, noShadow; }; // scene.frag MatUBO
 	static_assert(sizeof(SceneMatData) == 32, "scene.frag's MatUBO is two vec4");
@@ -1196,6 +1219,10 @@ private:
 	VkFramebuffer    m_reflPrepassFB = VK_NULL_HANDLE; // {ssaoPos, attr, ndc, ssaoPosDepth}
 	VkRenderPass     m_reflPrepassRP = VK_NULL_HANDLE; // 3 color + D16
 	VkPipeline       m_reflPrepassPipeline   = VK_NULL_HANDLE;
+	// Its instanced twin (Thema 182, 2f): a foliage cluster in ONE draw, the model per instance
+	// from the instance arena at binding 1 (reflPrepassVertexInstanced, {viewProj, view} in U).
+	// Optional: without it clusters go plant by plant through the slot ring below.
+	VkPipeline       m_reflPrepassInstPipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_reflPrepassSetLayout  = VK_NULL_HANDLE; // binding 1: U (dynamic)
 	VkPipelineLayout      m_reflPrepassPipeLayout = VK_NULL_HANDLE;
 	VkDescriptorPool      m_reflPrepassPool       = VK_NULL_HANDLE;

@@ -201,6 +201,8 @@ LIMITS = {
         # linked in from outside: CellRuntime/ICellHost (moved out of the game
         # executable), CellState, the per-cell script start/stop (CellScripts),
         # the streaming API group and StreamingComponent (Thema 183 steps 1-3).
+        # Thema 182 (foliage layers, detail levels, graph-material instanced
+        # twins) weighed the same 60.8 / 38.0 independently on its own branch.
         # New limits: measured plus 10 percent, the rule the other rows follow.
         #
         # app-advanced/app-basic: (56.0, 31.0) and (55.0, 30.0) until

@@ -17,6 +17,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/DefaultAssets.h>
 #include <Types/UUID.h>
 
 #include <algorithm>
@@ -35,6 +36,10 @@ constexpr float kPi = 3.14159265358979323846f;
 // bit pattern UUID::generate() enforces (hi & 0xF000 == 0x4000) and clear of the
 // DefaultAssets sentinels (hi 1..7), so these never collide with either.
 constexpr uint64_t kMeshBaseHi = 0x0000000000000100ULL;
+
+// The entries code names by UUID (DefaultAssets.h) sit at a fixed index below.
+static_assert(HE::kEngineCrossCardMeshId.hi == kMeshBaseHi + 8 && HE::kEngineCrossCardMeshId.lo == 1,
+              "CrossCard is entry 8 of the list in main()");
 
 struct Mesh
 {
@@ -132,6 +137,31 @@ Mesh makeQuad()
     const uint32_t c = m.addVertex( 0.5f, 0.5f, 0, 0,0,1, 1,1);
     const uint32_t d = m.addVertex(-0.5f, 0.5f, 0, 0,0,1, 0,1);
     m.quad(a, b, c, d);
+    return m;
+}
+
+Mesh makeCrossCard()
+{
+    // The far detail level of a foliage layer (HE::kEngineCrossCardMeshId): two
+    // upright 1x1 quads crossed at right angles. Unlike every primitive above the
+    // pivot is at the BASE (y 0..1): a foliage instance's origin is the ground,
+    // and a centred card would stand half in it. Each plane carries both faces, so
+    // it shows from every side with a single-sided material too; every face maps
+    // the full 0..1 picture, v = 1 at the top.
+    Mesh m;
+    struct Plane { float ax, az; };              // the quad's horizontal axis
+    const Plane planes[2] = { { 1.0f, 0.0f }, { 0.0f, 1.0f } };
+    for (const Plane& p : planes)
+        for (int side = 0; side < 2; ++side)
+        {
+            const float s  = side == 0 ? 1.0f : -1.0f;
+            const float nx = -p.az * s, nz = p.ax * s;   // the axis turned a quarter about Y, per side
+            const uint32_t a = m.addVertex(-0.5f * p.ax, 0.0f, -0.5f * p.az, nx, 0, nz, 0, 0);
+            const uint32_t b = m.addVertex( 0.5f * p.ax, 0.0f,  0.5f * p.az, nx, 0, nz, 1, 0);
+            const uint32_t c = m.addVertex( 0.5f * p.ax, 1.0f,  0.5f * p.az, nx, 0, nz, 1, 1);
+            const uint32_t d = m.addVertex(-0.5f * p.ax, 1.0f, -0.5f * p.az, nx, 0, nz, 0, 1);
+            m.quad(a, b, c, d);                          // fixWinding faces it along its normal
+        }
     return m;
 }
 
@@ -361,6 +391,8 @@ int main(int argc, char** argv)
         { "Quad",     makeQuad() },
         { "Capsule",  makeCapsule() },
         { "Torus",    makeTorus() },
+        // Append only: the index is the UUID, and scenes refer to these by it.
+        { "CrossCard", makeCrossCard() },
     };
 
     int index = 0, ok = 0;

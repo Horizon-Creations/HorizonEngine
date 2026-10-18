@@ -154,6 +154,100 @@ namespace
 		return id;
 	}
 
+	// ── Foliage layers ───────────────────────────────────────────────────────
+	// One layer's fields. A component with ONE layer writes them flat into the
+	// "foliage" object, exactly the keys a scene had before layers existed, so an
+	// old scene saves byte for byte as it was; only two or more layers go into a
+	// "layers" array. Everything the old format did not have is written only when
+	// it differs from its default, which keeps that promise for every untouched
+	// layer. `visibleKey` names the layer's own switch: "visible" inside the
+	// array, "layerVisible" in the flat form, where "visible" has always been
+	// the component's (zone hiding).
+	json foliageLayerToJson(const FoliageLayer& l, const char* visibleKey)
+	{
+		const FoliageLayer def;
+		json j = {
+			{ "mesh",         uuidToJson(l.meshAssetId) },
+			{ "material",     uuidToJson(l.materialAssetId) },
+			{ "density",      l.density },
+			{ "seed",         l.seed },
+			{ "minScale",     l.minScale },
+			{ "maxScale",     l.maxScale },
+			{ "drawDistance", l.drawDistance },
+			{ "maskRes",      l.maskRes },
+		};
+		if (!l.name.empty())                        j["name"]           = l.name;
+		if (l.visible != def.visible)               j[visibleKey]       = l.visible;
+		if (l.bucketSize != def.bucketSize)         j["bucketSize"]     = l.bucketSize;
+		if (l.castsShadow != def.castsShadow)       j["castsShadow"]    = l.castsShadow;
+		if (l.contributesAO != def.contributesAO)   j["contributesAO"]  = l.contributesAO;
+		if (l.shadowDistance != def.shadowDistance) j["shadowDistance"] = l.shadowDistance;
+		if (l.lodHysteresis != def.lodHysteresis)   j["lodHysteresis"]  = l.lodHysteresis;
+		// Farther detail levels; a layer without any writes no key at all.
+		if (!l.lods.empty())
+		{
+			json lods = json::array();
+			for (const FoliageLod& d : l.lods)
+				lods.push_back({ { "mesh",     uuidToJson(d.meshAssetId) },
+				                 { "material", uuidToJson(d.materialAssetId) },
+				                 { "distance", d.distance },
+				                 { "density",  d.density } });
+			j["lods"] = std::move(lods);
+		}
+		// Painted density mask, the same base64 treatment as the terrain's
+		// layer weights: one byte per texel, absent when the layer is uniform.
+		if (!l.densityMask.empty())
+			j["densityMaskB64"] = base64Encode(l.densityMask.data(), l.densityMask.size());
+		return j;
+	}
+
+	FoliageLayer foliageLayerFromJson(const json& c, const char* visibleKey)
+	{
+		FoliageLayer l;
+		l.name            = c.value("name",           l.name);
+		l.visible         = c.value(visibleKey,       l.visible);
+		l.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
+		l.materialAssetId = jsonToUuid(c.value("material", json()));
+		l.density         = c.value("density",        l.density);
+		l.seed            = c.value("seed",           l.seed);
+		l.minScale        = c.value("minScale",       l.minScale);
+		l.maxScale        = c.value("maxScale",       l.maxScale);
+		l.drawDistance    = c.value("drawDistance",   l.drawDistance);
+		l.maskRes         = c.value("maskRes",        l.maskRes);
+		l.bucketSize      = c.value("bucketSize",     l.bucketSize);
+		l.castsShadow     = c.value("castsShadow",    l.castsShadow);
+		l.contributesAO   = c.value("contributesAO",  l.contributesAO);
+		l.shadowDistance  = c.value("shadowDistance", l.shadowDistance);
+		l.lodHysteresis   = std::max(0.0f, c.value("lodHysteresis", l.lodHysteresis));
+		if (c.contains("lods") && c["lods"].is_array())
+		{
+			for (const json& d : c["lods"])
+			{
+				if (!d.is_object() || l.lods.size() >= FoliageLayer::kMaxLods) continue;
+				FoliageLod lod;
+				lod.meshAssetId     = jsonToUuid(d.value("mesh",     json()));
+				lod.materialAssetId = jsonToUuid(d.value("material", json()));
+				lod.distance        = std::max(0.0f, d.value("distance", lod.distance));
+				lod.density         = std::clamp(d.value("density", lod.density), 0.0f, 1.0f);
+				l.lods.push_back(lod);
+			}
+			// The extraction walks the levels outwards; a hand-edited file may not.
+			std::stable_sort(l.lods.begin(), l.lods.end(),
+			                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+		}
+		if (c.contains("densityMaskB64") && c["densityMaskB64"].is_string())
+		{
+			l.densityMask = base64Decode(c["densityMaskB64"].get<std::string>());
+			// A truncated/mismatched blob would index out of bounds when
+			// sampled or painted — drop it (uniform scatter) rather than
+			// carry a half-sized mask.
+			if (l.densityMask.size() != static_cast<size_t>(l.maskRes) * l.maskRes)
+				l.densityMask.clear();
+		}
+		l.dirty = true; // regenerate instances after load
+		return l;
+	}
+
 	// An entity's stable identity. Every entity gets one in
 	// HorizonWorld::createEntity, so the fallback only fires for an entity built
 	// by some path that bypassed it — minting one on the spot keeps the file
@@ -962,22 +1056,19 @@ namespace
 		}
 		if (auto* fol = registry.try_get<FoliageComponent>(entity))
 		{
-			json fj = {
-				{ "visible",      fol->visible },
-				{ "mesh",         uuidToJson(fol->meshAssetId) },
-				{ "material",     uuidToJson(fol->materialAssetId) },
-				{ "density",      fol->density },
-				{ "seed",         fol->seed },
-				{ "minScale",     fol->minScale },
-				{ "maxScale",     fol->maxScale },
-				{ "drawDistance", fol->drawDistance },
-				{ "maskRes",      fol->maskRes },
-			};
-			// Painted density mask, the same base64 treatment as the terrain's
-			// layer weights: one byte per texel, absent when the layer is uniform.
-			if (!fol->densityMask.empty())
-				fj["densityMaskB64"] = base64Encode(fol->densityMask.data(),
-				                                    fol->densityMask.size());
+			json fj;
+			if (fol->layers.size() == 1)
+			{
+				fj = foliageLayerToJson(fol->layers[0], "layerVisible");
+			}
+			else
+			{
+				json arr = json::array();
+				for (const FoliageLayer& l : fol->layers)
+					arr.push_back(foliageLayerToJson(l, "visible"));
+				fj["layers"] = std::move(arr);
+			}
+			fj["visible"] = fol->visible;
 			comps["foliage"] = std::move(fj);
 		}
 		if (auto* c = registry.try_get<UICanvasComponent>(entity))
@@ -2039,25 +2130,31 @@ namespace
 		{
 			const json& c = comps["foliage"];
 			FoliageComponent fol;
-			fol.visible         = c.value("visible",      fol.visible);
-			fol.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
-			fol.materialAssetId = jsonToUuid(c.value("material", json()));
-			fol.density         = c.value("density",      fol.density);
-			fol.seed            = c.value("seed",         fol.seed);
-			fol.minScale        = c.value("minScale",     fol.minScale);
-			fol.maxScale        = c.value("maxScale",     fol.maxScale);
-			fol.drawDistance    = c.value("drawDistance", fol.drawDistance);
-			fol.maskRes         = c.value("maskRes",      fol.maskRes);
-			if (c.contains("densityMaskB64") && c["densityMaskB64"].is_string())
+			fol.visible = c.value("visible", fol.visible);
+			if (c.contains("layers") && c["layers"].is_array())
 			{
-				fol.densityMask = base64Decode(c["densityMaskB64"].get<std::string>());
-				// A truncated/mismatched blob would index out of bounds when
-				// sampled or painted — drop it (uniform scatter) rather than
-				// carry a half-sized mask.
-				if (fol.densityMask.size() != static_cast<size_t>(fol.maskRes) * fol.maskRes)
-					fol.densityMask.clear();
+				fol.layers.clear();
+				for (const json& lj : c["layers"])
+				{
+					if (!lj.is_object()) continue;
+					if (fol.layers.size() >= FoliageComponent::kMaxLayers)
+					{
+						HE_LOG_WARN(Serialize, "Foliage: more than %zu layers on one landscape, "
+						                       "the rest are dropped", FoliageComponent::kMaxLayers);
+						break;
+					}
+					fol.layers.push_back(foliageLayerFromJson(lj, "visible"));
+				}
+				// Never empty (FoliageComponent's promise): a hand-edited empty
+				// list is one default layer, what "Add Component" gives.
+				if (fol.layers.empty()) fol.layers.emplace_back();
 			}
-			fol.dirty           = true; // regenerate instances after load
+			else
+			{
+				// The flat form: a scene from before layers, or one layer now.
+				fol.layers.assign(1, foliageLayerFromJson(c, "layerVisible"));
+			}
+			fol.dirty = true; // regenerate instances after load
 			registry.emplace_or_replace<FoliageComponent>(entity, std::move(fol));
 		}
 		if (comps.contains("animstatemachine"))

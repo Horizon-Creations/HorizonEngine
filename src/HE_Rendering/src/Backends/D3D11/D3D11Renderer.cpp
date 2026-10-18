@@ -1394,6 +1394,27 @@ struct D3D11RendererImpl
         ComPtr<ID3D11InputLayout>  il;
     };
     std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = shader hash (opaque + blended share one entry)
+    // The model matrix per instance (64 B, vertex buffer 1, TEXCOORD4..7) for a graph
+    // material's instanced twin (Thema 182, 2f). Its own buffer: instanceSB is a
+    // structured buffer, which D3D11 does not let double as a vertex buffer. Dynamic,
+    // k_maxInstances deep, refilled per batch with MAP_WRITE_DISCARD; made on first use.
+    ComPtr<ID3D11Buffer>       m_matInstVB;
+    bool                       m_matInstVBFailed = false;
+    ID3D11Buffer* ensureMatInstVB()
+    {
+        if (m_matInstVB || m_matInstVBFailed) return m_matInstVB.Get();
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = k_maxInstances * static_cast<UINT>(sizeof(glm::mat4));
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&bd, nullptr, &m_matInstVB)))
+        {
+            m_matInstVBFailed = true;
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: no instance buffer for graph materials, their batches draw per instance");
+        }
+        return m_matInstVB.Get();
+    }
     ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (full Lighting struct) — b0 PS / b8 WPO VS, filled once/frame
     ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
@@ -1873,12 +1894,31 @@ struct D3D11RendererImpl
         for (const uint32_t idx : m_sortedIndices)
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
-            // A foliage cluster is one plant's transform with a whole bucket's worth
-            // of instances: it writes no velocity here yet (Metal and GL draw each
-            // plant, static). Windows track: unfold it like they do.
-            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId, cm);
             if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+            // A foliage cluster stands for a bucket of plants: draw every one of them,
+            // static (previous pose = this pose, so the velocity is the camera's own
+            // motion), as GL and Metal do (Thema 182, 2f). The entity-keyed history
+            // below holds ONE pose per entity, which a cluster must not use: every
+            // plant of a layer shares the terrain's id.
+            if (obj.isCluster())
+            {
+                ctx->IASetVertexBuffers(0, 1, mesh->vbuf.GetAddressOf(), &stride, &offset);
+                ctx->IASetIndexBuffer(mesh->ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
+                    HE::TaaVelocityConstants c;
+                    c.mvpJitter = vpJit * model;
+                    c.mvpNow    = vpClean * model;
+                    c.mvpPrev   = taaPrevViewProj * model;
+                    D3D11_MAPPED_SUBRESOURCE m{};
+                    if (FAILED(ctx->Map(taaVelocityCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
+                    std::memcpy(m.pData, &c, sizeof(c));
+                    ctx->Unmap(taaVelocityCB.Get(), 0);
+                    ctx->DrawIndexed(mesh->indexCount, 0, 0);
+                });
+                continue;
+            }
 
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
@@ -1929,6 +1969,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> ssaoPosSRV;
     ComPtr<ID3D11Texture2D>          ssaoPosDepth;      // separate depth for position prepass
     ComPtr<ID3D11DepthStencilView>   ssaoPosDepthDSV;
+    static constexpr DXGI_FORMAT     kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT; // not D16, see createSSAOTargets
     ComPtr<ID3D11Texture2D>          ssaoTex;           // R8 AO output
     ComPtr<ID3D11RenderTargetView>   ssaoRTV;
     ComPtr<ID3D11ShaderResourceView> ssaoSRV;
@@ -2383,12 +2424,16 @@ struct D3D11RendererImpl
         makeRT(DXGI_FORMAT_R8_UNORM,           ssaoTex,    ssaoRTV,    ssaoSRV);
         makeRT(DXGI_FORMAT_R8_UNORM,           ssaoBlurTex, ssaoBlurRTV, ssaoBlurSRV);
 
-        // Depth buffer for position prepass
+        // Depth buffer for position prepass (and the reflection MRT pre-pass,
+        // which binds the same DSV). D32 like the GI G-buffer (Thema 182 step 6,
+        // decision 110): as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at
+        // 50 m), so at 50-90 m a plant and the ground rounded to one value and
+        // the draw order decided which landed in the position target.
         {
             D3D11_TEXTURE2D_DESC dd{};
             dd.Width = (UINT)w; dd.Height = (UINT)h;
             dd.MipLevels = dd.ArraySize = 1;
-            dd.Format = DXGI_FORMAT_D16_UNORM; dd.SampleDesc.Count = 1;
+            dd.Format = kSsaoPosDepthFormat; dd.SampleDesc.Count = 1;
             dd.Usage = D3D11_USAGE_DEFAULT;
             dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
             device->CreateTexture2D(&dd, nullptr, &ssaoPosDepth);
@@ -4659,11 +4704,20 @@ struct D3D11RendererImpl
     MatShaders* GetOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
                                           const std::string& vertBody,
                                           const MaterialShaderVariant* precompiled,
-                                          bool transparent, bool gbuffer = false)
+                                          bool transparent, bool gbuffer = false, bool instanced = false)
     {
         (void)transparent; // blend/depth are pass state on D3D11, not shader state
         if (gbuffer) precompiled = nullptr;
-        const uint64_t key = gbuffer ? (hash ^ 0x6742756666657231ULL) : hash;
+        // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
+        // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
+        // batch in ONE call, the model per instance at TEXCOORD4..7 from m_matInstVB
+        // on vertex buffer 1. Its own key: the PLAIN vertex behind the instanced input
+        // layout would draw every instance on one spot. The fragment is the plain one,
+        // so the library's fragment caches keep `hash`. The pak bakes no instanced
+        // vertex: no twin, the caller loops (as on GL).
+        if (instanced && precompiled) return nullptr;
+        const uint64_t key = (gbuffer ? (hash ^ 0x6742756666657231ULL) : hash)
+                           ^ (instanced ? 0x1D57A9CEDB0B1E55ULL : 0ULL);
         if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
             return it->second.vs ? &it->second : nullptr; // null vs == cached miss
 
@@ -4726,9 +4780,12 @@ struct D3D11RendererImpl
         }
         if (!built)
         {
-            const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-                ? m_matShaderLib.standardVertex(Backend::HLSL)
-                : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+            const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+            const HE::MaterialShaderLibrary::Compiled& vc = instanced
+                ? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::HLSL)
+                                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::HLSL))
+                : (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::HLSL)
+                                    : m_matShaderLib.customVertex(vh, vertBody, Backend::HLSL));
             // Clustered heLitP first (Thema 117): point/spot lights from the
             // t24..t26 cluster lists instead of the 8-light window. A variant
             // that does not cross-compile or that FXC rejects falls back to the
@@ -4774,18 +4831,30 @@ struct D3D11RendererImpl
         // IMPORTANT: SPIRV-Cross names GLSL vertex inputs by location as TEXCOORD{location}
         // (no remap_vertex_attributes registered in ShaderCompiler.cpp), so the material input
         // layout uses TEXCOORD0/1/2 — NOT the scene's POSITION/NORMAL/TEXCOORD. Same interleaved
-        // 32-B pos/normal/uv vertex buffer the scene meshes use.
+        // 32-B pos/normal/uv vertex buffer the scene meshes use. The instanced twin adds
+        // the model (locations 4..7 = TEXCOORD4..7) per instance from vertex buffer 1.
         const D3D11_INPUT_ELEMENT_DESC layout[] = {
             { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "TEXCOORD", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
         };
-        if (FAILED(device->CreateInputLayout(layout, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &sh.il)))
+        if (FAILED(device->CreateInputLayout(layout, instanced ? 7 : 3,
+                                             vsb->GetBufferPointer(), vsb->GetBufferSize(), &sh.il)))
         {
-            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: A4 material input layout creation failed");
+            HE_LOG_ERROR(RHI, "%s", instanced
+                ? "D3D11Renderer: A4 instanced material input layout creation failed, its batches draw per instance"
+                : "D3D11Renderer: A4 material input layout creation failed");
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
+        if (instanced)
+            HE_LOG_INFO(RHI, "%s", gbuffer
+                ? "D3D11Renderer: built an INSTANCED G-buffer material twin (one draw per batch)"
+                : "D3D11Renderer: built an INSTANCED material twin (one draw per batch)");
         return &m_materialShaders.emplace(key, std::move(sh)).first->second;
     }
 
@@ -7022,6 +7091,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D11);
                     D3D11RendererImpl::MatShaders* sh = nullptr;
+                    // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
+                    // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
+                    // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
+                    // build failed) sends it back to the per-instance loop.
+                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                                       && dc.instanceTransforms.size() <= p.k_maxInstances
+                                       && RenderSorter::graphInstancingEnabled() && p.ensureMatInstVB();
+                    D3D11RendererImpl::MatShaders* shInst = nullptr;
                     if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
@@ -7037,9 +7114,17 @@ void D3D11Renderer::DrawScene(int width, int height)
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
+                        if (wantTwin)
+                            shInst = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                 false, /*gbuffer=*/true, /*instanced=*/true);
                     }
                     else
+                    {
                         sh = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
+                        if (sh && wantTwin)
+                            shInst = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, false,
+                                                                 /*gbuffer=*/false, /*instanced=*/true);
+                    }
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +
@@ -7161,12 +7246,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                             p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
                             aoSRV, p.m_matWeightSampler.Get());
 
-                        auto drawMatInstance = [&](const glm::mat4& model) {
+                        // The per-draw half of every material draw: U at b1 VS,
+                        // HeParams at b3 PS / b9 WPO VS.
+                        auto uploadMatDraw = [&](const glm::mat4& mvp, const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
                             struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
                             static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
                             MatU u;
-                            u.mvp   = viewProj * model;
+                            u.mvp   = mvp;
                             u.model = model;
                             // Per-instance tint (RenderObject::instanceTint), as Metal and GL
                             // multiply it in: a graph reads it through Vertex Color (the editor
@@ -7194,13 +7281,40 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());   // b1 U (VS)
                             ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
                             ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
+                        };
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            uploadMatDraw(viewProj * model, model);
                             ctx->DrawIndexed(range.count, range.start, 0);
                             ++p.counters.draws;
                             p.counters.tris += range.count / 3;
                         };
-                        // Instanced graph materials draw each instance via the material path (this
-                        // increment does NOT combine graph materials with A3 GPU instancing).
-                        if (!dc.instanceTransforms.empty())
+                        D3D11_MAPPED_SUBRESOURCE im{};
+                        if (shInst && shInst->vs && shInst->ps && shInst->il
+                            && SUCCEEDED(ctx->Map(p.m_matInstVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im)))
+                        {
+                            // The batch: every model into m_matInstVB, ONE U with the
+                            // batch-constant half (U.mvp = viewProj, the twin multiplies
+                            // the model in), one instanced draw. The twin's VS/IL replace
+                            // the plain ones bound above; the restore below puts the
+                            // built-in pass's back, and vertex buffer 1 comes off.
+                            const UINT instCount = static_cast<UINT>(dc.instanceTransforms.size());
+                            std::memcpy(im.pData, dc.instanceTransforms.data(), instCount * sizeof(glm::mat4));
+                            ctx->Unmap(p.m_matInstVB.Get(), 0);
+                            const UINT instStride = sizeof(glm::mat4), instOffset = 0;
+                            ctx->IASetVertexBuffers(1, 1, p.m_matInstVB.GetAddressOf(), &instStride, &instOffset);
+                            ctx->VSSetShader(shInst->vs.Get(), nullptr, 0);
+                            ctx->PSSetShader(shInst->ps.Get(), nullptr, 0);
+                            ctx->IASetInputLayout(shInst->il.Get());
+                            uploadMatDraw(viewProj, glm::mat4(1.0f));
+                            ctx->DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);
+                            ++p.counters.draws;
+                            p.counters.tris += (range.count / 3) * instCount;
+                            ID3D11Buffer* nullVB = nullptr;
+                            const UINT zero = 0;
+                            ctx->IASetVertexBuffers(1, 1, &nullVB, &zero, &zero);
+                        }
+                        else if (!dc.instanceTransforms.empty())
+                            // No twin: each instance through the material path.
                             for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
                         else
                             drawMatInstance(dc.transform);
