@@ -72,4 +72,10 @@ namespace UIEditorPanel
 	bool isDirtyByContentPath(const std::string& contentPath);
 	bool saveByContentPath(AppContext& ctx, const std::string& contentPath);
 
+	// Test hooks for the hierarchy column's row clipping. Off draws every row,
+	// the reference a clipped frame is compared against; the count is how many
+	// rows the last frame submitted.
+	void setHierarchyRowClipping(bool on);
+	int  hierarchyRowsDrawn();
+
 }

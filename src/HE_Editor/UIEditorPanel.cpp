@@ -919,20 +919,123 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 }
 
 // ── Hierarchy panel (recursive tree) ───────────────────────────────────────────
-void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEdit)
+// Who is whose child, built once per frame. Every row used to ask
+// UIWidgetTree::childrenOf, a scan of all elements plus a vector, so a page of n
+// elements cost n² per frame (EDT-1802). Static so the vectors keep their
+// capacity; a parent that lost its children keeps an empty entry.
+//
+// Ids, not pointers, as childrenOf gave: a drop or the context menu's Delete
+// edits the tree in the middle of the walk. From that row on the index is stale
+// and the rest of the frame asks the tree, exactly as every row used to.
+struct HierarchyIndex
 {
-	UIElement* n = st.tree.find(nodeId);
-	if (!n) return;
+	std::unordered_map<int, std::vector<int>> children;   // parentId → child ids, tree order
+	std::unordered_map<int, UIElement*>       byId;
 
-	const auto children = st.tree.childrenOf(nodeId);
+	void rebuild(const HE::UIWidgetTree& tree)
+	{
+		for (auto& [parent, kids] : children) kids.clear();
+		byId.clear();
+		for (const auto& e : tree.elements)
+		{
+			children[e->parentId].push_back(e->id);
+			byId[e->id] = e.get();
+		}
+	}
+	const std::vector<int>& of(int parentId) const
+	{
+		static const std::vector<int> kNone;
+		const auto it = children.find(parentId);
+		return it == children.end() ? kNone : it->second;
+	}
+	UIElement* find(int id) const
+	{
+		const auto it = byId.find(id);
+		return it == byId.end() ? nullptr : it->second;
+	}
+};
+
+// ── Rows scrolled out of the column are not submitted ─────────────────────────
+// The Outliner's scheme (OutlinerPanel.cpp, "Rows scrolled out of the panel"): a
+// row outside the column only answers whether it is open, under the id its
+// TreeNodeEx would have used, pushes that id when it is, and adds its height to a
+// run laid out as one Dummy before the next row that shows. Folds and the ids of
+// the rows below are therefore the same as with every row drawn. The height is
+// measured off two consecutive drawn rows; until then everything is drawn.
+// While a drag is in the air every row is drawn: the source row has to keep
+// submitting its drag source, wherever it has scrolled to.
+bool  s_hierarchyClipping = true;
+float s_hierarchyRowStep  = 0.0f;
+int   s_hierarchyRowsDrawn = 0;
+
+struct HierarchyClip
+{
+	float top = 0.0f, bottom = 0.0f;   // the column's visible band, screen y
+	float step = 0.0f;                 // row height incl. spacing; 0 = draw every row
+	float skipped = 0.0f;              // clipped rows not laid out yet
+	float measureFrom = -1.0f;         // where the last drawn row started
+
+	// The clipped run as one Dummy: a Dummy adds the item spacing itself.
+	void flush()
+	{
+		if (skipped <= 0.0f) return;
+		ImGui::Dummy(ImVec2(1.0f, std::max(0.0f, skipped - ImGui::GetStyle().ItemSpacing.y)));
+		skipped = 0.0f;
+	}
+};
+
+// The row's label, which is also its id ("Name##hn<id>"; the widget designer's UI
+// test derives row ids from it). One buffer, so a row costs no allocation.
+const char* hierarchyLabel(const UIElement& n)
+{
+	static std::string s_label;
+	if (n.name.empty()) s_label.assign(n.typeName());
+	else                s_label.assign(n.name);
+	char id[24];
+	std::snprintf(id, sizeof(id), "##hn%d", n.id);
+	s_label += id;
+	return s_label.c_str();
+}
+
+void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, const HierarchyIndex& index,
+                       HierarchyClip& clip, bool& structureEdit)
+{
+	// structureEdit: this frame already changed the tree (see HierarchyIndex).
+	UIElement* n = structureEdit ? st.tree.find(nodeId) : index.find(nodeId);
+	if (!n) return;
+	std::vector<int> fresh;
+	if (structureEdit) fresh = st.tree.childrenOf(nodeId);
+	const std::vector<int>& children = structureEdit ? fresh : index.of(nodeId);
+
+	const float cursorY = ImGui::GetCursorScreenPos().y;
+	if (clip.measureFrom >= 0.0f && clip.skipped == 0.0f && cursorY > clip.measureFrom)
+		s_hierarchyRowStep = cursorY - clip.measureFrom;
+	clip.measureFrom = -1.0f;
+	const float rowTop = cursorY + clip.skipped;
+	if (clip.step > 0.0f && (rowTop + clip.step < clip.top || rowTop > clip.bottom))
+	{
+		clip.skipped += clip.step;
+		if (children.empty()) return;
+		// DefaultOpen: a row nobody has folded yet is open.
+		const ImGuiID id = ImGui::GetID(hierarchyLabel(*n));
+		if (ImGui::GetStateStorage()->GetInt(id, 1) == 0) return;
+		ImGui::TreePushOverrideID(id);
+		for (int c : children)
+			drawHierarchyNode(st, ctx, c, index, clip, structureEdit);
+		ImGui::TreePop();
+		return;
+	}
+	clip.flush();
+	clip.measureFrom = ImGui::GetCursorScreenPos().y;
+	++s_hierarchyRowsDrawn;
+
 	ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
 	                           ImGuiTreeNodeFlags_SpanAvailWidth |
 	                           ImGuiTreeNodeFlags_DefaultOpen;
 	if (children.empty())      flags |= ImGuiTreeNodeFlags_Leaf;
 	if (isSelected(st, nodeId)) flags |= ImGuiTreeNodeFlags_Selected;
 
-	const std::string label = elementName(*n) + "##hn" + std::to_string(nodeId);
-	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+	const bool open = ImGui::TreeNodeEx(hierarchyLabel(*n), flags);
 	// The row's box, taken while the tree node is still the last item: the three
 	// drop zones below are read out of it, and BeginDragDropSource submits no
 	// item of its own but the payload accept blocks do their own bookkeeping.
@@ -1046,7 +1149,9 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	// part of the selection the menu means the WHOLE selection — that is what
 	// right-clicking one of several highlighted rows means everywhere else —
 	// and on any other row it means that row alone.
-	if (ImGui::BeginPopupContextItem((std::string("##hctx") + std::to_string(nodeId)).c_str()))
+	char ctxId[24];
+	std::snprintf(ctxId, sizeof(ctxId), "##hctx%d", nodeId);
+	if (ImGui::BeginPopupContextItem(ctxId))
 	{
 		HE::Ed::Help::Scope helpScope("UI Hierarchy");
 		if (!isSelected(st, nodeId)) selectOnly(st, nodeId);
@@ -1076,7 +1181,7 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	if (open)
 	{
 		for (int c : children)
-			drawHierarchyNode(st, ctx, c, structureEdit);
+			drawHierarchyNode(st, ctx, c, index, clip, structureEdit);
 		ImGui::TreePop();
 	}
 }
@@ -7500,8 +7605,20 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 
 			bool structureEdit = false;
-			for (int rootId : st.tree.childrenOf(0))
-				drawHierarchyNode(st, ctx, rootId, structureEdit);
+			{
+				static HierarchyIndex s_index;
+				s_index.rebuild(st.tree);
+				HierarchyClip clip;
+				const ImVec2 winPos = ImGui::GetWindowPos();
+				clip.top    = winPos.y;
+				clip.bottom = winPos.y + ImGui::GetWindowHeight();
+				clip.step   = s_hierarchyClipping && !ImGui::GetDragDropPayload()
+				            ? s_hierarchyRowStep : 0.0f;
+				s_hierarchyRowsDrawn = 0;
+				for (int rootId : s_index.of(0))
+					drawHierarchyNode(st, ctx, rootId, s_index, clip, structureEdit);
+				clip.flush();
+			}
 			if (structureEdit) commitEdit(st, ctx);
 			ImGui::EndChild();
 		}
@@ -7733,5 +7850,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	ImGui::End();
 }
+
+void setHierarchyRowClipping(bool on) { s_hierarchyClipping = on; }
+int  hierarchyRowsDrawn()             { return s_hierarchyRowsDrawn; }
 
 } // namespace UIEditorPanel

@@ -59,6 +59,13 @@ namespace
 	std::vector<HcEditorUtil::ClassRef> s_pickerItems;
 	std::string                        s_pickerQuery;
 	bool                               s_pickerFocus = false;
+	// The rows the query lets through, as indices into s_pickerItems. Refiltered
+	// when the query changes, not per frame: the filter lowercases label and path
+	// of every asset, a few thousand allocations on a big project, which a
+	// keystroke can afford and sixty frames a second cannot (EDT-910).
+	std::vector<int>                   s_pickerShown;
+	std::string                        s_pickerShownQuery;
+	bool                               s_pickerShownValid = false;
 }
 
 AssetDrop acceptAssetDrop(AppContext& ctx, HE::AssetType want, const char* rejectNoun)
@@ -125,6 +132,7 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		s_pickerOwner = idSuffix ? idSuffix : "";
 		s_pickerItems = HcEditorUtil::listAssets(ctx.contentManager, want);
 		s_pickerQuery.clear();
+		s_pickerShownValid = false;
 		s_pickerFocus = true;
 		ImGui::OpenPopup(popupId.c_str());
 	}
@@ -161,30 +169,53 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		}
 		int shownCount = 0;
 		if (s_pickerOwner == (idSuffix ? idSuffix : ""))
-			for (const auto& a : s_pickerItems)
+		{
+			if (!s_pickerShownValid || s_pickerShownQuery != s_pickerQuery)
 			{
-				if (!HcEditorUtil::assetMatchesQuery(a.label, a.path, s_pickerQuery)) continue;
-				++shownCount;
-				if (ImGui::Selectable((a.label + "##" + a.path).c_str()) && ctx.contentManager)
-				{
-					const HE::UUID id = ctx.contentManager->loadAsset(a.path);
-					// Type-checked exactly like a drop: the scan sniffs headers,
-					// and a header that lied would otherwise put a wrong-typed
-					// UUID into the slot.
-					if (id != HE::UUID{} && resolveAsset(*ctx.contentManager, id, want, nullptr))
-					{
-						if (undo && ctx.undoSys) ctx.undoSys->snapshotNow("Assign Asset");
-						target = id;
-						action = SlotAction::Assigned;
-					}
-					else
-						HE_LOG_WARN(Editor, "Editor: could not load asset '%s'", a.path.c_str());
-					ImGui::CloseCurrentPopup();
-				}
-				// The list shows the file stem, so the path is what the hover is
-				// for — two assets called "Idle" are told apart by nothing else.
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", a.path.c_str());
+				s_pickerShown.clear();
+				for (int i = 0; i < static_cast<int>(s_pickerItems.size()); ++i)
+					if (HcEditorUtil::assetMatchesQuery(s_pickerItems[static_cast<std::size_t>(i)].label,
+					                                    s_pickerItems[static_cast<std::size_t>(i)].path,
+					                                    s_pickerQuery))
+						s_pickerShown.push_back(i);
+				s_pickerShownQuery = s_pickerQuery;
+				s_pickerShownValid = true;
 			}
+			shownCount = static_cast<int>(s_pickerShown.size());
+			// Only the rows in the list's window are submitted; every row is one
+			// line of text, so the clipper's measured height holds for all.
+			ImGuiListClipper clipper;
+			clipper.Begin(shownCount);
+			while (clipper.Step())
+				for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+				{
+					const int index = s_pickerShown[static_cast<std::size_t>(row)];
+					const auto& a = s_pickerItems[static_cast<std::size_t>(index)];
+					// The id is the item's index, not label + path: no string per row,
+					// and the list is fixed while the popup is open.
+					ImGui::PushID(index);
+					if (ImGui::Selectable(a.label.c_str()) && ctx.contentManager)
+					{
+						const HE::UUID id = ctx.contentManager->loadAsset(a.path);
+						// Type-checked exactly like a drop: the scan sniffs headers,
+						// and a header that lied would otherwise put a wrong-typed
+						// UUID into the slot.
+						if (id != HE::UUID{} && resolveAsset(*ctx.contentManager, id, want, nullptr))
+						{
+							if (undo && ctx.undoSys) ctx.undoSys->snapshotNow("Assign Asset");
+							target = id;
+							action = SlotAction::Assigned;
+						}
+						else
+							HE_LOG_WARN(Editor, "Editor: could not load asset '%s'", a.path.c_str());
+						ImGui::CloseCurrentPopup();
+					}
+					// The list shows the file stem, so the path is what the hover is
+					// for — two assets called "Idle" are told apart by nothing else.
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", a.path.c_str());
+					ImGui::PopID();
+				}
+		}
 		if (shownCount == 0)
 			ImGui::TextDisabled(s_pickerItems.empty() ? "(no assets of this type in the project)"
 			                                          : "(nothing matches)");
