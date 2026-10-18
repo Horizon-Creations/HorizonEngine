@@ -701,3 +701,35 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Next steps:** 1. Step 12: HorizonCodeGen against `HorizonEngine::HorizonEngine` + `HE_BUILD_PROFILE`, into `HorizonEngine/`;
   give it the same cache key/work-dir helpers (`buildCacheKey` takes any DylibBuildSpec). 2. Step 13: GUI export twice per profile,
   second one logs "Build cache hit"; `build_profile_strings.py --profile release` on the swapped Shipping game.
+
+## Handoff (step 12: CI red, Windows LNK1189 and Linux runtime_size)
+
+- **Topic / step:** Thema 211, step 12. Commits d27a46dd (Windows), 50a23711 (Linux), e2daabd6 (Editor/Game), pushed.
+  CI https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39172175638 and Runtime flavours 39172176022 on e2daabd6,
+  not seen finished.
+- **Windows LNK1189** (CI 39168157588, 39170780791, Runtime flavours 39170502233, the only red there): the 65535 counts the members
+  of the IMPORT library, one per exported symbol, not input objects. `WINDOWS_EXPORT_ALL_SYMBOLS` on the bundle exported every
+  external symbol of every object (four parts + absorbed backends/shader compilers, inline and template instantiations included).
+  Only HorizonScene uses export-all; Core/Net/Rendering export via `HE_*_BUILD_DLL` dllexport, carried in their objects. Fix
+  (`cmake/HorizonEngineBundle.cmake`, WIN32 block): export-all OFF, `HorizonEngine.def` from `$<TARGET_OBJECTS:HorizonScene>` via
+  `cmake/HorizonEngineBundleDef.cmake` (`cmake -E __create_def`, undocumented, the same command CMake runs for export-all). The
+  build log prints "HorizonEngine.def: N symbols ..." and fails over 65535. Static archives instead of objects were rejected:
+  export-all never walks archive members, and unreferenced Scene objects would be dropped. The editor's separate libs are unchanged.
+- **Linux runtime_size** (310/311 in 39168157588): not the bundle. libHorizonEngine.so 31.5 MB vs the four 32.5 MB (17.10 run
+  39031060917). New was crypto 5.3 MB: `bundle_linux` ran `ldd` (whole closure) on libHorizonEngine.so, which reaches the system
+  libcurl's libssl/libcrypto through HorizonNet; libHorizonCore.so, the old reference, never did. Now only direct NEEDED
+  (readelf -d, objdump -p, closure as fallback) of the wanted sonames are copied. Expected: about 37.0 MB without python, threshold
+  unchanged at 42. `runtime_size.py`: bucket `engine` (HorizonEngine), shaders also under `HorizonEngine/Shaders/`.
+- **Found in passing:** `Editor/Game` (editor POST_BUILD `copy_directory`, which never deletes) kept the four flat libs from before
+  step 10 in an upgraded tree, so exports shipped them. It is now emptied before the copy (`src/HE_Editor/CMakeLists.txt:611`).
+- **Verified (Mac, out/build/release, dev):** the .def mechanics in a throwaway CMake project (file(GENERATE) of TARGET_OBJECTS,
+  genex DEPENDS, the script, count line, null rebuild); NEEDED parsing on canned readelf/objdump output + `bash -n`; build of all
+  targets rc 0; `Editor/Game` holds only HorizonEngine/{libHorizonEngine,libHorizonPython}; runtime_size game 34.6 MB without python
+  (engine 25.8), OK. **Full ctest on e2daabd6 in the foreground** (-j4, private HOME, HE_CONFIG_DIR unset): 311 tests, 309 passed,
+  0 failed, 2 skipped (runtime_size_app_*), rc 0, 343 s. (Earlier "311/311" counted these two skips as passes.)
+- **CI only:** that HorizonEngine.dll links and the total (def + dllexport) stays under 65535, that the game and the Python plugin
+  still resolve every Scene symbol on Windows, Linux without libcrypto at about 37 MB. The Windows code path never ran on the Mac.
+- **Risk:** if the Scene def count + Core/Net/Rendering dllexports still pass 65535, the next step is filtering COMDAT
+  inline/template symbols out of the def (consumers instantiate their own); the logged count tells how close it is.
+- **Next steps:** 1. Read the "HorizonEngine.def: N symbols" line and runtime_size in 39172175638. 2. Step 13 (HorizonCodeGen against
+  the bundle).
