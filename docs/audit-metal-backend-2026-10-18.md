@@ -115,7 +115,7 @@ The probe leaves out the per-object material lookup and the extractor walk (unch
 GPU time per TLAS build varied between modes (0.4-2.3 ms at 10k) without a pattern I can
 explain; the claim is the build count (static: 0 per frame), not the per-build time.
 
-## Handoff
+## Handoff, step 1
 
 - **Topic / step:** 216, step 1 of 3
 - **Branch / commit:** `claude/audit-optimierung-metal-backend-stufe-3` @ 410aeb24 (witness),
@@ -152,3 +152,38 @@ explain; the claim is the build count (static: 0 per frame), not the per-build t
   flag; the colour/land-index uploads could use the ring only if every consumer runs in the
   same frame as the build. 2. Use the `upload` set plus `HE_DUMP_GI` shots (not bit-exact,
   measure a noise floor) for its A/B.
+
+## Handoff
+
+- **Topic / step:** 216, step 2 of 3 (REN-404/405/406)
+- **Branch / commit:** `claude/audit-optimierung-metal-backend-stufe-3` @ 8b421011 (code),
+  789e5b5b (record + probe), plus this handoff
+- **Done:** GI TLAS and tables kept while the caster set is unchanged, tables kept when
+  only transforms move, instance descriptors from the ring, BLAS slot map, BLAS builds
+  batched on the frame's command buffer without a wait, SW instance/inverse and landscape
+  table reuse; `giReflRay` placeholder validation abort fixed.
+- **Files:** `MetalRenderer.mm:8187` `BuildBLAS(mesh, encoder)`; `:8269` `giAccelLogEnabled`;
+  `:8305` SW path; `:8415` `BuildGILandscapeTable`; `:8466` `ReleaseGIAccel`; `:8485`
+  `EncodeGIAccelBuild` (compare at `:8610`); `:16035` `noLand` placeholder; `:16709`
+  invalidation flag; `:16936` profiler scope `Metal::EncodeGIAccelBuild`; shutdown ~`:6830`.
+  `MetalRenderer.h:1155-1205` (`GIAccelSnapshot`, comments rewritten);
+  `EditorApplication.cpp:9140` `HE_DUMP_GIMOVE`; `scripts/perf/gi_accel_probe.mm`.
+- **Verified:** build green (Release). Shots under Metal API + shader validation, before
+  = step-1 deploy copy: static HW/SW/reflections build once then keep; GIMOVE rebuilds ×6
+  then keeps, receiver shadow follows (GI on agrees with CSM, HW and SW); before/after
+  within the run-to-run noise (no pixel > 8 levels); GI off md5-identical. Probe numbers
+  above. Full `he_tests` (Release, from the build dir): 5431 cases, 3 red, the known ones
+  (`test_hpak` scanContentDirectory green with an empty HOME 59/59, `test_profiler` green
+  alone 18/18); he_tests does not link the Metal backend.
+- **Not verified:** mesh invalidation (sculpt) while the TLAS is cached, other than by
+  reading; a scene with landscapes (table reuse ran only as "no terrain"); an editor
+  frame time with GI on a real project (no `he_perf_capture` run); the GPU-side cost of
+  the batched BLAS frame; Intel/AMD Macs; macOS < 13 (no mesh-pointer table).
+- **Decisions:** no refit and no persistent scratch (in-flight race, see above);
+  material lookup per object stays (live Param slots); byte compares, a -0.0/NaN mismatch
+  only costs a rebuild.
+- **Traps:** `HE_DUMP_GIBLEED` only adds geometry inside `MATERIALTEST=1`. The headless
+  dump never calls the renderer's `Shutdown()` log path reliably; use `HE_DUMP_GIACCEL=1`.
+  `CAMX/CAMY` do not move the `MATERIALTEST` camera. Metal validation goes to stderr.
+- **Next steps:** 1. Step 3 (REN-301 Pimpl). 2. Optional: refit for moving scenes behind a
+  completion-handler fence, measured with the probe's `moved` case.
