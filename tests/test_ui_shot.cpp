@@ -3653,3 +3653,68 @@ TEST_CASE("ui shot: the documentation reader skips sections out of view")
 	DocsPanel::setSectionClipping(true);
 	DocsPanel::close();
 }
+
+// ── The search palette's keyboard, characterised (EDT-909) ───────────────────
+// searchMenuBegin/Item/End rank every row and keep the highlight; the rows reuse
+// buffers across frames now. What must not move: typing re-picks the best match,
+// ↓ walks the rows in drawn order, Enter picks the highlighted one a frame later.
+TEST_CASE("search palette: typing ranks, the arrow walks, Enter picks")
+{
+	constexpr int W = 600, H = 500;
+	Harness harness(W, H);
+	ImGuiIO& io = ImGui::GetIO();
+
+	std::string picked;
+	const auto frame = [&](bool open)
+	{
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("palette host");
+		if (open) ImGui::OpenPopup("##palette");
+		if (ImGui::BeginPopup("##palette"))
+		{
+			const std::string q = HcEditorUtil::searchMenuBegin("##q", "Search", 200.0f);
+			ImGui::BeginChild("##rows", ImVec2(260.0f, 300.0f));
+			// Like every caller: the rows that match are listed, the rest are not.
+			for (int i = 0; i < 300; ++i)
+			{
+				char shown[32], label[48];
+				std::snprintf(shown, sizeof(shown), "item %d", i);
+				std::snprintf(label, sizeof(label), "Item %d##id%d", i, i);
+				if (!q.empty() && std::string(shown).find(q) == std::string::npos) continue;
+				if (HcEditorUtil::searchMenuItem(label)) picked = label;
+			}
+			ImGui::EndChild();
+			HcEditorUtil::searchMenuEnd();
+			ImGui::EndPopup();
+		}
+		ImGui::End();
+		ImGui::Render();
+	};
+	const auto key = [&](ImGuiKey k)
+	{
+		io.AddKeyEvent(k, true);
+		frame(false);
+		io.AddKeyEvent(k, false);
+		frame(false);
+	};
+
+	frame(true);
+	frame(false);
+	frame(false);
+	// "Item 2" is the one exact name among "item 2", "item 20".. "item 299".
+	io.AddInputCharactersUTF8("Item 2");
+	frame(false);
+	frame(false);
+	CHECK(picked.empty());
+	key(ImGuiKey_DownArrow);           // from "Item 2" to the next row drawn: "Item 20"
+	key(ImGuiKey_Enter);
+	frame(false);
+	CHECK(picked == "Item 20##id20");
+
+	// Many frames with the palette open must keep the choice where it was.
+	picked.clear();
+	for (int i = 0; i < 5; ++i) frame(false);
+	CHECK(picked.empty());
+}

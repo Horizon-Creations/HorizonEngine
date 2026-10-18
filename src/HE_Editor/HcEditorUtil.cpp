@@ -1100,7 +1100,11 @@ namespace
 		std::string activeKey;            // the highlighted entry
 		std::string bestKey;              // best-ranked entry seen this frame
 		int         bestScore = INT_MAX;
-		std::vector<std::string> keys;    // entries registered this frame, in order
+		// Entries registered this frame, in order: the first keyCount of keys.
+		// The strings outlive the frame so the next one assigns into their
+		// capacity instead of allocating a string per row (EDT-909).
+		std::vector<std::string> keys;
+		std::size_t keyCount = 0;
 		int  move        = 0;             // pending ↑/↓ steps from the search field
 		bool enterQueued = false;         // Enter pressed; the highlight takes it next frame
 		bool scrollTo    = false;         // bring the highlight into view
@@ -1172,7 +1176,7 @@ std::string searchMenuBegin(const char* id, const char* hint, float width)
 	s_nav.queryDirty = (q != s_nav.query);
 	s_nav.query      = q;
 
-	s_nav.keys.clear();
+	s_nav.keyCount = 0;
 	s_nav.bestKey.clear();
 	s_nav.bestScore = INT_MAX;
 	return q;
@@ -1187,13 +1191,17 @@ bool searchMenuItem(const std::string& label, bool disabled)
 	}
 
 	// Rank on the VISIBLE text: an "##id" suffix disambiguates the ImGui id, it is
-	// not part of what the user is searching for.
-	std::string shown = label.substr(0, label.find("##"));
-	std::transform(shown.begin(), shown.end(), shown.begin(),
+	// not part of what the user is searching for. Lowered into one buffer that
+	// every row reuses.
+	static std::string s_shown;
+	s_shown.assign(label, 0, label.find("##"));
+	std::transform(s_shown.begin(), s_shown.end(), s_shown.begin(),
 		[](unsigned char c){ return (char)std::tolower(c); });
-	const int score = rankMatch(shown, s_nav.query);
+	const int score = rankMatch(s_shown, s_nav.query);
 	if (score < s_nav.bestScore) { s_nav.bestScore = score; s_nav.bestKey = label; }
-	s_nav.keys.push_back(label);
+	if (s_nav.keyCount < s_nav.keys.size()) s_nav.keys[s_nav.keyCount] = label;
+	else                                    s_nav.keys.push_back(label);
+	++s_nav.keyCount;
 
 	// The highlight still belongs to the previous query while the query is being
 	// edited this frame, so an Enter that arrived with the keystroke waits.
@@ -1216,7 +1224,7 @@ void searchMenuEnd()
 	// best match (that IS the point); otherwise the highlight stays where it is
 	// — including where ↑/↓ put it — as long as that entry is still listed.
 	auto indexOf = [](const std::string& k) -> int {
-		for (size_t i = 0; i < s_nav.keys.size(); ++i)
+		for (size_t i = 0; i < s_nav.keyCount; ++i)
 			if (s_nav.keys[i] == k) return static_cast<int>(i);
 		return -1; };
 
@@ -1228,10 +1236,10 @@ void searchMenuEnd()
 		idx             = indexOf(s_nav.activeKey);
 		scroll          = true;
 	}
-	if (s_nav.move != 0 && !s_nav.keys.empty())
+	if (s_nav.move != 0 && s_nav.keyCount > 0)
 	{
-		idx = std::clamp(idx + s_nav.move, 0, static_cast<int>(s_nav.keys.size()) - 1);
-		s_nav.activeKey = s_nav.keys[idx];
+		idx = std::clamp(idx + s_nav.move, 0, static_cast<int>(s_nav.keyCount) - 1);
+		s_nav.activeKey = s_nav.keys[static_cast<std::size_t>(idx)];
 		scroll          = true;
 	}
 	s_nav.scrollTo = scroll;
@@ -1272,12 +1280,25 @@ namespace
 		if (paletteHidden(fn.id))                      return false;
 		if (!apiGroupAllowed(fn.id, allowedGroups))    return false;
 		if (lowerQuery.empty())                        return true;
-		auto low = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
-			[](unsigned char c){ return (char)std::tolower(c); }); return v; };
+		// Case-insensitive "contains", in place: this runs per registry row and
+		// frame while the palette is open, and lowering three copies of every
+		// row's names was three allocations each (EDT-909).
+		const auto has = [&lowerQuery](const char* hay)
+		{
+			if (!hay) return false;
+			const std::size_t n = lowerQuery.size();
+			for (const char* h = hay; *h; ++h)
+			{
+				std::size_t i = 0;
+				while (i < n && h[i] &&
+				       static_cast<char>(std::tolower(static_cast<unsigned char>(h[i]))) == lowerQuery[i])
+					++i;
+				if (i == n) return true;
+			}
+			return false;
+		};
 		const char* shown = fn.displayName ? fn.displayName : fn.id;
-		return low(shown).find(lowerQuery) != std::string::npos
-		    || low(fn.id).find(lowerQuery) != std::string::npos
-		    || low(fn.category).find(lowerQuery) != std::string::npos;
+		return has(shown) || has(fn.id) || has(fn.category);
 	}
 } // namespace
 
@@ -1317,7 +1338,12 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 		else if (!header || std::string(header) != fn.category)
 		{ ImGui::TextDisabled("%s", fn.category); header = fn.category; }
 		// Unique ImGui id via the stable api id (display names may repeat later).
-		if (searchMenuItem(std::string(shown) + "##" + fn.id)) picked = fn.id;
+		// One buffer for every row's label.
+		static std::string s_label;
+		s_label.assign(shown);
+		s_label += "##";
+		s_label += fn.id;
+		if (searchMenuItem(s_label)) picked = fn.id;
 		if (ImGui::IsItemHovered())
 		{
 			// Same self-documentation as the canvas hover: build the EngineCall
