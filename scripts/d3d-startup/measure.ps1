@@ -39,12 +39,17 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 $dx = "$env:LOCALAPPDATA\NVIDIA\DXCache"
 $mineList = Join-Path $OutDir "dxcache_mine.txt"
 if ($Cold -and (Test-Path $mineList)) {
-    $n = 0
+    # The names follow the exe NAME, not its path: another HorizonEditor.exe (the
+    # user's own editor) shares them and keeps one open while it runs. Skip that one,
+    # the run is then only partly driver-cold.
+    $n = 0; $locked = @()
     foreach ($name in Get-Content $mineList) {
         $p = Join-Path $dx $name
-        if (Test-Path $p) { Remove-Item $p -Force; $n++ }
+        if (Test-Path $p) {
+            try { Remove-Item $p -Force -ErrorAction Stop; $n++ } catch { $locked += $name }
+        }
     }
-    "cold: removed $n DXCache files of this exe"
+    "cold: removed $n DXCache files of this exe$(if ($locked) { "; LOCKED by another process, kept: $($locked -join ' ')" })"
 }
 $before = @{}
 if (Test-Path $dx) { Get-ChildItem $dx -File | ForEach-Object { $before[$_.Name] = $_.LastWriteTimeUtc } }
