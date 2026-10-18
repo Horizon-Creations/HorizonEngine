@@ -111,24 +111,68 @@ strictness checks (length, non-hex, upper case, UUID overload), and a resolve af
 **snapshot** undo/redo. That is the path the old header comment named as the reason not
 to use an index.
 
+## Step 3: row clipping where it was missing (M12)
+
+One scheme where rows are nested or heights differ, the Outliner's: a row (or section)
+outside the visible band only adds its measured height to a run that is laid out as
+**one `Dummy`** before the next drawn row and after the last, so the scroll range is
+what drawing everything gives. Heights are measured off drawn rows; until one is known,
+everything is drawn. Flat lists of one-line rows use `ImGuiListClipper` directly.
+
+| Finding | Where | What changed |
+|---|---|---|
+| EDT-301 Content Browser grid | `ContentBrowserPanel.cpp`, `tileInView` before the folder loop | A row of tiles (folder and file alike) is one height, measured off two drawn rows; rows out of view are skipped whole. Everything is drawn while a drag payload exists or `s_revealScrollPath` waits. |
+| EDT-302 Docs reader | `DocsPanel.cpp` `drawPage` | Per-section heights; only a height that came out the same in two draws is trusted (a table settles its columns over a frame: without that rule `docs-examples` came out 1 px off). Reset per page, body width, font size and `s_lang`; no skipping while `s_scrollFrames > 0`. |
+| EDT-1503 Source control tree | `SourceControlTree.h` (new), `SourceControlPanel.cpp` `drawRows` | The tree is built once per status snapshot in `rebuildModel` as flat lines (folder/file, depth, subtree end, folded chain label) and drawn through the same clipper as the flat view. Folds live in `s_foldedDirs[section]` (by full path) instead of ImGui storage. |
+| EDT-1802 UI widget hierarchy | `UIEditorPanel.cpp` `HierarchyIndex`, `drawHierarchyNode` | One children index per frame instead of `childrenOf` per row (n²); rows out of view skipped the Outliner way under the same `Name##hn<id>` ids (the designer test derives ids from that label); label and popup id without allocation. After a drop or Delete in the walk the index is stale, and the rest of that frame asks the tree, as before. No skipping during a drag. |
+| EDT-910 Asset picker | `EditorWidgets.cpp` `assetSlot` popup | Filter result kept as indices, rebuilt on query change only; `ImGuiListClipper`; row id = index (`PushID`) instead of `label##path`. |
+| EDT-909 Node palette | `HcEditorUtil.cpp` `searchMenuItem`, `apiRowMatches`, `drawEngineApiMenu` | **No clipper**: ranking and the arrow keys need every row registered, and ImGui's `ItemAdd` already culls rows it cannot see. Allocations per row removed (one lowering buffer, key list reuses last frame's strings, in-place case-insensitive match). |
+| EDT-1404 Outliner | `OutlinerPanel.cpp` ~1100 | Stage 1 only: `visibleRows` is static and filled only while Shift is held. Stage 2 (visible list without the O(N) walk) is open; the audit wants a measurement first. |
+
+**Measured** (hidden editor, Metal, M5 MacBook Air, no `yes` load, other bees' builds may
+have run): tutorial project plus 3 000 files in `Content`, Content Browser open on that
+folder. Old binary **182 FPS**, new **505 to 523 FPS** (two runs), FPS read off the
+status bar of the `HE_DUMP_UI` frame. The grid region of old and new differs by 22 px,
+inside the 72 px that two runs of the same binary differ by; the scroll thumb is identical.
+
+**Frame budget in the UI tests:** asserted as rows submitted, not wall-clock (this Mac
+flakes under build load): the hierarchy submits 10 to 120 of 364 rows, the docs page
+fewer than 12 of 120 sections. Both tests also compare the clipped frame pixel for pixel
+with the unclipped one (`setHierarchyRowClipping`, `DocsPanel::setSectionClipping`) and
+check the scroll range.
+
+**Tests:** `test_widget_designer_ui.cpp` "the hierarchy clips rows out of view" (404
+elements, one folded box, scrolled to the middle); `test_ui_shot.cpp` "the
+documentation reader skips sections out of view" (120 sections, plus a jump) and
+"search palette: typing ranks, the arrow walks, Enter picks" (characterisation, green
+against the old code too); `test_sourcecontrol_tree.cpp` (new: order, chain folding,
+folds, 5 000 files). All `ui shot*` frames from before the step are byte-equal after it,
+except the 7 console shots and `texture_viewer_asset`, which differ between two runs of
+the same build as well.
+
 ## Handoff
 
-- **Topic / step:** 220, step 2 of 5 (step 1: 0b702211, its record above)
-- **Branch / commit:** `claude/audit-optimierung-editor-stufe-6`, the step-2 commit after 004a8530 (hash in the Hive post)
-- **Done:** `entityByUuid` answers from `findByEntityId` (+ `UUID` overload, used by the task board); `EditorSelection` keeps a member set, `contains` O(1), `roots` O(S·depth).
-- **Files touched:** `EditorCommands.h` (~312-325), `EditorCommands.cpp` (`entityByUuid`, end of file), `EditorSelection.h/.cpp`, `TaskBoardPanel.cpp` (547, 550, 579, 603), `tests/test_editor_selection.cpp` (+2 cases), `tests/test_editor_commands.cpp` (+1 case, +checks in two).
+- **Topic / step:** 220, step 3 of 5 (steps 1 and 2: records above)
+- **Branch / commits:** `claude/audit-optimierung-editor-stufe-6`: 17629338 (910/1802/1503/1404), e0e3c8a9 (302), 69ea22c0 (301), 1c4ac63f (909), then this record.
+- **Done:** row clipping for the Content Browser grid, docs reader, source-control tree, UI widget hierarchy and asset picker; the palette without per-row allocations; outliner stage 1. Table in "Step 3" above.
+- **Files touched:** `ContentBrowserPanel.cpp` (`tileInView`, before the folder loop), `DocsPanel.cpp/.h` (`drawPage`, `setSectionClipping`/`sectionsDrawn`), `SourceControlTree.h` (new), `SourceControlPanel.cpp` (`Model::tree`, `drawRows`), `UIEditorPanel.cpp/.h` (`HierarchyIndex`, `drawHierarchyNode`, hooks), `EditorWidgets.cpp` (picker), `HcEditorUtil.cpp` (`searchMenuItem`, `apiRowMatches`), `OutlinerPanel.cpp` (~1100); tests: `test_widget_designer_ui`, `test_ui_shot` (+2), `test_sourcecontrol_tree` (new, in `tests/CMakeLists.txt`).
 - **Verified:**
-  - Release `he_tests` + `HorizonEditor` are green; `EditorApplication`, `TaskBoardPanel`, `EditorCommands` and `EditorSelection` all compiled.
-  - Targeted tests are green: `test_editor_selection`, `test_editor_commands`, and `test_mcp_tools_{entity,scene,prefab,terrain,taskboard}`, `test_mcp_api`.
-  - Full `ctest -j4`: 302/303. The red one is `test_hpak:1188` (6 == 2): 4 `.hasset` in this Mac's EngineContentCache. It is 59/59 with an empty HOME and pre-existing.
-  - `editor_help_audit.py --check` exits 0; no new controls.
-- **Not verified:** no manual editor session (Ctrl+A in a big scene, task-board jump); no Windows/Linux (CI).
-- **Decisions taken:** lowercase-only parse (old string-compare semantics); zero id never matches; no per-revision `roots()` cache in the viewport (a reparent does not bump the revision); `setMany`'s double revision bump left as it was; no single-pass orphan check (O(1) lookups make it moot).
-- **Suggested, not taken:**
-  - EDT-702 (group gizmo rebuilds `worldMatrixOf` per member per frame) is the next cost in the same viewport path after `roots()`.
-  - Step 1's open points stand: `discoverAssets` on the index, the `test_hpak` HOME fix, and folding the index walk into `scanDirInto`.
+  - Release `he_tests` + `HorizonEditor` build green. Full `ctest -j4`: 303/304. The red one is the known `test_hpak:1188` (6 == 2, EngineContentCache in this HOME).
+  - All `ui shot*` frames from before are byte-equal after, except 8 that also vary run to run. The new clipped frames are pixel-equal to the unclipped ones.
+  - Hidden-editor A/B for the grid (numbers above). `editor_help_audit.py --check` exits 0.
+- **Not verified:**
+  - The Source Control panel is not in `he_tests`. Its tree is only compiled, plus the pure-line tests; nobody has looked at it as an image.
+  - A **scrolled** Content Browser A/B: there is no headless scroll, so only the top of the grid and the thumb were compared.
+  - Windows/Linux (CI).
+- **Decisions taken:**
+  - Folder lines in the SC tree are now one frame high (`FramePadding`) like the file rows. The clipper needs one step, so they are a few px taller than before.
+  - Folds of the SC tree are kept in the panel (they now survive a status refresh).
+  - The palette has no clipper (see table); outliner stage 2 not done.
+  - Picker row ids are the index, not `label##path`.
+- **Suggested, not taken:** EDT-302's `splitWords` cache and per-page `panelForTopic` (now only per drawn section). EDT-304 (copy of the search hits per frame) is next in the grid's path. Outliner stage 2 after a 50k measurement.
 - **Traps:**
-  - `findByEntityId` cannot see `registry.get<EntityIdComponent>(e).id = x` (no signal). A grep of `src/` found no such write; write through `setEntityId`/`patch`.
-  - Step 1's still apply: write `.hasset` without `saveAsset` → `noteContentChanged()`; pickers snapshot on popup open.
-- **Pending:** plan steps 3-5.
-- **Next steps:** 1. Step 3: row clipping (M12) where it is missing: EDT-301, 302, 1503, 1802, 909, 910, 1404; check the UI-test frame-time budget.
+  - Variable-height memos: trust only a height that was the same in two draws.
+  - Editor A/B: the old binary must sit in the build's `HE_Editor` dir (EditorDeps), and the noise of two runs is ~70 px.
+  - The widget designer test derives row ids from `Name##hn<id>`; keep that label.
+- **Pending:** plan steps 4-5.
+- **Next steps:** 1. Step 4: Collab EDT-402/1601/201/202 (signals and revisions instead of the per-frame structure diff).
