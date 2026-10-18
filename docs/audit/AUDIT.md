@@ -98,7 +98,7 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache`
 - [x] Metal: REN-302/402 `FrameUploadRing` benutzen, REN-405/404 TLAS/BLAS-Dirty, REN-406 asynchroner BLAS-Build (`docs/audit-metal-backend-2026-10-18.md`; REN-404: Materialauflösung pro Objekt bleibt, kein TLAS-Refit)
 - [ ] D3D12: REN-202 Meshes in DEFAULT-Heap; D3D11/GL: Material-Draw-Zustand (REN-103/601), UI-Batching (REN-603)
-- [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
+- [x] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach) (`docs/audit-metal-backend-2026-10-18.md` Schritt 3; offen: MtlRef, Feature-Substrukturen, LazyPipeline)
 
 **Stufe 4 – Scene-Systeme**
 - [ ] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound`

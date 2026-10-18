@@ -115,6 +115,61 @@ The probe leaves out the per-object material lookup and the extractor walk (unch
 GPU time per TLAS build varied between modes (0.4-2.3 ms at 10k) without a pattern I can
 explain; the claim is the build count (static: 0 per frame), not the per-build time.
 
+## Step 3: REN-301, `MetalRenderer` as a Pimpl like D3D11/D3D12
+
+The public `include/Backends/Metal/MetalRenderer.h` (1475 → 111 lines) holds only the
+IRenderer overrides, `GetDevice`/`GetCommandQueue`/`GetFramePassDescriptor` (the editor's
+ImGui bridge, `EditorApplication.cpp:1222`, `EditorUI.cpp:659`), `MetalOverlayContext` and
+`std::unique_ptr<MetalRendererImpl> m_impl`. Everything else, every member, nested type,
+constant and helper, is `class MetalRendererImpl` in `src/Backends/Metal/MetalRendererImpl.h`,
+which only `MetalRenderer.mm` includes.
+
+- **Methods moved with the state, not the other way round.** The 190 `MetalRenderer::`
+  definitions in the .mm became `MetalRendererImpl::`, bodies unchanged. Moving only the data
+  (D3D11's `p.member` style) would have rewritten ~3000 member tokens on 2182 lines of a file
+  that topics 180/182/207/214 also edit before 0.7.0; this way 287 lines changed.
+- **IRenderer's protected state** (`m_contentManager`, `m_world`, `m_editorCamera`,
+  `m_renderPath`, `m_viewMode`, `m_overlayCallback`; 109 tokens) is read as `m_owner.m_x`.
+  `m_owner` is the back-reference to the facade, which names the Impl its friend.
+  IRenderer's nested types, `kWorldPreviewSlots`, `GetEnvironment` and `GetWaterRipples` are
+  aliased on the Impl (`MetalRendererImpl.h:75-93`), so the bodies read as before.
+- **Facade:** `MetalRenderer.mm:6650-6754`, one forwarder per entry point. The Impl is never
+  subclassed, so the calls between entry points that used to go through the vtable now go
+  straight to the same function.
+- **Not done (the audit's later REN-301 parts, each a separate change):** the `MtlRef`
+  handle for the ~160 `void*` + `CFBridgingRelease` pairs, per-feature substructs, the
+  `LazyPipeline` helper for the eight `...Tried` flags. So the internal header is as big as
+  the old one was; only what the includers see got small (not the audit's "85 %" for the
+  backend as a whole).
+- Line numbers in the step 1/2 handoffs: `MetalRenderer.h:<n>` (private part) is now
+  `MetalRendererImpl.h:<n+18>`; `.mm` lines after 6650 moved by +104.
+
+### Witnesses
+
+- Build (Release): `RendererMetal`, `HorizonEditor`, `HorizonGame`, `he_tests` green, no new
+  warnings (the 14 `MTLStorageModeManaged` deprecations were there before). EditorUI.cpp,
+  EditorApplication.cpp and RendererFactory.cpp compile without the old header's transitive
+  includes.
+- Rebuild scope: a later edit to `MetalRendererImpl.h` recompiled `MetalRenderer.mm.o` only.
+  Before, every header edit also recompiled RendererFactory, EditorUI and EditorApplication.
+- Header cost for an includer (`-E` of a TU with just the include, RendererFactory's flags):
+  105,952 → 97,872 lines, where `IRenderer.h` alone is 97,749. So the Metal header's own share
+  went from 8,203 lines to 123. The `-fsyntax-only` time went 6.5 → 4.9 s, but that was
+  measured while shots and tests ran, so it is indicative only.
+- Pixels, before = self-contained copy of the HEAD deploy (no `MetalRendererImpl` symbol,
+  `nm`; the new one has 306): `frame_pixel_ab.sh <out> <tree> all`, 50 shots (frame, shadow,
+  upload sets, forward and deferred), noise floor 0 (two runs of the old build identical),
+  old/new **all 50 md5-identical**. The Metal material preview (`HE_PREVIEW_DUMP`,
+  `MATERIALTEST=displace PREVIEW=1`) is md5-identical over 2 old + 2 new runs. GI on
+  (`MATERIALTEST=1 GIBLEED=1 FRAMES=8 TOD=0.35 GI=1`, forward and deferred): old/new differ
+  in 9k-38k pixels by at most 2 levels, two runs of one build in 13k-35k by at most 2. That is
+  inside the noise.
+- `he_tests` full (from the build dir): 5431 cases, 3 red, the known ones (`test_hpak`
+  scanContentDirectory green with an empty HOME, `test_profiler` green alone). test_culling
+  (body checks on `MetalRendererImpl::EncodeFrame/ExtractFrame/EncodeShadowMap`),
+  test_foliage_cluster, test_engine_materials, test_bloom_kernel, test_particle_graph,
+  test_world_scale green.
+
 ## Handoff, step 1
 
 - **Topic / step:** 216, step 1 of 3
@@ -153,7 +208,7 @@ explain; the claim is the build count (static: 0 per frame), not the per-build t
   same frame as the build. 2. Use the `upload` set plus `HE_DUMP_GI` shots (not bit-exact,
   measure a noise floor) for its A/B.
 
-## Handoff
+## Handoff, step 2
 
 - **Topic / step:** 216, step 2 of 3 (REN-404/405/406)
 - **Branch / commit:** `claude/audit-optimierung-metal-backend-stufe-3` @ 8b421011 (code),
@@ -191,3 +246,33 @@ explain; the claim is the build count (static: 0 per frame), not the per-build t
   `MATERIALTEST` camera. Metal validation goes to the process's stderr, not the engine log.
 - **Next steps:** 1. Step 3 (REN-301 Pimpl). 2. Optional: refit for moving scenes behind a
   completion-handler fence, measured with the probe's `moved` case.
+
+## Handoff
+
+- **Topic / step:** 216, step 3 of 3 (REN-301)
+- **Branch / commit:** `claude/audit-optimierung-metal-backend-stufe-3` @ 289e3341 (code),
+  plus this record
+- **Done:** MetalRenderer is a Pimpl; state and helpers in `MetalRendererImpl`.
+- **Files:** `include/Backends/Metal/MetalRenderer.h` (facade, 111 lines);
+  `src/Backends/Metal/MetalRendererImpl.h` (new: old class body; aliases `:75-93`, `m_owner`
+  `:183`); `MetalRenderer.mm:1` include, `:6650-6754` forwarders; `src/HE_Rendering/CMakeLists.txt`
+  (source list); `tests/test_culling.cpp:3360,3415,3421-3422,3430,3440-3441` (grep strings).
+- **Verified:** see "Witnesses" in step 3: build green, 50/50 pixel shots md5-identical with
+  noise floor 0, preview md5-identical, GI within noise, full he_tests with only the 3 known reds.
+- **Not verified:** multi-window (`AttachWindow`/`RenderWindow`), thumbnails, skeletal/particle
+  previews, `RenderSceneImage` at runtime (they compile and only forward; no witness drove
+  them). Metal validation layer not run for this step (no GPU-side change). Intel/AMD Macs.
+  Windows/Linux CI (does not build Metal).
+- **Decisions:** methods moved into the Impl instead of `p.member` rewrites (merge surface,
+  see step 3). The Impl sits in its own internal header, not inside the 18k-line .mm. The
+  public `UnlitViewActive`/`WireframeViewActive` moved to the Impl (no outside caller).
+- **Traps / merge:** topic 214 (`claude/audit-optimierung-rendering-frontend-stufe-2`) adds
+  `m_visibility`, `m_refineRuns` and an inline `VisibilityKey()` to the old header and changes
+  both `ResolveMaterialShader*` signatures. After merging, those go into
+  `MetalRendererImpl.h`. Its new test greps `void MetalRenderer::CullCameraObjects()`, which
+  must become `MetalRendererImpl::` or the test fails at runtime. New members or helpers
+  belong in `MetalRendererImpl.h`. New IRenderer state the backend reads goes through
+  `m_owner`, and a new IRenderer nested type needs an alias there.
+- **Next steps:** 1. Merge (214 first, then this topic). 2. Optional REN-301 follow-ups:
+  `MtlRef` for the retained `void*`, per-feature substructs, `LazyPipeline`; each needs its own
+  pixel A/B (`frame_pixel_ab.sh … all` stays bit-exact for a pure refactor).
