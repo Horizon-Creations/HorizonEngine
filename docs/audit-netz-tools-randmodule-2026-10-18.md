@@ -116,3 +116,47 @@ about real networks.
   1. If CI is red on Windows/Linux, start in `Socket.cpp` `toSockaddr`/`fromSockaddr`
      (socklen_t, sin6_scope_id).
   2. Step 2 (Tools) starts at `docs/audit/modul_tools.md` TLS-101.
+
+## Step 2: TLS-101/102, TLS-201, TLS-203 (offline tools)
+
+**TLS-101.** `Importer::writeAsset` built a full `ContentManager` per asset to call
+`saveAsset`. New `HE::saveAssetFile(asset, contentRoot)` (`ContentManager/AssetFile.h`,
+defined next to `writeAssetFile` in `ContentManager.cpp`) writes the same file: same
+export gate, UUID minting, folder creation, log line. `saveAsset` shares its two halves.
+`setTextureSrgb` still builds a manager (it has to `loadAsset`; one per dialog row).
+**TLS-102.** `meshSidecarAssets` streams MREF and MTRL with `readOneChunk` instead of
+`HAsset::Reader::open` (which read every vertex buffer). Pre-v2 files now give an empty
+list (no test fixture is pre-v2). **TLS-201.** `ensureGlslangProcess()` in
+`ShaderCompiler.cpp`: init once, finalize at exit; the mutex stays. **TLS-203.** The
+manifest code moved unchanged from `ProjectExporter.cpp` into `Hpak/PackManifest.{h,cpp}`
+(`packSettingsFingerprint`, `openIncrementalCache`, `writeIncrementalManifest`); the
+export uses it, `hpak_packer` has `--cache <manifest>`.
+
+Measured (Release, M-series, load 4-7, no `yes` hogs, low-power off):
+
+| | before | after |
+|---|---|---|
+| `he::shaderc::compile`, small fragment shader, mean of 100, 3 alternating runs | 183-219 ms | 3.3-3.5 ms |
+| one asset write (256×256 RGBA texture), mean of 50 | 1.82 ms | 0.85-0.95 ms |
+| `hpak_packer` 40 EngineContent assets, zstd, second run | 0.47-0.93 s | 0.09 s (40/40 reused) |
+
+## Handoff (step 2)
+
+- **Commits:** 53a2234e (TLS-201), 0fa1921e (TLS-203), 5b04a439 (TLS-101/102 + tests),
+  plus this doc. Stopped on the queen's request after everything was verified.
+- **Verified:** build of `he_tests`, `hpak_packer`, `asset_compiler` green. New
+  `test_tools_writer_cache.cpp` 4/4 (saveAssetFile bytes == saveAsset bytes, UUID, gate;
+  manifest reuse byte for byte, rejected for other codec/key/cook, stale manifest,
+  missing files). Importer, ContentManager, export, hpak, sky/engine-material tests green.
+  Full `he_tests` without `test_material_graph`: 5340 cases, 3 failed: the same three as
+  step 1 (`test_hpak` scanContentDirectory passes with empty HOME, 2× EngineProfiler).
+  The bench binary exits 0 after the static glslang finalize. CLI: `--cache` pak is
+  byte-identical to a pack without cache; `--secret` reuses 40/40, other key falls back.
+- **Not verified:** `test_material_graph` (the case at :4789 brackets glslang itself;
+  refcounting makes that safe, but it was not run). Windows/Linux only via CI.
+  `asset_compiler` end to end was not A/B'd (bytes equal by construction + test).
+- **Traps:** benches are in `/tmp/tls201`, `/tmp/tls101` (link `libhe_shadercompiler.a`
+  statically, so no dylib A/B trap). `compile_commands.json` in the worktree is stale; take
+  INCLUDES from `build.ninja`.
+- **Next steps:** step 3 (SCM/CSY/SUP). Optional: `landscape_tex_gen`/`MatGen` could use
+  `saveAssetFile` too (TLS-117, not in scope).
