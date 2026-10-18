@@ -344,3 +344,47 @@ body or move behind a macro is open. They are needed for parity with the interpr
   the first build after this commit is a near-full rebuild (840 steps here).
 - **Next steps:** step 4 (generated header). Step 5 must keep editor/tests out of a release tree (or make them build) and can call
   `build_profile_strings.py --profile release` on the SDK libs; step 9 runs it on an exported game.
+
+## Handoff (step 4: compiled-in project configuration)
+
+- **Topic / step:** Thema 211, step 4 of 9. Branch claude/export-sdk-compile-horizoncode-codegen, one code commit + this doc.
+- **Done:** an exporter-side generator writes `HEGameBuildConfig.h`. It is one `constexpr HE::GameBuildConfig` aggregate with
+  designated initializers, holding every `ProjectConfig` field (the A.1 hcfg row: names, flags, startup scene, save template, theme,
+  bundle id, collision layers and audio buses as JSON) plus `Config/ProjectSettings.json` as JSON and the pak key XOR-masked
+  (random mask per export). A game built with `-DHE_GAME_BUILD_CONFIG=<file>` reads neither file; without it the old path runs unchanged.
+- **Files touched:** `src/HE_Core/include/Hpak/GameBuildConfig.h` (struct, generator, `readGameBuildConfigPakKey`, resolvers,
+  `kGameBuildConfigFormat`, which the generated file `static_assert`s), `src/HE_Core/src/Hpak/GameBuildConfig.cpp`,
+  `src/HE_Game/src/CompiledBuildConfig.{h,cpp}` (the only TU that includes the generated header; the define and include dir are
+  set on that one source file), `src/HE_Game/CMakeLists.txt` (`HE_GAME_BUILD_CONFIG` cache path, checks the file name; removes the
+  dead `HE_PROJECT_SECRET`), `GameApplication.cpp` (constructor peek, ProjectSettings, OnInit, key choice all go through the resolvers;
+  `m_configSource` in `GameApplication.h`), `tests/test_game_build_config.cpp` + golden `tests/fixtures/game_build_config/HEGameBuildConfig.h`.
+- **Precedence:** config = compiled > `project.hcfg` > none. Key = compiled > patched exe block > hcfg key (`HE::selectPakKey`).
+  Compiled settings JSON `""` means defaults, and the file is not read. Logs name only the source ("project configuration compiled
+  in (HEGameBuildConfig.h)", "pak key from ..."), never bytes.
+- **Verified:** `he_tests --source-file='*test_game_build_config.cpp'` 5 cases / 208 assertions: generator output == golden text, the
+  golden compiles in the test TU and reads back field by field, no 4-byte key run in the header, random masks differ but decode the same key,
+  compiled wins over a different hcfg + settings file, compiled without any file, old path (hcfg + settings) and key order unchanged.
+  Mutation (resolver ignores compiled values) turns 42 assertions red. `test_export_profiles` 449, `test_project_exporter` 324 and
+  `test_project_settings` 262 assertions are green. Real binary (dev tree, `HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=30`, copies under `/tmp/s4_witness`):
+  the prebuilt runtime next to an encrypted v2 hcfg logs "project configuration project.hcfg / pak key from project.hcfg". The same runtime
+  built with the golden header logs "compiled in" for both, with that foreign hcfg beside it and also with no file at all. The plain key is in
+  no 8-byte run of the executable, the masked bytes are there, and no log contains key bytes. Release tree (`out/build/release-profile`)
+  builds HorizonGame with the header, and `build_profile_strings.py --profile release` reports OK. Both trees were reconfigured back to
+  `HE_GAME_BUILD_CONFIG=` (empty) afterwards. Full ctest (`-j4`, private `HOME`, `HE_CONFIG_DIR` unset): 305 tests, all
+  passed except the two `runtime_size_app_*` (skipped, flavour-only).
+- **Not verified:** MSVC/GCC (CI). The forward declaration `struct ProjectConfig;` against the `HE_API` definition is untested on MSVC.
+  No real export writes the header yet (step 8). Window title from the compiled settings was not checked on screen (hidden run).
+- **Decisions taken:** one aggregate instead of loose constants (one place to keep in order, compile-time format check); JSON tails are
+  dumped `ensure_ascii` into raw strings whose delimiter grows if the payload could close it; other strings use octal escapes
+  (UTF-8-safe without `/utf-8`); the key is masked, not encrypted (same trust model as `EmbeddedPakKey.h`); `config.json` stays a player file
+  (its defaults are not in the header, see "Pending").
+- **Traps:** the golden fixture must be regenerated after a deliberate generator change:
+  `HE_UPDATE_GAME_BUILD_CONFIG_FIXTURE=1 he_tests --source-file='*test_game_build_config.cpp'`, then rebuild (the TU includes the old file
+  until it recompiles). JSON escapes `"`, so only a string ENDING in `)hecfg` exercises the delimiter growth. The generated header is as
+  sensitive as the executable, so it must not land in the export folder or in git (the fixture's key is a test key).
+- **Pending:** `config.json` defaults compiled in (topic goal "starts without a config file" still needs it, or an explicit decision
+  that config.json may be absent, which the game already tolerates: absent key = member default). The exporter does not call the generator yet.
+- **Next steps:** 1. Step 8: in the SDK path, build `ProjectConfig` as `writeProjectConfig` does (`ProjectExporter.cpp` phase 7; factor that
+  into a function), call `HE::writeGameBuildConfigHeader` into the private build dir, configure with `-DHE_GAME_BUILD_CONFIG`, skip the
+  key patch and the hcfg; incremental key reuse reads `HE::readGameBuildConfigPakKey` from the previous build dir. 2. Step 5: ship
+  `Hpak/GameBuildConfig.h` among the SDK's public headers.
