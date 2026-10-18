@@ -42,6 +42,79 @@ The audit estimated 0.2-1 ms per frame for 50-200 characters; the measured old c
 higher. Not measured: an editor frame with many real characters (no such witness scene),
 GPU-side effects, Intel/AMD Macs.
 
+## Step 2: REN-404/405/406, GI acceleration structures only rebuilt when the casters change
+
+Before, every GI-active frame (GI or GI reflections on) retired and reallocated the TLAS,
+its scratch and five tables, searched the unique-BLAS list linearly per caster, and every
+mesh seen for the first time was built on a command buffer of its own with
+`waitUntilCompleted`. Now (commit 8b421011):
+
+- **Dirty check (REN-405).** `EncodeGIAccelBuild` still gathers the per-instance arrays
+  each frame (`GIAccelSnapshot m_giAccelCur`: unique BLAS, mesh buffers, BLAS index,
+  transform, two colours, land index) and compares them byte for byte with what the
+  live TLAS was built from (`m_giAccelLast`). Equal: nothing is allocated, encoded or
+  uploaded. Only transforms differ: a fresh TLAS, the colour/land/mesh-pointer/mesh-index
+  tables stay. Anything else: fresh TLAS and tables, as before. `GIProbeSceneSignature`
+  could not be reused: it ignores motion on purpose.
+- **Lifetime.** The live snapshot holds a reference on each BLAS and vertex/index buffer
+  it uses (`CFRetain`, handed to `RetireGIObject` when replaced). Without that, a mesh
+  invalidated while the TLAS is cached would free the BLAS the TLAS points at, and a new
+  BLAS could take its address and pass the compare. The invalidation loop also sets
+  `m_giAccelDirty`. Every exit that builds nothing goes through `ReleaseGIAccel()`.
+- **Upload ring.** The TLAS instance descriptors are read by the build alone, so they
+  are a ring slice. The tables are read by the trace kernels in later frames and stay
+  ordinary retained buffers.
+- **REN-404.** BLAS → slot through `m_giBlasSlot` (cleared per frame, capacity kept).
+  The per-object `giInstanceSurface` call stays: a Param-driven pin reads live slot
+  values (slider drags), which no revision counter covers, and it is one lookup.
+- **REN-406.** `BuildBLAS(mesh, encoder)` encodes onto one acceleration-structure encoder
+  on the frame's command buffer, each build with its own scratch (builds inside one
+  encoder may overlap). The TLAS encoder comes later in the same command buffer and
+  declares every BLAS used, so Metal orders it after the builds. No CPU wait.
+- **SW path.** Unchanged instances keep `m_giSwInstanceBuf`; an unchanged transform
+  keeps its inverse. `BuildGILandscapeTable` keeps its buffer while the entries match.
+- **Not done: refit.** A refit writes the live TLAS in place while the previous frame may
+  still trace it, needs the refit usage flag, and needs a scratch that is not in flight.
+  A moving scene builds a fresh TLAS per frame, as before, but without the table uploads.
+  Persistent scratch was left out for the same reason.
+- **Found and fixed:** `giReflRay` bound the colour buffer as the no-terrain placeholder
+  for its `GILand` table. With fewer than six casters that buffer is shorter than one
+  192-byte entry, and Metal API validation aborted every GI-reflection frame of such a
+  scene (HW only; the SW placeholder could hit it too). It now binds a zeroed `GILandGpu`.
+
+### Witnesses and measurements
+
+`HE_DUMP_GIACCEL=1` logs one line per GI frame, saying whether the TLAS (SW: the instance
+buffer) was rebuilt or kept. `HE_DUMP_GIMOVE=<m>` (with `GIBLEED=1|2`) moves the receiver
+sphere for six frames before the ordinary settle frames. Shots: `MATERIALTEST=1 GIBLEED=1
+FRAMES=8 TOD=0.35`, `AA=0`, `HE_SKY_TIME=30`, under `MTL_DEBUG_LAYER=1
+MTL_SHADER_VALIDATION=1`, before = self-contained copy of the step-1 deploy.
+
+- Static scene, HW, SW and HW reflections: `rebuilt (tables)` once, then `kept` in every
+  later frame. Moving receiver: `rebuilt (transforms)` ×6 (HW) / `rebuilt` ×6 (SW), then
+  `kept`. The receiver's shadow follows it in the GI-on image (ray traced, HW and SW), at
+  the same place as the rasterized CSM shadow with GI off; a TLAS kept from the start
+  position would leave it where it was.
+- Pixels against the run-to-run noise (GI is not bit-reproducible, `frame_pixel_ab.sh:40`):
+  before/after differ in 685-2161 pixels, none by more than 8 levels; two runs of the same
+  build differ in 515-3175 pixels, none by more than 8. GI off: md5-identical before/after.
+  HW reflections: before aborts in validation (the placeholder bug), after runs clean.
+- `scripts/perf/gi_accel_probe.mm` (M5 Air on AC, no other load; grids of 2048 triangles,
+  three frames in flight; two runs within 10 %):
+
+| Case | Old | New |
+|---|---|---|
+| 100 new meshes in one frame (BLAS) | 103 ms render thread blocked | 8 ms encode, GPU done after 17 ms |
+| 500 new meshes in one frame (BLAS) | 308 ms blocked | 42 ms encode, GPU done after 73 ms |
+| 1k casters / 100 meshes, static, CPU per frame | 0.40 ms + TLAS build | 0.07 ms, no build |
+| 1k casters, all moving, CPU per frame | 0.40 ms | 0.20-0.23 ms |
+| 10k casters / 500 meshes, static, CPU per frame | 4.8 ms + TLAS build (GPU ~2 ms) | 0.70 ms, no build |
+| 10k casters, all moving, CPU per frame | 4.8 ms | 1.36 ms |
+
+The probe leaves out the per-object material lookup and the extractor walk (unchanged).
+GPU time per TLAS build varied between modes (0.4-2.3 ms at 10k) without a pattern I can
+explain; the claim is the build count (static: 0 per frame), not the per-build time.
+
 ## Handoff
 
 - **Topic / step:** 216, step 1 of 3
