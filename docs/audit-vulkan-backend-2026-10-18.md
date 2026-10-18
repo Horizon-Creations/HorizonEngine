@@ -65,23 +65,116 @@ load-time number** yet. Two kinds of witness are in place:
   mean |Δ| 0.05. Meshes come from the clustered scene and a texture from the UI
   image. Each shot also logs its upload line, so the run shows waits and CPU ms for
   both variants side by side. That is software rendering, not a load-time figure.
-* dGPU (NN-WS03): open a large scene with and without `HE_VK_UPLOAD_SYNC=1` and
-  compare the upload line plus first-frame time (F9 profiler). This is pending, see
-  below.
+* dGPU (NN-WS03): measured in step 2, see "Load time on NN-WS03" below.
+
+## Step 2: REN-808 (`VkPipelineCache`)
+
+**Before.** All 34 `vkCreateGraphicsPipelines`/`vkCreateComputePipelines` call sites (32 + 2)
+passed `VK_NULL_HANDLE` as the cache, and ImGui made its own pipelines with none.
+Whether a start was fast depended only on the driver's private disk cache.
+
+**Now** (`VulkanRenderer.h:741`, `VulkanRenderer.cpp:7643-7800`):
+
+* `createPipelineCache()` runs right after `createDevice()` (`:191`). It reads
+  `<pref path>/vkpipelinecache/<vendor>_<device>.bin`, the folder next to
+  `glprogcache`/`d3dshadercache`, with one file per GPU. `savePipelineCache()`
+  (`:405`, before `vkDestroyDevice`) writes it back when the blob changed. It
+  writes a temp file and renames it over the old one.
+* The file format is in `VulkanPipelineCacheFile.h` and has no Vulkan dependency:
+  our header (magic, vendor, device, driverVersion, pipelineCacheUUID, size,
+  hash64), then the driver blob unchanged. A blob is handed to the driver only if
+  our header repeats the device, the size and hash fit, and the driver's own
+  `VkPipelineCacheHeaderVersionOne` names the same device. Anything else is a miss
+  (start empty, rewrite at shutdown). If the driver refuses data that passed these
+  checks, the renderer retries with an empty cache. The rules are pinned in
+  `tests/test_vulkan_pipeline_cache.cpp`.
+* All 34 call sites go through `createGraphicsPipelines`/`createComputePipelines`,
+  which pass `m_pipelineCache` and time the call. ImGui gets the same cache
+  (`EditorApplication.cpp:1363`, `GetPipelineCache()`).
+* Switches: `HE_VK_PIPELINE_CACHE=0` turns the cache off (the old path, same
+  binary). `HE_VK_PIPELINE_CACHE_DIR=<dir>` moves the file. `SDL_GetPrefPath`
+  ignores `%APPDATA%`, so a scratch APPDATA does not isolate it.
+* Log lines: `[startup] Vulkan pipeline cache: <loaded|empty|hash mismatch|…>, N KB from <path>`,
+  `[startup] Vulkan Initialize: ms= pipelines= pipelineMs= cache=`, and at shutdown
+  `VulkanRenderer: pipelines — N created, X ms in vkCreate*Pipelines; cache … (in, out, written|unchanged)`.
+
+**Not done (REN-808's other half):** the sky fragment shader is still compiled
+GLSL→SPIR-V by shaderc on every start, and `BuildSkyNoise3D(256)` still bakes on
+every start. Neither goes through a pipeline cache. Pipelines are still built on
+the render thread, not in a job.
+
+### Load time on NN-WS03 (RTX 4070, driver 610.88, Release)
+
+Harness: `scripts/vulkan-startup/measure.ps1`, a sibling of the D3D one. The
+editor runs hidden, quits after 300 frames, and uses a private `-CacheDir`. The
+project is a copy of HEProject: 257 meshes, 27 textures, 61 MB, 38 pipelines.
+There are 3 runs per condition, interleaved, and the tables give the median.
+`-NoValidation` (`VK_LOADER_LAYERS_DISABLE=*validation*`) was set, because on this
+branch the validation layer is still forced on (`createInstance`,
+`gpuDebug = true`). REN-804 from Thema 212 is not on `release/0.7.0`/`main` yet.
+A second series with validation on gave the same picture: driver-cold
+pipelines 1.63-1.95 s.
+
+**Caveat:** a game ran on the same GPU the whole time (99 % load). Absolute ms
+are noisy, but the ratios held in every run.
+
+| Condition (pipeline cache / NVIDIA driver cache) | `vkCreate*Pipelines` | Renderer `Initialize` | First frame since `Run` |
+|---|---|---|---|
+| off / cold | 1730 ms (1646-2013) | 2556 ms | 3050 ms |
+| off / warm | 6.9 ms | 810 ms | 1242 ms |
+| empty / cold (very first start) | 1644 ms | 2274 ms | 2664 ms |
+| **loaded / cold** | **43 ms (39-47)** | **985 ms** | **1422 ms** |
+| loaded / warm | 3.9 ms | 823 ms | 1264 ms |
+
+"Driver cold" means a fresh copy of the exe under a new name: NVIDIA keys its
+Vulkan cache (`%LOCALAPPDATA%\NVIDIA\DXCache\*.nvph`) by exe **name**. The
+harness deletes the new files afterwards. `__GL_SHADER_DISK_CACHE=0` does
+**not** switch that cache off on Windows: a run with it set was just as fast
+and still updated the `.nvph`.
+
+**Reading.** On NVIDIA the driver's own cache already makes a repeated start
+fast, so `VkPipelineCache` saves ~1.6-1.7 s only where that cache is cold for
+this exe, while ours is warm. That happens with a renamed or moved exe (every
+exported game gets its own name), an evicted or deleted driver cache, and
+drivers with no implicit cache. After a driver update both caches are invalid
+(our header holds driverVersion and UUID). One cost: an *empty* cache next to a
+*warm* driver cache took ~50 ms instead of ~6-18 ms (bare editor, two runs).
+That happens once, on the first start after our file is lost.
+
+**Upload path (step 1, REN-802/803), same series, cache warm:**
+
+| | batches | waits / waiting | CPU in upload calls | First frame |
+|---|---|---|---|---|
+| `HE_VK_UPLOAD_SYNC=1` (old) | 284 | 284 / 212 ms | 228 ms | 1314 ms |
+| batch (new) | 28 | 0 / 0 ms | 16 ms | 1170 ms |
+
+The batch path logged **104 oversize staging buffers**: 61 MB in the first frame
+do not fit the 32 MB ring while its copies are unsubmitted. It never waits, but
+it allocates 104 buffers. See Next steps.
+
+**Persistence witness (bare editor):** run 1 logs `empty … written` (873 KB), run 2
+`loaded` (51.0 → 5.5 ms). After one payload byte was flipped, run 3 logged `hash mismatch`,
+exited 0 and rewrote the file. The file name `10de_2786.bin` shows the RTX ran, not
+the AMD iGPU.
 
 ## Handoff
 
-- **Topic / step:** 215, step 1 of 2
-- **Branch / commit:** `claude/audit-optimierung-vulkan-backend-stufe-3` @ 4266f16b (pushed: yes)
-- **Done:** Asset uploads on Vulkan no longer stall the queue per asset. Static/skeletal meshes are device-local and sub-allocated.
-- **Files touched:** `src/HE_Rendering/include/Backends/Vulkan/VulkanUploadAlloc.h` (ring + free list, Vulkan-free);
-  `VulkanRenderer.h:668` (upload-path members, `GpuMesh::valloc/ialloc`, `GpuSkeletalMesh::*Alloc`);
-  `VulkanRenderer.cpp:7284-7650` (pool, batch, wrappers, stats), `:7731`/`:7823` (texture uploads), `:7970` (albedo set first),
-  `:10437` (ImGui icons), `:392` (teardown); `tests/test_vulkan_upload_alloc.cpp`; `scripts/he_vk_imagetests.py` (sync variants, upload line).
-- **Verified:** `-fsyntax-only` of VulkanRenderer.cpp against MoltenVK 1.4.1 headers (recipe from the topic lesson) passes with rc 0 and no new `-Wall -Wextra` warnings in the touched lines; the negative control (misspelled member) fails. `he_tests --source-file='*test_vulkan_upload_alloc.cpp'`: 6/6, 46736 assertions. A mutated header (ring overrun, wrong merge) makes 3/6 fail. Full `ctest -j4` (Release, out/build/release): 309/310. Red is `test_hpak` (`test_hpak.cpp:1188`, `scanContentDirectory() == 2` reads 6), also when run alone. The diff touches neither ContentManager nor that test, and he_tests does not link the Vulkan renderer. Not checked against the base commit.
-- **Not verified:** the renderer has not run on any Vulkan device here (the Mac has no loader). Runtime and validation come from CI run https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39139994324 (lavapipe images + Windows MSVC compile), still running when this was written. No dGPU timing.
-- **Decisions taken:** memory sub-allocation, not one shared buffer with `vertexOffset`/`firstIndex` (bind sites untouched); each batch has its own fence instead of riding on the frame serial (one-shot submits never bump that serial); images stay dedicated; empty 64 MB blocks are freed at once (simpler; costs re-allocation churn on level reloads).
-- **Decisions suggested, not taken:** one vertex/index mega-buffer (REN-803 as the audit wrote it); pool image memory too; move the remaining one-shot waits onto the batch.
-- **Pending:** step 2 (`VkPipelineCache`, REN-808); dGPU load-time A/B on NN-WS03; `AUDIT.md` Stufe-3 Vulkan box once step 2 is in.
-- **Traps:** every new `vkQueueSubmit`/`vkDeviceWaitIdle` must use `submitGraphics`/`deviceWaitIdle`, otherwise it can run ahead of a pending copy. Create the view and stage the data before recording a copy, never destroy after. Submitters outside the file (imgui_impl_vulkan platform windows) do not go through the wrapper.
-- **Next steps:** 1. Read the CI run: lavapipe `clustered`/`ui_image` `sync vs …` lines must be ok, with no new validation messages; the Windows job must compile RendererVulkan. 2. Step 2: `VkPipelineCache` created in `createDevice`'s neighbourhood, passed to all 33 `vkCreateGraphicsPipelines`, persisted next to the exe. 3. On NN-WS03: large scene, `HE_VK_UPLOAD_SYNC=0/1`, compare the shutdown upload line and first-frame ms.
+- **Topic / step:** 215, step 2 of 2 (topic complete from my side)
+- **Branch / commit:** `claude/audit-optimierung-vulkan-backend-stufe-3`, see the hive post for the final commit (pushed: yes)
+- **Done:** REN-808 pipeline half: persisted `VkPipelineCache` for all 34 create sites + ImGui. dGPU numbers for steps 1 and 2 are above.
+- **Files touched:** `src/HE_Rendering/include/Backends/Vulkan/VulkanPipelineCacheFile.h` (new); `VulkanRenderer.h:51,741`;
+  `VulkanRenderer.cpp:191,225,405,7643-7800`, 34 call sites (sed: `vkCreate*Pipelines(m_device, VK_NULL_HANDLE,` → wrapper);
+  `src/HE_Editor/EditorApplication.cpp:1363`; `tests/test_vulkan_pipeline_cache.cpp` + `tests/CMakeLists.txt`; `scripts/vulkan-startup/measure.ps1`.
+- **Verified:** Windows Release build (MSVC, `F:/hw215`), no new warnings. `he_tests --source-file='*test_vulkan_pipeline_cache.cpp'` passes 4/4 (21 assertions).
+  Negative control (standalone `cl` build against a header without the driverVersion and hash checks): 2/4 fail, as expected.
+  `test_vulkan_upload_alloc` passes 6/6. Full `he_tests` (scratch APPDATA): 5532/5537. Red are the 3 `test_input_gamepad` cases (known on NN-WS03, a real pad is attached) and 2 `test_profiler` cases, which pass on their own (18/18), so they are flaky under load. Runtime on the RTX 4070 as above, every run exit 0.
+  Validation messages (layer on, 7-8 per run, all at shutdown after "shutting down ImGui": vkDestroyBuffer/Pipeline/Sampler in use)
+  are the same set with cache off, on, and `HE_VK_UPLOAD_SYNC=1`, so they do not come from steps 1/2. Not bisected.
+- **Not verified:** Linux/macOS/lavapipe runtime of step 2 (CI). AMD/Intel drivers. The exported game (HorizonGame has no ImGui; the renderer path is the same).
+- **Decisions taken:** one file per GPU (vendor_device), last writer wins when two editors run (costs warm-up, never correctness);
+  the cache is saved only at shutdown (a crash loses that session's new pipelines); ImGui shares the cache.
+- **Decisions suggested, not taken:** ship a pre-warmed cache with an exported game; cache the sky SPIR-V and the noise volume by input hash; build pipelines in a job.
+- **Traps:** a new `vkCreate*Pipelines` must use the wrappers, otherwise it bypasses the cache and the timing. `__GL_SHADER_DISK_CACHE` is ignored on Windows.
+  The validation layer is forced on until Thema 212 (REN-804) is merged, so timings without `-NoValidation` include it. Drive C: on NN-WS03 was full; build on F:.
+- **Next steps:** 1. CI on this branch (lavapipe exercises the cache with Mesa). 2. Staging ring: flush the batch when the ring is full, or size it to the frame's uploads
+  (104 oversize buffers on HEProject). 3. REN-808 rest: sky SPIR-V + `BuildSkyNoise3D` disk cache. 4. After Thema 212 merges, re-run `measure.ps1` without `-NoValidation`.
