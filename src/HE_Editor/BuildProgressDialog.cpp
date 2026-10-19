@@ -830,8 +830,17 @@ void render([[maybe_unused]] AppContext& ctx)
 
 	// Everything above the button row; the row itself is measured, not guessed,
 	// so the log box shrinks with the window instead of pushing the buttons out.
+	// The result line wraps (a long export message is several lines), so its
+	// height is measured with the same wrap width it is drawn with — one line
+	// reserved here pushed the button row out of the window.
+	const std::string& footerText = running ? activity : (finished ? message : std::string());
+	const float textH = footerText.empty() && running
+		? ImGui::GetTextLineHeightWithSpacing()
+		: std::max(ImGui::GetTextLineHeightWithSpacing(),
+		           ImGui::CalcTextSize(footerText.c_str(), nullptr, false, 690.0f).y
+		               + ImGui::GetStyle().ItemSpacing.y);
 	const float footerH = ImGui::GetFrameHeightWithSpacing()
-	                    + ImGui::GetTextLineHeightWithSpacing()
+	                    + textH
 	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;
 	ImGui::BeginChild("##build_step_log", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders,
 	                  ImGuiWindowFlags_HorizontalScrollbar);
