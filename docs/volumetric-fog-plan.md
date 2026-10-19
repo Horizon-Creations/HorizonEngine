@@ -232,6 +232,10 @@ S = σt · fogCol · mix(1, sunVis, kSunShare · seamFade)            // „Umge
 σs = albedo · σt
 ```
 
+- **`fogCol` ist immer `heSkyEnv`** (128²-Cube), in Inject, Apply und `heApplyFogT` — die Himmelsbibliothek
+  (`kSkyFS`/`skyColor()`) wird in keinen neuen Shader gezogen. Heute rechnen die eingebauten Shader die Nebelfarbe
+  prozedural pro Pixel (GL `:272`, Metal `:652`), Graph-Materialien aus dem Cube. Für eingebaut schattierte Flächen
+  ist Modus 1 deshalb eine bewusste, kleine Farbänderung am Horizont/um die Sonne.
 - **Sonne/Mond:** der Richtungslicht-Eintrag des RenderWorld (Tag Sonne, Nacht Mond), Farbe/Intensität wie die
   Flächen. Wolkenschatten nur Metal/GL (Vulkan/D3D binden Weiß bzw. Gate 0 — dieselbe Lücke wie bei den Flächen).
 - **`kSunShare = 0.5`:** Anteil der Himmels-Nebelfarbe, der im Schatten verschwindet. Ohne ihn wären
@@ -353,7 +357,9 @@ Fremdlast notieren (siehe `perf-measurement-on-m5`). Szene `landscape.hescene` +
   Material-Kreuzkompilierung) ebenfalls false, falls die Kernel über `MaterialShaderLibrary` laufen (§10).
 - **Abnahme Modus 0:** pixelgleich zu `main` — md5-A/B mit `HE_SKY_TIME` + AA + RENDERPATH gepinnt, je Backend.
 - **Paritätszeuge Modus 1:** Schalter `HE_FOG_PARITY=1` (noise/bank/dunst/Sonne/Lokal/kSunShare = 0) gegen Modus 0:
-  Abweichung pro Kanal ≤ 2/255 außerhalb der ersten Scheibe.
+  Abweichung pro Kanal ≤ 2/255 außerhalb der ersten Scheibe — **gemessen nur auf Graph-Material-Pixeln** (z. B.
+  Landschaft mit Auto-Landscape-Material), weil nur die schon heute `heSkyEnv` als Nebelfarbe nehmen. Auf eingebaut
+  schattierten Pixeln (prozedurales `skyColor()` gegen Cube pro Spalte) ist es nur eine Sichtprüfung.
 - **Unit-Tests** `tests/test_fog_volume.cpp`: Scheibenabbildung Hin-/Rückweg; `fogOpticalSegment(0,d)` = heutige
   Formel (Grenzfall k→0 inklusive); CPU-Integrator mit konstanter/Höhendichte gegen `exp(−optical)` (relativer
   Fehler < 1 % bei N = 64); `fogHistoryAlpha`; std140-Offsets von `FogVolumeConstants` (static_assert + Test).
