@@ -5616,8 +5616,18 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(scale, 0, noise, 1);
 				g.connect(noise, 0, mul, 0);
 				g.connect(amp, 0, mul, 1);
+				// HE_DUMP_DISPCONST = metres: a constant height instead of the noise (the
+				// sphere just grows), which takes the noise's own arithmetic out of a
+				// cross-backend comparison.
+				const char* cEnv = std::getenv("HE_DUMP_DISPCONST");
+				int height = mul;
+				if (cEnv && *cEnv)
+				{
+					height = g.addNode(HE::MatNodeType::ConstFloat);
+					g.findNode(height)->p[0] = static_cast<float>(std::atof(cEnv));
+				}
 				if (!(pEnv && std::string(pEnv) == "0"))
-					g.connect(mul, 0, out, HE::kMatOutputDisplacementPin);
+					g.connect(height, 0, out, HE::kMatOutputDisplacementPin);
 				HE::MatTessSettings& t = g.findNode(out)->tess;
 				t.maxFactor = (fEnv && *fEnv) ? static_cast<float>(std::atof(fEnv)) : 16.0f;
 				t.fadeNear = 20.0f; t.fadeFar = 60.0f; t.maxDisplacement = 1.0f;
