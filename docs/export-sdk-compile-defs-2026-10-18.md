@@ -837,3 +837,27 @@ body or move behind a macro is open. They are needed for parity with the interpr
   marker".
 - **Next steps:** 1. Release game run as above, once #36 is answered yes. 2. Steps 2-3 of the step-14 handoff (Windows SDK export
   run on NN-WS03, `_hcgen/` location).
+
+## Handoff (step 16: the release game, started once)
+
+- **Topic / step:** Thema 211, step 16, with the human's yes (hive_ask #36). No code change; this section only.
+- **Export:** private editor `config.json` `GameWindowMode` set from "Fullscreen" to "Windowed" (1280x720 were already there; the
+  old file is `/tmp/s16/config.before.json`). Deployed editor (02:07 build) hidden with `HE_MCP=1`, `/tmp/s14tools/export.py ...
+  Shipping /tmp/s14/exports/ship ship5`: 11.2 s, "45 asset(s) packed (45 reused) ... key embedded in the game binary — HorizonCode:
+  3 compiled — game compiled from the release SDK (build cache hit)", only `CompiledBuildConfig.cpp` rebuilt. Editor stopped with
+  TERM (gone after 1 s). `data/config.json` of the export now says `GameWindowMode` Windowed (the game reads it,
+  `GameApplication.cpp:504`; window mode is a player setting, not part of `HEGameBuildConfig.h`).
+- **Run (exactly one):** `cd /tmp/s14/exports/ship && HOME=/tmp/s14/gamehome DYLD_PRINT_LIBRARIES=1 ./HorizonTutorial`, 10 s,
+  then TERM: rc 0, quit cleanly, 251 frames in 10.1 s, 1 warning (no PlayerController class), 0 errors. Afterwards `pgrep` found no
+  game or editor process. Log `/tmp/s16/relgame.log` (throwaway). Witness lines (log line numbers without the dyld lines):
+  `:16` "Configuration: ... 1280x720 mode=0" (Windowed), `:21` "build profile 'release'", `:28` "project configuration compiled in
+  (HEGameBuildConfig.h)", `:29` "pak key from HEGameBuildConfig.h (compiled in)", `:30` "Mounted package ... HorizonTutorial.hpak: 51
+  entry/-ies", `:34` "Loaded dynamic library '.../HorizonEngine/libHorizonCodeGen.dylib'", `:35` "HorizonCode: 3 compiled classes",
+  `:39` "GameInstance running compiled", `:41` "S14 compiled HC marker", `:42` "loaded packed startup scene". dyld: exe, libHorizonEngine,
+  SDL3, lz4, zstd, crypto all from the folder, 0 `/opt/homebrew` paths.
+- **Read honestly:** the pak opened and the packed scene loaded with the compiled-in key, so decryption worked. The level script
+  says "Level script running (interpreted, 0 node(s))": it is an empty graph, not one of the 3 compiled classes. The game still
+  reads `data/config.json` (window, graphics); "starts without a config file" in the topic means project.hcfg/ProjectSettings,
+  which this game did not read (`:28`).
+- **Not verified:** Windows/Linux release run; a fresh Shipping export without the step-14 folder; `.app` export.
+- **Next steps:** 1. Windows SDK export + run on NN-WS03 (step-14 handoff, step 2). 2. Decide where `_hcgen/` belongs (step 3).
