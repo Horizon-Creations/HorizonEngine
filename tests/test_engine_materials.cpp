@@ -304,6 +304,66 @@ TEST_CASE("Engine water material: every knob has a tooltip in the Details panel"
 	CHECK(HE::Ed::Help::find("WaveD") == nullptr);
 }
 
+// ── DisplacementDemo (Thema 207): the example for the Output node's Displacement pin ──
+TEST_CASE("Engine displacement demo: the Displacement pin is wired, sine-only, three knobs")
+{
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "DisplacementDemo.hasset"));
+	Scratch s("disp");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+
+	const HE::UUID id = cm.loadAsset("Engine/Materials/DisplacementDemo.hasset");
+	CHECK(id == HE::UUID{ 0x0000000000000401ULL, 0x0000000000000001ULL });   // mat_gen entry 1
+	const MaterialAsset* m = cm.getMaterial(id);
+	REQUIRE(m);
+	CHECK(m->blendMode == static_cast<uint8_t>(HE::MatBlendMode::Opaque));
+	CHECK(m->domain == static_cast<uint8_t>(HE::MatDomain::Surface));
+
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(m->nodeGraphJson, g));
+	const HE::MatGraphNode* out = nullptr;
+	for (const HE::MatGraphNode& n : g.nodes)
+		if (n.type == HE::MatNodeType::Output) out = &n;
+	REQUIRE(out);
+	bool wired = false;
+	for (const HE::MatGraphLink& l : g.links)
+		wired |= l.dstNode == out->id && l.dstPin == HE::kMatOutputDisplacementPin;
+	CHECK(wired);
+	// What the shader bakes is what the node holds: Max Displacement is the
+	// Height slider's top, so the slider never asks for a clamped value.
+	CHECK(HE::matSanitizeTess(out->tess) == out->tess);
+	CHECK(out->tess.maxDisplacement == doctest::Approx(0.5f));
+
+	// A body for the domain stage, built from sines: no value noise, whose hash
+	// differs between GPU compilers and would crack the surface.
+	REQUIRE_FALSE(m->customShaderDispGlsl.empty());
+	CHECK(m->customShaderDispGlsl.find("sin(") != std::string::npos);
+	CHECK(m->customShaderDispGlsl.find("heHash") == std::string::npos);
+	CHECK(m->customShaderDispGlsl.find("Noise") == std::string::npos);
+	CHECK(m->customShaderVertGlsl.empty());
+	CHECK(m->graphTexturePaths.empty());
+	CHECK(m->nodeGraphJson.find("mem://") == std::string::npos);
+
+	const std::set<std::string> names(m->graphParamNames.begin(), m->graphParamNames.end());
+	CHECK(names == std::set<std::string>{ "Height", "TopColor", "GrooveColor" });
+	const int h = slotOf(*m, "Height");
+	REQUIRE(h >= 0);
+	CHECK(m->shaderParamData[static_cast<size_t>(h) * 4] == doctest::Approx(0.15f));
+	CHECK(m->graphParamMinMax[static_cast<size_t>(h) * 2 + 1] == doctest::Approx(0.5f));
+
+	// The file is what an export ships (the packer copies the baked fields), and
+	// loadAsset regenerated both texts above: the FILE must already hold them,
+	// or a game would ship a stale bake (or none, and draw the mesh flat).
+	const fs::path file = engineRoot() / "Materials" / "DisplacementDemo.hasset";
+	CHECK(readBaked(file).frag == m->customShaderFragGlsl);
+	HAsset::Reader r;
+	REQUIRE(r.open(file.string()));
+	const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
+	REQUIRE(c);
+	const std::string raw(c->data.begin(), c->data.end());
+	CHECK(raw.find(m->customShaderDispGlsl) != std::string::npos);
+}
+
 TEST_CASE("Engine water material: an edited value survives save and reload, the default does not move")
 {
 	Scratch s("save");

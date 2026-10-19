@@ -248,6 +248,15 @@ die Thumbnails laufen auf eigenen Encodern, nur `PREVIEW`/`THUMB` treffen sie.
 - Gegen GL vergleichen; Dämmerung (`HE_DUMP_TOD=0.26`) für AO an gegen aus.
 - Messwerte und das volle Rezept stehen in `docs/graph-material-skyenv-ao-hardware-acceptance-2026-10-05.md`.
 
+**Displacement-Pin (Thema 207):**
+- `HE_DUMP_MATERIALTEST=displace` ist der Inline-Zeuge (Wertrauschen × `HE_DUMP_DISPHEIGHT`,
+  `HE_DUMP_DISPCONST` = konstante Höhe, `HE_DUMP_DISPFACTOR` = maxFactor).
+- `HE_DUMP_MATTESTASSET=Engine/Materials/DisplacementDemo.hasset` legt statt des Inline-Graphen
+  eine Material-DATEI auf die Kugel (jeder `MATERIALTEST`-Wert). `HE_DUMP_DISPPIN=0` wirft ihren
+  Displacement-Body weg (= Pin unverbunden), `HE_DUMP_SETPARAM=Height,0.3,0,0` setzt ihren Knopf.
+- `HE_TESSELLATION=0` schaltet die Tessellation auf allen Backends ab (Fallback-A/B).
+- Rezept: `scripts/tess-hw/cap207.ps1 [-Asset …]` + `ana207.py` (Python aus Bash, wegen numpy).
+
 **Material-Vorschau läuft in Echtzeit (Thema 176 Schritt 3):** Die Vorschau im Material-Editor
 bekommt jedes Frame die UI-Uhr als `timeSeconds` (`IRenderer::RenderMaterialPreview`, Metal und GL;
 D3D11/D3D12/Vulkan haben keinen Vorschau-Pfad) und zeichnet neu, solange der Shader die Uhr liest

@@ -134,6 +134,10 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    # The Material Editor tab, driven the same way: the Tessellation cell and its
+    # popup while the Displacement pin is wired, on a renderer that tessellates
+    # and on one that does not (Thema 207).
+    test_material_editor_ui.cpp
     # The reward moments: once per frame, once per build run, the fade.
     test_editor_rewards.cpp
     test_editorcamera.cpp
@@ -887,6 +891,10 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The Material Editor tab, for test_material_editor_ui.cpp (Thema 207): same
+    # AppContext, same per-file HE_IMGUI_ENABLED. The canvas (GraphEditor), the
+    # pickers, the thumbnail cache and the shader library are already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
     # The profiler's Streaming tab and the editor's split/merge of streaming
     # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
     # outside symbol, the Scene window's show flags, is stubbed in
@@ -954,6 +962,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
+    test_material_editor_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp

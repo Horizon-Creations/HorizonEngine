@@ -5708,7 +5708,30 @@ void EditorApplication::dumpFrameHeadless()
 					"EditorApplication: HE_DUMP_MATPRECOMPILE baked precompiled shader variants");
 			}
 		}
-		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
+		// HE_DUMP_MATTESTASSET = content path: the sphere wears a material FILE instead
+		// of the inline graph above — e.g. the shipped Engine/Materials/DisplacementDemo
+		// (Thema 207), so the capture is of what a project gets, not of a look-alike.
+		// HE_DUMP_DISPPIN=0 drops its displacement body, which is what an unconnected
+		// pin generates (the fragment does not change with the pin).
+		HE::UUID matId{};
+		if (const char* ma = std::getenv("HE_DUMP_MATTESTASSET"); ma && *ma)
+		{
+			matId = contentManager().loadAsset(ma);
+			MaterialAsset* fileMat = contentManager().getMaterialMutable(matId);
+			if (fileMat)
+			{
+				if (const char* pEnv = std::getenv("HE_DUMP_DISPPIN"); pEnv && std::string(pEnv) == "0")
+					fileMat->customShaderDispGlsl.clear();
+				HE_LOG_INFO(Editor, "%s", ("EditorApplication: HE_DUMP_MATTESTASSET '" + std::string(ma) +
+				                           "' on the test sphere" +
+				                           (fileMat->customShaderDispGlsl.empty() ? "" : " (displaced)")).c_str());
+			}
+			else
+				HE_LOG_WARN(Editor, "%s", ("EditorApplication: HE_DUMP_MATTESTASSET '" + std::string(ma) +
+				                           "' is not a material").c_str());
+		}
+		if (!contentManager().getMaterial(matId))
+			matId = contentManager().registerMaterial(std::move(mat));
 		s_matTestId = matId;
 
 		// Witness the runtime scripting param path (HE_DUMP_SETPARAM="Name,r,g,b"):
