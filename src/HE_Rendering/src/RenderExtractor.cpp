@@ -1421,7 +1421,8 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
-	HE::extractFoliage(reg, out, m_contentManager);
+	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();
+	HE::extractFoliage(reg, out, m_contentManager, m_foliageLod.get());
 	extractSkinnedMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractDecals(reg, out);
 	// Ropes are ordinary mesh objects and must land in out.objects before the

@@ -48,7 +48,7 @@
 // api_transform_getPosition return where the entity actually stands" is a
 // question the test binary can put to a `HorizonWorld` on the stack.
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include <HorizonScene/EngineApi.h>
 

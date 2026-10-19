@@ -14,8 +14,9 @@ namespace HE::api { struct ApiFn; }
 
 // Small editor helper: enumerate the project's assets of a given type (for the
 // asset/object picker dropdowns — HorizonCode classes, widgets, textures, …).
-// Walks the content root and sniffs each .hasset header — cheap enough to call
-// while a combo is open.
+// Reads ContentManager's file index (one walk per content change, see
+// ContentManager::assetFiles) — cheap enough to call while a combo is open; the
+// copy is the part a per-frame caller should still avoid.
 namespace HcEditorUtil
 {
 	struct ClassRef
@@ -98,6 +99,11 @@ namespace HcEditorUtil
 	std::vector<std::string> engineParamChoices(const HorizonCode::Node& n,
 	                                            const std::string& param,
 	                                            ContentManager* cm);
+	// !engineParamChoices(n, param, cm).empty(), without building the list: the
+	// question a pin asks every frame to pick a dropdown over a text box. Names
+	// only, plus a look at ContentManager's cached file index.
+	bool engineParamHasChoices(const HorizonCode::Node& n, const std::string& param,
+	                           ContentManager* cm);
 
 	// ── HC class registry ─────────────────────────────────────────────────────
 	// The public interface of one HorizonCode class the editor knows about — an
@@ -408,10 +414,18 @@ namespace HcEditorUtil
 	// whatever the host knows). A pin with a list gets a DROPDOWN instead of a
 	// text box; without one, or with an empty list, the text box stays — a
 	// widget that has no animations yet still has to be able to author a name.
+	//
+	// `hasChoices`, when given, answers "dropdown or text box?" without building
+	// the list, and `choices` is then only called while the dropdown is open. It
+	// must say true exactly when `choices` would return a non-empty list (see
+	// engineParamHasChoices). Without it `choices` runs every frame, as before.
 	using ParamChoices =
 		std::function<std::vector<std::string>(const HorizonCode::Node&, const std::string&)>;
+	using ParamHasChoices =
+		std::function<bool(const HorizonCode::Node&, const std::string&)>;
 	void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
-	                          const ParamChoices& choices = {});
+	                          const ParamChoices& choices = {},
+	                          const ParamHasChoices& hasChoices = {});
 	// How much room that editor needs, in graph units (0 = the canvas's default
 	// slot). A string pin asks for more: a name has to be readable to be
 	// checkable, and as a dropdown it carries an arrow as well.

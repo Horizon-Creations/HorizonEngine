@@ -450,6 +450,7 @@ void HorizonWorld::onEntityIdSet(entt::registry& registry, Entity entity)
 {
     // Construct and update both land here: the component holds the NEW id by now,
     // and whatever the entity was indexed under before is in m_idIndexed.
+    ++m_entityIdRevision;
     unindexEntityId(entity);
     const HE::UUID id = registry.get<EntityIdComponent>(entity).id;
     if (id == HE::UUID{}) return;   // "no identity" is not indexed, see findByEntityId
@@ -459,6 +460,7 @@ void HorizonWorld::onEntityIdSet(entt::registry& registry, Entity entity)
 
 void HorizonWorld::onEntityIdDestroyed(entt::registry&, Entity entity)
 {
+    ++m_entityIdRevision;
     unindexEntityId(entity);
 }
 

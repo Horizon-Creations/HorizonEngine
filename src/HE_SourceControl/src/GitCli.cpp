@@ -633,14 +633,11 @@ bool GitCli::switchBranch(const std::filesystem::path& root, const std::string& 
 	}
 	// "origin/x" names a remote-tracking ref: switching to it directly would detach
 	// HEAD, so create the local branch that tracks it instead.
-	std::vector<std::string> locals;
-	std::string current;
-	listBranches(root, locals, current);
+	std::vector<std::string> locals, remotes;
+	listLocalAndRemoteBranches(root, locals, remotes);
 	const bool isLocal = std::find(locals.begin(), locals.end(), name) != locals.end();
 	if (!isLocal)
 	{
-		std::vector<std::string> remotes;
-		listRemoteBranches(root, remotes);
 		if (std::find(remotes.begin(), remotes.end(), name) != remotes.end())
 		{
 			const std::size_t slash = name.find('/');
@@ -676,6 +673,45 @@ bool GitCli::listRemoteBranches(const std::filesystem::path& root,
 		if (line.empty() || line.find('/') == std::string::npos) continue;
 		if (line.size() >= 5 && line.compare(line.size() - 5, 5, "/HEAD") == 0) continue;
 		out.push_back(std::move(line));
+	}
+	return true;
+}
+
+bool GitCli::listLocalAndRemoteBranches(const std::filesystem::path& root,
+                                        std::vector<std::string>& locals,
+                                        std::vector<std::string>& remotes, std::string* err)
+{
+	locals.clear();
+	remotes.clear();
+	// The full refname, so the prefix says which list a line belongs to; the name
+	// is what follows it (what refname:short prints for any unambiguous ref).
+	const GitResult r = run(root, { "for-each-ref", "--sort=refname", "--format=%(refname)",
+	                                "refs/heads", "refs/remotes" }, 10000);
+	if (!r.ok)
+	{
+		if (err) *err = trimTrailing(r.err);
+		return false;
+	}
+	static constexpr std::string_view kHeads   = "refs/heads/";
+	static constexpr std::string_view kRemotes = "refs/remotes/";
+	std::size_t pos = 0;
+	while (pos < r.out.size())
+	{
+		const std::size_t nl = r.out.find('\n', pos);
+		const std::string line = trimTrailing(r.out.substr(pos, nl == std::string::npos
+		                                                        ? std::string::npos : nl - pos));
+		pos = nl == std::string::npos ? r.out.size() : nl + 1;
+		if (line.compare(0, kHeads.size(), kHeads) == 0)
+		{
+			if (line.size() > kHeads.size()) locals.push_back(line.substr(kHeads.size()));
+			continue;
+		}
+		if (line.compare(0, kRemotes.size(), kRemotes) != 0) continue;
+		std::string name = line.substr(kRemotes.size());
+		// Same filter as listRemoteBranches: no bare remote, no symbolic HEAD.
+		if (name.empty() || name.find('/') == std::string::npos) continue;
+		if (name.size() >= 5 && name.compare(name.size() - 5, 5, "/HEAD") == 0) continue;
+		remotes.push_back(std::move(name));
 	}
 	return true;
 }
@@ -776,7 +812,7 @@ bool GitCli::restoreWorktreeTo(const std::filesystem::path& root,
 }
 
 bool GitCli::log(const std::filesystem::path& root, std::size_t maxCount,
-                 std::vector<CommitInfo>& out, std::string* err)
+                 std::vector<CommitInfo>& out, std::string* err, bool checkUnpushed)
 {
 	out.clear();
 
@@ -830,6 +866,7 @@ bool GitCli::log(const std::filesystem::path& root, std::size_t maxCount,
 
 	// Which of these the upstream does not have yet. Only meaningful (and only
 	// answerable) when an upstream exists — absence is not an error.
+	if (!checkUnpushed || out.empty()) return true;
 	const GitResult ahead = run(root, { "rev-list", "--abbrev-commit", "@{upstream}..HEAD" },
 	                            10000);
 	if (ahead.ok)

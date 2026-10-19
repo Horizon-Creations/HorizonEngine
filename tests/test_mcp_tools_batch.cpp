@@ -1,6 +1,6 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include <string>
 #include <vector>

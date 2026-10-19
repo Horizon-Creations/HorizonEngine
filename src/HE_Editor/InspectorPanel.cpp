@@ -18,6 +18,8 @@
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/DefaultAssets.h>   // kEngineCrossCardMeshId (foliage detail levels)
+#include <Diagnostics/Log.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <Types/Enums.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -3500,11 +3502,55 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
-	if (auto* fol = registry.try_get<FoliageComponent>(entity))
+	if (auto* folc = registry.try_get<FoliageComponent>(entity))
 	{
 		if (componentHeader("Foliage", true, removed))
 		{
 			EditorWidgets::WrapText wrap;
+			// One row per layer (one kind of plant: grass, a bush, a tree), the
+			// chosen one's fields below. The Landscape panel's Foliage brush paints
+			// the same chosen layer (FoliageComponent::activeLayer), so picking a
+			// layer here and painting it there go together.
+			if (folc->layers.empty()) folc->layers.emplace_back();   // never empty, see FoliageComponent
+			folc->activeLayer = static_cast<int>(folc->activeIndex());
+			for (size_t i = 0; i < folc->layers.size(); ++i)
+			{
+				FoliageLayer& l = folc->layers[i];
+				ImGui::PushID(static_cast<int>(i));
+				EditorWidgets::checkbox("##folvis", &l.visible); trackEdit();
+				EditorWidgets::helpForKey("Foliage/Layer Visible");
+				ImGui::SameLine();
+				const std::string label = foliageLayerLabel(l, i) + "  ("
+				                        + std::to_string(l.cachedInstances.size()) + ")";
+				if (ImGui::Selectable(label.c_str(), folc->activeLayer == static_cast<int>(i)))
+					folc->activeLayer = static_cast<int>(i);
+				EditorWidgets::helpForKey("Foliage/Layer");
+				ImGui::PopID();
+			}
+			ImGui::BeginDisabled(folc->layers.size() >= FoliageComponent::kMaxLayers);
+			if (EditorWidgets::smallButton("Add Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Layer");
+				folc->addLayer();
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Layer##fol");
+			ImGui::SameLine();
+			// The last layer stays: a component without one would be a component
+			// that does nothing, and removing the component says that better.
+			ImGui::BeginDisabled(folc->layers.size() <= 1);
+			if (EditorWidgets::dangerSmallButton("Remove Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Layer");
+				folc->layers.erase(folc->layers.begin() + static_cast<std::ptrdiff_t>(folc->activeIndex()));
+				folc->activeLayer = static_cast<int>(folc->activeIndex());
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Remove Layer##fol");
+			ImGui::Separator();
+
+			FoliageLayer* fol = folc->active();
+			Row::inputText("Name##fol", &fol->name); trackEdit();
 			// The layer had no way to be pointed at a mesh from here at all:
 			// a Foliage component added from "Add Component" kept a null mesh
 			// and scattered nothing, with only a log line to say why. Same
@@ -3530,8 +3576,88 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			// What the renderer does with the layer, not where it grows: no re-scatter.
+			EditorWidgets::checkbox("Cast Shadows##fol", &fol->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
+			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
+			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
+
+			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
+			// layer, the engine's cross card at the far end. The mesh above is the
+			// level the camera stands in; none of this re-scatters.
+			ImGui::Separator();
+			ImGui::TextUnformatted("Detail Levels");
+			EditorWidgets::helpForKey("Foliage/Detail Levels");
+			int  removeLod = -1;
+			bool sortLods  = false;
+			for (size_t k = 0; k < fol->lods.size(); ++k)
+			{
+				FoliageLod& d = fol->lods[k];
+				ImGui::PushID(static_cast<int>(k));
+				ImGui::Text("Level %zu", k + 1);
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Cross Card##fol"))
+				{
+					if (undo) undo->snapshotNow("Foliage Level Cross Card");
+					d.meshAssetId = HE::kEngineCrossCardMeshId;
+					// The card is an engine FILE: nothing loads it on its own, and a mesh
+					// that is not resident draws as the fallback cube without a word. By
+					// UUID once the engine folder is scanned, by path before that.
+					if (ctx.contentManager && !ctx.contentManager->ensureResident(HE::kEngineCrossCardMeshId)
+					    && ctx.contentManager->loadAsset("Engine/Meshes/CrossCard.hasset") != HE::kEngineCrossCardMeshId)
+						HE_LOG_WARN(Editor, "Foliage: the engine cross card (Engine/Meshes/CrossCard.hasset) is not "
+						                    "available — the level draws the fallback mesh");
+				}
+				EditorWidgets::helpForLabel("Cross Card##fol");
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("Remove Level##fol")) removeLod = static_cast<int>(k);
+				EditorWidgets::helpForLabel("Remove Level##fol");
+				EditorWidgets::assetDropSlot(ctx, "Mesh", d.meshAssetId,
+						HE::AssetType::StaticMesh, "follodmesh",
+						"(none — the layer's mesh, thinned)", "static mesh", /*showClear=*/true);
+				EditorWidgets::helpForKey("Foliage/Level Mesh");
+				if (EditorWidgets::assetDropSlot(ctx, "Material", d.materialAssetId,
+						HE::AssetType::Material, "follodmat",
+						"(none — the layer's material)", "material",
+						/*showClear=*/true) != EditorWidgets::SlotAction::None
+				    && ctx.renderer && d.materialAssetId != HE::UUID{})
+					ctx.renderer->InvalidateMaterial(d.materialAssetId);
+				EditorWidgets::helpForKey("Foliage/Level Material");
+				Row::dragFloat("Level Distance##fol", &d.distance, 1.0f, 0.0f, 2000.f, "from %.0f m"); trackEdit();
+				if (ImGui::IsItemDeactivatedAfterEdit()) sortLods = true;
+				Row::dragFloat("Level Density##fol", &d.density, 0.01f, 0.0f, 1.0f, "%.2f"); trackEdit();
+				if (d.distance >= fol->drawDistance)
+					ImGui::TextDisabled("Starts beyond the Draw Distance: never drawn");
+				ImGui::PopID();
+			}
+			if (removeLod >= 0)
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Level");
+				fol->lods.erase(fol->lods.begin() + removeLod);
+			}
+			// Kept in distance order, the order the list reads in and the file stores.
+			if (sortLods)
+				std::stable_sort(fol->lods.begin(), fol->lods.end(),
+				                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			ImGui::BeginDisabled(fol->lods.size() >= FoliageLayer::kMaxLods);
+			if (EditorWidgets::smallButton("Add Level##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Level");
+				// Halfway out for the first, then halfway from the last level to the edge.
+				const float last = fol->lods.empty() ? 0.0f : fol->lods.back().distance;
+				FoliageLod d;
+				d.distance = std::round(last + (fol->drawDistance - last) * 0.5f);
+				fol->lods.push_back(d);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Level##fol");
+			if (!fol->lods.empty())
+			{
+				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();
+			}
+			ImGui::Separator();
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
-			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
+			if (ImGui::Button("Regenerate")) { folc->dirty = true; trackEdit(); }
 			// The painted density mask is authored in Landscape mode's Foliage
 			// brush; here it is only reported and, if need be, dropped.
 			if (fol->densityMask.empty())

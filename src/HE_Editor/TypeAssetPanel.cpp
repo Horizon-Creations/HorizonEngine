@@ -261,13 +261,15 @@ void typeNamePicker(HE::StructField& f, bool& dirty, AppContext& ctx,
                     const std::string& excludePath)
 {
 	const bool wantEnum = f.type == PinType::Enum;
-	const auto  assets  = HcEditorUtil::listAssets(ctx.contentManager,
-		wantEnum ? HE::AssetType::EnumType : HE::AssetType::StructType);
 	const std::string shown = f.typeName.empty()
 		? std::string(wantEnum ? "Select an enum\xe2\x80\xa6" : "Select a struct\xe2\x80\xa6")
 		: std::filesystem::path(f.typeName).stem().string();
 	if (ImGui::BeginCombo("##typename", shown.c_str()))
 	{
+		// Only with the dropdown open: every Enum/Struct field draws one of
+		// these, and the closed ones never needed the list (EDT-1702).
+		const auto assets = HcEditorUtil::listAssets(ctx.contentManager,
+			wantEnum ? HE::AssetType::EnumType : HE::AssetType::StructType);
 		for (const auto& a : assets)
 		{
 			if (!wantEnum && a.path == excludePath) continue;
