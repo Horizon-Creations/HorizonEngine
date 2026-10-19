@@ -433,9 +433,17 @@ int installableCount(AppContext& ctx)
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
+// The ground under the row being drawn: the popup, or the popup lifted while the
+// row is the one a banner sent the user to. Every coloured line in a row goes
+// through rowText(), so it clears the theme's contrast floor on either.
+ImVec4 s_rowGround   = Theme::warm(0.13f);
+float  s_flashRowH   = 0.0f;   // the flashed row's height, as last drawn
+
+ImVec4 rowText(const ImVec4& c) { return Theme::readableOn(c, s_rowGround); }
+
 void dimWrapped(const char* text)
 {
-	ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextDim);
+	ImGui::PushStyleColor(ImGuiCol_Text, rowText(Theme::TextDim));
 	ImGui::TextWrapped("%s", text);
 	ImGui::PopStyleColor();
 }
@@ -494,7 +502,7 @@ void drawPhases(int current, const char* middle)
 	for (int i = 0; i < 3; ++i)
 	{
 		if (i > 0) { ImGui::SameLine(0.0f, 6.0f); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 6.0f); }
-		const ImVec4 c = i < current ? Theme::Ok : (i == current ? Theme::Text : Theme::TextDim);
+		const ImVec4 c = rowText(i < current ? Theme::Ok : (i == current ? Theme::Text : Theme::TextDim));
 		ImGui::TextColored(c, "%s", labels[i]);
 	}
 }
@@ -552,21 +560,43 @@ void drawRow(AppContext& ctx, Tool t)
 	const Slot& slot   = gitSlot ? s_gitSlot : s_tcSlot;
 
 	ImGui::TableNextRow();
-	if (t == s_flashTool && ImGui::GetTime() < s_flashUntil)
+	// The row a banner sent the user to is marked for 1.6 s. The mark used to be
+	// the accent at 35 % across the whole row, which put this row's amber Warn
+	// line on an amber-brown ground (4.7:1, and reported as unreadable) and its
+	// dim lines at 1.9:1. The accent now goes into a bar at the row's edge, where
+	// no text is; the row itself only lifts a little, and its text is held to the
+	// floor on that lift by rowText().
+	// The popup's ground, not the host window's: the dialog is a modal popup, and
+	// PopupBg is the lighter of the two, so text that clears it clears both.
+	s_rowGround = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+	const bool flashing = t == s_flashTool && ImGui::GetTime() < s_flashUntil;
+	const float k = flashing ? static_cast<float>((s_flashUntil - ImGui::GetTime()) / 1.6) : 0.0f;
+	if (flashing)
 	{
-		const float k = static_cast<float>((s_flashUntil - ImGui::GetTime()) / 1.6);
-		ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1,
-		                       ImGui::ColorConvertFloat4ToU32(Theme::alpha(Theme::Accent, 0.35f * k)));
+		const ImVec4 lift = Theme::alpha(Theme::Ivory, 0.08f * k);
+		ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, Theme::u32(lift));
+		s_rowGround = Theme::over(lift, s_rowGround);
 	}
+	ImGui::PushStyleColor(ImGuiCol_TextDisabled, rowText(Theme::TextDim));
 	ImGui::PushID(static_cast<int>(t));
 
 	// ── Icon ────────────────────────────────────────────────────────────────
 	ImGui::TableSetColumnIndex(0);
+	const ImVec2 cellPad = ImGui::GetStyle().CellPadding;
+	const ImVec2 rowTop(ImGui::GetCursorScreenPos().x - cellPad.x, ImGui::GetCursorScreenPos().y - cellPad.y);
+	if (flashing)
+	{
+		// The row's height is only known once its tallest column is drawn, so the
+		// bar takes last frame's; the first frame falls back to the icon's.
+		const float h = s_flashRowH > 0.0f ? s_flashRowH : ImGui::GetFrameHeightWithSpacing();
+		ImGui::GetWindowDrawList()->AddRectFilled(rowTop, ImVec2(rowTop.x + 3.0f, rowTop.y + h),
+		                                          Theme::u32(Theme::alpha(Theme::Accent, k)));
+	}
 	drawStateIcon(st);
 
 	// ── Body ────────────────────────────────────────────────────────────────
 	ImGui::TableSetColumnIndex(1);
-	ImGui::TextColored(Theme::TextHeading, "%s", toolName(t));
+	ImGui::TextColored(rowText(Theme::TextHeading), "%s", toolName(t));
 	if (st != RowState::Ok) dimWrapped(toolPurpose(t));
 
 	switch (st)
@@ -636,7 +666,7 @@ void drawRow(AppContext& ctx, Tool t)
 	{
 		const std::string log = gitSlot ? (ctx.gitInstallLog ? ctx.gitInstallLog() : std::string())
 		                                : (ctx.toolchainInstallLog ? ctx.toolchainInstallLog() : std::string());
-		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+		ImGui::PushStyleColor(ImGuiCol_Text, rowText(Theme::Warn));
 		ImGui::TextWrapped("%s was not installed.", toolName(t));
 		ImGui::PopStyleColor();
 		const std::string why = lastLine(log);
@@ -644,6 +674,8 @@ void drawRow(AppContext& ctx, Tool t)
 		break;
 	}
 	}
+
+	float rowBottom = ImGui::GetCursorScreenPos().y;
 
 	// ── Action ──────────────────────────────────────────────────────────────
 	ImGui::TableSetColumnIndex(2);
@@ -687,7 +719,12 @@ void drawRow(AppContext& ctx, Tool t)
 		break;
 	}
 
+	rowBottom = std::max(rowBottom, ImGui::GetCursorScreenPos().y);
+	if (flashing)
+		s_flashRowH = rowBottom - ImGui::GetStyle().ItemSpacing.y + cellPad.y - rowTop.y;
 	ImGui::PopID();
+	ImGui::PopStyleColor();   // TextDisabled
+	s_rowGround = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
 }
 
 void drawLog(AppContext& ctx)
@@ -779,7 +816,7 @@ void resetStateForTests()
 	s_tcSeen = s_tcConsumed = s_ackTc = s_ackGit = s_logIsGit = s_openLog = false;
 	s_queue.clear();
 	s_openRequested = s_autoOpened = s_dontShowAgain = s_sawMissing = false;
-	s_flashTool = Tool::None; s_flashUntil = 0.0; s_flashArmed = false;
+	s_flashTool = Tool::None; s_flashUntil = 0.0; s_flashArmed = false; s_flashRowH = 0.0f;
 	s_name[0] = s_email[0] = '\0';
 	s_identitySeeded = false;
 }

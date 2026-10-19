@@ -411,6 +411,38 @@ TEST_CASE("Tool setup: a failed install says why and offers Retry")
 	CHECK(bits.toolchainInstalls.size() == 2);
 }
 
+// The row a banner sends the user to is marked for a moment after the dialog opens.
+// That mark once filled the row with the accent at 35 %, under an amber Warn line and
+// the dim detail lines: the frame a person reported as unreadable. Only the first
+// frames after requestShow show it, so it gets its own shots (topic 224).
+TEST_CASE("Tool setup: the row a banner points at is marked when the dialog opens")
+{
+	Harness h;
+	ContextBits bits;
+	bits.onLinux(true, false, true, true, true);   // only the compiler is missing
+	frame(bits, false);
+	ToolSetupDialog::requestShow(Tool::Compiler);
+	frame(bits, false);
+	CHECK(state(bits, Tool::Compiler) == RowState::Missing);
+	dump(bits, "tool-setup-flash-missing");
+
+	{
+		const auto buttons = actions(bits);
+		REQUIRE(buttons.size() == 1);
+		clickAt(bits, buttons[0].second);
+		REQUIRE(bits.toolchainInstalls.size() == 1);
+	}
+	bits.tcInstalling = false;
+	bits.tcDone = true;
+	bits.tcOk   = false;
+	bits.tcLog  = "$ pkexec ...\nThe administrator password dialog was cancelled, so nothing was installed.\n";
+	frame(bits, false);
+	ToolSetupDialog::requestShow(Tool::Compiler);
+	frame(bits, false);
+	CHECK(state(bits, Tool::Compiler) == RowState::Failed);
+	dump(bits, "tool-setup-flash-failed");
+}
+
 TEST_CASE("Tool setup: Install All Missing works through the installers one at a time")
 {
 	Harness h;
