@@ -675,7 +675,7 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 	return true;
 }
 
-// ─── Compile game from SDK (export worker, after a successful export) ───────
+// ─── Compile game from SDK (export worker: built first, installed last) ─────
 // The build cache of one project + profile: beside EngineContentCache in the
 // user data dir (TMPDIR only without one; macOS purges it). Its
 // HEGameBuildConfig.h is also where the next incremental export finds the key.
@@ -688,41 +688,43 @@ static std::filesystem::path sdkGameWorkDir(const std::string& projName, const s
 	return HE::ExportSdk::buildWorkDir(cacheRoot, projName, profile);
 }
 
-// Builds the game from the SDK template with the export's configuration compiled
-// in and swaps it over the runtime's executable. There is no prebuilt game to
-// fall back on (topic 222 step 3): every way out short of a built and installed
-// game fails the export and takes the runtime's executable out of the folder,
-// so a folder that did not get its compiled game cannot be shipped or started
-// as if it had. `text` is appended to the result line when it worked and is the
-// error otherwise.
-struct SdkGameResult { bool ok = false; std::string text; };
-static SdkGameResult compileGameFromSdk(const ExportResult& res, const HE::ExportSdk::GameSdk& sdk,
-                                        const std::string& toolchain, const std::string& projName, int step)
+// The game is the export's first build (topic 222 step 6), not its last step:
+// ProjectExporter::planExport fixes what project.hcfg will say (layout, pak key,
+// startup scene UUID) before anything is packed, the game is compiled from the
+// SDK template with exactly that compiled in, and once the exporter has laid the
+// runtime down, installSdkGame swaps the built game over the runtime's
+// executable as part of Clean up. There is no prebuilt game to fall back on
+// (topic 222 step 3): a compile that fails ends the export before anything is
+// packed, and an install that fails takes the runtime's executable out of the
+// folder, so a folder without its compiled game cannot ship or start as if it
+// had. `text` is appended to the result line when it worked and is the error
+// otherwise.
+struct SdkGameResult
+{
+	bool ok = false;
+	std::string text;
+	std::filesystem::path artifact;   // the built game, for installSdkGame
+	bool cacheHit = false;
+};
+static SdkGameResult compileGameFromSdk(const ProjectConfig& planned, const std::filesystem::path& settingsFile,
+                                        const HE::ExportSdk::GameSdk& sdk, const std::string& toolchain,
+                                        const std::string& projName, int step)
 {
 	namespace fs = std::filesystem;
 	const std::string profile = sdk.profile;
-	Build::stepBegin(step);
 	const auto fail = [&](const std::string& why)
 	{
 		Build::log(2, "Compile game from the engine SDK: " + why, step);
-		std::error_code ec;
-		if (!res.executablePath.empty() && fs::remove(res.executablePath, ec))
-			Build::log(2, "Removed " + res.executablePath.filename().string() + " from the export: "
-			              "it ships only a game compiled from the SDK", step);
-		Build::setLaunchTarget({}, false);
 		Build::stepFailed(step);
 		return SdkGameResult{ false, "the game could not be compiled from the engine SDK (" + why +
-		                             "); the export has no game executable" };
+		                             "); nothing was packed" };
 	};
-	if (res.executablePath.empty()) return fail("the export has no game executable to replace");
 	if (!sdk.valid()) return fail(HE::ExportSdk::unavailableReason(sdk, profile, true, true));
 	Build::log(0, "Engine SDK (" + profile + "): " + sdk.root.string(), step);
 
 	// The header holds the pak key: it goes to a private work dir, never into the
 	// export folder. The work dir is the build cache: kept per project and
 	// profile, reused while its key (SDK, profile, toolchain, defines) holds.
-	const fs::path exe = res.executablePath;
-	const fs::path dataDir = HE::ExportSdk::exportDataDir(exe);
 	std::error_code ec;
 	const fs::path workDir = sdkGameWorkDir(projName, profile);
 	fs::create_directories(workDir, ec);
@@ -739,7 +741,7 @@ static SdkGameResult compileGameFromSdk(const ExportResult& res, const HE::Expor
 		Build::log(0, "Build cache miss (" + cache.changed + "): fresh build in " + workDir.string(), step);
 
 	Build::setActivity("Writing the compiled-in configuration\xe2\x80\xa6");
-	if (const std::string why = HE::ExportSdk::writeBuildConfigFromExport(dataDir, exe, profile, header);
+	if (const std::string why = HE::ExportSdk::writeBuildConfigFromPlan(planned, settingsFile, profile, header);
 	    !why.empty())
 		return fail(why);
 
@@ -755,7 +757,7 @@ static SdkGameResult compileGameFromSdk(const ExportResult& res, const HE::Expor
 			              : line.find("warning") != std::string::npos ? 1 : 0;
 			Build::log(sev, line, step);
 			if (const auto p = toolchainProgress(line))
-				Build::stepProgress(0.1f + 0.8f * *p);
+				Build::stepProgress(0.1f + 0.9f * *p);
 		});
 	Build::setCancelable(false);
 	if (!built.ok)
@@ -763,7 +765,35 @@ static SdkGameResult compileGameFromSdk(const ExportResult& res, const HE::Expor
 		if (!(spec.cancel && spec.cancel->load())) HE::ExportSdk::forgetBuildCache(workDir);
 		return fail(built.message);
 	}
+	Build::stepProgress(1.0f);
+	Build::log(0, "Built " + built.artifact.filename().string() + " (" + profile + ")", step);
+	return SdkGameResult{ true, {}, built.artifact, cache.hit };
+}
 
+// Clean up's share of the game: the built executable and engine libraries over
+// the runtime's, links to the bundled copies, a fresh signature. `step` is the
+// ring the lines are filed under.
+static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk::GameSdk& sdk,
+                                    const SdkGameResult& built, int step)
+{
+	namespace fs = std::filesystem;
+	const std::string profile = sdk.profile;
+	const auto fail = [&](const std::string& why)
+	{
+		Build::log(2, "Install the game compiled from the engine SDK: " + why, step);
+		std::error_code ec;
+		if (!res.executablePath.empty() && fs::remove(res.executablePath, ec))
+			Build::log(2, "Removed " + res.executablePath.filename().string() + " from the export: "
+			              "it ships only a game compiled from the SDK", step);
+		Build::setLaunchTarget({}, false);
+		Build::stepFailed(step);
+		return SdkGameResult{ false, "the game compiled from the engine SDK could not be installed (" +
+		                             why + "); the export has no game executable" };
+	};
+	if (res.executablePath.empty()) return fail("the export has no game executable to replace");
+	const fs::path exe = res.executablePath;
+
+	Build::setActivity("Installing the game compiled from the engine SDK\xe2\x80\xa6");
 	std::vector<std::string> copied;
 	if (const std::string why = HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied);
 	    !why.empty())
@@ -776,16 +806,16 @@ static SdkGameResult compileGameFromSdk(const ExportResult& res, const HE::Expor
 	// way the exporter does for a local run (ad hoc).
 	if (const fs::path app = exe.parent_path().parent_path().parent_path(); app.extension() == ".app")
 	{
+		Build::setActivity("Signing " + app.filename().string() + "\xe2\x80\xa6");
 		const std::string cmd = "codesign --force --deep --sign - \"" + app.string() + "\" 2>&1";
 		if (std::system(cmd.c_str()) != 0)
 			Build::log(1, "codesign of " + app.filename().string() + " failed", step);
 	}
 #endif
-	Build::stepProgress(1.0f);
 	Build::log(0, "Game compiled from the SDK (" + profile + "), " + std::to_string(copied.size()) +
 	              " file(s) replaced; configuration and pak key compiled in", step);
 	return SdkGameResult{ true, std::string(" — game compiled from the ") + profile + " SDK" +
-	                            (cache.hit ? " (build cache hit)" : "") };
+	                            (built.cacheHit ? " (build cache hit)" : "") };
 }
 
 // ─── The modal itself (drawn every frame; also reaps a finished worker) ──────
@@ -1704,22 +1734,27 @@ void startExport(AppContext& ctx)
                 // Setup is already over by the time anyone sees it — the work above
                 // runs on the UI thread — but it is where a scene that will not
                 // load or a missing runtime is reported, so it is a step and not a
-                // footnote. Build only exists when something is actually compiled:
-                // an export with no HorizonCode to translate would otherwise show a
-                // ring that turns green without ever having done anything.
+                // footnote. The rings are listed in the order the worker runs them,
+                // because Build::stepBegin closes the ones before it and a ring
+                // further up that filled last would read as a step out of turn.
+                // Build game comes first and every run has it: the game is
+                // compiled from the SDK with a configuration planned before the
+                // pack (topic 222 step 6), so the longest build of the export
+                // fails before anything is packed. Build HorizonCode only exists
+                // when something is actually compiled: an export with no
+                // HorizonCode to translate would otherwise show a ring that turns
+                // green without ever having done anything. Clean up stays last
+                // and also installs the built game over the runtime's executable.
                 const bool hasBuild = hcCompile && !hcSources.empty();
-                std::vector<std::string> stepNames{ "Setup" };
-                if (hasBuild) stepNames.emplace_back("Build");
+                std::vector<std::string> stepNames{ "Setup", "Build game" };
+                if (hasBuild) stepNames.emplace_back("Build HorizonCode");
                 stepNames.emplace_back("Package");
                 stepNames.emplace_back("Clean up");
-                // The game compile is its own step, last: it replaces the runtime's
-                // executable once the export around it stands. Every run has it.
-                stepNames.emplace_back("Compile game");
                 const int stepSetup   = 0;
-                const int stepBuild   = hasBuild ? 1 : -1;
-                const int stepPackage = hasBuild ? 2 : 1;
+                const int stepSdkGame = 1;
+                const int stepBuild   = hasBuild ? 2 : -1;
+                const int stepPackage = hasBuild ? 3 : 2;
                 const int stepCleanup = stepPackage + 1;
-                const int stepSdkGame = stepCleanup + 1;
                 const HE::ExportSdk::GameSdk gameSdk = gate.sdk;
                 const std::string sdkProfile = gate.profile;
                 // Part of the build cache key: another cmake or compiler gets a fresh tree.
@@ -1967,7 +2002,7 @@ void startExport(AppContext& ctx)
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              stepBuild, stepPackage, hostTarget,
+                                              stepBuild, stepPackage, stepCleanup, hostTarget,
                                               stepSdkGame, gameSdk, sdkToolchain,
                                               hcSdk]()
                 {
@@ -1977,13 +2012,33 @@ void startExport(AppContext& ctx)
                     std::string msg;
                     try
                     {
+                        ExportSettings esEff = es;
+
+                        // ── The game, compiled from the engine SDK, first. What
+                        // it carries compiled in (pak key, startup scene UUID,
+                        // layout) is planned here and pinned into esEff, so the
+                        // pack below writes exactly that. HorizonCode counts as
+                        // compiled when it is meant to be: should its build fall
+                        // back, the game says so at start instead of trusting it.
+                        Build::stepBegin(stepSdkGame);
+                        const ExportPlan plan = ProjectExporter::planExport(
+                            projName, sceneName, std::filesystem::path(outDir), esEff,
+                            !sceneBinary.empty(), hcCompile && !hcSources.empty());
+                        if (!plan.success)
+                        {
+                            Build::stepFailed(stepSdkGame);
+                            throw std::runtime_error(plan.errorMessage);
+                        }
+                        const SdkGameResult game = compileGameFromSdk(
+                            plan.config, es.projectSettingsFile, gameSdk, sdkToolchain, projName, stepSdkGame);
+                        if (!game.ok) throw std::runtime_error(game.text);
+
                         // ── HorizonCode → C++ (plan §8.1): generate + build the
                         // classes dylib BEFORE packing, so the exporter can ship
                         // it and the result line can report the outcome. Any
                         // failure here falls back to the interpreter loudly —
                         // the export itself never fails because of codegen
                         // (graphs are packed regardless).
-                        ExportSettings esEff = es;
                         std::string hcMsg;
                         std::string hcFatal;   // Stop mode: why the export must not proceed
                         if (hcCompile && !hcSources.empty())
@@ -2238,11 +2293,12 @@ void startExport(AppContext& ctx)
                                 ? " — key embedded in the game binary"
                                 : " — key in project.hcfg (runtime has no key block)";
                         if (res.success) msg += hcMsg;
+                        // Clean up is the exporter's last ring and still running:
+                        // the built game goes over the runtime's executable there.
                         if (res.success)
                         {
-                            const SdkGameResult game =
-                                compileGameFromSdk(res, gameSdk, sdkToolchain, projName, stepSdkGame);
-                            msg = game.ok ? msg + game.text : "Error: " + game.text;
+                            const SdkGameResult installed = installSdkGame(res, gameSdk, game, stepCleanup);
+                            msg = installed.ok ? msg + installed.text : "Error: " + installed.text;
                         }
                     }
                     catch (const std::exception& e)

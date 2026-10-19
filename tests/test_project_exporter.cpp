@@ -1670,7 +1670,92 @@ TEST_CASE("An incremental encrypted export reuses the key of the previous SDK ga
     he_test::removeAllQuiet(outputDir);
     he_test::removeAllQuiet(headerDir);
 }
+
+// Topic 222 step 6: the editor compiles the game (configuration and pak key
+// compiled in) BEFORE it packs, from what planExport returned. The export after
+// it must write that configuration and pack with that key and scene UUID, or the
+// game cannot open its pak or does not find its first scene.
+TEST_CASE("planExport: the export packs with the key and scene UUID planned before it")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_plan_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_plan_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID id{0xFEED,0x91A4};
+    const auto blob = makeMinimalMaterialBlob(id, "plan_mat");
+    { std::ofstream f(contentDir / "plan_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+    std::vector<uint8_t> sceneBinary(64);
+    for (size_t i = 0; i < sceneBinary.size(); ++i) sceneBinary[i] = static_cast<uint8_t>(i * 5 + 1);
+
+    ExportSettings settings;
+    settings.compress    = true;
+    settings.encrypt     = true;
+    settings.incremental = true;
+    REQUIRE(ProjectExporter::exportProject(contentDir, "PlanGame", "Main.hescene", outputDir,
+                                           settings, sceneBinary).success);
+    ProjectConfig first;
+    REQUIRE(ProjectConfigLoader::load(outputDir, first));
+
+    ExportSettings next = settings;
+    const ExportPlan plan = ProjectExporter::planExport("PlanGame", "Main.hescene", outputDir, next,
+                                                        /*packedScene*/ true, /*horizonCode*/ true);
+    REQUIRE(plan.success);
+    CHECK(next.planned);
+    // The incremental key reuse ran while the previous export was still there.
+    CHECK(std::memcmp(plan.config.encKey, first.encKey, 32) == 0);
+    CHECK(std::memcmp(next.plannedPakKey, first.encKey, 32) == 0);
+    CHECK(plan.config.encrypted);
+    CHECK(plan.config.hasPackedScene);
+    CHECK(plan.config.horizonCodeCompiled);   // the intent: no library is passed below
+    CHECK(plan.config.hpakFilename == "PlanGame.hpak");
+    CHECK(plan.config.mainSceneName.empty());
+    CHECK_FALSE(next.plannedSceneUuid == HE::UUID{});
+
+    const auto again = ProjectExporter::exportProject(contentDir, "PlanGame", "Main.hescene", outputDir,
+                                                      next, sceneBinary);
+    REQUIRE(again.success);
+    CHECK(again.assetsReused == 1);
+
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    CHECK(std::memcmp(cfg.encKey, plan.config.encKey, 32) == 0);
+    CHECK(std::memcmp(cfg.startupSceneUuid, plan.config.startupSceneUuid, 16) == 0);
+    CHECK(cfg.hpakFilename == plan.config.hpakFilename);
+    CHECK(cfg.mainSceneName == plan.config.mainSceneName);
+    CHECK_FALSE(cfg.horizonCodeCompiled);     // the hcfg says what really shipped
+
+    // The planned key opens the pak, the planned UUID finds the scene in it.
+    HE::UUID sceneUuid{};
+    std::memcpy(&sceneUuid.hi, plan.config.startupSceneUuid,     8);
+    std::memcpy(&sceneUuid.lo, plan.config.startupSceneUuid + 8, 8);
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / plan.config.hpakFilename).string(), plan.config.encKey));
+    CHECK(cm.readMountedEntry(sceneUuid) == sceneBinary);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
 #endif // HE_HAVE_CRYPTO
+
+TEST_CASE("planExport without encryption: loose startup scene, no key")
+{
+    auto outputDir = std::filesystem::temp_directory_path() / "he_test_export_plan_loose";
+    he_test::removeAllQuiet(outputDir);
+    ExportSettings settings;
+    const ExportPlan plan = ProjectExporter::planExport("LooseGame", "Levels/Main.hescene", outputDir,
+                                                        settings, /*packedScene*/ false, false);
+    REQUIRE(plan.success);
+    CHECK(settings.planned);
+    CHECK_FALSE(plan.config.encrypted);
+    CHECK_FALSE(plan.config.hasPackedScene);
+    CHECK(plan.config.mainSceneName == "Main.hescene");
+    uint8_t zero[32] = {};
+    CHECK(std::memcmp(plan.config.encKey, zero, 32) == 0);
+    he_test::removeAllQuiet(outputDir);
+}
 
 // ─── The project's own icon, and the splash picture ──────────────────────────
 #include <Application/AppIcon.h>

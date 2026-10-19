@@ -9,6 +9,7 @@
 #include <HorizonCode/HcCompiledLoader.h>
 #include <Hpak/GameBuildConfig.h>
 #include <Hpak/ProjectConfig.h>
+#include <Project/ProjectSettings.h>   // the settings file a planned header reads
 
 #include <algorithm>
 #include <atomic>
@@ -137,6 +138,39 @@ TEST_CASE("writeBuildConfigFromExport compiles in the exported hcfg and its key"
 
     CHECK_FALSE(HE::ExportSdk::writeBuildConfigFromExport(t.path / "empty", {}, "release",
                                                           header).empty());
+}
+
+TEST_CASE("writeBuildConfigFromPlan compiles in the planned configuration, key and settings file")
+{
+    TempDir t;
+    ProjectConfig planned;
+    planned.projectName  = "PlannedGame";
+    planned.hpakFilename = "PlannedGame.hpak";
+    planned.encrypted    = true;
+    for (int i = 0; i < 32; ++i) planned.encKey[i] = (uint8_t)(i * 3 + 5);
+
+    const fs::path header = t.path / "private" / "HEGameBuildConfig.h";
+    // No settings file: the defaults, as in a game without the shipped file.
+    REQUIRE(HE::ExportSdk::writeBuildConfigFromPlan(planned, {}, "dev", header).empty());
+    uint8_t key[32] = {};
+    REQUIRE(HE::readGameBuildConfigPakKey(header, key));
+    CHECK(std::memcmp(key, planned.encKey, 32) == 0);
+    CHECK(readFile(header).find("PlannedGame.hpak") != std::string::npos);
+
+    // The project's file is read from <root>/Config/ProjectSettings.json.
+    const fs::path root = t.path / "Project";
+    HE::ProjectSettings ps;
+    ps.game.title = "Planned Title";
+    REQUIRE(HE::saveProjectSettings(root, ps));
+    CHECK(HE::ExportSdk::writeBuildConfigFromPlan(planned, HE::projectSettingsPath(root), "dev",
+                                                  header).empty());
+    CHECK(readFile(header).find("Planned Title") != std::string::npos);
+
+    // A missing file is the defaults, a file elsewhere is refused.
+    CHECK(HE::ExportSdk::writeBuildConfigFromPlan(planned, HE::projectSettingsPath(t.path / "none"), "dev",
+                                                  header).empty());
+    CHECK_FALSE(HE::ExportSdk::writeBuildConfigFromPlan(planned, t.path / "Settings.json", "dev",
+                                                        header).empty());
 }
 
 TEST_CASE("makeBuildSpec: SDK template, private build dir, header compiled in")
