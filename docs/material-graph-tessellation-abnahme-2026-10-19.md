@@ -36,11 +36,11 @@ NN-WS03, RTX 4070, Release-Baum `C:/hw207` (eigenes Deploy), 19.10.2026, frische
 | `test_material_editor_ui` | 3 Fälle grün: D3D12 ohne Bernstein, Metal mit (Zelle > 20, Popup > 50, Vorschauhinweis > 50 px), ohne Draht keine Zelle (Kontrolle: Ordner-Zelle wird gefunden) |
 | `editor_help_audit.py --check` | 1202/1202 |
 | Demo, Pin an gegen unverbunden | D3D11 118 718, D3D12 118 718, Vulkan 118 682, GL 118 736 px: Kissen und Silhouette verformt |
-| `HE_TESSELLATION=0` gegen unverbunden (Fallback-Vertrag) | **0 px** auf D3D11, D3D12, Vulkan, GL (und Software) |
-| ref zweimal (Rauschboden) | 0 px auf allen fünf |
+| `HE_TESSELLATION=0` gegen unverbunden (Fallback-Vertrag) | **0 px** auf D3D11, D3D12, Vulkan, GL |
+| ref zweimal (Rauschboden) | 0 px auf allen vier |
 | `Height` zur Laufzeit 0 gegen unverbunden | ≤ 574 px, max 1/255 auf allen vier: der Knopf erreicht die Domain-Stufe |
 | `Height` 0,3 gegen Standard 0,15 | ~129 300 px auf allen vier |
-| Backends untereinander (Demo, Pin an) | D3D12↔D3D11 8 px max 1; Vulkan max 4; GL max 7; **0 px > 8**: kein Rauschband mehr |
+| Backends untereinander (Demo, Pin an) | D3D12↔D3D11 8 px max 1; Vulkan max 4; GL max 7; **0 px > 8**: kein Band wie beim Rauschzeugen (stützt die `heHash21`-Vermutung, bestätigt sie nicht) |
 | Logs | 0 `[ERROR]`; „built a tessellated …" auf D3D11/D3D12/Vulkan; D3D12-Debug-Layer nur ClearRenderTargetView (bekannt) |
 | Software-Backend | zeichnet **nur UI** („user interface only"): Bild leer, 0 px ist kein Beweis. Belegt: Demo lädt, Lauf ohne Fehler/Absturz, `SupportsTessellation()` = false → Editor zeigt den gelben Hinweis |
 
@@ -54,7 +54,7 @@ Pin an/aus 0 px. **Auf dem Endstand nicht erneut gefahren.**
 ## Handoff
 
 - **Topic / step:** 207, Schritt 5 (Build, Tests, Abnahme, Beispielmaterial, UI-Bild, Bericht)
-- **Branch / commit:** `claude/material-graph-shader-tessellation-displacement-als-pin-am-o`, Commit dieses Berichts
+- **Branch / commit:** `claude/material-graph-shader-tessellation-displacement-als-pin-am-o` @ 19540a54 (+ Korrektur-Commit dieses Berichts); CI 39217259679
 - **Done:** DisplacementDemo (mat_gen + .hasset), Demo-Test, `HE_DUMP_MATTESTASSET`, UI-Test mit
   Bildern, Hardware-A/B auf vier Backends + Software, voller Testlauf, Hilfe-Audit.
 - **Verified:** Tabelle oben.
@@ -63,13 +63,18 @@ Pin an/aus 0 px. **Auf dem Endstand nicht erneut gefahren.**
   im laufenden Editor (Test nutzt den echten Tab, aber Stand-in-Renderer und -Vorschau).
 - **Decisions taken:** Demo als Engine-Material (Content Browser + Export), texturfrei wie Water
   (mat_gen-Regel) und ohne Rauschen; Zellzahl als Konstante, nicht als Knopf (Naht);
-  `Water.hasset` NICHT neu committet — `mat_gen` schreibt es heute 2 Byte anders (Codegen-Drift
-  aus früheren Themen, nicht dieser Zweig), die eingecheckte Datei bleibt.
+  `Water.hasset` NICHT neu committet — `mat_gen` auf HEAD schreibt es 2 Byte länger, Unterschiede
+  ab Byte ~3568 im Fragmenttext. **Ursache nicht untersucht**; dieser Zweig hat die Codegen in
+  Schritt 2 geändert (6a36dd61), kann also nicht ausgeschlossen werden. Die eingecheckte Datei
+  bleibt, die Water-Tests sind mit ihr grün (der Ladepfad regeneriert ohnehin).
 - **Traps:** `mat_gen` erzeugt immer alle Einträge → nach dem Lauf `git checkout` auf Water, falls
   nicht beabsichtigt. Bash-Heredocs schlucken `\` in PowerShell-Pfaden (Edit-Tool nehmen).
   `he_ui::registerTexture` liefert 64-Bit-IDs (nicht auf `uint32_t` kürzen → weißes Bild).
   Kommentar-Rahmen des Canvas (222,183,97) liegen nah an kWarn: Bernstein-Test eng halten.
-- **Next steps:** 1. CI-Lauf dieses Commits abwarten (Hive meldet). 2. Optional Mac: `cap207`-
-  Äquivalent mit `HE_DUMP_MATTESTASSET` auf Metal (erwartet 0 px) und GL. 3. Handbuch
+- **Next steps:** 1. CI 39217259679 abwarten (Hive meldet; 39213586011 kann vom Concurrency-
+  Group abgebrochen erscheinen, das ist kein Rot). 2. Optional Mac: `cap207`-Äquivalent mit
+  `HE_DUMP_MATTESTASSET` auf Metal (erwartet 0 px) und GL; oder das Demo in den Bake-Test am Ende
+  von `test_engine_materials.cpp` aufnehmen (MSL/GL/FXC-Kompilat, heute nur Water). 3. `Water.hasset`-
+  Drift klären (s. o.). 4. Handbuch
   (`EditorDeps/Docs/he-docs.json`) um das Demo ergänzen; Merge-Fallen aus Schritt 4 gelten weiter
   (Thema 217 `bindMatRunState`, 214 Resolve-Cache, 215 `VkPipelineCache`).
