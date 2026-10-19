@@ -188,6 +188,13 @@ public:
 	{
 		return m_service.commitFiles(commit);
 	}
+	// Read-only: the new-branch dialog's per-keystroke check (GitService::
+	// requestCheckBranchName); the answer for exactly `name`, or nullptr.
+	void requestCheckBranchName(const std::string& name) { m_service.requestCheckBranchName(name); }
+	const HE::Sc::GitService::BranchNameCheck* branchNameCheck(const std::string& name) const
+	{
+		return m_service.branchNameCheck(name);
+	}
 	const std::filesystem::path& projectRoot() const { return m_projectRoot; }
 
 	// Status for a file given its ABSOLUTE path, which is what the Content

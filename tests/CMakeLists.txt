@@ -66,6 +66,11 @@ add_executable(he_tests
     # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
     test_temporal_aa.cpp
     test_gi_bvh.cpp
+    test_gi_blas_store.cpp
+    # Staging ring + mesh-memory free list of the Vulkan upload path (REN-802/803).
+    test_vulkan_upload_alloc.cpp
+    # Accept/reject rules of the on-disk VkPipelineCache file (REN-808).
+    test_vulkan_pipeline_cache.cpp
     test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
@@ -305,6 +310,13 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    # Topic 219 step 2: the importers' lean asset writer (TLS-101) and the pack
+    # manifest the packer CLI now shares with the export (TLS-203).
+    test_tools_writer_cache.cpp
+    # The export lock (Platform/ProjectWriteGate.h). Was only in the HE_IMGUI_ENABLED
+    # property list below, so it never ran, and the gate's state being one copy per
+    # Windows DLL went unseen.
+    test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
     # Assigning, posting updates and notices between two editors over a fake
@@ -464,6 +476,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBlasStore.cpp
     # The software UI rasterizer, compiled in for the same reason as the culler:
     # it is quads-in-pixels-out with no SDL, no window and no IRenderer, so what
     # the UI style vocabulary ACTUALLY draws is answerable headless — the one
@@ -983,7 +996,6 @@ set_source_files_properties(
     test_editor_rewards.cpp
     test_notification_popups_ui.cpp
     test_build_footer_ui.cpp
-    test_project_write_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp
@@ -1281,7 +1293,9 @@ endif()
 # with libssh2, like HorizonSelfUpdate) and its private src/ for CsRename.h. Its
 # ctest entry gets its own HOME/APPDATA below — see the ENVIRONMENT after the loop.
 if(TARGET HorizonContentSync)
-    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp)
+    # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
+    # case runs only with HE_TEST_SFTP pointing at a throwaway server.
+    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)
@@ -1345,6 +1359,10 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D11/D3D11ShaderManager.cpp
         ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D12/D3D12ShaderManager.cpp)
     target_link_libraries(he_tests PRIVATE d3dcompiler d3d11)
+    # The FXC bytecode cache both renderers start from (Thema 196): header-only
+    # under src/Backends/D3D_Shared, driven through timedD3DCompile.
+    target_sources(he_tests PRIVATE test_d3d_shader_cache.cpp)
+    target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src)
 endif()
 
 # One ctest entry per test SOURCE FILE, not one for the whole binary.

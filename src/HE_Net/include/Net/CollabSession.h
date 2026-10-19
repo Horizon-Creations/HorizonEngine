@@ -1096,7 +1096,10 @@ private:
     void handOverLock(std::uint64_t subject, ParticipantId to);
     // Host: run the policy and answer the creator. True = go ahead and relay.
     bool arbitrateCreate(ConnectionId conn, const AssetUpdate& a);
-    void sendAssetChunks(ConnectionId conn, ParticipantId from, const AssetUpdate& a);
+    // Begin, chunks, End — each frame built once and handed to every target
+    // (NetSession::sendTo), not re-serialized per peer.
+    void sendAssetChunks(const std::vector<ConnectionId>& to, ParticipantId from,
+                         const AssetUpdate& a);
     void installAssetChunkHandlers();
     bool readAssetHeader(BitReader& r, AssetUpdate& out, std::uint32_t& outTotal,
                          std::uint32_t& outChunks) const;

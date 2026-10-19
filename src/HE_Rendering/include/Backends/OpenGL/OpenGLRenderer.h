@@ -11,6 +11,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GiBlasStore.h>
 #include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
@@ -1179,12 +1180,7 @@ private:
 	// GL 4.3 context (GLAD_GL_VERSION_4_3) — macOS GL is 4.1 and never enters.
 	// Checkpoint GL-A: capability + settings + accel upload only, nothing
 	// samples these buffers yet (GI-off rendering stays byte-identical).
-	struct GIBlasRange
-	{
-		int32_t nodeOffset = 0, nodeCount = 0;
-		int32_t triOffset  = 0, triCount  = 0;
-		bool    valid      = false;
-	};
+	using GIBlasRange = HE::GiBlasRange;
 	// Matches the std430 GiInst block the kernels declare (kGiTraversalGLSL):
 	// mat4 + two shading rows + BLAS offsets, 112 bytes, 16-byte aligned.
 	// The shading pair is HE::giInstanceSurface's output — the probe kernel uses
@@ -1218,7 +1214,7 @@ private:
 	unsigned int m_giLandSSBO = 0;
 	int          m_giLandCount = 0;
 	std::vector<unsigned int> m_giLandWeightTex; // weightmap per landscape, same order
-	GIBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
+	HE::GiBvh    BuildGIBvh(const HE::UUID& meshId);  // CPU build from ContentManager data
 	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
 	void         DestroyGIAccel();
 
@@ -1315,13 +1311,12 @@ private:
 	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
 	void         PushGISceneUniforms(const GISceneLocs& locs, bool active, bool reflActive,
 	                                 bool ssrActive);
-	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
-	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
-	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
+	HE::GiBlasStore                m_giBlas;          // per-mesh BLASes, concatenated (all meshes)
 	std::vector<GIInstanceGpu>     m_giInstancesCpu;  // rebuilt per frame
-	bool         m_giBlasDirty       = false;         // node/tri SSBOs need re-upload
 	unsigned int m_giNodeSSBO        = 0;
 	unsigned int m_giTriSSBO         = 0;
+	size_t       m_giNodeCap         = 0;             // SSBO capacities in elements
+	size_t       m_giTriCap          = 0;
 	unsigned int m_giInstanceSSBO    = 0;
 	int          m_giInstanceCount   = 0;
 	bool         m_giSupported       = false;         // GL >= 4.3, cached at Initialize

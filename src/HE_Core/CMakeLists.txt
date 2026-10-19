@@ -20,6 +20,7 @@ add_library(HorizonCore SHARED
 	src/JobSystem/JobSystem.cpp
 	src/Platform/DynLib.cpp
 	src/Platform/Process.cpp
+	src/Platform/ProjectWriteGate.cpp
 	src/Window/Window.cpp
 	src/Renderer/IRenderer.cpp
 	src/Scripting/ScriptEngine.cpp
@@ -32,6 +33,7 @@ add_library(HorizonCore SHARED
 	src/Integrity/IntegrityProbe.cpp
 	src/Hpak/ProjectConfig.cpp
 	src/Hpak/ProjectExporter.cpp
+	src/Hpak/PackManifest.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
