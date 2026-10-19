@@ -149,6 +149,9 @@ add_executable(he_tests
     test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Thema 210: a landscape texture array that arrives late renders like a first load
+    # (content epoch on download + the backends' graph-texture miss sweep, source-pinned).
+    test_landscape_reload.cpp
     # The water model: bodies, coverage + owner raster, circle/polygon edits, scene format, undo.
     test_water_field.cpp
     test_water_surface.cpp

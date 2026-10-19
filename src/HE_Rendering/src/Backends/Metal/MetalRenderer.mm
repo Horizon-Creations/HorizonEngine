@@ -16,6 +16,7 @@
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
@@ -9555,6 +9556,10 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
 	if (array) key += "#arr";
+	// A miss is cached (no file open per frame) until files may have appeared: an
+	// EngineContent download landing after this first ask (Thema 210).
+	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+	                             [](void* tex) { return tex == nullptr; });
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);

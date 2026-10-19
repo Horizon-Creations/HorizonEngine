@@ -651,6 +651,7 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its 0 misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_set<unsigned int> m_glArrayTex;   // graph textures stored as GL_TEXTURE_2D_ARRAY
 	unsigned int m_whiteArrayTex = 0;                // 1×1×1 white array (missing array slot)
 	std::unordered_map<std::string, unsigned int> m_uiTexCache; // UI quad images, same keys, never sRGB

@@ -43,6 +43,7 @@
 #include "ShaderCompiler.h"                   // he::shaderc::compile (sky pass)
 #endif
 #include <HorizonRendering/SsaoKernel.h>
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <MaterialGraph/MaterialGraph.h>      // kMatMaxGraphTextures (heTexP0..3)
 
 static constexpr uint32_t k_maxFramesInFlight = 2;
@@ -3657,10 +3658,19 @@ VkImageView VulkanRenderer::resolveGraphTexture(const HE::UUID& id, const std::s
     std::string key = graphTexKey(id, path);
     if (key.empty() || !m_contentManager) return VK_NULL_HANDLE;
     if (array) key += "#arr"; // the same asset can be 2D in one material, an array in another
+    // Unlike the decal cache this caches a null asset too, so an unloadable one does
+    // not open its file every frame. But "still null" can also mean "not yet": an
+    // EngineContent download a path load started. Misses are dropped once the
+    // content epoch moved (Thema 210, mirrors GL); a null view was never bound, so
+    // whatever a failed upload left behind is freed right away.
+    HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+                                 [this](MaterialTexVk& mt) {
+                                     if (mt.view) return false;
+                                     destroyMaterialTex(mt);
+                                     return true;
+                                 });
     if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
         return it->second.view;
-    // Unlike the decal cache this caches a null asset too: resolveTextureRef loads
-    // synchronously, so "still null" means unloadable, not "not yet" (mirrors GL).
     MaterialTexVk mt;
     if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, path))
         uploadTextureImage(tex, mt.image, mt.mem, mt.view, array); // unsupported format → view stays null

@@ -1335,7 +1335,15 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 	// materialize's own completion callback. A success re-enters loadAssetAsync,
 	// which now resolves through the normal (just-updated) disk registry and
 	// queues a real async read — that read's own AsyncResult surfaces on a LATER
-	// pollAsyncResults() call, not this one.
+	// pollAsyncResults() call, not this one. That needs the count of completed
+	// jobs taken HERE, before the drain re-queues anything: a worker can finish
+	// a small file before this function reaches the loop below (seen on Linux CI,
+	// test_landscape_reload), and "the next call" would silently become "this one".
+	size_t available = 0;
+	{
+		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
+		available = m_asyncSink->results.size();
+	}
 	{
 		std::vector<PendingRemoteReady> remoteReady;
 		{
@@ -1354,6 +1362,10 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 				m_remoteAssets.erase(r.id);
 				m_remoteByPath.erase(r.relativePath);
 				m_remoteArrived.insert(r.relativePath);
+				// A file appeared under an EngineContent root: whoever remembered the
+				// path as "not there" (a renderer's graph-texture miss, Thema 210) looks
+				// once more. Costs one fresh file index per download.
+				noteContentChanged();
 				loadAssetAsync(r.id, r.callback);
 			}
 			else if (r.callback)
@@ -1371,11 +1383,6 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 	// nothing and do not count against the budget.
 	using Clock = std::chrono::steady_clock;
 	const Clock::time_point start = Clock::now();
-	size_t available = 0;
-	{
-		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
-		available = m_asyncSink->results.size();
-	}
 	size_t toRegister = 0;
 	size_t handled    = 0;
 

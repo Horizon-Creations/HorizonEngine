@@ -639,6 +639,7 @@ private:
 	// a miss is cached (view null → white default, no per-frame retry). InvalidateTexture
 	// drops the UUID key; a path-keyed loose asset is not hot-reloaded (same as GL).
 	std::unordered_map<std::string, MaterialTexVk> m_graphTexCache;
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its null-view misses were taken at (HE::forgetGraphTextureMisses)
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
 	std::vector<HE::UUID> m_pendingTexInval;
