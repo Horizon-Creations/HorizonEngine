@@ -289,7 +289,7 @@ TEST_CASE("Landscape reload: every backend's graph-texture resolve forgets its m
 	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
 	struct Site { const char* file; const char* signature; };
 	for (const Site& s : {
-		Site{ "Metal/MetalRenderer.mm",     "void* MetalRenderer::ResolveGraphTexture(" },
+		Site{ "Metal/MetalRenderer.mm",     "void* MetalRendererImpl::ResolveGraphTexture(" },
 		Site{ "OpenGL/OpenGLRenderer.cpp",  "unsigned int OpenGLRenderer::ResolveGraphTexture(" },
 		Site{ "Vulkan/VulkanRenderer.cpp",  "VkImageView VulkanRenderer::resolveGraphTexture(" },
 		Site{ "D3D11/D3D11Renderer.cpp",    "ID3D11ShaderResourceView* resolveGraphTexture(" },
