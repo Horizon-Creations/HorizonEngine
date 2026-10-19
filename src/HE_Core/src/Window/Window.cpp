@@ -6,6 +6,7 @@
 #include <iterator>
 #include <SDL3/SDL.h>
 #include "Diagnostics/Log.h"
+#include "Platform/BuildProfile.h"   // HE_FEATURE_TEST_HOOKS: the HE_HIDDEN_WINDOW family
 #include <stdexcept>
 
 namespace HE
@@ -64,6 +65,11 @@ namespace
 
     bool hiddenWindowRequested()
     {
+#if !HE_FEATURE_TEST_HOOKS
+        // A release build has no headless mode: a player's environment must not
+        // be able to hide the game's window.
+        return false;
+#else
         static const bool kHidden = []
         {
             const char* hw = std::getenv("HE_HIDDEN_WINDOW");
@@ -83,6 +89,7 @@ namespace
             return hidden;
         }();
         return kHidden;
+#endif
     }
 
     uint64_t backgroundFrameIntervalFromEnv(const char* backgroundFps,
@@ -115,6 +122,10 @@ namespace
 
     uint64_t backgroundFrameInterval()
     {
+#if !HE_FEATURE_TEST_HOOKS
+        // No overrides in a release build, so always the default throttle.
+        return backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, nullptr);
+#else
         static const uint64_t kInterval = []
         {
             const char* bg = std::getenv("HE_BACKGROUND_FPS");
@@ -135,6 +146,7 @@ namespace
             return ns;
         }();
         return kInterval;
+#endif
     }
 
     uint64_t backgroundThrottleDelayNs(uint64_t intervalNs, bool inBackground,

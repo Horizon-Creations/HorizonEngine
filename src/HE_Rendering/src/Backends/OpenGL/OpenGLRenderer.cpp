@@ -16,6 +16,7 @@
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
@@ -29,6 +30,7 @@
 #include <fstream>
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/EngineProfiler.h>
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <JobSystem/JobSystem.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -3771,10 +3773,15 @@ void OpenGLRenderer::UploadClusterLists(const HE::ClusterLightBuild& build)
 unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled,
-                                                       bool gbuffer)
+                                                       bool gbuffer, bool instanced)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
-	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
+	// The pak bakes no instanced vertex: the caller loops with the plain program.
+	if (instanced && precompiled) return 0;
+	// `key` also keys the fragment cache below, so the instanced slot gets its own
+	// program key without touching it.
+	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
+	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
@@ -3789,9 +3796,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
 	auto crossCompile = [&](Backend b, bool cl) {
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(b)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, b);
+		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+		const auto& v = instanced
+			? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(b)
+			                    : m_matShaderLib.customVertexInstanced(vh, vertBody, b))
+			: (vertBody.empty() ? m_matShaderLib.standardVertex(b)
+			                    : m_matShaderLib.customVertex(vh, vertBody, b));
 		const auto& f = cl ? m_matShaderLib.fragmentClustered(key, fragGlsl, b)
 		                   : m_matShaderLib.fragment(key, fragGlsl, b);
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
@@ -3933,8 +3943,38 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
 
-	m_materialPrograms[key] = program; // cache success AND failure (0)
+	if (instanced)
+		HE_LOG_INFO(RHI, "%s", program
+			? "OpenGLRenderer: the material program above is the INSTANCED twin (one draw per batch)"
+			: "OpenGLRenderer: no instanced material program, its batches draw per instance");
+	m_materialPrograms[progKey] = program; // cache success AND failure (0)
 	return program;
+}
+
+void OpenGLRenderer::DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms,
+                                             const glm::mat4& viewProj, const glm::vec3& baseColor,
+                                             unsigned int tex, float metallic, float roughness,
+                                             float opacity, int indexCount, const void* indexOffset)
+{
+	glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(transforms.size() * sizeof(glm::mat4)),
+	             transforms.data(), GL_STREAM_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	// Same block as the per-instance loops write, with the batch-constant half:
+	// the instanced vertex forms mvp = U.mvp * model itself.
+	struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+	obj.mvp   = viewProj;
+	obj.model = glm::mat4(1.0f);
+	obj.color = glm::vec4(baseColor, 1.0f);
+	obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+	obj.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
+	                        static_cast<GLsizei>(transforms.size()));
+	++m_counters.draws;
+	m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(transforms.size());
 }
 
 // Build (or fetch) the GL program that draws GPU-instanced ParticleGraph particles
@@ -5974,42 +6014,59 @@ void OpenGLRenderer::SetSSRSettings(const SSRSettings& s)
 // SSBOs; instances are a flat per-frame array referencing BLAS ranges. In
 // GL-A nothing samples these yet — upload only, zero visual change.
 
-OpenGLRenderer::GIBlasRange OpenGLRenderer::BuildGIBlas(const HE::UUID& meshId)
+HE::GiBvh OpenGLRenderer::BuildGIBvh(const HE::UUID& meshId)
 {
-	GIBlasRange range;
-	if (!m_contentManager) return range;
+	HE_PROFILE_SCOPE_N("GL::GiBuildBlas");
+	HE::GiBvh bvh;
+	if (!m_contentManager) return bvh;
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
-	if (!asset || asset->indices.empty()) return range;
+	if (!asset || asset->indices.empty()) return bvh;
 
 	// Same two layouts ResolveMesh uploads: cooked = interleaved 8-float
 	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
 	// tightly packed 3-float positions.
-	HE::GiBvh bvh;
 	if (asset->cooked && !asset->interleaved.empty())
 		bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
 		                     asset->indices.data(), asset->indices.size());
 	else if (!asset->vertices.empty())
 		bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
 		                     asset->indices.data(), asset->indices.size());
-	if (!bvh.valid()) return range;
+	return bvh;
+}
 
-	range.nodeOffset = static_cast<int32_t>(m_giNodesCpu.size());
-	range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
-	range.triOffset  = static_cast<int32_t>(m_giTrisCpu.size());
-	range.triCount   = static_cast<int32_t>(bvh.triangles.size());
-	range.valid      = true;
-	m_giNodesCpu.insert(m_giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
-	m_giTrisCpu.insert(m_giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
-	m_giBlasDirty = true;
-	return range;
+// One of the store's two arrays into its SSBO (`cap` elements). Between
+// rewrites only the tail [from, n) is new: glBufferSubData of just that. A
+// rewrite (compaction moved every range) or growth re-specifies the buffer with
+// headroom — GL orphans the old storage for draws still in flight.
+template <class T>
+static void uploadGiBlasSSBO(unsigned int ssbo, size_t& cap, const std::vector<T>& src, size_t from)
+{
+	const size_t n = src.size();
+	if (n == 0) return; // no instance points into it
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+	if (from > 0 && n <= cap)
+	{
+		glBufferSubData(GL_SHADER_STORAGE_BUFFER, static_cast<GLintptr>(from * sizeof(T)),
+		                static_cast<GLsizeiptr>((n - from) * sizeof(T)), src.data() + from);
+		return;
+	}
+	cap = n + n / 2;
+	glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(cap * sizeof(T)), nullptr, GL_STATIC_DRAW);
+	glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(n * sizeof(T)), src.data());
 }
 
 void OpenGLRenderer::UpdateGIAccel()
 {
+	HE_PROFILE_SCOPE_N("GL::GiUpdateAccel");
 	m_giInstanceCount = 0;
 	// Reflections reuse the acceleration structures without the probe/shadow
 	// passes, so the build also runs when ONLY they are enabled.
 	if (!(m_giEnabled || m_giReflEnabled) || !m_giSupported) return;
+
+	// Before any instance reads an offset: a compaction moves the ranges.
+	if (m_giBlas.compactIfWasteful())
+		HE_LOG_INFO(RHI, "OpenGLRenderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+		            m_giBlas.entries(), m_giBlas.tris().size());
 
 	// Same caster filter as the shadow pass / Metal's TLAS: castsShadow only,
 	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
@@ -6017,10 +6074,8 @@ void OpenGLRenderer::UpdateGIAccel()
 	m_giInstancesCpu.clear();
 	auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
 	{
-		auto it = m_giBlasCache.find(id);
-		if (it == m_giBlasCache.end())
-			it = m_giBlasCache.emplace(id, BuildGIBlas(id)).first;
-		return it->second;
+		if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
+		return m_giBlas.add(id, BuildGIBvh(id));
 	};
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
@@ -6091,17 +6146,12 @@ void OpenGLRenderer::UpdateGIAccel()
 	if (!m_giNodeSSBO)     glGenBuffers(1, &m_giNodeSSBO);
 	if (!m_giTriSSBO)      glGenBuffers(1, &m_giTriSSBO);
 	if (!m_giInstanceSSBO) glGenBuffers(1, &m_giInstanceSSBO);
-	if (m_giBlasDirty)
+	if (m_giBlas.dirty())
 	{
-		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giNodeSSBO);
-		glBufferData(GL_SHADER_STORAGE_BUFFER,
-		             static_cast<GLsizeiptr>(m_giNodesCpu.size() * sizeof(HE::GiBvhNode)),
-		             m_giNodesCpu.data(), GL_STATIC_DRAW);
-		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giTriSSBO);
-		glBufferData(GL_SHADER_STORAGE_BUFFER,
-		             static_cast<GLsizeiptr>(m_giTrisCpu.size() * sizeof(HE::GiBvhTriangle)),
-		             m_giTrisCpu.data(), GL_STATIC_DRAW);
-		m_giBlasDirty = false;
+		HE_PROFILE_SCOPE_N("GL::GiUploadBlas");
+		uploadGiBlasSSBO(m_giNodeSSBO, m_giNodeCap, m_giBlas.nodes(), m_giBlas.uploadFromNodes());
+		uploadGiBlasSSBO(m_giTriSSBO,  m_giTriCap,  m_giBlas.tris(),  m_giBlas.uploadFromTris());
+		m_giBlas.markUploaded();
 	}
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giInstanceSSBO);
 	glBufferData(GL_SHADER_STORAGE_BUFFER,
@@ -6118,12 +6168,10 @@ void OpenGLRenderer::DestroyGIAccel()
 	if (m_giLandSSBO)     { glDeleteBuffers(1, &m_giLandSSBO);     m_giLandSSBO     = 0; }
 	m_giLandWeightTex.clear();
 	m_giLandCount = 0;
-	m_giBlasCache.clear();
-	m_giNodesCpu.clear();
-	m_giTrisCpu.clear();
+	m_giNodeCap = m_giTriCap = 0;
+	m_giBlas.clear();
 	m_giInstancesCpu.clear();
 	m_giInstanceCount = 0;
-	m_giBlasDirty     = false;
 }
 
 OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int program) const
@@ -8894,6 +8942,10 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
 	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTex : 0;
 	if (array) key += "#arr";
+	// A miss is cached (no file open per frame) until files may have appeared: an
+	// EngineContent download landing after this first ask (Thema 210).
+	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+	                             [](unsigned int tex) { return tex == 0; });
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTex : 0);
 	unsigned int tex = 0;
@@ -10870,17 +10922,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (m.ebo) glDeleteBuffers(1, &m.ebo);
 			m_meshCache.erase(it);
 		}
-		// GI BLAS ranges live in concatenated arrays — a single mesh can't be
-		// spliced out cheaply, so an edited mesh drops the whole cache; it
-		// rebuilds lazily on the next GI-active frame (mirrors Metal's per-mesh
-		// BLAS release, just coarser).
-		if (m_giBlasCache.count(id))
-		{
-			m_giBlasCache.clear();
-			m_giNodesCpu.clear();
-			m_giTrisCpu.clear();
-			m_giBlasDirty = true;
-		}
+		// Just this mesh's BLAS (mirrors Metal's per-mesh release): its range
+		// turns into dead space and it rebuilds lazily on the next GI-active
+		// frame. Dropping the whole cache here cost every BVH of the scene per
+		// re-stitched terrain chunk (Thema 221, GiBlasStore.h).
+		m_giBlas.erase(id);
 	}
 	// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
 	// box without changing which objects exist → re-check the probe grid fit.
@@ -11815,7 +11861,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 				// Custom-material programs: forward (transparency + forward-routing)
 				// and, when the material has a G-buffer variant, its MRT program.
-				unsigned int matProg = 0, gbProg = 0; bool hasCustom = false;
+				unsigned int matProg = 0, gbProg = 0, gbInstProg = 0; bool hasCustom = false;
 				std::vector<float> mParams; unsigned int mGtex[4] = { 0, 0, 0, 0 }; int mGtexCount = 0;
 #if defined(HE_HAVE_SHADERC)
 				{
@@ -11834,7 +11880,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// carry no G-buffer GLSL yet).
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+						{
 							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							// A batch draws once with the instanced twin (2e); only
+							// built for batches, and 0 sends it back to the loop.
+							if (gbProg && !dc.instanceTransforms.empty() && m_instanceVBO
+							    && RenderSorter::graphInstancingEnabled())
+								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
+								                                       /*gbuffer=*/true, /*instanced=*/true);
+						}
 						if (ma)
 						{
 							mParams = !dc.paramOverride.empty() ? dc.paramOverride
@@ -11975,6 +12029,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
 					glActiveTexture(GL_TEXTURE0);
+					if (gbInstProg)
+					{
+						// The whole batch in one draw: its own program, the binds
+						// above (blocks and units are per program state, applied
+						// at link), U.mvp = viewProj, the models at attribs 4-7.
+						glUseProgram(gbInstProg);
+						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
+						glUseProgram(m_gbufferProgram);
+						continue;
+					}
 					// Only the per-object block changes between the instances of a
 					// batch; program, params and textures above stay bound.
 					auto drawGraphInstance = [&](const glm::mat4& t) {
@@ -12128,7 +12193,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// built-in instanced one would swap the look (no wind, no alpha discard,
 			// flat PBR) — such a batch is drawn instance by instance below, the rule
 			// Metal applies too (cMaterialPipeline == nullptr).
-			unsigned int matProg = 0;
+			// Since 2e (Thema 182) such a batch draws ONCE with the material's
+			// instanced twin (matInstProg); 0 (baked variant, failed build,
+			// HE_GRAPH_INSTANCING=0) keeps the loop.
+			unsigned int matProg = 0, matInstProg = 0;
 #if defined(HE_HAVE_SHADERC)
 			{
 				uint64_t shKey; std::string shFrag, shVert;
@@ -12140,6 +12208,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					if (matProg && !dc.instanceTransforms.empty() && m_instanceVBO
+					    && RenderSorter::graphInstancingEnabled())
+						matInstProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre,
+						                                        /*gbuffer=*/false, /*instanced=*/true);
 				}
 			}
 #endif
@@ -12264,6 +12336,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glActiveTexture(GL_TEXTURE13);
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
+					}
+					if (matInstProg)
+					{
+						// The whole batch in one draw (the binds above are context
+						// state; blocks and units are set per program at link).
+						glUseProgram(matInstProg);
+						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
+						glUseProgram(m_unlitProgram); // restore for the next single-draw
+						continue;
 					}
 					// Only the per-object block changes between the instances of a
 					// batch; program, lighting, params and textures stay bound.

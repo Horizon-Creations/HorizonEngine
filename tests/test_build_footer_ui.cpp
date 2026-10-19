@@ -10,8 +10,10 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <nlohmann/json.hpp>   // a mid-run state recorded from a live export
 
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -360,4 +362,73 @@ TEST_CASE("Build lock: only a running EXPORT locks the project")
 	BPD::Build::finish(true, "OK: done");
 	CHECK_FALSE(BPD::exportRunning());    // and the end of the run does
 	frames(bits, 3);
+}
+
+// ── An export's rings, in the order the run fills them (topic 222 step 6) ────
+// The game is the export's first build now: Setup, Build game, (Build
+// HorizonCode,) Package, Clean up. Starting a step closes the ones above it and
+// leaves the ones below pending, so a list in run order fills top to bottom.
+// HE_EXPORT_STEPS_SNAPSHOT names a mid-run state recorded from a live export
+// (scripts/he_export_step_order_live.py midrun-*.json); it is replayed instead of
+// the built-in one, and HE_UI_DUMP_DIR gets the picture as export_steps_midrun.bmp.
+
+TEST_CASE("Build window: an export's rings fill in list order, Build game first")
+{
+	Harness h;
+	ContextBits bits;
+
+	struct Ring { std::string name, state; float progress; std::string detail; };
+	std::vector<Ring> rings = {
+		{ "Setup", "done", 1.0f, "" }, { "Build game", "running", 0.62f, "62 %" },
+		{ "Build HorizonCode", "pending", 0.0f, "" }, { "Package", "pending", 0.0f, "" },
+		{ "Clean up", "pending", 0.0f, "" } };
+	std::string activity = "Compiling the game against the engine SDK\xe2\x80\xa6";
+	if (const char* p = std::getenv("HE_EXPORT_STEPS_SNAPSHOT"); p && *p)
+	{
+		std::ifstream in(p);
+		REQUIRE(in);
+		const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+		REQUIRE_FALSE(j.is_discarded());
+		rings.clear();
+		for (const auto& s : j.at("steps"))
+			rings.push_back({ s.at("name").get<std::string>(), s.at("state").get<std::string>(),
+			                  s.value("progress", 0.0f), s.value("detail", std::string()) });
+		activity = j.value("activity", std::string());
+	}
+
+	std::vector<std::string> names;
+	for (const Ring& r : rings) names.push_back(r.name);
+	REQUIRE(names.size() >= 2);
+	CHECK(names[0] == "Setup");
+	CHECK(names[1] == "Build game");
+	CHECK(names.back() == "Clean up");
+
+	// Replayed the way the worker drives it: each step begun in list order.
+	BPD::Build::begin(names, BPD::Kind::Export);
+	for (size_t i = 0; i < rings.size(); ++i)
+	{
+		if (rings[i].state == "pending") continue;
+		BPD::Build::stepBegin(static_cast<int>(i));
+		BPD::Build::stepProgress(rings[i].progress);
+		if (rings[i].state == "failed") BPD::Build::stepFailed(static_cast<int>(i));
+	}
+	BPD::Build::setActivity(activity);
+	BPD::requestOpen();
+	frames(bits, 4);
+
+	// The model shows the state the run was in: nothing below a pending step has started.
+	const auto snap = BPD::snapshot();
+	REQUIRE(snap.steps.size() == rings.size());
+	bool seenPending = false;
+	for (size_t i = 0; i < snap.steps.size(); ++i)
+	{
+		const int want = rings[i].state == "pending" ? 0 : rings[i].state == "running" ? 1
+		               : rings[i].state == "done" ? 2 : 3;
+		CHECK(snap.steps[i].state == want);
+		if (want == 0) seenPending = true;
+		else CHECK_FALSE(seenPending);
+	}
+	dump(bits, "export_steps_midrun");
+	finishRun();
+	frames(bits, 2);
 }

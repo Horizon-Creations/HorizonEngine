@@ -857,6 +857,10 @@ void EditorUI::render(AppContext& ctx, float dt)
     // ── Help ▸ Check for Updates… ────────────────────────────────────────────
     // Before the branch as well: the Hub has a Help menu on macOS too.
     SelfUpdateDialog::Draw(ctx);
+    // The takeover runs on a worker (beginInstall below and in the guarded
+    // action); quit once it has HorizonUpdater waiting for this process.
+    if (SelfUpdateDialog::finishInstall() && ctx.quit)
+        ctx.quit();
 
     // ── Help ▸ Documentation ─────────────────────────────────────────────────
     // Before the branch, so the manual is readable on the Project Hub as well as
@@ -893,9 +897,8 @@ void EditorUI::render(AppContext& ctx, float dt)
         // Restart to Update with no project open: nothing unsaved to ask about,
         // so no guard. Not while a project is being opened — the request then
         // waits and is taken by renderEditor's guarded path once it is loaded.
-        if (!ProjectPreflight::busy() && SelfUpdateDialog::takeInstallRequest() &&
-            SelfUpdateDialog::beginInstall(ctx) && ctx.quit)
-            ctx.quit();
+        if (!ProjectPreflight::busy() && SelfUpdateDialog::takeInstallRequest())
+            SelfUpdateDialog::beginInstall(ctx);
         // Drawn after the hub so the welcome card sits on top of it. Draws nothing
         // once the user has answered it once (persisted in the editor config).
         TutorialPanel::renderWelcome(ctx);
@@ -2624,10 +2627,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		case GuardedAction::CloseProject:      doCloseProject();                   break;
 		case GuardedAction::Quit:              if (ctx.quit) ctx.quit();           break;
 		// Reached only through the prompt (or with nothing unsaved): start
-		// HorizonUpdater, and quit only if it really started. A failure leaves
-		// the editor, the scene and the install exactly as they were.
+		// HorizonUpdater on the update worker; finishInstall() quits only once it
+		// really started. A failure leaves the editor, the scene and the install
+		// exactly as they were.
 		case GuardedAction::InstallUpdate:
-			if (SelfUpdateDialog::beginInstall(ctx) && ctx.quit) ctx.quit();
+			SelfUpdateDialog::beginInstall(ctx);
 			break;
 		case GuardedAction::None:                                                  break;
 		}

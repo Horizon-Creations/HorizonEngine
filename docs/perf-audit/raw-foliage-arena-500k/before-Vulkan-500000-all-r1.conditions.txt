@@ -1,0 +1,7 @@
+== before-Vulkan-500000-all-r1
+before:
+  cpu 6%  procs:
+  gpu (util, temp, sm clock): 34 %, 48, 1215 MHz
+after (rc=0):
+  cpu 14%  procs:
+  gpu (util, temp, sm clock): 32 %, 48, 1770 MHz

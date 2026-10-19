@@ -5,6 +5,7 @@
 #include <Net/LoopbackTransport.h>
 #include <Net/NetSession.h>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1276,6 +1277,87 @@ TEST_CASE("CollabSession: the host's asset save reaches clients")
     REQUIRE(arrived);
     CHECK(got.path == "Content/Scripts/Player.hcode");
     CHECK(got.bytes == payload);
+}
+
+TEST_CASE("CollabSession: a host's asset is serialized once for all peers, not once per peer")
+{
+    // NET-103. Three peers on a transport that fans out (a relay): every frame
+    // of the transfer — Begin, each chunk, End — must be handed down exactly
+    // once, addressed to all three, instead of three per-peer copies.
+    struct Fan final : ITransport {
+        std::deque<NetEvent> ev{ { NetEventType::Connected, 1, {} },
+                                 { NetEventType::Connected, 2, {} },
+                                 { NetEventType::Connected, 3, {} } };
+        std::vector<std::vector<ConnectionId>> to;
+        std::vector<std::vector<std::uint8_t>> frames;
+        int plainSends = 0;
+        void update() override {}
+        void send(ConnectionId, const std::uint8_t*, std::size_t, SendMode) override {
+            ++plainSends;
+        }
+        bool poll(NetEvent& out) override {
+            if (ev.empty()) return false;
+            out = ev.front();
+            ev.pop_front();
+            return true;
+        }
+        void disconnect(ConnectionId) override {}
+        std::size_t connectionCount() const override { return 3; }
+        bool fansOut() const override { return true; }
+        void sendToMany(const ConnectionId* t, std::size_t n, const std::uint8_t* d,
+                        std::size_t len, SendMode) override {
+            to.emplace_back(t, t + n);
+            frames.emplace_back(d, d + len);
+        }
+    };
+
+    Fan t;
+    NetSession net(&t, NetRole::Host);
+    CollabSession::Config cfg;
+    cfg.chunkBytes = 1000;
+    CollabSession host(&net, NetRole::Host, cfg);
+    net.pump();
+    REQUIRE(net.connections().size() == 3);
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'0103ull;
+    REQUIRE(host.requestLock(kAsset));
+    t.to.clear();
+    t.frames.clear();
+    t.plainSends = 0;
+
+    const auto payload = makeBlob(4500);   // five chunks, the last one short
+    REQUIRE(host.sendAsset(kAsset, "Content/Data/Table.hdata", payload));
+
+    REQUIRE(t.frames.size() == 1 + 5 + 1);
+    CHECK(t.plainSends == 0);
+    for (const auto& who : t.to) CHECK(who == std::vector<ConnectionId>{ 1, 2, 3 });
+
+    auto idOf = [](const std::vector<std::uint8_t>& f) {
+        REQUIRE(f.size() >= 2);
+        return static_cast<MessageId>(f[0] | (f[1] << 8));
+    };
+    const MessageId begin = idOf(t.frames.front());
+    const MessageId chunk = idOf(t.frames[1]);
+    const MessageId end   = idOf(t.frames.back());
+    CHECK(begin != chunk);
+    CHECK(end != chunk);
+    CHECK(begin != end);
+
+    // The chunks, in order, are the asset.
+    std::vector<std::uint8_t> joined;
+    for (std::size_t i = 1; i + 1 < t.frames.size(); ++i) {
+        CHECK(idOf(t.frames[i]) == chunk);
+        const std::vector<std::uint8_t>& f = t.frames[i];
+        BitReader r(f.data() + 2, f.size() - 2);
+        std::uint32_t from = 0, len = 0;
+        REQUIRE(r.readUInt32(from));
+        REQUIRE(r.readUInt32(len));
+        CHECK(from == host.localId());
+        std::vector<std::uint8_t> part(len);
+        REQUIRE(r.readBytes(part.data(), len));
+        joined.insert(joined.end(), part.begin(), part.end());
+    }
+    CHECK(joined == payload);
 }
 
 // ─── Structural changes ──────────────────────────────────────────────────────

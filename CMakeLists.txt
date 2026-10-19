@@ -56,6 +56,18 @@ endif()
 # platforms and subsumes the per-target settings on lz4_static/zstd_static below.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# ─── Floating-point contraction (GCC) ────────────────────────────────────────
+# Jolt adds -mavx2 -mfma as PUBLIC options on x86, so everything linking it gets
+# FMA, and GCC's default for GNU C++ is -ffp-contract=fast: it fuses a multiply
+# and an add even across statements, after inlining, differently at every call
+# site. The same glm product then rounds differently in two functions, and the
+# engine relies on "same maths, same bits" (LODSystem's sibling memo against
+# worldMatrixOf, propagateTransforms against worldPositionOf): on Linux 37 of 800
+# LOD decisions on an exact boundary flipped (tests/test_lod.cpp). Jolt builds
+# itself with -ffp-contract=off for the same reason; MSVC does not contract, and
+# Clang's default (on) fuses only within one expression.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>)
+
 # ─── SDL3 ──────────────────────────────────────────────────────────────────────
 include(FetchContent)
 FetchContent_Declare(
@@ -806,6 +818,11 @@ else()
     message(STATUS "HorizonEngine: in-engine profiler compiled OUT (zero overhead)")
 endif()
 
+# ── Build profile: dev | release (HE_BUILD_PROFILE, he_target_build_profile) ──
+# Only defines the option and the function; no engine target calls it yet, so
+# every target compiles as before (the header's fallback is dev).
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonBuildProfile.cmake")
+
 # ─── Deploy directories ────────────────────────────────────────────────────────
 # Overridable with -DDEPLOY_DIR=... (CI packaging points it at the workspace; the
 # default is the local dev deploy layout).
@@ -939,6 +956,9 @@ add_subdirectory(src/HE_Scene)
 # After HE_Scene: the Python plugin links it (and is loaded by it at runtime).
 add_subdirectory(src/HE_Python)
 add_subdirectory(src/HE_Rendering)
+# The four engine libraries as one HorizonEngine library, for the game and the
+# SDK only. After the four and the Python plugin, before HE_Game, which links it.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonEngineBundle.cmake")
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
 # An app-flavour tree builds a runtime, not an editor. Skipping the subdirectory
@@ -955,6 +975,10 @@ endif()
 if(TARGET HorizonEditor AND TARGET HorizonGame)
     add_dependencies(HorizonEditor HorizonGame)
 endif()
+
+# ─── Engine SDK (install component HorizonSDK, target HorizonSDK) ─────────────
+# After every library: it reads their final interface definitions.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonSDK.cmake")
 
 # ─── Tests ─────────────────────────────────────────────────────────────────────
 option(HE_BUILD_TESTS "Build the doctest unit tests" ON)

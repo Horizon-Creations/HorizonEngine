@@ -9,12 +9,15 @@
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include "HcFallbackReport.h"            // which classes ship interpreted, and why
+#include "ExportSdkBuild.h"              // the game compiled from an engine SDK (topic 211)
+#include "ExportSdkGateUi.h"             // what the export's game compile will do, or what stops it
 #include "AppMetadataRows.h"             // icon, version, splash — the same rows Project Settings draws
 #include "NotificationStore.h"           // a project write that fails has to say so
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
 #include <HorizonCode/HcClassResolve.h>
+#include <HorizonCode/HcCompiledLoader.h>  // compiledLibraryName
 #include <HorizonScene/HorizonScene.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -262,11 +265,126 @@ static std::thread       s_exportThread;
 // another popup is the current window becomes its child and closes with it, so
 // the Export button only asks and render() does it one level up.
 static bool              s_startRequest = false;
+// An export waiting for the toolchain (topic 222 step 3). Every export compiles
+// its game, so Export pressed without cmake or a compiler does not start a run
+// that must fail: it parks here, Tool Setup opens on the missing row, and the
+// run starts by itself once the probe finds both. Closing Tool Setup with them
+// still missing drops it.
+static bool              s_waitingForTools  = false;
+static bool              s_toolSetupOpened  = false;   // requestShowFor was called for this wait
+static bool              s_toolSetupSeen    = false;   // and the dialog has been on screen since
 
 namespace Build = BuildProgressDialog::Build;
 
 // Defined below render(), which is where a run is started from.
 void startExport(AppContext& ctx);
+
+// What the game compile of an export with the dialog's current settings will
+// find: the SDK of its profile (HE_GAME_SDK_DIR, else beside the editor), the
+// target, the toolchain. Read by the dialog every frame and by every door that
+// starts a run.
+static HE::ExportSdk::ExportGate currentExportGate(AppContext& ctx)
+{
+	const std::filesystem::path base =
+		SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath()) : std::filesystem::path{};
+	const std::string profile = HE::ExportSdk::sdkProfileFor(s_exportDevTools);
+	const char* env = std::getenv("HE_GAME_SDK_DIR");
+	const ExportPlatform platform = exportPlatformFromName(s_exportPlatform);
+	auto gate = HE::ExportSdk::checkExportGate(
+		HE::ExportSdk::findGameSdk(base, profile, env ? std::filesystem::path(env) : std::filesystem::path{}),
+		profile, platform == ExportPlatform::Host, ctx.toolchainProbe, exportPlatformName(platform));
+	// This machine's own platform by name runs on the GameRuntimes/<name> bundle
+	// of a cross export; the compiled game is the Host target's.
+#if defined(__APPLE__)
+	constexpr ExportPlatform kThisPlatform = ExportPlatform::MacOS;
+#elif defined(_WIN32)
+	constexpr ExportPlatform kThisPlatform = ExportPlatform::Windows;
+#else
+	constexpr ExportPlatform kThisPlatform = ExportPlatform::Linux;
+#endif
+	if (platform == kThisPlatform)
+		gate.why = "the game is compiled for this machine as the Host target: pick Host";
+	return gate;
+}
+
+// A run that cannot start, said where runs are watched: the Build window, one
+// failed Setup step, nothing serialized and nothing written.
+static void failBeforeStart(const std::string& why)
+{
+	const std::string m = "Error: export not started: " + why;
+	Build::begin({ "Setup" });
+	Build::stepBegin(0);
+	Build::log(2, m, 0);
+	Build::stepFailed(0);
+	Build::finish(false, m);
+	BuildProgressDialog::requestOpen();
+}
+
+// The doors a human uses (Export, Build Again): start the run when its game can
+// be compiled, park it when only the toolchain is missing (Tool Setup opens on
+// the row, the run continues by itself), refuse it otherwise.
+static void requestStart(AppContext& ctx)
+{
+	const auto gate = currentExportGate(ctx);
+	switch (gate.state)
+	{
+	case HE::ExportSdk::GateState::Ready:
+		s_waitingForTools = false;
+		startExport(ctx);
+		return;
+	case HE::ExportSdk::GateState::Blocked:
+		s_waitingForTools = false;
+		failBeforeStart(gate.why);
+		return;
+	case HE::ExportSdk::GateState::Waiting:
+	case HE::ExportSdk::GateState::NeedTools:
+		// No notification: right after launch the probe is merely still running
+		// and the run starts a moment later; a real gap opens Tool Setup, whose
+		// purpose line says what waits.
+		s_waitingForTools = true;
+		s_toolSetupOpened = s_toolSetupSeen = false;   // render() pumps it from this frame on
+		return;
+	}
+}
+
+// Every frame while an export is parked: start it once the toolchain is there,
+// open Tool Setup when the probe says what is missing, drop it when the dialog
+// is closed with the tools still missing (and nothing installing).
+static void pumpWaitingExport(AppContext& ctx)
+{
+	if (!s_waitingForTools || s_exportRunning.load() || BuildProgressDialog::Build::running()) return;
+	const auto gate = currentExportGate(ctx);
+	switch (gate.state)
+	{
+	case HE::ExportSdk::GateState::Ready:
+		s_waitingForTools = false;
+		startExport(ctx);
+		return;
+	case HE::ExportSdk::GateState::Blocked:
+		s_waitingForTools = false;
+		failBeforeStart(gate.why);
+		return;
+	case HE::ExportSdk::GateState::Waiting:   // a (re)check is running: the answer decides
+		return;
+	case HE::ExportSdk::GateState::NeedTools:
+		if (!s_toolSetupOpened)
+		{
+			ToolSetupDialog::requestShowFor(ExportSdkGateUi::toolFor(gate),
+			                                ExportSdkGateUi::kToolSetupPurpose);
+			s_toolSetupOpened = true;
+		}
+		else if (ToolSetupDialog::isShowing())
+			s_toolSetupSeen = true;
+		else if (s_toolSetupSeen && !ctx.toolchainInstalling)
+		{
+			s_waitingForTools = false;
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Export cancelled: " + gate.why,
+			               "Every export compiles its game from the engine SDK. Install cmake and a "
+			               "C++ compiler (Edit > Preferences > Editor > Tool Status) and export again.");
+		}
+		return;
+	}
+}
 
 // Moved to BuildProgressDialog: the game-logic build reports into the same
 // window and reads its rings the same way.
@@ -510,7 +628,7 @@ void open(AppContext& ctx)
 
 bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string* outError)
 {
-	const auto fail = [outError](const char* why) { if (outError) *outError = why; return false; };
+	const auto fail = [outError](const std::string& why) { if (outError) *outError = why; return false; };
 
 	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
 		return fail("no project is open");
@@ -541,8 +659,163 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 	reloadGameConfigRows(ctx);
 	s_exportBundleKey.clear();
 
+	// Every export compiles its game from the SDK (topic 222 step 3). This door
+	// does not park a run behind Tool Setup the way the button does: nobody is
+	// at the dialog to press Install, so the caller hears why instead.
+	const auto gate = currentExportGate(ctx);
+	if (gate.state == HE::ExportSdk::GateState::Waiting)
+		return fail("the editor is still checking for cmake and a C++ compiler; ask again in a moment");
+	if (gate.state == HE::ExportSdk::GateState::NeedTools)
+		return fail("every export compiles its game from the engine SDK, and " + gate.why +
+		            "; install it through the editor's Tool Setup");
+	if (gate.state == HE::ExportSdk::GateState::Blocked)
+		return fail("every export compiles its game from the engine SDK: " + gate.why);
+
 	startExport(ctx);
 	return true;
+}
+
+// ─── Compile game from SDK (export worker: built first, installed last) ─────
+// The build cache of one project + profile: beside EngineContentCache in the
+// user data dir (TMPDIR only without one; macOS purges it). Its
+// HEGameBuildConfig.h is also where the next incremental export finds the key.
+static std::filesystem::path sdkGameWorkDir(const std::string& projName, const std::string& profile)
+{
+	std::error_code ec;
+	std::filesystem::path cacheRoot = GlobalState::userDataDir();
+	cacheRoot = cacheRoot.empty() ? std::filesystem::temp_directory_path(ec) / "HorizonSdkGame"
+	                              : cacheRoot / "SdkGameBuilds";
+	return HE::ExportSdk::buildWorkDir(cacheRoot, projName, profile);
+}
+
+// The game is the export's first build (topic 222 step 6), not its last step:
+// ProjectExporter::planExport fixes what project.hcfg will say (layout, pak key,
+// startup scene UUID) before anything is packed, the game is compiled from the
+// SDK template with exactly that compiled in, and once the exporter has laid the
+// runtime down, installSdkGame swaps the built game over the runtime's
+// executable as part of Clean up. There is no prebuilt game to fall back on
+// (topic 222 step 3): a compile that fails ends the export before anything is
+// packed, and an install that fails takes the runtime's executable out of the
+// folder, so a folder without its compiled game cannot ship or start as if it
+// had. `text` is appended to the result line when it worked and is the error
+// otherwise.
+struct SdkGameResult
+{
+	bool ok = false;
+	std::string text;
+	std::filesystem::path artifact;   // the built game, for installSdkGame
+	bool cacheHit = false;
+};
+static SdkGameResult compileGameFromSdk(const ProjectConfig& planned, const std::filesystem::path& settingsFile,
+                                        const HE::ExportSdk::GameSdk& sdk, const std::string& toolchain,
+                                        const std::string& projName, int step)
+{
+	namespace fs = std::filesystem;
+	const std::string profile = sdk.profile;
+	const auto fail = [&](const std::string& why)
+	{
+		Build::log(2, "Compile game from the engine SDK: " + why, step);
+		Build::stepFailed(step);
+		return SdkGameResult{ false, "the game could not be compiled from the engine SDK (" + why +
+		                             "); nothing was packed" };
+	};
+	if (!sdk.valid()) return fail(HE::ExportSdk::unavailableReason(sdk, profile, true, true));
+	Build::log(0, "Engine SDK (" + profile + "): " + sdk.root.string(), step);
+
+	// The header holds the pak key: it goes to a private work dir, never into the
+	// export folder. The work dir is the build cache: kept per project and
+	// profile, reused while its key (SDK, profile, toolchain, defines) holds.
+	std::error_code ec;
+	const fs::path workDir = sdkGameWorkDir(projName, profile);
+	fs::create_directories(workDir, ec);
+	const fs::path header = workDir / "HEGameBuildConfig.h";
+	auto spec = HE::ExportSdk::makeBuildSpec(sdk, workDir, header);
+
+	Build::setActivity("Checking the build cache\xe2\x80\xa6");
+	const auto cache = HE::ExportSdk::prepareBuildCache(
+		workDir, HE::ExportSdk::buildCacheKey(sdk, spec, toolchain));
+	if (cache.hit)
+		Build::log(0, "Build cache hit (" + profile + "): reusing " + workDir.string() +
+		              ", only what changed is compiled", step);
+	else
+		Build::log(0, "Build cache miss (" + cache.changed + "): fresh build in " + workDir.string(), step);
+
+	Build::setActivity("Writing the compiled-in configuration\xe2\x80\xa6");
+	if (const std::string why = HE::ExportSdk::writeBuildConfigFromPlan(planned, settingsFile, profile, header);
+	    !why.empty())
+		return fail(why);
+
+	Build::setActivity(cache.hit ? "Compiling what changed against the engine SDK\xe2\x80\xa6"
+	                             : "Compiling the game against the engine SDK\xe2\x80\xa6");
+	Build::stepProgress(0.1f);
+	spec.cancel = Build::cancelFlag();
+	Build::setCancelable(true);
+	const auto built = HE::hccg::buildDylib(spec,
+		[step](const std::string& line)
+		{
+			const int sev = line.find("error") != std::string::npos ? 2
+			              : line.find("warning") != std::string::npos ? 1 : 0;
+			Build::log(sev, line, step);
+			if (const auto p = toolchainProgress(line))
+				Build::stepProgress(0.1f + 0.9f * *p);
+		});
+	Build::setCancelable(false);
+	if (!built.ok)
+	{
+		if (!(spec.cancel && spec.cancel->load())) HE::ExportSdk::forgetBuildCache(workDir);
+		return fail(built.message);
+	}
+	Build::stepProgress(1.0f);
+	Build::log(0, "Built " + built.artifact.filename().string() + " (" + profile + ")", step);
+	return SdkGameResult{ true, {}, built.artifact, cache.hit };
+}
+
+// Clean up's share of the game: the built executable and engine libraries over
+// the runtime's, links to the bundled copies, a fresh signature. `step` is the
+// ring the lines are filed under.
+static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk::GameSdk& sdk,
+                                    const SdkGameResult& built, int step)
+{
+	namespace fs = std::filesystem;
+	const std::string profile = sdk.profile;
+	const auto fail = [&](const std::string& why)
+	{
+		Build::log(2, "Install the game compiled from the engine SDK: " + why, step);
+		std::error_code ec;
+		if (!res.executablePath.empty() && fs::remove(res.executablePath, ec))
+			Build::log(2, "Removed " + res.executablePath.filename().string() + " from the export: "
+			              "it ships only a game compiled from the SDK", step);
+		Build::setLaunchTarget({}, false);
+		Build::stepFailed(step);
+		return SdkGameResult{ false, "the game compiled from the engine SDK could not be installed (" +
+		                             why + "); the export has no game executable" };
+	};
+	if (res.executablePath.empty()) return fail("the export has no game executable to replace");
+	const fs::path exe = res.executablePath;
+
+	Build::setActivity("Installing the game compiled from the engine SDK\xe2\x80\xa6");
+	std::vector<std::string> copied;
+	if (const std::string why = HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied);
+	    !why.empty())
+		// A half-done copy is neither game: say it loudly.
+		return fail(why + "; the export folder may be mixed, export again");
+	if (const int n = HE::ExportSdk::relinkToBundledDeps(HE::ExportSdk::exportEngineDir(exe), copied); n > 0)
+		Build::log(0, std::to_string(n) + " library link(s) moved to the bundled copies", step);
+#if defined(__APPLE__)
+	// Replacing Contents/MacOS/* broke the bundle's signature; sign it again the
+	// way the exporter does for a local run (ad hoc).
+	if (const fs::path app = exe.parent_path().parent_path().parent_path(); app.extension() == ".app")
+	{
+		Build::setActivity("Signing " + app.filename().string() + "\xe2\x80\xa6");
+		const std::string cmd = "codesign --force --deep --sign - \"" + app.string() + "\" 2>&1";
+		if (std::system(cmd.c_str()) != 0)
+			Build::log(1, "codesign of " + app.filename().string() + " failed", step);
+	}
+#endif
+	Build::log(0, "Game compiled from the SDK (" + profile + "), " + std::to_string(copied.size()) +
+	              " file(s) replaced; configuration and pak key compiled in", step);
+	return SdkGameResult{ true, std::string(" — game compiled from the ") + profile + " SDK" +
+	                            (built.cacheHit ? " (build cache hit)" : "") };
 }
 
 // ─── The modal itself (drawn every frame; also reaps a finished worker) ──────
@@ -985,23 +1258,21 @@ void render(AppContext& ctx)
             // target instead of a two-character mark beside it, and F1 opens it.
             EditorWidgets::checkbox("Incremental packing",   &s_exportIncremental);
 
-            // "Compile HorizonCode" needs cmake + a working compiler; disable it (and
-            // force it off) when the startup probe couldn't find them, so the export
-            // can't try a codegen build that would just fail. Null probe = not finished
-            // yet → leave it enabled. Graphs still ship and run interpreted regardless.
-            const bool hcToolchainOk =
-                !ctx.toolchainProbe ||
-                (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
-            // The same for the codegen SDK (engine headers + HorizonCore's link
-            // library) the build compiles against: the editor's build stages it
-            // into <editor>/SDK, so missing means a broken or hand-assembled
-            // install — and a compile that cannot succeed. Looked up once: it
-            // belongs to the installation, not to the project.
-            static const bool s_hcSdkFound = HE::hccg::resolveSdk(
-                SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
-                                  : std::filesystem::path{}).valid();
-            const bool hcCompileOk = hcToolchainOk && s_hcSdkFound;
-            if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
+            // The game itself is compiled from the engine SDK of the export's
+            // profile, every time (topic 222 step 3: no option, no prebuilt game):
+            // Dev Tools = the dev lib set, otherwise release, configuration and
+            // pak key compiled in. The line says what the export will compile
+            // against, or what stops it before anything runs.
+            const HE::ExportSdk::ExportGate sdkGate = currentExportGate(ctx);
+            {
+                EditorWidgets::WrapText wrap(550.0f);
+                ExportSdkGateUi::drawGameCompileStatus(ctx, sdkGate);
+            }
+
+            // Compiled HorizonCode is built with the same toolchain and against the
+            // same SDK as the game, so whatever stops that stops the export as a
+            // whole and is said once, above. Graphs ship and can run interpreted
+            // regardless.
             EditorWidgets::checkbox("Compile HorizonCode",   &s_exportCompileHC);
             // Kept in application projects, but said out loud that it is not the
             // default answer there: an app's graphs run on events — a click, a
@@ -1050,30 +1321,6 @@ void render(AppContext& ctx)
                 }
                 ImGui::Unindent();
             }
-            if (!hcCompileOk) ImGui::EndDisabled();
-            if (!hcCompileOk)
-            {
-                // The dialog's width is pinned (SetNextWindowSize above), so this
-                // conditional line cannot widen it — the only thing it can do when
-                // it does not fit is lose its tail, and the tail is the half that
-                // says the export still works ("will ship interpreted"). Same
-                // absolute column as the rest.
-                EditorWidgets::WrapText wrap(550.0f);
-                if (!hcToolchainOk)
-                {
-                    // The notice carries the way out: "Set Up…" opens the tool
-                    // dialog on the missing row (cmake first, then the compiler).
-                    const ToolSetupDialog::Tool missing =
-                        (ctx.toolchainProbe && !ctx.toolchainProbe->cmakeFound)
-                            ? ToolSetupDialog::Tool::Cmake : ToolSetupDialog::Tool::Compiler;
-                    ToolSetupDialog::drawMissingBanner(ctx, missing,
-                        "Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
-                }
-                else
-                    ImGui::TextDisabled("Disabled — this editor has no HorizonCode SDK (<editor>/SDK). "
-                                        "HorizonCode will ship interpreted.");
-            }
-
             if (exportAppBundleApplicable(s_exportPlatform))
             {
                 EditorWidgets::checkbox("macOS .app bundle", &s_exportAppBundle);
@@ -1153,9 +1400,12 @@ void render(AppContext& ctx)
             // Build::running() as well as our own flag: the game-logic compile
             // is a second worker reporting into the same window, and starting an
             // export on top of it would overwrite the run it is watching.
+            // A Blocked game compile (another target platform, no SDK of the
+            // profile) is nothing Export could fix; the line above says why.
             const bool canExport = !s_exportOutputDir.empty()
                                 && ctx.contentManager && !running
-                                && !BuildProgressDialog::Build::running();
+                                && !BuildProgressDialog::Build::running()
+                                && sdkGate.state != HE::ExportSdk::GateState::Blocked;
             if (!canExport) ImGui::BeginDisabled();
             if (EditorWidgets::primaryButton("Export", ImVec2(110, 0)))
             {
@@ -1194,8 +1444,9 @@ void render(AppContext& ctx)
     if (s_startRequest && !s_exportRunning.load())
     {
         s_startRequest = false;
-        startExport(ctx);
+        requestStart(ctx);
     }
+    pumpWaitingExport(ctx);
 #else
 	(void)ctx;
 #endif // HE_IMGUI_ENABLED
@@ -1217,6 +1468,16 @@ void startExport(AppContext& ctx)
 #ifdef HE_IMGUI_ENABLED
             ProjectManager* pm = ctx.projectManager;
             if (!pm || !ctx.contentManager) return;
+            // Every export compiles its game from the SDK: one that cannot is
+            // refused before a single scene is serialized. The doors decide what
+            // to do about a missing toolchain (requestStart parks, the MCP door
+            // answers); this is the backstop.
+            const HE::ExportSdk::ExportGate gate = currentExportGate(ctx);
+            if (!gate.ready())
+            {
+                failBeforeStart(gate.why);
+                return;
+            }
             const std::filesystem::path projectRoot =
                 std::filesystem::path(pm->currentProject().path).parent_path();
             {
@@ -1473,18 +1734,36 @@ void startExport(AppContext& ctx)
                 // Setup is already over by the time anyone sees it — the work above
                 // runs on the UI thread — but it is where a scene that will not
                 // load or a missing runtime is reported, so it is a step and not a
-                // footnote. Build only exists when something is actually compiled:
-                // an export with no HorizonCode to translate would otherwise show a
-                // ring that turns green without ever having done anything.
+                // footnote. The rings are listed in the order the worker runs them,
+                // because Build::stepBegin closes the ones before it and a ring
+                // further up that filled last would read as a step out of turn.
+                // Build game comes first and every run has it: the game is
+                // compiled from the SDK with a configuration planned before the
+                // pack (topic 222 step 6), so the longest build of the export
+                // fails before anything is packed. Build HorizonCode only exists
+                // when something is actually compiled: an export with no
+                // HorizonCode to translate would otherwise show a ring that turns
+                // green without ever having done anything. Clean up stays last
+                // and also installs the built game over the runtime's executable.
                 const bool hasBuild = hcCompile && !hcSources.empty();
-                std::vector<std::string> stepNames{ "Setup" };
-                if (hasBuild) stepNames.emplace_back("Build");
+                std::vector<std::string> stepNames{ "Setup", "Build game" };
+                if (hasBuild) stepNames.emplace_back("Build HorizonCode");
                 stepNames.emplace_back("Package");
                 stepNames.emplace_back("Clean up");
                 const int stepSetup   = 0;
-                const int stepBuild   = hasBuild ? 1 : -1;
-                const int stepPackage = hasBuild ? 2 : 1;
+                const int stepSdkGame = 1;
+                const int stepBuild   = hasBuild ? 2 : -1;
+                const int stepPackage = hasBuild ? 3 : 2;
                 const int stepCleanup = stepPackage + 1;
+                const HE::ExportSdk::GameSdk gameSdk = gate.sdk;
+                const std::string sdkProfile = gate.profile;
+                // Part of the build cache key: another cmake or compiler gets a fresh tree.
+                const std::string sdkToolchain = ctx.toolchainProbe
+                    ? "cmake " + ctx.toolchainProbe->cmakeVersion + ", " + ctx.toolchainProbe->compilerId
+                    : std::string();
+                // Compiled HorizonCode links the engine the game ships with: the
+                // SDK's lib set the game is compiled from, never another library.
+                const HE::hccg::SdkInfo hcSdk = HE::ExportSdk::codegenSdkFor(gameSdk);
 
                 Build::begin(stepNames);
                 Build::stepBegin(stepSetup);
@@ -1712,13 +1991,20 @@ void startExport(AppContext& ctx)
                 const std::string contentDir = ctx.contentManager->contentRoot();
                 const std::string outDir     = effOutDir.string();
                 const bool hostTarget        = platform == ExportPlatform::Host;
+                // The previous SDK-built game has its key compiled in, so an
+                // incremental pack can only reuse it from the header it was built
+                // from; without this every encrypted entry is packed again.
+                if (es.encrypt && es.incremental)
+                    es.previousBuildConfigHeader = sdkGameWorkDir(projName, sdkProfile) / "HEGameBuildConfig.h";
 
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              hcBase = base, stepBuild, stepPackage, hostTarget]()
+                                              stepBuild, stepPackage, stepCleanup, hostTarget,
+                                              stepSdkGame, gameSdk, sdkToolchain,
+                                              hcSdk]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -1726,13 +2012,33 @@ void startExport(AppContext& ctx)
                     std::string msg;
                     try
                     {
+                        ExportSettings esEff = es;
+
+                        // ── The game, compiled from the engine SDK, first. What
+                        // it carries compiled in (pak key, startup scene UUID,
+                        // layout) is planned here and pinned into esEff, so the
+                        // pack below writes exactly that. HorizonCode counts as
+                        // compiled when it is meant to be: should its build fall
+                        // back, the game says so at start instead of trusting it.
+                        Build::stepBegin(stepSdkGame);
+                        const ExportPlan plan = ProjectExporter::planExport(
+                            projName, sceneName, std::filesystem::path(outDir), esEff,
+                            !sceneBinary.empty(), hcCompile && !hcSources.empty());
+                        if (!plan.success)
+                        {
+                            Build::stepFailed(stepSdkGame);
+                            throw std::runtime_error(plan.errorMessage);
+                        }
+                        const SdkGameResult game = compileGameFromSdk(
+                            plan.config, es.projectSettingsFile, gameSdk, sdkToolchain, projName, stepSdkGame);
+                        if (!game.ok) throw std::runtime_error(game.text);
+
                         // ── HorizonCode → C++ (plan §8.1): generate + build the
                         // classes dylib BEFORE packing, so the exporter can ship
                         // it and the result line can report the outcome. Any
                         // failure here falls back to the interpreter loudly —
                         // the export itself never fails because of codegen
                         // (graphs are packed regardless).
-                        ExportSettings esEff = es;
                         std::string hcMsg;
                         std::string hcFatal;   // Stop mode: why the export must not proceed
                         if (hcCompile && !hcSources.empty())
@@ -1844,11 +2150,22 @@ void startExport(AppContext& ctx)
                                 Build::stepFailed(stepBuild);
                                 hcMsg = " — HorizonCode: generation failed, shipped interpreted";
                             }
+                            else if (!hcSdk.valid())
+                            {
+                                // Not reached: a run starts only with an SDK (the gate).
+                                const std::string why = "no engine SDK to compile against";
+                                Build::log(1, "HorizonCode: " + why + " — shipping interpreted");
+                                Build::stepFailed(stepBuild);
+                                hcMsg = " — HorizonCode: shipped interpreted (" + why + ")";
+                                buildLine = "build: SKIPPED — " + why;
+                            }
                             else
                             {
                                 Build::setActivity("Compiling the generated C++\xe2\x80\xa6");
                                 Build::stepProgress(0.4f);
-                                const auto sdk   = HE::hccg::resolveSdk(hcBase);
+                                const auto& sdk = hcSdk;
+                                Build::log(0, "Compiling HorizonCode against the engine SDK (" + sdk.profile
+                                              + "): " + sdk.packageDir.string());
                                 const auto built = HE::hccg::buildDylib(genDir, sdk,
                                     [](const std::string& line)
                                     {
@@ -1976,6 +2293,13 @@ void startExport(AppContext& ctx)
                                 ? " — key embedded in the game binary"
                                 : " — key in project.hcfg (runtime has no key block)";
                         if (res.success) msg += hcMsg;
+                        // Clean up is the exporter's last ring and still running:
+                        // the built game goes over the runtime's executable there.
+                        if (res.success)
+                        {
+                            const SdkGameResult installed = installSdkGame(res, gameSdk, game, stepCleanup);
+                            msg = installed.ok ? msg + installed.text : "Error: " + installed.text;
+                        }
                     }
                     catch (const std::exception& e)
                     {

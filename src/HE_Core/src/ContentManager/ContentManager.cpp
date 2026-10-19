@@ -1,5 +1,7 @@
 #include "ContentManager/ContentManager.h"
+#include "ContentManager/AssetFile.h"
 #include <Platform/ProjectWriteGate.h>
+#include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_ENGINE_CONTENT_EDITABLE
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
@@ -553,6 +555,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			uint32_t channelCount = 0;
 			HAsset::Reader::readPOD(c->data, o, channelCount);
 			a.channels.resize(channelCount);
+			size_t unsortedChannels = 0;
 			for (auto& ch : a.channels)
 			{
 				uint8_t pathByte = 0;
@@ -561,7 +564,15 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				ch.path = static_cast<AnimPathType>(pathByte);
 				HAsset::Reader::readVec(c->data, o, ch.times);
 				HAsset::Reader::readVec(c->data, o, ch.values);
+				if (!std::is_sorted(ch.times.begin(), ch.times.end())) ++unsortedChannels;
 			}
+			// The sampler finds its keyframe by binary search, which assumes the
+			// times ascend (glTF demands it). A file that breaks that still plays,
+			// just from the wrong keys — said once here rather than never.
+			if (unsortedChannels)
+				HE_LOG_WARN(Asset, "Animation clip '%s': %zu channel(s) have keyframe times "
+				                   "out of order — those channels will sample the wrong keys",
+				            assetName.c_str(), unsortedChannels);
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANOT))
 		{
@@ -970,8 +981,13 @@ static constexpr size_t kEnginePrefixLen = sizeof(kEnginePrefix) - 1;
 
 bool ContentManager::isEngineContentDevMode()
 {
+	// Engine authoring is a dev tree's business (HE_FEATURE_ENV_OVERRIDES).
+#if HE_FEATURE_ENV_OVERRIDES
 	const char* v = std::getenv("HE_ENGINE_CONTENT_EDITABLE");
 	return v && *v && std::atoi(v) != 0;
+#else
+	return false;
+#endif
 }
 
 std::string ContentManager::resolveAbsolutePath(const std::string& relativePath) const
@@ -1325,7 +1341,15 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 	// materialize's own completion callback. A success re-enters loadAssetAsync,
 	// which now resolves through the normal (just-updated) disk registry and
 	// queues a real async read — that read's own AsyncResult surfaces on a LATER
-	// pollAsyncResults() call, not this one.
+	// pollAsyncResults() call, not this one. That needs the count of completed
+	// jobs taken HERE, before the drain re-queues anything: a worker can finish
+	// a small file before this function reaches the loop below (seen on Linux CI,
+	// test_landscape_reload), and "the next call" would silently become "this one".
+	size_t available = 0;
+	{
+		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
+		available = m_asyncSink->results.size();
+	}
 	{
 		std::vector<PendingRemoteReady> remoteReady;
 		{
@@ -1344,6 +1368,10 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 				m_remoteAssets.erase(r.id);
 				m_remoteByPath.erase(r.relativePath);
 				m_remoteArrived.insert(r.relativePath);
+				// A file appeared under an EngineContent root: whoever remembered the
+				// path as "not there" (a renderer's graph-texture miss, Thema 210) looks
+				// once more. Costs one fresh file index per download.
+				noteContentChanged();
 				loadAssetAsync(r.id, r.callback);
 			}
 			else if (r.callback)
@@ -1361,11 +1389,6 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations, 
 	// nothing and do not count against the budget.
 	using Clock = std::chrono::steady_clock;
 	const Clock::time_point start = Clock::now();
-	size_t available = 0;
-	{
-		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
-		available = m_asyncSink->results.size();
-	}
 	size_t toRegister = 0;
 	size_t handled    = 0;
 
@@ -2281,21 +2304,19 @@ bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPa
 	return true;
 }
 
-bool ContentManager::saveAsset(RuntimeAsset& asset)
+// The two halves of a save that HE::saveAssetFile shares with saveAsset: the export
+// gate, and the write with its log lines.
+static bool saveRefusedByExport(const RuntimeAsset& asset)
 {
 	// An export is reading the project's files (ProjectWriteGate.h). The edit stays
 	// in memory — the asset is still dirty and saves once the export is over.
-	if (HE::ProjectWriteGate::refuse("save this asset"))
-	{
-		HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
-		return false;
-	}
-	const std::string fullPath = resolveSavePath(asset.path);
-	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
-	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+	if (!HE::ProjectWriteGate::refuse("save this asset")) return false;
+	HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
+	return true;
+}
 
+static bool writeAssetFileLogged(RuntimeAsset& asset, const std::string& fullPath)
+{
 	if (!writeAssetFile(asset, fullPath))
 	{
 		// Losing a save silently is the worst possible failure mode in an editor.
@@ -2304,7 +2325,26 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		return false;
 	}
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
-	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
+	            asset.path.c_str(), static_cast<unsigned>(static_cast<uint16_t>(asset.type)), fullPath.c_str());
+	return true;
+}
+
+bool HE::saveAssetFile(RuntimeAsset& asset, const std::string& contentRoot)
+{
+	if (saveRefusedByExport(asset)) return false;
+	// resolveSavePath of a manager without an engine content root.
+	return writeAssetFileLogged(asset, contentRoot + "/" + asset.path);
+}
+
+bool ContentManager::saveAsset(RuntimeAsset& asset)
+{
+	if (saveRefusedByExport(asset)) return false;
+	const std::string fullPath = resolveSavePath(asset.path);
+	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
+		HE_LOG_INFO(Asset, "%s",
+			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+
+	if (!writeAssetFileLogged(asset, fullPath)) return false;
 	noteContentChanged();   // may be the file somebody looked for and did not find
 
 	// What was just written IS the loaded copy, so pollHotReload must not take it

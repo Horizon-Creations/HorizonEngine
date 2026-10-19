@@ -16,6 +16,7 @@
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
@@ -9555,6 +9556,10 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
 	if (array) key += "#arr";
+	// A miss is cached (no file open per frame) until files may have appeared: an
+	// EngineContent download landing after this first ask (Thema 210).
+	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+	                             [](void* tex) { return tex == nullptr; });
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
@@ -12703,10 +12708,16 @@ void* MetalRenderer::EnsureMaterialArchive()
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool blend, bool gbuffer)
+                                               bool blend, bool gbuffer, bool instanced)
 {
+	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
+	if (instanced && precompiled) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
+	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
+	// own PSO slot but shares the plain form's fragment.
+	const uint64_t fragKey = key;
+	if (instanced) key ^= 0x1D57A9CEDB0B1E55ULL;
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
@@ -12736,18 +12747,22 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	else
 	{
 		// WPO materials get the graph-generated vertex; everything else the shared one.
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(Backend::Metal)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::Metal);
+		// The instanced twin takes the instanced form of either.
+		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+		const auto& v = instanced
+			? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::Metal)
+			                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::Metal))
+			: (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::Metal)
+			                    : m_matShaderLib.customVertex(vh, vertBody, Backend::Metal));
 		// Forward PSOs (opaque + blended) take the clustered heLitP variant —
 		// EncodeScene binds its lists on fragment buffers 4/5/6 and sets the gate;
 		// the material preview binds empty lists with the gate at 0. The G-buffer
 		// variant never shades lights. A variant that fails to compile falls back
 		// to the plain fragment (8-light window), not to a missing material.
-		const auto* f = &m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+		const auto* f = &m_matShaderLib.fragment(fragKey, fragGlsl, Backend::Metal); // shared, cached MSL
 		if (m_forwardClustered && !gbuffer)
 		{
-			const auto& fc = m_matShaderLib.fragmentClustered(key, fragGlsl, Backend::Metal);
+			const auto& fc = m_matShaderLib.fragmentClustered(fragKey, fragGlsl, Backend::Metal);
 			if (fc.ok) f = &fc;
 			else HE_LOG_WARN(RHI, "%s", ("MetalRenderer: clustered material variant failed, "
 			                             "using the 8-light window\n" + fc.log).c_str());
@@ -14432,6 +14447,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// only re-bind on an actual change (draws arrive sorted, so this is rare).
 		void*     cMaterialPipeline      = nullptr;
 		void*     cMaterialPipelineBlend = nullptr; // alpha-blended variant (transparency pass)
+		// Instanced twin (Thema 182, 2e): built on the material's first batch, not
+		// on sight. The sources are kept for that; a baked variant has no twin.
+		void*     cMaterialPipelineInst  = nullptr; bool cMaterialInstTried = false;
+		uint64_t  cShKey = 0; std::string cShFrag, cShVert; bool cShBaked = false;
 		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
 		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
@@ -14458,6 +14477,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// own cross-compiled pipeline (cached by source hash); else the default.
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
+				cMaterialPipelineInst = nullptr; cMaterialInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
@@ -14474,6 +14494,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
 						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						cShKey = shKey; cShFrag = shFrag; cShVert = shVert; cShBaked = pre != nullptr;
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
 						// (not gated on this material's own opacity): a per-instance tint
@@ -14560,7 +14581,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// above, only mvp/model differ per instance. Without this only dc.transform drew
 			// and every OTHER copy of an identical mesh vanished (the other backends already
 			// iterate instanceTransforms).
-			auto drawInstance = [&](const glm::mat4& xform)
+			// With `instPso` (2e) the same binds draw the whole batch: the material's
+			// instanced PSO, {mvp, model} per instance at vertex buffer 5 (instBuf),
+			// `instCount` instances in one call. Opaque only — the caller checks.
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
@@ -14569,7 +14595,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// resolves the material×instance-tint product itself above, so the
 				// shared threshold is applied to that instead of RenderSorter::
 				// isTransparent (which re-derives it from a DrawCall).
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -14589,7 +14615,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 				// M1: switch to this material's cross-compiled pipeline if it has one,
 				// else the default PBR pipeline. Re-bound only on a real change.
-				void* wantPipeline = cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -14652,6 +14679,19 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -14666,6 +14706,41 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// that is exactly the condition under which GeometryPass batched at all.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
 			const size_t instCount = dc.instanceTransforms.size();
+			// A graph-material batch (2e): the same {mvp, model} array, drawn with
+			// the material's instanced PSO and every bind of drawInstance. Built on
+			// the material's first batch; null (baked variant, failed build,
+			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
+			const bool graphBatch = instCount > 0 && cMaterialPipeline
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances && !cShBaked
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialInstTried)
+			{
+				cMaterialInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				                                                   /*blend=*/false, /*gbuffer=*/false,
+				                                                   /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineInst)
+			{
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				{
+					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_sceneInstancedPipeline
@@ -16230,6 +16305,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		void*     cMaterialPipeline      = nullptr; // forward PSO (forward-routed replay)
 		void*     cMaterialPipelineBlend = nullptr; // blended forward PSO (transparency)
 		void*     cMaterialPipelineGB    = nullptr; // G-buffer PSO (this pass)
+		// Instanced twin of the G-buffer PSO (2e), built on the first batch.
+		void*     cMaterialPipelineGBInst = nullptr; bool cMaterialGBInstTried = false;
+		uint64_t  cGbKey = 0; std::string cGbFrag, cGbVert;
 		bool      cMaterialWpo           = false;
 		bool      cMaterialCustom        = false;   // material HAS a custom shader at all
 		void*     boundPipeline     = defaultPipeline;
@@ -16252,6 +16330,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineGB = nullptr;
+				cMaterialPipelineGBInst = nullptr; cMaterialGBInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialCustom   = false;
 				cMaterialParams   = nullptr;
@@ -16278,8 +16357,11 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						// packs carry no G-buffer MSL yet), never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
 								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
+						}
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -16342,14 +16424,17 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			u.pbr.z   *= dc.instanceTint.a;
 			u.color = glm::vec4(baseColor, 1.0f);
 
-			auto drawInstance = [&](const glm::mat4& xform)
+			// `instPso` etc.: the whole batch in one draw, as in the forward loop (2e).
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
 				ui.model = xform;
 				// Same routing threshold as the forward loop — translucent draws
 				// go to the lighting pass's sorted blend replay.
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -16383,7 +16468,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					out.forwardOpaque.push_back(std::move(t));
 					return;
 				}
-				void* wantPipeline = cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -16434,6 +16520,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				}
 #endif
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -16448,6 +16547,41 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// way to perform — and one WITH a variant carries its own vertex stage.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
 			const size_t instCount = dc.instanceTransforms.size();
+			// ...which since 2e has an instanced twin: a graph-material batch with
+			// a G-buffer PSO draws once through drawInstance's binds. Built on the
+			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
+			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialGBInstTried)
+			{
+				cMaterialGBInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				                                                     /*blend=*/false, /*gbuffer=*/true,
+				                                                     /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineGBInst)
+			{
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				{
+					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineGBInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_gbufferInstancedPipeline

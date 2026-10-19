@@ -22,6 +22,8 @@ struct UnderwaterCameraData;
 namespace HE
 {
 
+struct FoliageLodMemory;   // FoliageExtract.h: the foliage level hysteresis of one view
+
 // ─── Cascaded-shadow-map fit (free functions so they are directly testable) ──
 // The maths the extractor's cascade loop is built from. Kept out of the
 // extractor itself because it is pure geometry: no ECS, no RenderWorld, no
@@ -325,6 +327,9 @@ private:
     // UUIDs never come through.
     std::unordered_set<std::string> m_sectionMaterialMissing;
     uint64_t                        m_sectionMaterialEpoch = 0;
+    // Which detail level each foliage plant was drawn with last time: an extractor is
+    // one view (the scene view, a preview), and the hysteresis is the view's.
+    std::unique_ptr<HE::FoliageLodMemory> m_foliageLod;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
     int       m_cascadeCount   = 3;

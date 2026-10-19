@@ -2,8 +2,10 @@
 #include "TestFsUtil.h"
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/ProjectExporter.h>
+#include <Hpak/GameBuildConfig.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakWriter.h>
+#include <HorizonCode/HcCompiledLoader.h>
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -1236,6 +1238,148 @@ TEST_CASE("ProjectExporter ships the runtime Shaders/ subdirectory and replaces 
     he_test::removeAllQuiet(outputDir);
 }
 
+// Thema 211 step 10: a runtime with HorizonEngine/ (the engine as one library)
+// exports as <ProjectName> + data/ + HorizonEngine/ (Platform/GameLayout.h).
+TEST_CASE("exportedExecutableName keeps what every file system takes")
+{
+    CHECK(exportedExecutableName("Space Game", false) == "Space Game");
+    CHECK(exportedExecutableName("Space Game", true) == "Space Game.exe");
+    CHECK(exportedExecutableName(" a/b\\c:d*e?f\"g<h>i|j. .", false) == "abcdefghij");
+    CHECK(exportedExecutableName(std::string("x\ty\x7f"), false) == "xy");
+    CHECK(exportedExecutableName("", false) == "Game");
+    CHECK(exportedExecutableName("...", true) == "Game.exe");
+}
+
+namespace
+{
+std::filesystem::path makeEngineDirRuntime(const std::filesystem::path& runtimeDir)
+{
+    he_test::removeAllQuiet(runtimeDir);
+    std::filesystem::create_directories(runtimeDir / "HorizonEngine" / "Shaders");
+    { std::ofstream f(runtimeDir / "HorizonGame"); f << "ELF"; }
+    { std::ofstream f(runtimeDir / "HorizonGame._pth"); f << "python314.zip\n"; }
+    { std::ofstream f(runtimeDir / "python314.zip"); f << "ZIP"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libHorizonEngine.dylib"); f << "ENGINE"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libSDL3.0.dylib"); f << "SDL"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libHorizonPython.dylib"); f << "PLUGIN"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libpython3.14.dylib"); f << "CPYTHON"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "Shaders" / "ui.vert.spv"); f << "SPV"; }
+    return runtimeDir;
+}
+} // namespace
+
+TEST_CASE("ProjectExporter: a HorizonEngine/ runtime exports as <ProjectName>, data/ and HorizonEngine/")
+{
+    const auto tmp        = std::filesystem::temp_directory_path();
+    const auto runtimeDir = makeEngineDirRuntime(tmp / "he_test_export_layout_runtime");
+    const auto contentDir = tmp / "he_test_export_layout_content";
+    const auto outputDir  = tmp / "he_test_export_layout_out";
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(outputDir);
+    // A previous export of the old flat layout into the same folder.
+    { std::ofstream f(outputDir / "HorizonGame"); f << "OLD"; }
+
+    ExportSettings settings;
+    settings.compress       = false;
+    settings.gameRuntimeDir = runtimeDir;
+    REQUIRE(runtimeHasEngineDir(runtimeDir));
+
+    SUBCASE("no Python: neither the plugin nor the interpreter nor the stdlib ship")
+    {
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(result.executablePath == outputDir / "Space Game");
+        CHECK(std::filesystem::is_regular_file(outputDir / "Space Game"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonGame"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "data" / "project.hcfg"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "project.hcfg"));
+        bool pakInData = false;
+        for (const auto& e : std::filesystem::directory_iterator(outputDir / "data"))
+            pakInData |= e.path().extension() == ".hpak";
+        CHECK(pakInData);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libHorizonEngine.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libSDL3.0.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "Shaders" / "ui.vert.spv"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine" / "libHorizonPython.dylib"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine" / "libpython3.14.dylib"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "python314.zip"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "Space Game._pth"));
+    }
+    SUBCASE("Python: plugin and interpreter beside the engine, the _pth renamed with the executable")
+    {
+        settings.bundlePython = true;
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libHorizonPython.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libpython3.14.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "python314.zip"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "Space Game._pth"));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonGame._pth"));
+    }
+    // Thema 211 step 13: compiled HorizonCode links the engine library, so it
+    // ships beside it; a copy an earlier export left in data/ goes.
+    SUBCASE("compiled HorizonCode goes into HorizonEngine/, not data/")
+    {
+        const auto hcLib = tmp / "he_test_export_layout_hclib";
+        { std::ofstream f(hcLib); f << "HCGEN"; }
+        std::filesystem::create_directories(outputDir / "data");
+        { std::ofstream f(outputDir / "data" / HorizonCode::compiledLibraryName()); f << "STALE"; }
+        settings.horizonCodeGenLib = hcLib;
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / HorizonCode::compiledLibraryName()));
+        CHECK_FALSE(std::filesystem::exists(outputDir / "data" / HorizonCode::compiledLibraryName()));
+        CHECK_FALSE(std::filesystem::exists(outputDir / HorizonCode::compiledLibraryName()));
+        std::filesystem::remove(hcLib);
+    }
+
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+TEST_CASE("ProjectExporter: a runtime without HorizonEngine/ keeps the flat layout and its name")
+{
+    const auto tmp        = std::filesystem::temp_directory_path();
+    const auto runtimeDir = tmp / "he_test_export_flat_runtime";
+    const auto contentDir = tmp / "he_test_export_flat_content";
+    const auto outputDir  = tmp / "he_test_export_flat_out";
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(runtimeDir);
+    std::filesystem::create_directories(contentDir);
+    { std::ofstream f(runtimeDir / "HorizonGame.exe"); f << "PE"; }
+    { std::ofstream f(runtimeDir / "HorizonCore.dll"); f << "DLL"; }
+
+    const auto hcLib = tmp / "he_test_export_flat_hclib";
+    { std::ofstream f(hcLib); f << "HCGEN"; }
+
+    ExportSettings settings;
+    settings.compress          = false;
+    settings.gameRuntimeDir    = runtimeDir;
+    settings.horizonCodeGenLib = hcLib;
+    CHECK_FALSE(runtimeHasEngineDir(runtimeDir));
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "Space Game", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.executablePath == outputDir / "HorizonGame.exe");
+    CHECK(std::filesystem::is_regular_file(outputDir / "HorizonCore.dll"));
+    CHECK(std::filesystem::is_regular_file(outputDir / "project.hcfg"));
+    // The flat layout keeps compiled HorizonCode beside the data, as before.
+    CHECK(std::filesystem::is_regular_file(outputDir / HorizonCode::compiledLibraryName()));
+    std::filesystem::remove(hcLib);
+    CHECK_FALSE(std::filesystem::exists(outputDir / "data"));
+    CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine"));
+
+    he_test::removeAllQuiet(runtimeDir);
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 TEST_CASE("ProjectExporter returns error for invalid output dir (file in the way)")
 {
     auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_err_content";
@@ -1452,7 +1596,166 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
     he_test::removeAllQuiet(contentDir);
     he_test::removeAllQuiet(outputDir);
 }
+
+// Thema 211 step 14: after a game compiled from the SDK, the export folder has
+// the key in neither project.hcfg (zeroed) nor a patched block (that game's block
+// is empty); only the private HEGameBuildConfig.h it was built from has it. A
+// Shipping export then repacked everything with a fresh key every time (seen live:
+// 0 of 45 reused, 368 s against 12 s for Development).
+TEST_CASE("An incremental encrypted export reuses the key of the previous SDK game build")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_sdkkey_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_sdkkey_out";
+    auto headerDir  = std::filesystem::temp_directory_path() / "he_test_export_sdkkey_build";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    he_test::removeAllQuiet(headerDir);
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(headerDir);
+
+    const HE::UUID id{0xFEED,0xC0DE};
+    const auto blob = makeMinimalMaterialBlob(id, "sdk_mat");
+    { std::ofstream f(contentDir / "sdk_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    ExportSettings settings;
+    settings.compress    = true;
+    settings.encrypt     = true;
+    settings.incremental = true;
+    REQUIRE(ProjectExporter::exportProject(contentDir, "SdkGame", "", outputDir, settings).success);
+
+    ProjectConfig first;
+    REQUIRE(ProjectConfigLoader::load(outputDir, first));
+    REQUIRE(first.encrypted);
+    uint8_t key[32];
+    std::memcpy(key, first.encKey, 32);
+
+    // What the SDK path leaves behind: the key only in the header.
+    const auto header = headerDir / "HEGameBuildConfig.h";
+    REQUIRE(HE::writeGameBuildConfigHeader(header, first, nullptr, "release"));
+    const auto toSdkState = [&]
+    {
+        ProjectConfig zeroed;
+        REQUIRE(ProjectConfigLoader::load(outputDir, zeroed));
+        std::memset(zeroed.encKey, 0, 32);
+        REQUIRE(ProjectConfigLoader::save(outputDir, zeroed));
+    };
+
+    SUBCASE("with the header the key is reused and the entry carried over")
+    {
+        toSdkState();
+        settings.previousBuildConfigHeader = header;
+        const auto again = ProjectExporter::exportProject(contentDir, "SdkGame", "", outputDir, settings);
+        REQUIRE(again.success);
+        CHECK(again.assetsReused == 1);
+        ProjectConfig cfg;
+        REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+        CHECK(std::memcmp(cfg.encKey, key, 32) == 0);
+        ContentManager cm;
+        REQUIRE(cm.loadPak((outputDir / "SdkGame.hpak").string(), key));
+        CHECK(cm.getMaterial(id) != nullptr);
+    }
+    SUBCASE("without it a fresh key is drawn and nothing is reused (the old behaviour)")
+    {
+        toSdkState();
+        const auto again = ProjectExporter::exportProject(contentDir, "SdkGame", "", outputDir, settings);
+        REQUIRE(again.success);
+        CHECK(again.assetsReused == 0);
+        ProjectConfig cfg;
+        REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+        CHECK(std::memcmp(cfg.encKey, key, 32) != 0);
+    }
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    he_test::removeAllQuiet(headerDir);
+}
+
+// Topic 222 step 6: the editor compiles the game (configuration and pak key
+// compiled in) BEFORE it packs, from what planExport returned. The export after
+// it must write that configuration and pack with that key and scene UUID, or the
+// game cannot open its pak or does not find its first scene.
+TEST_CASE("planExport: the export packs with the key and scene UUID planned before it")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_plan_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_plan_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID id{0xFEED,0x91A4};
+    const auto blob = makeMinimalMaterialBlob(id, "plan_mat");
+    { std::ofstream f(contentDir / "plan_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+    std::vector<uint8_t> sceneBinary(64);
+    for (size_t i = 0; i < sceneBinary.size(); ++i) sceneBinary[i] = static_cast<uint8_t>(i * 5 + 1);
+
+    ExportSettings settings;
+    settings.compress    = true;
+    settings.encrypt     = true;
+    settings.incremental = true;
+    REQUIRE(ProjectExporter::exportProject(contentDir, "PlanGame", "Main.hescene", outputDir,
+                                           settings, sceneBinary).success);
+    ProjectConfig first;
+    REQUIRE(ProjectConfigLoader::load(outputDir, first));
+
+    ExportSettings next = settings;
+    const ExportPlan plan = ProjectExporter::planExport("PlanGame", "Main.hescene", outputDir, next,
+                                                        /*packedScene*/ true, /*horizonCode*/ true);
+    REQUIRE(plan.success);
+    CHECK(next.planned);
+    // The incremental key reuse ran while the previous export was still there.
+    CHECK(std::memcmp(plan.config.encKey, first.encKey, 32) == 0);
+    CHECK(std::memcmp(next.plannedPakKey, first.encKey, 32) == 0);
+    CHECK(plan.config.encrypted);
+    CHECK(plan.config.hasPackedScene);
+    CHECK(plan.config.horizonCodeCompiled);   // the intent: no library is passed below
+    CHECK(plan.config.hpakFilename == "PlanGame.hpak");
+    CHECK(plan.config.mainSceneName.empty());
+    CHECK_FALSE(next.plannedSceneUuid == HE::UUID{});
+
+    const auto again = ProjectExporter::exportProject(contentDir, "PlanGame", "Main.hescene", outputDir,
+                                                      next, sceneBinary);
+    REQUIRE(again.success);
+    CHECK(again.assetsReused == 1);
+
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    CHECK(std::memcmp(cfg.encKey, plan.config.encKey, 32) == 0);
+    CHECK(std::memcmp(cfg.startupSceneUuid, plan.config.startupSceneUuid, 16) == 0);
+    CHECK(cfg.hpakFilename == plan.config.hpakFilename);
+    CHECK(cfg.mainSceneName == plan.config.mainSceneName);
+    CHECK_FALSE(cfg.horizonCodeCompiled);     // the hcfg says what really shipped
+
+    // The planned key opens the pak, the planned UUID finds the scene in it.
+    HE::UUID sceneUuid{};
+    std::memcpy(&sceneUuid.hi, plan.config.startupSceneUuid,     8);
+    std::memcpy(&sceneUuid.lo, plan.config.startupSceneUuid + 8, 8);
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / plan.config.hpakFilename).string(), plan.config.encKey));
+    CHECK(cm.readMountedEntry(sceneUuid) == sceneBinary);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
 #endif // HE_HAVE_CRYPTO
+
+TEST_CASE("planExport without encryption: loose startup scene, no key")
+{
+    auto outputDir = std::filesystem::temp_directory_path() / "he_test_export_plan_loose";
+    he_test::removeAllQuiet(outputDir);
+    ExportSettings settings;
+    const ExportPlan plan = ProjectExporter::planExport("LooseGame", "Levels/Main.hescene", outputDir,
+                                                        settings, /*packedScene*/ false, false);
+    REQUIRE(plan.success);
+    CHECK(settings.planned);
+    CHECK_FALSE(plan.config.encrypted);
+    CHECK_FALSE(plan.config.hasPackedScene);
+    CHECK(plan.config.mainSceneName == "Main.hescene");
+    uint8_t zero[32] = {};
+    CHECK(std::memcmp(plan.config.encKey, zero, 32) == 0);
+    he_test::removeAllQuiet(outputDir);
+}
 
 // ─── The project's own icon, and the splash picture ──────────────────────────
 #include <Application/AppIcon.h>

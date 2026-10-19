@@ -76,6 +76,7 @@ add_library(HorizonScene SHARED
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
+    src/EngineApiCpp.cpp
     src/PlayerSettings.cpp
     src/HcCodegen.cpp
     src/HiddenShell.cpp
@@ -103,6 +104,10 @@ target_compile_features(HorizonScene PUBLIC cxx_std_20)
 if(MSVC)
     target_compile_options(HorizonScene PRIVATE /bigobj)
 endif()
+
+# Build profile: the physics and transform env overrides are dev-only. Core
+# already passes it on; said here too so the target carries the property.
+he_target_build_profile(HorizonScene PUBLIC)
 
 target_link_libraries(HorizonScene
     PUBLIC  HorizonCore

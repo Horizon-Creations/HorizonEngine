@@ -115,8 +115,16 @@ std::optional<float> toolchainProgress(const std::string& line)
 namespace Build
 {
 
+static std::atomic<bool> s_cancel{false};
+static std::atomic<bool> s_cancelable{false};
+
+void setCancelable(bool cancelable) { s_cancelable.store(cancelable); }
+const std::atomic<bool>* cancelFlag() { return &s_cancel; }
+
 void begin(const std::vector<std::string>& stepNames, Kind kind)
 {
+	s_cancel.store(false);
+	s_cancelable.store(false);
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
 		s_kind = kind;
@@ -933,6 +941,14 @@ void render([[maybe_unused]] AppContext& ctx)
 		{
 			s_hidden = true;
 			ImGui::CloseCurrentPopup();
+		}
+		if (Build::s_cancelable.load())
+		{
+			ImGui::SameLine();
+			ImGui::BeginDisabled(Build::s_cancel.load());
+			if (EditorWidgets::button("Cancel", ImVec2(90.0f, 0.0f)))
+				Build::s_cancel.store(true);
+			ImGui::EndDisabled();
 		}
 	}
 	else if (ImGui::Button("Close", ImVec2(90.0f, 0.0f)))

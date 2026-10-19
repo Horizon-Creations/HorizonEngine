@@ -8618,26 +8618,14 @@ const std::vector<ApiFn>& registry()
             // cppCall codegen) reads it as. The substitution belongs to the
             // SCRIPTING surface, so it lives on the scripting surface's edge —
             // and there is exactly one, since both applications and both text
-            // languages dispatch through ApiFn::invoke.
+            // languages dispatch through ApiFn::invoke. Generated C++ calling
+            // the function directly asks entityOrSelf itself.
             fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
                         (Ctx& c, const VV& a) -> VV
             {
                 if (a.empty() || a[0].i != 0) return inner(c, a);
-                const Entity me = entity::self(c);
-                if (me == 0u)
-                {
-                    // No caller to stand in: a text script (Lua and Python have
-                    // no instance at all), or a class not bound to an entity.
-                    // Loud, because the alternative is the engine's most
-                    // expensive failure mode — a call that does nothing and says
-                    // nothing. Throttled per row, since a Tick would repeat it
-                    // sixty times a second.
-                    HE_LOG_THROTTLE(Script, Warning, 5.0,
-                                    "%s: Entity is empty and there is no calling object to "
-                                    "stand in for it - wire an entity into the pin",
-                                    id);
-                    return inner(c, a);
-                }
+                const Entity me = entityOrSelf(c, 0u, id);
+                if (me == 0u) return inner(c, a);
                 VV withSelf = a;
                 withSelf[0] = Value::ofInt(static_cast<int>(me));
                 return inner(c, withSelf);
@@ -8679,24 +8667,100 @@ const std::vector<ApiFn>& registry()
             fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
                         (Ctx& c, const VV& a) -> VV
             {
-                if (a.empty() || a[0].ref != 0u || !c.world || !c.self) return inner(c, a);
-                const int me = ScriptApi::widgetOfScript(*c.world, c.self);
-                if (me == 0)
-                {
-                    HE_LOG_THROTTLE(Script, Warning, 5.0,
-                                    "%s: Widget is empty and the caller is not a widget - "
-                                    "wire a widget into the pin", id);
-                    return inner(c, a);
-                }
+                if (a.empty() || a[0].ref != 0u) return inner(c, a);
+                const uint32_t me = widgetOrSelf(c, 0u, id);
+                if (me == 0u) return inner(c, a);
                 VV withSelf = a;
-                withSelf[0] = Value::ofRef(static_cast<uint32_t>(me));
+                withSelf[0] = Value::ofRef(me);
                 return inner(c, withSelf);
             };
+        }
+
+        // ── Fourth post-pass: how generated C++ calls each row (CppForm) ─────
+        // Ctx unless named here. Whole groups first: these namespaces are plain
+        // functions over process-wide state and none of their rows takes a Ctx.
+        // Then the single rows of mixed groups. A wrong entry is not a silent
+        // mistake: test_engine_api_direct.cpp calls every row in the form named
+        // here, so it stops compiling.
+        static constexpr const char* kFreeGroups[] = {
+            "debug", "fs", "input", "math", "player", "random", "save",
+            "settings", "string", "time", "timer",
+        };
+        static constexpr const char* kFreeRows[] = {
+            "app.setVSync", "app.vsync", "app.setFullscreen", "app.isFullscreen",
+            "camera.setStickSensitivityScale", "camera.stickSensitivityScale",
+            "camera.setStickInvertY", "camera.stickInvertY",
+            "scene.load", "scene.loadAdditive", "scene.unloadZone", "scene.activate",
+            "scene.hasPendingLevel", "scene.showZone", "scene.hideZone",
+            "scene.setZonePosition", "scene.zoneScene", "scene.loadedZones",
+        };
+        // `invoke` does more than forward, so a direct call would need a second
+        // marshalling written somewhere else — exactly what this table exists to
+        // prevent. These stay on hc::callApi:
+        static constexpr const char* kThunkRows[] = {
+            // Results are parallel arrays the thunk builds from a vector of structs.
+            "physics.raycastAll", "physics.pollJointBroken", "water.pollImmersion",
+            // `wet` is the return value, the level an out-parameter.
+            "water.levelAt", "water.surfaceAt",
+            // Every argument after `function` is forwarded as the call's own.
+            "net.callServer", "net.callClient", "net.callAllClients",
+            // The C++ signature takes the ContentManager, not a Ctx (save is Free).
+            "save.create", "save.load",
+        };
+        auto named = [](const char* id, const auto& list)
+        {
+            for (const char* n : list)
+                if (std::strcmp(id, n) == 0) return true;
+            return false;
+        };
+        for (auto& fn : t)
+        {
+            const std::string_view id = fn.id;
+            const std::string_view group = id.substr(0, id.find('.'));
+            bool freeGroup = false;
+            for (const char* g : kFreeGroups)
+                if (group == g) { freeGroup = true; break; }
+            if (named(fn.id, kThunkRows))                     fn.cppForm = CppForm::Thunk;
+            else if (freeGroup || named(fn.id, kFreeRows))    fn.cppForm = CppForm::Free;
         }
 
         return t;
     }();
     return table;
+}
+
+Entity entityOrSelf(Ctx& c, Entity e, const char* row)
+{
+    if (e != 0u) return e;
+    const Entity me = entity::self(c);
+    if (me == 0u)
+    {
+        // No caller to stand in: a text script (Lua and Python have
+        // no instance at all), or a class not bound to an entity.
+        // Loud, because the alternative is the engine's most
+        // expensive failure mode — a call that does nothing and says
+        // nothing. Throttled per row, since a Tick would repeat it
+        // sixty times a second.
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "%s: Entity is empty and there is no calling object to "
+                        "stand in for it - wire an entity into the pin",
+                        row);
+    }
+    return me;
+}
+
+uint32_t widgetOrSelf(Ctx& c, uint32_t widget, const char* row)
+{
+    if (widget != 0u || !c.world || !c.self) return widget;
+    const int me = ScriptApi::widgetOfScript(*c.world, c.self);
+    if (me == 0)
+    {
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "%s: Widget is empty and the caller is not a widget - "
+                        "wire a widget into the pin", row);
+        return 0u;
+    }
+    return static_cast<uint32_t>(me);
 }
 
 bool isScriptGroup(std::string_view group)

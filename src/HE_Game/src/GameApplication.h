@@ -1,7 +1,11 @@
 #pragma once
 #include <Application/Application.h>
+#include <Platform/BuildProfile.h>     // HE_FEATURE_DEV_HOTKEYS: V/F10 exist only in dev
+#if HE_FEATURE_DEV_HOTKEYS
 #include <Diagnostics/DevStatsTile.h>
+#endif
 #include <Hpak/ProjectConfig.h>
+#include <Hpak/GameBuildConfig.h>      // HE::ProjectConfigSource
 #include <Project/ProjectSettings.h>   // Config/ProjectSettings.json, shipped beside project.hcfg
 #include <Scripting/ScriptEngine.h>
 #include <memory>
@@ -142,6 +146,9 @@ private:
                              const std::vector<uint32_t>* onlyEntities = nullptr);
 
     ProjectConfig                 m_config;
+    // Where m_config came from: compiled in (HEGameBuildConfig.h) or project.hcfg.
+    // The pak key's precedence depends on it (HE::selectPakKey).
+    HE::ProjectConfigSource       m_configSource = HE::ProjectConfigSource::None;
     // The project's settings file, read from <exeDir>/Config/ProjectSettings.json
     // — the exporter copies it there VERBATIM (ProjectSettings.h explains why
     // it is not folded into project.hcfg). Missing = default-constructed =
@@ -181,12 +188,14 @@ private:
     // m_gameInstance so it is destroyed BEFORE the runtime it references.
     WidgetManager m_widgets;
 
+#if HE_FEATURE_DEV_HOTKEYS
     // F10: the stats card with the extended GPU numbers (Diagnostics/DevStatsTile.h).
     // Only answers while m_devHotkeys is set - a development build, or an export
     // profile that asked for it - and it sits after m_widgets so it is destroyed
-    // before it. Costs nothing while hidden.
+    // before it. Costs nothing while hidden. A release build has neither.
     HE::DevStatsTile m_devStats;
     bool             m_devHotkeys = false;   // V and F10; set in OnInit
+#endif
 
     // C++ GameLogic services (HorizonGameServices.h): the tables + their binding
     // must outlive the loaded library, so they live here. Filled + injected

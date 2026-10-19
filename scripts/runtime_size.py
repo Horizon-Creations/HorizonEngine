@@ -201,6 +201,8 @@ LIMITS = {
         # linked in from outside: CellRuntime/ICellHost (moved out of the game
         # executable), CellState, the per-cell script start/stop (CellScripts),
         # the streaming API group and StreamingComponent (Thema 183 steps 1-3).
+        # Thema 182 (foliage layers, detail levels, graph-material instanced
+        # twins) weighed the same 60.8 / 38.0 independently on its own branch.
         # New limits: measured plus 10 percent, the rule the other rows follow.
         #
         # app-advanced/app-basic: (56.0, 31.0) and (55.0, 30.0) until
@@ -272,6 +274,10 @@ BUCKETS = [
     ("scene",     lambda n, rel: "HorizonScene" in n),
     ("rendering", lambda n, rel: "HorizonRendering" in n),
     ("core",      lambda n, rel: "HorizonCore" in n),
+    # The game's engine since Thema 211 step 10: the four above as ONE library
+    # in HorizonEngine/ (cmake/HorizonEngineBundle.cmake). A game tree carries
+    # this bucket instead of the four; the editor deploy keeps the four.
+    ("engine",    lambda n, rel: "HorizonEngine" in n),
     ("sdl",       lambda n, rel: n.startswith("libSDL") or n.startswith("SDL")),
     ("compress",  lambda n, rel: "zstd" in n or "lz4" in n),
     # Windows only (he_bundle_crt in the root CMakeLists.txt): the MSVC
@@ -284,8 +290,10 @@ BUCKETS = [
     # Runtime-loaded shader binaries (Vulkan .spv, D3D12 DXR .cso) deployed as a
     # directory next to the exe. Matched by their PLACE, not their extension:
     # the set of files in there is decided by which backends the flavour built,
-    # which is exactly what these numbers are meant to show moving.
-    ("shaders",   lambda n, rel: rel.replace("\\", "/").startswith("Shaders/")),
+    # which is exactly what these numbers are meant to show moving. The game has
+    # them in HorizonEngine/Shaders/ beside the engine library (Thema 211).
+    ("shaders",   lambda n, rel: rel.replace("\\", "/").startswith(
+                                     ("Shaders/", "HorizonEngine/Shaders/"))),
     ("exe",       lambda n, rel: n in ("HorizonGame", "HorizonGame.exe")),
 ]
 

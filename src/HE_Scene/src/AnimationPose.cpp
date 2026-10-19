@@ -349,7 +349,10 @@ void blendPosesN(const std::vector<std::vector<JointTRS>>& poses,
                  const std::vector<float>&                 weights,
                  std::vector<JointTRS>&                    out)
 {
-    std::vector<size_t> order;
+    // Per thread and reused across calls (SCN-101): this runs for every
+    // blend-space state and layer every frame.
+    thread_local std::vector<size_t>   order;
+    thread_local std::vector<JointTRS> tmp;
     blendSpaceEvalOrder(weights, order);
     // Only poses that actually exist can anchor the chain.
     order.erase(std::remove_if(order.begin(), order.end(),
@@ -366,9 +369,8 @@ void blendPosesN(const std::vector<std::vector<JointTRS>>& poses,
         const float  wi = weights[i];
         const float  denom = accW + wi;
         if (denom <= 0.0f) continue;
-        std::vector<JointTRS> tmp;
         blendTRS(out, poses[i], wi / denom, tmp);
-        out  = std::move(tmp);
+        out.swap(tmp);   // swap, not move: both buffers keep their capacity
         accW = denom;
     }
 }

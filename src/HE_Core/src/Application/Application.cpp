@@ -4,6 +4,7 @@
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/EngineProfiler.h"
+#include "Platform/BuildProfile.h"   // HE_FEATURE_PROFILER_CAPTURE / _TEST_HOOKS
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <atomic>
@@ -53,7 +54,9 @@ void showErrorBox(const char* title, const char* text)
 // arrival (SDL's push stamp) → dispatch in PollEvents → commit of the frame
 // that consumed it (after Render/SwapBuffers; Render ends with the commit on
 // Metal). Its own registered event type, swallowed in the event callback, so
-// neither ImGui nor Input ever sees it. Off unless set; read once.
+// neither ImGui nor Input ever sees it. Off unless set; read once. Part of the
+// perf automation, so dev builds only (HE_FEATURE_PROFILER_CAPTURE).
+#if HE_FEATURE_PROFILER_CAPTURE
 struct InputLatencyProbe
 {
 	int                   hz = 0;
@@ -169,6 +172,7 @@ struct InputLatencyProbe
 	}
 };
 InputLatencyProbe g_inputLatency;
+#endif
 } // namespace
 
 namespace HE
@@ -258,6 +262,18 @@ namespace HE
 
 		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
+		// Startup timeline, every backend alike (Thema 196: D3D started far
+		// slower than Metal/Vulkan). "[startup]" lines, one grep away in the log;
+		// the D3D backends add their own phases under the same prefix.
+		using StartupClock = std::chrono::steady_clock;
+		const StartupClock::time_point startupT0 = StartupClock::now();
+		auto startupMs = [](StartupClock::time_point t0) {
+			return std::chrono::duration<double, std::milli>(StartupClock::now() - t0).count();
+		};
+		constexpr uint64_t kStartupFrameWatch  = 300;   // early frames that are watched
+		constexpr double   kStartupSlowFrameMs = 250.0; // and logged when this slow
+		bool firstPresentLogged = false;
+
 		// ── Hidden mode (see hiddenWindowRequested) ─────────────────────────
 		// Before ANY SDL_Init(VIDEO), which the splash below may already do: on
 		// macOS SDL registers the application right there, gives it a Dock icon
@@ -289,14 +305,17 @@ namespace HE
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{
+#if HE_FEATURE_PROFILER_CAPTURE
 			// HE_PERF_INPUT_LATENCY_HZ's own events stop here (no-op when off).
 			if (g_inputLatency.take(e)) return;
 			// F9 toggles a profiler benchmark capture, engine-wide (editor + game).
+			// Dev builds only: in a release game F9 is the game's key.
 			if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat)
 			{
 				toggleProfilerCapture();
 				return;
 			}
+#endif
 			// Forward window-close events for secondary windows
 			if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 			{
@@ -348,6 +367,8 @@ namespace HE
 		}
 
 		m_splash.setStatus("Initialising renderer", 0.15f);
+		HE_LOG_INFO(Core, "[startup] app phase=window+splash ms=%.1f", startupMs(startupT0));
+		const StartupClock::time_point rendererT0 = StartupClock::now();
 		m_renderer = CreateRenderer();
 		try
 		{
@@ -360,6 +381,8 @@ namespace HE
 				// the right present mode.
 				m_renderer->SetVSync(cfg.windowprops.vsync);
 				HE_LOG_INFO(Core, "%s", "Renderer initialized");
+				HE_LOG_INFO(Core, "[startup] app phase=renderer backend=%s ms=%.1f",
+				            rhiName(cfg.backend), startupMs(rendererT0));
 			}
 			else
 			{
@@ -378,7 +401,9 @@ namespace HE
 		}
 
 		m_splash.setStatus("Starting up", 0.35f);
+		const StartupClock::time_point onInitT0 = StartupClock::now();
 		OnInit();
+		HE_LOG_INFO(Core, "[startup] app phase=OnInit ms=%.1f", startupMs(onInitT0));
 		HE_LOG_INFO(Core, "%s", "OnInit complete — entering main loop");
 
 		m_splash.setStatus("Ready", 1.0f);
@@ -403,10 +428,12 @@ namespace HE
 		// heartbeat measures against (see setEventDriven).
 		Uint64 lastDrawTick = SDL_GetTicksNS();
 
+#if HE_FEATURE_PROFILER_CAPTURE
 		{
 			const char* perFrame = std::getenv("HE_PERF_INPUT_EVENTS");
 			g_inputLatency.start(perFrame && std::atoi(perFrame) > 0);
 		}
+#endif
 
 		while (m_running && !m_window->ShouldClose())
 		{
@@ -457,7 +484,8 @@ namespace HE
 			// It also turns hidden mode on (hiddenWindowRequested) — the run
 			// is a script's, not a person's; HE_HIDDEN_WINDOW=0 shows it anyway.
 			// Read once and cached: getenv per frame is a syscall for a value
-			// that cannot change.
+			// that cannot change. A test hook: dev builds only.
+#if HE_FEATURE_TEST_HOOKS
 			{
 				static const unsigned long long kExitAfter = []() -> unsigned long long
 				{
@@ -471,6 +499,7 @@ namespace HE
 					m_running = false;
 				}
 			}
+#endif
 
 			// ── HE_PROFILE_CAPTURE: a scripted F9 ───────────────────────────
 			// The same benchmark capture F9 starts, but without a person at the
@@ -486,6 +515,10 @@ namespace HE
 			// records at the vsync the app runs with instead of forcing it off
 			// (the paced frame rate a user sees, not the headroom);
 			// HE_PROFILE_NOTE labels the dump.
+			//
+			// This block and HE_CAPTURE_FRAME below are perf/image automation:
+			// dev builds only (HE_FEATURE_PROFILER_CAPTURE).
+#if HE_FEATURE_PROFILER_CAPTURE
 			{
 				struct AutoCapture
 				{
@@ -592,6 +625,7 @@ namespace HE
 						HE_LOG_ERROR(Core, "%s", "The renderer produced no frame to capture");
 				}
 			}
+#endif
 
 			// Hitch detector. A frame this long is always worth knowing about — it is
 			// usually a synchronous asset load, a shader compile or a GC-like stall in
@@ -630,7 +664,9 @@ namespace HE
 			// across the primary window so ImGui's hover state actually changes
 			// and the frame pays for that too, not just for the dispatch. Only
 			// ImGui and Input see the position: SDL's own mouse state is not
-			// touched by a pushed event. Read once; off (0) unless set.
+			// touched by a pushed event. Read once; off (0) unless set. Dev
+			// builds only, like the rest of the perf automation.
+#if HE_FEATURE_PROFILER_CAPTURE
 			{
 				static const int kSynthMotion = []
 				{
@@ -678,16 +714,86 @@ namespace HE
 					}
 				}
 			}
+#endif
+
+			// ── HE_PERF_KEY_HOLD=<key name>: a held key (perf audit) ────────
+			// The keyboard half of the synthetic load: from frame 50 on, the key
+			// goes down once and then repeats every frame, the event stream a
+			// held key delivers (macOS repeats at up to ~30 Hz). Only ImGui and
+			// Input see it; SDL's own keyboard state is not touched by a pushed
+			// event. Read once; off unless set. HE_PERF_KEY_RMB=1 first moves
+			// the pointer to the window's centre (frame 45) and presses the right
+			// button there (frame 49), so a W lands in the editor's fly-look the
+			// way a hand on mouse and keyboard delivers it.
+			{
+				static const SDL_Scancode kHeldKey = []
+				{
+					const char* v = std::getenv("HE_PERF_KEY_HOLD");
+					return (v && *v) ? SDL_GetScancodeFromName(v) : SDL_SCANCODE_UNKNOWN;
+				}();
+				static const bool kHoldRmb = []
+				{
+					const char* v = std::getenv("HE_PERF_KEY_RMB");
+					return v && std::atoi(v) > 0;
+				}();
+				SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr;
+				if (kHoldRmb && sw && (m_frameIndex == 45 || m_frameIndex == 49))
+				{
+					int w = 0, h = 0;
+					SDL_GetWindowSize(sw, &w, &h);
+					SDL_Event e{};
+					if (m_frameIndex == 45)
+					{
+						e.type            = SDL_EVENT_MOUSE_MOTION;
+						e.motion.windowID = SDL_GetWindowID(sw);
+						e.motion.which    = 1;
+						e.motion.x        = 0.5f * static_cast<float>(w);
+						e.motion.y        = 0.45f * static_cast<float>(h);
+					}
+					else
+					{
+						e.type             = SDL_EVENT_MOUSE_BUTTON_DOWN;
+						e.button.windowID  = SDL_GetWindowID(sw);
+						e.button.which     = 1;
+						e.button.button    = SDL_BUTTON_RIGHT;
+						e.button.down      = true;
+						e.button.clicks    = 1;
+						e.button.x         = 0.5f * static_cast<float>(w);
+						e.button.y         = 0.45f * static_cast<float>(h);
+						HE_LOG_INFO(Core, "HE_PERF_KEY_RMB: right button down at %d,%d", w / 2, h * 45 / 100);
+					}
+					SDL_PushEvent(&e);
+				}
+				if (kHeldKey != SDL_SCANCODE_UNKNOWN && sw && m_frameIndex >= 50)
+				{
+					static bool s_down = false;
+					SDL_Event e{};
+					e.type         = SDL_EVENT_KEY_DOWN;
+					e.key.windowID = SDL_GetWindowID(sw);
+					e.key.scancode = kHeldKey;
+					e.key.key      = SDL_GetKeyFromScancode(kHeldKey, SDL_KMOD_NONE, false);
+					e.key.down     = true;
+					e.key.repeat   = s_down;
+					if (!s_down)
+						HE_LOG_INFO(Core, "HE_PERF_KEY_HOLD: holding %s from frame %llu",
+						            SDL_GetScancodeName(kHeldKey),
+						            static_cast<unsigned long long>(m_frameIndex));
+					s_down = true;
+					SDL_PushEvent(&e);
+				}
+			}
 
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");
 				m_window->PollEvents();
 			}
+#if HE_FEATURE_PROFILER_CAPTURE
 			// The positive control for HE_PERF_INPUT_EVENTS: a cost that does not
 			// move with N only means something if the events were really handled.
 			if (m_frameIndex == 100 && std::getenv("HE_PERF_INPUT_EVENTS"))
 				HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS: frame 100 dispatched %u events",
 				            m_window->EventsLastPoll());
+#endif
 			if (m_window->ShouldClose()) break;
 
 			// Snapshot pad state right after event polling so hot-plug from
@@ -799,7 +905,29 @@ namespace HE
 				// The frame is committed (Metal/D3D/Vulkan inside Render, GL
 				// in the swap): whatever input it polled is as old as it gets
 				// on the CPU side.
+#if HE_FEATURE_PROFILER_CAPTURE
 				g_inputLatency.committed(m_frameIndex);
+#endif
+			}
+
+			// Startup timeline, continued: when the first frame reached the
+			// screen, and which of the early frames were slow. Busy time only
+			// (from the end of the idle wait), so an event-driven sleep does not
+			// read as a slow frame. Lazy work lands here — material warmup, a
+			// project opened from the first frames.
+			if (m_frameIndex <= kStartupFrameWatch)
+			{
+				const double busyMs = static_cast<double>(SDL_GetTicksNS() - nowTick) * 1e-6;
+				if (present && !firstPresentLogged)
+				{
+					firstPresentLogged = true;
+					HE_LOG_INFO(Core, "[startup] app first frame presented: frame=%llu ms=%.1f since Run, "
+					                  "frameBusyMs=%.1f",
+					            static_cast<unsigned long long>(m_frameIndex), startupMs(startupT0), busyMs);
+				}
+				else if (busyMs >= kStartupSlowFrameMs)
+					HE_LOG_INFO(Core, "[startup] app slow frame=%llu busyMs=%.1f (%.1f since Run)",
+					            static_cast<unsigned long long>(m_frameIndex), busyMs, startupMs(startupT0));
 			}
 
 			// Pull per-frame GPU timing + render counters from the backend while a
@@ -909,9 +1037,11 @@ namespace HE
 			}
 		}
 
+#if HE_FEATURE_PROFILER_CAPTURE
 		// Before anything shuts SDL down under the pushing thread.
 		g_inputLatency.stop();
 		g_inputLatency.report("final");
+#endif
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
 		// Detach and destroy secondary windows first — each through the same
@@ -1028,6 +1158,7 @@ namespace HE
         if (m_renderer) m_renderer->SetVSync(enabled);
     }
 
+#if HE_FEATURE_PROFILER_CAPTURE
     void Application::toggleProfilerCapture(bool forceVsyncOff, const char* note)
     {
         EngineProfiler& profiler = EngineProfiler::instance();
@@ -1070,6 +1201,7 @@ namespace HE
                         m_vsyncEnabled ? "on" : "off");
         }
     }
+#endif
 
     void Application::setWindowMode(WindowMode mode)
     {
