@@ -209,6 +209,7 @@ namespace
             opt.uvMetersPerTile = WaterSurface::kUvMetersPerTile;
             opt.clipToGround    = f.clipToGround;
             opt.shoreOvershoot  = f.shoreOvershoot;
+            opt.shoreFade       = true;     // the engine water material softens the shore from it
             const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin);
 
             // Steady state: nothing was edited, every surface still belongs to a

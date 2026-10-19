@@ -22,7 +22,9 @@
 #include <HorizonScene/Components/NavMeshComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
+#include <Physics/WaterWaves.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -1496,4 +1498,208 @@ TEST_CASE("Water shore: the settings are clamped, and a bad one keeps the old")
     tc.water.shoreOvershoot = -1.0f;
     water::sanitize(tc);
     CHECK(tc.water.shoreOvershoot == 0.0f);
+}
+
+// ── Soft shore (Thema 206 Schritt 2): the mesh carries the water's depth ────────────
+namespace
+{
+    // The shore proximity vertex i of a mesh carries (normal.x / gain; see WaterWaves.h).
+    float proximityOf(const StaticMeshAsset& m, uint32_t i)
+    {
+        return m.normals[i * 3] / HE::water::kShoreNormalGain;
+    }
+
+    // The triangles that cover something. The triangulator's ears (and so the pieces a
+    // split cuts them into) can be slivers of no area at all, a corner on the line of
+    // the other two; they draw nothing and a float cannot say which way they face.
+    std::vector<uint32_t> solidIndices(const StaticMeshAsset& m, double minArea = 1e-5)
+    {
+        std::vector<uint32_t> out;
+        for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
+        {
+            const float* a = &m.vertices[m.indices[i] * 3];
+            const float* b = &m.vertices[m.indices[i + 1] * 3];
+            const float* c = &m.vertices[m.indices[i + 2] * 3];
+            const double twice = (double(b[2]) - a[2]) * (double(c[0]) - a[0]) - (double(b[0]) - a[0]) * (double(c[2]) - a[2]);
+            if (std::abs(twice) < 2.0 * minArea) continue;
+            out.insert(out.end(), { m.indices[i], m.indices[i + 1], m.indices[i + 2] });
+        }
+        return out;
+    }
+
+    // Is a vertex of the (solid) mesh strictly inside an edge of one of its triangles? That
+    // is a T-junction: the two sides of the edge would be rasterised differently and a pixel
+    // of the blended sheet could drop out or draw twice.
+    bool hasTJunction(const StaticMeshAsset& m)
+    {
+        const std::vector<uint32_t> idx = solidIndices(m);
+        std::vector<uint32_t> used = idx;
+        std::sort(used.begin(), used.end());
+        used.erase(std::unique(used.begin(), used.end()), used.end());
+        auto P = [&](uint32_t i) { return glm::dvec2(m.vertices[i * 3], m.vertices[i * 3 + 2]); };
+        for (size_t t = 0; t + 2 < idx.size(); t += 3)
+            for (int k = 0; k < 3; ++k)
+            {
+                const glm::dvec2 a = P(idx[t + k]), b = P(idx[t + (k + 1) % 3]);
+                const glm::dvec2 ab = b - a;
+                const double len2 = glm::dot(ab, ab);
+                if (len2 < 1e-12) continue;
+                for (const uint32_t v : used)
+                {
+                    const glm::dvec2 p = P(v);
+                    const double u = glm::dot(p - a, ab) / len2;
+                    if (u <= 1e-6 || u >= 1.0 - 1e-6) continue;
+                    const glm::dvec2 q = a + ab * u;
+                    // A float holds a coordinate of 25 m to 3 µm: a vertex that close to the line is on it.
+                    if (glm::length(p - q) < 1e-5) return true;
+                }
+            }
+        return false;
+    }
+
+    // Every covering triangle faces up, and the covering ones overlap nowhere.
+    StaticMeshAsset solidOf(const StaticMeshAsset& m)
+    {
+        StaticMeshAsset s = m;
+        s.indices = solidIndices(m);
+        return s;
+    }
+
+    water::SurfaceOptions softShore(float overshoot = water::kDefaultShoreOvershoot)
+    {
+        water::SurfaceOptions o = clipped(overshoot);
+        o.shoreFade = true;
+        return o;
+    }
+}
+
+TEST_CASE("Water soft shore: off, the mesh is the plain sheet; without the ground it does nothing")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float) { return 0.04f * x; });
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 0.3f);
+    const Built plain = build(tc, id, clipped());
+    REQUIRE_FALSE(plain.s.empty());
+    CHECK(plain.s.shoreVertices == 0);
+    for (size_t i = 0; i < plain.s.mesh.normals.size(); i += 3) CHECK(plain.s.mesh.normals[i] == 0.0f);
+
+    // No ground to read the depth from: shoreFade asks for nothing, the mesh and its hash stay.
+    water::SurfaceOptions noGround;
+    noGround.shoreFade = true;
+    const Built a = build(tc, id, noGround), b = build(tc, id, water::SurfaceOptions{});
+    CHECK(a.s.hash == b.s.hash);
+    CHECK(a.s.mesh.vertices == b.s.mesh.vertices);
+    CHECK(a.s.mesh.indices == b.s.mesh.indices);
+    CHECK(a.s.mesh.normals == b.s.mesh.normals);
+    CHECK(a.s.shoreVertices == 0);
+}
+
+TEST_CASE("Water soft shore: on a plane bank the depth is carried linearly, the sheet is the same sheet")
+{
+    TerrainComponent tc = makeTerrain();                                  // 64 m, a metre per cell
+    shapeGround(tc, 65, [](float x, float) { return 0.04f * x; });       // 4 cm per metre, rising east
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 0.3f);
+    const Built plain = build(tc, id, clipped());
+    const Built soft  = build(tc, id, softShore());
+    REQUIRE_FALSE(soft.s.empty());
+
+    // The same sheet: the area, the outline, nothing overlapping, every triangle up.
+    CHECK(sumArea(soft.tris) == doctest::Approx(sumArea(plain.tris)).epsilon(1e-6));
+    CHECK_FALSE(anyOverlap(soft.tris));
+    CHECK(allFaceUp(soft.s.mesh));
+    CHECK_FALSE(hasTJunction(soft.s.mesh));
+    CHECK(soft.s.hash != plain.s.hash);                                   // another mesh with the same cells
+    // Refined near the shore, and not into a grid: tens of triangles, not a thousand.
+    CHECK(soft.s.triangles > plain.s.triangles);
+    CHECK(soft.s.triangles < 400);
+    CHECK(soft.s.shoreVertices > 0);
+
+    // Every vertex: normal (gain · e, 1, 0), e in 0..1.
+    const StaticMeshAsset& m = soft.s.mesh;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        CHECK(m.normals[i * 3 + 1] == 1.0f);
+        CHECK(m.normals[i * 3 + 2] == 0.0f);
+        const float e = proximityOf(m, i);
+        CHECK(e >= 0.0f);
+        CHECK(e <= 1.0f + 1e-6f);
+    }
+
+    // e = 1 at the waterline, 0 beyond kShoreFadeDepth of water; in between it is
+    // 1 − depth, depth being 0.3 − 0.04 x over the drawn sheet: e = 0.7 + 0.04 x.
+    auto expected = [](double x) { return std::clamp(0.7 + 0.04 * x, 0.0, 1.0); };
+    float seenOne = 0.0f;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        const double x = m.vertices[i * 3] + soft.s.center.x;
+        CHECK(proximityOf(m, i) == doctest::Approx(expected(x)).epsilon(0.04));
+        seenOne = std::max(seenOne, proximityOf(m, i));
+    }
+    CHECK(seenOne == doctest::Approx(1.0f));
+    // And between the vertices: the centre of every triangle carries the mean of its corners,
+    // which is what the rasteriser interpolates to there. It follows the real depth.
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+    {
+        const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
+        const double x = (m.vertices[a * 3] + m.vertices[b * 3] + m.vertices[c * 3]) / 3.0 + soft.s.center.x;
+        const float e = (proximityOf(m, a) + proximityOf(m, b) + proximityOf(m, c)) / 3.0f;
+        CHECK(e == doctest::Approx(expected(x)).epsilon(0.05));
+    }
+    // Deep open water far from the bank has no shore in it at all.
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+        if (m.vertices[i * 3] + soft.s.center.x < -19.0f) CHECK(proximityOf(m, i) == 0.0f);
+
+    // The same field always gives the same mesh.
+    const Built again = build(tc, id, softShore());
+    CHECK(again.s.hash == soft.s.hash);
+    CHECK(again.s.mesh.vertices == soft.s.mesh.vertices);
+    CHECK(again.s.mesh.normals == soft.s.mesh.normals);
+    CHECK(again.s.mesh.indices == soft.s.mesh.indices);
+}
+
+TEST_CASE("Water soft shore: an island's bridged hole and a round bank stay watertight")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 129, [](float x, float z) { return 6.0f - 0.03f * (x * x + z * z); });   // a mound, as above
+    const uint16_t id = addLake(tc, rect(-25, -25, 25, 25), 1.0f);
+    const Built plain = build(tc, id, clipped());
+    const Built soft  = build(tc, id, softShore());
+    REQUIRE_FALSE(soft.s.empty());
+    CHECK(soft.s.contours == 2);                                          // an outer boundary and the island's hole
+    CHECK(sumArea(soft.tris) == doctest::Approx(sumArea(plain.tris)).epsilon(1e-6));
+    const StaticMeshAsset solid = solidOf(soft.s.mesh);
+    CHECK_FALSE(anyOverlap(trisOf(solid, soft.s.center), 1e-7));
+    CHECK_FALSE(hasTJunction(soft.s.mesh));
+    CHECK(allFaceUp(solid));
+    CHECK(soft.s.shoreVertices > 0);
+    // Water over the ground's low rim is shallow, the lake's outer edge (the square) is no shore.
+    const StaticMeshAsset& m = soft.s.mesh;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        const float x = m.vertices[i * 3] + soft.s.center.x, z = m.vertices[i * 3 + 2] + soft.s.center.y;
+        if (std::max(std::abs(x), std::abs(z)) > 24.9f) CHECK(proximityOf(m, i) < 1.0f);
+    }
+}
+
+TEST_CASE("Water soft shore: a large lake with a gentle bank is built in good time and stays a shore mesh")
+{
+    TerrainComponent tc = makeTerrain(512.0f, 512);
+    shapeGround(tc, 513, [](float x, float z) { return 4.0f * (x * x + z * z) / (190.0f * 190.0f) - 2.0f; });
+    std::vector<glm::vec2> poly;
+    for (int i = 0; i < 400; ++i)
+    {
+        const double a = 6.28318530717958647692 * i / 400;
+        const double r = 200.0 + 9.0 * std::sin(a * 7.0) + 3.0 * std::cos(a * 19.0);
+        poly.emplace_back(static_cast<float>(r * std::cos(a)), static_cast<float>(r * std::sin(a)));
+    }
+    const uint16_t id = addLake(tc, poly);
+    const Built plain = build(tc, id, clipped());
+    const auto t0 = std::chrono::steady_clock::now();
+    const Built soft = build(tc, id, softShore());
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    REQUIRE_FALSE(soft.s.empty());
+    MESSAGE("soft shore: " << soft.s.triangles << " triangles (plain " << plain.s.triangles << "), " << ms << " ms");
+    CHECK(sumArea(soft.tris) == doctest::Approx(sumArea(plain.tris)).epsilon(1e-6));
+    CHECK(soft.s.triangles < 20000);
+    CHECK(ms < 2000.0);
 }

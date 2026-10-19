@@ -293,7 +293,10 @@ namespace
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
-	  "below the surface is not read yet.",
+	  "below the surface is not read yet. z = shore width: at a landscape's "
+	  "waterline the water fades in over this many metres of depth instead of "
+	  "ending in a hard edge (0 = hard, up to 0.7). w = shore foam: the lace "
+	  "along the waterline (0 = none, 1 = strong).",
 	  "", "materials#water" },
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "

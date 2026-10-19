@@ -638,9 +638,12 @@ Mb waterMaterial()
         "Water colour where the view ray through the water is short (looking straight down).", 0);
     const int deep = m.param(T::ParamColor, "DeepColor", { 0.004f, 0.028f, 0.052f }, "Color",
         "Water colour where the view ray through the water is long (toward the horizon).", 1);
-    const int turb = m.param(T::ParamVec2, "Turbidity", { 0.45f, 4.0f }, "Color",
+    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.35f, 0.7f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
-        "y = water depth in metres the tint assumes (no scene depth is read yet).", 2);
+        "y = water depth in metres the tint assumes (no scene depth is read yet). "
+        "z = shore width: the water fades in over this many metres of depth at the water's "
+        "edge (0 = a hard edge, up to 0.7). w = shore foam: the lace along the water's edge "
+        "(0 = none, 1 = strong). Needs the water mesh of a landscape; a plane has no shore.", 2);
     // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
     // the water physics follows (WaterQuery), so retuning the water here retunes
     // the surface a crate floats on with it.
@@ -693,7 +696,8 @@ Mb waterMaterial()
     const int wps  = m.un(T::SplitRGBA, wp, 1, 16);
     const Pin px{ wps, 0 }, pz{ wps, 2 };
     const int time = m.node(T::Time, 0, 17);
-    const int geoN = m.node(T::NormalWS, 0, 18);
+    const int geoN = m.node(T::NormalWS, 0, 18);      // the mesh normal; n.x also carries the shore (see "Soft shore")
+    const int gs   = m.un(T::SplitRGBA, geoN, 1, 18);
     const int view = m.node(T::ViewDir, 0, 19);
     const int dist = m.node(T::CameraDistance, 0, 20);
 
@@ -784,7 +788,9 @@ Mb waterMaterial()
     const int sz    = m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesZ), std::end(slopesZ)), 41, 28), gust, 44, 28),
                            ringZ, 45, 28);
     const int tilt  = m.node(T::Combine3, 45, 27);
-    m.link(sx, tilt, 0);
+    // The mesh normal's x tilt is the shore proximity, not a slope: it goes into the
+    // tilt too, so subtracting the tilt leaves the wave slope alone (0 off a landscape).
+    m.link(m.op(T::Add, sx, Pin{ gs, 0 }, 45, 25), tilt, 0);
     m.link(sz, tilt, 2);                                     // Y stays 0
     const int waveN = m.un(T::Normalize3, m.op(T::Subtract, geoN, tilt, 46, 27), 47, 27);
 
@@ -881,18 +887,52 @@ Mb waterMaterial()
     const int foamAmt = m.un(T::Saturate, m.op(T::Add, waveFoam, ringFoam, 35, 18), 36, 18);
     m.comment("Foam", 16, 16, 16, 8);
 
+    // Soft shore (docs/water-realistic-baseline-2026-10-20.md, Thema 206 Schritt 2). The
+    // material pass has no scene depth, so the water mesh brings the water's depth along:
+    // each vertex of a landscape's sheet tilts its normal in x by kShoreNormalGain · e
+    // (WaterMesh.cpp), e = 1 at the waterline falling to 0 at kShoreFadeDepth metres of
+    // water. Read back here as e = n.x / n.y / gain, depth = (1 − e) · kShoreFadeDepth.
+    // A plane (or any mesh without the channel) has n.x = 0: e = 0, the depth is the full
+    // fade depth, and every term below is exactly neutral (ramp 1, foam 0, the gate shut),
+    // so open water is bit for bit what it was.
+    //   * alpha ramp: smoothstep over the width, so the edge fades out instead of cutting;
+    //   * the ramp's own edge is wobbled by the foam lace, so the line of the water is
+    //     organic, not the contour of a lattice cell;
+    //   * foam fringe: a lace band over the part of the ramp where it is half there.
+    constexpr float kShoreGain  = HE::water::kShoreNormalGain;
+    constexpr float kShoreDepth = HE::water::kShoreFadeDepth;
+    const int shoreE  = m.un(T::Saturate, m.op(T::Divide, Pin{ gs, 0 }, m.op(T::Multiply, Pin{ gs, 1 }, m.k(kShoreGain, 47, 13), 48, 13), 49, 12), 50, 12);
+    const int shoreD  = m.op(T::Multiply, m.un(T::OneMinus, shoreE, 51, 12), m.k(kShoreDepth, 51, 13), 52, 12);
+    const int shoreW  = m.op(T::Add, m.un(T::Saturate, Pin{ ts, 2 }, 47, 15), m.k(0.001f, 47, 16), 48, 15);      // never 0
+    const int shoreGate = m.op(T::Step, m.k(1e-4f, 51, 15), shoreE, 52, 15);                                      // 0 on open water
+    const int wobble  = m.op(T::Multiply, m.op(T::Multiply, m.op(T::Subtract, lace, m.k(0.5f, 49, 17), 50, 17), shoreW, 51, 17), m.k(0.6f, 51, 18), 52, 17);
+    const int shoreF  = m.op(T::Divide, m.op(T::Add, shoreD, wobble, 53, 12), shoreW, 54, 12);                    // depth in widths
+    const int rampS   = m.op3(T::Smoothstep, m.k(0.0f, 53, 14), m.k(1.0f, 53, 14.5f), shoreF, 55, 12);
+    const int ramp    = m.op3(T::Lerp, m.k(1.0f, 55, 14), rampS, shoreGate, 56, 12);
+    const int fringe  = m.op(T::Multiply,
+                             m.op3(T::Smoothstep, m.k(0.04f, 53, 16), m.k(0.14f, 53, 16.5f), shoreF, 55, 16),
+                             m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(0.14f, 53, 18), m.k(0.5f, 53, 18.5f), shoreF, 55, 18), 56, 18), 57, 16);
+    const int shoreFoam = m.op(T::Multiply, m.op(T::Multiply, fringe, Pin{ ts, 3 }, 58, 16),
+                               m.op(T::Add, m.k(0.35f, 57, 19), m.op(T::Multiply, breakup, m.k(0.65f, 57, 20), 58, 19), 59, 19), 60, 16);
+    const int foamAll = m.un(T::Saturate, m.op(T::Add, foamAmt, shoreFoam, 61, 16), 62, 16);
+    m.comment("Soft shore", 47, 12, 16, 9);
+
     // Output tail. Far water is rougher: what a pixel can no longer resolve is
     // what a rougher surface averages, and it keeps the horizon from turning into
     // a mirror strip of single-pixel glints.
     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
                               m.k(0.25f, 42, 1.5f), 43, 1);
     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAmt, 46, 7);
+    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
     const int bodyA  = m.op3(T::Lerp, opac, m.k(1.0f, 39, 3), m.un(T::OneMinus, trans, 39, 4), 40, 3);
     const int alpha1 = m.op3(T::Lerp, bodyA, m.k(1.0f, 40, 4.5f), m.op(T::Multiply, refl, fres, 40, 2), 41, 3);
-    const int alpha  = m.op3(T::Lerp, alpha1, m.k(1.0f, 41, 4.5f), m.op(T::Multiply, foamAmt, m.k(0.85f, 41, 5), 42, 5), 43, 3);
+    const int alpha0 = m.op3(T::Lerp, alpha1, m.k(1.0f, 41, 4.5f), m.op(T::Multiply, foamAmt, m.k(0.85f, 41, 5), 42, 5), 43, 3);
+    // The shore: the water (and the wave foam on it) fades in over the width, the
+    // shore's own foam comes on top of the ramp and is opaque where it is thick.
+    const int alpha  = m.op3(T::Lerp, m.op(T::Multiply, alpha0, ramp, 44, 3.5f), m.k(1.0f, 44, 4.5f),
+                             m.op(T::Multiply, shoreFoam, m.k(0.85f, 44, 5), 45, 5), 46, 3);
     const int specO  = m.op(T::Multiply, spec, refl, 41, 0);
-    const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAmt, 45, 2);
+    const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAll, 45, 2);
 
     const Under under = undersideTerms(m, geoN, view, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
 

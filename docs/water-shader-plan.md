@@ -669,7 +669,7 @@ Neue Defaults (alle 15 Knöpfe, Test-Tabelle `kWaterKnobs` ist nachgezogen):
 |---|---|---|
 | `ShallowColor` | 0.10, 0.42, 0.45 | 0.045, 0.20, 0.22 |
 | `DeepColor` | 0.01, 0.07, 0.12 | 0.004, 0.028, 0.052 |
-| `Turbidity` | 0.35, 3.0 | 0.45, 4.0 |
+| `Turbidity` | 0.35, 3.0 | 0.45, 4.0 (§14: dazu z = 0.35 Uferbreite, w = 0.7 Uferschaum, Vec4) |
 | `WaveA` | 30, 1.2, 8, 0.25 | 20, 1.0, 14, 0.07 |
 | `WaveB` | 310, 0.8, 3.5, 0.18 | 335, 0.8, 5, 0.10 |
 | `WaveC` | 100, 0.5, 1.2, 0.12 | 70, 0.5, 1.6, 0.09 |
@@ -871,3 +871,7 @@ womöglich noch nicht). CI auf dem Zweig: noch nicht gelaufen (Eintrag unten, we
 ## 13. Bestandsaufnahme Thema 206 (Ufer, Referenzbilder, Baseline)
 
 Ufer-Zickzack, Referenzbilder, Baseline-Screenshots und Plan für Wellen/Normalen/Transparenz: `docs/water-realistic-baseline-2026-10-20.md` (Handoff-Abschnitt).
+
+## 14. Weiches Ufer (Thema 206 Schritt 2)
+
+Tiefe je Eckpunkt im Mesh (Normale), Alpha-Rampe + Schaumsaum im Material, `Turbidity` hat jetzt zwei Komponenten mehr (z = Uferbreite in m, w = Uferschaum; Default `0.45, 4.0, 0.35, 0.7`): `docs/water-shore-soft-2026-10-20.md`.

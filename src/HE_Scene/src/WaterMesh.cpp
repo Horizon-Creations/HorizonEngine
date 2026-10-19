@@ -2,9 +2,12 @@
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 
+#include <Physics/WaterWaves.h>
+
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -155,6 +158,150 @@ namespace
         return h;
     }
     template <typename T> uint64_t fnv(uint64_t h, const T& v) { return fnv(h, &v, sizeof(T)); }
+
+    // ── Soft shore ───────────────────────────────────────────────────────────
+    // e at one lattice corner: 1 up to the waterline (the drawn sheet's depth ≤ 0),
+    // 0 from kShoreFadeDepth on. A corner nobody sampled holds the far-deep sentinel
+    // and reads 0; a ground that was not a number or stands above the water reads 1.
+    float cornerProximity(const Lattice& L, int i, int j, float overshoot)
+    {
+        i = std::clamp(i, 0, L.w - 1);
+        j = std::clamp(j, 0, L.h - 1);
+        const float g = L.groundAt(i, j);
+        if (!(g == g)) return 1.0f;
+        const float depth = g - overshoot;
+        return std::clamp(1.0f - depth / HE::water::kShoreFadeDepth, 0.0f, 1.0f);
+    }
+
+    // An edge of the triangle soup by its end POINTS, not its vertex indices: the two
+    // copies a hole's bridge leaves of one corner are two vertices on the same point,
+    // and the triangles on either side of the bridge must split it together or the
+    // sheet cracks. Ordered, so a→b and b→a are one edge.
+    using EdgeKey = std::array<double, 4>;
+    EdgeKey edgeKey(const glm::dvec2& a, const glm::dvec2& b)
+    {
+        const bool swap = b.x < a.x || (b.x == a.x && b.y < a.y);
+        return swap ? EdgeKey{ b.x, b.y, a.x, a.y } : EdgeKey{ a.x, a.y, b.x, b.y };
+    }
+    struct EdgeHash
+    {
+        size_t operator()(const EdgeKey& k) const
+        {
+            uint64_t h = 1469598103934665603ull;
+            for (double d : k)
+            {
+                uint64_t u;
+                std::memcpy(&u, &d, sizeof(u));
+                h ^= u + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            }
+            return static_cast<size_t>(h);
+        }
+    };
+
+    // Splits the triangles near the shore until a straight line between vertices
+    // follows e. The error of an edge is how far e at its middle is from the mean of its
+    // ends; of a triangle, how far e at its centre is from the mean of its corners. An
+    // edge that is too coarse is split at its middle (a triangle takes the split of one,
+    // two or three of its edges, neighbours always agreeing, so there is no T-junction),
+    // and the passes repeat. A planar bank, whose e is exactly linear in position until
+    // it saturates, costs only the splits that bring a vertex to the place where it does:
+    // O(log) per edge, not a grid. Never finer than hmin, the scale e itself has (it is
+    // bilinear on the lattice cells), and never past maxVertices.
+    void refineShore(const Lattice& L, float overshoot, std::vector<glm::dvec2>& P,
+                     std::vector<float>& E, std::vector<uint32_t>& T)
+    {
+        constexpr float  kTolerance   = 0.03f;      // of e, i.e. 3 cm of water depth
+        constexpr int    kMaxPasses   = 24;
+        constexpr size_t kMaxVertices = 400000;
+        const double hmin  = 0.5 * std::min(L.cellW, L.cellH);
+        const double hmin2 = hmin * hmin;
+        auto eAt = [&](const glm::dvec2& p) { return shoreProximityAt(L, p.x, p.y, overshoot); };
+
+        std::unordered_map<EdgeKey, bool, EdgeHash> bad;      // verdict per edge, kept across passes
+        for (int pass = 0; pass < kMaxPasses; ++pass)
+        {
+            std::unordered_set<EdgeKey, EdgeHash> split;
+            for (size_t t = 0; t + 2 < T.size(); t += 3)
+            {
+                const uint32_t v[3] = { T[t], T[t + 1], T[t + 2] };
+                double longest = 0.0;
+                EdgeKey longestKey{};
+                for (int k = 0; k < 3; ++k)
+                {
+                    const glm::dvec2& a = P[v[k]];
+                    const glm::dvec2& b = P[v[(k + 1) % 3]];
+                    const glm::dvec2 d = b - a;
+                    const double len2 = glm::dot(d, d);
+                    if (len2 <= hmin2 * 4.0) continue;               // halves would be below hmin
+                    const EdgeKey key = edgeKey(a, b);
+                    auto it = bad.find(key);
+                    if (it == bad.end())
+                        it = bad.emplace(key, std::abs(eAt((a + b) * 0.5) - 0.5f * (E[v[k]] + E[v[(k + 1) % 3]])) > kTolerance).first;
+                    if (it->second) split.insert(key);
+                    if (len2 > longest) { longest = len2; longestKey = key; }
+                }
+                if (longest <= 0.0) continue;
+                // The inside of the triangle: a flat e between three equal corners can
+                // still hide a dip, and the longest edge is the one to cut for it.
+                const glm::dvec2 c = (P[v[0]] + P[v[1]] + P[v[2]]) / 3.0;
+                if (std::abs(eAt(c) - (E[v[0]] + E[v[1]] + E[v[2]]) / 3.0f) > kTolerance)
+                    split.insert(longestKey);
+            }
+            if (split.empty() || P.size() + split.size() > kMaxVertices) break;
+
+            std::unordered_map<EdgeKey, uint32_t, EdgeHash> mid;
+            mid.reserve(split.size());
+            for (const EdgeKey& k : split)
+            {
+                const glm::dvec2 m((k[0] + k[2]) * 0.5, (k[1] + k[3]) * 0.5);
+                mid.emplace(k, static_cast<uint32_t>(P.size()));
+                P.push_back(m);
+                E.push_back(eAt(m));
+            }
+            auto midOf = [&](uint32_t a, uint32_t b) -> int64_t
+            {
+                const auto it = mid.find(edgeKey(P[a], P[b]));
+                return it == mid.end() ? -1 : static_cast<int64_t>(it->second);
+            };
+
+            std::vector<uint32_t> out;
+            out.reserve(T.size() + split.size() * 6);
+            auto emit = [&](uint32_t a, uint32_t b, uint32_t c) { out.push_back(a); out.push_back(b); out.push_back(c); };
+            for (size_t t = 0; t + 2 < T.size(); t += 3)
+            {
+                uint32_t v[3] = { T[t], T[t + 1], T[t + 2] };
+                int64_t  m[3] = { midOf(v[0], v[1]), midOf(v[1], v[2]), midOf(v[2], v[0]) };   // on edge k → k+1
+                const int n = (m[0] >= 0) + (m[1] >= 0) + (m[2] >= 0);
+                if (n == 0) { emit(v[0], v[1], v[2]); continue; }
+                // Rotate so the split edges are the first ones; the winding is kept.
+                int r = 0;
+                if (n == 1) r = m[0] >= 0 ? 0 : (m[1] >= 0 ? 1 : 2);
+                else if (n == 2) r = m[2] < 0 ? 0 : (m[0] < 0 ? 1 : 2);
+                const uint32_t a = v[r], b = v[(r + 1) % 3], c = v[(r + 2) % 3];
+                const int64_t  mab = m[r], mbc = m[(r + 1) % 3], mca = m[(r + 2) % 3];
+                if (n == 1)
+                {
+                    emit(a, static_cast<uint32_t>(mab), c);
+                    emit(static_cast<uint32_t>(mab), b, c);
+                }
+                else if (n == 2)
+                {
+                    // ab and bc are split: the corner at b, then the quad a–mab–mbc–c on its shorter diagonal.
+                    const uint32_t p = static_cast<uint32_t>(mab), q = static_cast<uint32_t>(mbc);
+                    emit(p, b, q);
+                    const glm::dvec2 d1 = P[a] - P[q], d2 = P[p] - P[c];
+                    if (glm::dot(d1, d1) <= glm::dot(d2, d2)) { emit(a, p, q); emit(a, q, c); }
+                    else                                      { emit(a, p, c); emit(p, q, c); }
+                }
+                else
+                {
+                    const uint32_t p = static_cast<uint32_t>(mab), q = static_cast<uint32_t>(mbc), s = static_cast<uint32_t>(mca);
+                    emit(a, p, s); emit(p, b, q); emit(s, q, c); emit(p, q, s);
+                }
+            }
+            T.swap(out);
+        }
+    }
 }
 
 // ── Cells of a body ──────────────────────────────────────────────────────────
@@ -469,7 +616,22 @@ uint64_t surfaceHash(const Lattice& l, float level, const SurfaceOptions& opt)
     // A lake over a hill that was sculpted is a different sheet with the same cells.
     h = fnv(h, static_cast<uint64_t>(l.g.size()));
     if (!l.g.empty()) h = fnv(h, l.g.data(), l.g.size() * sizeof(float));
+    // Only when on, so a mesh without the soft shore keeps the hash it always had.
+    if (opt.shoreFade && !l.g.empty()) { h = fnv(h, static_cast<uint32_t>(1)); h = fnv(h, opt.shoreOvershoot); }
     return h;
+}
+
+float shoreProximityAt(const Lattice& L, double x, double z, float overshoot)
+{
+    if (!L.clipped() || L.w < 2 || L.h < 2) return 0.0f;
+    const double u = std::clamp((x - L.originX) / L.cellW - L.x0, 0.0, static_cast<double>(L.w - 1));
+    const double v = std::clamp((z - L.originZ) / L.cellH - L.z0, 0.0, static_cast<double>(L.h - 1));
+    const int i = std::min(static_cast<int>(u), L.w - 2);
+    const int j = std::min(static_cast<int>(v), L.h - 2);
+    const float tx = static_cast<float>(u - i), tz = static_cast<float>(v - j);
+    const float e00 = cornerProximity(L, i,     j,     overshoot), e10 = cornerProximity(L, i + 1, j,     overshoot);
+    const float e01 = cornerProximity(L, i,     j + 1, overshoot), e11 = cornerProximity(L, i + 1, j + 1, overshoot);
+    return (e00 + (e10 - e00) * tx) * (1.0f - tz) + (e01 + (e11 - e01) * tx) * tz;
 }
 
 bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOptions& opt, SurfaceMesh& out)
@@ -519,6 +681,7 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
     m.path = "mem://water_surface";
 
     const double invTile = 1.0 / std::max(1e-6f, opt.uvMetersPerTile);
+    const bool fade = opt.shoreFade && lattice.clipped();
     float bmin[3] = {  1e30f,  1e30f,  1e30f };
     float bmax[3] = { -1e30f, -1e30f, -1e30f };
 
@@ -529,28 +692,44 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
         rings.push_back(poly.outer);
         for (const Ring& h : poly.holes) rings.push_back(h);
 
-        const std::vector<uint32_t> tris = triangulate(rings);
+        std::vector<uint32_t> tris = triangulate(rings);
         if (tris.empty()) continue;
 
+        // The polygon's vertices, the rings laid end to end like the triangles index
+        // them, and with the soft shore the shore proximity of each.
+        std::vector<glm::dvec2> pts;
+        for (const Ring& r : rings) pts.insert(pts.end(), r.begin(), r.end());
+        std::vector<float> prox;
+        if (fade)
+        {
+            prox.reserve(pts.size());
+            for (const glm::dvec2& v : pts) prox.push_back(shoreProximityAt(lattice, v.x, v.y, opt.shoreOvershoot));
+            refineShore(lattice, opt.shoreOvershoot, pts, prox, tris);
+        }
+
         const uint32_t base = static_cast<uint32_t>(m.vertices.size() / 3);
-        for (const Ring& r : rings)
-            for (const glm::dvec2& v : r)
-            {
-                const float x = static_cast<float>(v.x - center.x);
-                const float z = static_cast<float>(v.y - center.y);
-                m.vertices.push_back(x);
-                m.vertices.push_back(0.0f);
-                m.vertices.push_back(z);
-                m.normals.push_back(0.0f);
-                m.normals.push_back(1.0f);
-                m.normals.push_back(0.0f);
-                // World coordinates, so a second body (or terrain) beside this one
-                // continues the pattern instead of restarting it.
-                m.uvs.push_back(static_cast<float>((v.x + opt.uvOrigin.x) * invTile));
-                m.uvs.push_back(static_cast<float>((v.y + opt.uvOrigin.y) * invTile));
-                bmin[0] = std::min(bmin[0], x); bmax[0] = std::max(bmax[0], x);
-                bmin[2] = std::min(bmin[2], z); bmax[2] = std::max(bmax[2], z);
-            }
+        for (size_t k = 0; k < pts.size(); ++k)
+        {
+            const glm::dvec2& v = pts[k];
+            const float x = static_cast<float>(v.x - center.x);
+            const float z = static_cast<float>(v.y - center.y);
+            m.vertices.push_back(x);
+            m.vertices.push_back(0.0f);
+            m.vertices.push_back(z);
+            // +Y; with the soft shore a tilt in x says how shallow the water is here
+            // (kShoreNormalGain, Physics/WaterWaves.h). The material reads it back.
+            const float e = fade ? prox[k] : 0.0f;
+            m.normals.push_back(e * HE::water::kShoreNormalGain);
+            m.normals.push_back(1.0f);
+            m.normals.push_back(0.0f);
+            if (e > 0.0f) ++out.shoreVertices;
+            // World coordinates, so a second body (or terrain) beside this one
+            // continues the pattern instead of restarting it.
+            m.uvs.push_back(static_cast<float>((v.x + opt.uvOrigin.x) * invTile));
+            m.uvs.push_back(static_cast<float>((v.y + opt.uvOrigin.y) * invTile));
+            bmin[0] = std::min(bmin[0], x); bmax[0] = std::max(bmax[0], x);
+            bmin[2] = std::min(bmin[2], z); bmax[2] = std::max(bmax[2], z);
+        }
 
         // The triangulator returns counter-clockwise in (x, z), i.e. facing down;
         // the surface faces up, like the terrain's (bl, tl, br).

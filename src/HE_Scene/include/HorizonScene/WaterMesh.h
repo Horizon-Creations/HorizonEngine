@@ -174,6 +174,13 @@ namespace HE::water
     std::vector<Polygon> groupContours(const std::vector<Contour>& contours);
 
     // ── The mesh ─────────────────────────────────────────────────────────────
+    // SOFT SHORE. The sheet ends where the ground comes up through it, so the visible
+    // shoreline is the terrain's facets cutting a flat sheet: constant alpha, a hard
+    // edge, a zigzag on a gentle beach. Only alpha can soften that, and alpha needs the
+    // water's depth per pixel, which the material pass does not have. With `shoreFade`
+    // the mesh brings it: each vertex's normal tilts by shoreProximityAt (x = gain · e,
+    // y = 1), and the triangles near the shore are split (edge midpoints, error driven,
+    // never finer than half a cell) until the interpolated e matches the lattice's.
     struct SurfaceOptions
     {
         // World XZ of the terrain's local origin. UVs are WORLD coordinates, so
@@ -187,6 +194,12 @@ namespace HE::water
         bool      clipToGround = false;
         float     shoreOvershoot = kDefaultShoreOvershoot;
         ShoreClip clipFor(float level) const { return { clipToGround, level, shoreOvershoot }; }
+        // Soft shore (Thema 206 Schritt 2): every vertex carries how shallow the water
+        // is under it (`shoreProximityAt`, in the normal's x tilt, Physics/WaterWaves.h
+        // kShoreNormalGain), and the sheet is refined near the shore until that
+        // interpolates faithfully. Needs the ground (clipToGround), else it does nothing.
+        // Off = the plain contour triangulation, normal +Y everywhere, bit for bit.
+        bool      shoreFade = false;
     };
 
     // Not `Surface`: that is WaterQuery.h's answer for a point, in the same
@@ -204,9 +217,17 @@ namespace HE::water
         uint32_t  contours = 0;              // closed contours found (outer boundaries + holes)
         uint32_t  polygons = 0;              // outer boundaries
         uint32_t  triangles = 0;
+        uint32_t  shoreVertices = 0;         // vertices with a shore proximity above 0 (soft shore)
         uint64_t  hash = 0;                  // of everything the mesh was built from
         bool empty() const { return mesh.indices.empty(); }
     };
+
+    // How near the water's edge a point of the sheet is, 0..1: 1 at the waterline and
+    // inland of it, falling to 0 at kShoreFadeDepth (Physics/WaterWaves.h) metres of
+    // water over the ground; 0 on an unclipped lattice and wherever the ground was
+    // never sampled (open water). Bilinear in the lattice cells' ground depth — over
+    // the DRAWN sheet, i.e. `overshoot` is taken off the lattice's depth.
+    float shoreProximityAt(const Lattice& lattice, double x, double z, float overshoot);
 
     // Hash of the lattice (ground included) and the options: equal hash, same mesh. Lets the caller
     // skip a rebuild when an edit near a body did not change it.

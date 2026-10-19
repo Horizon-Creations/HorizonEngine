@@ -98,7 +98,7 @@ struct Knob { const char* name; MatParamKind kind; float v[4]; };
 const Knob kWaterKnobs[] = {
 	{ "ShallowColor", MatParamKind::Color, { 0.045f, 0.20f, 0.22f, 0.0f } },
 	{ "DeepColor",    MatParamKind::Color, { 0.004f, 0.028f, 0.052f, 0.0f } },
-	{ "Turbidity",    MatParamKind::Vec2,  { 0.45f, 4.0f, 0.0f, 0.0f } },
+	{ "Turbidity",    MatParamKind::Vec4,  { 0.45f, 4.0f, 0.35f, 0.7f } },
 	{ "WaveA",        MatParamKind::Vec4,  { 20.0f, 1.0f, 14.0f, 0.07f } },
 	{ "WaveB",        MatParamKind::Vec4,  { 335.0f, 0.8f, 5.0f, 0.10f } },
 	{ "WaveC",        MatParamKind::Vec4,  { 70.0f, 0.5f, 1.6f, 0.09f } },
