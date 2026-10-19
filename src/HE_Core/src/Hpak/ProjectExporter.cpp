@@ -560,7 +560,13 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
 #endif
     }
     packSettings.encrypt = settings.encrypt;
-    if (settings.encrypt)
+    if (settings.encrypt && settings.planned)
+    {
+        // planExport already went through the sources below, and a game may
+        // have been compiled with its answer since: that key and no other.
+        std::memcpy(packSettings.key, settings.plannedPakKey, 32);
+    }
+    else if (settings.encrypt)
     {
         // Ship a random 256-bit key in project.hcfg (deriving from a passphrase
         // buys nothing when the key ships with the game anyway). Incremental
@@ -629,7 +635,9 @@ static void addSceneEntries(
     // encryption as the assets. Must happen before write().
     if (!startupSceneBinary.empty())
     {
-        ctx.sceneUuid = HE::UUID::generate();
+        // A planned export brings its UUID along (planExport): the game built
+        // before the pack has it compiled in.
+        if (ctx.sceneUuid == HE::UUID{}) ctx.sceneUuid = HE::UUID::generate();
         packer.addEntry(ctx.sceneUuid, startupSceneBinary, packSettings);
     }
 
@@ -1156,10 +1164,12 @@ static std::optional<ExportResult> copyHorizonCodeLib(const ExportSettings& sett
 }
 
 // Phase 7: project.hcfg — the manifest the shipped game boots from.
-static std::optional<ExportResult> writeProjectConfig(const std::string&          projectName,
-                                                      const ExportSettings&       settings,
-                                                      const std::vector<uint8_t>& startupSceneBinary,
-                                                      const ExportContext&        ctx)
+// The configuration itself, without the key: where that goes depends on whether
+// the runtime took it (writeProjectConfig) or on who asks (planExport).
+static ProjectConfig makeProjectConfig(const std::string&    projectName,
+                                       const ExportSettings& settings,
+                                       bool                  packedScene,
+                                       const ExportContext&  ctx)
 {
     ProjectConfig cfg;
     cfg.projectName   = projectName;
@@ -1196,16 +1206,25 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
                                     ? resolvedId : std::string();
     cfg.theme                 = settings.theme;
     cfg.themeMode             = settings.themeMode;
-    // Key placement: inside the game executable when the patch succeeded (the
-    // hcfg then carries only the encrypted flag), in the hcfg otherwise.
-    if (settings.encrypt && !ctx.keyEmbedded)
-        std::memcpy(cfg.encKey, ctx.packSettings.key, 32);
-    if (!startupSceneBinary.empty())
+    if (packedScene)
     {
         cfg.hasPackedScene = true;
         std::memcpy(cfg.startupSceneUuid,      &ctx.sceneUuid.hi, 8);
         std::memcpy(cfg.startupSceneUuid + 8,  &ctx.sceneUuid.lo, 8);
     }
+    return cfg;
+}
+
+static std::optional<ExportResult> writeProjectConfig(const std::string&          projectName,
+                                                      const ExportSettings&       settings,
+                                                      const std::vector<uint8_t>& startupSceneBinary,
+                                                      const ExportContext&        ctx)
+{
+    ProjectConfig cfg = makeProjectConfig(projectName, settings, !startupSceneBinary.empty(), ctx);
+    // Key placement: inside the game executable when the patch succeeded (the
+    // hcfg then carries only the encrypted flag), in the hcfg otherwise.
+    if (settings.encrypt && !ctx.keyEmbedded)
+        std::memcpy(cfg.encKey, ctx.packSettings.key, 32);
 
     if (!ProjectConfigLoader::save(ctx.dataDir, cfg))
         return ExportResult{false, "Failed to write project.hcfg", 0};
@@ -1501,6 +1520,7 @@ ExportResult ProjectExporter::exportProject(
     stage("layout");
     if (auto fail = prepareOutputLayout(outputDir, projectName, settings, ctx)) return *fail;
     if (auto fail = resolvePackSettings(settings, ctx))                         return *fail;
+    if (settings.planned) ctx.sceneUuid = settings.plannedSceneUuid;
     stage("pack");
     if (auto fail = packContent(contentDir, projectName, settings, startupSceneBinary,
                                 extraScenes, gameInstanceJson, ctx))            return *fail;
@@ -1532,4 +1552,46 @@ ExportResult ProjectExporter::exportProject(
 
     return {true, "", ctx.assetsPacked, ctx.binaryCopied, ctx.assetsReused, ctx.keyEmbedded,
             exe};
+}
+
+ExportPlan ProjectExporter::planExport(
+    const std::string&           projectName,
+    const std::string&           startupSceneName,
+    const std::filesystem::path& outputDir,
+    ExportSettings&              settings,
+    bool                         packedScene,
+    bool                         horizonCodeCompiled)
+{
+    // The same phases exportProject starts with, so the key comes from the same
+    // sources in the same order (the previous export's hcfg, its executable,
+    // the previous SDK build's header) while all of them are still there.
+    ExportContext ctx;
+    ExportPlan plan;
+    if (auto fail = prepareOutputLayout(outputDir, projectName, settings, ctx))
+    {
+        plan.errorMessage = fail->errorMessage;
+        return plan;
+    }
+    if (auto fail = resolvePackSettings(settings, ctx))
+    {
+        plan.errorMessage = fail->errorMessage;
+        return plan;
+    }
+    // What packContent and copyLooseStartupScene will name, decided the way
+    // they decide it.
+    ctx.hpakFilename = projectName + ".hpak";
+    if (packedScene)
+        ctx.sceneUuid = settings.planned ? settings.plannedSceneUuid : HE::UUID::generate();
+    else if (!startupSceneName.empty())
+        ctx.sceneFile = std::filesystem::path(startupSceneName).filename().string();
+    ctx.hcGenShipped = horizonCodeCompiled;
+
+    plan.config = makeProjectConfig(projectName, settings, packedScene, ctx);
+    if (settings.encrypt) std::memcpy(plan.config.encKey, ctx.packSettings.key, 32);
+
+    settings.planned = true;
+    std::memcpy(settings.plannedPakKey, ctx.packSettings.key, 32);
+    settings.plannedSceneUuid = ctx.sceneUuid;
+    plan.success = true;
+    return plan;
 }

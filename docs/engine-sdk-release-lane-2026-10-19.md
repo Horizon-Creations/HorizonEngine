@@ -34,9 +34,11 @@ After the install it checks that every lib set in the SDK carries the stamp `inc
   `out/dmg_staging/HorizonEditor.app/Contents/Resources/EngineSDK`, after the dmg target's editor
   build has reinstalled `lib/dev` on top.
 
-Locally nothing changes for an editor build: whoever wants Shipping exports from their own
-`out/deploy` runs `scripts/build_engine_sdk.py --editor-tree out/build/release --jobs 8` once.
-The editor build afterwards replaces `lib/dev` only (`HorizonSDK.cmake` removes `lib/<profile>`).
+~~Locally nothing changes for an editor build: whoever wants Shipping exports from their own
+`out/deploy` runs `scripts/build_engine_sdk.py --editor-tree out/build/release --jobs 8` once.~~
+Superseded by step 5 (`docs/engine-sdk-release-auto-2026-10-19.md`): a local dev editor build
+builds `lib/release` itself (`HE_SDK_RELEASE_SET`, off when `$CI` is set, so this lane stays).
+The editor build replaces `lib/dev` only (`HorizonSDK.cmake` removes `lib/<profile>`).
 
 ## Measured (M5 Air, battery, shared ccache)
 

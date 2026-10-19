@@ -4,6 +4,7 @@
 #include <Application/DocumentTypes.h>   // AppDocumentType (what the export declares)
 #include <Physics/CollisionLayers.h>     // the collision matrix the shipped build simulates with
 #include <Audio/AudioBusConfig.h>        // the mixer buses the shipped build plays through
+#include <Hpak/ProjectConfig.h>          // ExportPlan: the hcfg an export will write
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -252,6 +253,26 @@ struct HE_API ExportSettings {
     // that does not match the previous pak only costs the reuse (the manifest's
     // settings fingerprint includes the key). Empty = not asked.
     std::filesystem::path previousBuildConfigHeader;
+    // Set by ProjectExporter::planExport, never by hand: the pak key and the
+    // startup scene's pak UUID the export was planned with. The game compiled
+    // from the engine SDK carries both compiled in and is built BEFORE the pack
+    // (topic 222 step 6), so the pack must use exactly these instead of drawing
+    // its own — a different key or UUID would be a game that cannot open its
+    // pak or does not find its first scene.
+    bool          planned = false;
+    std::uint8_t  plannedPakKey[32] = {};
+    HE::UUID      plannedSceneUuid{};
+};
+
+// What project.hcfg of an export will say, known before anything is packed
+// (ProjectExporter::planExport). The pak key is in config.encKey whenever the
+// export encrypts, also where the written hcfg will leave it zero because the
+// key went into the runtime's executable instead: this is the configuration a
+// game compiled from the engine SDK takes in, and that game needs its key.
+struct HE_API ExportPlan {
+    bool          success = false;
+    std::string   errorMessage;
+    ProjectConfig config;
 };
 
 struct HE_API ExportResult {
@@ -416,4 +437,22 @@ public:
         // lifecycle (and whatever UI it creates). Empty → no GameInstance shipped.
         const std::string&           gameInstanceJson = {}
     );
+
+    // The part of an export that decides what project.hcfg will say, run on its
+    // own and before it: the output layout (created), the pak key (an
+    // incremental export's previous key, else a fresh one) and the startup
+    // scene's pak UUID. Pins key and UUID into `settings` (planned*), so an
+    // exportProject with the same arguments and these settings writes exactly
+    // the returned configuration. This is what lets the editor compile the
+    // game, which carries that configuration compiled in, before it packs.
+    // `packedScene` = a startup scene binary will be passed to exportProject;
+    // `horizonCodeCompiled` = the export intends to ship a HorizonCode library
+    // (the flag only makes the game warn when the library is missing).
+    static ExportPlan planExport(
+        const std::string&           projectName,
+        const std::string&           startupSceneName,
+        const std::filesystem::path& outputDir,
+        ExportSettings&              settings,
+        bool                         packedScene,
+        bool                         horizonCodeCompiled);
 };

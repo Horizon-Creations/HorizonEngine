@@ -143,6 +143,27 @@ std::string writeBuildConfigFromExport(const fs::path& dataDir, const fs::path& 
     return {};
 }
 
+std::string writeBuildConfigFromPlan(const ProjectConfig& planned, const fs::path& projectSettingsFile,
+                                     const std::string& profile, const fs::path& header)
+{
+    // The loader takes the project root (<root>/Config/ProjectSettings.json) and
+    // reads a missing file as the defaults, which is what a game without the
+    // shipped file runs on too.
+    ProjectSettings settings;
+    if (!projectSettingsFile.empty())
+    {
+        const fs::path root = projectSettingsFile.parent_path().parent_path();
+        if (projectSettingsPath(root) != projectSettingsFile)
+            return "the project settings file is not <project>/Config/ProjectSettings.json: " +
+                   projectSettingsFile.string();
+        if (!loadProjectSettings(root, settings))
+            return "cannot read " + projectSettingsFile.string();
+    }
+    if (!writeGameBuildConfigHeader(header, planned, &settings, profile.c_str()))
+        return "cannot write " + header.string();
+    return {};
+}
+
 fs::path exportDataDir(const fs::path& exportedExe)
 {
     const fs::path dir = exportedExe.parent_path();

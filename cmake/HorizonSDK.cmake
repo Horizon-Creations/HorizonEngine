@@ -240,15 +240,78 @@ add_custom_target(HorizonSDK
             --component ${_he_sdk_component} --prefix "${HE_ENGINE_SDK_DIR}"
     COMMENT "Installing the engine SDK's ${HE_BUILD_PROFILE} lib set into ${HE_ENGINE_SDK_DIR}"
     VERBATIM)
-add_dependencies(HorizonSDK ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sdl})
+# The libraries without the install: what a second tree compiles beside the
+# editor tree's own build (below) before it may install.
+add_custom_target(HorizonSDKLibs)
+add_dependencies(HorizonSDKLibs ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sdl})
+add_dependencies(HorizonSDK HorizonSDKLibs)
 # The editor pays for it on every build (topic 222), for the reason it already
 # depends on HorizonGame: every export compiles its game against this tree's lib
 # set at <editor>/../EngineSDK, and nobody remembered `--target HorizonSDK`. It
-# replaces lib/<this profile> only, so a release set that
-# scripts/build_engine_sdk.py put beside it stays. The dmg target depends on the
-# editor, so package_macos.sh finds the SDK fresh. Here and not beside the HorizonGame
-# dependency in the root CMakeLists.txt: the target does not exist there yet.
+# replaces lib/<this profile> only, so the release set beside it stays. The dmg
+# target depends on the editor, so package_macos.sh finds the SDK fresh. Here and
+# not beside the HorizonGame dependency in the root CMakeLists.txt: the target
+# does not exist there yet.
 if(TARGET HorizonEditor)
     add_dependencies(HorizonEditor HorizonSDK)
 endif()
 message(STATUS "HorizonEngine: SDK target HorizonSDK (${HE_BUILD_PROFILE} lib set) -> ${HE_ENGINE_SDK_DIR}")
+
+# ── The release lib set, from a second tree (topic 222 step 5) ───────────────
+# A Shipping export compiles against lib/release, which only a release-profile
+# tree can build. A dev editor tree builds one in <tree>/sdk-release on every
+# editor build, through scripts/build_engine_sdk.py (the profile is the only
+# difference; options, compilers and FetchContent sources come from this
+# cache). Measured on the M5 Air with the shared ccache: +0.8 s on a no-op
+# editor build, none for one touched engine .cpp (both trees relink in parallel),
+# the first build of the second tree 531 s (67 s configure, the rest compiling
+# at -j5); a header edit costs at most that compile part
+# (docs/engine-sdk-release-auto-2026-10-19.md).
+#
+# Two targets so the second tree compiles in parallel with this one and still
+# installs after it: both installs write the shared include/ and its stamp.
+# The libraries' step uses the console pool, so its progress shows live.
+#
+# Off by default in CI ($CI is set on every runner): ci.yml builds the set with
+# the same script on a push only, the PR runs skip the second engine build.
+if(DEFINED ENV{CI})
+    set(_he_sdk_release_default OFF)
+else()
+    set(_he_sdk_release_default ON)
+endif()
+option(HE_SDK_RELEASE_SET
+    "A dev editor tree also builds the engine SDK's release lib set (second tree in <tree>/sdk-release)"
+    ${_he_sdk_release_default})
+if(HE_SDK_RELEASE_SET AND HE_BUILD_PROFILE STREQUAL "dev" AND TARGET HorizonEditor)
+    if(NOT Python3_Interpreter_FOUND)
+        message(WARNING "HorizonSDK: no Python 3 interpreter, so the editor build cannot build "
+                        "the release lib set; Shipping exports stay refused until "
+                        "scripts/build_engine_sdk.py runs (or set HE_SDK_RELEASE_SET=OFF)")
+    else()
+        # Half the cores: the second tree compiles beside this tree's own jobs.
+        cmake_host_system_information(RESULT _he_cores QUERY NUMBER_OF_LOGICAL_CORES)
+        math(EXPR _he_jobs "${_he_cores} / 2")
+        if(_he_jobs LESS 2)
+            set(_he_jobs 2)
+        endif()
+        set(HE_SDK_RELEASE_JOBS ${_he_jobs} CACHE STRING
+            "Parallel jobs of the second tree that builds the release lib set")
+        set(HE_SDK_RELEASE_DIR "${CMAKE_BINARY_DIR}/sdk-release" CACHE PATH
+            "Build tree of the engine SDK's release lib set")
+        set(_he_sdk_release_cmd "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/build_engine_sdk.py"
+            --editor-tree "${CMAKE_BINARY_DIR}" --build-dir "${HE_SDK_RELEASE_DIR}"
+            --jobs ${HE_SDK_RELEASE_JOBS} --config $<CONFIG> --cmake "${CMAKE_COMMAND}")
+        add_custom_target(HorizonSDKReleaseLibs
+            COMMAND ${_he_sdk_release_cmd} --stage build
+            COMMENT "Building the engine SDK's release lib set in ${HE_SDK_RELEASE_DIR}"
+            USES_TERMINAL VERBATIM)
+        add_custom_target(HorizonSDKRelease
+            COMMAND ${_he_sdk_release_cmd} --stage install
+            COMMENT "Installing the engine SDK's release lib set into ${HE_ENGINE_SDK_DIR}"
+            VERBATIM)
+        add_dependencies(HorizonSDKRelease HorizonSDK HorizonSDKReleaseLibs)
+        add_dependencies(HorizonEditor HorizonSDKRelease)
+        message(STATUS "HorizonEngine: release lib set built with the editor (${HE_SDK_RELEASE_DIR}, "
+                       "-j${HE_SDK_RELEASE_JOBS}); HE_SDK_RELEASE_SET=OFF skips it")
+    endif()
+endif()

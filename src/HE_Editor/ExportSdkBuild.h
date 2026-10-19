@@ -15,6 +15,7 @@
 //
 // ImGui-free by construction, so the decisions are testable in he_tests.
 #include <HorizonScene/HcCodegen.h>   // DylibBuildSpec: the cmake configure + build
+#include <Hpak/ProjectConfig.h>       // the planned configuration the game is compiled with
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -94,6 +95,16 @@ std::string writeBuildConfigFromExport(const std::filesystem::path& dataDir,
                                        const std::filesystem::path& prebuiltExe,
                                        const std::string&           profile,
                                        const std::filesystem::path& header);
+
+// The same header from the configuration ProjectExporter::planExport returned,
+// before anything is packed (topic 222 step 6: the game is the export's first
+// build, not its last step). `projectSettingsFile` is ExportSettings::
+// projectSettingsFile, the file the export will ship verbatim; empty or absent =
+// the defaults, as in the shipped game. Empty string = written; otherwise why not.
+std::string writeBuildConfigFromPlan(const ProjectConfig&         planned,
+                                     const std::filesystem::path& projectSettingsFile,
+                                     const std::string&           profile,
+                                     const std::filesystem::path& header);
 
 // Where an export keeps its data (project.hcfg, the pak) and its engine
 // libraries, from its executable (Platform/GameLayout.h): Contents/Resources of
