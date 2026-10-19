@@ -174,6 +174,25 @@ Grün, 0 offene Controls.
   https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39290146357 (lief bei Abschluss
   dieses Schritts noch; die Hive beobachtet den neuesten Lauf dieses Themas und meldet grün/rot
   an die Queen).
+- Lauf 39290146357 (`0df9ea73`): alle vier Jobs success, macOS eingeschlossen.
+- Lauf https://github.com/Horizon-Creations/HorizonEngine/actions/runs/39302370729 (`dfd3fbed`):
+  macOS rot in `tests/test_physics_budget.cpp:529f` (`charactersDeferred` 32 statt 0, `charactersStepped`
+  32 statt 64). **Verdikt: vorbestehender Timing-Flake, keine Regression dieses Themas.**
+  - `dfd3fbed` unterscheidet sich von `0df9ea73` nur um diese Doku-Datei (`git diff 0df9ea73 dfd3fbed
+    --stat`); derselbe Code lief in 39290146357 auf macOS grün.
+  - Die eigenen Commits des Themas (`git diff $(git merge-base release/0.7.0 HEAD)..HEAD --stat`)
+    berühren `ContentManager`, `EditorApplication`, `TerrainSync` und Tests, nie `PhysicsWorld.cpp`,
+    `PhysicsBudget.h` oder `test_physics_budget.cpp`.
+  - Früherer Treffer auf der Basis: `release/0.7.0` Lauf 38909214550 (`7090180f`, Vorfahre von HEAD,
+    PR-Lauf), macOS rot an `test_physics_budget.cpp:496f` (die Kontrollgruppe desselben Testfalls:
+    gleiche zwei CHECKs auf `charactersDeferred`/`charactersStepped`). In den 21 jüngsten roten
+    CI-Läufen anderer Zweige kommt der Test sonst nie vor (Suche nach `test_physics_budget.*Failed`).
+  - Ursache: `PhysicsWorld.cpp` ~3544 stellt einen Charakter zurück, sobald `chargedMs + msSince(
+    charactersFrom) >= budgetMs` (10 ms im Test) und schon `kGuaranteedCharacters` = 32 gelaufen sind.
+    Der Test ist wanduhrabhängig; ein >10-ms-Stall des macOS-Runners mitten im Schritt (32 schaffen es,
+    die übrigen 32 werden zurückgestellt) reicht, kein Code nötig. Zahlen passen: 32/32.
+  - Keine Änderung am Test oder am Topic-Code. Nicht lokal wiederholt (kein Build-Ordner im Worktree;
+    ein Vollbau von `he_tests` stand in keinem Verhältnis zu einem ohnehin eindeutigen Befund).
 
 ## Handoff
 
