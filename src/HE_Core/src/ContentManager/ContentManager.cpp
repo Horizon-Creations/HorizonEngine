@@ -3095,6 +3095,17 @@ HE::UUID ContentManager::loadAssetFromMemory(const std::vector<uint8_t>& hassetD
 	{
 		HE::UUID id; std::string name;
 		readMetaChunk(*metaChunk, reader.header().version, id, name, relativePath);
+		// An engine default's embedded META path is bare (its own folder was its
+		// content root when authored — mesh_gen/mat_gen style), not the "Engine/…"
+		// path every caller of loadAsset()/idForPath() actually addresses it by
+		// (see HpakWriter's metaInNamespace comment). The pak's asset-path-index
+		// knows the real addressed path; prefer it so the FIRST load of this
+		// asset — normally by UUID alone, e.g. a MaterialComponent reference,
+		// never by path — registers under the right key instead of poisoning
+		// m_pathToUUID with a bare name a project asset could collide with.
+		if (id != HE::UUID{})
+			if (const auto it = m_pakIdToAddressedPath.find(id); it != m_pakIdToAddressedPath.end())
+				relativePath = it->second;
 	}
 
 	return parseAndRegisterAsset(relativePath, /*fullPath=*/std::string{}, reader);
@@ -3166,6 +3177,7 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 							id.lo = std::stoull(v.substr(colon + 1));
 						} catch (...) { continue; }
 						m_pakPathIndex[it.key()] = id;
+						m_pakIdToAddressedPath[id] = it.key();
 					}
 			}
 		}
@@ -3334,6 +3346,7 @@ void ContentManager::forgetProjectContent()
 	m_mounts.clear();
 	m_pakResidency.clear();
 	m_pakPathIndex.clear();
+	m_pakIdToAddressedPath.clear();
 
 	// The built-ins are the MANAGER's, not the project's — the default cube, the
 	// white texture, the default and terrain materials. Scenes reference them by
