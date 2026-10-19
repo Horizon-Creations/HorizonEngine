@@ -1,7 +1,11 @@
 #include "HorizonScene/HcCodegen.h"
 #include <HorizonCode/HorizonCodeGenSupport.h>   // hc::kMaxSteps — one definition of the limit
 #include <Types/TypeRegistry.h>   // enum defs at generation time
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include "HorizonScene/EngineApi.h"
 #include "HorizonScene/EngineApiCpp.h"   // hook signatures, shared with the API parity source
 #include <nlohmann/json.hpp>
@@ -12,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <regex>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -4614,7 +4619,8 @@ namespace {
 // Run a shell command, streaming each output line (stdout+stderr merged) to
 // `onLine` and appending everything to `captured`. Returns the exit status.
 int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
-                 std::string& captured, const std::atomic<bool>* cancel = nullptr)
+                 std::string& captured, const std::atomic<bool>* cancel = nullptr,
+                 ToolchainInstallControl* control = nullptr)
 {
 #if defined(_WIN32)
     FILE* pipe = HE::hiddenPopen(cmdLine(cmd + " 2>&1"));
@@ -4622,19 +4628,63 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
     FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
 #endif
     if (!pipe) return -1;
+    const auto nowMs = []
+    {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    if (control) control->lastActivityMs = nowMs();
+
+#if defined(_WIN32)
+    // The blocked fgets below cannot notice a cancel, and the shell is only the
+    // first link of winget -> installer -> ...: a watcher ends the whole tree and
+    // wakes the reader, and keeps the activity numbers current for the UI.
+    std::atomic<bool> readerDone{false};
+    std::mutex wmx; std::condition_variable wcv;
+    std::thread watcher;
+    if (control || cancel)
+    {
+        void* reader = HE::hiddenThreadHandle();
+        watcher = std::thread([&, reader]
+        {
+            HE::HiddenTreeStats last, now;
+            bool killed = false;
+            std::unique_lock<std::mutex> lk(wmx);
+            while (!readerDone.load())
+            {
+                wcv.wait_for(lk, std::chrono::milliseconds(300));
+                if (readerDone.load()) break;
+                if (cancel && cancel->load())
+                {
+                    HE::hiddenKillTree(pipe);       // repeated: a parent may respawn before it dies
+                    HE::hiddenInterruptRead(reader);
+                    killed = true;
+                    continue;
+                }
+                if (killed || !control || !HE::hiddenTreeStats(pipe, now)) continue;
+                if (now.activity != last.activity || now.processCount != last.processCount)
+                    control->lastActivityMs = nowMs();
+                control->processCount = now.processCount;
+                { std::lock_guard<std::mutex> nl(control->mx); control->processNames = now.names; }
+                last = now;
+            }
+            HE::hiddenCloseThread(reader);
+        });
+    }
+    const auto stopWatcher = [&]
+    {
+        { std::lock_guard<std::mutex> lk(wmx); readerDone = true; }
+        wcv.notify_all();
+        if (watcher.joinable()) watcher.join();
+    };
+#endif
+
     char buf[1024];
+    bool cancelled = false;
     while (std::fgets(buf, sizeof buf, pipe))
     {
-        if (cancel && cancel->load())
-        {
-            captured += "-- cancelled\n";
-#if defined(_WIN32)
-            HE::hiddenPclose(pipe);
-#else
-            pclose(pipe);
-#endif
-            return -2;
-        }
+        if (cancel && cancel->load()) { cancelled = true; break; }
+        if (control) control->lastActivityMs = nowMs();
         captured += buf;
         if (onLine)
         {
@@ -4643,11 +4693,19 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
             onLine(line);
         }
     }
+    if (cancel && cancel->load()) cancelled = true;
 #if defined(_WIN32)
-    return HE::hiddenPclose(pipe);
+    stopWatcher();
+    const int rc = HE::hiddenPclose(pipe);
 #else
-    return pclose(pipe);
+    const int rc = pclose(pipe);
 #endif
+    if (cancelled)
+    {
+        captured += "-- cancelled\n";
+        return -2;
+    }
+    return rc;
 }
 
 // True if <exe> resolves on PATH — used to pick an available package manager.
@@ -4982,18 +5040,67 @@ std::string resolveBrew()
 #endif
 } // namespace
 
+namespace {
+// The last "NN %" or "x MB / y MB" in a chunk of installer output (winget redraws its
+// bar with a carriage return, so one chunk holds many frames). -1 when there is none.
+int parseInstallPercent(const std::string& text)
+{
+    static const std::regex sized(R"((\d+(?:\.\d+)?)\s*(KB|MB|GB)\s*/\s*(\d+(?:\.\d+)?)\s*(KB|MB|GB))");
+    static const std::regex pct(R"((\d{1,3})\s*%)");
+    const auto unit = [](const std::string& u) { return u == "GB" ? 1024.0 : u == "MB" ? 1.0 : 1.0 / 1024.0; };
+    int out = -1;
+    for (std::sregex_iterator it(text.begin(), text.end(), sized), end; it != end; ++it)
+    {
+        const double total = std::stod((*it)[3]) * unit((*it)[4]);
+        if (total > 0.0)
+            out = std::clamp(static_cast<int>(std::stod((*it)[1]) * unit((*it)[2]) / total * 100.0), 0, 100);
+    }
+    if (out >= 0) return out;
+    for (std::sregex_iterator it(text.begin(), text.end(), pct), end; it != end; ++it)
+        out = std::clamp(std::stoi((*it)[1]), 0, 100);
+    return out;
+}
+} // namespace
+
 ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
-                                  const std::function<void(const std::string&)>& onLine)
+                                  const std::function<void(const std::string&)>& onLine,
+                                  ToolchainInstallControl* control)
 {
     ToolchainInstall r;
     const auto emit = [&](const std::string& s) { if (onLine) onLine(s); };
     const auto run  = [&](const std::string& cmd) -> int
     {
         emit("$ " + cmd);
+        // Progress frames go to the bar, not into the log: a download is hundreds of them.
+        const auto filter = [&](const std::string& line)
+        {
+            if (control)
+            {
+                const int p = parseInstallPercent(line);
+                if (p >= 0) control->percent = p;
+            }
+            if (line.find('\r') != std::string::npos)
+            {
+                const size_t cut = line.find_last_of('\r');
+                const std::string tail = line.substr(cut + 1);
+                if (tail.find_first_not_of(" \t") != std::string::npos && parseInstallPercent(tail) < 0)
+                    emit(tail);
+                return;
+            }
+            emit(line);
+        };
         std::string cap;
-        const int rc = runStreaming(cmd, onLine, cap);
-        emit(rc == 0 ? "[done]" : "[exit code " + std::to_string(rc) + "]");
+        const int rc = runStreaming(cmd, filter, cap, control ? &control->cancel : nullptr, control);
+        emit(rc == 0 ? "[done]" : rc == -2 ? "[cancelled]" : "[exit code " + std::to_string(rc) + "]");
         return rc;
+    };
+    // After a cancel nothing else starts; the result says so.
+    const auto cancelled = [&]
+    {
+        if (!control || !control->cancel.load()) return false;
+        r.exitCode = -2;
+        r.message  = "Cancelled.";
+        return true;
     };
 
 #if defined(__APPLE__)
@@ -5051,15 +5158,25 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
     if (needCmake)
     {
         r.attempted = true;
-        if (const int rc = run("winget install --id Kitware.CMake -e" + agree)) r.exitCode = rc;
+        // 0x8A15002B: winget finds the package installed and no newer version. cmake was
+        // needed because it is not on PATH, which an install again would not change.
+        constexpr int kNoApplicableUpgrade = static_cast<int>(0x8A15002Bu);
+        if (const int rc = run("winget install --id Kitware.CMake -e" + agree); rc && rc != kNoApplicableUpgrade)
+            r.exitCode = rc;
+        if (cancelled()) return r;
     }
     if (needCompiler)
     {
         r.attempted = true;
+        // --force: a Build Tools setup that was cancelled half-way is already registered
+        // with winget, which then answers "no upgrade" (0x8A15002B) and never runs the
+        // installer again, so the C++ workload stays missing. Forcing hands the
+        // --add to the Visual Studio installer, which completes or repairs it.
         if (const int rc = run(
-                "winget install --id Microsoft.VisualStudio.2022.BuildTools -e"
+                "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --force"
                 " --override \"--add Microsoft.VisualStudio.Workload.VCTools "
                 "--includeRecommended --quiet --wait --norestart\"" + agree)) r.exitCode = rc;
+        if (cancelled()) return r;
     }
 #else // Linux / other Unix
     std::string install;
@@ -5086,6 +5203,7 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
 #endif
 
     (void)needCmake; (void)needCompiler; // not every platform branch uses both
+    (void)cancelled;                     // only the Windows branch runs two installers in a row
     return r;
 }
 

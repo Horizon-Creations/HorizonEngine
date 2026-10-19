@@ -4991,6 +4991,12 @@ namespace
 	  "Runs the install for this tool again. The log of the failed run is still "
 	  "there until the new one starts.",
 	  "", "horizoncode#compiler" },
+	{ "Tool Setup/Cancel", "Cancel",
+	  "Ends the running install: winget and every installer it started are "
+	  "terminated. A half-finished Visual Studio setup can be left behind; Retry "
+	  "starts it again. An installer that runs with administrator rights may refuse "
+	  "to end, then the install stays listed as running until it exits.",
+	  "", "horizoncode#compiler" },
 	{ "Tool Setup/Show Log", "Show Log",
 	  "Opens the installer's output below the list, where the last lines say why "
 	  "it stopped.",

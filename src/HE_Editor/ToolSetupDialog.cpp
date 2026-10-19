@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -100,6 +101,25 @@ std::string clockText(const Slot& s)
 	std::snprintf(buf, sizeof(buf), "%ld:%02ld", secs / 60, secs % 60);
 	return buf;
 }
+
+// "2:05" from milliseconds.
+std::string mmss(long long ms)
+{
+	const long secs = static_cast<long>(std::max(0LL, ms) / 1000);
+	char buf[24];
+	std::snprintf(buf, sizeof(buf), "%ld:%02ld", secs / 60, secs % 60);
+	return buf;
+}
+
+long long steadyNowMs()
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+	    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Past this long without output or a change in the installer's processes the row
+// says so, and asks whether to keep waiting.
+constexpr long long kStallWarnMs = 90 * 1000;
 
 bool isToolchainTool(Tool t) { return t == Tool::Cmake || t == Tool::Compiler; }
 bool isGitInstallTool(Tool t) { return t == Tool::Git || t == Tool::GitLfs; }
@@ -214,7 +234,7 @@ Manual manualFor(Tool t)
 		break;
 	case Tool::Compiler:
 #if defined(_WIN32)
-		m.command = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e "
+		m.command = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --force "
 		            "--override \"--add Microsoft.VisualStudio.Workload.VCTools --quiet\"";
 		m.url = "https://visualstudio.microsoft.com/visual-cpp-build-tools/";
 #elif defined(__APPLE__)
@@ -628,7 +648,33 @@ void drawRow(AppContext& ctx, Tool t)
 #else
 		                 : "Package manager");
 #endif
-		ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(kColBody - 16.0f, 6.0f), "");
+		const HE::hccg::ToolchainInstallControl* ctl = gitSlot ? nullptr : ctx.toolchainInstallControl;
+		const int percent = ctl ? ctl->percent.load() : -1;
+		// A percentage the installer printed fills the bar; without one it keeps sweeping.
+		ImGui::ProgressBar(percent >= 0 ? percent / 100.0f : -1.0f * static_cast<float>(ImGui::GetTime()),
+		                   ImVec2(kColBody - 16.0f, 6.0f), "");
+		if (ctl)
+		{
+			std::string names;
+			{ std::lock_guard<std::mutex> lk(ctl->mx); names = ctl->processNames; }
+			if (ctl->cancel.load())
+				dimWrapped("Cancelling…");
+			else if (!names.empty())
+				dimWrapped(("Running: " + names + (percent >= 0 ? "  ·  " + std::to_string(percent) + " %" : std::string())).c_str());
+			else
+				dimWrapped("Waiting for the package manager to start…");
+			const long long last = ctl->lastActivityMs.load();
+			const long long idle = last > 0 ? steadyNowMs() - last : 0;
+			if (!ctl->cancel.load() && idle >= kStallWarnMs)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+				ImGui::TextWrapped("No change for %s. A large download by an installer that runs with "
+				                   "administrator rights cannot be measured from here; if the processes "
+				                   "above are gone or nothing moves for much longer, cancel and retry.",
+				                   mmss(idle).c_str());
+				ImGui::PopStyleColor();
+			}
+		}
 		const std::string prompt = promptLine(t);
 		if (!prompt.empty()) dimWrapped(prompt.c_str());
 		break;
@@ -683,6 +729,9 @@ void drawRow(AppContext& ctx, Tool t)
 			if (launch && launch->returnsBeforeInstalled && EditorWidgets::smallButton("Cancel"))
 				ctx.cancelGitInstall();
 		}
+		// The toolchain install can always be ended: the watcher kills the process tree.
+		if (!gitSlot && ctx.cancelToolchainInstall && EditorWidgets::smallButton("Cancel"))
+			ctx.cancelToolchainInstall();
 		break;
 
 	default:

@@ -1,6 +1,8 @@
 #pragma once
 #include <HorizonCode/HorizonCode.h>
 #include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -216,8 +218,32 @@ struct ToolchainInstall
     int         exitCode  = 0;     // last installer's exit code (0 = success)
     std::string message;           // human summary / why nothing could run
 };
+
+// The UI's handle on a running installToolchain: it sets `cancel`, and reads what the
+// installer's process tree is doing. A package manager prints nothing for minutes while
+// an installer it started downloads, so the output cannot say whether it still runs.
+// Windows only watches and kills the tree (winget -> installer); elsewhere `cancel`
+// is honoured between output lines and the activity fields stay empty.
+struct ToolchainInstallControl
+{
+    std::atomic<bool>          cancel{false};
+    std::atomic<int>           processCount{0};  // processes below the shell, 0 = none right now
+    std::atomic<std::int64_t>  lastActivityMs{0}; // steady clock ms of the last change in the tree or its output; 0 = none yet
+    std::atomic<int>           percent{-1};      // last "NN %" / "x MB / y MB" the installer printed, -1 = none
+    mutable std::mutex         mx;               // guards processNames
+    std::string                processNames;
+
+    void reset()
+    {
+        cancel = false; processCount = 0; lastActivityMs = 0; percent = -1;
+        std::lock_guard<std::mutex> lk(mx);
+        processNames.clear();
+    }
+};
+// `control` may be null. Cancelling returns with exitCode -2 and message "Cancelled.".
 ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
-                                  const std::function<void(const std::string&)>& onLine);
+                                  const std::function<void(const std::string&)>& onLine,
+                                  ToolchainInstallControl* control = nullptr);
 
 struct BuildOutcome
 {

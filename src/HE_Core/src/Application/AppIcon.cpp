@@ -343,11 +343,11 @@ bool heEmbedExeIcon(const std::filesystem::path& exe, const std::filesystem::pat
     for (std::uint16_t i = 0; i < count && ok; ++i)
     {
         const size_t e = 6 + 16u * i;
-        ok = UpdateResourceW(h, RT_ICON, MAKEINTRESOURCEW(i + 1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+        ok = UpdateResourceW(h, MAKEINTRESOURCEW(3), MAKEINTRESOURCEW(i + 1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
                              d.data() + u32(e + 12), u32(e + 8)) != FALSE;
     }
     // Id 1: the lowest group id is the icon Explorer shows for the executable.
-    ok = ok && UpdateResourceW(h, RT_GROUP_ICON, MAKEINTRESOURCEW(1),
+    ok = ok && UpdateResourceW(h, MAKEINTRESOURCEW(14), MAKEINTRESOURCEW(1),
                                MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
                                group.data(), (DWORD)group.size()) != FALSE;
     // FALSE = write; discard = !ok leaves the executable untouched on a failure.

@@ -2827,6 +2827,7 @@ void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 		std::lock_guard<std::mutex> lk(m_installLogMutex);
 		m_installLog.clear();
 	}
+	m_installCtl.reset();
 	m_installFinished.store(false, std::memory_order_release);
 	m_installAttempted.store(false, std::memory_order_release);
 	m_installExit.store(0, std::memory_order_release);
@@ -2840,7 +2841,7 @@ void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 			m_installLog += '\n';
 		};
 		const HE::hccg::ToolchainInstall res =
-			HE::hccg::installToolchain(needCmake, needCompiler, onLine);
+			HE::hccg::installToolchain(needCmake, needCompiler, onLine, &m_installCtl);
 		m_installAttempted.store(res.attempted, std::memory_order_release);
 		m_installExit.store(res.exitCode, std::memory_order_release);
 		m_installRunning.store(false, std::memory_order_release);
@@ -12709,6 +12710,8 @@ AppContext EditorApplication::makeContext()
 		.toolchainInstallOk  = m_installFinished.load(std::memory_order_acquire)
 		                           && m_installAttempted.load(std::memory_order_acquire)
 		                           && m_installExit.load(std::memory_order_acquire) == 0,
+		.toolchainInstallControl = &m_installCtl,
+		.cancelToolchainInstall  = [this]{ m_installCtl.cancel.store(true, std::memory_order_release); },
 		.reloadGameLogic     = [this]{ return reloadGameLogic(); },
 		.gitProbe            = m_gitChecked.load(std::memory_order_acquire)
 		                           ? &m_gitProbe : nullptr,
