@@ -242,10 +242,11 @@ add_custom_target(HorizonSDK
     VERBATIM)
 add_dependencies(HorizonSDK ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sdl})
 # The editor pays for it on every build (topic 222), for the reason it already
-# depends on HorizonGame: "Compile game from SDK" finds this tree's lib set at
-# <editor>/../EngineSDK, and nobody remembered `--target HorizonSDK`, so every
-# export fell back to the prebuilt game. The dmg target depends on the editor,
-# so package_macos.sh finds the SDK fresh. Here and not beside the HorizonGame
+# depends on HorizonGame: every export compiles its game against this tree's lib
+# set at <editor>/../EngineSDK, and nobody remembered `--target HorizonSDK`. It
+# replaces lib/<this profile> only, so a release set that
+# scripts/build_engine_sdk.py put beside it stays. The dmg target depends on the
+# editor, so package_macos.sh finds the SDK fresh. Here and not beside the HorizonGame
 # dependency in the root CMakeLists.txt: the target does not exist there yet.
 if(TARGET HorizonEditor)
     add_dependencies(HorizonEditor HorizonSDK)
