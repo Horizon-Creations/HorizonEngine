@@ -338,12 +338,11 @@ static void requestStart(AppContext& ctx)
 		return;
 	case HE::ExportSdk::GateState::Waiting:
 	case HE::ExportSdk::GateState::NeedTools:
+		// No notification: right after launch the probe is merely still running
+		// and the run starts a moment later; a real gap opens Tool Setup, whose
+		// purpose line says what waits.
 		s_waitingForTools = true;
-		s_toolSetupOpened = s_toolSetupSeen = false;
-		HE::Ed::notify(HE::Ed::NoteLevel::Info,
-		               "Export waits for cmake and a C++ compiler",
-		               "The game is compiled from the engine SDK. The export starts by itself "
-		               "once both are found.");
+		s_toolSetupOpened = s_toolSetupSeen = false;   // render() pumps it from this frame on
 		return;
 	}
 }
