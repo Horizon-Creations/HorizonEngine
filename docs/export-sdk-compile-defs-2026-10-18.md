@@ -817,3 +817,23 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Next steps:** 1. With the human's yes: export Shipping Windowed and start it ~10 s with a kill deadline, look for "compiled in",
   "pak key from HEGameBuildConfig.h", "HorizonCode: 3 compiled classes". 2. Windows run of an SDK export on NN-WS03 (offline today).
   3. Decide whether `_hcgen/` should move out of the export folder (next to the SDK build cache).
+
+## Handoff (step 15: closing checks, ctest in the foreground, CI, release game)
+
+- **Topic / step:** Thema 211, step 15. No code change; this section only.
+- **Verified (Mac, dev tree out/build/release, head 53e0d0f0):** `cmake --build out/build/release -j 8` rc 0 (all targets, embedded
+  shader check 58/58). Full ctest in the foreground, polled to its exit code (-j4, private `HOME=/tmp/s15_home`, `HE_CONFIG_DIR` unset):
+  311 tests, 309 passed, 0 failed, 2 skipped (`runtime_size_app_advanced/basic`, flavour-only), rc 0, 343.8 s.
+- **CI 39179960750 (53e0d0f0):** at the end of this step lavapipe and macOS green, Windows and Linux still running; nothing red seen,
+  so nothing fixed. The Hive reports the outcome.
+- **Not done:** the release game was NOT started. hive_ask #36 is still unanswered (queen, request 134: "Do NOT start the release
+  game"). The step-14 Shipping folder `/tmp/s14/exports/ship` is Fullscreen (`GameWindowMode` is missing from the editor config, the
+  dialog default is "Fullscreen", `ExportDialogPanel.cpp:93`), so do not run it as it is.
+- **How to run it with the human's yes:** 1. In `/tmp/s14/live/home/Library/Application Support/HorizonEngine/config.json`, add to
+  `CustomConfig` `{"Key":"GameWindowMode","Value":"Windowed"}` (plus `GameWindowWidth` 1280 / `GameWindowHeight` 720). 2. Start the
+  deployed editor hidden with that HOME as in step 14, then `python3 /tmp/s14tools/export.py <endpoint> Shipping /tmp/s14/exports/ship
+  ship5`. 3. `cd /tmp/s14/exports/ship && HOME=/tmp/s14/gamehome ./HorizonTutorial > /tmp/relgame.log 2>&1 & p=$!`, kill `$p` after
+  ~10 s, `wait $p`. Look for "compiled in", the pak key from HEGameBuildConfig.h, "HorizonCode: 3 compiled classes", "S14 compiled HC
+  marker".
+- **Next steps:** 1. Release game run as above, once #36 is answered yes. 2. Steps 2-3 of the step-14 handoff (Windows SDK export
+  run on NN-WS03, `_hcgen/` location).
