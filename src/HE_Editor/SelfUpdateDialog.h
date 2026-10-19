@@ -25,10 +25,15 @@ namespace SelfUpdateDialog
 	// "Restart to Update" was pressed: true once, then false until pressed again.
 	bool takeInstallRequest();
 
-	// The guarded action's body: start HorizonUpdater with the open project as
-	// the relaunch argument. True = the caller must quit now. False = nothing
-	// happened to the install, and the dialog is open again with the reason.
-	bool beginInstall(AppContext& ctx);
+	// The guarded action's body: start the takeover (HorizonUpdater with the open
+	// project as the relaunch argument) on the session's worker. The dialog stays
+	// open with "Installing" until it has an outcome; nothing quits here.
+	void beginInstall(AppContext& ctx);
+
+	// Every frame, wherever beginInstall can have been called from: true once the
+	// takeover has started HorizonUpdater, and the caller must quit now. A failed
+	// takeover leaves the install untouched and the dialog open with the reason.
+	bool finishInstall();
 
 	// Editor start: delete what earlier updates left beside the install, keeping
 	// the one previous install the running build was swapped in from

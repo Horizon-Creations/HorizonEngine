@@ -1,6 +1,6 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include <Application/AppIcon.h>   // heLoadPngRGBA — reading the PNG back
 

@@ -875,6 +875,75 @@ TEST_CASE("properties: declareVar does not shadow a HorizonCode variable of the 
         door, "Paint", Value::ofString("red"), false));
 }
 
+// The host compares the declaration with the table in place and reads values by
+// position (SCN-401/501). This walks it through the declaration changes that
+// move positions: a class that starts declaring a name the component already
+// holds (the component's entry is then skipped), and a class that goes away
+// (the component's entries move to the front).
+TEST_CASE("properties: a class gaining and losing variables mid-session keeps every index right") {
+    Rig rig;
+    const Entity door = authoredEntity(*rig.host.world, "Door");
+    rig.host.instances[static_cast<std::uint32_t>(door)] = rig.host.runtime.add(doorClass());
+    startHost(rig);
+    PropertyReplicator& hostProps = *rig.host.session->properties();
+    REQUIRE(hostProps.declareVar(door, "Paint", Value::ofString("red"), false));
+    REQUIRE(hostProps.declareVar(door, "Ammo", Value::ofInt(3), false));
+
+    Peer& client = addClient(rig, 31);
+    const Entity clientDoor = mirrorOf(*rig.host.world, door, *client.world);
+    rig.step(14);
+    REQUIRE(client.session->status() == NetGameSession::Status::Joined);
+    const std::uint32_t netId = rig.host.world->registry().get<NetworkComponent>(door).netId;
+    REQUIRE(hostProps.namesOf(netId) != nullptr);
+    CHECK(*hostProps.namesOf(netId) == std::vector<std::string>{ "Open", "Paint", "Ammo" });
+
+    auto clientAmmo = [&] {
+        Value v;
+        REQUIRE(client.session->properties()->getVar(clientDoor, "Ammo", v));
+        return v.i;
+    };
+
+    // A hot reload: the class now declares "Paint" itself. The component's
+    // "Paint" is shadowed and skipped, so the list keeps its length but the
+    // second name now lives in the class.
+    HorizonCode::Graph withPaint = doorClass();
+    HorizonCode::Variable paint;
+    paint.name = "Paint"; paint.type = PinType::String; paint.replicated = true;
+    withPaint.variables.insert(withPaint.variables.begin() + 1, paint);
+    const HorizonCode::InstanceId reloaded = rig.host.runtime.add(withPaint);
+    rig.host.instances[static_cast<std::uint32_t>(door)] = reloaded;
+    rig.step(14);
+    CHECK(*hostProps.namesOf(netId) == std::vector<std::string>{ "Open", "Paint", "Ammo" });
+    // Settled: the shadowed entry must count as the duplicate it is, or the
+    // declaration reads as "changed" and the table goes out on every frame.
+    {
+        const std::uint32_t tables = hostProps.stats().tablesSent;
+        rig.step(10);
+        CHECK(hostProps.stats().tablesSent == tables);
+    }
+    REQUIRE(hostProps.setVar(door, "Ammo", Value::ofInt(7)));
+    rig.step(14);
+    CHECK(clientAmmo() == 7);
+
+    // The class goes away: the component's entries are all that is left, and
+    // "Ammo" moves from index 2 to index 1.
+    rig.host.instances.erase(static_cast<std::uint32_t>(door));
+    rig.step(14);
+    CHECK(*hostProps.namesOf(netId) == std::vector<std::string>{ "Paint", "Ammo" });
+    REQUIRE(hostProps.setVar(door, "Ammo", Value::ofInt(11)));
+    rig.step(14);
+    CHECK(clientAmmo() == 11);
+
+    // Quiet afterwards: nothing changes, nothing is sent.
+    const std::uint32_t sent   = hostProps.stats().deltasSent;
+    const std::uint32_t tables = hostProps.stats().tablesSent;
+    rig.step(10);
+    CHECK(hostProps.stats().deltasSent == sent);
+    CHECK(hostProps.stats().tablesSent == tables);
+    CHECK(client.session->properties()->stats().unknownIndex == 0u);
+    CHECK(client.session->properties()->stats().typeMismatch == 0u);
+}
+
 // The HorizonCode half of OnRep (§6.4): the class declares OnRep_<Var> and the
 // dispatcher calls it with the OLD value. Built here rather than in
 // test_horizoncode_runtime because what is under test is the CONVENTION — the

@@ -3688,3 +3688,94 @@ TEST_CASE("Remote EngineContent: a material whose graph calls a remote function 
 	CHECK(glsl.find("missing function") == std::string::npos);
 	CHECK(glsl.find("heLight.weather") != std::string::npos);
 }
+
+// ── Loose-file index (assetFiles / sceneFiles) ───────────────────────────────
+// The editor's pickers used to walk both content roots and open every .hasset
+// for each open dropdown, every frame. The index walks once per content change,
+// which is only right if "content change" is every way a file can arrive.
+TEST_CASE("ContentManager assetFiles: one walk per epoch, content root first, typed")
+{
+	TempContentDir proj("he_test_asset_index_proj");
+	TempContentDir engineDir("he_test_asset_index_engine");
+	const fs::path content = proj.path / "Content";
+	fs::create_directories(content / "Meshes");
+	fs::create_directories(engineDir.path / "Meshes");
+
+	auto mesh = [](const char* name, const char* path)
+	{
+		StaticMeshAsset m;
+		m.type     = HE::AssetType::StaticMesh;
+		m.name     = name;
+		m.path     = path;
+		m.vertices = { 0,0,0, 1,0,0, 0,1,0 };
+		m.indices  = { 0, 1, 2 };
+		m.normals  = { 0,0,1, 0,0,1, 0,0,1 };
+		return m;
+	};
+	{
+		ContentManager gen(engineDir.path.string());
+		StaticMeshAsset sphere = mesh("Sphere", "Meshes/Sphere.hasset");
+		REQUIRE(gen.saveAsset(sphere));
+	}
+
+	ContentManager cm(content.string());
+	cm.setEngineContentRoot(engineDir.path.string());
+	StaticMeshAsset rock = mesh("Rock", "Meshes/Rock.hasset");
+	REQUIRE(cm.saveAsset(rock));
+
+	const ContentManager::AssetFileList first = cm.assetFiles(HE::AssetType::StaticMesh);
+	REQUIRE(first->size() == 2);
+	CHECK((*first)[0].path  == "Meshes/Rock.hasset");          // the project's own first…
+	CHECK((*first)[0].label == "Rock");
+	CHECK((*first)[0].bytes > 0);
+	CHECK((*first)[1].path  == "Engine/Meshes/Sphere.hasset"); // …then the engine's
+	CHECK(cm.assetFiles(HE::AssetType::Material)->empty());
+
+	// A file that arrives behind the manager's back is not seen until the epoch
+	// moves — that is the whole saving: no walk while nothing changed.
+	fs::copy_file(content / "Meshes/Rock.hasset", content / "Meshes/Rock2.hasset");
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh) == first);
+
+	cm.noteContentChanged();
+	const ContentManager::AssetFileList second = cm.assetFiles(HE::AssetType::StaticMesh);
+	CHECK(second->size() == 3);
+	CHECK(first->size() == 2);   // a snapshot: the rebuild did not touch what was handed out
+
+	// scanContentDirectory is what the editor runs after every content refresh,
+	// the periodic external-change poll included, so it has to move the epoch.
+	fs::copy_file(content / "Meshes/Rock.hasset", content / "Meshes/Rock3.hasset");
+	cm.scanContentDirectory();
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh)->size() == 4);
+
+	// …and so does every save.
+	StaticMeshAsset pebble = mesh("Pebble", "Meshes/Pebble.hasset");
+	REQUIRE(cm.saveAsset(pebble));
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh)->size() == 5);
+
+	// A different engine root is a different index, epoch or not.
+	cm.setEngineContentRoot(std::string());
+	CHECK(cm.assetFiles(HE::AssetType::StaticMesh)->size() == 4);
+}
+
+TEST_CASE("ContentManager sceneFiles: project-relative, sorted, refreshed with the epoch")
+{
+	TempContentDir proj("he_test_scene_index_proj");
+	const fs::path content = proj.path / "Content";
+	fs::create_directories(content / "Maps");
+	fs::create_directories(proj.path / "Levels");
+	std::ofstream(proj.path / "Levels/A.hescene") << "{}";
+	std::ofstream(content / "Maps/B.hescene") << "{}";
+	std::ofstream(content / "Maps/notes.txt") << "not a scene";
+
+	ContentManager cm(content.string());
+	const ContentManager::AssetFileList scenes = cm.sceneFiles();
+	REQUIRE(scenes->size() == 2);
+	CHECK((*scenes)[0].path  == "Content/Maps/B.hescene");
+	CHECK((*scenes)[0].label == "B");
+	CHECK((*scenes)[1].path  == "Levels/A.hescene");
+
+	std::ofstream(proj.path / "Levels/C.hescene") << "{}";
+	CHECK(cm.sceneFiles()->size() == 2);
+	cm.noteContentChanged();
+	CHECK(cm.sceneFiles()->size() == 3);
+}

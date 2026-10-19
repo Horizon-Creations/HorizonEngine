@@ -21,6 +21,7 @@ add_library(HorizonCore SHARED
 	src/Platform/DynLib.cpp
 	src/Platform/EngineProfile.cpp
 	src/Platform/Process.cpp
+	src/Platform/ProjectWriteGate.cpp
 	src/Window/Window.cpp
 	src/Renderer/IRenderer.cpp
 	src/Scripting/ScriptEngine.cpp
@@ -34,6 +35,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/ProjectConfig.cpp
 	src/Hpak/GameBuildConfig.cpp
 	src/Hpak/ProjectExporter.cpp
+	src/Hpak/PackManifest.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp

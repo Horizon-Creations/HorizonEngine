@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // what a path holds, without loading it
 #include "McpToolCommon.h"            // the argument readers, the confinement rule, the walk
@@ -205,31 +205,19 @@ Doc openDoc(ContentManager& content, const McpAnimatorHooks& h, const json& args
 
 	if (forWrite)
 	{
-		if (p.engine) { d.failure = failEngineReadOnly(p.rel); return d; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and the running session's animators have "
+			"already resolved this asset — their live parameters and current states "
+			"came from it. A change now would be half in effect, so it is refused "
+			"rather than half-applied. Ask the user to stop play mode.",
+			"is open in the editor with unsaved changes. That tab's own "
+			"copy is the truth while it is dirty: writing the file would be reverted by "
+			"the human's next Save, and there is no way to land an edit in the tab that "
+			"they could take back. Ask the user to save or close that tab, then call "
+			"again." };
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther, h.isDirty, kGate))
 		{
-			d.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and the running session's animators have "
-				"already resolved this asset — their live parameters and current states "
-				"came from it. A change now would be half in effect, so it is refused "
-				"rather than half-applied. Ask the user to stop play mode.");
-			return d;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			d.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return d;
-		}
-		if (h.isDirty && h.isDirty(p.rel))
-		{
-			d.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' is open in the editor with unsaved changes. That tab's own "
-				"copy is the truth while it is dirty: writing the file would be reverted by "
-				"the human's next Save, and there is no way to land an edit in the tab that "
-				"they could take back. Ask the user to save or close that tab, then call "
-				"again.");
+			d.failure = std::move(*refused);
 			return d;
 		}
 	}

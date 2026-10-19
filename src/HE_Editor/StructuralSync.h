@@ -2,6 +2,7 @@
 #include <entt/entt.hpp>
 #include <HorizonScene/Components/HierarchyComponent.h>
 
+#include <cstdint>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -171,6 +172,49 @@ private:
 	entt::registry& m_reg;
 	std::vector<std::pair<StructEntity, std::vector<StructEntity>>> m_saved;
 	std::vector<StructEntity> m_detached;
+};
+
+// ── When the diff has to run at all (EDT-402/1601) ───────────────────────────
+// The diff above is complete by construction, and it was also run on every
+// frame of a session: a set of every entity rebuilt, then three walks over it,
+// in the 99 % of frames in which nothing was created, destroyed or moved. The
+// world already counts exactly those changes (HorizonWorld::structureEpoch:
+// createEntity, destroyEntity, reparentEntity, the sibling-order edits, clear,
+// the scene loaders, cell streaming), so the pass runs when that counter moved.
+//
+// Two things keep it from being only as good as the counter:
+//   * pending work. A create, re-parent or destroy that did not go out is
+//     retried pass by pass (kSendRetryFrames counts PASSES), so while anything
+//     is waiting the pass runs every frame, exactly as before.
+//   * a fallback interval. What the counter cannot see — a raw
+//     registry().create(), a HierarchyComponent rewired by hand, a component
+//     added that makes an entity local-only (isTerrainGenerated) — is found by
+//     the full pass that still runs once a second. Late by at most that, never
+//     lost.
+struct StructPassGate
+{
+	static constexpr std::uint64_t kFallbackMs = 1000;
+
+	// The epoch the last pass started from. 0 never matches a world: its
+	// counter starts at 1, so a fresh gate always runs.
+	std::uint64_t seenEpoch  = 0;
+	std::uint64_t lastPassMs = 0;
+
+	bool due(std::uint64_t epoch, bool pendingWork, std::uint64_t nowMs,
+	         std::uint64_t fallbackMs = kFallbackMs) const
+	{
+		return epoch != seenEpoch || pendingWork || seenEpoch == 0 ||
+		       nowMs - lastPassMs >= fallbackMs;
+	}
+	// `epoch` as read BEFORE the pass: a change the pass makes itself (a
+	// refused re-parent put back) moves the counter again and is looked at once
+	// more, which costs one pass and never misses anything.
+	void ran(std::uint64_t epoch, std::uint64_t nowMs)
+	{
+		seenEpoch  = epoch;
+		lastPassMs = nowMs;
+	}
+	void reset() { *this = StructPassGate{}; }
 };
 
 } // namespace HE::Ed

@@ -13,6 +13,13 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+// Which driver a PoseKey came from: the same clip at the same time is not the
+// same pose when a blend or a state machine put it there.
+constexpr uint64_t kPoseKeyClip = 1;
+} // namespace
+
 void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
                              HE::RootMotionContext* rootMotion,
                              HE::NotifyQueue* notifies)
@@ -68,7 +75,25 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
             continue;
         }
 
-        std::vector<JointTRS> localTRS(mesh->skeleton.size());
+        // The gate (SCN-102, PoseFinalize.h): the same clip at the same time on the
+        // same skeleton is the same pose, and the bones still hold it. After the
+        // notifies above on purpose — a playhead that did not move fires nothing,
+        // but that is for notifyCollectClip to decide, not for the gate.
+        uint64_t key = 0;
+        if (HE::poseMayBeKept(reg, e))
+        {
+            key = HE::PoseKey(kPoseKeyClip)
+                      .id(animator.clipAssetId).ptr(clip).ptr(clip->channels.data())
+                      .id(smc.meshAssetId).ptr(mesh).ptr(mesh->skeleton.data())
+                      .count(mesh->skeleton.size()).real(animator.playbackTime)
+                      .value();
+            if (key == smc.poseKey) continue;
+        }
+
+        // Per thread and reused across entities and frames (SCN-101); assign
+        // resets it to the defaults sampleClip expects.
+        thread_local std::vector<JointTRS> localTRS;
+        localTRS.assign(mesh->skeleton.size(), JointTRS{});
         sampleClip(*clip, animator.playbackTime, localTRS);
 
         if (auto* rm = reg.try_get<RootMotionComponent>(e))
@@ -82,5 +107,6 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
         // Layer stack (if any) → FK → IBM. After rootMotionApply on purpose: a
         // layer must not write back the root translation that was just taken out.
         HE::poseFinalize(world, cm, dt, e, *mesh, localTRS, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
+        smc.poseKey = key;
     }
 }

@@ -95,15 +95,15 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] REN-903/908/401: Cluster-Build ohne Heap, SSAO-Kernel einmalig, Sky-Bake gemeinsam und gedrosselt
 
 **Stufe 3 – Backend-spezifisch (je Backend eigene PRs, unabhängig parallelisierbar)**
-- [ ] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache`
+- [x] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache` (Thema 215, `docs/audit-vulkan-backend-2026-10-18.md`: Upload-Batch ohne Wartepunkt, Mesh-Pool, persistenter Pipeline-Cache für alle 34 Create-Stellen + ImGui; RTX 4070: 284 Waits/212 ms → 0, Pipelines bei kaltem Treiber-Cache 1,7 s → 43 ms; offen aus REN-808: Sky-SPIR-V und Rauschvolumen pro Start, Pipeline-Bau im Job; Staging-Ring zu klein für 61 MB im ersten Frame)
 - [ ] Metal: REN-302/402 `FrameUploadRing` benutzen, REN-405/404 TLAS/BLAS-Dirty, REN-406 asynchroner BLAS-Build
 - [ ] D3D12: REN-202 Meshes in DEFAULT-Heap; D3D11/GL: Material-Draw-Zustand (REN-103/601), UI-Batching (REN-603)
 - [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
 
 **Stufe 4 – Scene-Systeme**
-- [ ] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound`
-- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out)
-- [ ] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung
+- [x] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound` (Thema 218 Schritt 1, `docs/audit-scene-systeme-2026-10-18.md`; offen aus SCN-102: Sichtbarkeits-/Distanz-LOD und `playing`-Flag der State Machine)
+- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out) (SCN-301/401/501/402/601 und SCN-604 erledigt in Thema 218 Schritt 2, SCN-801/802 in Schritt 3, `docs/audit-scene-systeme-2026-10-18.md`; offen: Welt-Skip des LOD-Systems, Änderungs-Gate des Chunk-Material-Syncs)
+- [x] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung (Thema 218 Schritt 4, `docs/audit-scene-systeme-2026-10-18.md`: State-Machine-Graph und Blend-Spaces pro Asset-Text geteilt, Moves im Serializer, Prefab-Sync parst jedes Asset einmal; offen: Überspringen unveränderter Platzierungen und Asset-Revision statt Textvergleich, Params als Index, LegacyConfig, Partikel-Config)
 
 **Stufe 5 – Netz, Tools, Randmodule**
 - [ ] NET-101 Byte-aligned Fast Path im BitStream (Wire-Format unverändert, Test!), NET-102/103 Frame einmal bauen, NET-201/202 POD-Adresse und Lesekopf
@@ -111,10 +111,10 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] SCM-101–103 git-Aufrufe reduzieren; CSY-101 SFTP-Session wiederverwenden; SUP-101 Takeover vom UI-Thread
 
 **Stufe 6 – Editor (viele kleine, voneinander unabhängige PRs)**
-- [ ] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug
-- [ ] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set; Row-Clipping-Pass (M12)
-- [ ] Collab: EDT-402/1601/201/202 Signale+Revisionen
-- [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9)
+- [x] Zentraler Asset-Index (Maßnahme 4) ⇒ dann die sieben Panel-Fixes in einem Zug (`docs/audit-editor-2026-10-18.md`)
+- [x] `entityByUuid` → `findByEntityId`; `EditorSelection` mit Set (beides erledigt, `docs/audit-editor-2026-10-18.md` Step 2); Row-Clipping-Pass (M12) erledigt (Step 3: EDT-301/302/1503/1802/910 geclippt, 909 ohne Clipper nur allokationsfrei, 1404 Stufe 1; Stufe 2 von 1404 offen)
+- [x] Collab: EDT-402/1601/201/202 Signale+Revisionen (`docs/audit-editor-2026-10-18.md` Step 4: Struktur-Pass per structureEpoch + 1-s-Netz, Net-IDs als Hash-Maps mit Fehltreffer-Cache, LS/GI-Diff per Signal + 250 ms)
+- [ ] Tabellen statt Parallellisten (EDT-801, 703/704), danach Extract-Method an den Monolithen (M9) — teilweise (`docs/audit-editor-2026-10-18.md` Step 5): EDT-801 `kAssetPanels`, EDT-1208 `refuseAssetWrite`, CORE-603 Basis-Property-Tabelle, M9 `dumpFrameHeadless`-Zeugenszenen erledigt; EDT-1209 (Step 6: `McpToolHooks.h` abgetrennt, `unique_ptr<McpBridge>`; Hook-Änderung baut 23+44 statt 101+94 Objekte neu, json.hpp kommt weiter über `GlobalState.h`); M9 Step 7: `ContentBrowserPanel::render` 4444 → 3117 Zeilen (neun Dialoge als `draw…Dialog`, EDT-303), `renderEditor` 2970 → 2102 (Footer, Tab-Leiste, vier Dialoge, EDT-802), reine Verschiebungen mit Rücksetz-Skript belegt; offen EDT-703/704 (Produktentscheidung), Menü-Tabelle/Guard-Klasse aus EDT-802 und `ModalDialog`-Helfer aus EDT-303 (Umbau, kein Extract-Method)
 
 ## 5. Nicht beurteilbar / Messung nötig
 

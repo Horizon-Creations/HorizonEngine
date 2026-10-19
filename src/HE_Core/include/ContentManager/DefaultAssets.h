@@ -92,6 +92,17 @@ constexpr int kEditorIconTextureSize = 64;
 // Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
 constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
 
+// ── Engine meshes (FILES, not registered here) ──────────────────────────────
+// The primitives under EditorDeps/EngineContent/Meshes ("Engine/Meshes/<Name>.hasset"),
+// written by mesh_gen: UUID block hi = 0x100, entry index, append only. Only the
+// ones code refers to are named here; mesh_gen static_asserts against them.
+
+// Two upright 1x1 quads crossed at right angles, both faces of each, pivot at the
+// BASE (y 0..1, unlike the centred primitives), full 0..1 UVs on every face: the
+// far detail level of a foliage layer (FoliageLod), drawn with a material that
+// carries a picture of the plant. Content path "Engine/Meshes/CrossCard.hasset".
+constexpr UUID kEngineCrossCardMeshId = { 0x0000000000000108ULL, 0x0000000000000001ULL };
+
 // ── Engine weather sounds (FILES, not registered here) ──────────────────────
 // The sounds WeatherComponent plays when none of its sound slots is set, so a
 // project gets rain, wind, snow, storm and thunder without a file of its own.

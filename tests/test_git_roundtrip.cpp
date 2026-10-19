@@ -990,6 +990,123 @@ TEST_CASE("A restore refuses to run over uncommitted work")
 	he_test::removeQuiet(repo);
 }
 
+TEST_CASE("A status refresh asks git less and still reports branches, history and remote")
+{
+	// SCM-101/102: one for-each-ref for local and remote branches, the unpushed
+	// check only when status says something is ahead, origin's URL carried over
+	// between background refreshes, and the new-branch dialog's name check on
+	// the worker instead of two git processes per frame.
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("refresh");
+	const fs::path bare = uniqueDir("refreshbare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	writeFile(repo / "a.txt", "one");
+	commitAll(repo, "first");
+	REQUIRE(GitCli::run(repo, { "branch", "feature/x" }).ok);
+
+	// The one-call listing says what the two separate ones say.
+	std::vector<std::string> locals, remotes, oldLocals, oldRemotes;
+	std::string current;
+	REQUIRE(GitCli::listLocalAndRemoteBranches(repo, locals, remotes));
+	REQUIRE(GitCli::listBranches(repo, oldLocals, current));
+	REQUIRE(GitCli::listRemoteBranches(repo, oldRemotes));
+	CHECK(locals == oldLocals);
+	CHECK(remotes == oldRemotes);
+	CHECK(locals == std::vector<std::string>{ "feature/x", "main" });
+	CHECK(remotes.empty());
+
+	GitService svc;
+	svc.open(repo);
+	auto settle = [&] {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while ((svc.busy() || svc.status().generation == 0) &&
+		       std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		svc.pump();
+	};
+	settle();
+	REQUIRE(svc.isRepo());
+	CHECK(svc.branches() == std::vector<std::string>{ "feature/x", "main" });
+	CHECK(svc.remoteBranches().empty());
+	CHECK(svc.remoteUrl().empty());
+	REQUIRE(svc.recentCommits().size() == 1);
+	CHECK_FALSE(svc.recentCommits()[0].unpushed);   // no upstream: nothing to compare with
+
+	// A remote added in a terminal: a background refresh carries the URL it read
+	// before (re-read once a minute); a command the user runs re-reads it.
+	REQUIRE(GitCli::run(repo, { "remote", "add", "origin", bare.string() }).ok);
+	REQUIRE(GitCli::run(repo, { "push", "-u", "origin", "main" }).ok);
+	svc.requestStatus();
+	settle();
+	CHECK(svc.remoteUrl().empty());
+	svc.requestFetch();
+	settle();
+	CHECK(svc.remoteUrl() == bare.string());
+	CHECK(svc.remoteBranches() == std::vector<std::string>{ "origin/main" });
+	REQUIRE(svc.recentCommits().size() == 1);
+	CHECK_FALSE(svc.recentCommits()[0].unpushed);   // upstream, nothing ahead
+
+	// Something ahead: now the unpushed check runs, and marks exactly that commit.
+	writeFile(repo / "b.txt", "two");
+	commitAll(repo, "second");
+	svc.requestStatus();
+	settle();
+	CHECK(svc.status().ahead == 1);
+	REQUIRE(svc.recentCommits().size() == 2);
+	CHECK(svc.recentCommits()[0].unpushed);
+	CHECK_FALSE(svc.recentCommits()[1].unpushed);
+
+	// The name check: nothing until the worker answered, then the answer for
+	// exactly the text asked about.
+	auto checkName = [&](const std::string& name) {
+		svc.requestCheckBranchName(name);
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while (!svc.branchNameCheck(name) && std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		return svc.branchNameCheck(name);
+	};
+	const GitService::BranchNameCheck* c = checkName("main");
+	REQUIRE(c);
+	CHECK(c->valid);
+	CHECK(c->taken);
+	c = checkName("has space");
+	REQUIRE(c);
+	CHECK_FALSE(c->valid);
+	CHECK_FALSE(c->taken);
+	c = checkName("feature/new-lighting");
+	REQUIRE(c);
+	CHECK(c->valid);
+	CHECK_FALSE(c->taken);
+	CHECK_FALSE(svc.branchNameCheck("main"));   // an answer is only for its own text
+	CHECK_FALSE(svc.busyWithWork());            // and never greys the buttons
+
+	// Answers to the check leave the last operation's outcome alone.
+	svc.requestCreateBranch("main", "", false);
+	settle();
+	REQUIRE_FALSE(svc.lastError().empty());
+	const std::string failure = svc.lastError();
+	REQUIRE(checkName("other"));
+	CHECK(svc.lastError() == failure);
+
+	// A burst of keystrokes: only the last text is answered for sure.
+	svc.requestCheckBranchName("f");
+	svc.requestCheckBranchName("fe");
+	c = checkName("feature/x");
+	REQUIRE(c);
+	CHECK(c->taken);
+
+	svc.close();
+	he_test::removeQuiet(repo);
+	he_test::removeQuiet(bare);
+}
+
 TEST_CASE("History reads back newest first and knows what is unpushed")
 {
 	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }

@@ -39,6 +39,7 @@
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "EditorBackendChoice.h"   // HE_DUMP_RHI against the config's RHI
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
+#include "McpBridge.h"             // the listener m_mcp points at
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
@@ -370,13 +371,19 @@ std::string getRHIName(HE::RendererBackend backend)
 	}
 }
 
+EditorApplication::EditorApplication(std::string startupPath)
+	: HE::Application(std::move(startupPath))
+	, m_mcp(std::make_unique<HE::Ed::McpBridge>())
+{
+}
+
 EditorApplication::~EditorApplication()
 {
 	// Before any member goes: stopping the bridge reports every connection to
 	// the client-gone hooks, and the lock hook reaches m_mcpLocks and m_collab,
 	// which are not all declared before m_mcp. OnShutdown normally did this
 	// already, and stop() is then a no-op.
-	m_mcp.stop();
+	m_mcp->stop();
 }
 
 HE::ApplicationConfig EditorApplication::GetConfig() const
@@ -1056,6 +1063,10 @@ void EditorApplication::OnInit()
 		// the snapshot left, which is exactly the parentage the peers share.
 		m_structureParent.clear();
 		m_structureUndeletable.clear();
+		m_structureUnsendable.clear();
+		// The records were just rebuilt: the next frame diffs against them.
+		m_structureGate.reset();
+		m_structureReparentPending = false;
 		// The level script came with the new scene, so the mirror describes a
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
@@ -1347,6 +1358,11 @@ void EditorApplication::OnInit()
 			static_assert(sizeof(rp) == sizeof(rpRaw), "VkRenderPass size mismatch");
 			std::memcpy(&rp, &rpRaw, sizeof(rp));
 			vkInfo.PipelineInfoMain.RenderPass = rp;
+			// The renderer's pipeline cache (REN-808): ImGui builds one pipeline per
+			// viewport/platform window, those land in the persisted cache too.
+			const uint64_t pcRaw = vk->GetPipelineCache();
+			static_assert(sizeof(vkInfo.PipelineCache) == sizeof(pcRaw), "VkPipelineCache size mismatch");
+			std::memcpy(&vkInfo.PipelineCache, &pcRaw, sizeof(pcRaw));
 			ImGui_ImplSDL3_InitForVulkan(window()->GetNativeWindow());
 			ImGui_ImplVulkan_Init(&vkInfo);
 			m_imguiReady = true;
@@ -2369,12 +2385,12 @@ void EditorApplication::startClaudeProbe()
 	m_claudeSettleFrames = 0;
 	// Read HERE, on the frame thread, before anything can connect. The worker may
 	// not touch the bridge at all.
-	m_claudeAuthBaseline = m_mcp.authCount();
+	m_claudeAuthBaseline = m_mcp->authCount();
 
 	const char* basePtr = SDL_GetBasePath();
 	const std::filesystem::path base     = basePtr ? std::filesystem::path(basePtr)
 	                                               : std::filesystem::path();
-	const std::filesystem::path endpoint = m_mcp.endpointFile();
+	const std::filesystem::path endpoint = m_mcp->endpointFile();
 
 	m_claudeThread = std::thread([this, base, endpoint]
 	{
@@ -2401,8 +2417,8 @@ void EditorApplication::pollClaudeProbe()
 	// nothing else was invited during those seconds, and if a second client did
 	// authenticate in the same window, the honest reading of that is still "a
 	// client reached this editor while the check ran".
-	m_claudeResult.authSeen   = m_mcp.authCount() > m_claudeAuthBaseline;
-	m_claudeResult.authClient = m_mcp.lastAuthClient();
+	m_claudeResult.authSeen   = m_mcp->authCount() > m_claudeAuthBaseline;
+	m_claudeResult.authClient = m_mcp->lastAuthClient();
 	m_claudeState = 2;
 }
 
@@ -2887,7 +2903,7 @@ static void appendRootMotionPreview(HorizonWorld& world, ContentManager& cm,
 		clipId = (b->blendAlpha >= HE::kNotifyDominanceAlpha) ? b->clipBId : b->clipAId;
 	else if (const auto* sm = reg.try_get<AnimatorStateMachineComponent>(e))
 	{
-		for (const HE::AnimationState& s : sm->resolvedGraph.states)
+		for (const HE::AnimationState& s : sm->graph().states)
 			if (s.name == sm->currentStateName) { clipId = s.clipId; break; }
 	}
 	if (clipId == HE::UUID{}) return;
@@ -4963,13 +4979,13 @@ void EditorApplication::OnRender(float dt)
 		// that forgets to update it is a handler writing into a destroyed world.
 		// Set here, one line before the tools that read it can run.
 		m_commands.setWorld(m_editorWorld.get());
-		m_mcp.setPort(static_cast<std::uint16_t>(
+		m_mcp->setPort(static_cast<std::uint16_t>(
 			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
 		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
 		// Preferences panel then only ever writes the config, and setEnabled
 		// ignores a value that has not changed, so this costs nothing.
-		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
-		m_mcp.update(nowMs);
+		m_mcp->setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
+		m_mcp->update(nowMs);
 		// After the pump, because it is the pump that notices a client has gone —
 		// and a client going is what hands its locks back.
 		updateMcpLocks(nowMs);
@@ -4994,7 +5010,18 @@ void EditorApplication::OnRender(float dt)
 	if (const int sync = m_git.takeSyncMoment())
 		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::Committed, sync);
 
-		if (m_collab.inSession()) syncStructuralChanges();
+		// Out of a session the gate forgets what it saw, so the first pass of the
+		// next one runs whatever the epoch says.
+		if (m_collab.inSession()) syncStructuralChanges(nowMs);
+		else
+		{
+			// Nobody left to retry for: an entry carried into the next session
+			// would only keep its pass running on every frame.
+			m_structureGate.reset();
+			m_structureUnsendable.clear();
+			m_structureUndeletable.clear();
+			m_structureReparentPending = false;
+		}
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
 		// Landscapes, after the structural diff so a landscape created this frame
@@ -5339,186 +5366,16 @@ void EditorApplication::captureLiveFrameIfAsked()
 			("EditorApplication: live frame capture failed → " + std::string(s_out)).c_str());
 }
 
-void EditorApplication::dumpFrameHeadless()
+// ── The witness scenes of the headless dump ─────────────────────────────────
+// Every HE_DUMP_* block that builds a scene for one capture (sky, material,
+// water, landscape, lights, …), in the order dumpFrameHeadless ran them inline;
+// pulled out of that function unchanged (audit M9). Each is a no-op unless its
+// variable is set. Two ids leave it: the material-test material, which the
+// preview-path witness reuses, and the landscape layer material, which
+// HE_DUMP_LAYEREDIT and the GI refit witness edit after the warmup.
+void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTestId,
+                                               HE::UUID& s_layerMatId)
 {
-	if (m_dumpPath.empty() || m_dumpDone) return;
-	IRenderer* r = renderer();
-	if (!r)
-	{
-		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
-		m_dumpDone = true;
-		return;
-	}
-
-	// Render the scene into a fixed offscreen target a few times, bypassing the
-	// ImGui overlay and the window swap. Doing this here (before the paced main
-	// loop) means it works even when the window is occluded / App-Napped on
-	// macOS — where the normal loop throttles to a near-frozen frame rate and a
-	// loop-driven capture never fires.
-	r->SetOverlayCallback(nullptr);
-	{
-		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
-		// shot that proves a bloom A/B has any bloom in it to compare.
-		IRenderer::BloomSettings bloom{
-			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
-		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
-		r->SetBloomSettings(bloom);
-	}
-	{
-		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
-		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
-		// not depend on the Preferences state of whoever ran the editor last.
-		const bool dumpSSAO = [&]{
-			const char* v = std::getenv("HE_DUMP_SSAO");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
-		}();
-		r->SetSSAOSettings(IRenderer::SSAOSettings{
-			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
-			m_editorConfig.SSAOMethod});
-	}
-	{
-		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
-		// depth-of-field settings for this capture only, so he_shot.py can A/B
-		// the pass and move the focus plane without touching config.json.
-		IRenderer::DepthOfFieldSettings dof{
-			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
-			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
-		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
-		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
-		r->SetDepthOfFieldSettings(dof);
-	}
-	{
-		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
-		// settings for this capture only. The camera motion itself comes from
-		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
-		IRenderer::MotionBlurSettings mb{
-			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
-			m_editorConfig.MotionBlurMax};
-		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
-		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
-		r->SetMotionBlurSettings(mb);
-	}
-	r->SetShadowSettings(projectShadowSettings());
-	{
-		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
-		// the render scale and the specular-AA toggle for this capture only, so
-		// he_shot.py can A/B the modes without touching config.json.
-		IRenderer::AntiAliasingSettings aa;
-		aa.method             = m_editorConfig.AntiAliasing;
-		aa.sharpness          = m_editorConfig.AASharpness;
-		aa.renderScale        = m_editorConfig.RenderScale;
-		aa.specularAA         = m_editorConfig.SpecularAA;
-		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
-		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
-		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
-		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
-		// The effect is a fraction of a roughness unit at normal strength, so an
-		// A/B that can only toggle it proves nothing headless — being able to
-		// exaggerate is what makes "does this reach the shader at all?" answerable.
-		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
-		{
-			const float s = static_cast<float>(std::atof(v));
-			aa.specularAA         = s > 0.0f;
-			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
-		}
-		r->SetAntiAliasingSettings(aa);
-	}
-	{
-		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
-		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
-		// the editor's Preferences state leaking between captures.
-		const bool dumpGI = [&]{
-			const char* v = std::getenv("HE_DUMP_GI");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
-		}();
-		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
-		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
-		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
-		// mask's rays per pixel and its edge-aware filter on any backend.
-		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
-		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
-		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
-		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
-		// history 0.98, no spatial filter. Every backend renders its own.
-		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
-		{
-			gi.shadowRays    = 256;
-			gi.shadowHistory = 0.98f;
-			gi.shadowFilter  = false;
-		}
-		r->SetGISettings(gi);
-	}
-	{
-		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
-		// this capture only, so he_shot.py can A/B the culler: the two captures
-		// must be pixel-identical, only "dump counters" (visible=, occluded=)
-		// may differ.
-		const bool dumpOcc = [&]{
-			const char* v = std::getenv("HE_DUMP_OCCLUSION");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
-		}();
-		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
-	}
-	{
-		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
-		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
-		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
-		const bool dumpSSR = [&]{
-			const char* v = std::getenv("HE_DUMP_SSR");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
-		}();
-		IRenderer::SSRSettings ssr{
-			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
-		ssr.quality = m_editorConfig.SSRQuality;
-		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
-			ssr.quality = std::atoi(q);
-		r->SetSSRSettings(ssr);
-	}
-	{
-		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
-		// capture only (ray-traced-reflections A/B without touching config.json).
-		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
-		const bool dumpGR = [&]{
-			const char* v = std::getenv("HE_DUMP_GIREFL");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
-		}();
-		IRenderer::GIReflectionSettings gr;
-		gr.enabled      = dumpGR;
-		gr.intensity    = m_editorConfig.GIReflIntensity;
-		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
-		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
-		gr.blur         = m_editorConfig.GIReflBlur;
-		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
-			gr.blur = std::atof(b) > 0.5;
-		gr.quality      = m_editorConfig.GIReflQuality;
-		gr.bounces      = m_editorConfig.GIReflBounces;
-		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
-			gr.quality = std::atoi(q);
-		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
-		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
-			gr.bounces = std::atoi(bc);
-		r->SetGIReflectionSettings(gr);
-	}
-	{
-		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
-		// only (he_shot Forward/Deferred A/B without touching config.json).
-		int path = m_editorConfig.RenderPath;
-		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
-			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
-		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
-			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
-	}
-	{
-		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
-		// the viewport's view mode for this capture. Explicitly Lit otherwise —
-		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
-		// is the same answer, but a capture should not depend on that.
-		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
-	}
-
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
 	// the scene environment so a headless dump exercises the sky features (stars /
 	// nebula / 3D clouds / contrails) that the default down-looking editor camera and
@@ -5632,7 +5489,6 @@ void EditorApplication::dumpFrameHeadless()
 	// scene whose MaterialAsset carries a custom shader, so the NORMAL render path
 	// (extractor → RenderObject.materialAssetId → ResolveMaterialShader → cross-compiled
 	// pipeline) draws it — witnessing the full asset→pixel path, not just an inline demo.
-	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
 	if (const char* mt = std::getenv("HE_DUMP_MATERIALTEST"); mt && *mt && m_editorWorld)
 	{
 		MaterialAsset mat;
@@ -7161,7 +7017,6 @@ void EditorApplication::dumpFrameHeadless()
 	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
 	// orange (7) — the last three on the weightmap's SECOND page, which the
 	// renderer uploads as the right half of the one heLandscapeWeights texture.
-	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -7510,6 +7365,7 @@ void EditorApplication::dumpFrameHeadless()
 	//   HE_DUMP_FOLIAGEMESH=cube|sphere  default cube
 	//   HE_DUMP_FOLIAGESCALE=<min>,<max> instance scale, default 0.5,1.0
 	//   HE_DUMP_FOLIAGESEED=<n>        scatter seed, default 42
+	//   HE_DUMP_FOLIAGELOD=<from>[:mesh[:density]],...  detail levels, see below
 	// The camera is the dump's own (HE_DUMP_CAMX/CAMY/CAMZ/PITCH/YAW); a view
 	// over the middle of the field is CAMX=0 CAMY=40 CAMZ=-120 PITCH=-20.
 	if (const char* ft = std::getenv("HE_DUMP_FOLIAGETEST"); ft && *ft && m_editorWorld)
@@ -7539,29 +7395,38 @@ void EditorApplication::dumpFrameHeadless()
 		ftc.dirty       = true;
 		reg.emplace<TerrainComponent>(land, ftc);
 		FoliageComponent fol;
-		fol.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
+		FoliageLayer&    fl = fol.layers[0];
+		fl.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
 		// +0.5: the scatter takes int(area * density), and float rounding must
 		// not cost the last instance.
-		fol.density      = (static_cast<float>(want) + 0.5f) / (side * side);
-		fol.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
-		fol.minScale     = scaleMin;
-		fol.maxScale     = scaleMax;
-		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
-		fol.dirty        = true;
+		fl.density      = (static_cast<float>(want) + 0.5f) / (side * side);
+		fl.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
+		fl.minScale     = scaleMin;
+		fl.maxScale     = scaleMax;
+		fl.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
+		fl.dirty        = true;
 		// HE_DUMP_FOLIAGEMAT=graph: the layer carries a node-graph material (one flat
 		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
 		// instances the batch with its built-in program draws it grey; one that keeps
 		// the material draws it magenta, once per instance (Thema 163 Teil 2b, GL gate).
-		if (const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT"); fm && std::string_view(fm) == "graph")
+		// =wind adds a Wind Sway node on the WPO pin (the Foliage template's vertex), so
+		// the batch exercises the instanced WPO vertex (Thema 182, 2e). The offset is
+		// windSpeed * 0.1 m at the top of a 1 m bend: pin it with HE_DUMP_WINDSPEED and
+		// HE_SKY_TIME (the graph's clock), and A/B against HE_GRAPH_INSTANCING=0.
+		const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT");
+		const bool  windMat = fm && std::string_view(fm) == "wind";
+		if (fm && (std::string_view(fm) == "graph" || windMat))
 		{
 			MaterialAsset mat;
 			mat.type = HE::AssetType::Material;
-			mat.name = "FoliageGraphTest";
+			mat.name = windMat ? "FoliageWindTest" : "FoliageGraphTest";
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.8f;
 			g.connect(col, 0, out, 0);
+			if (windMat)
+				g.connect(g.addNode(HE::MatNodeType::WindSway), 0, out, HE::kMatOutputWPOPin);
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
@@ -7569,7 +7434,44 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderVertGlsl = gen.vertexBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
-			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEMAT=%s (vertex body %zu chars)",
+			            fm, gen.vertexBody.size());
+			fl.materialAssetId = contentManager().registerMaterial(std::move(mat));
+		}
+		// HE_DUMP_FOLIAGELOD=<from>[:cube|sphere|card[:density]],... adds detail levels
+		// (Thema 182, 3a): e.g. "30:sphere,60:card:0.5". A level without a mesh only thins
+		// the layer's. "card" is the engine's cross-card FILE, loaded here so the witness
+		// also shows that it ships; the log line says whether it resolved.
+		if (const char* fd = std::getenv("HE_DUMP_FOLIAGELOD"); fd && *fd)
+		{
+			std::string spec(fd);
+			for (size_t at = 0; at < spec.size() && fl.lods.size() < FoliageLayer::kMaxLods;)
+			{
+				const size_t end = std::min(spec.find(',', at), spec.size());
+				const std::string item = spec.substr(at, end - at);
+				at = end + 1;
+				FoliageLod d;
+				d.distance = static_cast<float>(std::atof(item.c_str()));
+				const size_t c1 = item.find(':');
+				if (c1 != std::string::npos)
+				{
+					const size_t c2 = item.find(':', c1 + 1);
+					const std::string mesh = item.substr(c1 + 1, c2 == std::string::npos ? std::string::npos : c2 - c1 - 1);
+					if (mesh == "cube")   d.meshAssetId = HE::kDefaultCubeMeshId;
+					if (mesh == "sphere")   // an engine FILE too: not resident until loaded
+						d.meshAssetId = contentManager().loadAsset("Engine/Meshes/Sphere.hasset");
+					if (mesh == "card")
+					{
+						const HE::UUID card = contentManager().loadAsset("Engine/Meshes/CrossCard.hasset");
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD cross card %s",
+						            card == HE::kEngineCrossCardMeshId ? "loaded with its engine UUID" : "NOT loaded");
+						d.meshAssetId = HE::kEngineCrossCardMeshId;
+					}
+					if (c2 != std::string::npos) d.density = std::clamp(static_cast<float>(std::atof(item.c_str() + c2 + 1)), 0.0f, 1.0f);
+				}
+				fl.lods.push_back(d);
+			}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD %zu level(s) from '%s'", fl.lods.size(), fd);
 		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
@@ -7577,7 +7479,7 @@ void EditorApplication::dumpFrameHeadless()
 		FoliageSystem::update(*m_editorWorld);
 		const double scatterMs = std::chrono::duration<double, std::milli>(
 			std::chrono::steady_clock::now() - t0).count();
-		const FoliageComponent& placedFol = reg.get<FoliageComponent>(land);
+		const FoliageLayer& placedFol = reg.get<FoliageComponent>(land).layers[0];
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGETEST witness field added "
 			"(%zu instances placed of %ld asked, %s, %.0f m square, scale %.2f-%.2f, "
 			"drawDistance %.0f, scatter %.1f ms)",
@@ -8678,6 +8580,193 @@ void EditorApplication::dumpFrameHeadless()
 			"LOD3=%d refined=%d stitched=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1],
 			perLevel[2], perLevel[3], perLevel[4], stitched, camPos.x, camPos.y, camPos.z);
 	}
+}
+
+void EditorApplication::dumpFrameHeadless()
+{
+	if (m_dumpPath.empty() || m_dumpDone) return;
+	IRenderer* r = renderer();
+	if (!r)
+	{
+		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
+		m_dumpDone = true;
+		return;
+	}
+
+	// Render the scene into a fixed offscreen target a few times, bypassing the
+	// ImGui overlay and the window swap. Doing this here (before the paced main
+	// loop) means it works even when the window is occluded / App-Napped on
+	// macOS — where the normal loop throttles to a near-frozen frame rate and a
+	// loop-driven capture never fires.
+	r->SetOverlayCallback(nullptr);
+	{
+		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
+		// shot that proves a bloom A/B has any bloom in it to compare.
+		IRenderer::BloomSettings bloom{
+			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
+		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
+		r->SetBloomSettings(bloom);
+	}
+	{
+		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
+		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
+		// not depend on the Preferences state of whoever ran the editor last.
+		const bool dumpSSAO = [&]{
+			const char* v = std::getenv("HE_DUMP_SSAO");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
+		}();
+		r->SetSSAOSettings(IRenderer::SSAOSettings{
+			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
+	}
+	{
+		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
+		// depth-of-field settings for this capture only, so he_shot.py can A/B
+		// the pass and move the focus plane without touching config.json.
+		IRenderer::DepthOfFieldSettings dof{
+			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
+		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
+		r->SetDepthOfFieldSettings(dof);
+	}
+	{
+		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
+		// settings for this capture only. The camera motion itself comes from
+		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
+		IRenderer::MotionBlurSettings mb{
+			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax};
+		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
+		r->SetMotionBlurSettings(mb);
+	}
+	r->SetShadowSettings(projectShadowSettings());
+	{
+		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
+		// the render scale and the specular-AA toggle for this capture only, so
+		// he_shot.py can A/B the modes without touching config.json.
+		IRenderer::AntiAliasingSettings aa;
+		aa.method             = m_editorConfig.AntiAliasing;
+		aa.sharpness          = m_editorConfig.AASharpness;
+		aa.renderScale        = m_editorConfig.RenderScale;
+		aa.specularAA         = m_editorConfig.SpecularAA;
+		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
+		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
+		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
+		// The effect is a fraction of a roughness unit at normal strength, so an
+		// A/B that can only toggle it proves nothing headless — being able to
+		// exaggerate is what makes "does this reach the shader at all?" answerable.
+		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
+		{
+			const float s = static_cast<float>(std::atof(v));
+			aa.specularAA         = s > 0.0f;
+			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
+		}
+		r->SetAntiAliasingSettings(aa);
+	}
+	{
+		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
+		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
+		// the editor's Preferences state leaking between captures.
+		const bool dumpGI = [&]{
+			const char* v = std::getenv("HE_DUMP_GI");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
+		}();
+		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
+		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
+		// mask's rays per pixel and its edge-aware filter on any backend.
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
+		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
+		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
+		// history 0.98, no spatial filter. Every backend renders its own.
+		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
+		{
+			gi.shadowRays    = 256;
+			gi.shadowHistory = 0.98f;
+			gi.shadowFilter  = false;
+		}
+		r->SetGISettings(gi);
+	}
+	{
+		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
+		// this capture only, so he_shot.py can A/B the culler: the two captures
+		// must be pixel-identical, only "dump counters" (visible=, occluded=)
+		// may differ.
+		const bool dumpOcc = [&]{
+			const char* v = std::getenv("HE_DUMP_OCCLUSION");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
+		}();
+		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
+	}
+	{
+		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
+		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
+		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
+		const bool dumpSSR = [&]{
+			const char* v = std::getenv("HE_DUMP_SSR");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
+		}();
+		IRenderer::SSRSettings ssr{
+			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
+		ssr.quality = m_editorConfig.SSRQuality;
+		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
+			ssr.quality = std::atoi(q);
+		r->SetSSRSettings(ssr);
+	}
+	{
+		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
+		// capture only (ray-traced-reflections A/B without touching config.json).
+		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
+		const bool dumpGR = [&]{
+			const char* v = std::getenv("HE_DUMP_GIREFL");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
+		}();
+		IRenderer::GIReflectionSettings gr;
+		gr.enabled      = dumpGR;
+		gr.intensity    = m_editorConfig.GIReflIntensity;
+		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
+		gr.blur         = m_editorConfig.GIReflBlur;
+		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
+			gr.blur = std::atof(b) > 0.5;
+		gr.quality      = m_editorConfig.GIReflQuality;
+		gr.bounces      = m_editorConfig.GIReflBounces;
+		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
+			gr.quality = std::atoi(q);
+		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
+		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
+			gr.bounces = std::atoi(bc);
+		r->SetGIReflectionSettings(gr);
+	}
+	{
+		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
+		// only (he_shot Forward/Deferred A/B without touching config.json).
+		int path = m_editorConfig.RenderPath;
+		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
+			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
+		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+	}
+	{
+		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
+		// the viewport's view mode for this capture. Explicitly Lit otherwise —
+		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
+		// is the same answer, but a capture should not depend on that.
+		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
+	}
+
+	// The witness scenes (HE_DUMP_SKYTEST … HE_DUMP_TERRAINTICK): what this
+	// capture shows, built before the environment push and the warmup below.
+	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
+	HE::UUID s_layerMatId{}; // landscape layer material, re-authored after the warmup
+	buildDumpWitnessScenes(r, s_matTestId, s_layerMatId);
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
@@ -10137,7 +10226,7 @@ void EditorApplication::dumpFrameHeadless()
 	{
 		if (!m_mcpToolsRegistered) setupMcpTools();
 		m_commands.setWorld(m_editorWorld.get());
-		const HE::Ed::McpTool* tool = m_mcp.registry().find("scene_screenshot");
+		const HE::Ed::McpTool* tool = m_mcp->registry().find("scene_screenshot");
 
 		auto diffPercent = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 			if (a.size() != b.size() || a.empty()) return 100.0;
@@ -10395,6 +10484,12 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// this is just "have we asked yet".
 		m_collab.beginAssetEditSession(key);
 
+		// The two editor-owned graphs are diffed when something says they were
+		// edited (or every quarter second regardless), not on every frame.
+		const bool editorOwned =
+			key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath;
+		if (editorOwned && !editorDocDiffDue(key, nowMs)) continue;
+
 		publishDocDeltas(tab.assetPath, key);
 
 		// The Level Script and the Game Instance graph have no panel dirty flag,
@@ -10403,7 +10498,7 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// 2026-10-14.md section 3). For them "edited" is "the document differs
 		// from what the peers have seen". The diff waits in the mirror until the
 		// grant lands, and publishDocDeltas sends it then.
-		if (key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath)
+		if (editorOwned)
 		{
 			if (!m_collab.inSession() || m_collab.ownsAssetLock(key)) continue;
 			bool edited = false;
@@ -10445,6 +10540,14 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	{
 		const std::string key = *it;
 		if (!m_collab.inSession() || openRel.count(key)) { it = m_collabUntabbedEdits.erase(it); continue; }
+		if (!editorDocDiffDue(key, nowMs))
+		{
+			// Still ours to send: keep the claim (the release loop below gives
+			// back whatever is not in openRel).
+			openRel.insert(key);
+			++it;
+			continue;
+		}
 		publishDocDeltas(key, key);
 		bool edited = false;
 		for (const CollabDocSync::DocBinding& d : collabDocsForTab(key))
@@ -10479,6 +10582,19 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	for (const std::string& rel : openRel) m_docMirrorPaths.insert(rel);
 }
 
+bool EditorApplication::editorDocDiffDue(const std::string& key, std::uint64_t nowMs)
+{
+	const bool level = key == LevelScriptPanel::kTabPath;
+	CollabDocSync::DiffGate& gate = level ? m_levelScriptDiffGate : m_gameInstanceDiffGate;
+	const CollabDocSync::DocMirror& mirror = level ? m_levelScriptMirror : m_gameInstanceMirror;
+	// Both counters only grow, so their sum moves whenever either does.
+	const std::uint64_t signal = m_undo.revision() + m_editorDocEdits;
+	const bool owned = m_collab.ownsAssetLock(key);
+	if (!gate.due(signal, owned, mirror.seeded, nowMs)) return false;
+	gate.ran(signal, owned, nowMs);
+	return true;
+}
+
 // One tab's outgoing deltas.
 //
 // A diff serializes every item in the document, so this must NOT run for every
@@ -10500,7 +10616,9 @@ void EditorApplication::publishDocDeltas(const std::string& absPath,
 	// The two editor-owned graphs have no panel dirty flag — the level script is
 	// saved with the scene and the GameInstance graph writes itself on every edit
 	// — so they are diffed whenever we hold them. The diff is what decides whether
-	// anything actually changed, and it returns nothing when nothing did.
+	// anything actually changed, and it returns nothing when nothing did. HOW
+	// often that is asked is the per-frame caller's business (editorDocDiffDue):
+	// the MCP path calls this directly, before a mutation, and must always run.
 	const bool alwaysDiff = (key == LevelScriptPanel::kTabPath ||
 	                         key == GameInstancePanel::kTabPath);
 	const bool dirty = alwaysDiff || EditorUI::tabHasUnsavedEdits(absPath);
@@ -10583,7 +10701,7 @@ void EditorApplication::setupMcpTools()
 	// The endpoint file goes into the per-user data directory, NEVER into the
 	// project: a project directory is what ends up in git, and this file carries
 	// the token that authorises editing the scene.
-	m_mcp.setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
+	m_mcp->setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
 
 	HE::Ed::McpEditorHooks hooks;
 	hooks.projectName = [this] { return m_projectManager.currentProject().name; };
@@ -10603,18 +10721,18 @@ void EditorApplication::setupMcpTools()
 		return n;
 	};
 
-	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+	HE::Ed::registerCoreTools(m_mcp->registry(), std::move(hooks));
 
 	// A client going hands back the session locks IT took, and only those
 	// (plan §20.3) — not when the editor happens to have no client left.
-	m_mcp.registry().addClientGoneHook(
+	m_mcp->registry().addClientGoneHook(
 		[this](HE::Ed::McpClientId client) { releaseMcpLocksOf(client); });
 
 	// Placing and moving objects. Registered after the gateway is wired, because
 	// the tools capture a reference to it and the first `tools/call` may arrive
 	// in the same frame.
 	setupEditorCommands();
-	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+	HE::Ed::registerEntityTools(m_mcp->registry(), m_commands);
 
 	// Authoring HorizonCode. The tools take the documents as hooks rather than
 	// a pointer to this object for the same reason the two above do: a graph is
@@ -10696,6 +10814,7 @@ void EditorApplication::setupMcpTools()
 	};
 
 	hc.endEdit = [this](const std::string& key) {
+		++m_editorDocEdits;   // the diff gate's signal (editorDocDiffDue)
 		if (m_collab.inSession())
 		{
 			if (key == HE::Ed::kMcpDocLevelScript)
@@ -10757,7 +10876,7 @@ void EditorApplication::setupMcpTools()
 		return m_collab.assetLockedByOther(subject);
 	};
 
-	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
+	HE::Ed::registerHcTools(m_mcp->registry(), std::move(hc));
 
 	// The engine's own API, one tool per pure row of HE::api::registry(). No
 	// list here: what the engine registers is what a client can call, and the
@@ -10787,7 +10906,7 @@ void EditorApplication::setupMcpTools()
 		if (!m_editorWorld->registry().valid(e)) return {};
 		return HE::Ed::uuidOf(*m_editorWorld, e);
 	};
-	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
+	HE::Ed::registerApiTools(m_mcp->registry(), std::move(api));
 
 	// ── The files a project is made of ───────────────────────────────────────
 	// Resolve, list, create, delete, move. Hooks rather than a pointer to this
@@ -10903,7 +11022,7 @@ void EditorApplication::setupMcpTools()
 	};
 	assets.contentDirName = [] { return std::string("Content"); };
 
-	HE::Ed::registerAssetTools(m_mcp.registry(), contentManager(), std::move(assets));
+	HE::Ed::registerAssetTools(m_mcp->registry(), contentManager(), std::move(assets));
 
 	// ── The scene as a file ─────────────────────────────────────────────────
 	// The save/create/open half of the entity tools: without it a client could
@@ -10936,7 +11055,7 @@ void EditorApplication::setupMcpTools()
 	};
 	scene.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
 
-	HE::Ed::registerSceneTools(m_mcp.registry(), contentManager(), std::move(scene));
+	HE::Ed::registerSceneTools(m_mcp->registry(), contentManager(), std::move(scene));
 
 	// ── Shaping the ground ──────────────────────────────────────────────────
 	// Everything else about a terrain edit — undo, the publish to a session, the
@@ -10948,7 +11067,7 @@ void EditorApplication::setupMcpTools()
 		if (!m_editorWorld) return;
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 	};
-	HE::Ed::registerTerrainTools(m_mcp.registry(), m_commands, std::move(terrain));
+	HE::Ed::registerTerrainTools(m_mcp->registry(), m_commands, std::move(terrain));
 
 	// ── The widget tree of a UI Widget asset ────────────────────────────────
 	// The one hook worth reading twice is `liveTree`. A widget open in the
@@ -10975,7 +11094,7 @@ void EditorApplication::setupMcpTools()
 	widget.isDirty = [](const std::string& rel) {
 		return UIEditorPanel::isDirtyByContentPath(rel);
 	};
-	HE::Ed::registerWidgetTools(m_mcp.registry(), contentManager(), std::move(widget));
+	HE::Ed::registerWidgetTools(m_mcp->registry(), contentManager(), std::move(widget));
 
 	// ── What the game is played with ────────────────────────────────────────
 	// The opposite decision from the widget hooks above, and McpInputHooks says
@@ -10994,7 +11113,7 @@ void EditorApplication::setupMcpTools()
 	input.reloadFromDisk = [](const std::string& rel) {
 		return InputAssetPanel::reloadByContentPath(rel);
 	};
-	HE::Ed::registerInputTools(m_mcp.registry(), contentManager(), std::move(input));
+	HE::Ed::registerInputTools(m_mcp->registry(), contentManager(), std::move(input));
 
 	// ── What a surface looks like ───────────────────────────────────────────
 	// The same decision as the input tools above — an open tab with unsaved
@@ -11023,7 +11142,7 @@ void EditorApplication::setupMcpTools()
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
 	};
 	material.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
-	HE::Ed::registerMaterialTools(m_mcp.registry(), contentManager(), std::move(material));
+	HE::Ed::registerMaterialTools(m_mcp->registry(), contentManager(), std::move(material));
 
 	// ── The editor's unit of reuse ──────────────────────────────────────────
 	// The only tool family that takes both halves of the editor: the gateway,
@@ -11040,7 +11159,7 @@ void EditorApplication::setupMcpTools()
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
 	};
 	prefab.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
-	HE::Ed::registerPrefabTools(m_mcp.registry(), contentManager(), m_commands,
+	HE::Ed::registerPrefabTools(m_mcp->registry(), contentManager(), m_commands,
 	                            std::move(prefab));
 
 	// ── A project's own types ────────────────────────────────────────────────
@@ -11068,7 +11187,7 @@ void EditorApplication::setupMcpTools()
 			projectPath = projectPath.parent_path();
 		if (!projectPath.empty()) HE::writeCppTypesHeader(projectPath);
 	};
-	HE::Ed::registerTypeTools(m_mcp.registry(), contentManager(), std::move(types));
+	HE::Ed::registerTypeTools(m_mcp->registry(), contentManager(), std::move(types));
 
 	// ── An emitter's values ──────────────────────────────────────────────────
 	// The same four gates as material and types, plus the one thing a particle
@@ -11096,7 +11215,7 @@ void EditorApplication::setupMcpTools()
 		for (auto [e, ps] : m_editorWorld->registry().view<ParticleSystemComponent>().each())
 			if (ps.particleAssetId == id) ParticleSystem::markConfigDirty(ps);
 	};
-	HE::Ed::registerParticleTools(m_mcp.registry(), contentManager(), std::move(particles));
+	HE::Ed::registerParticleTools(m_mcp->registry(), contentManager(), std::move(particles));
 
 	// ── The animation assets ─────────────────────────────────────────────────
 	// Two panels behind one family, so the two tab questions dispatch on which
@@ -11124,7 +11243,7 @@ void EditorApplication::setupMcpTools()
 		for (auto [e, sm] : m_editorWorld->registry().view<AnimatorStateMachineComponent>().each())
 			if (sm.stateMachineAssetId == id) AnimationStateMachineSystem::markConfigDirty(sm);
 	};
-	HE::Ed::registerAnimatorTools(m_mcp.registry(), contentManager(), std::move(anim));
+	HE::Ed::registerAnimatorTools(m_mcp->registry(), contentManager(), std::move(anim));
 
 	// ── What a clip announces ────────────────────────────────────────────────
 	// Three gates instead of four, and the dirty one is asked differently: the
@@ -11142,7 +11261,7 @@ void EditorApplication::setupMcpTools()
 	clips.isDirty = [](const std::string& rel) {
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
-	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+	HE::Ed::registerClipTools(m_mcp->registry(), contentManager(), std::move(clips));
 
 	// ── A cutscene ───────────────────────────────────────────────────────────
 	// The four gates of the particle family, plus the one question only a
@@ -11168,7 +11287,7 @@ void EditorApplication::setupMcpTools()
 		isCamera = reg.all_of<CameraComponent>(e);
 		return true;
 	};
-	HE::Ed::registerSequenceTools(m_mcp.registry(), contentManager(), std::move(seq));
+	HE::Ed::registerSequenceTools(m_mcp->registry(), contentManager(), std::move(seq));
 
 	// ── Making the project run ───────────────────────────────────────────────
 	// The two Build menu actions and the window they both report into. Neither
@@ -11238,7 +11357,7 @@ void EditorApplication::setupMcpTools()
 			out.log.push_back(HE::Ed::McpBuildLogLine{ l.step, l.severity, l.text });
 		return out;
 	};
-	HE::Ed::registerBuildTools(m_mcp.registry(), std::move(build));
+	HE::Ed::registerBuildTools(m_mcp->registry(), std::move(build));
 
 	// ── The knobs ────────────────────────────────────────────────────────────
 	// Three of these hooks are the whole reason the settings tools are not just
@@ -11295,7 +11414,7 @@ void EditorApplication::setupMcpTools()
 		// pacer, the same call AppContext::setMaxFps makes.
 		if (what == "maxfps") setMaxFps(cfg.MaxFps);
 	};
-	HE::Ed::registerSettingsTools(m_mcp.registry(), std::move(settings));
+	HE::Ed::registerSettingsTools(m_mcp->registry(), std::move(settings));
 
 	// A picture of the scene. The renderer's still-on-request path is the hook,
 	// so the tool file never sees IRenderer beyond the camera struct — and the
@@ -11347,7 +11466,7 @@ void EditorApplication::setupMcpTools()
 	shot.screenshotDir = [] {
 		return (GlobalState::userDataDir() / "mcp-screenshots").string();
 	};
-	HE::Ed::registerScreenshotTools(m_mcp.registry(), std::move(shot));
+	HE::Ed::registerScreenshotTools(m_mcp->registry(), std::move(shot));
 
 	// The session. Reading it is always allowed; hosting, joining and leaving
 	// only when whoever started this editor said so for this run — see
@@ -11358,8 +11477,8 @@ void EditorApplication::setupMcpTools()
 	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
 		collab.controlAllowed = env[0] == '1';
 	// The team server is the way into a team session; same gate, same hooks.
-	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
-	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
+	HE::Ed::registerTeamTools(m_mcp->registry(), m_team, collab);
+	HE::Ed::registerCollabTools(m_mcp->registry(), m_collab, std::move(collab));
 
 	// The task board. Its one copy and its one writer are the panel's
 	// (TaskBoardPanel.h, "Who owns the board"), so every hook goes there — a
@@ -11378,13 +11497,13 @@ void EditorApplication::setupMcpTools()
 	tasks.lastError = [] { return TaskBoardPanel::lastError(); };
 	tasks.author    = [] { return TaskBoardPanel::author(); };
 	tasks.team      = [] { return TaskBoardPanel::team(); };
-	HE::Ed::registerTaskBoardTools(m_mcp.registry(), std::move(tasks));
+	HE::Ed::registerTaskBoardTools(m_mcp->registry(), std::move(tasks));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not
 	// for correctness — but a meta-tool listed before the tools it drives reads
 	// backwards.
-	HE::Ed::registerBatchTool(m_mcp.registry());
+	HE::Ed::registerBatchTool(m_mcp->registry());
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
@@ -11475,11 +11594,11 @@ void EditorApplication::rememberMcpLock(std::uint64_t subject)
 	const auto nowMs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
-	m_mcpLocks.take(subject, m_mcp.registry().callingClient(), nowMs);
+	m_mcpLocks.take(subject, m_mcp->registry().callingClient(), nowMs);
 }
 
 // A client's connection is gone: its share goes back, and nobody else's. Runs
-// inside m_mcp.update(), where the bridge sees the close.
+// inside m_mcp->update(), where the bridge sees the close.
 void EditorApplication::releaseMcpLocksOf(HE::Ed::McpClientId client)
 {
 	for (const std::uint64_t subject : m_mcpLocks.clientGone(client))
@@ -11527,7 +11646,7 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 		m_mcpLocks.clear();
 		return;
 	}
-	if (m_mcp.clientCount() == 0)
+	if (m_mcp->clientCount() == 0)
 	{
 		// What is still booked here belongs to nobody who can disconnect: the
 		// anonymous caller (a tool invoked without the bridge). Every real
@@ -11562,10 +11681,25 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 	}
 }
 
-void EditorApplication::syncStructuralChanges()
+void EditorApplication::syncStructuralChanges(std::uint64_t nowMs)
 {
 	if (!m_editorWorld) return;
 	auto& reg = m_editorWorld->registry();
+
+	// Nothing created, destroyed or moved since the last pass and nothing
+	// waiting for a retry: the diff would find nothing (StructPassGate).
+	const std::uint64_t epoch = m_editorWorld->structureEpoch();
+	const bool pendingWork = !m_structureUnsendable.empty() ||
+	                         !m_structureUndeletable.empty() ||
+	                         m_structureReparentPending;
+	if (!m_structureGate.due(epoch, pendingWork, nowMs)) return;
+	m_structureGate.ran(epoch, nowMs);
+	m_structureReparentPending = false;
+	// A create still retrying for an entity that is gone by now (undone, a
+	// peer's destroy) never comes up in newSubtreeRoots again, so its entry
+	// would never leave — and would keep this pass running on every frame.
+	for (auto it = m_structureUnsendable.begin(); it != m_structureUnsendable.end(); )
+		it = reg.valid(it->first) ? std::next(it) : m_structureUnsendable.erase(it);
 
 	// Entities the engine generates per machine — terrain chunks regenerate from
 	// the TerrainComponent, environment lights belong to the Sky entity — must
@@ -11578,7 +11712,8 @@ void EditorApplication::syncStructuralChanges()
 		       HE::isTerrainGenerated(reg, e);
 	};
 
-	std::unordered_set<Entity> current;
+	std::unordered_set<Entity>& current = m_structureCurrent;
+	current.clear();
 	reg.view<entt::entity>().each([&](auto e) {
 		if (!isLocalOnly(e)) current.insert(e);
 	});
@@ -11710,7 +11845,13 @@ void EditorApplication::syncStructuralChanges()
 		// resolve to nothing on the far side, and the receiver would read that as
 		// "the world root". Wait for it; the record stays, so this comes up again.
 		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
+		{
+			// Looked at again next frame only if that parent can still become
+			// known: one that is local-only never will, and would pin the pass
+			// to every frame (the fallback still looks once a second).
+			if (current.count(m.to)) m_structureReparentPending = true;
 			continue;
+		}
 
 		const std::uint64_t subject =
 			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(m.entity)));
@@ -11751,6 +11892,8 @@ void EditorApplication::syncStructuralChanges()
 		if (m_collab.publishReparent(static_cast<std::uint32_t>(entt::to_integral(m.entity)),
 		                             wireHandle(m.to), t9))
 			m_structureParent[m.entity] = m.to;
+		else
+			m_structureReparentPending = true;
 	}
 
 	// ── Destroyed ──
@@ -12200,6 +12343,7 @@ AppContext EditorApplication::makeContext()
 		.uiAudioEngine       = &m_uiAudio,
 		.gameInstanceGraph   = &m_gameInstanceGraph,
 		.commitGameInstance  = [this]{
+			++m_editorDocEdits;   // the diff gate's signal (editorDocDiffDue)
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 			saveGameInstanceGraph();
 			// The GameInstance is what BUILDS an application's UI, so editing it
@@ -12582,7 +12726,7 @@ AppContext EditorApplication::makeContext()
 #endif
 		.collab              = &m_collab,
 		.team                = &m_team,
-		.mcp                 = &m_mcp,
+		.mcp                 = m_mcp.get(),
 		.mcpCameras          = &m_mcpCameras,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
@@ -14297,7 +14441,7 @@ void EditorApplication::OnShutdown()
 	// reads a stale one connects to whatever the OS handed that port to next.
 	// The destructor would do it too — this is so it happens before the long
 	// teardown below rather than after it.
-	m_mcp.stop();
+	m_mcp->stop();
 
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process). Same rule

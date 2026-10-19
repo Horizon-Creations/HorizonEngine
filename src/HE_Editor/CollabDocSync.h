@@ -145,6 +145,43 @@ bool hasLocalChanges(const IDocAdapter& doc, const DocMirror& mirror);
 bool applyDeltas(IDocAdapter& doc, DocMirror& mirror, Scope scope,
                  const std::vector<HE::Net::CollabSession::DocDelta>& batch);
 
+// ── When to diff a document that has no dirty flag (EDT-201) ────────────────
+// The Level Script and the Game Instance graph have nothing that says "the user
+// changed this", so the diff itself was that flag — and ran on every frame of a
+// session the tab was open in, a full capture (every node to JSON) at 60 Hz to
+// find nothing. The editor does know when they are edited, through channels the
+// diff cannot miss for long: the scene-undo revision (every Level Script edit
+// snapshots), the Game Instance commit, an MCP client's endEdit. The caller
+// folds those into one number that only ever grows; when it moved, the lock
+// changed hands or the mirror needs its first capture, the diff runs now.
+// Otherwise it still runs every kFallbackMs, so an edit that reached the
+// document by some path nobody counted goes out late, never not at all.
+struct DiffGate
+{
+    static constexpr std::uint64_t kFallbackMs = 250;
+
+    std::uint64_t seenSignal = 0;
+    std::uint64_t lastRunMs  = 0;
+    bool          seenOwned  = false;
+    bool          primed     = false;   // false until the first run
+
+    bool due(std::uint64_t signal, bool owned, bool mirrorSeeded, std::uint64_t nowMs,
+             std::uint64_t fallbackMs = kFallbackMs) const
+    {
+        return !primed || !mirrorSeeded || signal != seenSignal || owned != seenOwned ||
+               nowMs - lastRunMs >= fallbackMs;
+    }
+    // `signal` as read before the diff: an edit later in the frame is next
+    // frame's.
+    void ran(std::uint64_t signal, bool owned, std::uint64_t nowMs)
+    {
+        seenSignal = signal;
+        seenOwned  = owned;
+        lastRunMs  = nowMs;
+        primed     = true;
+    }
+};
+
 // ── What a panel hands out ──────────────────────────────────────────────────
 // The live documents behind one open tab, each paired with the mirror tracking
 // what the peers have seen. The PANEL owns the mirror (it has to survive between

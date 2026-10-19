@@ -418,14 +418,28 @@ std::string uuidOf(HorizonWorld& world, Entity e)
 
 Entity entityByUuid(HorizonWorld& world, const std::string& uuid)
 {
-	if (uuid.empty()) return entt::null;
-	auto& reg = world.registry();
-	Entity found = entt::null;
-	reg.view<const EntityIdComponent>().each([&](auto e, const EntityIdComponent&) {
-		if (found != entt::null) return;
-		if (uuidOf(world, e) == uuid) found = e;
-	});
-	return found;
+	// The inverse of uuidOf's "%016llx%016llx", lowercase only: an upper-case
+	// digit never equalled uuidOf's text, so it does not resolve here either.
+	if (uuid.size() != 32) return entt::null;
+	std::uint64_t parts[2] = { 0, 0 };
+	for (std::size_t i = 0; i < 32; ++i)
+	{
+		const char c = uuid[i];
+		unsigned v;
+		if (c >= '0' && c <= '9')      v = static_cast<unsigned>(c - '0');
+		else if (c >= 'a' && c <= 'f') v = static_cast<unsigned>(c - 'a' + 10);
+		else return entt::null;
+		parts[i / 16] = (parts[i / 16] << 4) | v;
+	}
+	HE::UUID id;
+	id.hi = parts[0];
+	id.lo = parts[1];
+	return entityByUuid(world, id);
+}
+
+Entity entityByUuid(HorizonWorld& world, const HE::UUID& id)
+{
+	return world.findByEntityId(id);
 }
 
 } // namespace HE::Ed

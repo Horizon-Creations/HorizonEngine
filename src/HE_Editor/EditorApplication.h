@@ -11,6 +11,7 @@
 #include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "StructuralSync.h"  // StructPassGate: when the per-frame structure diff runs
 #include "TerrainSync.h"     // landscape grids and settings over the session
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "AssetAutosave.h"   // the same for dirty asset tabs
@@ -43,7 +44,6 @@
 #include <Net/RouterProbe.h>
 #include "GitController.h"
 #include "TeamSyncController.h"
-#include "McpBridge.h"
 #include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
 #include "McpLockBook.h"         // external locks, per MCP client
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
@@ -63,6 +63,11 @@
 #include <imgui.h>
 #include <cstdint>
 #endif
+
+// The MCP listener is held by pointer, so the 78 files that include this one
+// do not parse McpBridge.h and the tool registry behind it (EDT-1209). Who
+// calls into the bridge includes McpBridge.h itself.
+namespace HE::Ed { class McpBridge; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.
@@ -592,9 +597,9 @@ struct AppContext
 class EditorApplication : public HE::Application
 {
 public:
-	explicit EditorApplication(std::string startupPath)
-		: HE::Application(std::move(startupPath)) {}
-	~EditorApplication() override; // defined in .cpp where ScriptEngine is complete
+	// Both defined in .cpp, where ScriptEngine and McpBridge are complete.
+	explicit EditorApplication(std::string startupPath);
+	~EditorApplication() override;
 
 public:
 	// Logger sink target: appends a play-session warning/error (any thread).
@@ -866,7 +871,10 @@ private:
 	DebugDrawBuffer m_debugDraw;
 	std::size_t m_mcpGizmoLineBegin = 0;
 	std::size_t m_mcpGizmoLineEnd   = 0;
-	HE::Ed::McpBridge m_mcp;
+	// Made in the constructor and never reset, so it is never null. A pointer
+	// only to keep McpBridge.h out of this header; it stays in this slot for
+	// the destruction order above.
+	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.
@@ -926,8 +934,9 @@ private:
 	// tool that shapes, paints or plants a landscape replicates (TerrainSync.h).
 	HE::Ed::TerrainSync m_terrainSync;
 	bool                m_terrainSyncLive = false;   // in a session last frame
-	// Entities the session already knows about. Diffed each frame so every
-	// creation and deletion path is covered without hooking any of them.
+	// Entities the session already knows about. Diffed (whenever the structure
+	// epoch moved, and once a second regardless) so every creation and deletion
+	// path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
 	// New subtrees whose create the session refused, and for how many frames.
 	// Separate from m_structureKnown because "we tried and it did not go" is not
@@ -944,7 +953,16 @@ private:
 	std::unordered_map<Entity, int> m_structureUndeletable;
 	// A peer's destroy: drop the whole subtree from both records (echo protection).
 	void forgetStructureOf(Entity root);
-	void syncStructuralChanges();
+	// Runs the diff only when the world's structure epoch moved, something is
+	// still waiting to be retried, or a second passed (StructPassGate).
+	void syncStructuralChanges(std::uint64_t nowMs);
+	HE::Ed::StructPassGate     m_structureGate;
+	// A re-parent the last pass could not send (parent not announced yet, or no
+	// connection): the next frame has to look again, like the two retry maps.
+	bool                       m_structureReparentPending = false;
+	// "Everything that exists" for one pass. A member so the buckets survive
+	// between passes; only filled on the frames the gate lets through.
+	std::unordered_set<Entity> m_structureCurrent;
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the
 	// document it is already showing), and the debounced whole-file autosave
@@ -986,6 +1004,15 @@ private:
 	// Mirrors for the two editor-owned documents (panels keep their own).
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
+	// When those two are diffed (CollabDocSync::DiffGate). The signal is
+	// m_undo.revision() (every Level Script edit snapshots the scene) plus this
+	// count of Game Instance commits and MCP endEdits.
+	CollabDocSync::DiffGate m_levelScriptDiffGate;
+	CollabDocSync::DiffGate m_gameInstanceDiffGate;
+	std::uint64_t           m_editorDocEdits = 0;
+	// For the per-frame callers only: true when `key` (one of the two) is due
+	// for a diff, and the gate is then counted as run.
+	bool editorDocDiffDue(const std::string& key, std::uint64_t nowMs);
 	// Those two, edited while their tab is closed (an MCP client's hc_ tools):
 	// the tab loop never sees them, so updateAssetCollabSync sends them from here.
 	std::unordered_set<std::string> m_collabUntabbedEdits;
@@ -1359,6 +1386,8 @@ private:
 	bool          m_dumpQuit = true;
 	bool          m_dumpDone = false;
 	void dumpFrameHeadless();
+	// The HE_DUMP_* witness scenes dumpFrameHeadless builds before its capture.
+	void buildDumpWitnessScenes(IRenderer* r, HE::UUID& matTestId, HE::UUID& layerMatId);
 	// Live-frame witness (HE_DUMP_LIVE=<file.bmp> + HE_DUMP_LIVE_TRIGGER=<file>):
 	// the running editor's viewport, captured whenever the trigger file appears,
 	// so an outside driver can look at what the viewport draws AFTER its MCP

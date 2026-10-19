@@ -842,10 +842,15 @@ private:
 	// gbuffer = MRT G-buffer variant for the deferred path: fragGlsl is then the
 	// material's customShaderGBufGlsl and the PSO targets the three G-buffer
 	// formats (never blended). Own key space via a salt, like blend.
+	// instanced (Thema 182, 2e) = the same fragment over the instanced vertex
+	// ({mvp, model} per instance at vertex buffer 5) for one draw per batch; own
+	// salt. Null for a precompiled variant (no baked instanced vertex): the
+	// caller then loops with the plain PSO.
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
-	                                 bool blend = false, bool gbuffer = false);
+	                                 bool blend = false, bool gbuffer = false,
+	                                 bool instanced = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);

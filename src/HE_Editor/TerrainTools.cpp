@@ -47,12 +47,13 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
-// Landscape FOLIAGE mode: the same brush paints the foliage layer's density
-// mask (FoliageComponent::densityMask) — Grow raises it toward the target
+// Landscape FOLIAGE mode: the same brush paints a foliage layer's density
+// mask (FoliageLayer::densityMask) — Grow raises it toward the target
 // density, Erase pulls it to 0, which is how an exclusion area (a yard, a
-// road, a lake) is made. The terrain entity's own FoliageComponent is the
-// layer; FoliageSystem re-scatters it on the next tick, so a stroke shows up
-// under the cursor straight away.
+// road, a lake) is made. The layers live in the terrain entity's own
+// FoliageComponent; the brush paints the active one (activeLayer, shared with
+// Details), and FoliageSystem re-scatters it on the next tick, so a stroke
+// shows up under the cursor straight away.
 static bool        s_landscapeFoliage = false;
 // The Setup tab: material, heightmap, resolutions, resets. While it is open the brush is
 // off - a click in the viewport must not sculpt just because the user is reading a form.
@@ -733,14 +734,15 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			}
 			// ── Foliage mode: the layer's density mask ────────────
 			// Same brush, same hit, a third target: the mask of the
-			// terrain entity's FoliageComponent. FoliagePaint dirties
-			// the layer, and FoliageSystem re-scatters it on the next
-			// tick — the instances under the brush appear or vanish
-			// while dragging. Without a layer there is nothing to
-			// paint; the panel offers to add one.
+			// active layer of the terrain entity's FoliageComponent.
+			// FoliagePaint dirties that layer, and FoliageSystem
+			// re-scatters it on the next tick — the instances under the
+			// brush appear or vanish while dragging. Without a layer
+			// there is nothing to paint; the panel offers to add one.
 			else if (s_landscapeFoliage)
 			{
-				if (auto* fol = terrainReg.try_get<FoliageComponent>(terrainEnt))
+				auto* folc = terrainReg.try_get<FoliageComponent>(terrainEnt);
+				if (FoliageLayer* fol = folc ? folc->active() : nullptr)
 				{
 					if (lmbDown && !s_brushWasDown && ctx.undoSys)
 						ctx.undoSys->snapshotNow("Paint Foliage");   // one undo entry per stroke
@@ -1297,7 +1299,9 @@ void renderPanel(AppContext& ctx)
         const std::vector<std::string> layers =
             lmat ? lmat->graphLayerNames : std::vector<std::string>{};
         if (layers.empty()) s_landscapePaint = false;
-        auto* fol = reg.try_get<FoliageComponent>(terrainEnt);
+        // The foliage component and the layer the tab and the brush work on.
+        auto*         folc = reg.try_get<FoliageComponent>(terrainEnt);
+        FoliageLayer* fol  = folc ? folc->active() : nullptr;
 
         // ── The card ─────────────────────────────────────────────────────
         {
@@ -1535,9 +1539,9 @@ void renderPanel(AppContext& ctx)
             // ═════════════════════════ FOLIAGE ═══════════════════════════
             else if (s_landscapeFoliage)
             {
-                if (!fol)
+                if (!folc)
                 {
-                    // The layer is the terrain entity's own FoliageComponent - the same one
+                    // The layers are the terrain entity's own FoliageComponent - the same one
                     // "Add Component" in Details would put there.
                     dimText("This landscape has no foliage layer yet.");
                     if (EditorWidgets::primaryButton("Add Foliage Layer", ImVec2(-FLT_MIN, 0.0f)))
@@ -1550,6 +1554,56 @@ void renderPanel(AppContext& ctx)
                 }
                 else
                 {
+                    // Which layer the brush paints: one row per kind of plant, the same
+                    // list as the Foliage component's in Details, sharing its choice
+                    // (FoliageComponent::activeLayer). The number is what it scattered.
+                    sectionLabel("Layers");
+                    {
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        const float rowH = ImGui::GetFrameHeight() * 1.2f;
+                        const int   on   = static_cast<int>(folc->activeIndex());
+                        for (int i = 0; i < static_cast<int>(folc->layers.size()); ++i)
+                        {
+                            const FoliageLayer& l = folc->layers[static_cast<size_t>(i)];
+                            ImGui::PushID(i);
+                            const ImVec2 p = ImGui::GetCursorScreenPos();
+                            const float  w = ImGui::GetContentRegionAvail().x;
+                            if (ImGui::InvisibleButton("##follayer", ImVec2(w, rowH))) folc->activeLayer = i;
+                            const bool hov = ImGui::IsItemHovered();
+                            // The label is the layer's own name, so it is looked up by key.
+                            EditorWidgets::helpForKey("Landscape/Foliage Layer");
+                            if (i == on)
+                            {
+                                dl->AddRectFilled(p, ImVec2(p.x + w, p.y + rowH),
+                                                  (ImGui::GetColorU32(ImGuiCol_ButtonActive) & 0x00FFFFFFu) | 0x30000000u, 5.0f);
+                                dl->AddRect(p, ImVec2(p.x + w, p.y + rowH), ImGui::GetColorU32(ImGuiCol_ButtonActive), 5.0f);
+                            }
+                            else if (hov)
+                                dl->AddRectFilled(p, ImVec2(p.x + w, p.y + rowH), ImGui::GetColorU32(ImGuiCol_FrameBgHovered), 5.0f);
+                            const float ty = p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+                            const std::string name = foliageLayerLabel(l, static_cast<size_t>(i));
+                            // A hidden layer reads dimmed, as it is in the viewport.
+                            dl->AddText(ImVec2(p.x + 8.0f, ty),
+                                        ImGui::GetColorU32(l.visible ? ImGuiCol_Text : ImGuiCol_TextDisabled), name.c_str());
+                            char count[24];
+                            std::snprintf(count, sizeof(count), "%zu", l.cachedInstances.size());
+                            const float countW = ImGui::CalcTextSize(count).x;
+                            dl->AddText(ImVec2(p.x + w - countW - 8.0f, ty), ImGui::GetColorU32(ImGuiCol_TextDisabled), count);
+                            ImGui::PopID();
+                        }
+                    }
+                    if (folc->layers.size() < FoliageComponent::kMaxLayers)
+                    {
+                        if (EditorWidgets::button("Add Foliage Layer##more"))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Add Foliage Layer");
+                            folc->addLayer();
+                        }
+                        EditorWidgets::helpForLabel("Add Foliage Layer##more");
+                    }
+                    // The choice may have changed and the list may have grown (moving it).
+                    fol = folc->active();
+
                     // What grows: the mesh and material live on the layer, and without a
                     // mesh the brush paints a mask nobody can see.
                     sectionLabel("Layer");

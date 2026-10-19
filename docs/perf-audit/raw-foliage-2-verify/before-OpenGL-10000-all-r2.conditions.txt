@@ -1,0 +1,7 @@
+== before-OpenGL-10000-all-r2
+before:
+  cpu 4%  procs:
+  gpu (util, temp, sm clock): 2 %, 34, 2910 MHz
+after (rc=0):
+  cpu 3%  procs:
+  gpu (util, temp, sm clock): 78 %, 37, 2910 MHz

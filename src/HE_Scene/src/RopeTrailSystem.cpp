@@ -44,15 +44,17 @@ namespace
         hashBytes(h, &v, sizeof(T));
     }
 
-    StaticMeshAsset toStaticMesh(const HE::spline::MeshData& mesh)
+    // Moves, not copies: the rope's MeshData is a temporary of the rebuild, and
+    // a rope bound to a moving entity rebuilds every frame (SCN-604).
+    StaticMeshAsset toStaticMesh(HE::spline::MeshData&& mesh)
     {
         StaticMeshAsset a;
         a.name = "rope";
         a.path = "mem://rope";
-        a.vertices = mesh.positions;
-        a.normals  = mesh.normals;
-        a.uvs      = mesh.uvs;
-        a.indices  = mesh.indices;
+        a.vertices = std::move(mesh.positions);
+        a.normals  = std::move(mesh.normals);
+        a.uvs      = std::move(mesh.uvs);
+        a.indices  = std::move(mesh.indices);
         return a;
     }
 }
@@ -295,9 +297,19 @@ void update(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
 
     // ── Ropes: rebuild only what changed ─────────────────────────────────────
     auto& owned = g_ropeMeshes[&world];
+    // Ropes whose `owned` entry the sweep below would keep (the entry exists and
+    // names the rope's runtimeMeshId). When that is every entry, the sweep has
+    // nothing to give back and is skipped (SCN-604).
+    size_t kept = 0;
+    std::vector<glm::vec3> resolved;   // only filled for a rope with an attachment
     for (auto [e, rope] : reg.view<RopeComponent>().each())
     {
-        const std::vector<glm::vec3> pts = resolveControlPoints(world, e, rope);
+        // Without an attachment the resolved points ARE the control points, so
+        // they are hashed where they lie instead of copied every frame.
+        const bool attached = rope.controlPoints.size() >= 2 &&
+                              (!(rope.attachStart == HE::UUID{}) || !(rope.attachEnd == HE::UUID{}));
+        if (attached) resolved = resolveControlPoints(world, e, rope);
+        const std::vector<glm::vec3>& pts = attached ? resolved : rope.controlPoints;
         const uint64_t hash = geometryHash(rope, pts);
 
         // The MAP decides ownership, not the component. A rope's component can be
@@ -314,7 +326,10 @@ void update(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
             rope.builtHash     = 0;            // and rebuild: the parameters may differ
         }
 
-        if (ours && hash == rope.builtHash) continue;
+        // The sweep's own condition, taken before owned[] below can rehash.
+        const bool keptAsItIs = it != owned.end() && rope.runtimeMeshId == it->second;
+
+        if (ours && hash == rope.builtHash) { kept += keptAsItIs; continue; }
 
         HE::spline::MeshData mesh = buildRopeGeometry(rope, pts);
         if (mesh.empty())
@@ -323,12 +338,13 @@ void update(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
             // so this is not attempted again every frame; the mesh, if there is
             // one, keeps its last contents until the rope is buildable again.
             rope.builtHash = hash;
+            kept += keptAsItIs;
             continue;
         }
 
         if (ours)
         {
-            cm.replaceStaticMesh(rope.runtimeMeshId, toStaticMesh(mesh));
+            cm.replaceStaticMesh(rope.runtimeMeshId, toStaticMesh(std::move(mesh)));
             if (renderer) renderer->InvalidateMesh(rope.runtimeMeshId);
         }
         else
@@ -336,11 +352,13 @@ void update(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
             // Register ONCE per rope. Every registration can move the asset pool
             // and invalidate every ContentManager pointer anything else holds,
             // so doing it per rebuild would be a pointer minefield, not just a leak.
-            rope.runtimeMeshId  = cm.registerStaticMesh(toStaticMesh(mesh));
+            rope.runtimeMeshId  = cm.registerStaticMesh(toStaticMesh(std::move(mesh)));
             owned[entityKey(e)] = rope.runtimeMeshId;
         }
+        ++kept;   // either way the entry now names this rope's mesh
         rope.builtHash = hash;
     }
+    if (kept == owned.size()) return;
 
     // ── Give back the meshes of ropes that are gone ──────────────────────────
     // An entt handle is recycled, so "the entity is valid" is not enough: the

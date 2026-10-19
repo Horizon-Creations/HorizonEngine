@@ -51,6 +51,11 @@ public:
 	// Two entities holding one id (a damaged merge) both stay findable: the lookup
 	// answers with one of them, and with the other once that one is gone.
 	Entity   findByEntityId(const HE::UUID& id) const;
+	// Moves whenever any entity's id is set, replaced or removed — fed by the
+	// same signals as the index above, so with the same reach. For a cache of
+	// "no entity has an id like this" (CollabController's net-id misses): it
+	// stays valid exactly as long as this number does.
+	uint64_t entityIdRevision() const { return m_entityIdRevision; }
 	// Replace an entity's identity. Used by scene loading to restore the value
 	// from the file — deliberately NOT used by prefab instantiation, which keeps
 	// the freshly minted id so one prefab inserted twice yields two identities.
@@ -299,6 +304,7 @@ private:
 	//                key can only be found here.
 	std::unordered_multimap<HE::UUID, Entity> m_idIndex;
 	std::unordered_map<Entity, HE::UUID>      m_idIndexed;
+	uint64_t                                  m_entityIdRevision = 1;
 	// Connected to the registry's construct / update / destroy signals of
 	// EntityIdComponent in the constructor.
 	void onEntityIdSet(entt::registry& registry, Entity entity);

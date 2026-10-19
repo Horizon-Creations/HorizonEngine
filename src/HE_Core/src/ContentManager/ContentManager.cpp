@@ -1,4 +1,5 @@
 #include "ContentManager/ContentManager.h"
+#include "ContentManager/AssetFile.h"
 #include <Platform/ProjectWriteGate.h>
 #include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_ENGINE_CONTENT_EDITABLE
 #include <cstdint>
@@ -554,6 +555,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			uint32_t channelCount = 0;
 			HAsset::Reader::readPOD(c->data, o, channelCount);
 			a.channels.resize(channelCount);
+			size_t unsortedChannels = 0;
 			for (auto& ch : a.channels)
 			{
 				uint8_t pathByte = 0;
@@ -562,7 +564,15 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				ch.path = static_cast<AnimPathType>(pathByte);
 				HAsset::Reader::readVec(c->data, o, ch.times);
 				HAsset::Reader::readVec(c->data, o, ch.values);
+				if (!std::is_sorted(ch.times.begin(), ch.times.end())) ++unsortedChannels;
 			}
+			// The sampler finds its keyframe by binary search, which assumes the
+			// times ascend (glTF demands it). A file that breaks that still plays,
+			// just from the wrong keys — said once here rather than never.
+			if (unsortedChannels)
+				HE_LOG_WARN(Asset, "Animation clip '%s': %zu channel(s) have keyframe times "
+				                   "out of order — those channels will sample the wrong keys",
+				            assetName.c_str(), unsortedChannels);
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANOT))
 		{
@@ -2287,21 +2297,19 @@ bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPa
 	return true;
 }
 
-bool ContentManager::saveAsset(RuntimeAsset& asset)
+// The two halves of a save that HE::saveAssetFile shares with saveAsset: the export
+// gate, and the write with its log lines.
+static bool saveRefusedByExport(const RuntimeAsset& asset)
 {
 	// An export is reading the project's files (ProjectWriteGate.h). The edit stays
 	// in memory — the asset is still dirty and saves once the export is over.
-	if (HE::ProjectWriteGate::refuse("save this asset"))
-	{
-		HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
-		return false;
-	}
-	const std::string fullPath = resolveSavePath(asset.path);
-	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
-	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+	if (!HE::ProjectWriteGate::refuse("save this asset")) return false;
+	HE_LOG_INFO(Asset, "ContentManager: not saving '%s' — an export is running", asset.path.c_str());
+	return true;
+}
 
+static bool writeAssetFileLogged(RuntimeAsset& asset, const std::string& fullPath)
+{
 	if (!writeAssetFile(asset, fullPath))
 	{
 		// Losing a save silently is the worst possible failure mode in an editor.
@@ -2310,7 +2318,26 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		return false;
 	}
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
-	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
+	            asset.path.c_str(), static_cast<unsigned>(static_cast<uint16_t>(asset.type)), fullPath.c_str());
+	return true;
+}
+
+bool HE::saveAssetFile(RuntimeAsset& asset, const std::string& contentRoot)
+{
+	if (saveRefusedByExport(asset)) return false;
+	// resolveSavePath of a manager without an engine content root.
+	return writeAssetFileLogged(asset, contentRoot + "/" + asset.path);
+}
+
+bool ContentManager::saveAsset(RuntimeAsset& asset)
+{
+	if (saveRefusedByExport(asset)) return false;
+	const std::string fullPath = resolveSavePath(asset.path);
+	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
+		HE_LOG_INFO(Asset, "%s",
+			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+
+	if (!writeAssetFileLogged(asset, fullPath)) return false;
 	noteContentChanged();   // may be the file somebody looked for and did not find
 
 	// What was just written IS the loaded copy, so pollHotReload must not take it
@@ -3328,7 +3355,90 @@ size_t ContentManager::scanContentDirectory()
 	// scanDirInto calls' comment): resolveAbsolutePath() re-derives the actual
 	// override/default/cache precedence from the filesystem every time anyway.
 	scanDirInto(GlobalState::engineContentCacheDir().string(), std::string(kEnginePrefix));
+	// A rescan is what the editor does after every refresh of its folder trees,
+	// so this is where "the files may have changed" reaches the file index and
+	// everything else that keys on the epoch.
+	noteContentChanged();
 	return m_diskRegistry.size();
+}
+
+ContentManager::AssetFileList ContentManager::assetFiles(HE::AssetType type) const
+{
+	FileIndex& ix = m_assetFileIndex;
+	if (ix.epoch != m_contentEpoch || ix.contentRoot != m_contentRoot ||
+	    ix.engineRoot != m_engineContentRoot)
+	{
+		// Every type in one pass: a header sniff costs the same whichever type
+		// is wanted, and the next picker asks for another one.
+		std::unordered_map<uint16_t, std::vector<AssetFileEntry>> fresh;
+		auto walk = [&](const std::string& rootStr, const std::string& pathPrefix)
+		{
+			if (rootStr.empty()) return;
+			std::error_code ec;
+			std::filesystem::recursive_directory_iterator it(rootStr, ec), end;
+			for (; it != end; it.increment(ec))
+			{
+				if (ec) break;
+				if (!it->is_regular_file(ec)) continue;
+				if (it->path().extension() != ".hasset") continue;
+				const HE::AssetType t = sniffAssetTypeFromFile(it->path().string());
+				if (t == HE::AssetType::Unknown) continue;
+				AssetFileEntry e;
+				e.label = it->path().stem().string();
+				e.path  = pathPrefix + std::filesystem::relative(it->path(), rootStr, ec).generic_string();
+				std::error_code sec;
+				const auto sz = it->file_size(sec);
+				e.bytes = sec ? 0 : static_cast<std::uint64_t>(sz);
+				fresh[static_cast<uint16_t>(t)].push_back(std::move(e));
+			}
+		};
+		walk(m_contentRoot, "");
+		walk(m_engineContentRoot, std::string(kEnginePrefix));
+
+		ix.byType.clear();
+		for (auto& [t, list] : fresh)
+			ix.byType.emplace(t, std::make_shared<const std::vector<AssetFileEntry>>(std::move(list)));
+		ix.epoch       = m_contentEpoch;
+		ix.contentRoot = m_contentRoot;
+		ix.engineRoot  = m_engineContentRoot;
+	}
+	static const AssetFileList kNone = std::make_shared<const std::vector<AssetFileEntry>>();
+	const auto it = ix.byType.find(static_cast<uint16_t>(type));
+	return it != ix.byType.end() ? it->second : kNone;
+}
+
+ContentManager::AssetFileList ContentManager::sceneFiles() const
+{
+	FileIndex& ix = m_sceneFileIndex;
+	if (ix.scenes && ix.epoch == m_contentEpoch && ix.contentRoot == m_contentRoot)
+		return ix.scenes;
+
+	std::vector<AssetFileEntry> out;
+	if (!m_contentRoot.empty())
+	{
+		// Scenes live anywhere under the PROJECT root, not just Content/, and the
+		// path a scene.load pin stores is project-relative ("Content/123.hescene")
+		// because that is what the exporter packs it under and what the game's
+		// loadSceneInto resolves.
+		const std::filesystem::path projectRoot = std::filesystem::path(m_contentRoot).parent_path();
+		std::error_code ec;
+		std::filesystem::recursive_directory_iterator it(
+			projectRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") { ec.clear(); continue; }
+			AssetFileEntry e;
+			e.label = it->path().stem().string();
+			e.path  = it->path().lexically_relative(projectRoot).generic_string();
+			out.push_back(std::move(e));
+		}
+		std::sort(out.begin(), out.end(),
+		          [](const AssetFileEntry& a, const AssetFileEntry& b) { return a.path < b.path; });
+	}
+	ix.scenes      = std::make_shared<const std::vector<AssetFileEntry>>(std::move(out));
+	ix.epoch       = m_contentEpoch;
+	ix.contentRoot = m_contentRoot;
+	return ix.scenes;
 }
 
 bool ContentManager::ensureResident(HE::UUID id)

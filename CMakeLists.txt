@@ -56,6 +56,18 @@ endif()
 # platforms and subsumes the per-target settings on lz4_static/zstd_static below.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# ─── Floating-point contraction (GCC) ────────────────────────────────────────
+# Jolt adds -mavx2 -mfma as PUBLIC options on x86, so everything linking it gets
+# FMA, and GCC's default for GNU C++ is -ffp-contract=fast: it fuses a multiply
+# and an add even across statements, after inlining, differently at every call
+# site. The same glm product then rounds differently in two functions, and the
+# engine relies on "same maths, same bits" (LODSystem's sibling memo against
+# worldMatrixOf, propagateTransforms against worldPositionOf): on Linux 37 of 800
+# LOD decisions on an exact boundary flipped (tests/test_lod.cpp). Jolt builds
+# itself with -ffp-contract=off for the same reason; MSVC does not contract, and
+# Clang's default (on) fuses only within one expression.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>)
+
 # ─── SDL3 ──────────────────────────────────────────────────────────────────────
 include(FetchContent)
 FetchContent_Declare(

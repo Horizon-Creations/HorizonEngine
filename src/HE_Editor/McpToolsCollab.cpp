@@ -1,5 +1,5 @@
 #include "McpToolCommon.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "CollabController.h"
 #include "TeamController.h"

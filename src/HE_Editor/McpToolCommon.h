@@ -16,7 +16,11 @@
 
 #include "McpToolRegistry.h"
 
+#include <Types/Enums.h>   // AssetType, for the per-type listing below
+
 #include <nlohmann/json.hpp>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -64,6 +68,33 @@ PathCheck checkPath(ContentManager& content, const std::string& raw, bool mustEx
 // those files are the shipped engine defaults, shared by every project on this
 // machine.
 ToolResult failEngineReadOnly(const std::string& rel);
+
+// ── The write gate of an asset family ────────────────────────────────────────
+// Every asset family (animator, clip, input, material, particle, sequence, type,
+// widget) refuses a write for the same four reasons, and in the same order:
+// the Engine/ namespace, play-in-editor, a collaboration lock held by someone
+// else, unsaved edits in an open tab. The order is the refusal a client reads
+// when more than one applies, so it lives here once instead of in eight copies
+// (EDT-1208). The codes are the tools' contract (read_only, play_mode,
+// locked_by_other, dirty) and do not change; what does differ per family is
+// WHY play mode and a dirty tab are a problem, so those two texts are the
+// family's own.
+struct WriteGateText
+{
+	const char* playMode;   // the whole play_mode refusal
+	// The dirty refusal after "'<rel>' ". nullptr: the family has no dirty
+	// check at this point (the widget tools route a dirty tab's edit into it).
+	const char* dirty;
+};
+
+// The refusal for a write to `p`, or nothing if the write may go ahead. A hook
+// left empty answers "no" (not playing, not locked, not dirty), as every family
+// treated it before; each hook is asked only if the ones before it let it pass.
+std::optional<ToolResult> refuseAssetWrite(const PathCheck& p,
+                                           const std::function<bool()>& isPlaying,
+                                           const std::function<bool(const std::string&)>& lockedByOther,
+                                           const std::function<bool(const std::string&)>& isDirty,
+                                           const WriteGateText& text);
 
 // ── Finding every asset of a type in the project ─────────────────────────────
 // What the "list them all" half of a tool family needs, and the third caller is

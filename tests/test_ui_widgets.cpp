@@ -12142,6 +12142,49 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     CHECK(HE::uiBaseProperties().size() == 53);
 }
 
+// allProperties() and uiBaseProperties() are cut from one table (CORE-603).
+// Before, allProperties kept its own copy: it did not offer the drag rows, so
+// WidgetManager's "is this a property?" test (rememberOriginal) said no to
+// them, and its Gradient Angle / Shape carried ranges the shared list lacked.
+TEST_CASE("Base properties: allProperties offers the shared rows exactly as uiBaseProperties describes them")
+{
+    HE::UIPanel e;   // has a surface, so the border/gradient/shadow rows are in
+    const std::vector<HE::UIPropDesc> all = e.allProperties();
+    auto find = [&](const std::string& n) -> const HE::UIPropDesc* {
+        for (const HE::UIPropDesc& d : all) if (d.name == n) return &d;
+        return nullptr;
+    };
+    int offered = 0;
+    for (const HE::UIPropDesc& base : HE::uiBaseProperties())
+    {
+        const HE::UIPropDesc* d = find(base.name);
+        if (!d) continue;   // an asset slot this type does not have
+        ++offered;
+        CAPTURE(base.name);
+        CHECK(d->type == base.type);
+        CHECK(d->minV == base.minV);
+        CHECK(d->maxV == base.maxV);
+    }
+    // A panel has the material and texture slots; it lacks only Font.
+    CHECK(offered == static_cast<int>(HE::uiBaseProperties().size()) - 1);
+    CHECK(find("Font") == nullptr);
+    CHECK(find("Accepts Drop") != nullptr);
+    CHECK(find("Draggable") != nullptr);
+    CHECK(find("Drag Payload") != nullptr);
+
+    // A Text label has no surface: none of the surface rows, the drag rows still.
+    HE::UIText t;
+    const std::vector<HE::UIPropDesc> textAll = t.allProperties();
+    auto textHas = [&](const char* n) {
+        return std::any_of(textAll.begin(), textAll.end(),
+                           [&](const HE::UIPropDesc& d) { return d.name == n; });
+    };
+    CHECK_FALSE(textHas("Corner Radius"));
+    CHECK_FALSE(textHas("Inner Shadow Blur"));
+    CHECK(textHas("Draggable"));
+    CHECK(textHas("Font"));
+}
+
 TEST_CASE("Parameters: a declaration writes the property it names")
 {
     HE::UIWidgetTree t = labelledRow();

@@ -1531,6 +1531,10 @@ void startExport(AppContext& ctx)
                 // the export worker below.
                 if (hcCompile)
                 {
+                    // listAssets reads ContentManager's file index, which is as
+                    // fresh as the last content refresh. A class written since
+                    // would ship uncompiled, so the export walks the trees anew.
+                    if (ctx.contentManager) ctx.contentManager->noteContentChanged();
                     auto collectAssets = [&](HE::AssetType type)
                     {
                         for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager, type))

@@ -1,6 +1,6 @@
 #include "EditorSettingsCatalog.h"
 #include "McpToolCommon.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "ProjectManager.h"            // ProjectData, ExportProfile, HE::tools::toString
 #include <Physics/CollisionLayers.h>

@@ -271,6 +271,10 @@ void EngineContentSync::enqueueDownload(const std::string& relativePath, HE::UUI
 
 void EngineContentSync::drainQueue()
 {
+	// One session for the whole batch (a scene with many passive references
+	// queues them all at once), not one handshake per file. It lives exactly as
+	// long as this drain: the next batch connects anew.
+	SftpConnection conn(engineContentEndpoint());
 	for (;;)
 	{
 		{
@@ -295,13 +299,12 @@ void EngineContentSync::drainQueue()
 		}
 
 		const std::string relativePath = m_current.relativePath;
-		const SftpEndpoint& endpoint   = engineContentEndpoint();
-		const fs::path      localPath  = GlobalState::engineContentCacheDir() / relativePath;
+		const fs::path    localPath    = GlobalState::engineContentCacheDir() / relativePath;
 
 		// Byte-level progress, published as the read loop advances. Captures
 		// `this` deliberately: EngineContentSync is a function-local static
 		// (instance()), so it outlives every job by construction.
-		const SftpResult result = sftpGetFile(endpoint, relativePath, localPath.string(),
+		const SftpResult result = conn.getFile(relativePath, localPath.string(),
 			[this](std::uint64_t done, std::uint64_t total)
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);

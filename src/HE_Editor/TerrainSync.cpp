@@ -23,15 +23,44 @@ using json = nlohmann::json;
 // patch that claims one is refused before anything is allocated for it.
 constexpr std::uint32_t kMaxGridRes = 8192;
 
+static_assert(TerrainSync::kMaxFoliageMasks >= FoliageComponent::kMaxLayers,
+              "every foliage layer needs a mask field");
+
+bool isFoliageMask(std::uint8_t f)
+{
+	return f >= TerrainSync::FoliageMask && f < TerrainSync::kFieldCount;
+}
+
 std::uint32_t elemOf(std::uint8_t f)
 {
-	return f == TerrainSync::FoliageMask ? 1u : 4u;
+	return isFoliageMask(f) ? 1u : 4u;
 }
 
 bool isGrid(std::uint8_t f)
 {
 	return f == TerrainSync::Heights || f == TerrainSync::Weights ||
-	       f == TerrainSync::Weights2 || f == TerrainSync::FoliageMask;
+	       f == TerrainSync::Weights2 || isFoliageMask(f);
+}
+
+// Every grid field, in the order they are looked at.
+template <class Fn> void forEachGrid(Fn&& fn)
+{
+	for (std::uint8_t f = TerrainSync::Heights; f <= TerrainSync::Weights2; ++f) fn(f);
+	for (std::uint8_t f = TerrainSync::FoliageMask; f < TerrainSync::kFieldCount; ++f) fn(f);
+}
+
+std::size_t foliageLayerCount(entt::registry& reg, Entity e)
+{
+	const auto* fol = reg.try_get<FoliageComponent>(e);
+	return fol ? fol->layers.size() : 0;
+}
+
+// The foliage layer a mask field belongs to, or null if `e` has no such layer.
+FoliageLayer* foliageLayerOf(entt::registry& reg, Entity e, std::uint8_t f)
+{
+	auto* fol = reg.try_get<FoliageComponent>(e);
+	const std::size_t i = static_cast<std::size_t>(f - TerrainSync::FoliageMask);
+	return fol && i < fol->layers.size() ? &fol->layers[i] : nullptr;
 }
 
 std::uint64_t fnv1a(const std::vector<std::uint8_t>& bytes)
@@ -73,17 +102,15 @@ bool viewGrid(entt::registry& reg, Entity e, std::uint8_t f, GridView& out)
 		out.bytes = t->layerWeights2.size();
 		out.res   = t->weightRes;
 		break;
-	case TerrainSync::FoliageMask:
+	default:
 	{
-		auto* fol = reg.try_get<FoliageComponent>(e);
+		auto* fol = isFoliageMask(f) ? foliageLayerOf(reg, e, f) : nullptr;
 		if (!fol) return false;
 		out.data  = fol->densityMask.data();
 		out.bytes = fol->densityMask.size();
 		out.res   = fol->maskRes;
 		break;
 	}
-	default:
-		return false;
 	}
 	if (out.bytes == 0) { out.res = 0; return true; }
 	return out.bytes == static_cast<std::size_t>(out.res) * out.res * elemOf(f);
@@ -109,16 +136,14 @@ bool reallocateGrid(entt::registry& reg, Entity e, std::uint8_t f, std::uint32_t
 		if (res > 0) t->weightRes = res;
 		t->weightsDirty = true;
 		return true;
-	case TerrainSync::FoliageMask:
-		if (auto* fol = reg.try_get<FoliageComponent>(e))
+	default:
+		if (auto* fol = isFoliageMask(f) ? foliageLayerOf(reg, e, f) : nullptr)
 		{
 			fol->densityMask.assign(n, 0);
 			if (res > 0) fol->maskRes = res;
 			fol->dirty = true;
 			return true;
 		}
-		return false;
-	default:
 		return false;
 	}
 }
@@ -149,10 +174,8 @@ void markWritten(entt::registry& reg, Entity e, std::uint8_t f, const TerrainSyn
 	case TerrainSync::Weights2:
 		t->weightsDirty = true;
 		break;
-	case TerrainSync::FoliageMask:
-		if (auto* fol = reg.try_get<FoliageComponent>(e)) fol->dirty = true;
-		break;
 	default:
+		if (auto* fol = isFoliageMask(f) ? foliageLayerOf(reg, e, f) : nullptr) fol->dirty = true;
 		break;
 	}
 }
@@ -165,7 +188,8 @@ struct GridsAside
 	TerrainComponent* t = nullptr;
 	FoliageComponent* f = nullptr;
 	std::vector<float>        heights;
-	std::vector<std::uint8_t> w1, w2, mask;
+	std::vector<std::uint8_t> w1, w2;
+	std::vector<std::vector<std::uint8_t>> masks;   // one per foliage layer
 
 	GridsAside(entt::registry& reg, Entity e)
 	{
@@ -177,7 +201,11 @@ struct GridsAside
 			w1.swap(t->layerWeights);
 			w2.swap(t->layerWeights2);
 		}
-		if (f) mask.swap(f->densityMask);
+		if (f)
+		{
+			masks.resize(f->layers.size());
+			for (std::size_t i = 0; i < masks.size(); ++i) masks[i].swap(f->layers[i].densityMask);
+		}
 	}
 	~GridsAside()
 	{
@@ -187,7 +215,8 @@ struct GridsAside
 			w1.swap(t->layerWeights);
 			w2.swap(t->layerWeights2);
 		}
-		if (f) mask.swap(f->densityMask);
+		if (f)
+			for (std::size_t i = 0; i < masks.size(); ++i) masks[i].swap(f->layers[i].densityMask);
 	}
 	GridsAside(const GridsAside&) = delete;
 	GridsAside& operator=(const GridsAside&) = delete;
@@ -237,24 +266,33 @@ void restoreTerrain(TerrainComponent& n, TerrainComponent&& o)
 	n.water.revision     = o.water.revision + 1;
 }
 
-// Same for the foliage layer. Its scatter is only rebuilt when something it is
-// scattered from changed; otherwise the old component, scatter and all, stays.
+// Same for the foliage. `n` keeps every setting the blob carried (a peer that
+// switched off a layer's shadows must not see it switched back on here); what
+// comes over from `o`, layer by layer and matched by index, is what the blob
+// leaves out: the mask, and the scatter where nothing it is made from changed.
+// A layer the blob added scatters fresh. FoliageSystem sees changed settings
+// itself and bumps the revision a retained RenderWorld keys on.
 void restoreFoliage(FoliageComponent& n, FoliageComponent&& o)
 {
-	const bool maskCame = !n.densityMask.empty();
-	const bool same = n.visible == o.visible && n.meshAssetId == o.meshAssetId &&
-	                  n.materialAssetId == o.materialAssetId && n.density == o.density &&
-	                  n.seed == o.seed && n.minScale == o.minScale &&
-	                  n.maxScale == o.maxScale && n.drawDistance == o.drawDistance &&
-	                  n.maskRes == o.maskRes;
-	if (!maskCame && same)
+	for (std::size_t i = 0; i < n.layers.size() && i < o.layers.size(); ++i)
 	{
-		n = std::move(o);
-		return;
+		FoliageLayer& nl = n.layers[i];
+		FoliageLayer& ol = o.layers[i];
+		const bool maskCame = !nl.densityMask.empty();
+		if (!maskCame && nl.maskRes == ol.maskRes) nl.densityMask = std::move(ol.densityMask);
+		const bool sameScatter = !maskCame && nl.maskRes == ol.maskRes &&
+		                         nl.meshAssetId == ol.meshAssetId && nl.density == ol.density &&
+		                         nl.seed == ol.seed && nl.minScale == ol.minScale &&
+		                         nl.maxScale == ol.maxScale && nl.bucketSize == ol.bucketSize;
+		if (!sameScatter) continue;   // the loader left it dirty: it re-scatters
+		nl.cachedInstances = std::move(ol.cachedInstances);
+		nl.store           = std::move(ol.store);
+		nl.dirty           = ol.dirty;
 	}
-	if (!maskCame && n.maskRes == o.maskRes) n.densityMask = std::move(o.densityMask);
-	n.dirty    = true;
-	n.revision = o.revision + 1;   // a retained RenderWorld keys on it
+	n.dirty       = o.dirty;   // a pending whole re-scatter (the ground moved) stays pending
+	n.revision    = o.revision;
+	n.settingsKey = o.settingsKey;
+	n.activeLayer = o.activeLayer;
 }
 
 // Apply a component blob to `e` (replace or update) with the landscape's grids
@@ -331,8 +369,8 @@ void TerrainSync::reset()
 
 void TerrainSync::baseline(entt::registry& reg, Entity e, Mirror& m)
 {
-	for (std::uint8_t f = Heights; f <= FoliageMask; ++f)
-	{
+	m.foliageLayers = foliageLayerCount(reg, e);
+	forEachGrid([&](std::uint8_t f) {
 		GridView v;
 		m.grid[f].clear();
 		m.res[f] = 0;
@@ -343,7 +381,7 @@ void TerrainSync::baseline(entt::registry& reg, Entity e, Mirror& m)
 			m.grid[f].assign(v.data, v.data + v.bytes);
 			m.res[f] = v.res;
 		}
-	}
+	});
 }
 
 bool TerrainSync::emit(Entity e, Patch& p, const Send& send)
@@ -386,8 +424,10 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 			continue;
 		}
 
-		// Settings before grids: a resolution travels with them.
-		if (nowMs >= m.nextAt[Settings])
+		// Settings before grids: a resolution travels with them, and so does a new
+		// foliage layer, which is why a changed layer count does not wait its turn.
+		const std::size_t layers = foliageLayerCount(reg, e);
+		if (nowMs >= m.nextAt[Settings] || layers != m.foliageLayers)
 		{
 			m.nextAt[Settings] = nowMs + kSettingsIntervalMs;
 			std::vector<std::uint8_t> blob = settingsBlob(world, e);
@@ -398,21 +438,32 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 				p.field = Settings;
 				p.bytes = std::move(blob);
 				// Not sent (the link is down): it is still a change, next time.
-				if (emit(e, p, send)) m.settingsHash = hash;
+				if (emit(e, p, send)) { m.settingsHash = hash; m.foliageLayers = layers; }
+			}
+			else if (hash == m.settingsHash)
+			{
+				m.foliageLayers = layers;   // what the peers hold already
 			}
 		}
 
-		for (std::uint8_t f = Heights; f <= FoliageMask; ++f)
-			collectGrid(reg, e, m, static_cast<Field>(f), nowMs, send);
+		forEachGrid([&](std::uint8_t f) { collectGrid(reg, e, m, f, nowMs, send); });
 	}
 }
 
-void TerrainSync::collectGrid(entt::registry& reg, Entity e, Mirror& m, Field f,
+void TerrainSync::collectGrid(entt::registry& reg, Entity e, Mirror& m, std::uint8_t f,
                               std::uint64_t nowMs, const Send& send)
 {
 	if (nowMs < m.nextAt[f]) return;
 	GridView v;
-	if (!viewGrid(reg, e, f, v)) return;
+	if (!viewGrid(reg, e, f, v))
+	{
+		// A foliage layer that is not there (any more): forget its mask, so one
+		// that appears at this index later goes whole, as every new grid does.
+		if (isFoliageMask(f)) { m.grid[f].clear(); m.res[f] = 0; }
+		return;
+	}
+	// A layer the peers do not have yet: its mask waits for the settings that make it.
+	if (isFoliageMask(f) && static_cast<std::size_t>(f - FoliageMask) >= m.foliageLayers) return;
 
 	const std::uint32_t elem = elemOf(f);
 	std::vector<std::uint8_t>& mg = m.grid[f];
@@ -519,7 +570,11 @@ bool TerrainSync::applyOne(HorizonWorld& world, Entity e, const Patch& p)
 	{
 		if (!applyKeepingGrids(world, e, p.bytes, /*replace=*/false)) return false;
 		// What we now hold is what everybody holds: no change of ours to send.
-		if (mirror != m_mirrors.end()) mirror->second.settingsHash = fnv1a(settingsBlob(world, e));
+		if (mirror != m_mirrors.end())
+		{
+			mirror->second.settingsHash  = fnv1a(settingsBlob(world, e));
+			mirror->second.foliageLayers = foliageLayerCount(reg, e);
+		}
 		return true;
 	}
 	if (!isGrid(f)) return false;

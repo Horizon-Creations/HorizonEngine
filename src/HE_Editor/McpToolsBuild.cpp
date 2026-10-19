@@ -1,5 +1,5 @@
 #include "McpToolCommon.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "ProjectManager.h"            // ProjectData, ExportProfile
 #include <Hpak/ProjectExporter.h>      // exportPlatformName / exportPlatformFromName

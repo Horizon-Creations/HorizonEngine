@@ -9,9 +9,11 @@
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/EntityIdComponent.h>
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -219,14 +221,25 @@ TEST_CASE("Gateway create and destroy, with snapshot undo outside a session")
 	CHECK(h.created.size() == 1);
 	CHECK(h.applied == 1);
 	CHECK(authoredCount(h.world) == 3);   // root + Crate + copy
+	const std::string srcUuid  = HE::Ed::uuidOf(h.world, src);
+	const std::string copyUuid = HE::Ed::uuidOf(h.world, res.root);
 
 	// The snapshot went on the stack before the world was touched.
 	REQUIRE(h.snapshotUndo.canUndo());
 	CHECK(h.snapshotUndo.undo());
 	CHECK(authoredCount(h.world) == 2);
+	// A snapshot undo rebuilds the world and remaps every handle; the id index
+	// entityByUuid answers from has to follow.
+	const Entity srcBack = HE::Ed::entityByUuid(h.world, srcUuid);
+	REQUIRE((srcBack != entt::null));
+	CHECK(HE::Ed::uuidOf(h.world, srcBack) == srcUuid);
+	CHECK((HE::Ed::entityByUuid(h.world, copyUuid) == entt::null));
 
 	CHECK(h.snapshotUndo.redo());
 	CHECK(authoredCount(h.world) == 3);
+	const Entity copyBack = HE::Ed::entityByUuid(h.world, copyUuid);
+	REQUIRE((copyBack != entt::null));
+	CHECK(HE::Ed::uuidOf(h.world, copyBack) == copyUuid);
 }
 
 TEST_CASE("A peer's edit records nothing and publishes nothing")
@@ -589,4 +602,47 @@ TEST_CASE("entityByUuid finds what uuidOf named, and nothing else")
 	CHECK((HE::Ed::entityByUuid(h.world, ub) == b));
 	CHECK((HE::Ed::entityByUuid(h.world, "") == entt::null));
 	CHECK((HE::Ed::entityByUuid(h.world, std::string(32, '0')) == entt::null));
+	// Only uuidOf's own spelling: wrong length, a non-hex digit or upper case
+	// never equalled that text and does not resolve now either.
+	CHECK((HE::Ed::entityByUuid(h.world, ua.substr(0, 31)) == entt::null));
+	CHECK((HE::Ed::entityByUuid(h.world, ua + "0") == entt::null));
+	std::string upper = ua;
+	for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	if (upper != ua) CHECK((HE::Ed::entityByUuid(h.world, upper) == entt::null));
+	std::string bad = ua;
+	bad[7] = 'g';
+	CHECK((HE::Ed::entityByUuid(h.world, bad) == entt::null));
+	// The UUID form answers the same as the text.
+	CHECK((HE::Ed::entityByUuid(h.world, h.world.entityId(a)) == a));
+	CHECK((HE::Ed::entityByUuid(h.world, HE::UUID{}) == entt::null));
+}
+
+TEST_CASE("entityByUuid follows the world: same-frame create, a new id, destroy")
+{
+	// The lookup answers from the world's id index, which the registry's
+	// signals feed. The cases a linear scan could never get wrong are the ones
+	// worth pinning: an entity made a moment ago, an id replaced in place, a
+	// component emplaced by hand, a destroyed entity.
+	Harness h;
+	const Entity a = h.world.createEntity("A");
+	CHECK((HE::Ed::entityByUuid(h.world, HE::Ed::uuidOf(h.world, a)) == a));
+
+	const std::string before = HE::Ed::uuidOf(h.world, a);
+	HE::UUID fresh;
+	fresh.hi = 0x0123456789abcdefull;
+	fresh.lo = 0xfedcba9876543210ull;
+	h.world.setEntityId(a, fresh);
+	CHECK(HE::Ed::uuidOf(h.world, a) == "0123456789abcdeffedcba9876543210");
+	CHECK((HE::Ed::entityByUuid(h.world, "0123456789abcdeffedcba9876543210") == a));
+	CHECK((HE::Ed::entityByUuid(h.world, before) == entt::null));
+
+	const Entity raw = h.world.registry().create();
+	HE::UUID rawId;
+	rawId.hi = 7;
+	rawId.lo = 9;
+	h.world.registry().emplace<EntityIdComponent>(raw, EntityIdComponent{ rawId });
+	CHECK((HE::Ed::entityByUuid(h.world, "00000000000000070000000000000009") == raw));
+
+	h.world.destroyEntity(a);
+	CHECK((HE::Ed::entityByUuid(h.world, "0123456789abcdeffedcba9876543210") == entt::null));
 }
