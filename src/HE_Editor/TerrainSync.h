@@ -113,6 +113,15 @@ private:
 		std::vector<std::uint8_t> grid[kFieldCount];   // indexed by field id (unused ids stay empty)
 		std::uint32_t             res[kFieldCount]{};
 		std::uint64_t             settingsHash = 0;
+		// A digging lake's own bed (Body::digsBed: polygon, groundPatch, depth,
+		// bank) does not wait out the normal Settings pause: it must reach a peer
+		// before that peer's own per-frame WaterLake::syncSplines (TerrainSystem.cpp,
+		// unguarded by session or ownership) sees the spline's move over the
+		// faster transform channel and re-digs from what is still its OLD
+		// groundPatch, against ground the Heights channel may already have
+		// updated — a stale lift that does not cancel, left over as a dig too
+		// deep for the ground around it.
+		std::uint64_t             diggingHash = 0;
 		std::uint64_t             nextAt[kFieldCount]{};
 		// How many foliage layers the peers know of: the settings blob creates a
 		// layer on their side, so a layer's mask must not overtake it (it would be
