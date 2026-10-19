@@ -1,4 +1,9 @@
 #include "Diagnostics/DevStatsTile.h"
+#include "Platform/BuildProfile.h"
+
+// The game's F10 card is its only user, and F10 exists only where the dev
+// hotkeys do: a release build of HorizonCore carries none of this file.
+#if HE_FEATURE_DEV_HOTKEYS
 
 #include "ContentManager/ContentManager.h"
 #include "Diagnostics/Log.h"
@@ -259,3 +264,5 @@ void DevStatsTile::shutdown(WidgetManager& widgets)
 }
 
 } // namespace HE
+
+#endif // HE_FEATURE_DEV_HOTKEYS

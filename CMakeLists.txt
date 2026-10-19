@@ -818,6 +818,11 @@ else()
     message(STATUS "HorizonEngine: in-engine profiler compiled OUT (zero overhead)")
 endif()
 
+# ── Build profile: dev | release (HE_BUILD_PROFILE, he_target_build_profile) ──
+# Only defines the option and the function; no engine target calls it yet, so
+# every target compiles as before (the header's fallback is dev).
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonBuildProfile.cmake")
+
 # ─── Deploy directories ────────────────────────────────────────────────────────
 # Overridable with -DDEPLOY_DIR=... (CI packaging points it at the workspace; the
 # default is the local dev deploy layout).
@@ -951,6 +956,9 @@ add_subdirectory(src/HE_Scene)
 # After HE_Scene: the Python plugin links it (and is loaded by it at runtime).
 add_subdirectory(src/HE_Python)
 add_subdirectory(src/HE_Rendering)
+# The four engine libraries as one HorizonEngine library, for the game and the
+# SDK only. After the four and the Python plugin, before HE_Game, which links it.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonEngineBundle.cmake")
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
 # An app-flavour tree builds a runtime, not an editor. Skipping the subdirectory
@@ -967,6 +975,10 @@ endif()
 if(TARGET HorizonEditor AND TARGET HorizonGame)
     add_dependencies(HorizonEditor HorizonGame)
 endif()
+
+# ─── Engine SDK (install component HorizonSDK, target HorizonSDK) ─────────────
+# After every library: it reads their final interface definitions.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonSDK.cmake")
 
 # ─── Tests ─────────────────────────────────────────────────────────────────────
 option(HE_BUILD_TESTS "Build the doctest unit tests" ON)

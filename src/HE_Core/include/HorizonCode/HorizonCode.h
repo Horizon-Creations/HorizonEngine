@@ -20,6 +20,10 @@
 // demand. Functions carry an access modifier — public functions are callable
 // from gameplay scripts, private ones are graph-internal.
 
+// Defined in HE_Scene (HorizonScene/EngineApi.h). Context::apiCtx only passes a
+// reference to one on, so the interpreter never needs to see what is inside.
+namespace HE::api { struct Ctx; }
+
 namespace HorizonCode {
 
 // Defined in HorizonCodeCompiled.h — Context only ever passes the pointer on.
@@ -1284,6 +1288,13 @@ struct Context
     // the id is unknown. This is the seam that keeps the interpreter (HE_Core)
     // decoupled from the engine surface it drives.
     std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
+    // The same seam for a DIRECT call: fill `out` with the HE::api::Ctx that
+    // callApi would have built for this instance, so generated C++ can call
+    // HE::api::animator::setParam(ctx, …) itself instead of boxing its arguments
+    // through the registry (HorizonEngine/HorizonEngineApi.h, HE::api::Scope).
+    // False = nothing bound, `out` untouched: the null-Ctx tolerance then makes
+    // every direct call the no-op an unbound callApi is.
+    std::function<bool(HE::api::Ctx& out)> apiCtx;
 
     // Call a function on THIS instance that the running graph does not itself
     // declare — an INHERITED one. A class's graph only holds its own members,

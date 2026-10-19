@@ -7611,12 +7611,30 @@ namespace
 	  "whenever that pak or sidecar is missing, does not match, or the packing "
 	  "settings changed, so it cannot quietly ship a stale archive.",
 	  "", "export#incremental" },
+	{ "Export/Compile game from SDK", "",
+	  "Compiles the game executable itself from the engine SDK instead of shipping "
+	  "the prebuilt one. The project configuration and the pak key are compiled "
+	  "into the binary, and a Shipping export (Dev Tools off) links the SDK's release "
+	  "libraries, so development features do not exist in it at all. It needs cmake, "
+	  "a C++ compiler and an EngineSDK folder beside the editor (or HE_GAME_SDK_DIR) "
+	  "holding the libraries of that profile, and only runs for a Host target. "
+	  "Whatever is missing, or a "
+	  "build that fails, leaves the prebuilt game in the export; the line under the "
+	  "checkbox and the Compile game step say why. The choice is saved with the export "
+	  "profile. The build is cached per project and profile: the next export compiles "
+	  "only what changed, as long as the SDK, the profile and cmake and the compiler "
+	  "stay the same (the build log says cache hit or miss, and why).",
+	  "", "" },
 	{ "Export/Compile HorizonCode", "",
 	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "
 	  "GameInstance — into C++ and ships them as a compiled library. It needs "
 	  "cmake and a C++ toolchain on this machine and only runs for a Host target. "
-	  "The graphs ship as well either way, so by default anything that fails to "
-	  "translate simply runs interpreted.",
+	  "The library is built against the same engine SDK and profile as the game, "
+	  "so it needs \"Compile game from SDK\" as well; it ships in the HorizonEngine "
+	  "folder beside the engine library, and the game refuses a library of another "
+	  "profile. The graphs ship as well either way, so by default anything that "
+	  "fails to translate, or a game that is not compiled from the SDK, simply runs "
+	  "interpreted.",
 	  "", "horizoncode#compiler" },
 	{ "Export/Interpret on failure", "",
 	  "A graph that cannot be translated ships interpreted. The build always "
@@ -7744,6 +7762,10 @@ namespace
 	  "Puts this window away while the build keeps running. The footer shows its "
 	  "progress; click that to bring the window back. When the build ends with the "
 	  "window away, a notification says how it went.",
+	  "", "export#shipped-files" },
+	{ "Build Window/Cancel", "",
+	  "Stops the step that is compiling right now (the game from the engine SDK). "
+	  "The export stays as it was before that step: the prebuilt game ships.",
 	  "", "export#shipped-files" },
 	{ "Build Window/Build Again", "",
 	  "Runs the same export once more with the settings the last run used, "

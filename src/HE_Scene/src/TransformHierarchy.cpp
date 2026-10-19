@@ -4,6 +4,7 @@
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include <Diagnostics/Log.h>
 #include <Diagnostics/Profiler.h>
+#include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_PROPAGATE_FULL/_VERIFY
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -240,19 +241,27 @@ namespace {
     // world calm: scan again from the next call on.
     constexpr size_t kCalmDivisor = 4;      // at most 1/4 rebuilt
 
+    // Both switches below are dev builds only (HE_FEATURE_ENV_OVERRIDES): a release
+    // game always runs the incremental pass, unverified.
+#if HE_FEATURE_ENV_OVERRIDES
     bool envOn(const char* name)
     {
         const char* v = std::getenv(name);
         return v && *v && std::atoi(v) != 0;
     }
+#endif
 
     // HE_PROPAGATE_FULL=1: every pass walks the whole hierarchy, as before the scan
     // existed. The way to tell whether a stale transform is the incremental pass, and a
     // same-binary A/B for the measurements.
     bool alwaysFull()
     {
+#if HE_FEATURE_ENV_OVERRIDES
         static const bool on = envOn("HE_PROPAGATE_FULL");
         return on;
+#else
+        return false;
+#endif
     }
 
     // HE_PROPAGATE_VERIFY=1: after every incremental pass, walk the whole hierarchy as
@@ -262,7 +271,11 @@ namespace {
     // variable set is a check of every call the tests make.
     bool verifyOn()
     {
+#if HE_FEATURE_ENV_OVERRIDES
         static const bool on = envOn("HE_PROPAGATE_VERIFY");
+#else
+        constexpr bool on = false;
+#endif
         // A test that switched a detector off wants the pass to be wrong.
         return on && !g_switches.ignoreStructureEpoch && !g_switches.ignoreInvalidation
                   && !g_switches.ignoreValueCompare && !g_switches.ignoreTransformRemoval

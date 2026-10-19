@@ -19,6 +19,7 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/CrashHandler.cpp
 	src/JobSystem/JobSystem.cpp
 	src/Platform/DynLib.cpp
+	src/Platform/EngineProfile.cpp
 	src/Platform/Process.cpp
 	src/Platform/ProjectWriteGate.cpp
 	src/Window/Window.cpp
@@ -32,6 +33,7 @@ add_library(HorizonCore SHARED
 	src/Crypto/Sha256.cpp
 	src/Integrity/IntegrityProbe.cpp
 	src/Hpak/ProjectConfig.cpp
+	src/Hpak/GameBuildConfig.cpp
 	src/Hpak/ProjectExporter.cpp
 	src/Hpak/PackManifest.cpp
 	src/Events/EventBus.cpp
@@ -81,6 +83,12 @@ target_compile_definitions(HorizonCore
 	PRIVATE HE_CORE_BUILD_DLL
 	PUBLIC  HE_CORE_DLL
 )
+
+# Build profile (cmake/HorizonBuildProfile.cmake, Platform/BuildProfile.h): the
+# F9 capture, the headless hooks and the HE_* overrides in here exist only in a
+# dev tree. PUBLIC, so everything that links Core compiles its headers with the
+# same profile.
+he_target_build_profile(HorizonCore PUBLIC)
 
 target_link_libraries(HorizonCore
 	PUBLIC  glm::glm

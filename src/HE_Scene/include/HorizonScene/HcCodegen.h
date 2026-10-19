@@ -1,5 +1,6 @@
 #pragma once
 #include <HorizonCode/HorizonCode.h>
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -35,7 +36,7 @@ struct ClassSource
     //
     // It is also the INHERITANCE the generator emits: chain.front() must appear
     // in the same run as its own source, and the class comes out as
-    // `C_Goblin : public C_Enemy`. `graph` is therefore this class's OWN level
+    // `Goblin : public Enemy`. `graph` is therefore this class's OWN level
     // (ResolvedClass::levels.back()) — NOT the flattened chain. Handing in a
     // flattened graph together with a chain would compile every inherited member
     // twice: once in the base's class and once more here.
@@ -92,6 +93,14 @@ struct Result
 
 Result generate(const std::vector<ClassSource>& sources, const Options& opt);
 
+// Whether an Engine Call node on this registry row comes out as a direct C++
+// call (HE::api::animator::setParam(api, …), through HorizonEngine/
+// HorizonEngineApi.h) instead of the hc::callApi dispatch. False for a Thunk row
+// (its invoke does more than forward), a row with a Struct pin, and an unknown id.
+// The direct call never passes Services::callApi, so a host that records that
+// seam (the parity tests) sees only the dispatched rows.
+bool callsDirectly(const std::string& apiId);
+
 // The CMake project that builds the generated files into HorizonCodeGen.<dylib>
 // (export packaging, plan §8.2). cppFiles = the .cpp names from Result::files.
 std::string generateCMakeLists(const Options& opt, const std::vector<std::string>& cppFiles);
@@ -105,11 +114,24 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
 // <root>/include + <root>/lib, plus <root>/src/HE_Core/include when present —
 // the layout src/HE_Editor/CMakeLists.txt stages (engine headers in the
 // checkout's own place, third-party headers in include/).
+//
+// Generated code calls the engine directly (HorizonEngine/HorizonEngineApi.h),
+// so it links HorizonScene as well as HorizonCore: a staged SDK carries
+// <root>/src/HE_Scene/include and both libraries, a development build lists the
+// second library directory under "libDirs". An engine SDK as the HorizonSDK
+// target installs it (<root>/lib/cmake/HorizonEngine) is used through its CMake
+// package instead — `packageDir`, handed to the project as HorizonEngine_DIR.
+// `profile` (dev/release) picks the package's lib set, the one the game is built
+// against (Thema 211 step 13): the library then links the one HorizonEngine
+// library, carries that profile and builds in its own build-<profile> folder.
 struct SdkInfo
 {
     std::vector<std::filesystem::path> includeDirs;
     std::filesystem::path              libDir;
-    bool valid() const { return !includeDirs.empty() && !libDir.empty(); }
+    std::vector<std::filesystem::path> extraLibDirs;   // more library dirs (dev builds: HorizonScene's)
+    std::filesystem::path              packageDir;     // <root>/lib/cmake/HorizonEngine, when present
+    std::string                        profile;        // HE_BUILD_PROFILE for the package; empty = its default
+    bool valid() const { return !packageDir.empty() || (!includeDirs.empty() && !libDir.empty()); }
 };
 SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir);
 
@@ -232,6 +254,10 @@ struct DylibBuildSpec
     std::vector<std::string> defines;
     // What the "nothing was produced" message calls the missing library.
     std::string              what = "HorizonCodeGen library";
+    // Set from another thread to stop the run: checked per output line, the
+    // pipe is closed (the toolchain dies on its next write) and the outcome is
+    // "cancelled". Null = not cancelable.
+    const std::atomic<bool>* cancel = nullptr;
 };
 BuildOutcome buildDylib(const DylibBuildSpec& spec,
                         const std::function<void(const std::string& line)>& onLine = {});

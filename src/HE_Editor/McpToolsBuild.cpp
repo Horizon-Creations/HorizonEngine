@@ -168,6 +168,13 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			  "What a graph that cannot be compiled means: false ships it "
 			  "interpreted (compiling is then an optimisation and never a gate), "
 			  "true fails the export instead." } } },
+		{ "compileGameFromSdk", json{ { "type", "boolean" },
+			{ "description",
+			  "Compile the game itself against the engine SDK (EngineSDK beside "
+			  "the editor), with the profile's lib set (devTools: dev, else "
+			  "release) and the configuration and pak key compiled in. Host "
+			  "target only; falls back to the prebuilt game when the SDK, cmake "
+			  "or a compiler is missing." } } },
 		{ "textureFormat", json{ { "type", "string" }, { "enum", json::array({ "Auto", "None" }) },
 			{ "description",
 			  "Block format the textures are cooked to: Auto picks it from the "
@@ -265,6 +272,7 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 		if (hasArg(args, "appBundle"))          p.appBundle          = boolArg(args, "appBundle", p.appBundle);
 		if (hasArg(args, "compileHorizonCode")) p.compileHorizonCode = boolArg(args, "compileHorizonCode", p.compileHorizonCode);
 		if (hasArg(args, "hcStopOnFailure"))    p.hcStopOnFailure    = boolArg(args, "hcStopOnFailure", p.hcStopOnFailure);
+		if (hasArg(args, "compileGameFromSdk")) p.compileGameFromSdk = boolArg(args, "compileGameFromSdk", p.compileGameFromSdk);
 		if (hasArg(args, "textureFormat"))
 			p.textureFormat = strArg(args, "textureFormat") == "None" ? "None" : "Auto";
 		if (hasArg(args, "textureQuality"))
@@ -289,6 +297,7 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			{ "targetPlatform", p.targetPlatform },
 			{ "outputDir",      p.outputDir },
 			{ "compileHorizonCode", p.compileHorizonCode },
+			{ "compileGameFromSdk", p.compileGameFromSdk },
 			{ "note", "poll project_build_status — `running` goes false and "
 			          "`finished` true when the export is over" },
 		});

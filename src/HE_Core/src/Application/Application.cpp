@@ -4,6 +4,7 @@
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/EngineProfiler.h"
+#include "Platform/BuildProfile.h"   // HE_FEATURE_PROFILER_CAPTURE / _TEST_HOOKS
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <atomic>
@@ -53,7 +54,9 @@ void showErrorBox(const char* title, const char* text)
 // arrival (SDL's push stamp) → dispatch in PollEvents → commit of the frame
 // that consumed it (after Render/SwapBuffers; Render ends with the commit on
 // Metal). Its own registered event type, swallowed in the event callback, so
-// neither ImGui nor Input ever sees it. Off unless set; read once.
+// neither ImGui nor Input ever sees it. Off unless set; read once. Part of the
+// perf automation, so dev builds only (HE_FEATURE_PROFILER_CAPTURE).
+#if HE_FEATURE_PROFILER_CAPTURE
 struct InputLatencyProbe
 {
 	int                   hz = 0;
@@ -169,6 +172,7 @@ struct InputLatencyProbe
 	}
 };
 InputLatencyProbe g_inputLatency;
+#endif
 } // namespace
 
 namespace HE
@@ -301,14 +305,17 @@ namespace HE
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{
+#if HE_FEATURE_PROFILER_CAPTURE
 			// HE_PERF_INPUT_LATENCY_HZ's own events stop here (no-op when off).
 			if (g_inputLatency.take(e)) return;
 			// F9 toggles a profiler benchmark capture, engine-wide (editor + game).
+			// Dev builds only: in a release game F9 is the game's key.
 			if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat)
 			{
 				toggleProfilerCapture();
 				return;
 			}
+#endif
 			// Forward window-close events for secondary windows
 			if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 			{
@@ -421,10 +428,12 @@ namespace HE
 		// heartbeat measures against (see setEventDriven).
 		Uint64 lastDrawTick = SDL_GetTicksNS();
 
+#if HE_FEATURE_PROFILER_CAPTURE
 		{
 			const char* perFrame = std::getenv("HE_PERF_INPUT_EVENTS");
 			g_inputLatency.start(perFrame && std::atoi(perFrame) > 0);
 		}
+#endif
 
 		while (m_running && !m_window->ShouldClose())
 		{
@@ -475,7 +484,8 @@ namespace HE
 			// It also turns hidden mode on (hiddenWindowRequested) — the run
 			// is a script's, not a person's; HE_HIDDEN_WINDOW=0 shows it anyway.
 			// Read once and cached: getenv per frame is a syscall for a value
-			// that cannot change.
+			// that cannot change. A test hook: dev builds only.
+#if HE_FEATURE_TEST_HOOKS
 			{
 				static const unsigned long long kExitAfter = []() -> unsigned long long
 				{
@@ -489,6 +499,7 @@ namespace HE
 					m_running = false;
 				}
 			}
+#endif
 
 			// ── HE_PROFILE_CAPTURE: a scripted F9 ───────────────────────────
 			// The same benchmark capture F9 starts, but without a person at the
@@ -504,6 +515,10 @@ namespace HE
 			// records at the vsync the app runs with instead of forcing it off
 			// (the paced frame rate a user sees, not the headroom);
 			// HE_PROFILE_NOTE labels the dump.
+			//
+			// This block and HE_CAPTURE_FRAME below are perf/image automation:
+			// dev builds only (HE_FEATURE_PROFILER_CAPTURE).
+#if HE_FEATURE_PROFILER_CAPTURE
 			{
 				struct AutoCapture
 				{
@@ -610,6 +625,7 @@ namespace HE
 						HE_LOG_ERROR(Core, "%s", "The renderer produced no frame to capture");
 				}
 			}
+#endif
 
 			// Hitch detector. A frame this long is always worth knowing about — it is
 			// usually a synchronous asset load, a shader compile or a GC-like stall in
@@ -648,7 +664,9 @@ namespace HE
 			// across the primary window so ImGui's hover state actually changes
 			// and the frame pays for that too, not just for the dispatch. Only
 			// ImGui and Input see the position: SDL's own mouse state is not
-			// touched by a pushed event. Read once; off (0) unless set.
+			// touched by a pushed event. Read once; off (0) unless set. Dev
+			// builds only, like the rest of the perf automation.
+#if HE_FEATURE_PROFILER_CAPTURE
 			{
 				static const int kSynthMotion = []
 				{
@@ -696,6 +714,7 @@ namespace HE
 					}
 				}
 			}
+#endif
 
 			// ── HE_PERF_KEY_HOLD=<key name>: a held key (perf audit) ────────
 			// The keyboard half of the synthetic load: from frame 50 on, the key
@@ -768,11 +787,13 @@ namespace HE
 				HE_PROFILE_SCOPE_N("PollEvents");
 				m_window->PollEvents();
 			}
+#if HE_FEATURE_PROFILER_CAPTURE
 			// The positive control for HE_PERF_INPUT_EVENTS: a cost that does not
 			// move with N only means something if the events were really handled.
 			if (m_frameIndex == 100 && std::getenv("HE_PERF_INPUT_EVENTS"))
 				HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS: frame 100 dispatched %u events",
 				            m_window->EventsLastPoll());
+#endif
 			if (m_window->ShouldClose()) break;
 
 			// Snapshot pad state right after event polling so hot-plug from
@@ -884,7 +905,9 @@ namespace HE
 				// The frame is committed (Metal/D3D/Vulkan inside Render, GL
 				// in the swap): whatever input it polled is as old as it gets
 				// on the CPU side.
+#if HE_FEATURE_PROFILER_CAPTURE
 				g_inputLatency.committed(m_frameIndex);
+#endif
 			}
 
 			// Startup timeline, continued: when the first frame reached the
@@ -1014,9 +1037,11 @@ namespace HE
 			}
 		}
 
+#if HE_FEATURE_PROFILER_CAPTURE
 		// Before anything shuts SDL down under the pushing thread.
 		g_inputLatency.stop();
 		g_inputLatency.report("final");
+#endif
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
 		// Detach and destroy secondary windows first — each through the same
@@ -1133,6 +1158,7 @@ namespace HE
         if (m_renderer) m_renderer->SetVSync(enabled);
     }
 
+#if HE_FEATURE_PROFILER_CAPTURE
     void Application::toggleProfilerCapture(bool forceVsyncOff, const char* note)
     {
         EngineProfiler& profiler = EngineProfiler::instance();
@@ -1175,6 +1201,7 @@ namespace HE
                         m_vsyncEnabled ? "on" : "off");
         }
     }
+#endif
 
     void Application::setWindowMode(WindowMode mode)
     {

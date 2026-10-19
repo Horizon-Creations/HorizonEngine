@@ -310,6 +310,7 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    test_export_sdk_build.cpp
     # Topic 219 step 2: the importers' lean asset writer (TLS-101) and the pack
     # manifest the packer CLI now shares with the export (TLS-203).
     test_tools_writer_cache.cpp
@@ -739,6 +740,9 @@ add_executable(he_tests
     # by construction, so "does a fallback reach the list with its reason" is
     # answerable without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcFallbackReport.cpp
+    # Export with the game compiled from an engine SDK: SDK lookup, the compiled-in
+    # configuration and the swap over the prebuilt runtime. ImGui-free.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkBuild.cpp
     # Renaming a HorizonCode member across assets. Deliberately free of ImGui and
     # of the content system, which is what lets the whole decision — whose call is
     # this, may it be rewritten — be asserted here instead of clicked through.
@@ -1117,17 +1121,20 @@ endif()
 # emits the compiled classes at BUILD time; they are compiled INTO he_tests so
 # no compiler is needed at test runtime.
 set(HCGEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/hcgen_fixtures)
+# The generated class names: each fixture's file stem in PascalCase (fix/math_ops
+# → MathOps, see classNameFor in HcCodegen.cpp), one hcgen_<Class>.h/.cpp each.
 set(HCGEN_CLASSES
-    flow_branch_sequence coerce_matrix math_ops bitwise_ops vector_ops variables functions_basic
-    functions_recursive foreach_arrays events_multi widget_props limits_smoke
-    functions_locals engine_pure_multiout engine_exec_cached animator_sync
-    ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
-    latent_flow enums structs GameInstance gi_caller engine_events
-    cast_target casts inherit_base inherit_derived
-    inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
-    pull_construct pull_spawner bind_to
-    extract_destruct extract_derived extract_listener
+    FlowBranchSequence CoerceMatrix MathOps BitwiseOps VectorOps Variables FunctionsBasic
+    FunctionsRecursive ForeachArrays EventsMulti WidgetProps LimitsSmoke
+    FunctionsLocals EnginePureMultiout EngineExecCached AnimatorSync
+    RefTarget RefsObjects DispatchOwner DispatchListener DispatchSink
+    LatentFlow Enums Structs GameInstance GiCaller EngineEvents
+    CastTarget Casts InheritBase InheritDerived
+    InheritNovarsBase InheritNovars InputActions Containers Reroutes
+    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings PlayerSlots
+    PullConstruct PullSpawner BindTo
+    ExtractDestruct ExtractDerived ExtractListener
+    EngineWorld
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs
@@ -1140,15 +1147,20 @@ foreach(t E_FixMood E_FixDup S_FixInner S_FixStats)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_type_${t}.h)
 endforeach()
 foreach(c ${HCGEN_CLASSES})
-    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
-    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_C_${c}.h)
+    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_${c}.cpp ${HCGEN_DIR}/hcgen_${c}.reflect.cpp)
+    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_${c}.h)
 endforeach()
 add_custom_command(OUTPUT ${HCGEN_SOURCES} ${HCGEN_HEADERS}
     COMMAND hc_codegen --fixtures --out ${HCGEN_DIR}
     DEPENDS hc_codegen ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen/fixtures.h
     COMMENT "hc_codegen: generating HorizonCode parity fixtures")
-target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp)
+target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp
+                                test_hc_codegen_readable.cpp)
 target_include_directories(he_tests PRIVATE ${HCGEN_DIR} fixtures/hcodegen)
+# What the generated code looks like (Thema 211 step 7): byte-for-byte golden
+# files of three fixtures, kept LF by .gitattributes.
+set_source_files_properties(test_hc_codegen_readable.cpp PROPERTIES
+    COMPILE_DEFINITIONS HE_TEST_HCGEN_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen_golden")
 
 # The same generated sources also become a REAL shared library with the C
 # manifest export — test_hccompiled_loader.cpp loads it through
@@ -1161,12 +1173,62 @@ target_compile_definitions(test_hcgen PRIVATE HCGEN_BUILD_DYLIB)
 # project generateCMakeLists() writes does exactly this too.
 set_target_properties(test_hcgen PROPERTIES
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
-target_link_libraries(test_hcgen PRIVATE HorizonCore)
+# HorizonScene, like generateCMakeLists' project: an Engine Call node is a direct
+# HE::api call (HorizonEngine/HorizonEngineApi.h), and HE::api lives there.
+target_link_libraries(test_hcgen PRIVATE HorizonScene)
 target_include_directories(test_hcgen PRIVATE ${HCGEN_DIR})
 add_dependencies(he_tests test_hcgen)
 target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
+
+# ─── Engine API for generated code (Thema 211 step 6) ─────────────────────────
+# hc_codegen spells every HE::api registry row as a direct C++ call through
+# HorizonEngine/HorizonEngineApi.h; the file is compiled INTO he_tests, so a row
+# whose cppCall/cppForm/params do not match its function fails this build, and
+# test_engine_api_direct.cpp compares each call with the row's invoke. Depends on
+# HorizonScene as well: the rows live there, and a changed registry must
+# regenerate even if the hc_codegen binary itself comes out unchanged.
+# Not named test_*, so the ctest loop does not register it.
+set(HE_API_DIRECT_SRC ${CMAKE_CURRENT_BINARY_DIR}/engine_api_direct/engine_api_direct_gen.cpp)
+add_custom_command(OUTPUT ${HE_API_DIRECT_SRC}
+    COMMAND hc_codegen --api-direct ${HE_API_DIRECT_SRC}
+    DEPENDS hc_codegen HorizonScene
+    COMMENT "hc_codegen: generating the engine-API direct-call parity source")
+target_sources(he_tests PRIVATE ${HE_API_DIRECT_SRC}
+    test_engine_api_direct.cpp test_engine_api_header.cpp)
+# engine_api_direct.h, which the generated file (in the build tree) includes.
+set_source_files_properties(${HE_API_DIRECT_SRC} PROPERTIES
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Build profile probes (Thema 211 step 2): he_tests has one profile, so the same
+# probe source is compiled once per profile into its own static library and
+# test_build_profile.cpp compares what each copy saw. "default" deliberately
+# skips he_target_build_profile to pin the header's fallback. Not named test_*,
+# so the ctest loop below does not register them as tests of their own.
+foreach(_probe dev release default override)
+    set(_lib he_build_profile_probe_${_probe})
+    add_library(${_lib} STATIC build_profile_probe.cpp)
+    target_compile_features(${_lib} PRIVATE cxx_std_20)
+    string(SUBSTRING "${_probe}" 0 1 _head)
+    string(SUBSTRING "${_probe}" 1 -1 _tail)
+    string(TOUPPER "${_head}" _head)
+    target_compile_definitions(${_lib} PRIVATE HE_PROBE_FN=buildProfileProbe${_head}${_tail})
+    target_include_directories(${_lib} PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+    target_link_libraries(he_tests PRIVATE ${_lib})
+endforeach()
+he_target_build_profile(he_build_profile_probe_dev PROFILE dev)
+he_target_build_profile(he_build_profile_probe_release PROFILE release)
+he_target_build_profile(he_build_profile_probe_override PRIVATE PROFILE release
+                        FEATURES TEST_HOOKS=1)
+target_sources(he_tests PRIVATE test_build_profile.cpp)
+
+# Compiled-in project configuration (Thema 211 step 4): the test includes the
+# generator's checked-in output, so only its own TU gets the fixture directory.
+target_sources(he_tests PRIVATE test_game_build_config.cpp)
+set_source_files_properties(test_game_build_config.cpp PROPERTIES
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config
+    COMPILE_DEFINITIONS HE_TEST_GAME_BUILD_CONFIG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config/HEGameBuildConfig.h")
 
 # ─── Process-runner fixture ────────────────────────────────────────────────────
 # A real child process, because every bug HE::Proc exists to avoid is invisible
@@ -1221,6 +1283,13 @@ target_compile_definitions(he_tests PRIVATE
 # of engineRootFromSdk(); here the build system already knows it.
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_ENGINE_ROOT="${CMAKE_SOURCE_DIR}")
+
+# The "Compile HorizonCode" export with a real compiler (Thema 211 step 7): the
+# test writes the he_sdk_config.json a development editor writes beside itself
+# (src/HE_Editor/CMakeLists.txt), so it needs the same three values.
+target_sources(he_tests PRIVATE test_hc_codegen_export_build.cpp)
+set_source_files_properties(test_hc_codegen_export_build.cpp PROPERTIES
+    COMPILE_DEFINITIONS "HE_TEST_GLM_DIR=\"${glm_SOURCE_DIR}\";HE_TEST_CORE_LIB_DIR=\"$<TARGET_FILE_DIR:HorizonCore>\";HE_TEST_SCENE_LIB_DIR=\"$<TARGET_LINKER_FILE_DIR:HorizonScene>\"")
 
 add_library(test_gamelogic_services SHARED fixtures/test_gamelogic_services.cpp)
 target_include_directories(test_gamelogic_services PRIVATE
@@ -1514,6 +1583,31 @@ if(Python3_Interpreter_FOUND)
         set_tests_properties(${_rs_name} PROPERTIES SKIP_RETURN_CODE 2)
     endforeach()
 endif()
+
+# ── "Does a game build against the engine SDK?" (Thema 211 steps 5 and 9) ───
+# Installs this tree's HorizonSDK component (its lib set of the one SDK), moves
+# it, checks that only compiler input is in it, and builds two projects that see
+# nothing of this tree: a probe (one call into each library, the profile it was
+# handed, a missing lib set and a stale header stamp refused) and the shipped
+# template, i.e. HorizonGame from the SDK with the golden HEGameBuildConfig.h
+# compiled in. Both lib sets in one SDK: run the driver by hand with
+# -DHE_BUILD_DIR_2=<release tree> -DHE_PROFILE_2=release. Same
+# generator and compilers as this tree; the work dir sits in the build tree, not
+# in /tmp. Needs the engine libraries built (an ordinary full build).
+add_test(NAME sdk_example_project
+         COMMAND ${CMAKE_COMMAND}
+                 "-DHE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                 "-DHE_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                 "-DHE_WORK_DIR=${CMAKE_BINARY_DIR}/sdk-test"
+                 "-DHE_PROFILE=${HE_BUILD_PROFILE}"
+                 "-DHE_CONFIG=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,Release>"
+                 "-DHE_GENERATOR=${CMAKE_GENERATOR}"
+                 "-DHE_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+                 "-DHE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                 "-DHE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+                 "-DHE_OBJCXX_COMPILER=${CMAKE_OBJCXX_COMPILER}"
+                 -P "${CMAKE_SOURCE_DIR}/tests/sdk_example/run_sdk_example.cmake")
+set_tests_properties(sdk_example_project PROPERTIES TIMEOUT 1500 LABELS sdk)
 
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP
 # multicast) and hand sessions between two live endpoints. Letting two of them

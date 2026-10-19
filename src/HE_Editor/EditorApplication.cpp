@@ -1994,22 +1994,10 @@ void EditorApplication::OnInit()
 		// leaving play (which creates and destroys the physics world) needs no
 		// rebinding. Outside play mode physics is null and those nodes no-op,
 		// which is the honest answer: nothing is simulating.
-		svc.callApi = [this](HorizonCode::InstanceId self, const std::string& id,
-		                     const std::vector<HorizonCode::Value>& args)
-			-> std::vector<HorizonCode::Value> {
-			const HE::api::ApiFn* fn = HE::api::find(id);
-			// An id the registry does not know is almost always an OLD graph whose
-			// EngineCall node names a row that has since been removed or renamed
-			// (widget.create and its three lifecycle siblings, most recently).
-			// Returning {} silently made that look like a call that simply did
-			// nothing. The codegen path already throws on it; only the interpreter
-			// was quiet. Deliberately NOT inside HE::api::find(): nullptr is
-			// ordinary control flow for its other callers, which run per frame
-			// while drawing.
-			if (!fn) {
-				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
-				return {};
-			}
+		//
+		// The Ctx a call runs against, for the dispatcher below and for compiled
+		// code calling HE::api directly — one builder, so the two cannot drift.
+		auto callCtx = [this](HorizonCode::InstanceId self) -> HE::api::Ctx {
 			// fs/save sandbox: the project's Saved/ directory (follows the loaded
 			// project; setSandboxRoot is a cheap string assign).
 			const std::string& projPath = m_projectManager.currentProject().path;
@@ -2035,9 +2023,31 @@ void EditorApplication::OnInit()
 			// So does the rest of the app-level half (audio, runtime, entity
 			// host, the object services and what "quit" means in this host):
 			// apiCtx() is the one place that fills it.
-			HE::api::Ctx c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(),
-			                        &contentManager(), self);
+			return apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager(), self);
+		};
+		svc.callApi = [callCtx](HorizonCode::InstanceId self, const std::string& id,
+		                     const std::vector<HorizonCode::Value>& args)
+			-> std::vector<HorizonCode::Value> {
+			const HE::api::ApiFn* fn = HE::api::find(id);
+			// An id the registry does not know is almost always an OLD graph whose
+			// EngineCall node names a row that has since been removed or renamed
+			// (widget.create and its three lifecycle siblings, most recently).
+			// Returning {} silently made that look like a call that simply did
+			// nothing. The codegen path already throws on it; only the interpreter
+			// was quiet. Deliberately NOT inside HE::api::find(): nullptr is
+			// ordinary control flow for its other callers, which run per frame
+			// while drawing.
+			if (!fn) {
+				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
+				return {};
+			}
+			HE::api::Ctx c = callCtx(self);
 			return fn->invoke(c, args);
+		};
+		// Compiled HorizonCode calling HE::api directly (HE::api::Scope) gets
+		// the Ctx the dispatcher above builds, sandbox and grants included.
+		svc.apiCtx = [callCtx](HorizonCode::InstanceId self, HE::api::Ctx& out) {
+			out = callCtx(self);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}

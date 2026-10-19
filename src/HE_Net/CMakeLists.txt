@@ -68,6 +68,9 @@ target_link_libraries(HorizonNet PRIVATE nlohmann_json::nlohmann_json)
 # than reimplementing: Hpak::aesGcm* (AEAD, backed by OpenSSL/mbedTLS),
 # Hpak::randomBytes (CSPRNG) and KeyDerivation::hmac (HMAC-SHA256).
 target_link_libraries(HorizonNet PRIVATE HorizonCore)
+# Build profile, PUBLIC like Core's: Core is linked PRIVATE here, so a target
+# that links only Net would otherwise compile with no profile at all.
+he_target_build_profile(HorizonNet PUBLIC)
 
 # Winsock (Windows only; POSIX sockets need no extra link library).
 if(WIN32)

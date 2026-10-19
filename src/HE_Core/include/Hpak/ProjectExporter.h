@@ -36,7 +36,7 @@ enum class RuntimeFlavor : uint8_t { Game = 0, AppAdvanced, AppBasic };
 struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
-    // When set, the shipped game scans a Mods/ folder next to the executable and
+    // When set, the shipped game scans a Mods/ folder in its data folder (data/Mods) and
     // mounts every .hpak there as an overlay on the base pak (same UUID replaces,
     // new UUID adds — including the packed startup scene).
     bool    enableModSupport = false;
@@ -244,6 +244,14 @@ struct HE_API ExportSettings {
     // the canonical loader name and project.hcfg records horizonCodeCompiled.
     // Empty = interpreted export (the default and the fallback).
     std::filesystem::path horizonCodeGenLib;
+    // Incremental + encrypt: the HEGameBuildConfig.h of the previous game build
+    // from the engine SDK for this project and profile (Thema 211). That game
+    // carries its key compiled in, neither in project.hcfg nor in a patched
+    // block, so without this the previous key is unreadable, a fresh one is
+    // drawn and every entry is packed again. Tried after both of those; a key
+    // that does not match the previous pak only costs the reuse (the manifest's
+    // settings fingerprint includes the key). Empty = not asked.
+    std::filesystem::path previousBuildConfigHeader;
 };
 
 struct HE_API ExportResult {
@@ -257,7 +265,7 @@ struct HE_API ExportResult {
     // block (legacy runtime) — then the key ships in the hcfg as before.
     bool        keyEmbedded      = false;
     // The game executable this export produced, for a caller that wants to run
-    // it. Inside the .app it is the binary itself (Contents/MacOS/HorizonGame),
+    // it. Inside the .app it is the binary itself (Contents/MacOS/<name>),
     // not the bundle directory — a bundle cannot be exec'd. Empty when no
     // runtime was shipped, and, for a cross-platform target, a binary this
     // machine cannot run: the caller decides whether launching makes sense.
@@ -297,6 +305,19 @@ HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& edit
                                                ExportPlatform p,
                                                RuntimeFlavor  f = RuntimeFlavor::Game,
                                                RuntimeFlavor* outFlavor = nullptr);
+
+// ─── Export layout (Platform/GameLayout.h) ────────────────────────────────────
+// A runtime bundle with the engine in HorizonEngine/ (the HorizonEngine library,
+// Thema 211 step 10) exports as <ProjectName>(.exe) + data/ + HorizonEngine/.
+// A runtime without that folder (built before it, e.g. a GameRuntimes/<platform>
+// bundle from another machine) keeps the flat layout and the name HorizonGame:
+// its executable looks for the pak beside itself.
+HE_API bool runtimeHasEngineDir(const std::filesystem::path& runtimeDir);
+// The executable's file name in that layout: the project name without the
+// characters no file system takes (/ \ : * ? " < > | and control characters,
+// trailing dots and spaces), "Game" when nothing is left, plus ".exe" for a
+// Windows runtime.
+HE_API std::string exportedExecutableName(const std::string& projectName, bool windowsExe);
 
 // ─── Embedded pak key ─────────────────────────────────────────────────────────
 // The game executable carries a 64-byte patchable key block (see

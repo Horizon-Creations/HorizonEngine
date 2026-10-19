@@ -1,6 +1,7 @@
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/AssetFile.h"
 #include <Platform/ProjectWriteGate.h>
+#include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_ENGINE_CONTENT_EDITABLE
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
@@ -980,8 +981,13 @@ static constexpr size_t kEnginePrefixLen = sizeof(kEnginePrefix) - 1;
 
 bool ContentManager::isEngineContentDevMode()
 {
+	// Engine authoring is a dev tree's business (HE_FEATURE_ENV_OVERRIDES).
+#if HE_FEATURE_ENV_OVERRIDES
 	const char* v = std::getenv("HE_ENGINE_CONTENT_EDITABLE");
 	return v && *v && std::atoi(v) != 0;
+#else
+	return false;
+#endif
 }
 
 std::string ContentManager::resolveAbsolutePath(const std::string& relativePath) const
