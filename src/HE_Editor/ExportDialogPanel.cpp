@@ -551,6 +551,18 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 }
 
 // ─── Compile game from SDK (export worker, after a successful export) ───────
+// The build cache of one project + profile: beside EngineContentCache in the
+// user data dir (TMPDIR only without one; macOS purges it). Its
+// HEGameBuildConfig.h is also where the next incremental export finds the key.
+static std::filesystem::path sdkGameWorkDir(const std::string& projName, const std::string& profile)
+{
+	std::error_code ec;
+	std::filesystem::path cacheRoot = GlobalState::userDataDir();
+	cacheRoot = cacheRoot.empty() ? std::filesystem::temp_directory_path(ec) / "HorizonSdkGame"
+	                              : cacheRoot / "SdkGameBuilds";
+	return HE::ExportSdk::buildWorkDir(cacheRoot, projName, profile);
+}
+
 // Builds the game from the SDK template with the export's configuration compiled
 // in and swaps it over the prebuilt executable. Every way out short of a built
 // and installed game leaves the prebuilt export untouched and says so; the
@@ -600,10 +612,7 @@ static std::string compileGameFromSdk(const ExportResult& res, const std::filesy
 	const fs::path exe = res.executablePath;
 	const fs::path dataDir = HE::ExportSdk::exportDataDir(exe);
 	std::error_code ec;
-	fs::path cacheRoot = GlobalState::userDataDir();
-	cacheRoot = cacheRoot.empty() ? fs::temp_directory_path(ec) / "HorizonSdkGame"
-	                              : cacheRoot / "SdkGameBuilds";
-	const fs::path workDir = HE::ExportSdk::buildWorkDir(cacheRoot, projName, profile);
+	const fs::path workDir = sdkGameWorkDir(projName, profile);
 	fs::create_directories(workDir, ec);
 	const fs::path header = workDir / "HEGameBuildConfig.h";
 	auto spec = HE::ExportSdk::makeBuildSpec(sdk, workDir, header);
@@ -1896,6 +1905,11 @@ void startExport(AppContext& ctx)
                 const std::string contentDir = ctx.contentManager->contentRoot();
                 const std::string outDir     = effOutDir.string();
                 const bool hostTarget        = platform == ExportPlatform::Host;
+                // The previous SDK-built game has its key compiled in, so an
+                // incremental pack can only reuse it from the header it was built
+                // from; without this every encrypted entry is packed again.
+                if (sdkGame && es.encrypt && es.incremental)
+                    es.previousBuildConfigHeader = sdkGameWorkDir(projName, sdkProfile) / "HEGameBuildConfig.h";
 
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above

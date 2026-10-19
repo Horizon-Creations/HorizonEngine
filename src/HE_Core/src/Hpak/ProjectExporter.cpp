@@ -3,7 +3,8 @@
 #include <Types/Enums.h>            // HE::AssetType (the packed type indices)
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
-#include <Application/AppIcon.h>            // the generated .icns/.ico/.png
+#include <Hpak/GameBuildConfig.h>           // readGameBuildConfigPakKey (incremental key reuse)
+#include <Application/AppIcon.h>           // the generated .icns/.ico/.png
 #include <Application/DocumentTypes.h>      // …and the three ways to declare a file type
 #include <Renderer/UIFont.h>                // uiParseRichColor for the plate colour
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
@@ -706,6 +707,11 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
                     if (readEmbeddedPakKey(ctx.binDir / exe, packSettings.key))
                     { haveKey = true; break; }
             }
+            // A game compiled from the SDK has neither: its key lives in the
+            // header it was built from.
+            if (!haveKey && !settings.previousBuildConfigHeader.empty() &&
+                HE::readGameBuildConfigPakKey(settings.previousBuildConfigHeader, packSettings.key))
+                haveKey = true;
         }
         if (!haveKey && !Hpak::randomBytes(packSettings.key, 32))
             return ExportResult{false, "Crypto backend unavailable — cannot encrypt", 0};

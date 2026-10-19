@@ -12,9 +12,12 @@ the release check proves nothing).
     scripts/build_profile_strings.py --profile dev     <dir-or-file>...
 
 A directory stands for the HorizonGame executable plus the HorizonCore,
-HorizonScene, HorizonNet and HorizonEngine libraries found under it (a build tree or a
-deploy folder). Exit 1 if a release binary still has something, or a dev
-binary set lacks something.
+HorizonScene, HorizonNet, HorizonEngine and HorizonCodeGen libraries found under
+it (a build tree or a deploy folder). An exported game folder (one with a
+HorizonEngine/ beside the executable) names its executable after the project, so
+there every native executable at the top of the folder counts as the game.
+Exit 1 if a release binary still has something, or a dev binary set lacks
+something.
 
 Strings are matched on the raw bytes (environment names must end in a NUL,
 so "HE_LOG" does not match inside "HE_LOG_NO_CONSOLE"); symbols through
@@ -64,7 +67,19 @@ FEATURES: dict[str, dict[str, list[str]]] = {
 
 GAME_NAMES = ("HorizonGame", "HorizonGame.exe")
 # HorizonEngine: the four as one library, what an exported game loads (Thema 211 step 10).
-LIB_STEMS = ("HorizonCore", "HorizonScene", "HorizonNet", "HorizonEngine")
+# HorizonCodeGen: the compiled HorizonCode, built against the game's lib set (step 13).
+LIB_STEMS = ("HorizonCore", "HorizonScene", "HorizonNet", "HorizonEngine", "HorizonCodeGen")
+# Mach-O (thin, both byte orders, fat), ELF, PE.
+NATIVE_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\x7fELF", b"MZ")
+
+
+def is_native_executable(p: Path) -> bool:
+    try:
+        with p.open("rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    return any(head.startswith(m) for m in NATIVE_MAGIC)
 
 
 def binaries_in(path: Path) -> list[Path]:
@@ -80,7 +95,11 @@ def binaries_in(path: Path) -> list[Path]:
         elif any(name.startswith(pre + s) for s in LIB_STEMS for pre in ("lib", "")) and \
                 p.suffix in (".dylib", ".so", ".dll"):
             found.append(p)
-    return sorted(found)
+        elif (p.parent / "HorizonEngine").is_dir() and p.suffix in ("", ".exe") and \
+                is_native_executable(p):
+            # <ProjectName>(.exe) of an exported game (Thema 211 step 10).
+            found.append(p)
+    return sorted(set(found))
 
 
 def symbols_of(path: Path) -> str:

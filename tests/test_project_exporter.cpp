@@ -2,6 +2,7 @@
 #include "TestFsUtil.h"
 #include <Hpak/ProjectConfig.h>
 #include <Hpak/ProjectExporter.h>
+#include <Hpak/GameBuildConfig.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakWriter.h>
 #include <HorizonCode/HcCompiledLoader.h>
@@ -1594,6 +1595,80 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
 
     he_test::removeAllQuiet(contentDir);
     he_test::removeAllQuiet(outputDir);
+}
+
+// Thema 211 step 14: after a game compiled from the SDK, the export folder has
+// the key in neither project.hcfg (zeroed) nor a patched block (that game's block
+// is empty); only the private HEGameBuildConfig.h it was built from has it. A
+// Shipping export then repacked everything with a fresh key every time (seen live:
+// 0 of 45 reused, 368 s against 12 s for Development).
+TEST_CASE("An incremental encrypted export reuses the key of the previous SDK game build")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_sdkkey_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_sdkkey_out";
+    auto headerDir  = std::filesystem::temp_directory_path() / "he_test_export_sdkkey_build";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    he_test::removeAllQuiet(headerDir);
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(headerDir);
+
+    const HE::UUID id{0xFEED,0xC0DE};
+    const auto blob = makeMinimalMaterialBlob(id, "sdk_mat");
+    { std::ofstream f(contentDir / "sdk_mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(blob.data()), blob.size()); }
+
+    ExportSettings settings;
+    settings.compress    = true;
+    settings.encrypt     = true;
+    settings.incremental = true;
+    REQUIRE(ProjectExporter::exportProject(contentDir, "SdkGame", "", outputDir, settings).success);
+
+    ProjectConfig first;
+    REQUIRE(ProjectConfigLoader::load(outputDir, first));
+    REQUIRE(first.encrypted);
+    uint8_t key[32];
+    std::memcpy(key, first.encKey, 32);
+
+    // What the SDK path leaves behind: the key only in the header.
+    const auto header = headerDir / "HEGameBuildConfig.h";
+    REQUIRE(HE::writeGameBuildConfigHeader(header, first, nullptr, "release"));
+    const auto toSdkState = [&]
+    {
+        ProjectConfig zeroed;
+        REQUIRE(ProjectConfigLoader::load(outputDir, zeroed));
+        std::memset(zeroed.encKey, 0, 32);
+        REQUIRE(ProjectConfigLoader::save(outputDir, zeroed));
+    };
+
+    SUBCASE("with the header the key is reused and the entry carried over")
+    {
+        toSdkState();
+        settings.previousBuildConfigHeader = header;
+        const auto again = ProjectExporter::exportProject(contentDir, "SdkGame", "", outputDir, settings);
+        REQUIRE(again.success);
+        CHECK(again.assetsReused == 1);
+        ProjectConfig cfg;
+        REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+        CHECK(std::memcmp(cfg.encKey, key, 32) == 0);
+        ContentManager cm;
+        REQUIRE(cm.loadPak((outputDir / "SdkGame.hpak").string(), key));
+        CHECK(cm.getMaterial(id) != nullptr);
+    }
+    SUBCASE("without it a fresh key is drawn and nothing is reused (the old behaviour)")
+    {
+        toSdkState();
+        const auto again = ProjectExporter::exportProject(contentDir, "SdkGame", "", outputDir, settings);
+        REQUIRE(again.success);
+        CHECK(again.assetsReused == 0);
+        ProjectConfig cfg;
+        REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+        CHECK(std::memcmp(cfg.encKey, key, 32) != 0);
+    }
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    he_test::removeAllQuiet(headerDir);
 }
 #endif // HE_HAVE_CRYPTO
 

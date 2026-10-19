@@ -244,6 +244,14 @@ struct HE_API ExportSettings {
     // the canonical loader name and project.hcfg records horizonCodeCompiled.
     // Empty = interpreted export (the default and the fallback).
     std::filesystem::path horizonCodeGenLib;
+    // Incremental + encrypt: the HEGameBuildConfig.h of the previous game build
+    // from the engine SDK for this project and profile (Thema 211). That game
+    // carries its key compiled in, neither in project.hcfg nor in a patched
+    // block, so without this the previous key is unreadable, a fresh one is
+    // drawn and every entry is packed again. Tried after both of those; a key
+    // that does not match the previous pak only costs the reuse (the manifest's
+    // settings fingerprint includes the key). Empty = not asked.
+    std::filesystem::path previousBuildConfigHeader;
 };
 
 struct HE_API ExportResult {
