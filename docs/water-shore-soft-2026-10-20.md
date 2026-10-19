@@ -71,7 +71,11 @@ mit Tiefe linear/ohne T-Stücke, Insel mit Brücke, großer See), `*test_engine_
   `EditorDeps/EngineContent/Materials/Water.hasset`, `tests/test_water_surface.cpp`, `tests/test_engine_materials.cpp`,
   `EditorHelp.cpp` (Tooltip), `he-docs.json` (Engine Water), `scripts/shore_edge_sharpness.py`.
 - **Verified:** siehe Messung oben (Bild, md5, Tests). `Water.hasset` zweimal `mat_gen` byte-gleich, EditorDeps = Deploy.
-- **Not verified:** D3D11/D3D12/Vulkan (Schritt 5; dieselbe Graph-/Vertex-Quelle, aber nie gerendert), echte
+- **Not verified:** Insel/Brücke im gerenderten Bild (nur der Test `bridged hole` deckt `refineShore` über eine
+  Ohrenschnitt-Brücke; kein Baseline-View hat eine Insel), Landschaft mit Y-Drehung oder ungleicher Skalierung (der Kanal
+  reist in der WELT-Normalen `mat3(model) * n`: eine Drehung um Y schiebt die Neigung von x nach z, bei 90° ist das Ufer wieder
+  hart; ungleiche Skalierung ändert das x/y-Verhältnis und damit `e`; alle Zeugen und Tests laufen ohne Drehung/Skalierung),
+  D3D11/D3D12/Vulkan (Schritt 5; dieselbe Graph-/Vertex-Quelle, aber nie gerendert), echte
   1-km-Landschaft mit Terrain-LOD (Witness: 1-m-Höhenfeld, LOD0), unsichtbarer Schatten/GI mit der Normalen-Neigung,
   GPU-Zeit des Mehr-Dreiecks-Meshes, Sculpt-Neubau im Editor interaktiv.
 - **Decisions taken:** Tiefe aus dem Gitter-`g` (rein aus Gitter + Optionen, Hash trägt sie) statt aus dem Terrain
@@ -85,7 +89,9 @@ mit Tiefe linear/ohne T-Stücke, Insel mit Brücke, großer See), `*test_engine_
   also nur bis 1 m), 5 (D3D/Vulkan).
 - **Traps:** gespeicherte Overrides/Skripte, die `Turbidity` nur mit 2 Werten setzen, haben z = w = 0: Kante wieder
   hart, kein Schaum (kein Fehler, nur das alte Bild). `kShoreFadeDepth` ist auch die Obergrenze der Tiefe, die das
-  Material kennt. Fremde Materialien auf dem Wasser sehen am Ufer bis 1,8° gekippte Normalen. Die Degenerierten
+  Material kennt. Fremde Materialien auf dem Wasser sehen am Ufer bis 1,8° gekippte Normalen. Der Test `hasTJunction` braucht 1e-5 m
+  Abstand (ein Float hält 25 m auf 3 µm): an der Brücke liegen zwei Eckpunkte ~4e-5 m auseinander (Kontur-Eckpunkt und eine
+  Kantenmitte), das ist kein T-Stück, nicht noch einmal diagnostizieren. Die Degenerierten
   (Fläche 0) Dreiecke des Ohrenschnitts bleiben im Mesh, Tests filtern sie (`solidIndices`).
 - **Next steps:** 1. Schritt 3. 2. Schritt 4 liest `e` für Transparenz (Boden sichtbar). 3. Schritt 5 rendert
   `beach`/`shore` auf D3D11/D3D12/Vulkan gegen `after-*.png`.
