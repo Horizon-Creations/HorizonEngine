@@ -95,6 +95,9 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem
 //       it is an ABI mix nobody can check at load; `why` says so, the classes ship
 //       interpreted
 //   otherwise (flat runtime) -> `legacy`, the editor's codegen SDK (separate libraries)
+// `gameSdkUnavailable`: unavailableReason() when the export asked for the SDK game
+// and cannot have it (no compiler, no SDK); `why` then names that instead of
+// asking for a checkbox that is already on.
 struct CodegenSdkChoice
 {
     HE::hccg::SdkInfo sdk;   // invalid = ship interpreted
@@ -102,7 +105,8 @@ struct CodegenSdkChoice
     bool              fromGameSdk = false;
 };
 CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool runtimeHasEngineDir,
-                                  const HE::hccg::SdkInfo& legacy);
+                                  const HE::hccg::SdkInfo& legacy,
+                                  const std::string& gameSdkUnavailable = {});
 
 // ── Build cache (topic 211 step 11) ─────────────────────────────────────────
 // A project + profile keeps its work dir, and in it the cmake build tree, across

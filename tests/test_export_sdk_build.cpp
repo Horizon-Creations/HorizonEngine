@@ -190,6 +190,12 @@ TEST_CASE("chooseCodegenSdk: the game's SDK and lib set, never the prebuilt game
         CHECK_FALSE(c.fromGameSdk);
         CHECK(c.why.find("Compile game from SDK") != std::string::npos);
     }
+    // Asked for, but the game cannot be built here (step 14, seen live without a
+    // compiler): the reason, not a request for the checkbox that is already on.
+    c = HE::ExportSdk::chooseCodegenSdk(sdk, false, true, legacy, "no working C++ compiler found");
+    CHECK_FALSE(c.sdk.valid());
+    CHECK(c.why.find("no working C++ compiler found") != std::string::npos);
+    CHECK(c.why.find("turn on") == std::string::npos);
 
     // A flat runtime (no HorizonEngine/) keeps the editor's codegen SDK.
     c = HE::ExportSdk::chooseCodegenSdk(sdk, false, false, legacy);

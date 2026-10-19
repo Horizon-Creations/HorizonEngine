@@ -1672,11 +1672,12 @@ void startExport(AppContext& ctx)
                     const char* sdkEnv = std::getenv("HE_GAME_SDK_DIR");
                     const auto gameSdk = HE::ExportSdk::findGameSdk(base, sdkProfile,
                         sdkEnv ? std::filesystem::path(sdkEnv) : std::filesystem::path{});
-                    const bool gameFromSdk = sdkGame && HE::ExportSdk::unavailableReason(
-                        gameSdk, sdkProfile, sdkCmakeOk, sdkCompilerOk).empty();
+                    const std::string gameSdkWhy = sdkGame ? HE::ExportSdk::unavailableReason(
+                        gameSdk, sdkProfile, sdkCmakeOk, sdkCompilerOk) : std::string();
+                    const bool gameFromSdk = sdkGame && gameSdkWhy.empty();
                     hcSdk = HE::ExportSdk::chooseCodegenSdk(gameSdk, gameFromSdk,
                         !runtimeDir.empty() && runtimeHasEngineDir(runtimeDir),
-                        HE::hccg::resolveSdk(base));
+                        HE::hccg::resolveSdk(base), gameSdkWhy);
                 }
 
                 Build::begin(stepNames);

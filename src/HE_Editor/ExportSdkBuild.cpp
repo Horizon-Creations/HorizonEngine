@@ -140,7 +140,7 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workD
 }
 
 CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool runtimeHasEngineDir,
-                                  const HE::hccg::SdkInfo& legacy)
+                                  const HE::hccg::SdkInfo& legacy, const std::string& gameSdkUnavailable)
 {
     CodegenSdkChoice c;
     if (gameFromSdk && gameSdk.valid())
@@ -152,8 +152,11 @@ CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool
     }
     if (runtimeHasEngineDir)
     {
-        c.why = "compiled HorizonCode is built with the game from the engine SDK; "
-                "turn on \"Compile game from SDK\"";
+        c.why = gameSdkUnavailable.empty()
+            ? "compiled HorizonCode is built with the game from the engine SDK; "
+              "turn on \"Compile game from SDK\""
+            : "compiled HorizonCode is built with the game from the engine SDK, which "
+              "cannot be compiled here (" + gameSdkUnavailable + ")";
         return c;
     }
     c.sdk = legacy;
