@@ -17,10 +17,16 @@ behobenen Collab-Fehler, auf Branch `claude/collab-bugs-materialien-horizoncode-
 - **Testname:** `"Streaming an engine material by UUID first must not hijack a project material
   of the same name"` (tests/test_project_exporter.cpp:707)
 - **Verifiziert:** Test einzeln grün (siehe unten); war laut Commit-Message rot vor dem Fix (beide
-  Checks, `idForPath` und `loadAsset(projMatId)`, schlugen fehl).
-- **Nicht verifiziert:** keine echte Mehr-Rechner-Sitzung (zwei laufende `HorizonEditor`-Prozesse);
-  der Test reproduziert die ContentManager-Mechanik unit-test-artig, nicht über eine reale
-  Collab-Session/MCP.
+  Checks, `idForPath` und `loadAsset(projMatId)`, schlugen fehl) — selbst nicht reproduziert (kein
+  Revert/Re-Test auf dem alten Stand in diesem Schritt, nur die Commit-Message als Quelle für "rot
+  davor").
+- **Nicht verifiziert:** **Dieser Test hat KEINEN zweiten Host/Client — das Thema verlangt "alle
+  drei Szenarien mit zwei Editoren in einem Test grün", diese Bedingung ist für Fehler 1 damit NICHT
+  erfüllt.** Der Test (gelesen, Zeilen 707–784) verwendet EINEN einzigen `ContentManager` (`cm`), der
+  zuerst per `ensureResident(engineMatId)` ein per Pak-UUID gestreamtes Asset lädt und dann per
+  `idForPath`/`loadAsset` auflöst — ein reiner ContentManager-/Pak-Mounting-Unit-Test ohne
+  `CollabSession`, `CollabController` oder zweite Maschine. Keine echte Mehr-Rechner-Sitzung (zwei
+  laufende `HorizonEditor`-Prozesse) wurde getestet.
 
 ## Fehler 2: Host-Änderung an HorizonCode-Graphen erreicht Clients nicht
 
@@ -35,12 +41,18 @@ behobenen Collab-Fehler, auf Branch `claude/collab-bugs-materialien-horizoncode-
 - **Fix:** Ein zweiter Diff direkt nach dem Claim, genau in dem Frame, in dem das Lock von
   "nicht gehalten" auf "gehalten" wechselt — vor dem Autosave.
 - **Testname:** `"Live sync: the host's edit on a freshly claimed lock reaches the client"`
-  (tests/test_collab_controller.cpp:~815, per-Tab-Reihenfolge von Hand nachgebaut)
-- **Verifiziert:** Test einzeln grün (siehe unten); `HorizonEditor` baut mit dem Fix sauber durch
-  (bestätigt, dass `EditorApplication.cpp` kompiliert — die Datei selbst ist NICHT in `he_tests`
-  gelinkt).
-- **Nicht verifiziert:** `EditorApplication.cpp` läuft nicht in `he_tests`; der Test bildet die
-  Frame-Reihenfolge nach, ist aber kein Lauf der echten Klasse. Keine echte Mehr-Rechner-Sitzung.
+  (tests/test_collab_controller.cpp:782)
+- **Verifiziert:** echtes Host/Client-Paar bestätigt (gelesen, Zeilen 782–830): ein `CollabController
+  host` ruft `startHosting`, ein zweiter `CollabController client` ruft `joinSession("127.0.0.1",
+  host.port(), …)` — eine reale `CollabSession`-Verbindung über echtes TCP auf localhost, kein
+  reiner In-Memory-Doppelgänger. Test einzeln grün (siehe unten); `HorizonEditor` baut mit dem Fix
+  sauber durch (bestätigt, dass `EditorApplication.cpp` kompiliert — die Datei selbst ist NICHT in
+  `he_tests` gelinkt). War laut Commit-Message rot vor dem Fix — selbst nicht reproduziert (nur die
+  Commit-Message als Quelle für "rot davor").
+- **Nicht verifiziert:** `EditorApplication.cpp` läuft nicht in `he_tests`; der Test bildet
+  `updateAssetCollabSync`s Pro-Tab-Frame-Reihenfolge von Hand nach (echte Host/Client-Session, aber
+  kein Lauf der echten `EditorApplication`-Klasse). Keine echte Mehr-Rechner-Sitzung (zwei laufende
+  `HorizonEditor`-Prozesse).
 
 ## Fehler 3: Wasser-Werkzeuge setzen dig bed nach Landscape-Edit zurück
 
@@ -61,7 +73,12 @@ behobenen Collab-Fehler, auf Branch `claude/collab-bugs-materialien-horizoncode-
   konvergiert zu falschen, zu tiefen Höhen; grün danach). Zwei begleitende Fälle
   (`"a lake's dig bed survives a landscape edit elsewhere"`, `"a settings patch on raised ground
   does not move the ground reference"`) decken die einfacheren, bereits korrekten Pfade ab.
-- **Verifiziert:** alle drei Fälle einzeln grün (siehe unten).
+- **Verifiziert:** alle drei Fälle einzeln grün (siehe unten); war laut Commit-Message rot vor dem
+  Fix (ein Oracle konvergiert zu falschen, zu tiefen Höhen) — selbst nicht reproduziert (nur die
+  Commit-Message als Quelle für "rot davor"). `host`/`client` laufen über `makeMachine()` +
+  `Net({...})` (test_terrain_sync.cpp), ein In-Test-Harness mit zwei vollständigen
+  `TerrainComponent`-Zuständen, aber ohne reale `CollabSession`/TCP — ein zweiseitiger Test, aber
+  über ein leichteres Doppel als Fehler 2's echte Session.
 - **Nicht verifiziert:** keine echte Mehr-Rechner-Sitzung; kein visueller Vergleich im laufenden
   Editor (kein D3D/Vulkan-Capture für dieses Thema vorgesehen — explizit ausgeschlossen).
 
@@ -85,11 +102,19 @@ echten Editor-Config), scoped Debug build.
 
 Die 5 roten Fälle, keiner davon berührt Collab-/Material-/Wasser-Code:
 
-- `tests/test_hc_codegen_export_build.cpp:181` — dokumentiertes Baseline-Rauschen (siehe
-  `docs/handoff-template.md`-Vorläufer-Handoffs dieses Themas, Schritt 1–3).
-- `tests/test_input_gamepad.cpp` (mehrere Fälle, Zeilen 725–896) — ein echtes Xbox-Gamepad ist an
-  NN-WS03 angeschlossen; dokumentiert in der Hive-Lektion zu Vulkan/D3D-Baseline-Rauschen.
-- `tests/test_physics_threading.cpp:305` — SEH-Crash, dokumentiertes Baseline-Rauschen.
+- `tests/test_hc_codegen_export_build.cpp:181` — dokumentiertes Baseline-Rauschen; bereits in den
+  hive_post-Ergebnissen von Schritt 1 (9b762406) und Schritt 3 (0df9ea73) dieses Themas als
+  vorbestehend genannt, unabhängig vom hier gebauten Code.
+- `tests/test_input_gamepad.cpp` (3 Testfälle, Zeilen 725–896) — ein echtes Xbox-Gamepad ist an
+  NN-WS03 angeschlossen (dokumentiert in der Auto-Memory-Notiz `vulkan-d3d-baseline-noise.md`, nicht
+  in einer Hive-Lektion). **Umgebungsabhängig, nicht deterministisch:** Schritt 3's eigener Lauf
+  eine Stunde zuvor (`full_run2.log`, selbes Binary — `ninja: no work to do` auf demselben HEAD
+  `0df9ea73` bestätigt das) zeigte NULL Gamepad-Fehler (nur 2 rote Fälle insgesamt: hc_codegen +
+  physics_threading). Derselbe Build zeigte in diesem Schritt 3 rote Gamepad-Testfälle. Die
+  Codebasis war zwischen beiden Läufen identisch — der Unterschied kommt vom angeschlossenen
+  Controller (Reconnect/Zustandswechsel), nicht vom Code.
+- `tests/test_physics_threading.cpp:305` — SEH-Crash, dokumentiertes Baseline-Rauschen (gleiche
+  Quelle wie oben).
 
 Zusätzlich gezielt nur die drei geänderten Testdateien gelaufen lassen, zur Bestätigung ohne das
 Rauschen der übrigen Suite:
@@ -99,6 +124,37 @@ tests\he_tests.exe --source-file=*test_project_exporter.cpp --source-file=*test_
 [doctest] test cases:  17 |  17 passed | 0 failed | 5623 skipped
 [doctest] assertions: 162 | 162 passed | 0 failed |
 ```
+
+## Gezielter Collab- und Wasser-Testlauf
+
+Explizit die Collab- und Wasser-/Lake-Testdateien gelaufen lassen (Dateinamen einzeln als
+`--source-file`, nicht als Substring-Wildcard — der Worktree-Ordner selbst heißt
+`claude-collab-bugs-materialien-horizonco` und enthält damit das Wort "collab"; ein
+`--source-file=*collab*`-Wildcard matcht über den vollen Pfad fälschlich die GESAMTE Suite):
+
+```
+test_collab_docsync.cpp, test_collab_settle.cpp, test_collab_undo.cpp,
+test_mcp_tools_collab.cpp, test_net_collab.cpp, test_collab_controller.cpp,
+test_terrain_sync.cpp, test_water_lake.cpp, test_water_lake_api.cpp,
+test_water_brush.cpp, test_water_field.cpp, test_project_exporter.cpp
+
+[doctest] test cases:  41 |  41 passed | 0 failed | 5599 skipped
+[doctest] assertions: 423 | 423 passed | 0 failed |
+```
+
+Nicht real gegen einen externen Server gelaufen (brauchen eine laufende `collab_server`-Instanz,
+per Env-Var angebunden, sonst früh-returnend grün ohne die eigentliche Leitung zu prüfen):
+
+- `test_mcp_tools_collab.cpp:230` "collab tools: host and join by session id through a real relay"
+  (HE_TEST_RELAY)
+- `test_net_relay.cpp:825` "Relay: against a real collab_server" (HE_TEST_RELAY)
+- `test_net_relay.cpp:1291` "Relay fan-out: against a real collab_server" (HE_TEST_RELAY)
+- `test_net_team.cpp:787/891/972` "Team: two editors / saved session tokens / profiles through a
+  real collab_server" (HE_TEST_TEAM_SERVER)
+
+Daneben zwei allgemeine (nicht collab-spezifische) Netz-Stack-Fälle, die auf NN-WS03 wegen
+`HE_NET_LOOPBACK_ONLY` nur den Loopback-Pfad prüfen, nicht den dual-stack-Pfad: `test_net_discovery.cpp:941`,
+`test_net_tcp.cpp:166/204`.
 
 ## `editor_help_audit.py --check`
 
@@ -125,33 +181,51 @@ Grün, 0 offene Controls.
 - **Branch / commit:** `claude/collab-bugs-materialien-horizoncode-wasser` @ `0df9ea73` (gepusht: ja,
   bereits vor diesem Schritt)
 - **Done:** Alle drei Collab-Bugs (Engine-Material-Referenz, HorizonCode-Host→Client-Sync,
-  Wasser dig-bed) sind mit je einem roten→grünen `he_tests`-Fall verifiziert; voller `he_tests`-Lauf
-  zeigt nur dokumentiertes, themenfremdes Baseline-Rauschen; `HorizonEditor` und `he_tests` bauen
-  sauber im Vordergrund; `editor_help_audit.py --check` ist grün.
+  Wasser dig-bed) sind mit je einem (laut Commit-Message) roten→grünen `he_tests`-Fall gefixt und
+  jetzt grün; voller `he_tests`-Lauf zeigt nur dokumentiertes, themenfremdes Baseline-Rauschen;
+  `HorizonEditor` und `he_tests` bauen sauber im Vordergrund; `editor_help_audit.py --check` ist
+  grün. **ABER:** die Thema-Bedingung "alle drei Szenarien mit zwei Editoren in einem Test grün" ist
+  nur für Fehler 2 und 3 erfüllt — Fehler 1's Test hat keinen zweiten Host/Client (siehe oben, Fehler
+  1 → Nicht verifiziert). Das Thema ist damit nach dem eigenen Fertig-Kriterium noch NICHT
+  vollständig abgeschlossen.
 - **Files touched (dieser Schritt):** nur `docs/collab-bugs-verifikation-2026-10-15.md` neu
   angelegt — keine Code-Änderungen in diesem Schritt.
 - **Verified:** siehe Abschnitte oben (Vollbau, voller Testlauf, gezielter Testlauf der drei
-  Testdateien, editor_help_audit.py, CI-Lauf gestartet).
-- **Not verified:** keine echte Mehr-Rechner-Sitzung (zwei tatsächlich laufende
-  `HorizonEditor`-Prozesse/MCP-Clients) für keinen der drei Fehler — alle drei Tests bilden Host/
-  Client-Paare über den In-Test-Harness (`makeMachine`/`Net` bzw. Hand-Nachbau der
-  Editor-Frame-Reihenfolge) nach, nicht über echte Prozesse. `EditorApplication.cpp` (Fehler 2)
-  läuft nicht in `he_tests` selbst. Kein visueller D3D/Vulkan-Vergleich für den Wasser-Fix (laut
-  Thema explizit ausgeschlossen). Der neue CI-Lauf für `0df9ea73` war bei Abschluss dieses Schritts
-  noch nicht fertig.
+  Testdateien, gezielter Collab+Wasser-Testlauf über 12 Testdateien, editor_help_audit.py,
+  CI-Lauf gestartet).
+- **Not verified:**
+  - **Fehler 1 hat keinen Zwei-Editoren-Test** (siehe oben) — die Thema-Bedingung ist dafür nicht
+    erfüllt. Das muss noch nachgeholt werden (neuer Test mit zwei `ContentManager`/Sessions, oder
+    die Queen entscheidet, dass der bestehende Unit-Test für diesen Fehler ausreicht).
+  - Keine echte Mehr-Rechner-Sitzung (zwei tatsächlich laufende `HorizonEditor`-Prozesse/
+    MCP-Clients) für keinen der drei Fehler. `EditorApplication.cpp` (Fehler 2) läuft nicht in
+    `he_tests` selbst.
+  - "Rot vor dem Fix" wurde für keinen der drei Fehler in diesem Schritt selbst nachvollzogen
+    (kein Revert + Re-Test) — die Aussage stützt sich auf die jeweilige Commit-Message.
+  - Die HE_TEST_RELAY-/HE_TEST_TEAM_SERVER-gated Collab-Fälle (6 Testfälle, siehe oben) laufen ohne
+    reale `collab_server`-Instanz nur ihren früh-returnenden Zweig, nicht die eigentliche Leitung.
+  - Kein visueller D3D/Vulkan-Vergleich für den Wasser-Fix (laut Thema explizit ausgeschlossen).
+  - Der neue CI-Lauf für `0df9ea73` war bei Abschluss dieses Schritts noch nicht fertig.
 - **Decisions taken:** frischen CI-Lauf für HEAD `0df9ea73` gestartet, weil der einzige vorhandene
   CI-Lauf nur bis zum vorletzten Commit reichte und den Wasser-Fix nie gesehen hatte.
 - **Decisions suggested, not taken:** keine.
-- **Pending:** nichts Code-seitiges für dieses Thema; die Queen kann nach grünem CI-Lauf auf
-  `0df9ea73` mergen. Eine echte Mehr-Rechner-Verifikation (zwei physische/MCP-gesteuerte
-  Editor-Instanzen) bliebe ein optionaler Nachschlag, ist aber laut Thema nicht Bedingung für
-  "fertig" (das Thema verlangt zwei-Editoren-*Tests*, nicht zwei-Editoren-*Prozesse*).
+- **Pending:** Fehler 1 braucht noch einen Test mit einem zweiten Host/Client (oder eine
+  Entscheidung der Queen, dass der bestehende Single-ContentManager-Test als Nachweis reicht), bevor
+  das Thema nach seinem eigenen Fertig-Kriterium geschlossen werden kann. Ansonsten nichts
+  Code-seitiges; nach grünem CI-Lauf auf `0df9ea73` und Klärung von Fehler 1 kann die Queen mergen.
+  Eine echte Mehr-Rechner-Verifikation (zwei physische/MCP-gesteuerte Editor-Instanzen) bliebe ein
+  optionaler Nachschlag, ist aber laut Thema nicht Bedingung für "fertig" (das Thema verlangt
+  zwei-Editoren-*Tests*, nicht zwei-Editoren-*Prozesse*).
 - **Traps:** `he_tests` überschreibt die echte `%APPDATA%`-Config — immer `APPDATA` auf ein
   Scratch-Verzeichnis setzen (hier `C:\hw209\scratch_appdata`). `test_input_gamepad.cpp` schlägt auf
   NN-WS03 real fehl, weil dort ein echtes Xbox-Pad angeschlossen ist — kein neuer Flake.
   `EditorApplication.cpp` ist nicht in `he_tests` gelinkt; ein Fix dort braucht immer auch einen
   `HorizonEditor`-Build zur Bestätigung.
-- **Next steps:** 1. CI-Lauf 39290146357 abwarten (beobachtet die Hive). 2. Bei Grün: Merge nach
-  `release/0.7.0` durch die Queen. 3. Optional, falls gewünscht: eine echte Zwei-Prozess-Collab-Sitzung
-  (zwei `HorizonEditor`-Instanzen über MCP) für mindestens einen der drei Fälle als zusätzliche
-  manuelle Bestätigung.
+- **Next steps:** 1. Fehler 1 (`tests/test_project_exporter.cpp:707`): einen Zwei-Editoren-Test
+  ergänzen (z. B. zwei `ContentManager`/`CollabSession` wie in `test_collab_controller.cpp:782`,
+  die beide dasselbe gepackte Asset mounten/referenzieren) — oder die Queen entscheidet bewusst,
+  dass der bestehende Unit-Test ausreicht, und das Thema wird trotzdem geschlossen. 2. CI-Lauf
+  39290146357 abwarten (beobachtet die Hive). 3. Bei Grün und geklärtem Punkt 1: Merge nach
+  `release/0.7.0` durch die Queen. 4. Optional: eine echte Zwei-Prozess-Collab-Sitzung (zwei
+  `HorizonEditor`-Instanzen über MCP) für mindestens einen der drei Fälle als zusätzliche manuelle
+  Bestätigung.
