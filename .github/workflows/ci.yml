@@ -523,6 +523,24 @@ jobs:
             fi
           done
 
+      # The engine SDK (topic 222): the editor build runs the HorizonSDK target, which
+      # installs it into $DEPLOY_ROOT/EngineSDK, beside Editor/. The unzipped editor
+      # looks for <editor>/EngineSDK ("Compile game from SDK"), so it moves in as the
+      # runtimes do. Not push-only like those: every editor build installs it, so a
+      # missing folder means the dependency is gone again.
+      - name: Stage the engine SDK into the editor package
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          DEPLOY_ROOT="${DEPLOY_ROOT:-package}"
+          if [ ! -d "$DEPLOY_ROOT/EngineSDK" ]; then
+            echo "::error::$DEPLOY_ROOT/EngineSDK missing — HorizonEditor no longer builds HorizonSDK (cmake/HorizonSDK.cmake)"
+            exit 1
+          fi
+          rm -rf "$DEPLOY_ROOT/Editor/EngineSDK"
+          mv "$DEPLOY_ROOT/EngineSDK" "$DEPLOY_ROOT/Editor/EngineSDK"
+          echo "staged EngineSDK ($(ls "$DEPLOY_ROOT/Editor/EngineSDK/lib" | tr '\n' ' '))"
+
       # .heproj file type (Thema 161): Windows and Linux have no installer, so the
       # registration is files inside the package, FileTypes/. The ctest case
       # heproj_file_types judged the SOURCE of those files; this judges what was
