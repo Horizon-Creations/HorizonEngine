@@ -58,7 +58,10 @@ not notice.
   --require dev --require release` ok, same stamp; timings above; `scripts/he_sdk_export_live.py`:
   `Development=True Shipping=True no_compiler=True`, Shipping log "Game compiled from the SDK
   (release)"; `build_profile_strings.py --profile release` OK on the Shipping export and on lib/release.
-  The dmg target and he_tests: see the result post.
+  `--target dmg` (package_macos.sh, 31 s on top): "engine SDK (lib sets: dev release) -> Resources/EngineSDK",
+  `--verify` on `out/dmg_staging/HorizonEditor.app/Contents/Resources/EngineSDK` ok for both.
+  he_tests (all but test_material_graph): 5492/5495, the three known ones (test_hpak.cpp:1188 user
+  content cache, test_profiler.cpp:107/215 order) pass alone / with an empty HOME.
 - **Not verified:** Windows/Linux local builds with the option ON (CI has it OFF); a header edit's cost;
   a CLion build without ccache in the environment (the launchers are mirrored from the cache).
 - **Decisions:** always ON locally, OFF in CI by `$CI`; nested tree inside the editor tree (deleting the
