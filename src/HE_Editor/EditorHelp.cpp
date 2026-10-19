@@ -263,7 +263,9 @@ namespace
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
 	  "the transparent pass — so it no longer writes depth. On the engine water "
 	  "(already transparent) the parameter of that name is the opacity looking "
-	  "straight down into clear water; depth tint, Fresnel and foam raise it.",
+	  "straight down into clear water; depth tint, Fresnel and foam raise it. "
+	  "In the last metre before a landscape's shore it falls toward a quarter "
+	  "of itself as the water gets shallower, so the ground shows through.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
 	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
@@ -293,7 +295,8 @@ namespace
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
-	  "below the surface is not read yet. z = shore width: at a landscape's "
+	  "below the surface is not read yet (in the last metre before a landscape's "
+	  "shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
 	  "waterline the water fades in over this many metres of depth instead of "
 	  "ending in a hard edge (0 = hard, up to 0.7). w = shore foam: the lace "
 	  "along the waterline (0 = none, 1 = strong).",

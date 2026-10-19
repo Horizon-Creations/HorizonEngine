@@ -14,6 +14,7 @@ Views:
   shore    HE_DUMP_WATERLAKE=bowl, the curved bank, grid 256 (0.5 m cells)
   shore33  the same with HE_DUMP_WATERRES=33 (3.9 m cells = a 1000 m landscape at res 256)
   shoresheet33  shore33 with the landscape hidden (the sheet's own outline)
+  shallow, shallow-hi  the wide shallow bank seen from 6 m / 4 m up (the ground through the water)
   beach, beach33, beach-smooth, beach-sheet   the jagged shore of a gentle rough beach (see VIEWS)
 
 Usage: scripts/water_baseline_shots.py OUTDIR [--prefix baseline] [--backends Metal,OpenGL]
@@ -43,6 +44,12 @@ VIEWS = {
                     CAMX="8", CAMY="318", CAMZ="34", PITCH="-45"),
     "beach33": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERROUGH="0.03", WATERLEVEL="0.3",
                     CAMX="8", CAMY="318", CAMZ="34", PITCH="-45", WATERRES="33"),
+    # Shallow water over a wide gentle bank (slope 0.02, 0.5 m of water at the shore line): the ground
+    # through the water and the blend to the edge (Thema 206 step 4). Low camera, 30 degrees.
+    "shallow": dict(WATERLAKE="slope", WATERSLOPE="0.02", WATERROUGH="0.015", WATERLEVEL="0.5",
+                    CAMX="8", CAMY="306", CAMZ="20", PITCH="-30"),
+    "shallow-hi": dict(WATERLAKE="slope", WATERSLOPE="0.02", WATERROUGH="0.015", WATERLEVEL="0.5",
+                       CAMX="2", CAMY="304", CAMZ="14", PITCH="-40"),
     "beach-smooth": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3",
                          CAMX="8", CAMY="318", CAMZ="34", PITCH="-45"),
     "beach-sheet": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERROUGH="0.03", WATERLEVEL="0.3",
