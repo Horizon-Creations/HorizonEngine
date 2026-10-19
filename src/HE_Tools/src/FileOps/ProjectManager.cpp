@@ -672,7 +672,6 @@ static json profileToJson(const ExportProfile& p)
 	j["shaderBackends"]   = p.shaderBackends;
 	j["compileHorizonCode"] = p.compileHorizonCode;
 	j["hcStopOnFailure"]    = p.hcStopOnFailure;
-	j["compileGameFromSdk"] = p.compileGameFromSdk;
 	j["textureFormat"]      = p.textureFormat;
 	j["textureQuality"]     = p.textureQuality;
 	return j;
@@ -696,7 +695,9 @@ static ExportProfile profileFromJson(const json& j)
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
 	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	p.hcStopOnFailure    = jsonBool(j, "hcStopOnFailure", false);
-	p.compileGameFromSdk = jsonBool(j, "compileGameFromSdk", false);
+	// "compileGameFromSdk" (topic 211) is read by nobody any more: every export
+	// compiles its game from the engine SDK (topic 222 step 3). A project saved
+	// with it still loads; the key is dropped on the next save.
 	p.textureFormat      = jsonString(j, "textureFormat", "Auto");
 	if (p.textureFormat != "None") p.textureFormat = "Auto";   // one spelling, not a guess
 	p.textureQuality     = j.contains("textureQuality") && j["textureQuality"].is_number_integer()

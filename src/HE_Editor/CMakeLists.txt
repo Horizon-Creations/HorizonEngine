@@ -333,6 +333,7 @@ add_executable(HorizonEditor WIN32
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
 	ExportSdkBuild.cpp
+	ExportSdkGateUi.cpp
 	HcExecTrace.cpp
 	HcWatch.cpp
 	HcWatchPanel.cpp

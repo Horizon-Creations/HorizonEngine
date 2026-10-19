@@ -263,20 +263,21 @@ else
     echo "    WARNING: $DEPLOY_DIR/SDK not found — the .app will export HorizonCode interpreted only."
 fi
 
-# The engine SDK (cmake/HorizonSDK.cmake): what "Compile game from SDK" builds an
-# exported game against. The HorizonSDK target installs it beside the editor's deploy,
-# a sibling like the app flavours, and the editor build runs that target. findGameSdk()
-# looks for <base>/EngineSDK, so without it every such export from the .app falls back
-# to the prebuilt game. It carries the lib set of the tree that built the editor (dev);
-# a release set beside it comes from a release-profile tree (topic 222 step 3).
+# The engine SDK (cmake/HorizonSDK.cmake): what every export compiles its game against
+# (topic 222 step 3: no prebuilt game ships). The HorizonSDK target installs it beside
+# the editor's deploy, a sibling like the app flavours, and the editor build runs that
+# target. findGameSdk() looks for <base>/EngineSDK, so a .app without it cannot export
+# at all, and packaging stops. It carries the lib set of the tree that built the editor
+# (dev); a release set beside it comes from a release-profile tree (topic 222 step 4).
 _engine_sdk="$SOURCE_DIR/out/deploy/EngineSDK"
 if [ -d "$_engine_sdk" ]; then
     echo "    engine SDK (lib sets: $(ls "$_engine_sdk/lib" | grep -v '^cmake$' | paste -sd' ' -)) → Resources/EngineSDK"
     rm -rf "$RES_PATH/EngineSDK"
     cp -R "$_engine_sdk" "$RES_PATH/EngineSDK"
 else
-    echo "    WARNING: $_engine_sdk not found — exports from the .app will use the prebuilt game."
-    echo "             Build HorizonEditor first (it installs the engine SDK alongside)."
+    echo "    ERROR: $_engine_sdk not found — the .app could not export any game."
+    echo "           Build HorizonEditor first (it installs the engine SDK alongside)."
+    exit 1
 fi
 
 # ─── 6b. App icon (.icns from the HC logo) ────────────────────────────────────

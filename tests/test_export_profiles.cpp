@@ -361,7 +361,6 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].appBundle       = true;
     proj.exportProfiles[1].textureFormat   = "None";
     proj.exportProfiles[1].textureQuality  = 2;
-    proj.exportProfiles[1].compileGameFromSdk = true;
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -384,8 +383,6 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].appBundle);
     CHECK(p2.exportProfiles[1].textureFormat == "None");
     CHECK(p2.exportProfiles[1].textureQuality == 2);
-    CHECK(p2.exportProfiles[1].compileGameFromSdk);
-    CHECK_FALSE(p2.exportProfiles[2].compileGameFromSdk); // default: the prebuilt game
     CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true
@@ -401,6 +398,42 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
         nlohmann::json j = nlohmann::json::parse(in);
         CHECK(j.value("futureField", 0) == 42);
         CHECK(j.contains("preset"));
+    }
+    he_test::removeAllQuiet(dir);
+}
+
+// Topic 222 step 3: "Compile game from SDK" is no option any more, every export
+// compiles its game. A project saved while it was one still loads, and the key
+// goes with the next save instead of lingering as a switch nothing reads.
+TEST_CASE("Export profile: the old compileGameFromSdk key loads and is dropped on save")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_sdkgame";
+    he_test::removeAllQuiet(dir);
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "SdkGame", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        REQUIRE(j.contains("exportProfiles"));
+        REQUIRE(j["exportProfiles"].is_array());
+        REQUIRE_FALSE(j["exportProfiles"].empty());
+        for (auto& prof : j["exportProfiles"]) prof["compileGameFromSdk"] = true;
+        std::ofstream out(heproj);
+        out << j.dump(4);
+    }
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    const size_t profiles = pm2.currentProject().exportProfiles.size();
+    CHECK(profiles >= 1);
+    REQUIRE(pm2.saveProject(heproj));
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        REQUIRE(j["exportProfiles"].size() == profiles);
+        for (const auto& prof : j["exportProfiles"])
+            CHECK_FALSE(prof.contains("compileGameFromSdk"));
     }
     he_test::removeAllQuiet(dir);
 }

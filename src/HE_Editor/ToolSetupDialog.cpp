@@ -73,6 +73,8 @@ bool s_sawMissing    = false;   // something was missing while the dialog was op
 Tool   s_flashTool   = Tool::None;
 double s_flashUntil  = 0.0;
 bool   s_flashArmed  = false;   // set by requestShow, started once the dialog draws
+std::string s_purpose;          // requestShowFor: who opened it and what waits
+bool   s_showing     = false;   // the popup was drawn in the last DrawToolSetupDialog
 
 // Pre-filled from whatever git already has, so a user with only one of the two set
 // does not have to retype the other.
@@ -780,6 +782,7 @@ void resetStateForTests()
 	s_queue.clear();
 	s_openRequested = s_autoOpened = s_dontShowAgain = s_sawMissing = false;
 	s_flashTool = Tool::None; s_flashUntil = 0.0; s_flashArmed = false;
+	s_purpose.clear(); s_showing = false;
 	s_name[0] = s_email[0] = '\0';
 	s_identitySeeded = false;
 }
@@ -789,7 +792,18 @@ void requestShow(Tool focus)
 	s_openRequested = true;
 	s_flashTool     = focus;
 	s_flashArmed    = focus != Tool::None;
+	s_purpose.clear();
 }
+
+void requestShowFor(Tool focus, const char* purpose)
+{
+	requestShow(focus);
+	s_purpose = purpose ? purpose : "";
+}
+
+const char* purpose() { return s_purpose.c_str(); }
+
+bool isShowing() { return s_showing; }
 
 void drawToolSetup(AppContext& ctx, bool* closeRequested)
 {
@@ -822,6 +836,15 @@ void drawToolSetup(AppContext& ctx, bool* closeRequested)
 				"to compile HorizonCode and native GameLogic; git, Git LFS and your name are "
 				"needed for source control. Installs go through this system's package manager. %s",
 				platformPromptSentence());
+		}
+		// Opened for something that is waiting on a tool (the export): say what
+		// waits and that it carries on by itself.
+		if (!s_purpose.empty())
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+			ImGui::TextWrapped("%s", s_purpose.c_str());
+			ImGui::PopStyleColor();
 		}
 		ImGui::Spacing();
 	}
@@ -921,13 +944,19 @@ void DrawToolSetupDialog(AppContext& ctx)
 
 	ImGui::SetNextWindowSize(ImVec2(kDialogWidth, 0.0f), ImGuiCond_Appearing);
 	EditorWidgets::pinDialogToEditorWindow();
+	s_showing = false;
 	if (!ImGui::BeginPopupModal("##ToolSetup", nullptr,
 	                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		// Closed (or never opened): whatever opened it for a purpose has had its answer.
+		s_purpose.clear();
 		return;
+	}
 
 	bool close = false;
 	drawToolSetup(ctx, &close);
 	if (close) ImGui::CloseCurrentPopup();
+	else s_showing = true;
 	ImGui::EndPopup();
 }
 

@@ -1,13 +1,17 @@
 #pragma once
 // Export: compile the game itself against an engine SDK (topic 211 step 8).
 //
-// The prebuilt-runtime export runs first and stays the answer whenever this
-// cannot run: no SDK of the wanted profile, no cmake or compiler, a configure or
-// compile that fails. Only a game that actually built replaces the prebuilt
-// executable (and the engine libraries beside it, which must come from the same
-// SDK). The game then carries the project configuration and the pak key compiled
-// in (HEGameBuildConfig.h, written into a private work dir, never into the
-// export folder) and only the features its profile has.
+// Every export compiles its game (topic 222 step 3): there is no option and no
+// prebuilt game to fall back on. The runtime bundle beside the editor is still
+// laid down first, as the export's scaffolding (data layout, the Python plugin,
+// the key the exporter patches in), and its executable plus the engine libraries
+// beside it are then replaced by the ones built from the SDK. A run that cannot
+// compile (no SDK of the wanted profile, no cmake or compiler) does not start
+// (checkExportGate); one whose compile fails is a failed export, and the
+// prebuilt executable is taken out of the folder so it cannot ship by accident.
+// The game carries the project configuration and the pak key compiled in
+// (HEGameBuildConfig.h, written into a private work dir, never into the export
+// folder) and only the features its profile has.
 //
 // ImGui-free by construction, so the decisions are testable in he_tests.
 #include <HorizonScene/HcCodegen.h>   // DylibBuildSpec: the cmake configure + build
@@ -52,6 +56,35 @@ GameSdk findGameSdk(const std::filesystem::path& editorBase, const std::string& 
 std::string unavailableReason(const GameSdk& sdk, const std::string& profile,
                               bool cmakeFound, bool compilerFound);
 
+// ── Before an export starts (topic 222 step 3) ──────────────────────────────
+// What the dialog shows under its settings and what the Export button checks
+// before any scene is serialized:
+//   Blocked    nothing in this editor can fix it: the target is another
+//              platform (the game is compiled with this machine's toolchain), or
+//              there is no SDK with the profile's lib set. Installing tools would
+//              not help, so this wins over a missing toolchain.
+//   Waiting    the toolchain probe has not answered yet (also again after a
+//              recheck: the editor drops the probe while it re-runs).
+//   NeedTools  cmake and/or the compiler are missing: the Tool Setup dialog
+//              installs them, and a parked export continues once they are found.
+//   Ready      the export can run; `sdk` is the SDK it compiles against.
+enum class GateState { Ready, Waiting, NeedTools, Blocked };
+struct ExportGate
+{
+    GateState   state = GateState::Waiting;
+    GameSdk     sdk;
+    std::string profile;          // dev | release
+    std::string why;              // empty when Ready
+    bool        needCmake    = false;
+    bool        needCompiler = false;
+    bool ready() const { return state == GateState::Ready; }
+};
+// `probe` null = the probe is still running. `targetName` is the export's target
+// platform as the dialog names it ("Windows"), used only for a non-host target.
+ExportGate checkExportGate(const GameSdk& sdk, const std::string& profile, bool hostTarget,
+                           const HE::hccg::ToolchainProbe* probe,
+                           const std::string& targetName = {});
+
 // Writes <header> (HEGameBuildConfig.h) from what the prebuilt export just put
 // down: project.hcfg in `dataDir`, Config/ProjectSettings.json under it, and the
 // pak key — from the hcfg, or (when the exporter patched it into the prebuilt
@@ -86,27 +119,11 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const std::filesystem
 // The HorizonCodeGen library is built against the same SDK and lib set as the
 // game, through its package: it links the one HorizonEngine library of that
 // profile, bakes the profile in (the game refuses another) and ships in the
-// export's HorizonEngine/ beside that library.
-// `gameFromSdk` = the export compiles the game AND unavailableReason(gameSdk) was
-// empty, so the game will be built from exactly that SDK.
-//   game compiled from a usable SDK -> that SDK (codegen SDK info with its profile)
-//   otherwise, runtime with HorizonEngine/ -> nothing: the prebuilt game's engine
-//       library is not the SDK's, and a library linked against another build of
-//       it is an ABI mix nobody can check at load; `why` says so, the classes ship
-//       interpreted
-//   otherwise (flat runtime) -> `legacy`, the editor's codegen SDK (separate libraries)
-// `gameSdkUnavailable`: unavailableReason() when the export asked for the SDK game
-// and cannot have it (no compiler, no SDK); `why` then names that instead of
-// asking for a checkbox that is already on.
-struct CodegenSdkChoice
-{
-    HE::hccg::SdkInfo sdk;   // invalid = ship interpreted
-    std::string       why;   // set when sdk is invalid
-    bool              fromGameSdk = false;
-};
-CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool runtimeHasEngineDir,
-                                  const HE::hccg::SdkInfo& legacy,
-                                  const std::string& gameSdkUnavailable = {});
+// export's HorizonEngine/ beside that library. Since every export compiles its
+// game, that is always the game's SDK (the editor's own codegen SDK and the
+// prebuilt game's library are never linked into an export). Invalid when
+// `gameSdk` is.
+HE::hccg::SdkInfo codegenSdkFor(const GameSdk& gameSdk);
 
 // ── Build cache (topic 211 step 11) ─────────────────────────────────────────
 // A project + profile keeps its work dir, and in it the cmake build tree, across
