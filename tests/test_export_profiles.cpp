@@ -377,9 +377,11 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].excludePatterns
           == std::vector<std::string>{ "Debug/*", "*_wip.hasset" });
     CHECK(p2.exportProfiles[1].startupScene == "Content/Menu.hescene");
-    CHECK(p2.exportProfiles[1].outputDir == "/tmp/ship_out");
+    // The output directory and the target are derived/fixed, never read back: a
+    // path saved on one OS is foreign on another (a "C:\..." name is relative on macOS).
+    CHECK(p2.exportProfiles[1].outputDir.empty());
     CHECK_FALSE(p2.exportProfiles[1].incremental);
-    CHECK(p2.exportProfiles[1].targetPlatform == "Windows");
+    CHECK(p2.exportProfiles[1].targetPlatform == "Host");
     CHECK(p2.exportProfiles[1].appBundle);
     CHECK(p2.exportProfiles[1].textureFormat == "None");
     CHECK(p2.exportProfiles[1].textureQuality == 2);

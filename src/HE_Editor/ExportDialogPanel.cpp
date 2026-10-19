@@ -88,35 +88,21 @@ static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL 
 // under the very keys the game reads them by. Defaults are what a game shipped
 // with before the config could carry them, so an untouched dialog changes
 // nothing about the output.
-static int    s_exportWindowWidth  = 1280;
-static int    s_exportWindowHeight = 720;
-static std::string s_exportWindowMode = "Fullscreen";  // Windowed | Fullscreen | Borderless
-static bool   s_exportGameVSync    = true;
-static std::string s_exportBackend;                    // getRHIName value; empty = the target's default
+// The window and the backend are not asked at export time any more: they are
+// the project's (Project ▸ Game Window page) or, when it defers to the editor,
+// a 1280x720 fullscreen window on the platform's default backend. Nothing is
+// remembered in the editor's settings, so an old "GameBackend" key in
+// config.json cannot ride into a build.
+constexpr int         kDefaultWindowWidth  = 1280;
+constexpr int         kDefaultWindowHeight = 720;
+constexpr const char* kDefaultWindowMode   = "Fullscreen";   // Windowed | Fullscreen | Borderless
 
-// The backend list lives in GameBackendRules.h now, shared with the game
-// runtime that reads what this dialog writes — see the header. ("Host" is
-// resolved there too, by targetPlatformName.)
-static std::vector<const char*> exportBackendChoices(const std::string& platform)
-{
-    return HE::BackendRules::choicesFor(platform);
-}
-
-// Which backend THIS export ships, as opposed to which one the dialog remembers.
-// Asked here, per export, and deliberately NOT written back into s_exportBackend:
-// that static is the GAME's choice, remembered across projects in the editor's
-// own settings under the key "GameBackend" and reloaded whenever the dialog
-// opens. The rule itself, and why writing to it was the bug, is in the header.
+// Which backend THIS export ships. The rule itself is in GameBackendRules.h.
 // The project's Render Defaults page (Config/ProjectSettings.json) when it has
-// switched "Use the editor's settings" OFF — then the window and backend rows
-// are the PROJECT's answer, on every machine, and the dialog's remembered rows
-// are not consulted. nullptr while the project defers to the editor (the
-// default, and every project made before the page existed).
-//
-// The project's values are READ here, never copied into the s_export* statics:
-// those are the editor's memory across projects, and a project that wrote its
-// own numbers into them would have every later export of some other project
-// start from those (see dialog-static-leaks in the Software-backend story).
+// switched "Use the editor's settings" OFF — then the window and backend are
+// the PROJECT's answer, on every machine. nullptr while the project defers to
+// the editor (the default, and every project made before the page existed).
+// Read here, never copied into a dialog static (dialog-static-leaks).
 static const HE::ProjectRenderDefaults* projectRenderDefaults(const AppContext& ctx)
 {
     if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty()) return nullptr;
@@ -130,12 +116,11 @@ static std::string effectiveExportBackend(const AppContext& ctx)
                          && ctx.projectManager->currentProject().appProject;
     const bool advanced   = ctx.projectManager
                          && ctx.projectManager->currentProject().advancedShaderEffects;
-    // The project's backend goes through the same app rule as the dialog's: an
-    // application still takes the platform default or the software renderer,
-    // whatever the page says.
+    // An application still takes the platform default or the software renderer,
+    // whatever the page says; a game with no project answer takes the default.
     const HE::ProjectRenderDefaults* project = projectRenderDefaults(ctx);
     return HE::BackendRules::forExport(appProject, advanced,
-                                       project ? project->backend : s_exportBackend);
+                                       project ? project->backend : std::string());
 }
 
 // The settings the shipped game boots with, written in config.json's own shape
@@ -212,10 +197,12 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     }
     else
     {
-        put("GameWindowWidth",  s_exportWindowWidth);
-        put("GameWindowHeight", s_exportWindowHeight);
-        put("GameWindowMode",   s_exportWindowMode);
-        put("GameVSync",        s_exportGameVSync);
+        // An application opens as an ordinary window; a game fills the screen.
+        const bool app = ctx.projectManager && ctx.projectManager->currentProject().appProject;
+        put("GameWindowWidth",  kDefaultWindowWidth);
+        put("GameWindowHeight", kDefaultWindowHeight);
+        put("GameWindowMode",   app ? "Windowed" : kDefaultWindowMode);
+        put("GameVSync",        true);
     }
     // Left out entirely when no backend was picked: an absent key is what tells
     // the game to keep its own platform default, and that is a different answer
@@ -516,15 +503,21 @@ static std::vector<uint8_t> CompileParticleShaderVariants(const std::string& nod
 	return HE::encodeParticleShaderVariants(variants);
 }
 
-// Fill the export dialog fields from a profile. An empty profile outputDir
-// resolves to <projectRoot>/Export/<profile name>. All string fields are
+// Fill the export dialog fields from a profile. The output directory is not a
+// profile choice: it is always <projectRoot>/Export/<profile name> on THIS
+// machine. A stored absolute path travels with the project to another OS (a
+// "C:\\..." path is a relative name on macOS and ends up under the working
+// directory), so any outputDir a profile still carries is ignored. All string fields are
 // std::string — no fixed buffers, so nothing can silently truncate (a cut-off
 // exclude pattern would broaden the glob and change the pak contents).
 static void exportProfileToDialog(const ExportProfile& p, const std::filesystem::path& projectRoot)
 {
-	s_exportOutputDir = p.outputDir.empty()
-		? (projectRoot / "Export" / p.name).string()
-		: p.outputDir;
+	// Only the automation entry (project_build's outputDir, a one-run copy of the
+	// profile that never reaches disk) can name a directory, and only one that is
+	// absolute HERE; a stored path is never read back (ProjectManager).
+	s_exportOutputDir = std::filesystem::path(p.outputDir).is_absolute()
+		? p.outputDir
+		: (projectRoot / "Export" / p.name).string();
 	s_exportCompress     = p.compress;
 	s_exportEncrypt      = p.encrypt;
 	s_exportModSupport   = p.enableModSupport;
@@ -536,41 +529,18 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportHcStop       = p.hcStopOnFailure;
 	s_exportTextureFormat  = p.textureFormat;
 	s_exportTextureQuality = p.textureQuality;
-	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
-	// falls back to Host — showing "Host" in the combo makes that fallback
-	// visible BEFORE exporting host binaries somewhere unexpected.
+	// Canonicalize via the enum round-trip. The platform is not read from disk
+	// any more (always Host); only project_build's one-run copy can name another.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
 	s_exportShaderBackends = p.shaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 }
 
-// The window/backend rows are not part of the profile — they ride to the game in
-// config.json and live in the editor's own settings under the keys the game
-// reads them by. Reloaded so a run starts on what the last export shipped, from
-// both doors into this panel: the modal (open) and startFromProfile.
-static void reloadGameConfigRows(AppContext& ctx)
-{
-	if (!ctx.globalState) return;
-	GlobalState& gs = *ctx.globalState;
-	s_exportWindowWidth  = gs.getCustomConfigInt("GameWindowWidth",     s_exportWindowWidth);
-	s_exportWindowHeight = gs.getCustomConfigInt("GameWindowHeight",    s_exportWindowHeight);
-	s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
-	s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
-	s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
-	// …and only if it is a backend this dialog would offer for SOME target.
-	// A settings file written by an editor that still forced "Software" into
-	// this key while exporting an application carries that word forever
-	// otherwise, and the next game export ships it. Dropping it means "the
-	// platform default", which is what the row shows when nothing was picked.
-	if (!s_exportBackend.empty() && !HE::BackendRules::isOffered(s_exportBackend))
-		s_exportBackend.clear();
-}
-
 // Read the dialog fields back into a profile (the name stays as-is).
 static void exportDialogToProfile(ExportProfile& p)
 {
-	p.outputDir        = s_exportOutputDir;
+	p.outputDir.clear();   // derived from project root + profile name, never stored
 	p.compress         = s_exportCompress;
 	p.encrypt          = s_exportEncrypt;
 	p.enableModSupport = s_exportModSupport;
@@ -620,8 +590,6 @@ void open(AppContext& ctx)
 		it.increment(ec);
 	}
 
-	reloadGameConfigRows(ctx);
-
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
 	s_showExportModal = true;
 }
@@ -654,9 +622,6 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 	for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
 		if (proj.exportProfiles[i].name == profile.name) { s_exportProfileIdx = i; break; }
 
-	// The window/backend rows are not part of the profile and are read from the
-	// editor config, exactly as opening the dialog does.
-	reloadGameConfigRows(ctx);
 	s_exportBundleKey.clear();
 
 	// Every export compiles its game from the SDK (topic 222 step 3). This door
@@ -923,10 +888,6 @@ void render(AppContext& ctx)
             }
 
             // ── Editable fields (mirror of the selected profile) ──────────────
-            ImGui::Text("Output Directory:");
-            ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputText("##exportDir", &s_exportOutputDir);
-
             // An application has no scene to start in — its GameInstance builds
             // the UI and that is the whole picture (docs/he-apps-plan.md E5). The
             // field is hidden rather than shown empty, and the value cleared, so a
@@ -956,25 +917,9 @@ void render(AppContext& ctx)
                 }
             }
 
-            ImGui::Text("Target Platform:");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(140.0f);
-            if (ImGui::BeginCombo("##exportPlatform", s_exportPlatform.c_str()))
-            {
-                for (const char* name : { "Host", "Windows", "macOS", "Linux" })
-                    if (ImGui::Selectable(name, s_exportPlatform == name))
-                    {
-                        s_exportPlatform = name;
-                        // A backend the new target does not have would ship as a
-                        // name the game can only fall back from — drop it rather
-                        // than carry it across the switch.
-                        bool stillOffered = s_exportBackend.empty();
-                        for (const char* b : exportBackendChoices(s_exportPlatform))
-                            if (s_exportBackend == b) { stillOffered = true; break; }
-                        if (!stillOffered) s_exportBackend.clear();
-                    }
-                ImGui::EndCombo();
-            }
+            // No target picker: exports build for this machine (the runtime bundle,
+            // the SDK the game is compiled against and the HorizonCode toolchain are
+            // the host's). The platform is not read from the project file.
             {
                 // Live feedback: show the runtime bundle this export would ship,
                 // or a warning when none is found (data-only exports can't run).
@@ -1033,152 +978,15 @@ void render(AppContext& ctx)
                     ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
             }
 
-            // ── How the game starts ─────────────────────────────────────────
-            // These ride to the player in config.json rather than in the pak, so
-            // they stay editable after the fact — and so the graphics settings
-            // this editor is set to reach the shipped build at all.
-            ImGui::Spacing();
-            // An application does not choose a resolution and a display mode at
-            // export time. It opens as a window the way every other application
-            // does, and the user maximises it or drags it about; a fixed pixel
-            // size baked into the build is a game's idea. The values are still
-            // WRITTEN (config.json carries defaults either way) — they are just
-            // not asked about, and app mode pins them to a sane window.
-            //
-            // A project whose Render Defaults page switched "Use the editor's
-            // settings" off has answered these rows itself: they are shown as
-            // it answered them and cannot be edited here, because an edit here
-            // would be overruled at export time and the person would not know
-            // why. The statics are left alone — they are the editor's memory,
-            // and the next project must not inherit this one's numbers.
-            const HE::ProjectRenderDefaults* projectDefaults = projectRenderDefaults(ctx);
+            // Window size, display mode and backend are the project's (Project >
+            // Game Window); they are not asked again at export time.
             if (exportingApp)
-                s_exportWindowMode = "Windowed";
-            else if (projectDefaults)
-            {
-                ImGui::TextDisabled("Game Window: %d x %d %s, VSync %s",
-                                    projectDefaults->windowWidth, projectDefaults->windowHeight,
-                                    projectDefaults->windowMode.c_str(),
-                                    projectDefaults->vsync ? "on" : "off");
-                ImGui::TextDisabled("Graphics Backend: %s",
-                                    projectDefaults->backend.empty() ? "(platform default)"
-                                                                     : projectDefaults->backend.c_str());
-                ImGui::TextDisabled("Set by the project: Project Settings > Rendering > Defaults. "
-                                    "Switch \"Use the editor's settings\" on there to choose here.");
-            }
-            else
-            {
-                ImGui::Text("Game Window:");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.0f);
-                if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
-                    s_exportWindowWidth = std::max(320, s_exportWindowWidth);
-                ImGui::SameLine();
-                ImGui::TextUnformatted("x");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.0f);
-                if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
-                    s_exportWindowHeight = std::max(240, s_exportWindowHeight);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(120.0f);
-                if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
-                {
-                    for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
-                        if (ImGui::Selectable(mode, s_exportWindowMode == mode))
-                            s_exportWindowMode = mode;
-                    ImGui::EndCombo();
-                }
-                ImGui::SameLine();
-                EditorWidgets::checkbox("VSync", &s_exportGameVSync);
-            }
-
-            // An application does not pick a backend: it takes the platform's
-            // (Metal on macOS, OpenGL elsewhere — docs/he-apps-plan.md A0), and
-            // with Advanced Shader Effects OFF it takes the software renderer,
-            // which is what that switch has meant all along (Block G). This is
-            // the line that makes the checkbox at project creation mean
-            // something in the shipped build: no GPU, no driver, no shader
-            // translation, just the CPU drawing rectangles.
-            if (!exportingApp && !projectDefaults)
-            {
-                ImGui::Text("Graphics Backend:");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(140.0f);
-                if (ImGui::BeginCombo("##gameBackend",
-                                      s_exportBackend.empty() ? "(platform default)"
-                                                              : s_exportBackend.c_str()))
-                {
-                    if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
-                        s_exportBackend.clear();
-                    for (const char* name : exportBackendChoices(s_exportPlatform))
-                        if (ImGui::Selectable(name, s_exportBackend == name))
-                            s_exportBackend = name;
-                    ImGui::EndCombo();
-                }
-                ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
-                                    "the target runtime lacks falls back to its default.");
-            }
-            else if (exportingApp)
             {
                 // Told, not stored: effectiveExportBackend() answers the same
-                // question at export time. Writing the answer into
-                // s_exportBackend is what leaked "Software" into the next
-                // GAME export (see the comment there).
-                const bool advanced =
-                    ctx.projectManager->currentProject().advancedShaderEffects;
-                if (!advanced)
+                // question at export time.
+                if (!ctx.projectManager->currentProject().advancedShaderEffects)
                     ImGui::TextDisabled("Advanced Shader Effects are off: this application "
                                         "ships the software renderer and needs no GPU.");
-            }
-
-            // ── What the build IS to the person who installs it ────────────
-            // Icon, version and splash live in the project (Project Settings ▸
-            // Application / General); they are shown HERE because this is the
-            // screen somebody is on when they notice the build still says 1.0.
-            // Bound straight to the ProjectData and saved when an edit ends,
-            // never copied into a dialog static (see the note at the top).
-            if (ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
-            {
-                ImGui::Spacing();
-                ProjectData& proj = ctx.projectManager->currentProject();
-                if (ImGui::CollapsingHeader("Application: icon, version, splash"))
-                {
-                    bool heproj = false, settings = false;
-                    // The icon as the export will write it, beside its rows.
-                    const int kPx = 48;
-                    if (const ImTextureID tex = static_cast<ImTextureID>(
-                            AppMetadataRows::iconPreviewTexture(ctx, proj, kPx)))
-                    {
-                        ImGui::Image(tex, ImVec2((float)kPx, (float)kPx));
-                        ImGui::SameLine();
-                    }
-                    ImGui::BeginGroup();
-                    EditorWidgets::Row::inputText("Icon##exporticonname", &proj.appIconName);
-                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
-                    EditorWidgets::helpForLabel("Icon");
-                    heproj |= AppMetadataRows::drawIconFileRow(ctx, proj);
-                    ImGui::EndGroup();
-                    EditorWidgets::Row::inputText("Version##exportversion", &proj.appVersion);
-                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
-                    EditorWidgets::helpForLabel("Version");
-                    ImGui::TextDisabled("Bundle identifier, plate colour and file types: "
-                                        "Project Settings > Application.");
-                    ImGui::Spacing();
-                    settings |= AppMetadataRows::drawSplashRows(ctx, proj, /*compact=*/true);
-
-                    if (heproj && !ctx.projectManager->saveProject(proj.path))
-                        HE::Ed::notify(HE::Ed::NoteLevel::Critical,
-                                       "Could not save the project's application settings",
-                                       proj.path);
-                    if (settings)
-                    {
-                        proj.settings.clamp();
-                        if (!ctx.projectManager->saveProjectSettings())
-                            HE::Ed::notify(HE::Ed::NoteLevel::Critical,
-                                           "Could not save the project's splash settings",
-                                           HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
-                    }
-                }
             }
 
             // ── Textures ────────────────────────────────────────────────────
@@ -1896,16 +1704,8 @@ void startExport(AppContext& ctx)
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and
-                // the window rows are remembered for the next export.
+                // (the window and backend are the project's, not remembered here).
                 es.gameConfigJson   = buildGameConfigJson(ctx);
-                if (ctx.globalState)
-                {
-                    ctx.globalState->setCustomConfigEntry("GameWindowWidth",  s_exportWindowWidth);
-                    ctx.globalState->setCustomConfigEntry("GameWindowHeight", s_exportWindowHeight);
-                    ctx.globalState->setCustomConfigEntry("GameWindowMode",   s_exportWindowMode);
-                    ctx.globalState->setCustomConfigEntry("GameVSync",        s_exportGameVSync);
-                    ctx.globalState->setCustomConfigEntry("GameBackend",      s_exportBackend);
-                }
                 es.gameRuntimeDir   = runtimeDir;
                 // Engine-wide default content (primitive meshes, default materials)
                 // ships INSIDE the pak under "Engine/…": it lives next to the editor,
