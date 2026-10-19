@@ -7725,11 +7725,27 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		ltc.seed        = 0;
 		ltc.dirty       = true;
 		ltc.water.res   = 256;
+		// HE_DUMP_WATERRES=<cells per side>: the water grid of the witness. 33 on this
+		// 128 m landscape is the 3.9 m cell of a real 1000 m landscape at res 256, which
+		// is what the shore contour is as coarse as (Thema 206 baseline).
+		if (const char* r = std::getenv("HE_DUMP_WATERRES"); r && *r)
+			ltc.water.res = static_cast<uint32_t>(std::clamp(std::atoi(r), 8, 1024));
 		if (bank)
 		{
 			// The ground, as a sculpted height field (terrain-local metres). 129 is
 			// 2^7+1, so TerrainSystem does not resample it.
 			const uint32_t hr = 129;
+			// HE_DUMP_WATERSLOPE=<m per m> (default 0.12) and HE_DUMP_WATERROUGH=<m> (default 0, a
+			// per-vertex jitter of the 1 m height field): a gentle beach with facet noise is what
+			// makes the shoreline of a flat sheet jagged, a steep smooth bank does not (Thema 206).
+			const float bankSlope = [] { const char* v = std::getenv("HE_DUMP_WATERSLOPE"); return v && *v ? static_cast<float>(std::atof(v)) : 0.12f; }();
+			const float bankRough = [] { const char* v = std::getenv("HE_DUMP_WATERROUGH"); return v && *v ? static_cast<float>(std::atof(v)) : 0.0f; }();
+			auto hashNoise = [](uint32_t a, uint32_t b) {
+				uint32_t h = a * 374761393u + b * 668265263u;
+				h = (h ^ (h >> 13)) * 1274126177u;
+				h ^= h >> 16;
+				return static_cast<float>(h & 0xffffu) / 32767.5f - 1.0f;   // -1..1
+			};
 			ltc.resolution = hr;
 			ltc.sculptHeights.assign(static_cast<size_t>(hr) * hr, 0.0f);
 			for (uint32_t zi = 0; zi < hr; ++zi)
@@ -7739,7 +7755,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
 					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
 						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
-						               : 0.12f * x + 1.2f * std::sin(0.15f * z);
+						               : bankSlope * x + 10.0f * bankSlope * std::sin(0.15f * z) + bankRough * hashNoise(xi, zi);
 				}
 		}
 		if (const char* c = std::getenv("HE_DUMP_WATERCLIP"); c && *c)

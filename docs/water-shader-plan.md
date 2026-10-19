@@ -867,3 +867,7 @@ womöglich noch nicht). CI auf dem Zweig: noch nicht gelaufen (Eintrag unten, we
 - Das Website-Handbuch (`HC-Website`, `materials.html#water`) kennt weder `Variation` noch die Defaults
   und das Bild von Schritt 7. Wer `build_docs_bundle.py` neu laufen lässt, ohne den Absatz „No
   repeating pattern" in der HTML nachzutragen, verliert ihn aus `he-docs.json`.
+
+## 13. Bestandsaufnahme Thema 206 (Ufer, Referenzbilder, Baseline)
+
+Ufer-Zickzack, Referenzbilder, Baseline-Screenshots und Plan für Wellen/Normalen/Transparenz: `docs/water-realistic-baseline-2026-10-20.md` (Handoff-Abschnitt).
