@@ -993,7 +993,14 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                 const std::string fname = dit->path().filename().string();
                 // The log of a run from the deploy folder is not part of the runtime.
                 const bool runLog = fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".log") == 0;
-                if (runLog || skippedPython(fname)) { dit.increment(ec); continue; }
+                // With the HorizonEngine/ layout the engine is that one folder: a
+                // Horizon*.dll beside the executable is a leftover of an older
+                // runtime (HorizonAsset/HorizonTools were never part of the game)
+                // that the editor's wholesale copy of the runtime folder carried
+                // along. The game's loader never looks at it.
+                const bool strayEngineDll = ctx.engineLayout && fname.rfind("Horizon", 0) == 0
+                    && fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".dll") == 0;
+                if (runLog || strayEngineDll || skippedPython(fname)) { dit.increment(ec); continue; }
                 if (auto fail = shipFile(dit->path(), routeRuntime(fname))) return fail;
             }
             dit.increment(ec);

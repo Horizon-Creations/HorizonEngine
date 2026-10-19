@@ -144,6 +144,10 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 		"${DEPLOY_GAME}/$<TARGET_FILE_NAME:HorizonRendering>"
 		"${DEPLOY_GAME}/$<TARGET_FILE_NAME:HorizonNet>"
 		"${DEPLOY_GAME}/$<TARGET_FILE_NAME:SDL3::SDL3>"
+		# Never part of the game; left behind by older deploys, they ride along
+		# into <editor>/Game and from there into every export.
+		"${DEPLOY_GAME}/HorizonAsset.dll"
+		"${DEPLOY_GAME}/HorizonTools.dll"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		$<TARGET_FILE:HorizonGame>
 		"${DEPLOY_GAME}"

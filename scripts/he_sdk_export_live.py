@@ -67,7 +67,7 @@ def package(c, outdir, tag, profile):
 
 
 def has_release_set(editor):
-    for d in (editor.parent / "EngineSDK", editor.parent.parent / "EngineSDK"):
+    for d in (editor / "EngineSDK", editor.parent / "EngineSDK", editor.parent.parent / "EngineSDK"):
         if (d / "lib" / "cmake" / "HorizonEngine" / "HorizonEngineTargets-release.cmake").exists():
             return True
     return False

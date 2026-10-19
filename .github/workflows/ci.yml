@@ -567,12 +567,16 @@ jobs:
         shell: bash
         run: |
           DEPLOY_ROOT="${DEPLOY_ROOT:-package}"
-          if [ ! -d "$DEPLOY_ROOT/EngineSDK" ]; then
-            echo "::error::$DEPLOY_ROOT/EngineSDK missing — HorizonEditor no longer builds HorizonSDK (cmake/HorizonSDK.cmake)"
+          # HorizonSDK installs into Editor/EngineSDK itself now; the move only
+          # serves a build tree whose cache still holds the old sibling path.
+          if [ -d "$DEPLOY_ROOT/EngineSDK" ]; then
+            rm -rf "$DEPLOY_ROOT/Editor/EngineSDK"
+            mv "$DEPLOY_ROOT/EngineSDK" "$DEPLOY_ROOT/Editor/EngineSDK"
+          fi
+          if [ ! -d "$DEPLOY_ROOT/Editor/EngineSDK" ]; then
+            echo "::error::$DEPLOY_ROOT/Editor/EngineSDK missing — HorizonEditor no longer builds HorizonSDK (cmake/HorizonSDK.cmake)"
             exit 1
           fi
-          rm -rf "$DEPLOY_ROOT/Editor/EngineSDK"
-          mv "$DEPLOY_ROOT/EngineSDK" "$DEPLOY_ROOT/Editor/EngineSDK"
           echo "staged EngineSDK ($(ls "$DEPLOY_ROOT/Editor/EngineSDK/lib" | tr '\n' ' '))"
           if [ "${{ steps.release_sdk.outcome }}" = "success" ]; then
             PY=$(command -v python3 || command -v python)

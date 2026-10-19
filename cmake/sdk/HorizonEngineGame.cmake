@@ -51,10 +51,25 @@ function(horizon_add_game target)
         # A copy per target, so the definition and include dir set on it below do
         # not leak to another game of the same project through the shared source.
         set(_config_cpp "${CMAKE_CURRENT_BINARY_DIR}/${target}_build_config/CompiledBuildConfig.cpp")
-        configure_file("${_src}/CompiledBuildConfig.cpp" "${_config_cpp}" COPYONLY)
+        # The copy carries the header's hash, so a rewritten header changes the
+        # SOURCE of this translation unit and every generator recompiles it.
+        # OBJECT_DEPENDS alone is not enough: the Visual Studio generator ignores
+        # it, and MSBuild's file tracker does not follow a per-source include dir,
+        # so a kept build tree (the export's build cache) relinked the old
+        # executable with the previous export's startup-scene UUID and pak key
+        # compiled in — a game that mounts its pak and then finds no scene.
+        file(SHA256 "${_bc}" _bc_hash)
+        file(READ "${_src}/CompiledBuildConfig.cpp" _cbc_text)
+        set(_cbc_text "${_cbc_text}\n// HEGameBuildConfig.h sha256: ${_bc_hash}\n")
+        set(_cbc_old "")
+        if(EXISTS "${_config_cpp}")
+            file(READ "${_config_cpp}" _cbc_old)
+        endif()
+        if(NOT _cbc_old STREQUAL _cbc_text)
+            file(WRITE "${_config_cpp}" "${_cbc_text}")
+        endif()
         # OBJECT_DEPENDS: Make's dependency scan does not follow a per-source
-        # include dir, and the export rewrites the header into a kept build tree
-        # (its build cache): without it the old configuration stayed compiled in.
+        # include dir either (the hash above already forces the recompile).
         set_source_files_properties("${_config_cpp}" PROPERTIES
             INCLUDE_DIRECTORIES "${_bc_dir}"
             COMPILE_DEFINITIONS HE_GAME_BUILD_CONFIG=1

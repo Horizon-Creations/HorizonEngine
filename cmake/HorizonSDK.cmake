@@ -47,8 +47,15 @@ include(CMakePackageConfigHelpers)
 
 # Not HE_SDK_DIR any more (that one held SDK-<profile>, one folder per profile):
 # a renamed variable keeps an older cache from installing into the old folder.
-set(HE_ENGINE_SDK_DIR "${DEPLOY_DIR}/EngineSDK" CACHE PATH
-    "Where the HorizonSDK target installs this tree's lib set of the engine SDK (never <editor>/SDK: the editor's POST_BUILD wipes that)")
+#
+# Inside the editor's own deploy folder (<editor>/EngineSDK, where findGameSdk looks
+# first) rather than beside it: the editor package is one folder, not Editor/ plus a
+# sibling that has to be moved in. Never <editor>/SDK: the editor's POST_BUILD wipes
+# that (the HorizonCode codegen SDK). The editor's POST_BUILD touches only Game/ and
+# SDK/, so EngineSDK/ survives an editor rebuild. An existing build tree keeps the
+# old sibling path in its cache: reconfigure with -UHE_ENGINE_SDK_DIR to move.
+set(HE_ENGINE_SDK_DIR "${DEPLOY_EDITOR}/EngineSDK" CACHE PATH
+    "Where the HorizonSDK target installs this tree's lib set of the engine SDK (inside the editor deploy folder; never <editor>/SDK: the editor's POST_BUILD wipes that)")
 
 # The engine as ONE library (step 10): what the exported game loads from its
 # HorizonEngine/ folder. The editor keeps the four libraries it is made of; the
@@ -247,7 +254,7 @@ add_dependencies(HorizonSDKLibs ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sd
 add_dependencies(HorizonSDK HorizonSDKLibs)
 # The editor pays for it on every build (topic 222), for the reason it already
 # depends on HorizonGame: every export compiles its game against this tree's lib
-# set at <editor>/../EngineSDK, and nobody remembered `--target HorizonSDK`. It
+# set at <editor>/EngineSDK, and nobody remembered `--target HorizonSDK`. It
 # replaces lib/<this profile> only, so the release set beside it stays. The dmg
 # target depends on the editor, so package_macos.sh finds the SDK fresh. Here and
 # not beside the HorizonGame dependency in the root CMakeLists.txt: the target

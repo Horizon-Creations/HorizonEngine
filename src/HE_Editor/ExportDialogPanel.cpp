@@ -27,6 +27,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
+#include <Application/AppIcon.h>           // heEmbedExeIcon: the exe's own icon on Windows
 #include <Application/GameBackendRules.h>  // shared with the game runtime that reads config.json
 #include <Project/ProjectSettings.h>       // the project's Render Defaults, title, settings file path
 #include <HorizonRendering/ParticleShaderTemplates.h>
@@ -764,6 +765,22 @@ static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk
 	    !why.empty())
 		// A half-done copy is neither game: say it loudly.
 		return fail(why + "; the export folder may be mixed, export again");
+#if defined(_WIN32)
+	// The icon goes into the executable's resources instead of staying a loose
+	// AppIcon.ico beside it (nothing reads that file at run time). The exe was
+	// just replaced by the SDK build, so this is the first point it can be done;
+	// a failure keeps the .ico where it is.
+	{
+		const fs::path ico = exe.parent_path() / "AppIcon.ico";
+		std::error_code icoEc;
+		if (fs::exists(ico, icoEc))
+		{
+			if (HE::heEmbedExeIcon(exe, ico)) fs::remove(ico, icoEc);
+			else Build::log(1, "Could not embed AppIcon.ico into " + exe.filename().string() +
+			                   "; it stays beside the executable", step);
+		}
+	}
+#endif
 	if (const int n = HE::ExportSdk::relinkToBundledDeps(HE::ExportSdk::exportEngineDir(exe), copied); n > 0)
 		Build::log(0, std::to_string(n) + " library link(s) moved to the bundled copies", step);
 #if defined(__APPLE__)
