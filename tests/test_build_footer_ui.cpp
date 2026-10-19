@@ -10,8 +10,10 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <nlohmann/json.hpp>   // a mid-run state recorded from a live export
 
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -369,8 +371,6 @@ TEST_CASE("Build lock: only a running EXPORT locks the project")
 // HE_EXPORT_STEPS_SNAPSHOT names a mid-run state recorded from a live export
 // (scripts/he_export_step_order_live.py midrun-*.json); it is replayed instead of
 // the built-in one, and HE_UI_DUMP_DIR gets the picture as export_steps_midrun.bmp.
-#include <nlohmann/json.hpp>
-#include <fstream>
 
 TEST_CASE("Build window: an export's rings fill in list order, Build game first")
 {
