@@ -221,11 +221,6 @@ struct ExportProfile
 	// the export instead, for a build in which every class really is native —
 	// which is also what makes the direct cross-class call paths always hit.
 	bool hcStopOnFailure = false;
-	// Compile the game itself against the engine SDK (EngineSDK beside the
-	// editor) instead of shipping the prebuilt runtime: the profile's lib set
-	// (devTools = dev, else release), configuration and pak key compiled in.
-	// Host targets only; without an SDK, cmake or compiler the prebuilt game ships.
-	bool compileGameFromSdk = false;
 	// Texture compression. "Auto" picks the block format from the target's GPU
 	// family (the only behaviour there was); "None" ships RGBA8 with baked mips
 	// — the largest pak and the exact pixels, for a pixel-art game or a diff

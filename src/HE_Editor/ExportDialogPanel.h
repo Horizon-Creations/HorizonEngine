@@ -36,10 +36,15 @@ namespace ExportDialogPanel
 	// same way open() does, and hands the job to the same worker reporting into
 	// the same BuildProgressDialog.
 	//
-	// Returns false with `outError` only for the two things that stop a run from
-	// STARTING: no project (or no content manager) and a run already going.
+	// Returns false with `outError` for what stops a run from STARTING: no
+	// project (or no content manager), a run already going, and a game that
+	// cannot be compiled from the engine SDK here (the export dialog's gate,
+	// ExportSdk::checkExportGate: another target platform, no SDK of the
+	// profile, no cmake or compiler, or the toolchain probe still running). The
+	// button parks a run behind Tool Setup in that last case; this door has no
+	// human to press Install, so it answers instead.
 	// Everything that can go wrong once it has started — no runtime bundle for
-	// the target, a startup scene that no longer loads, a failing toolchain — is
+	// the target, a startup scene that no longer loads, a failing compile — is
 	// a FAILED run in the Build window, exactly as it is when a human pressed the
 	// button, and is read back from there.
 	bool startFromProfile(AppContext& ctx, const ExportProfile& profile,

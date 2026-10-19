@@ -905,6 +905,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. It reads both probes and the two installers'
     # callbacks; HorizonScene (HcCodegen) and HorizonSourceControl are linked below.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
+    # The export dialog's game-compile line (topic 222), for test_tool_setup_ui.cpp:
+    # same AppContext, same per-file HE_IMGUI_ENABLED; ExportSdkBuild.cpp is above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkGateUi.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
@@ -991,6 +994,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     test_git_install_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkGateUi.cpp
     test_tool_setup_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp

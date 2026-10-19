@@ -475,7 +475,6 @@ json exportProfilesToJson(const ProjectData& p)
 			{ "appBundle",          e.appBundle },
 			{ "compileHorizonCode", e.compileHorizonCode },
 			{ "hcStopOnFailure",    e.hcStopOnFailure },
-			{ "compileGameFromSdk", e.compileGameFromSdk },
 			{ "excludePatterns",    e.excludePatterns },
 			{ "active",             e.name == p.activeExportProfile },
 		});

@@ -2362,6 +2362,16 @@ void EditorApplication::startToolchainProbe()
 	m_toolchainThread = std::thread([this]
 	{
 		HE::hccg::ToolchainProbe probe = HE::hccg::probeToolchain();
+		// HE_SIMULATE_MISSING_TOOLCHAIN=compiler|cmake|both: the probe reports
+		// that part missing, so the export's toolchain gate and Tool Setup can be
+		// checked on a machine that has everything (topic 222 step 3).
+		if (const char* sim = std::getenv("HE_SIMULATE_MISSING_TOOLCHAIN"); sim && *sim)
+		{
+			const std::string s = sim;
+			if (s == "cmake" || s == "both")    { probe.cmakeFound = false; probe.cmakeVersion.clear(); }
+			if (s == "compiler" || s == "both") { probe.compilerFound = false; probe.compilerId.clear();
+			                                      probe.detail = "simulated (HE_SIMULATE_MISSING_TOOLCHAIN)"; }
+		}
 		m_toolchainProbe = std::move(probe);
 		m_toolchainChecked.store(true, std::memory_order_release);
 	});

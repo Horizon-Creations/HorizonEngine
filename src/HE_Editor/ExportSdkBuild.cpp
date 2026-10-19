@@ -31,8 +31,8 @@ GameSdk sdkAt(const fs::path& root, const std::string& profile)
     sdk.templateDir = root / "share" / "HorizonEngine" / "template";
     // One SDK holds a lib set per profile (cmake/HorizonSDK.cmake); the one
     // asked for must be installed. Whether its header stamp still matches is
-    // the package's call: a refusal there fails the configure, and the
-    // prebuilt game stays.
+    // the package's call: a refusal there fails the configure, and with it
+    // the export.
     if (!fs::is_regular_file(sdk.packageDir / "HorizonEngineConfig.cmake", ec) ||
         !fs::is_regular_file(sdk.packageDir / ("HorizonEngineTargets-" + profile + ".cmake"), ec) ||
         !fs::is_regular_file(sdk.templateDir / "CMakeLists.txt", ec))
@@ -79,6 +79,46 @@ std::string unavailableReason(const GameSdk& sdk, const std::string& profile,
     if (!cmakeFound)    return "cmake not found";
     if (!compilerFound) return "no working C++ compiler found";
     return {};
+}
+
+ExportGate checkExportGate(const GameSdk& sdk, const std::string& profile, bool hostTarget,
+                           const HE::hccg::ToolchainProbe* probe, const std::string& targetName)
+{
+    ExportGate g;
+    g.sdk     = sdk;
+    g.profile = profile;
+    if (!hostTarget)
+    {
+        // The game is compiled with this machine's toolchain, for this machine;
+        // a prebuilt game for another platform is exactly what no longer ships.
+        g.state = GateState::Blocked;
+        g.why   = "the game is compiled from the engine SDK on the platform it runs on: export " +
+                  (targetName.empty() ? std::string("that target") : "the " + targetName + " build") +
+                  " from the editor there";
+        return g;
+    }
+    if (!sdk.valid())
+    {
+        g.state = GateState::Blocked;
+        g.why   = unavailableReason(sdk, profile, true, true);
+        return g;
+    }
+    if (!probe)
+    {
+        g.state = GateState::Waiting;
+        g.why   = "checking for cmake and a C++ compiler";
+        return g;
+    }
+    g.needCmake    = !probe->cmakeFound;
+    g.needCompiler = !probe->compilerFound;
+    if (g.needCmake || g.needCompiler)
+    {
+        g.state = GateState::NeedTools;
+        g.why   = unavailableReason(sdk, profile, probe->cmakeFound, probe->compilerFound);
+        return g;
+    }
+    g.state = GateState::Ready;
+    return g;
 }
 
 std::string writeBuildConfigFromExport(const fs::path& dataDir, const fs::path& prebuiltExe,
@@ -139,29 +179,13 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workD
     return spec;
 }
 
-CodegenSdkChoice chooseCodegenSdk(const GameSdk& gameSdk, bool gameFromSdk, bool runtimeHasEngineDir,
-                                  const HE::hccg::SdkInfo& legacy, const std::string& gameSdkUnavailable)
+HE::hccg::SdkInfo codegenSdkFor(const GameSdk& gameSdk)
 {
-    CodegenSdkChoice c;
-    if (gameFromSdk && gameSdk.valid())
-    {
-        c.sdk.packageDir = gameSdk.packageDir;
-        c.sdk.profile    = gameSdk.profile;
-        c.fromGameSdk    = true;
-        return c;
-    }
-    if (runtimeHasEngineDir)
-    {
-        c.why = gameSdkUnavailable.empty()
-            ? "compiled HorizonCode is built with the game from the engine SDK; "
-              "turn on \"Compile game from SDK\""
-            : "compiled HorizonCode is built with the game from the engine SDK, which "
-              "cannot be compiled here (" + gameSdkUnavailable + ")";
-        return c;
-    }
-    c.sdk = legacy;
-    if (!c.sdk.valid()) c.why = "no codegen SDK found (HE_HCGEN_SDK, <editor>/SDK, he_sdk_config.json)";
-    return c;
+    HE::hccg::SdkInfo s;
+    if (!gameSdk.valid()) return s;
+    s.packageDir = gameSdk.packageDir;
+    s.profile    = gameSdk.profile;
+    return s;
 }
 
 fs::path buildWorkDir(const fs::path& cacheRoot, const std::string& project, const std::string& profile)

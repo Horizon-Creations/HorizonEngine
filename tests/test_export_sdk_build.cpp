@@ -160,50 +160,77 @@ TEST_CASE("makeBuildSpec: SDK template, private build dir, header compiled in")
           != spec.artifactNames.end());
 }
 
-// Topic 211 step 13: compiled HorizonCode links the engine the game ships with.
-TEST_CASE("chooseCodegenSdk: the game's SDK and lib set, never the prebuilt game's engine")
+// Topic 211 step 13: compiled HorizonCode links the engine the game ships with,
+// and since topic 222 step 3 that is always the SDK the game is compiled from.
+TEST_CASE("codegenSdkFor: the game's SDK and lib set, nothing else")
 {
     HE::ExportSdk::GameSdk sdk;
     sdk.root       = "/sdk";
     sdk.packageDir = "/sdk/lib/cmake/HorizonEngine";
     sdk.profile    = "release";
-    HE::hccg::SdkInfo legacy;
-    legacy.includeDirs = { "/editor/SDK/include" };
-    legacy.libDir      = "/editor/SDK/lib";
 
-    // Game compiled from the SDK: the same package and lib set, nothing else.
-    auto c = HE::ExportSdk::chooseCodegenSdk(sdk, true, true, legacy);
-    REQUIRE(c.sdk.valid());
-    CHECK(c.fromGameSdk);
-    CHECK(c.why.empty());
-    CHECK(c.sdk.packageDir == sdk.packageDir);
-    CHECK(c.sdk.profile == "release");
-    CHECK(c.sdk.includeDirs.empty());
-    CHECK(c.sdk.libDir.empty());
+    const auto c = HE::ExportSdk::codegenSdkFor(sdk);
+    REQUIRE(c.valid());
+    CHECK(c.packageDir == sdk.packageDir);
+    CHECK(c.profile == "release");
+    CHECK(c.includeDirs.empty());
+    CHECK(c.libDir.empty());
+    CHECK_FALSE(HE::ExportSdk::codegenSdkFor(HE::ExportSdk::GameSdk{}).valid());
+}
 
-    // Prebuilt game with HorizonEngine/: no library at all, and why.
-    for (const bool gameFromSdk : { false, true })
-    {
-        c = HE::ExportSdk::chooseCodegenSdk(gameFromSdk ? HE::ExportSdk::GameSdk{} : sdk,
-                                            gameFromSdk, true, legacy);
-        CHECK_FALSE(c.sdk.valid());
-        CHECK_FALSE(c.fromGameSdk);
-        CHECK(c.why.find("Compile game from SDK") != std::string::npos);
-    }
-    // Asked for, but the game cannot be built here (step 14, seen live without a
-    // compiler): the reason, not a request for the checkbox that is already on.
-    c = HE::ExportSdk::chooseCodegenSdk(sdk, false, true, legacy, "no working C++ compiler found");
-    CHECK_FALSE(c.sdk.valid());
-    CHECK(c.why.find("no working C++ compiler found") != std::string::npos);
-    CHECK(c.why.find("turn on") == std::string::npos);
+// Topic 222 step 3: every export compiles its game, so the gate decides before
+// anything runs whether it can, waits, needs tools, or cannot at all.
+TEST_CASE("checkExportGate: ready, waiting for the probe, tools missing, blocked")
+{
+    using HE::ExportSdk::GateState;
+    HE::ExportSdk::GameSdk sdk;
+    sdk.root       = "/sdk";
+    sdk.packageDir = "/sdk/lib/cmake/HorizonEngine";
+    sdk.profile    = "dev";
+    HE::hccg::ToolchainProbe ok;
+    ok.cmakeFound = ok.compilerFound = true;
 
-    // A flat runtime (no HorizonEngine/) keeps the editor's codegen SDK.
-    c = HE::ExportSdk::chooseCodegenSdk(sdk, false, false, legacy);
-    REQUIRE(c.sdk.valid());
-    CHECK_FALSE(c.fromGameSdk);
-    CHECK(c.sdk.libDir == legacy.libDir);
-    CHECK(c.sdk.profile.empty());
-    CHECK_FALSE(HE::ExportSdk::chooseCodegenSdk(sdk, false, false, {}).why.empty());
+    auto g = HE::ExportSdk::checkExportGate(sdk, "dev", true, &ok);
+    CHECK(g.state == GateState::Ready);
+    CHECK(g.ready());
+    CHECK(g.why.empty());
+    CHECK(g.sdk.root == sdk.root);
+    CHECK(g.profile == "dev");
+
+    // The probe has not answered (startup, or a recheck after an install): wait,
+    // never "missing" — the export must not open Tool Setup on a guess.
+    g = HE::ExportSdk::checkExportGate(sdk, "dev", true, nullptr);
+    CHECK(g.state == GateState::Waiting);
+    CHECK_FALSE(g.ready());
+    CHECK_FALSE(g.needCmake);
+    CHECK_FALSE(g.needCompiler);
+
+    // Missing tools: which ones, so Tool Setup opens on the right row.
+    HE::hccg::ToolchainProbe noCompiler = ok;
+    noCompiler.compilerFound = false;
+    g = HE::ExportSdk::checkExportGate(sdk, "dev", true, &noCompiler);
+    CHECK(g.state == GateState::NeedTools);
+    CHECK_FALSE(g.needCmake);
+    CHECK(g.needCompiler);
+    CHECK(g.why.find("compiler") != std::string::npos);
+    HE::hccg::ToolchainProbe none;
+    g = HE::ExportSdk::checkExportGate(sdk, "dev", true, &none);
+    CHECK(g.state == GateState::NeedTools);
+    CHECK(g.needCmake);
+    CHECK(g.needCompiler);
+
+    // No SDK of the profile: installing tools would not help, so it is Blocked
+    // even with no compiler, and the reason names the lib set.
+    g = HE::ExportSdk::checkExportGate(HE::ExportSdk::GameSdk{}, "release", true, &none);
+    CHECK(g.state == GateState::Blocked);
+    CHECK(g.why.find("'release'") != std::string::npos);
+    g = HE::ExportSdk::checkExportGate(HE::ExportSdk::GameSdk{}, "release", true, nullptr);
+    CHECK(g.state == GateState::Blocked);
+
+    // Another target platform: the game is compiled here, for here.
+    g = HE::ExportSdk::checkExportGate(sdk, "dev", false, &ok, "Windows");
+    CHECK(g.state == GateState::Blocked);
+    CHECK(g.why.find("Windows") != std::string::npos);
 }
 
 TEST_CASE("Export profile picks the lib set: Development dev, Shipping release")
@@ -463,8 +490,8 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
     // Compiled HorizonCode (topic 211 step 13), the export's way: generated
     // classes built against the same SDK and lib set as the game, through its
     // package, into build-<profile>, shipped in the export's HorizonEngine/.
-    const auto hcSdk = HE::ExportSdk::chooseCodegenSdk(sdk, true, true, {});
-    REQUIRE(hcSdk.fromGameSdk);
+    const auto hcSdk = HE::ExportSdk::codegenSdkFor(sdk);
+    REQUIRE(hcSdk.valid());
     const fs::path genDir = t.path / "hcgen";
     {
         HE::hccg::Options opt;
@@ -480,7 +507,7 @@ TEST_CASE("compile game from SDK end to end (HE_EXPORT_SDK_E2E)")
         }
         touchFile(genDir / "CMakeLists.txt", HE::hccg::generateCMakeLists(opt, cppFiles));
     }
-    const auto hc = HE::hccg::buildDylib(genDir, hcSdk.sdk);
+    const auto hc = HE::hccg::buildDylib(genDir, hcSdk);
     INFO(hc.message);
     REQUIRE(hc.ok);
     CHECK(hc.artifact.parent_path() == genDir / ("build-" + profile));

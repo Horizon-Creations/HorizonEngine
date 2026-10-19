@@ -232,12 +232,23 @@ install(CODE [[
 ]] COMPONENT ${_he_sdk_component})
 
 # ── The target ───────────────────────────────────────────────────────────────
-# Not ALL: an engine build should not pay for a copy nobody asked for. The
-# install script copies the files the dependencies below have just built.
+# Not ALL: a tree without an editor (a release-profile tree, an app flavour)
+# builds it only when asked. The install script copies the files the
+# dependencies below have just built.
 add_custom_target(HorizonSDK
     COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --config $<CONFIG>
             --component ${_he_sdk_component} --prefix "${HE_ENGINE_SDK_DIR}"
     COMMENT "Installing the engine SDK's ${HE_BUILD_PROFILE} lib set into ${HE_ENGINE_SDK_DIR}"
     VERBATIM)
 add_dependencies(HorizonSDK ${_he_sdk_libs} ${_he_sdk_runtime_only} ${_he_sdl})
+# The editor pays for it on every build (topic 222), for the reason it already
+# depends on HorizonGame: every export compiles its game against this tree's lib
+# set at <editor>/../EngineSDK, and nobody remembered `--target HorizonSDK`. It
+# replaces lib/<this profile> only, so a release set that
+# scripts/build_engine_sdk.py put beside it stays. The dmg target depends on the
+# editor, so package_macos.sh finds the SDK fresh. Here and not beside the HorizonGame
+# dependency in the root CMakeLists.txt: the target does not exist there yet.
+if(TARGET HorizonEditor)
+    add_dependencies(HorizonEditor HorizonSDK)
+endif()
 message(STATUS "HorizonEngine: SDK target HorizonSDK (${HE_BUILD_PROFILE} lib set) -> ${HE_ENGINE_SDK_DIR}")
