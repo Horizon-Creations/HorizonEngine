@@ -10,6 +10,7 @@ Views:
   open     engine water plane, standard camera of docs/water-shader-plan.md 9.1
            (waves, normals, reflection; no shore)
   open-hi  the same plane from 14 m up at 40 degrees, wave detail
+  far      the 400 m plane from 3 m up at 6 degrees: the distance fades, horizon aliasing
   shore    HE_DUMP_WATERLAKE=bowl, the curved bank, grid 256 (0.5 m cells)
   shore33  the same with HE_DUMP_WATERRES=33 (3.9 m cells = a 1000 m landscape at res 256)
   shoresheet33  shore33 with the landscape hidden (the sheet's own outline)
@@ -28,6 +29,8 @@ COMMON = dict(TOD="0.4", RENDERPATH="0", AA="0")
 VIEWS = {
     "open":    dict(WATERTEST="floor", CAMY="4", CAMZ="6", PITCH="-25"),
     "open-hi": dict(WATERTEST="floor", CAMY="14", CAMZ="10", PITCH="-40"),
+    # A 400 m plane seen at a low angle: the chop's distance fades and the horizon (Thema 206 step 3).
+    "far":     dict(WATERTEST="floor", WATERSIZE="400", CAMY="3", CAMZ="0", PITCH="-6"),
     "shore":   dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60"),
     "shore33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33"),
     "shoresheet33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33",

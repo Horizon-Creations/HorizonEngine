@@ -445,6 +445,9 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
     return w;
 }
 
+// Chop strengths relative to `drive` (the summed steepness), see the chop layers in waterMaterial.
+constexpr float kChopBase = 0.3f, kChopMid = 0.9f, kChopFine = 0.8f, kChopFiner = 0.55f;
+
 // ── Fine ripples ─────────────────────────────────────────────────────────────
 // The slope of a drifting FBM height field, by finite differences — the plan's
 // "Normal from Height by hand" (§6), three noise reads per layer. Sines alone,
@@ -706,7 +709,13 @@ Mb waterMaterial()
     const int fadeB = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(60.0f, 17, 21), m.k(220.0f, 17, 21.5f), dist, 18, 21), 19, 21);
     const int fadeC = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(25.0f, 17, 22), m.k(110.0f, 17, 22.5f), dist, 18, 22), 19, 22);
     const int fadeR = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(14.0f, 17, 23), m.k(70.0f, 17, 23.5f), dist, 18, 23), 19, 23);
-    const Pin fB{ fadeB }, fC{ fadeC }, fR{ fadeR };
+    // The two finest chop layers (below) are a few centimetres to a decimetre per noise
+    // octave, so they go under a pixel much sooner than the coarse chop: each gets its
+    // own, shorter fade. The footprint of a pixel at 25° grazing is ~2.4x its width, which
+    // is why 0.17 m cells are gone by ~14 m and 0.4 m cells by ~40 m.
+    const int fadeF = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(7.0f, 17, 24), m.k(40.0f, 17, 24.5f), dist, 18, 24), 19, 24);
+    const int fadeG = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(3.0f, 17, 25), m.k(14.0f, 17, 25.5f), dist, 18, 25), 19, 25);
+    const Pin fB{ fadeB }, fC{ fadeC }, fR{ fadeR }, fF{ fadeF }, fG{ fadeG };
 
     // Gusts: slow large patches where the sea is rougher and where it is calmer.
     // Without them the same texture repeats evenly to the horizon. The same field
@@ -748,28 +757,38 @@ Mb waterMaterial()
     m.comment("Wave B and its companion", 1, 34, 15, 8);
     m.comment("Wave C (ripples) and its companion", 1, 42, 15, 8);
 
-    // Chop: two layers of drifting noise slope, one riding each of the two
-    // shorter wave knobs' direction. Strength follows the sum of the three
-    // steepnesses, so flat waves (w = 0) mean flat water.
+    // Chop: four layers of drifting noise slope, from 2.6 m down to 0.17 m per noise
+    // cell. Reference 29 (open sea from above) is not a few waves with some noise on top:
+    // it is short, irregular wavelets at EVERY scale from a metre to a hand's width, each
+    // lit only on its flank, with calm glassy patches between. Two layers left the near
+    // field a smooth dark sheet with sparse glints; the finer layers fill the gap down to
+    // what a pixel can still resolve (each fades out sooner, see fadeF / fadeG), and they
+    // ride different directions and speeds so the pattern does not crawl as one. Strength
+    // follows the sum of the three steepnesses, so flat waves (w = 0) mean flat water.
     const int sA = m.un(T::SplitRGBA, waveA, 17, 26);
     const int sB = m.un(T::SplitRGBA, waveB, 17, 27);
     const int sC = m.un(T::SplitRGBA, waveC, 17, 28);
     const Pin drive = m.sum({ Pin{ sA, 3 }, Pin{ sB, 3 }, Pin{ sC, 3 } }, 18, 26);
-    const int ampBase = m.op(T::Multiply, drive, m.k(0.2f, 20, 26), 21, 26);
+    const int ampBase = m.op(T::Multiply, drive, m.k(kChopBase, 20, 26), 21, 26);
     const int amp1    = m.op(T::Multiply, ampBase, fR, 22, 26);
-    const int amp2    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(0.55f, 22, 27), 22, 27), fR, 23, 27);
-    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,
-                                m.op(T::Multiply, b.dirX, m.op(T::Multiply, b.speed, m.k(0.55f, 24, 29), 25, 29), 26, 29),
-                                m.op(T::Multiply, b.dirZ, m.op(T::Multiply, b.speed, m.k(0.55f, 24, 30), 25, 30), 26, 30),
-                                amp1, 24, 31);
-    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,
-                                m.op(T::Multiply, c.dirX, m.op(T::Multiply, c.speed, m.k(0.9f, 24, 36), 25, 36), 26, 36),
-                                m.op(T::Multiply, c.dirZ, m.op(T::Multiply, c.speed, m.k(0.9f, 24, 37), 25, 37), 26, 37),
-                                amp2, 24, 38);
+    const int amp2    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopMid, 22, 27), 22, 27), fR, 23, 27);
+    const int amp3    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopFine, 22, 28), 22, 28), fF, 23, 28);
+    const int amp4    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopFiner, 22, 29), 22, 29), fG, 23, 29);
+    auto drift = [&](const Wave& w, float speed, float col, float row) {
+        return std::pair<Pin, Pin>{
+            m.op(T::Multiply, w.dirX, m.op(T::Multiply, w.speed, m.k(speed, col, row), col + 1, row), col + 2, row),
+            m.op(T::Multiply, w.dirZ, m.op(T::Multiply, w.speed, m.k(speed, col, row + 1), col + 1, row + 1), col + 2, row + 1) };
+    };
+    const auto d1 = drift(b, 0.55f, 24, 29), d2 = drift(c, 0.9f, 24, 36);
+    const auto d3 = drift(b, -0.8f, 24, 43), d4 = drift(c, -1.3f, 24, 50);
+    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, 24, 31);
+    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, 24, 38);
+    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, 24, 45);
+    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, 24, 52);
     m.comment("Chop (noise slope, finite differences)", 24, 29, 8, 14);
 
-    const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x };
-    const Pin slopesZ[] = { a.slopeZ, a2.slopeZ, b.slopeZ, b2.slopeZ, c.slopeZ, c2.slopeZ, r1.z, r2.z };
+    const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x, r3.x, r4.x };
+    const Pin slopesZ[] = { a.slopeZ, a2.slopeZ, b.slopeZ, b2.slopeZ, c.slopeZ, c2.slopeZ, r1.z, r2.z, r3.z, r4.z };
     // The rings the water physics raised where a body went into or out of the surface
     // (the Water Ripple node, which reads the lighting block the engine fills). Their
     // slope is one more term of the SAME sum, so it leans the one normalised wave normal
