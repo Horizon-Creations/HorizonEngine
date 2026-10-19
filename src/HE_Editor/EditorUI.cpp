@@ -3001,12 +3001,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			MacMenuBar::setToggleState(MC::ToggleOrthographic, ctx.editorCamera->orthographic());
 		}
 		// Rows whose verb follows the state, like the ImGui rows' labels.
-		MacMenuBar::setToggleState(MC::PlayToggle,  ctx.isPlaying);
-		MacMenuBar::setToggleState(MC::PauseToggle, ctx.isPlaying && ctx.isPaused);
-		MacMenuBar::setItemTitle(MC::PlayToggle,
-			ctx.appLivePreview ? "Restart Preview" : ctx.isPlaying ? "Stop" : "Play");
-		MacMenuBar::setItemTitle(MC::PauseToggle,
-			ctx.hcSuspended ? "Continue" : (ctx.isPlaying && ctx.isPaused) ? "Resume" : "Pause");
 		MacMenuBar::setItemTitle(MC::ToggleLock,
 			(ctx.world && sceneTabActiveNow && ViewportPanel::entityActionState(ctx).primaryLocked)
 				? "Unlock" : "Lock");
@@ -3380,32 +3374,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 #endif
 		ImGui::EndMenu();
 	}
-	// ── Play: the toolbar's transport, with shortcuts ───────────────────────
+	// ── Play: only what the viewport toolbar has no control for ─────────────
+	// The transport (Play/Pause/Step) is the toolbar's; a multiplayer session
+	// is started from here.
 	if (ImGui::BeginMenu("Play", ctx.projectLoaded))
 	{
 		HE::Ed::Help::Scope helpScope("Play");
-		// Same verbs, same gates as the Scene toolbar's centre well
-		// (ViewportToolbar.cpp): an application restarts its live preview
-		// instead of entering play mode; Pause is Continue while a HorizonCode
-		// run is stopped at a breakpoint.
-		if (EditorWidgets::menuItem(ctx.appLivePreview ? "Restart Preview" : ctx.isPlaying ? "Stop" : "Play",
-		                            EditorShortcuts::label("play.toggle").c_str(), false, canPlay()))
-			playToggle();
-		if (EditorWidgets::menuItem(ctx.hcSuspended ? "Continue" : (ctx.isPlaying && ctx.isPaused) ? "Resume" : "Pause",
-		                            EditorShortcuts::label("play.pause").c_str(),
-		                            ctx.isPlaying && ctx.isPaused, ctx.isPlaying || ctx.hcSuspended))
-			pauseToggle();
-		if (EditorWidgets::menuItem("Step Frame", EditorShortcuts::label("play.step").c_str(), false, ctx.isPlaying))
-			stepFrame();
-		if (EditorWidgets::menuItem("Step Node", nullptr, false, ctx.hcSuspended))
-			stepNode();
-
 		// ── Multiplayer (docs/gameplay-replication-plan.md §5.6) ────────────
 		// Two processes, like collaboration: this editor plays as the host, a
 		// second editor or a game started with --join comes in. Not available
 		// for an application project, which has no play mode to put a session
 		// in.
-		ImGui::Separator();
 		const bool canNet = canPlay() && !ctx.appLivePreview;
 		if (EditorWidgets::menuItem("Play as Host", nullptr, false, canNet && !!ctx.playAsHost))
 			// 0: take the project's Default port (Project Settings ▸ Game ▸
@@ -3557,8 +3536,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// the one that loses whatever the user was in the middle of.
 		if (EditorWidgets::menuItem("Documentation", "F1", DocsPanel::isOpen()))
 			DocsPanel::open();
-		if (EditorWidgets::menuItem("Search the Documentation...", "Ctrl+F1"))
-			DocsPanel::openSearch("");
 		if (EditorWidgets::menuItem("Documentation (Website)")) SDL_OpenURL(kDocsUrl);
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
