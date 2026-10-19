@@ -895,6 +895,17 @@ private:
 	// resolve a pak asset that no UUID reference closure reached (e.g. a widget a
 	// HorizonCode script creates by path). Later mounts overwrite (overlay).
 	std::unordered_map<std::string, HE::UUID>     m_pakPathIndex;
+	// Reverse of the above (UUID → addressed path), filled from the same
+	// __asset_index__ entries. loadAssetFromMemory() uses it to register a
+	// streamed-by-UUID asset into m_pathToUUID under its ADDRESSED path
+	// ("Engine/Materials/Foo.hasset") instead of its raw embedded META path
+	// ("Materials/Foo.hasset" for an engine default — see HpakWriter's
+	// metaInNamespace comment). Without it, the first UUID-only load of an
+	// engine asset (the normal case: a MaterialComponent/mesh-section reference
+	// in a packed game never names a path) poisoned m_pathToUUID under the bare
+	// name, which could then hijack a project asset addressed by that same
+	// relative path.
+	std::unordered_map<HE::UUID, std::string>     m_pakIdToAddressedPath;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	// UUID → type. Two origins: loading an asset adds its type, and mounting a pak

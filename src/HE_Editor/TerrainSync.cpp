@@ -70,6 +70,41 @@ std::uint64_t fnv1a(const std::vector<std::uint8_t>& bytes)
 	return h;
 }
 
+void fnv1aMix(std::uint64_t& h, const void* data, std::size_t n)
+{
+	const auto* b = static_cast<const std::uint8_t*>(data);
+	for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+}
+
+// A digging lake's own bed, cheaply: just enough of Body (polygon, the dug
+// depth/bank, the ground patch's rect — not its float delta, which would cost
+// as much as the Settings blob itself) to tell "the bed moved since the last
+// look" from "nothing about it changed". Used only to decide whether Settings
+// must not wait its normal turn (see TerrainSync.h, Mirror::diggingHash); the
+// wire payload is still the ordinary settingsBlob().
+std::uint64_t diggingFingerprint(entt::registry& reg, Entity e)
+{
+	auto* t = reg.try_get<TerrainComponent>(e);
+	if (!t) return 0;
+	std::uint64_t h = 1469598103934665603ull;
+	for (const HE::water::Body& b : t->water.bodies)
+	{
+		if (!b.digsBed) continue;
+		fnv1aMix(h, &b.id, sizeof(b.id));
+		fnv1aMix(h, &b.level, sizeof(b.level));
+		fnv1aMix(h, &b.dugDepth, sizeof(b.dugDepth));
+		fnv1aMix(h, &b.dugBank, sizeof(b.dugBank));
+		if (!b.polygon.empty())
+			fnv1aMix(h, b.polygon.data(), b.polygon.size() * sizeof(b.polygon[0]));
+		fnv1aMix(h, &b.groundPatch.res, sizeof(b.groundPatch.res));
+		fnv1aMix(h, &b.groundPatch.x0, sizeof(b.groundPatch.x0));
+		fnv1aMix(h, &b.groundPatch.z0, sizeof(b.groundPatch.z0));
+		fnv1aMix(h, &b.groundPatch.w, sizeof(b.groundPatch.w));
+		fnv1aMix(h, &b.groundPatch.h, sizeof(b.groundPatch.h));
+	}
+	return h;
+}
+
 // One grid of one landscape as it stands now. `bytes` 0 = there is none.
 struct GridView
 {
@@ -421,13 +456,21 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 			// structural diff sent whole): what is there now is what everyone has.
 			baseline(reg, e, m);
 			m.settingsHash = fnv1a(settingsBlob(world, e));
+			m.diggingHash  = diggingFingerprint(reg, e);
 			continue;
 		}
 
 		// Settings before grids: a resolution travels with them, and so does a new
 		// foliage layer, which is why a changed layer count does not wait its turn.
+		// A digging lake's own bed does not wait either: a peer's syncSplines
+		// (TerrainSystem.cpp, unguarded) sees the spline's move over the faster
+		// transform channel and re-digs there and then, lifting whatever
+		// groundPatch it still holds — stale, if Settings has not caught up with
+		// the Heights the dig itself already sent out faster. Out of turn here
+		// closes that window instead of leaving it to chance.
 		const std::size_t layers = foliageLayerCount(reg, e);
-		if (nowMs >= m.nextAt[Settings] || layers != m.foliageLayers)
+		const std::uint64_t digHash = diggingFingerprint(reg, e);
+		if (nowMs >= m.nextAt[Settings] || layers != m.foliageLayers || digHash != m.diggingHash)
 		{
 			m.nextAt[Settings] = nowMs + kSettingsIntervalMs;
 			std::vector<std::uint8_t> blob = settingsBlob(world, e);
@@ -438,11 +481,12 @@ void TerrainSync::collect(HorizonWorld& world, std::uint64_t nowMs, const Send& 
 				p.field = Settings;
 				p.bytes = std::move(blob);
 				// Not sent (the link is down): it is still a change, next time.
-				if (emit(e, p, send)) { m.settingsHash = hash; m.foliageLayers = layers; }
+				if (emit(e, p, send)) { m.settingsHash = hash; m.foliageLayers = layers; m.diggingHash = digHash; }
 			}
 			else if (hash == m.settingsHash)
 			{
 				m.foliageLayers = layers;   // what the peers hold already
+				m.diggingHash = digHash;
 			}
 		}
 
@@ -574,6 +618,7 @@ bool TerrainSync::applyOne(HorizonWorld& world, Entity e, const Patch& p)
 		{
 			mirror->second.settingsHash  = fnv1a(settingsBlob(world, e));
 			mirror->second.foliageLayers = foliageLayerCount(reg, e);
+			mirror->second.diggingHash   = diggingFingerprint(reg, e);
 		}
 		return true;
 	}

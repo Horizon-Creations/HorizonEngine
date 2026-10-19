@@ -7,10 +7,13 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/WaterLake.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <Types/UUID.h>
 
 #include <nlohmann/json.hpp>
 
@@ -290,6 +293,153 @@ TEST_CASE("Landscape sync: settings travel without the grids and keep the built 
 	net.clearSent();
 	net.collect(*host);
 	CHECK(net.sentBy[0].empty());
+}
+
+// ── Water: a lake's own dig bed (Thema 188 Schritt 2) ────────────────────────
+
+TEST_CASE("Landscape sync: a settings patch on raised ground does not move the ground reference")
+{
+	auto host = makeMachine(0), client = makeMachine(1);
+	for (float& h : host->tc().sculptHeights) h = 10.0f;
+	client->tc().sculptHeights = host->tc().sculptHeights;
+	Net net({ host.get(), client.get() });
+	net.collectAll();
+
+	net.tick();
+	host->tc().water.shoreOvershoot = 0.75f;   // the only thing that forces a Settings patch
+	net.collect(*host);
+	REQUIRE(net.sentBy[0].size() == 1);
+	CHECK(net.sentBy[0][0].field == TerrainSync::Settings);
+	net.deliver();
+	REQUIRE(client->tc().water.shoreOvershoot == doctest::Approx(0.75f));
+
+	const std::vector<glm::vec2> poly = { { -10, -10 }, { 10, -10 }, { 10, 10 }, { -10, 10 } };
+	CHECK(terrainHeightAt(client->tc(), 0.0f, 0.0f) == doctest::Approx(10.0f));
+	CHECK(HE::water::lake::lowestGround(client->tc(), poly) == doctest::Approx(10.0f));
+	CHECK(HE::water::lake::lowestGround(client->tc(), poly) ==
+	      doctest::Approx(HE::water::lake::lowestGround(host->tc(), poly)));
+}
+
+TEST_CASE("Landscape sync: a client's own syncSplines must not re-dig a lake's bed from a stale patch")
+{
+	// Both machines run WaterLake::syncSplines on their own TerrainSystem tick
+	// (TerrainSystem.cpp:535), unguarded by session or ownership — a spline move
+	// that arrives from a peer looks exactly like one the local user made. For a
+	// lake that digs its own bed (Body::digsBed) that means BOTH machines redig
+	// the ground locally, each lifting its OWN recorded groundPatch first. If the
+	// client's groundPatch is still the OLD one (Settings travels at 200 ms,
+	// slower than the Heights that already carried the host's fresh dig at
+	// 33 ms), the client's lift does not cancel what the host already dug, and
+	// the fresh dig on top does not cover the leftover: a residual bite that
+	// compounds on the next move.
+	auto host = makeMachine(0), client = makeMachine(1);
+	Net net({ host.get(), client.get() });
+	net.collectAll();
+
+	net.tick();
+	const HE::UUID spline = HE::UUID::generate();
+	const std::vector<glm::vec2> poly = { { -10, -10 }, { 10, -10 }, { 10, 10 }, { -10, 10 } };
+	const uint16_t id = HE::water::lake::create(host->tc(), spline, poly, 0.0f);
+	REQUIRE(id != HE::water::kNoBody);
+	REQUIRE(HE::water::lake::dig(host->tc(), id, 2.0f, 4.0f).ok);
+	net.collect(*host);
+	net.deliver();
+	REQUIRE(client->tc().water.findBody(id) != nullptr);
+	REQUIRE(client->tc().sculptHeights == host->tc().sculptHeights);
+
+	// Let the settings timer start fresh right before the move, so the window
+	// between a 33 ms Heights send and the next allowed Settings send is real.
+	net.tick(250);
+	net.collectAll();
+	net.deliver();
+
+	// The oracle: one machine, one `follow` call, the answer both host and
+	// client must converge to.
+	TerrainComponent oracle = host->tc();
+	// Shifted +12 m in x: the western part of the old outline and its bank
+	// (as far out as x = -14) is now outside the new outline and its bank
+	// (which starts at x = -2), so a correct lift must bring it all back to
+	// plain ground.
+	const std::vector<glm::vec2> moved = { { 2, -10 }, { 22, -10 }, { 22, 10 }, { 2, 10 } };
+	REQUIRE(HE::water::lake::follow(oracle, id, moved).ok);
+
+	// The host: the user actually dragged the point. This is the one true edit.
+	REQUIRE(HE::water::lake::follow(host->tc(), id, moved).ok);
+	net.tick(40);
+	net.collect(*host);
+	REQUIRE(std::any_of(net.sentBy[0].begin(), net.sentBy[0].end(),
+	                    [](const Patch& p) { return (p.field & ~TerrainSync::kWholeGrid) == TerrainSync::Heights; }));
+	net.deliver();
+
+	// The client: its own syncSplines, reacting to the same spline move as if it
+	// had arrived over the (separate, untested-here) transform channel — exactly
+	// what TerrainSystem.cpp:535 does every tick, host or client, unconditionally.
+	REQUIRE(HE::water::lake::follow(client->tc(), id, moved).ok);
+
+	net.collectAll();
+	net.deliver();
+	net.tick(250);
+	net.collectAll();
+	net.deliver();
+
+	CHECK(host->tc().sculptHeights == oracle.sculptHeights);
+	CHECK(client->tc().sculptHeights == oracle.sculptHeights);
+	// The old bed's floor, outside the new outline's reach, must be back at the
+	// plain ground (0) on both — not a leftover bite from a stale lift.
+	CHECK(terrainHeightAt(oracle, -6.0f, 0.0f) == doctest::Approx(0.0f));   // sanity: the oracle itself
+	CHECK(terrainHeightAt(host->tc(), -6.0f, 0.0f) == doctest::Approx(0.0f));
+	CHECK(terrainHeightAt(client->tc(), -6.0f, 0.0f) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Landscape sync: a lake's dig bed survives a landscape edit elsewhere")
+{
+	auto host = makeMachine(0), client = makeMachine(1);
+	Net net({ host.get(), client.get() });
+	net.collectAll();   // first sight: the shared blank state
+
+	net.tick();
+	const HE::UUID spline = HE::UUID::generate();
+	const std::vector<glm::vec2> poly = { { -10, -10 }, { 10, -10 }, { 10, 10 }, { -10, 10 } };
+	const uint16_t id = HE::water::lake::create(host->tc(), spline, poly, 0.0f);
+	REQUIRE(id != HE::water::kNoBody);
+	REQUIRE(HE::water::lake::dig(host->tc(), id, 2.0f, 4.0f).ok);
+
+	const HE::water::Body* dug = host->tc().water.findBody(id);
+	REQUIRE(dug != nullptr);
+	REQUIRE(dug->digsBed);
+	REQUIRE(dug->dugDepth == doctest::Approx(2.0f));
+	REQUIRE(dug->dugBank == doctest::Approx(4.0f));
+	REQUIRE_FALSE(dug->groundPatch.empty());
+	const float dugDepth = dug->dugDepth, dugBank = dug->dugBank;
+
+	net.collect(*host);
+	net.deliver();
+
+	// The client now holds the same lake, with the same dug bed.
+	const HE::water::Body* onClient = client->tc().water.findBody(id);
+	REQUIRE(onClient != nullptr);
+	CHECK(onClient->digsBed);
+	CHECK(onClient->dugDepth == doctest::Approx(dugDepth));
+	CHECK(onClient->dugBank == doctest::Approx(dugBank));
+	CHECK_FALSE(onClient->groundPatch.empty());
+	CHECK(client->tc().sculptHeights == host->tc().sculptHeights);
+
+	// The host edits the landscape somewhere else, far from the lake.
+	net.tick();
+	TerrainSculpt::apply(host->tc(), 25.0f, 25.0f, TerrainSculpt::Op::Raise, 3.0f, 1.0f, 5.0f);
+	net.collect(*host);
+	net.deliver();
+
+	// The lake's own dig bed must still be there on the client, at the depth
+	// and bank it was dug with — not the normal zero a fresh body starts at —
+	// and the excavated ground must still match the host's.
+	const HE::water::Body* afterEdit = client->tc().water.findBody(id);
+	REQUIRE(afterEdit != nullptr);
+	CHECK(afterEdit->digsBed);
+	CHECK(afterEdit->dugDepth == doctest::Approx(dugDepth));
+	CHECK(afterEdit->dugBank == doctest::Approx(dugBank));
+	CHECK_FALSE(afterEdit->groundPatch.empty());
+	CHECK(client->tc().sculptHeights == host->tc().sculptHeights);
 }
 
 TEST_CASE("Landscape sync: a patch that does not fit the grid changes nothing")

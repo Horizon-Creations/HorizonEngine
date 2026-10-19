@@ -10545,6 +10545,11 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 			key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath;
 		if (editorOwned && !editorDocDiffDue(key, nowMs)) continue;
 
+		// Read before the diff below, which runs while we may not own the lock
+		// yet — the content-asset branch further down needs to know whether a
+		// claim that lands THIS frame is new, see the comment there.
+		const bool ownedBeforeDiff = m_collab.ownsAssetLock(key);
+
 		publishDocDeltas(tab.assetPath, key);
 
 		// The Level Script and the Game Instance graph have no panel dirty flag,
@@ -10569,6 +10574,19 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 			continue;   // held by someone else, or the host has not answered yet
 		if (!m_collab.ownsAssetLock(key))
 			continue;   // claim in flight — the grant is one round trip away
+
+		// A HOST's claim above self-grants with no round trip, so it can land in
+		// THIS frame, right after the call above ran with ownsAssetLock() still
+		// false (and therefore sent nothing). The autosave below is about to
+		// clear this tab's dirty flag, and once it does, no later frame's diff
+		// will ever see owned and dirty together for this edit again — it would
+		// simply be skipped as "nothing of ours to send" forever, not merely
+		// delayed. Diffing again now, while dirty is still set, is what makes a
+		// fresh claim's own edit go out as a delta instead of only through the
+		// 1 s whole-file autosave. A client's grant is always at least one
+		// round trip (a frame) later, so ownedBeforeDiff is already true by the
+		// time its own diff runs with dirty still set, and this never fires.
+		if (!ownedBeforeDiff) publishDocDeltas(tab.assetPath, key);
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;

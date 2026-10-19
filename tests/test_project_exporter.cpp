@@ -704,6 +704,85 @@ TEST_CASE("A project override of an engine default is the one that ships")
     he_test::removeAllQuiet(outputDir);
 }
 
+TEST_CASE("Streaming an engine material by UUID first must not hijack a project material of the same name")
+{
+    // A packed game never loads an engine default BY PATH first — a scene's
+    // MaterialComponent (and every other reference, per MaterialAsset.h /
+    // Components/MaterialComponent.h) carries only the baked UUID, so
+    // ensureResident(id) is the FIRST thing that ever touches it. That streams
+    // through loadAssetFromMemory(), which used to register the asset into
+    // m_pathToUUID under its EMBEDDED META path — bare, e.g. "Default.hasset",
+    // because mat_gen-style authoring uses the engine root as its own content
+    // root (see "ProjectExporter ships the engine default content under
+    // Engine/" above and HpakWriter's metaInNamespace comment) — instead of the
+    // addressed "Engine/Default.hasset" the pak's asset-path-index (and every
+    // caller of loadAsset()/idForPath()) actually uses. A project asset that
+    // happens to share that bare relative path then resolved to the ENGINE
+    // material instead of its own.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_enghijack_content";
+    auto engineDir  = std::filesystem::temp_directory_path() / "he_test_enghijack_engine";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_enghijack_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(engineDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    const HE::UUID engineMatId{0x0000000000000500ULL, 0x0000000000000001ULL};
+    const HE::UUID projMatId  {0x0000000000000500ULL, 0x0000000000000002ULL};
+
+    {
+        // Authored exactly like an engine default: its own folder is its content
+        // root, so its embedded META path is the bare "Default.hasset".
+        ContentManager gen(engineDir.string());
+        MaterialAsset m;
+        m.type = HE::AssetType::Material;
+        m.id   = engineMatId;
+        m.name = "EngineDefault";
+        m.path = "Default.hasset";
+        REQUIRE(gen.saveAsset(m));
+    }
+    {
+        // The PROJECT's own material at the SAME content-relative path.
+        ContentManager gen(contentDir.string());
+        MaterialAsset m;
+        m.type = HE::AssetType::Material;
+        m.id   = projMatId;
+        m.name = "ProjectDefault";
+        m.path = "Default.hasset";
+        REQUIRE(gen.saveAsset(m));
+    }
+
+    ExportSettings settings;
+    settings.compress         = false;
+    settings.engineContentDir = engineDir;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "HijackGame", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 2);   // distinct addressed paths, distinct UUIDs
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak((outputDir / "HijackGame.hpak").string()));
+
+    // The normal order in a packed game: the engine default streams by its
+    // baked UUID first (a MaterialComponent reference, or the scene's UUID
+    // reference closure) — never by path.
+    REQUIRE(cm.ensureResident(engineMatId));
+
+    // The pak's addressed path for the engine default must resolve by a PURE
+    // lookup (RenderExtractor::resolveSectionMaterial's idForPath fast path
+    // asks exactly this, with no loadAsset fallback for a hit).
+    CHECK(cm.idForPath("Engine/Default.hasset") == engineMatId);
+
+    // The project's OWN material, loaded by ITS content-relative path, must
+    // resolve to ITSELF — not to the engine default that happened to stream
+    // first under the colliding bare key.
+    CHECK(cm.loadAsset("Default.hasset") == projMatId);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(engineDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 // ─── The EngineContent download cache as the third "Engine/" tier ─────────────
 // Thema 189: since the landscape texture arrays moved to the EngineContent server
 // (Thema 177), the editor reads them from %APPDATA%/HorizonEngine/EngineContentCache
