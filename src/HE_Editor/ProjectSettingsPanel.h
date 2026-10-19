@@ -3,64 +3,63 @@
 
 struct AppContext;
 
-// ── Project Settings tab ─────────────────────────────────────────────────────
+// ── Project pages of the Preferences tab ─────────────────────────────────────
 // Everything that belongs to the PROJECT rather than to the editor on this
 // machine: what it is called, how its shadows and physics behave, what the
 // packaged build boots with, which scripts its text needs, what its scripts may
-// reach, which collision channels touch. A full editor tab (Edit ▸ Project
-// Settings…), laid out like Preferences — a category rail on the
-// left, the selected page on the right — because the two are the same kind of
-// surface and should be operated the same way. The difference is WHERE a value
-// goes: Preferences writes config.json on this machine, this tab writes the
-// project's .heproj and its Config/ProjectSettings.json, both of which travel
-// with the project and into the build it exports.
+// reach, which collision channels touch. These used to be a tab of their own
+// (Edit ▸ Project Settings); they are pages of Preferences now, in its Project /
+// World / Online groups, so every setting has ONE place. The difference is
+// still WHERE a value goes: the editor pages write config.json on this machine,
+// these write the project's .heproj and its Config/ProjectSettings.json, both of
+// which travel with the project and into the build it exports.
 //
-// The four pages that used to sit under "Project" in Preferences (Application,
-// Permissions, Fonts, Collision Layers) live here now, unchanged; their help
-// scopes ("Application/…", "Permissions/…") are theirs and moved with them.
+// The page bodies live here (the Preferences tab only lists and calls them), so
+// the headless UI test can draw one without the whole Preferences tab.
 namespace ProjectSettingsPanel
 {
-	// Sentinel "asset path" identifying the tab (no backing .hasset).
-	constexpr const char* kTabPath = "::ProjectSettings::";
-
-	// Sub-pages. The rail lists them in six groups (Project, Rendering, Input,
-	// Physics, Audio, Online); the enum is only an identity.
+	// Sub-pages. EditorSettingsPanel's rail lists them in three groups (Project,
+	// World, Online); the enum is only an identity. The graphics rows and the
+	// gamepad deadzones are not pages here: they are drawn once, on Preferences ▸
+	// Graphics and Input, bound to the project's values when it sets its own.
 	enum class Page
 	{
 		// Project — what it IS. SourceControl is its repository (init, remote,
 		// GitHub, large files): the repository belongs to the project, not to
 		// whoever has it open.
-		General, Application, SourceControl, Permissions, Fonts,
-		// Rendering — how it draws. RenderDefaults is the packaged build's window
-		// and backend; Quality / PostProcessing / Reflections are the graphics
-		// block (Config/ProjectSettings.json, "graphics") over the same rows
-		// Preferences ▸ Viewport Quality shows for the user's own values.
-		RenderDefaults, Quality, PostProcessing, Reflections, Shadows,
-		// Input — the game's gamepad deadzones ("input").
-		Input,
-		// Physics — how it simulates
-		Simulation, CollisionLayers,
-		// Audio — the mixer's buses live in their own window; the page points
-		// there rather than duplicating the strip.
-		AudioBuses,
+		General, Application, RenderDefaults, Fonts, Permissions, SourceControl,
+		// World — how it simulates and sounds.
+		Shadows, Simulation, CollisionLayers, AudioBuses,
 		// Online — what a session of it is: AntiCheat is what its host refuses to
 		// believe from a client ("anticheat"), Multiplayer the port, seats and
 		// tick rate ("multiplayer").
 		AntiCheat, Multiplayer,
 	};
 
-	// Fill the given tab rect with the tab (rail + content).
-	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);
+	// The rail label of a page ("Game Window" for RenderDefaults).
+	const char* pageTitle(Page page);
 
-	// Ask EditorUI to open (or focus) the tab — usable from panels drawn
-	// outside renderEditor. The overload with a Page also switches to that
-	// page. Consumed once per frame by the tab strip.
+	// Draw one page's body into the current window (no heading, no rail).
+	void drawPage(AppContext& ctx, Page page);
+
+	// Preferences ▸ Graphics: the rows named by `keys`, bound to the project's
+	// own graphics when it sets them (the checkbox at the top switches that),
+	// else to the editor's values. One set of rows, not one per owner.
+	void drawGraphics(AppContext& ctx, const char* const* keys, int keyCount);
+
+	// Preferences ▸ Input: the gamepad deadzone rows, bound the same way.
+	void drawGamepad(AppContext& ctx);
+
+	// Ask for the Preferences tab to open on a project page (usable from panels
+	// drawn outside renderEditor). EditorUI consumes it once per frame and
+	// forwards the page to EditorSettingsPanel.
 	void requestOpen();
 	void requestOpen(Page page);
 	bool takeOpenRequest();
+	Page requestedPage();
 
 	// The Audio ▸ Buses page's "Open Audio Mixer": the mixer's open flag lives
-	// in EditorUI with the other tool windows, so the tab raises a request and
+	// in EditorUI with the other tool windows, so the page raises a request and
 	// EditorUI consumes it once per frame.
 	bool takeAudioMixerRequest();
 }

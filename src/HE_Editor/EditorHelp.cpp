@@ -2105,16 +2105,16 @@ namespace
 	  "viewport each take the Esc first, and the next press clears.",
 	  "Esc", "editor#outliner" },
 	{ "Edit/Project Settings", "",
-	  "Opens the project's own settings as an editor tab: its title and startup "
-	  "scene, shadows, physics rate and gravity, what the packaged build boots "
-	  "with, permissions, fonts, collision layers. Everything on it travels with "
-	  "the project and into the build you export — the opposite of Preferences, "
-	  "which follow the editor on this machine.",
+	  "Opens Preferences on the Project group: the project's title and startup "
+	  "scene, the game window, shadows, physics rate and gravity, what the "
+	  "packaged build boots with, permissions, fonts, collision layers. Those "
+	  "pages travel with the project and into the build you export — the "
+	  "opposite of the Editor pages, which follow the editor on this machine.",
 	  "", "editor#preferences" },
 	{ "Edit/Preferences", "",
-	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
-	  "tools. They belong to the editor, not to the project — that one has its "
-	  "own tab, Project Settings.",
+	  "Opens the settings as an editor tab: appearance, input, renderer, "
+	  "collaboration, tools, and the open project's own pages (Project, World, "
+	  "Online), which are saved in the project and not on this machine.",
 	  "Ctrl+,", "editor#preferences" },
 	{ "View/Toggle Fullscreen", "",
 	  "Fills the screen with the editor window. On a Mac the View menu's own "
@@ -4665,10 +4665,10 @@ namespace
 	  "global illumination. Only the preview changes: exporting still writes the "
 	  "project's values, and play mode follows the project.",
 	  "", "" },
-	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
-	  "Opens the Project Settings page of the repository: initialising it, the "
+	{ "Source Control/Open Project Repository\xe2\x80\xa6", "Open Project Repository",
+	  "Opens the Project \xe2\x96\xb8 Repository page: initialising the repository, the "
 	  "remote, GitHub setup and large files. The repository belongs to the "
-	  "project, so those controls travel with it and no longer sit here; git on "
+	  "project, so those controls travel with it and do not sit here; git on "
 	  "this machine and the signed-in account stay on this page.",
 	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────

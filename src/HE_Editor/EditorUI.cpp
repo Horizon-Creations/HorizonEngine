@@ -61,7 +61,7 @@
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "EditorShortcuts.h"           // the chords the menus print and the keys fire
 #include "EditorTabs.h"                // find-or-focus for every way of opening an asset tab
-#include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
+#include "ProjectSettingsPanel.h"        // the project pages of the Preferences tab
 #include "ToolSetupDialog.h"             // startup check: cmake, compiler, git, Git LFS, identity
 #include "ProjectPreflight.h"            // engine-content check in front of every project open
 #include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
@@ -2444,8 +2444,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
-		    || path == EditorSettingsPanel::kTabPath
-		    || path == ProjectSettingsPanel::kTabPath)
+		    || path == EditorSettingsPanel::kTabPath)
 		{
 			doSaveScene();
 			return;
@@ -2822,10 +2821,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// Open request raised outside this function (e.g. the Source Control window's
 	// "set up the remote in Preferences" pointer) — consumed here where the tab
 	// list lives.
+	// A project page was asked for (the Source Control window's "set up the remote"):
+	// the project pages are Preferences pages now, so forward it before the take.
+	if (ProjectSettingsPanel::takeOpenRequest())
+		EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::requestedPage());
 	if (EditorSettingsPanel::takeOpenRequest())
 		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
-	if (ProjectSettingsPanel::takeOpenRequest())
-		openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
 	// The Audio ▸ Buses page's "Open Audio Mixer" — the flag is this file's.
 	if (ProjectSettingsPanel::takeAudioMixerRequest() && !s_showAudioMixer)
 		togglePanelWindow(s_showAudioMixer, "Audio Mixer");
@@ -3038,7 +3039,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
 			case MC::ProjectSettings:
-				if (ctx.projectLoaded) openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+				if (ctx.projectLoaded)
+				{
+					EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::Page::General);
+					openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
+				}
 				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
@@ -3296,7 +3301,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         }
         ImGui::Separator();
 		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
-			openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+		{
+			EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::Page::General);
+			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
+		}
 		if (EditorWidgets::menuItem("Preferences", EditorShortcuts::label("edit.preferences").c_str()))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
@@ -4288,8 +4296,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // Instance are virtual tabs (no backing .hasset) and come first.
         if (tabPath == EditorSettingsPanel::kTabPath)
             EditorSettingsPanel::render(ctx, tabPos, tabSize);
-        else if (tabPath == ProjectSettingsPanel::kTabPath)
-            ProjectSettingsPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == LevelScriptPanel::kTabPath)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)

@@ -1635,7 +1635,6 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
-	m_editorConfig.PreviewQualityMode          = globalstate.getCustomConfigInt("PreviewQualityMode", m_editorConfig.PreviewQualityMode);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -13534,7 +13533,9 @@ void EditorApplication::syncGraphicsSource()
 {
 	const HE::ProjectGraphics* project =
 		m_projectLoaded ? &m_projectManager.currentProject().settings.graphics : nullptr;
-	const bool follow = project && project->enabled && m_editorConfig.PreviewQualityMode == 0;
+	// One set of graphics rows (Preferences ▸ Graphics): when the project sets its
+	// own, the viewport shows them — what you see is what ships.
+	const bool follow = project && project->enabled;
 	if (follow)
 	{
 		if (!m_graphicsFromProject)
@@ -14724,7 +14725,6 @@ void EditorApplication::writeEditorConfig()
 		m_graphicsFromProject = false;
 		m_editorConfig.GraphicsFromProject = false;
 	}
-	globalstate.setCustomConfigEntry("PreviewQualityMode",         m_editorConfig.PreviewQualityMode);
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;
