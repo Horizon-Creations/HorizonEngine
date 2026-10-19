@@ -116,7 +116,10 @@ def main():
             if libset == "dev" or release:
                 ok[profile] = bool(st and st.get("success") and compiled)
             else:
-                ok[profile] = refused is not None and "'release'" in refused
+                # The refusal arrives as the repr of the tool's content list, so
+                # its quotes are escaped: match the words, not the quoting.
+                ok[profile] = (refused is not None and "release" in refused
+                               and "lib set" in refused and st is None)
             log("── %s: %s" % (profile, "as expected" if ok[profile] else "NOT as expected"))
         c.close()
     finally:
