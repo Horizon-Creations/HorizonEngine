@@ -4658,12 +4658,6 @@ namespace
 	  "global illumination. Only the preview changes: exporting still writes the "
 	  "project's values, and play mode follows the project.",
 	  "", "" },
-	{ "Source Control/Open Project Repository\xe2\x80\xa6", "Open Project Repository",
-	  "Opens the Project \xe2\x96\xb8 Repository page: initialising the repository, the "
-	  "remote, GitHub setup and large files. The repository belongs to the "
-	  "project, so those controls travel with it and do not sit here; git on "
-	  "this machine and the signed-in account stay on this page.",
-	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
 	  "On, the packaged build boots with the window and backend this editor's "
@@ -9122,7 +9116,7 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Project Settings page that owns the setup: initialising the "
+	  "Opens Preferences \xe2\x96\xb8 Source Control, which owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },

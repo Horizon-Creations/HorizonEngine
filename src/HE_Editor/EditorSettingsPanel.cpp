@@ -1117,7 +1117,6 @@ void requestOpenProjectPage(ProjectSettingsPanel::Page page)
 	case P::RenderDefaults:  target = Page::ProjectWindow;       break;
 	case P::Fonts:           target = Page::ProjectFonts;        break;
 	case P::Permissions:     target = Page::ProjectPermissions;  break;
-	case P::SourceControl:   target = Page::ProjectRepository;   break;
 	case P::Shadows:         target = Page::WorldShadows;        break;
 	case P::Simulation:      target = Page::WorldSimulation;     break;
 	case P::CollisionLayers: target = Page::WorldCollisionLayers; break;
@@ -1639,14 +1638,13 @@ void drawSourceControlPage(AppContext& ctx)
 	ImGui::SeparatorText("GitHub account");
 	GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/false);
 
-	// The repository of the open PROJECT is on the Project group, next to the
-	// other things that belong to the project; say where.
+	// The open project's repository: init, remote, auto-push, large files.
 	ImGui::Spacing();
 	ImGui::SeparatorText("Repository");
-	ImGui::TextDisabled("Init, remote, auto-push and large files belong to the project: "
-	                    "Project \xe2\x96\xb8 Repository.");
-	if (EditorWidgets::button("Open Project Repository\xe2\x80\xa6", ImVec2(240.0f, 0.0f)))
-		s_page = Page::ProjectRepository;
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+		ImGui::TextDisabled("No project is open.");
+	else
+		drawRepositorySection(ctx);
 }
 
 // ─── Status page (Tools) ─────────────────────────────────────────────────────
@@ -2211,7 +2209,6 @@ constexpr NavItem kProjectItems[] = {
 	{ Page::ProjectWindow,      "Game Window" },
 	{ Page::ProjectFonts,       "Fonts" },
 	{ Page::ProjectPermissions, "Permissions" },
-	{ Page::ProjectRepository,  "Repository" },
 };
 constexpr NavItem kWorldItems[] = {
 	{ Page::WorldShadows,        "Shadows" },
@@ -2244,7 +2241,6 @@ bool projectPageOf(Page p, ProjectSettingsPanel::Page& out)
 	case Page::ProjectWindow:       out = P::RenderDefaults;  return true;
 	case Page::ProjectFonts:        out = P::Fonts;           return true;
 	case Page::ProjectPermissions:  out = P::Permissions;     return true;
-	case Page::ProjectRepository:   out = P::SourceControl;   return true;
 	case Page::WorldShadows:        out = P::Shadows;         return true;
 	case Page::WorldSimulation:     out = P::Simulation;      return true;
 	case Page::WorldCollisionLayers: out = P::CollisionLayers; return true;
@@ -2308,16 +2304,6 @@ const char* pageTitle(Page p)
 }
 
 } // namespace
-
-// The repository half, on the Project ▸ Repository page. Marks
-// the page as a source-control page this frame so the Source Control window keeps
-// its fast status poll running while somebody looks at it, as it did for the
-// Preferences page this half used to be on.
-void DrawRepositorySection(AppContext& ctx)
-{
-	s_scPageFrame = ImGui::GetFrameCount();
-	drawRepositorySection(ctx);
-}
 
 // ─── The Preferences tab ─────────────────────────────────────────────────────
 

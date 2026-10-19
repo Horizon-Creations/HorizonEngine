@@ -57,7 +57,7 @@ namespace EditorSettingsPanel
 		Status,
 		// Project / World / Online — one page per ProjectSettingsPanel::Page.
 		ProjectGeneral, ProjectApplication, ProjectWindow, ProjectFonts,
-		ProjectPermissions, ProjectRepository,
+		ProjectPermissions,
 		WorldShadows, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
 		OnlineAntiCheat, OnlineMultiplayer,
 	};
@@ -106,11 +106,6 @@ namespace EditorSettingsPanel
 		EditorConfig*      config   = nullptr;
 	};
 	void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& options);
-
-	// The repository half of source control (init, remote, GitHub setup, large
-	// files): the repository belongs to the PROJECT, so it is drawn on the
-	// Project ▸ Repository page and not on Accounts & Connections ▸ Source Control.
-	void DrawRepositorySection(AppContext& ctx);
 
 	// Fill the given tab rect with the Preferences tab (nav + content).
 	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);

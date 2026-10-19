@@ -794,20 +794,6 @@ void drawRenderDefaultsPage(AppContext& ctx)
 }
 
 // ─── Project ▸ Source Control ────────────────────────────────────────────────
-// The project's repository. Git itself and the signed-in account are Preferences
-// ▸ Source Control (this machine); init, remote and large files are this
-// project's, so they are here.
-void drawSourceControlPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Source Control");
-	hint("The repository of the open project: whether it has one, where it pushes, "
-	     "and which files go through Git LFS. Git on this machine and the GitHub "
-	     "account are in Preferences \xe2\x96\xb8 Source Control.");
-	ImGui::Spacing();
-	if (!openProject(ctx)) return;
-	EditorSettingsPanel::DrawRepositorySection(ctx);
-}
-
 // ─── World ▸ Shadows ─────────────────────────────────────────────────────
 // The directional light's cascaded shadow maps. The defaults are the constants
 // the extractor has always used, so a project that never opens this page draws
@@ -1330,7 +1316,6 @@ const char* pageTitle(Page page)
 	case Page::RenderDefaults:  return "Game Window";
 	case Page::Fonts:           return "Fonts";
 	case Page::Permissions:     return "Permissions";
-	case Page::SourceControl:   return "Repository";
 	case Page::Shadows:         return "Shadows";
 	case Page::Simulation:      return "Simulation";
 	case Page::CollisionLayers: return "Collision Layers";
@@ -1350,7 +1335,6 @@ void drawPage(AppContext& ctx, Page page)
 	case Page::RenderDefaults:  drawRenderDefaultsPage(ctx);  break;
 	case Page::Fonts:           drawFontsPage(ctx);           break;
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
-	case Page::SourceControl:   drawSourceControlPage(ctx);   break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;
 	case Page::CollisionLayers: drawCollisionLayersPage(ctx); break;

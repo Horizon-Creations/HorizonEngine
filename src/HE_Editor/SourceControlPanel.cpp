@@ -1283,7 +1283,7 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	ImGui::Spacing();
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Open source-control settings…"))
-		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::SourceControl);
 }
 
 void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
@@ -1628,7 +1628,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			                   "in Project Settings \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
 			if (EditorWidgets::button("Set up in Project Settings…", ImVec2(240.0f, 0.0f)))
-				ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::SourceControl);
 		}
 
 		// Errors are not printed here: GitController posts them to the notifications

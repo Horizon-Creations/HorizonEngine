@@ -24,10 +24,9 @@ namespace ProjectSettingsPanel
 	// Graphics and Input, bound to the project's values when it sets its own.
 	enum class Page
 	{
-		// Project — what it IS. SourceControl is its repository (init, remote,
-		// GitHub, large files): the repository belongs to the project, not to
-		// whoever has it open.
-		General, Application, RenderDefaults, Fonts, Permissions, SourceControl,
+		// Project — what it IS. (Its repository is on Accounts & Connections ▸
+		// Source Control, next to git itself and the GitHub account.)
+		General, Application, RenderDefaults, Fonts, Permissions,
 		// World — how it simulates and sounds.
 		Shadows, Simulation, CollisionLayers, AudioBuses,
 		// Online — what a session of it is: AntiCheat is what its host refuses to
