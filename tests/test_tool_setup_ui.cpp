@@ -728,7 +728,10 @@ TEST_CASE("Export: the game-compile line with a toolchain and without a compiler
 	const ImVec2 at = firstItem(bits);
 	REQUIRE(at.x >= 0.0f);
 	CHECK_FALSE(toolSetupOpen());
+	// Two frames over it first: the empty frame toolSetupOpen() just ran left the
+	// host window unhovered, and a press then lands on the window, not the button.
 	ImGui::GetIO().AddMousePosEvent(at.x, at.y);
+	exportFrame(bits, false);
 	exportFrame(bits, false);
 	exportFrame(bits, true);
 	exportFrame(bits, false);
@@ -743,6 +746,7 @@ TEST_CASE("Tool setup: opened for an export, it says what waits and closes once 
 	ContextBits bits;
 	bits.onLinux(true, false, true, true, true);
 	spendAutoOpen(bits);
+	exportFrame(bits, false);   // isShowing() is about the last frame that drew the dialog
 	CHECK_FALSE(ToolSetupDialog::isShowing());
 
 	ToolSetupDialog::requestShowFor(Tool::Compiler, ExportSdkGateUi::kToolSetupPurpose);

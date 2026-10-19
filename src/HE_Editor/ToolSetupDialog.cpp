@@ -122,8 +122,8 @@ const char* toolPurpose(Tool t)
 {
 	switch (t)
 	{
-	case Tool::Cmake:       return "Builds HorizonCode and C++ GameLogic.";
-	case Tool::Compiler:    return "Compiles HorizonCode export and native GameLogic.";
+	case Tool::Cmake:       return "Builds every exported game, HorizonCode and C++ GameLogic.";
+	case Tool::Compiler:    return "Compiles every exported game, HorizonCode and native GameLogic.";
 	case Tool::Git:         return "Source control and cloning.";
 	case Tool::GitLfs:      return "Keeps meshes, textures and audio out of the repository's own history.";
 	case Tool::GitIdentity: return "git records who made each change and refuses to commit without it.";
@@ -833,7 +833,8 @@ void drawToolSetup(AppContext& ctx, bool* closeRequested)
 		{
 			ImGui::TextWrapped(
 				"The editor keeps working without these. cmake and a C++ compiler are needed "
-				"to compile HorizonCode and native GameLogic; git, Git LFS and your name are "
+				"to export a game (it is compiled from the engine SDK), HorizonCode and native "
+				"GameLogic; git, Git LFS and your name are "
 				"needed for source control. Installs go through this system's package manager. %s",
 				platformPromptSentence());
 		}
