@@ -66,6 +66,10 @@ not notice.
   a CLion build without ccache in the environment (the launchers are mirrored from the cache).
 - **Decisions:** always ON locally, OFF in CI by `$CI`; nested tree inside the editor tree (deleting the
   tree deletes both); the script stays the one place that knows how to make the second tree.
+- **Traps:** every dev tree's first `--target HorizonEditor` now also builds `<tree>/sdk-release`
+  (~8 min on the Air; ccache mostly misses across worktrees, the build-relative paths differ);
+  `--target he_tests` does not. A compile error only the release profile has (code around
+  `#if HE_FEATURE_*`) now breaks the editor build; the cause is in the nested tree's console output.
 - **Next steps:** 1. Optionally switch CI's push lane to the editor-built set (`-DHE_SDK_RELEASE_SET=ON`
   on push) and drop the separate step; needs a CI run per platform. 2. Windows dev box check of the
   nested tree path length.

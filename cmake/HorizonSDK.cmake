@@ -263,8 +263,10 @@ message(STATUS "HorizonEngine: SDK target HorizonSDK (${HE_BUILD_PROFILE} lib se
 # editor build, through scripts/build_engine_sdk.py (the profile is the only
 # difference; options, compilers and FetchContent sources come from this
 # cache). Measured on the M5 Air with the shared ccache: +0.8 s on a no-op
-# editor build, +6 s for one changed engine .cpp, the first build of the second
-# tree 62 s configure + 205 s compile (docs/engine-sdk-release-auto-2026-10-19.md).
+# editor build, none for one touched engine .cpp (both trees relink in parallel),
+# the first build of the second tree 531 s (67 s configure, the rest compiling
+# at -j5); a header edit costs at most that compile part
+# (docs/engine-sdk-release-auto-2026-10-19.md).
 #
 # Two targets so the second tree compiles in parallel with this one and still
 # installs after it: both installs write the shared include/ and its stamp.
