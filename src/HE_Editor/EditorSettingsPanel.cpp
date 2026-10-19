@@ -2424,7 +2424,6 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		if (s_page == Page::Appearance)
 		{
 			ImGui::Spacing();
-			ImGui::SeparatorText("Panels");
 			drawPanelsPage();
 		}
 		else if (s_page == Page::Input)

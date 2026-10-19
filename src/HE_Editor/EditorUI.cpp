@@ -3038,13 +3038,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
-			case MC::ProjectSettings:
-				if (ctx.projectLoaded)
-				{
-					EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::Page::General);
-					openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
-				}
-				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
 			case MC::Undo:      undoNow(ctx); break;
@@ -3300,11 +3293,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ctx.selection.clear();
         }
         ImGui::Separator();
-		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
-		{
-			EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::Page::General);
-			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
-		}
 		if (EditorWidgets::menuItem("Preferences", EditorShortcuts::label("edit.preferences").c_str()))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();

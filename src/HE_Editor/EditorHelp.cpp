@@ -2104,13 +2104,6 @@ namespace
 	  "menu or list, a field being typed into, a dialog and a fly-look in the "
 	  "viewport each take the Esc first, and the next press clears.",
 	  "Esc", "editor#outliner" },
-	{ "Edit/Project Settings", "",
-	  "Opens Preferences on the Project group: the project's title and startup "
-	  "scene, the game window, shadows, physics rate and gravity, what the "
-	  "packaged build boots with, permissions, fonts, collision layers. Those "
-	  "pages travel with the project and into the build you export — the "
-	  "opposite of the Editor pages, which follow the editor on this machine.",
-	  "", "editor#preferences" },
 	{ "Edit/Preferences", "",
 	  "Opens the settings as an editor tab: appearance, input, renderer, "
 	  "collaboration, tools, and the open project's own pages (Project, World, "
