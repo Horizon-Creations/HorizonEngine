@@ -774,3 +774,46 @@ body or move behind a macro is open. They are needed for parity with the interpr
 - **Next steps (step 14):** GUI export Development + Shipping with both checkboxes, twice each (cache hit), start the dev one;
   `build_profile_strings.py --profile release` on the Shipping export incl. `HorizonEngine/libHorizonCodeGen.dylib`. Optional:
   `hc_codegen --engine-version` so fixture builds need no patch.
+
+## Handoff (step 14: verification end to end, both profiles, cache, fallback)
+
+- **Topic / step:** Thema 211, step 14. Commits b25a1da9 (pak key reuse + profile script), 742c4e7f (fallback message) + this doc.
+  CI 39175897773 on 8d479641: all four jobs green (Windows "HorizonEngine.def: 48771 symbols", 312/312 there).
+- **How the export was driven:** the deployed `HorizonEditor` (Release, dev profile) hidden, private HOME (`config.json` RHI 4, cloned
+  EngineContentCache), MCP `project_package` (the tool is `project_package`, not `project_export` as earlier handoffs wrote) ->
+  `startFromProfile` -> the dialog's own `startExport` worker, polled through `project_build_status`. Project: a copy of
+  HorizonTutorial plus a GameInstance graph authored over MCP (`hc_add_node` Event "OnInit" -> Print "S14 compiled HC marker",
+  `hc_save`). Driver scripts were throwaway (`/tmp/s14tools`). **The modal itself was never clicked**: same worker and log lines,
+  not a GUI click-through.
+- **Verified (Mac, out/build/release + out/build/release-profile, both SDK sets reinstalled, UUID of SDK lib/dev == deployed game lib):**
+  Development x2: 3 graphs compiled against `EngineSDK` (dev); miss "no earlier build" 82 s, then "Build cache hit (dev)" 11.8 s
+  (only `CompiledBuildConfig.cpp` rebuilt, the header's mask is random per write). Shipping x2: release SDK, "key embedded in the game
+  binary", miss then "Build cache hit (release)". Layout `HorizonTutorial` + `data/` + `HorizonEngine/{libHorizonEngine, libHorizonCodeGen,
+  SDL3, crypto, lz4, zstd}`, no Homebrew or part-library links, exe LC_RPATH `@executable_path/HorizonEngine;@executable_path`, HC lib
+  only `@loader_path` and exports `HE_HorizonCodeGenProfile`. Dev game hidden 30 frames rc 0: profile 'dev', "project configuration
+  compiled in", "HorizonCode: 3 compiled classes", marker printed, every engine dylib from `HorizonEngine/` (DYLD_PRINT_LIBRARIES).
+  `build_profile_strings.py --profile release <Shipping folder>`: OK 33/33 (exe + HorizonEngine + HorizonCodeGen); same on the
+  Development folder FAILED 33 (negative control); `--profile dev` on it all present. Fallback (editor started with `CXX=/nonexistent/c++`,
+  probe fails): "Compile game from SDK: no working C++ compiler found — the prebuilt game ships", HC interpreted, no HC library in the
+  folder; that game hidden 30 frames rc 0 prints the same OnInit + marker lines as the compiled one (parity on this graph).
+  Full ctest on 742c4e7f (-j4, private HOME, HE_CONFIG_DIR unset): 311, 309 passed, 0 failed, 2 skipped (runtime_size_app_*), rc 0, 342 s
+  (also before any change, on 50bdf4ab: same numbers, 344 s). Help audit 1206/1206.
+- **Found and fixed:** (1) an incremental Shipping export over an SDK-built game never reused its pak: that game's key is compiled in, the
+  hcfg key is zeroed and the exe block empty, so `ProjectExporter` drew a new key and repacked all (0/45 reused, 368-423 s each).
+  `ExportSettings::previousBuildConfigHeader` (`ProjectExporter.h:254`) is tried last (`ProjectExporter.cpp:712`); the dialog points it
+  at `sdkGameWorkDir()/HEGameBuildConfig.h` (`ExportDialogPanel.cpp:557, :1913`), as step 4 had planned. Live after the fix: 45/45
+  reused, 35.7 s (game miss on the new header stamp) and 11.5 s (hit); exe block still empty. Test in `test_project_exporter.cpp`.
+  (2) `build_profile_strings.py` on an export folder saw only libHorizonEngine (exe is named after the project since step 10, HC lib
+  unlisted): now both are scanned (`:99`). (3) Without a compiler the HC line said "turn on Compile game from SDK" with the box on;
+  `chooseCodegenSdk(..., gameSdkUnavailable)` names the reason (`ExportSdkBuild.cpp:143`).
+- **Not verified:** the release game was NOT started (release ignores hidden mode, lesson 458; asked the queen, request 133 -> human
+  hive_ask #36, no answer by the end). So "compiled config + key decrypt the pak + compiled HC in a release game" is proven only by
+  build, static checks and the unit tests. A fresh default-profile export without a pre-existing outputDir. `.app` export. Windows/Linux:
+  CI compiles and runs ctest only; `$ORIGIN` rpath, `HorizonCodeGen.dll` beside `HorizonEngine.dll` (delay-load hook), and an SDK game
+  build there never ran. `.def` headroom: 48771 from Scene + unknown dllexports of Core/Net/Rendering under 65535.
+- **Observations, not changed:** `_hcgen/` (generated sources + their build tree, 4.1 MB) stays in the export folder (pre-existing,
+  `ExportDialogPanel.cpp` genDir), ships if the folder is zipped. Shipping packing of this small project costs ~6 min when not reused
+  (landscape texture arrays).
+- **Next steps:** 1. With the human's yes: export Shipping Windowed and start it ~10 s with a kill deadline, look for "compiled in",
+  "pak key from HEGameBuildConfig.h", "HorizonCode: 3 compiled classes". 2. Windows run of an SDK export on NN-WS03 (offline today).
+  3. Decide whether `_hcgen/` should move out of the export folder (next to the SDK build cache).
