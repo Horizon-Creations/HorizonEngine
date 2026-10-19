@@ -247,7 +247,7 @@ which only `MetalRenderer.mm` includes.
 - **Next steps:** 1. Step 3 (REN-301 Pimpl). 2. Optional: refit for moving scenes behind a
   completion-handler fence, measured with the probe's `moved` case.
 
-## Handoff
+## Handoff, step 3
 
 - **Topic / step:** 216, step 3 of 3 (REN-301)
 - **Branch / commit:** `claude/audit-optimierung-metal-backend-stufe-3` @ 289e3341 (code),
@@ -276,3 +276,48 @@ which only `MetalRenderer.mm` includes.
 - **Next steps:** 1. Merge (214 first, then this topic). 2. Optional REN-301 follow-ups:
   `MtlRef` for the retained `void*`, per-feature substructs, `LazyPipeline`; each needs its own
   pixel A/B (`frame_pixel_ab.sh … all` stays bit-exact for a pure refactor).
+
+## Step 4: merge with release/0.7.0 (a087d17a)
+
+The step expected friction with Thema 221's `GiBlasStore`. There was none: 221 (2027daf8,
+488e9cab) changes GL, Vulkan, D3D11 and D3D12 only, and Metal keeps its own BLAS slot map.
+The Metal conflicts came from Thema 182 (2e, graph-material instancing) and Thema 210
+(graph-texture misses per content epoch), both written against the old fat header:
+
+- `MetalRenderer.h`: this branch's facade kept. Release's two header hunks moved to
+  `MetalRendererImpl.h`: `GetOrBuildMaterialPipeline(..., bool instanced = false)` `:869-877`,
+  `m_graphTexMissEpoch` `:1401`.
+- `MetalRenderer.mm:16606-16611` (deferred loop): release's `cGbKey/cGbFrag/cGbVert` block,
+  read through `m_owner.m_contentManager`. The auto-merged `forgetGraphTextureMisses` call
+  `:9812` read the bare `m_contentManager` and now goes through `m_owner` as well.
+- `tests/test_landscape_reload.cpp:292`: Thema 210's source pin looked for
+  `void* MetalRenderer::ResolveGraphTexture(`. It compiled and failed at runtime, which is the
+  step-3 trap, and now reads `MetalRendererImpl::` (7595c2b7).
+- `docs/audit/AUDIT.md`: the Vulkan box comes from release (Thema 215), the Metal box from this branch.
+
+## Handoff
+
+- **Topic / step:** 216, step 4 of 4 (merge with release/0.7.0)
+- **Branch / commit:** `claude/audit-optimierung-metal-backend-stufe-3` @ 86b78e78 (merge),
+  7595c2b7 (test pin), plus this record
+- **Done:** release/0.7.0 merged into the branch; the Pimpl holds release's Metal changes.
+- **Verified:** Release build of `HorizonEditor` and `he_tests` green (`out/build/release`, shaderc
+  ON). `scripts/perf/foliage_graph_ab.py --editor out/deploy/Editor --rhi Metal` on the merged
+  build: WF/WD/GF/GD instanced == loop, 0 px, 5-6 draws against 1941-1942, 58,060 tris both;
+  wind and clock controls move the plant mask (23k and 28k of 111k px). That puts Thema 182's
+  instanced PSO through `MetalRendererImpl` on screen. Full `he_tests` from the build dir: 5554
+  cases. Before the pin fix, 4 were red: test_landscape_reload plus the 3 known ones. After it,
+  test_landscape_reload 5/5 and test_culling green. The known ones pass in isolation:
+  `test_hpak` with an empty HOME, 767/767 assertions; `test_profiler` alone, 18/18.
+- **Not verified:** Metal API/shader validation on the merged build. `frame_pixel_ab.sh … all`
+  against release: not bit-exact by design, because release changes the rendering. The Thema 210
+  epoch sweep on Metal at runtime: the source pin and the backend-neutral FakeBackend test only.
+  Windows/Linux: CI (see the Hive post).
+- **Decisions:** the merge commit was amended once before the push. The first form left a
+  `>>>>>>>` line and release's unchecked Metal box in AUDIT.md (Hive lesson 469).
+- **Traps:** a test grep for `MetalRenderer::X(` written on another branch compiles and only fails
+  at runtime. Grep all of `tests/` without `| head` after every merge. Topic 214 is still not
+  on release, so the step-3 merge notes (`m_visibility`, `VisibilityKey`, the `CullCameraObjects`
+  grep string) still apply when it lands.
+- **Next steps:** 1. CI green on the branch, then the queen merges into release/0.7.0.
+  2. Optional REN-301 follow-ups as in the step-3 handoff.
