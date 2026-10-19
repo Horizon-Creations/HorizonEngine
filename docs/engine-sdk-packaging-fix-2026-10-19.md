@@ -39,9 +39,11 @@ complains about the no-op time.
 * Export dialog: the checkbox is never disabled. The dialog prints "Will use the prebuilt game: <why>"
   from `findGameSdk(SDL_GetBasePath(), profile)` + `unavailableReason` (`ExportDialogPanel.cpp:1213-1231`).
   I checked that exact path in the real editor with MCP `project_package` (profiles Development and Shipping,
-  `compileGameFromSdk: true`, `HE_GAME_SDK_DIR` unset). The script is the scratch file
-  `/tmp/he222_witness/sdk_export_live.py`, built on `scripts/he_rewards_live.py`'s Editor/setup/export.
-  I did not look at the ImGui frame itself.
+  `compileGameFromSdk: true`, `HE_GAME_SDK_DIR` unset): `python3 scripts/he_sdk_export_live.py <outdir>`
+  (rc 0, "RESULT dev_compiled=True release_compiled=False"). It reuses `he_rewards_live.py`'s Editor/setup/export.
+  Step 3 runs it with `--require both`. I did not look at the ImGui frame itself.
+* `sdk_example_project` (ctest, label `sdk`) installs into `<build>/sdk-test/sdk-installed`, not into
+  `HE_ENGINE_SDK_DIR`, so CI's ctest does not disturb `package/EngineSDK` before the staging step.
 * `HE_EXPORT_SDK_E2E=out/deploy/EngineSDK he_tests --source-file='*test_export_sdk_build.cpp'`: 11/11
   cases, 136/136 assertions. It builds a game and compiled HorizonCode against the auto-installed SDK.
 * Full `he_tests` (from the build dir, `HE_CONFIG_DIR` unset): 5591/5594, 522 s. None of the 3 failures
@@ -55,7 +57,7 @@ complains about the no-op time.
 
 ## Handoff
 
-- **Topic / step:** 222, step 2. Commit f154bac4 (fix) plus this doc.
+- **Topic / step:** 222, step 2. Commit f154bac4 (fix), this doc, `scripts/he_sdk_export_live.py` (witness).
 - **Done:** HorizonEditor → HorizonSDK dependency, the .app copy, CI staging, and the measurements above.
 - **Verified:** everything in the table, on this Mac, in this worktree's `out/build/release` and `out/deploy`.
 - **Not verified:** Windows/Linux (CI run started at the end of the step, see the Hive post); a Shipping
