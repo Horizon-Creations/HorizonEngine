@@ -813,6 +813,7 @@ void draw(const Hooks& hooks)
 			const ImU32 dimCol  = HE::Ed::Theme::u32(HE::Ed::Theme::TextDim);
 			const ImU32 linkCol = HE::Ed::Theme::u32(HE::Ed::Theme::AccentHi);
 			const ImU32 linkHot = HE::Ed::Theme::u32(HE::Ed::Theme::AccentBright);
+			const ImVec4 surface = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
 			ImDrawList* dl      = ImGui::GetWindowDrawList();
 
 			ImGuiListClipper clipper;
@@ -874,6 +875,11 @@ void draw(const Hooks& hooks)
 					const bool isCrit  = line.level == HE::LogLevel::Critical;
 					const bool isError = line.level >= HE::LogLevel::Error;
 					const bool isWarn  = line.level == HE::LogLevel::Warning;
+					// The row's text sits on its own severity's tint: red on red,
+					// which put an error at 3.9:1 and a critical one at 3.2:1. So the
+					// text is held to the theme's floor on that ground (the window's,
+					// the lighter one the console can sit on, under the tint).
+					ImVec4 ground = surface;
 					if (isError || isWarn)
 					{
 						const float up   = std::floor(style.ItemSpacing.y * 0.5f);
@@ -881,6 +887,7 @@ void draw(const Hooks& hooks)
 						ImU32 tint = isWarn ? EditorToolbar::kWarnWell : EditorToolbar::kBadWell;
 						if (isCrit) tint = withAlpha(EditorToolbar::kBad, 76);
 						dl->AddRectFilled(lo, hi, tint);
+						ground = HE::Ed::Theme::over(ImGui::ColorConvertU32ToFloat4(tint), surface);
 						dl->AddRectFilled(lo, ImVec2(p.x + (isCrit ? 4.0f : 3.0f), hi.y),
 						                  isWarn ? EditorToolbar::kWarn : EditorToolbar::kBad);
 					}
@@ -941,24 +948,34 @@ void draw(const Hooks& hooks)
 
 					// The content, over everything.
 					const float ty = p.y + (rowH - lineH) * 0.5f;
+					const bool  tinted = isError || isWarn;
+					const auto  onRow  = [&](ImU32 c, const ImVec4& under) {
+						return HE::Ed::Theme::u32(HE::Ed::Theme::readableOn(ImGui::ColorConvertU32ToFloat4(c), under));
+					};
 					if (!line.cont)
 					{
-						dl->AddText(ImVec2(p.x + xTime, ty), dimCol,
+						dl->AddText(ImVec2(p.x + xTime, ty), tinted ? onRow(dimCol, ground) : dimCol,
 						            line.time.c_str(), line.time.c_str() + kClockChars);
 						dl->AddText(ImVec2(p.x + xCat, ty), withAlpha(textCol, 170),
 						            HE::Log::categoryName(static_cast<HE::Log::Cat>(line.cat)));
 					}
-					const ImU32 msgCol = colourFor(line.level);
+					const ImU32 levelCol = colourFor(line.level);
+					const ImU32 msgCol   = tinted ? onRow(levelCol, ground) : levelCol;
 					dl->AddText(ImVec2(p.x + xMsg, ty), msgCol, line.msg.c_str());
 					if (line.repeat > 1)
 					{
+						// The count's pill is the level's colour again, one layer
+						// deeper: 2.4:1 on a critical row before it was measured.
 						const ImVec2 lo(badgeX, p.y + 2.0f), hi(badgeX + badgeW, p.y + rowH - 1.0f);
-						dl->AddRectFilled(lo, hi, withAlpha(msgCol, 56), (hi.y - lo.y) * 0.5f);
-						dl->AddText(ImVec2(badgeX + 6.0f, ty), msgCol, badge);
+						const ImU32 pill = withAlpha(levelCol, 56);
+						dl->AddRectFilled(lo, hi, pill, (hi.y - lo.y) * 0.5f);
+						const ImVec4 pillGround = HE::Ed::Theme::over(ImGui::ColorConvertU32ToFloat4(pill), ground);
+						dl->AddText(ImVec2(badgeX + 6.0f, ty), onRow(levelCol, pillGround), badge);
 					}
 					if (leads)
 					{
-						const ImU32 col = linkHovered ? linkHot : linkCol;
+						const ImU32 col = tinted ? onRow(linkHovered ? linkHot : linkCol, ground)
+						                         : (linkHovered ? linkHot : linkCol);
 						dl->AddText(ImVec2(linkX, ty), col, linkText);
 						const float underline = ty + lineH;
 						if (linkHovered)
