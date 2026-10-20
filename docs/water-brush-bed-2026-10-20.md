@@ -100,3 +100,23 @@ Auftrag: Beim Erase soll das vom Pinsel gegrabene Bett wieder geschlossen werden
   `HorizonEditor` baut.
 - **Nicht verifiziert:** nicht im laufenden Editor gesehen; ein Erase mit niedriger Stärke, bei dem der Körper schon vor dem Ende
   des Strichs verschwindet, wurde nur über die Logik bedacht, nicht eigens getestet. Der Undo-Schritt nimmt Gelände mit (Snapshot).
+
+## Nachtrag: Wasser-Material bleibt gebunden (Schritt 9c)
+
+Meldung: Das Material werde beim Malen und nach dem Wiederöffnen der Szene nicht richtig gebunden.
+
+- **Befund:** `WaterSurface.cpp` `Pass::apply` rief `ensureWaterMaterial(cm)` und setzte das `MaterialComponent` nur beim Anlegen
+  einer Oberfläche (`existing == entt::null`). Eine Oberfläche, die weiterlebt, bekam weder eine Residenz-Prüfung noch eine Reparatur:
+  wird das Material danach entladen (Projektwechsel, Unload-Sweep, Szenenwechsel) oder fehlt/zeigt das Component auf anderes (Snapshot,
+  Skript, ältere Szene), zeichnet der Renderer mit dem grauen Fallback, bis die Oberfläche neu gebaut wird. Beim ersten Malen passt der
+  Anlegepfad; das Problem liegt bei allem, was danach kommt. Die Log-Warnung kommt nicht, weil die Datei gefunden wird.
+- **Fix:** `Pass::terrain` prüft jetzt in jedem Tick, noch vor dem Steady-Return, alle vorhandenen Oberflächen: Material nicht resident →
+  `ensureWaterMaterial` (bei einem Fehlschlag höchstens einmal pro 60 Ticks, Zähler `Field::materialWait`, Laufzeit, nicht gespeichert);
+  `MaterialComponent` fehlt oder zeigt auf etwas anderes → auf `kEngineWaterMaterialId` gesetzt, `dirty`.
+- **Test:** `test_water_surface.cpp`, „a surface that already exists is given its material back“ (Material entladen → wieder geladen;
+  Component entfernt + entladen → beides zurück; Component auf Null-UUID → Wasser-Material). Mit `Water*,landscape ui*,*terrain*,
+  *engine material*,*Scene*` 509/509 grün, `HorizonEditor` baut.
+- **Nicht verifiziert:** Ein Negativ-Lauf ohne den Fix wurde nicht gemacht (der Test wurde mit dem Fix geschrieben), und im echten Editor
+  habe ich weder das Wiederöffnen noch das Malen gesehen; ich konnte den Fehler des Nutzers nicht an seinem Deploy reproduzieren. Wenn
+  es danach noch grau bleibt, ist die Ursache woanders (Renderer löst die Material-UUID nicht auf / Shader-Kompilierung): dann in
+  `HorizonEngine.log` nach Material-Fehlern suchen und `HE_DUMP_WATERLAKE` auf Metal schießen.

@@ -361,6 +361,8 @@ namespace HE::water
         // rather compare numbers than watch a flag. A loaded field starts dirty
         // over the whole terrain (the surface is rebuilt, never saved).
         bool     dirty = false;
+        // Ticks until WaterSurface tries to load a missing water material again.
+        uint32_t materialWait = 0;
         float    dirtyMinX = 0.0f, dirtyMinZ = 0.0f, dirtyMaxX = 0.0f, dirtyMaxZ = 0.0f;
         uint64_t revision = 0;
 

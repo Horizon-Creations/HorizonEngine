@@ -1787,3 +1787,44 @@ TEST_CASE("Water soft shore: a large lake with a gentle bank is built in good ti
     CHECK(soft.s.triangles < 20000);
     CHECK(ms < 2000.0);
 }
+
+#ifdef HE_EDITOR_DEPS_DIR
+// ── The material stays bound (Thema 206 Schritt 9c) ──────────────────────────
+// ensureWaterMaterial and the MaterialComponent were only done when a surface was
+// CREATED. A surface that lives on (a scene that is re-opened and adopts one, a
+// brush stroke after the material was unloaded, a component lost to an undo
+// snapshot) drew with the plain fallback until it was rebuilt.
+TEST_CASE("Water surface: a surface that already exists is given its material back, loaded and bound")
+{
+    Rig rig;
+    rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 20 }, { -20, 20 } };
+    addLake(rig.tc(), poly, 2.0f);
+    rig.update();
+    auto& reg = rig.world.registry();
+    REQUIRE(rig.surfaces().size() == 1);
+    const Entity e = rig.surfaces()[0];
+    CHECK(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+    CHECK(reg.get<MaterialComponent>(e).materialAssetId == HE::kEngineWaterMaterialId);
+
+    // The material goes away (a project switch, an unload sweep) and nothing was edited.
+    REQUIRE(rig.cm.unloadAsset(HE::kEngineWaterMaterialId));
+    REQUIRE_FALSE(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+    rig.update();
+    CHECK(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+
+    // The binding is lost (a snapshot that did not carry it, a script) and so is the material.
+    reg.remove<MaterialComponent>(e);
+    REQUIRE(rig.cm.unloadAsset(HE::kEngineWaterMaterialId));
+    rig.update();
+    const auto* mat = reg.try_get<MaterialComponent>(e);
+    REQUIRE(mat);
+    CHECK(mat->materialAssetId == HE::kEngineWaterMaterialId);
+    CHECK(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+
+    // Bound to something else: a scene that was saved with another material on it.
+    reg.get<MaterialComponent>(e).materialAssetId = HE::UUID{};
+    rig.update();
+    CHECK(reg.get<MaterialComponent>(e).materialAssetId == HE::kEngineWaterMaterialId);
+}
+#endif

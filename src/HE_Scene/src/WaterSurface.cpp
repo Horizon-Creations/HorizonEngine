@@ -232,6 +232,35 @@ namespace
             opt.shoreTiltScale  = shoreTiltScaleOf(world, te);
             const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin, opt.shoreTiltScale);
 
+            // The material stays with the surface, not only with its creation: a scene
+            // that was re-opened, an unload sweep or a snapshot that did not carry the
+            // component leaves a surface that lives on and draws the plain fallback.
+            // One look at the residency per tick (a map lookup), a retry at most once
+            // a second when the file is missing.
+            if (!byBody.empty())
+            {
+                if (!cm.isLoaded(HE::kEngineWaterMaterialId))
+                {
+                    if (f.materialWait > 0) --f.materialWait;
+                    else
+                    {
+                        ensureWaterMaterial(cm);
+                        if (!cm.isLoaded(HE::kEngineWaterMaterialId)) f.materialWait = 60;
+                    }
+                }
+                for (auto& kv : byBody)
+                {
+                    auto* mat = reg().try_get<MaterialComponent>(kv.second);
+                    if (!mat)
+                        reg().emplace<MaterialComponent>(kv.second).materialAssetId = HE::kEngineWaterMaterialId;
+                    else if (mat->materialAssetId != HE::kEngineWaterMaterialId)
+                    {
+                        mat->materialAssetId = HE::kEngineWaterMaterialId;
+                        mat->dirty = true;
+                    }
+                }
+            }
+
             // Steady state: nothing was edited, every surface still belongs to a
             // body, was built with today's parameters and stands at its body's
             // level. That is nearly every tick, and it costs no more than this.
