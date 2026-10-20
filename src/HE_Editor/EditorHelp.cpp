@@ -7378,23 +7378,40 @@ namespace
 	  "that water's level.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Dig Bed##water", "Dig Bed",
-	  "Also digs while you paint: the ground under the brush is lowered to a "
-	  "floor Depth below the water level, with the brush falloff as the bank. "
-	  "It digs only where the water is, so the pit never reaches past it: "
-	  "ground at the edge of a stroke stays as it is until the water has "
-	  "spread there, and ground above the water level is cut down to it "
-	  "the moment the water covers it. "
+	  "Also digs while you paint, and it is what makes the water look like water: "
+	  "the surface material shades by how deep the water is, so a pond on flat "
+	  "ground without a bed is nothing but shallow shore (clear, foamy, no body "
+	  "colour). The bed is dug from the shore, not from the brush: under the "
+	  "water the ground sinks by Slope metres for every metre from the shoreline "
+	  "until it is Max Depth below the surface, and stays there. Painting on or "
+	  "pushing the shore out digs the newly inner ground the same way, as far in "
+	  "as it takes to reach Max Depth. "
+	  "It digs only where the water is, so the pit never reaches past it; ground "
+	  "above the water level under the water is cut down to it at once. "
 	  "Where that leaves ground standing above the water (painting uphill), "
 	  "it is shaved into a dry bank that slopes down to the waterline, "
 	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
-	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
+	  "does not dig on forever. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Depth##water", "Bed Depth",
-	  "How far below the water level the bed is dug, in metres. Only used "
-	  "with Dig Bed.",
+	{ "Landscape/Max Depth##water", "Bed Max Depth",
+	  "The deepest the bed gets below the water level, in metres. It is reached at "
+	  "Max Depth / Slope metres from the shore (shown under the sliders) and held "
+	  "from there to the middle. Only used with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Slope##water", "Bed Slope",
+	  "How steeply the bed falls from the shore towards the middle: metres of depth "
+	  "per metre walked in. 0.25 drops a metre over four. A low slope gives a long "
+	  "gentle beach before the water is at full depth, a high one a steep drop-off "
+	  "close to the bank. Only used with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Bed Roughness##water", "Bed Roughness",
+	  "A little unevenness on the floor of the water, from 0 (smooth) to 1. It is a "
+	  "share of the depth at each point that a fixed pattern adds or takes away, so "
+	  "the shoreline itself stays clean and the same stroke always digs the same "
+	  "floor. Only used with Dig Bed.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Resolution##water", "Water Grid Resolution",
 	  "How many cells per side the landscape's water is stored in, from 32 to "

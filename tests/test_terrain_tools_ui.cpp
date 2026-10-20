@@ -755,6 +755,11 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 		REQUIRE(img.valid());
 		dump(img, "landscape-water-panel");
 	}
+	// Dig Bed is on by default (a pond without a bed is all shore, see its help):
+	// off for the first strokes, which are about the water alone.
+	clickAt(ctx, digX, digY);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
 	const size_t depth0 = undo.undoDepth();
 	REQUIRE(land().water.bodies.empty());
 
@@ -865,8 +870,10 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 		const TerrainComponent& t = land();
 		CHECK(undo.undoDepth() == depth2 + 1);
 		REQUIRE(t.sculptHeights.size() == 129u * 129u);
-		// Water 0.3 m up on flat ground, a bed 1 m (the default depth) under it.
-		CHECK(terrainHeightAt(t, gx, gz) == doctest::Approx(-0.7f).epsilon(0.02));
+		// Water 0.3 m up on flat ground; the bed under its middle has sunk below the
+		// ground, and no deeper than Max Depth (2 m by default) under the level.
+		CHECK(terrainHeightAt(t, gx, gz) < -0.2f);
+		CHECK(terrainHeightAt(t, gx, gz) >= 0.3f - 2.0f * 1.3f);   // roughness may add up to 20 %
 		CHECK(terrainHeightAt(t, -40.0f, -40.0f) == 0.0f);         // out of reach, untouched
 		CHECK(t.regionDirty);                                      // only the chunks under the brush rebuild
 		CHECK_FALSE(t.dirty);
@@ -877,9 +884,8 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 	CHECK(land().sculptHeights.empty());
 	CHECK(water::bodyAt(land(), gx, gz) == water::kNoBody);
 
-	// Back to Sculpt, Dig Bed off again: the file-static mode must not leak into
-	// another test.
-	clickAt(ctx, digX, digY);
+	// Back to Sculpt, Dig Bed left on (its default): the file-static mode must not
+	// leak into another test.
 	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));

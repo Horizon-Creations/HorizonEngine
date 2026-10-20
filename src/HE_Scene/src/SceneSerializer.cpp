@@ -805,6 +805,12 @@ namespace
 						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
 						bj["underwaterCaustics"] = std::move(cj);
 					}
+					// The brush's bed (Thema 206 Schritt 9): only for a body it dug.
+					if (b.brushBed != HE::water::BrushBedParams{})
+					{
+						bj["brushBed"] = { { "enabled", b.brushBed.enabled }, { "maxDepth", b.brushBed.maxDepth },
+						                   { "slope", b.brushBed.slope }, { "roughness", b.brushBed.roughness } };
+					}
 					bodies.push_back(std::move(bj));
 				}
 				tc["waterBodies"] = std::move(bodies);
@@ -1841,6 +1847,18 @@ namespace
 							num("scale",     b.underwaterCaustics.scale);
 							num("speed",     b.underwaterCaustics.speed);
 							num("depth",     b.underwaterCaustics.depth);
+						}
+						if (bj.contains("brushBed") && bj["brushBed"].is_object())
+						{
+							const json& dj = bj["brushBed"];
+							if (dj.contains("enabled") && dj["enabled"].is_boolean()) b.brushBed.enabled = dj["enabled"].get<bool>();
+							const auto num = [&dj](const char* key, float& into)
+							{
+								if (dj.contains(key) && dj[key].is_number()) into = dj[key].get<float>();
+							};
+							num("maxDepth",  b.brushBed.maxDepth);
+							num("slope",     b.brushBed.slope);
+							num("roughness", b.brushBed.roughness);
 						}
 						w.bodies.push_back(b);
 					}
