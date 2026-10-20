@@ -8678,7 +8678,21 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // reach the image through graph materials (heLitP, t32); the built-in PBR
     // shader has no stage for them yet, and a failed reflection-shader
     // compile only leaves the pass off (it does not clear this).
-    c.supportsGIReflections = m_impl->giSupported;
+    //
+    // Forced off regardless of giSupported (Thema 191 step 4, measured on the
+    // RTX 4070 / NN-WS03): turning the pass on costs a flat +~22ms/frame
+    // (median whole-frame GPU time 7-8ms -> ~30ms) at EVERY quality tier and
+    // with blur on or off alike — the tier ladder (rays/resolution) gives zero
+    // mitigation here, unlike D3D12/Vulkan where the same A/B is within noise
+    // (~3-4ms regardless of the pass). The flat, tier-independent cost points
+    // at updateGiAccel's instance buffer (D3D11Renderer.cpp, makeSB call in
+    // updateGiAccel): it recreates one D3D11_USAGE_IMMUTABLE buffer+SRV every
+    // frame with no frame-in-flight indexing, unlike D3D12/Vulkan's per-frame
+    // -indexed instance buffers — a likely CPU/GPU sync stall, not GI-specific
+    // rendering cost. Hidden here (not fixed: that is a D3D11 port change,
+    // out of this step's scope) so no quality tier can be mistaken for a fix.
+    // Re-enable once a future step removes the per-frame recreate.
+    c.supportsGIReflections = false;
     // Forward SSR reads radiance out of the post chain's HDR scene target, so
     // it is there exactly when the chain is (docs/ssr-cross-backend-plan.md C6,
     // closed by the swapchain post chain): editor viewport and packaged game

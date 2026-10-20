@@ -3546,7 +3546,7 @@ void GameApplication::OnRender(float deltaTime)
 			gr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflMaxRoughness", 0.6f));
 			gr.quality      = GlobalState::getInstance().getCustomConfigInt("GIReflQuality", 1);
 			gr.bounces      = GlobalState::getInstance().getCustomConfigInt("GIReflBounces", 1);
-			gr.blur         = GlobalState::getInstance().getCustomConfigBool("GIReflBlur", true);
+			gr.blur         = GlobalState::getInstance().getCustomConfigBool("GIReflBlur", false);
 			r->SetGIReflectionSettings(gr);
 
 			// Anti-aliasing — same config.json keys the editor's Preferences write
