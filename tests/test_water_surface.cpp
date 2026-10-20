@@ -827,6 +827,12 @@ TEST_CASE("Water surface: an edit rebuilds the body it touches and leaves the ot
     CHECK(reg.get<WaterSurfaceComponent>(rig.surfaceOf(a)).meshId == meshA);     // replaced in place
     CHECK(reg.get<WaterSurfaceComponent>(rig.surfaceOf(b)).hash == hashB);
     CHECK(rig.cm.getStaticMesh(meshB)->vertices == vertsB);
+    // A rebuilt surface (the entity reused, only its mesh replaced) still carries
+    // the engine water material — apply() sets it once, at creation, and must not
+    // lose it on every later edit a paint stroke makes.
+    const auto* matA = reg.try_get<MaterialComponent>(rig.surfaceOf(a));
+    REQUIRE(matA);
+    CHECK(matA->materialAssetId == HE::kEngineWaterMaterialId);
     const auto grown = trisOf(*rig.cm.getStaticMesh(meshA),
         { reg.get<TransformComponent>(rig.surfaceOf(a)).position.x, reg.get<TransformComponent>(rig.surfaceOf(a)).position.z });
     CHECK(sumArea(grown) == doctest::Approx(28.0 * 28.0).epsilon(0.01));
