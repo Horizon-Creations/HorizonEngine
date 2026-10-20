@@ -781,8 +781,13 @@ struct GiGBufOut { float4 pos : SV_Target0; float4 norm : SV_Target1; };
 GiGBufOut GiGBufPS(VSOut i)
 {
     GiGBufOut o;
-    o.pos  = float4(i.worldPos, 1.0);          // a = 1 → valid geometry
-    o.norm = float4(normalize(i.normal), 0.0);
+    // The receiver's material rides in the two alpha channels instead of a third
+    // render target (GL writes a separate (roughness, metallic) MRT): pos.a =
+    // 1 + metallic keeps every `pos.a < 0.5` validity test as it was, norm.a =
+    // roughness. The shadow/temporal/a-trous passes read .xyz (and the < 0.5
+    // test) only. A host that leaves uPBR zero (D3D11 today) gets the old 1 / 0.
+    o.pos  = float4(i.worldPos, 1.0 + saturate(uPBR.x)); // a >= 1 → valid geometry
+    o.norm = float4(normalize(i.normal), saturate(uPBR.y));
     return o;
 }
 )HLSL";
@@ -1324,6 +1329,374 @@ void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
     float2 newVisSample = float2(dist, dist * dist);
     float hVis = lerp(baseH, 0.3, saturate(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0)));
     uVis[outCoord] = lerp(newVisSample, oldVis.xy, hVis);
+}
+)HLSL";
+
+// ─── Ray-traced GI reflections (docs/gi-reflections-cross-backend-plan-2026-10-20.md) ───
+// HLSL port of the GL kernel kGiReflCS (OpenGLRenderer.cpp): ONE specular ray
+// per prepass pixel (tier: 1/2/4 jittered rays for a rough receiver) against the
+// same software BVH the shadow/probe kernels walk, the hit shaded from the sun +
+// local lights + the DDGI probe field, so a reflection agrees with the diffuse
+// GI around it. Prepended with kGiTraversalHLSL (giNodes/giTris/giInsts, b1).
+// Binding contract = the compute root signature's: t0/t1 the prepass, t5/t6 the
+// CURRENT probe atlases (the shading-side Chebyshev sampler needs bilinear, so
+// the root signature carries a linear static sampler on s1), u0 the result.
+//
+// Gaps against GL, all deliberate for the first D3D port:
+//  · no baked sky for a ray that misses (a miss writes confidence 0, and the
+//    composite keeps the sky-cube term — GL's own behaviour without the bake);
+//  · no painted-landscape albedo (the D3D GiInst has no landscape index);
+//  · no bounce loop (GL has none either: one segment).
+// The receiver's roughness is norm.a of the prepass (GiGBufPS); the hit's
+// emissive travels in GiInst.offsets.z/.w as two packed halves (the struct stays
+// 96 bytes, so the shadow/probe kernels and the DXR blobs are untouched).
+inline constexpr const char* kGiReflCSHLSL = R"HLSL(
+cbuffer GiReflCB : register(b0)
+{
+    float4 uCamPos;      // xyz = camera world position
+    float4 uSunDir;      // xyz = direction TOWARD the sun, w = local light count
+    float4 uSunColor;    // rgb = sun radiance * intensity
+    float4 uAmbient;     // rgb = never-black floor applied at a hit
+    float4 uGridOrigin;  // xyz = probe-grid origin, w = spacing
+    float4 uGridCounts;  // xyz = probes per axis, w = probes per atlas row
+    float4 uReflParams;  // x = max ray distance, y = max roughness, z = indirect intensity, w = probe atlases valid
+    float4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 -> glossy cone jitter
+    float4 uRays;        // x = rays per glossy pixel (tier)
+    float4 uLightPosRange[8];  // xyz pos, w range
+    float4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+    float4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+};
+Texture2D<float4>   uGPos   : register(t0); // prepass world position, a >= 1 valid geometry
+Texture2D<float4>   uGNorm  : register(t1); // prepass world normal, a = receiver roughness
+Texture2D<float4>   uGIIrr  : register(t5); // DDGI irradiance atlas
+Texture2D<float2>   uGIVis  : register(t6); // DDGI visibility atlas
+RWTexture2D<float4> uOut    : register(u0); // rgb radiance, a confidence
+SamplerState        uLinSamp : register(s1); // linear + clamp
+
+static const int kOctSize = 8; // must match the host's kGIProbeOctSize
+
+// Closest hit with the triangle index (the shadow/probe kernels use the cheaper
+// pair above and fake the normal with -rayDir; a mirror needs the real one).
+bool giBlasHitTri(int nodeOfs, int triOfs, float3 o, float3 d, float tMin, float tMax,
+                  out float tOut, out int triOut)
+{
+    tOut   = tMax;
+    triOut = -1;
+    float3 invD = 1.0 / d;
+    int stack[64];
+    int sp = 0;
+    stack[sp++] = nodeOfs;
+    bool hit = false;
+    float best = tMax;
+    while (sp > 0)
+    {
+        GiNode n = giNodes[stack[--sp]];
+        float3 t0 = (n.d0.xyz - o) * invD;
+        float3 t1 = (n.d1.xyz - o) * invD;
+        float3 lo = min(t0, t1);
+        float3 hi = max(t0, t1);
+        float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+        float tF = min(min(hi.x, hi.y), min(hi.z, best));
+        if (tN > tF) continue;
+        int leftFirst = asint(n.d0.w);
+        int triCount  = asint(n.d1.w);
+        if (triCount > 0)
+        {
+            for (int i = 0; i < triCount; ++i)
+            {
+                int   ti = triOfs + leftFirst + i;
+                float t;
+                if (giTriHit(giTris[ti], o, d, tMin, best, t))
+                {
+                    hit = true; best = t; tOut = t; triOut = ti;
+                }
+            }
+        }
+        else if (sp + 2 <= 64)
+        {
+            stack[sp++] = nodeOfs + leftFirst;
+            stack[sp++] = nodeOfs + leftFirst + 1;
+        }
+    }
+    return hit;
+}
+
+int giSceneClosestHitTri(float3 o, float3 d, float tMin, float tMax, out float tOut, out int triOut)
+{
+    int   bestInst = -1;
+    float best     = tMax;
+    triOut = -1;
+    for (int i = 0; i < uGiCount.x; ++i)
+    {
+        float3 oL = mul(giInsts[i].invTransform, float4(o, 1.0)).xyz;
+        float3 dL = mul((float3x3)giInsts[i].invTransform, d);
+        float t; int tri;
+        if (giBlasHitTri(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, best, t, tri))
+        {
+            best = t; bestInst = i; triOut = tri;
+        }
+    }
+    tOut = best;
+    return bestInst;
+}
+
+// World-space geometric normal of triangle `tri` on instance `inst`, facing
+// AGAINST the incoming ray. The BVH triangles are object space, so the normal
+// moves with the inverse-transpose of object->world, and invTransform IS
+// world->object: transpose(M) * n == mul(n, M) in HLSL's row-vector form.
+float3 giHitNormal(int inst, int tri, float3 rayDir)
+{
+    GiTri t = giTris[tri];
+    float3 nL = cross(t.v1.xyz - t.v0.xyz, t.v2.xyz - t.v0.xyz);
+    float3 nW = mul(nL, (float3x3)giInsts[inst].invTransform);
+    float len = length(nW);
+    if (len < 1e-12) return -rayDir;
+    nW /= len;
+    return (dot(nW, rayDir) > 0.0) ? -nW : nW;
+}
+
+// The hit's emissive: two halves per int lane (r,g in .z; b in .w's low half).
+float3 giHitEmissive(int inst)
+{
+    uint z = asuint(giInsts[inst].offsets.z);
+    uint w = asuint(giInsts[inst].offsets.w);
+    return float3(f16tof32(z & 0xFFFFu), f16tof32(z >> 16u), f16tof32(w & 0xFFFFu));
+}
+
+// SYNC: the scene shader's giOctEncode / sampleDDGIIrradiance (the sampled
+// variant WITH the Chebyshev visibility test) and the GL kernel's copy. Pinned
+// by the "DDGI probe sampling on the shading side" subcase of test_culling.cpp.
+float2 giOctEncode(float3 n)
+{
+    float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+float3 sampleDDGIIrradiance(float3 P, float3 N)
+{
+    int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0, 0.0, 0.0);
+    int probesPerRow = max(1, int(uGridCounts.w));
+    int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+    float2 atlasSizeTexels = float2(float(probesPerRow), float(probeRows)) * float(kOctSize);
+    float spacing = max(uGridOrigin.w, 1e-4);
+
+    float3 gridSpace = (P - uGridOrigin.xyz) / spacing;
+    float3 base      = floor(gridSpace);
+    float3 fracP     = gridSpace - base;
+
+    float3 sumColor  = float3(0.0, 0.0, 0.0);
+    float  sumWeight = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        float3 cell = base + offs;
+        if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+            continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+        float3 trilinear = lerp(1.0 - fracP, fracP, offs);
+        float weight = trilinear.x * trilinear.y * trilinear.z;
+        if (weight <= 1e-5) continue;
+
+        float3 probePos   = uGridOrigin.xyz + cell * spacing;
+        float3 toProbe    = probePos - P;
+        float  dist       = max(length(toProbe), 1e-4);
+        float3 dirToProbe = toProbe / dist;
+
+        weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+        float2 tileOrigin = float2(float(probeIndex % probesPerRow),
+                                   float(probeIndex / probesPerRow)) * float(kOctSize);
+
+        float2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(kOctSize)) / atlasSizeTexels;
+        float2 visSample = uGIVis.SampleLevel(uLinSamp, visUV, 0).rg;
+        float mean = visSample.x, mean2 = visSample.y;
+        float variance = abs(mean2 - mean * mean);
+        float chebyshev = 1.0;
+        if (dist > mean)
+        {
+            float d = dist - mean;
+            chebyshev = variance / (variance + d * d);
+            chebyshev = chebyshev * chebyshev * chebyshev;
+        }
+        weight *= max(chebyshev, 0.05);
+
+        float2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(kOctSize)) / atlasSizeTexels;
+        sumColor  += uGIIrr.SampleLevel(uLinSamp, irrUV, 0).rgb * weight;
+        sumWeight += weight;
+    }
+    return sumColor / max(sumWeight, 1e-4);
+}
+
+// SYNC: the same hash/cone pair as kGiShadowCSHLSL (a separate compilation unit).
+uint3 giPcg3d(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+float2 giHash2(uint2 gid, float seed)
+{
+    uint3 h = giPcg3d(uint3(gid, 0u));
+    return frac(float2(h.xy >> 8u) * (1.0 / 16777216.0) + seed * float2(0.7548776662, 0.5698402910));
+}
+float3 giConeSample(float3 L, float angleRad, float2 xi)
+{
+    float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 T  = normalize(cross(up, L));
+    float3 B  = cross(L, T);
+    float r   = sin(angleRad) * sqrt(xi.x);
+    float phi = 6.28318530718 * xi.y;
+    return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+[numthreads(8, 8, 1)]
+void GiReflCS(uint3 gid3 : SV_DispatchThreadID)
+{
+    uint2 gid = gid3.xy;
+    if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+    int2 px = int2(gid);
+
+    // The result has the prepass' size, so the receiver is a plain texel fetch.
+    float4 pv = uGPos.Load(int3(px, 0));
+    // Background, or a receiver too rough to show a traced reflection: confidence
+    // 0 means the composite keeps the sky-cube term, the right answer for both.
+    if (pv.a < 0.5) { uOut[px] = float4(0.0, 0.0, 0.0, 0.0); return; }
+    float4 nm    = uGNorm.Load(int3(px, 0));
+    float  rough = nm.a;
+    if (rough > uReflParams.y) { uOut[px] = float4(0.0, 0.0, 0.0, 0.0); return; }
+
+    float3 N = normalize(nm.xyz);
+    float3 V = normalize(uCamPos.xyz - pv.xyz);
+    float3 R = reflect(-V, N);
+    // Near-mirrors keep ONE deterministic ray (a cone narrower than a pixel would
+    // only dither the silhouette); rougher receivers spend the tier's rays.
+    float coneW = (uFrame.w > 0.5 && rough > 0.08) ? rough * 0.5 : 0.0;
+    int   rays  = (coneW > 1e-3) ? clamp(int(uRays.x), 1, 8) : 1;
+    // Normal-offset origin + a min-t, the same self-intersection guards the
+    // shadow kernel uses.
+    float3 origin = pv.xyz + N * 0.05;
+
+    float3 outRadiance = float3(0.0, 0.0, 0.0);
+    float  outConf     = 0.0;
+    [loop] for (int sIdx = 0; sIdx < rays; ++sIdx)
+    {
+        float3 Rs = R;
+        if (coneW > 1e-3)
+        {
+            // The sample index goes into the hashed pixel id, not the seed: every
+            // sample gets its own per-pixel offset under the same R2 frame step.
+            float2 xi = giHash2(gid + uint2(0u, uint(sIdx) * 65536u), uFrame.x);
+            Rs = giConeSample(R, coneW, float2((float(sIdx) + xi.x) / float(rays), xi.y));
+            if (dot(Rs, N) <= 0.0) Rs = R;
+        }
+
+        float dist; int tri;
+        int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
+        if (hitInst < 0)
+            continue; // miss: nothing (no sky bake on D3D yet), the composite keeps the sky term
+
+        float3 hitPos = origin + Rs * dist;
+        float3 hitN   = giHitNormal(hitInst, tri, Rs);
+        float3 albedo = giInsts[hitInst].baseColor.rgb;
+
+        // Hit shading: emissive first (a glowing object shows in a mirror even
+        // unlit; the probe field deliberately does not carry it), then the sun,
+        // the local lights and the probe field.
+        float3 radiance = giHitEmissive(hitInst);
+        float ndl = max(dot(hitN, uSunDir.xyz), 0.0);
+        if (ndl > 0.0 && dot(uSunColor.rgb, float3(1.0, 1.0, 1.0)) > 1e-5)
+        {
+            if (giSceneAnyHit(hitPos + hitN * 0.05, uSunDir.xyz, 0.02, 10000.0)) ndl = 0.0;
+            radiance += albedo * uSunColor.rgb * ndl;
+        }
+        int lightCount = int(uSunDir.w);
+        for (int i = 0; i < lightCount; ++i)
+        {
+            float3 toL = uLightPosRange[i].xyz - hitPos;
+            float d  = max(length(toL), 1e-4);
+            float range = max(uLightPosRange[i].w, 1e-4);
+            if (d >= range) continue;
+            float3 L = toL / d;
+            float ndl2 = max(dot(hitN, L), 0.0);
+            if (ndl2 <= 0.0) continue;
+            float atten = 1.0 - d / range;
+            atten *= atten;
+            if (uLightColorType[i].w > 1.5)
+            {
+                float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+                float cosCone = uLightDirCos[i].w;
+                atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            if (giSceneAnyHit(hitPos + hitN * 0.05, L, 0.02, max(d - 0.1, 0.02))) continue;
+            radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
+        }
+        // Indirect: the probe field at the hit, what makes this reflection
+        // "GI-based" rather than a second, differently lit scene. Only when the
+        // atlases are filled; the flat floor is added either way.
+        if (uReflParams.w > 0.5)
+            radiance += albedo * sampleDDGIIrradiance(hitPos, hitN) * uReflParams.z;
+        radiance += albedo * uAmbient.rgb;
+
+        // Confidence fades toward the ray's far end (probe grid ends, geometry
+        // outside the BVH): fading into the sky term is the graceful failure.
+        float conf = 1.0 - smoothstep(uReflParams.x * 0.75, uReflParams.x, dist);
+        outRadiance += radiance;
+        outConf     += conf;
+    }
+    // Averaged over the rays traced: a missed sample adds nothing to either, so a
+    // lobe half off the geometry gets a proportionally lower confidence.
+    uOut[px] = float4(outRadiance / float(rays), outConf / float(rays));
+}
+)HLSL";
+
+// Separable 5-tap Gaussian over the half-res reflection result, CONFIDENCE-
+// weighted (a miss contributes no colour, so the edges of a hit region do not
+// bleed toward black). Port of kGiReflBlurFS. uDir.xy = one-stride UV step.
+inline constexpr const char* kGiReflBlurHLSL = R"HLSL(
+Texture2D    uSrc     : register(t0);
+SamplerState uLinSamp : register(s1); // linear + clamp
+cbuffer GiReflBlurCB : register(b0) { float4 uDir; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    const float w[5] = { 0.0625, 0.25, 0.375, 0.25, 0.0625 };
+    float3 sumC = float3(0.0, 0.0, 0.0);
+    float  sumA = 0.0;
+    [unroll] for (int k = -2; k <= 2; ++k)
+    {
+        float4 s  = uSrc.SampleLevel(uLinSamp, i.uv + uDir.xy * float(k), 0);
+        float  wi = w[k + 2];
+        sumC += s.rgb * s.a * wi;
+        sumA += s.a * wi;
+    }
+    return float4(sumC / max(sumA, 1e-4), sumA);
+}
+)HLSL";
+
+// Roughness lerp between the SHARP trace and the blurred copy (GL's
+// kGiReflMixFS): a mirror stays a mirror, a rough receiver takes the blur. The
+// sharp copy may only win where the trace is deterministic (the kernel opens its
+// cone above roughness 0.08). t0 = sharp, t1 = blurred, t2 = prepass normal
+// (a = roughness, read as a texel: it has this target's size). uParams.x = the
+// resolution floor.
+inline constexpr const char* kGiReflMixHLSL = R"HLSL(
+Texture2D    uSharp   : register(t0);
+Texture2D    uBlurred : register(t1);
+Texture2D    uGNorm   : register(t2);
+SamplerState uLinSamp : register(s1);
+cbuffer GiReflMixCB : register(b0) { float4 uParams; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float rough = saturate(uGNorm.Load(int3(int2(i.pos.xy), 0)).a);
+    float t = max(saturate(uParams.x), smoothstep(0.08, 0.25, rough));
+    return lerp(uSharp.SampleLevel(uLinSamp, i.uv, 0), uBlurred.SampleLevel(uLinSamp, i.uv, 0), t);
 }
 )HLSL";
 
