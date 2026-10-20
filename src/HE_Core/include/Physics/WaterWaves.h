@@ -55,6 +55,18 @@ namespace HE::water
     inline constexpr WaveTrain kWaveB{ 335.0f, 0.8f,  5.0f, 0.10f };
     inline constexpr WaveTrain kWaveC{  70.0f, 0.5f,  1.6f, 0.09f };   // fine ripples
 
+    // SHORE PROXIMITY, mesh -> material (Thema 206 Schritt 2). The material pass reads
+    // neither the scene depth nor a vertex colour, so the water mesh (HE_Scene,
+    // WaterMesh.cpp) carries "how shallow is the water here" in the one per-vertex
+    // channel the graph can see and the renderers all upload: the vertex normal. A
+    // vertex gets the normal (kShoreNormalGain · e, 1, 0), e = 1 − depth / kShoreFadeDepth
+    // clamped to 0..1, depth = the water over the ground in metres; the material
+    // (mat_gen) reads e back as normal.x / normal.y / kShoreNormalGain. A mesh without
+    // the channel (the engine plane, any user mesh) has x = 0, which reads as e = 0:
+    // open water, nothing near a shore. A power of two, so the divide is exact.
+    inline constexpr float kShoreFadeDepth  = 1.0f;          // metres of water over which e runs 1 -> 0
+    inline constexpr float kShoreNormalGain = 1.0f / 32.0f;  // a 1.8 degree tilt at the waterline
+
     // The trains the physics follows: the two that carry the height (C is 2 cm).
     inline constexpr int       kPhysicsWaveCount = 2;
     inline constexpr WaveTrain kPhysicsWaves[kPhysicsWaveCount] = { kWaveA, kWaveB };

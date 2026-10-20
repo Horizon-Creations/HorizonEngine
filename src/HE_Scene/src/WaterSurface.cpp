@@ -53,14 +53,33 @@ namespace
 
     // Everything that is the same for all bodies of a landscape and moves their
     // mesh without moving a cell (the shore clipping settings included).
-    uint64_t paramsKeyOf(const TerrainComponent& tc, const glm::vec2& uvOrigin)
+    uint64_t paramsKeyOf(const TerrainComponent& tc, const glm::vec2& uvOrigin, float shoreTiltScale)
     {
         uint64_t h = 1469598103934665603ull;
         h = mix(h, tc.sizeX); h = mix(h, tc.sizeZ); h = mix(h, tc.water.res);
         h = mix(h, uvOrigin.x); h = mix(h, uvOrigin.y);
         h = mix(h, WaterSurface::kUvMetersPerTile);
         h = mix(h, tc.water.clipToGround); h = mix(h, tc.water.shoreOvershoot);
+        h = mix(h, shoreTiltScale);
         return h;
+    }
+
+    // sy/sx of the landscape's own world scale (Thema 206 Schritt 8): the water
+    // material's vertex stage always reads the normal through mat3(uModel) (every
+    // backend, MaterialShaderLibrary.cpp), never an inverse-transpose normal matrix, so
+    // a non-uniform X-vs-Y world scale on the landscape (or one of ITS ancestors) scales
+    // the baked shore tilt by sx/sy before the shader sees it. Baking in the inverse
+    // ratio cancels that; a rotation needs no such term (SurfaceMesh's tilt survives any
+    // heading, see MatGen/main.cpp shoreE). Column length, not t.scale: a parent chain's
+    // combined rotation+scale is exactly what mat3(uModel) multiplies, and TRS composition
+    // (T * R * S per node) keeps each column's length equal to that node's own scale
+    // factor regardless of rotation — this only breaks under shear, which this engine's
+    // transform system does not otherwise produce.
+    float shoreTiltScaleOf(HorizonWorld& world, entt::entity te)
+    {
+        const glm::mat3 m(HE::worldMatrixOf(world, te));
+        const float sx = glm::length(m[0]), sy = glm::length(m[1]);
+        return sy / std::max(sx, 1e-6f);
     }
 
     // The mesh asset behind a surface goes with it: out of the renderer's cache,
@@ -209,7 +228,9 @@ namespace
             opt.uvMetersPerTile = WaterSurface::kUvMetersPerTile;
             opt.clipToGround    = f.clipToGround;
             opt.shoreOvershoot  = f.shoreOvershoot;
-            const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin);
+            opt.shoreFade       = true;     // the engine water material softens the shore from it
+            opt.shoreTiltScale  = shoreTiltScaleOf(world, te);
+            const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin, opt.shoreTiltScale);
 
             // Steady state: nothing was edited, every surface still belongs to a
             // body, was built with today's parameters and stands at its body's
