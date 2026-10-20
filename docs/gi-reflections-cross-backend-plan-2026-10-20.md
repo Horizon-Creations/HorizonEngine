@@ -134,3 +134,26 @@ D3D/Vulkan folgen GL, nicht Metals Composite. **Nur vorgeschlagen:** roughness/m
 2. Schritt 3 (Vulkan): `gi_refl.comp` SW zuerst, Binding 32 echt, Built-in-`scene.frag`-Kaskade, `he_vk_imagetests.py` `gi_refl` beurteilen.
 3. Beide: `test_culling`-Drift-Subcase um die neuen Kopien erweitern.
 **Fallen:** siehe §4. Kein Build-Baum im Worktree (Vollbau ~17+ min, CLAUDE.md/Memory: compdb + `-fsyntax-only` reicht für Mac-Syntax).
+
+## Handoff, Schritt 2 (D3D12, 2026-10-20)
+
+**Erledigt (nur D3D12; D3D11 NICHT angefasst):** `kGiReflCSHLSL` + `kGiReflBlurHLSL`/`kGiReflMixHLSL` in `D3D_Shared/HlslSources.h`
+(Port von `kGiReflCS`, ein Segment, kein Sky-Bake, keine Landschaft). Host in `D3D12Renderer.cpp`: `SetGIReflectionSettings`,
+`supportsGIReflections = giSupported`, `createGiReflPipelines` (ausserhalb der `ok`-Kette von `createGiPipelines`, Fehler schaltet nur
+die Reflektion ab), `ensureGiReflTargets`, `runGiReflections` (Trace CS, A-trous-Blur ueber `giReflBlurReachFor`, Roughness-Mix),
+`runGiShadow(..., maskPasses)`: ohne diffuses GI laeuft nur der Prepass. Ergebnis -> `heGIReflFwd` (t32) ueber den CPU-Template-Slot
+`kSlotGIReflFwd`; `Lighting::giRefl = {intensity, maxRoughness, 1, 0}` nur wenn `giReflReady` (dieses Frame produziert).
+**Entscheidungen:** Rauheit des Empfaengers in Prepass `norm.a`, Metallic in `pos.a = 1 + metallic` (keine dritte MRT; alle Leser testen
+`pos.a < 0.5` und lesen `norm.xyz`). `GiInst` bleibt 96 B: Emissive als zwei Halbwerte in `offsets.z/.w` (ehem. Pad), `baseColor.a`
+unveraendert; Hit-Rauheit/-Metallic werden NICHT getragen (GL liest sie auch nicht). `giInstanceSurface` nur bei Reflektion an, damit das
+GI-only-Bild unveraendert bleibt (sonst waere jedes Graph-Material im Probe-Feld weiss). Static-Sampler s1 (linear) an `giComputeRS` und
+`giFsRS` ergaenzt. Trace-Aufloesung = Prepass (halb), Blur-Reichweite mit `resDivUsed = 2`, Mix-Floor 0.35 (GL-Luecke, wie dort).
+**NICHT verifiziert:** `D3D12Renderer.cpp` wurde nie kompiliert (Mac, keine D3D-Header), nichts davon lief auf einer GPU. Geprueft:
+alle HLSL-Strings mit `glslangValidator -D -V -e <entry>` (rc 0, Negativkontrolle schlaegt an), die geaenderten test_culling-Regexe per
+Python-Simulation gegen die echten Quelltexte (`he_tests` selbst nicht gebaut). FXC ist strenger als glslang.
+**Luecken:** D3D11 (Slot t32 dort unbelegt, Prepass-cbuffer ungeklaert); eingebaute D3D12-PBR-Shader haben keine GIRefl-Stufe (Wirkung nur
+ueber heLitP-Graph-Materialien, Forward + Deferred-Resolve); kein Sky-Miss-Bake; keine Landschaftsfarbe am Treffer; kein Temporal;
+Atlas-Deskriptoren (t5/t6) werden bei Atlas-Wechsel ohne GPU-Flush neu geschrieben.
+**Naechste Schritte:** 1. Windows (NN-WS03): `cmake --build <tree> --target RendererD3D12 RendererD3D11 -j 8 -- -k 0`, dann
+`he_tests` fuer test_culling + test_gi_reflection_tier; 2. Szene mit Graph-Material (glatt/rauh, metallisch) aufnehmen, Reflektion an/aus;
+3. D3D11 nachziehen; 4. Schritt 3 (Vulkan) mit denselben Entscheidungen.
