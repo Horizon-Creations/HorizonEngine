@@ -724,7 +724,10 @@ namespace HE
 			// event. Read once; off unless set. HE_PERF_KEY_RMB=1 first moves
 			// the pointer to the window's centre (frame 45) and presses the right
 			// button there (frame 49), so a W lands in the editor's fly-look the
-			// way a hand on mouse and keyboard delivers it.
+			// way a hand on mouse and keyboard delivers it. Dev builds only, like
+			// the rest of the perf automation — this is a synthetic input
+			// injection hook and must not exist in a Shipping binary.
+#if HE_FEATURE_PROFILER_CAPTURE
 			{
 				static const SDL_Scancode kHeldKey = []
 				{
@@ -782,6 +785,7 @@ namespace HE
 					SDL_PushEvent(&e);
 				}
 			}
+#endif
 
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");

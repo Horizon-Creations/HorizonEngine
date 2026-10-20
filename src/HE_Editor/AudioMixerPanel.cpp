@@ -151,9 +151,11 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 			ImGui::PushStyleColor(ImGuiCol_Button,        HE::Ed::Theme::Accent);
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, HE::Ed::Theme::AccentHi);
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  HE::Ed::Theme::Accent);
+			// The label in Ink: Text on the full accent was 2.6:1.
+			ImGui::PushStyleColor(ImGuiCol_Text,          HE::Ed::Theme::textOn(HE::Ed::Theme::Accent));
 		}
 		const bool pressed = ImGui::Button(label, ImVec2(ImGui::GetFrameHeight() * 1.4f, 0.0f));
-		if (lit) ImGui::PopStyleColor(3);
+		if (lit) ImGui::PopStyleColor(4);
 		return pressed;
 	};
 	const float pairW = ImGui::GetFrameHeight() * 1.4f * (solo ? 2.0f : 1.0f) + (solo ? st.ItemSpacing.x : 0.0f);
@@ -189,9 +191,10 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 				ImGui::PushStyleColor(ImGuiCol_Button,        HE::Ed::Theme::Accent);
 				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, HE::Ed::Theme::AccentHi);
 				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  HE::Ed::Theme::Accent);
+				ImGui::PushStyleColor(ImGuiCol_Text,          HE::Ed::Theme::textOn(HE::Ed::Theme::Accent));
 			}
 			if (ImGui::Button("EQ", ImVec2(w, 0.0f))) r.eq = true;
-			if (eqLit) ImGui::PopStyleColor(3);
+			if (eqLit) ImGui::PopStyleColor(4);
 			EditorWidgets::helpForKey("Audio Mixer/EQ");
 		}
 		const float w = ImGui::CalcTextSize("Remove").x + st.FramePadding.x * 2.0f;

@@ -479,8 +479,11 @@ RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
 		const char* letter = catLetter(r.cat);
 		const float fs = ImGui::GetFontSize() * 0.74f;
 		const ImVec2 ls = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, letter);
+		// White read 3.0:1 on the mesh amber and 3.4:1 on the texture teal, so
+		// the letter picks white or Ink by its tile.
+		const ImVec4 tile = ImGui::ColorConvertU32ToFloat4(catColour(r.cat));
 		dl->AddText(ImGui::GetFont(), fs, ImVec2(a.x + (s - ls.x) * 0.5f, a.y + (s - ls.y) * 0.5f),
-		            IM_COL32(255, 255, 255, 255), letter);
+		            HE::Ed::Theme::u32(HE::Ed::Theme::textOn(tile, ImVec4(1, 1, 1, 1))), letter);
 		x += s + 6.0f;
 	}
 
