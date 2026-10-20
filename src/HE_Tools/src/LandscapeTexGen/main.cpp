@@ -26,6 +26,15 @@
 //   they are not written a second time. Touches nothing --pack or the placeholders
 //   wrote, and takes a UUID block of its own (kLooseIndexBase).
 //
+//   Variants (Thema 180, Schritt 3): every option that builds the arrays takes --variants N
+//   (default 1). The arrays then hold 4 * N + 1 slices: layer g's variant v is slice g * N + v
+//   (Grass..Snow), WetGround last (HE::autoLandscapeSliceOf). Variant 1 is the file or
+//   placeholder above; variant v >= 2 lives in T_Landscape_<Layer>_<Map>_V<v>.hasset. --pack takes
+//   them from <Layer>_<Map>_v2.png, _v3.png ... (N = the highest v found; a layer without that
+//   file repeats its variant 1). Without --pack, --variants N writes synthetic variants (other
+//   tints, other bump strength) so the mechanism can be seen without real photographs. The
+//   default N = 1 writes byte for byte what this tool always wrote.
+//
 //          landscape_tex_gen <output-dir> --material
 //   writes the auto landscape material M_AutoLandscape.hasset instead (Schritt 5,
 //   HE::buildAutoLandscapeGraph) — run it on EditorDeps/EngineContent/Materials.
@@ -87,6 +96,12 @@ constexpr uint64_t kTexBaseHi = 0x0000000000000400ULL;
 // (WetGround would get 0x42C..0x42E), so a layer added later never shifts one.
 constexpr int kLooseIndexBase = 0x20;
 
+// Variants 2.. of the layer textures (--variants): index = kVariantIndexBase +
+// ((variant - 2) * layer count + layer) * 3 + map. Four variants of five layers take
+// 0x30..0x6B, clear of the weather functions at 0x500.
+constexpr int kVariantIndexBase = 0x30;
+constexpr int kMaxVariants      = 8;
+
 constexpr int kSize  = 128;          // texels per side
 constexpr int kCells = 4;            // checker cells per side
 constexpr int kCell  = kSize / kCells;
@@ -140,8 +155,20 @@ bool inMarker(int x, int y)
     return bar || foot;
 }
 
-std::vector<uint8_t> makeMap(const Layer& L, Map map)
+// `variant` >= 1 (the 2nd, 3rd ... variant of a layer) is the synthetic stand-in for another
+// photograph of the same ground: another tint, the checker phase flipped, a different bump
+// strength. Every map of one variant changes together, so a hex that draws it shows a matching
+// albedo / normal / mask.
+std::vector<uint8_t> makeMap(const Layer& L0, Map map, int variant = 0)
 {
+    Layer L = L0;
+    float tint[3] = { 1.0f, 1.0f, 1.0f };
+    if (variant > 0)
+    {
+        static const float kTints[3][3] = { { 1.30f, 0.90f, 0.65f }, { 0.65f, 0.95f, 1.35f }, { 1.15f, 1.15f, 0.55f } };
+        for (int c = 0; c < 3; ++c) tint[c] = kTints[(variant - 1) % 3][c];
+        L.heightAmp *= (variant % 2) ? 0.5f : 1.5f;
+    }
     std::vector<uint8_t> px(static_cast<size_t>(kSize) * kSize * 4);
     for (int y = 0; y < kSize; ++y)
         for (int x = 0; x < kSize; ++x)
@@ -158,10 +185,10 @@ std::vector<uint8_t> makeMap(const Layer& L, Map map)
                 }
                 else
                 {
-                    const bool  dark = ((x / kCell) + (y / kCell)) % 2 != 0;
+                    const bool  dark = (((x / kCell) + (y / kCell) + variant) % 2) != 0;
                     const float k    = dark ? 0.8f : 1.0f;
                     for (int c = 0; c < 3; ++c)
-                        p[c] = static_cast<uint8_t>(std::lround(L.albedo[c] * k));
+                        p[c] = static_cast<uint8_t>(std::lround(std::min(L.albedo[c] * k * tint[c], 255.0f)));
                 }
                 p[3] = 255;
                 break;
@@ -201,25 +228,43 @@ std::string assetName(const Layer& L, int map)
     return std::string("T_Landscape_") + L.name + "_" + kMapNames[map];
 }
 
+// Variant 0 is the layer's own texture; variant v >= 1 is "<name>_V<v + 1>".
+std::string variantAssetName(const Layer& L, int map, int variant)
+{
+    return variant == 0 ? assetName(L, map) : assetName(L, map) + "_V" + std::to_string(variant + 1);
+}
+
+uint64_t variantUuidIndex(size_t layer, int map, int variant)
+{
+    return static_cast<uint64_t>(kVariantIndexBase +
+        ((variant - 1) * static_cast<int>(std::size(kLayers)) + static_cast<int>(layer)) * MapCount + map);
+}
+
 // The three texture ARRAYS (Thema 158, Schritt 3): one per map kind, slice k =
 // kLayers[k], so a Texture Array Sample node reads all five layers through one
 // heTexP slot. Assembled from the per-layer .hasset files ON DISK — the
 // placeholders this tool just wrote, or real textures imported over the same
 // paths later — with a baked mip chain, so every backend samples the same
 // levels. UUID index 15 + map (after the 15 per-layer textures).
-int writeArrays(const std::string& outDir)
+int writeArrays(const std::string& outDir, int variants = 1)
 {
     const int layerCount = static_cast<int>(std::size(kLayers));
+    const int depth      = HE::autoLandscapeArrayDepth(variants);
     int ok = 0;
     for (int map = 0; map < MapCount; ++map)
     {
         const std::string name = std::string("T_Landscape_") + kMapNames[map] + "_Array";
         ContentManager src(outDir);
         // Load every slice first, THEN take pointers: a load may move the ones
-        // already handed out.
+        // already handed out. Slice order = HE::autoLandscapeSliceSource: layer g's variant v
+        // at g * variants + v, WetGround last (variants == 1: kLayers order, as it always was).
         std::vector<decltype(src.loadAsset(std::string()))> ids;
-        for (const Layer& L : kLayers)
-            ids.push_back(src.loadAsset(assetName(L, map) + ".hasset"));
+        for (int slice = 0; slice < depth; ++slice)
+        {
+            int layer = 0, variant = 0;
+            HE::autoLandscapeSliceSource(slice, variants, layer, variant);
+            ids.push_back(src.loadAsset(variantAssetName(kLayers[layer], map, variant) + ".hasset"));
+        }
         std::vector<const TextureAsset*> slices;
         for (const auto& id : ids)
             slices.push_back(src.getTexture(id));
@@ -244,7 +289,7 @@ int writeArrays(const std::string& outDir)
         }
         ContentManager check(outDir);
         const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
-        if (!t || t->id != a.id || t->layers != static_cast<uint32_t>(layerCount) ||
+        if (!t || t->id != a.id || t->layers != static_cast<uint32_t>(depth) ||
             t->mipLevels != a.mipLevels || t->srgb != a.srgb || t->data != a.data ||
             !HE::textureArrayPayloadValid(*t))
         {
@@ -322,10 +367,10 @@ Image resized(const Image& src, int w, int h)
 
 // <Layer>_<Alias>.<ext>, case-insensitive; the first alias that exists wins.
 std::filesystem::path findMap(const std::map<std::string, std::filesystem::path>& files,
-                              const char* layer, std::initializer_list<const char*> aliases)
+                              const char* layer, const std::vector<std::string>& aliases)
 {
     static const char* const kExt[] = { "png", "jpg", "jpeg", "tga", "bmp" };
-    for (const char* alias : aliases)
+    for (const std::string& alias : aliases)
         for (const char* ext : kExt)
         {
             const auto it = files.find(lowered(std::string(layer) + "_" + alias + "." + ext));
@@ -379,16 +424,16 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
         if (e.is_regular_file()) files[lowered(e.path().filename().string())] = e.path();
 
     struct Found { Image albedo, normal, rough, ao, height; bool any = false; };
-    std::vector<Found> found(std::size(kLayers));
 
     // Pack size: --size, else the first colour map found.
     int size = requestedSize;
-    for (size_t li = 0; li < std::size(kLayers); ++li)
-    {
-        const char* name = kLayers[li].name;
-        Found& f = found[li];
+    // The files of one layer's variant: suffix "" = the plain names, "_v2" = Grass_Albedo_v2.png...
+    const auto findLayer = [&](const char* name, const std::string& suffix, bool report) {
+        Found f;
         const auto load = [&](Image& img, std::initializer_list<const char*> aliases, const char* what) {
-            const fs::path p = findMap(files, name, aliases);
+            std::vector<std::string> names;
+            for (const char* a : aliases) names.push_back(std::string(a) + suffix);
+            const fs::path p = findMap(files, name, names);
             if (p.empty()) return;
             if (!loadImage(p, img))
             {
@@ -396,7 +441,7 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
                 return;
             }
             f.any = true;
-            std::printf("  %-10s %-9s %s (%dx%d)\n", name, what, p.filename().string().c_str(), img.w, img.h);
+            if (report) std::printf("  %-10s %-9s %s (%dx%d)\n", name, what, p.filename().string().c_str(), img.w, img.h);
             if (size <= 0) size = img.w;
         };
         load(f.albedo, { "Albedo", "Color", "BaseColor", "Diffuse" }, "Albedo");
@@ -404,6 +449,31 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
         load(f.rough,  { "Roughness" },                               "Roughness");
         load(f.ao,     { "AO", "AmbientOcclusion" },                  "AO");
         load(f.height, { "Height", "Displacement" },                  "Height");
+        return f;
+    };
+    std::vector<Found> found(std::size(kLayers));
+    for (size_t li = 0; li < std::size(kLayers); ++li)
+        found[li] = findLayer(kLayers[li].name, "", true);
+    // Variants 2..: the highest v any of the four painted layers has a file for. WetGround is
+    // never read by the material and has one variant.
+    const int groups = HE::kAutoLandscapeVariantGroups;
+    int variants = 1;
+    std::vector<std::vector<Found>> extra;   // [variant - 1][layer]
+    for (int v = 2; v <= kMaxVariants; ++v)
+    {
+        std::vector<Found> set(std::size(kLayers));
+        bool any = false;
+        for (int li = 0; li < groups; ++li)
+        {
+            set[li] = findLayer(kLayers[li].name, "_v" + std::to_string(v), true);
+            any = any || set[li].any;
+        }
+        if (!any) continue;
+        // A gap (_v3 without any _v2) would leave a variant slot empty: fill the ones below
+        // with the plain files of their layers rather than fail.
+        while (static_cast<int>(extra.size()) < v - 2) extra.push_back(found);
+        extra.push_back(std::move(set));
+        variants = v;
     }
     if (size <= 0)
     {
@@ -413,62 +483,75 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
                      pngDir.c_str());
         return 1;
     }
-    std::printf("landscape_tex_gen: packing at %dx%d\n", size, size);
+    std::printf("landscape_tex_gen: packing at %dx%d, %d variant%s per layer\n", size, size, variants,
+                variants == 1 ? "" : "s");
 
     int ok = 0, total = 0;
+    // One layer's three maps from the files found for it (or, with none, its placeholder look at
+    // the pack size, so the arrays stay one size and the layer is still recognisable).
+    const auto buildSet = [&](const Layer& L, const Found& f, int variant, std::vector<uint8_t>& albedo,
+                              std::vector<uint8_t>& normal, std::vector<uint8_t>& mask) {
+        const size_t n = static_cast<size_t>(size) * size * 4;
+        if (!f.any)
+        {
+            std::printf("  %-10s (no files — placeholder)\n", L.name);
+            const auto up = [&](Map m) {
+                Image p; p.w = kSize; p.h = kSize; p.px = makeMap(L, m, variant);
+                return resized(p, size, size).px; };
+            albedo = up(Albedo); normal = up(Normal); mask = up(Mask);
+            return;
+        }
+        const auto fit = [&](const Image& img, const char* what) {
+            if (img.valid() && (img.w != size || img.h != size))
+                std::printf("  %-10s %-9s resized %dx%d -> %dx%d\n", L.name, what, img.w, img.h, size, size);
+            return img.valid() ? resized(img, size, size) : Image{}; };
+        const Image a = fit(f.albedo, "Albedo"), nm = fit(f.normal, "Normal"),
+                    r = fit(f.rough, "Roughness"), ao = fit(f.ao, "AO"), hg = fit(f.height, "Height");
+        albedo.assign(n, 255);
+        normal.resize(n);
+        mask.resize(n);
+        for (size_t i = 0; i < n; i += 4)
+        {
+            if (a.valid())  { albedo[i] = a.px[i]; albedo[i + 1] = a.px[i + 1]; albedo[i + 2] = a.px[i + 2]; }
+            else            { albedo[i] = L.albedo[0]; albedo[i + 1] = L.albedo[1]; albedo[i + 2] = L.albedo[2]; }
+            if (nm.valid()) { normal[i] = nm.px[i]; normal[i + 1] = nm.px[i + 1]; normal[i + 2] = nm.px[i + 2]; }
+            else            { normal[i] = 128; normal[i + 1] = 128; normal[i + 2] = 255; }   // flat
+            normal[i + 3] = 255;
+            mask[i]     = ao.valid() ? ao.px[i] : 255;                      // R = AO (white = unoccluded)
+            mask[i + 1] = r.valid()  ? r.px[i]  : toByte(L.roughness);      // G = roughness
+            mask[i + 2] = hg.valid() ? hg.px[i] : 128;                      // B = height
+            mask[i + 3] = 255;
+        }
+        if (!f.albedo.valid()) std::printf("  %-10s Albedo    missing — flat layer colour\n", L.name);
+        if (!f.normal.valid()) std::printf("  %-10s Normal    missing — flat normal\n", L.name);
+        if (!f.rough.valid())  std::printf("  %-10s Roughness missing — placeholder roughness\n", L.name);
+        if (!f.ao.valid())     std::printf("  %-10s AO        missing — white\n", L.name);
+        if (!f.height.valid()) std::printf("  %-10s Height    missing — mid-grey\n", L.name);
+    };
     int index = 0;
     for (size_t li = 0; li < std::size(kLayers); ++li)
     {
         const Layer& L = kLayers[li];
-        const Found& f = found[li];
         std::vector<uint8_t> albedo, normal, mask;
-        const size_t n = static_cast<size_t>(size) * size * 4;
-        if (!f.any)
-        {
-            // No files for this layer: its placeholder look at the pack size, so the
-            // arrays stay one size and the layer is still recognisable.
-            std::printf("  %-10s (no files — placeholder)\n", L.name);
-            const auto up = [&](Map m) {
-                Image p; p.w = kSize; p.h = kSize; p.px = makeMap(L, m);
-                return resized(p, size, size).px; };
-            albedo = up(Albedo); normal = up(Normal); mask = up(Mask);
-        }
-        else
-        {
-            const auto fit = [&](const Image& img, const char* what) {
-                if (img.valid() && (img.w != size || img.h != size))
-                    std::printf("  %-10s %-9s resized %dx%d -> %dx%d\n", L.name, what, img.w, img.h, size, size);
-                return img.valid() ? resized(img, size, size) : Image{}; };
-            const Image a = fit(f.albedo, "Albedo"), nm = fit(f.normal, "Normal"),
-                        r = fit(f.rough, "Roughness"), ao = fit(f.ao, "AO"), hg = fit(f.height, "Height");
-            albedo.assign(n, 255);
-            normal.resize(n);
-            mask.resize(n);
-            for (size_t i = 0; i < n; i += 4)
-            {
-                if (a.valid())  { albedo[i] = a.px[i]; albedo[i + 1] = a.px[i + 1]; albedo[i + 2] = a.px[i + 2]; }
-                else            { albedo[i] = L.albedo[0]; albedo[i + 1] = L.albedo[1]; albedo[i + 2] = L.albedo[2]; }
-                if (nm.valid()) { normal[i] = nm.px[i]; normal[i + 1] = nm.px[i + 1]; normal[i + 2] = nm.px[i + 2]; }
-                else            { normal[i] = 128; normal[i + 1] = 128; normal[i + 2] = 255; }   // flat
-                normal[i + 3] = 255;
-                mask[i]     = ao.valid() ? ao.px[i] : 255;                      // R = AO (white = unoccluded)
-                mask[i + 1] = r.valid()  ? r.px[i]  : toByte(L.roughness);      // G = roughness
-                mask[i + 2] = hg.valid() ? hg.px[i] : 128;                      // B = height
-                mask[i + 3] = 255;
-            }
-            if (!f.albedo.valid()) std::printf("  %-10s Albedo    missing — flat layer colour\n", L.name);
-            if (!f.normal.valid()) std::printf("  %-10s Normal    missing — flat normal\n", L.name);
-            if (!f.rough.valid())  std::printf("  %-10s Roughness missing — placeholder roughness\n", L.name);
-            if (!f.ao.valid())     std::printf("  %-10s AO        missing — white\n", L.name);
-            if (!f.height.valid()) std::printf("  %-10s Height    missing — mid-grey\n", L.name);
-        }
+        buildSet(L, found[li], 0, albedo, normal, mask);
         total += 3;
         ok += saveLayerTexture(outDir, assetName(L, Albedo), index++, size, size, true,  std::move(albedo)) ? 1 : 0;
         ok += saveLayerTexture(outDir, assetName(L, Normal), index++, size, size, false, std::move(normal)) ? 1 : 0;
         ok += saveLayerTexture(outDir, assetName(L, Mask),   index++, size, size, false, std::move(mask))   ? 1 : 0;
+        if (static_cast<int>(li) >= groups) continue;
+        for (int v = 1; v < variants; ++v)
+        {
+            // A layer with no file for this variant repeats its first one.
+            const Found& fv = extra[v - 1][li].any ? extra[v - 1][li] : found[li];
+            buildSet(L, fv, extra[v - 1][li].any ? v : 0, albedo, normal, mask);
+            total += 3;
+            ok += saveLayerTexture(outDir, variantAssetName(L, Albedo, v), static_cast<int>(variantUuidIndex(li, Albedo, v)), size, size, true,  std::move(albedo)) ? 1 : 0;
+            ok += saveLayerTexture(outDir, variantAssetName(L, Normal, v), static_cast<int>(variantUuidIndex(li, Normal, v)), size, size, false, std::move(normal)) ? 1 : 0;
+            ok += saveLayerTexture(outDir, variantAssetName(L, Mask,   v), static_cast<int>(variantUuidIndex(li, Mask,   v)), size, size, false, std::move(mask))   ? 1 : 0;
+        }
     }
     std::printf("landscape_tex_gen: wrote %d/%d layer textures to %s\n", ok, total, outDir.c_str());
-    const int arrays = writeArrays(outDir);
+    const int arrays = writeArrays(outDir, variants);
     std::printf("landscape_tex_gen: wrote %d/%d texture arrays to %s\n", arrays, MapCount, outDir.c_str());
     return ok == total && arrays == MapCount ? 0 : 1;
 }
@@ -605,7 +688,9 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--arrays-only | --material | --pack <png-dir> [--size N] | --loose <png-dir> [--size N]]\n"
+        std::fprintf(stderr, "usage: landscape_tex_gen <output-dir> [--variants N] [--arrays-only | --material | --pack <png-dir> [--size N] | --loose <png-dir> [--size N]]\n"
+                             "  --variants N   N variants per layer in the arrays (4 * N + 1 slices, default 1);\n"
+                             "                 without --pack the extra variants are synthetic\n"
                              "  --pack         pack real <Layer>_<Map>.png files from <png-dir> (see the header)\n"
                              "  --loose        write the Roughness / AO / Height PNGs of <png-dir> as loose\n"
                              "                 textures of their own (see the header)\n"
@@ -617,6 +702,11 @@ int main(int argc, char** argv)
     }
     const std::string outDir = argv[1];
     const bool arraysOnly = argc > 2 && std::string(argv[2]) == "--arrays-only";
+    // --variants N (anywhere after the output folder): variants per layer for the placeholder and
+    // --arrays-only forms; --pack finds its own count from the files.
+    int variants = 1;
+    for (int i = 2; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--variants") variants = std::clamp(std::atoi(argv[i + 1]), 1, kMaxVariants);
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
 
@@ -646,7 +736,7 @@ int main(int argc, char** argv)
 
     if (arraysOnly)
     {
-        const int arrays = writeArrays(outDir);
+        const int arrays = writeArrays(outDir, variants);
         std::printf("landscape_tex_gen: wrote %d/%d texture arrays to %s\n", arrays, MapCount, outDir.c_str());
         return arrays == MapCount ? 0 : 1;
     }
@@ -694,8 +784,21 @@ int main(int argc, char** argv)
             ++ok;
         }
 
+    // The synthetic variants 2.. of the four painted layers (--variants N).
+    int okVar = 0, totalVar = 0;
+    for (int v = 1; v < variants; ++v)
+        for (size_t li = 0; li < std::size(kLayers) && static_cast<int>(li) < HE::kAutoLandscapeVariantGroups; ++li)
+            for (int map = 0; map < MapCount; ++map)
+            {
+                ++totalVar;
+                okVar += saveLayerTexture(outDir, variantAssetName(kLayers[li], map, v),
+                                          static_cast<int>(variantUuidIndex(li, map, v)), kSize, kSize,
+                                          map == Albedo, makeMap(kLayers[li], static_cast<Map>(map), v)) ? 1 : 0;
+            }
+    if (totalVar > 0)
+        std::printf("landscape_tex_gen: wrote %d/%d variant textures to %s\n", okVar, totalVar, outDir.c_str());
     std::printf("landscape_tex_gen: wrote %d/%d textures to %s\n", ok, total, outDir.c_str());
-    const int arrays = writeArrays(outDir);
+    const int arrays = writeArrays(outDir, variants);
     std::printf("landscape_tex_gen: wrote %d/%d texture arrays to %s\n", arrays, MapCount, outDir.c_str());
-    return ok == total && arrays == MapCount ? 0 : 1;
+    return ok == total && okVar == totalVar && arrays == MapCount ? 0 : 1;
 }

@@ -107,6 +107,11 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // ── Texture reads (column 2): albedo / normal / mask per layer ──────────
     // A bombed layer reads all three maps on ONE hex grid: same uv node, same
     // Cell node, same rotation/sharpness/seed → codegen emits the grid once.
+    //
+    // Groups = the four painted layers: the arrays hold 4 * V + 1 slices (V variants per layer,
+    // then WetGround), V = depth / 4 in the shader. Each hex of a bombed read draws its own
+    // variant; a 5-slice array (V = 1) reads exactly the slices it always did.
+    const int groups = w.constF(static_cast<float>(kAutoLandscapeVariantGroups), 2);
     auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
         LayerReads lr;
         const int slice = w.constF(static_cast<float>(static_cast<int>(L)), 2);
@@ -115,6 +120,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
             r.graph.findNode(p)->s = path;
             r.graph.connect(uv, 0, p, 0);
             r.graph.connect(slice, 0, p, 1);
+            r.graph.connect(groups, 0, p, 2); // the unbombed debug read shows variant 0 of the layer
             if (seed < 0) return p;
             const int b = w.node(bombed, 2);
             MatGraphNode* bn = r.graph.findNode(b);
@@ -123,6 +129,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
             r.graph.connect(uv, 0, b, 0);
             r.graph.connect(slice, 0, b, 1);
             r.graph.connect(pCell, 0, b, 2);
+            r.graph.connect(groups, 0, b, 3);
             // Compile-time choice: the untaken read is never emitted.
             const int sw = w.op(T::StaticSwitch, 2, { { b }, { p } });
             r.graph.findNode(sw)->s = kAutoLandscapeSwitchBombing;

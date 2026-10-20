@@ -228,11 +228,14 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "Blended", F::Vec3, 0 } }, 0 },
 
         // ── v13: texture arrays — s = the array texture, Slice picks the layer ──
+        // "Groups" (appended, Thema 180 Schritt 3): 0 / unwired = the array is read slice for
+        // slice as always; N > 0 = it holds N groups of V variants each (depth = N * V + extra),
+        // "Slice" names the group and the node reads that group's variant 0.
         { MatNodeType::TextureArraySample, "Texture Array Sample", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 0 },
         { MatNodeType::NormalMapArraySample, "Normal Map Array", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
 
         // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength);
@@ -243,11 +246,16 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::NormalMapBombSample, "Normal Map Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "N", F::Vec3, 0 } }, 4 },
+        // "Groups" (appended, Thema 180 Schritt 3): wired with N > 0, each of the three hexes
+        // draws its own variant 0..V-1 of group "Slice" from its cell's hash (V = depth / N);
+        // unwired = one slice for all three, as before.
         { MatNodeType::TextureArrayBombSample, "Texture Array Bombing", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
+            { "Groups", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
         { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
+            { "Groups", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 4 },
 
         // ── v15: the hex grid as data, no texture — p[0] = Seed ──
@@ -533,6 +541,7 @@ struct EmitCtx
     // prefix. One layer's Albedo/Normal/Mask reads reuse ONE grid this way.
     bool usesBombGrid = false;
     bool usesBombCells = false;                          // heBombCells (Bombing Cells, no texture)
+    bool usesBombGridV = false;                          // heBombGridV (array bombing with a Groups pin)
     bool usesWaterRipple = false;                        // heWaterRipple (Water Ripple, reads heLight)
     std::unordered_map<std::string, std::string> bombGrids;
     // Landscape layer blending: the fragment declares heLandscapeWeights and the
@@ -652,23 +661,40 @@ std::string arrayCoord(const std::string& sampler, const std::string& uv, const 
 // <g>; the declaration is appended to `decl` only when this grid is new in the
 // scope, so call it AFTER the node's inputs are emitted (an input may itself be a
 // bombing node that declares the grid first).
+//
+// `variants` = the heBombGridV form: the same grid plus <g>s, the variant numbers
+// (the low 8 bits of each hex's hash) of the three hexes. Its own cache key, so a
+// plain read and a variant read of one layer never share a grid.
 std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const std::string& cell,
-                     const MatGraphNode& n, std::string& decl)
+                     const MatGraphNode& n, std::string& decl, bool variants = false)
 {
     const float rot   = std::clamp(n.p[0], 0.0f, 1.0f);
     const float sharp = n.p[1] > 0.0f ? std::min(n.p[1], 32.0f) : kMatBombDefaultSharpness;
     const long  seedI = std::lround(std::clamp(n.p[2], -2.0e9f, 2.0e9f));
     const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
-    c.usesBombGrid = true;
-    const std::string key = sc.key + "|" + uv + "|" + cell + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed;
+    (variants ? c.usesBombGridV : c.usesBombGrid) = true;
+    const std::string key = sc.key + "|" + uv + "|" + cell + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed
+                          + (variants ? "|V" : "");
     if (auto it = c.bombGrids.find(key); it != c.bombGrids.end()) return it->second;
     const std::string g = "n" + std::to_string(++c.varCounter) + "_g";
     decl += "vec2 " + g + "t0, " + g + "t1, " + g + "t2; mat2 " + g + "r0, " + g + "r1, " + g
-          + "r2; vec3 " + g + "w; heBombGrid(" + uv + ", " + cell + ", " + fmtF(rot) + ", " + fmtF(sharp) + ", "
-          + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, " + g + "r2, "
-          + g + "w); vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ";
+          + "r2; vec3 " + g + "w; ";
+    if (variants) decl += "uvec3 " + g + "s; ";
+    decl += std::string(variants ? "heBombGridV(" : "heBombGrid(") + uv + ", " + cell + ", " + fmtF(rot) + ", "
+          + fmtF(sharp) + ", " + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, "
+          + g + "r2, " + g + "w" + (variants ? ", " + g + "s" : std::string()) + "); vec2 " + g + "dx = dFdx("
+          + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ";
     c.bombGrids.emplace(key, g);
     return g;
+}
+
+// The number of variants per group of an array read with a Groups pin: the array's
+// depth divided by the group count, in integers, so every backend divides the same.
+// A Groups value of 0 (or less) is one variant, i.e. the slice read as it always was.
+std::string variantCount(const std::string& sampler, const std::string& groups)
+{
+    return "int(floor(" + groups + " + 0.5)) > 0 ? max(textureSize(" + sampler + ", 0).z / int(floor(" + groups
+         + " + 0.5)), 1) : 1";
 }
 
 // emitNode's node switch, split by family into functions that are never
@@ -894,9 +920,20 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
             const std::string sampler = textureSampler(c, n, /*array=*/true, &isArr);
             const std::string uv      = uvInput(c, sc, n, 0);
             decl = "vec2 " + v + "_uv = " + uv + ";";
-            const std::string coord = isArr
-                ? arrayCoord(sampler, v + "_uv", inputExpr(c, sc, n, 1, F::Float))
+            const std::string sliceExpr = isArr ? inputExpr(c, sc, n, 1, F::Float) : std::string();
+            std::string coord = isArr
+                ? arrayCoord(sampler, v + "_uv", sliceExpr)
                 : v + "_uv"; // heTex0 fallback: a plain 2D read, the slice has no meaning
+            if (isArr && hasInput(sc, n, 2))
+            {
+                // Groups wired: "Slice" names a group, this read takes the group's variant 0
+                // (slice = group * V). Without bombing there is no per-hex choice to make, and one
+                // variant per pixel would be a hard seam, so the debug mode shows variant 0.
+                const std::string depth = "float(textureSize(" + sampler + ", 0).z - 1)";
+                decl += " int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 2, F::Float)) + ";";
+                coord = "vec3(" + v + "_uv, min(clamp(floor(" + sliceExpr
+                      + " + 0.5), 0.0, " + depth + ") * float(" + v + "_V), " + depth + "))";
+            }
             if (n.type == MatNodeType::TextureArraySample)
             {
                 decl += " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
@@ -943,11 +980,33 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                 decl = "float " + v + "_l = clamp(floor(" + inputExpr(c, sc, n, 1, F::Float)
                      + " + 0.5), 0.0, float(textureSize(" + sampler + ", 0).z - 1)); ";
             const std::string cell = inputExpr(c, sc, n, wantArray ? 2 : 1, F::Float);
-            const std::string g = bombGrid(c, sc, uv, cell, n, decl);
+            // Groups wired (array nodes only): the layer above is the GROUP and every hex draws
+            // its own variant of it from its cell's hash, so a seam between two variants is
+            // the grid's soft hex blend and no texture read is added.
+            const bool variants = isArr && hasInput(sc, n, 3);
+            if (variants)
+            {
+                decl += "int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 3, F::Float)) + "; ";
+            }
+            const std::string g = bombGrid(c, sc, uv, cell, n, decl, variants);
+            if (variants)
+            {
+                // slice = group * V + variant, the variant from the hash's 8 free low bits in
+                // integers (no float rounding that could differ per API), clamped into the array.
+                for (int k = 0; k < 3; ++k)
+                {
+                    const std::string i = std::to_string(k);
+                    decl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + int(((" + g
+                          + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u), 0, textureSize(" + sampler
+                          + ", 0).z - 1); ";
+                }
+            }
             // One hex's read: its bombed uv, the unbombed gradients turned with it.
             auto tap = [&](int k) {
                 const std::string i = std::to_string(k);
-                const std::string coord = isArr ? "vec3(" + g + "t" + i + ", " + v + "_l)" : g + "t" + i;
+                const std::string coord = !isArr ? g + "t" + i
+                    : variants ? "vec3(" + g + "t" + i + ", float(" + v + "_s" + i + "))"
+                               : "vec3(" + g + "t" + i + ", " + v + "_l)";
                 return "textureGrad(" + sampler + ", " + coord + ", " + g + "r" + i + " * " + g
                      + "dx, " + g + "r" + i + " * " + g + "dy)";
             };
@@ -1804,7 +1863,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
             "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
             "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
-    if (c.usesBombGrid || c.usesBombCells)
+    if (c.usesBombGrid || c.usesBombGridV || c.usesBombCells)
         // The hash both bombing helpers draw their numbers from. A graph that uses
         // only the texture nodes gets exactly the text it always had.
         src +=
@@ -1868,6 +1927,37 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    heBombTap(uv, size, b + ivec2(si, si), rot, seed, t0, r0);\n"
             "    heBombTap(uv, size, b + ivec2(si, 1 - si), rot, seed, t1, r1);\n"
             "    heBombTap(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
+            "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
+            "    w /= w.x + w.y + w.z; }\n";
+    if (c.usesBombGridV)
+        // heBombGrid with the variant of each hex returned beside its tap: the low 8 bits of
+        // the hex's first hash word, which the offset (h.xy >> 8) and the rotation (h.z >> 8)
+        // never read. Same cell, same hash, same order of the three taps as heBombGrid above,
+        // so the variant belongs to exactly the hex whose texel it picks. Emitted only when a
+        // node has its Groups pin wired: graphs without keep their text.
+        src +=
+            "void heBombTapV(vec2 uv, float size, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r,\n"
+            "                out uint sel) {\n"
+            "    uvec3 h = heBombHash(cell, seed);\n"
+            "    vec2 off = vec2(h.xy >> 8u) * (1.0 / 16777216.0);\n"
+            "    float a = (float(h.z >> 8u) * (2.0 / 16777216.0) - 1.0) * 3.14159265 * rot;\n"
+            "    float cs = cos(a); float sn = sin(a);\n"
+            "    r = mat2(cs, sn, -sn, cs);\n"
+            "    vec2 cen = vec2(float(cell.x) + 0.5 * float(cell.y), 0.8660254 * float(cell.y)) * size;\n"
+            "    t = r * (uv - cen) + cen + off;\n"
+            "    sel = h.x & 255u; }\n"
+            "void heBombGridV(vec2 uv, float cell, float rot, float sharp, uint seed, out vec2 t0,\n"
+            "                 out vec2 t1, out vec2 t2, out mat2 r0, out mat2 r1, out mat2 r2, out vec3 w,\n"
+            "                 out uvec3 sel) {\n"
+            "    float size = max(cell, 0.001);\n"
+            "    vec2 st = uv / size;\n"
+            "    vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);\n"
+            "    vec2 bf = floor(sk); vec2 f = sk - bf; float fz = 1.0 - f.x - f.y;\n"
+            "    float s = step(0.0, -fz); float s2 = 2.0 * s - 1.0;\n"
+            "    ivec2 b = ivec2(bf); int si = int(s);\n"
+            "    heBombTapV(uv, size, b + ivec2(si, si), rot, seed, t0, r0, sel.x);\n"
+            "    heBombTapV(uv, size, b + ivec2(si, 1 - si), rot, seed, t1, r1, sel.y);\n"
+            "    heBombTapV(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2, sel.z);\n"
             "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
             "    w /= w.x + w.y + w.z; }\n";
     if (c.usesWaterRipple)

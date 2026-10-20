@@ -96,6 +96,35 @@ inline constexpr int kAutoLandscapePaintLayerCount = 6;
 // It stays so the array layout and its texture ids (0x40F..0x411) do not move.
 enum class AutoLandscapeLayer : int { Grass = 0, Dirt = 1, Rock = 2, Snow = 3, WetGround = 4 };
 
+// Variants per layer (Thema 180, Schritt 3). The three arrays hold kAutoLandscapeVariantGroups * V + 1
+// slices: layer g's variant v is slice g * V + v (g = Grass..Snow), the unread WetGround slice
+// comes last. V is not stored anywhere: the shader takes depth / 4, so the same material renders
+// the 5-slice placeholder arrays (V = 1) and a 13-slice set (V = 3) alike.
+inline constexpr int kAutoLandscapeVariantGroups = 4;
+inline constexpr int autoLandscapeArrayDepth(int variants) { return kAutoLandscapeVariantGroups * variants + 1; }
+inline constexpr int autoLandscapeVariantCount(int depth)
+{ return depth / kAutoLandscapeVariantGroups > 1 ? depth / kAutoLandscapeVariantGroups : 1; }
+// The variant a hex draws: the low 8 bits of its hash's first word, scaled to 0..V-1 in integers
+// (the shader's `((h.x & 255u) * uint(V)) >> 8u`, which every backend computes bit for bit).
+inline constexpr int autoLandscapeVariantOf(uint32_t hashX, int variants)
+{ return static_cast<int>(((hashX & 255u) * static_cast<uint32_t>(variants)) >> 8u); }
+// Slice of layer `group`'s variant `variant` in an array `depth` slices deep; clamped into the
+// array like the shader does, so a shorter array can never read outside itself.
+inline constexpr int autoLandscapeSliceOf(int group, int variant, int depth)
+{
+    const int s = group * autoLandscapeVariantCount(depth) + variant;
+    return s < 0 ? 0 : (s > depth - 1 ? depth - 1 : s);
+}
+
+// The inverse, for whoever assembles the arrays: which (layer, variant) slice `slice` holds.
+// Layers are AutoLandscapeLayer values; the last slice (4 * V) is WetGround, variant 0.
+inline constexpr void autoLandscapeSliceSource(int slice, int variants, int& layer, int& variant)
+{
+    if (slice >= kAutoLandscapeVariantGroups * variants) { layer = kAutoLandscapeVariantGroups; variant = 0; return; }
+    layer = slice / variants;
+    variant = slice % variants;
+}
+
 // Exposed parameter names (HeParams slots, Material Instance overrides) and the
 // static switch. Kept here so the witness and the tests cannot drift from the graph.
 inline constexpr char kAutoLandscapeParamGroundTile[]     = "Ground Tile Size";

@@ -2744,8 +2744,11 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	// Grass, Dirt, Rock and Snow each read albedo + normal + mask on ONE grid (four
 	// grids in total). The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
-	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 4u);
+	// Thema 180 Schritt 3: the layers read through the variant grid (Groups wired), which
+	// is heBombGrid plus the variant numbers; the plain heBombGrid is not emitted at all.
+	CHECK(countOf(gen.glsl, "void heBombGridV(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 4u);
+	CHECK(gen.glsl.find("heBombGrid(") == std::string::npos);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
 	CHECK(gen.switches[0].second);
