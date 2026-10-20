@@ -2055,6 +2055,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "gi_shadow.comp",     sh / "gi_shadow.comp" },
 			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp" },
 			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl" },
+			{ "gi_refl.comp",       sh / "gi_refl.comp" }, // Vulkan reflection kernel, its own giHash2/giPcg3d copy
 			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h" },
 			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp" },
 			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm" },
@@ -2263,15 +2264,19 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		const size_t hlslTo   = hlslAll.find(")HLSL\";", hlslFrom);
 		REQUIRE(hlslTo != std::string::npos);
 
+		// gi_refl.comp (Vulkan, Thema 191 step 6) is the sixth copy: a whole
+		// file, like scene.frag above (not sliced by literal name — there is
+		// only one GLSL reflection kernel per file on this backend).
 		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag",
 		                                         "kUnlitFS (GL)", "kGiReflCS (GL)",
-		                                         "kGiReflCSHLSL (D3D)" };
+		                                         "kGiReflCSHLSL (D3D)", "gi_refl.comp (Vulkan)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib.substr(open + 3, close - open - 3)),
 			stripLineComments(readFile(sh / "scene.frag")),
 			glslLiteral("kUnlitFS"),
 			glslLiteral("kGiReflCS"),
 			stripLineComments(hlslAll.substr(hlslFrom, hlslTo - hlslFrom)),
+			stripLineComments(readFile(sh / "gi_refl.comp")),
 		};
 		checkGroup(names, src, {
 			// HLSL spells the parameter `float3 n`, and the regex runs before
@@ -2280,10 +2285,12 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
 			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
 			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
-			                              R"(OctEncode\(float3 n\)\s*\{([^}]*)\})" } },
+			                              R"(OctEncode\(float3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
 			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
 			                              R"(const int kOctSize = (\d+);)",
 			                              R"(const int kOctSize = (\d+);)" } },
 			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },

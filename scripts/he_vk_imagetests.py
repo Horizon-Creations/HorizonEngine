@@ -203,10 +203,16 @@ CASES = {
                     "sw": ["GI probe grid", "software GI path forced"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
-    # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
-    # Vulkan has no GI reflections yet (giRefl gate stays 0, GI doc §7.1) and the
-    # first lavapipe run measured off == on to the byte. The number is here so the
-    # day it moves is visible; make it a judged pair once Vulkan draws them.
+    # appear in the mirror floor (docs/gi-reflections-plan.md). Still REPORT
+    # ONLY as of Thema 191 step 6 (gi_refl.comp SW kernel + blur/mix landed):
+    # the mirror FLOOR itself is a plain MaterialAsset, so it renders through
+    # the built-in PBR shader and shows nothing (no giRefl cascade there on any
+    # backend yet) — only the graph-material cubes change. First real (non-
+    # byte-identical) measurement, RTX 4070 not lavapipe: off vs on mean |Δ|
+    # 0.19, max 49, 3.7% of pixels changed by >2 steps — no validation layer
+    # messages. No lavapipe number yet (CI's software ICD may differ from a
+    # real GPU's numbers); make it a judged pair (min_mean) once CI reports
+    # one, the same way "gi" above picked 0.3.
     "gi_refl": {
         "base": {"GIREFLTEST": "1", "GI": "1", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
                  "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
