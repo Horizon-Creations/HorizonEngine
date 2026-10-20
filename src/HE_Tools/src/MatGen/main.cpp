@@ -887,7 +887,15 @@ Mb waterMaterial()
     // colour come through) and thickens to the assumed depth over the metre before. The blend
     // is a smoothstep of e, which is 0 at one metre: no step where the shore range begins,
     // and in open water (e = 0) this is Turbidity.y itself.
-    const int tintMix = m.op3(T::Smoothstep, m.k(0.0f, 14, 5), tintStart, shoreE, 15, 5);
+    // tintStart is a user knob (0..1, see ShallowWater param above): a branchless
+    // max(tintStart, eps) before it feeds Smoothstep as the non-zero edge — equal
+    // Smoothstep edges (tintStart <= 0) are undefined behaviour. A true max rather
+    // than an unconditional epsilon add (like shoreW below) so any value already
+    // above eps, including the default, passes through unchanged.
+    const int epsTint = m.k(0.001f, 13, 3.5f);
+    const int tintOk  = m.op(T::Greater, tintStart, epsTint, 13, 4);
+    const int tintStartC = m.op3(T::If, tintOk, tintStart, epsTint, 14, 4);
+    const int tintMix = m.op3(T::Smoothstep, m.k(0.0f, 14, 5), tintStartC, shoreE, 15, 5);
     const int tintD   = m.op3(T::Lerp, Pin{ ts, 1 }, shoreD, tintMix, 17, 5);
     const int path  = m.op(T::Divide, tintD, m.op(T::Add, ndvR, m.k(0.05f, 24, 6), 25, 5), 26, 5);
     const int dens  = m.op(T::Multiply, m.op(T::Multiply, Pin{ ts, 0 }, path, 27, 5), m.k(-1.0f, 27, 6), 28, 5);
@@ -1000,7 +1008,11 @@ Mb waterMaterial()
     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
     // where shoreD is a metre, so neutral outside the shore range).
-    const int clearMix = m.op3(T::Smoothstep, m.k(0.0f, 37, 3), clearDepth, shoreD, 38, 3);
+    // clearDepth is a user knob too: same branchless max(., eps) clamp as tintStart above.
+    const int epsClear = m.k(0.001f, 36, 1.5f);
+    const int clearOk  = m.op(T::Greater, clearDepth, epsClear, 36, 2);
+    const int clearDepthC = m.op3(T::If, clearOk, clearDepth, epsClear, 37, 2);
+    const int clearMix = m.op3(T::Smoothstep, m.k(0.0f, 37, 3), clearDepthC, shoreD, 38, 3);
     const int opacEff  = m.op(T::Multiply, opac, m.op3(T::Lerp, opacFloor, m.k(1.0f, 38, 2.5f), clearMix, 39, 2), 40, 2.5f);
     const int bodyA  = m.op3(T::Lerp, opacEff, m.k(1.0f, 39, 3), m.un(T::OneMinus, trans, 39, 4), 40, 3);
     const int alpha1 = m.op3(T::Lerp, bodyA, m.k(1.0f, 40, 4.5f), m.op(T::Multiply, refl, fres, 40, 2), 41, 3);
