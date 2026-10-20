@@ -162,7 +162,23 @@ LIMITS = {
         # JobSystemThreadPool. A green run prints no report, so the number before
         # is only known as "at most 34.0". New limits: measured plus 10 percent,
         # the rule the darwin game row above follows.
-        "game":         (48.0, 38.0),
+        # game: (48.0, 38.0) until 20.10.2026, raised on purpose. Thema 191
+        # (GI-Reflections D3D/Vulkan, run 39459602760, windows-latest, the
+        # ci.yml recipe) weighed 48.2 MB total, 37.1 MB without python and went
+        # red by 0.2 MB on the total alone. Comparing against the same recipe's
+        # last green run on release/0.7.0 (39437132173, same day, a few hours
+        # earlier) shows the regression is NOT this topic's engine code: the
+        # "engine" bucket is identical at 32.3 MB both times and "without
+        # python" is identical at 37.1 MB both times — GI-Reflections only
+        # moved "shaders" by 0.1 MB (the three new gi_refl.comp/.frag
+        # binaries). What actually grew is "python", 9.8 -> 11.0 MB, because
+        # the windows-latest runner's bundled CPython moved from 3.14 to 3.15
+        # between those two runs (zip_stdlib.py: 552 -> 590 modules) — an
+        # unrelated CI image change, not a regression to gate on. It also broke
+        # HorizonPython.dll loading (test_python_scripting, same run), which is
+        # a separate problem for whoever owns that test, not fixed here. New
+        # limits: measured plus 10 percent, the rule the other rows follow.
+        "game":         (53.0, 41.0),
         # app-advanced/app-basic: (41.0, 30.0) / (40.0, 29.0) until 08.10.2026,
         # unmeasured since 05.09.2026 — a month of unrelated growth across the
         # whole engine (world streaming, multiplayer, …), not a re-check after
