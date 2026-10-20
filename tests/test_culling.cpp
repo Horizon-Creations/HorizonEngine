@@ -2251,19 +2251,40 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			return stripLineComments(gl.substr(from, to - from));
 		};
 
+		// The D3D12/D3D11 reflection kernel (kGiReflCSHLSL, HlslSources.h) is the
+		// fifth copy: a hit shaded from the same probe field in HLSL. Sliced by its
+		// literal name, like the GL ones.
+		const std::string hlslAll = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                     "Backends" / "D3D_Shared" / "HlslSources.h");
+		const std::string hlslDecl = "inline constexpr const char* kGiReflCSHLSL = R\"HLSL(";
+		const size_t hlslAt = hlslAll.find(hlslDecl);
+		REQUIRE(hlslAt != std::string::npos); // literal renamed/moved
+		const size_t hlslFrom = hlslAt + hlslDecl.size();
+		const size_t hlslTo   = hlslAll.find(")HLSL\";", hlslFrom);
+		REQUIRE(hlslTo != std::string::npos);
+
 		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag",
-		                                         "kUnlitFS (GL)", "kGiReflCS (GL)" };
+		                                         "kUnlitFS (GL)", "kGiReflCS (GL)",
+		                                         "kGiReflCSHLSL (D3D)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib.substr(open + 3, close - open - 3)),
 			stripLineComments(readFile(sh / "scene.frag")),
 			glslLiteral("kUnlitFS"),
 			glslLiteral("kGiReflCS"),
+			stripLineComments(hlslAll.substr(hlslFrom, hlslTo - hlslFrom)),
 		};
 		checkGroup(names, src, {
-			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
+			// HLSL spells the parameter `float3 n`, and the regex runs before
+			// canonicalise() rewrites the dialect, so the D3D copy has its own.
+			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(float3 n\)\s*\{([^}]*)\})" } },
 			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
 			                              R"(const int kOctSize = (\d+);)" } },
 			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },
 			{ "trilinear weight cutoff",{ R"(weight <= ([0-9.e+-]+)\) continue)" } },
