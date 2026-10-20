@@ -18,13 +18,20 @@ Views:
   beach, beach33, beach-smooth, beach-sheet   the jagged shore of a gentle rough beach (see VIEWS)
 
 Usage: scripts/water_baseline_shots.py OUTDIR [--prefix baseline] [--backends Metal,OpenGL]
-                                        [--views open,shore,...] [--repeat 2]
+                                        [--views open,shore,...] [--repeat 2] [--editor PATH]
 --repeat 2 renders every frame twice and prints both md5s (the reproducibility check).
+
+On Windows (--backends D3D11,D3D12,Vulkan,OpenGL) he_shot.py does not run (it shells out to
+`sips`), so this script drives the deployed editor itself: own HE_CONFIG_DIR, poll the BMP
+until it stops growing then kill (D3D12 can hang in shutdown), HorizonEngine.log copied next
+to the PNG, PNG written with PIL. See scripts/underwater_acceptance.py for the same pattern.
 """
-import argparse, hashlib, os, pathlib, shutil, subprocess, sys, tempfile
+import argparse, hashlib, os, pathlib, shutil, subprocess, sys, tempfile, time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SHOT = REPO / "scripts" / "he_shot.py"
+DEFAULT_EDITOR = REPO / "out" / "deploy" / "Editor" / (
+    "HorizonEditor.exe" if os.name == "nt" else "HorizonEditor")
 
 COMMON = dict(TOD="0.4", RENDERPATH="0", AA="0")
 VIEWS = {
@@ -61,7 +68,60 @@ def md5(p):
     return hashlib.md5(pathlib.Path(p).read_bytes()).hexdigest()
 
 
-def shoot(out, view, backend):
+def shoot_windows(editor, out, view, backend, timeout):
+    cfg = tempfile.mkdtemp(prefix="hecfg_")
+    bmp = pathlib.Path(out).with_suffix(".he.bmp")
+    if bmp.exists():
+        bmp.unlink()
+    kv = dict(COMMON, **VIEWS[view])
+    env = dict(os.environ, HE_CONFIG_DIR=cfg, HE_HIDDEN_WINDOW="1", HE_COLLAB_OFFLINE="1",
+               HE_D3D_SHADER_CACHE="0", HE_DUMP_PATH=str(bmp), HE_DUMP_QUIT="1",
+               HE_DUMP_SKYTEST="1", HE_DUMP_RHI=backend, HE_SKY_TIME="1.0")
+    for k, v in kv.items():
+        env[f"HE_DUMP_{k.upper()}"] = str(v)
+    engine_log = pathlib.Path(editor).parent / "HorizonEngine.log"
+    logpath = pathlib.Path(out).with_suffix(".engine.log")
+    t0 = time.time()
+    proc = subprocess.Popen([str(editor)], env=env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, cwd=str(pathlib.Path(editor).parent))
+    size, stable_since, rc = -1, None, None
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            break
+        now = time.time()
+        if now - t0 > timeout:
+            proc.kill(); rc = "timeout"; break
+        cur = bmp.stat().st_size if bmp.exists() else -1
+        if cur > 1024 and cur == size:
+            stable_since = stable_since or now
+            if now - stable_since > 15:        # D3D12 can hang in shutdown after the dump
+                proc.kill(); rc = "killed after dump"; break
+        else:
+            stable_since = None
+        size = cur
+        time.sleep(0.5)
+    if rc in ("timeout", "killed after dump"):
+        proc.wait()
+    if engine_log.exists():
+        shutil.copyfile(engine_log, logpath)
+    shutil.rmtree(cfg, ignore_errors=True)
+    ok = bmp.exists() and bmp.stat().st_size > 1024
+    if ok:
+        try:
+            from PIL import Image
+            Image.open(bmp).convert("RGB").save(out)
+        except ImportError:
+            shutil.copyfile(bmp, pathlib.Path(out).with_suffix(".bmp"))
+            ok = False
+    if not ok:
+        print(f"FAILED {out} (exit {rc}, {time.time() - t0:.0f}s)", file=sys.stderr)
+    return ok
+
+
+def shoot(out, view, backend, editor=None, timeout=90):
+    if os.name == "nt":
+        return shoot_windows(editor or DEFAULT_EDITOR, out, view, backend, timeout)
     cfg = tempfile.mkdtemp(prefix="hecfg_")
     env = dict(os.environ, HE_SKY_TIME="1.0", HE_CONFIG_DIR=cfg, HE_HIDDEN_WINDOW="1",
                HE_SHOT_TIMEOUT=os.environ.get("HE_SHOT_TIMEOUT", "400"))
@@ -82,6 +142,8 @@ def main():
     ap.add_argument("--backends", default="Metal,OpenGL")
     ap.add_argument("--views", default=",".join(VIEWS))
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("--editor", default=str(DEFAULT_EDITOR))
+    ap.add_argument("--timeout", type=int, default=90)
     a = ap.parse_args()
     out = pathlib.Path(a.outdir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -91,7 +153,7 @@ def main():
             sums = []
             for i in range(a.repeat):
                 p = out / (f"{a.prefix}-{be.lower()}-{v}.png" if i == 0 else f"_repeat{i}-{be.lower()}-{v}.png")
-                if shoot(p, v, be):
+                if shoot(p, v, be, a.editor, a.timeout):
                     sums.append(md5(p))
                 else:
                     bad += 1
