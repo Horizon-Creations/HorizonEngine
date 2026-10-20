@@ -84,12 +84,14 @@ Ausnahme ohne Nutzen. Die Daten-/Funktionsform (Settings in HE_Core + freie Funk
    (`HlslSources.h:799`) haben nur `baseColor`; GL hat zusätzlich `emissive` und den Landschaftsindex
    (`OpenGLRenderer.cpp:1795`). `GIInstanceGpu.pad0/pad1` (`VulkanRenderer.h:1412`) sind frei, reichen aber nicht für
    emissive(vec4)+metallic/roughness. Layout-Wechsel = Shader + CPU-Struct + `static_assert` gleichzeitig.
-3. **Prepass-Ausgabe:** Vulkan `gi_gbuf.frag` schreibt nur Pos+Normale (`oNorm.a = 0`); D3D `kGiGBufHLSL` ebenso. roughness/metallic fehlen.
+3. **Prepass-Ausgabe:** Vulkan `gi_gbuf.frag` schreibt nur Pos+Normale (`oNorm.a = 0`); D3D `GiGBufPS` (`HlslSources.h:780-786`, gelesen) ebenso: `pos`+`norm` mit `norm.a = 0`; der `uPBR`-cbuffer ist im VS
+   deklariert, wird aber nicht in den PS durchgereicht. roughness/metallic fehlen.
    Billigste Option: `oNorm.a`/`oPos` packen statt dritter Render-Target (Schritt 2/3 entscheidet, hier nur Vorschlag).
 4. **Built-in-PBR-Shader haben keine Kaskade:** Vulkan `shaders/scene.frag` und D3D-HLSL-Scene-Shader (`HlslSources.h`) enthalten kein
    `giRefl`/`ssr`. Nur Graph-Materialien (`heLitP`) und der Deferred-Resolve sehen das Ergebnis, bis dort ein Gegenstück zu GLs `kUnlitFS` steht.
 5. **Bindung:** Vulkan Binding 32 und D3D12 `t32` sind belegt (Weiß/Null), müssen die echte Textur + `giRefl.z = 1` bekommen.
-   **D3D11 bindet `t32` gar nicht** (nur D3D12 deklariert den Slot; die geteilte `kHlslMaterialPins`-Tabelle pinnt ihn auf `t32/s9`).
+   **D3D11:** `grep heGIReflFwd|t32|t31 D3D11Renderer.cpp` findet den Slot nirgends (Kommentare zu `heSSRFwd` ausgenommen);
+   ob D3D11 an `t32` etwas bindet, ist damit **nicht belegt**, Schritt 2 liest die Material-SRV-Bindung dort selbst (D3D12 deklariert den Slot; die geteilte `kHlslMaterialPins`-Tabelle pinnt ihn auf `t32/s9`).
 6. **Vulkan ohne Sky-Cube:** `fog.z` wird nie gesetzt, die Kaskade startet bei Schwarz (Kommentar `MaterialShaderLibrary.cpp:721`).
    Ein Miss (`a = 0`) zeigt dann Schwarz statt Himmel, nicht Fehler des Passes.
 7. **Vulkan HW-Ray-Query:** `gi_*_hw.comp` existieren für Schatten/Probes. Für Reflektionen braucht ein Closest-Hit
