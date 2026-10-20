@@ -396,7 +396,7 @@ getestet; Thema 182 hat sie ausdrücklich für Thema 180 freigehalten. Ein eigen
 
 Die Meshes sind **zur Werkzeug-Zeit** erzeugte Engine-Assets, nicht zur Laufzeit: gleiche Bytes auf fünf Backends, cookbar, mit handgemachten LOD-Stufen (die Engine hat keinen Simplifier,
 `R:docs/foliage-instancing-lod-plan-2026-10-10.md` §0 Punkt 3). Ort: `src/HE_Tools/src/MeshGen/main.cpp` (Primitive `Cube`, `Sphere`, `Cylinder`, `Cone`, `Plane`, `Capsule`, `Torus` stehen in der Tabelle
-um `:356`); die UUID-Zeilen (`hi = 0x100`, Eintrag + 1, nur anhängen) laufen bis `0x108` (Kreuz-Karte, `R:DefaultAssets.h:104`), neue Meshes ab `0x109`, mit `static_assert` im Generator.
+um `:356`); die UUIDs (`hi = 0x100 + Eintragsindex`, nur anhängen) laufen bis `0x108` (Kreuz-Karte, `R:DefaultAssets.h:104`), neue Meshes ab `0x109`, mit `static_assert` im Generator.
 
 | Schicht | Mesh-Sorte | Erzeugung | LOD-Stufen |
 |---|---|---|---|
