@@ -2,6 +2,9 @@
 
 Stand: 2026-08-03. Basis-Audit des Ist-Zustands auf Branch `claude/gi-reflektionen-plan-0bf44e`.
 
+> **Status 2026-10-20 (Thema 191):** D3D11/D3D12/Vulkan-Port und gemeinsamer Tier-Header
+> (`HorizonRendering/GIReflectionTier.h`) in `docs/gi-reflections-cross-backend-plan-2026-10-20.md`.
+
 > **Umsetzungsstand (2026-08-03): P0 + P1 + P2 implementiert und visuell verifiziert**
 > (he_shot-A/B mit der `HE_DUMP_SSRTEST`-Spiegelszene: off = nur SkyEnv, GIRefl-on =
 > rote Würfel-Spiegelung aus dem Trace, SSR+GIRefl = SSR gewinnt on-screen mit

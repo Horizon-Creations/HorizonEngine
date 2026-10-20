@@ -67,6 +67,8 @@ add_executable(he_tests
     test_temporal_aa.cpp
     test_gi_bvh.cpp
     test_gi_blas_store.cpp
+    # Rays / resolution / blur per GI-reflection tier, one table for all backends.
+    test_gi_reflection_tier.cpp
     # Staging ring + mesh-memory free list of the Vulkan upload path (REN-802/803).
     test_vulkan_upload_alloc.cpp
     # Accept/reject rules of the on-disk VkPipelineCache file (REN-808).

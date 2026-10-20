@@ -6,6 +6,7 @@
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
+#include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
@@ -15895,13 +15896,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// did not trace, so its width follows resDiv — quarter-res gets four
 		// texels of it, full res one. Higher tier = more rays AND more pixels =
 		// sharper, which is the direction a quality setting should move in.
-		const int resDiv = m_giReflQuality >= 2 ? 1 : (m_giReflQuality >= 1 ? 2 : 4);
+		const HE::GIReflTier tier = HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled);
+		const int resDiv = tier.resDiv;
 		const int tw = std::max(1, width / resDiv), th = std::max(1, height / resDiv);
 		// How much blur even a MIRROR gets, purely to hide the resolution:
 		// none at full res, most at quarter. Without it a quarter-res mirror
 		// keeps its stair-steps — "sharp" is not the same as "detailed".
-		const float giReflBlurFloor = m_giReflBlurEnabled
-			? (resDiv >= 4 ? 0.75f : (resDiv >= 2 ? 0.35f : 0.0f)) : 0.0f;
+		const float giReflBlurFloor = tier.blurFloor;
 		m_giReflBlurFloor = giReflBlurFloor;
 		EnsureGIReflTarget(tw, th);
 		if (!m_giReflTex) return;
@@ -15922,8 +15923,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// EMA, so it looked WORSE than the tier below whenever that EMA had to
 		// be damped. A near-mirror still traces one ray (its cone is narrower
 		// than a pixel), so mirrors cost the same at every tier.
-		const int  rays     = m_giReflQuality >= 2 ? 4 : (m_giReflQuality >= 1 ? 2 : 1);
-		const bool jitter   = rays > 1;
+		const int  rays     = tier.rays;
+		const bool jitter   = tier.jitter;
 		const bool meshData = m_giHwRt && m_giMeshPtrBuf && m_giInstanceMeshBuf;
 		m_giReflFrameSeed = HE::NextGIJitterSeed(m_giReflFrameSeed); // wraps: GIJitter.h
 
@@ -16130,20 +16131,15 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			// composite, forward: the mix pass below) is what keeps a MIRROR
 			// mirror-sharp at every tier while a rough surface gets the lobe.
 			// Screen pixels → reflection texels: one texel spans resDiv of them.
-			const float lobeScreen = kGIReflLobeScreenPx
-			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f)
-			                       / static_cast<float>(std::max(rays, 1));
-			const float reach = std::clamp(1.0f + lobeScreen / static_cast<float>(resDiv),
-			                               1.0f, 512.0f); // also pins a NaN setting
+			const HE::GIReflBlurReach br = HE::giReflBlurReachFor(m_giReflMaxRoughness, rays, resDiv);
 			// Levels, then strides SCALED to land on `reach` exactly. Doubling raw
 			// strides 1,2,4,… and stopping at the first one past the target snaps
 			// the total to 2^n − 1, so the "tier-independent" screen reach came out
 			// quantized — Medium could end up blurring WIDER than Low, which is the
 			// inversion this whole rework exists to remove. n levels of scaled
 			// strides sum to `reach` for any value.
-			const int levels = std::clamp(
-				static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
-			const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+			const int levels = br.levels;
+			const float unit = br.unit;
 			// Every pass reads ONE texture and writes a DIFFERENT one: H always
 			// lands in ping, V always in rough, and the next level reads rough.
 			// Letting a non-final level write back into ping is a read-write
