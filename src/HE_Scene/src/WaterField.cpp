@@ -124,7 +124,10 @@ namespace
         if (!bodiesEq(a, b)) return false;
         for (size_t i = 0; i < a.size(); ++i)
             if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog ||
-                a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].brushBed != b[i].brushBed)
+                a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].brushBed != b[i].brushBed ||
+                a[i].brushPatch.res != b[i].brushPatch.res || a[i].brushPatch.x0 != b[i].brushPatch.x0 ||
+                a[i].brushPatch.z0 != b[i].brushPatch.z0 || a[i].brushPatch.w != b[i].brushPatch.w ||
+                a[i].brushPatch.h != b[i].brushPatch.h || a[i].brushPatch.delta != b[i].brushPatch.delta)
                 return false;
         return true;
     }
@@ -982,6 +985,7 @@ void sanitize(TerrainComponent& tc)
         nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);
         nb.underwaterCaustics = clampUnderwaterCaustics(nb.underwaterCaustics);
         nb.brushBed = clampBrushBed(nb.brushBed);
+        if (!nb.brushPatch.empty() && !patchFits(nb.brushPatch, tc.resolution)) nb.brushPatch = GroundPatch{};
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

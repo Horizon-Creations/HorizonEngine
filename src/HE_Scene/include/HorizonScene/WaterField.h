@@ -287,6 +287,10 @@ namespace HE::water
         UnderwaterCausticsParams underwaterCaustics{};
         // The bed the water brush last dug under this body (see BrushBedParams).
         BrushBedParams brushBed{};
+        // What the brush's digs moved, summed over every dab (height after minus
+        // height before, so lowered ground is negative): the way back for the eraser's
+        // "Close Bed". Saved with the bed; sanitize drops one that does not fit.
+        GroundPatch brushPatch;
         // The outline the lake's cells were last laid from (terrain-local XZ, the
         // polygon of the spline, no closing duplicate). Empty for brush water and
         // for a lake whose spline never reached the field. It is the baseline the

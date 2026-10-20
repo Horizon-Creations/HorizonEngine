@@ -806,10 +806,19 @@ namespace
 						bj["underwaterCaustics"] = std::move(cj);
 					}
 					// The brush's bed (Thema 206 Schritt 9): only for a body it dug.
-					if (b.brushBed != HE::water::BrushBedParams{})
+					if (b.brushBed != HE::water::BrushBedParams{} || !b.brushPatch.empty())
 					{
-						bj["brushBed"] = { { "enabled", b.brushBed.enabled }, { "maxDepth", b.brushBed.maxDepth },
-						                   { "slope", b.brushBed.slope }, { "roughness", b.brushBed.roughness } };
+						json dj = { { "enabled", b.brushBed.enabled }, { "maxDepth", b.brushBed.maxDepth },
+						            { "slope", b.brushBed.slope }, { "roughness", b.brushBed.roughness } };
+						const HE::water::GroundPatch& bp = b.brushPatch;
+						if (!bp.empty())
+						{
+							dj["res"] = bp.res;
+							dj["rect"] = { bp.x0, bp.z0, bp.w, bp.h };
+							dj["deltaB64"] = base64Encode(reinterpret_cast<const uint8_t*>(bp.delta.data()),
+							                              bp.delta.size() * sizeof(float));
+						}
+						bj["brushBed"] = std::move(dj);
 					}
 					bodies.push_back(std::move(bj));
 				}
@@ -1859,6 +1868,28 @@ namespace
 							num("maxDepth",  b.brushBed.maxDepth);
 							num("slope",     b.brushBed.slope);
 							num("roughness", b.brushBed.roughness);
+							if (dj.contains("res") && dj["res"].is_number_unsigned() &&
+							    dj.contains("rect") && dj["rect"].is_array() && dj["rect"].size() == 4 &&
+							    dj.contains("deltaB64") && dj["deltaB64"].is_string())
+							{
+								const json& r = dj["rect"];
+								bool ints = true;
+								for (const json& v : r) ints = ints && v.is_number_integer();
+								const std::vector<uint8_t> raw = base64Decode(dj["deltaB64"].get<std::string>());
+								if (ints && raw.size() % sizeof(float) == 0)
+								{
+									HE::water::GroundPatch& gp = b.brushPatch;
+									const auto clampInt = [](const json& v)
+									{
+										return static_cast<int>(std::clamp<long long>(v.get<long long>(), -1, 1 << 20));
+									};
+									gp.res = static_cast<uint32_t>(std::min<uint64_t>(dj["res"].get<uint64_t>(), 1u << 20));
+									gp.x0 = clampInt(r[0]); gp.z0 = clampInt(r[1]);
+									gp.w  = clampInt(r[2]); gp.h  = clampInt(r[3]);
+									gp.delta.resize(raw.size() / sizeof(float));
+									if (!raw.empty()) std::memcpy(gp.delta.data(), raw.data(), raw.size());
+								}
+							}
 						}
 						w.bodies.push_back(b);
 					}

@@ -76,3 +76,27 @@ from the shore“. **Dig Bed ist jetzt standardmäßig an** (Max Depth 2 m, Slop
    neu schießen und in `docs/water-brush/` ablegen.
 2. Entscheiden, ob der Spline-See dasselbe Profil bekommt.
 3. Windows/Linux-CI abwarten.
+
+## Nachtrag: Close Bed on Erase
+
+Auftrag: Beim Erase soll das vom Pinsel gegrabene Bett wieder geschlossen werden, auf Wunsch per Checkbox.
+
+- **Datenmodell:** Jeder Dab mit Dig summiert, was er am Gelände verändert hat (Höhe danach minus davor, Senken negativ), in
+  `Body::brushPatch` (`GroundPatch`, wie beim See). Aufgenommen wird der ganze Bereich, den ein Dab bewegen kann, die Böschung
+  eingeschlossen (`recordPatch`, `WaterBrush.cpp`). Gespeichert im Schlüssel `brushBed` (`res`, `rect`, `deltaB64`), in `sameContent`
+  verglichen, in `sanitize` verworfen, wenn er nicht zum Höhenraster passt. Ältere Szenen haben ihn nicht und laden wie vorher.
+- **Verhalten:** `Params::closeBed` (Standard im API aus). Beim Erase gibt `closeBedAt` jedem Eckpunkt, dessen Wasser weg ist (`bodyAt`
+  ist nicht mehr der Körper), `Stärke · Pinselprofil` seines Anteils zurück und verkleinert den Patch um den zurückgegebenen Teil.
+  Zurück geht nur der Anteil des Pinsels, später selbst Gesculptetes bleibt; unter Wasser, das stehen bleibt, bleibt das Bett.
+  `removeCircle` löscht einen Körper ohne Zellen samt Patch: deshalb nimmt der Dab die Patches vorher mit, und ein verschwundener
+  Körper wird in diesem Kreis mit voller Stärke geschlossen (danach kommt nichts mehr zurück). Der Rest außerhalb des Kreises bleibt
+  dann offen, wenn die Maus vorher losgelassen wird.
+- **Editor:** Checkbox „Close Bed on Erase“ im Abschnitt Ground des Wasser-Tabs, Hilfeeintrag `Landscape/Close Bed on Erase##water`.
+  **Standard an.** Grund: Wer Wasser wegradiert, will in aller Regel den Teich weg haben und kein trockenes Loch behalten; die Option
+  fasst nur Gelände an, das der Pinsel selbst gegraben hat (der Patch), also nie fremdes Sculpting. Aus = Verhalten wie bisher.
+- **Tests (`test_water_brush.cpp`):** Bett öffnen, mit Erase wieder auf die alte Höhe schließen (Abweichung < 5 cm, nie über dem
+  Original), mit der Checkbox aus bleibt es offen (bit-gleich dem offenen Zustand), weit entferntes Erase ändert nichts, Patch
+  übersteht Speichern/Laden und schließt danach noch. `Water*,landscape ui*` 229/229, `editor_help_audit.py --check` ok,
+  `HorizonEditor` baut.
+- **Nicht verifiziert:** nicht im laufenden Editor gesehen; ein Erase mit niedriger Stärke, bei dem der Körper schon vor dem Ende
+  des Strichs verschwindet, wurde nur über die Logik bedacht, nicht eigens getestet. Der Undo-Schritt nimmt Gelände mit (Snapshot).

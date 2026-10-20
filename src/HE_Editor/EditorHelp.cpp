@@ -7396,6 +7396,14 @@ namespace
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
+	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "
+	  "again, back toward the height it had before the digging, at the brush's "
+	  "strength and profile. Only the brush's own digging is returned, and only "
+	  "where the water is gone: under water that is left, the bed stays. Ground you "
+	  "sculpted yourself afterwards keeps your changes. Off: erasing takes the water "
+	  "and leaves the hole. One undo step takes it back.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Max Depth##water", "Bed Max Depth",
 	  "The deepest the bed gets below the water level, in metres. It is reached at "
 	  "Max Depth / Slope metres from the shore (shown under the sliders) and held "

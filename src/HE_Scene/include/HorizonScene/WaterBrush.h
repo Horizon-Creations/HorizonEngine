@@ -54,7 +54,13 @@ struct TerrainComponent;
 // slope that starts just above the water's reach at the shoreline and rises to meet
 // the old ground within the brush's radius + falloff of the shore. Dry land, never
 // below the water, never raised.
-// The settings the bed was dug with are kept on the body (Body::brushBed, saved).
+// The settings the bed was dug with are kept on the body (Body::brushBed, saved), and
+// so is what the digs moved (Body::brushPatch, the sum of every dab's change in
+// height). With Params::closeBed the ERASER uses it: ground under water it has just
+// dried goes back toward where it stood before the brush dug it (by `amount`, weighted
+// by the brush profile), and the patch shrinks by what was given back. Ground the
+// user sculpted afterwards keeps that change; only the brush's own share is returned.
+//
 //
 // PACING is the caller's: Params::amount is the share (0..1) one dab moves each
 // cell toward wet (or dry), the same number addCircle/removeCircle take as their
@@ -81,6 +87,7 @@ namespace HE::water::brush
         bool  dig      = false;
         float digDepth = 1.0f;     // Max Depth: the bed never goes deeper below the stroke's level (m)
         float bedSlope = kDefaultBedSlope;   // Slope: bed sinks this many metres per metre from the shore
+        bool  closeBed = false;    // erasing also gives the ground the brush dug under the erased water back
         float bedRoughness = 0.0f; // Bed Roughness 0..1: share of the depth a fixed noise adds or takes
     };
 

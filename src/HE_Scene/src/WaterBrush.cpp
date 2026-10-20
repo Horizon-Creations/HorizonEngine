@@ -446,6 +446,93 @@ namespace
                                            -halfZ + static_cast<float>(cz1) * stepZ + stepZ);
         return lowered;
     }
+
+    // Add what a dab changed in `was`'s rect (height now minus height then) to the
+    // body's patch, growing the patch's rect to hold it.
+    void recordPatch(TerrainComponent& tc, uint16_t body, const Region& was)
+    {
+        Body* b = tc.water.findBody(body);
+        if (!b || was.empty()) return;
+        const int res = static_cast<int>(tc.resolution);
+        if (tc.sculptHeights.size() != static_cast<size_t>(res) * res) return;
+        const int w = was.x1 - was.x0 + 1;
+        int cx0 = res, cx1 = -1, cz0 = res, cz1 = -1;
+        for (int zi = was.z0; zi <= was.z1; ++zi)
+            for (int xi = was.x0; xi <= was.x1; ++xi)
+                if (tc.sculptHeights[static_cast<size_t>(zi) * res + xi] != was.heights[static_cast<size_t>(zi - was.z0) * w + (xi - was.x0)])
+                {
+                    cx0 = std::min(cx0, xi); cx1 = std::max(cx1, xi);
+                    cz0 = std::min(cz0, zi); cz1 = std::max(cz1, zi);
+                }
+        if (cx1 < 0) return;
+        GroundPatch& gp = b->brushPatch;
+        const bool have = !gp.empty() && patchFits(gp, tc.resolution);
+        int nx0 = cx0, nz0 = cz0, nx1 = cx1, nz1 = cz1;
+        if (have)
+        {
+            nx0 = std::min(nx0, gp.x0); nz0 = std::min(nz0, gp.z0);
+            nx1 = std::max(nx1, gp.x0 + gp.w - 1); nz1 = std::max(nz1, gp.z0 + gp.h - 1);
+        }
+        GroundPatch m;
+        m.res = tc.resolution; m.x0 = nx0; m.z0 = nz0; m.w = nx1 - nx0 + 1; m.h = nz1 - nz0 + 1;
+        m.delta.assign(static_cast<size_t>(m.w) * m.h, 0.0f);
+        if (have)
+            for (int j = 0; j < gp.h; ++j)
+                for (int i = 0; i < gp.w; ++i)
+                    m.delta[static_cast<size_t>(gp.z0 + j - nz0) * m.w + (gp.x0 + i - nx0)] = gp.delta[static_cast<size_t>(j) * gp.w + i];
+        for (int zi = cz0; zi <= cz1; ++zi)
+            for (int xi = cx0; xi <= cx1; ++xi)
+                m.delta[static_cast<size_t>(zi - nz0) * m.w + (xi - nx0)] +=
+                    tc.sculptHeights[static_cast<size_t>(zi) * res + xi] - was.heights[static_cast<size_t>(zi - was.z0) * w + (xi - was.x0)];
+        gp = std::move(m);
+    }
+
+    // The eraser's Close Bed: under the circle, every vertex of `gp` (a body's patch)
+    // whose water is gone (`id` no longer owns it) gets back `amount` · weight of what
+    // the brush dug there. Returns the vertices raised.
+    uint32_t closeBedAt(TerrainComponent& tc, uint16_t id, GroundPatch& gp,
+                        float x, float z, float radius, float falloff, float amount)
+    {
+        const int res = static_cast<int>(tc.resolution);
+        if (tc.sculptHeights.size() != static_cast<size_t>(res) * res || !(amount > 0.0f)) return 0;
+        if (gp.empty() || !patchFits(gp, tc.resolution)) return 0;
+        const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
+        const float stepX = tc.sizeX / static_cast<float>(res - 1);
+        const float stepZ = tc.sizeZ / static_cast<float>(res - 1);
+        const float rad = std::max(0.0f, radius), fall = std::max(0.0f, falloff);
+        const float outer = rad + fall;
+        uint32_t raised = 0;
+        int cx0 = res, cx1 = -1, cz0 = res, cz1 = -1;
+        const int x0 = std::max(gp.x0, static_cast<int>(std::floor((x - outer + halfX) / stepX)));
+        const int x1 = std::min(gp.x0 + gp.w - 1, static_cast<int>(std::ceil((x + outer + halfX) / stepX)));
+        const int z0 = std::max(gp.z0, static_cast<int>(std::floor((z - outer + halfZ) / stepZ)));
+        const int z1 = std::min(gp.z0 + gp.h - 1, static_cast<int>(std::ceil((z + outer + halfZ) / stepZ)));
+        for (int zi = z0; zi <= z1; ++zi)
+            for (int xi = x0; xi <= x1; ++xi)
+            {
+                float& dl = gp.delta[static_cast<size_t>(zi - gp.z0) * gp.w + (xi - gp.x0)];
+                if (!(dl < 0.0f)) continue;
+                const float vx = -halfX + static_cast<float>(xi) * stepX, vz = -halfZ + static_cast<float>(zi) * stepZ;
+                const float dist = std::hypot(vx - x, vz - z);
+                if (dist > outer) continue;
+                const float weight = dist <= rad ? 1.0f : 1.0f - (dist - rad) / std::max(fall, 1e-6f);
+                if (!(weight > 0.0f)) continue;
+                if (bodyAt(tc, vx, vz) == id) continue;   // still under this water: its bed stays
+                const float give = dl * std::min(1.0f, amount * weight);   // negative
+                tc.sculptHeights[static_cast<size_t>(zi) * res + xi] -= give;
+                dl -= give;
+                ++raised;
+                cx0 = std::min(cx0, xi); cx1 = std::max(cx1, xi);
+                cz0 = std::min(cz0, zi); cz1 = std::max(cz1, zi);
+            }
+        if (raised > 0)
+            TerrainSculpt::markRegionDirty(tc,
+                                           -halfX + static_cast<float>(cx0) * stepX - stepX,
+                                           -halfZ + static_cast<float>(cz0) * stepZ - stepZ,
+                                           -halfX + static_cast<float>(cx1) * stepX + stepX,
+                                           -halfZ + static_cast<float>(cz1) * stepZ + stepZ);
+        return raised;
+    }
 }
 
 Target targetAt(const TerrainComponent& tc, float x, float z, const Params& p)
@@ -502,9 +589,23 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         // Nothing painted yet: removeCircle would allocate an all-dry grid just to
         // take nothing out of it, and that grid makes the scene non-pristine.
         if (!tc.water.allocated()) { d.ok = true; ++s.dabs; return d; }
+        // removeCircle forgets a body it left without a cell, and its patch with it:
+        // take the patches along first, close with them, give the survivors the rest.
+        std::vector<std::pair<uint16_t, GroundPatch>> patches;
+        if (p.closeBed)
+            for (const Body& b : tc.water.bodies)
+                if (!b.brushPatch.empty()) patches.emplace_back(b.id, b.brushPatch);
         const Result r = removeCircle(tc, x, z, p.radius, p.falloff, p.amount);
         d.ok = r.ok;
         d.cells = r.changed;
+        for (auto& [id, patch] : patches)
+        {
+            // A body that is gone has no water left for the bed to stay under, and
+            // nothing will ever come back to it: it is closed at full strength.
+            const bool gone = tc.water.findBody(id) == nullptr;
+            d.ground += closeBedAt(tc, id, patch, x, z, p.radius, p.falloff, gone ? 1.0f : p.amount);
+            if (Body* b = tc.water.findBody(id)) b->brushPatch = std::move(patch);
+        }
         ++s.dabs;
         return d;
     }
@@ -527,6 +628,9 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         const float reach = outer + std::min(bed.maxDepth / bed.slope, kMaxBedReach);
         const float cellStep = std::max(tc.sizeX, tc.sizeZ) / static_cast<float>(std::max(2u, tc.resolution) - 1u);
         const Region was = saveRegion(tc, x, z, reach + 2.0f * cellStep);
+        // Everything the dab can move, the bank (out to twice the brush) included:
+        // what the eraser may give back later.
+        const Region everything = saveRegion(tc, x, z, std::max(reach, 2.0f * outer) + 4.0f * cellStep);
         const uint32_t cut = digBed(tc, s.body, s.level, x, z, outer, bed.maxDepth, bed.slope, bed.roughness, amount);
         // The pit is the water's shape and never more (Thema 188): whatever the dig
         // lowered that the sheet, as the mesh builds it, does not cover goes back.
@@ -536,6 +640,7 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         // to the waterline (Thema 188 Schritt 4), dry land that never reaches the water.
         d.bank   = (dug > 0 || d.cells > 0) ? shapeBank(tc, s.body, s.level, x, z, outer) : 0u;
         d.ground = dug + d.bank;
+        recordPatch(tc, s.body, everything);
     }
     ++s.dabs;
     return d;

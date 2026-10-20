@@ -1223,3 +1223,88 @@ TEST_CASE("Water brush bed: the settings live on the body, save and load with th
     CHECK(held.slope == water::kMaxBedSlope);
     CHECK(held.roughness == 0.0f);
 }
+
+// ── Close Bed on Erase ───────────────────────────────────────────────────────
+
+namespace
+{
+    // A dug pond, then an erase stroke over all of it with closeBed as given.
+    TerrainComponent digThenErase(bool closeBed, std::vector<float>& original)
+    {
+        TerrainComponent tc = makeLand(10.0f);
+        original = tc.sculptHeights;
+        brush::Params p = params();
+        p.radius = 8.0f; p.falloff = 2.0f;
+        p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.5f;
+        drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+        brush::Params e = p;
+        e.erase = true; e.dig = false; e.closeBed = closeBed; e.radius = 14.0f; e.falloff = 4.0f;
+        drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 12);
+        return tc;
+    }
+}
+
+TEST_CASE("Water brush Close Bed: erasing the water closes the pit the brush dug, with the box off it stays open")
+{
+    std::vector<float> original;
+    const TerrainComponent opened = [&]
+    {
+        TerrainComponent tc = makeLand(10.0f);
+        brush::Params p = params();
+        p.radius = 8.0f; p.falloff = 2.0f; p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.5f;
+        drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+        return tc;
+    }();
+    REQUIRE(opened.water.bodies.size() == 1);
+    CHECK_FALSE(opened.water.bodies[0].brushPatch.empty());
+    CHECK(opened.sculptHeights[32u * 65u + 32u] < 8.5f);               // the bed is open
+
+    const TerrainComponent closed = digThenErase(true, original);
+    CHECK(closed.water.wetCells() == 0u);
+    float worst = 0.0f;
+    for (size_t i = 0; i < original.size(); ++i)
+    {
+        CHECK(closed.sculptHeights[i] <= original[i] + 1e-4f);         // closing never overshoots the old ground
+        worst = std::max(worst, original[i] - closed.sculptHeights[i]);
+    }
+    CHECK(worst < 0.05f);                                              // back to the old ground
+
+    std::vector<float> original2;
+    const TerrainComponent left = digThenErase(false, original2);
+    CHECK(left.water.wetCells() == 0u);
+    CHECK(left.sculptHeights[32u * 65u + 32u] < 8.5f);                 // still a hole, as before this option
+    CHECK(left.sculptHeights[32u * 65u + 32u] == opened.sculptHeights[32u * 65u + 32u]);
+}
+
+TEST_CASE("Water brush Close Bed: ground still under remaining water keeps its bed, and the patch saves and loads")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    brush::Params p = params();
+    p.radius = 8.0f; p.falloff = 2.0f; p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.5f;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+    const float middle = tc.sculptHeights[32u * 65u + 32u];
+    brush::Params e = p;
+    e.erase = true; e.dig = false; e.closeBed = true; e.radius = 3.0f; e.falloff = 1.0f;
+    drag(tc, { 20.0f, 0.0f }, { 20.0f, 0.0f }, e, 4);                  // far from the water: nothing happens
+    CHECK(tc.sculptHeights[32u * 65u + 32u] == middle);
+
+    HorizonWorld world;
+    const Entity en = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(en);
+    world.registry().emplace<TerrainComponent>(en, tc);
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto view = loaded.registry().view<TerrainComponent>();
+    REQUIRE(view.size() == 1u);
+    TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
+    CHECK(water::sameContent(lt.water, tc.water));
+    CHECK(lt.water.bodies[0].brushPatch.delta == tc.water.bodies[0].brushPatch.delta);
+
+    // The loaded patch still closes the bed.
+    e.radius = 14.0f; e.falloff = 4.0f;
+    drag(lt, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 12);
+    CHECK(lt.sculptHeights[32u * 65u + 32u] > 9.9f);
+}
