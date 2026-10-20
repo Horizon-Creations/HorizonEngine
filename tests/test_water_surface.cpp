@@ -23,6 +23,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Physics/WaterWaves.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1655,6 +1656,46 @@ TEST_CASE("Water soft shore: on a plane bank the depth is carried linearly, the 
     CHECK(again.s.mesh.vertices == soft.s.mesh.vertices);
     CHECK(again.s.mesh.normals == soft.s.mesh.normals);
     CHECK(again.s.mesh.indices == soft.s.mesh.indices);
+}
+
+TEST_CASE("Water soft shore: the shore-proximity readback survives a landscape's own Y-rotation (Thema 206 Schritt 8)")
+{
+    // The bake above puts (gain*e, 1, 0) in the mesh normal; the material reads it back from
+    // the WORLD normal mat3(uModel) * n, normalized (vNormal in the vertex shader, NormalWS
+    // normalizes it in MaterialGraph.cpp). A landscape (or its WaterSurface child) rotated
+    // about Y moves that tilt out of x and into z. This reimplements both the OLD decode
+    // (e = n.x / (n.y*gain), MatGen/main.cpp before Schritt 8) and the NEW one
+    // (e = len(n.xz) / (n.y*gain)) in C++ to check the formula itself against a world normal
+    // built the same way the renderer builds it — it does not run the generated shader.
+    const float gain = HE::water::kShoreNormalGain;
+    auto oldDecode = [&](const glm::vec3& n) { return n.x / (n.y * gain); };
+    auto newDecode = [&](const glm::vec3& n) { return std::sqrt(n.x * n.x + n.z * n.z) / (n.y * gain); };
+
+    for (const float e : { 0.0f, 0.25f, 0.6f, 1.0f })
+    {
+        const glm::vec3 local(gain * e, 1.0f, 0.0f);
+        for (const float deg : { 0.0f, 30.0f, 60.0f, 90.0f, 135.0f, 180.0f, 270.0f })
+        {
+            const glm::mat3 r(glm::rotate(glm::mat4(1.0f), glm::radians(deg), glm::vec3(0, 1, 0)));
+            const glm::vec3 world = glm::normalize(r * local);
+            CHECK(newDecode(world) == doctest::Approx(e).epsilon(1e-4));              // holds at every heading
+            if (deg == 0.0f || e == 0.0f)
+                CHECK(oldDecode(world) == doctest::Approx(e).epsilon(1e-4));
+            else
+                CHECK_FALSE(oldDecode(world) == doctest::Approx(e).epsilon(0.02));    // the bug: wrong past 0 deg
+        }
+
+        // A non-uniform scale on the landscape (sx != sy, e.g. 2:1): the shader has no way
+        // to see the object's scale, so BOTH decodes are off by that ratio — the fix only
+        // closes the rotation case, not this one, and says so (not a silent full failure
+        // like the rotation zero-out: e stays a bounded, graceful stretch of the gradient).
+        if (e > 0.0f)
+        {
+            const glm::mat3 s(2.0f, 0, 0,  0, 1.0f, 0,  0, 0, 3.0f);
+            const glm::vec3 scaled = glm::normalize(s * local);
+            CHECK(newDecode(scaled) == doctest::Approx(2.0f * e).epsilon(1e-3));
+        }
+    }
 }
 
 TEST_CASE("Water soft shore: an island's bridged hole and a round bank stay watertight")

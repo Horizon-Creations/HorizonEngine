@@ -833,8 +833,11 @@ Mb waterMaterial()
     const int tilt  = m.node(T::Combine3, 45, 27);
     // The mesh normal's x tilt is the shore proximity, not a slope: it goes into the
     // tilt too, so subtracting the tilt leaves the wave slope alone (0 off a landscape).
+    // A landscape rotated about Y moves that tilt out of x and into z (and back), so
+    // both components get the same treatment — whatever the rotation did to it, it is
+    // still exactly (gs.x, gs.z) and subtracting that cancels it regardless of heading.
     m.link(m.op(T::Add, sx, Pin{ gs, 0 }, 45, 25), tilt, 0);
-    m.link(sz, tilt, 2);                                     // Y stays 0
+    m.link(m.op(T::Add, sz, Pin{ gs, 2 }, 45, 29), tilt, 2);
     const int waveN = m.un(T::Normalize3, m.op(T::Subtract, geoN, tilt, 46, 27), 47, 27);
 
     // Fresnel off the WAVE normal with an exposed exponent. The Fresnel node
@@ -857,9 +860,18 @@ Mb waterMaterial()
     // below): e = 1 at the waterline falling to 0 at kShoreFadeDepth metres of water, read
     // from the normal's x tilt. Nothing deeper than that is visible here; on a plane (and in
     // open water) e = 0, the depth is the full fade depth and everything built on it is neutral.
+    // Read as the tilt's magnitude in the XZ plane, not x alone: a landscape rotated about Y
+    // moves the baked tilt between x and z (zeroing a raw x/y read at 90°) but leaves
+    // sqrt(x^2+z^2) exactly where it was, since the local normal only ever had one horizontal
+    // component to begin with. A non-uniform X/Z-vs-Y scale on the landscape still scales e by
+    // that ratio — the shader has no way to see the object's scale to undo it — but that is a
+    // stretched gradient, not the hard on/off the rotation case used to be.
     constexpr float kShoreGain  = HE::water::kShoreNormalGain;
     constexpr float kShoreDepth = HE::water::kShoreFadeDepth;
-    const int shoreE  = m.un(T::Saturate, m.op(T::Divide, Pin{ gs, 0 }, m.op(T::Multiply, Pin{ gs, 1 }, m.k(kShoreGain, 47, 13), 48, 13), 49, 12), 50, 12);
+    const int shoreX2  = m.op(T::Multiply, Pin{ gs, 0 }, Pin{ gs, 0 }, 44, 11);
+    const int shoreZ2  = m.op(T::Multiply, Pin{ gs, 2 }, Pin{ gs, 2 }, 44, 12);
+    const int shoreMag = m.op(T::Power, m.op(T::Add, shoreX2, shoreZ2, 45, 11), m.k(0.5f, 45, 12), 46, 11);
+    const int shoreE  = m.un(T::Saturate, m.op(T::Divide, shoreMag, m.op(T::Multiply, Pin{ gs, 1 }, m.k(kShoreGain, 47, 13), 48, 13), 49, 12), 50, 12);
     const int shoreD  = m.op(T::Multiply, m.un(T::OneMinus, shoreE, 51, 12), m.k(kShoreDepth, 51, 13), 52, 12);
 
     // Water body: transmittance exp(-absorption · depth / cos) along the view ray,
@@ -951,10 +963,12 @@ Mb waterMaterial()
     // material pass has no scene depth, so the water mesh brings the water's depth along:
     // each vertex of a landscape's sheet tilts its normal in x by kShoreNormalGain · e
     // (WaterMesh.cpp), e = 1 at the waterline falling to 0 at kShoreFadeDepth metres of
-    // water. Read back here as e = n.x / n.y / gain, depth = (1 − e) · kShoreFadeDepth.
-    // A plane (or any mesh without the channel) has n.x = 0: e = 0, the depth is the full
-    // fade depth, and every term below is exactly neutral (ramp 1, foam 0, the gate shut),
-    // so open water is bit for bit what it was.
+    // water. Read back here (shoreE above) as e = |n.xz| / n.y / gain, depth = (1 − e) ·
+    // kShoreFadeDepth — the magnitude, not n.x alone, because a landscape rotated about Y
+    // moves the tilt between x and z (Thema 206 Schritt 8). A plane (or any mesh without the
+    // channel) has n.x = n.z = 0: e = 0, the depth is the full fade depth, and every term
+    // below is exactly neutral (ramp 1, foam 0, the gate shut), so open water is bit for bit
+    // what it was.
     //   * alpha ramp: smoothstep over the width, so the edge fades out instead of cutting;
     //   * the ramp's own edge is wobbled by the foam lace, so the line of the water is
     //     organic, not the contour of a lattice cell;
