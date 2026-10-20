@@ -1864,16 +1864,25 @@ namespace
 		a.terrain.layerWeights.resize(a.terrain.weightRes * a.terrain.weightRes * 4);
 		for (size_t i = 0; i < a.terrain.layerWeights.size(); ++i)
 			a.terrain.layerWeights[i] = static_cast<uint8_t>(i * 7 + 1);
+		// Water (WaterField.h): a lake from a spline and a brush pond, at a
+		// resolution of their own, so every key of the water block is written.
+		a.terrain.water.res = 16;
+		{
+			const uint16_t lake = a.terrain.water.createBody(3.5f, HE::UUID::generate());
+			const uint16_t pond = a.terrain.water.createBody(-0.75f);
+			HE::water::addCircle(a.terrain, lake, -40.0f, 10.0f, 30.0f, 10.0f);
+			HE::water::addCircle(a.terrain, pond, 80.0f, -30.0f, 20.0f, 15.0f, 0.7f);
+		}
 		reg.emplace<TerrainComponent>(land, a.terrain);
 
 		a.foliage.visible         = false;
-		a.foliage.meshAssetId     = HE::UUID::generate();
-		a.foliage.materialAssetId = HE::UUID::generate();
-		a.foliage.density         = 0.45f;
-		a.foliage.seed            = 1234;
-		a.foliage.minScale        = 0.55f;
-		a.foliage.maxScale        = 1.85f;
-		a.foliage.drawDistance    = 140.0f;
+		a.foliage.layers[0].meshAssetId     = HE::UUID::generate();
+		a.foliage.layers[0].materialAssetId = HE::UUID::generate();
+		a.foliage.layers[0].density         = 0.45f;
+		a.foliage.layers[0].seed            = 1234;
+		a.foliage.layers[0].minScale        = 0.55f;
+		a.foliage.layers[0].maxScale        = 1.85f;
+		a.foliage.layers[0].drawDistance    = 140.0f;
 		reg.emplace<FoliageComponent>(land, a.foliage);
 
 		// ── "Weather": its own entity since Forts. (addWeather), like Sky ─────
@@ -2241,18 +2250,23 @@ namespace
 			REQUIRE(t->sculptHeights.size() == a.terrain.sculptHeights.size());
 			for (size_t i = 0; i < a.terrain.sculptHeights.size(); ++i)
 				CHECK(t->sculptHeights[i] == doctest::Approx(a.terrain.sculptHeights[i]));
+			// The water: bodies (level, source), counter and every cell.
+			REQUIRE(a.terrain.water.wetCells() > 0);
+			CHECK(HE::water::sameContent(t->water, a.terrain.water));
+			CHECK(t->water.bodies.size() == 2);
+			CHECK(t->water.bodies[0].fromSpline());
 		}
 		{
 			const auto* f = reg.try_get<FoliageComponent>(land);
 			REQUIRE(f != nullptr);
 			CHECK(f->visible         == a.foliage.visible);
-			CHECK(f->meshAssetId     == a.foliage.meshAssetId);
-			CHECK(f->materialAssetId == a.foliage.materialAssetId);
-			CHECK(f->density         == doctest::Approx(a.foliage.density));
-			CHECK(f->seed            == a.foliage.seed);
-			CHECK(f->minScale        == doctest::Approx(a.foliage.minScale));
-			CHECK(f->maxScale        == doctest::Approx(a.foliage.maxScale));
-			CHECK(f->drawDistance    == doctest::Approx(a.foliage.drawDistance));
+			CHECK(f->layers[0].meshAssetId     == a.foliage.layers[0].meshAssetId);
+			CHECK(f->layers[0].materialAssetId == a.foliage.layers[0].materialAssetId);
+			CHECK(f->layers[0].density         == doctest::Approx(a.foliage.layers[0].density));
+			CHECK(f->layers[0].seed            == a.foliage.layers[0].seed);
+			CHECK(f->layers[0].minScale        == doctest::Approx(a.foliage.layers[0].minScale));
+			CHECK(f->layers[0].maxScale        == doctest::Approx(a.foliage.layers[0].maxScale));
+			CHECK(f->layers[0].drawDistance    == doctest::Approx(a.foliage.layers[0].drawDistance));
 		}
 
 		const Entity weather = world.weatherEntity();

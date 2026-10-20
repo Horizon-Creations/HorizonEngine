@@ -652,6 +652,25 @@ private:
 	int   m_localShadowSize = 1024;
 	bool  m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	void  EnsureShadowResources();
+	// The frame's one walk of the world (Thema 162, step 4): this frame's sun, the content
+	// manager, then RenderExtractor::extract into m_renderWorld at `aspect`. EncodeFrame calls it
+	// once before the shadow pass, so the walk belongs to the frame and not to whichever pass
+	// happens to run first; EncodeShadowMap calls it again as its guarantee that m_renderWorld
+	// holds the walk at ITS aspect, which then is a key compare inside the extractor, not a walk
+	// (RenderExtractor::beginFrame). One function for both on purpose: the second call only stays
+	// a key compare while it pushes exactly what the first one pushed, and two hand-written copies
+	// are two chances to drift apart. tests/test_culling.cpp pins that the pass goes through it.
+	void  ExtractFrame(float aspect);
+	// Every object's world bound replaced by the real bound of its resolved mesh
+	// (RenderObject::refineWorldBounds; ResolveMesh also uploads a mesh seen for the first time),
+	// once per walk of the extractor: the walk lives in m_renderWorld for the whole frame, so
+	// EncodeFrame does the loop right after the walk, and every pass calls this again as its
+	// guarantee that the bounds are real and finds it done. A new walk or a different object
+	// array starts over (Thema 162, step 4).
+	void  RefineObjectBounds();
+	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
+	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
+	size_t              m_refinedCount   = 0;
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
@@ -823,10 +842,15 @@ private:
 	// gbuffer = MRT G-buffer variant for the deferred path: fragGlsl is then the
 	// material's customShaderGBufGlsl and the PSO targets the three G-buffer
 	// formats (never blended). Own key space via a salt, like blend.
+	// instanced (Thema 182, 2e) = the same fragment over the instanced vertex
+	// ({mvp, model} per instance at vertex buffer 5) for one draw per batch; own
+	// salt. Null for a precompiled variant (no baked instanced vertex): the
+	// caller then loops with the plain PSO.
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
-	                                 bool blend = false, bool gbuffer = false);
+	                                 bool blend = false, bool gbuffer = false,
+	                                 bool instanced = false);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
@@ -1020,6 +1044,19 @@ private:
 	// Runs velocity + smear on `sourceHdr` into m_mbColor; returns it, or null
 	// when the pass could not run (the caller then keeps `sourceHdr`).
 	void* EncodeMotionBlur(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
+
+	// Underwater caustics + fog (Thema 185 Schritte 2 und 3): one full-res pass ahead of
+	// motion blur/bloom, after DoF (see kUnderwaterCausticsMSL; the fog is folded into it).
+	// Built on first use, never runs unless the camera is under water with
+	// RenderWorld::underwaterCamera.causticsIntensity > 0 or .density > 0.
+	void*     m_ucPipeline         = nullptr; // id<MTLRenderPipelineState>
+	void*     m_ucColor            = nullptr; // id<MTLTexture> RGBA16F full-res
+	int       m_ucW                = 0;
+	int       m_ucH                = 0;
+	bool      m_ucTried            = false;   // the pipeline failed once: do not retry every frame
+	// Reads `sourceHdr` + the scene depth, writes m_ucColor; returns it, or null when the
+	// pass could not run (the caller then keeps `sourceHdr`).
+	void* EncodeUnderwaterCaustics(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
 
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Raymarch the clouds into m_cloudColor (rgb = L, a = T) at quarter resolution; the
@@ -1296,6 +1333,7 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its nullptr misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────

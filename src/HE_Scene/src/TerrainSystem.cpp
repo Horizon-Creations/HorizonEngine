@@ -5,11 +5,15 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
 #include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/WaterSurface.h"
+#include "HorizonScene/WaterField.h"
+#include "HorizonScene/WaterLake.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
@@ -205,6 +209,34 @@ namespace
                lod->refinedMeshId == cc.tessMeshId;
     }
 
+    // ── Seam stitching ───────────────────────────────────────────────────────
+    // Chunk entity → its stitched mesh, per world: the same give-back
+    // bookkeeping as g_tessMeshes, for the same reasons.
+    std::unordered_map<const HorizonWorld*, std::unordered_map<uint32_t, HE::UUID>>
+        g_stitchMeshes;
+
+    // What a stitched mesh was built for: the level it copies (low byte,
+    // LODComponent::kRefined included), each edge's neighbour cell count as
+    // 1 + log2 (0 = edge untouched) and the pinned corners. Bit 63 keeps a
+    // valid key away from 0, which TerrainChunkComponent::stitchKey uses for
+    // "nothing valid in the mesh".
+    uint64_t stitchKeyOf(uint8_t level, const TerrainChunkStitch& st)
+    {
+        uint64_t key = (uint64_t{1} << 63) | level;
+        for (int e = 0; e < 4; ++e)
+        {
+            uint64_t code = 0;
+            for (uint32_t c = st.edgeCells[e]; c; c >>= 1) ++code;
+            key |= code << (8 + 8 * e);
+        }
+        return key | (static_cast<uint64_t>(st.corners) << 40);
+    }
+
+    bool stitchKeyIsRefined(uint64_t key)
+    {
+        return key != 0 && static_cast<uint8_t>(key & 0xFF) == LODComponent::kRefined;
+    }
+
     // Unhook the refined level from the chunk's LODComponent and empty its
     // mesh. The UUID stays registered and owned, so coming back is a replace.
     void emptyTessLevel(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
@@ -217,14 +249,18 @@ namespace
             lod->refinedMaxDistance = 0.0f;
             // Off the refined mesh right now, not a tick later when LODSystem
             // runs — the mesh is about to be empty.
+            // Drawn either as is or as its stitched copy (stitchSeams).
             if (auto* mc = reg.try_get<MeshComponent>(ce);
-                mc && mc->meshAssetId == cc.tessMeshId && !lod->levels.empty())
+                mc && (mc->meshAssetId == cc.tessMeshId || lod->current == LODComponent::kRefined)
+                && !lod->levels.empty())
             {
                 lod->current    = 0;
                 mc->meshAssetId = lod->levels.front().meshId;
                 mc->dirty       = true;
             }
+            if (lod->stitchedLevel == LODComponent::kRefined) lod->stitchedMeshId = HE::UUID{};
         }
+        if (stitchKeyIsRefined(cc.stitchKey)) cc.stitchKey = 0;   // copied the emptied mesh
         if (cc.tessMeshId != HE::UUID{} && cm.getStaticMesh(cc.tessMeshId) != nullptr)
         {
             StaticMeshAsset empty;
@@ -257,6 +293,7 @@ namespace
         lod.refinedMeshId      = cc.tessMeshId;
         lod.refinedMaxDistance = maxDistance;
         cc.tessActive = true;
+        if (stitchKeyIsRefined(cc.stitchKey)) cc.stitchKey = 0;   // copied the old refined mesh
     }
 }
 
@@ -289,7 +326,8 @@ namespace TerrainSystem
         const bool keepTess = hasTessLevel(lod, cc) && tessFactorOf(tc) > 1u
                            && tc.tessellationDistance > 0.0f;
         const auto* oldMc = reg.try_get<MeshComponent>(chunkEnt);
-        const bool drawsTess = keepTess && oldMc && oldMc->meshAssetId == cc.tessMeshId;
+        const bool drawsTess = keepTess && oldMc && (oldMc->meshAssetId == cc.tessMeshId ||
+                                                     lod->current == LODComponent::kRefined);
 
         LODComponent newLod;
         const float chunkWorld = tc.sizeX / static_cast<float>(g.chunksPerSide);
@@ -321,6 +359,7 @@ namespace TerrainSystem
             newLod.levels.push_back({ id, maxDist });
         }
         reg.emplace_or_replace<LODComponent>(chunkEnt, newLod);
+        cc.stitchKey = 0;   // the levels it copied are new; stitchSeams copies again
         if (keepTess)
             fillTessLevel(world, cm, renderer, chunkEnt, cc,
                           buildTessMesh(field, res, tc, g, cx, cz, disp),
@@ -423,7 +462,14 @@ namespace TerrainSystem
         // recolouring the one it has — never reached the screen. Re-synced every
         // tick (NOT gated on tc.dirty: a material swap doesn't dirty the heightfield)
         // so the parent's material and its per-entity param overrides propagate
-        // without rebuilding the terrain.
+        // without rebuilding the terrain. No change marker can gate it: the
+        // Inspector, MCP and scripts write materialAssetId and the overrides
+        // straight into the component. What it does save is the work around the
+        // compare: one pass over the chunks for all landscapes (not one per
+        // landscape), and the parent's material read in place, not copied.
+        //
+        // The parents' default material first: that emplace is the one that can
+        // move the pool the pointers below point into.
         for (entt::entity te : terrains)
         {
             if (auto* have = reg.try_get<MaterialComponent>(te);
@@ -433,10 +479,13 @@ namespace TerrainSystem
                 MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
                 reg.emplace_or_replace<MaterialComponent>(te, mat);
             }
-            // Copied out by value: emplacing below can reallocate the pool, which
-            // would dangle a pointer into the parent's component.
-            const MaterialComponent src = reg.get<MaterialComponent>(te);
-            auto same = [&src](const MaterialComponent& d)
+        }
+        {
+            std::vector<std::pair<entt::entity, const MaterialComponent*>> sources;
+            sources.reserve(terrains.size());
+            for (entt::entity te : terrains)
+                sources.emplace_back(te, &reg.get<MaterialComponent>(te));
+            auto same = [](const MaterialComponent& d, const MaterialComponent& src)
             {
                 if (d.materialAssetId != src.materialAssetId) return false;
                 if (d.paramOverrides.size() != src.paramOverrides.size()) return false;
@@ -448,21 +497,42 @@ namespace TerrainSystem
                 }
                 return true;
             };
-            std::vector<entt::entity> needMat; // chunks with no MaterialComponent yet
+            // Chunks with no MaterialComponent yet, and their landscape.
+            std::vector<std::pair<entt::entity, entt::entity>> needMat;
             for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
             {
-                if (cc.terrain != te) continue;
+                const MaterialComponent* src = nullptr;
+                for (const auto& [te, m] : sources)
+                    if (te == cc.terrain) { src = m; break; }
+                if (!src) continue;   // its landscape is gone
+                // A chunk's own component, never a parent's: writing through it
+                // leaves the source pointers valid.
                 auto* dst = reg.try_get<MaterialComponent>(ce);
-                if (!dst) { needMat.push_back(ce); continue; }
-                if (same(*dst)) continue;
-                dst->materialAssetId = src.materialAssetId;
-                dst->paramOverrides  = src.paramOverrides;
+                if (!dst) { needMat.emplace_back(ce, cc.terrain); continue; }
+                if (same(*dst, *src)) continue;
+                dst->materialAssetId = src->materialAssetId;
+                dst->paramOverrides  = src->paramOverrides;
                 dst->dirty           = true;
             }
             // Deferred: emplace adds storage, which must not happen mid-view.
-            for (entt::entity ce : needMat)
+            // Each one can move the pool, so the parent's material is copied
+            // out fresh every time.
+            for (const auto& [ce, te] : needMat)
+            {
+                const MaterialComponent src = reg.get<MaterialComponent>(te);
                 reg.emplace_or_replace<MaterialComponent>(ce, src);
+            }
         }
+
+        // ── The lakes follow their splines ───────────────────────────────────
+        // BEFORE the chunks: a point that moved since the last call reshapes the
+        // water it belongs to and, for a lake that digs its own bed, moves the bed
+        // (WaterLake.h). That dig marks the region dirty, and the chunk loop right
+        // below rebuilds those chunks and hands the same rect to the water's shore
+        // clipping on this very frame — after the loop it would be one frame
+        // behind, and the sheet would be clipped against the old ground for it.
+        // The surface pass after the chunks builds the new sheet.
+        HE::water::lake::syncSplines(world);
 
         for (entt::entity te : terrains)
         {
@@ -568,6 +638,12 @@ namespace TerrainSystem
                     ++chunksBuilt;
                 }
 
+            // The ground moved, and a water sheet clipped against it has to follow:
+            // hand the rectangle over BEFORE the flags below are cleared (the
+            // surface pass runs after them). Water edits never come back this way.
+            HE::water::noteGroundChanged(tc, rebuildAll || !tc.regionDirty,
+                                         tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ);
+
             // Diagnostic (INFO, at most once a second while a brush is dragging): what
             // this rebuild saw — whether it ran, how many chunks it touched and the
             // height range of the field they were built from. A landscape that stays
@@ -599,6 +675,17 @@ namespace TerrainSystem
             tc.dirty              = false;
             tc.regionDirty        = false;
 
+            // The foliage layer on this terrain was scattered over the ground as
+            // it stood: a sculpt stroke, Reset Sculpting, a new size / resolution,
+            // an import or an MCP dab changed it, so the plants would float or
+            // sink. Every one of those ends here, in the rebuild gate (a material
+            // swap does not — it is handled above, ungated — and must not
+            // re-scatter). The re-scatter itself is FoliageSystem's, later in the
+            // tick. A held brush rebuilds on every frame and so re-scatters on
+            // every frame: the cost grows with the layer's instance count.
+            if (auto* fol = reg.try_get<FoliageComponent>(te))
+                fol->dirty = true;
+
             // The ground the player stands on has to follow the ground they see —
             // but NOT from here. Reached only from inside the dirty/regionDirty
             // gate, which sounds like "once per edit" and is not: a brush drag
@@ -608,6 +695,15 @@ namespace TerrainSystem
             if (physics)
                 g_pendingTerrainColliders[&world][static_cast<uint32_t>(te)] = true;
         }
+
+        // ── Water surfaces ───────────────────────────────────────────────────
+        // After the chunks and OUTSIDE the dirty gate above: a water edit leaves
+        // the terrain clean (Field::dirty is the water's own flag, a brush stroke
+        // must not regenerate chunks) and still needs its surface. In this function
+        // rather than in the world tick so that every direct updateTerrains of the
+        // editor — and the headless dump, which renders before any tick — gets it.
+        // The lakes were brought in line with their splines before the chunks.
+        WaterSurface::update(world, cm, renderer);
 
         // ── The collider catches up when the edit stops ──────────────────────
         // A height-field rebuild is not in the same price class as the mesh
@@ -697,9 +793,30 @@ namespace TerrainSystem
             if (owned.empty()) g_tessMeshes.erase(w);
         }
 
-        // ── Chunks per terrain, with their camera distance ───────────────────
+        // ── What each landscape needs this tick ──────────────────────────────
+        // Off: its chunks only give their refined level back. Not built yet or
+        // rebuilding: updateTerrains owns this tick, its chunks are left alone.
+        // Only a landscape that refines gets its chunks' camera distances —
+        // that walk up the parent chain per chunk was the whole cost of a tick
+        // with tessellation off (the default). A few landscapes at most, so a
+        // linear lookup per chunk; the buckets keep their capacity across ticks.
+        enum class Tess : uint8_t { Off, Busy, Refine };
         struct Near { entt::entity e; float dist; };
-        std::unordered_map<uint32_t, std::vector<Near>> byTerrain;
+        struct Landscape { entt::entity te; Tess tess; std::vector<Near> chunks; };
+        thread_local std::vector<Landscape> landscapes;
+        size_t numLandscapes = 0;
+        for (auto [te, tc] : reg.view<TerrainComponent>().each())
+        {
+            if (numLandscapes == landscapes.size()) landscapes.emplace_back();
+            Landscape& l = landscapes[numLandscapes++];
+            l.te = te;
+            l.tess = (tessFactorOf(tc) <= 1u || !(tc.tessellationDistance > 0.0f)) ? Tess::Off
+                   : (tc.builtRes == 0 || tc.dirty || tc.regionDirty)               ? Tess::Busy
+                                                                                     : Tess::Refine;
+            l.chunks.clear();
+        }
+
+        // ── Chunks per terrain, with their camera distance ───────────────────
         const auto owned = g_tessMeshes.find(&world);
         for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
         {
@@ -721,30 +838,33 @@ namespace TerrainSystem
                     cc.tessActive = false;
                 }
             }
+            // A chunk of a landscape that is gone is left as it is.
+            Landscape* l = nullptr;
+            for (size_t i = 0; i < numLandscapes; ++i)
+                if (landscapes[i].te == cc.terrain) { l = &landscapes[i]; break; }
+            if (!l || l->tess == Tess::Busy) continue;
+            if (l->tess == Tess::Off)
+            {
+                // Touches this chunk's components and its own mesh only, no
+                // storage is added or removed: safe inside the view.
+                if (cc.tessActive) emptyTessLevel(reg, cm, renderer, ce, cc);
+                continue;
+            }
             // Same distance LODSystem measures: world position of the chunk
             // centre, composed from the parent chain (see LODSystem::update).
             const float d = glm::distance(cameraPos, HE::worldPositionOf(world, ce));
-            byTerrain[static_cast<uint32_t>(cc.terrain)].push_back({ ce, d });
+            l->chunks.push_back({ ce, d });
         }
 
+        // The shared build budget goes to the landscapes in view order.
         uint32_t budget = kTessBuildsPerTick;
-        for (auto& [terrainKey, chunks] : byTerrain)
+        for (size_t li = 0; li < numLandscapes; ++li)
         {
-            const entt::entity te = static_cast<entt::entity>(terrainKey);
-            const auto* tcp = reg.valid(te) ? reg.try_get<TerrainComponent>(te) : nullptr;
-            if (!tcp) continue;
-            const TerrainComponent& tc = *tcp;
+            Landscape& l = landscapes[li];
+            if (l.tess != Tess::Refine || l.chunks.empty()) continue;
+            const TerrainComponent& tc = reg.get<TerrainComponent>(l.te);
             const float D = tc.tessellationDistance;
-
-            if (tessFactorOf(tc) <= 1u || !(D > 0.0f))
-            {
-                for (const Near& n : chunks)
-                    if (auto& cc = reg.get<TerrainChunkComponent>(n.e); cc.tessActive)
-                        emptyTessLevel(reg, cm, renderer, n.e, cc);
-                continue;
-            }
-            // Not built yet (or rebuilding): updateTerrains owns this tick.
-            if (tc.builtRes == 0 || tc.dirty || tc.regionDirty) continue;
+            std::vector<Near>& chunks = l.chunks;
 
             std::sort(chunks.begin(), chunks.end(),
                       [](const Near& a, const Near& b) { return a.dist < b.dist; });
@@ -792,6 +912,166 @@ namespace TerrainSystem
                 ++kept;
                 --budget;
             }
+        }
+    }
+
+    void stitchSeams(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
+    {
+        auto& reg = world.registry();
+
+        // ── Give back the stitched meshes of chunks that are gone ────────────
+        if (auto w = g_stitchMeshes.find(&world); w != g_stitchMeshes.end())
+        {
+            auto& owned = w->second;
+            for (auto it = owned.begin(); it != owned.end(); )
+            {
+                const entt::entity e = static_cast<entt::entity>(it->first);
+                const auto* cc = reg.valid(e) ? reg.try_get<TerrainChunkComponent>(e) : nullptr;
+                if (cc && cc->stitchMeshId == it->second) { ++it; continue; }
+                if (renderer) renderer->InvalidateMesh(it->second);
+                if (!cm.unloadAsset(it->second))
+                    HE_LOG_DEBUG(Asset, "Terrain stitched mesh %016llx%016llx stayed loaded"
+                                 " — something still holds a handle on it",
+                                 static_cast<unsigned long long>(it->second.hi),
+                                 static_cast<unsigned long long>(it->second.lo));
+                it = owned.erase(it);
+            }
+            if (owned.empty()) g_stitchMeshes.erase(w);
+        }
+
+        // ── Each terrain's chunk grid with the detail each chunk draws now ───
+        // cells = cells per chunk side of the chosen level; 0 = no chunk
+        // there (terrain border, not built, not streamed in): nothing to meet.
+        struct Slot { entt::entity e = entt::null; uint32_t cells = 0; };
+        struct Grid { ChunkGrid g; uint32_t factor = 1; std::vector<Slot> slots; };
+        std::unordered_map<uint32_t, Grid> grids;
+        const auto owned = g_stitchMeshes.find(&world);
+        for (auto [ce, cc, lod] : reg.view<TerrainChunkComponent, LODComponent>().each())
+        {
+            // A stitched mesh this chunk does not own (a copied component) is
+            // not its to refill: forget it and start from none.
+            if (cc.stitchMeshId != HE::UUID{})
+            {
+                const bool mine = owned != g_stitchMeshes.end() &&
+                    [&] { const auto f = owned->second.find(static_cast<uint32_t>(ce));
+                          return f != owned->second.end() && f->second == cc.stitchMeshId; }();
+                if (!mine)
+                {
+                    if (lod.stitchedMeshId == cc.stitchMeshId) lod.stitchedMeshId = HE::UUID{};
+                    cc.stitchMeshId = HE::UUID{};
+                    cc.stitchKey    = 0;
+                }
+            }
+            const entt::entity te = cc.terrain;
+            const auto* tc = reg.valid(te) ? reg.try_get<TerrainComponent>(te) : nullptr;
+            if (!tc || tc->builtRes == 0) continue;
+            auto [it, fresh] = grids.try_emplace(static_cast<uint32_t>(te));
+            Grid& gr = it->second;
+            if (fresh)
+            {
+                gr.g      = computeGrid(tc->builtRes);
+                gr.factor = tessFactorOf(*tc);
+                gr.slots.resize(static_cast<size_t>(gr.g.chunksPerSide) * gr.g.chunksPerSide);
+            }
+            if (cc.cx >= gr.g.chunksPerSide || cc.cz >= gr.g.chunksPerSide ||
+                lod.levels.size() != gr.g.numLODs)
+                continue;
+            uint32_t cells = 0;
+            if (lod.current == LODComponent::kRefined)
+                cells = lod.refinedMeshId != HE::UUID{} ? gr.g.lod0Cells * gr.factor : 0u;
+            else if (lod.current < lod.levels.size())
+                cells = gr.g.lod0Cells >> lod.current;
+            gr.slots[static_cast<size_t>(cc.cz) * gr.g.chunksPerSide + cc.cx] = { ce, cells };
+        }
+
+        // ── The finer side of every mixed seam follows the coarser one ───────
+        for (auto& [terrainKey, gr] : grids)
+        {
+            const int cps = static_cast<int>(gr.g.chunksPerSide);
+            auto cellsAt = [&](int x, int z) -> uint32_t
+            {
+                if (x < 0 || z < 0 || x >= cps || z >= cps) return 0u;
+                return gr.slots[static_cast<size_t>(z) * cps + x].cells;
+            };
+            for (int cz = 0; cz < cps; ++cz)
+                for (int cx = 0; cx < cps; ++cx)
+                {
+                    const Slot& s = gr.slots[static_cast<size_t>(cz) * cps + cx];
+                    if (s.e == entt::null || s.cells == 0) continue;
+                    auto coarser = [&](int x, int z)
+                    {
+                        const uint32_t n = cellsAt(x, z);
+                        return n != 0 && n < s.cells ? n : 0u;
+                    };
+                    // Edge order of TerrainChunkStitch: v0, u1, v1, u0.
+                    TerrainChunkStitch st;
+                    st.edgeCells[0] = coarser(cx, cz - 1);
+                    st.edgeCells[1] = coarser(cx + 1, cz);
+                    st.edgeCells[2] = coarser(cx, cz + 1);
+                    st.edgeCells[3] = coarser(cx - 1, cz);
+                    // Only the refined level can differ from the plain field at
+                    // a corner (displacement), and only there does a coarser
+                    // DIAGONAL neighbour, which shares nothing but that point,
+                    // need the corner pinned.
+                    if (s.cells > gr.g.lod0Cells)
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            const int sx = (k == 1 || k == 2) ? 1 : -1;
+                            const int sz = k >= 2 ? 1 : -1;
+                            if (coarser(cx + sx, cz) || coarser(cx, cz + sz) ||
+                                coarser(cx + sx, cz + sz))
+                                st.corners |= static_cast<uint8_t>(1u << k);
+                        }
+
+                    auto& lod = reg.get<LODComponent>(s.e);
+                    auto& cc  = reg.get<TerrainChunkComponent>(s.e);
+                    auto* mc  = reg.try_get<MeshComponent>(s.e);
+                    if (!mc) continue;
+                    const HE::UUID plainId = lod.current == LODComponent::kRefined
+                        ? lod.refinedMeshId : lod.levels[lod.current].meshId;
+                    HE::UUID want = plainId;
+                    if (st.any())
+                    {
+                        const uint64_t key = stitchKeyOf(lod.current, st);
+                        if (cc.stitchKey != key || cc.stitchMeshId == HE::UUID{} ||
+                            cm.getStaticMesh(cc.stitchMeshId) == nullptr)
+                        {
+                            StaticMeshAsset m;
+                            // Both pointers die at the registration below: copy first.
+                            if (const auto* base = cm.getStaticMesh(plainId))
+                                if (const auto* l0 = cm.getStaticMesh(lod.levels.front().meshId))
+                                    m = stitchTerrainChunkEdges(*base, s.cells, *l0,
+                                                                gr.g.lod0Cells, st);
+                            cc.stitchKey = 0;
+                            if (!m.vertices.empty())
+                            {
+                                if (cc.stitchMeshId != HE::UUID{} &&
+                                    cm.getStaticMesh(cc.stitchMeshId) != nullptr)
+                                {
+                                    cm.replaceStaticMesh(cc.stitchMeshId, std::move(m));
+                                    if (renderer) renderer->InvalidateMesh(cc.stitchMeshId);
+                                }
+                                else
+                                {
+                                    cc.stitchMeshId = cm.registerStaticMesh(std::move(m));
+                                    g_stitchMeshes[&world][static_cast<uint32_t>(s.e)] = cc.stitchMeshId;
+                                }
+                                cc.stitchKey = key;
+                            }
+                        }
+                        if (cc.stitchKey == key) want = cc.stitchMeshId;
+                    }
+                    // Back to the plain level keeps the stitched mesh as it is:
+                    // a camera going back and forth over one LOD distance
+                    // re-uses it instead of rebuilding.
+                    lod.stitchedMeshId = want != plainId ? want : HE::UUID{};
+                    lod.stitchedLevel  = lod.current;
+                    if (mc->meshAssetId != want)
+                    {
+                        mc->meshAssetId = want;
+                        mc->dirty       = true;
+                    }
+                }
         }
     }
 }

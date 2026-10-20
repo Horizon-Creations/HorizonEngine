@@ -1,13 +1,16 @@
 #pragma once
 
 // ─── SFTP file transfer for the EngineContent sync ────────────────────────────
-// Thin wrapper around libssh2's SFTP subsystem. Every function here opens its
-// own TCP connection + SSH session + SFTP channel and tears the whole thing
-// down before returning — there is no client object holding a live connection
-// across calls. Same principle as HpakReader being reopened per async job: it
-// makes every one of these safe to call from any worker thread without a lock,
-// at the cost of a fresh handshake per call (fine — these run on background
-// threads for one-file-at-a-time downloads, never in a hot loop).
+// Thin wrapper around libssh2's SFTP subsystem. Every free function here opens
+// its own TCP connection + SSH session + SFTP channel and tears the whole thing
+// down before returning. Same principle as HpakReader being reopened per async
+// job: it makes every one of these safe to call from any worker thread without
+// a lock, at the cost of a fresh handshake per call.
+//
+// A caller that moves many files in one go (publish, manifest rebuild, the
+// download queue) holds an SftpConnection instead: one handshake for the whole
+// batch rather than one or two per file, each of which is several round trips
+// plus the hoster's password check.
 //
 // Password auth only, because that is what the configured account uses (see
 // SftpCredentials.h) — that is also why this links libssh2 directly instead of
@@ -20,6 +23,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -97,5 +101,44 @@ HE_CS_API SftpResult sftpEnsureRemoteDir(const SftpEndpoint& endpoint,
 // for anything that isn't a .hasset (see EngineContentPublish.h).
 HE_CS_API SftpResult sftpListRemoteTree(const SftpEndpoint& endpoint,
                                          std::vector<RemoteFileInfo>& outFiles);
+
+// One TCP+SSH+SFTP session kept open across several of the operations above,
+// with the same semantics per operation as the free function of the same name.
+// One owner, one thread at a time: not thread-safe, never shared.
+//
+// The session opens on the first operation and closes with the object. If an
+// operation fails because the CONNECTION broke (not because the server said no:
+// a missing file or a refused path leaves the session open), the session is
+// dropped; when that session had already carried an earlier operation, which is
+// the case of a server that closed an idle or long-lived session, the operation
+// is tried once more on a fresh session. So every operation gets at least one
+// attempt on a fresh session before it reports a broken connection, exactly as
+// with the free functions.
+class HE_CS_API SftpConnection
+{
+public:
+	explicit SftpConnection(SftpEndpoint endpoint);
+	~SftpConnection();
+	SftpConnection(const SftpConnection&)            = delete;
+	SftpConnection& operator=(const SftpConnection&) = delete;
+
+	// Connects now (the operations do it on demand); ok when already open.
+	SftpResult open();
+	void       close();
+	bool       isOpen() const;
+	// Sessions this object has started so far, failed attempts included.
+	unsigned   sessionsOpened() const;
+
+	SftpResult getFile(const std::string& remoteRelPath, const std::string& localPath,
+	                   const SftpProgressFn& onProgress = {});
+	SftpResult putFile(const std::string& localPath, const std::string& remoteRelPath);
+	SftpResult ensureRemoteDir(const std::string& remoteRelDir);
+	SftpResult listRemoteTree(std::vector<RemoteFileInfo>& outFiles);
+
+	struct Impl;
+
+private:
+	std::unique_ptr<Impl> m_impl;
+};
 
 } // namespace HE::Cs

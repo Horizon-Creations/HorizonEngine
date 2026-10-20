@@ -14,6 +14,12 @@ struct HE_API ProjectConfig {
     std::string  mainSceneName;         // fallback: filename of a loose startup .hescene (empty = none)
     uint8_t      projectUuidBytes[16] = {}; // legacy (unused by the AES-GCM path)
     bool         enableModSupport = false;
+    // The export profile asked for the development hotkeys in the shipped game
+    // (V = VSync, F10 = the stats card with per-pass GPU times). Written by the
+    // Development profile, never by Shipping. A game built from a Debug runtime has
+    // them whatever this says (HE_GAME_DEV_HOTKEYS); this is what gives an exported
+    // Release runtime the same keys.
+    bool         devTools = false;
     // AES-256-GCM key for the pak. NOTE: this ships with the game, so it is
     // obfuscation against casual ripping, not a security boundary. The runtime
     // reads it here and hands it to ContentManager::mountPak() (GameApplication).

@@ -919,20 +919,123 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 }
 
 // ── Hierarchy panel (recursive tree) ───────────────────────────────────────────
-void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEdit)
+// Who is whose child, built once per frame. Every row used to ask
+// UIWidgetTree::childrenOf, a scan of all elements plus a vector, so a page of n
+// elements cost n² per frame (EDT-1802). Static so the vectors keep their
+// capacity; a parent that lost its children keeps an empty entry.
+//
+// Ids, not pointers, as childrenOf gave: a drop or the context menu's Delete
+// edits the tree in the middle of the walk. From that row on the index is stale
+// and the rest of the frame asks the tree, exactly as every row used to.
+struct HierarchyIndex
 {
-	UIElement* n = st.tree.find(nodeId);
-	if (!n) return;
+	std::unordered_map<int, std::vector<int>> children;   // parentId → child ids, tree order
+	std::unordered_map<int, UIElement*>       byId;
 
-	const auto children = st.tree.childrenOf(nodeId);
+	void rebuild(const HE::UIWidgetTree& tree)
+	{
+		for (auto& [parent, kids] : children) kids.clear();
+		byId.clear();
+		for (const auto& e : tree.elements)
+		{
+			children[e->parentId].push_back(e->id);
+			byId[e->id] = e.get();
+		}
+	}
+	const std::vector<int>& of(int parentId) const
+	{
+		static const std::vector<int> kNone;
+		const auto it = children.find(parentId);
+		return it == children.end() ? kNone : it->second;
+	}
+	UIElement* find(int id) const
+	{
+		const auto it = byId.find(id);
+		return it == byId.end() ? nullptr : it->second;
+	}
+};
+
+// ── Rows scrolled out of the column are not submitted ─────────────────────────
+// The Outliner's scheme (OutlinerPanel.cpp, "Rows scrolled out of the panel"): a
+// row outside the column only answers whether it is open, under the id its
+// TreeNodeEx would have used, pushes that id when it is, and adds its height to a
+// run laid out as one Dummy before the next row that shows. Folds and the ids of
+// the rows below are therefore the same as with every row drawn. The height is
+// measured off two consecutive drawn rows; until then everything is drawn.
+// While a drag is in the air every row is drawn: the source row has to keep
+// submitting its drag source, wherever it has scrolled to.
+bool  s_hierarchyClipping = true;
+float s_hierarchyRowStep  = 0.0f;
+int   s_hierarchyRowsDrawn = 0;
+
+struct HierarchyClip
+{
+	float top = 0.0f, bottom = 0.0f;   // the column's visible band, screen y
+	float step = 0.0f;                 // row height incl. spacing; 0 = draw every row
+	float skipped = 0.0f;              // clipped rows not laid out yet
+	float measureFrom = -1.0f;         // where the last drawn row started
+
+	// The clipped run as one Dummy: a Dummy adds the item spacing itself.
+	void flush()
+	{
+		if (skipped <= 0.0f) return;
+		ImGui::Dummy(ImVec2(1.0f, std::max(0.0f, skipped - ImGui::GetStyle().ItemSpacing.y)));
+		skipped = 0.0f;
+	}
+};
+
+// The row's label, which is also its id ("Name##hn<id>"; the widget designer's UI
+// test derives row ids from it). One buffer, so a row costs no allocation.
+const char* hierarchyLabel(const UIElement& n)
+{
+	static std::string s_label;
+	if (n.name.empty()) s_label.assign(n.typeName());
+	else                s_label.assign(n.name);
+	char id[24];
+	std::snprintf(id, sizeof(id), "##hn%d", n.id);
+	s_label += id;
+	return s_label.c_str();
+}
+
+void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, const HierarchyIndex& index,
+                       HierarchyClip& clip, bool& structureEdit)
+{
+	// structureEdit: this frame already changed the tree (see HierarchyIndex).
+	UIElement* n = structureEdit ? st.tree.find(nodeId) : index.find(nodeId);
+	if (!n) return;
+	std::vector<int> fresh;
+	if (structureEdit) fresh = st.tree.childrenOf(nodeId);
+	const std::vector<int>& children = structureEdit ? fresh : index.of(nodeId);
+
+	const float cursorY = ImGui::GetCursorScreenPos().y;
+	if (clip.measureFrom >= 0.0f && clip.skipped == 0.0f && cursorY > clip.measureFrom)
+		s_hierarchyRowStep = cursorY - clip.measureFrom;
+	clip.measureFrom = -1.0f;
+	const float rowTop = cursorY + clip.skipped;
+	if (clip.step > 0.0f && (rowTop + clip.step < clip.top || rowTop > clip.bottom))
+	{
+		clip.skipped += clip.step;
+		if (children.empty()) return;
+		// DefaultOpen: a row nobody has folded yet is open.
+		const ImGuiID id = ImGui::GetID(hierarchyLabel(*n));
+		if (ImGui::GetStateStorage()->GetInt(id, 1) == 0) return;
+		ImGui::TreePushOverrideID(id);
+		for (int c : children)
+			drawHierarchyNode(st, ctx, c, index, clip, structureEdit);
+		ImGui::TreePop();
+		return;
+	}
+	clip.flush();
+	clip.measureFrom = ImGui::GetCursorScreenPos().y;
+	++s_hierarchyRowsDrawn;
+
 	ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
 	                           ImGuiTreeNodeFlags_SpanAvailWidth |
 	                           ImGuiTreeNodeFlags_DefaultOpen;
 	if (children.empty())      flags |= ImGuiTreeNodeFlags_Leaf;
 	if (isSelected(st, nodeId)) flags |= ImGuiTreeNodeFlags_Selected;
 
-	const std::string label = elementName(*n) + "##hn" + std::to_string(nodeId);
-	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+	const bool open = ImGui::TreeNodeEx(hierarchyLabel(*n), flags);
 	// The row's box, taken while the tree node is still the last item: the three
 	// drop zones below are read out of it, and BeginDragDropSource submits no
 	// item of its own but the payload accept blocks do their own bookkeeping.
@@ -1046,7 +1149,9 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	// part of the selection the menu means the WHOLE selection — that is what
 	// right-clicking one of several highlighted rows means everywhere else —
 	// and on any other row it means that row alone.
-	if (ImGui::BeginPopupContextItem((std::string("##hctx") + std::to_string(nodeId)).c_str()))
+	char ctxId[24];
+	std::snprintf(ctxId, sizeof(ctxId), "##hctx%d", nodeId);
+	if (ImGui::BeginPopupContextItem(ctxId))
 	{
 		HE::Ed::Help::Scope helpScope("UI Hierarchy");
 		if (!isSelected(st, nodeId)) selectOnly(st, nodeId);
@@ -1076,7 +1181,7 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	if (open)
 	{
 		for (int c : children)
-			drawHierarchyNode(st, ctx, c, structureEdit);
+			drawHierarchyNode(st, ctx, c, index, clip, structureEdit);
 		ImGui::TreePop();
 	}
 }
@@ -4899,6 +5004,32 @@ std::string spacedTypeName(const char* n)
 
 // A 24 px-ish pictogram of the component, centred on `c`. Plain strokes, so it
 // takes the tile's colour and needs no texture.
+// How big the palette's tiles are, against a 1080-point-tall screen. The tiles
+// were fixed sizes in the points the UI is laid out in, so on a screen with more
+// points (a 1440p or 4K monitor at 100 %) they were a smaller part of it — and on
+// a Retina laptop and a 27" monitor the same palette looked like two different
+// panels. Scaled with the height of the monitor the editor is on, in those same
+// points, they take the same share of it everywhere. Never below 1: a laptop
+// keeps the size it has. Without a monitor list (headless) the window's height
+// stands in for the monitor's.
+float paletteScreenScale()
+{
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	if (!vp) return 1.0f;
+	float height = vp->Size.y;
+	const ImVec2 centre(vp->Pos.x + vp->Size.x * 0.5f, vp->Pos.y + vp->Size.y * 0.5f);
+	for (const ImGuiPlatformMonitor& m : ImGui::GetPlatformIO().Monitors)
+		if (centre.x >= m.MainPos.x && centre.x < m.MainPos.x + m.MainSize.x &&
+		    centre.y >= m.MainPos.y && centre.y < m.MainPos.y + m.MainSize.y)
+		{
+			height = m.MainSize.y;
+			break;
+		}
+	// In steps of a twentieth, so a window dragged between monitors of nearly the
+	// same size does not shuffle the tiles.
+	return std::clamp(std::round(height / 1080.0f * 20.0f) / 20.0f, 1.0f, 2.5f);
+}
+
 void paletteGlyph(ImDrawList* dl, const ImVec2& c, float size, UIWidgetType t, ImU32 col)
 {
 	const float h  = size * 0.5f;
@@ -7203,6 +7334,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 			// A plain click adds (centered on the canvas or under the selected
 			// panel); dragging the tile onto the canvas/hierarchy places it there.
+			const float tileScale = paletteScreenScale();
 			const auto tile = [&](UIWidgetType t, const ImVec2& size) -> bool
 			{
 				ImGui::PushID(static_cast<int>(t));
@@ -7212,18 +7344,18 @@ void render(AppContext& ctx, const std::string& assetPath,
 				ImDrawList* dl  = ImGui::GetWindowDrawList();
 				dl->AddRectFilled(p0, p1, hot ? IM_COL32(60, 60, 68, 255) : IM_COL32(38, 38, 43, 255), 5.0f);
 				dl->AddRect(p0, p1, IM_COL32(255, 255, 255, hot ? 55 : 22), 5.0f);
-				const float gs = 22.0f;
-				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 6.0f + gs * 0.5f), gs, t,
+				const float gs = 28.0f * tileScale;
+				paletteGlyph(dl, ImVec2((p0.x + p1.x) * 0.5f, p0.y + 8.0f * tileScale + gs * 0.5f), gs, t,
 				             hot ? IM_COL32(240, 240, 245, 255) : IM_COL32(190, 192, 202, 255));
 				// The label: on one line when it fits, else broken at its space
 				// ("Horizontal" / "Box"), and only then shortened — never cut
-				// mid-letter. A notch smaller than body text: the tiles are narrow
-				// on purpose.
+				// mid-letter. A notch smaller than body text, and growing with the
+				// tile on a larger screen.
 				ImFont* font   = ImGui::GetFont();
-				const float fs = ImGui::GetFontSize() * 0.82f;
+				const float fs = ImGui::GetFontSize() * 0.86f * tileScale;
 				const auto widthOf = [&](const std::string& t)
 				{ return font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.c_str()).x; };
-				const float maxW = size.x - 4.0f;
+				const float maxW = size.x - 4.0f * tileScale;
 				const auto fitLine = [&](std::string line)
 				{
 					while (line.size() > 3 && widthOf(line) > maxW)
@@ -7244,7 +7376,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					lines.push_back(fitLine(full.substr(sp + 1)));
 				}
 				const float lineH = fs + 1.0f;
-				float ty = p1.y - lineH * lines.size() - 3.0f;
+				float ty = p1.y - lineH * lines.size() - 4.0f * tileScale;
 				for (const std::string& ln : lines)
 				{
 					dl->AddText(font, fs, ImVec2((p0.x + p1.x - widthOf(ln)) * 0.5f, ty),
@@ -7301,10 +7433,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// The tiles share the column's width equally. (The pane's own padding
 			// and scrollbar are already out of this number: the child is measured
 			// from inside.) The column count is the most that keep a tile at
-			// least kMinW wide; when the pane is too
+			// least kMinW wide (62 points on a 1080-point-tall screen — wide enough
+			// for "Vertical" and "Horizontal" whole, the longest words — and more on a bigger one); when the pane is too
 			// narrow for that many, there is one column fewer and every tile is
 			// correspondingly larger.
-			constexpr float kMinW = 42.0f, kTileH = 56.0f;
+			const float kMinW = 62.0f * tileScale, kTileH = 78.0f * tileScale;
 			const float spacing = ImGui::GetStyle().ItemSpacing.x;
 			const float availW  = ImGui::GetContentRegionAvail().x;
 			const int   cols    = std::max(1, static_cast<int>((availW + spacing) / (kMinW + spacing)));
@@ -7347,8 +7480,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// WidgetRef. This one is left out: a widget that embeds itself is
 			// refused at runtime, so it is not offered here either.
 			{
-				const auto widgets = HcEditorUtil::listAssets(ctx.contentManager,
-				                                              HE::AssetType::Widget);
+				// The palette is on screen whenever a widget tab is, so it reads
+				// the ContentManager's file index in place: no walk, no copy per
+				// frame. It walked both content roots and opened every .hasset
+				// in every frame before (EDT-1801).
+				static const std::vector<ContentManager::AssetFileEntry> kNoWidgets;
+				const ContentManager::AssetFileList widgetFiles = ctx.contentManager
+					? ctx.contentManager->assetFiles(HE::AssetType::Widget) : nullptr;
+				const auto& widgets = widgetFiles ? *widgetFiles : kNoWidgets;
 				// Two lists, not one. The engine's own components arrive under
 				// the "Engine/" prefix and would otherwise sit in the middle of
 				// the project's own widgets in alphabetical order — where an
@@ -7358,7 +7497,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				auto isEngine = [](const std::string& p)
 				{ return p.rfind("Engine/", 0) == 0; };
 
-				auto drawOne = [&](const HcEditorUtil::ClassRef& a)
+				auto drawOne = [&](const ContentManager::AssetFileEntry& a)
 				{
 					ImGui::PushID(a.path.c_str());
 					const bool clicked = ImGui::Button(a.label.c_str(), ImVec2(-1.0f, 0));
@@ -7466,8 +7605,20 @@ void render(AppContext& ctx, const std::string& assetPath,
 			}
 
 			bool structureEdit = false;
-			for (int rootId : st.tree.childrenOf(0))
-				drawHierarchyNode(st, ctx, rootId, structureEdit);
+			{
+				static HierarchyIndex s_index;
+				s_index.rebuild(st.tree);
+				HierarchyClip clip;
+				const ImVec2 winPos = ImGui::GetWindowPos();
+				clip.top    = winPos.y;
+				clip.bottom = winPos.y + ImGui::GetWindowHeight();
+				clip.step   = s_hierarchyClipping && !ImGui::GetDragDropPayload()
+				            ? s_hierarchyRowStep : 0.0f;
+				s_hierarchyRowsDrawn = 0;
+				for (int rootId : s_index.of(0))
+					drawHierarchyNode(st, ctx, rootId, s_index, clip, structureEdit);
+				clip.flush();
+			}
 			if (structureEdit) commitEdit(st, ctx);
 			ImGui::EndChild();
 		}
@@ -7699,5 +7850,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	ImGui::End();
 }
+
+void setHierarchyRowClipping(bool on) { s_hierarchyClipping = on; }
+int  hierarchyRowsDrawn()             { return s_hierarchyRowsDrawn; }
 
 } // namespace UIEditorPanel

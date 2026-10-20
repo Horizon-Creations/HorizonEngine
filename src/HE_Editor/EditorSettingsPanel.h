@@ -1,15 +1,18 @@
 #pragma once
 #include <imgui.h>
+#include "ProjectSettingsPanel.h"
 
 struct AppContext;
+struct EditorConfig;
 
 // ── Preferences tab + engine-settings catalog ────────────────────────────────
 // The Preferences UI is a full editor tab (Edit ▸ Preferences, Ctrl+,): a
-// category navigation on the left (General / Editor / Rendering, each with
-// sub-pages) and the selected page's settings on the right. It replaced the
-// old modal popup. Everything here follows the EDITOR from project to project;
-// what belongs to the project is on the Project Settings tab
-// (ProjectSettingsPanel).
+// category navigation on the left (Editor / Project / World / Online / Preview /
+// Accounts & Connections / Tools, each with pages) and the selected page's
+// settings on the right. It replaced the old modal popup. The Editor, Preview,
+// Accounts and Tools groups follow the EDITOR from project to project; the
+// Project, World and Online groups edit the open PROJECT (their bodies are
+// ProjectSettingsPanel's) and write into it, not into config.json.
 //
 // The engine-settings catalog is shared with the Quick Settings dock panel:
 // every setting row carries a "pin" toggle in the Preferences tab, and Quick
@@ -19,30 +22,49 @@ struct AppContext;
 // World entity.)
 namespace EditorSettingsPanel
 {
-	enum class SettingsMode { Preferences, QuickSettings };
+	// Project: the same rows drawn by a Project Settings page, bound to a
+	// config the caller hands in (DrawOptions::config) — no pin gutter, no
+	// category headings, never locked.
+	enum class SettingsMode { Preferences, QuickSettings, Project };
 
-	// Sub-pages of the Preferences tab (the left-hand navigation buttons).
+	// Sub-pages of the Preferences tab (the left-hand navigation buttons), in the
+	// order the rail lists them. The Project / World / Online pages at the end of
+	// the enum belong to the open project (ProjectSettingsPanel.h); the rest are
+	// about THIS editor and THIS user.
 	enum class Page
 	{
-		// General
-		Appearance, Viewport, ContentBrowser, Autosave, Feedback,
-		// Editor — everything the editor itself does that is not the renderer:
-		// the graph editor's look, the collaboration session, the repository
-		// (git install status and the repository share one page), and the status
-		// of the outside tools the editor needs.
-		// RemoteControl is the MCP bridge: letting an external client drive this
-		// editor. It sits next to Collaboration because it is the same kind of
-		// question — who else may change this scene — and apart from it because
-		// the answer is a different one: a collaborator is a person who was
-		// invited, a remote client is a program on this machine.
-		// Shortcuts is the keyboard: every editor-wide chord, rebindable.
-		Panels, Shortcuts, CollabGeneral, RemoteControl, Repository, Status,
-		// Rendering
-		Display, PostProcessing, GlobalIllumination, Effects,
-		// (The pages that edit the PROJECT — Application, Permissions, Fonts,
-		// Collision Layers — used to sit here for want of a project settings
-		// surface. They are on the Project Settings tab now: ProjectSettingsPanel.)
+		// Editor — how the editor behaves and looks.
+		// Appearance carries the graph editors' and the widget designer's own
+		// switches under its rows (what used to be the Panels page). Input is the
+		// pointer, the gamepad and the keyboard: every editor-wide chord,
+		// rebindable. ProjectData is what the editor keeps about a project as it
+		// works on it: the content browser's scan and cache, and the autosave.
+		Appearance, Viewport, Input, ProjectData, Feedback,
+		// Preview — what the viewport is drawn with on this machine. EditorRenderer
+		// is the editor's own backend and frame pacing; ViewportQuality is the
+		// user's own graphics values — what a project that sets none previews
+		// with, and an override for one that does (a machine that cannot carry
+		// the project's bloom and GI).
+		EditorRenderer, ViewportQuality,
+		// Accounts & Connections — who you are and what the editor talks to.
+		// SourceControl is git on this machine and the GitHub account (the
+		// repository of a PROJECT is on its Project Settings tab). Team is the
+		// team server and the session settings. RemoteControl is the MCP bridge:
+		// a program on this machine driving this editor, which is a different
+		// question from a collaborator, who is a person who was invited.
+		SourceControl, Team, RemoteControl,
+		// Tools — the status of the outside tools the editor needs.
+		Status,
+		// Project / World / Online — one page per ProjectSettingsPanel::Page.
+		ProjectGeneral, ProjectApplication, ProjectWindow, ProjectFonts,
+		ProjectPermissions,
+		WorldShadows, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
+		OnlineAntiCheat, OnlineMultiplayer,
 	};
+
+	// Open the tab on the page that draws `page` (what a "set it up in the
+	// project" button asks for; EditorUI forwards ProjectSettingsPanel's request).
+	void requestOpenProjectPage(ProjectSettingsPanel::Page page);
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
 	constexpr const char* kTabPath = "::Preferences::";
@@ -69,6 +91,21 @@ namespace EditorSettingsPanel
 	// draws everything (Quick Settings).
 	void DrawEngineSettings(AppContext& ctx, SettingsMode mode,
 	                        const char* categoryFilter = nullptr);
+
+	// The general form. A page shows the rows of one category (`category`), or
+	// exactly the rows named in `rows` whatever their category (the pages are not
+	// the catalogue's categories any more: Viewport Quality draws rows from three
+	// of them). `config` is the config the widgets edit — the editor's own by
+	// default, a scratch copy on the Project pages, which write it back
+	// into the project's block afterwards.
+	struct DrawOptions
+	{
+		const char*        category = nullptr;
+		const char* const* rows     = nullptr;
+		int                rowCount = 0;
+		EditorConfig*      config   = nullptr;
+	};
+	void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& options);
 
 	// Fill the given tab rect with the Preferences tab (nav + content).
 	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);

@@ -3,8 +3,15 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/LODSystem.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/TransformHierarchy.h>
 #include <glm/glm.hpp>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 static HE::UUID makeId(uint64_t hi, uint64_t lo) { return {hi, lo}; }
 
@@ -269,4 +276,122 @@ TEST_CASE("LODComponent serializes and deserializes correctly")
     CHECK(found);
 
     he_test::removeQuiet(tmp);
+}
+
+// LODSystem composes a parent's world matrix once for a run of siblings instead
+// of walking every chunk's whole chain (SCN-402). That has to be the SAME
+// position, to the bit, that worldPositionOf gives: a level boundary is a <=
+// on the distance, and a position an ulp off flips an entity standing on one.
+// So every entity here gets two thresholds, exactly its distance and the next
+// float below it, and must land on the first and miss the second. Only holds
+// while the compiler fuses no multiply-add across statements: GCC with Jolt's
+// -mfma did (-ffp-contract=fast), see the top-level CMakeLists.txt.
+TEST_CASE("LODSystem's world position is worldPositionOf's to the bit, on a level boundary")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+    uint32_t seed = 12345u;
+    auto rnd = [&seed](float lo, float hi) {
+        seed = seed * 1664525u + 1013904223u;
+        return lo + (hi - lo) * static_cast<float>(seed >> 8) / static_cast<float>(1u << 24);
+    };
+    auto randomTransform = [&] {
+        TransformComponent t;
+        t.position = { rnd(-300.f, 300.f), rnd(-50.f, 50.f), rnd(-300.f, 300.f) };
+        t.rotation = { rnd(-180.f, 180.f), rnd(-180.f, 180.f), rnd(-180.f, 180.f) };
+        t.scale    = { rnd(0.3f, 3.f), rnd(0.3f, 3.f), rnd(0.3f, 3.f) };
+        return t;
+    };
+
+    // Parents up to three deep, then LOD entities under them: in runs of
+    // siblings (the case the memo serves), alternating between parents (the
+    // case it has to recompute), at the top level, and one without a transform.
+    std::vector<Entity> parents;
+    for (int i = 0; i < 12; ++i)
+    {
+        const Entity p = world.createEntity("Parent");
+        reg.emplace_or_replace<TransformComponent>(p, randomTransform());
+        if (i >= 4) world.reparentEntity(p, parents[static_cast<size_t>(i - 4)]);
+        parents.push_back(p);
+    }
+    const glm::vec3 cam(17.f, 5.f, -23.f);
+    std::vector<Entity> onEdge, belowEdge;
+    for (int i = 0; i < 400; ++i)
+    {
+        Entity parent = entt::null;
+        if (i < 240)      parent = parents[static_cast<size_t>(i / 20)];   // runs
+        else if (i < 380) parent = parents[static_cast<size_t>(i % 12)];   // alternating
+        for (int twin = 0; twin < 2; ++twin)
+        {
+            const Entity e = world.createEntity("Lod");
+            if (i != 399) reg.emplace_or_replace<TransformComponent>(e, randomTransform());
+            else          reg.remove<TransformComponent>(e);
+            if (parent != entt::null) world.reparentEntity(e, parent);
+            reg.emplace<MeshComponent>(e, MeshComponent{});
+            (twin == 0 ? onEdge : belowEdge).push_back(e);
+        }
+        // The twin is an exact copy, so both stand at the same world position.
+        if (const auto* t = reg.try_get<TransformComponent>(onEdge.back()))
+            reg.emplace_or_replace<TransformComponent>(belowEdge.back(), *t);
+    }
+    // Half the world with fresh local caches, half without: cachedLocalMatrix
+    // takes either branch, and both must agree with the walk.
+    HE::propagateTransforms(world);
+    for (size_t i = 0; i < onEdge.size(); i += 2)
+        if (auto* t = reg.try_get<TransformComponent>(onEdge[i])) t->position.x += 1e-3f;
+    for (size_t i = 0; i < onEdge.size(); ++i)
+        if (const auto* t = reg.try_get<TransformComponent>(onEdge[i]))
+            reg.emplace_or_replace<TransformComponent>(belowEdge[i], *t);
+
+    for (size_t i = 0; i < onEdge.size(); ++i)
+    {
+        const float d = glm::distance(cam, HE::worldPositionOf(world, onEdge[i]));
+        LODComponent on;
+        on.levels = { { makeId(1, 0), d }, { makeId(2, 0), 1e30f } };
+        reg.emplace<LODComponent>(onEdge[i], on);
+        LODComponent below;
+        below.levels = { { makeId(1, 0), std::nextafter(d, 0.0f) }, { makeId(2, 0), 1e30f } };
+        reg.emplace<LODComponent>(belowEdge[i], below);
+    }
+
+    // Which side went wrong tells the cause apart: twins at different positions
+    // (a fresh local matrix against propagateTransforms' cached one) put the
+    // below threshold on the wrong twin; a wrong onEdge with equal twins means
+    // LODSystem's position is not worldPositionOf's.
+    auto bitsOf = [](const glm::vec3& v) {
+        uint32_t b[3];
+        std::memcpy(b, &v, sizeof(b));
+        char s[40];
+        std::snprintf(s, sizeof(s), "%08x %08x %08x", b[0], b[1], b[2]);
+        return std::string(s);
+    };
+    // Strings, not literals out of a ?: : doctest under GCC streamed those as "1".
+    auto kindOf = [](size_t i) {
+        return std::string(i < 240 ? "run" : i < 380 ? "alternating" : "top") + (i % 2 == 0 ? ", moved" : ", cached");
+    };
+    size_t twinDiffers = 0;
+    for (size_t i = 0; i < onEdge.size(); ++i)
+    {
+        const glm::vec3 a = HE::worldPositionOf(world, onEdge[i]);
+        const glm::vec3 b = HE::worldPositionOf(world, belowEdge[i]);
+        if (std::memcmp(&a, &b, sizeof(a)) == 0) continue;
+        if (++twinDiffers <= 3)
+            MESSAGE("twin " << i << " (" << kindOf(i) << "): " << bitsOf(a) << " vs " << bitsOf(b));
+    }
+
+    LODSystem::update(world, cam);
+    size_t wrongOn = 0, wrongBelow = 0;
+    for (size_t i = 0; i < onEdge.size(); ++i)
+    {
+        const bool on    = reg.get<LODComponent>(onEdge[i]).current != 0;
+        const bool below = reg.get<LODComponent>(belowEdge[i]).current != 1;
+        if ((on || below) && wrongOn + wrongBelow < 3)
+            MESSAGE("wrong " << i << std::string(on ? " onEdge" : "") << std::string(below ? " belowEdge" : "")
+                    << " (" << kindOf(i) << ")");
+        wrongOn    += on;
+        wrongBelow += below;
+    }
+    CHECK(twinDiffers == 0);
+    CHECK(wrongOn == 0);
+    CHECK(wrongBelow == 0);
 }

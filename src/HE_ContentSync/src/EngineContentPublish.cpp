@@ -5,12 +5,13 @@
 #include "ContentSync/SftpCredentials.h"
 
 #include <ContentManager/HAsset.h>
-#include <Hpak/HpakFormat.h> // Hpak::hash64 — same content-hash function incremental packing uses
+#include <Hpak/HpakFormat.h> // Hpak::fnv1a64Bytes — the manifest's change key, see EngineContentManifestEntry
 
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 
@@ -91,7 +92,7 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 		EngineContentManifestEntry entry;
 		entry.relativePath = rel.generic_string();
 		entry.uuid          = id;
-		entry.contentHash   = Hpak::hash64(bytes.data(), bytes.size());
+		entry.contentHash   = Hpak::fnv1a64Bytes(bytes.data(), bytes.size());
 		entry.size          = bytes.size();
 		local.entries.push_back(std::move(entry));
 	}
@@ -99,10 +100,13 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 
 	// ── Diff: pull the remote manifest (absent on a first publish — not a
 	// failure, just means "everything is new") ─────────────────────────────────
+	// One session for the whole publish: the manifest, every directory, every
+	// file and the manifest again, instead of one or two handshakes per file.
+	SftpConnection conn(endpoint);
 	EngineContentManifest remote;
 	{
 		const fs::path tmp = fs::temp_directory_path(ec) / "engine_content_remote_manifest.json.tmp";
-		if (sftpGetFile(endpoint, "manifest.json", tmp.string()).ok)
+		if (conn.getFile("manifest.json", tmp.string()).ok)
 			parseManifest(readWholeFile(tmp), remote);
 		std::error_code rmEc;
 		fs::remove(tmp, rmEc);
@@ -110,6 +114,7 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 
 	// ── Upload changed/new files ────────────────────────────────────────────────
 	std::size_t uploaded = 0, unchanged = 0;
+	std::unordered_set<std::string> ensuredDirs;   // created (or found) once per publish
 	for (const auto& entry : local.entries)
 	{
 		const auto* remoteEntry = remote.findByPath(entry.relativePath);
@@ -120,19 +125,20 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 		}
 
 		const fs::path relDir = fs::path(entry.relativePath).parent_path();
-		if (!relDir.empty())
+		if (!relDir.empty() && !ensuredDirs.count(relDir.generic_string()))
 		{
-			const SftpResult mk = sftpEnsureRemoteDir(endpoint, relDir.generic_string());
+			const SftpResult mk = conn.ensureRemoteDir(relDir.generic_string());
 			if (!mk.ok)
 			{
 				result.error = "Could not create remote directory '" + relDir.generic_string() +
 				                "': " + mk.error;
 				return result;
 			}
+			ensuredDirs.insert(relDir.generic_string());
 		}
 
 		const std::string localAbs = (fs::path(engineContentRoot) / entry.relativePath).string();
-		const SftpResult  put      = sftpPutFile(endpoint, localAbs, entry.relativePath);
+		const SftpResult  put      = conn.putFile(localAbs, entry.relativePath);
 		if (!put.ok)
 		{
 			result.error = "Upload of '" + entry.relativePath + "' failed: " + put.error;
@@ -151,7 +157,7 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 		std::ofstream out(tmpManifest, std::ios::binary | std::ios::trunc);
 		out << serializeManifest(local);
 	}
-	const SftpResult putManifest = sftpPutFile(endpoint, tmpManifest.string(), "manifest.json");
+	const SftpResult putManifest = conn.putFile(tmpManifest.string(), "manifest.json");
 	std::error_code  rmEc;
 	fs::remove(tmpManifest, rmEc);
 	if (!putManifest.ok)
@@ -180,8 +186,10 @@ RebuildManifestResult rebuildManifestFromServerBlocking(std::function<void(const
 		return result;
 	}
 
+	// One session for the listing, every .hasset download and the new manifest.
+	SftpConnection conn(endpoint);
 	std::vector<RemoteFileInfo> files;
-	const SftpResult listing = sftpListRemoteTree(endpoint, files);
+	const SftpResult listing = conn.listRemoteTree(files);
 	if (!listing.ok)
 	{
 		result.error = "Could not list the server: " + listing.error;
@@ -215,7 +223,7 @@ RebuildManifestResult rebuildManifestFromServerBlocking(std::function<void(const
 		// it without downloading — same cost publishEngineContentBlocking pays
 		// locally, just over the network here.
 		const fs::path tmp = fs::temp_directory_path(ec) / "engine_content_rebuild_scan.tmp";
-		const SftpResult dl = sftpGetFile(endpoint, f.relativePath, tmp.string());
+		const SftpResult dl = conn.getFile(f.relativePath, tmp.string());
 		if (!dl.ok)
 		{
 			log("Skipped " + f.relativePath + " (download failed: " + dl.error + ")");
@@ -236,7 +244,7 @@ RebuildManifestResult rebuildManifestFromServerBlocking(std::function<void(const
 		EngineContentManifestEntry entry;
 		entry.relativePath = f.relativePath;
 		entry.uuid          = id;
-		entry.contentHash   = Hpak::hash64(bytes.data(), bytes.size());
+		entry.contentHash   = Hpak::fnv1a64Bytes(bytes.data(), bytes.size());
 		entry.size          = bytes.size();
 		manifest.entries.push_back(std::move(entry));
 		++result.hassetEntries;
@@ -248,7 +256,7 @@ RebuildManifestResult rebuildManifestFromServerBlocking(std::function<void(const
 		std::ofstream out(tmpManifest, std::ios::binary | std::ios::trunc);
 		out << serializeManifest(manifest);
 	}
-	const SftpResult putManifest = sftpPutFile(endpoint, tmpManifest.string(), "manifest.json");
+	const SftpResult putManifest = conn.putFile(tmpManifest.string(), "manifest.json");
 	std::error_code  rmEc;
 	fs::remove(tmpManifest, rmEc);
 	if (!putManifest.ok)

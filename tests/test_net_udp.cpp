@@ -16,6 +16,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+  #include <sys/socket.h>
+#endif
+
 using namespace HE::Net;
 
 // Every case here runs over real localhost UDP sockets, like test_net_tcp. What
@@ -256,11 +260,12 @@ TEST_CASE("UdpTransport: a Connect without a valid cookie allocates nothing on t
 {
     Pair p = connectedPair();   // one genuine peer, so "nothing changed" is observable
 
-    // Bound WITHOUT SO_REUSEADDR (socketBindUdp sets it). On Linux two reuse
-    // sockets may share a UDP port, and the ephemeral picker hands out a port
-    // the client's reuse socket already holds: the "stranger" then comes from
-    // the client's own address, and its datagram reaches the host as client
-    // data (seen once on Linux CI, run 37544985679).
+    // On Linux two sockets that both set SO_REUSEADDR may share a UDP port, and
+    // the ephemeral picker hands out a port a reuse socket already holds: the
+    // "stranger" then comes from the client's own address, and its datagram
+    // reaches the host as client data (seen once on Linux CI, run 37544985679).
+    // The product no longer sets the option on any UDP socket (section 12 pins
+    // that); the port check below stays as a tripwire for the stranger itself.
     SocketHandle raw = socketCreateUdp();
     REQUIRE(raw != kInvalidSocket);
     REQUIRE(socketBindUdpTo(raw, "127.0.0.1", 0));
@@ -676,4 +681,229 @@ TEST_CASE("UdpTransport: the log carries no cookie material and no nonce")
         }
         CHECK_MESSAGE(longest < 10, "log line carries a cookie value: " << line);
     }
+}
+
+// ─── 12. Ports are not shared ────────────────────────────────────────────────
+//
+// Thema 170. socketBindUdp used to set SO_REUSEADDR on every UDP socket,
+// including each client transport's ephemeral one. On Linux two sockets that
+// both set it may bind one port, and the ephemeral picker (port 0) does not
+// skip a port a reuse socket holds: two clients — or a client and a host — end
+// up sharing a port and the kernel hands a datagram to whichever it likes.
+// macOS/BSD never did that for unicast UDP, so the collision itself can only
+// be observed on Linux; the option, though, can be read back anywhere.
+
+namespace {
+
+// SO_REUSEADDR as the kernel reports it; -1 when the query itself failed.
+// Windows: 0 without asking. The product never sets the option on a game socket
+// there (socketSetReuseAddr is deliberately a no-op, see Socket.cpp), and the
+// test executable does not link ws2_32 itself — only HorizonNet does — so a
+// getsockopt call here would not link.
+int reuseAddrOption([[maybe_unused]] SocketHandle h) {
+#ifdef _WIN32
+    return 0;
+#else
+    int value = -1;
+    socklen_t len = sizeof(value);
+    if (::getsockopt(static_cast<int>(h), SOL_SOCKET, SO_REUSEADDR, &value, &len) != 0)
+        return -1;
+    return value != 0 ? 1 : 0;
+#endif
+}
+
+} // namespace
+
+TEST_CASE("UDP sockets: none of the game transport's sockets sets SO_REUSEADDR")
+{
+    SUBCASE("a client socket for an IPv4 peer") {
+        SocketHandle s = socketCreateUdpFor(false);
+        REQUIRE(s != kInvalidSocket);
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("a client socket for an IPv6 peer") {
+        SocketHandle s = socketCreateUdpFor(true);
+        if (s == kInvalidSocket) return;   // no IPv6 stack here, nothing to read
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("the host socket") {
+        SocketHandle s = socketCreateUdpDualStack(0);
+        REQUIRE(s != kInvalidSocket);
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+    SUBCASE("socketBindUdp itself") {
+        SocketHandle s = socketCreateUdp();
+        REQUIRE(s != kInvalidSocket);
+        REQUIRE(socketBindUdp(s, 0));
+        CHECK(reuseAddrOption(s) == 0);
+        socketClose(s);
+    }
+#ifndef _WIN32   // reuseAddrOption cannot read the option there, see above
+    SUBCASE("socketBindUdpShared still does, that is its whole point") {
+        SocketHandle s = socketCreateUdp();
+        REQUIRE(s != kInvalidSocket);
+        // Port 0: only the option is under test, not a well-known port.
+        REQUIRE(socketBindUdpShared(s, 0));
+        CHECK(reuseAddrOption(s) == 1);
+        socketClose(s);
+    }
+#endif
+}
+
+TEST_CASE("UDP sockets: a client's port cannot be bound again by a socket that asks for reuse")
+{
+    SocketHandle client = socketCreateUdpFor(false);
+    REQUIRE(client != kInvalidSocket);
+    const std::uint16_t port = socketBoundPort(client);
+    REQUIRE(port != 0);
+
+    // The second socket sets the option ITSELF. Linux shares a UDP port only
+    // when both parties ask, so this is what separates "the client refuses to
+    // share" from "the second socket happened not to ask". With the old client
+    // (reuse set) this bind succeeds on Linux; macOS and Windows refuse it
+    // either way, so this case only proves the fix on Linux.
+    SocketHandle other = socketCreateUdp();
+    REQUIRE(other != kInvalidSocket);
+    REQUIRE(socketSetReuseAddr(other, true));
+    CHECK_FALSE(socketBindUdp(other, port));
+
+    socketClose(other);
+    socketClose(client);
+}
+
+// Linux and macOS only. On Windows this case was red in CI (run 38144939526,
+// "CHECK( second == kInvalidSocket )", the second socketCreateUdpDualStack on
+// the held port returned a valid socket), and that is not about this change:
+// socketSetReuseAddr has always been a no-op there (see Socket.cpp), so the
+// bind calls on Windows are the same with and without it. Why Windows lets the
+// second host in is NOT established — the Winsock page on SO_REUSEADDR says a
+// dual-stack wildcard bind is checked on both stacks, which would predict
+// failure, and the log has no Net lines to tell the v6 bind from the IPv4
+// fallback. The part that IS covered on Windows is the case above (two IPv4
+// wildcard binds on one port: the second one fails there, CI-green). If two
+// hosts on one port must also fail on Windows, that is SO_EXCLUSIVEADDRUSE on
+// the host socket — a product change that needs a Windows machine to verify.
+#ifndef _WIN32
+TEST_CASE("UDP sockets: a second host cannot bind the port a host already holds")
+{
+    SocketHandle first = socketCreateUdpDualStack(0);
+    REQUIRE(first != kInvalidSocket);
+    const std::uint16_t port = socketBoundPort(first);
+    REQUIRE(port != 0);
+
+    // Two game servers on one fixed port must fail loudly; on Linux with the
+    // old reuse option both "succeeded" and split the clients between them.
+    SocketHandle second = socketCreateUdpDualStack(port);
+    CHECK(second == kInvalidSocket);
+
+    if (second != kInvalidSocket) socketClose(second);
+    socketClose(first);
+}
+#endif
+
+// ─── Parsed peer addresses (NET-201) ─────────────────────────────────────────
+// The transport keys its peers by SocketAddress instead of a "host|port"
+// string built per datagram. The key has to sort peers exactly as the strings
+// did: same family + address + port is one peer, the IPv6 scope is ignored
+// (the old key stripped "%en0"), and a v4-mapped address is NOT the plain v4
+// one (the strings "::ffff:1.2.3.4" and "1.2.3.4" differed too).
+
+TEST_CASE("SocketAddress: peer identity matches the old string key")
+{
+    const SocketAddressPeerHash hash;
+    auto parse = [](const char* host, std::uint16_t port) {
+        SocketAddress a;
+        REQUIRE(socketParseAddress(host, port, a));
+        return a;
+    };
+
+    const SocketAddress v4a = parse("127.0.0.1", 4000);
+    const SocketAddress v4b = parse("127.0.0.1", 4000);
+    CHECK(v4a.family == 4);
+    CHECK(v4a.port == 4000);
+    CHECK(v4a.samePeer(v4b));
+    CHECK(hash(v4a) == hash(v4b));
+    CHECK_FALSE(v4a.samePeer(parse("127.0.0.1", 4001)));
+    CHECK_FALSE(v4a.samePeer(parse("127.0.0.2", 4000)));
+    CHECK(socketAddressText(v4a) == "127.0.0.1");
+
+    const SocketAddress v6 = parse("::1", 4000);
+    CHECK(v6.family == 6);
+    CHECK(v6.samePeer(parse("::1", 4000)));
+    CHECK_FALSE(v6.samePeer(parse("::2", 4000)));
+    CHECK(socketAddressText(v6) == "::1");
+
+    const SocketAddress mapped = parse("::ffff:127.0.0.1", 4000);
+    CHECK(mapped.family == 6);
+    CHECK_FALSE(mapped.samePeer(v4a));
+    CHECK(socketAddressText(mapped) == "::ffff:127.0.0.1");
+
+    // Scope: built by hand so it does not depend on an interface name existing.
+    SocketAddress scoped = parse("fe80::1", 4000);
+    SocketAddress bare   = scoped;
+    scoped.scope = 7;
+    CHECK(scoped.samePeer(bare));
+    CHECK(hash(scoped) == hash(bare));
+    // A numeric scope parses into the field (sending to link-local needs it).
+    SocketAddress parsedScope;
+    if (socketParseAddress("fe80::1%1", 4000, parsedScope)) {
+        CHECK(parsedScope.scope == 1);
+        CHECK(parsedScope.samePeer(bare));
+    } else {
+        MESSAGE("numeric IPv6 scope not parseable on this platform; skipped");
+    }
+
+    // Unused bytes of a v4 address do not take part.
+    SocketAddress noisy = v4a;
+    noisy.ip[10] = 0xAB;
+    CHECK(noisy.samePeer(v4a));
+    CHECK(hash(noisy) == hash(v4a));
+
+    SocketAddress junk;
+    CHECK_FALSE(socketParseAddress("not an address", 1, junk));
+    CHECK_FALSE(socketParseAddress("localhost", 1, junk));   // numeric only, no DNS
+}
+
+TEST_CASE("SocketAddress: send and receive through the parsed form")
+{
+    SocketHandle a = socketCreateUdp();
+    SocketHandle b = socketCreateUdp();
+    REQUIRE(a != kInvalidSocket);
+    REQUIRE(b != kInvalidSocket);
+    REQUIRE(socketBindUdpTo(a, "127.0.0.1", 0));
+    REQUIRE(socketBindUdpTo(b, "127.0.0.1", 0));
+
+    SocketAddress toB;
+    REQUIRE(socketParseAddress("127.0.0.1", socketBoundPort(b), toB));
+    const std::uint8_t msg[] = { 1, 2, 3, 4, 5 };
+    std::size_t sent = 0;
+    REQUIRE(socketSendTo(a, msg, sizeof(msg), toB, sent) == SocketResult::Ok);
+    CHECK(sent == sizeof(msg));
+
+    REQUIRE(socketWaitReadable(b, 1000));
+    std::uint8_t buf[64] = {};
+    std::size_t got = 0;
+    SocketAddress from;
+    REQUIRE(socketRecvFrom(b, buf, sizeof(buf), got, from) == SocketResult::Ok);
+    CHECK(got == sizeof(msg));
+    CHECK(std::memcmp(buf, msg, sizeof(msg)) == 0);
+    CHECK(from.family == 4);
+    CHECK(from.port == socketBoundPort(a));
+    CHECK(socketAddressText(from) == "127.0.0.1");
+
+    // And straight back to the address recvfrom reported.
+    REQUIRE(socketSendTo(b, msg, 2, from, sent) == SocketResult::Ok);
+    REQUIRE(socketWaitReadable(a, 1000));
+    std::string host;
+    std::uint16_t port = 0;
+    REQUIRE(socketRecvFrom(a, buf, sizeof(buf), got, host, port) == SocketResult::Ok);
+    CHECK(got == 2);
+    CHECK(host == "127.0.0.1");
+    CHECK(port == socketBoundPort(b));
+
+    socketClose(a);
+    socketClose(b);
 }

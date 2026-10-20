@@ -1,4 +1,5 @@
 #include "EditorUI.h"
+#include "NotificationStore.h"   // failures are notifications
 #include "EditorTheme.h"   // brand palette (the editor tab strip)
 #include <algorithm>
 #include <cstdint>
@@ -31,6 +32,7 @@
 #include "EditorToolbar.h"                // setRevealAssetHook — the asset tabs' header button
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
+#include "SplineTool.h"                  // Spline mode: its panel, and the Delete / Esc keys it takes first
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
 #include "ViewportToolbar.h"             // the View menu draws the toolbar's pickers
 #include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
@@ -39,14 +41,17 @@
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
+#include "EditorUiShot.h"                // HE_DUMP_UI trigger shots of the running UI
 #include "ProfilerPanel.h"               // Window > Performance Profiler window
 #include "ConsolePanel.h"                // Window > Console — every HE_LOG record, all levels
 #include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // Window > Collaboration (host / join a live session)
+#include "TeamView.h"               // Window > Team (members, presence, invitations)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
+#include "NotificationPopups.h"    // its loud end: toasts bottom-right and the critical modal
 #include "PlayErrorReveal.h"        // the first error of a play session opens the console
 #include "SourceControlPanel.h"     // Window > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
@@ -56,9 +61,8 @@
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "EditorShortcuts.h"           // the chords the menus print and the keys fire
 #include "EditorTabs.h"                // find-or-focus for every way of opening an asset tab
-#include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
-#include "ToolchainDialog.h"
-#include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "ProjectSettingsPanel.h"        // the project pages of the Preferences tab
+#include "ToolSetupDialog.h"             // startup check: cmake, compiler, git, Git LFS, identity
 #include "ProjectPreflight.h"            // engine-content check in front of every project open
 #include "SceneDiskWatch.h"             // "the open scene changed on disk (git pull) - reload?"
 #include "GitCloneDialog.h"               // clone a GitHub repository as a project
@@ -68,6 +72,7 @@
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
+#include "SelfUpdateDialog.h"            // Help > Check for Updates (SFTP self-update)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
@@ -75,6 +80,8 @@
 #include "AudioMixerPanel.h"             // Window > Audio Mixer window
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
+#include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
+#include "TaskBoardFooter.h"             // ...and its count, next task and tick-off list in the footer
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "EditorRewards.h"               // the footer's "Saved"/"Build succeeded" moments
@@ -96,6 +103,7 @@
 #include <SDL3/SDL.h>
 #include <filesystem>
 #include <mutex>       // the play log is read under its mutex (PlayErrorReveal)
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -130,9 +138,11 @@ namespace
 	// A destructive action that would discard the current scene. When requested
 	// while the scene is dirty it is stashed and a "Save changes?" modal is shown;
 	// the action runs once the user resolves the modal.
+	// InstallUpdate (Help ▸ Check for Updates ▸ Restart to Update) quits the
+	// editor for HorizonUpdater, so it is guarded exactly like Quit.
 	enum class GuardedAction {
 		None, NewScene, OpenSceneDialog, OpenScenePath,
-		OpenProjectDialog, OpenProjectPath, CloseProject, Quit,
+		OpenProjectDialog, OpenProjectPath, CloseProject, Quit, InstallUpdate,
 	};
 }
 
@@ -222,6 +232,34 @@ static bool s_showEnvironment = false;
 
 // Toggled by Window > Collaboration; drives the live-session panel.
 static bool s_showCollab = false;
+// Toggled by Window > Team; drives the team window (members, presence,
+// invitations — TeamView).
+static bool s_showTeam = false;
+
+// Window > Team. The body is TeamView's (shared with Preferences ▸ Team and
+// drawn headless by tests/test_team_ui.cpp); this is only the window around it.
+static void drawTeamWindow(AppContext& ctx, bool& open)
+{
+	if (!ctx.team) return;
+	// A new invitation opens the window, once per invitation: Join and Decline
+	// are in here, and a notification that says "invited" with nothing to press
+	// would leave the guest looking for the window. Closing it again sticks.
+	static std::set<std::string> s_invitesSeen;
+	for (const auto& s : ctx.team->sessions())
+		if (s.invited && s_invitesSeen.insert(s.session).second) open = true;
+	if (!open) return;
+	ImGui::SetNextWindowSize(ImVec2(420, 520), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Team", &open)) { ImGui::End(); return; }
+	{
+		EditorWidgets::WrapText wrap;   // released before End()
+		TeamView::drawPanel(*ctx.team,
+		                    { &ctx.editorConfig.CollabRelayAddress,
+		                      &ctx.editorConfig.TeamName,
+		                      &ctx.editorConfig.TeamMember },
+		                    TeamView::editorForm());
+	}
+	ImGui::End();
+}
 // Toggled by Window > Source Control; drives the repository status panel.
 static bool s_showSourceControl = false;
 // Toggled by Window > Console (and Ctrl/Cmd+`); drives the log window.
@@ -233,6 +271,8 @@ static bool s_showUndoHistory = false;
 // Toggled by Window > Watch; drives the window that shows what a HorizonCode run
 // stopped at a breakpoint is holding. Also raised by a stop itself (below).
 static bool s_showWatch = false;
+// Toggled by Window > Task Board; drives the project's to-do list.
+static bool s_showTaskBoard = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -260,11 +300,13 @@ static bool docsPanelOpener(const char* window)
 		{ "Performance Profiler", &s_showProfiler      },
 		{ "Environment",          &s_showEnvironment   },
 		{ "Collaboration",        &s_showCollab        },
+		{ "Team",                 &s_showTeam          },
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
 		{ "Undo History",         &s_showUndoHistory   },
 		{ "Watch",                &s_showWatch         },
+		{ "Task Board",           &s_showTaskBoard     },
 		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
 		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
 		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
@@ -312,11 +354,13 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Performance Profiler", "PanelOpenProfiler",      &s_showProfiler      },
 	{ "Environment",          "PanelOpenEnvironment",   &s_showEnvironment   },
 	{ "Collaboration",        "PanelOpenCollaboration", &s_showCollab        },
+	{ "Team",                 "PanelOpenTeam",          &s_showTeam          },
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
 	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
+	{ "Task Board",           "PanelOpenTaskBoard",     &s_showTaskBoard     },
 	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
@@ -383,6 +427,8 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+	// Help ▸ Check for Updates: a check or a download on its worker.
+	SelfUpdateDialog::joinPendingWork();
 	// And the GitHub sign-in: its poll thread and the worker that stores a token.
 	GitHubSignIn::joinPendingWork();
 }
@@ -548,6 +594,11 @@ void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
     if (!ctx.imguiReady) return;
+
+    // The tab each dock node had open when the editor was last closed: imgui
+    // restores it from imgui.ini and then lets every panel that shows up later
+    // take the selection, so this puts it back (EditorDockState.h).
+    EditorDockState::holdSavedTabs();
 
     // Refresh the frame-cached pointer-grammar answer for ctx-less call sites
     // (the shared GraphEditor canvas asks via EditorInput::trackpadActive()).
@@ -762,13 +813,11 @@ void EditorUI::render(AppContext& ctx, float dt)
     // config to read — before anything can draw a panel and report it closed.
     loadPanelVisibility(ctx);
 
-    // ── Startup toolchain check — overlays either screen below ───────────────
-    ToolchainDialog::DrawToolchainDialog(ctx);
-
-    // ── Startup source-control check ─────────────────────────────────────────
-    // Same placement, and for the same reason: it must overlay the Project Hub
-    // as well as the editor, since a user can clone a project before opening one.
-    GitMissingDialog::DrawGitMissingDialog(ctx);
+    // ── Startup tool check — overlays either screen below ────────────────────
+    // cmake, the C++ compiler, git, Git LFS and the git identity in one dialog. It
+    // must overlay the Project Hub as well as the editor, since a user can clone a
+    // project before opening one.
+    ToolSetupDialog::DrawToolSetupDialog(ctx);
     // Clone from GitHub: raised from the Hub and from Preferences, so drawn here
     // over both. It only leaves a .heproj path behind; the Hub and the editor
     // each open it through their own path (takeOpenRequest).
@@ -805,6 +854,14 @@ void EditorUI::render(AppContext& ctx, float dt)
     // opening a project as after, and the macOS Help menu is reachable in both.
     ReportIssueDialog::DrawReportIssueDialog(ctx);
 
+    // ── Help ▸ Check for Updates… ────────────────────────────────────────────
+    // Before the branch as well: the Hub has a Help menu on macOS too.
+    SelfUpdateDialog::Draw(ctx);
+    // The takeover runs on a worker (beginInstall below and in the guarded
+    // action); quit once it has HorizonUpdater waiting for this process.
+    if (SelfUpdateDialog::finishInstall() && ctx.quit)
+        ctx.quit();
+
     // ── Help ▸ Documentation ─────────────────────────────────────────────────
     // Before the branch, so the manual is readable on the Project Hub as well as
     // in the editor. That is not symmetry for its own sake: "how do I start a
@@ -837,6 +894,11 @@ void EditorUI::render(AppContext& ctx, float dt)
     else
     {
         ProjectHubPanel::render(ctx);
+        // Restart to Update with no project open: nothing unsaved to ask about,
+        // so no guard. Not while a project is being opened — the request then
+        // waits and is taken by renderEditor's guarded path once it is loaded.
+        if (!ProjectPreflight::busy() && SelfUpdateDialog::takeInstallRequest())
+            SelfUpdateDialog::beginInstall(ctx);
         // Drawn after the hub so the welcome card sits on top of it. Draws nothing
         // once the user has answered it once (persisted in the editor config).
         TutorialPanel::renderWelcome(ctx);
@@ -877,6 +939,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     // HE_DUMP_TUTORIALUI only: the tour card's placement, pictured from this
     // frame's draw data (a no-op without the variable).
     TutorialPanel::witnessAfterRender();
+    // HE_DUMP_UI only: this frame's whole UI on a trigger file, for drivers that
+    // need to SEE the footer, a menu or a panel of a hidden editor.
+    HE::Ed::UiShot::liveAfterRender();
 
     // ── Multi-viewport / platform windows ─────────────────────────────────────
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -898,15 +963,240 @@ void EditorUI::render(AppContext& ctx, float dt)
 
 
 
+// ── The asset panels, one row each (EDT-801) ─────────────────────────────────
+// Every asset editor tab is one row of kAssetPanels, and every question the
+// editor asks "all the panels" is a loop over it: the dirty mark, the list of
+// unsaved files, Save, the crash-recovery copies, collaboration's documents,
+// forgetting a deleted asset, a peer's reload and the tab's render dispatch.
+// These used to be eight hand-written lists, and they had drifted (Cinematic was
+// missing from the recovery copies without a word, the comment counted fourteen
+// panels where there were fifteen). A new panel is now added in one place, and an
+// operation it does not have is a visible nullptr in its row.
+//
+// The ROW ORDER is the render dispatch order, and that order means something:
+// the first row whose isAsset() says yes draws the tab. The raw-file rows (audio,
+// texture, C++ source: extension checks) must come before the script editor, the
+// last row, which takes whatever is left (isAsset == nullptr) and would show a
+// .wav or a .cpp as HAsset text. Every other operation asks every row, so for
+// them the order is only the order the panels are asked in: each panel answers
+// for the paths it holds and ignores the rest (save() of a path it does not hold
+// reports success), collabDocs takes the first non-empty answer, and the dirty
+// paths are sorted afterwards.
+namespace
+{
+using AssetPanelRenderFn = void (*)(AppContext&, const std::string&, const ImVec2&, const ImVec2&);
+
+struct AssetPanelOps
+{
+	const char* name;   // for a reader of the table; nothing looks it up
+	// Draws the tab when this is the first row to say yes. nullptr: the
+	// fallthrough row, which takes every path no row above claimed.
+	bool (*isAsset)(const std::string& path);
+	AssetPanelRenderFn render;
+	bool (*isDirty)(const std::string& path);
+	void (*appendDirtyPaths)(std::vector<std::string>& out);
+	bool (*save)(AppContext& ctx, const std::string& path);
+	void (*appendSnapshots)(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
+	CollabDocSync::DocBindings (*collabDocs)(const std::string& path);
+	void (*forget)(const std::string& path);
+	bool (*reloadFromDisk)(const std::string& path);
+};
+
+// Advanced Shader Effects off = this project does not author materials
+// (docs/he-apps-plan.md E1b). An existing one can still be opened — the file is
+// right there in the browser — but it says why it is inert rather than showing
+// an editor whose result nothing would draw.
+void renderMaterialTab(AppContext& ctx, const std::string& path, const ImVec2& pos, const ImVec2& size)
+{
+	const bool allowMaterials = !ctx.projectManager ||
+		ctx.projectManager->currentProject().advancedShaderEffects;
+	if (allowMaterials)
+	{
+		MaterialEditorPanel::render(ctx, path, pos, size);
+		return;
+	}
+#ifdef HE_IMGUI_ENABLED
+	ImGui::SetNextWindowPos(pos);
+	ImGui::SetNextWindowSize(size);
+	ImGui::Begin("##MaterialsDisabled", nullptr,
+	             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+	             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+	ImGui::TextWrapped(
+		"Advanced Shader Effects are switched off for this project, so materials "
+		"are not used. Widgets are styled with corner radius, borders, gradients "
+		"and shadows instead.");
+	ImGui::Spacing();
+	ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
+	ImGui::End();
+#endif
+}
+
+// Panels whose save() needs no context.
+template <bool (*Save)(const std::string&)>
+bool saveWithoutCtx(AppContext&, const std::string& path) { return Save(path); }
+
+constexpr AssetPanelOps kAssetPanels[] = {
+	{ "Material",
+	  [](const std::string& p) { return MaterialEditorPanel::isMaterialAsset(p) ||
+	                                    MaterialEditorPanel::isMaterialFunctionAsset(p); },
+	  renderMaterialTab,
+	  MaterialEditorPanel::isDirty, MaterialEditorPanel::appendDirtyPaths,
+	  MaterialEditorPanel::save, MaterialEditorPanel::appendSnapshots,
+	  MaterialEditorPanel::collabDocs, MaterialEditorPanel::forget,
+	  MaterialEditorPanel::reloadFromDisk },
+	{ "Widget",
+	  UIEditorPanel::isWidgetAsset, UIEditorPanel::render,
+	  UIEditorPanel::isDirty, UIEditorPanel::appendDirtyPaths,
+	  UIEditorPanel::save, UIEditorPanel::appendSnapshots,
+	  UIEditorPanel::collabDocs, UIEditorPanel::forget,
+	  UIEditorPanel::reloadFromDisk },
+	{ "HorizonCode Class",
+	  HorizonCodeClassPanel::isClassAsset, HorizonCodeClassPanel::render,
+	  HorizonCodeClassPanel::isDirty, HorizonCodeClassPanel::appendDirtyPaths,
+	  HorizonCodeClassPanel::save, HorizonCodeClassPanel::appendSnapshots,
+	  HorizonCodeClassPanel::collabDocs, HorizonCodeClassPanel::forget,
+	  HorizonCodeClassPanel::reloadFromDisk },
+	{ "Input",
+	  InputAssetPanel::isInputAsset, InputAssetPanel::render,
+	  InputAssetPanel::isDirty, InputAssetPanel::appendDirtyPaths,
+	  InputAssetPanel::save, InputAssetPanel::appendSnapshots,
+	  nullptr, InputAssetPanel::forget,
+	  InputAssetPanel::reloadFromDisk },
+	{ "Theme",
+	  ThemeAssetPanel::isThemeAsset, ThemeAssetPanel::render,
+	  ThemeAssetPanel::isDirty, ThemeAssetPanel::appendDirtyPaths,
+	  ThemeAssetPanel::save, ThemeAssetPanel::appendSnapshots,
+	  nullptr, ThemeAssetPanel::forget,
+	  ThemeAssetPanel::reloadFromDisk },
+	{ "Bone Mask",
+	  BoneMaskPanel::isBoneMaskAsset, BoneMaskPanel::render,
+	  BoneMaskPanel::isDirty, BoneMaskPanel::appendDirtyPaths,
+	  BoneMaskPanel::save, BoneMaskPanel::appendSnapshots,
+	  nullptr, BoneMaskPanel::forget,
+	  BoneMaskPanel::reloadFromDisk },
+	{ "Blend Space",
+	  BlendSpacePanel::isBlendSpaceAsset, BlendSpacePanel::render,
+	  BlendSpacePanel::isDirty, BlendSpacePanel::appendDirtyPaths,
+	  BlendSpacePanel::save, BlendSpacePanel::appendSnapshots,
+	  nullptr, BlendSpacePanel::forget,
+	  BlendSpacePanel::reloadFromDisk },
+	{ "Sequence",
+	  SequencerPanel::isSequencerAsset, SequencerPanel::render,
+	  SequencerPanel::isDirty, SequencerPanel::appendDirtyPaths,
+	  SequencerPanel::save, SequencerPanel::appendSnapshots,
+	  nullptr, SequencerPanel::forget,
+	  SequencerPanel::reloadFromDisk },
+	// No crash-recovery copy: CinematicPanel has no appendSnapshots, so an
+	// unsaved cinematic is not in Saved/Autosave/Assets. Open question from the
+	// audit (EDT-801), kept as it was.
+	{ "Cinematic",
+	  CinematicPanel::isCinematicAsset, CinematicPanel::render,
+	  CinematicPanel::isDirty, CinematicPanel::appendDirtyPaths,
+	  CinematicPanel::save, nullptr,
+	  nullptr, CinematicPanel::forget,
+	  CinematicPanel::reloadFromDisk },
+	{ "Type",
+	  TypeAssetPanel::isTypeAsset, TypeAssetPanel::render,
+	  TypeAssetPanel::isDirty, TypeAssetPanel::appendDirtyPaths,
+	  TypeAssetPanel::save, TypeAssetPanel::appendSnapshots,
+	  nullptr, TypeAssetPanel::forget,
+	  TypeAssetPanel::reloadFromDisk },
+	// Dirty under a DIFFERENT path than the tab's: what it edits is the clip
+	// scrubbed in it, so isDirty/save answer for clip paths, never for the mesh.
+	// No reloadFromDisk: a peer's change to the mesh or the clip does not
+	// refresh this tab (as before; nothing caches the mesh's file here).
+	{ "Skeletal Mesh",
+	  SkeletalMeshEditorPanel::isSkeletalMeshAsset, SkeletalMeshEditorPanel::render,
+	  SkeletalMeshEditorPanel::isDirty, SkeletalMeshEditorPanel::appendDirtyPaths,
+	  SkeletalMeshEditorPanel::save, SkeletalMeshEditorPanel::appendSnapshots,
+	  nullptr, SkeletalMeshEditorPanel::forget,
+	  nullptr },
+	// A viewer: nothing to lose, nothing to save.
+	{ "Static Mesh",
+	  StaticMeshEditorPanel::isStaticMeshAsset, StaticMeshEditorPanel::render,
+	  nullptr, nullptr, nullptr, nullptr, nullptr,
+	  StaticMeshEditorPanel::forget, nullptr },
+	{ "Particle Graph",
+	  ParticleGraphEditorPanel::isParticleAsset, ParticleGraphEditorPanel::render,
+	  ParticleGraphEditorPanel::isDirty, ParticleGraphEditorPanel::appendDirtyPaths,
+	  ParticleGraphEditorPanel::save, ParticleGraphEditorPanel::appendSnapshots,
+	  ParticleGraphEditorPanel::collabDocs, ParticleGraphEditorPanel::forget,
+	  ParticleGraphEditorPanel::reloadFromDisk },
+	{ "Animator State Machine",
+	  AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset,
+	  AnimatorStateMachineEditorPanel::render,
+	  AnimatorStateMachineEditorPanel::isDirty, AnimatorStateMachineEditorPanel::appendDirtyPaths,
+	  AnimatorStateMachineEditorPanel::save, AnimatorStateMachineEditorPanel::appendSnapshots,
+	  AnimatorStateMachineEditorPanel::collabDocs, AnimatorStateMachineEditorPanel::forget,
+	  AnimatorStateMachineEditorPanel::reloadFromDisk },
+	// Audio .hasset AND raw .wav/.ogg. Like the C++ viewer below it, the raw-file
+	// half is an extension check, so it has to beat the script editor fallthrough
+	// — which would render megabytes of PCM as text.
+	{ "Audio",
+	  AudioEditorPanel::isAudioAsset, AudioEditorPanel::render,
+	  AudioEditorPanel::isDirty, AudioEditorPanel::appendDirtyPaths,
+	  AudioEditorPanel::save, AudioEditorPanel::appendSnapshots,
+	  nullptr, AudioEditorPanel::forget,
+	  AudioEditorPanel::reloadFromDisk },
+	// Texture .hasset AND raw .png/.jpg/… — the raw half is an extension check
+	// too. A viewer, like the static mesh one.
+	{ "Texture",
+	  TextureViewerPanel::isTextureAsset, TextureViewerPanel::render,
+	  nullptr, nullptr, nullptr, nullptr, nullptr,
+	  TextureViewerPanel::forget, nullptr },
+	// C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
+	// come before the script editor fallthrough, which assumes an HAsset.
+	{ "C++ Class",
+	  CppClassEditorPanel::isCppSourceAsset, CppClassEditorPanel::render,
+	  CppClassEditorPanel::isDirty, CppClassEditorPanel::appendDirtyPaths,
+	  saveWithoutCtx<CppClassEditorPanel::save>, CppClassEditorPanel::appendSnapshots,
+	  nullptr, CppClassEditorPanel::forget,
+	  CppClassEditorPanel::reloadFromDisk },
+	// Last, and the fallthrough: whatever no row above claimed opens here.
+	{ "Script",
+	  nullptr, ScriptEditorPanel::render,
+	  ScriptEditorPanel::isDirty, ScriptEditorPanel::appendDirtyPaths,
+	  saveWithoutCtx<ScriptEditorPanel::save>, ScriptEditorPanel::appendSnapshots,
+	  nullptr, ScriptEditorPanel::forget,
+	  ScriptEditorPanel::reloadFromDisk },
+};
+
+// The row that draws the tab at `path`: the first that claims it, else the
+// fallthrough (the last row).
+const AssetPanelOps& assetPanelFor(const std::string& path)
+{
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.isAsset && row.isAsset(path)) return row;
+	return kAssetPanels[std::size(kAssetPanels) - 1];
+}
+
+// The pairs that only make sense together. A row with a dirty flag but no
+// appendDirtyPaths would hide a closed dirty tab from the quit guard; one with
+// no save would let the prompt claim to have saved it. Checked by the compiler,
+// so a half-filled new row does not build.
+constexpr bool assetPanelsConsistent()
+{
+	for (const AssetPanelOps& row : kAssetPanels)
+	{
+		if (!row.render || !row.forget) return false;
+		if (!row.isDirty != !row.appendDirtyPaths) return false;
+		if (!row.isDirty != !row.save) return false;
+	}
+	return kAssetPanels[std::size(kAssetPanels) - 1].isAsset == nullptr;
+}
+static_assert(assetPanelsConsistent(),
+              "kAssetPanels: every row renders and forgets, isDirty comes with "
+              "appendDirtyPaths and save, and the last row is the fallthrough");
+} // namespace
+
 // True if the editor tab for `assetPath` holds edits that were never written to disk.
-// EVERY panel that can modify its asset has to be listed here — this one predicate
-// gates the tab's dirty mark, forgetTabState (a panel missing from the list has its
-// unsaved graph dropped when the tab closes) and the Quit/Close-Project guard. That
-// is exactly how the Particle and Animator-State-Machine graphs used to be lost.
-// The Static Mesh viewer has nothing to lose and stays out. The Skeletal Mesh tab
-// is in, but under a DIFFERENT path than the tab's: what it edits is the clip
-// scrubbed in it (notifies, the per-clip root-motion switch), so it answers for
-// clip paths and never for the mesh it is named after.
+// EVERY panel that can modify its asset needs isDirty in its kAssetPanels row —
+// this one predicate gates the tab's dirty mark, forgetTabState (a panel without
+// it has its unsaved graph dropped when the tab closes) and the Quit/Close-Project
+// guard. That is exactly how the Particle and Animator-State-Machine graphs used
+// to be lost. The Static Mesh and Texture viewers have nothing to lose. The
+// Skeletal Mesh tab answers under a DIFFERENT path than the tab's (its row says
+// why), so the question is put to every row, not just to the one drawing the tab.
 // The virtual tabs (Level Script / Game Instance) edit the world, so their dirty
 // state is the scene's (ctx.sceneDirty) and is guarded separately.
 // Public (declared in EditorUI.h) because the OS-level quit veto in
@@ -916,22 +1206,9 @@ void EditorUI::render(AppContext& ctx, float dt)
 bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
-	return ScriptEditorPanel::isDirty(assetPath)        ||
-	       CppClassEditorPanel::isDirty(assetPath)      ||
-	       MaterialEditorPanel::isDirty(assetPath)      ||
-	       UIEditorPanel::isDirty(assetPath)            ||
-	       HorizonCodeClassPanel::isDirty(assetPath)    ||
-	       InputAssetPanel::isDirty(assetPath)          ||
-	       TypeAssetPanel::isDirty(assetPath)           ||
-	       ThemeAssetPanel::isDirty(assetPath)          ||
-	       BoneMaskPanel::isDirty(assetPath)            ||
-	       BlendSpacePanel::isDirty(assetPath)          ||
-	       SequencerPanel::isDirty(assetPath)           ||
-       CinematicPanel::isDirty(assetPath)           ||
-	       AudioEditorPanel::isDirty(assetPath)         ||
-	       ParticleGraphEditorPanel::isDirty(assetPath) ||
-	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
-	       SkeletalMeshEditorPanel::isDirty(assetPath);
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.isDirty && row.isDirty(assetPath)) return true;
+	return false;
 }
 
 // Every unsaved asset, INCLUDING ones whose tab the user already closed.
@@ -942,77 +1219,35 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 std::vector<std::string> EditorUI::unsavedAssetPaths()
 {
 	std::vector<std::string> out;
-	ScriptEditorPanel::appendDirtyPaths(out);
-	CppClassEditorPanel::appendDirtyPaths(out);
-	MaterialEditorPanel::appendDirtyPaths(out);
-	UIEditorPanel::appendDirtyPaths(out);
-	HorizonCodeClassPanel::appendDirtyPaths(out);
-	InputAssetPanel::appendDirtyPaths(out);
-	TypeAssetPanel::appendDirtyPaths(out);
-	ThemeAssetPanel::appendDirtyPaths(out);
-	BoneMaskPanel::appendDirtyPaths(out);
-	BlendSpacePanel::appendDirtyPaths(out);
-	SequencerPanel::appendDirtyPaths(out);
-	CinematicPanel::appendDirtyPaths(out);
-	AudioEditorPanel::appendDirtyPaths(out);
-	ParticleGraphEditorPanel::appendDirtyPaths(out);
-	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
-	SkeletalMeshEditorPanel::appendDirtyPaths(out);
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.appendDirtyPaths) row.appendDirtyPaths(out);
 	std::sort(out.begin(), out.end());
 	out.erase(std::unique(out.begin(), out.end()), out.end());
 	return out;
 }
 
 // Save one asset through whichever panel owns its edits — the write half of
-// tabHasUnsavedEdits, and it must list exactly the same panels (a panel missing
-// here silently keeps its edits after the prompt claimed to have saved them).
+// tabHasUnsavedEdits (the table refuses a row with isDirty but no save).
 // Every panel's save() answers true for a path it isn't holding, so asking all of
 // them is the whole dispatch: there is no path→panel map to keep in sync.
 bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
 	bool ok = true;
-	ok = ScriptEditorPanel::save(assetPath)                          && ok;
-	ok = CppClassEditorPanel::save(assetPath)                        && ok;
-	ok = MaterialEditorPanel::save(ctx, assetPath)                   && ok;
-	ok = UIEditorPanel::save(ctx, assetPath)                         && ok;
-	ok = HorizonCodeClassPanel::save(ctx, assetPath)                 && ok;
-	ok = InputAssetPanel::save(ctx, assetPath)                       && ok;
-	ok = TypeAssetPanel::save(ctx, assetPath)                        && ok;
-	ok = ThemeAssetPanel::save(ctx, assetPath)                       && ok;
-	ok = BoneMaskPanel::save(ctx, assetPath)                         && ok;
-	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
-	ok = SequencerPanel::save(ctx, assetPath)                        && ok;
-	ok = CinematicPanel::save(ctx, assetPath)                        && ok;
-	ok = AudioEditorPanel::save(ctx, assetPath)                      && ok;
-	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
-	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
-	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.save) ok = row.save(ctx, assetPath) && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
 	// a save that reported success but left the state dirty.
 	return ok && !tabHasUnsavedEdits(assetPath);
 }
 
-// The recovery half of saveAsset: the same fourteen panels, each reporting its
+// The recovery half of saveAsset: every row that can write a copy reports its
 // dirty files and how to write what a Save would write to another path.
 // AssetAutosave does the rest (EditorApplication::updateAssetAutosave).
 void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
 {
-	ScriptEditorPanel::appendSnapshots(ctx, out);
-	CppClassEditorPanel::appendSnapshots(ctx, out);
-	MaterialEditorPanel::appendSnapshots(ctx, out);
-	UIEditorPanel::appendSnapshots(ctx, out);
-	HorizonCodeClassPanel::appendSnapshots(ctx, out);
-	InputAssetPanel::appendSnapshots(ctx, out);
-	TypeAssetPanel::appendSnapshots(ctx, out);
-	ThemeAssetPanel::appendSnapshots(ctx, out);
-	BoneMaskPanel::appendSnapshots(ctx, out);
-	BlendSpacePanel::appendSnapshots(ctx, out);
-	SequencerPanel::appendSnapshots(ctx, out);
-	AudioEditorPanel::appendSnapshots(ctx, out);
-	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
-	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
-	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.appendSnapshots) row.appendSnapshots(ctx, out);
 }
 
 // The live documents behind an open tab, for collaboration's item-level sync.
@@ -1022,11 +1257,11 @@ void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 CollabDocSync::DocBindings EditorUI::collabDocsFor(const std::string& assetPath)
 {
 	if (assetPath.empty()) return {};
-	if (auto d = MaterialEditorPanel::collabDocs(assetPath);            !d.empty()) return d;
-	if (auto d = UIEditorPanel::collabDocs(assetPath);                  !d.empty()) return d;
-	if (auto d = HorizonCodeClassPanel::collabDocs(assetPath);          !d.empty()) return d;
-	if (auto d = ParticleGraphEditorPanel::collabDocs(assetPath);       !d.empty()) return d;
-	if (auto d = AnimatorStateMachineEditorPanel::collabDocs(assetPath); !d.empty()) return d;
+	for (const AssetPanelOps& row : kAssetPanels)
+	{
+		if (!row.collabDocs) continue;
+		if (auto d = row.collabDocs(assetPath); !d.empty()) return d;
+	}
 	return {};
 }
 
@@ -1041,24 +1276,7 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 {
 	if (assetPath.empty()) return;
 	MaterialEditorPanel::releasePreviewAssets(ctx, assetPath);
-	ScriptEditorPanel::forget(assetPath);
-	CppClassEditorPanel::forget(assetPath);
-	MaterialEditorPanel::forget(assetPath);
-	UIEditorPanel::forget(assetPath);
-	HorizonCodeClassPanel::forget(assetPath);
-	InputAssetPanel::forget(assetPath);
-	TypeAssetPanel::forget(assetPath);
-	ThemeAssetPanel::forget(assetPath);
-	BoneMaskPanel::forget(assetPath);
-	BlendSpacePanel::forget(assetPath);
-	SequencerPanel::forget(assetPath);
-	CinematicPanel::forget(assetPath);
-	ParticleGraphEditorPanel::forget(assetPath);
-	AnimatorStateMachineEditorPanel::forget(assetPath);
-	StaticMeshEditorPanel::forget(assetPath);
-	SkeletalMeshEditorPanel::forget(assetPath);
-	AudioEditorPanel::forget(assetPath);
-	TextureViewerPanel::forget(assetPath);
+	for (const AssetPanelOps& row : kAssetPanels) row.forget(assetPath);
 }
 
 // ── Leaving a project ────────────────────────────────────────────────────────
@@ -1135,21 +1353,8 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 {
 	if (assetPath.empty()) return false;
 	bool any = false;
-	any = ScriptEditorPanel::reloadFromDisk(assetPath)                    || any;
-	any = CppClassEditorPanel::reloadFromDisk(assetPath)                  || any;
-	any = MaterialEditorPanel::reloadFromDisk(assetPath)                  || any;
-	any = UIEditorPanel::reloadFromDisk(assetPath)                        || any;
-	any = HorizonCodeClassPanel::reloadFromDisk(assetPath)                || any;
-	any = InputAssetPanel::reloadFromDisk(assetPath)                      || any;
-	any = TypeAssetPanel::reloadFromDisk(assetPath)                       || any;
-	any = ThemeAssetPanel::reloadFromDisk(assetPath)                      || any;
-	any = BoneMaskPanel::reloadFromDisk(assetPath)                        || any;
-	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
-	any = SequencerPanel::reloadFromDisk(assetPath)                       || any;
-	any = CinematicPanel::reloadFromDisk(assetPath)                       || any;
-	any = AudioEditorPanel::reloadFromDisk(assetPath)                     || any;
-	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
-	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
+	for (const AssetPanelOps& row : kAssetPanels)
+		if (row.reloadFromDisk) any = row.reloadFromDisk(assetPath) || any;
 	return any;
 }
 
@@ -1158,7 +1363,969 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 // Raised by an asset editor's Save button (EditorToolbar::setSaveHook), consumed
 // where the Save chord is read.
 static bool s_saveFromToolbar = false;
+
+// Does the active tab's undo live on the world's stack? The scene tab, and two
+// asset tabs whose every edit snapshots into ctx.undoSys: the Level Script (it
+// saves with the scene) and a Particle Graph. Every other asset editor has its
+// own dirty flag and, where it has undo at all, its own stack bound to the same
+// chord inside the panel (material graph, UI editor, sequencer, cinematic,
+// audio editor, the mesh slot editors). The sequencer also writes one world
+// entry ("Bind Clip"); that one is undone from the footer button or the Edit
+// menu, the chord stays with the sequencer's clip history. The footer reads
+// its keys BEFORE the tab renders, so it cannot ask "did the panel take
+// Ctrl+Z" — it asks whose tab this is, and an allow-list on purpose: an editor
+// that snapshots into the world stack and is forgotten here gets a Ctrl+Z that
+// does nothing (loud), where a deny-list gets a Ctrl+Z that quietly undoes the
+// scene as well (the bug this replaces). Read from ctx here and now: the tab can
+// have changed since `sceneTabActiveNow` was taken at the top of the frame.
+static bool activeTabUsesWorldUndo(const AppContext& ctx)
+{
+	if (ctx.activeTab < 0 || ctx.activeTab >= static_cast<int>(ctx.tabs.size()))
+		return true;
+	const std::string& path = ctx.tabs[ctx.activeTab].assetPath;
+	return path.empty()
+	    || path == LevelScriptPanel::kTabPath
+	    || ParticleGraphEditorPanel::isParticleAsset(path);
+}
+
+// The one door onto "the" undo history for every control that has one: the
+// footer buttons, the Ctrl+Z chord, the native menu command and the Edit menu.
+// In a session it is CollabUndo (your own changes, as republished inverses);
+// outside one it is the snapshot stack. The Edit menu used to be the only one
+// that knew about the session, so Ctrl+Z in a session restored a whole-world
+// snapshot: every entity came back under a new handle, the structural diff
+// published a destroy and a create for all of them, and peers' concurrent edits
+// were reverted (docs/collab-sync-audit-entities-2026-10-14.md, gap 4.1).
+static bool sessionUndoActive(const AppContext& ctx)
+{
+	// Not during play: the controls stay quiet then, as they do outside a
+	// session (makeContext withholds the snapshot stack while playing).
+	return !ctx.isPlaying && ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
+}
+static bool canUndoNow(const AppContext& ctx)
+{
+	if (sessionUndoActive(ctx)) return ctx.collabUndo->canUndo();
+	return ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo;
+}
+static bool canRedoNow(const AppContext& ctx)
+{
+	if (sessionUndoActive(ctx)) return ctx.collabUndo->canRedo();
+	return ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo;
+}
+static void undoNow(AppContext& ctx)
+{
+	if (!canUndoNow(ctx)) return;
+	if (sessionUndoActive(ctx)) ctx.collabUndo->undo();
+	else                        ctx.undo();
+}
+static void redoNow(AppContext& ctx)
+{
+	if (!canRedoNow(ctx)) return;
+	if (sessionUndoActive(ctx)) ctx.collabUndo->redo();
+	else                        ctx.redo();
+}
 #endif
+
+#ifdef HE_IMGUI_ENABLED
+// ─── renderEditor()'s state shared with the blocks below ──────────────────────
+// These were function-local statics of renderEditor(). The dialogs, the footer and
+// the tab bar below are their own functions now (EDT-802), so what they share with
+// renderEditor() lives here: same lifetime, same names, same initial values.
+
+// ── Unsaved-changes guard state ─────────────────────────────────────────
+// A destructive action requested while the scene is dirty is stashed here and
+// the "Unsaved Changes" modal is raised; the action runs when the user picks
+// Save (after the save completes) or Don't Save. s_guardSaveThenAct bridges the
+// async Save-As dialog: it tells the file-result handler to run s_guardAction
+// once the freshly chosen path has been written.
+static GuardedAction s_guardAction      = GuardedAction::None;
+static std::string   s_guardArg;            // path payload for OpenScenePath
+static bool          s_openUnsavedModal = false;
+static bool          s_guardSaveThenAct = false;
+// The same stash for the step BEFORE that one: the confirmation a host gets
+// when a session-ending action would drop the peers connected to this editor.
+static GuardedAction s_collabAction     = GuardedAction::None;
+static std::string   s_collabArg;
+static bool          s_openCollabModal  = false;
+// Why the prompt's last save attempt failed ("" = none). A failed write must
+// never let the guarded action run — the modal stays open with the reason and
+// the entries that are still dirty.
+static std::string   s_guardSaveError;
+
+// One-shot request to programmatically select a top-level tab (set by a
+// Content-Browser double-click). -1 = none. The tab bar applies SetSelected for
+// exactly one frame and then clears it, so it never fights the user's own tab
+// clicks — applying SetSelected every frame would (and did) do both.
+static int           s_tabSelectRequest = -1;
+
+static constexpr float kFooterH  = 24.0f;
+static constexpr float kTabBarH  = 28.0f;
+
+static void drawJoinSessionDialog(AppContext& ctx)
+{
+    // ── Join Session (Play ▸ Join Session…) ─────────────────────────────────
+    // Outside the menu bar, because the menu closes the moment the entry is
+    // clicked and a dialog drawn inside it would close with it.
+    if (s_netJoinDialogOpen)
+    {
+        ImGui::OpenPopup("Join Session##netjoin");
+        EditorWidgets::pinDialogToEditorWindow();
+    }
+    if (ImGui::BeginPopupModal("Join Session##netjoin", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Its own scope, not the Play menu's: the dialog is drawn out here,
+        // long after that menu has closed, so nothing is pushed at this point
+        // and the two fields would be looked up bare.
+        HE::Ed::Help::Scope helpScope("Join Session");
+        ImGui::TextUnformatted("Address of the host, and the code it is showing.");
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(320.0f);
+        ImGui::InputText("Host", s_netJoinAddress, sizeof(s_netJoinAddress));
+        EditorWidgets::helpForLabel("Host");
+        ImGui::SetNextItemWidth(320.0f);
+        ImGui::InputText("Join code", s_netJoinCode, sizeof(s_netJoinCode));
+        EditorWidgets::helpForLabel("Join code");
+        ImGui::Spacing();
+        // A join without a code cannot complete the crypto handshake at all, so
+        // it would fail as "could not connect" — a message that sends somebody
+        // looking at their firewall. Say it here instead.
+        const bool ready = s_netJoinAddress[0] != '\0' && s_netJoinCode[0] != '\0';
+        if (!ready) ImGui::TextDisabled("Both are required.");
+        ImGui::BeginDisabled(!ready);
+        // The wrapper, not ImGui::Button: its help lookup is hover-gated and
+        // allows a disabled item, so the greyed button is what answers "why
+        // can I not press this".
+        if (EditorWidgets::button("Join", ImVec2(120, 0)))
+        {
+            if (ctx.playAsJoin) ctx.playAsJoin(s_netJoinAddress, s_netJoinCode);
+            s_netJoinDialogOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            s_netJoinDialogOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+static void drawAboutPopup(AppContext& ctx, bool openAboutPopup)
+{
+    // ── About ───────────────────────────────────────────────────────────────
+    // Windows and Linux only in practice: macOS drops the ImGui menu row and
+    // answers Help ▸ About from the App menu's standard panel (MacMenuBar.mm),
+    // which carries the same version string from the bundle's Info.plist.
+    if (openAboutPopup)
+        ImGui::OpenPopup("About Horizon Engine##about");
+    // Only while the popup is actually up: pinDialogToEditorWindow sets ImGui's
+    // NEXT-window position, and an unconditional call would hand it to whatever
+    // window opens after this one instead.
+    if (ImGui::IsPopupOpen("About Horizon Engine##about"))
+        EditorWidgets::pinDialogToEditorWindow();
+    if (ImGui::BeginPopupModal("About Horizon Engine##about", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Its own scope for the same reason as the join dialog above: drawn out
+        // here, with the Help menu long closed. Until now its two buttons were
+        // counted as covered by the coverage scan only because that scan walks
+        // the file top to bottom and had "Help" still open from line 2071 — an
+        // accident of position, and one entry away from being real.
+        HE::Ed::Help::Scope helpScope("About");
+        if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
+        ImGui::TextUnformatted("Horizon Engine");
+        if (ctx.fontSubheading) ImGui::PopFont();
+        ImGui::TextDisabled("Version %s", HE_VERSION_FULL);
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
+        ImGui::Spacing();
+        if (EditorWidgets::smallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (EditorWidgets::smallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
+        ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(120.0f, 0.0f))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
+static void drawHostingConfirmation(AppContext& ctx, const auto& requestGuardedInner)
+{
+    // ── Hosting-a-session confirmation ──────────────────────────────────────
+    // Ahead of the unsaved-changes prompt, because it is the question with the
+    // wider consequence: closing or switching the project while hosting takes
+    // the session down for every peer connected to this editor. Confirm hands
+    // the action on to the ordinary guard, which may still ask about unsaved
+    // work; Cancel drops it entirely and the session keeps running.
+    if (s_openCollabModal)
+    {
+        ImGui::OpenPopup("Collaboration Session##host");
+        s_openCollabModal = false;
+    }
+    {
+        EditorWidgets::pinDialogToEditorWindow(ImVec2(420.0f, 0.0f));
+        if (ImGui::BeginPopupModal("Collaboration Session##host", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        {
+            const GuardedAction action = s_collabAction;
+            const std::string   arg    = s_collabArg;
+            {
+                EditorWidgets::WrapText wrap;
+                // The participant list includes this editor, so the count of
+                // OTHERS is one less — and never negative, because a host that
+                // nobody has joined yet still appears in it.
+                const int peers = ctx.collab
+                    ? std::max(0, static_cast<int>(ctx.collab->participants().size()) - 1) : 0;
+                ImGui::TextUnformatted("You are hosting a collaboration session.");
+                ImGui::Spacing();
+                if (peers > 0)
+                    ImGui::Text("%d other %s connected to this editor.",
+                                peers, peers == 1 ? "person is" : "people are");
+                ImGui::TextUnformatted(
+                    action == GuardedAction::Quit || action == GuardedAction::InstallUpdate
+                        ? "Quitting ends the session for everyone."
+                        : "Leaving this project ends the session for everyone. "
+                          "A session belongs to one project, so it cannot follow "
+                          "you into the next.");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            const char* runLabel = action == GuardedAction::Quit      ? "Quit Anyway"
+                                 : action == GuardedAction::InstallUpdate ? "Update Anyway"
+                                 : action == GuardedAction::CloseProject ? "Close Anyway"
+                                                                        : "Switch Anyway";
+            if (EditorWidgets::dangerButton(runLabel, ImVec2(130, 0)))
+            {
+                s_collabAction = GuardedAction::None;
+                ImGui::CloseCurrentPopup();
+                requestGuardedInner(action, arg);
+            }
+            ImGui::SameLine();
+            if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)) ||
+                ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                s_collabAction = GuardedAction::None;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+}
+
+static void drawNewProjectPopup(AppContext& ctx)
+{
+    // ── New Project Popup ─────────────────────────────────────────────────────
+    // Templates: ProjectHubPanel::kPresetNames/kPresetDescs — shared with the
+    // Hub's own create form so the two lists cannot drift apart.
+    // Index order MUST match ProjectScriptLanguage (HorizonCode, Lua, Python, Cpp).
+    static const std::array<const char*, 4> kLangNames = {
+        "HorizonCode (Visual Scripting)", "Lua", "Python", "C++",
+    };
+    static const std::array<const char*, 4> kLangDesc = {
+        "Node graphs; compiles to native C++ on export.",
+        "Lightweight text scripting (default script backend).",
+        "CPython scripting (needs a Python install on dev machines).",
+        "Native GameLogic library, built with your own toolchain.",
+    };
+
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
+    EditorWidgets::pinDialogToEditorWindow();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8.0f, 8.0f));
+    if (ImGui::BeginPopupModal("##NewProjectPopup", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+    {
+        ImGui::PopStyleVar(2);
+        // This form is the Project Hub's create form in a modal — the same
+        // controls, so the same help scope. Without it the rows here are
+        // filed under whatever scope happens to precede them in this file,
+        // which is the Help MENU.
+        HE::Ed::Help::Scope helpScope("Project Hub");
+
+        if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
+        ImGui::TextUnformatted("New Project");
+        if (ctx.fontSubheading) ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Project Name");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##npName", ctx.hubProjectName, ctx.hubProjectNameSize);
+
+        ImGui::Spacing();
+        ImGui::Text("Project Directory");
+        ImGui::SetNextItemWidth(-70.0f);
+        ImGui::InputText("##npDir", ctx.hubProjectDir, ctx.hubProjectDirSize);
+        ImGui::SameLine();
+        if (ImGui::Button("Browse##npBrowse", ImVec2(62.0f, 0)))
+        {
+#ifdef _WIN32
+            IFileOpenDialog* pDlg = nullptr;
+            if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg))))
+            {
+                DWORD dwOpts = 0;
+                pDlg->GetOptions(&dwOpts);
+                pDlg->SetOptions(dwOpts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+                HWND hwnd = nullptr;
+                if (ctx.window)
+                    hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+                        SDL_GetWindowProperties(ctx.window->GetNativeWindow()),
+                        SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+                if (SUCCEEDED(pDlg->Show(hwnd)))
+                {
+                    IShellItem* pItem = nullptr;
+                    if (SUCCEEDED(pDlg->GetResult(&pItem)))
+                    {
+                        PWSTR pPath = nullptr;
+                        if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pPath)))
+                        {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, pPath, -1,
+                                nullptr, 0, nullptr, nullptr);
+                            if (len > 0 && len <= ctx.hubProjectDirSize)
+                                WideCharToMultiByte(CP_UTF8, 0, pPath, -1,
+                                    ctx.hubProjectDir, ctx.hubProjectDirSize, nullptr, nullptr);
+                            CoTaskMemFree(pPath);
+                        }
+                        pItem->Release();
+                    }
+                }
+                pDlg->Release();
+            }
+#else
+            SDL_ShowOpenFolderDialog(
+                [](void* userdata, const char* const* filelist, int)
+                {
+                    auto* b = static_cast<SDLDialogBridge*>(userdata);
+                    if (filelist && filelist[0])
+                    {
+                        *b->pendingDirResult = filelist[0];
+                        *b->pendingDirReady  = true;
+                    }
+                },
+                ctx.dialogBridge,
+                ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+                nullptr, false);
+#endif
+        }
+
+        if (ctx.pendingDirReady)
+        {
+            strncpy(ctx.hubProjectDir, ctx.pendingDirResult.c_str(), ctx.hubProjectDirSize - 1);
+            ctx.hubProjectDir[ctx.hubProjectDirSize - 1] = '\0';
+            ctx.pendingDirReady  = false;
+            ctx.pendingDirResult.clear();
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("Template");
+        ImGui::SetNextItemWidth(-1);
+        // All of them, not the first five — see the Project Hub's twin.
+        ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
+            ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount,
+            ProjectHubPanel::kPresetCount);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::Text("Scripting Language");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::Combo("##npLang", &ctx.hubSelectedLang,
+            kLangNames.data(), static_cast<int>(kLangNames.size()));
+        ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
+        ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
+        ImGui::PopStyleColor();
+
+        // Advanced Shader Effects: whether this project may author materials
+        // (docs/he-apps-plan.md A0). Only for APPLICATIONS — a game without
+        // materials is not a thing anyone wants, and offering the switch
+        // everywhere is how an Empty project ended up with materials
+        // disabled by a checkbox its author read as harmless.
+        //
+        // Forced back on for every other template, so leaving it unticked and
+        // then picking Game cannot carry the setting across.
+        if (isAppPreset(static_cast<ProjectPreset>(ctx.hubSelectedPreset)))
+        {
+            ImGui::Spacing();
+            ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
+            ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
+                ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
+                : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
+                  "Smaller build, no GPU required.");
+        }
+        else
+            ctx.hubAdvancedShaderFx = true;
+
+        ImGui::Spacing();
+        if (!ctx.hubCreateError.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+            ImGui::TextWrapped("%s", ctx.hubCreateError.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
+
+        ImGui::Separator();
+        ImGui::Spacing();
+        const float btnW = (480.0f - 16.0f * 2 - 8.0f) * 0.5f;
+        if (EditorWidgets::primaryButton("Create", ImVec2(btnW, 0)))
+        {
+            ctx.hubCreateError.clear();
+            std::string name = ctx.hubProjectName;
+            std::string dir  = ctx.hubProjectDir;
+            if (name.empty())
+                ctx.hubCreateError = "Please enter a project name.";
+            else if (dir.empty())
+                ctx.hubCreateError = "Please select a project directory.";
+            else
+            {
+                std::filesystem::path projRoot = std::filesystem::path(dir) / name;
+                bool ok = ctx.projectManager->createNewProject(
+                    projRoot.string(), name,
+                    static_cast<ProjectPreset>(ctx.hubSelectedPreset),
+                    static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang),
+                    /*appProject*/ false, ctx.hubAdvancedShaderFx);
+                if (ok)
+                {
+                    const std::string& heprojPath = ctx.projectManager->currentProject().path;
+                    ctx.globalState->addKnownProject(heprojPath);
+                    ctx.globalState->writeConfig();
+                    ctx.contentRefreshPending = true;
+                    // Said here rather than left to the content-refresh modal to
+                    // infer. This was the one project-opening path that did not
+                    // set it, so the modal had to set it for everybody — and a
+                    // modal that turns "a project is open" on unconditionally
+                    // turns it on after a CLOSE too.
+                    ctx.projectLoaded = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                else
+                {
+                    HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
+                           "Check that the folder exists and is writable.");
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (EditorWidgets::cancelButton("Cancel", ImVec2(btnW, 0)))
+        {
+            ctx.hubCreateError.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    else
+    {
+        ImGui::PopStyleVar(2);
+    }
+}
+
+static void drawFooterBar(AppContext& ctx)
+{
+    // ── Footer bar ────────────────────────────────────────────────────────────
+    // Must be rendered BEFORE the DockSpace window so ImGui processes it first
+    // and docked windows cannot overlap it.
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - kFooterH), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, kFooterH), ImGuiCond_Always);
+    ImGui::SetNextWindowViewport(vp->ID);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(8.0f, 4.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
+
+    // NoBringToFrontOnFocus: this is chrome pinned to the window edge. Clicking
+    // Undo down here must not lift the bar over a floating panel that overlaps it.
+    ImGui::Begin("##EditorFooter", nullptr,
+        ImGuiWindowFlags_NoTitleBar            |
+        ImGuiWindowFlags_NoResize              |
+        ImGuiWindowFlags_NoMove                |
+        ImGuiWindowFlags_NoScrollbar           |
+        ImGuiWindowFlags_NoSavedSettings       |
+        ImGuiWindowFlags_NoDocking             |
+        ImGuiWindowFlags_NoFocusOnAppearing    |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNav                 |
+        ImGuiWindowFlags_NoDecoration);
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor();
+
+	if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
+
+	// Left — Undo / Redo buttons
+	{
+		constexpr float btnSize = 16.0f;
+		ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.10f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.20f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 0.0f));
+
+		const bool canUndo = canUndoNow(ctx);
+		const bool canRedo = canRedoNow(ctx);
+
+		ImGui::BeginDisabled(!canUndo);
+		bool doUndo;
+		if (ctx.toolbarIcons.undo)
+			doUndo = ImGui::ImageButton("##footerUndo", ctx.toolbarIcons.undo, ImVec2(btnSize, btnSize));
+		else
+			doUndo = ImGui::Button("Undo");
+		ImGui::EndDisabled();
+
+		ImGui::SameLine(0.0f, 4.0f);
+
+		ImGui::BeginDisabled(!canRedo);
+		bool doRedo;
+		if (ctx.toolbarIcons.redo)
+			doRedo = ImGui::ImageButton("##footerRedo", ctx.toolbarIcons.redo, ImVec2(btnSize, btnSize));
+		else
+			doRedo = ImGui::Button("Redo");
+		ImGui::EndDisabled();
+
+		// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y) by
+		// default — whatever Preferences ▸ Shortcuts says now. Only where the
+		// tab's undo IS the world's (see activeTabUsesWorldUndo): the chord on
+		// an asset editor with its own stack belongs to that editor, and
+		// answering it here too would take the last scene edit back with it.
+		// The buttons above stay the way onto the scene stack from any tab.
+		if (activeTabUsesWorldUndo(ctx))
+		{
+			if (EditorShortcuts::pressed("edit.undo"))    doUndo = true;
+			if (EditorShortcuts::pressed("edit.redo") ||
+			    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
+		}
+
+		if (doUndo) undoNow(ctx);
+		if (doRedo) redoNow(ctx);
+
+		ImGui::PopStyleVar();
+		ImGui::PopStyleColor(3);
+	}
+
+	// Source control, immediately right of Undo/Redo — the bottom-left corner
+	// every editor keeps it in. Ambient by design: "eleven files I have not
+	// committed" is something to notice in passing, not to go looking for.
+	ImGui::SameLine(0.0f, 14.0f);
+	if (SourceControlPanel::DrawFooterStatus(ctx))
+		revealFloatingWindow(s_showSourceControl, "Source Control");
+
+	// The task board, next to it — the other thing down here about the
+	// project rather than the editor. Its list opens from the overlay pass;
+	// its width stops short of the centred status line (TaskBoardFooter.h).
+	ImGui::SameLine(0.0f, 14.0f);
+	TaskBoardFooter::DrawFooter(ctx, TaskBoardFooter::budget(ImGui::GetCursorPosX(), ImGui::GetWindowWidth()));
+
+	// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
+	// The resolution is the actual viewport framebuffer size the scene renders at.
+	std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
+	int viewportPxW = 0, viewportPxH = 0;
+	ViewportPanel::renderSizePx(viewportPxW, viewportPxH);
+	if (viewportPxW > 0 && viewportPxH > 0)
+		fpsText = std::to_string(viewportPxW) + "x" + std::to_string(viewportPxH)
+		        + "   " + fpsText;
+	const float fpsW = ImGui::CalcTextSize(fpsText.c_str()).x;
+	ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
+	ImGui::Text("%s", fpsText.c_str());
+
+	// ── The right-anchored group ──────────────────────────────────────────
+	// Everything below is placed by subtracting the width of everything to
+	// its right, plus a 16px gap for each neighbour that is actually there.
+	// The chain is hand-maintained: inserting a widget here means editing
+	// EVERY block to its left as well, or the two overlap silently. Right to
+	// left the order is: FPS, your team status, notification bell, presence,
+	// online team members, download queue, session activity, MCP.
+
+	// Your team status, between the counters and the bell (topic 202): your
+	// face while signed in to the team server, a red X otherwise, which opens
+	// the sign-in modal (TeamView::drawFooterStatus). Always there, like the
+	// bell, so "am I signed in" is answered in the same corner every time.
+	// teamSlot is its width plus the gap to the bell, subtracted by every
+	// block to its left.
+	const float teamW    = ctx.team ? TeamView::footerStatusWidth() : 0.0f;
+	const float teamSlot = teamW > 0.0f ? teamW + 10.0f : 0.0f;
+	if (teamW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+		if (TeamView::drawFooterStatus(*ctx.team,
+		                               { &ctx.editorConfig.CollabRelayAddress,
+		                                 &ctx.editorConfig.TeamName,
+		                                 &ctx.editorConfig.TeamMember },
+		                               TeamView::editorForm()))
+			revealFloatingWindow(s_showTeam, "Team");
+	}
+
+	// The notification bell, left of the counters and your team status. It sits at the
+	// right-hand end of the group rather than the left because it is the only
+	// item here that is not transient — presence, the download queue and the
+	// activity line all come and go, so a bell placed left of them would move
+	// across half the footer depending on what else happened to be running,
+	// and the one control the user is meant to reach for when something went
+	// wrong must be in the same corner every time.
+	const float bellW = NotificationBar::FooterWidth(ctx);
+	if (bellW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+		NotificationBar::DrawFooter(ctx);
+	}
+
+	// Collaboration presence, immediately left of the counters — ambient by
+	// design: who else is in the scene, without a window open.
+	const float presenceW = CollabPresenceBar::FooterWidth(ctx);
+	if (presenceW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f
+		                - (bellW > 0.0f ? 16.0f : 0.0f));
+		CollabPresenceBar::DrawFooter(ctx);
+	}
+
+	// Who else in the team is online and NOT in the session, left of the
+	// session's faces (topic 202): rounded squares with a green dot, and a
+	// rule between the two clusters, so "online somewhere" never reads as
+	// "here with you". Joining moves a face from this cluster to that one.
+	// Signed in it is there with or without a session. Stacked; its menu
+	// (every member, Invite) is drawn from the overlay pass below.
+	const float onlineW = ctx.team ? TeamView::footerOnlineWidth(*ctx.team) : 0.0f;
+	if (onlineW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f
+		                - (bellW > 0.0f ? 16.0f : 0.0f)
+		                - (presenceW > 0.0f ? 16.0f : 0.0f));
+		TeamView::drawFooterOnline(*ctx.team, presenceW > 0.0f);
+	}
+	// Someone who just joined slides from the stack to their face in the
+	// session's cluster. Outside the block above: the stack may be gone by
+	// now (the last one online joined). Drawn over both clusters, takes
+	// no width, so the chain above does not count it.
+	if (ctx.team) TeamView::drawFooterJoins(*ctx.team, CollabPresenceBar::FooterFaces());
+
+	// EngineContent SFTP download queue — right-aligned, left of the presence
+	// clusters. Deliberately part of the RIGHT group rather than growing
+	// rightwards from source control on the left: the label is an asset
+	// filename of unbounded length, and a left-anchored item that grows runs
+	// straight through the centred "Ready" text below. Right-aligning bounds
+	// it against a fixed edge instead. Draws nothing when idle.
+	const float syncW = EngineContentSyncBar::FooterWidth(ctx);
+	if (syncW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f
+		                - (bellW > 0.0f ? 16.0f : 0.0f)
+		                - (presenceW > 0.0f ? 16.0f : 0.0f)
+		                - (onlineW > 0.0f ? 16.0f : 0.0f));
+		EngineContentSyncBar::DrawFooter(ctx);
+	}
+
+	// What the session just did to the project: assets other participants
+	// created, and the host's answer to one of ours. Left of the download
+	// queue, in the same right-anchored group and for the same reason — the
+	// text is a sentence of unbounded length, and only a fixed edge keeps it
+	// out of the centred status label.
+	// Hoisted out of the `if` it used to be scoped to: the block below needs
+	// this width too, and asking a second time would be asking a DIFFERENT
+	// question — clicking the activity line clears it, so a second call in
+	// the same frame returns 0 for a line that was just drawn, and everything
+	// to its left would jump one widget's width to the right for that frame.
+	const float actW = CollabActivityBar::FooterWidth(ctx);
+	if (actW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f
+		                - (bellW > 0.0f ? 16.0f : 0.0f)
+		                - (presenceW > 0.0f ? 16.0f : 0.0f)
+		                - (onlineW > 0.0f ? 16.0f : 0.0f)
+		                - (syncW > 0.0f ? 16.0f : 0.0f));
+		if (CollabActivityBar::DrawFooter(ctx))
+			revealFloatingWindow(s_showCollab, "Collaboration");
+	}
+
+	// Is an external tool driving this editor? Left-most of the right-hand
+	// group, and the only one of these that is about who ELSE may be changing
+	// the scene without a face or a cursor to show for it. Draws nothing at
+	// all while remote control is off, which is almost every session — so
+	// when it does appear, it means something.
+	//
+	// The chain above is hand-maintained: this block subtracts the width of
+	// every widget to its right plus 16px per neighbour that is actually
+	// there. Being at the left end is what keeps the edit to one block —
+	// inserting anywhere else means editing everything to its left as well.
+	const float mcpW = McpStatusBar::FooterWidth(ctx);
+	if (mcpW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f
+		                - (bellW > 0.0f ? 16.0f : 0.0f)
+		                - (presenceW > 0.0f ? 16.0f : 0.0f)
+		                - (onlineW > 0.0f ? 16.0f : 0.0f)
+		                - (syncW > 0.0f ? 16.0f : 0.0f)
+		                - (actW > 0.0f ? 16.0f : 0.0f));
+		McpStatusBar::DrawFooter(ctx);
+	}
+
+	// A build whose window was put away (Hide in the Build window): its progress,
+	// and a click brings the window back. Left-most of the group, like the block
+	// above, so adding it meant editing nothing to its right. Draws nothing unless
+	// a run is going on with the window hidden.
+	if (const float buildW = BuildProgressDialog::FooterWidth(ctx); buildW > 0.0f)
+	{
+		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - teamSlot - bellW - presenceW - onlineW - syncW - actW - mcpW - buildW
+		                - ImGui::GetStyle().WindowPadding.x - 16.0f
+		                - (bellW > 0.0f ? 16.0f : 0.0f)
+		                - (presenceW > 0.0f ? 16.0f : 0.0f)
+		                - (onlineW > 0.0f ? 16.0f : 0.0f)
+		                - (syncW > 0.0f ? 16.0f : 0.0f)
+		                - (actW > 0.0f ? 16.0f : 0.0f)
+		                - (mcpW > 0.0f ? 16.0f : 0.0f));
+		BuildProgressDialog::DrawFooter(ctx);
+	}
+
+	// Middle — status
+	// Reward feedback (EditorRewards.h) lives here: the moment's line fading
+	// back to "Ready", and the progress counters beside "Ready". The
+	// BuildSucceeded edge detector runs at the top of render(), every frame.
+	HE::Ed::Rewards::drawFooterStatus(ctx, "Ready");
+
+    if (ctx.fontBody) ImGui::PopFont();
+
+    ImGui::End();
+}
+
+static void drawEditorTabBar(AppContext& ctx)
+{
+    // ── Editor TabBar (below menu bar, above DockSpace) ────────────────────────
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, kTabBarH), ImGuiCond_Always);
+    ImGui::SetNextWindowViewport(vp->ID);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(4.0f, 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_TabRounding,      2.0f);
+    {
+        using namespace HE::Ed::Theme;
+        ImGui::PushStyleColor(ImGuiCol_WindowBg,   warm(0.115f));
+        ImGui::PushStyleColor(ImGuiCol_Tab,        warm(0.165f));
+        ImGui::PushStyleColor(ImGuiCol_TabHovered, mix(warm(0.165f), AccentHi, 0.26f));
+        ImGui::PushStyleColor(ImGuiCol_TabActive,  mix(warm(0.225f), AccentHi, 0.14f));
+    }
+
+    // NoBringToFrontOnFocus for the same reason as the footer: switching tabs
+    // must not lift this strip over a floating panel.
+    ImGui::Begin("##EditorTabBar", nullptr,
+        ImGuiWindowFlags_NoTitleBar            |
+        ImGuiWindowFlags_NoResize              |
+        ImGuiWindowFlags_NoMove                |
+        ImGuiWindowFlags_NoScrollbar           |
+        ImGuiWindowFlags_NoSavedSettings       |
+        ImGuiWindowFlags_NoDocking             |
+        ImGuiWindowFlags_NoFocusOnAppearing    |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNav                 |
+        ImGuiWindowFlags_NoDecoration);
+
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(4);
+
+    // ── Tab state (owned by AppContext / EditorApplication) ───────────
+    auto& s_tabs      = ctx.tabs;
+    auto& s_activeTab = ctx.activeTab;
+
+    // Open request from inside an editor panel (e.g. double-clicking a Material
+    // Function node) — same find-or-push flow as the Content Browser double-click.
+    // The request comes from ContentManager::resolveAbsolutePath, which is not
+    // the spelling the Content Browser's tile has: EditorTabs matches the asset,
+    // not the string.
+    if (const std::string req = MaterialEditorPanel::takeOpenRequest(); !req.empty())
+        EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, req, {},
+                                ctx.contentManager);
+
+    // The texture viewer: a just-imported image, or a raw-image tab whose Import
+    // ran and which now becomes the asset's tab (`replacing`) rather than a second
+    // one opening beside it. Also where the viewer frees last frame's textures.
+    TextureViewerPanel::beginFrame();
+    for (auto req = TextureViewerPanel::takeOpenRequest(); !req.path.empty();
+         req = TextureViewerPanel::takeOpenRequest())
+    {
+        if (EditorTabs::find(s_tabs, req.path, ctx.contentManager) < 0 && !req.replacing.empty())
+        {
+            // The raw-image tab becomes the imported asset's tab in place.
+            const int old = EditorTabs::find(s_tabs, req.replacing, ctx.contentManager);
+            if (old >= 0)
+            {
+                TextureViewerPanel::forget(s_tabs[old].assetPath);
+                s_tabs[old].assetPath = req.path;
+                s_tabs[old].label     = std::filesystem::path(req.path).stem().string();
+            }
+        }
+        EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, req.path,
+            std::filesystem::path(req.path).stem().string(), ctx.contentManager);
+    }
+
+    // A "go to node" from the console (HcExecTrace::requestReveal): the tab
+    // half. The two editor-owned graphs are their reserved tab paths; a
+    // class or widget is a content-relative path that has to become the
+    // full path the tab bar keys on. The node half stays pending for the
+    // panel, which selects it once the tab draws (LevelScriptPanel /
+    // UIEditorPanel). Compared as paths, not strings: the browser's tab
+    // paths come from a directory walk and this one from a join, and on
+    // Windows those spell the separators differently.
+    if (std::string revealTab; HcExecTrace::takeRevealTab(revealTab))
+    {
+        const bool reserved = revealTab == LevelScriptPanel::kTabPath ||
+                              revealTab == GameInstancePanel::kTabPath;
+        const std::string full = reserved ? revealTab
+            : ctx.contentManager ? ctx.contentManager->resolveAbsolutePath(revealTab)
+            : std::string();
+        if (full.empty() || (!reserved && !std::filesystem::exists(full)))
+            HcExecTrace::cancelReveal();   // nothing to open; drop the node half too
+        else
+        {
+            const std::string label = reserved
+                ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
+                : std::filesystem::path(full).stem().string();
+            EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, full, label,
+                                    ctx.contentManager);
+        }
+    }
+
+    // A "go to line" from the console (ScriptEditorPanel::requestReveal):
+    // the tab half, for a Lua/Python script. The path is already the full
+    // one (the console resolved it), so this is the same find-or-push as
+    // above; the line half stays pending for the panel, which selects it
+    // once the tab draws. Same path comparison as the node reveal.
+    if (std::string revealScript; ScriptEditorPanel::takeRevealPath(revealScript))
+    {
+        if (!std::filesystem::exists(revealScript))
+            ScriptEditorPanel::cancelReveal();   // gone since the error was logged
+        else
+            EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, revealScript,
+                std::filesystem::path(revealScript).stem().string(), ctx.contentManager);
+    }
+
+    if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
+
+    if (ImGui::BeginTabBar("##MainTabBar",
+        ImGuiTabBarFlags_Reorderable |
+        ImGuiTabBarFlags_FittingPolicyScroll |
+        ImGuiTabBarFlags_NoCloseWithMiddleMouseButton))
+    {
+        // Closing a tab drops its cached editor state (text buffers, graphs,
+        // preview textures) so per-session cost stays flat no matter how many
+        // tabs were opened. Dirty states are kept: reopening the tab restores
+        // the unsaved edits instead of silently discarding them.
+        auto forgetTabState = [&ctx](const AppContext::EditorTab& t){
+            if (t.assetPath.empty()) return;
+            // Assets a panel's PREVIEW streamed in go back regardless of the
+            // dirty check below: an unsaved graph is worth keeping in memory,
+            // the mesh its preview happened to sit on is not. Panels leave
+            // anything the scene or another tab still uses alone.
+            MaterialEditorPanel::releasePreviewAssets(ctx, t.assetPath);
+            if (EditorUI::tabHasUnsavedEdits(t.assetPath)) return;
+            // The panel list itself lives in discardPanelState — one place
+            // to add a new panel to, rather than two that drift apart.
+            EditorUI::discardPanelState(ctx, t.assetPath);
+        };
+
+        for (int i = 0; i < static_cast<int>(s_tabs.size()); )
+        {
+            auto& tab = s_tabs[i];
+            if (!tab.open)
+            {
+                forgetTabState(tab);
+                s_tabs.erase(s_tabs.begin() + i);
+                // Everything after it moved down one: a select request that
+                // was aimed at a later tab (a tab opened in the frame this one
+                // was closed in) would otherwise land on its neighbour or on
+                // nothing at all, and the asset just opened would not come up.
+                if (s_tabSelectRequest > i) --s_tabSelectRequest;
+                continue;
+            }
+
+            ImGuiTabItemFlags flags = ImGuiTabItemFlags_None;
+            // Force-select only on an explicit one-shot request (double-click). Using
+            // s_activeTab here every frame is wrong: BeginTabItem mutates s_activeTab
+            // mid-loop, so the Scene tab (rendered first) steals it back — and the
+            // constant SetSelected also swallows manual tab clicks.
+            if (i == s_tabSelectRequest) flags |= ImGuiTabItemFlags_SetSelected;
+
+            bool pOpen = tab.closable ? tab.open : true;
+            // Stable ID (### + assetPath) so appending a dirty marker to the visible
+            // label never changes the tab's identity — which would reset its state.
+            const bool tabDirty = EditorUI::tabHasUnsavedEdits(tab.assetPath);
+            // V4 (EditorRewards.h, "The visual cues"): just saved, the
+            // " *" makes room for a drawn check — blanks as wide as the
+            // marker, so the tab keeps its width until the check is gone.
+            const HE::Ed::Rewards::TabMark mark =
+                HE::Ed::Rewards::tabMark(ctx, tab.assetPath, tabDirty);
+            std::string suffix = tabDirty ? " *" : "";
+            if (mark.check)
+            {
+                const float markW = ImGui::CalcTextSize((tab.label + " *").c_str()).x;
+                suffix = " ";
+                while (ImGui::CalcTextSize((tab.label + suffix).c_str()).x < markW
+                       && suffix.size() < 8)
+                    suffix += ' ';
+            }
+            const std::string shown = tab.label + suffix
+                + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
+            const bool tabOpen =
+                ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags);
+            if (mark.check)
+            {
+                // The tab's own rect, straight after BeginTabItem (whatever
+                // it returned): the label starts one frame padding in, and
+                // the marker's "*" stood after the label and a space.
+                const ImVec2 mn    = ImGui::GetItemRectMin();
+                const float  lineH = ImGui::GetTextLineHeight();
+                const float  size  = std::floor(lineH * 0.62f);
+                const float  x     = mn.x + ImGui::GetStyle().FramePadding.x
+                                   + ImGui::CalcTextSize((tab.label + " ").c_str()).x;
+                const float  y     = mn.y + ImGui::GetStyle().FramePadding.y
+                                   + (lineH - size) * 0.5f;
+                HE::Ed::Rewards::drawCheckMark(x, y, size, mark.stroke, mark.alpha);
+            }
+            if (tabOpen)
+            {
+                s_activeTab = i;
+                ImGui::EndTabItem();
+            }
+            if (tab.closable) tab.open = pOpen;
+            ++i;
+        }
+        // Remove closed tabs (dropping their cached editor state)
+        for (const auto& t : s_tabs)
+            if (t.closable && !t.open) forgetTabState(t);
+        s_tabs.erase(
+            std::remove_if(s_tabs.begin(), s_tabs.end(),
+                [](const AppContext::EditorTab& t){ return t.closable && !t.open; }),
+            s_tabs.end());
+        // Keep the active index valid after a tab closes (else it dangles or points
+        // at the wrong tab). Fall back to the Scene tab (index 0) when out of range.
+        if (s_activeTab >= static_cast<int>(s_tabs.size()))
+            s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+        if (s_activeTab < 0) s_activeTab = 0;
+        s_tabSelectRequest = -1;   // consume the one-shot select request
+
+        ImGui::EndTabBar();
+    }
+
+    if (ctx.fontBody) ImGui::PopFont();
+
+    ImGui::End();
+}
+
+#endif // HE_IMGUI_ENABLED
 
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
@@ -1176,33 +2343,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
 	// A project failed to open (openProjectAt); the "##EditorOpenError" modal
 	// is opened where it is drawn, on the frame after.
-	static bool s_openProjectErrorPopup = false;
-
-	// ── Unsaved-changes guard state ─────────────────────────────────────────
-	// A destructive action requested while the scene is dirty is stashed here and
-	// the "Unsaved Changes" modal is raised; the action runs when the user picks
-	// Save (after the save completes) or Don't Save. s_guardSaveThenAct bridges the
-	// async Save-As dialog: it tells the file-result handler to run s_guardAction
-	// once the freshly chosen path has been written.
-	static GuardedAction s_guardAction      = GuardedAction::None;
-	static std::string   s_guardArg;            // path payload for OpenScenePath
-	static bool          s_openUnsavedModal = false;
-	static bool          s_guardSaveThenAct = false;
-	// The same stash for the step BEFORE that one: the confirmation a host gets
-	// when a session-ending action would drop the peers connected to this editor.
-	static GuardedAction s_collabAction     = GuardedAction::None;
-	static std::string   s_collabArg;
-	static bool          s_openCollabModal  = false;
-	// Why the prompt's last save attempt failed ("" = none). A failed write must
-	// never let the guarded action run — the modal stays open with the reason and
-	// the entries that are still dirty.
-	static std::string   s_guardSaveError;
-
-	// One-shot request to programmatically select a top-level tab (set by a
-	// Content-Browser double-click). -1 = none. The tab bar applies SetSelected for
-	// exactly one frame and then clears it, so it never fights the user's own tab
-	// clicks — applying SetSelected every frame would (and did) do both.
-	static int           s_tabSelectRequest = -1;
 
 	auto sceneDialogDir = [&]() -> std::string
 	{
@@ -1271,12 +2411,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	};
 	// Reward moment (EditorRewards.h): Saved — a successful synchronous save of
 	// a scene that HAD unsaved edits (the Save-As path fires in its handler).
-	auto doSaveScene = [&]()
+	// False only when a synchronous write failed (the Save-As dialog being in
+	// flight is not a failure): the guarded Save below must not carry on to quit or
+	// switch project on top of a scene that did not reach the disk.
+	auto doSaveScene = [&]() -> bool
 	{
-		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return; }
+		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return true; }
 		const bool wasDirty = ctx.sceneDirty;
-		if (writeScene() && wasDirty)
+		const bool ok = writeScene();
+		if (ok && wasDirty)
 			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
+		return ok;
 	};
 	// ── Save (Ctrl/Cmd+S): the tab you are LOOKING AT ──────────────────────
 	// Saving the scene from inside a material graph is the wrong document: the
@@ -1299,8 +2444,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
-		    || path == EditorSettingsPanel::kTabPath
-		    || path == ProjectSettingsPanel::kTabPath)
+		    || path == EditorSettingsPanel::kTabPath)
 		{
 			doSaveScene();
 			return;
@@ -1481,6 +2625,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		case GuardedAction::OpenProjectPath:   openProjectAt(arg);                 break;
 		case GuardedAction::CloseProject:      doCloseProject();                   break;
 		case GuardedAction::Quit:              if (ctx.quit) ctx.quit();           break;
+		// Reached only through the prompt (or with nothing unsaved): start
+		// HorizonUpdater on the update worker; finishInstall() quits only once it
+		// really started. A failure leaves the editor, the scene and the install
+		// exactly as they were.
+		case GuardedAction::InstallUpdate:
+			SelfUpdateDialog::beginInstall(ctx);
+			break;
 		case GuardedAction::None:                                                  break;
 		}
 	};
@@ -1493,7 +2644,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	auto endsSession = [](GuardedAction a)
 	{
 		return a == GuardedAction::Quit || a == GuardedAction::CloseProject ||
-		       a == GuardedAction::OpenProjectDialog || a == GuardedAction::OpenProjectPath;
+		       a == GuardedAction::OpenProjectDialog || a == GuardedAction::OpenProjectPath ||
+		       a == GuardedAction::InstallUpdate;
 	};
 	// (asset path, label to show) per unsaved asset. The path is what the prompt's
 	// per-asset Save button writes through EditorUI::saveAsset.
@@ -1521,6 +2673,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		const bool tabsDirty = endsSession(a) && !unsavedTabEntries().empty();
 		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
+		if (a == GuardedAction::InstallUpdate)
+			HE_LOG_INFO(Editor, "Editor: unsaved changes (scene %s, %zu asset tab(s)) -- asking before the update",
+			            ctx.sceneDirty ? "dirty" : "clean", unsavedTabEntries().size());
 		s_guardAction      = a;
 		s_guardArg         = arg;
 		s_guardSaveThenAct = false;
@@ -1557,6 +2712,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.exitRequested = false;
 		requestGuarded(GuardedAction::Quit);
 	}
+
+	// Help ▸ Check for Updates ▸ Restart to Update: through the same door as
+	// Quit, so unsaved scene and asset-tab edits are asked about first.
+	if (SelfUpdateDialog::takeInstallRequest())
+		requestGuarded(GuardedAction::InstallUpdate);
 
 	// A clone finished from Preferences ▸ Source Control: open it the way File ▸
 	// Open Project does, unsaved-work prompt and session teardown included.
@@ -1614,6 +2774,35 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// docked into the scene tab and is not drawn on any other, so the scene tab
 	// has to come forward before the panel can navigate to the asset.
 	if (ContentBrowserPanel::takeRevealTabSwitch()) openViewportTab();
+	// A Task Board chip clicked last frame (TaskBoardPanel.h, "Jumps"). Every
+	// target lives on the scene tab — the Content Browser, the Outliner, the
+	// scene itself, a docked panel — so that comes forward first.
+	if (const TaskBoardPanel::Jump jump = TaskBoardPanel::takeJump();
+	    jump.kind != TaskBoardPanel::Jump::Kind::None)
+	{
+		using K = TaskBoardPanel::Jump::Kind;
+		openViewportTab();
+		switch (jump.kind)
+		{
+		case K::Asset:  ContentBrowserPanel::revealAsset(jump.target); break;
+		case K::Scene:
+			// The open scene is already there; any other goes through the
+			// unsaved-changes prompt like File ▸ Open Scene. An entity jump that
+			// needed its scene selects the entity once it is loaded.
+			if (!EditorTabs::sameAsset(ctx.currentScenePath, jump.target, ctx.contentManager))
+				requestGuarded(GuardedAction::OpenScenePath, jump.target);
+			break;
+		case K::Entity:
+			// Already selected by the panel; show where. The latch, because the
+			// Outliner may not exist until the scene tab has drawn once.
+			ImGui::SetWindowFocus("World Outliner");
+			s_revealTitle       = "World Outliner";
+			s_revealFocusFrames = 2;
+			break;
+		case K::Panel:  docsPanelOpener(jump.target.c_str()); break;
+		case K::None:   break;
+		}
+	}
 	// View-menu panel toggle. Ticking one on has to make it VISIBLE, and where
 	// that is depends on how the user keeps it: a FLOATING panel draws over
 	// whichever tab is open, so it is only pulled to the front (it may already
@@ -1632,10 +2821,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// Open request raised outside this function (e.g. the Source Control window's
 	// "set up the remote in Preferences" pointer) — consumed here where the tab
 	// list lives.
+	// A project page was asked for (the Source Control window's "set up the remote"):
+	// the project pages are Preferences pages now, so forward it before the take.
+	if (ProjectSettingsPanel::takeOpenRequest())
+		EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::requestedPage());
 	if (EditorSettingsPanel::takeOpenRequest())
 		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
-	if (ProjectSettingsPanel::takeOpenRequest())
-		openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
 	// The Audio ▸ Buses page's "Open Audio Mixer" — the flag is this file's.
 	if (ProjectSettingsPanel::takeAudioMixerRequest() && !s_showAudioMixer)
 		togglePanelWindow(s_showAudioMixer, "Audio Mixer");
@@ -1772,11 +2963,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleProfiler,      s_showProfiler);
 		MacMenuBar::setToggleState(MC::ToggleEnvironment,   s_showEnvironment);
 		MacMenuBar::setToggleState(MC::ToggleCollab,        s_showCollab);
+		MacMenuBar::setToggleState(MC::ToggleTeam,          s_showTeam);
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
+		MacMenuBar::setToggleState(MC::ToggleTaskBoard,     s_showTaskBoard);
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
@@ -1808,12 +3001,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			MacMenuBar::setToggleState(MC::ToggleOrthographic, ctx.editorCamera->orthographic());
 		}
 		// Rows whose verb follows the state, like the ImGui rows' labels.
-		MacMenuBar::setToggleState(MC::PlayToggle,  ctx.isPlaying);
-		MacMenuBar::setToggleState(MC::PauseToggle, ctx.isPlaying && ctx.isPaused);
-		MacMenuBar::setItemTitle(MC::PlayToggle,
-			ctx.appLivePreview ? "Restart Preview" : ctx.isPlaying ? "Stop" : "Play");
-		MacMenuBar::setItemTitle(MC::PauseToggle,
-			ctx.hcSuspended ? "Continue" : (ctx.isPlaying && ctx.isPaused) ? "Resume" : "Pause");
 		MacMenuBar::setItemTitle(MC::ToggleLock,
 			(ctx.world && sceneTabActiveNow && ViewportPanel::entityActionState(ctx).primaryLocked)
 				? "Unlock" : "Lock");
@@ -1845,17 +3032,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
-			case MC::ProjectSettings:
-				if (ctx.projectLoaded) openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
-				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
-			case MC::Undo:
-				if (ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo) ctx.undo();
-				break;
-			case MC::Redo:
-				if (ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo) ctx.redo();
-				break;
+			case MC::Undo:      undoNow(ctx); break;
+			case MC::Redo:      redoNow(ctx); break;
 			case MC::Cut:       if (canEditEntity()  && ctx.cutEntity)       ctx.cutEntity();       break;
 			case MC::Copy:      if (canEditEntity()  && ctx.copyEntity)      ctx.copyEntity();      break;
 			case MC::Paste:     if (canPasteEntity() && ctx.pasteEntity)     ctx.pasteEntity();     break;
@@ -1933,12 +3113,14 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleProfiler:  togglePanelWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: togglePanelWindow(s_showEnvironment, "Environment"); break;
 			case MC::ToggleCollab:      togglePanelWindow(s_showCollab, "Collaboration");    break;
+			case MC::ToggleTeam:        togglePanelWindow(s_showTeam, "Team");               break;
 			case MC::ToggleSourceControl:
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
+			case MC::ToggleTaskBoard: togglePanelWindow(s_showTaskBoard, "Task Board");      break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
 			case MC::ToggleScene3:
@@ -1954,6 +3136,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleLandscapeTools: toggleLandscapeTools();                          break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
+			case MC::CheckForUpdates: SelfUpdateDialog::open();                              break;
 			case MC::Documentation:       DocsPanel::open();                                 break;
 			case MC::SearchDocumentation: DocsPanel::openSearch("");                         break;
 			case MC::DocumentationOnline: SDL_OpenURL(kDocsUrl);                             break;
@@ -2104,8 +3287,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ctx.selection.clear();
         }
         ImGui::Separator();
-		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
-			openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
 		if (EditorWidgets::menuItem("Preferences", EditorShortcuts::label("edit.preferences").c_str()))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
@@ -2193,32 +3374,17 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 #endif
 		ImGui::EndMenu();
 	}
-	// ── Play: the toolbar's transport, with shortcuts ───────────────────────
+	// ── Play: only what the viewport toolbar has no control for ─────────────
+	// The transport (Play/Pause/Step) is the toolbar's; a multiplayer session
+	// is started from here.
 	if (ImGui::BeginMenu("Play", ctx.projectLoaded))
 	{
 		HE::Ed::Help::Scope helpScope("Play");
-		// Same verbs, same gates as the Scene toolbar's centre well
-		// (ViewportToolbar.cpp): an application restarts its live preview
-		// instead of entering play mode; Pause is Continue while a HorizonCode
-		// run is stopped at a breakpoint.
-		if (EditorWidgets::menuItem(ctx.appLivePreview ? "Restart Preview" : ctx.isPlaying ? "Stop" : "Play",
-		                            EditorShortcuts::label("play.toggle").c_str(), false, canPlay()))
-			playToggle();
-		if (EditorWidgets::menuItem(ctx.hcSuspended ? "Continue" : (ctx.isPlaying && ctx.isPaused) ? "Resume" : "Pause",
-		                            EditorShortcuts::label("play.pause").c_str(),
-		                            ctx.isPlaying && ctx.isPaused, ctx.isPlaying || ctx.hcSuspended))
-			pauseToggle();
-		if (EditorWidgets::menuItem("Step Frame", EditorShortcuts::label("play.step").c_str(), false, ctx.isPlaying))
-			stepFrame();
-		if (EditorWidgets::menuItem("Step Node", nullptr, false, ctx.hcSuspended))
-			stepNode();
-
 		// ── Multiplayer (docs/gameplay-replication-plan.md §5.6) ────────────
 		// Two processes, like collaboration: this editor plays as the host, a
 		// second editor or a game started with --join comes in. Not available
 		// for an application project, which has no play mode to put a session
 		// in.
-		ImGui::Separator();
 		const bool canNet = canPlay() && !ctx.appLivePreview;
 		if (EditorWidgets::menuItem("Play as Host", nullptr, false, canNet && !!ctx.playAsHost))
 			// 0: take the project's Default port (Project Settings ▸ Game ▸
@@ -2314,6 +3480,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showEnvironment, "Environment");
         if (EditorWidgets::menuItem("Collaboration", nullptr, s_showCollab))
             togglePanelWindow(s_showCollab, "Collaboration");
+        if (EditorWidgets::menuItem("Team", nullptr, s_showTeam))
+            togglePanelWindow(s_showTeam, "Team");
         if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
         if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
@@ -2322,6 +3490,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showUndoHistory, "Undo History");
         if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
             togglePanelWindow(s_showWatch, "Watch");
+        if (EditorWidgets::menuItem("Task Board", nullptr, s_showTaskBoard))
+            togglePanelWindow(s_showTaskBoard, "Task Board");
         // The extra scene panes and the level's own graph: game things, like
         // the grid — an application has no level to look at from above. The
         // Game Instance is the one graph an app really does own, and stays.
@@ -2366,8 +3536,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// the one that loses whatever the user was in the middle of.
 		if (EditorWidgets::menuItem("Documentation", "F1", DocsPanel::isOpen()))
 			DocsPanel::open();
-		if (EditorWidgets::menuItem("Search the Documentation...", "Ctrl+F1"))
-			DocsPanel::openSearch("");
 		if (EditorWidgets::menuItem("Documentation (Website)")) SDL_OpenURL(kDocsUrl);
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
@@ -2375,6 +3543,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
 			ReportIssueDialog::open();
+		if (SelfUpdateDialog::available() &&
+		    EditorWidgets::menuItem("Check for Updates...", nullptr, SelfUpdateDialog::isOpen()))
+			SelfUpdateDialog::open();
 		ImGui::Separator();
 		if (EditorWidgets::menuItem("About")) openAboutPopup = true;
 		ImGui::EndMenu();
@@ -2383,92 +3554,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     ImGui::PopFont();
 	}
 
-    // ── Join Session (Play ▸ Join Session…) ─────────────────────────────────
-    // Outside the menu bar, because the menu closes the moment the entry is
-    // clicked and a dialog drawn inside it would close with it.
-    if (s_netJoinDialogOpen)
-    {
-        ImGui::OpenPopup("Join Session##netjoin");
-        EditorWidgets::pinDialogToEditorWindow();
-    }
-    if (ImGui::BeginPopupModal("Join Session##netjoin", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        // Its own scope, not the Play menu's: the dialog is drawn out here,
-        // long after that menu has closed, so nothing is pushed at this point
-        // and the two fields would be looked up bare.
-        HE::Ed::Help::Scope helpScope("Join Session");
-        ImGui::TextUnformatted("Address of the host, and the code it is showing.");
-        ImGui::Spacing();
-        ImGui::SetNextItemWidth(320.0f);
-        ImGui::InputText("Host", s_netJoinAddress, sizeof(s_netJoinAddress));
-        EditorWidgets::helpForLabel("Host");
-        ImGui::SetNextItemWidth(320.0f);
-        ImGui::InputText("Join code", s_netJoinCode, sizeof(s_netJoinCode));
-        EditorWidgets::helpForLabel("Join code");
-        ImGui::Spacing();
-        // A join without a code cannot complete the crypto handshake at all, so
-        // it would fail as "could not connect" — a message that sends somebody
-        // looking at their firewall. Say it here instead.
-        const bool ready = s_netJoinAddress[0] != '\0' && s_netJoinCode[0] != '\0';
-        if (!ready) ImGui::TextDisabled("Both are required.");
-        ImGui::BeginDisabled(!ready);
-        // The wrapper, not ImGui::Button: its help lookup is hover-gated and
-        // allows a disabled item, so the greyed button is what answers "why
-        // can I not press this".
-        if (EditorWidgets::button("Join", ImVec2(120, 0)))
-        {
-            if (ctx.playAsJoin) ctx.playAsJoin(s_netJoinAddress, s_netJoinCode);
-            s_netJoinDialogOpen = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0)))
-        {
-            s_netJoinDialogOpen = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
+    drawJoinSessionDialog(ctx);
 
     // (The New Project popup is opened further down, after the shortcut block
     // that can ask for it too — see `openNewProjectPopup` there.)
 
-    // ── About ───────────────────────────────────────────────────────────────
-    // Windows and Linux only in practice: macOS drops the ImGui menu row and
-    // answers Help ▸ About from the App menu's standard panel (MacMenuBar.mm),
-    // which carries the same version string from the bundle's Info.plist.
-    if (openAboutPopup)
-        ImGui::OpenPopup("About Horizon Engine##about");
-    // Only while the popup is actually up: pinDialogToEditorWindow sets ImGui's
-    // NEXT-window position, and an unconditional call would hand it to whatever
-    // window opens after this one instead.
-    if (ImGui::IsPopupOpen("About Horizon Engine##about"))
-        EditorWidgets::pinDialogToEditorWindow();
-    if (ImGui::BeginPopupModal("About Horizon Engine##about", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        // Its own scope for the same reason as the join dialog above: drawn out
-        // here, with the Help menu long closed. Until now its two buttons were
-        // counted as covered by the coverage scan only because that scan walks
-        // the file top to bottom and had "Help" still open from line 2071 — an
-        // accident of position, and one entry away from being real.
-        HE::Ed::Help::Scope helpScope("About");
-        if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-        ImGui::TextUnformatted("Horizon Engine");
-        if (ctx.fontSubheading) ImGui::PopFont();
-        ImGui::TextDisabled("Version %s", HE_VERSION_FULL);
-        ImGui::Spacing();
-        ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
-        ImGui::Spacing();
-        if (EditorWidgets::smallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
-        ImGui::SameLine();
-        if (EditorWidgets::smallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
-        ImGui::Separator();
-        if (ImGui::Button("Close", ImVec2(120.0f, 0.0f))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
+    drawAboutPopup(ctx, openAboutPopup);
 
     // ── Export Project modal ────────────────────────────────────────────────
     ExportDialogPanel::render(ctx);
@@ -2477,66 +3568,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // frame always resolves the same way.
     GameLogicBuildPanel::render(ctx);
 
-    // ── Hosting-a-session confirmation ──────────────────────────────────────
-    // Ahead of the unsaved-changes prompt, because it is the question with the
-    // wider consequence: closing or switching the project while hosting takes
-    // the session down for every peer connected to this editor. Confirm hands
-    // the action on to the ordinary guard, which may still ask about unsaved
-    // work; Cancel drops it entirely and the session keeps running.
-    if (s_openCollabModal)
-    {
-        ImGui::OpenPopup("Collaboration Session##host");
-        s_openCollabModal = false;
-    }
-    {
-        EditorWidgets::pinDialogToEditorWindow(ImVec2(420.0f, 0.0f));
-        if (ImGui::BeginPopupModal("Collaboration Session##host", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
-        {
-            const GuardedAction action = s_collabAction;
-            const std::string   arg    = s_collabArg;
-            {
-                EditorWidgets::WrapText wrap;
-                // The participant list includes this editor, so the count of
-                // OTHERS is one less — and never negative, because a host that
-                // nobody has joined yet still appears in it.
-                const int peers = ctx.collab
-                    ? std::max(0, static_cast<int>(ctx.collab->participants().size()) - 1) : 0;
-                ImGui::TextUnformatted("You are hosting a collaboration session.");
-                ImGui::Spacing();
-                if (peers > 0)
-                    ImGui::Text("%d other %s connected to this editor.",
-                                peers, peers == 1 ? "person is" : "people are");
-                ImGui::TextUnformatted(
-                    action == GuardedAction::Quit
-                        ? "Quitting ends the session for everyone."
-                        : "Leaving this project ends the session for everyone. "
-                          "A session belongs to one project, so it cannot follow "
-                          "you into the next.");
-            }
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            const char* runLabel = action == GuardedAction::Quit      ? "Quit Anyway"
-                                 : action == GuardedAction::CloseProject ? "Close Anyway"
-                                                                        : "Switch Anyway";
-            if (EditorWidgets::dangerButton(runLabel, ImVec2(130, 0)))
-            {
-                s_collabAction = GuardedAction::None;
-                ImGui::CloseCurrentPopup();
-                requestGuardedInner(action, arg);
-            }
-            ImGui::SameLine();
-            if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)) ||
-                ImGui::IsKeyPressed(ImGuiKey_Escape))
-            {
-                s_collabAction = GuardedAction::None;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-    }
+    drawHostingConfirmation(ctx, requestGuardedInner);
 
     // ── Unsaved-changes modal ───────────────────────────────────────────────
     // Raised by requestGuarded() when a scene-discarding action is attempted with a
@@ -2561,6 +3593,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // Snapshot the stashed action — the buttons may clear it.
             const GuardedAction action = s_guardAction;
             const std::string   arg    = s_guardArg;
+            // The self-update acceptance driver answers this prompt like a click
+            // (SelfUpdateDialog.h); None for everyone else, every time.
+            using Answer = SelfUpdateDialog::PromptAnswer;
+            const Answer driven = action == GuardedAction::InstallUpdate
+                ? SelfUpdateDialog::takeE2EPromptAnswer() : Answer::None;
 
             // Editor tabs are only at risk when the action ends the session; a scene
             // switch keeps them and their unsaved edits (see requestGuarded).
@@ -2647,9 +3684,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ImGui::TextDisabled("Your unsaved changes will be lost otherwise.");
             if (!s_guardSaveError.empty())
             {
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", s_guardSaveError.c_str());
-                ImGui::TextDisabled("Nothing was closed or discarded.");
+                // Said as a notification (once: the slot is emptied), not as red text in
+                // the dialog that the next click has to scroll past.
+                HE::Ed::NoteSpec note;
+                note.level  = HE::Ed::NoteLevel::Important;
+                note.title  = "Not saved";
+                note.text   = s_guardSaveError;
+                note.detail = "Nothing was closed or discarded.";
+                note.key    = "guard.save";
+                HE::Ed::notify(std::move(note));
+                s_guardSaveError.clear();
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
@@ -2659,7 +3703,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (anythingDirty)
             {
                 const bool both = ctx.sceneDirty && !dirtyTabs.empty();
-                if (ImGui::Button(both ? "Save All" : "Save", ImVec2(110, 0)))
+                if (ImGui::Button(both ? "Save All" : "Save", ImVec2(110, 0)) || driven == Answer::Save)
                 {
                     // Assets first: those writes are synchronous, so a failure can
                     // still abort the flow before the scene's async Save-As dialog is
@@ -2685,20 +3729,31 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                         if (!dirtyTabs.empty())
                             HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
                         const bool hadPath = !ctx.currentScenePath.empty();
+                        bool sceneSaved = true;
                         if (ctx.sceneDirty)
-                            doSaveScene(); // synchronous if a path exists, else async Save-As
-                        if (!ctx.sceneDirty || hadPath)
+                            sceneSaved = doSaveScene(); // synchronous if a path exists, else async Save-As
+                        if (!sceneSaved)
                         {
-                            runGuardedAction(action, arg);
-                            s_guardAction = GuardedAction::None;
+                            // Quitting or switching now would throw the unsaved scene away
+                            // behind a dialog that said it was being saved. Stay here; the
+                            // failure itself is a notification (saveSceneToPath).
+                            s_guardSaveError = "The scene could not be saved.";
                         }
                         else
                         {
-                            // Save-As dialog is in flight; the file-result handler runs
-                            // the action once a path has been chosen and written.
-                            s_guardSaveThenAct = true;
+                            if (!ctx.sceneDirty || hadPath)
+                            {
+                                runGuardedAction(action, arg);
+                                s_guardAction = GuardedAction::None;
+                            }
+                            else
+                            {
+                                // Save-As dialog is in flight; the file-result handler runs
+                                // the action once a path has been chosen and written.
+                                s_guardSaveThenAct = true;
+                            }
+                            ImGui::CloseCurrentPopup();
                         }
-                        ImGui::CloseCurrentPopup();
                     }
                 }
                 ImGui::SameLine();
@@ -2710,9 +3765,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // between them and the Save button next door.
             const char* runLabel = !anythingDirty ? "Continue"
                                  : (ctx.sceneDirty ? "Don't Save" : "Discard");
-            const bool runIt = anythingDirty
+            const bool runIt = (anythingDirty
                 ? EditorWidgets::dangerButton(runLabel, ImVec2(110, 0))
-                : ImGui::Button(runLabel, ImVec2(110, 0));
+                : ImGui::Button(runLabel, ImVec2(110, 0))) || driven == Answer::Discard;
             if (runIt)
             {
                 runGuardedAction(action, arg);
@@ -2722,8 +3777,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             }
             ImGui::SameLine();
             if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)) ||
-                ImGui::IsKeyPressed(ImGuiKey_Escape))
+                ImGui::IsKeyPressed(ImGuiKey_Escape) || driven == Answer::Cancel)
             {
+                if (action == GuardedAction::InstallUpdate)
+                    HE_LOG_INFO(Editor, "Editor: update cancelled at the unsaved-changes prompt -- nothing changed");
                 s_guardAction      = GuardedAction::None;
                 s_guardSaveThenAct = false;
                 s_guardSaveError.clear();
@@ -2893,255 +3950,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
 
-    if (s_openProjectErrorPopup)
-    {
-        s_openProjectErrorPopup = false;
-        ImGui::OpenPopup("##EditorOpenError");
-    }
-    if (!ctx.hubOpenError.empty())
-    {
-        EditorWidgets::pinDialogToEditorWindow();
-        if (ImGui::BeginPopupModal("##EditorOpenError", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
-        {
-            // hubOpenError is whatever went wrong opening a project, and it
-            // normally names the file it failed on — an absolute path. Two things
-            // follow. It has to wrap, or the dialog is one line as wide as the path
-            // and the sentence ends off-screen. And the column has to be absolute:
-            // this popup sizes itself to its content, so wrapping at its own right
-            // edge is a feedback loop — every frame it fits the wrapped text and
-            // every frame the text wraps tighter, down to ImGui's minimum.
-            //
-            // The guard lives in its own scope because EndPopup() below hands
-            // ImGui's current window back to whatever is under this popup — here
-            // the implicit debug window — and popping the wrap position after that
-            // pops a stack that was never pushed.
-            {
-                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 30.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-                ImGui::TextUnformatted(ctx.hubOpenError.c_str());
-                ImGui::PopStyleColor();
-                ImGui::Spacing();
-                if (EditorWidgets::primaryButton("OK", ImVec2(120, 0)))
-                {
-                    ctx.hubOpenError.clear();
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndPopup();
-        }
-    }
+    // (A modal for ctx.hubOpenError used to be drawn here. Nothing ever asked for it to
+    // open, and the error is a notification now: see ProjectHubPanel's Open page.)
 
-    // ── New Project Popup ─────────────────────────────────────────────────────
-    {
-        // Templates: ProjectHubPanel::kPresetNames/kPresetDescs — shared with the
-        // Hub's own create form so the two lists cannot drift apart.
-        // Index order MUST match ProjectScriptLanguage (HorizonCode, Lua, Python, Cpp).
-        static const std::array<const char*, 4> kLangNames = {
-            "HorizonCode (Visual Scripting)", "Lua", "Python", "C++",
-        };
-        static const std::array<const char*, 4> kLangDesc = {
-            "Node graphs; compiles to native C++ on export.",
-            "Lightweight text scripting (default script backend).",
-            "CPython scripting (needs a Python install on dev machines).",
-            "Native GameLogic library, built with your own toolchain.",
-        };
+    drawNewProjectPopup(ctx);
 
-        ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
-        EditorWidgets::pinDialogToEditorWindow();
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 16.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(8.0f, 8.0f));
-        if (ImGui::BeginPopupModal("##NewProjectPopup", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
-        {
-            ImGui::PopStyleVar(2);
-            // This form is the Project Hub's create form in a modal — the same
-            // controls, so the same help scope. Without it the rows here are
-            // filed under whatever scope happens to precede them in this file,
-            // which is the Help MENU.
-            HE::Ed::Help::Scope helpScope("Project Hub");
-
-            if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-            ImGui::TextUnformatted("New Project");
-            if (ctx.fontSubheading) ImGui::PopFont();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::Text("Project Name");
-            ImGui::SetNextItemWidth(-1);
-            ImGui::InputText("##npName", ctx.hubProjectName, ctx.hubProjectNameSize);
-
-            ImGui::Spacing();
-            ImGui::Text("Project Directory");
-            ImGui::SetNextItemWidth(-70.0f);
-            ImGui::InputText("##npDir", ctx.hubProjectDir, ctx.hubProjectDirSize);
-            ImGui::SameLine();
-            if (ImGui::Button("Browse##npBrowse", ImVec2(62.0f, 0)))
-            {
-#ifdef _WIN32
-                IFileOpenDialog* pDlg = nullptr;
-                if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
-                    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg))))
-                {
-                    DWORD dwOpts = 0;
-                    pDlg->GetOptions(&dwOpts);
-                    pDlg->SetOptions(dwOpts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                    HWND hwnd = nullptr;
-                    if (ctx.window)
-                        hwnd = static_cast<HWND>(SDL_GetPointerProperty(
-                            SDL_GetWindowProperties(ctx.window->GetNativeWindow()),
-                            SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
-                    if (SUCCEEDED(pDlg->Show(hwnd)))
-                    {
-                        IShellItem* pItem = nullptr;
-                        if (SUCCEEDED(pDlg->GetResult(&pItem)))
-                        {
-                            PWSTR pPath = nullptr;
-                            if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pPath)))
-                            {
-                                int len = WideCharToMultiByte(CP_UTF8, 0, pPath, -1,
-                                    nullptr, 0, nullptr, nullptr);
-                                if (len > 0 && len <= ctx.hubProjectDirSize)
-                                    WideCharToMultiByte(CP_UTF8, 0, pPath, -1,
-                                        ctx.hubProjectDir, ctx.hubProjectDirSize, nullptr, nullptr);
-                                CoTaskMemFree(pPath);
-                            }
-                            pItem->Release();
-                        }
-                    }
-                    pDlg->Release();
-                }
-#else
-                SDL_ShowOpenFolderDialog(
-                    [](void* userdata, const char* const* filelist, int)
-                    {
-                        auto* b = static_cast<SDLDialogBridge*>(userdata);
-                        if (filelist && filelist[0])
-                        {
-                            *b->pendingDirResult = filelist[0];
-                            *b->pendingDirReady  = true;
-                        }
-                    },
-                    ctx.dialogBridge,
-                    ctx.window ? ctx.window->GetNativeWindow() : nullptr,
-                    nullptr, false);
-#endif
-            }
-
-            if (ctx.pendingDirReady)
-            {
-                strncpy(ctx.hubProjectDir, ctx.pendingDirResult.c_str(), ctx.hubProjectDirSize - 1);
-                ctx.hubProjectDir[ctx.hubProjectDirSize - 1] = '\0';
-                ctx.pendingDirReady  = false;
-                ctx.pendingDirResult.clear();
-            }
-
-            ImGui::Spacing();
-            ImGui::Text("Template");
-            ImGui::SetNextItemWidth(-1);
-            // All of them, not the first five — see the Project Hub's twin.
-            ImGui::ListBox("##npPresets", &ctx.hubSelectedPreset,
-                ProjectHubPanel::kPresetNames, ProjectHubPanel::kPresetCount,
-                ProjectHubPanel::kPresetCount);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", ProjectHubPanel::kPresetDescs[ctx.hubSelectedPreset]);
-            ImGui::PopStyleColor();
-
-            ImGui::Spacing();
-            ImGui::Text("Scripting Language");
-            ImGui::SetNextItemWidth(-1);
-            ImGui::Combo("##npLang", &ctx.hubSelectedLang,
-                kLangNames.data(), static_cast<int>(kLangNames.size()));
-            ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
-            ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
-            ImGui::PopStyleColor();
-
-            // Advanced Shader Effects: whether this project may author materials
-            // (docs/he-apps-plan.md A0). Only for APPLICATIONS — a game without
-            // materials is not a thing anyone wants, and offering the switch
-            // everywhere is how an Empty project ended up with materials
-            // disabled by a checkbox its author read as harmless.
-            //
-            // Forced back on for every other template, so leaving it unticked and
-            // then picking Game cannot carry the setting across.
-            if (isAppPreset(static_cast<ProjectPreset>(ctx.hubSelectedPreset)))
-            {
-                ImGui::Spacing();
-                ImGui::Checkbox("Advanced Shader Effects", &ctx.hubAdvancedShaderFx);
-                ImGui::TextDisabled("%s", ctx.hubAdvancedShaderFx
-                    ? "Materials and material graphs are available. The packaged build ships a GPU renderer."
-                    : "No materials: widgets are styled with corner radius, borders, gradients and shadows. "
-                      "Smaller build, no GPU required.");
-            }
-            else
-                ctx.hubAdvancedShaderFx = true;
-
-            ImGui::Spacing();
-            if (!ctx.hubCreateError.empty())
-            {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-                ImGui::TextWrapped("%s", ctx.hubCreateError.c_str());
-                ImGui::PopStyleColor();
-                ImGui::Spacing();
-            }
-
-            ImGui::Separator();
-            ImGui::Spacing();
-            const float btnW = (480.0f - 16.0f * 2 - 8.0f) * 0.5f;
-            if (EditorWidgets::primaryButton("Create", ImVec2(btnW, 0)))
-            {
-                ctx.hubCreateError.clear();
-                std::string name = ctx.hubProjectName;
-                std::string dir  = ctx.hubProjectDir;
-                if (name.empty())
-                    ctx.hubCreateError = "Please enter a project name.";
-                else if (dir.empty())
-                    ctx.hubCreateError = "Please select a project directory.";
-                else
-                {
-                    std::filesystem::path projRoot = std::filesystem::path(dir) / name;
-                    bool ok = ctx.projectManager->createNewProject(
-                        projRoot.string(), name,
-                        static_cast<ProjectPreset>(ctx.hubSelectedPreset),
-                        static_cast<ProjectScriptLanguage>(ctx.hubSelectedLang),
-                        /*appProject*/ false, ctx.hubAdvancedShaderFx);
-                    if (ok)
-                    {
-                        const std::string& heprojPath = ctx.projectManager->currentProject().path;
-                        ctx.globalState->addKnownProject(heprojPath);
-                        ctx.globalState->writeConfig();
-                        ctx.contentRefreshPending = true;
-                        // Said here rather than left to the content-refresh modal to
-                        // infer. This was the one project-opening path that did not
-                        // set it, so the modal had to set it for everybody — and a
-                        // modal that turns "a project is open" on unconditionally
-                        // turns it on after a CLOSE too.
-                        ctx.projectLoaded = true;
-                        ImGui::CloseCurrentPopup();
-                    }
-                    else
-                    {
-                        ctx.hubCreateError = "Failed to create project. Check path/permissions.";
-                    }
-                }
-            }
-            ImGui::SameLine();
-            if (EditorWidgets::cancelButton("Cancel", ImVec2(btnW, 0)))
-            {
-                ctx.hubCreateError.clear();
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-        else
-        {
-            ImGui::PopStyleVar(2);
-        }
-    }
-
-    static constexpr float kFooterH  = 24.0f;
-    static constexpr float kTabBarH  = 28.0f;
 // Collab read-only banner above a locked asset tab. Tall enough for a real
 // button ("Ask to edit") rather than text alone, AND for the sentence next to it
 // to take two lines: that sentence is ~100 characters and only gets the tab
@@ -3162,427 +3975,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::GetStyle().FramePadding.y +
         ImGui::GetStyle().WindowPadding.y * 2.0f + 6.0f;
 
-    // ── Footer bar ────────────────────────────────────────────────────────────
-    // Must be rendered BEFORE the DockSpace window so ImGui processes it first
-    // and docked windows cannot overlap it.
-    {
-        const ImGuiViewport* vp = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - kFooterH), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, kFooterH), ImGuiCond_Always);
-        ImGui::SetNextWindowViewport(vp->ID);
+    drawFooterBar(ctx);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(8.0f, 4.0f));
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
-
-        // NoBringToFrontOnFocus: this is chrome pinned to the window edge. Clicking
-        // Undo down here must not lift the bar over a floating panel that overlaps it.
-        ImGui::Begin("##EditorFooter", nullptr,
-            ImGuiWindowFlags_NoTitleBar            |
-            ImGuiWindowFlags_NoResize              |
-            ImGuiWindowFlags_NoMove                |
-            ImGuiWindowFlags_NoScrollbar           |
-            ImGuiWindowFlags_NoSavedSettings       |
-            ImGuiWindowFlags_NoDocking             |
-            ImGuiWindowFlags_NoFocusOnAppearing    |
-            ImGuiWindowFlags_NoBringToFrontOnFocus |
-            ImGuiWindowFlags_NoNav                 |
-            ImGuiWindowFlags_NoDecoration);
-
-        ImGui::PopStyleVar(3);
-        ImGui::PopStyleColor();
-
-		if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
-
-		// Left — Undo / Redo buttons
-		{
-			constexpr float btnSize = 16.0f;
-			ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.10f));
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.20f));
-			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 0.0f));
-
-			const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
-			const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
-
-			ImGui::BeginDisabled(!canUndo);
-			bool doUndo;
-			if (ctx.toolbarIcons.undo)
-				doUndo = ImGui::ImageButton("##footerUndo", ctx.toolbarIcons.undo, ImVec2(btnSize, btnSize));
-			else
-				doUndo = ImGui::Button("Undo");
-			ImGui::EndDisabled();
-
-			ImGui::SameLine(0.0f, 4.0f);
-
-			ImGui::BeginDisabled(!canRedo);
-			bool doRedo;
-			if (ctx.toolbarIcons.redo)
-				doRedo = ImGui::ImageButton("##footerRedo", ctx.toolbarIcons.redo, ImVec2(btnSize, btnSize));
-			else
-				doRedo = ImGui::Button("Redo");
-			ImGui::EndDisabled();
-
-			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y) by
-			// default — whatever Preferences ▸ Shortcuts says now.
-			if (EditorShortcuts::pressed("edit.undo"))    doUndo = true;
-			if (EditorShortcuts::pressed("edit.redo") ||
-			    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
-
-			if (doUndo && canUndo && ctx.undo) ctx.undo();
-			if (doRedo && canRedo && ctx.redo) ctx.redo();
-
-			ImGui::PopStyleVar();
-			ImGui::PopStyleColor(3);
-		}
-
-		// Source control, immediately right of Undo/Redo — the bottom-left corner
-		// every editor keeps it in. Ambient by design: "eleven files I have not
-		// committed" is something to notice in passing, not to go looking for.
-		ImGui::SameLine(0.0f, 14.0f);
-		if (SourceControlPanel::DrawFooterStatus(ctx))
-			revealFloatingWindow(s_showSourceControl, "Source Control");
-
-		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
-		// The resolution is the actual viewport framebuffer size the scene renders at.
-		std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
-		int viewportPxW = 0, viewportPxH = 0;
-		ViewportPanel::renderSizePx(viewportPxW, viewportPxH);
-		if (viewportPxW > 0 && viewportPxH > 0)
-			fpsText = std::to_string(viewportPxW) + "x" + std::to_string(viewportPxH)
-			        + "   " + fpsText;
-		const float fpsW = ImGui::CalcTextSize(fpsText.c_str()).x;
-		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
-		ImGui::Text("%s", fpsText.c_str());
-
-		// ── The right-anchored group ──────────────────────────────────────────
-		// Everything below is placed by subtracting the width of everything to
-		// its right, plus a 16px gap for each neighbour that is actually there.
-		// The chain is hand-maintained: inserting a widget here means editing
-		// EVERY block to its left as well, or the two overlap silently. Right to
-		// left the order is: FPS, notification bell, presence, download queue,
-		// session activity.
-
-		// The notification bell, immediately left of the counters. It sits at the
-		// right-hand end of the group rather than the left because it is the only
-		// item here that is not transient — presence, the download queue and the
-		// activity line all come and go, so a bell placed left of them would move
-		// across half the footer depending on what else happened to be running,
-		// and the one control the user is meant to reach for when something went
-		// wrong must be in the same corner every time.
-		const float bellW = NotificationBar::FooterWidth(ctx);
-		if (bellW > 0.0f)
-		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW
-			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
-			NotificationBar::DrawFooter(ctx);
-		}
-
-		// Collaboration presence, immediately left of the counters — ambient by
-		// design: who else is in the scene, without a window open.
-		const float presenceW = CollabPresenceBar::FooterWidth(ctx);
-		if (presenceW > 0.0f)
-		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW
-			                - ImGui::GetStyle().WindowPadding.x - 16.0f
-			                - (bellW > 0.0f ? 16.0f : 0.0f));
-			CollabPresenceBar::DrawFooter(ctx);
-		}
-
-		// EngineContent SFTP download queue — right-aligned, left of the presence
-		// cluster. Deliberately part of the RIGHT group rather than growing
-		// rightwards from source control on the left: the label is an asset
-		// filename of unbounded length, and a left-anchored item that grows runs
-		// straight through the centred "Ready" text below. Right-aligning bounds
-		// it against a fixed edge instead. Draws nothing when idle.
-		const float syncW = EngineContentSyncBar::FooterWidth(ctx);
-		if (syncW > 0.0f)
-		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW
-			                - ImGui::GetStyle().WindowPadding.x - 16.0f
-			                - (bellW > 0.0f ? 16.0f : 0.0f)
-			                - (presenceW > 0.0f ? 16.0f : 0.0f));
-			EngineContentSyncBar::DrawFooter(ctx);
-		}
-
-		// What the session just did to the project: assets other participants
-		// created, and the host's answer to one of ours. Left of the download
-		// queue, in the same right-anchored group and for the same reason — the
-		// text is a sentence of unbounded length, and only a fixed edge keeps it
-		// out of the centred status label.
-		// Hoisted out of the `if` it used to be scoped to: the block below needs
-		// this width too, and asking a second time would be asking a DIFFERENT
-		// question — clicking the activity line clears it, so a second call in
-		// the same frame returns 0 for a line that was just drawn, and everything
-		// to its left would jump one widget's width to the right for that frame.
-		const float actW = CollabActivityBar::FooterWidth(ctx);
-		if (actW > 0.0f)
-		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW
-			                - ImGui::GetStyle().WindowPadding.x - 16.0f
-			                - (bellW > 0.0f ? 16.0f : 0.0f)
-			                - (presenceW > 0.0f ? 16.0f : 0.0f)
-			                - (syncW > 0.0f ? 16.0f : 0.0f));
-			if (CollabActivityBar::DrawFooter(ctx))
-				revealFloatingWindow(s_showCollab, "Collaboration");
-		}
-
-		// Is an external tool driving this editor? Left-most of the right-hand
-		// group, and the only one of these that is about who ELSE may be changing
-		// the scene without a face or a cursor to show for it. Draws nothing at
-		// all while remote control is off, which is almost every session — so
-		// when it does appear, it means something.
-		//
-		// The chain above is hand-maintained: this block subtracts the width of
-		// every widget to its right plus 16px per neighbour that is actually
-		// there. Being at the left end is what keeps the edit to one block —
-		// inserting anywhere else means editing everything to its left as well.
-		if (const float mcpW = McpStatusBar::FooterWidth(ctx); mcpW > 0.0f)
-		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW - mcpW
-			                - ImGui::GetStyle().WindowPadding.x - 16.0f
-			                - (bellW > 0.0f ? 16.0f : 0.0f)
-			                - (presenceW > 0.0f ? 16.0f : 0.0f)
-			                - (syncW > 0.0f ? 16.0f : 0.0f)
-			                - (actW > 0.0f ? 16.0f : 0.0f));
-			McpStatusBar::DrawFooter(ctx);
-		}
-
-		// Middle — status
-		// Reward feedback (EditorRewards.h) lives here: the moment's line fading
-		// back to "Ready", and the progress counters beside "Ready". The
-		// BuildSucceeded edge detector runs at the top of render(), every frame.
-		HE::Ed::Rewards::drawFooterStatus(ctx, "Ready");
-
-        if (ctx.fontBody) ImGui::PopFont();
-
-        ImGui::End();
-    }
-
-    // ── Editor TabBar (below menu bar, above DockSpace) ────────────────────────
-    {
-        const ImGuiViewport* vp = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, kTabBarH), ImGuiCond_Always);
-        ImGui::SetNextWindowViewport(vp->ID);
-
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(4.0f, 2.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_TabRounding,      2.0f);
-        {
-            using namespace HE::Ed::Theme;
-            ImGui::PushStyleColor(ImGuiCol_WindowBg,   warm(0.115f));
-            ImGui::PushStyleColor(ImGuiCol_Tab,        warm(0.165f));
-            ImGui::PushStyleColor(ImGuiCol_TabHovered, mix(warm(0.165f), AccentHi, 0.26f));
-            ImGui::PushStyleColor(ImGuiCol_TabActive,  mix(warm(0.225f), AccentHi, 0.14f));
-        }
-
-        // NoBringToFrontOnFocus for the same reason as the footer: switching tabs
-        // must not lift this strip over a floating panel.
-        ImGui::Begin("##EditorTabBar", nullptr,
-            ImGuiWindowFlags_NoTitleBar            |
-            ImGuiWindowFlags_NoResize              |
-            ImGuiWindowFlags_NoMove                |
-            ImGuiWindowFlags_NoScrollbar           |
-            ImGuiWindowFlags_NoSavedSettings       |
-            ImGuiWindowFlags_NoDocking             |
-            ImGuiWindowFlags_NoFocusOnAppearing    |
-            ImGuiWindowFlags_NoBringToFrontOnFocus |
-            ImGuiWindowFlags_NoNav                 |
-            ImGuiWindowFlags_NoDecoration);
-
-        ImGui::PopStyleVar(4);
-        ImGui::PopStyleColor(4);
-
-        // ── Tab state (owned by AppContext / EditorApplication) ───────────
-        auto& s_tabs      = ctx.tabs;
-        auto& s_activeTab = ctx.activeTab;
-
-        // Open request from inside an editor panel (e.g. double-clicking a Material
-        // Function node) — same find-or-push flow as the Content Browser double-click.
-        // The request comes from ContentManager::resolveAbsolutePath, which is not
-        // the spelling the Content Browser's tile has: EditorTabs matches the asset,
-        // not the string.
-        if (const std::string req = MaterialEditorPanel::takeOpenRequest(); !req.empty())
-            EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, req, {},
-                                    ctx.contentManager);
-
-        // The texture viewer: a just-imported image, or a raw-image tab whose Import
-        // ran and which now becomes the asset's tab (`replacing`) rather than a second
-        // one opening beside it. Also where the viewer frees last frame's textures.
-        TextureViewerPanel::beginFrame();
-        for (auto req = TextureViewerPanel::takeOpenRequest(); !req.path.empty();
-             req = TextureViewerPanel::takeOpenRequest())
-        {
-            if (EditorTabs::find(s_tabs, req.path, ctx.contentManager) < 0 && !req.replacing.empty())
-            {
-                // The raw-image tab becomes the imported asset's tab in place.
-                const int old = EditorTabs::find(s_tabs, req.replacing, ctx.contentManager);
-                if (old >= 0)
-                {
-                    TextureViewerPanel::forget(s_tabs[old].assetPath);
-                    s_tabs[old].assetPath = req.path;
-                    s_tabs[old].label     = std::filesystem::path(req.path).stem().string();
-                }
-            }
-            EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, req.path,
-                std::filesystem::path(req.path).stem().string(), ctx.contentManager);
-        }
-
-        // A "go to node" from the console (HcExecTrace::requestReveal): the tab
-        // half. The two editor-owned graphs are their reserved tab paths; a
-        // class or widget is a content-relative path that has to become the
-        // full path the tab bar keys on. The node half stays pending for the
-        // panel, which selects it once the tab draws (LevelScriptPanel /
-        // UIEditorPanel). Compared as paths, not strings: the browser's tab
-        // paths come from a directory walk and this one from a join, and on
-        // Windows those spell the separators differently.
-        if (std::string revealTab; HcExecTrace::takeRevealTab(revealTab))
-        {
-            const bool reserved = revealTab == LevelScriptPanel::kTabPath ||
-                                  revealTab == GameInstancePanel::kTabPath;
-            const std::string full = reserved ? revealTab
-                : ctx.contentManager ? ctx.contentManager->resolveAbsolutePath(revealTab)
-                : std::string();
-            if (full.empty() || (!reserved && !std::filesystem::exists(full)))
-                HcExecTrace::cancelReveal();   // nothing to open; drop the node half too
-            else
-            {
-                const std::string label = reserved
-                    ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
-                    : std::filesystem::path(full).stem().string();
-                EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, full, label,
-                                        ctx.contentManager);
-            }
-        }
-
-        // A "go to line" from the console (ScriptEditorPanel::requestReveal):
-        // the tab half, for a Lua/Python script. The path is already the full
-        // one (the console resolved it), so this is the same find-or-push as
-        // above; the line half stays pending for the panel, which selects it
-        // once the tab draws. Same path comparison as the node reveal.
-        if (std::string revealScript; ScriptEditorPanel::takeRevealPath(revealScript))
-        {
-            if (!std::filesystem::exists(revealScript))
-                ScriptEditorPanel::cancelReveal();   // gone since the error was logged
-            else
-                EditorTabs::openOrFocus(s_tabs, s_activeTab, s_tabSelectRequest, revealScript,
-                    std::filesystem::path(revealScript).stem().string(), ctx.contentManager);
-        }
-
-        if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
-
-        if (ImGui::BeginTabBar("##MainTabBar",
-            ImGuiTabBarFlags_Reorderable |
-            ImGuiTabBarFlags_FittingPolicyScroll |
-            ImGuiTabBarFlags_NoCloseWithMiddleMouseButton))
-        {
-            // Closing a tab drops its cached editor state (text buffers, graphs,
-            // preview textures) so per-session cost stays flat no matter how many
-            // tabs were opened. Dirty states are kept: reopening the tab restores
-            // the unsaved edits instead of silently discarding them.
-            auto forgetTabState = [&ctx](const AppContext::EditorTab& t){
-                if (t.assetPath.empty()) return;
-                // Assets a panel's PREVIEW streamed in go back regardless of the
-                // dirty check below: an unsaved graph is worth keeping in memory,
-                // the mesh its preview happened to sit on is not. Panels leave
-                // anything the scene or another tab still uses alone.
-                MaterialEditorPanel::releasePreviewAssets(ctx, t.assetPath);
-                if (tabHasUnsavedEdits(t.assetPath)) return;
-                // The panel list itself lives in discardPanelState — one place
-                // to add a new panel to, rather than two that drift apart.
-                discardPanelState(ctx, t.assetPath);
-            };
-
-            for (int i = 0; i < static_cast<int>(s_tabs.size()); )
-            {
-                auto& tab = s_tabs[i];
-                if (!tab.open)
-                {
-                    forgetTabState(tab);
-                    s_tabs.erase(s_tabs.begin() + i);
-                    // Everything after it moved down one: a select request that
-                    // was aimed at a later tab (a tab opened in the frame this one
-                    // was closed in) would otherwise land on its neighbour or on
-                    // nothing at all, and the asset just opened would not come up.
-                    if (s_tabSelectRequest > i) --s_tabSelectRequest;
-                    continue;
-                }
-
-                ImGuiTabItemFlags flags = ImGuiTabItemFlags_None;
-                // Force-select only on an explicit one-shot request (double-click). Using
-                // s_activeTab here every frame is wrong: BeginTabItem mutates s_activeTab
-                // mid-loop, so the Scene tab (rendered first) steals it back — and the
-                // constant SetSelected also swallows manual tab clicks.
-                if (i == s_tabSelectRequest) flags |= ImGuiTabItemFlags_SetSelected;
-
-                bool pOpen = tab.closable ? tab.open : true;
-                // Stable ID (### + assetPath) so appending a dirty marker to the visible
-                // label never changes the tab's identity — which would reset its state.
-                const bool tabDirty = tabHasUnsavedEdits(tab.assetPath);
-                // V4 (EditorRewards.h, "The visual cues"): just saved, the
-                // " *" makes room for a drawn check — blanks as wide as the
-                // marker, so the tab keeps its width until the check is gone.
-                const HE::Ed::Rewards::TabMark mark =
-                    HE::Ed::Rewards::tabMark(ctx, tab.assetPath, tabDirty);
-                std::string suffix = tabDirty ? " *" : "";
-                if (mark.check)
-                {
-                    const float markW = ImGui::CalcTextSize((tab.label + " *").c_str()).x;
-                    suffix = " ";
-                    while (ImGui::CalcTextSize((tab.label + suffix).c_str()).x < markW
-                           && suffix.size() < 8)
-                        suffix += ' ';
-                }
-                const std::string shown = tab.label + suffix
-                    + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
-                const bool tabOpen =
-                    ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags);
-                if (mark.check)
-                {
-                    // The tab's own rect, straight after BeginTabItem (whatever
-                    // it returned): the label starts one frame padding in, and
-                    // the marker's "*" stood after the label and a space.
-                    const ImVec2 mn    = ImGui::GetItemRectMin();
-                    const float  lineH = ImGui::GetTextLineHeight();
-                    const float  size  = std::floor(lineH * 0.62f);
-                    const float  x     = mn.x + ImGui::GetStyle().FramePadding.x
-                                       + ImGui::CalcTextSize((tab.label + " ").c_str()).x;
-                    const float  y     = mn.y + ImGui::GetStyle().FramePadding.y
-                                       + (lineH - size) * 0.5f;
-                    HE::Ed::Rewards::drawCheckMark(x, y, size, mark.stroke, mark.alpha);
-                }
-                if (tabOpen)
-                {
-                    s_activeTab = i;
-                    ImGui::EndTabItem();
-                }
-                if (tab.closable) tab.open = pOpen;
-                ++i;
-            }
-            // Remove closed tabs (dropping their cached editor state)
-            for (const auto& t : s_tabs)
-                if (t.closable && !t.open) forgetTabState(t);
-            s_tabs.erase(
-                std::remove_if(s_tabs.begin(), s_tabs.end(),
-                    [](const AppContext::EditorTab& t){ return t.closable && !t.open; }),
-                s_tabs.end());
-            // Keep the active index valid after a tab closes (else it dangles or points
-            // at the wrong tab). Fall back to the Scene tab (index 0) when out of range.
-            if (s_activeTab >= static_cast<int>(s_tabs.size()))
-                s_activeTab = static_cast<int>(s_tabs.size()) - 1;
-            if (s_activeTab < 0) s_activeTab = 0;
-            s_tabSelectRequest = -1;   // consume the one-shot select request
-
-            ImGui::EndTabBar();
-        }
-
-        if (ctx.fontBody) ImGui::PopFont();
-
-        ImGui::End();
-    }
+    drawEditorTabBar(ctx);
 
     // ── Top-level tab gating ───────────────────────────────────────────────────
     // The built-in "Scene" tab (empty assetPath) shows the dockspace + all panels
@@ -3655,7 +4050,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (EditorShortcuts::pressed("entity.selectAll"))
                 selectAllEntities();
             if (escFree && !ctx.selection.empty() && EditorShortcuts::pressed("entity.deselect"))
-                ctx.selection.clear();
+            {
+                // Spline mode with a point held: Esc lets go of the point first,
+                // the second one deselects the spline.
+                if (!SplineTool::escapeKey(ctx))
+                    ctx.selection.clear();
+            }
         }
 
         // The scene tab is not enough on its own: the Content Browser is docked
@@ -3681,7 +4081,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     ctx.copyEntity();
                 if (EditorShortcuts::pressed("entity.cut") && ctx.cutEntity)
                     ctx.cutEntity();
-                if (EditorShortcuts::pressed("entity.delete") && ctx.deleteEntity)
+                // Spline mode with a point selected: Delete takes the point, not
+                // the spline it belongs to (the tool runs after this block in
+                // the frame, so the key has to be offered to it here).
+                if (EditorShortcuts::pressed("entity.delete") && !SplineTool::deleteKey(ctx) &&
+                    ctx.deleteEntity)
                     ctx.deleteEntity();
             }
             if (EditorShortcuts::pressed("entity.paste") && canPasteEntity() && ctx.pasteEntity)
@@ -3851,85 +4255,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ImGui::BeginDisabled(true);
             }
         }
-        // Dispatch by asset type: material assets get the node-graph editor, script
-        // assets the code editor. (Cheap header sniff; both panels cache their state.)
-        // The Level Script + Game Instance are virtual tabs (no backing .hasset).
+        // Dispatch by asset type: the first kAssetPanels row that claims the path
+        // draws it (cheap header sniffs, cached per path; the row order is the
+        // dispatch order, see the table). The Settings tabs, Level Script and Game
+        // Instance are virtual tabs (no backing .hasset) and come first.
         if (tabPath == EditorSettingsPanel::kTabPath)
             EditorSettingsPanel::render(ctx, tabPos, tabSize);
-        else if (tabPath == ProjectSettingsPanel::kTabPath)
-            ProjectSettingsPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == LevelScriptPanel::kTabPath)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)
             GameInstancePanel::render(ctx, tabPos, tabSize);
-        else if (MaterialEditorPanel::isMaterialAsset(tabPath) ||
-            MaterialEditorPanel::isMaterialFunctionAsset(tabPath))
-        {
-            // Advanced Shader Effects off = this project does not author
-            // materials (docs/he-apps-plan.md E1b). An existing one can still be
-            // opened — the file is right there in the browser — but it says why
-            // it is inert rather than showing an editor whose result nothing
-            // would draw.
-            const bool allowMaterials = !ctx.projectManager ||
-                ctx.projectManager->currentProject().advancedShaderEffects;
-            if (allowMaterials)
-                MaterialEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-            else
-            {
-                ImGui::SetNextWindowPos(tabPos);
-                ImGui::SetNextWindowSize(tabSize);
-                ImGui::Begin("##MaterialsDisabled", nullptr,
-                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-                ImGui::TextWrapped(
-                    "Advanced Shader Effects are switched off for this project, so materials "
-                    "are not used. Widgets are styled with corner radius, borders, gradients "
-                    "and shadows instead.");
-                ImGui::Spacing();
-                ImGui::TextDisabled("Turn them on in the project settings to edit this asset.");
-                ImGui::End();
-            }
-        }
-        else if (UIEditorPanel::isWidgetAsset(tabPath))
-            UIEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (HorizonCodeClassPanel::isClassAsset(tabPath))
-            HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (InputAssetPanel::isInputAsset(tabPath))
-            InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (ThemeAssetPanel::isThemeAsset(tabPath))
-            ThemeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (BoneMaskPanel::isBoneMaskAsset(tabPath))
-            BoneMaskPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (BlendSpacePanel::isBlendSpaceAsset(tabPath))
-            BlendSpacePanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (SequencerPanel::isSequencerAsset(tabPath))
-            SequencerPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (CinematicPanel::isCinematicAsset(tabPath))
-            CinematicPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (TypeAssetPanel::isTypeAsset(tabPath))
-            TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
-            SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (StaticMeshEditorPanel::isStaticMeshAsset(tabPath))
-            StaticMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (ParticleGraphEditorPanel::isParticleAsset(tabPath))
-            ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
-            AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        // Audio .hasset AND raw .wav/.ogg. Like the C++ viewer below it, the raw-file half
-        // is an extension check, so it has to beat the ScriptEditorPanel fallthrough —
-        // which would render megabytes of PCM as text.
-        else if (AudioEditorPanel::isAudioAsset(tabPath))
-            AudioEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        // Texture .hasset AND raw .png/.jpg/… — the raw half is an extension check too.
-        else if (TextureViewerPanel::isTextureAsset(tabPath))
-            TextureViewerPanel::render(ctx, tabPath, tabPos, tabSize);
-        // C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
-        // come before the ScriptEditorPanel fallthrough, which assumes an HAsset.
-        else if (CppClassEditorPanel::isCppSourceAsset(tabPath))
-            CppClassEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
-            ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+            assetPanelFor(tabPath).render(ctx, tabPath, tabPos, tabSize);
 
         if (tabReadOnly) ImGui::EndDisabled();
         return;
@@ -3980,6 +4317,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (s_resetLayoutRequested || ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
         {
             BuildDefaultDockLayout(dockspaceId, ImGui::GetContentRegionAvail());
+            EditorDockState::forgetSavedTabs();   // the layout the tabs belonged to is gone
             s_resetLayoutRequested = false;
             s_sceneTabBarHandled   = false;   // fresh layout → hide the viewport's tab bar again
             // Persist immediately so the layout survives an early exit and becomes
@@ -4016,14 +4354,20 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // DockBuilderDockWindow("Quick Settings") still find this window, across
     // both the mode switch and this rename.
     const bool landscapePanel = ctx.editorConfig.mode == EditorMode::Landscape && ctx.world;
+    const bool splinePanel    = ctx.editorConfig.mode == EditorMode::Spline && ctx.world;
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin(landscapePanel ? "Landscape###Quick Settings"
+               : splinePanel    ? "Spline###Quick Settings"
                                 : "Quick Settings###Quick Settings");
     if (ctx.fontHeading) ImGui::PopFont();
 
     if (landscapePanel)
     {
         TerrainTools::renderPanel(ctx);
+    }
+    else if (splinePanel)
+    {
+        SplineTool::renderPanel(ctx);
     }
     else
     {
@@ -4086,6 +4430,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
+    drawTeamWindow(ctx, s_showTeam);
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
 	// Here for the reason this whole function exists, and it earns it more than
 	// most: output is watched from INSIDE a script or a graph tab, and left
@@ -4110,6 +4455,10 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 		s_wasHcPaused = paused;
 	}
 	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
+	// The task board: a task is read and ticked off from wherever the work is,
+	// which is as often a graph tab as the scene. Drawn even while closed — a
+	// chip that had to open a scene selects its entity once the scene is in.
+	TaskBoardPanel::DrawTaskBoardWindow(ctx, s_showTaskBoard);
 	// The console, for the first error of a play session — the same gesture as
 	// the Watch window above, for the same reason: the console is closed by
 	// default, the bell in the footer is ambient by its own description and the
@@ -4148,10 +4497,14 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	updatePanelVisibility(ctx);
 
     // Last of all, so the menus that hang off the footer clusters cannot end up
-    // underneath a docked panel or a floating tool window. Both of these draw
-    // nothing unless their own footer half ran this frame.
+    // underneath a docked panel or a floating tool window. Each of these draws
+    // nothing unless its own footer half ran this frame.
     CollabPresenceBar::DrawOverlay(ctx);
+    if (ctx.team && TeamView::drawFooterOnlineMenu(*ctx.team))
+        revealFloatingWindow(s_showTeam, "Team");
     NotificationBar::DrawOverlay(ctx);
+    NotificationPopups::DrawOverlay(ctx);   // last: toasts above the panels, the modal above all
+    if (TaskBoardFooter::DrawOverlay(ctx)) revealFloatingWindow(s_showTaskBoard, "Task Board");
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

@@ -210,6 +210,33 @@ enum class MatNodeType : uint8_t
     // The numbers come from the integer hash the bombing nodes use (pcg3d of the hex
     // index), so every backend picks the same ones bit for bit.
     BombCells,
+
+    // ── v16: the rings on the water (Thema 179, Schritt 3) ──
+    // The rings the water physics raised where a body went into or out of the surface
+    // (heLight.waterRipples / waterRippleA / waterRippleB, which HE::FillMaterialWater
+    // fills from IRenderer::GetWaterRipples), summed at one point. The engine water
+    // subtracts Slope from its wave normal and adds Foam to its foam mask, so a crate
+    // that lands on a lake leaves rings in the shader.
+    //   input  : Position (world XZ in metres; unconnected = this fragment's world XZ)
+    //   outputs: Height (metres), Slope (the height's gradient in world XZ, what a
+    //            normal subtracts to lean with the ring) and Foam (0..1, white on the
+    //            crest of a strong ring)
+    // Without rings (a preview, a UI pass, a scene with no splash) all three are 0.
+    // Fragment stage only: a World Position Offset body gets zeros, since the rings
+    // are a normal-and-foam effect on a flat surface.
+    WaterRipple,
+
+    // ── v17: the sun (Thema 205, Schritt 3) ──
+    // The scene's dominant directional light as a material input, read from the
+    // lighting prefix every backend already fills (heLight.sunDir.xyz / sunColor.rgb:
+    // RenderWorld::dominantDirectionalLight, so it dims at night and under cloud the
+    // way the shadows do). heLitP lights a surface from the sun on its own; this is
+    // for light it cannot see — the engine water's underside, where the sun shines
+    // THROUGH the surface toward a camera below it.
+    //   outputs: Direction (unit world vec3 TOWARD the sun), Color (radiance, colour
+    //            times intensity)
+    // A zero-filled block (UI pass) gives zeros; both stages declare the prefix.
+    Sun,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

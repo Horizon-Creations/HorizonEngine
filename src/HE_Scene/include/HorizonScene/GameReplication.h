@@ -135,7 +135,7 @@ public:
 	GameReplication(HE::Net::NetSession* net, HE::Net::NetRole role)
 		: GameReplication(net, role, Config{}) {}
 
-	void setWorld(HorizonWorld* world) { m_world = world; }
+	void setWorld(HorizonWorld* world) { m_world = world; m_interpEpoch = 0; }
 
 	// The simulation step, shared by client prediction and server execution.
 	// Without one shared function the two would drift by construction.
@@ -301,12 +301,28 @@ private:
 		// next tick.
 		std::uint32_t tick = 0;
 		bool          hasTick = false;
+		// The interpolation has arrived (t == 1) and the pose below is what it
+		// wrote. While the transform still holds exactly that pose, another frame
+		// would write the same values again and mark the entity dirty for nothing
+		// (SCN-301), so advanceInterpolation skips it. Anything that moves the
+		// transform in between (a script, the floating origin) fails the
+		// comparison and is overwritten as before: the server stays the truth.
+		bool      settled = false;
+		glm::vec3 writtenPosition { 0.0f };
+		glm::vec3 writtenRotation { 0.0f };
 	};
 
 	void sendSnapshots();
 	void applySnapshot(HE::Net::BitReader& r);
 	void applyBaseline(HE::Net::BitReader& r);
 	void advanceInterpolation(float dt);
+	// The entry of a net id that was bound to an entity again: its last written
+	// pose belongs to whatever held the id before.
+	void unsettle(std::uint32_t netId);
+	static bool samePose(const Sample& a, const Sample& b)
+	{
+		return a.position == b.position && a.rotation == b.rotation;
+	}
 	void handleInput(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
 
 	// Integrity: the local manifest is resolved lazily (the probe hashes on a
@@ -346,6 +362,11 @@ private:
 
 	std::unordered_map<HE::Net::ConnectionId, glm::vec3> m_viewpoints;
 	std::unordered_map<std::uint32_t, InterpState>       m_interp;
+	// HorizonWorld::structureEpoch() as advanceInterpolation last saw it. A
+	// reparent changes which origin a position is relative to (wireOrigin)
+	// without touching the transform, so a different epoch unsettles every
+	// entry. 0 is never a live epoch, so a fresh world always starts unsettled.
+	std::uint64_t m_interpEpoch = 0;
 
 	float  m_tickAccumulator = 0.0f;
 	Stats  m_stats;

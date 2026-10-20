@@ -152,6 +152,10 @@ uint32_t OcclusionCuller::refine(const RenderWorld& world, const ContentManager*
 		if (!visible[i]) continue;
 		const RenderObject& obj = world.objects[i];
 		if (!obj.worldBounds.isValid() || !obj.contributesAO) continue;
+		// A foliage cluster's box spans a whole bucket while its mesh and transform are
+		// one plant: it would win a place among the biggest occluders and then rasterize a
+		// single bush. It is still an OCCLUDEE below — hidden only when its whole box is.
+		if (obj.isCluster()) continue;
 		if (obj.instanceTint.a < RenderSorter::kOpaqueOpacityThreshold) continue;
 
 		// Screen-area gate FIRST — pure math on the bounds — so the thousands

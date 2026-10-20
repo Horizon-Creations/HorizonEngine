@@ -50,6 +50,9 @@ namespace HE {
 //   shadows         IRenderer::ShadowSettings, pushed per frame by editor + game.
 //   physics         PhysicsWorld gravity + the fixed step both apps drive it at.
 //   renderDefaults  the export dialog's config.json when useEditorSettings is off.
+//   graphics        the graphics half of that config.json, and the editor viewport's
+//                   look, when `graphics.enabled` (see ProjectGraphics).
+//   input           the game's gamepad deadzones when `input.enabled`.
 //   anticheat       the host's AntiCheatService (HorizonScene) — thresholds,
 //                   what happens per level, the game's value rules.
 //   multiplayer     NetGameSession::setProjectDefaults — the port, the seats,
@@ -129,10 +132,33 @@ struct HE_API ProjectPhysicsSettings
     // position, would jump by the shift. Read by the packaged game only; the
     // editor's Play keeps absolute coordinates.
     float     floatingOriginRadius = 0.0f;   // m
+    // Threads that take part in one physics step, the one that calls it included
+    // (Thema 178). 0 = automatic: half the cores minus the caller, at most four
+    // Jolt workers (PhysicsTuning::autoWorkers). 1 = single-threaded, N = the
+    // caller plus N-1 workers. Jolt's simulation is deterministic whatever the
+    // count, so this moves speed and nothing else. HE_PHYSICS_THREADS in the
+    // environment overrides it, for a benchmark or a bug report.
+    int       threads = 0;
+    // Time budget for the work around the physics step (Thema 178 step 3), in ms per
+    // step: character updates, scene queries, streaming bodies. What does not fit
+    // waits for the next step (a crowd of characters is stepped over several steps,
+    // each with the time it missed). 0 = no budget. The default is a quarter of a 60 Hz
+    // frame (PhysicsBudgetConfig::frameMs, HE_Scene, spells the same number; a
+    // test keeps them together). HE_PHYSICS_BUDGET_MS in
+    // the environment overrides it.
+    float     budgetMs = 4.0f;
+    // Contact events one poll hands to gameplay, per list; the rest wait in order for
+    // the next poll. 0 = all. Settings file only, no editor field.
+    int       eventsPerPoll = 4096;
 
     static constexpr int   kMinHz = 10;
     static constexpr int   kMaxHz = 480;
     static constexpr float kMaxFloatingOriginRadius = 1.0e5f;
+    // PhysicsTuning::kMaxThreads (HE_Scene) spells the same number; a static_assert
+    // in tests/test_project_settings.cpp keeps the two together.
+    static constexpr int   kMaxThreads = 32;
+    static constexpr float kMaxBudgetMs = 1000.0f;
+    static constexpr int   kMaxEventsPerPoll = 1 << 20;
 
     // The step length both applications hand to HE::advanceFixedSteps. ONE
     // function so the editor's preview and the packaged game cannot round the
@@ -163,6 +189,87 @@ struct HE_API ProjectRenderDefaults
 
     static constexpr int kMinWindowEdge = 320;
     static constexpr int kMaxWindowEdge = 16384;
+};
+
+// ─── Graphics ─────────────────────────────────────────────────────────────────
+// How the game LOOKS: anti-aliasing, post-processing, reflections, global
+// illumination and the render path. Until now these lived in the editor's own
+// config.json — one set for every project on the machine — and the exporter
+// wrote that set into every build ("the graphics half is the editor's live
+// configuration"). Two projects therefore shared their bloom, and what a game
+// looked like depended on who exported it. Here they travel with the project.
+//
+// `enabled` false (the default) IS that old behaviour, so a project without
+// this block ships exactly what it always did: the exporting editor's values,
+// and the editor's viewport previews with the user's own. `enabled` true makes
+// the values below the project's word — the export writes them, and the
+// viewport follows them unless the user chose "my own values" for the preview
+// (Preferences ▸ Viewport Quality).
+//
+// One list, expanded where a struct, a comparison, the file and the editor's
+// config need it, so a field is added in exactly one place. Columns: type,
+// member (also the key in the file), default, the EditorConfig member it
+// mirrors, lowest and highest accepted value (ignored for bool).
+#define HE_PROJECT_GRAPHICS_FIELDS(X) \
+    /* Quality */ \
+    X(int,   renderPath,                 0,     RenderPath,                0.0,    1.0) \
+    X(int,   antiAliasing,               1,     AntiAliasing,              0.0,    4.0) \
+    X(float, aaSharpness,                0.35f, AASharpness,               0.0,    1.0) \
+    X(float, renderScale,                1.0f,  RenderScale,               0.25,   2.0) \
+    X(bool,  specularAA,                 true,  SpecularAA,                0.0,    1.0) \
+    X(float, specularAAStrength,         1.0f,  SpecularAAStrength,        0.0,    2.0) \
+    X(bool,  occlusionCulling,           false, OcclusionCulling,          0.0,    1.0) \
+    X(bool,  gpuParticles,               true,  GpuParticles,              0.0,    1.0) \
+    /* Post-processing */ \
+    X(bool,  bloomEnabled,               true,  BloomEnabled,              0.0,    1.0) \
+    X(float, bloomThreshold,             1.0f,  BloomThreshold,            0.0,    10.0) \
+    X(float, bloomIntensity,             0.6f,  BloomIntensity,            0.0,    5.0) \
+    X(bool,  ssaoEnabled,                true,  SSAOEnabled,               0.0,    1.0) \
+    X(float, ssaoRadius,                 0.5f,  SSAORadius,                0.01,   10.0) \
+    X(float, ssaoIntensity,              1.0f,  SSAOIntensity,             0.0,    1.0) \
+    X(int,   ssaoMethod,                 0,     SSAOMethod,                0.0,    2.0) \
+    X(bool,  dofEnabled,                 false, DoFEnabled,                0.0,    1.0) \
+    X(float, dofFocusDistance,           10.0f, DoFFocusDistance,          0.1,    1000.0) \
+    X(float, dofFocusRange,              4.0f,  DoFFocusRange,             0.0,    1000.0) \
+    X(float, dofAperture,                2.8f,  DoFAperture,               1.0,    22.0) \
+    X(bool,  motionBlurEnabled,          false, MotionBlurEnabled,         0.0,    1.0) \
+    X(float, motionBlurIntensity,        0.5f,  MotionBlurIntensity,       0.0,    2.0) \
+    X(float, motionBlurMax,              24.0f, MotionBlurMax,             0.0,    128.0) \
+    /* Reflections and global illumination */ \
+    X(bool,  ssrEnabled,                 false, SSREnabled,                0.0,    1.0) \
+    X(float, ssrIntensity,               1.0f,  SSRIntensity,              0.0,    2.0) \
+    X(float, ssrMaxRoughness,            0.6f,  SSRMaxRoughness,           0.0,    1.0) \
+    X(int,   ssrQuality,                 1,     SSRQuality,                0.0,    2.0) \
+    X(bool,  giEnabled,                  false, GlobalIlluminationEnabled, 0.0,    1.0) \
+    X(float, giIndirectIntensity,        1.0f,  GIIndirectIntensity,       0.0,    5.0) \
+    X(float, giLightRadius,              0.5f,  GILightRadius,             0.0,    10.0) \
+    X(int,   giShadowQuality,            1,     GIShadowQuality,           0.0,    2.0) \
+    X(bool,  giReflectionsEnabled,       false, GIReflectionsEnabled,      0.0,    1.0) \
+    X(float, giReflIntensity,            1.0f,  GIReflIntensity,           0.0,    2.0) \
+    X(float, giReflMaxRoughness,         0.6f,  GIReflMaxRoughness,        0.0,    1.0) \
+    X(int,   giReflQuality,              1,     GIReflQuality,             0.0,    2.0) \
+    X(int,   giReflBounces,              1,     GIReflBounces,             1.0,    4.0) \
+    X(bool,  giReflBlur,                 false, GIReflBlur,                0.0,    1.0)
+
+struct HE_API ProjectGraphics
+{
+    bool enabled = false;
+#define HE_X(T, name, def, editorName, lo, hi) T name = def;
+    HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+};
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+// The gamepad deadzones the GAME uses. They were the editor's (config.json),
+// which is what the game in the editor read and the exported game did not: what
+// was tuned was not what shipped. `enabled` false keeps that.
+struct HE_API ProjectInputSettings
+{
+    bool  enabled         = false;
+    float stickDeadzone   = 0.15f;
+    float triggerDeadzone = 0.05f;
+
+    static constexpr float kMaxDeadzone = 0.9f;
 };
 
 // ─── Anti-cheat ───────────────────────────────────────────────────────────────
@@ -337,6 +444,15 @@ struct HE_API ProjectMultiplayerSettings
     // switch that does nothing, so the page says so on the row.
     bool discoverDirectory = true;
     bool portMapping       = true;
+    // A relay server, "host:port" (port optional, default 7777), or empty for
+    // the direct path. With an address, Play as Host / net.host register the
+    // session there and joiners connect to it, so every socket is OUTGOING and
+    // nobody needs a port forward. The session on the relay is derived from
+    // the join code, so a joiner needs nothing but the code; address and port
+    // of the Join dialog are then ignored. Over the relay the session runs on
+    // TCP, so unreliable sends arrive reliably (and later under loss).
+    // HE_NET_RELAY overrides it. docs/relay-server-protocol.md.
+    std::string relayAddress;
 
     // Remote calls a client may make per second before the host counts the
     // excess as an observation (§7.6), measured over a two-second window.
@@ -361,16 +477,43 @@ struct HE_API ProjectMultiplayerSettings
     static constexpr int   kMaxRpcPerSecond      = 10000;
 };
 
+// ─── Source control ───────────────────────────────────────────────────────────
+// Who keeps this project's history (docs/team-server-source-control-design-
+// 2026-10-13.md §6.1). "git" is the editor talking to a repository directly,
+// which is what every project did before the team server existed and stays the
+// default. "teamServer" hands that job to the team's server: it takes every
+// member's saves, merges them and commits, and the editor no longer commits or
+// pushes to a local .git itself.
+//
+// A project setting and not a preference because the whole team has to flip
+// together: this file is synced, so one change reaches everybody. The server's
+// address and the member's login are per user (the team settings), never here.
+struct HE_API ProjectSourceControlSettings
+{
+    enum class Mode : std::uint8_t { Git, TeamServer };
+
+    Mode mode = Mode::Git;
+    // The team and the project on its server, as the team admin named them when
+    // the project was created there. Only read with mode == TeamServer.
+    std::string team;
+    std::string project;
+
+    bool teamServer() const { return mode == Mode::TeamServer; }
+};
+
 struct HE_API ProjectSettings
 {
     static constexpr int kVersion = 1;
 
-    ProjectGameSettings        game;
-    ProjectShadowSettings      shadows;
-    ProjectPhysicsSettings     physics;
-    ProjectRenderDefaults      renderDefaults;
-    ProjectAntiCheatSettings   antiCheat;
-    ProjectMultiplayerSettings multiplayer;
+    ProjectGameSettings          game;
+    ProjectShadowSettings        shadows;
+    ProjectPhysicsSettings       physics;
+    ProjectRenderDefaults        renderDefaults;
+    ProjectGraphics              graphics;
+    ProjectInputSettings         input;
+    ProjectAntiCheatSettings     antiCheat;
+    ProjectMultiplayerSettings   multiplayer;
+    ProjectSourceControlSettings sourceControl;
 
     // True when nothing differs from a fresh construction. The saver uses it to
     // leave a project that never touched its settings WITHOUT a file, so an old

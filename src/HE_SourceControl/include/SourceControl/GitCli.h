@@ -25,6 +25,11 @@ struct GitResult
 	int         exitCode = -1;
 	std::string out;
 	std::string err;      // git's own message, already scrubbed of credentials
+	// git itself could not be started — not installed, or removed since it was
+	// located. A different answer from any failure git reports, and one a caller
+	// must not read as "not a repository" (GitService's project-open check would
+	// otherwise offer `git init` on an existing repository).
+	bool        gitMissing = false;
 };
 
 class HE_SC_API GitCli {
@@ -134,8 +139,12 @@ public:
 	// The most recent commits, newest first. `unpushed` is filled only when an
 	// upstream exists. Field/record separators are the ASCII control characters
 	// (0x1F/0x1E), so commit messages cannot break the framing.
+	// `checkUnpushed = false` skips the second git call that fills `unpushed`:
+	// for a caller that already knows from status that there is no upstream or
+	// nothing ahead of it, which is exactly when that call has nothing to find.
 	static bool log(const std::filesystem::path& root, std::size_t maxCount,
-	                std::vector<CommitInfo>& out, std::string* err = nullptr);
+	                std::vector<CommitInfo>& out, std::string* err = nullptr,
+	                bool checkUnpushed = true);
 
 	// ── Restoring an old state ───────────────────────────────────────────────
 	// Put the working tree and index back to exactly how `commit` had them —
@@ -221,6 +230,15 @@ public:
 	// Remote-tracking branches ("origin/main"), without the symbolic HEAD entry.
 	static bool listRemoteBranches(const std::filesystem::path& root,
 	                               std::vector<std::string>& out, std::string* err = nullptr);
+
+	// Both lists in ONE git call: `locals` as listBranches gives them (without the
+	// current one, which RepoStatus::branch already names), `remotes` as
+	// listRemoteBranches does. What a status refresh uses, since it runs every few
+	// seconds and each git call is a process start.
+	static bool listLocalAndRemoteBranches(const std::filesystem::path& root,
+	                                       std::vector<std::string>& locals,
+	                                       std::vector<std::string>& remotes,
+	                                       std::string* err = nullptr);
 
 	// Stash everything including untracked files, so a branch switch starts clean.
 	static bool stashPush(const std::filesystem::path& root, const std::string& message,

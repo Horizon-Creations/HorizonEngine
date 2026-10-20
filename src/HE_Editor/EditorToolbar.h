@@ -55,10 +55,14 @@ inline constexpr ImU32 kDownBg    = IM_COL32(255, 250, 240,  38);
 // Armed. Amber at the same luminance the old armed-blue had (~102 / ~123), so
 // the bars did not get louder — only warmer.
 inline constexpr ImU32 kOnBg      = IM_COL32(168, 100,  30, 255);
-inline constexpr ImU32 kOnBgHover = IM_COL32(198, 124,  42, 255);
+// Hovering an armed cell deepens it rather than lightening it: kFgOn on the old
+// lighter hover (198,124,42) was 3.2:1, on this one it is 5.5:1.
+inline constexpr ImU32 kOnBgHover = IM_COL32(150,  89,  27, 255);
 inline constexpr ImU32 kFg        = IM_COL32(200, 196, 188, 255);
 inline constexpr ImU32 kFgOn      = IM_COL32(255, 252, 245, 255);
-inline constexpr ImU32 kFgDim     = IM_COL32( 99,  95,  88, 255);
+// Theme::TextDim. Also the colour of every bar's readout ("Blend Space",
+// "Python"), so it has to read: the old (99,95,88) was 2.5:1 on a well.
+inline constexpr ImU32 kFgDim     = IM_COL32(153, 146, 136, 255);
 
 // State colours, shared so "something needs attention" is the same amber
 // everywhere and "this went wrong" the same red.
@@ -72,6 +76,7 @@ inline constexpr ImU32 kWarn      = IM_COL32(230, 176,  86, 255);
 inline constexpr ImU32 kBad       = IM_COL32(222,  92,  92, 255);
 inline constexpr ImU32 kGoodWell  = IM_COL32( 96, 196, 124,  28);
 inline constexpr ImU32 kBadWell   = IM_COL32(222,  92,  92,  38);
+inline constexpr ImU32 kWarnWell  = IM_COL32(230, 176,  86,  30);
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
 inline constexpr float kWellRound = 7.0f;

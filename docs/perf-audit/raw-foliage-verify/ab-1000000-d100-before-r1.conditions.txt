@@ -1,0 +1,15 @@
+== ab-1000000-d100-before-r1  2026-10-10 20:43:09
+before:
+  uptime:      load averages: 7.76 10.78 10.12
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=87
+  power:       Now drawing from 'Battery Power'
+  busy procs:  117.5% /Applications/CLion.app/Contents/MacOS/clion; 99.1% /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-entities-pro-zelle-streamen-nur-d/out/build/release/tests/he_tests; 34.6% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 10.5% claude; 
+after (rc=0):
+  uptime:      load averages: 6.88 10.19 9.94
+  locked:      none
+  lowpower:    0
+  gpu:         "Device Utilization %"=96
+  power:       Now drawing from 'Battery Power'
+  busy procs:  86.6% /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-entities-pro-zelle-streamen-nur-d/out/build/release/tests/he_tests; 46.3% /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer; 20.1% /Users/connorjansen/VSCode/HorizonEngine/out/deploy/Editor/HorizonEditor; 17.2% /usr/sbin/coreaudiod; 

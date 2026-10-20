@@ -264,6 +264,27 @@ private:
     mutable std::string      m_parsedFrom;   // the markup m_parsed was built from
     mutable HE::UIRichText   m_parsed;
     mutable bool             m_parsedOnce = false;
+
+    // What auto-size measured last time, and EVERYTHING it measured from
+    // (Thema 213, CORE-602). Auto-size runs every frame for every label, and a
+    // label's words, size and font almost never change between two frames, so
+    // the glyph walk is done again only when one of these does. The font is
+    // in the key as a pointer as well as a key: an imported font is not baked
+    // yet on the first frames, and the label must re-measure the frame it is.
+    // Transient, never serialized; a copy carries it along, which is right,
+    // because the copy has the same inputs.
+    struct MeasuredFor
+    {
+        bool                   valid = false;
+        std::string            text;
+        float                  fs = 0.0f, wrapW = 0.0f;
+        int                    alignH = 0, alignV = 0;
+        bool                   wordWrap = false, richText = false;
+        uint32_t               fontKey = 0;
+        const HE::BakedUIFont* font = nullptr;
+    };
+    MeasuredFor m_measuredFor;
+    glm::vec2   m_measured{ 0.0f, 0.0f };
 };
 
 // ── Button ────────────────────────────────────────────────────────────────────

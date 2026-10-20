@@ -1,6 +1,7 @@
 #include "McpStatusBar.h"
 
-#include "EditorApplication.h"        // AppContext, EditorConfig, McpBridge
+#include "EditorApplication.h"        // AppContext, EditorConfig
+#include "McpBridge.h"                // what AppContext::mcp points at
 #include "EditorSettingsPanel.h"      // clicking the line opens the Remote Control page
 
 #ifdef HE_IMGUI_ENABLED

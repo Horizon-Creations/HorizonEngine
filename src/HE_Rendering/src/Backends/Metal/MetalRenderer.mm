@@ -4,6 +4,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
@@ -15,6 +16,7 @@
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
@@ -220,6 +222,17 @@ static bool skyViewLutEnabled()
 }
 // Sky-View LUT size. MUST match kSkyLutW/H in kSkyMSL.
 static constexpr int kSkyLutW = 256, kSkyLutH = 128;
+
+// Does the underwater post pass (Thema 185: caustic net + depth fog, EncodeUnderwaterCaustics)
+// run this frame? ONE definition for the two places that must agree: the post chain's gate and
+// the scene pass's depth store (the pass SAMPLES the scene depth, which on a tile GPU only
+// reaches memory if the scene pass stores it — see the hdrPass depth attachment).
+// Not gated on wet: density stays above 0 for a dry camera in the waterline band just above
+// the surface (HE::fogWaterlineBand, Thema 185 Schritt 5), and the net is 0 whenever dry.
+static bool underwaterPostWanted(const UnderwaterCameraData& uc)
+{
+	return uc.causticsIntensity > 0.0f || uc.density > 0.0f;
+}
 
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
@@ -1689,6 +1702,177 @@ fragment float4 dofCompositeFragment(FSOut in [[stage_in]],
 // is top-left, so ndc.y = 1 - 2·uv.y going in and the velocity's y flips sign
 // coming out — a yaw must streak horizontally on both backends, a pitch
 // vertically.
+// Underwater caustics (Thema 185 Schritt 3) — MSL twin of the GL kUnderwaterCausticsFS
+// (OpenGLRenderer.cpp carries the derivation). Per pixel: the depth names a world
+// position P; the sun's ray through P, bent by Snell's law, pierces the flat surface
+// plane at S; the engine water's wave trains (Physics/WaterWaves.h, spliced in at
+// @TRAINS@) give the surface's curvature there, and 1/|det| of the light's
+// surface->floor mapping is how much it is squeezed. Since Thema 205 Schritt 2 the light
+// is redistributed (scene * (1 - a) + rgb) and fades out by depth; see the GL twin.
+// Metal depth is already GL ndc z (same convention as mbVelocityFragment above).
+//
+// The same pass carries the depth fog (Thema 185 Schritt 2: a separate alpha-blended pass
+// on the D3D/Vulkan backends, see HlslSources.h kUnderwaterFogHLSL), folded in AFTER the
+// net — the order those backends draw them in — instead of costing a second full-resolution
+// read+write for a few instructions. The pass therefore runs whenever the camera is under
+// water and either the net intensity or the fog density is non-zero.
+static const char* kUnderwaterCausticsMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct FSOut { float4 position [[position]]; float2 uv; };
+
+vertex FSOut fsVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	FSOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+struct UcParams
+{
+	float4x4 invViewProj;   // GL-style clip, jittered like the depth it reads
+	float4   camSurface;    // xyz = camera world position, w = surface Y
+	float4   sun;           // xyz = direction TOWARD the sun (unit)
+	float4   sunColor;      // rgb = sun radiance (0 at night)
+	float4   caustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
+	float4   tintDensity;   // rgb = resolved fog tint, a = per-metre density (the fog stage, see ucFragment)
+};
+
+constant float kTrains[12] = { @TRAINS@ };
+constant int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
+constant float kChopSteep  = 0.05;
+constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
+constant float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
+
+// The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
+// cells between them lose (float4(0) where there is no net; Thema 205 Schritt 2, the GL twin
+// carries the reasoning). The screen derivatives of P come in as arguments: ucFragment takes
+// them before any branch. Past the one uniform early-out it runs for every pixel, the result
+// selected away for the sky, so fwidth(det) stays defined (sky P parked at the camera).
+static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dPy, bool hit)
+{
+	const float kTwoPi = 6.28318530718;
+	const float kEta   = 1.33;
+	float3 L = u.sun.xyz;
+	if (u.caustics.x <= 0.0 || L.y <= 0.02)
+		return float4(0.0);                                     // off, or no sun
+	P = hit ? P : u.camSurface.xyz;
+	float  depth = u.camSurface.w - P.y;                        // metres below the flat surface
+	float  fadeDepth = u.caustics.w;
+
+	float2 hz   = L.xz / kEta;
+	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
+	float3 Lr   = float3(hz.x, cosT, hz.y);
+	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
+	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * u.caustics.z), sin(0.37 * S.x - 0.27 * u.caustics.z));
+
+	// Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
+	float  mxx = 0.0, mzz = 0.0, mxz = 0.0;
+	float2 gxx = float2(0.0), gzz = float2(0.0), gxz = float2(0.0);   // their gradients over S
+	for (int i = 0; i < 6 + kChopTrains; ++i)
+	{
+		float deg, len, stp, spd;
+		if (i < 6)
+		{
+			int   b    = i % 3;
+			float comp = i >= 3 ? 1.0 : 0.0;
+			deg = kTrains[b * 4] + comp * 57.0;
+			len = kTrains[b * 4 + 2] * mix(1.0, 0.73, comp);
+			stp = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+			spd = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		}
+		else
+		{
+			float j = float(i - 5);
+			deg = 20.0 + 137.508 * j;
+			len = 1.2 * pow(1.0 / 3.0, (j - 1.0) / float(kChopTrains - 1));
+			stp = kChopSteep;
+			spd = sqrt(9.81 / kTwoPi * len);
+		}
+		float  rad = deg * (3.14159265359 / 180.0);
+		float2 dv  = float2(cos(rad), sin(rad));
+		float  k   = kTwoPi / len * u.caustics.y;
+		float  ph  = k * (dot(dv, S) - spd * u.caustics.z);
+		float  c   = stp * k * sin(ph);
+		float2 dc  = (stp * k * k * cos(ph)) * dv;
+		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;   gzz -= dc * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;   gxz -= dc * dv.x * dv.y;
+	}
+	float  kd   = (kEta - 1.0) / kEta * kFocal;
+	float  det  = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+	float2 gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
+	// det's change per pixel: exact gradient over S times the pixel's (smooth) step in S.
+	// Floored by the pixel's step in S against the chop's ~10 / m (det's peaks have no gradient).
+	float2 dSx  = dfdx(S);
+	float2 dSy  = dfdy(S);
+	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
+	                  10.0 * u.caustics.y * (length(dSx) + length(dSy)));
+	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
+	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
+	float capAA = 2.0 / max(dDet, 1e-4);                      // fold lines >= 2 px, else fade (GL twin)
+	float cap   = min(mix(10.0, 2.0, t), capAA);                // only the core above kCore lights up (GL twin)
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
+
+	float3 n = normalize(cross(dPx, dPy));
+	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
+	float w = u.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
+	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	                    kDark * min(w, 1.0) * max(1.0 - J, 0.0));
+	return hit ? net : float4(0.0);
+}
+
+fragment float4 ucFragment(FSOut in [[stage_in]],
+                           texture2d<float> scene [[texture(0)]],
+                           depth2d<float> depthTex [[texture(1)]],
+                           constant UcParams& u [[buffer(0)]])
+{
+	constexpr sampler sl(filter::linear,  address::clamp_to_edge);
+	constexpr sampler sn(filter::nearest, address::clamp_to_edge);
+	float3 sc = scene.sample(sl, in.uv).rgb;
+	float  d  = depthTex.sample(sn, in.uv);
+	float4 wp = u.invViewProj * float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, d, 1.0);
+	float3 P  = wp.xyz / max(wp.w, 1e-8);
+	float3 dPx = dfdx(P);                                       // before any early-out: derivatives are
+	float3 dPy = dfdy(P);                                       // undefined after divergent flow
+	float4 net = causticLight(u, P, dPx, dPy, d < 1.0);               // the sky has no floor to catch the net
+	float3 lit = sc * (1.0 - net.a) + net.rgb;                         // the D3D/Vulkan blend, ONE / INV_SRC_ALPHA
+
+	// The fog (twin of kUnderwaterFogHLSL): Beer-Lambert over the part of the camera->P ray
+	// that lies on the wet side of the flat surface plane. Both ends dry = 0 (a ray that
+	// never enters the water pays nothing); both wet = the whole ray; split = the part before
+	// the plane crossing, which is what keeps the waterline soft. Applied AFTER the net so
+	// the fog swallows it with distance, exactly as on the D3D backends (caustics first,
+	// then the premultiplied tint*fog + dst*(1-fog) blend).
+	float3 camPos   = u.camSurface.xyz;
+	float  surfaceY = u.camSurface.w;
+	bool   camBelow = camPos.y < surfaceY;
+	bool   pBelow   = P.y < surfaceY;
+	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
+	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
+	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
+	float4 wn = u.invViewProj * float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, 0.0, 1.0);
+	bool   nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+	float  segment;
+	if (camBelow == pBelow)
+		segment = camBelow ? length(camPos - P) : 0.0;
+	else
+	{
+		float  t = (surfaceY - camPos.y) / (P.y - camPos.y);
+		float3 crossPt = camPos + t * (P - camPos);
+		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
+	}
+	float fogAmount = 1.0 - exp(-u.tintDensity.a * segment);
+	return float4(lit * (1.0 - fogAmount) + u.tintDensity.rgb * fogAmount, 1.0);
+}
+)MSL";
+
 static const char* kMotionBlurMSL = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
@@ -6632,6 +6816,10 @@ void MetalRenderer::Shutdown()
 	DestroyBloomTargets();
 	DestroyDepthOfFieldTargets();
 	DestroyMotionBlurTargets();
+	if (m_ucColor)    { CFBridgingRelease(m_ucColor);    m_ucColor = nullptr; }
+	if (m_ucPipeline) { CFBridgingRelease(m_ucPipeline); m_ucPipeline = nullptr; }
+	m_ucW = m_ucH = 0;
+	m_ucTried = false;
 	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroySSAOTargets();
@@ -7732,15 +7920,9 @@ void MetalRenderer::EnsureShadowResources()
 	}
 }
 
-void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
+void MetalRenderer::ExtractFrame(float aspect)
 {
-	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
-
-	// Re-extract to get the cascade light matrices + caster geometry. CRITICAL for
-	// CSM: this MUST use the SAME day-night state and the SAME aspect ratio as the
-	// scene pass's extract (EncodeScene), because the cascade fit depends on both.
-	// If they differ, the depth maps are rendered with different cascade matrices
-	// than the shader samples with → shadows slide with the camera (swimming).
+	if (!m_world) return;
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
 	                        env.sunColor, env.sunIntensity,
@@ -7748,14 +7930,56 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	                        env.cloudCoverage);
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+}
+
+void MetalRenderer::RefineObjectBounds()
+{
+	// What the loop writes depends only on an object's transform and its mesh's bound, and the
+	// walk stays in m_renderWorld for the whole frame (RenderExtractor::beginFrame): a second loop
+	// over the same walk writes the same values again. Each of them cost about 3.5 ms of CPU at
+	// 50k entities, three a frame (shadow, SSAO, scene), a fifth of the frame. So: once per walk.
+	// EncodeFrame refines right after the walk, every pass calls this again as its guarantee and
+	// finds it done; a new walk (the count moves) or another object array starts over, and a
+	// frame that never reached the frame step (no primary window) has its first pass do it.
+	// A mesh that could not be resolved when the loop ran
+	// keeps the bound the walk gave it for the rest of the walk, invalid at worst, and an object
+	// with an invalid bound is never culled: the conservative side, the draw loops resolve the
+	// mesh on their own.
+	const uint64_t      walk    = m_extractor.fullExtractCount();
+	const RenderObject* objects = m_renderWorld.objects.data();
+	const size_t        count   = m_renderWorld.objects.size();
+	if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
+	{
+		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+		for (RenderObject& obj : m_renderWorld.objects)
+			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
+				obj.refineWorldBounds(mesh->localBounds);
+	}
+	m_refinedWalk    = walk;
+	m_refinedObjects = objects;
+	m_refinedCount   = count;
+}
+
+void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
+{
+	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
+
+	// The cascade light matrices + caster geometry are the frame's walk, which EncodeFrame took
+	// just before this pass (ExtractFrame); this call is the key check that m_renderWorld holds
+	// that walk at THIS pass's aspect, no walk of its own. CRITICAL for CSM: the cascade fit
+	// must use the SAME day-night state and the SAME aspect ratio as the scene pass's extract
+	// (EncodeScene), because it depends on both. If they differ, the depth maps are rendered
+	// with different cascade matrices than the shader samples with → shadows slide with the
+	// camera (swimming). Day-night and the shadow settings are part of the extractor's frame
+	// key, so a sun that moved since the walk (or settings pushed in between) is a new walk,
+	// never last frame's cascades.
+	ExtractFrame(aspect);
 	// CSM needs a directional light; the local (point/spot) atlas is independent
 	// of it — night scenes with only shadow-casting point lights still render.
 	const bool wantCsm   = m_renderWorld.shadow.enabled;
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
 	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	RefineObjectBounds();
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
 		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
@@ -8053,7 +8277,8 @@ void MetalRenderer::EncodeGISwAccelBuild()
 	};
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
-		if (!obj.castsShadow) continue;
+		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+		if (!obj.castsShadow || obj.isCluster()) continue;
 		// Default-cube fallback — must match the draw loops (see the HW path).
 		GISwBlasRange range = resolveSwRange(obj.meshAssetId);
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
@@ -8243,7 +8468,8 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
-			if (!obj.castsShadow) continue;
+			// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
+			if (!obj.castsShadow || obj.isCluster()) continue;
 			// Same fallback the shadow-caster/G-buffer DRAW loops use: an entity
 			// without a resolvable mesh asset renders as the default cube, so it
 			// must occlude as one too — skipping it here made such objects
@@ -8793,17 +9019,17 @@ void MetalRenderer::EnsureGIProbeGrid()
 	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
-	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
-	// call earlier this frame, which creates BRAND NEW RenderObjects whose
-	// worldBounds are whatever the extractor could produce — invalid for meshes it
-	// could not resolve, a unit-cube proxy for particles/skinned (see
-	// RenderObject.h) — NOT the real per-mesh bounds EncodeShadowMap/EncodeSSAO
-	// refresh in their own passes. Those refreshes don't survive the re-extraction,
-	// so refresh here too before unioning, or the grid ends up sized to a handful
-	// of proxy boxes instead of the actual scene.
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	// m_renderWorld holds the frame's walk (ExtractFrame, answered in place by every later
+	// extract() of the frame — RenderExtractor::beginFrame), not a fresh one: the
+	// RenderObjects are the ones the shadow pass already refined, when it had cascades or
+	// local layers to draw. The walk itself leaves worldBounds as the extractor could
+	// produce them — invalid for meshes it could not resolve, a unit-cube proxy for
+	// particles/skinned (see RenderObject.h) — NOT the real per-mesh bounds, and a frame
+	// whose shadow pass returned early (no sun, no local shadow lights) refined nothing.
+	// refineWorldBounds writes the same value every time, so refresh here too before
+	// unioning, or the grid ends up sized to a handful of proxy boxes instead of the
+	// actual scene.
+	RefineObjectBounds();
 
 	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
 	// in m_renderWorld.objects (an older note here said otherwise). What kept a
@@ -9330,6 +9556,10 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
 	if (array) key += "#arr";
+	// A miss is cached (no file open per frame) until files may have appeared: an
+	// EngineContent download landing after this first ask (Thema 210).
+	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+	                             [](void* tex) { return tex == nullptr; });
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
@@ -11991,6 +12221,107 @@ void* MetalRenderer::EncodeMotionBlur(void* cmdBufPtr, void* sourceHdr, int full
 	return m_mbColor;
 }
 
+// Underwater caustics: one encoder in the caller's command buffer, sourceHdr + scene
+// depth in, the HDR image with the refracted-sun net added out (m_ucColor). The pipeline
+// is built on first use (a failure is logged once and the pass then stays off).
+void* MetalRenderer::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
+{
+	if (!sourceHdr || !m_hdrDepth) return nullptr;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_ucPipeline)
+	{
+		if (m_ucTried) return nullptr;
+		m_ucTried = true;
+		std::string src = kUnderwaterCausticsMSL;
+		src.replace(src.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
+		NSError* err = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()]
+		                                          options:nil error:&err];
+		if (!lib)
+		{
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: underwater caustics shader compile failed");
+			return nullptr;
+		}
+		MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+		d.vertexFunction   = [lib newFunctionWithName:@"fsVertex"];
+		d.fragmentFunction = [lib newFunctionWithName:@"ucFragment"];
+		d.colorAttachments[0].pixelFormat = kSceneColorFormat;
+		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:d error:&err];
+		if (!pso)
+		{
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: underwater caustics pipeline creation failed");
+			return nullptr;
+		}
+		m_ucPipeline = (void*)CFBridgingRetain(pso);
+	}
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (!m_ucColor || fullW != m_ucW || fullH != m_ucH)
+	{
+		if (m_ucColor) { CFBridgingRelease(m_ucColor); m_ucColor = nullptr; }
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:kSceneColorFormat width:fullW height:fullH mipmapped:NO];
+		desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		desc.storageMode = MTLStorageModePrivate;
+		m_ucColor = (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+		m_ucW = fullW;
+		m_ucH = fullH;
+	}
+	if (!m_ucColor) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+	const UnderwaterCameraData& uc = m_renderWorld.underwaterCamera;
+	glm::vec3 sunColor(0.0f);
+	glm::vec3 towardSun = glm::normalize(m_renderWorld.sunDirection);
+	{
+		glm::vec3 domDir;
+		m_renderWorld.dominantDirectionalLight(domDir, sunColor);   // colour is 0 at night
+	}
+	float engineSeconds = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+		engineSeconds = static_cast<float>(std::atof(ov));   // deterministic headless captures
+	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 invViewProj = glm::inverse(viewProj);
+	const glm::vec3 cam = m_renderWorld.camera.position;
+
+	// Layout mirrors the MSL UcParams struct (160 bytes).
+	struct UcParams
+	{
+		float invViewProj[16];
+		float camSurface[4];
+		float sun[4];
+		float sunColor[4];
+		float caustics[4];
+		float tintDensity[4];
+	} u{};
+	std::memcpy(u.invViewProj, glm::value_ptr(invViewProj), sizeof(u.invViewProj));
+	u.camSurface[0] = cam.x; u.camSurface[1] = cam.y; u.camSurface[2] = cam.z; u.camSurface[3] = uc.surfaceY;
+	u.sun[0] = towardSun.x; u.sun[1] = towardSun.y; u.sun[2] = towardSun.z;
+	u.sunColor[0] = sunColor.r; u.sunColor[1] = sunColor.g; u.sunColor[2] = sunColor.b;
+	u.caustics[0] = uc.causticsIntensity;
+	u.caustics[1] = uc.causticsScale;
+	u.caustics[2] = engineSeconds * uc.causticsSpeed;
+	u.caustics[3] = uc.causticsDepth;
+	u.tintDensity[0] = uc.tintColor.r; u.tintDensity[1] = uc.tintColor.g; u.tintDensity[2] = uc.tintColor.b;
+	u.tintDensity[3] = uc.density;
+
+	const uint32_t ucBase = ftBeginMulti("UnderwaterCaustics");
+	MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+	p.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ucColor;
+	p.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+	p.colorAttachments[0].storeAction = MTLStoreActionStore;
+	if (ucBase != kInvalidSlot) ftAttachStart((__bridge void*)p, ucBase);
+	if (ucBase != kInvalidSlot) ftAttachEnd  ((__bridge void*)p, ucBase);
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ucPipeline];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)sourceHdr atIndex:0];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrDepth atIndex:1];
+	[enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	return m_ucColor;
+}
+
 void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
 {
 	m_ssaoEnabled   = s.enabled;
@@ -12088,9 +12419,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(width) / static_cast<float>(height), &m_editorCamera);
 	if (m_renderWorld.objects.empty()) return;
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	RefineObjectBounds();
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 	}
@@ -12379,10 +12708,16 @@ void* MetalRenderer::EnsureMaterialArchive()
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool blend, bool gbuffer)
+                                               bool blend, bool gbuffer, bool instanced)
 {
+	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
+	if (instanced && precompiled) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
+	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
+	// own PSO slot but shares the plain form's fragment.
+	const uint64_t fragKey = key;
+	if (instanced) key ^= 0x1D57A9CEDB0B1E55ULL;
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
@@ -12412,18 +12747,22 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	else
 	{
 		// WPO materials get the graph-generated vertex; everything else the shared one.
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(Backend::Metal)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::Metal);
+		// The instanced twin takes the instanced form of either.
+		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+		const auto& v = instanced
+			? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::Metal)
+			                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::Metal))
+			: (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::Metal)
+			                    : m_matShaderLib.customVertex(vh, vertBody, Backend::Metal));
 		// Forward PSOs (opaque + blended) take the clustered heLitP variant —
 		// EncodeScene binds its lists on fragment buffers 4/5/6 and sets the gate;
 		// the material preview binds empty lists with the gate at 0. The G-buffer
 		// variant never shades lights. A variant that fails to compile falls back
 		// to the plain fragment (8-light window), not to a missing material.
-		const auto* f = &m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+		const auto* f = &m_matShaderLib.fragment(fragKey, fragGlsl, Backend::Metal); // shared, cached MSL
 		if (m_forwardClustered && !gbuffer)
 		{
-			const auto& fc = m_matShaderLib.fragmentClustered(key, fragGlsl, Backend::Metal);
+			const auto& fc = m_matShaderLib.fragmentClustered(fragKey, fragGlsl, Backend::Metal);
 			if (fc.ok) f = &fc;
 			else HE_LOG_WARN(RHI, "%s", ("MetalRenderer: clustered material variant failed, "
 			                             "using the 8-light window\n" + fc.log).c_str());
@@ -12693,6 +13032,29 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 		const RenderObject& obj = m_renderWorld.objects[idx];
 		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
 		if (!mesh || !mesh->vertexBuf || !mesh->indexBuf) continue;
+
+		// A foliage cluster stands for a bucket of plants: draw every one of them,
+		// static (previous pose = this pose, so the velocity is the camera's own
+		// motion). The entity-keyed history below holds ONE pose per entity, which
+		// is all a cluster must not use: every plant of a layer shares the terrain's id.
+		if (obj.isCluster())
+		{
+			[enc setVertexBuffer:(__bridge id<MTLBuffer>)mesh->vertexBuf offset:0 atIndex:0];
+			m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+			{
+				VelocityUniformsCPU u;
+				u.mvpJitter = viewProjJit   * model;
+				u.mvpNow    = viewProjClean * model;
+				u.mvpPrev   = m_taaPrevViewProj * model;
+				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+				                indexCount:mesh->indexCount
+				                 indexType:MTLIndexTypeUInt32
+				               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
+				         indexBufferOffset:0];
+			});
+			continue;
+		}
 
 		// An object seen for the first time reports no motion — its "previous"
 		// position is where it is now. Anything else invents a streak out of
@@ -13766,10 +14128,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	}
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	RefineObjectBounds();
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	CullCameraObjects();
@@ -14088,6 +14447,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// only re-bind on an actual change (draws arrive sorted, so this is rare).
 		void*     cMaterialPipeline      = nullptr;
 		void*     cMaterialPipelineBlend = nullptr; // alpha-blended variant (transparency pass)
+		// Instanced twin (Thema 182, 2e): built on the material's first batch, not
+		// on sight. The sources are kept for that; a baked variant has no twin.
+		void*     cMaterialPipelineInst  = nullptr; bool cMaterialInstTried = false;
+		uint64_t  cShKey = 0; std::string cShFrag, cShVert; bool cShBaked = false;
 		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
 		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
@@ -14114,6 +14477,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// own cross-compiled pipeline (cached by source hash); else the default.
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
+				cMaterialPipelineInst = nullptr; cMaterialInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
@@ -14130,6 +14494,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
 						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						cShKey = shKey; cShFrag = shFrag; cShVert = shVert; cShBaked = pre != nullptr;
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
 						// (not gated on this material's own opacity): a per-instance tint
@@ -14216,7 +14581,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// above, only mvp/model differ per instance. Without this only dc.transform drew
 			// and every OTHER copy of an identical mesh vanished (the other backends already
 			// iterate instanceTransforms).
-			auto drawInstance = [&](const glm::mat4& xform)
+			// With `instPso` (2e) the same binds draw the whole batch: the material's
+			// instanced PSO, {mvp, model} per instance at vertex buffer 5 (instBuf),
+			// `instCount` instances in one call. Opaque only — the caller checks.
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
@@ -14225,7 +14595,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// resolves the material×instance-tint product itself above, so the
 				// shared threshold is applied to that instead of RenderSorter::
 				// isTransparent (which re-derives it from a DrawCall).
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -14245,7 +14615,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 				// M1: switch to this material's cross-compiled pipeline if it has one,
 				// else the default PBR pipeline. Re-bound only on a real change.
-				void* wantPipeline = cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -14308,6 +14679,19 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -14322,6 +14706,41 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// that is exactly the condition under which GeometryPass batched at all.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
 			const size_t instCount = dc.instanceTransforms.size();
+			// A graph-material batch (2e): the same {mvp, model} array, drawn with
+			// the material's instanced PSO and every bind of drawInstance. Built on
+			// the material's first batch; null (baked variant, failed build,
+			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
+			const bool graphBatch = instCount > 0 && cMaterialPipeline
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances && !cShBaked
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialInstTried)
+			{
+				cMaterialInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				                                                   /*blend=*/false, /*gbuffer=*/false,
+				                                                   /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineInst)
+			{
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				{
+					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_sceneInstancedPipeline
@@ -14514,6 +14933,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
 	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
 	HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
+	HE::FillMaterialWater(GetWaterRipples(), matLight); // Water Ripple node: the rings the physics raised
 	// Local (point/spot) shadow atlas for heLitP — the same matrices the
 	// built-in shaders sample with, Metal depth remap AND top-left UV origin
 	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -15806,10 +16226,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 
 	if (m_renderWorld.objects.empty()) return;
 
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
-		    mesh && mesh->localBounds.isValid())
-			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+	RefineObjectBounds();
 
 	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
@@ -15849,6 +16266,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// the deferred path would draw every Wind Sway material standing still.
 		HE::FillMaterialWind(GetEnvironment(), matLight);
 		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
+		HE::FillMaterialWater(GetWaterRipples(), matLight);  // Water Ripple node, same rings as the forward pass
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
@@ -15887,6 +16305,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		void*     cMaterialPipeline      = nullptr; // forward PSO (forward-routed replay)
 		void*     cMaterialPipelineBlend = nullptr; // blended forward PSO (transparency)
 		void*     cMaterialPipelineGB    = nullptr; // G-buffer PSO (this pass)
+		// Instanced twin of the G-buffer PSO (2e), built on the first batch.
+		void*     cMaterialPipelineGBInst = nullptr; bool cMaterialGBInstTried = false;
+		uint64_t  cGbKey = 0; std::string cGbFrag, cGbVert;
 		bool      cMaterialWpo           = false;
 		bool      cMaterialCustom        = false;   // material HAS a custom shader at all
 		void*     boundPipeline     = defaultPipeline;
@@ -15909,6 +16330,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineGB = nullptr;
+				cMaterialPipelineGBInst = nullptr; cMaterialGBInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialCustom   = false;
 				cMaterialParams   = nullptr;
@@ -15935,8 +16357,11 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						// packs carry no G-buffer MSL yet), never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
 								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
+						}
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -15999,14 +16424,17 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			u.pbr.z   *= dc.instanceTint.a;
 			u.color = glm::vec4(baseColor, 1.0f);
 
-			auto drawInstance = [&](const glm::mat4& xform)
+			// `instPso` etc.: the whole batch in one draw, as in the forward loop (2e).
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
 				ui.model = xform;
 				// Same routing threshold as the forward loop — translucent draws
 				// go to the lighting pass's sorted blend replay.
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -16040,7 +16468,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					out.forwardOpaque.push_back(std::move(t));
 					return;
 				}
-				void* wantPipeline = cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -16091,6 +16520,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				}
 #endif
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -16105,6 +16547,41 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// way to perform — and one WITH a variant carries its own vertex stage.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
 			const size_t instCount = dc.instanceTransforms.size();
+			// ...which since 2e has an instanced twin: a graph-material batch with
+			// a G-buffer PSO draws once through drawInstance's binds. Built on the
+			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
+			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialGBInstTried)
+			{
+				cMaterialGBInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				                                                     /*blend=*/false, /*gbuffer=*/true,
+				                                                     /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineGBInst)
+			{
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				{
+					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineGBInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_gbufferInstancedPipeline
@@ -16394,22 +16871,34 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
 			shW = shOff ? (int)m_viewportReqW : pw;
 			shH = shOff ? (int)m_viewportReqH : ph;
+			const float shadowAspect = shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f;
+			// The frame's state, taken here and not inside the shadow pass (Thema 162, step 4):
+			// the one walk of the world and the real bound of every object. The walk used to be
+			// the shadow pass's own first extract, so the profiler booked the biggest cost of the
+			// frame at 50k entities under Metal::EncodeShadowMap, and each pass refined the bounds
+			// again. Every pass from here on, the shadow pass included, finds both in
+			// m_renderWorld: its extract() is a key compare, its RefineObjectBounds() finds the
+			// bounds done. The scope is the frame's; Metal::EncodeShadowMap below is the pass.
+			{
+				HE_PROFILE_SCOPE_N("Metal::ExtractFrame");
+				ExtractFrame(shadowAspect);
+				if (m_world) RefineObjectBounds();
+			}
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
-				EncodeShadowMap((__bridge void*)cmdBuf,
-				                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+				EncodeShadowMap((__bridge void*)cmdBuf, shadowAspect);
 			}
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
-			// sample it at texture 16). Uses the extraction EncodeShadowMap just
-			// ran (dominant light + camera).
+			// sample it at texture 16). Uses the frame's walk (ExtractFrame above:
+			// dominant light + camera).
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
 				EncodeCloudShadow((__bridge void*)cmdBuf);
 			}
 			// Sky-View LUT for the sky pass in the scene encoder. The sun comes from
-			// the extraction EncodeShadowMap ran; if that one was skipped it is last
-			// frame's, and EncodeSky falls back to the per-pixel integral whenever
-			// the LUT's sun doesn't match the one it draws with.
+			// the frame's walk (ExtractFrame above); a frame without a world has none
+			// and it is last frame's, and EncodeSky falls back to the per-pixel integral
+			// whenever the LUT's sun doesn't match the one it draws with.
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
 				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);
@@ -16718,8 +17207,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// flat texture and blurred everything alike). Off keeps the free
 			// discard. The forward velocity pass (TAA/MetalFX) depth-TESTS
 			// against it too — same rule, or it would test against garbage and
-			// silently emit no motion at all.
-			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive())
+			// silently emit no motion at all. The underwater caustics + fog pass
+			// (Thema 185) samples it as well: without this term a camera under water
+			// with DoF, motion blur and TAA all off (the defaults) read a flat depth
+			// texture, and the pass painted the whole frame as one depth.
+			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive()
+			                                       || underwaterPostWanted(m_renderWorld.underwaterCamera))
 			                                          ? MTLStoreActionStore
 			                                          : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
@@ -16834,6 +17327,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_dofResult = m_dofEnabled ? EncodeDepthOfField((__bridge void*)cmdBuf, sceneW, sceneH)
 			                           : nullptr;
 			void* sceneHdr = m_dofResult ? m_dofResult : m_hdrColor;
+
+			// Underwater caustics + fog next, on whatever DoF left (Thema 185 Schritte 2 und 3):
+			// light added to the scene and the depth fog over it, so motion blur, bloom and the
+			// tonemap treat both like any other lit surface. Runs only with the camera under
+			// water and at least one of the body's two knobs (net intensity, fog density)
+			// above 0 (the extractor's waterline fade-in makes the intensity exactly 0 on the
+			// line, the fog carries on through it); every other frame pays nothing.
+			if (underwaterPostWanted(m_renderWorld.underwaterCamera))
+				if (void* const ucTex = EncodeUnderwaterCaustics((__bridge void*)cmdBuf, sceneHdr, sceneW, sceneH))
+					sceneHdr = ucTex;
 
 			// Motion blur next, on whatever DoF left: the camera's frame-to-frame
 			// motion smears the image (velocity from depth + previous view-

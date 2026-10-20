@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/CellRuntime.h"   // the streaming group
 #include "HorizonScene/TransformHierarchy.h"   // world position, composed on demand
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/AudioEngine.h"
@@ -23,6 +24,13 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
+#include "HorizonScene/WaterBrush.h"         // the water group: the brush,
+#include "HorizonScene/WaterLake.h"          //   the lakes and
+#include "HorizonScene/WaterField.h"         //   the model they edit
+#include "HorizonScene/WaterQuery.h"         // …and the questions the physics asks of it
+#include "HorizonScene/WaterRipples.h"       // the rings water.disturb adds to
+#include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/EntityHost.h"
 #include "HorizonScene/EntityVisibility.h"   // the one list of what "visible" flips
 #include <UIWidget/UIShortcut.h>   // a menu entry's chord is checked where it is taken in
@@ -529,13 +537,15 @@ glm::dvec3 saveOriginFor(Ctx& c, Entity e)
 }
 } // namespace
 
-bool saveState(Ctx& c, Entity e)
+namespace
 {
-    std::string uuid;
-    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
-    if (!ss) return false;
+// What entity.saveState writes and entity.applySavedState applies, without their
+// gates (play mode, an active save): the cells' in-memory state (CellState.h)
+// keeps an unloaded cell's entities in exactly this form.
+nlohmann::json captureStateJson(Ctx& c, Entity e, const SaveStateComponent& ss)
+{
     nlohmann::json j = nlohmann::json::object();
-    if (ss->saveTransform)
+    if (ss.saveTransform)
     {
         const glm::dvec3 origin = saveOriginFor(c, e);
         if (auto* t = c.world->registry().try_get<TransformComponent>((entt::entity)e))
@@ -545,14 +555,93 @@ bool saveState(Ctx& c, Entity e)
                 { "rot", { t->rotation.x, t->rotation.y, t->rotation.z } },
                 { "scl", { t->scale.x,    t->scale.y,    t->scale.z } } };
     }
-    if (ss->saveVisibility)
+    if (ss.saveVisibility)
         j["visible"] = getVisible(c, e);
     // Only when there is something: an entity whose class ticks nothing (or
     // that has no class) writes exactly the state it wrote before this existed.
-    if (ss->saveScriptVars)
+    if (ss.saveScriptVars)
         if (nlohmann::json vars = scriptVarsToJson(c, e); !vars.empty())
             j["vars"] = std::move(vars);
-    return save::setEntityState(uuid, j.dump());
+    return j;
+}
+
+void applyStateJson(Ctx& c, Entity e, const SaveStateComponent& ss, const nlohmann::json& j, uint8_t parts)
+{
+    // Partial application: only what the save carries touches the instance.
+    if (parts & kStateWorld)
+    {
+        if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss.saveTransform)
+        {
+            if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
+            {
+                auto vec3 = [&](const char* key, glm::vec3& out) {
+                    auto it = t->find(key);
+                    if (it != t->end() && it->is_array() && it->size() >= 3)
+                        out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+                };
+                if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
+                {
+                    const glm::dvec3 origin = saveOriginFor(c, e);
+                    tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
+                                             (*it)[1].get<double>() - origin.y,
+                                             (*it)[2].get<double>() - origin.z);
+                }
+                vec3("rot", tc->rotation);
+                vec3("scl", tc->scale);
+
+                // Restoring a physics entity means moving the BODY, not the
+                // transform: the step overwrites the transform from Jolt, so a save
+                // restore on the one kind of entity a save exists for (the player,
+                // the crate the player pushed) used to be undone the same frame.
+                // Velocity is reset because the save carries none — arriving with
+                // the motion the entity had before the load is an artefact of the
+                // restore, not restored state.
+                //
+                // The pose above is LOCAL — it came out of TransformComponent when
+                // the save was written — so it goes through teleportToLocalPose,
+                // which converts it to the world pose physics deals in and puts the
+                // saved spelling back afterwards (setTransform would otherwise
+                // return the rotation as degrees(eulerAngles(q)), the same
+                // orientation written differently, and save → load → save would stop
+                // being byte-identical).
+                if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
+                    teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
+            }
+        }
+        if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss.saveVisibility)
+            setVisible(c, e, v->get<bool>());
+    }
+    if (parts & kStateScript)
+        if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss.saveScriptVars)
+            applyScriptVars(c, e, *v);
+}
+} // namespace
+
+bool saveState(Ctx& c, Entity e)
+{
+    std::string uuid;
+    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
+    if (!ss) return false;
+    return save::setEntityState(uuid, captureStateJson(c, e, *ss).dump());
+}
+
+std::string stateOf(Ctx& c, Entity e)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return {};
+    const auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled) return {};
+    return captureStateJson(c, e, *ss).dump();
+}
+
+bool applyState(Ctx& c, Entity e, const std::string& text, uint8_t parts)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return false;
+    const auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled) return false;
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return false;
+    applyStateJson(c, e, *ss, j, parts);
+    return true;
 }
 
 bool hasSavedState(Ctx& c, Entity e)
@@ -575,49 +664,7 @@ bool applySavedState(Ctx& c, Entity e)
     }
     nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return false;
-    // Partial application: only what the save carries touches the instance.
-    if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss->saveTransform)
-    {
-        if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
-        {
-            auto vec3 = [&](const char* key, glm::vec3& out) {
-                auto it = t->find(key);
-                if (it != t->end() && it->is_array() && it->size() >= 3)
-                    out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
-            };
-            if (auto it = t->find("pos"); it != t->end() && it->is_array() && it->size() >= 3)
-            {
-                const glm::dvec3 origin = saveOriginFor(c, e);
-                tc->position = glm::vec3((*it)[0].get<double>() - origin.x,
-                                         (*it)[1].get<double>() - origin.y,
-                                         (*it)[2].get<double>() - origin.z);
-            }
-            vec3("rot", tc->rotation);
-            vec3("scl", tc->scale);
-
-            // Restoring a physics entity means moving the BODY, not the
-            // transform: the step overwrites the transform from Jolt, so a save
-            // restore on the one kind of entity a save exists for (the player,
-            // the crate the player pushed) used to be undone the same frame.
-            // Velocity is reset because the save carries none — arriving with
-            // the motion the entity had before the load is an artefact of the
-            // restore, not restored state.
-            //
-            // The pose above is LOCAL — it came out of TransformComponent when
-            // the save was written — so it goes through teleportToLocalPose,
-            // which converts it to the world pose physics deals in and puts the
-            // saved spelling back afterwards (setTransform would otherwise
-            // return the rotation as degrees(eulerAngles(q)), the same
-            // orientation written differently, and save → load → save would stop
-            // being byte-identical).
-            if (c.physics && c.physics->hasPhysics(static_cast<uint32_t>(e)))
-                teleportToLocalPose(c, e, *tc, /*withRotation=*/true, /*resetVelocity=*/true);
-        }
-    }
-    if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
-        setVisible(c, e, v->get<bool>());
-    if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss->saveScriptVars)
-        applyScriptVars(c, e, *v);
+    applyStateJson(c, e, *ss, j, kStateAll);
     return true;
 }
 } // namespace entity
@@ -1349,6 +1396,312 @@ void setSpeed(Ctx& c, Entity e, float v)
     agent->speed = std::max(0.0f, v);
 }
 } // namespace nav
+
+// ── Water ────────────────────────────────────────────────────────────────────
+namespace water {
+namespace {
+// A landscape and the two matrices the world/terrain-local boundary needs. The
+// world matrix is composed on the spot (HE::worldMatrixOf), never read off the
+// stored one, which is a frame old.
+struct Land
+{
+    TerrainComponent* tc = nullptr;
+    entt::entity      entity = entt::null;
+    glm::mat4         toWorld{ 1.0f };
+    glm::mat4         toLocal{ 1.0f };
+    glm::vec2 xz(float x, float z) const
+    {
+        const glm::vec4 p = toLocal * glm::vec4(x, toWorld[3].y, z, 1.0f);
+        return { p.x, p.z };
+    }
+    // A WORLD height and a terrain-local one, for a landscape that is moved and
+    // uniformly scaled but not tipped over.
+    float localY(float worldY) const { return (toLocal * glm::vec4(toWorld[3].x, worldY, toWorld[3].z, 1.0f)).y; }
+    float worldY(float localY) const { return (toWorld * glm::vec4(0.0f, localY, 0.0f, 1.0f)).y; }
+};
+
+bool landOf(Ctx& c, Entity e, const char* who, Land& out)
+{
+    if (!c.world) return false;
+    auto& reg = c.world->registry();
+    const auto id = static_cast<entt::entity>(e);
+    TerrainComponent* tc = reg.valid(id) ? reg.try_get<TerrainComponent>(id) : nullptr;
+    if (!tc)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: entity %u is not a landscape (it has no TerrainComponent)",
+                        who, static_cast<uint32_t>(e));
+        return false;
+    }
+    out.tc = tc;
+    out.entity = id;
+    out.toWorld = HE::worldMatrixOf(*c.world, id);
+    out.toLocal = glm::inverse(out.toWorld);
+    return true;
+}
+
+bool splineOf(Ctx& c, Entity e, const char* who, entt::entity& out)
+{
+    if (!c.world) return false;
+    const auto id = static_cast<entt::entity>(e);
+    if (!c.world->registry().valid(id) || !c.world->registry().all_of<SplineComponent>(id))
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: entity %u has no SplineComponent", who, static_cast<uint32_t>(e));
+        return false;
+    }
+    out = id;
+    return true;
+}
+
+int makeLake(Ctx& c, Entity terrain, Entity spline, bool fromGround, float levelOrAbove,
+             bool dig, float depth, float bank, const char* who)
+{
+    Land land;
+    entt::entity sp;
+    if (!landOf(c, terrain, who, land) || !splineOf(c, spline, who, sp)) return 0;
+    HE::water::lake::Params p;
+    p.levelFromGround = fromGround;
+    p.levelOffset     = fromGround ? levelOrAbove : 0.0f;
+    p.level           = fromGround ? 0.0f : land.localY(levelOrAbove);
+    p.dig             = dig;
+    p.depth           = depth;
+    p.bank            = bank;
+    const HE::water::lake::Created made = HE::water::lake::create(*c.world, land.entity, sp, p);
+    if (!made.ok)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: %s", who, made.error.c_str());
+        return 0;
+    }
+    return static_cast<int>(made.body);
+}
+} // namespace
+
+int createLake(Ctx& c, Entity terrain, Entity spline, float level, bool dig, float depth, float bank)
+{
+    return makeLake(c, terrain, spline, false, level, dig, depth, bank, "water.createLake");
+}
+
+int createLakeAtGround(Ctx& c, Entity terrain, Entity spline, float above, bool dig, float depth, float bank)
+{
+    return makeLake(c, terrain, spline, true, above, dig, depth, bank, "water.createLakeAtGround");
+}
+
+int reshapeLake(Ctx& c, Entity spline)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.reshapeLake", sp)) return -1;
+    const HE::water::Result r = HE::water::lake::reshape(*c.world, sp);
+    return r.ok ? static_cast<int>(r.changed) : -1;
+}
+
+int digLake(Ctx& c, Entity spline, float depth, float bank)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.digLake", sp)) return -1;
+    const TerrainSculpt::Result r = HE::water::lake::dig(*c.world, sp, depth, bank);
+    return r.ok ? static_cast<int>(r.changed) : -1;
+}
+
+bool setLakeLevel(Ctx& c, Entity spline, float level)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.setLakeLevel", sp)) return false;
+    const HE::water::lake::Link l = HE::water::lake::linkOf(*c.world, sp);
+    if (l.body == HE::water::kNoBody) return false;
+    Land land;
+    if (!landOf(c, static_cast<Entity>(l.terrain), "water.setLakeLevel", land)) return false;
+    return HE::water::setLevel(*land.tc, l.body, land.localY(level));
+}
+
+bool removeLake(Ctx& c, Entity spline)
+{
+    entt::entity sp;
+    return splineOf(c, spline, "water.removeLake", sp) && HE::water::lake::remove(*c.world, sp);
+}
+
+Entity convertToLake(Ctx& c, Entity terrain, int body)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.convertToLake", land)) return 0;
+    if (body <= 0 || body > 65535) return 0;
+    const HE::water::lake::Converted cv =
+        HE::water::lake::convertBody(*c.world, land.entity, static_cast<uint16_t>(body));
+    if (cv.spline == entt::null)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "water.convertToLake: %s", cv.error.c_str());
+        return 0;
+    }
+    return static_cast<Entity>(cv.spline);
+}
+
+namespace {
+int dab(Ctx& c, Entity terrain, float x, float z, float radius, float falloff, bool erase, const char* who)
+{
+    Land land;
+    if (!landOf(c, terrain, who, land)) return 0;
+    HE::water::brush::Params p;
+    p.radius  = std::max(0.0f, radius);
+    p.falloff = std::max(0.0f, falloff);
+    p.amount  = 1.0f;
+    p.erase   = erase;
+    const glm::vec2 at = land.xz(x, z);
+    HE::water::brush::Stroke s;
+    HE::water::brush::begin(s, *land.tc, at.x, at.y, p);
+    const HE::water::brush::Dab d = HE::water::brush::dab(s, *land.tc, at.x, at.y, p);
+    HE::water::brush::end(s, *land.tc);
+    return static_cast<int>(d.cells);
+}
+} // namespace
+
+int paint(Ctx& c, Entity terrain, float x, float z, float radius, float falloff)
+{
+    return dab(c, terrain, x, z, radius, falloff, false, "water.paint");
+}
+
+int erase(Ctx& c, Entity terrain, float x, float z, float radius, float falloff)
+{
+    return dab(c, terrain, x, z, radius, falloff, true, "water.erase");
+}
+
+int bodyAt(Ctx& c, Entity terrain, float x, float z)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.bodyAt", land)) return 0;
+    const glm::vec2 at = land.xz(x, z);
+    return static_cast<int>(HE::water::bodyAt(*land.tc, at.x, at.y));
+}
+
+bool levelAt(Ctx& c, Entity terrain, float x, float z, float& worldLevel)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.levelAt", land)) return false;
+    const glm::vec2 at = land.xz(x, z);
+    float local = 0.0f;
+    if (!HE::water::levelAt(*land.tc, at.x, at.y, local)) return false;
+    worldLevel = land.worldY(local);
+    return true;
+}
+
+int lakeBody(Ctx& c, Entity spline)
+{
+    entt::entity sp;
+    if (!splineOf(c, spline, "water.lakeBody", sp)) return 0;
+    return static_cast<int>(HE::water::lake::linkOf(*c.world, sp).body);
+}
+
+Entity lakeSpline(Ctx& c, Entity terrain, int body)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.lakeSpline", land) || body <= 0 || body > 65535) return 0;
+    const HE::water::Body* b = land.tc->water.findBody(static_cast<uint16_t>(body));
+    if (!b || !b->fromSpline()) return 0;
+    const entt::entity e = c.world->findByEntityId(b->sourceSpline);
+    return e == entt::null ? 0 : static_cast<Entity>(e);
+}
+
+int wetCells(Ctx& c, Entity terrain, int body)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.wetCells", land)) return 0;
+    return static_cast<int>(land.tc->water.wetCells(body <= 0 ? HE::water::kNoBody : static_cast<uint16_t>(body)));
+}
+
+// ── What the water does to the things in it (Thema 179 step 5) ──────────────
+namespace {
+// The one question the rows below ask: the water at a world point, as the physics sees it.
+// A fresh index each call: it is a view over the landscapes with water (nothing is
+// rescanned for a point query), and it cannot be left holding the component pointers of a
+// landscape that a script has just deleted. The clock is the physics' own, 0 without one.
+bool surfaceNow(Ctx& c, float x, float z, HE::water::Surface& out)
+{
+    out = HE::water::Surface{};
+    if (!c.world) return false;
+    const HE::water::WaterIndex index = HE::water::WaterIndex::build(*c.world);
+    return index.surfaceAt(x, z, c.physics ? c.physics->simTime() : 0.0, out);
+}
+} // namespace
+
+bool surfaceAt(Ctx& c, float x, float z, float& height)
+{
+    HE::water::Surface s;
+    if (!surfaceNow(c, x, z, s)) return false;
+    height = s.height;
+    return true;
+}
+
+float depthAt(Ctx& c, float x, float z)
+{
+    HE::water::Surface s;
+    return surfaceNow(c, x, z, s) ? s.depth : 0.0f;
+}
+
+glm::vec3 flowAt(Ctx& c, float x, float z)
+{
+    HE::water::Surface s;
+    return surfaceNow(c, x, z, s) ? s.flow : glm::vec3(0.0f);
+}
+
+float submerged(Ctx& c, Entity e)
+{
+    return c.physics ? c.physics->submergedFraction(static_cast<uint32_t>(e)) : 0.0f;
+}
+
+float buoyancy(Ctx& c, Entity e)
+{
+    return c.physics ? c.physics->waterLift(static_cast<uint32_t>(e)) : 0.0f;
+}
+
+std::vector<ImmersionEvent> pollImmersion(Ctx& c)
+{
+    std::vector<ImmersionEvent> out;
+    if (!c.physics) return out;
+    for (const PhysicsWorld::WaterEvent& ev : c.physics->pollWaterEvents())
+        out.push_back({ static_cast<Entity>(ev.entity), ev.entered, ev.speed, ev.position });
+    return out;
+}
+
+void disturb(Ctx& c, float x, float z, float radius, float strength)
+{
+    if (!c.physics)
+    {
+        HE_LOG_THROTTLE(Terrain, Warning, 5.0, "%s: there is no physics world to hold the ring "
+                        "(rings are made while the game plays)", "water.disturb");
+        return;
+    }
+    if (!std::isfinite(x) || !std::isfinite(z)) return;
+    HE::water::Ripple r;
+    r.pos      = glm::vec2(x, z);
+    r.radius   = radius;
+    r.strength = strength;
+    r.kind     = WaterRippleScript;
+    // A ring on moving water goes with it, like the rings a body makes.
+    HE::water::Surface s;
+    if (surfaceNow(c, x, z, s)) r.drift = glm::vec2(s.flow.x, s.flow.z);
+    c.physics->waterRipples().add(r);   // clamps, and drops what is not a number or has no strength
+}
+
+bool setFlow(Ctx& c, Entity terrain, int body, float x, float z)
+{
+    Land land;
+    if (!landOf(c, terrain, "water.setFlow", land)) return false;
+    if (body <= 0 || body > 65535 || !std::isfinite(x) || !std::isfinite(z)) return false;
+    const HE::water::Body* b = land.tc->water.findBody(static_cast<uint16_t>(body));
+    if (!b) return false;
+    // World axes in, the landscape's own axes out. A current is a velocity: the landscape's
+    // turn about Y carries it, its scale does not (the same rotation the query uses to carry
+    // the stored current back out to the world).
+    glm::mat3 turn(1.0f);
+    for (int k = 0; k < 3; ++k)
+    {
+        const glm::vec3 col(land.toWorld[k]);
+        const float len = glm::length(col);
+        if (len > 1.0e-12f) turn[k] = col / len;
+    }
+    const glm::vec3 local = glm::transpose(turn) * glm::vec3(x, 0.0f, z);
+    HE::water::BodyPhysics p = b->physics;
+    p.flow = glm::vec2(local.x, local.z);
+    return HE::water::setPhysics(*land.tc, static_cast<uint16_t>(body), p);
+}
+} // namespace water
 
 // ── Entity UI ────────────────────────────────────────────────────────────────
 namespace ui {
@@ -2343,6 +2696,61 @@ std::string typeNameId(Ctx& c, const HE::UUID& id)
 }
 
 } // namespace content
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+namespace streaming {
+
+namespace
+{
+HE::CellRuntime* g_cells = nullptr;
+
+// The world position plus the world's origin: what the streamer measures by.
+glm::dvec3 absoluteOf(const Ctx& c, const glm::vec3& position)
+{
+    glm::dvec3 p(position);
+    if (c.world) p += c.world->origin();
+    return p;
+}
+} // namespace
+
+void             install(HE::CellRuntime* runtime) { g_cells = runtime; }
+HE::CellRuntime* installed() { return g_cells; }
+
+Cell cellAt(Ctx& c, const glm::vec3& position)
+{
+    Cell out;
+    if (!g_cells || !g_cells->active()) return out;
+    const HE::CellManifest& m = g_cells->streamer().manifest();
+    const glm::dvec3 p = absoluteOf(c, position);
+    out.x = HE::CellManifest::cellIndex(p.x, m.cellSize);
+    out.z = HE::CellManifest::cellIndex(p.z, m.cellSize);
+    for (const HE::CellManifest::Cell& cell : m.cells)
+        if (cell.x == out.x && cell.z == out.z) { out.exists = true; break; }
+    return out;
+}
+
+bool isLoaded(Ctx&, int x, int z)
+{
+    return g_cells && g_cells->active() && g_cells->streamer().isLoaded(x, z);
+}
+
+bool isSettled(Ctx& c, const glm::vec3& position, float radius)
+{
+    if (!g_cells || !g_cells->active()) return true;
+    return g_cells->streamer().isSettled(absoluteOf(c, position), std::max(0.0f, radius));
+}
+
+int pin(Ctx& c, const glm::vec3& position, float radius)
+{
+    return g_cells ? g_cells->pin(absoluteOf(c, position), radius) : 0;
+}
+
+bool unpin(Ctx&, int handle)
+{
+    return g_cells && g_cells->unpin(handle);
+}
+
+} // namespace streaming
 
 // ── Audio ────────────────────────────────────────────────────────────────────
 namespace audio {
@@ -6125,6 +6533,127 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "nav.setSpeed", "Navigation", true, {{"entity", P::Int}, {"speed", P::Float}}, {}, "HE::api::nav::setSpeed",
             [](Ctx& c, const VV& a){ nav::setSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
 
+        // Water — lakes, ponds and the brush on a landscape. x/z/level are WORLD
+        // (the water block in EngineApi.h says why); the landscape and the spline
+        // are entities, a body is the Int id the landscape's water gives it.
+        t.push_back({ "water.createLake", "Water", true,
+            {{"terrain", P::Int}, {"spline", P::Int}, {"level", P::Float}, {"dig", P::Bool},
+             {"depth", P::Float}, {"bank", P::Float}},
+            {{"body", P::Int}}, "HE::api::water::createLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::createLake(
+                c, (Entity)aI(a, 0), (Entity)aI(a, 1), aF(a, 2), aB(a, 3), aF(a, 4), aF(a, 5))) }; } });
+        t.push_back({ "water.createLakeAtGround", "Water", true,
+            {{"terrain", P::Int}, {"spline", P::Int}, {"above", P::Float}, {"dig", P::Bool},
+             {"depth", P::Float}, {"bank", P::Float}},
+            {{"body", P::Int}}, "HE::api::water::createLakeAtGround",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::createLakeAtGround(
+                c, (Entity)aI(a, 0), (Entity)aI(a, 1), aF(a, 2), aB(a, 3), aF(a, 4), aF(a, 5))) }; } });
+        t.push_back({ "water.reshapeLake", "Water", true, {{"spline", P::Int}}, {{"changed", P::Int}},
+            "HE::api::water::reshapeLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::reshapeLake(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.digLake", "Water", true,
+            {{"spline", P::Int}, {"depth", P::Float}, {"bank", P::Float}}, {{"lowered", P::Int}},
+            "HE::api::water::digLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::digLake(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "water.setLakeLevel", "Water", true, {{"spline", P::Int}, {"level", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::water::setLakeLevel",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(water::setLakeLevel(
+                c, (Entity)aI(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "water.removeLake", "Water", true, {{"spline", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::water::removeLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(water::removeLake(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.convertToLake", "Water", true, {{"terrain", P::Int}, {"body", P::Int}}, {{"spline", P::Int}},
+            "HE::api::water::convertToLake",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)water::convertToLake(
+                c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "water.paint", "Water", true,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}, {"radius", P::Float}, {"falloff", P::Float}},
+            {{"cells", P::Int}}, "HE::api::water::paint",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::paint(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), aF(a, 3), aF(a, 4))) }; } });
+        t.push_back({ "water.erase", "Water", true,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}, {"radius", P::Float}, {"falloff", P::Float}},
+            {{"cells", P::Int}}, "HE::api::water::erase",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::erase(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), aF(a, 3), aF(a, 4))) }; } });
+        t.push_back({ "water.bodyAt", "Water", false,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}}, {{"body", P::Int}},
+            "HE::api::water::bodyAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::bodyAt(
+                c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "water.levelAt", "Water", false,
+            {{"terrain", P::Int}, {"x", P::Float}, {"z", P::Float}}, {{"wet", P::Bool}, {"level", P::Float}},
+            "HE::api::water::levelAt",
+            [](Ctx& c, const VV& a){ float lvl = 0.0f;
+                const bool wet = water::levelAt(c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2), lvl);
+                return VV{ Value::ofBool(wet), Value::ofFloat(lvl) }; } });
+        t.push_back({ "water.lakeBody", "Water", false, {{"spline", P::Int}}, {{"body", P::Int}},
+            "HE::api::water::lakeBody",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::lakeBody(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.lakeSpline", "Water", false, {{"terrain", P::Int}, {"body", P::Int}}, {{"spline", P::Int}},
+            "HE::api::water::lakeSpline",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)water::lakeSpline(
+                c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "water.wetCells", "Water", false, {{"terrain", P::Int}, {"body", P::Int}}, {{"cells", P::Int}},
+            "HE::api::water::wetCells",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(water::wetCells(
+                c, (Entity)aI(a, 0), aI(a, 1))) }; } });
+
+        // Water physics (Thema 179 step 5): what the water does to the things in it. WORLD
+        // space and no landscape handle — the caller has a position or a body. The first
+        // five only read.
+        t.push_back({ "water.surfaceAt", "Water", false,
+            {{"x", P::Float}, {"z", P::Float}}, {{"wet", P::Bool}, {"height", P::Float}},
+            "HE::api::water::surfaceAt",
+            [](Ctx& c, const VV& a){ float h = 0.0f;
+                const bool wet = water::surfaceAt(c, aF(a, 0), aF(a, 1), h);
+                return VV{ Value::ofBool(wet), Value::ofFloat(h) }; } });
+        t.push_back({ "water.depthAt", "Water", false,
+            {{"x", P::Float}, {"z", P::Float}}, {{"depth", P::Float}},
+            "HE::api::water::depthAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(water::depthAt(
+                c, aF(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "water.flowAt", "Water", false,
+            {{"x", P::Float}, {"z", P::Float}}, {{"flow", P::Vec3}},
+            "HE::api::water::flowAt",
+            [](Ctx& c, const VV& a){ return VV{ v3(water::flowAt(c, aF(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "water.submerged", "Water", false, {{"entity", P::Int}}, {{"share", P::Float}},
+            "HE::api::water::submerged",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(water::submerged(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "water.buoyancy", "Water", false, {{"entity", P::Int}}, {{"lift", P::Float}},
+            "HE::api::water::buoyancy",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(water::buoyancy(c, (Entity)aI(a, 0))) }; } });
+        // Four PARALLEL arrays, index i of each is one event (a graph value is a list of ONE
+        // type, the reason raycastAll and pollJointBroken split theirs the same way). Drained
+        // once, here: a second row on the same queue would hand whoever ran second nothing.
+        t.push_back({ "water.pollImmersion", "Water", true,
+            {}, {{"entities", P::Int, /*isArray=*/true}, {"entered", P::Bool, /*isArray=*/true},
+                 {"speeds", P::Float, /*isArray=*/true}, {"positions", P::Vec3, /*isArray=*/true}},
+            "HE::api::water::pollImmersion",
+            [](Ctx& c, const VV&){
+                Value entities; entities.isArray = true; entities.type = P::Int;
+                Value entered;  entered.isArray  = true; entered.type  = P::Bool;
+                Value speeds;   speeds.isArray   = true; speeds.type   = P::Float;
+                Value points;   points.isArray   = true; points.type   = P::Vec3;
+                for (const auto& ev : water::pollImmersion(c))
+                {
+                    entities.items.push_back(Value::ofInt((int)ev.entity));
+                    entered.items.push_back(Value::ofBool(ev.entered));
+                    speeds.items.push_back(Value::ofFloat(ev.speed));
+                    points.items.push_back(v3(ev.position));
+                }
+                return VV{ std::move(entities), std::move(entered), std::move(speeds), std::move(points) }; } });
+        t.push_back({ "water.disturb", "Water", true,
+            {{"x", P::Float}, {"z", P::Float}, {"radius", P::Float}, {"strength", P::Float}}, {},
+            "HE::api::water::disturb",
+            [](Ctx& c, const VV& a){ water::disturb(c, aF(a, 0), aF(a, 1), aF(a, 2), aF(a, 3)); return VV{}; } });
+        t.push_back({ "water.setFlow", "Water", true,
+            {{"terrain", P::Int}, {"body", P::Int}, {"x", P::Float}, {"z", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::water::setFlow",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(water::setFlow(
+                c, (Entity)aI(a, 0), aI(a, 1), aF(a, 2), aF(a, 3))) }; } });
+
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(ui::getText(c, (Entity)aI(a, 0))) }; } });
@@ -6949,6 +7478,26 @@ const std::vector<ApiFn>& registry()
             {{"type", P::String}}, "HE::api::content::typeName",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(content::typeName(c, aS(a, 0))) }; } });
 
+        // Streaming — the scene's cells. Unpermissioned: a pin loads what the scene
+        // would load anyway if the camera went there, and the rest only asks.
+        t.push_back({ "streaming.cellAt", "Streaming", false, {{"position", P::Vec3}},
+            {{"x", P::Int}, {"z", P::Int}, {"exists", P::Bool}}, "HE::api::streaming::cellAt",
+            [](Ctx& c, const VV& a){
+                const streaming::Cell cell = streaming::cellAt(c, aV3(a, 0));
+                return VV{ Value::ofInt(cell.x), Value::ofInt(cell.z), Value::ofBool(cell.exists) }; } });
+        t.push_back({ "streaming.isLoaded", "Streaming", false, {{"x", P::Int}, {"z", P::Int}},
+            {{"loaded", P::Bool}}, "HE::api::streaming::isLoaded",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::isLoaded(c, aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "streaming.isSettled", "Streaming", false, {{"position", P::Vec3}, {"radius", P::Float}},
+            {{"settled", P::Bool}}, "HE::api::streaming::isSettled",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::isSettled(c, aV3(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "streaming.pin", "Streaming", true, {{"position", P::Vec3}, {"radius", P::Float}},
+            {{"handle", P::Int}}, "HE::api::streaming::pin",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(streaming::pin(c, aV3(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "streaming.unpin", "Streaming", true, {{"handle", P::Int}},
+            {{"ok", P::Bool}}, "HE::api::streaming::unpin",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(streaming::unpin(c, aI(a, 0))) }; } });
+
         // Audio
         t.push_back({ "audio.play", "Audio", true,
             {{"asset", P::String}, {"volume", P::Float}, {"pitch", P::Float}, {"loop", P::Bool}},
@@ -7632,6 +8181,28 @@ const std::vector<ApiFn>& registry()
             { "nav.remainingDistance", "Remaining Distance" },
             // Locomotion owns "Set Max Speed"; this one is the agent's pace.
             { "nav.setSpeed", "Set Agent Speed" },
+            { "water.createLake", "Create Lake" },
+            { "water.createLakeAtGround", "Create Lake At Ground" },
+            { "water.reshapeLake", "Reshape Lake" },
+            { "water.digLake", "Dig Lake" },
+            { "water.setLakeLevel", "Set Lake Level" },
+            { "water.removeLake", "Remove Lake" },
+            { "water.convertToLake", "Convert Pond To Lake" },
+            { "water.paint", "Paint Water" },
+            { "water.erase", "Erase Water" },
+            { "water.bodyAt", "Water Body At" },
+            { "water.levelAt", "Water Level At" },
+            { "water.lakeBody", "Get Lake Body" },
+            { "water.lakeSpline", "Get Lake Spline" },
+            { "water.wetCells", "Count Wet Cells" },
+            { "water.surfaceAt", "Water Surface At" },
+            { "water.depthAt", "Water Depth At" },
+            { "water.flowAt", "Water Flow At" },
+            { "water.submerged", "Get Submerged Share" },
+            { "water.buoyancy", "Get Water Buoyancy" },
+            { "water.pollImmersion", "Poll Water Immersion" },
+            { "water.disturb", "Disturb Water" },
+            { "water.setFlow", "Set Water Flow" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             // Suffixed like Set Position and Get Velocity above, and for the
             // same reason: Movement owns the unqualified "Is Grounded", and the
@@ -7871,6 +8442,9 @@ const std::vector<ApiFn>& registry()
 #undef HE_ENV_NAME_ROW
             { "content.load", "Load Asset" },      { "content.unload", "Unload Asset" },
             { "content.isLoaded", "Is Asset Loaded" }, { "content.typeName", "Asset Type Name" },
+            { "streaming.cellAt", "Cell At" },     { "streaming.isLoaded", "Is Cell Loaded" },
+            { "streaming.isSettled", "Is Area Settled" },
+            { "streaming.pin", "Pin Cells" },      { "streaming.unpin", "Unpin Cells" },
             { "audio.play", "Play Sound" },        { "audio.playAt", "Play Sound At" },
             { "audio.stop", "Stop Sound" },        { "audio.stopAll", "Stop All Sounds" },
             { "audio.isPlaying", "Is Sound Playing" }, { "audio.setBusVolume", "Set Bus Volume" },
@@ -8044,26 +8618,14 @@ const std::vector<ApiFn>& registry()
             // cppCall codegen) reads it as. The substitution belongs to the
             // SCRIPTING surface, so it lives on the scripting surface's edge —
             // and there is exactly one, since both applications and both text
-            // languages dispatch through ApiFn::invoke.
+            // languages dispatch through ApiFn::invoke. Generated C++ calling
+            // the function directly asks entityOrSelf itself.
             fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
                         (Ctx& c, const VV& a) -> VV
             {
                 if (a.empty() || a[0].i != 0) return inner(c, a);
-                const Entity me = entity::self(c);
-                if (me == 0u)
-                {
-                    // No caller to stand in: a text script (Lua and Python have
-                    // no instance at all), or a class not bound to an entity.
-                    // Loud, because the alternative is the engine's most
-                    // expensive failure mode — a call that does nothing and says
-                    // nothing. Throttled per row, since a Tick would repeat it
-                    // sixty times a second.
-                    HE_LOG_THROTTLE(Script, Warning, 5.0,
-                                    "%s: Entity is empty and there is no calling object to "
-                                    "stand in for it - wire an entity into the pin",
-                                    id);
-                    return inner(c, a);
-                }
+                const Entity me = entityOrSelf(c, 0u, id);
+                if (me == 0u) return inner(c, a);
                 VV withSelf = a;
                 withSelf[0] = Value::ofInt(static_cast<int>(me));
                 return inner(c, withSelf);
@@ -8105,24 +8667,100 @@ const std::vector<ApiFn>& registry()
             fn.invoke = [inner = std::move(fn.invoke), id = fn.id]
                         (Ctx& c, const VV& a) -> VV
             {
-                if (a.empty() || a[0].ref != 0u || !c.world || !c.self) return inner(c, a);
-                const int me = ScriptApi::widgetOfScript(*c.world, c.self);
-                if (me == 0)
-                {
-                    HE_LOG_THROTTLE(Script, Warning, 5.0,
-                                    "%s: Widget is empty and the caller is not a widget - "
-                                    "wire a widget into the pin", id);
-                    return inner(c, a);
-                }
+                if (a.empty() || a[0].ref != 0u) return inner(c, a);
+                const uint32_t me = widgetOrSelf(c, 0u, id);
+                if (me == 0u) return inner(c, a);
                 VV withSelf = a;
-                withSelf[0] = Value::ofRef(static_cast<uint32_t>(me));
+                withSelf[0] = Value::ofRef(me);
                 return inner(c, withSelf);
             };
+        }
+
+        // ── Fourth post-pass: how generated C++ calls each row (CppForm) ─────
+        // Ctx unless named here. Whole groups first: these namespaces are plain
+        // functions over process-wide state and none of their rows takes a Ctx.
+        // Then the single rows of mixed groups. A wrong entry is not a silent
+        // mistake: test_engine_api_direct.cpp calls every row in the form named
+        // here, so it stops compiling.
+        static constexpr const char* kFreeGroups[] = {
+            "debug", "fs", "input", "math", "player", "random", "save",
+            "settings", "string", "time", "timer",
+        };
+        static constexpr const char* kFreeRows[] = {
+            "app.setVSync", "app.vsync", "app.setFullscreen", "app.isFullscreen",
+            "camera.setStickSensitivityScale", "camera.stickSensitivityScale",
+            "camera.setStickInvertY", "camera.stickInvertY",
+            "scene.load", "scene.loadAdditive", "scene.unloadZone", "scene.activate",
+            "scene.hasPendingLevel", "scene.showZone", "scene.hideZone",
+            "scene.setZonePosition", "scene.zoneScene", "scene.loadedZones",
+        };
+        // `invoke` does more than forward, so a direct call would need a second
+        // marshalling written somewhere else — exactly what this table exists to
+        // prevent. These stay on hc::callApi:
+        static constexpr const char* kThunkRows[] = {
+            // Results are parallel arrays the thunk builds from a vector of structs.
+            "physics.raycastAll", "physics.pollJointBroken", "water.pollImmersion",
+            // `wet` is the return value, the level an out-parameter.
+            "water.levelAt", "water.surfaceAt",
+            // Every argument after `function` is forwarded as the call's own.
+            "net.callServer", "net.callClient", "net.callAllClients",
+            // The C++ signature takes the ContentManager, not a Ctx (save is Free).
+            "save.create", "save.load",
+        };
+        auto named = [](const char* id, const auto& list)
+        {
+            for (const char* n : list)
+                if (std::strcmp(id, n) == 0) return true;
+            return false;
+        };
+        for (auto& fn : t)
+        {
+            const std::string_view id = fn.id;
+            const std::string_view group = id.substr(0, id.find('.'));
+            bool freeGroup = false;
+            for (const char* g : kFreeGroups)
+                if (group == g) { freeGroup = true; break; }
+            if (named(fn.id, kThunkRows))                     fn.cppForm = CppForm::Thunk;
+            else if (freeGroup || named(fn.id, kFreeRows))    fn.cppForm = CppForm::Free;
         }
 
         return t;
     }();
     return table;
+}
+
+Entity entityOrSelf(Ctx& c, Entity e, const char* row)
+{
+    if (e != 0u) return e;
+    const Entity me = entity::self(c);
+    if (me == 0u)
+    {
+        // No caller to stand in: a text script (Lua and Python have
+        // no instance at all), or a class not bound to an entity.
+        // Loud, because the alternative is the engine's most
+        // expensive failure mode — a call that does nothing and says
+        // nothing. Throttled per row, since a Tick would repeat it
+        // sixty times a second.
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "%s: Entity is empty and there is no calling object to "
+                        "stand in for it - wire an entity into the pin",
+                        row);
+    }
+    return me;
+}
+
+uint32_t widgetOrSelf(Ctx& c, uint32_t widget, const char* row)
+{
+    if (widget != 0u || !c.world || !c.self) return widget;
+    const int me = ScriptApi::widgetOfScript(*c.world, c.self);
+    if (me == 0)
+    {
+        HE_LOG_THROTTLE(Script, Warning, 5.0,
+                        "%s: Widget is empty and the caller is not a widget - "
+                        "wire a widget into the pin", row);
+        return 0u;
+    }
+    return static_cast<uint32_t>(me);
 }
 
 bool isScriptGroup(std::string_view group)
@@ -8223,6 +8861,10 @@ bool isScriptGroup(std::string_view group)
                                                     // door opens" or "let go of the level I just
                                                     // left", which is what residency control is.
                                                     "content",
+                                                    // "streaming" has no flat twin either: a
+                                                    // teleport written in Lua could otherwise
+                                                    // never wait for the floor it lands on.
+                                                    "streaming",
                                                     // "anticheat" has no flat twin and never will:
                                                     // the plan's Lua and Python examples (§4.3)
                                                     // are horizon.anticheat.check / reportLevel /
@@ -8247,7 +8889,14 @@ bool isScriptGroup(std::string_view group)
                                                     // "hc" exists FOR the text languages: it
                                                     // is how a Lua or Python script hears a
                                                     // HorizonCode variable change (plan §4.5).
-                                                    "hc" };
+                                                    "hc",
+                                                    // "water" has no flat twin: a landscape's
+                                                    // lakes, ponds and the brush are reachable
+                                                    // from a text script only here, which is
+                                                    // what makes a lake something a level script
+                                                    // can raise, drain or move, not just a thing
+                                                    // an author drew.
+                                                    "water" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

@@ -186,6 +186,11 @@ struct ExportProfile
 	bool        compress         = true;
 	bool        encrypt          = false;
 	bool        enableModSupport = false;
+	// The shipped game answers V (VSync) and F10 (stats card with per-pass GPU
+	// times). For a build you test with, not for players: Development has it,
+	// Shipping does not. A profile saved before this existed gets it when it is
+	// named "Development" (profileFromJson).
+	bool        devTools         = false;
 	// Project-relative path of the .hescene to ship as startup scene.
 	// Empty = the scene currently open in the editor.
 	std::string startupScene;

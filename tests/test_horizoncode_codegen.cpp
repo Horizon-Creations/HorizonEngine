@@ -347,14 +347,39 @@ namespace
 			REQUIRE(comp.id != 0);
 		}
 
+		// A trace without the rows generated code calls DIRECTLY: those never
+		// pass Services::callApi on the compiled side (HE::api::<group>::<fn>
+		// through HorizonEngineApi.h), so only the interpreter would record
+		// them. What they did is compared through their effects instead (the
+		// variables below, and test_hc_codegen_world.cpp against a real world).
+		// Rows still dispatched (Thunk rows) stay in, on both sides.
+		static std::vector<std::string> dispatchedOnly(const std::vector<std::string>& trace)
+		{
+			std::vector<std::string> out;
+			for (const std::string& t : trace)
+			{
+				if (t.rfind("callApi ", 0) == 0)
+				{
+					const size_t open = t.find('(');
+					if (HE::hccg::callsDirectly(t.substr(8, open == std::string::npos
+					                                            ? std::string::npos : open - 8)))
+						continue;
+				}
+				out.push_back(t);
+			}
+			return out;
+		}
+
 		void checkParity()
 		{
 			// Host-call traces: order and count must match exactly.
-			REQUIRE(interp.trace.size() == comp.trace.size());
-			for (size_t i = 0; i < interp.trace.size(); ++i)
+			const std::vector<std::string> ti = dispatchedOnly(interp.trace);
+			const std::vector<std::string> tc = dispatchedOnly(comp.trace);
+			REQUIRE(ti.size() == tc.size());
+			for (size_t i = 0; i < ti.size(); ++i)
 			{
 				INFO("trace entry ", i);
-				CHECK(interp.trace[i] == comp.trace[i]);
+				CHECK(ti[i] == tc[i]);
 			}
 			// Variable stores.
 			const auto si = interp.rt.variablesSnapshot(interp.id);
@@ -1660,17 +1685,17 @@ TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes"
 		std::string all;
 		for (const auto& f : r.files) all += f.contents;
 
-		CHECK(all.find("class C_inherit_derived final : public C_inherit_base") != std::string::npos);
+		CHECK(all.find("class InheritDerived final : public InheritBase") != std::string::npos);
 		// The base cannot be final — something derives from it.
-		CHECK(all.find("class C_inherit_base : public HorizonCode::CompiledInstance") != std::string::npos);
+		CHECK(all.find("class InheritBase : public HorizonCode::CompiledInstance") != std::string::npos);
 		// One table for the chain, and the unhandled cases passed upward.
-		CHECK(all.find("hc::concatSlots(C_inherit_base::slots()") != std::string::npos);
-		CHECK(all.find("C_inherit_base::fireEvent(name, elem, arg)") != std::string::npos);
-		CHECK(all.find("C_inherit_base::reseedVariables()") != std::string::npos);
+		CHECK(all.find("hc::concatSlots(InheritBase::slots()") != std::string::npos);
+		CHECK(all.find("InheritBase::fireEvent(name, elem, arg)") != std::string::npos);
+		CHECK(all.find("InheritBase::reseedVariables()") != std::string::npos);
 		// The inherited members are reachable from the derived bodies: a direct
 		// member write, and a direct qualified call.
-		CHECK(all.find("v_hits = 99.0f") != std::string::npos);
-		CHECK(all.find("C_inherit_base::Damage(") != std::string::npos);
+		CHECK(all.find("    hits = 99.0f") != std::string::npos);
+		CHECK(all.find("InheritBase::Damage(") != std::string::npos);
 		CHECK(all.find("\nprotected:") != std::string::npos);
 		// The direct-call surface follows the Runtime: the base declares its
 		// public methods virtual because something derives from it, and the
@@ -1688,7 +1713,7 @@ TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes"
 
 TEST_CASE("codegen: a class whose base did not compile ships interpreted with it")
 {
-	// `C_Goblin : public C_Enemy` cannot exist without C_Enemy. Handing in the
+	// `Goblin : public Enemy` cannot exist without Enemy. Handing in the
 	// derived class alone must not produce a class with a missing base — it has
 	// to fall back, which is the answer that keeps ONE object per instance.
 	HE::hccg::ClassSource derived;

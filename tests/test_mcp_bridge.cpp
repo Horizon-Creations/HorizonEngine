@@ -1,7 +1,7 @@
 #include "doctest.h"
 
 #include "McpBridge.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include <Net/TcpTransport.h>
 

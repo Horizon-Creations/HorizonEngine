@@ -123,6 +123,18 @@ mkdir -p "$MACOS_PATH" "$FW_PATH" "$RES_PATH"
 # ─── 3. Binary ────────────────────────────────────────────────────────────────
 cp "$DEPLOY_DIR/$APP_NAME" "$BINARY"
 
+# HorizonUpdater (src/HE_SelfUpdate): the self-update takeover helper. It is NOT
+# one of the engine dylibs copied below (it is a separate executable, deployed by
+# its own he_deploy_dll POST_BUILD step beside HorizonEditor in $DEPLOY_DIR, same
+# as this binary), so without this line it is silently absent from the DMG and
+# Takeover.cpp finds nothing next to the bundled editor to copy out and run.
+if [ -f "$DEPLOY_DIR/HorizonUpdater" ]; then
+    cp "$DEPLOY_DIR/HorizonUpdater" "$MACOS_PATH/HorizonUpdater"
+    echo "    HorizonUpdater → Contents/MacOS"
+else
+    echo "    WARNING: $DEPLOY_DIR/HorizonUpdater not found — self-update will not work from this .app."
+fi
+
 # ─── 4. Engine dylibs: copy everything from the flat deploy ───────────────────
 echo "--> Copying engine dylibs..."
 for lib in "$DEPLOY_DIR/"*.dylib; do
@@ -249,6 +261,24 @@ if [ -d "$DEPLOY_DIR/SDK" ]; then
     cp -R "$DEPLOY_DIR/SDK" "$RES_PATH/SDK"
 else
     echo "    WARNING: $DEPLOY_DIR/SDK not found — the .app will export HorizonCode interpreted only."
+fi
+
+# The engine SDK (cmake/HorizonSDK.cmake): what every export compiles its game against
+# (topic 222 step 3: no prebuilt game ships). The HorizonSDK target installs it beside
+# the editor's deploy, a sibling like the app flavours, and the editor build runs that
+# target. findGameSdk() looks for <base>/EngineSDK, so a .app without it cannot export
+# at all, and packaging stops. It carries the lib set of the tree that built the editor
+# (dev); a release set beside it comes from a release-profile tree (topic 222 step 4).
+_engine_sdk="$SOURCE_DIR/out/deploy/Editor/EngineSDK"
+[ -d "$_engine_sdk" ] || _engine_sdk="$SOURCE_DIR/out/deploy/EngineSDK"   # older build tree: SDK beside Editor/
+if [ -d "$_engine_sdk" ]; then
+    echo "    engine SDK (lib sets: $(ls "$_engine_sdk/lib" | grep -v '^cmake$' | paste -sd' ' -)) → Resources/EngineSDK"
+    rm -rf "$RES_PATH/EngineSDK"
+    cp -R "$_engine_sdk" "$RES_PATH/EngineSDK"
+else
+    echo "    ERROR: $_engine_sdk not found — the .app could not export any game."
+    echo "           Build HorizonEditor first (it installs the engine SDK alongside)."
+    exit 1
 fi
 
 # ─── 6b. App icon (.icns from the HC logo) ────────────────────────────────────

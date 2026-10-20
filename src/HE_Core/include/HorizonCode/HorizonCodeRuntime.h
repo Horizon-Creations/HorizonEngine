@@ -4,6 +4,7 @@
 #include "HorizonCode.h"
 #include "HorizonCodeCompiled.h"
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -528,8 +529,20 @@ public:
         // cannot say. 0 means the call came from outside HorizonCode.
         std::function<std::vector<Value>(InstanceId self, const std::string& apiId,
                                          const std::vector<Value>& args)> callApi;
+        // The Ctx callApi builds for `self`, handed out for a direct call from
+        // generated C++ (Context::apiCtx). A host binds both from the ONE place
+        // that fills its Ctx, so a direct call and a dispatched one cannot see
+        // different worlds. Unbound = direct calls get the null Ctx.
+        std::function<void(InstanceId self, HE::api::Ctx& out)> apiCtx;
     };
     void setServices(Services s) { m_services = std::move(s); }
+
+    // Who is creating, for a call that does not go through callApi: generated
+    // C++ calling HE::api directly pushes itself here for as long as its call
+    // runs (HE::api::Scope), so an object it spawns names it as its Creator
+    // exactly like one spawned through an EngineCall node. Pairs strictly.
+    void pushCreator(InstanceId id) { m_creatorStack.push_back(id); }
+    void popCreator() { if (!m_creatorStack.empty()) m_creatorStack.pop_back(); }
 
     // ── Multiplayer: route a runOn ≠ Local call (plan §7.2) ─────────────────
     // Forwarded into every instance's Context as Context::rpcRoute, with `self`
@@ -627,6 +640,20 @@ public:
     void debugAbort();
 
 private:
+    // An instance's handlers and functions by name, every level, LEAF FIRST —
+    // the order levelHandlingEvent and levelWithFunction search in. Every
+    // declaration is kept, not just the first, because the searches filter:
+    // an element-bound Event does not answer for another element, and an
+    // inherited call skips a base's private function for a public one further
+    // up. Within a level, entries keep the graph's node order.
+    struct DispatchIndex
+    {
+        struct Handler  { size_t level; int elem; };   // elem 0 = any element
+        struct Function { size_t level; const Node* entry; };
+        std::unordered_map<std::string, std::vector<Handler>>  events;
+        std::unordered_map<std::string, std::vector<Function>> functions;
+    };
+
     struct Inst
     {
         Inst() = default;
@@ -689,6 +716,26 @@ private:
             if (nodeState.size() <= level) nodeState.resize(level + 1);
             return nodeState[level];
         }
+
+        // ── Built on first use, kept for the instance's life ────────────────
+        // Both are derived from `levels` alone, which is set once at
+        // registration and never written again — so neither is ever stale.
+        //
+        // One Context per level (contextFor). Everything it captures is
+        // (runtime, id, level) and every service is looked up at call time, so
+        // the one built for the first fire answers exactly what a fresh one
+        // would; building ~40 std::functions per event was the whole cost.
+        // Shared rather than owned by the Runner: a nested Runner of the same
+        // instance (an inherited call, a Call Function on Self) runs on the
+        // same one, and a run that destroys its own instance must not lose the
+        // Context under its feet. `contextsOf` is the Runtime that built them:
+        // they capture its `this`, and a moved Runtime builds its own.
+        std::vector<std::shared_ptr<const Context>> contexts;
+        const Runtime*                              contextsOf = nullptr;
+        // Which level answers an event or a function (dispatchOf): what the
+        // leaf-first scan over every node of every level used to find on
+        // every fire, including the far more common "nobody handles Tick".
+        mutable std::unique_ptr<const DispatchIndex> dispatch;
     };
     // One scheduled Delay continuation (Runtime::update drives these).
     // `level` travels with it for the same reason nodeState is per level: the
@@ -781,6 +828,11 @@ private:
     // Delay continuations — needs it, because a node id only means something
     // inside its own graph.
     Context makeContext(InstanceId id, size_t level = 0);
+    // The instance's Context for `level`, built by makeContext on first use
+    // (see Inst::contexts). What every interpreted Runner runs on.
+    std::shared_ptr<const Context> contextFor(Inst& i, InstanceId id, size_t level);
+    // The instance's DispatchIndex, built on first use.
+    const DispatchIndex& dispatchOf(const Inst& i) const;
 
     // ── dispatch across an instance's levels ─────────────────────────────────
     // Which level answers for a member, searched LEAF FIRST. That single rule

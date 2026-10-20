@@ -8,7 +8,12 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/EntityIdComponent.h>
 
+#include <nlohmann/json.hpp>
+
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -216,14 +221,25 @@ TEST_CASE("Gateway create and destroy, with snapshot undo outside a session")
 	CHECK(h.created.size() == 1);
 	CHECK(h.applied == 1);
 	CHECK(authoredCount(h.world) == 3);   // root + Crate + copy
+	const std::string srcUuid  = HE::Ed::uuidOf(h.world, src);
+	const std::string copyUuid = HE::Ed::uuidOf(h.world, res.root);
 
 	// The snapshot went on the stack before the world was touched.
 	REQUIRE(h.snapshotUndo.canUndo());
 	CHECK(h.snapshotUndo.undo());
 	CHECK(authoredCount(h.world) == 2);
+	// A snapshot undo rebuilds the world and remaps every handle; the id index
+	// entityByUuid answers from has to follow.
+	const Entity srcBack = HE::Ed::entityByUuid(h.world, srcUuid);
+	REQUIRE((srcBack != entt::null));
+	CHECK(HE::Ed::uuidOf(h.world, srcBack) == srcUuid);
+	CHECK((HE::Ed::entityByUuid(h.world, copyUuid) == entt::null));
 
 	CHECK(h.snapshotUndo.redo());
 	CHECK(authoredCount(h.world) == 3);
+	const Entity copyBack = HE::Ed::entityByUuid(h.world, copyUuid);
+	REQUIRE((copyBack != entt::null));
+	CHECK(HE::Ed::uuidOf(h.world, copyBack) == copyUuid);
 }
 
 TEST_CASE("A peer's edit records nothing and publishes nothing")
@@ -512,6 +528,66 @@ TEST_CASE("A destroy carries the whole subtree, and undo restores all of it")
 	CHECK((parentOf(h.world, backChild) != entt::null));
 }
 
+TEST_CASE("A destroy is refused while someone else holds an entity under it")
+{
+	// The host only checks the lock of the entity a destroy names, so a child a
+	// peer was editing used to die with an unheld parent here and live on
+	// everywhere else. The gateway walks the subtree before anything goes.
+	Harness h;
+	h.sessionOn = true;
+	const Entity parent = h.world.createEntity("Parent");
+	const Entity child  = h.world.createEntity("Child");
+	const Entity grand  = h.world.createEntity("Grandchild");
+	REQUIRE(h.world.reparentEntity(child, parent));
+	REQUIRE(h.world.reparentEntity(grand, child));
+	h.ownedLocks.push_back(h.subjectFor(static_cast<std::uint32_t>(entt::to_integral(parent))));
+	h.lockedElsewhere.push_back(h.subjectFor(static_cast<std::uint32_t>(entt::to_integral(grand))));
+
+	CHECK(h.cmds.execute(Command::destroy(parent), Origin::User).error == CmdError::LockedByOther);
+	CHECK(h.cmds.execute(Command::destroy(parent), Origin::External).error == CmdError::LockedByOther);
+	CHECK(h.world.registry().valid(grand));
+	CHECK(h.destroyed.empty());
+
+	// A peer's destroy was agreed at the host; it is never second-guessed here.
+	CHECK(h.cmds.execute(Command::destroy(parent), Origin::Remote).ok());
+
+	SUBCASE("outside a session the same delete goes through")
+	{
+		Harness o;
+		const Entity p2 = o.world.createEntity("Parent");
+		const Entity c2 = o.world.createEntity("Child");
+		REQUIRE(o.world.reparentEntity(c2, p2));
+		o.lockedElsewhere.push_back(o.subjectFor(static_cast<std::uint32_t>(entt::to_integral(c2))));
+		CHECK(o.cmds.execute(Command::destroy(p2), Origin::User).ok());
+	}
+}
+
+TEST_CASE("A component write publishes the whole entity, not the caller's patch")
+{
+	// Peers apply a component blob as a REPLACEMENT now (so a Remove Component
+	// reaches them). A one-key patch from an MCP client sent as-is would strip
+	// every other component over there.
+	Harness h;
+	h.sessionOn = true;
+	const Entity e = h.world.createEntity("Crate");
+	h.world.registry().emplace<TransformComponent>(e);
+	h.world.registry().emplace<LightComponent>(e);
+	h.ownedLocks.push_back(h.subjectFor(static_cast<std::uint32_t>(entt::to_integral(e))));
+
+	std::vector<std::uint8_t> published;
+	h.cmds.hooks().publishComponents = [&](std::uint32_t, const std::vector<std::uint8_t>& b) {
+		published = b;
+	};
+	nlohmann::json patch;
+	patch["transform"] = { { "position", { 4.0, 5.0, 6.0 } } };
+	REQUIRE(h.cmds.execute(Command::setComponents(e, nlohmann::json::to_cbor(patch)),
+	                       Origin::External).ok());
+	REQUIRE_FALSE(published.empty());
+	const auto sent = nlohmann::json::from_cbor(published);
+	CHECK(sent.contains("transform"));
+	CHECK(sent.contains("light"));
+}
+
 TEST_CASE("entityByUuid finds what uuidOf named, and nothing else")
 {
 	Harness h;
@@ -526,4 +602,47 @@ TEST_CASE("entityByUuid finds what uuidOf named, and nothing else")
 	CHECK((HE::Ed::entityByUuid(h.world, ub) == b));
 	CHECK((HE::Ed::entityByUuid(h.world, "") == entt::null));
 	CHECK((HE::Ed::entityByUuid(h.world, std::string(32, '0')) == entt::null));
+	// Only uuidOf's own spelling: wrong length, a non-hex digit or upper case
+	// never equalled that text and does not resolve now either.
+	CHECK((HE::Ed::entityByUuid(h.world, ua.substr(0, 31)) == entt::null));
+	CHECK((HE::Ed::entityByUuid(h.world, ua + "0") == entt::null));
+	std::string upper = ua;
+	for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	if (upper != ua) CHECK((HE::Ed::entityByUuid(h.world, upper) == entt::null));
+	std::string bad = ua;
+	bad[7] = 'g';
+	CHECK((HE::Ed::entityByUuid(h.world, bad) == entt::null));
+	// The UUID form answers the same as the text.
+	CHECK((HE::Ed::entityByUuid(h.world, h.world.entityId(a)) == a));
+	CHECK((HE::Ed::entityByUuid(h.world, HE::UUID{}) == entt::null));
+}
+
+TEST_CASE("entityByUuid follows the world: same-frame create, a new id, destroy")
+{
+	// The lookup answers from the world's id index, which the registry's
+	// signals feed. The cases a linear scan could never get wrong are the ones
+	// worth pinning: an entity made a moment ago, an id replaced in place, a
+	// component emplaced by hand, a destroyed entity.
+	Harness h;
+	const Entity a = h.world.createEntity("A");
+	CHECK((HE::Ed::entityByUuid(h.world, HE::Ed::uuidOf(h.world, a)) == a));
+
+	const std::string before = HE::Ed::uuidOf(h.world, a);
+	HE::UUID fresh;
+	fresh.hi = 0x0123456789abcdefull;
+	fresh.lo = 0xfedcba9876543210ull;
+	h.world.setEntityId(a, fresh);
+	CHECK(HE::Ed::uuidOf(h.world, a) == "0123456789abcdeffedcba9876543210");
+	CHECK((HE::Ed::entityByUuid(h.world, "0123456789abcdeffedcba9876543210") == a));
+	CHECK((HE::Ed::entityByUuid(h.world, before) == entt::null));
+
+	const Entity raw = h.world.registry().create();
+	HE::UUID rawId;
+	rawId.hi = 7;
+	rawId.lo = 9;
+	h.world.registry().emplace<EntityIdComponent>(raw, EntityIdComponent{ rawId });
+	CHECK((HE::Ed::entityByUuid(h.world, "00000000000000070000000000000009") == raw));
+
+	h.world.destroyEntity(a);
+	CHECK((HE::Ed::entityByUuid(h.world, "0123456789abcdeffedcba9876543210") == entt::null));
 }

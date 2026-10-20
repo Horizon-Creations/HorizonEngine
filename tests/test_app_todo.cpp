@@ -617,7 +617,9 @@ TEST_CASE("Todo app: it exports as a software build with no scene")
             if (n.find(".dylib") == std::string::npos &&
                 n.find(".so")    == std::string::npos &&
                 n != "HorizonGame") continue;
-            const auto src = runtimeDir / n;
+            // By relative path: the engine libraries sit in HorizonEngine/ on
+            // both sides since Thema 211 step 10.
+            const auto src = runtimeDir / entry.path().lexically_relative(out);
             std::error_code sec;
             if (!std::filesystem::is_regular_file(src, sec)) continue;
             shipped  += std::filesystem::file_size(entry.path());
@@ -882,7 +884,12 @@ TEST_CASE("Both app flavours actually start")
         CAPTURE(advanced);
         const auto out = exportTodoApp(advanced, /*fullBleed=*/false);
         if (out.empty()) { MESSAGE("no deployed game runtime — skipped"); return; }
-        const auto exe = out / "HorizonGame";
+        // A runtime with HorizonEngine/ ships the executable under the project's
+        // name (Thema 211 step 10); an older flat one as HorizonGame.
+        const std::filesystem::path runtimeDir = HE_TEST_GAME_RUNTIME_DIR;
+        const auto exe = out / (runtimeHasEngineDir(runtimeDir)
+                                    ? exportedExecutableName("TodoApp", false)
+                                    : std::string("HorizonGame"));
         if (!std::filesystem::exists(exe))
         {
             MESSAGE("no runnable binary for this platform — skipped");

@@ -4,7 +4,15 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/ContentManager.h>
 #include <glm/glm.hpp>
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 
 // ─── FoliageSystem instance generation ────────────────────────────────────────
@@ -20,9 +28,9 @@ TEST_CASE("FoliageSystem generates expected number of instances")
     reg.emplace<TerrainComponent>(e, tc);
 
     FoliageComponent fol;
-    fol.meshAssetId = HE::UUID{1, 0};
-    fol.density     = 0.1f;  // 0.1 per unit area → 50*50*0.1 = 250 instances
-    fol.seed        = 42;
+    fol.layers[0].meshAssetId = HE::UUID{1, 0};
+    fol.layers[0].density     = 0.1f;  // 0.1 per unit area → 50*50*0.1 = 250 instances
+    fol.layers[0].seed        = 42;
     fol.dirty       = true;
     reg.emplace<FoliageComponent>(e, fol);
 
@@ -30,7 +38,7 @@ TEST_CASE("FoliageSystem generates expected number of instances")
 
     const auto& f = reg.get<FoliageComponent>(e);
     CHECK(!f.dirty);
-    CHECK(f.cachedInstances.size() == 250u);
+    CHECK(f.layers[0].cachedInstances.size() == 250u);
 }
 
 TEST_CASE("FoliageSystem clears dirty flag after update")
@@ -41,8 +49,8 @@ TEST_CASE("FoliageSystem clears dirty flag after update")
     reg.emplace<TerrainComponent>(e, TerrainComponent{});
 
     FoliageComponent fol;
-    fol.meshAssetId = HE::UUID{1,0};
-    fol.density = 0.01f;
+    fol.layers[0].meshAssetId = HE::UUID{1,0};
+    fol.layers[0].density = 0.01f;
     fol.dirty = true;
     reg.emplace<FoliageComponent>(e, fol);
 
@@ -50,9 +58,9 @@ TEST_CASE("FoliageSystem clears dirty flag after update")
     CHECK(!reg.get<FoliageComponent>(e).dirty);
 
     // Second update with dirty=false should not regenerate
-    const size_t before = reg.get<FoliageComponent>(e).cachedInstances.size();
+    const size_t before = reg.get<FoliageComponent>(e).layers[0].cachedInstances.size();
     FoliageSystem::update(world); // dirty=false → no-op
-    CHECK(reg.get<FoliageComponent>(e).cachedInstances.size() == before);
+    CHECK(reg.get<FoliageComponent>(e).layers[0].cachedInstances.size() == before);
 }
 
 TEST_CASE("FoliageSystem instances are deterministic across calls")
@@ -64,10 +72,10 @@ TEST_CASE("FoliageSystem instances are deterministic across calls")
         auto e = w.createEntity("T");
         TerrainComponent tc; tc.sizeX = 20.f; tc.sizeZ = 20.f; tc.seed = 1;
         reg.emplace<TerrainComponent>(e, tc);
-        FoliageComponent fol; fol.meshAssetId = HE::UUID{1,0}; fol.density = 0.5f; fol.seed = 7;
+        FoliageComponent fol; fol.layers[0].meshAssetId = HE::UUID{1,0}; fol.layers[0].density = 0.5f; fol.layers[0].seed = 7;
         reg.emplace<FoliageComponent>(e, fol);
         FoliageSystem::update(w);
-        return reg.get<FoliageComponent>(e).cachedInstances;
+        return reg.get<FoliageComponent>(e).layers[0].cachedInstances;
     };
 
     HorizonWorld w1, w2;
@@ -87,8 +95,8 @@ TEST_CASE("FoliageSystem skips entities without TerrainComponent")
     auto e = world.createEntity("NoTerrain");
 
     FoliageComponent fol;
-    fol.meshAssetId = HE::UUID{1,0};
-    fol.density = 1.f;
+    fol.layers[0].meshAssetId = HE::UUID{1,0};
+    fol.layers[0].density = 1.f;
     fol.dirty = true;
     reg.emplace<FoliageComponent>(e, fol);
 
@@ -106,14 +114,14 @@ TEST_CASE("FoliageSystem skips FoliageComponent with null mesh")
 
     FoliageComponent fol;
     // meshAssetId left as null UUID
-    fol.density = 1.f;
+    fol.layers[0].density = 1.f;
     fol.dirty = true;
     reg.emplace<FoliageComponent>(e, fol);
 
     FoliageSystem::update(world);
     // dirty=false but cachedInstances should be empty (skipped due to null mesh)
     CHECK(!reg.get<FoliageComponent>(e).dirty);
-    CHECK(reg.get<FoliageComponent>(e).cachedInstances.empty());
+    CHECK(reg.get<FoliageComponent>(e).layers[0].cachedInstances.empty());
 }
 
 TEST_CASE("FoliageSystem places instances at terrain height")
@@ -128,14 +136,14 @@ TEST_CASE("FoliageSystem places instances at terrain height")
     reg.emplace<TerrainComponent>(e, tc);
 
     FoliageComponent fol;
-    fol.meshAssetId = HE::UUID{1,0};
-    fol.density = 1.f;
+    fol.layers[0].meshAssetId = HE::UUID{1,0};
+    fol.layers[0].density = 1.f;
     fol.dirty = true;
     reg.emplace<FoliageComponent>(e, fol);
 
     FoliageSystem::update(world);
 
-    const auto& instances = reg.get<FoliageComponent>(e).cachedInstances;
+    const auto& instances = reg.get<FoliageComponent>(e).layers[0].cachedInstances;
     REQUIRE(!instances.empty());
 
     // All Y positions should be >= 0 (terrain height is >= 0 for seed!=0 fbm)
@@ -156,13 +164,13 @@ TEST_CASE("FoliageComponent serializes and deserializes correctly")
     auto e = world.createEntity("FolEnt");
 
     FoliageComponent fol;
-    fol.meshAssetId     = HE::UUID{0xDEAD,0xBEEF};
-    fol.materialAssetId = HE::UUID{0x1234,0x5678};
-    fol.density         = 0.25f;
-    fol.seed            = 99;
-    fol.minScale        = 0.5f;
-    fol.maxScale        = 2.0f;
-    fol.drawDistance    = 120.f;
+    fol.layers[0].meshAssetId     = HE::UUID{0xDEAD,0xBEEF};
+    fol.layers[0].materialAssetId = HE::UUID{0x1234,0x5678};
+    fol.layers[0].density         = 0.25f;
+    fol.layers[0].seed            = 99;
+    fol.layers[0].minScale        = 0.5f;
+    fol.layers[0].maxScale        = 2.0f;
+    fol.layers[0].drawDistance    = 120.f;
     reg.emplace<FoliageComponent>(e, fol);
 
     auto tmp = std::filesystem::temp_directory_path() / "he_test_foliage.hescene";
@@ -175,13 +183,13 @@ TEST_CASE("FoliageComponent serializes and deserializes correctly")
     bool found = false;
     world2.registry().view<FoliageComponent>().each([&](auto, const FoliageComponent& f) {
         found = true;
-        CHECK(f.meshAssetId     == HE::UUID{0xDEAD,0xBEEF});
-        CHECK(f.materialAssetId == HE::UUID{0x1234,0x5678});
-        CHECK(f.density         == doctest::Approx(0.25f));
-        CHECK(f.seed            == 99);
-        CHECK(f.minScale        == doctest::Approx(0.5f));
-        CHECK(f.maxScale        == doctest::Approx(2.0f));
-        CHECK(f.drawDistance    == doctest::Approx(120.f));
+        CHECK(f.layers[0].meshAssetId     == HE::UUID{0xDEAD,0xBEEF});
+        CHECK(f.layers[0].materialAssetId == HE::UUID{0x1234,0x5678});
+        CHECK(f.layers[0].density         == doctest::Approx(0.25f));
+        CHECK(f.layers[0].seed            == 99);
+        CHECK(f.layers[0].minScale        == doctest::Approx(0.5f));
+        CHECK(f.layers[0].maxScale        == doctest::Approx(2.0f));
+        CHECK(f.layers[0].drawDistance    == doctest::Approx(120.f));
         CHECK(f.dirty           == true); // always dirty after load
     });
     CHECK(found);
@@ -207,9 +215,9 @@ namespace
         tc.sizeX = 100.f; tc.sizeZ = 100.f; tc.seed = 0;
         reg.emplace<TerrainComponent>(e, tc);
         FoliageComponent fol;
-        fol.meshAssetId = HE::UUID{1, 0};
-        fol.density     = density;
-        fol.seed        = seed;
+        fol.layers[0].meshAssetId = HE::UUID{1, 0};
+        fol.layers[0].density     = density;
+        fol.layers[0].seed        = seed;
         reg.emplace<FoliageComponent>(e, fol);
         return e;
     }
@@ -221,26 +229,26 @@ TEST_CASE("FoliagePaint allocates a full mask that changes nothing")
     auto& reg = world.registry();
     auto e = makeMaskedLayer(world);
     FoliageSystem::update(world);
-    const std::vector<glm::mat4> uniform = reg.get<FoliageComponent>(e).cachedInstances;
+    const std::vector<glm::mat4> uniform = reg.get<FoliageComponent>(e).layers[0].cachedInstances;
     REQUIRE(uniform.size() == 2000u);   // 100*100*0.2
 
     auto& fol = reg.get<FoliageComponent>(e);
-    FoliagePaint::ensureMask(fol);
-    CHECK(fol.densityMask.size() == static_cast<size_t>(fol.maskRes) * fol.maskRes);
-    CHECK(fol.dirty);
-    for (uint8_t b : fol.densityMask) { if (b != 255) { CHECK(b == 255); break; } }
-    CHECK(FoliagePaint::coverage(fol) == doctest::Approx(1.0f));
+    FoliagePaint::ensureMask(fol.layers[0]);
+    CHECK(fol.layers[0].densityMask.size() == static_cast<size_t>(fol.layers[0].maskRes) * fol.layers[0].maskRes);
+    CHECK(fol.layers[0].dirty);
+    for (uint8_t b : fol.layers[0].densityMask) { if (b != 255) { CHECK(b == 255); break; } }
+    CHECK(FoliagePaint::coverage(fol.layers[0]) == doctest::Approx(1.0f));
 
     // A full mask is the uniform layer: same count, same poses, same order.
     FoliageSystem::update(world);
-    const auto& masked = reg.get<FoliageComponent>(e).cachedInstances;
+    const auto& masked = reg.get<FoliageComponent>(e).layers[0].cachedInstances;
     REQUIRE(masked.size() == uniform.size());
     for (size_t i = 0; i < masked.size(); ++i) CHECK(masked[i] == uniform[i]);
 
     // ensureMask on a correctly sized mask leaves it alone.
-    fol.densityMask[7] = 3;
-    FoliagePaint::ensureMask(fol);
-    CHECK(fol.densityMask[7] == 3);
+    fol.layers[0].densityMask[7] = 3;
+    FoliagePaint::ensureMask(fol.layers[0]);
+    CHECK(fol.layers[0].densityMask[7] == 3);
 }
 
 TEST_CASE("FoliagePaint erase leaves the circle empty and the rest untouched")
@@ -249,20 +257,20 @@ TEST_CASE("FoliagePaint erase leaves the circle empty and the rest untouched")
     auto& reg = world.registry();
     auto e = makeMaskedLayer(world);
     FoliageSystem::update(world);
-    const std::vector<glm::mat4> uniform = reg.get<FoliageComponent>(e).cachedInstances;
+    const std::vector<glm::mat4> uniform = reg.get<FoliageComponent>(e).layers[0].cachedInstances;
 
     auto& fol = reg.get<FoliageComponent>(e);
     const auto& tc = reg.get<TerrainComponent>(e);
     // A hard-edged full-strength erase at (20, -10), radius 15.
-    REQUIRE(FoliagePaint::paint(fol, tc, 20.f, -10.f, /*radius=*/15.f, /*falloff=*/0.f,
+    REQUIRE(FoliagePaint::paint(fol.layers[0], tc, 20.f, -10.f, /*radius=*/15.f, /*falloff=*/0.f,
                                 /*strength=*/1.f, /*target=*/0.f));
-    CHECK(fol.dirty);
-    CHECK(FoliagePaint::sample(fol, tc, 20.f, -10.f) == doctest::Approx(0.0f));
-    CHECK(FoliagePaint::sample(fol, tc, -40.f, 40.f) == doctest::Approx(1.0f));
-    CHECK(FoliagePaint::coverage(fol) < 1.0f);
+    CHECK(fol.layers[0].dirty);
+    CHECK(FoliagePaint::sample(fol.layers[0], tc, 20.f, -10.f) == doctest::Approx(0.0f));
+    CHECK(FoliagePaint::sample(fol.layers[0], tc, -40.f, 40.f) == doctest::Approx(1.0f));
+    CHECK(FoliagePaint::coverage(fol.layers[0]) < 1.0f);
 
     FoliageSystem::update(world);
-    const auto& masked = reg.get<FoliageComponent>(e).cachedInstances;
+    const auto& masked = reg.get<FoliageComponent>(e).layers[0].cachedInstances;
     CHECK(masked.size() < uniform.size());
     CHECK(!masked.empty());
 
@@ -297,27 +305,27 @@ TEST_CASE("FoliagePaint half-density target thins the scatter in proportion")
     auto& reg = world.registry();
     auto e = makeMaskedLayer(world, /*density=*/0.5f);
     auto& fol = reg.get<FoliageComponent>(e);
-    FoliagePaint::fillMask(fol, 0.5f);
-    CHECK(FoliagePaint::coverage(fol) == doctest::Approx(0.5f).epsilon(0.01));
+    FoliagePaint::fillMask(fol.layers[0], 0.5f);
+    CHECK(FoliagePaint::coverage(fol.layers[0]) == doctest::Approx(0.5f).epsilon(0.01));
 
     FoliageSystem::update(world);
-    const size_t n = reg.get<FoliageComponent>(e).cachedInstances.size();
+    const size_t n = reg.get<FoliageComponent>(e).layers[0].cachedInstances.size();
     // 5000 candidates kept with probability 0.5 → 2500 ± a generous band.
     CHECK(n > 2200u);
     CHECK(n < 2800u);
 
     // Fill at 0 → nothing at all, dirty again.
-    FoliagePaint::fillMask(fol, 0.0f);
-    CHECK(fol.dirty);
+    FoliagePaint::fillMask(fol.layers[0], 0.0f);
+    CHECK(fol.layers[0].dirty);
     FoliageSystem::update(world);
-    CHECK(reg.get<FoliageComponent>(e).cachedInstances.empty());
+    CHECK(reg.get<FoliageComponent>(e).layers[0].cachedInstances.empty());
 
     // Clearing the mask is back to the uniform layer.
-    FoliagePaint::clearMask(fol);
-    CHECK(fol.densityMask.empty());
-    CHECK(fol.dirty);
+    FoliagePaint::clearMask(fol.layers[0]);
+    CHECK(fol.layers[0].densityMask.empty());
+    CHECK(fol.layers[0].dirty);
     FoliageSystem::update(world);
-    CHECK(reg.get<FoliageComponent>(e).cachedInstances.size() == 5000u);
+    CHECK(reg.get<FoliageComponent>(e).layers[0].cachedInstances.size() == 5000u);
 }
 
 TEST_CASE("FoliagePaint falloff fades and repeated strokes converge to the target")
@@ -328,11 +336,11 @@ TEST_CASE("FoliagePaint falloff fades and repeated strokes converge to the targe
     auto& fol = reg.get<FoliageComponent>(e);
     const auto& tc = reg.get<TerrainComponent>(e);
 
-    REQUIRE(FoliagePaint::paint(fol, tc, 0.f, 0.f, /*radius=*/5.f, /*falloff=*/20.f,
+    REQUIRE(FoliagePaint::paint(fol.layers[0], tc, 0.f, 0.f, /*radius=*/5.f, /*falloff=*/20.f,
                                 /*strength=*/1.f, /*target=*/0.f));
-    const float centre = FoliagePaint::sample(fol, tc, 0.f, 0.f);
-    const float mid    = FoliagePaint::sample(fol, tc, 15.f, 0.f);
-    const float edge   = FoliagePaint::sample(fol, tc, 30.f, 0.f);
+    const float centre = FoliagePaint::sample(fol.layers[0], tc, 0.f, 0.f);
+    const float mid    = FoliagePaint::sample(fol.layers[0], tc, 15.f, 0.f);
+    const float edge   = FoliagePaint::sample(fol.layers[0], tc, 30.f, 0.f);
     CHECK(centre == doctest::Approx(0.0f));
     CHECK(mid > centre);
     CHECK(mid < edge);
@@ -340,18 +348,18 @@ TEST_CASE("FoliagePaint falloff fades and repeated strokes converge to the targe
 
     // Soft strokes: 0.3 per call toward 0 reaches EXACTLY 0 rather than
     // parking at 1/255 (the residue snap), so an erased yard is truly empty.
-    FoliagePaint::fillMask(fol, 1.0f);
+    FoliagePaint::fillMask(fol.layers[0], 1.0f);
     for (int i = 0; i < 40; ++i)
-        FoliagePaint::paint(fol, tc, 0.f, 0.f, 5.f, 0.f, 0.3f, 0.f);
-    CHECK(FoliagePaint::sample(fol, tc, 0.f, 0.f) == doctest::Approx(0.0f));
+        FoliagePaint::paint(fol.layers[0], tc, 0.f, 0.f, 5.f, 0.f, 0.3f, 0.f);
+    CHECK(FoliagePaint::sample(fol.layers[0], tc, 0.f, 0.f) == doctest::Approx(0.0f));
 
     // Out of range or degenerate → false, nothing touched.
-    FoliagePaint::fillMask(fol, 1.0f);
-    fol.dirty = false;
-    CHECK_FALSE(FoliagePaint::paint(fol, tc, 500.f, 500.f, 5.f, 0.f, 1.f, 0.f));
-    CHECK_FALSE(FoliagePaint::paint(fol, tc, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f));
-    CHECK_FALSE(FoliagePaint::paint(fol, tc, 0.f, 0.f, 5.f, 0.f, 0.f, 0.f));
-    CHECK_FALSE(fol.dirty);
+    FoliagePaint::fillMask(fol.layers[0], 1.0f);
+    fol.layers[0].dirty = false;
+    CHECK_FALSE(FoliagePaint::paint(fol.layers[0], tc, 500.f, 500.f, 5.f, 0.f, 1.f, 0.f));
+    CHECK_FALSE(FoliagePaint::paint(fol.layers[0], tc, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f));
+    CHECK_FALSE(FoliagePaint::paint(fol.layers[0], tc, 0.f, 0.f, 5.f, 0.f, 0.f, 0.f));
+    CHECK_FALSE(fol.layers[0].dirty);
 }
 
 TEST_CASE("FoliageComponent density mask survives a save and drops a bad blob")
@@ -361,9 +369,9 @@ TEST_CASE("FoliageComponent density mask survives a save and drops a bad blob")
     auto e = makeMaskedLayer(world);
     auto& fol = reg.get<FoliageComponent>(e);
     const auto& tc = reg.get<TerrainComponent>(e);
-    fol.maskRes = 64;
-    REQUIRE(FoliagePaint::paint(fol, tc, 10.f, 10.f, 10.f, 0.f, 1.f, 0.f));
-    const std::vector<uint8_t> painted = fol.densityMask;
+    fol.layers[0].maskRes = 64;
+    REQUIRE(FoliagePaint::paint(fol.layers[0], tc, 10.f, 10.f, 10.f, 0.f, 1.f, 0.f));
+    const std::vector<uint8_t> painted = fol.layers[0].densityMask;
 
     auto tmp = std::filesystem::temp_directory_path() / "he_test_foliage_mask.hescene";
     SceneSerializer ser;
@@ -374,21 +382,178 @@ TEST_CASE("FoliageComponent density mask survives a save and drops a bad blob")
     bool found = false;
     world2.registry().view<FoliageComponent>().each([&](auto, const FoliageComponent& f) {
         found = true;
-        CHECK(f.maskRes == 64u);
-        CHECK(f.densityMask == painted);
+        CHECK(f.layers[0].maskRes == 64u);
+        CHECK(f.layers[0].densityMask == painted);
         CHECK(f.dirty);
     });
     CHECK(found);
 
     // A mask whose size disagrees with maskRes is dropped on load, not carried.
-    fol.maskRes = 32;   // densityMask still 64² bytes
+    fol.layers[0].maskRes = 32;   // densityMask still 64² bytes
     REQUIRE(ser.save(world, tmp, HE::SerializeFormat::JSON));
     HorizonWorld world3;
     REQUIRE(ser.load(world3, tmp, HE::SerializeFormat::JSON));
     world3.registry().view<FoliageComponent>().each([&](auto, const FoliageComponent& f) {
-        CHECK(f.maskRes == 32u);
-        CHECK(f.densityMask.empty());
+        CHECK(f.layers[0].maskRes == 32u);
+        CHECK(f.layers[0].densityMask.empty());
     });
 
     he_test::removeQuiet(tmp);
+}
+
+// ─── The layer follows the ground (Thema 163, Teil 2b) ───────────────────────
+// The scatter reads the terrain once. Whatever changes the ground afterwards has
+// to say so, or the plants float over a stroke and sink into a fill. Every
+// change ends in TerrainSystem's rebuild gate, which marks the layer.
+
+namespace
+{
+    // A flat 16 m landscape (res 9 = 2^3+1, so no resample) carrying a layer of
+    // 256 plants, built and scattered once.
+    entt::entity makeGroundedLayer(HorizonWorld& world, ContentManager& cm)
+    {
+        auto& reg = world.registry();
+        auto  te  = world.createEntity("Landscape");
+        reg.emplace<TransformComponent>(te);
+        TerrainComponent tc;
+        tc.resolution = 9;
+        tc.sizeX = tc.sizeZ = 16.0f;
+        tc.seed = 0;
+        tc.heightScale = 0.0f;
+        tc.dirty = true;
+        reg.emplace<TerrainComponent>(te, tc);
+        FoliageComponent fol;
+        fol.layers[0].meshAssetId = HE::UUID{1, 0};
+        fol.layers[0].density     = 1.0f;   // 16 * 16 * 1.0 = 256 plants
+        fol.layers[0].seed        = 7;
+        reg.emplace<FoliageComponent>(te, fol);
+
+        TerrainSystem::updateTerrains(world, cm);
+        FoliageSystem::update(world);
+        return te;
+    }
+
+    // Every plant stands on the ground the terrain describes right now.
+    bool allOnTheGround(const FoliageComponent& f, const TerrainComponent& t)
+    {
+        for (const glm::mat4& m : f.layers[0].cachedInstances)
+            if (std::abs(m[3].y - terrainHeightAt(t, m[3].x, m[3].z)) > 1e-4f) return false;
+        return !f.layers[0].cachedInstances.empty();
+    }
+
+    float highestPlant(const FoliageComponent& f)
+    {
+        float y = -1e9f;
+        for (const glm::mat4& m : f.layers[0].cachedInstances) y = std::max(y, m[3].y);
+        return y;
+    }
+}
+
+TEST_CASE("Foliage re-scatters over the new ground after a sculpt stroke")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    auto& tc  = reg.get<TerrainComponent>(te);
+
+    REQUIRE(fol.layers[0].cachedInstances.size() == 256u);
+    CHECK(!fol.dirty);
+    CHECK(highestPlant(fol) == doctest::Approx(0.0f));   // flat ground, flat layer
+    const uint32_t revisionBefore = fol.revision;
+
+    // A dab through the same one-shot form the MCP and scripts use: heights move,
+    // regionDirty is set, nothing touches the layer.
+    const auto r = TerrainSculpt::apply(tc, 0.0f, 0.0f, TerrainSculpt::Op::Raise, 5.0f, 2.0f, 3.0f);
+    REQUIRE(r.ok);
+    REQUIRE(r.changed > 0u);
+    CHECK(!fol.dirty);
+
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(fol.dirty);                       // the rebuild gate marked the layer
+
+    FoliageSystem::update(world);
+    CHECK(!fol.dirty);
+    CHECK(fol.revision > revisionBefore);   // and a retained RenderWorld hears of it
+    CHECK(fol.layers[0].cachedInstances.size() == 256u);
+    CHECK(highestPlant(fol) > 0.5f);        // something stands on the new hill
+    CHECK(allOnTheGround(fol, tc));
+    // The renderer reads the store, not the world-space copy: it moved too.
+    REQUIRE(fol.layers[0].store != nullptr);
+    float storeTop = -1e9f;
+    for (const glm::mat4& m : fol.layers[0].store->local) storeTop = std::max(storeTop, m[3].y);
+    CHECK(storeTop == doctest::Approx(highestPlant(fol)));
+}
+
+TEST_CASE("Foliage re-scatters over flat ground after Reset Sculpting")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    auto& tc  = reg.get<TerrainComponent>(te);
+
+    REQUIRE(TerrainSculpt::apply(tc, 0.0f, 0.0f, TerrainSculpt::Op::Raise, 5.0f, 2.0f, 3.0f).ok);
+    TerrainSystem::updateTerrains(world, cm);
+    FoliageSystem::update(world);
+    REQUIRE(highestPlant(fol) > 0.5f);
+
+    // What the Landscape panel's Reset Sculpting button does.
+    tc.sculptHeights.clear();
+    tc.dirty = true;
+    CHECK(!fol.dirty);
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(fol.dirty);
+
+    FoliageSystem::update(world);
+    CHECK(highestPlant(fol) == doctest::Approx(0.0f));
+    CHECK(allOnTheGround(fol, tc));
+}
+
+TEST_CASE("Foliage re-scatters over the whole terrain after a new size")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    auto& tc  = reg.get<TerrainComponent>(te);
+    REQUIRE(fol.layers[0].cachedInstances.size() == 256u);
+
+    // What the Inspector's Width / Depth drag does: the size changes, `dirty` is set.
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.dirty = true;
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(fol.dirty);
+
+    FoliageSystem::update(world);
+    CHECK(fol.layers[0].cachedInstances.size() == 1024u);   // 32 * 32 * 1.0
+    float reach = 0.0f;
+    for (const glm::mat4& m : fol.layers[0].cachedInstances) reach = std::max(reach, std::abs(m[3].x));
+    CHECK(reach > 8.0f);                          // plants out in the new half, not just the old 16 m
+}
+
+TEST_CASE("Foliage is left alone by a terrain tick that changed no ground")
+{
+    // The negative control: the rebuild gate is the only trigger. A material swap
+    // (synced ungated at the top of the tick) and an idle tick must not re-scatter.
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto  te  = makeGroundedLayer(world, cm);
+    auto& reg = world.registry();
+    auto& fol = reg.get<FoliageComponent>(te);
+    REQUIRE(!fol.dirty);
+    const uint32_t revisionBefore = fol.revision;
+
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(!fol.dirty);
+
+    reg.get<MaterialComponent>(te).materialAssetId = HE::UUID{ 0xABCDEF01ull, 0x1234ull };
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(!fol.dirty);
+
+    FoliageSystem::update(world);
+    CHECK(fol.revision == revisionBefore);
 }

@@ -6,9 +6,35 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#if defined(_WIN32)
+#include <crtdbg.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32)
+	// No modal window, ever: a Debug CRT assertion, a run-time check failure
+	// ("Stack around the variable ... was corrupted"), abort() and an unhandled
+	// fault each pop a dialog that waits for a human — a run on a shared
+	// workstation then hangs and puts the box in front of whoever sits there.
+	// The report goes to stderr instead and doctest records the case as failed
+	// or crashed. Release builds compile the _Crt calls away.
+	::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+	for (const int type : { _CRT_WARN, _CRT_ERROR, _CRT_ASSERT })
+	{
+		_CrtSetReportMode(type, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+		_CrtSetReportFile(type, _CRTDBG_FILE_STDERR);
+	}
+#endif
+
 	// The engine mirrors its log to the console by default, which would bury the
 	// doctest report under thousands of lines. Records still go to the ring
 	// buffer (so the logging tests can inspect them) and to any file a test opens.
@@ -28,6 +54,15 @@ int main(int argc, char** argv)
 	_putenv_s("HE_COLLAB_OFFLINE", "1");
 #else
 	setenv("HE_COLLAB_OFFLINE", "1", 1);
+#endif
+
+	// A relay address in the developer's environment would route every
+	// peer-to-peer test through somebody's relay server. The relay tests set
+	// their addresses explicitly (and HE_TEST_RELAY for the real server).
+#if defined(_WIN32)
+	_putenv_s("HE_NET_RELAY", "");
+#else
+	unsetenv("HE_NET_RELAY");
 #endif
 
 	// Every listener the suite opens binds the loopback address rather than

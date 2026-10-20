@@ -7,7 +7,7 @@
 namespace HE::Net {
 
 NetSession::NetSession(ITransport* transport, NetRole role)
-    : m_transport(transport), m_role(role) {}
+    : m_transport(transport), m_fansOut(transport && transport->fansOut()), m_role(role) {}
 
 void NetSession::on(MessageId id, MessageHandler handler) {
     m_handlers[id] = std::move(handler);
@@ -20,15 +20,11 @@ void NetSession::send(ConnectionId conn, MessageId id, const BitWriter& payload,
                     static_cast<unsigned>(id));
         return;
     }
-    // Frame: 16-bit id (leaves the stream byte-aligned) followed by the payload
-    // bytes verbatim. Any zero-pad in the payload's final byte is harmless — the
-    // receiving handler reads exactly the typed fields it expects and stops.
-    BitWriter framed;
-    framed.writeUInt16(id);
-    const std::vector<std::uint8_t> pd = payload.data();
-    if (!pd.empty()) framed.writeBytes(pd.data(), pd.size());
+    sendFrame(conn, id, frame(id, payload), mode);
+}
 
-    const std::vector<std::uint8_t> bytes = framed.data();
+void NetSession::sendFrame(ConnectionId conn, MessageId id,
+                           const std::vector<std::uint8_t>& bytes, SendMode mode) {
     HE_LOG_TRACE(Net, "msg %u out → conn %llu (%s)", static_cast<unsigned>(id),
                  static_cast<unsigned long long>(conn),
                  detail::logBytes(bytes.size()).c_str());
@@ -36,14 +32,72 @@ void NetSession::send(ConnectionId conn, MessageId id, const BitWriter& payload,
 }
 
 void NetSession::broadcast(MessageId id, const BitWriter& payload, SendMode mode) {
+    if (m_fansOut) return fanOut(m_connections, id, payload, mode);
+    if (!m_transport || m_connections.empty()) return;
     // Snapshot the peer list: a handler could mutate it, and send() must not be
     // iterating a container that shifts underneath it.
     const std::vector<ConnectionId> peers = m_connections;
     HE_LOG_TRACE(Net, "msg %u broadcast to %zu peer(s)", static_cast<unsigned>(id),
                  peers.size());
+    // One frame for everyone: it does not depend on the recipient.
+    const std::vector<std::uint8_t> bytes = frame(id, payload);
     for (const ConnectionId conn : peers) {
-        send(conn, id, payload, mode);
+        sendFrame(conn, id, bytes, mode);
     }
+}
+
+void NetSession::broadcastExcept(ConnectionId except, MessageId id, const BitWriter& payload,
+                                 SendMode mode) {
+    if (m_fansOut) {
+        std::vector<ConnectionId> to;
+        to.reserve(m_connections.size());
+        for (const ConnectionId c : m_connections)
+            if (c != except) to.push_back(c);
+        return fanOut(to, id, payload, mode);
+    }
+    if (!m_transport) return;
+    // The loop the callers wrote by hand before this existed, with the frame
+    // built once instead of per peer.
+    std::vector<std::uint8_t> bytes;
+    for (const ConnectionId other : m_connections) {
+        if (other == except) continue;
+        if (bytes.empty()) bytes = frame(id, payload);
+        sendFrame(other, id, bytes, mode);
+    }
+}
+
+void NetSession::sendTo(const std::vector<ConnectionId>& to, MessageId id,
+                        const BitWriter& payload, SendMode mode) {
+    if (m_fansOut) return fanOut(to, id, payload, mode);
+    if (!m_transport || to.empty()) return;
+    const std::vector<std::uint8_t> bytes = frame(id, payload);
+    for (const ConnectionId conn : to) sendFrame(conn, id, bytes, mode);
+}
+
+std::vector<std::uint8_t> NetSession::frame(MessageId id, const BitWriter& payload) const {
+    // The 16-bit id is written LSB-first, i.e. low byte then high byte, which
+    // leaves the stream byte-aligned; the payload follows verbatim. Any
+    // zero-pad in the payload's final byte is harmless — the receiving handler
+    // reads exactly the typed fields it expects and stops. Byte for byte what
+    // a BitWriter with writeUInt16(id) + writeBytes(payload) produced.
+    std::vector<std::uint8_t> out;
+    out.reserve(2 + payload.byteSize());
+    out.push_back(static_cast<std::uint8_t>(id & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((id >> 8) & 0xFFu));
+    payload.appendTo(out);
+    return out;
+}
+
+void NetSession::fanOut(const std::vector<ConnectionId>& to, MessageId id,
+                        const BitWriter& payload, SendMode mode) {
+    if (!m_transport || to.empty()) return;
+    // One recipient is a plain send; a broadcast would only tell everyone
+    // else that it was not for them.
+    if (to.size() == 1) return send(to.front(), id, payload, mode);
+    const std::vector<std::uint8_t> bytes = frame(id, payload);
+    HE_LOG_TRACE(Net, "msg %u fanned out to %zu peer(s) (%s)", static_cast<unsigned>(id),
+                 to.size(), detail::logBytes(bytes.size()).c_str());
+    m_transport->sendToMany(to.data(), to.size(), bytes.data(), bytes.size(), mode);
 }
 
 void NetSession::disconnect(ConnectionId conn) {

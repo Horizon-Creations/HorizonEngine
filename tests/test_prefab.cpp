@@ -1171,8 +1171,10 @@ TEST_CASE("PrefabSync: a lost record whose entity was changed here stays, as a c
         const Entity l2 = outer2.createEntity("Lamp");
         const Entity b2 = outer2.createEntity("Bulb");
         outer2.reparentEntity(b2, l2);
-        outer2.registry().get<EntityIdComponent>(l2).id = idOf(outerTemplate.registry(), oLamp);
-        outer2.registry().get<EntityIdComponent>(b2).id = tOBulb;
+        // Through setEntityId: a write straight into the component fires no
+        // signal, and the world's id index would stay on the ids it was born with.
+        outer2.setEntityId(l2, idOf(outerTemplate.registry(), oLamp));
+        outer2.setEntityId(b2, tOBulb);
         SceneSerializer::PrefabSyncReport rep2;
         REQUIRE(ser.syncPrefabInstance(scene2, root2, ser.serializeSubtree(outer2, l2), &rep2));
         CHECK(rep2.entitiesRemoved == 0);
@@ -1459,7 +1461,7 @@ TEST_CASE("PrefabNested: a nested placement the outer asset gained arrives whole
     HorizonWorld bare;
     const Entity bPost = bare.createEntity("Post");
     bare.addComponent(bPost, TransformComponent{});
-    bare.registry().get<EntityIdComponent>(bPost).id = idOf(o.world.registry(), o.post);
+    bare.setEntityId(bPost, idOf(o.world.registry(), o.post));
     SceneSerializer ser;
     HorizonWorld scene;
     std::vector<PrefabInstanceComponent::Binding> bindings;
@@ -1633,6 +1635,53 @@ TEST_CASE("PrefabSync: the whole-world pass reads each asset from the content ma
     CHECK(reg.get<LightComponent>(a.bulb).intensity == doctest::Approx(5.0f));
     CHECK(reg.get<LightComponent>(b.bulb).intensity == doctest::Approx(5.0f));
     CHECK(reg.get<LightComponent>(orphan.bulb).intensity == doctest::Approx(1.0f));
+}
+
+// The whole-world pass parses each asset once and hands the tree to every
+// placement (SCN-702). What a placement makes of an asset that is there but
+// does not parse is still that placement's own refusal: not synced, not
+// counted as unresolved, and the placements beside it on a good asset sync.
+TEST_CASE("PrefabSync: the whole-world pass refuses an unreadable asset per placement and still syncs the rest")
+{
+    Template t;
+    ContentManager cm;
+    PrefabAsset good;
+    good.name = "Lamp";
+    good.data = t.capture();
+    const HE::UUID goodId = cm.registerPrefab(std::move(good));
+    PrefabAsset bad;
+    bad.name = "Broken";
+    bad.data = { 0xFF, 0x00, 0x13 };
+    const HE::UUID badId = cm.registerPrefab(std::move(bad));
+
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const Placed a = place(scene, t.capture(), goodId);
+    const Placed b = place(scene, t.capture(), badId);
+    const Placed c = place(scene, t.capture(), badId);
+    const Placed d = place(scene, t.capture(), goodId);
+
+    t.world.registry().get<LightComponent>(t.bulb).intensity = 7.0f;
+    PrefabAsset changed;
+    changed.id   = goodId;
+    changed.name = "Lamp";
+    changed.data = t.capture();
+    cm.registerPrefab(std::move(changed));
+
+    SceneSerializer ser;
+    SceneSerializer::PrefabSyncReport rep;
+    CHECK(ser.syncPrefabInstances(scene, cm, &rep) == 2);
+    CHECK(rep.unresolvedAssets == 0);
+    CHECK(rep.instances == 2);
+    CHECK(reg.get<LightComponent>(a.bulb).intensity == doctest::Approx(7.0f));
+    CHECK(reg.get<LightComponent>(d.bulb).intensity == doctest::Approx(7.0f));
+    CHECK(reg.get<LightComponent>(b.bulb).intensity == doctest::Approx(1.0f));
+    CHECK(reg.get<LightComponent>(c.bulb).intensity == doctest::Approx(1.0f));
+
+    // And a second pass over an unchanged world applies nothing.
+    SceneSerializer::PrefabSyncReport again;
+    CHECK(ser.syncPrefabInstances(scene, cm, &again) == 2);
+    CHECK(again.componentsApplied == 0);
 }
 
 // ─── Override recording, revert, push-to-prefab ──────────────────────────────

@@ -1,5 +1,6 @@
 #include "ContentSync/SftpClient.h"
 #include "ContentSync/CsLog.h"
+#include "CsRename.h"
 
 #include <Net/Socket.h>
 
@@ -110,8 +111,8 @@ HE::Net::SocketHandle connectBlocking(const std::string& host, std::uint16_t por
 	return h;
 }
 
-// Owns one TCP+SSH+SFTP session end to end. Never held across calls — each
-// SftpClient function opens exactly one of these for the duration of the call.
+// Owns one TCP+SSH+SFTP session end to end. An SftpConnection holds one across
+// its operations; each one-shot function opens exactly one for its call.
 struct Session
 {
 	HE::Net::SocketHandle sock = HE::Net::kInvalidSocket;
@@ -215,12 +216,27 @@ std::string joinRemotePath(const std::string& base, const std::string& relPath)
 // or unreadable directory contributes nothing rather than aborting the whole
 // walk — the same "degrade, don't abort" contract populateFolder() uses for
 // the local filesystem equivalent (GlobalState.cpp).
+// A libssh2 call just failed: did the CONNECTION break, or did the server answer
+// with an error status (no such file, permission denied)? Only the first one
+// makes the session unusable for what follows.
+bool connectionFault(const Session& s)
+{
+	return !s.ssh || libssh2_session_last_errno(s.ssh) != LIBSSH2_ERROR_SFTP_PROTOCOL;
+}
+
+// `fault` is set when a directory could not be read because the connection
+// broke: a listing cut short that way must fail, not pass as a smaller tree.
 void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
                              const std::string& relPrefix,
-                             std::vector<RemoteFileInfo>& out)
+                             std::vector<RemoteFileInfo>& out, bool& fault)
 {
+	if (fault) return;
 	LIBSSH2_SFTP_HANDLE* dir = libssh2_sftp_opendir(s.sftp, fullDirPath.c_str());
-	if (!dir) return;
+	if (!dir)
+	{
+		if (connectionFault(s)) fault = true;
+		return;
+	}
 
 	char nameBuf[512];
 	for (;;)
@@ -228,6 +244,7 @@ void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
 		LIBSSH2_SFTP_ATTRIBUTES attrs;
 		std::memset(&attrs, 0, sizeof(attrs));
 		const int rc = libssh2_sftp_readdir_ex(dir, nameBuf, sizeof(nameBuf), nullptr, 0, &attrs);
+		if (rc < 0 && connectionFault(s)) fault = true;
 		if (rc <= 0) break; // 0 = end of directory, <0 = error — nothing more to read either way
 
 		const std::string name(nameBuf, static_cast<std::size_t>(rc));
@@ -274,7 +291,8 @@ void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
 		}
 		if (isDir)
 		{
-			listRemoteDirRecursive(s, childFull, childRel, out);
+			listRemoteDirRecursive(s, childFull, childRel, out, fault);
+			if (fault) break;
 			continue;
 		}
 
@@ -303,6 +321,261 @@ SftpResult sftpWithConnectRetry(const std::function<SftpResult()>& op, int attem
 	return result;
 }
 
+// ── SftpConnection ───────────────────────────────────────────────────────────
+
+struct SftpConnection::Impl
+{
+	SftpEndpoint             endpoint;
+	std::unique_ptr<Session> session;
+	unsigned                 opsOnSession   = 0;   // finished on the current session
+	unsigned                 sessionsOpened = 0;
+
+	SftpResult ensureOpen()
+	{
+		if (session) return { true, {} };
+		auto s = std::make_unique<Session>();
+		++sessionsOpened;
+		if (!s->open(endpoint)) return { false, s->error, s->transient };
+		session      = std::move(s);
+		opsOnSession = 0;
+		return { true, {} };
+	}
+
+	// Runs `op` on the live session. `op` sets its bool when it failed because the
+	// connection broke; that session is then dropped, and if it had carried an
+	// earlier operation (a server closing a session that has been open a while)
+	// the operation gets one more go on a fresh one. A failure on a fresh session
+	// is final, as it is for the free functions.
+	SftpResult run(const std::function<SftpResult(Session&, bool&)>& op)
+	{
+		for (int attempt = 0;; ++attempt)
+		{
+			const SftpResult opened = ensureOpen();
+			if (!opened.ok) return opened;
+			const bool reused = opsOnSession > 0;
+			bool fault = false;
+			SftpResult r = op(*session, fault);
+			if (r.ok || !fault)
+			{
+				++opsOnSession;   // the server answered: the session is still good
+				return r;
+			}
+			session.reset();
+			if (!reused || attempt > 0) return r;
+			HE_LOG_INFO(ContentSync, "SFTP session dropped after %u operation(s) (%s); reconnecting",
+			            opsOnSession, r.error.c_str());
+		}
+	}
+};
+
+SftpConnection::SftpConnection(SftpEndpoint endpoint) : m_impl(std::make_unique<Impl>())
+{
+	m_impl->endpoint = std::move(endpoint);
+}
+
+SftpConnection::~SftpConnection() = default;
+
+SftpResult SftpConnection::open() { return m_impl->ensureOpen(); }
+void       SftpConnection::close() { m_impl->session.reset(); }
+bool       SftpConnection::isOpen() const { return m_impl->session != nullptr; }
+unsigned   SftpConnection::sessionsOpened() const { return m_impl->sessionsOpened; }
+
+SftpResult SftpConnection::getFile(const std::string& remoteRelPath, const std::string& localPath,
+                                   const SftpProgressFn& onProgress)
+{
+	const std::string remotePath = joinRemotePath(m_impl->endpoint.remoteBasePath, remoteRelPath);
+	return m_impl->run([&](Session& s, bool& fault) -> SftpResult {
+		LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
+		if (!handle)
+		{
+			fault = connectionFault(s);
+			return { false, "Could not open remote file '" + remoteRelPath + "': " + s.lastSshError() };
+		}
+
+		// Total size for progress reporting. Not fatal if the server withholds it —
+		// 0 means "unknown" to every consumer, which is honest; a wrong number would
+		// not be.
+		std::uint64_t totalBytes = 0;
+		{
+			LIBSSH2_SFTP_ATTRIBUTES attrs;
+			std::memset(&attrs, 0, sizeof(attrs));
+			if (libssh2_sftp_fstat_ex(handle, &attrs, 0) == 0 && (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE))
+				totalBytes = attrs.filesize;
+		}
+
+		std::error_code ec;
+		fs::path local = localPath;
+		if (!local.parent_path().empty())
+			fs::create_directories(local.parent_path(), ec); // ec ignored: the ofstream open below is the real check
+
+		const fs::path tmpPath = local.string() + ".partial";
+		std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+		if (!out)
+		{
+			libssh2_sftp_close_handle(handle);
+			return { false, "Could not create local file '" + tmpPath.string() + "'" };
+		}
+
+		if (onProgress) onProgress(0, totalBytes);
+
+		std::vector<char> buf(64 * 1024);
+		std::uint64_t doneBytes = 0;
+		bool failed = false;
+		bool readFailed = false;
+		for (;;)
+		{
+			const ssize_t n = libssh2_sftp_read(handle, buf.data(), buf.size());
+			if (n < 0)
+			{
+				failed = readFailed = true;
+				break;
+			}
+			if (n == 0) break; // EOF
+			out.write(buf.data(), n);
+			if (!out)
+			{
+				failed = true;
+				break;
+			}
+			doneBytes += static_cast<std::uint64_t>(n);
+			if (onProgress) onProgress(doneBytes, totalBytes);
+		}
+		const std::string readError = failed ? s.lastSshError() : std::string();
+		if (readFailed) fault = connectionFault(s);
+		libssh2_sftp_close_handle(handle);
+		out.close();
+
+		if (failed)
+		{
+			std::error_code rmEc;
+			fs::remove(tmpPath, rmEc);
+			return { false, "Download of '" + remoteRelPath + "' failed: " + readError };
+		}
+
+		detail::renameReplacing(tmpPath, local, ec);
+		if (ec)
+		{
+			std::error_code rmEc;
+			fs::remove(tmpPath, rmEc);
+			return { false, "Could not finalize downloaded file '" + local.string() + "': " + ec.message() };
+		}
+		return { true, {} };
+	});
+}
+
+SftpResult SftpConnection::putFile(const std::string& localPath, const std::string& remoteRelPath)
+{
+	// Checked before any connection is made, as the free function always did: a
+	// missing local file is no reason for a handshake.
+	if (!std::ifstream(localPath, std::ios::binary))
+		return { false, "Could not open local file '" + localPath + "'" };
+
+	const std::string remotePath = joinRemotePath(m_impl->endpoint.remoteBasePath, remoteRelPath);
+	return m_impl->run([&](Session& s, bool& fault) -> SftpResult {
+		// Opened per attempt, so a retry on a fresh session sends from the start.
+		std::ifstream in(localPath, std::ios::binary);
+		if (!in) return { false, "Could not open local file '" + localPath + "'" };
+
+		LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(),
+		                                                 LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
+		                                                 LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR |
+		                                                 LIBSSH2_SFTP_S_IRGRP | LIBSSH2_SFTP_S_IROTH);
+		if (!handle)
+		{
+			fault = connectionFault(s);
+			return { false, "Could not open remote file '" + remoteRelPath + "' for writing: " + s.lastSshError() };
+		}
+
+		std::vector<char> buf(64 * 1024);
+		bool failed = false;
+		while (in)
+		{
+			in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+			const std::streamsize got = in.gcount();
+			if (got <= 0) break;
+
+			std::streamsize written = 0;
+			while (written < got)
+			{
+				const ssize_t n = libssh2_sftp_write(handle, buf.data() + written,
+				                                      static_cast<std::size_t>(got - written));
+				if (n < 0) { failed = true; break; }
+				written += n;
+			}
+			if (failed) break;
+		}
+		const std::string writeError = failed ? s.lastSshError() : std::string();
+		if (failed) fault = connectionFault(s);
+		libssh2_sftp_close_handle(handle);
+
+		if (failed)
+			return { false, "Upload of '" + localPath + "' failed: " + writeError };
+		return { true, {} };
+	});
+}
+
+SftpResult SftpConnection::ensureRemoteDir(const std::string& remoteRelDir)
+{
+	// Build up one path segment at a time — sftp mkdir has no -p equivalent,
+	// and creating a deep path in one call fails if any intermediate level is
+	// missing.
+	std::string rel = remoteRelDir;
+	while (!rel.empty() && rel.back() == '/') rel.pop_back();
+	while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
+
+	return m_impl->run([&](Session& s, bool& fault) -> SftpResult {
+		if (rel.empty()) return { true, {} };
+		std::string partial;
+		std::size_t pos = 0;
+		while (pos <= rel.size())
+		{
+			std::size_t next = rel.find('/', pos);
+			if (next == std::string::npos) next = rel.size();
+			partial += (partial.empty() ? "" : "/") + rel.substr(pos, next - pos);
+
+			const std::string full = joinRemotePath(m_impl->endpoint.remoteBasePath, partial);
+			// A pre-existing directory is not an error — libssh2_sftp_mkdir_ex
+			// returns an error either way, so this deliberately ignores the
+			// server's answer rather than trying to distinguish "already exists"
+			// (SFTP servers do not agree on the status code for that) from a real
+			// failure that the subsequent putFile call will surface anyway. Only
+			// a broken connection counts.
+			if (libssh2_sftp_mkdir_ex(s.sftp, full.c_str(), static_cast<unsigned int>(full.size()),
+			                          LIBSSH2_SFTP_S_IRWXU | LIBSSH2_SFTP_S_IRGRP | LIBSSH2_SFTP_S_IXGRP |
+			                          LIBSSH2_SFTP_S_IROTH | LIBSSH2_SFTP_S_IXOTH) != 0 &&
+			    connectionFault(s))
+			{
+				fault = true;
+				return { false, "Could not create remote directory '" + partial + "': " + s.lastSshError() };
+			}
+
+			if (next == rel.size()) break;
+			pos = next + 1;
+		}
+		return { true, {} };
+	});
+}
+
+SftpResult SftpConnection::listRemoteTree(std::vector<RemoteFileInfo>& outFiles)
+{
+	std::string root = m_impl->endpoint.remoteBasePath;
+	if (root.empty())        root = "/";
+	else if (root.front() != '/') root = "/" + root;
+
+	return m_impl->run([&](Session& s, bool& fault) -> SftpResult {
+		outFiles.clear();
+		listRemoteDirRecursive(s, root, "", outFiles, fault);
+		if (fault)
+		{
+			outFiles.clear();
+			return { false, "Listing the server failed: " + s.lastSshError() };
+		}
+		return { true, {} };
+	});
+}
+
+// ── The one-shot functions: one session per call ─────────────────────────────
+
 SftpResult sftpTestConnection(const SftpEndpoint& endpoint)
 {
 	Session s;
@@ -313,173 +586,22 @@ SftpResult sftpTestConnection(const SftpEndpoint& endpoint)
 SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRelPath,
                         const std::string& localPath, const SftpProgressFn& onProgress)
 {
-	Session s;
-	if (!s.open(endpoint)) return { false, s.error, s.transient };
-
-	const std::string remotePath = joinRemotePath(endpoint.remoteBasePath, remoteRelPath);
-	LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
-	if (!handle)
-		return { false, "Could not open remote file '" + remoteRelPath + "': " + s.lastSshError() };
-
-	// Total size for progress reporting. Not fatal if the server withholds it —
-	// 0 means "unknown" to every consumer, which is honest; a wrong number would
-	// not be.
-	std::uint64_t totalBytes = 0;
-	{
-		LIBSSH2_SFTP_ATTRIBUTES attrs;
-		std::memset(&attrs, 0, sizeof(attrs));
-		if (libssh2_sftp_fstat_ex(handle, &attrs, 0) == 0 && (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE))
-			totalBytes = attrs.filesize;
-	}
-
-	std::error_code ec;
-	fs::path local = localPath;
-	if (!local.parent_path().empty())
-		fs::create_directories(local.parent_path(), ec); // ec ignored: the ofstream open below is the real check
-
-	const fs::path tmpPath = local.string() + ".partial";
-	std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
-	if (!out)
-	{
-		libssh2_sftp_close_handle(handle);
-		return { false, "Could not create local file '" + tmpPath.string() + "'" };
-	}
-
-	if (onProgress) onProgress(0, totalBytes);
-
-	std::vector<char> buf(64 * 1024);
-	std::uint64_t doneBytes = 0;
-	bool failed = false;
-	for (;;)
-	{
-		const ssize_t n = libssh2_sftp_read(handle, buf.data(), buf.size());
-		if (n < 0)
-		{
-			failed = true;
-			break;
-		}
-		if (n == 0) break; // EOF
-		out.write(buf.data(), n);
-		if (!out)
-		{
-			failed = true;
-			break;
-		}
-		doneBytes += static_cast<std::uint64_t>(n);
-		if (onProgress) onProgress(doneBytes, totalBytes);
-	}
-	const std::string readError = failed ? s.lastSshError() : std::string();
-	libssh2_sftp_close_handle(handle);
-	out.close();
-
-	if (failed)
-	{
-		std::error_code rmEc;
-		fs::remove(tmpPath, rmEc);
-		return { false, "Download of '" + remoteRelPath + "' failed: " + readError };
-	}
-
-	fs::rename(tmpPath, local, ec);
-	if (ec)
-	{
-		std::error_code rmEc;
-		fs::remove(tmpPath, rmEc);
-		return { false, "Could not finalize downloaded file '" + local.string() + "': " + ec.message() };
-	}
-	return { true, {} };
+	return SftpConnection(endpoint).getFile(remoteRelPath, localPath, onProgress);
 }
 
 SftpResult sftpPutFile(const SftpEndpoint& endpoint, const std::string& localPath, const std::string& remoteRelPath)
 {
-	std::ifstream in(localPath, std::ios::binary);
-	if (!in) return { false, "Could not open local file '" + localPath + "'" };
-
-	Session s;
-	if (!s.open(endpoint)) return { false, s.error, s.transient };
-
-	const std::string remotePath = joinRemotePath(endpoint.remoteBasePath, remoteRelPath);
-	LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(),
-	                                                 LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC,
-	                                                 LIBSSH2_SFTP_S_IRUSR | LIBSSH2_SFTP_S_IWUSR |
-	                                                 LIBSSH2_SFTP_S_IRGRP | LIBSSH2_SFTP_S_IROTH);
-	if (!handle)
-		return { false, "Could not open remote file '" + remoteRelPath + "' for writing: " + s.lastSshError() };
-
-	std::vector<char> buf(64 * 1024);
-	bool failed = false;
-	while (in)
-	{
-		in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
-		const std::streamsize got = in.gcount();
-		if (got <= 0) break;
-
-		std::streamsize written = 0;
-		while (written < got)
-		{
-			const ssize_t n = libssh2_sftp_write(handle, buf.data() + written,
-			                                      static_cast<std::size_t>(got - written));
-			if (n < 0) { failed = true; break; }
-			written += n;
-		}
-		if (failed) break;
-	}
-	const std::string writeError = failed ? s.lastSshError() : std::string();
-	libssh2_sftp_close_handle(handle);
-
-	if (failed)
-		return { false, "Upload of '" + localPath + "' failed: " + writeError };
-	return { true, {} };
+	return SftpConnection(endpoint).putFile(localPath, remoteRelPath);
 }
 
 SftpResult sftpEnsureRemoteDir(const SftpEndpoint& endpoint, const std::string& remoteRelDir)
 {
-	Session s;
-	if (!s.open(endpoint)) return { false, s.error, s.transient };
-
-	// Build up one path segment at a time — sftp mkdir has no -p equivalent,
-	// and creating a deep path in one call fails if any intermediate level is
-	// missing.
-	std::string rel = remoteRelDir;
-	while (!rel.empty() && rel.back() == '/') rel.pop_back();
-	while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
-	if (rel.empty()) return { true, {} };
-
-	std::string partial;
-	std::size_t pos = 0;
-	while (pos <= rel.size())
-	{
-		std::size_t next = rel.find('/', pos);
-		if (next == std::string::npos) next = rel.size();
-		partial += (partial.empty() ? "" : "/") + rel.substr(pos, next - pos);
-
-		const std::string full = joinRemotePath(endpoint.remoteBasePath, partial);
-		// A pre-existing directory is not an error — libssh2_sftp_mkdir_ex
-		// returns an error either way, so this deliberately ignores the
-		// result rather than trying to distinguish "already exists" (SFTP
-		// servers do not agree on the status code for that) from a real
-		// failure that the subsequent putFile call will surface anyway.
-		libssh2_sftp_mkdir_ex(s.sftp, full.c_str(), static_cast<unsigned int>(full.size()),
-		                       LIBSSH2_SFTP_S_IRWXU | LIBSSH2_SFTP_S_IRGRP | LIBSSH2_SFTP_S_IXGRP |
-		                       LIBSSH2_SFTP_S_IROTH | LIBSSH2_SFTP_S_IXOTH);
-
-		if (next == rel.size()) break;
-		pos = next + 1;
-	}
-	return { true, {} };
+	return SftpConnection(endpoint).ensureRemoteDir(remoteRelDir);
 }
 
 SftpResult sftpListRemoteTree(const SftpEndpoint& endpoint, std::vector<RemoteFileInfo>& outFiles)
 {
-	Session s;
-	if (!s.open(endpoint)) return { false, s.error, s.transient };
-
-	std::string root = endpoint.remoteBasePath;
-	if (root.empty())        root = "/";
-	else if (root.front() != '/') root = "/" + root;
-
-	outFiles.clear();
-	listRemoteDirRecursive(s, root, "", outFiles);
-	return { true, {} };
+	return SftpConnection(endpoint).listRemoteTree(outFiles);
 }
 
 } // namespace HE::Cs

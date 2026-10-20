@@ -52,6 +52,20 @@ public:
     // Number of currently live peer links.
     virtual std::size_t connectionCount() const = 0;
 
+    // ── One message to several peers ─────────────────────────────────────────
+    // A transport that can deliver one message to many peers cheaper than one
+    // send() each (RelayFanout: one frame to the relay, which makes the copies)
+    // says so here. NetSession asks once, at construction; for every other
+    // transport it keeps its own send() loop, so their path does not change.
+    virtual bool fansOut() const { return false; }
+
+    // `to` lists the recipients; every live peer not in it must not get the
+    // message. Only called when fansOut() is true. The default is the loop.
+    virtual void sendToMany(const ConnectionId* to, std::size_t count,
+                            const std::uint8_t* data, std::size_t len, SendMode mode) {
+        for (std::size_t i = 0; i < count; ++i) send(to[i], data, len, mode);
+    }
+
     // Convenience overload for the common vector payload.
     void send(ConnectionId conn, const std::vector<std::uint8_t>& bytes, SendMode mode) {
         send(conn, bytes.data(), bytes.size(), mode);

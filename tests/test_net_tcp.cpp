@@ -326,6 +326,56 @@ TEST_CASE("TcpTransport: message boundaries survive stream fragmentation")
     CHECK(got[2].data == small2);
 }
 
+TEST_CASE("TcpTransport: 64 MiB queued at a peer that is not reading arrive whole and in order")
+{
+    // The send queue under backpressure (NET-202): the kernel takes a socket
+    // buffer's worth, the rest waits behind a read head and drains over many
+    // ticks, with more frames appended behind it while it does. Every byte
+    // must come out once, in order, on the right frame boundary.
+    auto server = TcpTransport::listen(0);
+    REQUIRE(server != nullptr);
+    auto client = TcpTransport::connect("127.0.0.1", server->boundPort());
+    REQUIRE(client != nullptr);
+    REQUIRE(pumpUntil(*server, *client, [&] {
+        return server->connectionCount() == 1 && client->connectionCount() == 1;
+    }));
+    ConnectionId toClient = kInvalidConnection;
+    for (const auto& ev : drain(*server)) {
+        if (ev.type == NetEventType::Connected) toClient = ev.conn;
+    }
+    REQUIRE(toClient != kInvalidConnection);
+    drain(*client);
+
+    constexpr int         kFrames = 64;
+    constexpr std::size_t kSize   = 1024 * 1024;
+    auto frameByte = [](int f, std::size_t i) {
+        return static_cast<std::uint8_t>((i * 131u) ^ (static_cast<unsigned>(f) * 29u));
+    };
+    std::vector<std::uint8_t> frame(kSize);
+    for (int f = 0; f < kFrames; ++f) {
+        for (std::size_t i = 0; i < kSize; ++i) frame[i] = frameByte(f, i);
+        server->send(toClient, frame, SendMode::ReliableOrdered);   // client does not read yet
+    }
+
+    int  received = 0;
+    bool intact   = true;
+    REQUIRE(pumpUntil(*server, *client, [&] {
+        for (auto& ev : drain(*client)) {
+            if (ev.type != NetEventType::Data) continue;
+            if (ev.data.size() != kSize) { intact = false; continue; }
+            for (std::size_t i = 0; i < kSize; i += 4093) {
+                if (ev.data[i] != frameByte(received, i)) { intact = false; break; }
+            }
+            if (ev.data.back() != frameByte(received, kSize - 1)) intact = false;
+            ++received;
+        }
+        return received >= kFrames;
+    }, std::chrono::seconds(60)));
+    CHECK(received == kFrames);
+    CHECK(intact);
+    CHECK(server->connectionCount() == 1);   // and the link is still up
+}
+
 // ─── Disconnect ──────────────────────────────────────────────────────────────
 
 TEST_CASE("TcpTransport: destroying the client notifies the server")

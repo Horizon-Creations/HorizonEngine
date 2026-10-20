@@ -1,8 +1,11 @@
 #include "SceneAutosave.h"
 
+#include "NotificationStore.h"
+
 #include <Diagnostics/Log.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -122,6 +125,7 @@ namespace HE::Ed
 		if (ec)
 		{
 			HE_LOG_WARN(Editor, "%s", ("SceneAutosave: cannot create " + m_dir + ": " + ec.message()).c_str());
+			reportAutosaveFailure("the scene", "Cannot create " + m_dir + ": " + ec.message());
 			return false;
 		}
 
@@ -134,6 +138,7 @@ namespace HE::Ed
 			// still describes it — nothing to undo here beyond the temp.
 			removeQuiet(tmp);
 			HE_LOG_WARN(Editor, "%s", ("SceneAutosave: writing " + tmp.string() + " failed").c_str());
+			reportAutosaveFailure("the scene", "Writing " + tmp.string() + " failed.");
 			return false;
 		}
 		fs::rename(tmp, live, ec);
@@ -141,6 +146,7 @@ namespace HE::Ed
 		{
 			removeQuiet(tmp);
 			HE_LOG_WARN(Editor, "%s", ("SceneAutosave: cannot replace " + live.string() + ": " + ec.message()).c_str());
+			reportAutosaveFailure("the scene", "Cannot replace " + live.string() + ": " + ec.message());
 			return false;
 		}
 
@@ -154,9 +160,11 @@ namespace HE::Ed
 		if (!writeManifest(fs::path(m_dir) / kLiveManifest, stamped))
 		{
 			HE_LOG_WARN(Editor, "%s", ("SceneAutosave: cannot write manifest in " + m_dir).c_str());
+			reportAutosaveFailure("the scene", "Cannot write the manifest in " + m_dir + ".");
 			return false;
 		}
 
+		reportAutosaveWorking();
 		m_lastRevision = revision;
 		m_haveRevision = true;
 		HE_LOG_DEBUG(Editor, "%s", ("SceneAutosave: snapshot written to " + live.string()).c_str());
@@ -264,5 +272,31 @@ namespace HE::Ed
 		info.revision    = j.value("revision", std::uint64_t(0));
 		info.savedAtUnix = j.value("savedAt", std::int64_t(0));
 		return info;
+	}
+
+	namespace
+	{
+		std::atomic<bool> s_autosaveTold{false};
+	}
+
+	void reportAutosaveFailure(const std::string& what, const std::string& why)
+	{
+		// Once per outage: the autosave retries every interval, and a toast per
+		// attempt would be the thing that gets this surface muted.
+		if (s_autosaveTold.exchange(true)) return;
+		NoteSpec note;
+		note.level  = NoteLevel::Important;
+		note.title  = "Autosave is not working";
+		note.text   = "The editor could not write its recovery copy of " + what +
+		              ", so unsaved changes cannot be restored if it crashes. Save by hand "
+		              "until this clears.";
+		note.detail = why;
+		note.key    = "autosave";
+		notify(std::move(note));
+	}
+
+	void reportAutosaveWorking()
+	{
+		if (s_autosaveTold.exchange(false)) resolveNotification("autosave");
 	}
 }

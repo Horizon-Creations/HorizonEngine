@@ -80,9 +80,16 @@ CASES = {
         "variants": {
             "window":    {"env": {"HE_FORWARD_CLUSTER": "0"}},
             "clustered": {},
+            # REN-802/803: the old wait after every upload. The meshes now copy
+            # through the deferred upload batch into device-local memory; drawn
+            # with the batch submitted in front of the frame, the picture must
+            # be the one the blocking path draws (this scene is bit-identical
+            # from run to run, so the bound is near zero).
+            "sync":      {"env": {"HE_VK_UPLOAD_SYNC": "1"}},
         },
-        "pairs": [("window", "clustered", 1.5)],
-        "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"]},
+        "pairs": [("window", "clustered", 1.5), ("sync", "clustered", None, 0.05)],
+        "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"],
+                    "sync":      ["HE_VK_UPLOAD_SYNC"]},
     },
     # Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10.11):
     # G-buffer pass → resolve (heLitP, the same code graph materials shade with)
@@ -294,6 +301,73 @@ CASES = {
         "stripes": {v: [("terrain", 0.08, 0.78, 0.92, 0.98, STRIPE_MAX),
                         ("sphere",  0.37, 0.17, 0.63, 0.47, STRIPE_MAX)] for v in ("gi_off", "gi_on")},
     },
+    # Water Ripple node (Thema 179 Schritt 4, docs/water-physics-plan.md §14/§16): the
+    # shipped Engine/Materials/Water.hasset on a 40 m plane (HE_DUMP_WATERTEST), one ring
+    # of a crate's size at 0.8 s age written straight into the block (HE_DUMP_WATERRIPPLE,
+    # no physics, no time advance — the same string twice is the same image). Steps 1-3
+    # built the node and filled Metal/OpenGL; this step adds the three missing
+    # FillMaterialWater calls (D3D11Renderer.cpp:6443, D3D12Renderer.cpp:10201,
+    # VulkanRenderer.cpp:7755) — before them Vulkan bound sizeof(Lighting) bytes (the
+    # ABI tail was already there) but never copied the block in, so the ring was computed
+    # by the shader against a zeroed waterRipples.x (count 0) and the loop never ran: off
+    # and on were byte-identical. "off" (no ring) is the same picture as before Schritt 3's
+    # shader change touched this material (the branch is dead at count 0, §14.3's Mac
+    # byte-identical control).
+    #
+    # Judged at half the measured number, the convention every other case here follows.
+    # Measured on this exact case: RTX 4070 (real Vulkan, driver 1.4.341, 12.10.2026) off vs
+    # on mean |Δ| 0.2445 (max 104, 51702 px, 2.6 % of pixels off by more than 2); lavapipe
+    # (llvmpipe LLVM 20.1.2, Vulkan 1.4.318, CI run 38213877852 on ff3411bd) mean |Δ| 0.2451
+    # (max 104, 51289 px, 2.603 %). Before the three FillMaterialWater calls of Schritt 4,
+    # off and on were byte-identical (mean |Δ| 0), so 0.12 fails exactly when the ring is
+    # gone, with a factor of two of room for the backend difference (19 to 400 px).
+    "water_ripple": {
+        "base": {"WATERTEST": "1", "SKYTEST": "1", "TOD": "0.4", "CAMY": "4", "CAMZ": "6",
+                 "PITCH": "-25", "CLOUDMODE": "0", "COVERAGE": "0"},
+        "variants": {
+            "off": {},
+            "on":  {"dump": {"WATERRIPPLE": "0,-3,0.8,1,0.8"}},
+        },
+        "pairs": [("off", "on", 0.12)],
+        "require": {"off": ["HE_DUMP_WATERTEST engine water plane added"],
+                    "on":  ["HE_DUMP_WATERTEST engine water plane added",
+                            "HE_DUMP_WATERRIPPLE 1 ring(s)"]},
+    },
+    # Underwater (Thema 205 step 4, docs/underwater-look-acceptance-2026-10-15.md): the
+    # bowl lake of scripts/underwater_look_shots.py (HE_DUMP_WATERLAKE=bowl, surface at
+    # Y 302), camera 2 m under it. "floor" and "floor_off" are the view "floor" with the
+    # caustic net on and off (UWCAUSTICS=0): the net is postfx_underwatercaustics.frag,
+    # the pipeline Thema 185 step 4 added and step 2 of 205 rewrote. "up" is the view
+    # "up": the underside of the surface, drawn by the Water material's underside branch
+    # (205 step 3) — Snell's window (sky, bright) above the rim, total internal
+    # reflection (water colour, dark) below it. These are the first Vulkan pictures of
+    # either under the validation layer on CI; the hardware acceptance stays on NN-WS03.
+    #
+    # Measured on Metal (M5, 15.10.2026), not yet on lavapipe: floor on vs off mean |Δ|
+    # 11.73; up window (0.45, 0.12) rgb (171, 190, 203) vs below the rim (0.50, 0.85)
+    # (34, 99, 112). Vulkan draws this scene brighter (the floor nearly white, Thema 185
+    # §8.1) and the net saturates there: 185's net measured 0.23 on Vulkan against 0.63
+    # on GL. 1.5 is a third of 11.73 scaled by that factor — it fails when the net is
+    # silently off (0), not when it is one shade weaker. Tighten after the first run.
+    "underwater": {
+        "base": {"WATERLAKE": "bowl", "SKYTEST": "1", "TOD": "0.45", "COVERAGE": "0.2",
+                 "CLOUDMODE": "0", "AA": "0", "BLOOM": "0", "RENDERPATH": "1",
+                 "CAMX": "0", "CAMY": "300", "YAW": "180"},
+        "variants": {
+            "floor_off": {"dump": {"CAMZ": "28", "PITCH": "-20", "UWCAUSTICS": "0"},
+                          "env": {"HE_SKY_TIME": "5"}},
+            "floor":     {"dump": {"CAMZ": "28", "PITCH": "-20"}, "env": {"HE_SKY_TIME": "5"}},
+            "up":        {"dump": {"CAMZ": "20", "PITCH": "35"}, "env": {"HE_SKY_TIME": "5"}},
+        },
+        "pairs": [("floor_off", "floor", 1.5)],
+        "require": {v: ["HE_DUMP_WATERLAKE witness landscape added"]
+                    for v in ("floor_off", "floor", "up")},
+        "samples": {"up": {"window": (0.45, 0.12), "below_rim": (0.50, 0.85)}},
+        "checks": {"up": [
+            ("Snell's window is brighter than the reflection below the rim (Metal: rgb sum 557 vs 244)",
+             lambda p: sum(p["window"]) > sum(p["below_rim"]) + 90),
+        ]},
+    },
     # UI Image widget (Thema 157): tile 12 of HE_DUMP_UITEST=image is an Image
     # element at x 60..300, y 590..700 of the 1280x720 frame showing a generated
     # picture (red top-left, green top-right, blue bottom-left, yellow bottom-
@@ -304,8 +378,11 @@ CASES = {
     # scripts/ui-image-repro/ana157.py's job on hardware.
     "ui_image": {
         "base": {"UITEST": "image", "FRAMES": "16"},
-        "variants": {"image": {}},
-        "pairs": [],
+        # "sync": the texture through the old blocking upload (REN-802), the
+        # same picture as the deferred upload batch draws.
+        "variants": {"image": {}, "sync": {"env": {"HE_VK_UPLOAD_SYNC": "1"}}},
+        "pairs": [("sync", "image", None, 0.05)],
+        "require": {"sync": ["HE_VK_UPLOAD_SYNC"]},
         "probes": {"image": [("red TL", 0.09375, 0.857, "r"), ("green TR", 0.1875, 0.857, "g"),
                              ("blue BL", 0.09375, 0.933, "b")]},
         # The witness texture is flagged sRGB; sampled through an _SRGB view it
@@ -552,6 +629,11 @@ def main():
                   f"/total={shot['validation_total']}", flush=True)
             for line in sorted(set(shot["validation_in_dump"]))[:10]:
                 print(f"      validation: {line[:300]}")
+            # The renderer's upload totals at shutdown (REN-802/803): uploads,
+            # batches, oversize staging buffers, time in upload calls and waits.
+            for line in shot["_log"].splitlines():
+                if "VulkanRenderer: uploads" in line:
+                    print(f"      {line.strip()[:300]}")
             if not img:
                 problems.append(f"{vname}: no image ({shot.get('bmp_error', 'missing')})")
                 print(f"  ── last log lines of {shot['log']} ──")

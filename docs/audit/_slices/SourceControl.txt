@@ -1,0 +1,25 @@
+## slice 1 loc=7867 files=24 first=GitCli.cpp last=TeamSyncService.cpp
+src/HE_SourceControl/src/GitCli.cpp
+src/HE_SourceControl/src/GitHubApi.cpp
+src/HE_SourceControl/src/GitHubOAuth.cpp
+src/HE_SourceControl/src/GitHubTokenStore.cpp
+src/HE_SourceControl/src/GitInstall.cpp
+src/HE_SourceControl/src/GitLocator.cpp
+src/HE_SourceControl/src/GitProbe.cpp
+src/HE_SourceControl/src/GitService.cpp
+src/HE_SourceControl/src/RepoConfig.cpp
+src/HE_SourceControl/src/ScLog.h
+src/HE_SourceControl/include/SourceControl/GitCli.h
+src/HE_SourceControl/include/SourceControl/GitHubApi.h
+src/HE_SourceControl/include/SourceControl/GitHubOAuth.h
+src/HE_SourceControl/include/SourceControl/GitHubTokenStore.h
+src/HE_SourceControl/include/SourceControl/GitInstall.h
+src/HE_SourceControl/include/SourceControl/GitLocator.h
+src/HE_SourceControl/include/SourceControl/GitProbe.h
+src/HE_SourceControl/include/SourceControl/GitService.h
+src/HE_SourceControl/include/SourceControl/RepoConfig.h
+src/HE_SourceControl/include/SourceControl/RepoStatus.h
+src/HE_SourceControl/include/SourceControl/ScCommon.h
+src/HE_SourceControl/include/SourceControl/TeamSyncService.h
+src/HE_SourceControl/src/StatusParser.cpp
+src/HE_SourceControl/src/TeamSyncService.cpp

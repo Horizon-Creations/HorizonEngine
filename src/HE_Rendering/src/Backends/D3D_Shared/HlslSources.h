@@ -416,6 +416,201 @@ float4 main(In i) : SV_Target {
 }
 )HLSL";
 
+// ─── Underwater fog post pass (Thema 185 Schritt 2) ─────────────────────────
+// A straight alpha-blended overlay onto the HDR scene colour — no ping-pong
+// target, the depth-reconstruction convention is the deferred resolve's own
+// (MaterialShaderLibrary.cpp's buildDeferredResolveSource: depthParams.x = the
+// uv→NDC y sign, .y/.z = NDC-z scale/bias, folded in by the C++ fill site so
+// this stays convention-free between D3D11 and D3D12).
+//
+// Per pixel: reconstruct the world position the depth buffer names, then the
+// length of the SEGMENT of [camera, that point] that lies on the wet side of
+// the flat plane y = surfaceY (the body's un-waved level, same one
+// queryUnderwaterCamera compares the camera against). Both endpoints on the
+// dry side → 0 (a dry camera looking at the sky pays nothing); both on the wet
+// side → the whole ray (looking at the lake bed from inside it); split →
+// only the portion before the plane crossing. This is what makes the
+// waterline soft: the segment — and so the blend — grows continuously as the
+// camera's own eye crosses y = surfaceY, never a step.
+//
+// cbuffer CB (b0, PS only): invViewProj (64B) + depthParams (16B) +
+// camPos.xyz/surfaceY (16B) + tintColor.rgb/density (16B) = 112B, no padding.
+// Output is PREMULTIPLIED (rgb = tint * fogAmount, a = fogAmount) for a
+// ONE/INV_SRC_ALPHA blend state: dst' = tint*fog + dst*(1-fog) in one draw.
+inline constexpr const char* kUnderwaterFogHLSL = R"HLSL(
+Texture2D    uDepth : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0)
+{
+    float4x4 uInvViewProj;
+    float4   uDepthParams;    // x = uv.y sign, y/z = ndc-z scale/bias, w unused
+    float4   uCamPosSurfaceY; // xyz = camera world pos, w = surfaceY
+    float4   uTintDensity;    // rgb = resolved tint, a = per-metre density
+};
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    float d = uDepth.Sample(uSamp, i.uv).r;
+    float4 clip = float4(i.uv.x * 2.0 - 1.0,
+                         (i.uv.y * 2.0 - 1.0) * uDepthParams.x,
+                         d * uDepthParams.y + uDepthParams.z, 1.0);
+    float4 wp = mul(uInvViewProj, clip);
+    float3 P = wp.xyz / max(wp.w, 1e-8);
+
+    float3 camPos   = uCamPosSurfaceY.xyz;
+    float  surfaceY = uCamPosSurfaceY.w;
+    bool camBelow = camPos.y < surfaceY;
+    bool pBelow   = P.y < surfaceY;
+
+    // This pixel's point on the near plane (d = 0 through the same mapping). For a DRY
+    // camera (the waterline band, Thema 185 Schritt 5) the fog only belongs where the
+    // near plane has sliced the water sheet off — the ray crossed the plane before the
+    // near plane — so the floor shows bare where it would otherwise lie under the
+    // surface. Everywhere else the translucent surface itself is drawn (it is not in
+    // this depth buffer), and fogging what lies under it would tint the lake.
+    float4 wn = mul(uInvViewProj, float4(clip.xy, uDepthParams.z, 1.0));
+    bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+
+    float segment;
+    if (camBelow == pBelow)
+        segment = camBelow ? length(camPos - P) : 0.0;
+    else
+    {
+        float t = (surfaceY - camPos.y) / (P.y - camPos.y);
+        float3 crossPt = camPos + t * (P - camPos);
+        segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
+    }
+
+    float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
+    return float4(uTintDensity.rgb * fogAmount, fogAmount);
+}
+)HLSL";
+
+// ─── Underwater caustics (Thema 185 Schritt 3) ──────────────────────────────
+// HLSL twin of GL's kUnderwaterCausticsFS (OpenGLRenderer.cpp carries the derivation):
+// per pixel the depth names a world position P; the sun's ray through P, bent by Snell's
+// law, pierces the flat surface plane at S; the engine water's own wave trains
+// (Physics/WaterWaves.h, spliced into @TRAINS@ by HE::causticsWaveTrainsList() — the
+// caller replaces the token before compiling) give the surface's curvature there, and
+// 1/|det| of the light's surface->floor mapping is how much it is squeezed. Since Thema 205
+// Schritt 2 ten fine chop trains ride on the engine's six, the focal distance is fixed and
+// the depth only fades the net out (the GL twin carries the reasoning).
+// Output is for a ONE/INV_SRC_ALPHA blend onto the HDR scene colour: rgb = the light the
+// lines gain, a = the share the cells between them lose, so dst' = rgb + dst * (1 - a).
+// Drawn BEFORE the fog pass so the fog swallows the net with distance like everything
+// else. Same depthParams convention as kUnderwaterFogHLSL. The derivatives are taken in
+// uniform flow only (HLSL leaves ddx/ddy undefined after divergent flow): the one early-out
+// is the same for every pixel, the sky is selected away at the end.
+// cbuffer b0 = mat4 + 5 x float4 (144 bytes), t0 = scene depth, s0 = point clamp.
+inline constexpr const char* kUnderwaterCausticsHLSL = R"HLSL(
+Texture2D    uDepth : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0)
+{
+    float4x4 uInvViewProj;
+    float4   uDepthParams;   // x = uv.y sign, y/z = ndc-z scale/bias, w unused
+    float4   uCamSurface;    // xyz = camera world pos, w = surface Y
+    float4   uSun;           // xyz = direction TOWARD the sun (unit)
+    float4   uSunColor;      // rgb = sun radiance (0 at night)
+    float4   uCaustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
+};
+static const float kTrains[12] = { @TRAINS@ };
+static const int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
+static const float kChopSteep  = 0.05;
+static const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
+static const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+static const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+static const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target
+{
+    const float kTwoPi = 6.28318530718;
+    const float kEta   = 1.33;
+    float d = uDepth.Sample(uSamp, i.uv).r;
+    float4 clip = float4(i.uv.x * 2.0 - 1.0,
+                         (i.uv.y * 2.0 - 1.0) * uDepthParams.x,
+                         d * uDepthParams.y + uDepthParams.z, 1.0);
+    float4 wp = mul(uInvViewProj, clip);
+    float3 P = wp.xyz / max(wp.w, 1e-8);
+    float3 dPx = ddx(P);
+    float3 dPy = ddy(P);
+
+    // Past this one early-out (the same for every pixel) the shader runs for every pixel, sky
+    // and dry ones included, and selects the result away at the end: the screen derivatives
+    // of S below are undefined in divergent flow. A sky pixel's P is parked at the camera.
+    float3 L = uSun.xyz;
+    if (L.y <= 0.02)
+        return float4(0.0, 0.0, 0.0, 0.0);           // no sun
+    bool hit = d < 1.0;                              // the sky has no floor to catch the net
+    P = hit ? P : uCamSurface.xyz;
+    float depth = uCamSurface.w - P.y;               // metres below the flat surface
+    float fadeDepth = uCaustics.w;
+
+    float2 hz   = L.xz / kEta;
+    float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
+    float3 Lr   = float3(hz.x, cosT, hz.y);
+    float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
+    S += 1.6 * float2(sin(0.43 * S.y + 0.31 * uCaustics.z), sin(0.37 * S.x - 0.27 * uCaustics.z));
+
+    // Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
+    float  mxx = 0.0, mzz = 0.0, mxz = 0.0;
+    float2 gxx = float2(0.0, 0.0), gzz = float2(0.0, 0.0), gxz = float2(0.0, 0.0);   // their gradients over S
+    [unroll]
+    for (int t = 0; t < 6 + kChopTrains; ++t)
+    {
+        float deg, len, stp, spd;
+        if (t < 6)
+        {
+            int   b    = t % 3;
+            float comp = t >= 3 ? 1.0 : 0.0;
+            deg = kTrains[b * 4] + comp * 57.0;
+            len = kTrains[b * 4 + 2] * lerp(1.0, 0.73, comp);
+            stp = kTrains[b * 4 + 3] * lerp(1.0, 0.6, comp);
+            spd = kTrains[b * 4 + 1] * lerp(1.0, 1.15, comp);
+        }
+        else
+        {
+            float j = float(t - 5);
+            deg = 20.0 + 137.508 * j;
+            len = 1.2 * pow(1.0 / 3.0, (j - 1.0) / float(kChopTrains - 1));
+            stp = kChopSteep;
+            spd = sqrt(9.81 / kTwoPi * len);
+        }
+        float  rad = radians(deg);
+        float2 dv  = float2(cos(rad), sin(rad));
+        float  k   = kTwoPi / len * uCaustics.y;
+        float  ph  = k * (dot(dv, S) - spd * uCaustics.z);
+        float  c   = stp * k * sin(ph);
+        float2 dc  = (stp * k * k * cos(ph)) * dv;
+        mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
+        mzz -= c * dv.y * dv.y;   gzz -= dc * dv.y * dv.y;
+        mxz -= c * dv.x * dv.y;   gxz -= dc * dv.x * dv.y;
+    }
+    float  kd   = (kEta - 1.0) / kEta * kFocal;
+    float  det  = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+    float2 gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
+    // det's change per pixel: exact gradient over S times the pixel's (smooth) step in S,
+    // floored by that step against the chop's ~10 / m (det's peaks have no gradient). Fold
+    // lines at least 2 px wide, else the net fades out (GL twin).
+    float2 dSx  = ddx(S);
+    float2 dSy  = ddy(S);
+    float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
+                      10.0 * uCaustics.y * (length(dSx) + length(dSy)));
+    float tD    = saturate(depth / fadeDepth);
+    float fade  = (1.0 - tD * tD * (3.0 - 2.0 * tD)) * smoothstep(0.0, 0.15, depth);
+    float capAA = 2.0 / max(dDet, 1e-4);
+    float cap   = min(lerp(10.0, 2.0, tD), capAA);             // only the core above kCore lights up (GL twin)
+    float J     = 1.0 / max(abs(det), 1.0 / cap);
+
+    float3 n = normalize(cross(dPx, dPy));
+    if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
+    float w = uCaustics.x * saturate(dot(n, Lr)) * fade * smoothstep(1.0, 2.0, capAA);
+    float4 net = float4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+                        kDark * min(w, 1.0) * max(1.0 - J, 0.0));
+    return hit ? net : float4(0.0, 0.0, 0.0, 0.0);
+}
+)HLSL";
+
 // ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ─────────────────────────
 // The HLSL twins of GL's kTaaVelocityVS/FS, kTaaResolveFS and kTaaSharpenFS
 // (OpenGLRenderer.cpp) and of Metal's kTaaMSL, same rule: the geometry is

@@ -1,4 +1,5 @@
 #include "ContentBrowserPanel.h"
+#include <Platform/ProjectWriteGate.h>   // refuse file operations while an export reads the project
 #include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorTheme.h"     // brand palette (selected tiles, labels)
 #include <algorithm>
@@ -574,6 +575,24 @@ static void collectEngineSources(const std::vector<std::string>& paths,
 	std::sort(out.begin(), out.end());
 }
 
+// A file operation the user asked for did not happen. Until now these were an
+// HE_LOG_ERROR and nothing else (the log reaches the bell only as a developer-style
+// line, throttled): the item just stayed where it was, which reads as "the click did
+// nothing". A toast with the reason says what to look at.
+static void notifyFileFailure(std::string text, const std::string& reason, std::string path = {})
+{
+	// An export that is reading the project turned the operation away and said so
+	// (ProjectWriteGate.h); "could not delete X" on top of that would be a second,
+	// less useful toast for the same refusal.
+	if (HE::ProjectWriteGate::locked()) return;
+	HE::Ed::NoteSpec note;
+	note.level     = HE::Ed::NoteLevel::Important;
+	note.text      = std::move(text);
+	note.detail    = reason;
+	note.assetPath = std::move(path);
+	HE::Ed::notify(std::move(note));
+}
+
 // Copy `sources` into Content/<targetRel> and import the copies. With
 // `keepStructure` each file also keeps its sub-folder from the engine tree
 // (Engine/Audio/x.wav → <target>/Audio/x.wav). A name the project already uses
@@ -584,6 +603,7 @@ static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sou
 {
 	namespace fs = std::filesystem;
 	if (!ctx.contentManager || sources.empty()) return;
+	if (HE::ProjectWriteGate::refuse("import files")) return;
 	const fs::path contentRoot(ctx.contentManager->contentRoot());
 	const HE::Ed::Rewards::DirSnapshot before =
 		HE::Ed::Rewards::importSnapshot(ctx, (contentRoot / targetRel).string());
@@ -641,9 +661,1395 @@ static void runEngineImport(AppContext& ctx, const std::vector<std::string>& sou
 	                    std::to_string(sources.size() - textures.size()) + " file(s) into " + where;
 	if (!textures.empty())
 		text += "; " + std::to_string(textures.size()) + " texture(s) wait for their color space";
-	HE::Ed::notify(failed ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Info,
+	HE::Ed::notify(failed ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
 	               "Imported into the project", text + (failed ? " (" + std::to_string(failed) + " failed — see the console)" : "") + ".");
 }
+
+#ifdef HE_IMGUI_ENABLED
+// ─── Browser state shared by render() and its dialogs ────────────────────────
+// These were function-local statics of render(). The dialogs below are their own
+// functions now (EDT-303), so the state they share with render() lives here: same
+// lifetime (one instance per process), same names, same initial values.
+
+// ── Selection + context-menu target ──────────────────────────────
+// Declared up here because BOTH panes write them: the grid tiles below and
+// the folder tree, which raises the same context menu rather than having
+// one of its own.
+static std::string s_selectedItem;
+static bool        s_selectedIsFolder = false;
+// Everything selected, s_selectedItem included — that one stays the ANCHOR
+// (what a rename targets, where a Shift-range starts) so every single-item
+// path keeps working unchanged. Deleting and moving read the whole set.
+//
+// Paths, not File*: the tree is rebuilt and freed on every content refresh,
+// and a selection outlives that by design.
+static std::vector<std::string> s_selection;
+// Set when a press lands on an already-selected tile: the collapse to that
+// one item is deferred to the release, so a drag can still carry the set.
+// Empty means nothing is pending.
+static std::string s_pendingCollapseTo;
+static bool        s_pendingCollapseDragged = false;
+
+// ── Shared selection/rename/context state ────────────────────────
+// (The selection above is declared first because the tree raises the same
+// context menu the grid does; the context-menu target stays in render().)
+static std::string s_renameTarget;
+static bool        s_renameIsFolder   = false;
+static char        s_renameBuf[256]   = {};
+static bool        s_openRenamePopup  = false;
+static bool        s_renameIsCreate   = false; // naming a freshly created item
+// Why the last OK was refused (empty = nothing to say). Shown under the
+// field, because a dialog that simply ignores the button reads as broken.
+static std::string s_renameError;
+// A created asset is announced to the session when its name is FINAL,
+// not when the file appears. tryCreate writes "NewMaterial.hasset" and
+// then opens the naming dialog; publishing at the write would put the
+// placeholder on every peer and, a second later, a rename — two events
+// for one user action, and the rename half needs the host's approval.
+// Holds the path from the write until the dialog resolves, whichever way
+// it resolves.
+static std::string s_pendingCreatePublish;
+// A folder travels a different way — it has no bytes — so the announcing
+// block has to know which of the two it is holding.
+static bool        s_pendingCreateIsFolder = false;
+static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
+// Delete-folder confirmation: the dialog outlives the frame its context
+// menu closed in, so the target and the list of files that go with it are
+// kept as STRINGS — a Folder* would dangle across the content refresh
+// (same use-after-free the grid navigation statics above guard against).
+static std::string              s_deleteFolderTarget;
+static std::vector<std::string> s_deleteFolderFiles;
+static bool                     s_openDeleteFolderPopup = false;
+// A single asset used to go on one click of a red menu item — no dialog,
+// no undo, and nothing on screen afterwards to say what had been there.
+// Same STRING-not-pointer rule as the folder case: this outlives the
+// frame the popup is opened on.
+static std::vector<std::string> s_deleteAssetTargets;
+static bool                     s_deleteAssetIsSource = false;   // .h/.cpp pair
+static bool                     s_openDeleteAssetPopup = false;
+// Which reference scan each dialog is showing. 0 = none started (a C++
+// class, which holds no asset references, or a scan that could not be
+// built) — the section is simply omitted then.
+static std::uint64_t            s_deleteAssetScanGen  = 0;
+static std::uint64_t            s_deleteFolderScanGen = 0;
+// The same scan, asked as a question rather than as a step on the way to
+// deleting something.
+// Pattern rename over a selection: the rule, and what it applies to.
+static std::vector<std::string> s_patternTargets;
+static char                     s_patternFind[128]    = {};
+static char                     s_patternReplace[128] = {};
+static char                     s_patternPrefix[64]   = {};
+static char                     s_patternSuffix[64]   = {};
+static bool                     s_patternNumber = false;
+static int                      s_patternStart  = 1;
+static bool                     s_openPatternRenamePopup = false;
+// Import to Project…: what is being imported, and where it goes.
+static std::vector<std::string> s_engImportSources;
+static std::string              s_engImportTarget;       // content-relative folder, "" = Content
+static bool                     s_engImportKeep        = true;
+static char                     s_engImportNewFolder[128] = {};
+static bool                     s_openEngImportPopup   = false;
+static std::string              s_referencesTarget;
+static bool                     s_referencesIsFolder  = false;
+static std::uint64_t            s_referencesScanGen   = 0;
+static bool                     s_openReferencesPopup = false;
+#ifdef HE_HAVE_LIBSSH2
+// "Remove Local Copy" confirmation — the inverse of the download popup, and
+// the same plain-data rule: the tree is rebuilt underneath this dialog.
+static std::string   s_removeCacheFullPath;
+static std::string   s_removeCacheRelPath;   // cache/SFTP-relative, the manifest's own spelling
+static HE::UUID      s_removeCacheUuid;
+static bool          s_openRemoveCachePopup = false;
+static std::uint64_t s_removeCacheScanGen   = 0;
+#endif
+
+#ifdef HE_HAVE_LIBSSH2
+// Remote-download confirmation: same "outlives the popup's opening frame,
+// so keep it as plain data, never a File*" reasoning as the delete-folder
+// state above — a content refresh (which the download itself triggers)
+// would dangle a pointer into the old tree.
+static std::string s_remoteDownloadRelativePath;
+static HE::UUID    s_remoteDownloadUuid;
+static std::string s_remoteDownloadTabLabel;
+static std::string s_remoteDownloadFullPath;
+static bool        s_openRemoteDownloadPopup = false;
+// A completed download's onComplete callback (see the confirmation popup
+// below) runs on a WORKER thread and must not touch ctx.tabs directly —
+// it drops the path here instead, and the drain right below (main thread,
+// once per frame) does the actual opening. Same shape as ContentManager's
+// AsyncSink: producer on a worker, consumer on the main thread, never both.
+static std::mutex               s_pendingOpenMutex;
+static std::vector<std::string> s_pendingOpenFullPaths;
+#endif
+
+// Name-a-C++-class popup (C++ projects only): the create menu stages a
+// class name here, then this popup writes Source/<Name>.{h,cpp}.
+static bool        s_openCppClassPopup = false;
+static char        s_cppClassName[128] = "GameplayClass";
+
+static void drawRenameDialog(AppContext& ctx)
+{
+	// Trigger rename popup outside item context popup. Gated on the content
+	// refresh having settled so it never competes with the ##ContentRefresh
+	// modal (e.g. right after a create, which requests both).
+	if (s_openRenamePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_rename_popup");
+		s_openRenamePopup = false;
+	}
+
+	// ── Rename / name-on-create popup ─────────────────────────────────
+	ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_rename_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// 320 px wide, fixed by the SetNextWindowSize above and NoResize — about
+		// forty characters. s_renameError is what runs past that: the "already
+		// exists here." refusal starts with the name it is refusing, so on any
+		// ordinary asset name the reason is the half that goes over the edge, and
+		// "Could not rename: " + the filesystem's own message is longer still.
+		// The one line that explains why the dialog stayed open was the one line
+		// the user could not read. It does not auto-resize, so the window edge is
+		// the right column to wrap at.
+		//
+		// A block of its own, closing before the EndPopup() at the foot of this
+		// body: EndPopup() makes the browser's grid child the current window
+		// again, and a pop running after it would take the wrap position off THAT
+		// window instead. Everything below the block is the OK/Cancel handling,
+		// which draws no text.
+		bool confirm = false;
+		{
+			EditorWidgets::WrapText wrap;
+			const char* verb = s_renameIsCreate ? "Name" : "Rename";
+			ImGui::Text("%s %s", verb, s_renameIsFolder ? "Folder" : "Asset");
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			// Focus the field as the dialog opens so the user can type at once.
+			// The error goes with it: Escape closes a modal without running
+			// either button's branch, so clearing it on the way IN is the one
+			// place that catches every way out.
+			if (ImGui::IsWindowAppearing())
+			{
+				s_renameError.clear();
+				ImGui::SetKeyboardFocusHere();
+			}
+			ImGui::SetNextItemWidth(-1.0f);
+			confirm = ImGui::InputText("##rename_input", s_renameBuf, sizeof(s_renameBuf),
+				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+			// Why the last OK did nothing. Cleared on every keystroke, so the
+			// message belongs to the name in the box and not to one two edits ago.
+			if (ImGui::IsItemEdited()) s_renameError.clear();
+			if (!s_renameError.empty())
+			{
+				ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f), "%s",
+				                   s_renameError.c_str());
+			}
+			ImGui::Spacing();
+		}
+
+		// (A script's language is fixed by the project, chosen in the New
+		// Project wizard — there is no per-asset language picker here.)
+
+		if (EditorWidgets::primaryButton("OK", ImVec2(140, 0)) || confirm)
+		{
+			std::string newName(s_renameBuf);
+
+			// Would this land on something that is already there?
+			// std::filesystem::rename REPLACES an existing destination
+			// without a word — so "rename Foo to Bar" silently destroyed
+			// Bar, and in a session it destroyed Bar on every machine at
+			// once. Checked here, before anything is asked for or moved.
+			bool blocked = newName.empty() || s_renameTarget.empty();
+			// A NAME, not a path. The field took anything, and the result was
+			// pasted straight onto the parent directory — so typing "../Foo" or
+			// "sub/Foo" moved the asset somewhere the browser never showed it,
+			// and "../../../Foo" moved it out of the project entirely, taking its
+			// retargeted references with it. Refused here rather than sanitised,
+			// because silently changing what someone typed is its own surprise.
+			if (!blocked && (newName.find('/') != std::string::npos ||
+			                 newName.find('\\') != std::string::npos ||
+			                 newName == "." || newName == ".."))
+			{
+				s_renameError = "A name cannot contain a path.";
+				blocked = true;
+			}
+			if (!blocked)
+			{
+				const std::filesystem::path oldP(s_renameTarget);
+				const std::filesystem::path newP = s_renameIsFolder
+					? oldP.parent_path() / newName
+					: oldP.parent_path() / (newName + oldP.extension().string());
+				std::error_code exEc;
+				// equivalent(), not a path comparison: on a case-insensitive
+				// disk "foo" and "Foo" ARE the same file, and refusing to
+				// change a name's capitalisation would be wrong.
+				if (std::filesystem::exists(newP, exEc) &&
+				    !std::filesystem::equivalent(oldP, newP, exEc))
+				{
+					s_renameError = "\"" + newP.filename().string() +
+					                "\" already exists here.";
+					blocked = true;
+				}
+			}
+
+			if (!blocked)
+			{
+				std::filesystem::path oldPath(s_renameTarget);
+				std::filesystem::path newPath;
+				if (s_renameIsFolder)
+					newPath = oldPath.parent_path() / newName;
+				else
+					newPath = oldPath.parent_path() / (newName + oldPath.extension().string());
+
+				// Renaming an existing asset in a session is a REQUEST, the
+				// same as deleting one: it breaks every reference to the old
+				// name, which is as much somebody else's problem as ours.
+				// Naming a freshly created asset is not — nothing refers to
+				// it yet, and it is announced under its final name anyway.
+				//
+				// NOT an early return, however tempting: this popup sits
+				// inside the panel's own Begin/End, and leaving from here
+				// would skip the End and unbalance the ImGui window stack —
+				// which nothing but a runtime assertion would ever tell us.
+				// NOT gated on being a client. requestAssetRename answers the
+				// host by broadcasting it — that branch is the whole reason
+				// it exists — and excluding the host here meant a host's
+				// rename went to its own disk and nowhere else: peers kept
+				// the old path, and the next scene save handed them a
+				// reference to a file they did not have. The delete paths
+				// call unconditionally for exactly this reason; this one now
+				// matches them.
+				bool requested = false;
+				if (!s_renameIsCreate && ctx.collab &&
+				    ctx.contentManager && ctx.collab->inSession())
+				{
+					const std::string relOld =
+						ctx.contentManager->toContentRelativePath(oldPath.string());
+					const std::string relNew =
+						ctx.contentManager->toContentRelativePath(newPath.string());
+					// Folders included: renaming one moves every asset under
+					// it, so it breaks references on a far larger scale than
+					// renaming a single file does.
+					requested = !relOld.empty() && !relNew.empty() &&
+					            ctx.collab->requestAssetRename(relOld, relNew,
+					                                          s_renameIsFolder);
+				}
+
+				// Nothing moves locally when it was asked for. It moves when
+				// the host says so, on every machine at once — renaming here
+				// first would leave us out of step until the answer, and out
+				// of step for good if the answer is no.
+				std::error_code ec;
+				if (!requested)
+				{
+					if (HE::ProjectWriteGate::refuse("rename a file"))
+						ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+					else
+						std::filesystem::rename(oldPath, newPath, ec);
+				}
+				// A rename that FAILS used to close the dialog and say nothing —
+				// no message, no log line — so a name the filesystem refuses
+				// (permissions, a lock, a case-only change on a case-insensitive
+				// volume) looked exactly like one that worked, until the tile came
+				// back under its old name. The dialog already keeps itself open
+				// with a reason for the failures IT detects; one from the
+				// filesystem deserves the same.
+				if (!requested && ec)
+				{
+					s_renameError = "Could not rename: " + ec.message();
+					HE_LOG_ERROR(Editor, "%s",
+						("Editor: rename of '" + s_renameTarget + "' failed: " + ec.message()).c_str());
+				}
+				if (!requested && !ec)
+				{
+					// Carry every stored reference to the old path (or, for a
+					// folder, to anything under it) over to the new one — an
+					// asset renamed out from under its referrers is exactly how
+					// a project silently loses its materials/textures. Skipped
+					// on create: a brand-new asset has no referrers yet.
+					if (!s_renameIsCreate)
+						retargetReferences(ctx, s_renameTarget, newPath.string(), s_renameIsFolder);
+					// Both paths now hold something else than the type cache believes:
+					// the old one nothing, the new one possibly a stale negative entry
+					// from before it existed. A FOLDER rename moves every asset below
+					// it, so there the whole map has to go.
+					if (s_renameIsFolder)
+					{
+						EditorAssetTypeCache::invalidateAll();
+						// Same for the tiles: every asset under the folder is now
+						// addressed by a path that no longer exists. Their .hthumb
+						// files are left behind as orphans rather than walking the
+						// whole subtree to delete them — they are never looked up
+						// again, and the cache directory is disposable by design.
+						AssetThumbnailCache::clear();
+					}
+					else
+					{
+						EditorAssetTypeCache::invalidate(s_renameTarget);
+						EditorAssetTypeCache::invalidate(newPath.string());
+						AssetThumbnailCache::invalidate(s_renameTarget);
+						AssetThumbnailCache::invalidate(newPath.string());
+					}
+					if (s_selectedItem == s_renameTarget)
+						s_selectedItem = newPath.string();
+					// The name the session will hear about. Only meaningful on
+					// create; on a rename this is empty and stays so.
+					if (s_renameIsCreate && !s_pendingCreatePublish.empty())
+						s_pendingCreatePublish = newPath.string();
+					// The tabs follow: a renamed asset's own, and for a folder every
+					// tab on an asset beneath it. One left on the old path would
+					// show a file that is gone — and a double-click on the asset at
+					// its new name would open a second tab beside it.
+					EditorTabs::retarget(ctx.tabs, s_renameTarget, newPath.string(),
+					                     s_renameIsFolder);
+					s_quietContentRefresh = true;
+
+					// In a C++ project, a freshly created scene gets a matching
+					// native level script (Source/<Scene>LevelScript.{h,cpp}) with
+					// event stubs — the C++ mirror of the HorizonCode Level Script
+					// graph. Uses the scene's final name.
+					if (s_renameIsCreate && ctx.projectManager &&
+					    ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp &&
+					    newPath.extension() == ".hescene")
+					{
+						const std::filesystem::path projRoot =
+							std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
+						if (writeCppLevelScript(projRoot.string(), newName))
+							HE_LOG_INFO(Editor, "%s",
+								("Editor: generated C++ level script for scene '" + newName + "'").c_str());
+					}
+				}
+			}
+			// Left open when the name was refused: the dialog is where the
+			// reason is, and closing it would look like the rename worked.
+			if (!blocked)
+			{
+				s_renameTarget.clear();
+				s_renameIsCreate = false;
+				s_renameScriptLang = -1;
+				s_renameError.clear();
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(140, 0)))
+		{
+			// Cancel means cancel. The asset is written BEFORE this dialog opens
+			// (the name is the only thing still missing), so leaving it there
+			// turned "no, never mind" into a NewMaterial.hasset the user then had
+			// to hunt down and delete through the confirmation dialog — more work
+			// than going through with the creation would have been.
+			//
+			// Only for a CREATE: cancelling a rename must obviously not delete
+			// the asset being renamed.
+			if (s_renameIsCreate && !s_renameTarget.empty())
+			{
+				std::error_code rmEc;
+				if (s_renameIsFolder) std::filesystem::remove_all(s_renameTarget, rmEc);
+				else                  std::filesystem::remove(s_renameTarget, rmEc);
+				if (rmEc)
+					HE_LOG_WARN(Editor, "%s",
+						("Editor: cancelled create left '" + s_renameTarget + "' behind: " +
+						 rmEc.message()).c_str());
+				else
+				{
+					EditorAssetTypeCache::invalidate(s_renameTarget);
+					AssetThumbnailCache::invalidate(s_renameTarget);
+					if (s_selectedItem == s_renameTarget) s_selectedItem.clear();
+					s_quietContentRefresh = true;
+				}
+				// Nothing was created after all, so nothing may be announced to
+				// the session — the publish below fires on whatever this holds.
+				s_pendingCreatePublish.clear();
+				s_pendingCreateIsFolder = false;
+			}
+			s_renameTarget.clear();
+			s_renameIsCreate = false;
+			s_renameScriptLang = -1;
+			s_renameError.clear();
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
+	}
+	// ── The created asset is announced HERE ───────────────────────────
+	// After the popup block, so it runs however the dialog ended: OK with a
+	// new name, Cancel keeping the default, or Escape — which closes a modal
+	// without running either branch and used to leave s_renameTarget and
+	// s_renameIsCreate standing. Waiting for it to be closed AND not merely
+	// waiting to open (the content-refresh gate can hold it back a frame) is
+	// what keeps this from firing on the frame between the two.
+	else if (!s_pendingCreatePublish.empty() && !s_openRenamePopup)
+	{
+		if (s_renameIsCreate)   // Escape: neither branch cleared this
+		{
+			s_renameTarget.clear();
+			s_renameIsCreate   = false;
+			s_renameScriptLang = -1;
+		}
+		// A new asset has no referrers and no lock, so there is nothing to
+		// hold and nothing to retarget — the host decides whether the name
+		// is free and hands it on.
+		if (ctx.collab && ctx.contentManager)
+		{
+			// collabKeyFor, not toContentRelativePath: anything under Source
+			// — a C++ class OR a folder in that tree — has no
+			// content-relative form, and the empty string read as "no
+			// session" meant the create never left this machine.
+			const std::string rel =
+				collabKeyFor(ctx, s_pendingCreatePublish, s_pendingCreateIsFolder);
+			if (rel.empty()) { /* nothing a session carries */ }
+			else if (s_pendingCreateIsFolder) ctx.collab->publishFolderCreate(rel);
+			else ctx.collab->publishAssetCreate(rel, s_pendingCreatePublish);
+		}
+		s_pendingCreatePublish.clear();
+		s_pendingCreateIsFolder = false;
+	}
+}
+
+static void drawDeleteAssetDialog(AppContext& ctx, const HE::Folder& sourceFolder, const auto& isReadOnlyGround, const auto& deleteAssetNow)
+{
+	// ── Delete-asset confirmation ─────────────────────────────────────
+	// Opened here rather than from the context menu for the same reason as
+	// the two below: a modal cannot be opened from inside the context
+	// popup's ID stack.
+	if (s_openDeleteAssetPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_delete_asset_popup");
+		s_openDeleteAssetPopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_delete_asset_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// In a session this is a REQUEST, not a deletion — for everyone but
+		// the host, who has just answered the only question a request asks.
+		// Read before the wrapped block below because the button at the foot of
+		// the dialog is labelled from it, and the block has to close before
+		// EndPopup() (see the note inside it).
+		const bool needsApproval = ctx.collab && ctx.collab->inSession() &&
+		                           !ctx.collab->isHost();
+		// 460 px holds about sixty-five characters and the red line below is
+		// seventy-three: unwrapped it ends around "cannot be", so the dialog
+		// shows "This deletes the file. It does not go to the trash and" and
+		// swallows the clause saying the deletion cannot be undone — the single
+		// fact the confirmation exists to state. Fixed width and NoResize, so
+		// wrapping at the window edge cannot feed back into the dialog's size;
+		// only its height grows.
+		//
+		// In a block, because EndPopup() below hands the current window back to
+		// the browser's grid child: a pop after that point would strip the wrap
+		// position from the panel instead of from this dialog. The button row
+		// after the block draws no text of its own — a button label is clipped by
+		// ImGui, never wrapped.
+		{
+			EditorWidgets::WrapText wrap;
+			const int assetCount = static_cast<int>(s_deleteAssetTargets.size());
+			if (assetCount == 1)
+				ImGui::Text("Delete \"%s\"",
+					std::filesystem::path(s_deleteAssetTargets.front()).filename().string().c_str());
+			else
+				ImGui::Text("Delete %d assets", assetCount);
+			ImGui::Separator();
+			ImGui::Spacing();
+			// Two facts the user cannot get back afterwards, so they belong here
+			// rather than in a log line nobody reads.
+			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
+				assetCount == 1
+					? "This deletes the file. It does not go to the trash and cannot be undone."
+					: "This deletes the files. They do not go to the trash and cannot be undone.");
+			if (s_deleteAssetIsSource)
+				ImGui::TextDisabled("Both halves of the class (.h and .cpp) are deleted.");
+			// Naming them is the point of a confirmation for a SET: "delete 12
+			// assets" is not something anyone can check, and the selection may have
+			// been built with a Shift-click over a run nobody read.
+			if (assetCount > 1)
+			{
+				const float lineH = ImGui::GetTextLineHeightWithSpacing();
+				const float listH = std::clamp(lineH * static_cast<float>(assetCount) + 8.0f,
+				                               lineH * 2.0f, 140.0f);
+				ImGui::Spacing();
+				ImGui::BeginChild("##cb_delete_asset_list", ImVec2(-1.0f, listH), true);
+				// Wrapped rather than scrolled sideways — see the referrer list.
+				// This is the list somebody reads to decide whether to destroy
+				// twelve files, and a name whose end is off-screen is a name they
+				// cannot check. Its own guard: the child starts with no wrap
+				// position, and this one has to pop before EndChild() hands the
+				// dialog window back.
+				{
+					EditorWidgets::WrapText listWrap;
+					for (const std::string& p : s_deleteAssetTargets)
+						ImGui::TextUnformatted(std::filesystem::path(p).filename().string().c_str());
+				}
+				ImGui::EndChild();
+			}
+			ImGui::Spacing();
+			// Which files break, by name — the question the old flat "anything still
+			// referencing it keeps a broken reference" line raised and left hanging.
+			drawReferenceSection(s_deleteAssetScanGen,
+				"They keep a reference to something that is no longer there.");
+			ImGui::Spacing();
+
+			if (needsApproval)
+			{
+				ImGui::Spacing();
+				ImGui::TextDisabled("The host has to approve this before it happens.");
+				ImGui::Spacing();
+			}
+		}
+		if (EditorWidgets::dangerButton(needsApproval ? "Ask the host" : "Delete",
+		                                ImVec2(210, 0)))
+		{
+			// One confirmation, N deletions — and, in a session, ONE thing for
+			// the host to answer. The requests still travel individually (each
+			// keeps its own id, which is what lets the host approve nine of
+			// twelve), but they carry a shared batch id, so the in-tray shows a
+			// single "Delete 12 assets" row that opens into the list instead of
+			// twelve rows to click through.
+			if (ctx.collab) ctx.collab->beginAssetOpBatch();
+			for (const std::string& target : s_deleteAssetTargets)
+			{
+				// Asked again per path, not trusted from the frame the dialog was
+				// opened on: the browser can refresh underneath an open modal.
+				if (isReadOnlyGround(target)) continue;
+				// "Is this a C++ class?" is a property of the FILE, not of the
+				// root the grid happened to be showing. One flag for a whole set
+				// either orphans the .cpp half of a class or runs the sibling
+				// sweep next to a plain .hasset.
+				const bool isSourceClass = isUnderFolder(target, sourceFolder.fullPath);
+				// collabKeyFor, not toContentRelativePath: a C++ class is not
+				// under the content root, and reading its empty content-relative
+				// path as "no session" deleted it here and nowhere else.
+				const std::string rel = collabKeyFor(ctx, target);
+				// requestOrPerformAssetOp answers false when there is no session,
+				// which is the ordinary case and means: just delete it.
+				if (!(ctx.collab && !rel.empty() &&
+				      ctx.collab->requestAssetDelete(rel)))
+				{
+					deleteAssetNow(target, isSourceClass);
+				}
+			}
+			if (ctx.collab) ctx.collab->endAssetOpBatch();
+			s_deleteAssetTargets.clear();
+			s_selection.clear();
+			s_deleteAssetScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+		{
+			s_deleteAssetTargets.clear();
+			s_deleteAssetScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+	// Escape closes a modal without running either branch, and a target left
+	// behind would be deleted by the NEXT confirmation. Same stale-state trap
+	// the create/rename popup has (see the note there) — and the scan the
+	// dialog started has nobody left to answer, so it is called off too.
+	else if (!s_deleteAssetTargets.empty() && !s_openDeleteAssetPopup)
+	{
+		s_deleteAssetTargets.clear();
+		s_deleteAssetScanGen = 0;
+		cancelReferenceScan();
+	}
+}
+
+static void drawPatternRenameDialog(AppContext& ctx)
+{
+	// ── Pattern rename ────────────────────────────────────────────────
+	// A rule, applied to a set, with the result on screen BEFORE anything
+	// happens. The preview is not a nicety: a find-and-replace over twelve
+	// files is exactly the operation where "I meant the other Rock" is only
+	// visible once you see the twelve new names next to the old ones — and
+	// afterwards it is twelve renames to undo by hand.
+	if (s_openPatternRenamePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_pattern_rename_popup");
+		s_openPatternRenamePopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_pattern_rename_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// Its own scope, like the download dialogs below: "Number them" and
+		// "starting at" are keyed under the Content Browser. Inline in render() the
+		// help audit read them under the context menu's scope a few hundred lines up;
+		// the two buttons have no scoped key and fall back to the same bare entries.
+		HE::Ed::Help::Scope helpScope("Content Browser");
+		ImGui::Text("Rename %d assets", static_cast<int>(s_patternTargets.size()));
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		ImGui::SetNextItemWidth(180.0f);
+		ImGui::InputTextWithHint("##pat_find", "find", s_patternFind, sizeof(s_patternFind));
+		ImGui::SameLine();
+		ImGui::TextDisabled("\xE2\x86\x92");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(180.0f);
+		ImGui::InputTextWithHint("##pat_repl", "replace with",
+		                         s_patternReplace, sizeof(s_patternReplace));
+
+		ImGui::SetNextItemWidth(180.0f);
+		ImGui::InputTextWithHint("##pat_pre", "prefix", s_patternPrefix, sizeof(s_patternPrefix));
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(180.0f);
+		ImGui::InputTextWithHint("##pat_suf", "suffix", s_patternSuffix, sizeof(s_patternSuffix));
+
+		ImGui::Checkbox("Number them", &s_patternNumber);
+		if (s_patternNumber)
+		{
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(90.0f);
+			ImGui::InputInt("starting at", &s_patternStart);
+			if (s_patternStart < 0) s_patternStart = 0;
+		}
+		ImGui::Spacing();
+
+		// The rule, in one place, so the preview and the commit below cannot
+		// drift into meaning two different things.
+		auto newStemFor = [&](const std::string& absPath, int index) -> std::string
+		{
+			std::string stem = std::filesystem::path(absPath).stem().string();
+			const std::string find(s_patternFind);
+			if (!find.empty())
+			{
+				const std::string repl(s_patternReplace);
+				std::string out;
+				out.reserve(stem.size());
+				for (std::size_t i = 0; i < stem.size(); )
+				{
+					if (stem.compare(i, find.size(), find) == 0)
+					{ out += repl; i += find.size(); }
+					else out += stem[i++];
+				}
+				stem = out;
+			}
+			stem = std::string(s_patternPrefix) + stem + std::string(s_patternSuffix);
+			if (s_patternNumber) stem += std::to_string(s_patternStart + index);
+			return stem;
+		};
+
+		// Refused for the same reasons a single rename is, plus the one a set
+		// adds: two rules can collapse two names onto one, and the second
+		// rename would then silently replace the first one's file.
+		std::string blockReason;
+		std::vector<std::pair<std::string, std::string>> plan;   // abs -> new abs
+		{
+			std::unordered_map<std::string, int> seen;
+			for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
+			{
+				const std::filesystem::path old(s_patternTargets[i]);
+				const std::string stem = newStemFor(s_patternTargets[i], static_cast<int>(i));
+				if (stem.empty())
+				{ blockReason = "That leaves at least one asset with no name."; break; }
+				if (stem.find('/') != std::string::npos || stem.find('\\') != std::string::npos)
+				{ blockReason = "A name cannot contain a path."; break; }
+				const std::filesystem::path dst =
+					old.parent_path() / (stem + old.extension().string());
+				if (++seen[dst.string()] > 1)
+				{ blockReason = "Two assets would end up with the same name."; break; }
+				std::error_code exEc;
+				if (std::filesystem::exists(dst, exEc) &&
+				    !std::filesystem::equivalent(old, dst, exEc))
+				{ blockReason = "\"" + dst.filename().string() + "\" already exists here."; break; }
+				plan.emplace_back(s_patternTargets[i], dst.string());
+			}
+		}
+
+		// Old → new, for as many as fit. Unchanged rows are dimmed: with a
+		// rule that only matches half the selection, which half is the thing
+		// worth seeing.
+		const float lineH = ImGui::GetTextLineHeightWithSpacing();
+		const float listH = std::clamp(lineH * static_cast<float>(s_patternTargets.size()) + 8.0f,
+		                               lineH * 2.0f, 200.0f);
+		ImGui::BeginChild("##pat_preview", ImVec2(-1.0f, listH), true);
+		// Wrapped, not scrolled sideways. The whole value of this preview is
+		// reading the NEW name before committing to it, and that is the half
+		// that sits furthest right — exactly the half a horizontal scrollbar
+		// hides. The wrap position covers the arrow and both names, so a long
+		// pair breaks onto a second line instead of running off the edge.
+		//
+		// In a block, so the pop lands on this child rather than on the dialog
+		// window EndChild() restores below it.
+		{
+			EditorWidgets::WrapText wrap;
+			for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
+			{
+				const std::filesystem::path old(s_patternTargets[i]);
+				const std::string oldStem = old.stem().string();
+				const std::string newStem = newStemFor(s_patternTargets[i], static_cast<int>(i));
+				if (oldStem == newStem)
+					ImGui::TextDisabled("%s  (unchanged)", oldStem.c_str());
+				else
+				{
+					ImGui::TextDisabled("%s", oldStem.c_str());
+					ImGui::SameLine();
+					ImGui::TextDisabled("\xE2\x86\x92");
+					ImGui::SameLine();
+					ImGui::TextUnformatted(newStem.c_str());
+				}
+			}
+		}
+		ImGui::EndChild();
+
+		int changed = 0;
+		for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
+			if (std::filesystem::path(s_patternTargets[i]).stem().string() !=
+			    newStemFor(s_patternTargets[i], static_cast<int>(i))) ++changed;
+
+		// The refusal carries a filename: "\"Rock_Cliff_Weathered_02.hasset\"
+		// already exists here." passes the 560 px this dialog is pinned to, and
+		// the part that gets cut is "already exists here" — leaving a quoted name
+		// and no reason next to a Rename button that has gone grey for no visible
+		// cause. Fixed width and NoResize, so wrapping cannot shrink the dialog.
+		//
+		// Only these two lines, and in a block: everything between the header and
+		// here is either an input (which ImGui does not wrap anyway) or the plan
+		// that the button below reads, and the pop has to happen before the
+		// EndPopup() at the foot of this body — after it, the current window is
+		// the browser's grid child.
+		{
+			EditorWidgets::WrapText wrap;
+			if (!blockReason.empty())
+				ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f), "%s", blockReason.c_str());
+			else
+				ImGui::TextDisabled("References follow the assets, as with a single rename.");
+		}
+		ImGui::Spacing();
+
+		const bool canApply = blockReason.empty() && changed > 0 &&
+		                      plan.size() == s_patternTargets.size();
+		ImGui::BeginDisabled(!canApply);
+		if (EditorWidgets::primaryButton(
+				changed > 0 ? ("Rename " + std::to_string(changed)).c_str() : "Rename",
+				ImVec2(210, 0)))
+		{
+			// One gesture, so one batch for the session and one retarget walk.
+			if (ctx.collab) ctx.collab->beginAssetOpBatch();
+			for (const auto& [oldAbs, newAbs] : plan)
+			{
+				if (oldAbs == newAbs) continue;
+				// A session decides renames centrally, exactly as the single
+				// rename does; without a session this is just a move.
+				const std::string oldKey = collabKeyFor(ctx, oldAbs);
+				const std::string newKey = collabKeyFor(ctx, newAbs);
+				if (ctx.collab && !oldKey.empty() && !newKey.empty() &&
+				    ctx.collab->requestAssetRename(oldKey, newKey))
+					continue;   // asked for; the host's answer moves it everywhere
+
+				std::error_code ec;
+				if (HE::ProjectWriteGate::refuse("rename a file"))
+					ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+				else
+					std::filesystem::rename(oldAbs, newAbs, ec);
+				if (ec)
+				{
+					HE_LOG_ERROR(Editor, "%s",
+						("Editor: rename of '" + oldAbs + "' failed: " + ec.message()).c_str());
+					notifyFileFailure("Could not rename \"" + std::filesystem::path(oldAbs).filename().string() + "\".", ec.message(), oldAbs);
+					continue;
+				}
+				retargetReferences(ctx, oldAbs, newAbs, /*folder=*/false);
+				EditorAssetTypeCache::invalidate(oldAbs);
+				EditorAssetTypeCache::invalidate(newAbs);
+				AssetThumbnailCache::invalidate(oldAbs);
+				AssetThumbnailCache::invalidate(newAbs);
+				EditorTabs::retarget(ctx.tabs, oldAbs, newAbs);
+				for (std::string& sel : s_selection)
+					if (sel == oldAbs) sel = newAbs;
+				if (s_selectedItem == oldAbs) s_selectedItem = newAbs;
+			}
+			if (ctx.collab) ctx.collab->endAssetOpBatch();
+			s_quietContentRefresh = true;
+			s_patternTargets.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+		{
+			s_patternTargets.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+	else if (!s_patternTargets.empty() && !s_openPatternRenamePopup)
+		s_patternTargets.clear();
+}
+
+static void drawEngineImportDialog(AppContext& ctx, const HE::Folder& contentFolder)
+{
+	// ── Import to Project… (engine content → a folder you pick) ─────────
+	// The one-click menu entry decides for you (Content, engine sub-folders
+	// kept). This asks: which folder of the project, whether to keep the
+	// engine's own sub-folders under it, and optionally a new folder to make.
+	if (s_openEngImportPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_engine_import_popup");
+		s_openEngImportPopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_engine_import_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		HE::Ed::Help::Scope helpScope("Import to Project");
+		const std::size_t total = s_engImportSources.size();
+		ImGui::Text("Import %d file%s into the project", static_cast<int>(total), total == 1 ? "" : "s");
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		// What goes in: names as the engine tree spells them, a handful of lines.
+		{
+			const float lineH = ImGui::GetTextLineHeightWithSpacing();
+			const float listH = std::clamp(lineH * static_cast<float>(std::min<std::size_t>(total, 6)) + 8.0f,
+			                               lineH * 2.0f, lineH * 6.0f + 8.0f);
+			ImGui::BeginChild("##eng_files", ImVec2(-1.0f, listH), true);
+			for (std::size_t i = 0; i < total; ++i)
+			{
+				std::string rel = ctx.contentManager
+					? ctx.contentManager->toContentRelativePath(s_engImportSources[i]) : std::string();
+				if (rel.empty()) rel = std::filesystem::path(s_engImportSources[i]).filename().string();
+				ImGui::TextUnformatted(rel.c_str());
+			}
+			ImGui::EndChild();
+		}
+
+		ImGui::Spacing();
+		ImGui::TextDisabled("Target folder");
+		ImGui::BeginChild("##eng_target", ImVec2(-1.0f, 170.0f), true);
+		{
+			if (ImGui::Selectable("Content", s_engImportTarget.empty()))
+				s_engImportTarget.clear();
+			EditorWidgets::helpForLabel("Content");
+			std::function<void(const HE::Folder*, const std::string&)> pick =
+				[&](const HE::Folder* folder, const std::string& rel)
+			{
+				for (const HE::Folder* sub : folder->subfolders)
+				{
+					// Content/Engine holds the project's overrides of engine
+					// defaults — not a place to put new work.
+					if (rel.empty() && sub->name == "Engine") continue;
+					const std::string subRel = rel.empty() ? sub->name : rel + "/" + sub->name;
+					ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+					                           ImGuiTreeNodeFlags_SpanAvailWidth;
+					if (sub->subfolders.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+					if (subRel == s_engImportTarget) flags |= ImGuiTreeNodeFlags_Selected;
+					const bool open = ImGui::TreeNodeEx((sub->name + "##engt_" + subRel).c_str(), flags);
+					if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
+						s_engImportTarget = subRel;
+					if (open) { pick(sub, subRel); ImGui::TreePop(); }
+				}
+			};
+			pick(&contentFolder, std::string());
+		}
+		ImGui::EndChild();
+
+		ImGui::SetNextItemWidth(-1.0f);
+		ImGui::InputTextWithHint("##eng_newfolder", "new sub-folder in the target (optional)",
+		                         s_engImportNewFolder, sizeof(s_engImportNewFolder));
+		ImGui::Checkbox("Keep the engine's folder structure", &s_engImportKeep);
+		EditorWidgets::helpForLabel("Keep the engine's folder structure");
+
+		// The effective target, spelled out — and refused when the new folder
+		// name could not be one.
+		const std::string newName(s_engImportNewFolder);
+		const bool badName = newName.find_first_of("/\\:*?\"<>|") != std::string::npos ||
+		                     newName == "." || newName == "..";
+		std::string effective = s_engImportTarget;
+		if (!newName.empty() && !badName)
+			effective += (effective.empty() ? "" : "/") + newName;
+		ImGui::Spacing();
+		if (badName)
+			ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.45f, 1.0f), "A folder name cannot contain a path or special characters.");
+		else
+			ImGui::TextDisabled("Goes to  Content%s%s", effective.empty() ? "" : "/", effective.c_str());
+		ImGui::Spacing();
+
+		ImGui::BeginDisabled(badName || total == 0);
+		if (EditorWidgets::primaryButton("Import", ImVec2(120, 0)))
+		{
+			runEngineImport(ctx, s_engImportSources, effective, s_engImportKeep);
+			s_engImportSources.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (EditorWidgets::button("Cancel", ImVec2(120, 0)))
+		{
+			s_engImportSources.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+}
+
+static void drawReferencesDialog(AppContext& ctx)
+{
+	// ── "Find References" result ──────────────────────────────────────
+	// Not a confirmation: nothing is about to happen, so there is one way out
+	// and no red button. Opened out here for the same ID-stack reason as the
+	// dialogs around it.
+	if (s_openReferencesPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_references_popup");
+		s_openReferencesPopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_references_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// The title carries an asset name the user did not choose the length of:
+		// "What uses anything in \"Environment_Cliffs_Weathered\"?" is past the
+		// 460 px this dialog is pinned to, and the question mark — the part that
+		// makes it a question about THAT folder — is the first thing lost. Fixed
+		// width, NoResize, so the window edge is the column to wrap at.
+		//
+		// A block, since EndPopup() at the foot of this body restores the
+		// browser's grid child as the current window.
+		{
+			EditorWidgets::WrapText wrap;
+			const std::string name = s_referencesIsFolder
+				? std::filesystem::path(s_referencesTarget).filename().string()
+				: std::filesystem::path(s_referencesTarget).stem().string();
+			ImGui::Text(s_referencesIsFolder ? "What uses anything in \"%s\"?" : "What uses \"%s\"?",
+			            name.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			drawReferenceSection(s_referencesScanGen,
+				s_referencesIsFolder ? "Renaming or moving the folder carries these along."
+				                     : "Renaming or moving it carries these along; deleting it breaks them.");
+			ImGui::Spacing();
+		}
+		if (EditorWidgets::primaryButton("Close", ImVec2(210, 0)))
+		{
+			s_referencesTarget.clear();
+			s_referencesScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+	else if (!s_referencesTarget.empty() && !s_openReferencesPopup)
+	{
+		s_referencesTarget.clear();
+		s_referencesScanGen = 0;
+		cancelReferenceScan();
+	}
+}
+
+static void drawDeleteFolderDialog(AppContext& ctx, const auto& deleteFolderNow)
+{
+	// ── Delete-folder confirmation ────────────────────────────────────
+	// Raised from the item context menu, opened here for the same reason the
+	// rename dialog is: a modal cannot be opened from inside the context
+	// popup's ID stack, and the content-refresh gate keeps it from competing
+	// with the "##ContentRefresh" modal (which a delete requests as well).
+	if (s_openDeleteFolderPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_delete_folder_popup");
+		s_openDeleteFolderPopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_delete_folder_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// A folder is the biggest yes in this panel — everything under it
+		// goes — so in a session it is asked for like any other deletion. Read
+		// out here because the button below is labelled from it, and the wrapped
+		// block has to close before EndPopup() (see the note inside it).
+		const bool folderNeedsApproval =
+			ctx.collab && ctx.collab->inSession() && !ctx.collab->isHost();
+		// A folder name is as long as the user made it, and this dialog is pinned
+		// to 460 px: "Delete Folder \"Environment_Cliffs_Weathered\"" already runs
+		// out of room, and the name — the only thing distinguishing this dialog
+		// from the one about another folder — is what gets cut. Fixed width and
+		// NoResize, so the window edge is the right column and wrapping only ever
+		// makes the dialog taller.
+		//
+		// In a block: EndPopup() at the foot of this body makes the browser's
+		// grid child current again, so a pop after it would land on the panel.
+		{
+			EditorWidgets::WrapText wrap;
+			const std::string folderName =
+				std::filesystem::path(s_deleteFolderTarget).filename().string();
+			const int fileCount = static_cast<int>(s_deleteFolderFiles.size());
+
+			ImGui::Text("Delete Folder \"%s\"", folderName.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
+				"This deletes the folder and the %d asset%s inside it.",
+				fileCount, fileCount == 1 ? "" : "s");
+			ImGui::Spacing();
+			// Scanned for the whole subtree at once — every asset under the folder is
+			// a target, and referrers INSIDE the folder are left out: they are going
+			// away with it, so they say nothing about what breaks.
+			drawReferenceSection(s_deleteFolderScanGen,
+				"They keep references to assets that are no longer there.");
+			ImGui::Spacing();
+
+			// The list is what makes the warning worth reading, so it is shown in
+			// full up to a point — a folder with thousands of assets would cost a
+			// line of text per entry per frame, and the tail says nothing the count
+			// above has not already said.
+			constexpr int k_maxListed = 200;
+			const int listed = (std::min)(fileCount, k_maxListed);
+			const float lineH  = ImGui::GetTextLineHeightWithSpacing();
+			const float listH  = std::clamp(lineH * static_cast<float>(listed) + 8.0f,
+			                                lineH * 2.0f, 220.0f);
+			ImGui::BeginChild("##cb_delete_folder_list", ImVec2(-1.0f, listH), true);
+			// Wrapped, not scrolled sideways. These are paths relative to the
+			// content root and several folders deep, so this is the list that
+			// overflowed worst — and it is the one attached to the biggest yes in
+			// the panel. Its own guard, in its own block: the child window starts
+			// without a wrap position, and this one has to pop before EndChild()
+			// makes the dialog current again.
+			{
+				EditorWidgets::WrapText listWrap;
+				for (int i = 0; i < listed; ++i)
+					ImGui::TextUnformatted(s_deleteFolderFiles[static_cast<size_t>(i)].c_str());
+				if (fileCount > listed)
+					ImGui::TextDisabled("... and %d more", fileCount - listed);
+			}
+			ImGui::EndChild();
+			ImGui::Spacing();
+
+			if (folderNeedsApproval)
+			{
+				ImGui::TextDisabled("The host has to approve this before it happens.");
+				ImGui::Spacing();
+			}
+		}
+		if (EditorWidgets::dangerButton(folderNeedsApproval ? "Ask the host" : "Delete",
+		                                ImVec2(210, 0)))
+		{
+			const std::string rel =
+				collabKeyFor(ctx, s_deleteFolderTarget, /*isFolder=*/true);
+			if (!(ctx.collab && !rel.empty() &&
+			      ctx.collab->requestAssetDelete(rel, /*folder=*/true)))
+			{
+				deleteFolderNow(s_deleteFolderTarget);
+			}
+			s_deleteFolderTarget.clear();
+			s_deleteFolderFiles.clear();
+			s_deleteFolderScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+		{
+			s_deleteFolderTarget.clear();
+			s_deleteFolderFiles.clear();
+			s_deleteFolderScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+	// Same Escape trap as the asset dialog above: the folder target survives a
+	// dismissal that ran neither branch, and the scan keeps walking for a
+	// dialog nobody is looking at.
+	else if (!s_deleteFolderTarget.empty() && !s_openDeleteFolderPopup)
+	{
+		s_deleteFolderTarget.clear();
+		s_deleteFolderFiles.clear();
+		s_deleteFolderScanGen = 0;
+		cancelReferenceScan();
+	}
+}
+
+#ifdef HE_HAVE_LIBSSH2
+static void drawRemoteDownloadDialog(AppContext& ctx)
+{
+	// ── EngineContent remote-download confirmation ─────────────────────
+	// Raised from the file-grid double-click above. Same "cannot open a modal
+	// from inside another ID stack" reason the delete-folder dialog is opened
+	// out here instead of at the click site.
+	if (s_openRemoteDownloadPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_remote_download_popup");
+		s_openRemoteDownloadPopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_remote_download_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// Outside the context menu's scope, so without its own the Download
+		// button asked the help table for a bare "Download" and got nothing.
+		HE::Ed::Help::Scope helpScope("Content Browser");
+		// TextWrapped already covers the paragraph; the title is the line that
+		// does not. At the 420 px this dialog is pinned to, "Download
+		// \"SM_Rock_Cliff_Weathered_Large\"?" loses its closing quote and its
+		// question mark, so the one dialog that asks about a NAMED asset stops
+		// showing the whole name. Fixed width and NoResize — the window edge is
+		// the right column, and wrapping only grows the height.
+		//
+		// A block, because EndPopup() below restores the browser's grid child as
+		// the current window and the pop must happen before that.
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::Text("Download \"%s\"?", s_remoteDownloadTabLabel.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextWrapped(
+				"This EngineContent asset is not on this machine yet — it lives on the "
+				"EngineContent server. Downloading it saves a copy in the shared "
+				"EngineContent cache, so every project (not just this one) can use it "
+				"from now on without downloading it again.");
+			ImGui::Spacing();
+		}
+
+		if (EditorWidgets::primaryButton("Download", ImVec2(200, 0)))
+		{
+			const std::string relPath           = s_remoteDownloadRelativePath;
+			const std::string fullPath          = s_remoteDownloadFullPath;
+			GlobalState*      gs                = ctx.globalState;
+			const std::string engineContentPath = ctx.contentManager->engineContentRoot();
+			const std::string projectContentRoot = ctx.contentManager->contentRoot();
+			HE::Cs::EngineContentSync::instance().enqueueDownload(
+				relPath, s_remoteDownloadUuid, HE::Cs::DownloadTrigger::Explicit,
+				[fullPath, relPath, gs, engineContentPath, projectContentRoot](bool success)
+				{
+					// Worker thread — must not touch ctx/ImGui. GlobalState's own
+					// refresh is safe here (mutex-guarded, filesystem-only, same
+					// fact startSftpProbe's manifest refresh already relies on).
+					// The re-merge is what clears this asset's isRemoteOnly flag:
+					// mergeManifestInto now sees the freshly-downloaded file in the
+					// cache and emits a normal node instead of a remote placeholder.
+					// The tab-open request, which DOES need the main thread, goes
+					// through s_pendingOpenFullPaths (static storage, so this
+					// reference stays valid regardless of when the callback fires).
+					//
+					// This is the EXPLICIT route: the user pressed Download and
+					// is waiting for a tab to open. By the time it fails the
+					// dialog has closed and the footer's progress bar is gone —
+					// so without a word here, the answer to "I clicked Download"
+					// is nothing at all, forever.
+					if (!success)
+					{
+						HE::Ed::notify(HE::Ed::NoteLevel::Important,
+							"\"" + std::filesystem::path(relPath).filename().string()
+								+ "\" could not be downloaded.",
+							"The EngineContent server did not hand over the file. Check "
+							"the connection and start the download again.",
+							fullPath);
+						return;
+					}
+					if (gs && !engineContentPath.empty())
+						gs->refreshEngineFolder(engineContentPath, projectContentRoot);
+					std::lock_guard<std::mutex> lock(s_pendingOpenMutex);
+					s_pendingOpenFullPaths.push_back(fullPath);
+				});
+			s_remoteDownloadRelativePath.clear();
+			s_remoteDownloadTabLabel.clear();
+			s_remoteDownloadFullPath.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(200, 0)))
+		{
+			s_remoteDownloadRelativePath.clear();
+			s_remoteDownloadTabLabel.clear();
+			s_remoteDownloadFullPath.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+}
+
+static void drawRemoveCacheDialog(AppContext& ctx, const auto& removeCachedCopyNow)
+{
+	// ── "Remove Local Copy" confirmation ──────────────────────────────
+	// The mirror image of the download dialog above, and worded as such: this
+	// asks about DISK, not about the asset. Nothing here is destructive in the
+	// way the two delete dialogs are, so it says what will happen next (a
+	// re-download) rather than what will be lost.
+	if (s_openRemoveCachePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_remove_cache_popup");
+		s_openRemoveCachePopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_remove_cache_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		HE::Ed::Help::Scope helpScope("Content Browser");
+		// Two lines here are longer than the 460 px this dialog is pinned to. The
+		// title carries a full filename, and the dimmed line below is
+		// seventy-eight characters: unwrapped it ends at "the copy in memory", so
+		// the caveat says something is in memory and never says until when — the
+		// only part of it that is actionable. Fixed width and NoResize, so the
+		// window edge is the column and wrapping only makes the dialog taller.
+		//
+		// In a block, so the pop happens before the EndPopup() at the foot of
+		// this body — after it the current window is the browser's grid child.
+		{
+			EditorWidgets::WrapText wrap;
+			const std::string assetName =
+				std::filesystem::path(s_removeCacheFullPath).filename().string();
+
+			ImGui::Text("Remove the local copy of \"%s\"?", assetName.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextWrapped(
+				"This deletes the downloaded file from the shared EngineContent cache "
+				"on this machine — every project here loses its local copy. The asset "
+				"itself stays on the server and is downloaded again the next time "
+				"something needs it.");
+			ImGui::Spacing();
+			// Same scan the delete dialogs run, different conclusion: these files do
+			// not break, they simply trigger the download again.
+			drawReferenceSection(s_removeCacheScanGen,
+				"They keep working — the asset downloads again when they need it.");
+			ImGui::Spacing();
+			// Honest about the half that a file removal cannot undo: an asset that is
+			// live in the open scene stays in memory until it is reloaded.
+			if (ctx.contentManager && !(s_removeCacheUuid == HE::UUID{}) &&
+			    ctx.contentManager->isLoaded(s_removeCacheUuid))
+			{
+				ImGui::TextDisabled("It is loaded right now — the copy in memory stays until the scene is reloaded.");
+				ImGui::Spacing();
+			}
+		}
+
+		if (EditorWidgets::dangerButton("Remove Local Copy", ImVec2(210, 0)))
+		{
+			removeCachedCopyNow(s_removeCacheFullPath, s_removeCacheRelPath, s_removeCacheUuid);
+			s_removeCacheFullPath.clear();
+			s_removeCacheRelPath.clear();
+			s_removeCacheUuid   = HE::UUID{};
+			s_removeCacheScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+		{
+			s_removeCacheFullPath.clear();
+			s_removeCacheRelPath.clear();
+			s_removeCacheUuid   = HE::UUID{};
+			s_removeCacheScanGen = 0;
+			cancelReferenceScan();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+	// The same Escape trap the two delete dialogs guard against: a target left
+	// behind would be removed by the NEXT confirmation, and the scan would keep
+	// walking a whole project for a dialog that is gone.
+	else if (!s_removeCacheFullPath.empty() && !s_openRemoveCachePopup)
+	{
+		s_removeCacheFullPath.clear();
+		s_removeCacheRelPath.clear();
+		s_removeCacheUuid    = HE::UUID{};
+		s_removeCacheScanGen = 0;
+		cancelReferenceScan();
+	}
+}
+#endif
+
+static void drawCppClassDialog(AppContext& ctx)
+{
+	// ── Name-a-C++-class popup (C++ projects only) ────────────────────
+	// The Create menu's "C++ Class" item stages a default name and raises
+	// this; on confirm it writes Source/<Name>.{h,cpp}. Those files live
+	// outside Content/, so they don't appear in the browser — the user edits
+	// them in their own C++ toolchain (which is the C++ workflow).
+	if (s_openCppClassPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+	{
+		ImGui::OpenPopup("##cb_cpp_class_popup");
+		s_openCppClassPopup = false;
+	}
+	ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_Always);
+	EditorWidgets::pinDialogToEditorWindow();
+	if (ImGui::BeginPopupModal("##cb_cpp_class_popup", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		// The narrowest dialog in the panel, and the only one whose lines fit at
+		// the 340 px it asks for. They do not always get 340: pinDialogToEditorWindow
+		// caps every dialog to the editor's work area and floors that cap at
+		// 240 px, so on a small editor window this one is squeezed and "Creates
+		// Source/<Name>.h and .cpp" loses its tail — the half that says a class is
+		// TWO files, which is the entire content of the line. Wrapping at the
+		// window edge follows the cap wherever it lands; the dialog does not
+		// auto-resize, so there is nothing for the wrap to feed back into.
+		//
+		// In a block that closes before the EndPopup() below, which is what hands
+		// the current window back to the browser's grid child.
+		bool confirm = false;
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextUnformatted("New C++ Class");
+			ImGui::Separator();
+			ImGui::Spacing();
+			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+			ImGui::SetNextItemWidth(-1.0f);
+			confirm = ImGui::InputText("##cpp_class_input", s_cppClassName, sizeof(s_cppClassName),
+				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+			ImGui::TextDisabled("Creates Source/<Name>.h and .cpp");
+			ImGui::Spacing();
+		}
+		const bool canCreate = s_cppClassName[0] != '\0' && ctx.projectManager &&
+			!ctx.projectManager->currentProject().path.empty();
+		if ((EditorWidgets::primaryButton("Create", ImVec2(150, 0)) || confirm) && canCreate)
+		{
+			const std::filesystem::path projRoot =
+				std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
+			std::string created;
+			if (writeCppClass(projRoot.string(), s_cppClassName, &created))
+			{
+				HE_LOG_INFO(Editor, "%s",
+					("Editor: created C++ class at " + created).c_str());
+				// BOTH halves. A class is a .h and a .cpp, and a peer that
+				// received only the header would have a declaration with
+				// nothing behind it — which compiles right up until it does
+				// not. They travel under the reserved ::Source:: key, since
+				// they live beside Content rather than inside it.
+				if (ctx.collab && ctx.collab->inSession())
+				{
+					const std::string srcRoot = projRoot.string() + "/Source";
+					const std::filesystem::path h(created);
+					for (const char* ext : { ".h", ".cpp" })
+					{
+						const std::filesystem::path f =
+							h.parent_path() / (h.stem().string() + ext);
+						if (!std::filesystem::exists(f)) continue;
+						const std::string rel =
+							CollabController::projectRelativeAssetPath(f.string(), srcRoot);
+						if (rel.empty()) continue;
+						ctx.collab->publishAssetCreate("::Source::" + rel, f.string());
+					}
+				}
+			}
+			else
+			{
+				HE_LOG_ERROR(Editor, "%s", "Editor: failed to create C++ class");
+				notifyFileFailure("Could not create the C++ class.", "The files could not be written. Check that the project's Source folder is writable.");
+			}
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(150, 0)))
+			ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+}
+
+#endif // HE_IMGUI_ENABLED
 
 void render(AppContext& ctx, int& tabSelectRequest,
             const std::function<void(const std::string&)>& openSceneGuarded)
@@ -699,24 +2105,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// fall back to Content so the grid never shows a stale/empty Source view.
 		if (s_selectedRootKind == 2 && !cbShowSource) { s_selectedRootKind = 0; s_selectedTreeFolder = nullptr; }
 
-		// ── Selection + context-menu target ──────────────────────────────
-		// Declared up here because BOTH panes write them: the grid tiles below and
-		// the folder tree, which raises the same context menu rather than having
-		// one of its own.
-		static std::string s_selectedItem;
-		static bool        s_selectedIsFolder = false;
-		// Everything selected, s_selectedItem included — that one stays the ANCHOR
-		// (what a rename targets, where a Shift-range starts) so every single-item
-		// path keeps working unchanged. Deleting and moving read the whole set.
-		//
-		// Paths, not File*: the tree is rebuilt and freed on every content refresh,
-		// and a selection outlives that by design.
-		static std::vector<std::string> s_selection;
-		// Set when a press lands on an already-selected tile: the collapse to that
-		// one item is deferred to the release, so a drag can still carry the set.
-		// Empty means nothing is pending.
-		static std::string s_pendingCollapseTo;
-		static bool        s_pendingCollapseDragged = false;
 		auto isSelected = [&](const std::string& p)
 		{ return std::find(s_selection.begin(), s_selection.end(), p) != s_selection.end(); };
 		// Leaving a root behind invalidates the whole selection: the paths stay
@@ -1113,7 +2501,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				// Said out loud: a click that lands on the scene tab and shows
 				// nothing reads as a broken button.
-				HE::Ed::notify(HE::Ed::NoteLevel::Warning, "Not in the Content Browser",
+				HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not in the Content Browser",
 					"\"" + fs::path(target).filename().string() +
 					"\" is not listed under Content, Engine or Source.");
 			}
@@ -1419,78 +2807,53 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		int col = 0;
 
-		// ── Shared selection/rename/context state ────────────────────────
-		// (The four above are declared before the tree, which raises the same
-		// context menu the grid does.)
-		static std::string s_renameTarget;
-		static bool        s_renameIsFolder   = false;
-		static char        s_renameBuf[256]   = {};
-		static bool        s_openRenamePopup  = false;
-		static bool        s_renameIsCreate   = false; // naming a freshly created item
-	// Why the last OK was refused (empty = nothing to say). Shown under the
-	// field, because a dialog that simply ignores the button reads as broken.
-	static std::string s_renameError;
-		// A created asset is announced to the session when its name is FINAL,
-		// not when the file appears. tryCreate writes "NewMaterial.hasset" and
-		// then opens the naming dialog; publishing at the write would put the
-		// placeholder on every peer and, a second later, a rename — two events
-		// for one user action, and the rename half needs the host's approval.
-		// Holds the path from the write until the dialog resolves, whichever way
-		// it resolves.
-		static std::string s_pendingCreatePublish;
-		// A folder travels a different way — it has no bytes — so the announcing
-		// block has to know which of the two it is holding.
-		static bool        s_pendingCreateIsFolder = false;
-		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
-		// Delete-folder confirmation: the dialog outlives the frame its context
-		// menu closed in, so the target and the list of files that go with it are
-		// kept as STRINGS — a Folder* would dangle across the content refresh
-		// (same use-after-free the grid navigation statics above guard against).
-		static std::string              s_deleteFolderTarget;
-		static std::vector<std::string> s_deleteFolderFiles;
-		static bool                     s_openDeleteFolderPopup = false;
-		// A single asset used to go on one click of a red menu item — no dialog,
-		// no undo, and nothing on screen afterwards to say what had been there.
-		// Same STRING-not-pointer rule as the folder case: this outlives the
-		// frame the popup is opened on.
-		static std::vector<std::string> s_deleteAssetTargets;
-		static bool                     s_deleteAssetIsSource = false;   // .h/.cpp pair
-		static bool                     s_openDeleteAssetPopup = false;
-		// Which reference scan each dialog is showing. 0 = none started (a C++
-		// class, which holds no asset references, or a scan that could not be
-		// built) — the section is simply omitted then.
-		static std::uint64_t            s_deleteAssetScanGen  = 0;
-		static std::uint64_t            s_deleteFolderScanGen = 0;
-		// The same scan, asked as a question rather than as a step on the way to
-		// deleting something.
-		// Pattern rename over a selection: the rule, and what it applies to.
-		static std::vector<std::string> s_patternTargets;
-		static char                     s_patternFind[128]    = {};
-		static char                     s_patternReplace[128] = {};
-		static char                     s_patternPrefix[64]   = {};
-		static char                     s_patternSuffix[64]   = {};
-		static bool                     s_patternNumber = false;
-		static int                      s_patternStart  = 1;
-		static bool                     s_openPatternRenamePopup = false;
-		// Import to Project…: what is being imported, and where it goes.
-		static std::vector<std::string> s_engImportSources;
-		static std::string              s_engImportTarget;       // content-relative folder, "" = Content
-		static bool                     s_engImportKeep        = true;
-		static char                     s_engImportNewFolder[128] = {};
-		static bool                     s_openEngImportPopup   = false;
-		static std::string              s_referencesTarget;
-		static bool                     s_referencesIsFolder  = false;
-		static std::uint64_t            s_referencesScanGen   = 0;
-		static bool                     s_openReferencesPopup = false;
-#ifdef HE_HAVE_LIBSSH2
-		// "Remove Local Copy" confirmation — the inverse of the download popup, and
-		// the same plain-data rule: the tree is rebuilt underneath this dialog.
-		static std::string   s_removeCacheFullPath;
-		static std::string   s_removeCacheRelPath;   // cache/SFTP-relative, the manifest's own spelling
-		static HE::UUID      s_removeCacheUuid;
-		static bool          s_openRemoveCachePopup = false;
-		static std::uint64_t s_removeCacheScanGen   = 0;
-#endif
+		// ── Rows scrolled out of the grid are not drawn (EDT-301) ─────────
+		// Every tile used to be built every frame (thumbnail and type lookups,
+		// the git badge, label truncation by measuring) for a folder of
+		// thousands with thirty on screen. A row of tiles is one height, folder
+		// and file alike: the icon button and one line of label. It is measured
+		// off two consecutive drawn rows; a row wholly outside the grid then only
+		// adds that height to a run laid out as ONE Dummy before the next row
+		// that shows (or after the last), so the scroll range stays what drawing
+		// every row gives. Until the height is known every row is drawn, and so
+		// it is while a drag is in the air (the source tile has to keep
+		// submitting its drag source, wherever it has scrolled to) or a reveal
+		// waits for its tile to scroll itself into view.
+		static float s_tileRowStep = 0.0f;
+		const bool  clipTileRows = s_tileRowStep > 0.0f && s_revealScrollPath.empty() &&
+		                           !ImGui::GetDragDropPayload();
+		const float gridTop      = ImGui::GetWindowPos().y;
+		const float gridBottom   = gridTop + ImGui::GetWindowHeight();
+		float tileRowsSkipped    = 0.0f;    // clipped rows not laid out yet
+		float tileRowFrom        = -1.0f;   // where the last drawn row started
+		bool  tileRowDrawn       = true;    // the row the current tile is in
+		const auto flushSkippedTileRows = [&tileRowsSkipped]
+		{
+			if (tileRowsSkipped <= 0.0f) return;
+			// A Dummy adds the item spacing itself.
+			ImGui::Dummy(ImVec2(1.0f, (std::max)(0.0f, tileRowsSkipped - ImGui::GetStyle().ItemSpacing.y)));
+			tileRowsSkipped = 0.0f;
+		};
+		// Asked first thing for every tile, with its column: false means its row
+		// is out of view and the tile is skipped (the column still counts).
+		const auto tileInView = [&](int column) -> bool
+		{
+			if (column != 0) return tileRowDrawn;
+			const float y = ImGui::GetCursorScreenPos().y;
+			if (tileRowFrom >= 0.0f && tileRowsSkipped == 0.0f && y > tileRowFrom)
+				s_tileRowStep = y - tileRowFrom;
+			tileRowFrom = -1.0f;
+			const float top = y + tileRowsSkipped;
+			tileRowDrawn = !(clipTileRows && (top + s_tileRowStep < gridTop || top > gridBottom));
+			if (!tileRowDrawn)
+			{
+				tileRowsSkipped += s_tileRowStep;
+				return false;
+			}
+			flushSkippedTileRows();
+			tileRowFrom = ImGui::GetCursorScreenPos().y;
+			return true;
+		};
 
 		// Everything the scan needs about WHERE to look, filled from the content
 		// manager on the frame thread and then owned by the worker.
@@ -1528,24 +2891,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			return beginScanForMany(std::vector<std::string>{ targetAbs }, isFolder);
 		};
-#ifdef HE_HAVE_LIBSSH2
-		// Remote-download confirmation: same "outlives the popup's opening frame,
-		// so keep it as plain data, never a File*" reasoning as the delete-folder
-		// state above — a content refresh (which the download itself triggers)
-		// would dangle a pointer into the old tree.
-		static std::string s_remoteDownloadRelativePath;
-		static HE::UUID    s_remoteDownloadUuid;
-		static std::string s_remoteDownloadTabLabel;
-		static std::string s_remoteDownloadFullPath;
-		static bool        s_openRemoteDownloadPopup = false;
-		// A completed download's onComplete callback (see the confirmation popup
-		// below) runs on a WORKER thread and must not touch ctx.tabs directly —
-		// it drops the path here instead, and the drain right below (main thread,
-		// once per frame) does the actual opening. Same shape as ContentManager's
-		// AsyncSink: producer on a worker, consumer on the main thread, never both.
-		static std::mutex               s_pendingOpenMutex;
-		static std::vector<std::string> s_pendingOpenFullPaths;
-#endif
 
 		// Opens (or focuses) a tab for `fullPath`, exactly what a double-click on a
 		// known asset type does. Factored out so a completed EngineContent download
@@ -1611,10 +2956,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			for (const std::string& p : ready) openAssetTab(p);
 		}
 #endif
-		// Name-a-C++-class popup (C++ projects only): the create menu stages a
-		// class name here, then this popup writes Source/<Name>.{h,cpp}.
-		static bool        s_openCppClassPopup = false;
-		static char        s_cppClassName[128] = "GameplayClass";
 
 		// ── Folders first ─────────────────────────────────────────────────
 		// Hidden while a search is running: the answer to "where is Rock_Cliff" is
@@ -1623,8 +2964,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static const std::vector<HE::Folder*> kNoFolders;
 		for (auto* sub : filterActive ? kNoFolders : displayFolder->subfolders)
 		{
-			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
+			if (!tileInView(col)) { ++col; continue; }
+			if (col > 0) ImGui::SameLine();
 
 			const bool isSel = isSelected(sub->fullPath);
 
@@ -1874,8 +3216,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		for (auto* file : gridFiles)
 		{
-			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
+			if (!tileInView(col)) { ++col; continue; }
+			if (col > 0) ImGui::SameLine();
 
 			const bool isSel = isSelected(file->fullPath);
 
@@ -2305,6 +3648,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::EndGroup();
 			++col;
 		}
+		flushSkippedTileRows();
 
 		ImGui::PopStyleVar();
 
@@ -2414,7 +3758,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (moveIsAllowed && !requested)
 			{
 				ec.clear();
-				std::filesystem::rename(src, dst, ec);
+				// Read as "failed, try again later", which is what an export in progress is.
+				if (HE::ProjectWriteGate::refuse("move a file"))
+					ec = std::make_error_code(std::errc::resource_unavailable_try_again);
+				else
+					std::filesystem::rename(src, dst, ec);
 				if (!ec)
 				{
 					// Everything that pointed at the old path — other assets' stored
@@ -2457,6 +3805,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// not offer it — the code was not reachable from there.
 		auto createFolderIn = [&](const std::string& targetFolder)
 		{
+			if (HE::ProjectWriteGate::refuse("create a folder")) return;
 			std::string base = targetFolder + "/NewFolder";
 			std::string dir  = base;
 			int counter = 1;
@@ -2468,6 +3817,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not create folder '" + dir + "': " + mkEc.message()).c_str());
+				notifyFileFailure("Could not create the folder \"" + std::filesystem::path(dir).filename().string() + "\".", mkEc.message(), dir);
 				return;
 			}
 
@@ -2749,12 +4099,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// deletion are separate things — the menu item now only asks.
 		auto deleteAssetNow = [&](const std::string& assetAbs, bool isSourceClass)
 		{
+			if (HE::ProjectWriteGate::refuse("delete an asset")) return;
 			std::error_code ec;
 			std::filesystem::remove(assetAbs, ec);
 			if (ec)
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not delete '" + assetAbs + "': " + ec.message()).c_str());
+				notifyFileFailure("Could not delete \"" + std::filesystem::path(assetAbs).filename().string() + "\".", ec.message(), assetAbs);
 				return;
 			}
 			// The path is free again: a NEW asset of a different type may be created
@@ -2830,6 +4182,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not remove the local copy of '" + cacheRel + "': " + ec.message()).c_str());
+				notifyFileFailure("Could not remove the local copy of \"" + std::filesystem::path(cacheRel).filename().string() + "\".", ec.message(), cacheRel);
 				return false;
 			}
 
@@ -2878,7 +4231,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 								// copy they just removed looks like it took the
 								// asset with it for good.
 								if (!success)
-									HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+									HE::Ed::notify(HE::Ed::NoteLevel::Important,
 										"\"" + std::filesystem::path(remotePath).filename().string()
 											+ "\" could not be downloaded again.",
 										"Its local copy was removed and the server did not hand "
@@ -2931,12 +4284,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// away, one holding assets only gets here after the confirmation dialog.
 		auto deleteFolderNow = [&](const std::string& folderAbs)
 		{
+			if (HE::ProjectWriteGate::refuse("delete a folder")) return;
 			std::error_code ec;
 			std::filesystem::remove_all(folderAbs, ec);
 			if (ec)
 			{
 				HE_LOG_ERROR(Editor, "%s",
 					("Editor: could not delete folder '" + folderAbs + "': " + ec.message()).c_str());
+				notifyFileFailure("Could not delete the folder \"" + std::filesystem::path(folderAbs).filename().string() + "\".", ec.message(), folderAbs);
 				return;
 			}
 			// Both caches are keyed by path and every asset below the folder just
@@ -3030,7 +4385,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			    EditorWidgets::menuItem("Revert to Default"))
 			{
 				const std::string relPath = ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
-				if (!relPath.empty())
+				// An override is a project file like any other, and reverting
+				// deletes it. In a session that is the host's call — the same
+				// one every other delete gets — or this machine falls back to
+				// the default while every peer keeps the override.
+				const std::string key = relPath.empty() ? std::string()
+				                                        : collabKeyFor(ctx, s_ctxMenuItem);
+				if (!key.empty() && ctx.collab && ctx.collab->requestAssetDelete(key))
+				{
+					s_ctxMenuItem.clear();
+				}
+				else if (!relPath.empty() && !HE::ProjectWriteGate::refuse("revert an asset"))
 				{
 					const HE::UUID id = ctx.contentManager->loadAsset(relPath); // current (override) id
 					std::error_code ec;
@@ -3048,7 +4413,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						HE_LOG_INFO(Editor, "%s", ("Editor: reverted '" + relPath + "' to its engine default").c_str());
 					}
 					else
+					{
 						HE_LOG_ERROR(Editor, "%s", ("Editor: could not remove override for '" + relPath + "'").c_str());
+						notifyFileFailure("Could not revert \"" + std::filesystem::path(relPath).filename().string() + "\" to its engine default.", "The override could not be removed.", relPath);
+					}
 				}
 				ImGui::CloseCurrentPopup();
 			}
@@ -3190,8 +4558,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							HE::Ed::Rewards::markImported(ctx, before);
 						}
 						else
+						{
 							HE_LOG_ERROR(Editor, "%s",
 								("Editor: import failed for " + srcPath.string()).c_str());
+							notifyFileFailure("Could not import \"" + srcPath.filename().string() + "\".", "The importer rejected the file. Check that it is a supported, undamaged format.", srcPath.string());
+						}
 						ctx.contentRefreshPending = true;
 					}
 					ImGui::CloseCurrentPopup();
@@ -3247,8 +4618,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						if (lease)
 						{
 							if (!Importer::reimport(s_ctxMenuItem, ctx.contentManager->contentRoot()))
+							{
 								HE_LOG_ERROR(Editor, "%s",
 									("Editor: reimport failed for " + s_ctxMenuItem).c_str());
+								notifyFileFailure("Could not reimport \"" + std::filesystem::path(s_ctxMenuItem).filename().string() + "\".", "The source file may have moved or no longer imports.", s_ctxMenuItem);
+							}
 							// The new bytes have to reach the others, or every peer
 							// keeps the old asset with no sign that it changed. What
 							// actually travels depends on the type: authored assets go
@@ -3603,1222 +4977,21 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::EndPopup();
 		}
 
-		// Trigger rename popup outside item context popup. Gated on the content
-		// refresh having settled so it never competes with the ##ContentRefresh
-		// modal (e.g. right after a create, which requests both).
-		if (s_openRenamePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_rename_popup");
-			s_openRenamePopup = false;
-		}
-
-		// ── Rename / name-on-create popup ─────────────────────────────────
-		ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_rename_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			// 320 px wide, fixed by the SetNextWindowSize above and NoResize — about
-			// forty characters. s_renameError is what runs past that: the "already
-			// exists here." refusal starts with the name it is refusing, so on any
-			// ordinary asset name the reason is the half that goes over the edge, and
-			// "Could not rename: " + the filesystem's own message is longer still.
-			// The one line that explains why the dialog stayed open was the one line
-			// the user could not read. It does not auto-resize, so the window edge is
-			// the right column to wrap at.
-			//
-			// A block of its own, closing before the EndPopup() at the foot of this
-			// body: EndPopup() makes the browser's grid child the current window
-			// again, and a pop running after it would take the wrap position off THAT
-			// window instead. Everything below the block is the OK/Cancel handling,
-			// which draws no text.
-			bool confirm = false;
-			{
-				EditorWidgets::WrapText wrap;
-				const char* verb = s_renameIsCreate ? "Name" : "Rename";
-				ImGui::Text("%s %s", verb, s_renameIsFolder ? "Folder" : "Asset");
-				ImGui::Separator();
-				ImGui::Spacing();
-
-				// Focus the field as the dialog opens so the user can type at once.
-				// The error goes with it: Escape closes a modal without running
-				// either button's branch, so clearing it on the way IN is the one
-				// place that catches every way out.
-				if (ImGui::IsWindowAppearing())
-				{
-					s_renameError.clear();
-					ImGui::SetKeyboardFocusHere();
-				}
-				ImGui::SetNextItemWidth(-1.0f);
-				confirm = ImGui::InputText("##rename_input", s_renameBuf, sizeof(s_renameBuf),
-					ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-				// Why the last OK did nothing. Cleared on every keystroke, so the
-				// message belongs to the name in the box and not to one two edits ago.
-				if (ImGui::IsItemEdited()) s_renameError.clear();
-				if (!s_renameError.empty())
-				{
-					ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f), "%s",
-					                   s_renameError.c_str());
-				}
-				ImGui::Spacing();
-			}
-
-			// (A script's language is fixed by the project, chosen in the New
-			// Project wizard — there is no per-asset language picker here.)
-
-			if (EditorWidgets::primaryButton("OK", ImVec2(140, 0)) || confirm)
-			{
-				std::string newName(s_renameBuf);
-
-				// Would this land on something that is already there?
-				// std::filesystem::rename REPLACES an existing destination
-				// without a word — so "rename Foo to Bar" silently destroyed
-				// Bar, and in a session it destroyed Bar on every machine at
-				// once. Checked here, before anything is asked for or moved.
-				bool blocked = newName.empty() || s_renameTarget.empty();
-				// A NAME, not a path. The field took anything, and the result was
-				// pasted straight onto the parent directory — so typing "../Foo" or
-				// "sub/Foo" moved the asset somewhere the browser never showed it,
-				// and "../../../Foo" moved it out of the project entirely, taking its
-				// retargeted references with it. Refused here rather than sanitised,
-				// because silently changing what someone typed is its own surprise.
-				if (!blocked && (newName.find('/') != std::string::npos ||
-				                 newName.find('\\') != std::string::npos ||
-				                 newName == "." || newName == ".."))
-				{
-					s_renameError = "A name cannot contain a path.";
-					blocked = true;
-				}
-				if (!blocked)
-				{
-					const std::filesystem::path oldP(s_renameTarget);
-					const std::filesystem::path newP = s_renameIsFolder
-						? oldP.parent_path() / newName
-						: oldP.parent_path() / (newName + oldP.extension().string());
-					std::error_code exEc;
-					// equivalent(), not a path comparison: on a case-insensitive
-					// disk "foo" and "Foo" ARE the same file, and refusing to
-					// change a name's capitalisation would be wrong.
-					if (std::filesystem::exists(newP, exEc) &&
-					    !std::filesystem::equivalent(oldP, newP, exEc))
-					{
-						s_renameError = "\"" + newP.filename().string() +
-						                "\" already exists here.";
-						blocked = true;
-					}
-				}
-
-				if (!blocked)
-				{
-					std::filesystem::path oldPath(s_renameTarget);
-					std::filesystem::path newPath;
-					if (s_renameIsFolder)
-						newPath = oldPath.parent_path() / newName;
-					else
-						newPath = oldPath.parent_path() / (newName + oldPath.extension().string());
-
-					// Renaming an existing asset in a session is a REQUEST, the
-					// same as deleting one: it breaks every reference to the old
-					// name, which is as much somebody else's problem as ours.
-					// Naming a freshly created asset is not — nothing refers to
-					// it yet, and it is announced under its final name anyway.
-					//
-					// NOT an early return, however tempting: this popup sits
-					// inside the panel's own Begin/End, and leaving from here
-					// would skip the End and unbalance the ImGui window stack —
-					// which nothing but a runtime assertion would ever tell us.
-					// NOT gated on being a client. requestAssetRename answers the
-					// host by broadcasting it — that branch is the whole reason
-					// it exists — and excluding the host here meant a host's
-					// rename went to its own disk and nowhere else: peers kept
-					// the old path, and the next scene save handed them a
-					// reference to a file they did not have. The delete paths
-					// call unconditionally for exactly this reason; this one now
-					// matches them.
-					bool requested = false;
-					if (!s_renameIsCreate && ctx.collab &&
-					    ctx.contentManager && ctx.collab->inSession())
-					{
-						const std::string relOld =
-							ctx.contentManager->toContentRelativePath(oldPath.string());
-						const std::string relNew =
-							ctx.contentManager->toContentRelativePath(newPath.string());
-						// Folders included: renaming one moves every asset under
-						// it, so it breaks references on a far larger scale than
-						// renaming a single file does.
-						requested = !relOld.empty() && !relNew.empty() &&
-						            ctx.collab->requestAssetRename(relOld, relNew,
-						                                          s_renameIsFolder);
-					}
-
-					// Nothing moves locally when it was asked for. It moves when
-					// the host says so, on every machine at once — renaming here
-					// first would leave us out of step until the answer, and out
-					// of step for good if the answer is no.
-					std::error_code ec;
-					if (!requested) std::filesystem::rename(oldPath, newPath, ec);
-					// A rename that FAILS used to close the dialog and say nothing —
-					// no message, no log line — so a name the filesystem refuses
-					// (permissions, a lock, a case-only change on a case-insensitive
-					// volume) looked exactly like one that worked, until the tile came
-					// back under its old name. The dialog already keeps itself open
-					// with a reason for the failures IT detects; one from the
-					// filesystem deserves the same.
-					if (!requested && ec)
-					{
-						s_renameError = "Could not rename: " + ec.message();
-						HE_LOG_ERROR(Editor, "%s",
-							("Editor: rename of '" + s_renameTarget + "' failed: " + ec.message()).c_str());
-					}
-					if (!requested && !ec)
-					{
-						// Carry every stored reference to the old path (or, for a
-						// folder, to anything under it) over to the new one — an
-						// asset renamed out from under its referrers is exactly how
-						// a project silently loses its materials/textures. Skipped
-						// on create: a brand-new asset has no referrers yet.
-						if (!s_renameIsCreate)
-							retargetReferences(ctx, s_renameTarget, newPath.string(), s_renameIsFolder);
-						// Both paths now hold something else than the type cache believes:
-						// the old one nothing, the new one possibly a stale negative entry
-						// from before it existed. A FOLDER rename moves every asset below
-						// it, so there the whole map has to go.
-						if (s_renameIsFolder)
-						{
-							EditorAssetTypeCache::invalidateAll();
-							// Same for the tiles: every asset under the folder is now
-							// addressed by a path that no longer exists. Their .hthumb
-							// files are left behind as orphans rather than walking the
-							// whole subtree to delete them — they are never looked up
-							// again, and the cache directory is disposable by design.
-							AssetThumbnailCache::clear();
-						}
-						else
-						{
-							EditorAssetTypeCache::invalidate(s_renameTarget);
-							EditorAssetTypeCache::invalidate(newPath.string());
-							AssetThumbnailCache::invalidate(s_renameTarget);
-							AssetThumbnailCache::invalidate(newPath.string());
-						}
-						if (s_selectedItem == s_renameTarget)
-							s_selectedItem = newPath.string();
-						// The name the session will hear about. Only meaningful on
-						// create; on a rename this is empty and stays so.
-						if (s_renameIsCreate && !s_pendingCreatePublish.empty())
-							s_pendingCreatePublish = newPath.string();
-						// The tabs follow: a renamed asset's own, and for a folder every
-						// tab on an asset beneath it. One left on the old path would
-						// show a file that is gone — and a double-click on the asset at
-						// its new name would open a second tab beside it.
-						EditorTabs::retarget(ctx.tabs, s_renameTarget, newPath.string(),
-						                     s_renameIsFolder);
-						s_quietContentRefresh = true;
-
-						// In a C++ project, a freshly created scene gets a matching
-						// native level script (Source/<Scene>LevelScript.{h,cpp}) with
-						// event stubs — the C++ mirror of the HorizonCode Level Script
-						// graph. Uses the scene's final name.
-						if (s_renameIsCreate && ctx.projectManager &&
-						    ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp &&
-						    newPath.extension() == ".hescene")
-						{
-							const std::filesystem::path projRoot =
-								std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
-							if (writeCppLevelScript(projRoot.string(), newName))
-								HE_LOG_INFO(Editor, "%s",
-									("Editor: generated C++ level script for scene '" + newName + "'").c_str());
-						}
-					}
-				}
-				// Left open when the name was refused: the dialog is where the
-				// reason is, and closing it would look like the rename worked.
-				if (!blocked)
-				{
-					s_renameTarget.clear();
-					s_renameIsCreate = false;
-					s_renameScriptLang = -1;
-					s_renameError.clear();
-					ImGui::CloseCurrentPopup();
-				}
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(140, 0)))
-			{
-				// Cancel means cancel. The asset is written BEFORE this dialog opens
-				// (the name is the only thing still missing), so leaving it there
-				// turned "no, never mind" into a NewMaterial.hasset the user then had
-				// to hunt down and delete through the confirmation dialog — more work
-				// than going through with the creation would have been.
-				//
-				// Only for a CREATE: cancelling a rename must obviously not delete
-				// the asset being renamed.
-				if (s_renameIsCreate && !s_renameTarget.empty())
-				{
-					std::error_code rmEc;
-					if (s_renameIsFolder) std::filesystem::remove_all(s_renameTarget, rmEc);
-					else                  std::filesystem::remove(s_renameTarget, rmEc);
-					if (rmEc)
-						HE_LOG_WARN(Editor, "%s",
-							("Editor: cancelled create left '" + s_renameTarget + "' behind: " +
-							 rmEc.message()).c_str());
-					else
-					{
-						EditorAssetTypeCache::invalidate(s_renameTarget);
-						AssetThumbnailCache::invalidate(s_renameTarget);
-						if (s_selectedItem == s_renameTarget) s_selectedItem.clear();
-						s_quietContentRefresh = true;
-					}
-					// Nothing was created after all, so nothing may be announced to
-					// the session — the publish below fires on whatever this holds.
-					s_pendingCreatePublish.clear();
-					s_pendingCreateIsFolder = false;
-				}
-				s_renameTarget.clear();
-				s_renameIsCreate = false;
-				s_renameScriptLang = -1;
-				s_renameError.clear();
-				ImGui::CloseCurrentPopup();
-			}
-
-			ImGui::EndPopup();
-		}
-		// ── The created asset is announced HERE ───────────────────────────
-		// After the popup block, so it runs however the dialog ended: OK with a
-		// new name, Cancel keeping the default, or Escape — which closes a modal
-		// without running either branch and used to leave s_renameTarget and
-		// s_renameIsCreate standing. Waiting for it to be closed AND not merely
-		// waiting to open (the content-refresh gate can hold it back a frame) is
-		// what keeps this from firing on the frame between the two.
-		else if (!s_pendingCreatePublish.empty() && !s_openRenamePopup)
-		{
-			if (s_renameIsCreate)   // Escape: neither branch cleared this
-			{
-				s_renameTarget.clear();
-				s_renameIsCreate   = false;
-				s_renameScriptLang = -1;
-			}
-			// A new asset has no referrers and no lock, so there is nothing to
-			// hold and nothing to retarget — the host decides whether the name
-			// is free and hands it on.
-			if (ctx.collab && ctx.contentManager)
-			{
-				// collabKeyFor, not toContentRelativePath: anything under Source
-				// — a C++ class OR a folder in that tree — has no
-				// content-relative form, and the empty string read as "no
-				// session" meant the create never left this machine.
-				const std::string rel =
-					collabKeyFor(ctx, s_pendingCreatePublish, s_pendingCreateIsFolder);
-				if (rel.empty()) { /* nothing a session carries */ }
-				else if (s_pendingCreateIsFolder) ctx.collab->publishFolderCreate(rel);
-				else ctx.collab->publishAssetCreate(rel, s_pendingCreatePublish);
-			}
-			s_pendingCreatePublish.clear();
-			s_pendingCreateIsFolder = false;
-		}
-
-		// ── Delete-asset confirmation ─────────────────────────────────────
-		// Opened here rather than from the context menu for the same reason as
-		// the two below: a modal cannot be opened from inside the context
-		// popup's ID stack.
-		if (s_openDeleteAssetPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_delete_asset_popup");
-			s_openDeleteAssetPopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_delete_asset_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			// In a session this is a REQUEST, not a deletion — for everyone but
-			// the host, who has just answered the only question a request asks.
-			// Read before the wrapped block below because the button at the foot of
-			// the dialog is labelled from it, and the block has to close before
-			// EndPopup() (see the note inside it).
-			const bool needsApproval = ctx.collab && ctx.collab->inSession() &&
-			                           !ctx.collab->isHost();
-			// 460 px holds about sixty-five characters and the red line below is
-			// seventy-three: unwrapped it ends around "cannot be", so the dialog
-			// shows "This deletes the file. It does not go to the trash and" and
-			// swallows the clause saying the deletion cannot be undone — the single
-			// fact the confirmation exists to state. Fixed width and NoResize, so
-			// wrapping at the window edge cannot feed back into the dialog's size;
-			// only its height grows.
-			//
-			// In a block, because EndPopup() below hands the current window back to
-			// the browser's grid child: a pop after that point would strip the wrap
-			// position from the panel instead of from this dialog. The button row
-			// after the block draws no text of its own — a button label is clipped by
-			// ImGui, never wrapped.
-			{
-				EditorWidgets::WrapText wrap;
-				const int assetCount = static_cast<int>(s_deleteAssetTargets.size());
-				if (assetCount == 1)
-					ImGui::Text("Delete \"%s\"",
-						std::filesystem::path(s_deleteAssetTargets.front()).filename().string().c_str());
-				else
-					ImGui::Text("Delete %d assets", assetCount);
-				ImGui::Separator();
-				ImGui::Spacing();
-				// Two facts the user cannot get back afterwards, so they belong here
-				// rather than in a log line nobody reads.
-				ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
-					assetCount == 1
-						? "This deletes the file. It does not go to the trash and cannot be undone."
-						: "This deletes the files. They do not go to the trash and cannot be undone.");
-				if (s_deleteAssetIsSource)
-					ImGui::TextDisabled("Both halves of the class (.h and .cpp) are deleted.");
-				// Naming them is the point of a confirmation for a SET: "delete 12
-				// assets" is not something anyone can check, and the selection may have
-				// been built with a Shift-click over a run nobody read.
-				if (assetCount > 1)
-				{
-					const float lineH = ImGui::GetTextLineHeightWithSpacing();
-					const float listH = std::clamp(lineH * static_cast<float>(assetCount) + 8.0f,
-					                               lineH * 2.0f, 140.0f);
-					ImGui::Spacing();
-					ImGui::BeginChild("##cb_delete_asset_list", ImVec2(-1.0f, listH), true);
-					// Wrapped rather than scrolled sideways — see the referrer list.
-					// This is the list somebody reads to decide whether to destroy
-					// twelve files, and a name whose end is off-screen is a name they
-					// cannot check. Its own guard: the child starts with no wrap
-					// position, and this one has to pop before EndChild() hands the
-					// dialog window back.
-					{
-						EditorWidgets::WrapText listWrap;
-						for (const std::string& p : s_deleteAssetTargets)
-							ImGui::TextUnformatted(std::filesystem::path(p).filename().string().c_str());
-					}
-					ImGui::EndChild();
-				}
-				ImGui::Spacing();
-				// Which files break, by name — the question the old flat "anything still
-				// referencing it keeps a broken reference" line raised and left hanging.
-				drawReferenceSection(s_deleteAssetScanGen,
-					"They keep a reference to something that is no longer there.");
-				ImGui::Spacing();
-
-				if (needsApproval)
-				{
-					ImGui::Spacing();
-					ImGui::TextDisabled("The host has to approve this before it happens.");
-					ImGui::Spacing();
-				}
-			}
-			if (EditorWidgets::dangerButton(needsApproval ? "Ask the host" : "Delete",
-			                                ImVec2(210, 0)))
-			{
-				// One confirmation, N deletions — and, in a session, ONE thing for
-				// the host to answer. The requests still travel individually (each
-				// keeps its own id, which is what lets the host approve nine of
-				// twelve), but they carry a shared batch id, so the in-tray shows a
-				// single "Delete 12 assets" row that opens into the list instead of
-				// twelve rows to click through.
-				if (ctx.collab) ctx.collab->beginAssetOpBatch();
-				for (const std::string& target : s_deleteAssetTargets)
-				{
-					// Asked again per path, not trusted from the frame the dialog was
-					// opened on: the browser can refresh underneath an open modal.
-					if (isReadOnlyGround(target)) continue;
-					// "Is this a C++ class?" is a property of the FILE, not of the
-					// root the grid happened to be showing. One flag for a whole set
-					// either orphans the .cpp half of a class or runs the sibling
-					// sweep next to a plain .hasset.
-					const bool isSourceClass = isUnderFolder(target, sourceFolder.fullPath);
-					// collabKeyFor, not toContentRelativePath: a C++ class is not
-					// under the content root, and reading its empty content-relative
-					// path as "no session" deleted it here and nowhere else.
-					const std::string rel = collabKeyFor(ctx, target);
-					// requestOrPerformAssetOp answers false when there is no session,
-					// which is the ordinary case and means: just delete it.
-					if (!(ctx.collab && !rel.empty() &&
-					      ctx.collab->requestAssetDelete(rel)))
-					{
-						deleteAssetNow(target, isSourceClass);
-					}
-				}
-				if (ctx.collab) ctx.collab->endAssetOpBatch();
-				s_deleteAssetTargets.clear();
-				s_selection.clear();
-				s_deleteAssetScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
-			{
-				s_deleteAssetTargets.clear();
-				s_deleteAssetScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-		// Escape closes a modal without running either branch, and a target left
-		// behind would be deleted by the NEXT confirmation. Same stale-state trap
-		// the create/rename popup has (see the note there) — and the scan the
-		// dialog started has nobody left to answer, so it is called off too.
-		else if (!s_deleteAssetTargets.empty() && !s_openDeleteAssetPopup)
-		{
-			s_deleteAssetTargets.clear();
-			s_deleteAssetScanGen = 0;
-			cancelReferenceScan();
-		}
-
-		// ── Pattern rename ────────────────────────────────────────────────
-		// A rule, applied to a set, with the result on screen BEFORE anything
-		// happens. The preview is not a nicety: a find-and-replace over twelve
-		// files is exactly the operation where "I meant the other Rock" is only
-		// visible once you see the twelve new names next to the old ones — and
-		// afterwards it is twelve renames to undo by hand.
-		if (s_openPatternRenamePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_pattern_rename_popup");
-			s_openPatternRenamePopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_pattern_rename_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			ImGui::Text("Rename %d assets", static_cast<int>(s_patternTargets.size()));
-			ImGui::Separator();
-			ImGui::Spacing();
-
-			ImGui::SetNextItemWidth(180.0f);
-			ImGui::InputTextWithHint("##pat_find", "find", s_patternFind, sizeof(s_patternFind));
-			ImGui::SameLine();
-			ImGui::TextDisabled("\xE2\x86\x92");
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(180.0f);
-			ImGui::InputTextWithHint("##pat_repl", "replace with",
-			                         s_patternReplace, sizeof(s_patternReplace));
-
-			ImGui::SetNextItemWidth(180.0f);
-			ImGui::InputTextWithHint("##pat_pre", "prefix", s_patternPrefix, sizeof(s_patternPrefix));
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(180.0f);
-			ImGui::InputTextWithHint("##pat_suf", "suffix", s_patternSuffix, sizeof(s_patternSuffix));
-
-			ImGui::Checkbox("Number them", &s_patternNumber);
-			if (s_patternNumber)
-			{
-				ImGui::SameLine();
-				ImGui::SetNextItemWidth(90.0f);
-				ImGui::InputInt("starting at", &s_patternStart);
-				if (s_patternStart < 0) s_patternStart = 0;
-			}
-			ImGui::Spacing();
-
-			// The rule, in one place, so the preview and the commit below cannot
-			// drift into meaning two different things.
-			auto newStemFor = [&](const std::string& absPath, int index) -> std::string
-			{
-				std::string stem = std::filesystem::path(absPath).stem().string();
-				const std::string find(s_patternFind);
-				if (!find.empty())
-				{
-					const std::string repl(s_patternReplace);
-					std::string out;
-					out.reserve(stem.size());
-					for (std::size_t i = 0; i < stem.size(); )
-					{
-						if (stem.compare(i, find.size(), find) == 0)
-						{ out += repl; i += find.size(); }
-						else out += stem[i++];
-					}
-					stem = out;
-				}
-				stem = std::string(s_patternPrefix) + stem + std::string(s_patternSuffix);
-				if (s_patternNumber) stem += std::to_string(s_patternStart + index);
-				return stem;
-			};
-
-			// Refused for the same reasons a single rename is, plus the one a set
-			// adds: two rules can collapse two names onto one, and the second
-			// rename would then silently replace the first one's file.
-			std::string blockReason;
-			std::vector<std::pair<std::string, std::string>> plan;   // abs -> new abs
-			{
-				std::unordered_map<std::string, int> seen;
-				for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
-				{
-					const std::filesystem::path old(s_patternTargets[i]);
-					const std::string stem = newStemFor(s_patternTargets[i], static_cast<int>(i));
-					if (stem.empty())
-					{ blockReason = "That leaves at least one asset with no name."; break; }
-					if (stem.find('/') != std::string::npos || stem.find('\\') != std::string::npos)
-					{ blockReason = "A name cannot contain a path."; break; }
-					const std::filesystem::path dst =
-						old.parent_path() / (stem + old.extension().string());
-					if (++seen[dst.string()] > 1)
-					{ blockReason = "Two assets would end up with the same name."; break; }
-					std::error_code exEc;
-					if (std::filesystem::exists(dst, exEc) &&
-					    !std::filesystem::equivalent(old, dst, exEc))
-					{ blockReason = "\"" + dst.filename().string() + "\" already exists here."; break; }
-					plan.emplace_back(s_patternTargets[i], dst.string());
-				}
-			}
-
-			// Old → new, for as many as fit. Unchanged rows are dimmed: with a
-			// rule that only matches half the selection, which half is the thing
-			// worth seeing.
-			const float lineH = ImGui::GetTextLineHeightWithSpacing();
-			const float listH = std::clamp(lineH * static_cast<float>(s_patternTargets.size()) + 8.0f,
-			                               lineH * 2.0f, 200.0f);
-			ImGui::BeginChild("##pat_preview", ImVec2(-1.0f, listH), true);
-			// Wrapped, not scrolled sideways. The whole value of this preview is
-			// reading the NEW name before committing to it, and that is the half
-			// that sits furthest right — exactly the half a horizontal scrollbar
-			// hides. The wrap position covers the arrow and both names, so a long
-			// pair breaks onto a second line instead of running off the edge.
-			//
-			// In a block, so the pop lands on this child rather than on the dialog
-			// window EndChild() restores below it.
-			{
-				EditorWidgets::WrapText wrap;
-				for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
-				{
-					const std::filesystem::path old(s_patternTargets[i]);
-					const std::string oldStem = old.stem().string();
-					const std::string newStem = newStemFor(s_patternTargets[i], static_cast<int>(i));
-					if (oldStem == newStem)
-						ImGui::TextDisabled("%s  (unchanged)", oldStem.c_str());
-					else
-					{
-						ImGui::TextDisabled("%s", oldStem.c_str());
-						ImGui::SameLine();
-						ImGui::TextDisabled("\xE2\x86\x92");
-						ImGui::SameLine();
-						ImGui::TextUnformatted(newStem.c_str());
-					}
-				}
-			}
-			ImGui::EndChild();
-
-			int changed = 0;
-			for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
-				if (std::filesystem::path(s_patternTargets[i]).stem().string() !=
-				    newStemFor(s_patternTargets[i], static_cast<int>(i))) ++changed;
-
-			// The refusal carries a filename: "\"Rock_Cliff_Weathered_02.hasset\"
-			// already exists here." passes the 560 px this dialog is pinned to, and
-			// the part that gets cut is "already exists here" — leaving a quoted name
-			// and no reason next to a Rename button that has gone grey for no visible
-			// cause. Fixed width and NoResize, so wrapping cannot shrink the dialog.
-			//
-			// Only these two lines, and in a block: everything between the header and
-			// here is either an input (which ImGui does not wrap anyway) or the plan
-			// that the button below reads, and the pop has to happen before the
-			// EndPopup() at the foot of this body — after it, the current window is
-			// the browser's grid child.
-			{
-				EditorWidgets::WrapText wrap;
-				if (!blockReason.empty())
-					ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f), "%s", blockReason.c_str());
-				else
-					ImGui::TextDisabled("References follow the assets, as with a single rename.");
-			}
-			ImGui::Spacing();
-
-			const bool canApply = blockReason.empty() && changed > 0 &&
-			                      plan.size() == s_patternTargets.size();
-			ImGui::BeginDisabled(!canApply);
-			if (EditorWidgets::primaryButton(
-					changed > 0 ? ("Rename " + std::to_string(changed)).c_str() : "Rename",
-					ImVec2(210, 0)))
-			{
-				// One gesture, so one batch for the session and one retarget walk.
-				if (ctx.collab) ctx.collab->beginAssetOpBatch();
-				for (const auto& [oldAbs, newAbs] : plan)
-				{
-					if (oldAbs == newAbs) continue;
-					// A session decides renames centrally, exactly as the single
-					// rename does; without a session this is just a move.
-					const std::string oldKey = collabKeyFor(ctx, oldAbs);
-					const std::string newKey = collabKeyFor(ctx, newAbs);
-					if (ctx.collab && !oldKey.empty() && !newKey.empty() &&
-					    ctx.collab->requestAssetRename(oldKey, newKey))
-						continue;   // asked for; the host's answer moves it everywhere
-
-					std::error_code ec;
-					std::filesystem::rename(oldAbs, newAbs, ec);
-					if (ec)
-					{
-						HE_LOG_ERROR(Editor, "%s",
-							("Editor: rename of '" + oldAbs + "' failed: " + ec.message()).c_str());
-						continue;
-					}
-					retargetReferences(ctx, oldAbs, newAbs, /*folder=*/false);
-					EditorAssetTypeCache::invalidate(oldAbs);
-					EditorAssetTypeCache::invalidate(newAbs);
-					AssetThumbnailCache::invalidate(oldAbs);
-					AssetThumbnailCache::invalidate(newAbs);
-					EditorTabs::retarget(ctx.tabs, oldAbs, newAbs);
-					for (std::string& sel : s_selection)
-						if (sel == oldAbs) sel = newAbs;
-					if (s_selectedItem == oldAbs) s_selectedItem = newAbs;
-				}
-				if (ctx.collab) ctx.collab->endAssetOpBatch();
-				s_quietContentRefresh = true;
-				s_patternTargets.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndDisabled();
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
-			{
-				s_patternTargets.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-		else if (!s_patternTargets.empty() && !s_openPatternRenamePopup)
-			s_patternTargets.clear();
-
-		// ── Import to Project… (engine content → a folder you pick) ─────────
-		// The one-click menu entry decides for you (Content, engine sub-folders
-		// kept). This asks: which folder of the project, whether to keep the
-		// engine's own sub-folders under it, and optionally a new folder to make.
-		if (s_openEngImportPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_engine_import_popup");
-			s_openEngImportPopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_engine_import_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			HE::Ed::Help::Scope helpScope("Import to Project");
-			const std::size_t total = s_engImportSources.size();
-			ImGui::Text("Import %d file%s into the project", static_cast<int>(total), total == 1 ? "" : "s");
-			ImGui::Separator();
-			ImGui::Spacing();
-
-			// What goes in: names as the engine tree spells them, a handful of lines.
-			{
-				const float lineH = ImGui::GetTextLineHeightWithSpacing();
-				const float listH = std::clamp(lineH * static_cast<float>(std::min<std::size_t>(total, 6)) + 8.0f,
-				                               lineH * 2.0f, lineH * 6.0f + 8.0f);
-				ImGui::BeginChild("##eng_files", ImVec2(-1.0f, listH), true);
-				for (std::size_t i = 0; i < total; ++i)
-				{
-					std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(s_engImportSources[i]) : std::string();
-					if (rel.empty()) rel = std::filesystem::path(s_engImportSources[i]).filename().string();
-					ImGui::TextUnformatted(rel.c_str());
-				}
-				ImGui::EndChild();
-			}
-
-			ImGui::Spacing();
-			ImGui::TextDisabled("Target folder");
-			ImGui::BeginChild("##eng_target", ImVec2(-1.0f, 170.0f), true);
-			{
-				if (ImGui::Selectable("Content", s_engImportTarget.empty()))
-					s_engImportTarget.clear();
-				EditorWidgets::helpForLabel("Content");
-				std::function<void(const HE::Folder*, const std::string&)> pick =
-					[&](const HE::Folder* folder, const std::string& rel)
-				{
-					for (const HE::Folder* sub : folder->subfolders)
-					{
-						// Content/Engine holds the project's overrides of engine
-						// defaults — not a place to put new work.
-						if (rel.empty() && sub->name == "Engine") continue;
-						const std::string subRel = rel.empty() ? sub->name : rel + "/" + sub->name;
-						ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
-						                           ImGuiTreeNodeFlags_SpanAvailWidth;
-						if (sub->subfolders.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
-						if (subRel == s_engImportTarget) flags |= ImGuiTreeNodeFlags_Selected;
-						const bool open = ImGui::TreeNodeEx((sub->name + "##engt_" + subRel).c_str(), flags);
-						if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
-							s_engImportTarget = subRel;
-						if (open) { pick(sub, subRel); ImGui::TreePop(); }
-					}
-				};
-				pick(&contentFolder, std::string());
-			}
-			ImGui::EndChild();
-
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::InputTextWithHint("##eng_newfolder", "new sub-folder in the target (optional)",
-			                         s_engImportNewFolder, sizeof(s_engImportNewFolder));
-			ImGui::Checkbox("Keep the engine's folder structure", &s_engImportKeep);
-			EditorWidgets::helpForLabel("Keep the engine's folder structure");
-
-			// The effective target, spelled out — and refused when the new folder
-			// name could not be one.
-			const std::string newName(s_engImportNewFolder);
-			const bool badName = newName.find_first_of("/\\:*?\"<>|") != std::string::npos ||
-			                     newName == "." || newName == "..";
-			std::string effective = s_engImportTarget;
-			if (!newName.empty() && !badName)
-				effective += (effective.empty() ? "" : "/") + newName;
-			ImGui::Spacing();
-			if (badName)
-				ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.45f, 1.0f), "A folder name cannot contain a path or special characters.");
-			else
-				ImGui::TextDisabled("Goes to  Content%s%s", effective.empty() ? "" : "/", effective.c_str());
-			ImGui::Spacing();
-
-			ImGui::BeginDisabled(badName || total == 0);
-			if (EditorWidgets::primaryButton("Import", ImVec2(120, 0)))
-			{
-				runEngineImport(ctx, s_engImportSources, effective, s_engImportKeep);
-				s_engImportSources.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndDisabled();
-			ImGui::SameLine();
-			if (EditorWidgets::button("Cancel", ImVec2(120, 0)))
-			{
-				s_engImportSources.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-
-		// ── "Find References" result ──────────────────────────────────────
-		// Not a confirmation: nothing is about to happen, so there is one way out
-		// and no red button. Opened out here for the same ID-stack reason as the
-		// dialogs around it.
-		if (s_openReferencesPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_references_popup");
-			s_openReferencesPopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_references_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			// The title carries an asset name the user did not choose the length of:
-			// "What uses anything in \"Environment_Cliffs_Weathered\"?" is past the
-			// 460 px this dialog is pinned to, and the question mark — the part that
-			// makes it a question about THAT folder — is the first thing lost. Fixed
-			// width, NoResize, so the window edge is the column to wrap at.
-			//
-			// A block, since EndPopup() at the foot of this body restores the
-			// browser's grid child as the current window.
-			{
-				EditorWidgets::WrapText wrap;
-				const std::string name = s_referencesIsFolder
-					? std::filesystem::path(s_referencesTarget).filename().string()
-					: std::filesystem::path(s_referencesTarget).stem().string();
-				ImGui::Text(s_referencesIsFolder ? "What uses anything in \"%s\"?" : "What uses \"%s\"?",
-				            name.c_str());
-				ImGui::Separator();
-				ImGui::Spacing();
-				drawReferenceSection(s_referencesScanGen,
-					s_referencesIsFolder ? "Renaming or moving the folder carries these along."
-					                     : "Renaming or moving it carries these along; deleting it breaks them.");
-				ImGui::Spacing();
-			}
-			if (EditorWidgets::primaryButton("Close", ImVec2(210, 0)))
-			{
-				s_referencesTarget.clear();
-				s_referencesScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-		else if (!s_referencesTarget.empty() && !s_openReferencesPopup)
-		{
-			s_referencesTarget.clear();
-			s_referencesScanGen = 0;
-			cancelReferenceScan();
-		}
-
-		// ── Delete-folder confirmation ────────────────────────────────────
-		// Raised from the item context menu, opened here for the same reason the
-		// rename dialog is: a modal cannot be opened from inside the context
-		// popup's ID stack, and the content-refresh gate keeps it from competing
-		// with the "##ContentRefresh" modal (which a delete requests as well).
-		if (s_openDeleteFolderPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_delete_folder_popup");
-			s_openDeleteFolderPopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_delete_folder_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			// A folder is the biggest yes in this panel — everything under it
-			// goes — so in a session it is asked for like any other deletion. Read
-			// out here because the button below is labelled from it, and the wrapped
-			// block has to close before EndPopup() (see the note inside it).
-			const bool folderNeedsApproval =
-				ctx.collab && ctx.collab->inSession() && !ctx.collab->isHost();
-			// A folder name is as long as the user made it, and this dialog is pinned
-			// to 460 px: "Delete Folder \"Environment_Cliffs_Weathered\"" already runs
-			// out of room, and the name — the only thing distinguishing this dialog
-			// from the one about another folder — is what gets cut. Fixed width and
-			// NoResize, so the window edge is the right column and wrapping only ever
-			// makes the dialog taller.
-			//
-			// In a block: EndPopup() at the foot of this body makes the browser's
-			// grid child current again, so a pop after it would land on the panel.
-			{
-				EditorWidgets::WrapText wrap;
-				const std::string folderName =
-					std::filesystem::path(s_deleteFolderTarget).filename().string();
-				const int fileCount = static_cast<int>(s_deleteFolderFiles.size());
-
-				ImGui::Text("Delete Folder \"%s\"", folderName.c_str());
-				ImGui::Separator();
-				ImGui::Spacing();
-				ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
-					"This deletes the folder and the %d asset%s inside it.",
-					fileCount, fileCount == 1 ? "" : "s");
-				ImGui::Spacing();
-				// Scanned for the whole subtree at once — every asset under the folder is
-				// a target, and referrers INSIDE the folder are left out: they are going
-				// away with it, so they say nothing about what breaks.
-				drawReferenceSection(s_deleteFolderScanGen,
-					"They keep references to assets that are no longer there.");
-				ImGui::Spacing();
-
-				// The list is what makes the warning worth reading, so it is shown in
-				// full up to a point — a folder with thousands of assets would cost a
-				// line of text per entry per frame, and the tail says nothing the count
-				// above has not already said.
-				constexpr int k_maxListed = 200;
-				const int listed = (std::min)(fileCount, k_maxListed);
-				const float lineH  = ImGui::GetTextLineHeightWithSpacing();
-				const float listH  = std::clamp(lineH * static_cast<float>(listed) + 8.0f,
-				                                lineH * 2.0f, 220.0f);
-				ImGui::BeginChild("##cb_delete_folder_list", ImVec2(-1.0f, listH), true);
-				// Wrapped, not scrolled sideways. These are paths relative to the
-				// content root and several folders deep, so this is the list that
-				// overflowed worst — and it is the one attached to the biggest yes in
-				// the panel. Its own guard, in its own block: the child window starts
-				// without a wrap position, and this one has to pop before EndChild()
-				// makes the dialog current again.
-				{
-					EditorWidgets::WrapText listWrap;
-					for (int i = 0; i < listed; ++i)
-						ImGui::TextUnformatted(s_deleteFolderFiles[static_cast<size_t>(i)].c_str());
-					if (fileCount > listed)
-						ImGui::TextDisabled("... and %d more", fileCount - listed);
-				}
-				ImGui::EndChild();
-				ImGui::Spacing();
-
-				if (folderNeedsApproval)
-				{
-					ImGui::TextDisabled("The host has to approve this before it happens.");
-					ImGui::Spacing();
-				}
-			}
-			if (EditorWidgets::dangerButton(folderNeedsApproval ? "Ask the host" : "Delete",
-			                                ImVec2(210, 0)))
-			{
-				const std::string rel =
-					collabKeyFor(ctx, s_deleteFolderTarget, /*isFolder=*/true);
-				if (!(ctx.collab && !rel.empty() &&
-				      ctx.collab->requestAssetDelete(rel, /*folder=*/true)))
-				{
-					deleteFolderNow(s_deleteFolderTarget);
-				}
-				s_deleteFolderTarget.clear();
-				s_deleteFolderFiles.clear();
-				s_deleteFolderScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
-			{
-				s_deleteFolderTarget.clear();
-				s_deleteFolderFiles.clear();
-				s_deleteFolderScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-		// Same Escape trap as the asset dialog above: the folder target survives a
-		// dismissal that ran neither branch, and the scan keeps walking for a
-		// dialog nobody is looking at.
-		else if (!s_deleteFolderTarget.empty() && !s_openDeleteFolderPopup)
-		{
-			s_deleteFolderTarget.clear();
-			s_deleteFolderFiles.clear();
-			s_deleteFolderScanGen = 0;
-			cancelReferenceScan();
-		}
-
+		// ── Dialogs ───────────────────────────────────────────────────────
+		// Each one is its own function above render() (EDT-303). Called in the order
+		// they used to stand here, so the popups open, stack and run their Escape
+		// clean-ups exactly as before.
+		drawRenameDialog(ctx);
+		drawDeleteAssetDialog(ctx, sourceFolder, isReadOnlyGround, deleteAssetNow);
+		drawPatternRenameDialog(ctx);
+		drawEngineImportDialog(ctx, contentFolder);
+		drawReferencesDialog(ctx);
+		drawDeleteFolderDialog(ctx, deleteFolderNow);
 #ifdef HE_HAVE_LIBSSH2
-		// ── EngineContent remote-download confirmation ─────────────────────
-		// Raised from the file-grid double-click above. Same "cannot open a modal
-		// from inside another ID stack" reason the delete-folder dialog is opened
-		// out here instead of at the click site.
-		if (s_openRemoteDownloadPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_remote_download_popup");
-			s_openRemoteDownloadPopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_remote_download_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			// Outside the context menu's scope, so without its own the Download
-			// button asked the help table for a bare "Download" and got nothing.
-			HE::Ed::Help::Scope helpScope("Content Browser");
-			// TextWrapped already covers the paragraph; the title is the line that
-			// does not. At the 420 px this dialog is pinned to, "Download
-			// \"SM_Rock_Cliff_Weathered_Large\"?" loses its closing quote and its
-			// question mark, so the one dialog that asks about a NAMED asset stops
-			// showing the whole name. Fixed width and NoResize — the window edge is
-			// the right column, and wrapping only grows the height.
-			//
-			// A block, because EndPopup() below restores the browser's grid child as
-			// the current window and the pop must happen before that.
-			{
-				EditorWidgets::WrapText wrap;
-				ImGui::Text("Download \"%s\"?", s_remoteDownloadTabLabel.c_str());
-				ImGui::Separator();
-				ImGui::Spacing();
-				ImGui::TextWrapped(
-					"This EngineContent asset is not on this machine yet — it lives on the "
-					"EngineContent server. Downloading it saves a copy in the shared "
-					"EngineContent cache, so every project (not just this one) can use it "
-					"from now on without downloading it again.");
-				ImGui::Spacing();
-			}
-
-			if (EditorWidgets::primaryButton("Download", ImVec2(200, 0)))
-			{
-				const std::string relPath           = s_remoteDownloadRelativePath;
-				const std::string fullPath          = s_remoteDownloadFullPath;
-				GlobalState*      gs                = ctx.globalState;
-				const std::string engineContentPath = ctx.contentManager->engineContentRoot();
-				const std::string projectContentRoot = ctx.contentManager->contentRoot();
-				HE::Cs::EngineContentSync::instance().enqueueDownload(
-					relPath, s_remoteDownloadUuid, HE::Cs::DownloadTrigger::Explicit,
-					[fullPath, relPath, gs, engineContentPath, projectContentRoot](bool success)
-					{
-						// Worker thread — must not touch ctx/ImGui. GlobalState's own
-						// refresh is safe here (mutex-guarded, filesystem-only, same
-						// fact startSftpProbe's manifest refresh already relies on).
-						// The re-merge is what clears this asset's isRemoteOnly flag:
-						// mergeManifestInto now sees the freshly-downloaded file in the
-						// cache and emits a normal node instead of a remote placeholder.
-						// The tab-open request, which DOES need the main thread, goes
-						// through s_pendingOpenFullPaths (static storage, so this
-						// reference stays valid regardless of when the callback fires).
-						//
-						// This is the EXPLICIT route: the user pressed Download and
-						// is waiting for a tab to open. By the time it fails the
-						// dialog has closed and the footer's progress bar is gone —
-						// so without a word here, the answer to "I clicked Download"
-						// is nothing at all, forever.
-						if (!success)
-						{
-							HE::Ed::notify(HE::Ed::NoteLevel::Problem,
-								"\"" + std::filesystem::path(relPath).filename().string()
-									+ "\" could not be downloaded.",
-								"The EngineContent server did not hand over the file. Check "
-								"the connection and start the download again.",
-								fullPath);
-							return;
-						}
-						if (gs && !engineContentPath.empty())
-							gs->refreshEngineFolder(engineContentPath, projectContentRoot);
-						std::lock_guard<std::mutex> lock(s_pendingOpenMutex);
-						s_pendingOpenFullPaths.push_back(fullPath);
-					});
-				s_remoteDownloadRelativePath.clear();
-				s_remoteDownloadTabLabel.clear();
-				s_remoteDownloadFullPath.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(200, 0)))
-			{
-				s_remoteDownloadRelativePath.clear();
-				s_remoteDownloadTabLabel.clear();
-				s_remoteDownloadFullPath.clear();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-
-		// ── "Remove Local Copy" confirmation ──────────────────────────────
-		// The mirror image of the download dialog above, and worded as such: this
-		// asks about DISK, not about the asset. Nothing here is destructive in the
-		// way the two delete dialogs are, so it says what will happen next (a
-		// re-download) rather than what will be lost.
-		if (s_openRemoveCachePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_remove_cache_popup");
-			s_openRemoveCachePopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_remove_cache_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			HE::Ed::Help::Scope helpScope("Content Browser");
-			// Two lines here are longer than the 460 px this dialog is pinned to. The
-			// title carries a full filename, and the dimmed line below is
-			// seventy-eight characters: unwrapped it ends at "the copy in memory", so
-			// the caveat says something is in memory and never says until when — the
-			// only part of it that is actionable. Fixed width and NoResize, so the
-			// window edge is the column and wrapping only makes the dialog taller.
-			//
-			// In a block, so the pop happens before the EndPopup() at the foot of
-			// this body — after it the current window is the browser's grid child.
-			{
-				EditorWidgets::WrapText wrap;
-				const std::string assetName =
-					std::filesystem::path(s_removeCacheFullPath).filename().string();
-
-				ImGui::Text("Remove the local copy of \"%s\"?", assetName.c_str());
-				ImGui::Separator();
-				ImGui::Spacing();
-				ImGui::TextWrapped(
-					"This deletes the downloaded file from the shared EngineContent cache "
-					"on this machine — every project here loses its local copy. The asset "
-					"itself stays on the server and is downloaded again the next time "
-					"something needs it.");
-				ImGui::Spacing();
-				// Same scan the delete dialogs run, different conclusion: these files do
-				// not break, they simply trigger the download again.
-				drawReferenceSection(s_removeCacheScanGen,
-					"They keep working — the asset downloads again when they need it.");
-				ImGui::Spacing();
-				// Honest about the half that a file removal cannot undo: an asset that is
-				// live in the open scene stays in memory until it is reloaded.
-				if (ctx.contentManager && !(s_removeCacheUuid == HE::UUID{}) &&
-				    ctx.contentManager->isLoaded(s_removeCacheUuid))
-				{
-					ImGui::TextDisabled("It is loaded right now — the copy in memory stays until the scene is reloaded.");
-					ImGui::Spacing();
-				}
-			}
-
-			if (EditorWidgets::dangerButton("Remove Local Copy", ImVec2(210, 0)))
-			{
-				removeCachedCopyNow(s_removeCacheFullPath, s_removeCacheRelPath, s_removeCacheUuid);
-				s_removeCacheFullPath.clear();
-				s_removeCacheRelPath.clear();
-				s_removeCacheUuid   = HE::UUID{};
-				s_removeCacheScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
-			{
-				s_removeCacheFullPath.clear();
-				s_removeCacheRelPath.clear();
-				s_removeCacheUuid   = HE::UUID{};
-				s_removeCacheScanGen = 0;
-				cancelReferenceScan();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
-		// The same Escape trap the two delete dialogs guard against: a target left
-		// behind would be removed by the NEXT confirmation, and the scan would keep
-		// walking a whole project for a dialog that is gone.
-		else if (!s_removeCacheFullPath.empty() && !s_openRemoveCachePopup)
-		{
-			s_removeCacheFullPath.clear();
-			s_removeCacheRelPath.clear();
-			s_removeCacheUuid    = HE::UUID{};
-			s_removeCacheScanGen = 0;
-			cancelReferenceScan();
-		}
+		drawRemoteDownloadDialog(ctx);
+		drawRemoveCacheDialog(ctx, removeCachedCopyNow);
 #endif
-
-		// ── Name-a-C++-class popup (C++ projects only) ────────────────────
-		// The Create menu's "C++ Class" item stages a default name and raises
-		// this; on confirm it writes Source/<Name>.{h,cpp}. Those files live
-		// outside Content/, so they don't appear in the browser — the user edits
-		// them in their own C++ toolchain (which is the C++ workflow).
-		if (s_openCppClassPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
-		{
-			ImGui::OpenPopup("##cb_cpp_class_popup");
-			s_openCppClassPopup = false;
-		}
-		ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_Always);
-		EditorWidgets::pinDialogToEditorWindow();
-		if (ImGui::BeginPopupModal("##cb_cpp_class_popup", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-		{
-			// The narrowest dialog in the panel, and the only one whose lines fit at
-			// the 340 px it asks for. They do not always get 340: pinDialogToEditorWindow
-			// caps every dialog to the editor's work area and floors that cap at
-			// 240 px, so on a small editor window this one is squeezed and "Creates
-			// Source/<Name>.h and .cpp" loses its tail — the half that says a class is
-			// TWO files, which is the entire content of the line. Wrapping at the
-			// window edge follows the cap wherever it lands; the dialog does not
-			// auto-resize, so there is nothing for the wrap to feed back into.
-			//
-			// In a block that closes before the EndPopup() below, which is what hands
-			// the current window back to the browser's grid child.
-			bool confirm = false;
-			{
-				EditorWidgets::WrapText wrap;
-				ImGui::TextUnformatted("New C++ Class");
-				ImGui::Separator();
-				ImGui::Spacing();
-				if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-				ImGui::SetNextItemWidth(-1.0f);
-				confirm = ImGui::InputText("##cpp_class_input", s_cppClassName, sizeof(s_cppClassName),
-					ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-				ImGui::TextDisabled("Creates Source/<Name>.h and .cpp");
-				ImGui::Spacing();
-			}
-			const bool canCreate = s_cppClassName[0] != '\0' && ctx.projectManager &&
-				!ctx.projectManager->currentProject().path.empty();
-			if ((EditorWidgets::primaryButton("Create", ImVec2(150, 0)) || confirm) && canCreate)
-			{
-				const std::filesystem::path projRoot =
-					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
-				std::string created;
-				if (writeCppClass(projRoot.string(), s_cppClassName, &created))
-				{
-					HE_LOG_INFO(Editor, "%s",
-						("Editor: created C++ class at " + created).c_str());
-					// BOTH halves. A class is a .h and a .cpp, and a peer that
-					// received only the header would have a declaration with
-					// nothing behind it — which compiles right up until it does
-					// not. They travel under the reserved ::Source:: key, since
-					// they live beside Content rather than inside it.
-					if (ctx.collab && ctx.collab->inSession())
-					{
-						const std::string srcRoot = projRoot.string() + "/Source";
-						const std::filesystem::path h(created);
-						for (const char* ext : { ".h", ".cpp" })
-						{
-							const std::filesystem::path f =
-								h.parent_path() / (h.stem().string() + ext);
-							if (!std::filesystem::exists(f)) continue;
-							const std::string rel =
-								CollabController::projectRelativeAssetPath(f.string(), srcRoot);
-							if (rel.empty()) continue;
-							ctx.collab->publishAssetCreate("::Source::" + rel, f.string());
-						}
-					}
-				}
-				else
-					HE_LOG_ERROR(Editor, "%s", "Editor: failed to create C++ class");
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (EditorWidgets::cancelButton("Cancel", ImVec2(150, 0)))
-				ImGui::CloseCurrentPopup();
-			ImGui::EndPopup();
-		}
+		drawCppClassDialog(ctx);
 
 		// ── Background left-click → clear selection ───────────────────────
 		if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&

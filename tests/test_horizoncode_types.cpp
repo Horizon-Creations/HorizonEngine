@@ -578,11 +578,11 @@ TEST_CASE("HcCodegen: a call into another compiled class is emitted direct")
 
     std::string callerCpp;
     for (const auto& f : r.files)
-        if (f.name == "hcgen_C_caller.cpp") callerCpp = f.contents;
+        if (f.name == "hcgen_Caller.cpp") callerCpp = f.contents;
     REQUIRE_FALSE(callerCpp.empty());
 
     // The public function resolves to a checked downcast and a typed call...
-    CHECK(callerCpp.find("hc::as<C_callee>") != std::string::npos);
+    CHECK(callerCpp.find("hc::as<Callee>") != std::string::npos);
     CHECK(callerCpp.find("->Damage(") != std::string::npos);
     // ...with the seam kept as the fallback for a null/foreign/interpreted ref.
     CHECK(callerCpp.find("hc::callExternal(m_ctx, t") != std::string::npos);
@@ -631,9 +631,9 @@ TEST_CASE("HcCodegen: generated files include only what they use")
         for (const auto& f : r.files) if (f.name == name) return f.contents;
         return std::string{};
     };
-    const std::string callerH   = file("hcgen_C_caller.h");
-    const std::string callerCpp = file("hcgen_C_caller.cpp");
-    const std::string targetH   = file("hcgen_C_target.h");
+    const std::string callerH   = file("hcgen_Caller.h");
+    const std::string callerCpp = file("hcgen_Caller.cpp");
+    const std::string targetH   = file("hcgen_Target.h");
     REQUIRE_FALSE(callerH.empty());
     REQUIRE_FALSE(callerCpp.empty());
     REQUIRE_FALSE(targetH.empty());
@@ -650,9 +650,9 @@ TEST_CASE("HcCodegen: generated files include only what they use")
           != std::string::npos);
 
     // A .cpp names its own header plus the classes it calls into.
-    CHECK(callerCpp.find("#include \"hcgen_C_caller.h\"")  != std::string::npos);
-    CHECK(callerCpp.find("#include \"hcgen_C_target.h\"")  != std::string::npos);
-    CHECK(file("hcgen_C_target.cpp").find("hcgen_C_caller.h") == std::string::npos);
+    CHECK(callerCpp.find("#include \"hcgen_Caller.h\"")  != std::string::npos);
+    CHECK(callerCpp.find("#include \"hcgen_Target.h\"")  != std::string::npos);
+    CHECK(file("hcgen_Target.cpp").find("hcgen_Caller.h") == std::string::npos);
 
     // Nothing generated goes through an umbrella: those exist for hand-written
     // C++, and using them here would make every file depend on every other.
@@ -893,7 +893,7 @@ TEST_CASE("HcCodegen: events reach the Runtime as ids, under readable names")
     REQUIRE(r.ok);
     std::string cpp;
     for (const auto& f : r.files)
-        if (f.name == "hcgen_C_evt.cpp") cpp = f.contents;
+        if (f.name == "hcgen_Evt.cpp") cpp = f.contents;
     REQUIRE_FALSE(cpp.empty());
 
     // One constant per event the class names, interned at load — no baked

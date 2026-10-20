@@ -3,7 +3,7 @@
 # editor collaboration / source-control presence+locks (Layer 3b) share one
 # transport + serialization core:
 #   Layer 0  Platform sockets      (shared with the SC HTTP stack; later checkpoint)
-#   Layer 1  ITransport / Session   (Loopback, TCP, UDP; SecureTransport + LossyTransport as decorators)
+#   Layer 1  ITransport / Session   (Loopback, TCP, UDP, Relay; SecureTransport + LossyTransport as decorators)
 #   Layer 2  BitStream / messages   (bit-packed, quantized serialization)
 #
 # Deliberately dependency-light: every transport is built on the platform
@@ -13,6 +13,10 @@ add_library(HorizonNet SHARED
 	src/Socket.cpp
 	src/LoopbackTransport.cpp
 	src/TcpTransport.cpp
+	src/RelayFanout.cpp
+	src/RelayTransport.cpp
+	src/TeamClient.cpp
+	src/ScClient.cpp
 	src/UdpTransport.cpp
 	src/LossyTransport.cpp
 	src/SecureTransport.cpp
@@ -64,6 +68,9 @@ target_link_libraries(HorizonNet PRIVATE nlohmann_json::nlohmann_json)
 # than reimplementing: Hpak::aesGcm* (AEAD, backed by OpenSSL/mbedTLS),
 # Hpak::randomBytes (CSPRNG) and KeyDerivation::hmac (HMAC-SHA256).
 target_link_libraries(HorizonNet PRIVATE HorizonCore)
+# Build profile, PUBLIC like Core's: Core is linked PRIVATE here, so a target
+# that links only Net would otherwise compile with no profile at all.
+he_target_build_profile(HorizonNet PUBLIC)
 
 # Winsock (Windows only; POSIX sockets need no extra link library).
 if(WIN32)

@@ -18,6 +18,8 @@
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/DefaultAssets.h>   // kEngineCrossCardMeshId (foliage detail levels)
+#include <Diagnostics/Log.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <Types/Enums.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <HorizonScene/SplineCurve.h>      // the Spline section's length readout
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -1015,8 +1018,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::InputText("##entity_name", buf, sizeof(buf),
 			                     ImGuiInputTextFlags_EnterReturnsTrue))
 			{
-				if (undo) undo->snapshotNow("Rename Entity");
-				world.renameEntity(entity, buf);
+				// Held by somebody else in the session: a request to the host,
+				// not a local name that only this machine would ever show. Only
+				// for the scene's world: a prefab editor's handles name other
+				// entities, and its world is nobody's to lock.
+				if (!(ctx.askHostToRename && &world == ctx.world && buf[0] != '\0' &&
+				      name->name != buf &&
+				      ctx.askHostToRename(entity, buf)))
+				{
+					if (undo) undo->snapshotNow("Rename Entity");
+					world.renameEntity(entity, buf);
+				}
 			}
 			// Off because of something above it: the box here is ticked, and
 			// the entity is still not in the game — say which is the case.
@@ -2703,6 +2715,64 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RopeComponent>(entity); }
 	}
 
+	// ── Spline ──────────────────────────────────────────────────────────────
+	// A line or an outline through its control points, in the entity's own space.
+	// It renders nothing and builds nothing by itself: the viewport draws it as a
+	// guide, and whatever uses it (a lake shore, a path) reads the points. The
+	// Spline mode of the Scene toolbar draws and edits the same data; this is the
+	// numeric view of it, and the way to type a point in exactly.
+	if (auto* spline = registry.try_get<SplineComponent>(entity))
+	{
+		if (componentHeader("Spline", true, removed))
+		{
+			EditorWidgets::checkbox("Closed##spline", &spline->closed); trackEdit();
+
+			char summary[96];
+			std::snprintf(summary, sizeof summary, "%zu point%s, %.2f m long",
+			              spline->controlPoints.size(),
+			              spline->controlPoints.size() == 1 ? "" : "s",
+			              HE::spline::Curve(*spline).length());
+			ImGui::TextDisabled("%s", summary);
+			if (spline->closed && spline->controlPoints.size() < 3)
+				hint("A closed spline needs at least three points; with fewer it is drawn open.");
+
+			// One fixed label for every row, so the tooltip lookup and the help
+			// audit see a single control rather than "Point 0", "Point 1" … (the
+			// same arrangement as the rope's control points).
+			ImGui::Spacing();
+			EditorWidgets::subHeading("Control Points");
+			for (int i = 0; i < static_cast<int>(spline->controlPoints.size()); ++i)
+			{
+				ImGui::PushID(i);
+				Row::dragFloat3("Point", &spline->controlPoints[static_cast<size_t>(i)].x,
+				                0.05f, -100000.0f, 100000.0f);
+				trackEdit();
+				// A spline may be emptied: every state on the way to a finished
+				// line is a valid component, the viewport tool deletes down to
+				// zero too.
+				if (EditorWidgets::dangerSmallButton("Remove##splinept"))
+				{
+					if (undo) undo->snapshotNow();
+					spline->controlPoints.erase(spline->controlPoints.begin() + i);
+					--i;
+				}
+				ImGui::PopID();
+			}
+			if (ImGui::Button("+ Point"))
+			{
+				if (undo) undo->snapshotNow();
+				// Carries on in the direction of the last segment, so the new point
+				// is somewhere you can see and grab; a lone point steps along +X.
+				const size_t n = spline->controlPoints.size();
+				const glm::vec3 tail = n ? spline->controlPoints[n - 1] : glm::vec3(0.0f);
+				glm::vec3 step = (n >= 2) ? (tail - spline->controlPoints[n - 2]) : glm::vec3(1.0f, 0.0f, 0.0f);
+				if (glm::dot(step, step) < 1e-8f) step = glm::vec3(1.0f, 0.0f, 0.0f);
+				spline->controlPoints.push_back(tail + step);
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SplineComponent>(entity); }
+	}
+
 	// ── Trail ───────────────────────────────────────────────────────────────
 	// The other half of the same feature and the opposite data rate: nothing here
 	// is geometry, it is the rule by which the entity drops points behind itself.
@@ -2766,6 +2836,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
+			// What water does to this body (Thema 179). Both are read at every physics
+			// step, so changing them while the game plays takes effect at once, and
+			// neither is part of what the body is built from: nothing is rebuilt.
+			EditorWidgets::checkbox("Affected By Water", &r->affectedByWater); trackEdit();
+			// "##rb": a CollapsingHeader opens no id scope, and the Environment's cloud
+			// "Density" is a bare one too; the help lookup ignores the suffix.
+			Row::dragFloat("Density##rb", &r->density, 10.0f, 0.0f, 20000.0f,
+			               r->density > 0.0f ? "%.0f kg/m3" : "from mass"); trackEdit();
+			r->density = std::max(0.0f, r->density);
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
@@ -3096,6 +3175,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SaveStateComponent>(entity); }
 	}
 
+	// ── Streaming (where it lives in a scene split into cells) ──────────────
+	if (auto* st = registry.try_get<StreamingComponent>(entity))
+	{
+		if (componentHeader("Streaming", true, removed))
+		{
+			int mode = static_cast<int>(st->mode);
+			if (Row::comboZ("Mode##streaming", &mode, "Auto Resident "))
+				st->mode = mode == 0 ? StreamingComponent::Mode::Auto : StreamingComponent::Mode::Resident;
+			trackEdit();
+			hint("Read when the scene is split into cells (Streaming tab). Resident keeps this "
+			     "entity, and the top-level subtree it is in, in the always-loaded base scene; "
+			     "Auto leaves it to the splitter. Split again after changing it.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<StreamingComponent>(entity); }
+	}
+
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -3268,6 +3363,25 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::EndDisabled();
 			}
 
+			// Water: where the sheets of this landscape's lakes and brushed water
+			// end against the ground. The water's own settings, so they go through
+			// setShoreClip and stay out of `changed` — which would regenerate every
+			// chunk of the landscape for a flag that only the water reads.
+			ImGui::SeparatorText("Water");
+			{
+				bool clip = t->water.clipToGround;
+				if (EditorWidgets::checkbox("Clip To Ground##tcw", &clip))
+					HE::water::setShoreClip(*t, clip, t->water.shoreOvershoot);
+				trackEdit();
+				ImGui::BeginDisabled(!t->water.clipToGround);
+				float over = t->water.shoreOvershoot;
+				if (Row::dragFloat("Shore Overshoot##tcw", &over, 0.01f, 0.0f,
+				                   HE::water::kMaxShoreOvershoot, "%.2f m"))
+					HE::water::setShoreClip(*t, t->water.clipToGround, over);
+				trackEdit();
+				ImGui::EndDisabled();
+			}
+
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.
@@ -3388,11 +3502,55 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
-	if (auto* fol = registry.try_get<FoliageComponent>(entity))
+	if (auto* folc = registry.try_get<FoliageComponent>(entity))
 	{
 		if (componentHeader("Foliage", true, removed))
 		{
 			EditorWidgets::WrapText wrap;
+			// One row per layer (one kind of plant: grass, a bush, a tree), the
+			// chosen one's fields below. The Landscape panel's Foliage brush paints
+			// the same chosen layer (FoliageComponent::activeLayer), so picking a
+			// layer here and painting it there go together.
+			if (folc->layers.empty()) folc->layers.emplace_back();   // never empty, see FoliageComponent
+			folc->activeLayer = static_cast<int>(folc->activeIndex());
+			for (size_t i = 0; i < folc->layers.size(); ++i)
+			{
+				FoliageLayer& l = folc->layers[i];
+				ImGui::PushID(static_cast<int>(i));
+				EditorWidgets::checkbox("##folvis", &l.visible); trackEdit();
+				EditorWidgets::helpForKey("Foliage/Layer Visible");
+				ImGui::SameLine();
+				const std::string label = foliageLayerLabel(l, i) + "  ("
+				                        + std::to_string(l.cachedInstances.size()) + ")";
+				if (ImGui::Selectable(label.c_str(), folc->activeLayer == static_cast<int>(i)))
+					folc->activeLayer = static_cast<int>(i);
+				EditorWidgets::helpForKey("Foliage/Layer");
+				ImGui::PopID();
+			}
+			ImGui::BeginDisabled(folc->layers.size() >= FoliageComponent::kMaxLayers);
+			if (EditorWidgets::smallButton("Add Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Layer");
+				folc->addLayer();
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Layer##fol");
+			ImGui::SameLine();
+			// The last layer stays: a component without one would be a component
+			// that does nothing, and removing the component says that better.
+			ImGui::BeginDisabled(folc->layers.size() <= 1);
+			if (EditorWidgets::dangerSmallButton("Remove Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Layer");
+				folc->layers.erase(folc->layers.begin() + static_cast<std::ptrdiff_t>(folc->activeIndex()));
+				folc->activeLayer = static_cast<int>(folc->activeIndex());
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Remove Layer##fol");
+			ImGui::Separator();
+
+			FoliageLayer* fol = folc->active();
+			Row::inputText("Name##fol", &fol->name); trackEdit();
 			// The layer had no way to be pointed at a mesh from here at all:
 			// a Foliage component added from "Add Component" kept a null mesh
 			// and scattered nothing, with only a log line to say why. Same
@@ -3418,8 +3576,88 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			// What the renderer does with the layer, not where it grows: no re-scatter.
+			EditorWidgets::checkbox("Cast Shadows##fol", &fol->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
+			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
+			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
+
+			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
+			// layer, the engine's cross card at the far end. The mesh above is the
+			// level the camera stands in; none of this re-scatters.
+			ImGui::Separator();
+			ImGui::TextUnformatted("Detail Levels");
+			EditorWidgets::helpForKey("Foliage/Detail Levels");
+			int  removeLod = -1;
+			bool sortLods  = false;
+			for (size_t k = 0; k < fol->lods.size(); ++k)
+			{
+				FoliageLod& d = fol->lods[k];
+				ImGui::PushID(static_cast<int>(k));
+				ImGui::Text("Level %zu", k + 1);
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Cross Card##fol"))
+				{
+					if (undo) undo->snapshotNow("Foliage Level Cross Card");
+					d.meshAssetId = HE::kEngineCrossCardMeshId;
+					// The card is an engine FILE: nothing loads it on its own, and a mesh
+					// that is not resident draws as the fallback cube without a word. By
+					// UUID once the engine folder is scanned, by path before that.
+					if (ctx.contentManager && !ctx.contentManager->ensureResident(HE::kEngineCrossCardMeshId)
+					    && ctx.contentManager->loadAsset("Engine/Meshes/CrossCard.hasset") != HE::kEngineCrossCardMeshId)
+						HE_LOG_WARN(Editor, "Foliage: the engine cross card (Engine/Meshes/CrossCard.hasset) is not "
+						                    "available — the level draws the fallback mesh");
+				}
+				EditorWidgets::helpForLabel("Cross Card##fol");
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("Remove Level##fol")) removeLod = static_cast<int>(k);
+				EditorWidgets::helpForLabel("Remove Level##fol");
+				EditorWidgets::assetDropSlot(ctx, "Mesh", d.meshAssetId,
+						HE::AssetType::StaticMesh, "follodmesh",
+						"(none — the layer's mesh, thinned)", "static mesh", /*showClear=*/true);
+				EditorWidgets::helpForKey("Foliage/Level Mesh");
+				if (EditorWidgets::assetDropSlot(ctx, "Material", d.materialAssetId,
+						HE::AssetType::Material, "follodmat",
+						"(none — the layer's material)", "material",
+						/*showClear=*/true) != EditorWidgets::SlotAction::None
+				    && ctx.renderer && d.materialAssetId != HE::UUID{})
+					ctx.renderer->InvalidateMaterial(d.materialAssetId);
+				EditorWidgets::helpForKey("Foliage/Level Material");
+				Row::dragFloat("Level Distance##fol", &d.distance, 1.0f, 0.0f, 2000.f, "from %.0f m"); trackEdit();
+				if (ImGui::IsItemDeactivatedAfterEdit()) sortLods = true;
+				Row::dragFloat("Level Density##fol", &d.density, 0.01f, 0.0f, 1.0f, "%.2f"); trackEdit();
+				if (d.distance >= fol->drawDistance)
+					ImGui::TextDisabled("Starts beyond the Draw Distance: never drawn");
+				ImGui::PopID();
+			}
+			if (removeLod >= 0)
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Level");
+				fol->lods.erase(fol->lods.begin() + removeLod);
+			}
+			// Kept in distance order, the order the list reads in and the file stores.
+			if (sortLods)
+				std::stable_sort(fol->lods.begin(), fol->lods.end(),
+				                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			ImGui::BeginDisabled(fol->lods.size() >= FoliageLayer::kMaxLods);
+			if (EditorWidgets::smallButton("Add Level##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Level");
+				// Halfway out for the first, then halfway from the last level to the edge.
+				const float last = fol->lods.empty() ? 0.0f : fol->lods.back().distance;
+				FoliageLod d;
+				d.distance = std::round(last + (fol->drawDistance - last) * 0.5f);
+				fol->lods.push_back(d);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Level##fol");
+			if (!fol->lods.empty())
+			{
+				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();
+			}
+			ImGui::Separator();
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
-			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
+			if (ImGui::Button("Regenerate")) { folc->dirty = true; trackEdit(); }
 			// The painted density mask is authored in Landscape mode's Foliage
 			// brush; here it is only reported and, if need be, dropped.
 			if (fol->densityMask.empty())
@@ -3680,6 +3918,7 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<FoliageComponent>("Foliage"),
 	addRow<LODComponent>("LOD"),
 	addRow<RopeComponent>("Rope"),
+	addRow<SplineComponent>("Spline"),
 	addRow<TrailComponent>("Trail"),
 };
 constexpr AddRow kPhysicsRows[] = {
@@ -3723,6 +3962,7 @@ constexpr AddRow kGameplayRows[] = {
 	// to give it logic, and the gate was hiding exactly the component you need.
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
+	addRow<StreamingComponent>("Streaming"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),

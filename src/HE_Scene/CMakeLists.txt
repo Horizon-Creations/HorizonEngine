@@ -12,6 +12,10 @@ add_library(HorizonScene SHARED
     src/FloatingOrigin.cpp
     src/CellStreamer.cpp
     src/CellSplit.cpp
+    src/CellPhysics.cpp
+    src/CellRuntime.cpp
+    src/CellState.cpp
+    src/CellScripts.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp
@@ -26,6 +30,14 @@ add_library(HorizonScene SHARED
     src/TerrainSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp
+    src/WaterField.cpp
+    src/WaterBrush.cpp
+    src/WaterLake.cpp
+    src/WaterMesh.cpp
+    src/WaterTriangulate.cpp
+    src/WaterSurface.cpp
+    src/WaterQuery.cpp
+    src/WaterRipples.cpp
     src/TerrainHeightmap.cpp
     src/TerrainGenerate.cpp
     src/FoliagePaint.cpp
@@ -47,6 +59,7 @@ add_library(HorizonScene SHARED
     src/NavigationSystem.cpp
     src/ParticleSystem.cpp
     src/SplineGeometry.cpp
+    src/SplineCurve.cpp
     src/RopeTrailSystem.cpp
     src/LODSystem.cpp
     src/WeatherSystem.cpp
@@ -63,6 +76,7 @@ add_library(HorizonScene SHARED
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
+    src/EngineApiCpp.cpp
     src/PlayerSettings.cpp
     src/HcCodegen.cpp
     src/HiddenShell.cpp
@@ -90,6 +104,10 @@ target_compile_features(HorizonScene PUBLIC cxx_std_20)
 if(MSVC)
     target_compile_options(HorizonScene PRIVATE /bigobj)
 endif()
+
+# Build profile: the physics and transform env overrides are dev-only. Core
+# already passes it on; said here too so the target carries the property.
+he_target_build_profile(HorizonScene PUBLIC)
 
 target_link_libraries(HorizonScene
     PUBLIC  HorizonCore

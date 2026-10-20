@@ -53,7 +53,7 @@ namespace
         Empty, Cube,
         CameraThirdPerson, CameraFirstPerson, CameraPlain,
         LightDirectional, LightPoint, LightSpot,
-        Rope, Trail,
+        Rope, Trail, Lake,
     };
 
     Entity createPreset(HorizonWorld& world, Preset p)
@@ -70,6 +70,7 @@ namespace
             case Preset::LightSpot:         name = "Spot Light";        break;
             case Preset::Rope:              name = "Rope";              break;
             case Preset::Trail:             name = "Trail";             break;
+            case Preset::Lake:              name = "Lake";              break;
             default:                                                    break;
         }
 
@@ -121,6 +122,43 @@ namespace
             // one at all.
             case Preset::Rope:  world.addComponent(e, RopeComponent{});  break;
             case Preset::Trail: world.addComponent(e, TrailComponent{}); break;
+            // A lake spawns as a closed spline with an example ring (a ring, not
+            // a rect: the spline's Catmull-Rom bulges past a rectangle's corners,
+            // see WaterLake.h's lake::reshape tests) a few metres across, so there
+            // is a shape to see and edit the moment it is made — same idea as
+            // Rope's default control points.
+            case Preset::Lake:
+            {
+                SplineComponent sc;
+                sc.closed = true;
+                constexpr int   kPoints = 16;
+                constexpr float kRadius = 5.0f;
+                sc.controlPoints.reserve(kPoints);
+                for (int i = 0; i < kPoints; ++i)
+                {
+                    const float a = 6.2831853f * static_cast<float>(i) / static_cast<float>(kPoints);
+                    sc.controlPoints.emplace_back(kRadius * std::cos(a), 0.0f, kRadius * std::sin(a));
+                }
+                world.addComponent(e, std::move(sc));
+
+                // Not yet a lake — no water, no dig: that stays the "Create
+                // Lake" button's job (one click, in the Spline panel, once the
+                // ring sits where it should; WaterLake.h: "Create Lake" is the
+                // ground AND the water together, one undo step). Doing it here
+                // instead would dig under wherever identity-local happens to
+                // land BEFORE a caller like "Create Child" reparents the fresh
+                // entity a second time (OutlinerPanel.cpp's own Create-Child
+                // menu does exactly that right after this returns) — the dig
+                // would be left behind at the wrong spot.
+                //
+                // What IS safe to do here: group it under a landscape instead of
+                // leaving one more loose name at the Outliner root — part of
+                // Thema 174 Schritt 14's "not a flat list" ask. Parenting alone
+                // has nothing to misalign; a second reparent just moves the
+                // still-bare spline again, same as any other preset.
+                for (auto te : world.registry().view<TerrainComponent>()) { world.reparentEntity(e, te); break; }
+                break;
+            }
             default: break;
         }
         return e;
@@ -158,6 +196,7 @@ namespace
         ImGui::Separator();
         item("Rope",  Preset::Rope);
         item("Trail", Preset::Trail);
+        item("Lake",  Preset::Lake);
         return picked;
     }
 
@@ -357,8 +396,15 @@ namespace
         const ImVec2 max(min.x + w, min.y + h);
         dl->AddRectFilled(min, max, fill, h * 0.5f);
         if (edge) dl->AddRect(min, max, edge, h * 0.5f, 0, 1.0f);
+        // A chip's ink is its fill's hue (a collaborator's colour on a 22 % pill
+        // of the same colour was 3.3 to 3.5:1), so it is held to the theme's
+        // floor on the pill as it lands on the window.
+        const ImVec4 ground = HE::Ed::Theme::over(ImGui::ColorConvertU32ToFloat4(fill),
+                                                  ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+        const ImU32 readable = HE::Ed::Theme::u32(
+            HE::Ed::Theme::readableOn(ImGui::ColorConvertU32ToFloat4(ink), ground));
         dl->AddText(ImVec2(std::floor(min.x + 6.0f), std::floor(min.y + (h - ImGui::GetFontSize()) * 0.5f)),
-                    ink, text);
+                    readable, text);
     }
 
     // The two buttons at the right edge of one Outliner row, over the row. They
@@ -611,11 +657,12 @@ void render(AppContext& ctx)
             {
                 if (!registry.valid(entity)) return false;
                 // The built-in environment sun/moon lights belong to the World's
-                // Environment, and runtime terrain chunks are generated from the
-                // TerrainComponent — hide both from the Outliner.
+                // Environment, and runtime terrain chunks and water surfaces are
+                // generated from the TerrainComponent — hide all of them from the
+                // Outliner.
                 if (entity != ctx.world->rootEntity() &&
                     (registry.all_of<EnvironmentLightComponent>(entity) ||
-                     registry.all_of<TerrainChunkComponent>(entity)))
+                     HE::isTerrainGenerated(registry, entity)))
                     return false;
                 auto* name = registry.try_get<NameComponent>(entity);
                 auto* hier = registry.try_get<HierarchyComponent>(entity);
@@ -1057,8 +1104,14 @@ void render(AppContext& ctx)
         // "between" means in the order the user sees — closed subtrees are not
         // in it. Collected during the loop and resolved after it, because the
         // clicked row may lie above the anchor.
-        std::vector<Entity> visibleRows;
-        visibleRows.reserve(s_outlinerCache.size());
+        //
+        // Only needed when this frame can BE a Shift-click (Shift is held);
+        // otherwise it was a push per entity and, at 50k, a 200 KB block
+        // allocated per frame for nothing (EDT-1404). Static so the capacity
+        // outlives the frame.
+        static std::vector<Entity> visibleRows;
+        visibleRows.clear();
+        const bool collectVisibleRows = ImGui::GetIO().KeyShift;
         Entity shiftRangeTarget = entt::null;
 
         // ── Row look, decided once per frame ──────────────────────────────
@@ -1111,7 +1164,7 @@ void render(AppContext& ctx)
             // a hit whose children all fell away is a leaf, arrow and all.
             const bool hasChildren = filterActive ? shown[nodeIndex].childShown
                                                   : node.hasChildren;
-            visibleRows.push_back(node.entity);
+            if (collectVisibleRows) visibleRows.push_back(node.entity);
 
             // Close tree levels we've left: on the path, and in ImGui as far
             // as they were really pushed.
@@ -1582,7 +1635,10 @@ void render(AppContext& ctx)
                         s_renameEntity = entt::null;
                     else if (enter || away)
                     {
-                        if (!s_renameBuf.empty() && s_renameBuf != node.name)
+                        // Somebody else editing it: the host is asked instead,
+                        // and the name changes everywhere at once on a yes.
+                        if (!s_renameBuf.empty() && s_renameBuf != node.name &&
+                            !(ctx.askHostToRename && ctx.askHostToRename(node.entity, s_renameBuf)))
                         {
                             if (ctx.undoSys) ctx.undoSys->snapshotNow("Rename Entity");
                             ctx.world->renameEntity(node.entity, s_renameBuf);
@@ -1613,7 +1669,9 @@ void render(AppContext& ctx)
                         prefabChanged = inst->overrides.size() + node.structuralChanges;
                         Badge& b = badges[nb];
                         b.text = prefabAsset && !prefabAsset->name.empty() ? prefabAsset->name : "Prefab";
-                        b.fill = ImGui::GetColorU32(HE::Ed::Theme::alpha(accent, prefabChanged ? 0.80f : 0.14f));
+                        // Changed: the full accent, because its dark ink reached
+                        // only 4.2:1 on the accent at 0.80 over the window.
+                        b.fill = ImGui::GetColorU32(HE::Ed::Theme::alpha(accent, prefabChanged ? 1.0f : 0.14f));
                         b.edge = prefabChanged ? 0u : ImGui::GetColorU32(HE::Ed::Theme::alpha(accent, 0.55f));
                         b.ink  = prefabChanged ? ImGui::GetColorU32(ImVec4(0.10f, 0.08f, 0.05f, 1.0f))
                                                : ImGui::GetColorU32(HE::Ed::Theme::AccentHi);
@@ -1868,6 +1926,7 @@ static const struct { EntityPresetRow row; Preset preset; } kPresetTable[] = {
     { { "Spot",           "Light"  }, Preset::LightSpot         },
     { { "Rope",           ""       }, Preset::Rope              },
     { { "Trail",          ""       }, Preset::Trail             },
+    { { "Lake",           ""       }, Preset::Lake              },
 };
 
 const EntityPresetRow* entityPresetTable(int& outCount)

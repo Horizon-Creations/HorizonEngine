@@ -174,6 +174,20 @@ public:
         // clamps it to >= 0.5). `weather` above carries the 0..1 values. Zero in the
         // fill sites that never call HE::FillMaterialWeather (previews, UI).
         float weather2[4]      = {};
+        // Water disturbances (append-only, v3.5, Thema 179): the rings the water
+        // physics raises where a body goes into or out of the surface, laid out
+        // exactly like WaterRippleBlock (Renderer/WaterRipples.h) — HE::FillMaterialWater
+        // copies the three arrays over, LightPacking.cpp static_asserts the sizes. The
+        // Water Ripple node reads them. waterRipples.x = 0 is "no rings": the node
+        // returns zeros and its loop never runs, which is what every fill site that
+        // never calls FillMaterialWater (previews, UI, D3D11 / D3D12 / Vulkan until
+        // they do) leaves in place.
+        //   waterRipples : x = live count (0..16), y = ring speed (m/s), z = decay time (s)
+        //   waterRippleA : xy = centre (world XZ), z = start radius (m), w = strength 0..1
+        //   waterRippleB : x = age (s), y = kind (WaterRippleKind)
+        float waterRipples[4]     = {};
+        float waterRippleA[16][4] = {};
+        float waterRippleB[16][4] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
     // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26
@@ -473,6 +487,19 @@ public:
     // the HeLighting/HeParams UBOs, and the offset is applied in world space.
     const Compiled& customVertex(uint64_t bodyHash, const std::string& body, Backend backend);
 
+    // Instanced twins of standardVertex / customVertex (Thema 182, plan 2e): one draw
+    // for a whole GeometryPass batch of a graph material, wind (WPO) included. The
+    // per-draw u.model / u.mvp come per instance instead:
+    //   Metal  a mat4 array at vertex buffer 5, {mvp, model} per instance (the
+    //          scene's k_instStride layout); the U block at buffer 1 still carries
+    //          color/flags/pbr. Same maths as the per-draw form.
+    //   others the model as vec4 attributes at locations 4-7 (divisor 1, the mesh
+    //          VAO's instance binding); u.mvp must hold the batch's viewProj.
+    // Varyings and the U block are the plain variant's, so every material fragment
+    // pairs with either form unchanged.
+    const Compiled& standardVertexInstanced(Backend backend);
+    const Compiled& customVertexInstanced(uint64_t bodyHash, const std::string& body, Backend backend);
+
     // Screen-space quad vertex for materials on IN-GAME UI elements: emits the
     // same varyings as standardVertex (so any material fragment drops in) from
     // an attribute-less 4-vertex strip. Repurposes the standard U block (same
@@ -493,9 +520,9 @@ private:
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
 
-    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
+    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
-    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
+    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend, instanced)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)

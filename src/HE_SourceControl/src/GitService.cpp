@@ -3,6 +3,7 @@
 #include "SourceControl/GitCli.h"
 #include "SourceControl/GitHubApi.h"
 #include "SourceControl/GitHubTokenStore.h"
+#include "SourceControl/GitLocator.h"
 #include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
@@ -37,6 +38,8 @@ void GitService::startWorker()
 	m_quit.store(false, std::memory_order_release);
 	m_status    = RepoStatus{};
 	m_lastError.clear();
+	m_branchCheckValid = false;   // asked of the previous repository
+	m_remoteUrlStale   = true;
 
 	m_worker = std::thread([this] { workerMain(); });
 }
@@ -189,6 +192,32 @@ GitService::commitFiles(const std::string& commit) const
 {
 	const auto it = m_commitFiles.find(commit);
 	return it == m_commitFiles.end() ? nullptr : &it->second;
+}
+
+void GitService::requestCheckBranchName(const std::string& name)
+{
+	if (!m_worker.joinable() || name.empty()) return;
+	// An older answer, even for the same text, may predate a branch created since.
+	m_branchCheckValid = false;
+	{
+		// A burst of keystrokes collapses: a check still waiting in the queue is
+		// for text the user has typed past, so it is replaced, not answered.
+		std::lock_guard<std::mutex> lock(m_inMutex);
+		for (Command& queued : m_in)
+		{
+			if (queued.kind != Kind::CheckBranchName) continue;
+			queued.text = name;
+			return;
+		}
+	}
+	Command c{ Kind::CheckBranchName, {} };
+	c.text = name;
+	push(std::move(c));
+}
+
+const GitService::BranchNameCheck* GitService::branchNameCheck(const std::string& name) const
+{
+	return m_branchCheckValid && m_branchCheck.name == name ? &m_branchCheck : nullptr;
 }
 
 void GitService::requestRestoreTo(const std::string& commit, const std::string& shortOid)
@@ -381,6 +410,19 @@ void GitService::workerMain()
 		{
 		case Kind::Open:
 		{
+			// Asked first: findRepoRoot without git comes back empty, which below
+			// reads as "no repository" — for a project that may well be one.
+			m_openPath = cmd.path;
+			m_openedWithoutGit = !gitExecutable();
+			if (m_openedWithoutGit)
+			{
+				m_root.clear();
+				HE_SC_WARN("git is not installed; repository detection for %s skipped",
+				           cmd.path.string().c_str());
+				ev.statusValid = true;
+				ev.gitMissing  = true;
+				break;
+			}
 			m_root = GitCli::findRepoRoot(cmd.path);
 			if (m_root.empty())
 			{
@@ -580,6 +622,16 @@ void GitService::workerMain()
 				break;   // not worth an error banner: the row just shows nothing
 			}
 			ev.commitFilesFor = cmd.text;
+			break;
+		}
+		case Kind::CheckBranchName:
+		{
+			// The same two questions createBranch would run into, asked of git so
+			// the answer cannot drift from what the command will accept.
+			ev.branchCheckValid  = true;
+			ev.branchCheck.name  = cmd.text;
+			ev.branchCheck.valid = !m_root.empty() && GitCli::isValidBranchName(m_root, cmd.text);
+			ev.branchCheck.taken = ev.branchCheck.valid && GitCli::branchExists(m_root, cmd.text);
 			break;
 		}
 		case Kind::Push:
@@ -877,12 +929,30 @@ void GitService::workerMain()
 			return;
 		}
 
+		// A re-target or anything the user ran (set remote, GitHub setup, init ...)
+		// may have changed origin; only the background refreshes reuse the URL.
+		if (cmd.kind == Kind::Open || countsAsWork(cmd)) m_remoteUrlStale = true;
+
 		if (wantStatus)
 		{
 			m_statusPending.store(false, std::memory_order_release);
+			// git arrived since the open (installed by the editor, or by hand and
+			// then Recheck, which refreshes the locator): the detection the open
+			// had to skip runs now, so an existing repository shows up without
+			// reopening the project.
+			if (m_root.empty() && m_openedWithoutGit && gitExecutable())
+			{
+				m_openedWithoutGit = false;
+				m_root = GitCli::findRepoRoot(m_openPath);
+				HE_SC_INFO("git is available now; repository: %s",
+				           m_root.empty() ? "none" : m_root.string().c_str());
+			}
 			if (m_root.empty())
 			{
 				ev.statusValid = true;
+				// Cached lookup, no process: a periodic refresh must not quietly
+				// turn "git missing" back into "no repository".
+				ev.gitMissing  = !gitExecutable();
 			}
 			else
 			{
@@ -890,18 +960,32 @@ void GitService::workerMain()
 				RepoStatus  s;
 				if (GitCli::status(m_root, s, &err))
 				{
-					ev.statusValid = true;
-					ev.status      = std::move(s);
-					// Piggybacked on every refresh: one cheap invocation, and the
-					// panel always knows whether push/pull have anywhere to go.
-					ev.remoteUrl      = GitCli::remoteUrl(m_root);
+					// Every git call below is a process start, and a visible panel
+					// refreshes every 3 s: what status already answered, or what
+					// cannot have changed since the last read, is not asked again.
+					//
+					// origin's URL rides along so the panel always knows whether
+					// push/pull have anywhere to go. Re-read after any command (it
+					// may have set the remote) and once a minute (`git remote add`
+					// in a terminal), otherwise carried over.
+					const auto now = std::chrono::steady_clock::now();
+					if (m_remoteUrlStale || now - m_remoteUrlReadAt >= std::chrono::seconds(60))
+					{
+						m_cachedRemoteUrl = GitCli::remoteUrl(m_root);
+						m_remoteUrlReadAt = now;
+						m_remoteUrlStale  = false;
+					}
+					ev.remoteUrl      = m_cachedRemoteUrl;
 					ev.remoteUrlValid = true;
 					// Recent history rides along too — it only changes when a
-					// refresh was warranted anyway (commit, pull, poll).
-					GitCli::log(m_root, 20, ev.commits);
-					std::string ignoredCurrent;
-					GitCli::listBranches(m_root, ev.branches, ignoredCurrent);
-					GitCli::listRemoteBranches(m_root, ev.remoteBranches);
+					// refresh was warranted anyway (commit, pull, poll). Which of
+					// it is unpushed is a second call, needed only when status
+					// says there is an upstream and something ahead of it.
+					GitCli::log(m_root, 20, ev.commits, nullptr,
+					            !s.upstream.empty() && s.ahead > 0);
+					ev.statusValid = true;
+					ev.status      = std::move(s);
+					GitCli::listLocalAndRemoteBranches(m_root, ev.branches, ev.remoteBranches);
 					GitCli::stashList(m_root, ev.stashes);
 				}
 				else
@@ -946,6 +1030,14 @@ void GitService::pump(std::size_t maxEvents)
 			if (m_commitFiles.size() >= 64) m_commitFiles.clear();
 			m_commitFiles[ev.commitFilesFor] = std::move(ev.commitFiles);
 		}
+		if (ev.branchCheckValid)
+		{
+			// An answer to a question asked while typing, nothing more: it must not
+			// clear the last operation's error or info below.
+			m_branchCheck      = std::move(ev.branchCheck);
+			m_branchCheckValid = true;
+			continue;
+		}
 
 		if (!ev.error.empty())
 		{
@@ -971,6 +1063,7 @@ void GitService::pump(std::size_t maxEvents)
 			m_stashes        = std::move(ev.stashes);
 		}
 		if (!ev.statusValid)       continue;
+		m_gitMissing = ev.gitMissing;
 		// Swapped in whole. A partially updated snapshot is the bug class this
 		// design exists to remove.
 		ev.status.generation = ++m_generation;

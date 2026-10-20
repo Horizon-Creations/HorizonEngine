@@ -131,6 +131,13 @@ public:
     // HE_MTL_INSTANCING plays on Metal. Read once per process.
     static bool depthInstancingEnabled();
 
+    // HE_GRAPH_INSTANCING=0 sends a batch of a node-graph material back to the
+    // per-instance loop with the material's plain program, instead of one draw
+    // with its instanced twin (MaterialShaderLibrary::standardVertexInstanced /
+    // customVertexInstanced, Thema 182 2e). The same-binary A/B for that path,
+    // on every backend that has it. Read once per process.
+    static bool graphInstancingEnabled();
+
 private:
     // Precomputed per-object sort key so the O(n log n) comparator never has to
     // recompute camera distance or extract a matrix column. Reused across frames

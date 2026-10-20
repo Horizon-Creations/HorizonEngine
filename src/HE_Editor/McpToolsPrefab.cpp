@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // what a path holds, without loading it
 #include "EditorCommands.h"           // the one door into the scene

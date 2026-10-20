@@ -113,6 +113,7 @@ struct TypeRegistry::Impl
     mutable std::mutex mutex;
     std::unordered_map<std::string, EnumDef>   enums;    // key = assetPath
     std::unordered_map<std::string, StructDef> structs;  // key = assetPath
+    uint64_t generation = 0;                             // bumped by every write
 };
 
 TypeRegistry& TypeRegistry::instance()
@@ -132,6 +133,7 @@ void TypeRegistry::registerEnum(EnumDef def)
     Impl& im = impl();
     std::lock_guard<std::mutex> lk(im.mutex);
     im.enums[def.assetPath] = std::move(def);
+    ++im.generation;
 }
 
 void TypeRegistry::registerStruct(StructDef def)
@@ -139,6 +141,7 @@ void TypeRegistry::registerStruct(StructDef def)
     Impl& im = impl();
     std::lock_guard<std::mutex> lk(im.mutex);
     im.structs[def.assetPath] = std::move(def);
+    ++im.generation;
 }
 
 void TypeRegistry::removeType(const std::string& assetPath)
@@ -147,6 +150,7 @@ void TypeRegistry::removeType(const std::string& assetPath)
     std::lock_guard<std::mutex> lk(im.mutex);
     im.enums.erase(assetPath);
     im.structs.erase(assetPath);
+    ++im.generation;
 }
 
 void TypeRegistry::clear()
@@ -155,6 +159,14 @@ void TypeRegistry::clear()
     std::lock_guard<std::mutex> lk(im.mutex);
     im.enums.clear();
     im.structs.clear();
+    ++im.generation;
+}
+
+uint64_t TypeRegistry::generation() const
+{
+    Impl& im = impl();
+    std::lock_guard<std::mutex> lk(im.mutex);
+    return im.generation;
 }
 
 bool TypeRegistry::getEnum(const std::string& assetPath, EnumDef& out) const

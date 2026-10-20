@@ -379,6 +379,60 @@ TEST_CASE("TerrainSystem propagates the Landscape's material to its chunks")
     }
 }
 
+// One pass over the chunks serves every landscape (SCN-802): each chunk must
+// still follow its own.
+TEST_CASE("TerrainSystem: chunks of two landscapes each follow their own landscape's material")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+
+    Entity tes[2];
+    for (int i = 0; i < 2; ++i)
+    {
+        tes[i] = world.createEntity("Landscape");
+        reg.emplace<TransformComponent>(tes[i]);
+        TerrainComponent tc;
+        tc.resolution = 129;   // 2×2 chunks
+        tc.sizeX = tc.sizeZ = 16.0f;
+        tc.dirty = true;
+        reg.emplace<TerrainComponent>(tes[i], tc);
+    }
+    TerrainSystem::updateTerrains(world, cm);
+
+    const HE::UUID mats[2] = { HE::UUID{ 0xA1ull, 0x1ull }, HE::UUID{ 0xB2ull, 0x2ull } };
+    for (int i = 0; i < 2; ++i)
+    {
+        auto& m = reg.get<MaterialComponent>(tes[i]);
+        m.materialAssetId = mats[i];
+        MaterialParamOverride ov; ov.name = i == 0 ? "Tint" : "Wetness"; ov.value[0] = 0.25f + i;
+        m.paramOverrides = { ov };
+    }
+    // A chunk that lost its MaterialComponent gets the one of its own landscape.
+    entt::entity bare = entt::null;
+    for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+        if (cc.terrain == tes[1]) { bare = ce; break; }
+    REQUIRE((bare != entt::null));
+    reg.remove<MaterialComponent>(bare);
+
+    TerrainSystem::updateTerrains(world, cm);
+    size_t seen[2] = { 0, 0 };
+    for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+    {
+        const int i = cc.terrain == tes[0] ? 0 : 1;
+        REQUIRE((cc.terrain == tes[i]));
+        const auto* mc = reg.try_get<MaterialComponent>(ce);
+        REQUIRE(mc != nullptr);
+        CHECK(mc->materialAssetId == mats[i]);
+        REQUIRE(mc->paramOverrides.size() == 1);
+        CHECK(mc->paramOverrides[0].name == (i == 0 ? "Tint" : "Wetness"));
+        CHECK(mc->paramOverrides[0].value[0] == doctest::Approx(0.25f + i));
+        ++seen[i];
+    }
+    CHECK(seen[0] == 4);
+    CHECK(seen[1] == 4);
+}
+
 // ── Texture tiling ────────────────────────────────────────────────────────────
 // Terrain UVs run 0..1 across the WHOLE landscape, so a texture was stretched
 // over the entire terrain instead of tiling.

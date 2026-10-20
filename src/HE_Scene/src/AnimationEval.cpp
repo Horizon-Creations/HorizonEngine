@@ -9,15 +9,36 @@
 namespace
 {
 
+// The key k with times[k] < t <= times[k+1]: one less than the first j >= 1 with
+// times[j] >= t, or the last key when there is none. It runs for every channel of
+// every posed skeleton every frame (SCN-103).
+//
+// Two ways to the same index. A hand-keyed channel has a handful of keys and the
+// walk is fastest there; a mocap channel has hundreds, and the walk costs O(n)
+// and more the later the playhead. Measured on the M5 (docs/audit-scene-systeme-
+// 2026-10-18.md): the walk wins below ~48 keys (2.5x at 2), the binary search
+// from ~64 on (4-8x at 300-1000). The binary search needs `times` ascending —
+// glTF demands that, and the clip loader warns when a file breaks it.
+//
+// Its predicate is !(x >= t) rather than x < t on purpose: for a NaN t the two
+// differ, and this one lands on the last key, exactly where the walk does.
+constexpr size_t kBracketBinaryFrom = 64;
+
 static size_t findBracket(const std::vector<float>& times, float t)
 {
-    size_t k = 0;
-    for (size_t i = 0; i + 1 < times.size(); ++i)
+    if (times.size() < kBracketBinaryFrom)
     {
-        if (times[i + 1] >= t) { k = i; return k; }
-        k = i + 1;
+        size_t k = 0;
+        for (size_t i = 0; i + 1 < times.size(); ++i)
+        {
+            if (times[i + 1] >= t) { k = i; return k; }
+            k = i + 1;
+        }
+        return k;
     }
-    return k;
+    const auto it = std::lower_bound(times.begin() + 1, times.end(), t,
+                                     [](float x, float v) { return !(x >= v); });
+    return static_cast<size_t>(it - times.begin()) - 1;
 }
 
 static float bracketAlpha(const std::vector<float>& times, size_t k, float t)

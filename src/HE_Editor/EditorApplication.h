@@ -8,8 +8,11 @@
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "TeamController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "StructuralSync.h"  // StructPassGate: when the per-frame structure diff runs
+#include "TerrainSync.h"     // landscape grids and settings over the session
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "AssetAutosave.h"   // the same for dirty asset tabs
 #include "NotificationStore.h"
@@ -33,17 +36,19 @@
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected in the preview (no kick)
 #include <HorizonScene/Net/NetGameSession.h>        // the multiplayer session (plan Â§5.6)
 #include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
+#include <SourceControl/GitInstall.h>
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/SftpProbe.h>
 #endif
 #include <Net/RouterProbe.h>
 #include "GitController.h"
-#include "McpBridge.h"
+#include "TeamSyncController.h"
 #include "McpClaudeProbe.h"      // Tool Status: can Claude actually reach this editor
 #include "McpLockBook.h"         // external locks, per MCP client
 #include "DeferredHandleRetireList.h" // Vulkan viewport descriptor sets, freed behind the GPU
 #include "EditorCommands.h"
+#include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -58,6 +63,11 @@
 #include <imgui.h>
 #include <cstdint>
 #endif
+
+// The MCP listener is held by pointer, so the 78 files that include this one
+// do not parse McpBridge.h and the tool registry behind it (EDT-1209). Who
+// calls into the bridge includes McpBridge.h itself.
+namespace HE::Ed { class McpBridge; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.
@@ -170,6 +180,9 @@ struct AppContext
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
+	// The cells Play streams in a split scene (PlayCellStreaming), for the
+	// Streaming tab; null before the first Play.
+	const HE::CellRuntime* playCells = nullptr;
 	// An APPLICATION project has no play mode: its UI runs permanently and the
 	// viewport panel is the app itself (docs/he-apps-plan.md E2). Panels that ask
 	// "are we playing?" to decide whether the in-game UI owns the pointer must
@@ -310,6 +323,12 @@ struct AppContext
 	std::function<void()> cutEntity;
 	std::function<void()> pasteEntity;
 	std::function<void()> deleteEntity;
+	// A rename typed into the Outliner or the Details name field, for an entity
+	// somebody else in the session is editing. True = it went to the host as a
+	// request and the caller must NOT rename locally (the name would hold here
+	// and nowhere else until the holder's next edit overwrote it). False = no
+	// conflict (or no session): rename as always. Unbound in tests = false.
+	std::function<bool(Entity, const std::string& newName)> askHostToRename;
 	// Is there anything to paste? Drives the Paste item's enabled state.
 	bool entityClipboardFull = false;
 
@@ -343,13 +362,13 @@ struct AppContext
 
 	// Startup toolchain probe (cmake + C++ compiler), run once on a background
 	// thread so a slow/missing toolchain never blocks editor init. Null until
-	// the probe finishes. The "Toolchain Missing" dialog (EditorUI) opens when
+	// the probe finishes. The tool setup dialog (ToolSetupDialog) opens when
 	// it's non-null and something's missing, unless suppressed in preferences.
 	const HE::hccg::ToolchainProbe* toolchainProbe = nullptr;
 	std::function<void()> recheckToolchain; // re-runs the probe (after the user installs something)
 
 	// Auto-install of the missing toolchain (see HcCodegen::installToolchain). The
-	// "Toolchain Missing" dialog calls startToolchainInstall(needCmake, needCompiler);
+	// tool setup dialog calls startToolchainInstall(needCmake, needCompiler);
 	// the install runs on a background thread and streams output, which the dialog
 	// shows live by polling toolchainInstallLog() each frame.
 	std::function<void(bool needCmake, bool needCompiler)> startToolchainInstall;
@@ -357,6 +376,10 @@ struct AppContext
 	bool toolchainInstalling  = false; // an install is currently running
 	bool toolchainInstallDone = false; // the last install finished (success or failure)
 	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
+	// What the running install's process tree is doing, and the way to end it. Null /
+	// empty where the editor has no install to watch.
+	const HE::hccg::ToolchainInstallControl* toolchainInstallControl = nullptr;
+	std::function<void()> cancelToolchainInstall; // ends winget and the installers below it
 
 	// Build ▸ Build and Reload Game Logic: hot-swap the module that was just
 	// compiled into the RUNNING play session (onStop the old image, load the new
@@ -378,6 +401,25 @@ struct AppContext
 	// and the fix is one git config call, not an install.
 	std::function<void(std::string name, std::string email)> setGitIdentity;
 	bool gitIdentityApplying = false;
+
+	// Installing git when the probe found none (HE::Sc::runGitInstall), started
+	// only by the user pressing "Install Git". Same shape as the toolchain install
+	// above: a worker streams the installer's output, the dialog polls the log
+	// each frame, and the probe re-runs when it ends — and if git now runs, the
+	// project's repository is looked up again, so the panel picks up where it was.
+	std::function<void()> startGitInstall;
+	// The same for Git LFS (HE::Sc::GitInstallTarget::GitLfs): same worker, log and
+	// flags — only one install runs at a time — so gitInstallIsLfs says which of
+	// the two the log and the done/ok flags belong to.
+	std::function<void()> startGitLfsInstall;
+	// Stops waiting for Apple's installer (the only wait that can be stopped:
+	// a package manager that is already running cannot be interrupted).
+	std::function<void()> cancelGitInstall;
+	std::function<std::string()> gitInstallLog; // thread-safe snapshot of the streamed output
+	bool gitInstalling   = false; // an install is currently running
+	bool gitInstallDone  = false; // the last install finished (success or failure)
+	bool gitInstallOk    = false; // finished, and `git --version` (LFS: `git lfs version`) ran afterwards
+	bool gitInstallIsLfs = false; // the install that is running / last ran is Git LFS, not git
 
 	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
 	// same null-means-still-running convention as the two above. Read-only: it
@@ -403,6 +445,9 @@ struct AppContext
 	// Source-control state for the panel and the Content Browser badges. Null in
 	// builds without the module.
 	GitController* git = nullptr;
+	// Saving through the team server (sourceControl.mode = "teamServer"): the
+	// panel's team-sync view. Null in tests that build no editor.
+	TeamSyncController* teamSync = nullptr;
 
 	// Performance counters (mutable, updated each frame by UI)
 	float* frametimeHistory = nullptr;
@@ -502,6 +547,9 @@ struct AppContext
 	// Live collaboration session (see CollabController). Null until the editor
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
+	// The team server connection (see TeamController): login, presence, and
+	// the team sessions it sets up on `collab`. Null in tests.
+	TeamController* team = nullptr;
 
 	// The MCP bridge, for the two places that have to show what it is actually
 	// doing: the Remote Control page in Preferences and the footer chip. READ
@@ -553,9 +601,9 @@ struct AppContext
 class EditorApplication : public HE::Application
 {
 public:
-	explicit EditorApplication(std::string startupPath)
-		: HE::Application(std::move(startupPath)) {}
-	~EditorApplication() override; // defined in .cpp where ScriptEngine is complete
+	// Both defined in .cpp, where ScriptEngine and McpBridge are complete.
+	explicit EditorApplication(std::string startupPath);
+	~EditorApplication() override;
 
 public:
 	// Logger sink target: appends a play-session warning/error (any thread).
@@ -584,6 +632,12 @@ private:
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
+	// The user's own graphics values, set aside while the open project's are the
+	// ones in m_editorConfig (syncGraphicsSource). What the config file gets, and
+	// what comes back when the project closes or the preview is switched to
+	// "my own values".
+	EditorConfig m_userGraphics;
+	bool         m_graphicsFromProject = false;
 
 	// App-wide HorizonCode host: owns the runtime the editor world runs on and
 	// the GameInstance script. m_gameInstanceGraph is the authored source (edited
@@ -612,6 +666,14 @@ private:
 	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
 	// any trailing field may be left off.
 	IRenderer::ShadowSettings projectShadowSettings();
+	// Which graphics values m_editorConfig holds this frame: the open project's
+	// (graphics.enabled, preview mode "same as the project") or the user's own.
+	// Every frame, before the renderer is handed them.
+	void syncGraphicsSource();
+	// The gamepad deadzones the game in the editor runs with: the project's when
+	// it sets them (input.enabled), the editor's own otherwise.
+	float playStickDeadzone();
+	float playTriggerDeadzone();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
@@ -621,6 +683,9 @@ private:
 	// is what makes both uniform across every asset kind.
 	void        applyAssetBytes(const std::string& relativePath,
 	                            const std::vector<std::uint8_t>& bytes);
+	// The team server wrote (or removed) `projectRelPath`: what is loaded or
+	// open re-reads it. The open scene is SceneDiskWatch's (it asks).
+	void        applyTeamSyncFile(const std::string& projectRelPath);
 	void        saveOpenTabs();
 	void        restoreOpenTabs();
 	std::string m_lastTabSig; // change detection for the auto-save
@@ -702,6 +767,15 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
+	// A split scene's cells, streamed around the play camera — the game's
+	// CellRuntime with the editor as its host (PlayCellStreaming.h). Made at the
+	// first Play, ended at every Stop before the edited scene is restored.
+	std::unique_ptr<PlayCellStreaming> m_playCells;
+	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
+	// builds the block itself and pushEnvironment hands it to the renderer instead of the
+	// physics world's. Off outside the dump.
+	WaterRippleBlock m_dumpRipples;
+	bool             m_dumpRipplesOn = false;
 	// The step is the PROJECT's (ProjectPhysicsSettings::fixedDt, read from
 	// currentProject().settings where the accumulator steps): the packaged game
 	// reads the same file, so it simulates at the rate the editor previewed at.
@@ -739,6 +813,15 @@ private:
 	void copySelectedEntity(bool cut);
 	void pasteEntityClipboard();
 	void deleteSelectedEntity();
+	// In a session: the targets whose subtree no other participant holds a lock
+	// in. The rest are left alone and the user is told, once, by name — a delete
+	// the session refuses must not happen here either, or the entity is gone on
+	// this machine and alive on every other one.
+	// `askHost`: a refused DELETE becomes a request in the host's in-tray
+	// (CollabEntityOps.h) instead of a dead end — the same decision an asset
+	// delete gets. Off for removals nobody typed (an undo replaying a create).
+	std::vector<Entity> withoutPeerHeld(const std::vector<Entity>& targets, const char* verb,
+	                                    bool askHost = false);
 	// The selection roots that may be copied or removed: valid, not built-in
 	// (root, sun, moon), and not under another selected entity.
 	std::vector<Entity> editableSelectionRoots() const;
@@ -751,12 +834,18 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	// The team server: sign-in, presence, invitations. Sets team sessions up on
+	// m_collab, so it is declared after it. Pumped right after it.
+	TeamController   m_team{ m_collab };
 	// Editor-wide "something happened" channel — see NotificationStore.h. Owned
 	// here and handed to the UI through AppContext, the same shape m_collab and
 	// m_git use, except that this one is written from worker threads too and
 	// therefore carries its own mutex.
 	HE::Ed::NotificationStore m_notifications;
 	GitController    m_git;
+	// Saves through the team server when the project says so (topic 199).
+	// Over the three above, so declared after them; pumped after m_team.
+	TeamSyncController m_teamSync{ m_team, m_git, m_collab };
 	// The local MCP listener. Pumped once per frame from OnRender, next to the
 	// collaboration pump and for the same reason: both apply things that came
 	// off a socket, and both have to do it on the main thread between the world
@@ -786,7 +875,10 @@ private:
 	DebugDrawBuffer m_debugDraw;
 	std::size_t m_mcpGizmoLineBegin = 0;
 	std::size_t m_mcpGizmoLineEnd   = 0;
-	HE::Ed::McpBridge m_mcp;
+	// Made in the constructor and never reset, so it is never null. A pointer
+	// only to keep McpBridge.h out of this header; it stays in this slot for
+	// the destruction order above.
+	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.
@@ -842,8 +934,13 @@ private:
 	void updateMcpLocks(std::uint64_t nowMs);
 	bool mcpLockedByOther(std::uint64_t subject);
 	CollabUndo       m_collabUndo;
-	// Entities the session already knows about. Diffed each frame so every
-	// creation and deletion path is covered without hooking any of them.
+	// Landscape edits: diffed each frame like the entity set below, so every
+	// tool that shapes, paints or plants a landscape replicates (TerrainSync.h).
+	HE::Ed::TerrainSync m_terrainSync;
+	bool                m_terrainSyncLive = false;   // in a session last frame
+	// Entities the session already knows about. Diffed (whenever the structure
+	// epoch moved, and once a second regardless) so every creation and deletion
+	// path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
 	// New subtrees whose create the session refused, and for how many frames.
 	// Separate from m_structureKnown because "we tried and it did not go" is not
@@ -852,7 +949,24 @@ private:
 	// nothing said. Entries leave on the first success or when the retries run
 	// out; see syncStructuralChanges for why there is a limit at all.
 	std::unordered_map<Entity, int> m_structureUnsendable;
-	void syncStructuralChanges();
+	// The parent each known entity had when the diff last looked (StructuralSync.h
+	// reparentedSince), so a move in the hierarchy is published like a create.
+	std::unordered_map<Entity, Entity> m_structureParent;
+	// Known entities that are gone but whose destroy the session refused, and for
+	// how many frames: the same retry rule as m_structureUnsendable.
+	std::unordered_map<Entity, int> m_structureUndeletable;
+	// A peer's destroy: drop the whole subtree from both records (echo protection).
+	void forgetStructureOf(Entity root);
+	// Runs the diff only when the world's structure epoch moved, something is
+	// still waiting to be retried, or a second passed (StructPassGate).
+	void syncStructuralChanges(std::uint64_t nowMs);
+	HE::Ed::StructPassGate     m_structureGate;
+	// A re-parent the last pass could not send (parent not announced yet, or no
+	// connection): the next frame has to look again, like the two retry maps.
+	bool                       m_structureReparentPending = false;
+	// "Everything that exists" for one pass. A member so the buckets survive
+	// between passes; only filled on the frames the gate lets through.
+	std::unordered_set<Entity> m_structureCurrent;
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the
 	// document it is already showing), and the debounced whole-file autosave
@@ -894,6 +1008,18 @@ private:
 	// Mirrors for the two editor-owned documents (panels keep their own).
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
+	// When those two are diffed (CollabDocSync::DiffGate). The signal is
+	// m_undo.revision() (every Level Script edit snapshots the scene) plus this
+	// count of Game Instance commits and MCP endEdits.
+	CollabDocSync::DiffGate m_levelScriptDiffGate;
+	CollabDocSync::DiffGate m_gameInstanceDiffGate;
+	std::uint64_t           m_editorDocEdits = 0;
+	// For the per-frame callers only: true when `key` (one of the two) is due
+	// for a diff, and the gate is then counted as run.
+	bool editorDocDiffDue(const std::string& key, std::uint64_t nowMs);
+	// Those two, edited while their tab is closed (an MCP client's hc_ tools):
+	// the tab loop never sees them, so updateAssetCollabSync sends them from here.
+	std::unordered_set<std::string> m_collabUntabbedEdits;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
 	// The recovery snapshot of the open scene, written on a timer whether or
 	// not a collaboration session is running (the whole-file autosave above
@@ -924,6 +1050,11 @@ private:
 	// the tabs are told to reload AFTER that poll, which the restore forces to
 	// run on the next frame — otherwise a tab would re-read the stale copy.
 	std::vector<std::string> m_reloadTabsAfterPoll;
+	// Assets a collaboration peer's file just replaced. applyAssetBytes re-reads
+	// them on the spot, so the tab reload right after it sees the new bytes; the
+	// per-type follow-up a hot reload gets (renderer caches, material instances,
+	// prefab placements) runs on the next poll, which the arrival forces.
+	std::vector<HE::UUID> m_reloadedByPeer;
 	// Set by the quit the UI hands us (AppContext::quit), which only fires once
 	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
 	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
@@ -1043,6 +1174,13 @@ private:
 	// tools are the caller that HAS to know, because the client on the other end
 	// cannot see either.
 	bool saveSceneToPath(const std::string& path);
+	// Host, in a session: the scene settled (somebody saved it, or nobody has
+	// touched it for a while), so the host writes it to its own scene file.
+	// False when it cannot now (Play, no file yet, a disk conflict pending);
+	// the key then stays pending (CollabSettle.h).
+	bool persistSessionScene();
+	bool m_settleWritingScene  = false;   // persistSessionScene's write is not a new save
+	bool m_collabAutosaveWrite = false;   // the session's 1 s autosave is not a save either
 	// Hand the current viewport image to the thumbnail cache as this scene's
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.
@@ -1146,6 +1284,22 @@ private:
 	std::thread       m_gitIdentityThread;
 	std::atomic<bool> m_gitIdentityApplying{false};
 	void applyGitIdentity(std::string name, std::string email);
+	// Installing git (see startGitInstall). Its own log and flags, not the
+	// toolchain install's: both can run at once and must not share a log.
+	std::thread       m_gitInstallThread;
+	std::atomic<bool> m_gitInstallRunning{false};
+	std::atomic<bool> m_gitInstallFinished{false};
+	std::atomic<bool> m_gitInstallOk{false};
+	std::atomic<bool> m_gitInstallIsLfs{false};   // what the run above is installing
+	std::atomic<bool> m_gitInstallCancel{false};
+	// Raised by any probe that found a runnable git (after Install Git, or a
+	// Recheck after installing by hand) and consumed on the frame thread, the
+	// only one that may re-open the project in m_git — which it does when the
+	// last open had no git to ask (GitController::gitMissing).
+	std::atomic<bool> m_gitReopenRepo{false};
+	std::mutex        m_gitInstallLogMutex;
+	std::string       m_gitInstallLog;
+	void startGitInstall(bool lfs = false);
 
 #ifdef HE_HAVE_LIBSSH2
 	// EngineContent SFTP reachability probe. Same lifecycle as the other
@@ -1211,6 +1365,7 @@ private:
 	std::atomic<bool> m_installAttempted{false};
 	std::mutex        m_installLogMutex;
 	std::string       m_installLog;
+	HE::hccg::ToolchainInstallControl m_installCtl;
 	void startToolchainInstall(bool needCmake, bool needCompiler);
 
 	// Hot-reload: disk-asset change detection
@@ -1236,6 +1391,8 @@ private:
 	bool          m_dumpQuit = true;
 	bool          m_dumpDone = false;
 	void dumpFrameHeadless();
+	// The HE_DUMP_* witness scenes dumpFrameHeadless builds before its capture.
+	void buildDumpWitnessScenes(IRenderer* r, HE::UUID& matTestId, HE::UUID& layerMatId);
 	// Live-frame witness (HE_DUMP_LIVE=<file.bmp> + HE_DUMP_LIVE_TRIGGER=<file>):
 	// the running editor's viewport, captured whenever the trigger file appears,
 	// so an outside driver can look at what the viewport draws AFTER its MCP

@@ -19,6 +19,7 @@ enum class EditorMode
 {
 	View,
 	Landscape,
+	Spline,    // draw and edit lines and outlines (SplineComponent) in the Scene viewport
 };
 
 struct EditorConfig
@@ -62,6 +63,24 @@ struct EditorConfig
 	// is ahead of everything else the session wants to say. The cap is also the
 	// only thing bounding what one peer can make another allocate.
 	int CollabMaxAssetMB = 64;
+
+	// A relay server for collaboration sessions, "host:port" (port optional,
+	// default 7777). Empty — the default — means peer-to-peer, exactly as it
+	// was before the relay existed. With an address, hosting and joining make
+	// only OUTGOING connections to that server, which pairs host and guests by
+	// session id and forwards their (still end-to-end encrypted) bytes. For
+	// when the host cannot open a port. docs/relay-server-protocol.md.
+	//
+	// Since topic 197 this is the TEAM server's address too (Preferences ▸
+	// Team): the team server is the relay, so one field. Kept under its old
+	// name and config key so an address entered as a relay carries over.
+	std::string CollabRelayAddress;
+	// The team and member last signed in with (Preferences ▸ Team). Never the
+	// password: that stays in memory (TeamController). What survives a restart
+	// is a session token from the team server, in team-session.txt beside
+	// config.json and not in here (TeamController::setTokenFile, topic 201).
+	std::string TeamName;
+	std::string TeamMember;
 
 	// The MCP bridge: let an external client (a Claude instance, through the
 	// stdio shim) drive this editor — read what is open, and from a later step
@@ -114,6 +133,9 @@ struct EditorConfig
 	bool  RewardsSoundProblem       = true; // under RewardsSound
 	bool  RewardsSoundDragDrop      = true; // HC graph drag and drop cues (EditorDragCues.h)
 	bool  RewardsProblemPulse  = true;   // V8/V9: the bell rings out, a failed node pulses
+	// Toasts (bottom-right) and critical dialogs for notifications. Off: everything
+	// goes to the notification centre (the footer bell) only. See NotificationStore.h.
+	bool  NotificationPopups   = true;
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 	bool  RewardsCounterTick   = true;   // V3: a number that rose lights up (under Progress)
 	bool  RewardsStreakTooltip = true;   // hovering the counters: the last 7 days (under Progress)
@@ -181,6 +203,13 @@ struct EditorConfig
 	// hearing it is how you tune it. Off for the days a rain loop is in the way.
 	// Play mode always has them (the component's own switch is the one to use there).
 	bool  WeatherSoundInEditor = true;
+
+	// Runtime only, never saved: the graphics fields of this struct currently
+	// hold the PROJECT's values and not the user's (EditorApplication::
+	// syncGraphicsSource sets it every frame). The settings rows read it to lock
+	// themselves — an edit would be overwritten the next frame — and the config
+	// writer reads it to put the user's own values back before saving.
+	bool  GraphicsFromProject = false;
 
 	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
 	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
@@ -260,6 +289,7 @@ struct EditorConfig
 		{
 		case EditorMode::View:      return "View";
 		case EditorMode::Landscape: return "Landscape";
+		case EditorMode::Spline:    return "Spline";
 		default:                   return "Unknown";
 		}
 	}

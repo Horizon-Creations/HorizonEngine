@@ -4,6 +4,7 @@
 #include "EditorApplication.h"
 #include "EditorHelp.h"   // "Session Participants/<label>" — the roster is drawn twice
 #include "EditorWidgets.h"
+#include "TeamView.h"     // the online team stack's joining slide lands on these faces
 
 #include <Renderer/IRenderer.h>
 
@@ -22,6 +23,12 @@
 
 namespace CollabPresenceBar
 {
+namespace
+{
+	// FooterFaces(): written by DrawFooter, empty without a session.
+	std::vector<TeamView::SessionFace> s_footerFaces;
+}
+
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
@@ -320,6 +327,7 @@ void DrawFooter(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
 	s_clusterDrawn = false;
+	s_footerFaces.clear();
 
 	CollabController* collab = ctx.collab;
 	if (!collab || !collab->inSession()) { s_menuOpen = false; s_pinned = false; return; }
@@ -343,6 +351,10 @@ void DrawFooter(AppContext& ctx)
 	{
 		const HE::Net::Participant& p = roster[static_cast<std::size_t>(i)];
 		const ImVec2 at(origin.x + i * (kFaceSize + kFaceGap), origin.y);
+		s_footerFaces.push_back({ p.name, at.x, at.y, kFaceSize });
+		// A team member still sliding over from the online stack: the slide
+		// is their face until it lands here (TeamView::drawFooterJoins).
+		if (ctx.team && p.id != localId && TeamView::footerJoining(*ctx.team, p.name)) continue;
 		drawAvatarAt(ctx, dl, at, kFaceSize,
 		             avatarTexture(ctx.renderer, p.id, p.avatar.rgba, p.avatar.size),
 		             p.id, p.name, p.id == localId);
@@ -361,6 +373,11 @@ void DrawFooter(AppContext& ctx)
 #else
 	(void)ctx;
 #endif
+}
+
+const std::vector<TeamView::SessionFace>& FooterFaces()
+{
+	return s_footerFaces;
 }
 
 #ifdef HE_IMGUI_ENABLED

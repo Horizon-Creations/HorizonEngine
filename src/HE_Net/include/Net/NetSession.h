@@ -46,6 +46,19 @@ public:
     void broadcast(MessageId id, const BitWriter& payload,
                    SendMode mode = SendMode::ReliableOrdered);
 
+    // Send to every live peer but `except` — the host relaying one client's
+    // change to all the others.
+    void broadcastExcept(ConnectionId except, MessageId id, const BitWriter& payload,
+                         SendMode mode = SendMode::ReliableOrdered);
+
+    // Send the same message to each of `to`.
+    void sendTo(const std::vector<ConnectionId>& to, MessageId id, const BitWriter& payload,
+                SendMode mode = SendMode::ReliableOrdered);
+
+    // The three above are a send() per peer, unless the transport fans out
+    // (ITransport::fansOut — a relay that copies one frame to every client).
+    // Then the message is framed once and handed over once.
+
     // Overloads for id-only messages (no payload).
     void send(ConnectionId conn, MessageId id, SendMode mode = SendMode::ReliableOrdered) {
         send(conn, id, BitWriter{}, mode);
@@ -68,7 +81,16 @@ public:
     const std::vector<ConnectionId>& connections() const { return m_connections; }
 
 private:
+    // [id low byte][id high byte][payload bytes]: the one place a frame is built.
+    // It does not depend on the recipient, so every multi-peer send builds it once.
+    std::vector<std::uint8_t> frame(MessageId id, const BitWriter& payload) const;
+    void sendFrame(ConnectionId conn, MessageId id, const std::vector<std::uint8_t>& bytes,
+                   SendMode mode);
+    void fanOut(const std::vector<ConnectionId>& to, MessageId id, const BitWriter& payload,
+                SendMode mode);
+
     ITransport*                                    m_transport = nullptr;
+    bool                                           m_fansOut   = false;   // m_transport->fansOut(), asked once
     NetRole                                        m_role      = NetRole::None;
     std::unordered_map<MessageId, MessageHandler>  m_handlers;
     ConnectionHandler                              m_onConnect;
