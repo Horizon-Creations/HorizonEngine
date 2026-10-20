@@ -6245,7 +6245,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
 			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
-			// HE_DUMP_WATERPARAMS="FresnelPower=10;DeepColor=1,0,0": per-entity
+			// HE_DUMP_WATERPARAMS="Surface=10,0.8,0.08,0.3;DeepColor=1,0,0": per-entity
 			// overrides, the same MaterialComponent::paramOverrides the Details
 			// panel writes, so a shot pair can show what ONE knob does. Components
 			// left out keep the material's default.

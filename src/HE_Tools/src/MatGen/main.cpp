@@ -448,7 +448,7 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
 // Chop strengths relative to `drive` (the summed steepness), see the chop layers in waterMaterial.
 constexpr float kChopBase = 0.3f, kChopMid = 0.9f, kChopFine = 0.8f, kChopFiner = 0.55f;
 
-// Shallow water (Thema 206 step 4), constants because all sixteen parameter slots are taken.
+// Shallow water (Thema 206 step 4), defaults of the ShallowWater parameter (step 6).
 // The tint depth follows the real shore depth for e above 0 (water shallower than one metre)
 // and has fully taken over at e = kShallowTintE (half a metre); the Opacity floor falls to
 // kShallowOpacity of itself at no depth and is whole again from kShallowClearDepth metres.
@@ -668,18 +668,33 @@ Mb waterMaterial()
     const int waveC = m.param(T::ParamVec4, "WaveC", { wc.directionDeg, wc.speed, wc.length, wc.steepness }, "Waves",
         "Fine ripples. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Also sets the strength of the chop on top.", 5);
-    const int fresPow = m.param(T::ParamFloat, "FresnelPower", { 5.0f }, "Surface",
-        "Fresnel exponent: how quickly the surface turns reflective toward grazing angles "
-        "(5 = physical water).", 6, 1.0f, 10.0f);
-    const int refl = m.param(T::ParamFloat, "Reflection", { 0.8f }, "Surface",
-        "How strongly sky and scene reflection cover the water: scales the Fresnel lift of "
-        "the opacity and the specular F0.", 7, 0.0f, 1.0f);
-    const int rough = m.param(T::ParamFloat, "Roughness", { 0.08f }, "Surface",
-        "Surface roughness. Low = sharp reflections and a tight sun glint. Distant water "
-        "is made rougher on top of this.", 8, 0.0f, 1.0f);
-    const int spec = m.param(T::ParamFloat, "Specular", { 0.3f }, "Surface",
-        "Dielectric specular (0.5 = F0 0.04). Multiplied by Reflection; ~0.3 gives water's F0 0.02.",
-        9, 0.0f, 1.0f);
+    // The four plain floats share one slot (Thema 206 step 6): each used only .x of a whole
+    // Vec4 slot, and all sixteen were taken. Slider ranges of the old floats, for the tooltip:
+    // FresnelPower 1..10, the other three 0..1.
+    const int surf = m.param(T::ParamVec4, "Surface", { 5.0f, 0.8f, 0.08f, 0.3f }, "Surface",
+        "x = Fresnel exponent (1..10): how quickly the surface turns reflective toward grazing "
+        "angles (5 = physical water). "
+        "y = reflection (0..1): how strongly sky and scene reflection cover the water, scales the "
+        "Fresnel lift of the opacity and the specular F0. "
+        "z = roughness (0..1): low = sharp reflections and a tight sun glint, distant water is "
+        "made rougher on top of this. "
+        "w = dielectric specular (0..1): 0.5 = F0 0.04, multiplied by reflection, ~0.3 gives "
+        "water's F0 0.02.", 6);
+    // Shallow water (Thema 206 step 4): the tint and the Opacity floor follow the real shore
+    // depth in the last metre before a landscape's shore. Defaults reproduce the step 4 constants.
+    const int shallowW = m.param(T::ParamVec4, "ShallowWater", { kShallowClearDepth, kShallowTintE, kShallowOpacity, 0.0f }, "Surface",
+        "Shore shallows (need the water mesh of a landscape; a plane has no shore, no effect). "
+        "x = clear depth (m, 0..1): from this much water on the opacity floor is whole, "
+        "shallower water lets the ground show through more. "
+        "y = tint start (0..1, shore closeness: 0 = a metre of water or more, 1 = none): "
+        "where the depth tint has fully taken over the real depth, 0.5 = half a metre; "
+        "further out it blends to the assumed depth (Turbidity.y). "
+        "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
+        "w = reserved, no effect yet.", 7);
+    const int sfs = m.un(T::SplitRGBA, surf, 1, 20);
+    const Pin fresPow{ sfs, 0 }, refl{ sfs, 1 }, rough{ sfs, 2 }, spec{ sfs, 3 };
+    const int shs = m.un(T::SplitRGBA, shallowW, 1, 22);
+    const Pin clearDepth{ shs, 0 }, tintStart{ shs, 1 }, opacFloor{ shs, 2 };
     const int opac = m.param(T::ParamFloat, "Opacity", { 0.5f }, "Surface",
         "Opacity looking straight down into clear water. Depth tint, Fresnel and foam raise it. "
         "In the last metre before a landscape's shore it falls toward a quarter of itself as the "
@@ -858,7 +873,7 @@ Mb waterMaterial()
     // colour come through) and thickens to the assumed depth over the metre before. The blend
     // is a smoothstep of e, which is 0 at one metre: no step where the shore range begins,
     // and in open water (e = 0) this is Turbidity.y itself.
-    const int tintMix = m.op3(T::Smoothstep, m.k(0.0f, 14, 5), m.k(kShallowTintE, 14, 5.5f), shoreE, 15, 5);
+    const int tintMix = m.op3(T::Smoothstep, m.k(0.0f, 14, 5), tintStart, shoreE, 15, 5);
     const int tintD   = m.op3(T::Lerp, Pin{ ts, 1 }, shoreD, tintMix, 17, 5);
     const int path  = m.op(T::Divide, tintD, m.op(T::Add, ndvR, m.k(0.05f, 24, 6), 25, 5), 26, 5);
     const int dens  = m.op(T::Multiply, m.op(T::Multiply, Pin{ ts, 0 }, path, 27, 5), m.k(-1.0f, 27, 6), 28, 5);
@@ -969,8 +984,8 @@ Mb waterMaterial()
     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
     // where shoreD is a metre, so neutral outside the shore range).
-    const int clearMix = m.op3(T::Smoothstep, m.k(0.0f, 37, 3), m.k(kShallowClearDepth, 37, 3.5f), shoreD, 38, 3);
-    const int opacEff  = m.op(T::Multiply, opac, m.op3(T::Lerp, m.k(kShallowOpacity, 38, 2), m.k(1.0f, 38, 2.5f), clearMix, 39, 2), 40, 2.5f);
+    const int clearMix = m.op3(T::Smoothstep, m.k(0.0f, 37, 3), clearDepth, shoreD, 38, 3);
+    const int opacEff  = m.op(T::Multiply, opac, m.op3(T::Lerp, opacFloor, m.k(1.0f, 38, 2.5f), clearMix, 39, 2), 40, 2.5f);
     const int bodyA  = m.op3(T::Lerp, opacEff, m.k(1.0f, 39, 3), m.un(T::OneMinus, trans, 39, 4), 40, 3);
     const int alpha1 = m.op3(T::Lerp, bodyA, m.k(1.0f, 40, 4.5f), m.op(T::Multiply, refl, fres, 40, 2), 41, 3);
     const int alpha0 = m.op3(T::Lerp, alpha1, m.k(1.0f, 41, 4.5f), m.op(T::Multiply, foamAmt, m.k(0.85f, 41, 5), 42, 5), 43, 3);
@@ -1012,8 +1027,8 @@ Mb waterMaterial()
 // The parameters a material promises, in no particular order — the codegen
 // numbers slots by first use, not by canvas position.
 const std::set<std::string> kWaterParams = {
-    "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "FresnelPower",
-    "Reflection", "Roughness", "Specular", "Opacity", "Refraction", "FoamColor", "Foam",
+    "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "Surface",
+    "ShallowWater", "Opacity", "Refraction", "FoamColor", "Foam",
     "Caustics", "Variation",
 };
 

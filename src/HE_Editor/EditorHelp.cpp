@@ -255,7 +255,7 @@ namespace
 	{ "Material/Roughness", "",
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
 	  "that decides whether something reads as wet, polished or worn. On the "
-	  "engine water it is a parameter of its own: keep it low for sharp "
+	  "engine water it is the z component of Surface: keep it low for sharp "
 	  "reflections and a tight sun glint. Distant water is made rougher on top "
 	  "of it, the way the eye averages ripples it can no longer resolve.",
 	  "", "rendering#lighting" },
@@ -321,19 +321,29 @@ namespace
 	  "steepnesses together also set how strong the irregular chop on top is: "
 	  "all three at 0 gives a flat surface.",
 	  "", "materials#water" },
-	{ "Material/FresnelPower", "",
-	  "How quickly the surface turns reflective toward grazing angles. 5 is "
-	  "physical water; lower values make the water mirror-like even when you "
-	  "look down into it.",
+	{ "Material/Surface", "",
+	  "The four plain surface numbers of the water in one row. x = Fresnel "
+	  "exponent (1 to 10): how quickly the surface turns reflective toward "
+	  "grazing angles, 5 is physical water, lower values make it mirror-like "
+	  "even when you look down into it. y = reflection (0 to 1): how strongly "
+	  "sky and scene reflection cover the water, it scales the Fresnel lift of "
+	  "the opacity and the specular strength, 0 leaves only the water colour. "
+	  "z = roughness (0 to 1): low gives sharp reflections and a tight sun "
+	  "glint, distant water is made rougher on top. w = specular (0 to 1): "
+	  "strength of the specular reflection for a non-metal (0.5 = F0 0.04), "
+	  "multiplied by the reflection; about 0.3 gives water's real F0 of 0.02.",
 	  "", "materials#water" },
-	{ "Material/Reflection", "",
-	  "How strongly sky and scene reflection cover the water. Scales both the "
-	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
-	  "the water colour.",
-	  "", "materials#water" },
-	{ "Material/Specular", "",
-	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
-	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
+	{ "Material/ShallowWater", "",
+	  "How water behaves in the last metre before a landscape's shore (a plane "
+	  "has no shore, so nothing changes there). x = clear depth in metres: "
+	  "from this much water on, Opacity is whole; shallower water lets the "
+	  "ground show through more. Raise it to see further into the shallows "
+	  "before the water turns opaque. y = tint start (0 to 1, shore closeness "
+	  "where 0 is a metre of water or more and 1 is none): where the depth tint "
+	  "has fully taken over the real depth, 0.5 is half a metre; further out it "
+	  "blends to the assumed depth in Turbidity. z = opacity floor (0 to 1): "
+	  "the share of Opacity left at no depth at all. w is reserved and does "
+	  "nothing yet.",
 	  "", "materials#water" },
 	{ "Material/Refraction", "",
 	  "How much the waves bend the view into the water: the depth tint and the "

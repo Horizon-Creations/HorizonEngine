@@ -230,6 +230,8 @@ zusammengehörige Paare = ein `ParamVec2`. Ein-/Aus-Schalter laufen über **Stat
 die keinen Slot kosten (sie erzeugen Shader-Permutationen, ein Ausschalten spart auch
 GPU-Zeit).
 
+> **Thema 206 Schritt 6:** `FresnelPower`/`Reflection`/`Roughness`/`Specular` (Zeilen 7 bis 10 unten) sind seitdem EIN Vec4 `Surface` (x/y/z/w in dieser Reihenfolge); dazu kommt `ShallowWater` (Uferflachwasser, siehe `docs/water-shallow-params-2026-10-20.md`). Die Tabelle unten ist der Stand vor Schritt 6.
+
 | # | Name (Param-Knoten) | Typ | Komponenten | Gruppe | braucht neuen Knoten? |
 |---|---|---|---|---|---|
 | 1 | `ShallowColor` Flachwasserfarbe | Color | rgb | Farbe | — |
