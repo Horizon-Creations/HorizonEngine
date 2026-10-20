@@ -174,6 +174,76 @@ TEST_CASE("ProjectManager: manifest without profiles loads seeded defaults")
     he_test::removeAllQuiet(dir);
 }
 
+// The development hotkeys (V, F10 stats card) ride along with the export: the
+// Development profile asks for them, Shipping does not, and a profile saved before
+// the key existed is read by its name so existing projects get them on Development.
+TEST_CASE("Export profile: the development hotkeys follow the Development profile")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_devtools";
+    he_test::removeAllQuiet(dir);
+    fs::create_directories(dir);
+
+    SUBCASE("seeded defaults")
+    {
+        const auto profiles = defaultExportProfiles();
+        REQUIRE(profiles.size() == 2);
+        CHECK(profiles[0].devTools);
+        CHECK_FALSE(profiles[1].devTools);
+    }
+
+    SUBCASE("a manifest from before the key existed")
+    {
+        {
+            std::ofstream out(dir / "Old.heproj");
+            out << R"({"name":"Old","version":"1.0","preset":0,"exportProfiles":[
+                {"name":"Development","compress":false,"encrypt":false,"enableModSupport":true},
+                {"name":"Shipping","compress":true,"encrypt":true},
+                {"name":"Demo","compress":true}]})";
+        }
+        ProjectManager pm;
+        REQUIRE(pm.loadProject((dir / "Old.heproj").string()));
+        const auto& ps = pm.currentProject().exportProfiles;
+        REQUIRE(ps.size() == 3);
+        CHECK(ps[0].devTools);
+        CHECK_FALSE(ps[1].devTools);
+        CHECK_FALSE(ps[2].devTools);
+    }
+
+    SUBCASE("an explicit choice survives a save")
+    {
+        ProjectManager pm;
+        REQUIRE(pm.createNewProject((dir / "P").string(), "P", ProjectPreset::Empty));
+        const std::string heproj = pm.currentProject().path;
+        pm.currentProject().exportProfiles[0].devTools = false;   // switched off on Development
+        pm.currentProject().exportProfiles[1].devTools = true;    // switched on on Shipping
+        REQUIRE(pm.saveProject(heproj));
+        ProjectManager again;
+        REQUIRE(again.loadProject(heproj));
+        CHECK_FALSE(again.currentProject().exportProfiles[0].devTools);
+        CHECK(again.currentProject().exportProfiles[1].devTools);
+    }
+
+    SUBCASE("project.hcfg carries it, and an older one reads as off")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "G";
+        cfg.hpakFilename = "G.hpak";
+        cfg.devTools     = true;
+        REQUIRE(ProjectConfigLoader::save(dir, cfg));
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(dir, loaded));
+        CHECK(loaded.devTools);
+
+        cfg.devTools = false;
+        REQUIRE(ProjectConfigLoader::save(dir, cfg));
+        ProjectConfig off;
+        off.devTools = true;
+        REQUIRE(ProjectConfigLoader::load(dir, off));
+        CHECK_FALSE(off.devTools);
+    }
+    he_test::removeAllQuiet(dir);
+}
+
 // The collision matrix travels in the .heproj, and it travels SPARSELY: a
 // project that never edited it keeps a manifest with no such key at all, and a
 // missing key has to read back as "everything collides" — which is how every
@@ -307,9 +377,11 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].excludePatterns
           == std::vector<std::string>{ "Debug/*", "*_wip.hasset" });
     CHECK(p2.exportProfiles[1].startupScene == "Content/Menu.hescene");
-    CHECK(p2.exportProfiles[1].outputDir == "/tmp/ship_out");
+    // The output directory and the target are derived/fixed, never read back: a
+    // path saved on one OS is foreign on another (a "C:\..." name is relative on macOS).
+    CHECK(p2.exportProfiles[1].outputDir.empty());
     CHECK_FALSE(p2.exportProfiles[1].incremental);
-    CHECK(p2.exportProfiles[1].targetPlatform == "Windows");
+    CHECK(p2.exportProfiles[1].targetPlatform == "Host");
     CHECK(p2.exportProfiles[1].appBundle);
     CHECK(p2.exportProfiles[1].textureFormat == "None");
     CHECK(p2.exportProfiles[1].textureQuality == 2);
@@ -328,6 +400,42 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
         nlohmann::json j = nlohmann::json::parse(in);
         CHECK(j.value("futureField", 0) == 42);
         CHECK(j.contains("preset"));
+    }
+    he_test::removeAllQuiet(dir);
+}
+
+// Topic 222 step 3: "Compile game from SDK" is no option any more, every export
+// compiles its game. A project saved while it was one still loads, and the key
+// goes with the next save instead of lingering as a switch nothing reads.
+TEST_CASE("Export profile: the old compileGameFromSdk key loads and is dropped on save")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_sdkgame";
+    he_test::removeAllQuiet(dir);
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "SdkGame", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        REQUIRE(j.contains("exportProfiles"));
+        REQUIRE(j["exportProfiles"].is_array());
+        REQUIRE_FALSE(j["exportProfiles"].empty());
+        for (auto& prof : j["exportProfiles"]) prof["compileGameFromSdk"] = true;
+        std::ofstream out(heproj);
+        out << j.dump(4);
+    }
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    const size_t profiles = pm2.currentProject().exportProfiles.size();
+    CHECK(profiles >= 1);
+    REQUIRE(pm2.saveProject(heproj));
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        REQUIRE(j["exportProfiles"].size() == profiles);
+        for (const auto& prof : j["exportProfiles"])
+            CHECK_FALSE(prof.contains("compileGameFromSdk"));
     }
     he_test::removeAllQuiet(dir);
 }

@@ -1,0 +1,10 @@
+## slice 1 loc=4641 files=9 first=AppMacMenu.h last=main.cpp
+src/HE_Game/src/AppMacMenu.h
+src/HE_Game/src/AppMacMenu.mm
+src/HE_Game/src/AppNotify.h
+src/HE_Game/src/AppNotify.mm
+src/HE_Game/src/EmbeddedPakKey.cpp
+src/HE_Game/src/EmbeddedPakKey.h
+src/HE_Game/src/GameApplication.cpp
+src/HE_Game/src/GameApplication.h
+src/HE_Game/src/main.cpp

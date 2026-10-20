@@ -11,6 +11,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GiBlasStore.h>
 #include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
@@ -428,10 +429,21 @@ private:
 
 	// `gbuffer` marks the deferred G-buffer variant: it never shades, so it stays
 	// on the plain GLSL 4.10 compile even when forward clustering is on.
+	// `instanced` (Thema 182, 2e) pairs the same fragment with the instanced vertex
+	// (model per instance at attribs 4-7, U.mvp = the batch's viewProj) for one
+	// glDrawElementsInstanced per batch; own cache slot. Returns 0 for a
+	// precompiled variant (no baked instanced vertex) or a failed build, and the
+	// caller then loops over the instances with the plain program.
 	unsigned int GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr,
-	                                       bool gbuffer = false);
+	                                       bool gbuffer = false, bool instanced = false);
+	// One glDrawElementsInstanced for a graph-material batch with the instanced
+	// program already in use and its textures/params bound: the models go to
+	// m_instanceVBO, the U block gets mvp = viewProj (model unused).
+	void DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms, const glm::mat4& viewProj,
+	                             const glm::vec3& baseColor, unsigned int tex, float metallic,
+	                             float roughness, float opacity, int indexCount, const void* indexOffset);
 	// Clustered heLitP (Thema 117, GL 4.3+): the three cluster lists of
 	// HE::BuildClusterLights as SSBOs on bindings 4/5/6
 	// (MaterialShaderLibrary::kGlCluster*SsboBinding). m_forwardClustered is
@@ -653,6 +665,7 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its 0 misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_set<unsigned int> m_glArrayTex;   // graph textures stored as GL_TEXTURE_2D_ARRAY
 	unsigned int m_whiteArrayTex = 0;                // 1×1×1 white array (missing array slot)
 	std::unordered_map<std::string, unsigned int> m_uiTexCache; // UI quad images, same keys, never sRGB
@@ -1181,12 +1194,7 @@ private:
 	// GL 4.3 context (GLAD_GL_VERSION_4_3) — macOS GL is 4.1 and never enters.
 	// Checkpoint GL-A: capability + settings + accel upload only, nothing
 	// samples these buffers yet (GI-off rendering stays byte-identical).
-	struct GIBlasRange
-	{
-		int32_t nodeOffset = 0, nodeCount = 0;
-		int32_t triOffset  = 0, triCount  = 0;
-		bool    valid      = false;
-	};
+	using GIBlasRange = HE::GiBlasRange;
 	// Matches the std430 GiInst block the kernels declare (kGiTraversalGLSL):
 	// mat4 + two shading rows + BLAS offsets, 112 bytes, 16-byte aligned.
 	// The shading pair is HE::giInstanceSurface's output — the probe kernel uses
@@ -1220,7 +1228,7 @@ private:
 	unsigned int m_giLandSSBO = 0;
 	int          m_giLandCount = 0;
 	std::vector<unsigned int> m_giLandWeightTex; // weightmap per landscape, same order
-	GIBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
+	HE::GiBvh    BuildGIBvh(const HE::UUID& meshId);  // CPU build from ContentManager data
 	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
 	void         DestroyGIAccel();
 
@@ -1317,13 +1325,12 @@ private:
 	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
 	void         PushGISceneUniforms(const GISceneLocs& locs, bool active, bool reflActive,
 	                                 bool ssrActive);
-	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
-	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
-	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
+	HE::GiBlasStore                m_giBlas;          // per-mesh BLASes, concatenated (all meshes)
 	std::vector<GIInstanceGpu>     m_giInstancesCpu;  // rebuilt per frame
-	bool         m_giBlasDirty       = false;         // node/tri SSBOs need re-upload
 	unsigned int m_giNodeSSBO        = 0;
 	unsigned int m_giTriSSBO         = 0;
+	size_t       m_giNodeCap         = 0;             // SSBO capacities in elements
+	size_t       m_giTriCap          = 0;
 	unsigned int m_giInstanceSSBO    = 0;
 	int          m_giInstanceCount   = 0;
 	bool         m_giSupported       = false;         // GL >= 4.3, cached at Initialize

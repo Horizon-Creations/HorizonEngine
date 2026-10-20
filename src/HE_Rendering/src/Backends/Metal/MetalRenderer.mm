@@ -16,6 +16,7 @@
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
@@ -1706,7 +1707,8 @@ fragment float4 dofCompositeFragment(FSOut in [[stage_in]],
 // position P; the sun's ray through P, bent by Snell's law, pierces the flat surface
 // plane at S; the engine water's wave trains (Physics/WaterWaves.h, spliced in at
 // @TRAINS@) give the surface's curvature there, and 1/|det| of the light's
-// surface->floor mapping is how much it is squeezed. Added to the scene colour.
+// surface->floor mapping is how much it is squeezed. Since Thema 205 Schritt 2 the light
+// is redistributed (scene * (1 - a) + rgb) and fades out by depth; see the GL twin.
 // Metal depth is already GL ndc z (same convention as mbVelocityFragment above).
 //
 // The same pass carries the depth fog (Thema 185 Schritt 2: a separate alpha-blended pass
@@ -1736,23 +1738,33 @@ struct UcParams
 	float4   camSurface;    // xyz = camera world position, w = surface Y
 	float4   sun;           // xyz = direction TOWARD the sun (unit)
 	float4   sunColor;      // rgb = sun radiance (0 at night)
-	float4   caustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = fade depth (m)
+	float4   caustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
 	float4   tintDensity;   // rgb = resolved fog tint, a = per-metre density (the fog stage, see ucFragment)
 };
 
 constant float kTrains[12] = { @TRAINS@ };
+constant int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
+constant float kChopSteep  = 0.05;
+constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
+constant float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
+constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
-// The light the refracted-sun net adds at P (float3(0) where there is none). The screen
-// derivatives of P come in as arguments: ucFragment takes them before any branch.
-static float3 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dPy)
+// The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
+// cells between them lose (float4(0) where there is no net; Thema 205 Schritt 2, the GL twin
+// carries the reasoning). The screen derivatives of P come in as arguments: ucFragment takes
+// them before any branch. Past the one uniform early-out it runs for every pixel, the result
+// selected away for the sky, so fwidth(det) stays defined (sky P parked at the camera).
+static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dPy, bool hit)
 {
 	const float kTwoPi = 6.28318530718;
 	const float kEta   = 1.33;
+	float3 L = u.sun.xyz;
+	if (u.caustics.x <= 0.0 || L.y <= 0.02)
+		return float4(0.0);                                     // off, or no sun
+	P = hit ? P : u.camSurface.xyz;
 	float  depth = u.camSurface.w - P.y;                        // metres below the flat surface
 	float  fadeDepth = u.caustics.w;
-	float3 L = u.sun.xyz;
-	if (u.caustics.x <= 0.0 || depth <= 0.0 || depth > 5.0 * fadeDepth || L.y <= 0.02)
-		return float3(0.0);                                     // off, dry, too deep, no sun
 
 	float2 hz   = L.xz / kEta;
 	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
@@ -1760,31 +1772,60 @@ static float3 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
 	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * u.caustics.z), sin(0.37 * S.x - 0.27 * u.caustics.z));
 
-	float mxx = 0.0, mzz = 0.0, mxz = 0.0;
-	for (int i = 0; i < 6; ++i)
+	// Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
+	float  mxx = 0.0, mzz = 0.0, mxz = 0.0;
+	float2 gxx = float2(0.0), gzz = float2(0.0), gxz = float2(0.0);   // their gradients over S
+	for (int i = 0; i < 6 + kChopTrains; ++i)
 	{
-		int   b    = i % 3;
-		float comp = i >= 3 ? 1.0 : 0.0;
-		float rad  = kTrains[b * 4] * (3.14159265359 / 180.0) + comp * 0.99483767;   // companion: +57 deg
+		float deg, len, stp, spd;
+		if (i < 6)
+		{
+			int   b    = i % 3;
+			float comp = i >= 3 ? 1.0 : 0.0;
+			deg = kTrains[b * 4] + comp * 57.0;
+			len = kTrains[b * 4 + 2] * mix(1.0, 0.73, comp);
+			stp = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
+			spd = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
+		}
+		else
+		{
+			float j = float(i - 5);
+			deg = 20.0 + 137.508 * j;
+			len = 1.2 * pow(1.0 / 3.0, (j - 1.0) / float(kChopTrains - 1));
+			stp = kChopSteep;
+			spd = sqrt(9.81 / kTwoPi * len);
+		}
+		float  rad = deg * (3.14159265359 / 180.0);
 		float2 dv  = float2(cos(rad), sin(rad));
-		float k    = kTwoPi / (kTrains[b * 4 + 2] * mix(1.0, 0.73, comp)) * u.caustics.y;
-		float stp  = kTrains[b * 4 + 3] * mix(1.0, 0.6, comp);
-		float spd  = kTrains[b * 4 + 1] * mix(1.0, 1.15, comp);
-		float c    = stp * k * sin(k * (dot(dv, S) - spd * u.caustics.z));
-		mxx -= c * dv.x * dv.x;
-		mzz -= c * dv.y * dv.y;
-		mxz -= c * dv.x * dv.y;
+		float  k   = kTwoPi / len * u.caustics.y;
+		float  ph  = k * (dot(dv, S) - spd * u.caustics.z);
+		float  c   = stp * k * sin(ph);
+		float2 dc  = (stp * k * k * cos(ph)) * dv;
+		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
+		mzz -= c * dv.y * dv.y;   gzz -= dc * dv.y * dv.y;
+		mxz -= c * dv.x * dv.y;   gxz -= dc * dv.x * dv.y;
 	}
-	float kd  = (kEta - 1.0) / kEta * (0.6 * depth + 2.0);
-	float det = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
-	float x   = max(1.0 / max(abs(det), 0.1) - 2.0, 0.0);
-	float net = x / (x + 2.0);
+	float  kd   = (kEta - 1.0) / kEta * kFocal;
+	float  det  = (1.0 + kd * mxx) * (1.0 + kd * mzz) - kd * kd * mxz * mxz;
+	float2 gdet = kd * ((1.0 + kd * mzz) * gxx + (1.0 + kd * mxx) * gzz) - 2.0 * kd * kd * mxz * gxz;
+	// det's change per pixel: exact gradient over S times the pixel's (smooth) step in S.
+	// Floored by the pixel's step in S against the chop's ~10 / m (det's peaks have no gradient).
+	float2 dSx  = dfdx(S);
+	float2 dSy  = dfdy(S);
+	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
+	                  10.0 * u.caustics.y * (length(dSx) + length(dSy)));
+	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
+	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
+	float capAA = 2.0 / max(dDet, 1e-4);                      // fold lines >= 2 px, else fade (GL twin)
+	float cap   = min(mix(10.0, 2.0, t), capAA);                // only the core above kCore lights up (GL twin)
+	float J     = 1.0 / max(abs(det), 1.0 / cap);
 
 	float3 n = normalize(cross(dPx, dPy));
 	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
-	float ndl   = clamp(dot(n, Lr), 0.0, 1.0);
-	float atten = exp(-depth / fadeDepth) * smoothstep(0.0, 0.4, depth);
-	return u.sunColor.rgb * (u.caustics.x * net * ndl * atten);
+	float w = u.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
+	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	                    kDark * min(w, 1.0) * max(1.0 - J, 0.0));
+	return hit ? net : float4(0.0);
 }
 
 fragment float4 ucFragment(FSOut in [[stage_in]],
@@ -1800,7 +1841,8 @@ fragment float4 ucFragment(FSOut in [[stage_in]],
 	float3 P  = wp.xyz / max(wp.w, 1e-8);
 	float3 dPx = dfdx(P);                                       // before any early-out: derivatives are
 	float3 dPy = dfdy(P);                                       // undefined after divergent flow
-	float3 lit = sc + (d < 1.0 ? causticLight(u, P, dPx, dPy) : float3(0.0));   // the sky has no floor to catch the net
+	float4 net = causticLight(u, P, dPx, dPy, d < 1.0);               // the sky has no floor to catch the net
+	float3 lit = sc * (1.0 - net.a) + net.rgb;                         // the D3D/Vulkan blend, ONE / INV_SRC_ALPHA
 
 	// The fog (twin of kUnderwaterFogHLSL): Beer-Lambert over the part of the camera->P ray
 	// that lies on the wet side of the flat surface plane. Both ends dry = 0 (a ray that
@@ -9514,6 +9556,10 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
 	if (array) key += "#arr";
+	// A miss is cached (no file open per frame) until files may have appeared: an
+	// EngineContent download landing after this first ask (Thema 210).
+	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+	                             [](void* tex) { return tex == nullptr; });
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
@@ -12662,10 +12708,16 @@ void* MetalRenderer::EnsureMaterialArchive()
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool blend, bool gbuffer)
+                                               bool blend, bool gbuffer, bool instanced)
 {
+	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
+	if (instanced && precompiled) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
+	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
+	// own PSO slot but shares the plain form's fragment.
+	const uint64_t fragKey = key;
+	if (instanced) key ^= 0x1D57A9CEDB0B1E55ULL;
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
@@ -12695,18 +12747,22 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	else
 	{
 		// WPO materials get the graph-generated vertex; everything else the shared one.
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(Backend::Metal)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::Metal);
+		// The instanced twin takes the instanced form of either.
+		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+		const auto& v = instanced
+			? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::Metal)
+			                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::Metal))
+			: (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::Metal)
+			                    : m_matShaderLib.customVertex(vh, vertBody, Backend::Metal));
 		// Forward PSOs (opaque + blended) take the clustered heLitP variant —
 		// EncodeScene binds its lists on fragment buffers 4/5/6 and sets the gate;
 		// the material preview binds empty lists with the gate at 0. The G-buffer
 		// variant never shades lights. A variant that fails to compile falls back
 		// to the plain fragment (8-light window), not to a missing material.
-		const auto* f = &m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+		const auto* f = &m_matShaderLib.fragment(fragKey, fragGlsl, Backend::Metal); // shared, cached MSL
 		if (m_forwardClustered && !gbuffer)
 		{
-			const auto& fc = m_matShaderLib.fragmentClustered(key, fragGlsl, Backend::Metal);
+			const auto& fc = m_matShaderLib.fragmentClustered(fragKey, fragGlsl, Backend::Metal);
 			if (fc.ok) f = &fc;
 			else HE_LOG_WARN(RHI, "%s", ("MetalRenderer: clustered material variant failed, "
 			                             "using the 8-light window\n" + fc.log).c_str());
@@ -14391,6 +14447,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// only re-bind on an actual change (draws arrive sorted, so this is rare).
 		void*     cMaterialPipeline      = nullptr;
 		void*     cMaterialPipelineBlend = nullptr; // alpha-blended variant (transparency pass)
+		// Instanced twin (Thema 182, 2e): built on the material's first batch, not
+		// on sight. The sources are kept for that; a baked variant has no twin.
+		void*     cMaterialPipelineInst  = nullptr; bool cMaterialInstTried = false;
+		uint64_t  cShKey = 0; std::string cShFrag, cShVert; bool cShBaked = false;
 		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
 		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
@@ -14417,6 +14477,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// own cross-compiled pipeline (cached by source hash); else the default.
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
+				cMaterialPipelineInst = nullptr; cMaterialInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
@@ -14433,6 +14494,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
 						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						cShKey = shKey; cShFrag = shFrag; cShVert = shVert; cShBaked = pre != nullptr;
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
 						// (not gated on this material's own opacity): a per-instance tint
@@ -14519,7 +14581,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// above, only mvp/model differ per instance. Without this only dc.transform drew
 			// and every OTHER copy of an identical mesh vanished (the other backends already
 			// iterate instanceTransforms).
-			auto drawInstance = [&](const glm::mat4& xform)
+			// With `instPso` (2e) the same binds draw the whole batch: the material's
+			// instanced PSO, {mvp, model} per instance at vertex buffer 5 (instBuf),
+			// `instCount` instances in one call. Opaque only — the caller checks.
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
@@ -14528,7 +14595,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// resolves the material×instance-tint product itself above, so the
 				// shared threshold is applied to that instead of RenderSorter::
 				// isTransparent (which re-derives it from a DrawCall).
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -14548,7 +14615,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 				// M1: switch to this material's cross-compiled pipeline if it has one,
 				// else the default PBR pipeline. Re-bound only on a real change.
-				void* wantPipeline = cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -14611,6 +14679,19 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -14625,6 +14706,41 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// that is exactly the condition under which GeometryPass batched at all.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
 			const size_t instCount = dc.instanceTransforms.size();
+			// A graph-material batch (2e): the same {mvp, model} array, drawn with
+			// the material's instanced PSO and every bind of drawInstance. Built on
+			// the material's first batch; null (baked variant, failed build,
+			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
+			const bool graphBatch = instCount > 0 && cMaterialPipeline
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances && !cShBaked
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialInstTried)
+			{
+				cMaterialInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				                                                   /*blend=*/false, /*gbuffer=*/false,
+				                                                   /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineInst)
+			{
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				{
+					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_sceneInstancedPipeline
@@ -16189,6 +16305,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		void*     cMaterialPipeline      = nullptr; // forward PSO (forward-routed replay)
 		void*     cMaterialPipelineBlend = nullptr; // blended forward PSO (transparency)
 		void*     cMaterialPipelineGB    = nullptr; // G-buffer PSO (this pass)
+		// Instanced twin of the G-buffer PSO (2e), built on the first batch.
+		void*     cMaterialPipelineGBInst = nullptr; bool cMaterialGBInstTried = false;
+		uint64_t  cGbKey = 0; std::string cGbFrag, cGbVert;
 		bool      cMaterialWpo           = false;
 		bool      cMaterialCustom        = false;   // material HAS a custom shader at all
 		void*     boundPipeline     = defaultPipeline;
@@ -16211,6 +16330,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineGB = nullptr;
+				cMaterialPipelineGBInst = nullptr; cMaterialGBInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialCustom   = false;
 				cMaterialParams   = nullptr;
@@ -16237,8 +16357,11 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						// packs carry no G-buffer MSL yet), never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
 								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
+						}
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -16301,14 +16424,17 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			u.pbr.z   *= dc.instanceTint.a;
 			u.color = glm::vec4(baseColor, 1.0f);
 
-			auto drawInstance = [&](const glm::mat4& xform)
+			// `instPso` etc.: the whole batch in one draw, as in the forward loop (2e).
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
 				ui.model = xform;
 				// Same routing threshold as the forward loop — translucent draws
 				// go to the lighting pass's sorted blend replay.
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -16342,7 +16468,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					out.forwardOpaque.push_back(std::move(t));
 					return;
 				}
-				void* wantPipeline = cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -16393,6 +16520,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				}
 #endif
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -16407,6 +16547,41 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// way to perform — and one WITH a variant carries its own vertex stage.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
 			const size_t instCount = dc.instanceTransforms.size();
+			// ...which since 2e has an instanced twin: a graph-material batch with
+			// a G-buffer PSO draws once through drawInstance's binds. Built on the
+			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
+			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialGBInstTried)
+			{
+				cMaterialGBInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				                                                     /*blend=*/false, /*gbuffer=*/true,
+				                                                     /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineGBInst)
+			{
+				std::vector<glm::mat4> xf;
+				xf.reserve(instCount * 2);
+				for (const glm::mat4& t : dc.instanceTransforms)
+				{
+					xf.push_back(viewProj * t); // mvp
+					xf.push_back(t);            // model
+				}
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				{
+					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineGBInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_gbufferInstancedPipeline

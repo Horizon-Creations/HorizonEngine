@@ -20,6 +20,7 @@
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/AnimatorBlendComponent.h>
 #include <HorizonScene/Components/PropertyAnimatorComponent.h>
+#include <HorizonScene/Components/StreamingComponent.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <cmath>
@@ -671,9 +672,13 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 	CHECK(moves("light", { { "type", 1 } }));       // point
 	CHECK(moves("light", { { "type", 2 } }));       // spot
 	CHECK(moves("rigidbody", { { "type", 0 } }));   // static
+	// Stateful (Thema 183 step 2): what the runtime's CellState keeps over an unload.
+	CHECK(moves("saveState"));
+	// …and a script, which the cell host starts and stops with the cell (step 3).
+	CHECK(moves("script", { { "asset", json::array({ 77, 77 }) } }));
 
 	for (const char* key : { "audiosource", "audiolistener", "animationlayers", "rootmotion",
-	                         "animstatemachine", "ik", "sequenceplayer", "script", "saveState",
+	                         "animstatemachine", "ik", "sequenceplayer",
 	                         "navagent", "navmesh", "characterController", "movement", "camera",
 	                         "cameraRig", "joint", "rope", "trail", "network", "environment", "weather",
 	                         "terrain", "foliage", "uicanvas", "uielement", "uitext", "uiimage", "uibutton",
@@ -682,6 +687,76 @@ TEST_CASE("splitSceneIntoCells: which components may move into a cell, and which
 	CHECK_FALSE(moves("light", { { "type", 0 } }));       // directional
 	CHECK_FALSE(moves("rigidbody", { { "type", 1 } }));   // dynamic
 	CHECK_FALSE(moves("rigidbody", { { "type", 2 } }));   // kinematic
+
+	// A stateful thing is still held back by what else it carries: the least movable
+	// component decides, as for a static one.
+	const auto movesWith = [&](json comps)
+	{
+		comps["transform"] = { { "position", { 50.0, 0.0, 50.0 } } };
+		json ents = json::array();
+		ents.push_back({ { "uuid", json::array({ 0x5100, 1 }) }, { "name", "World" }, { "parent", nullptr },
+		                 { "children", json::array({ json::array({ 0x5100, 2 }) }) } });
+		ents.push_back({ { "uuid", json::array({ 0x5100, 2 }) }, { "name", "Thing" },
+		                 { "parent", json::array({ 0x5100, 1 }) }, { "components", std::move(comps) } });
+		HE::CellSplitOptions o;
+		o.cellSize = 100.0f;
+		o.dir      = "Content/W.cells";
+		const HE::CellSplitResult r = HE::splitSceneIntoCells(json{ { "version", "1.1" }, { "entities", ents } }, o);
+		REQUIRE(r.error.empty());
+		if (r.moved == 1)
+		{
+			REQUIRE(r.cells.size() == 1);
+			CHECK(r.cells[0].scene["streaming"]["classes"]["stateful"] == 1);
+			CHECK(r.cells[0].scene["streaming"]["classes"]["static"] == 0);
+		}
+		return r.moved == 1;
+	};
+	CHECK(movesWith({ { "mesh", json::object() }, { "saveState", json::object() } }));
+	CHECK(movesWith({ { "saveState", json::object() }, { "script", json::object() } }));
+	CHECK_FALSE(movesWith({ { "script", json::object() }, { "characterController", json::object() } }));
+	CHECK_FALSE(movesWith({ { "saveState", json::object() }, { "rigidbody", { { "type", 1 } } } }));
+
+	// The author's switch (StreamingComponent, Thema 183 step 3): Resident keeps
+	// what would move in the base, Auto changes nothing — in either direction. A block
+	// without a mode, or with one this splitter does not know, is Resident.
+	CHECK_FALSE(movesWith({ { "mesh", json::object() }, { "streaming", { { "mode", 1 } } } }));
+	CHECK_FALSE(movesWith({ { "script", json::object() }, { "streaming", { { "mode", 1 } } } }));
+	CHECK(movesWith({ { "saveState", json::object() }, { "streaming", { { "mode", 0 } } } }));
+	CHECK_FALSE(movesWith({ { "camera", json::object() }, { "streaming", { { "mode", 0 } } } }));
+	CHECK_FALSE(movesWith({ { "mesh", json::object() }, { "streaming", json::object() } }));
+	CHECK_FALSE(movesWith({ { "mesh", json::object() }, { "streaming", { { "mode", 7 } } } }));
+}
+
+TEST_CASE("splitSceneIntoCells: a Resident child keeps its whole top-level subtree in the base")
+{
+	// The switch sits on any entity of a subtree, and a subtree is split as one: a
+	// house whose door is marked Resident stays in the base, door and walls.
+	const auto id = [](std::uint64_t n) { return json::array({ 0x5200 + n, n }); };
+	json ents = json::array();
+	ents.push_back({ { "uuid", id(1) }, { "name", "World" }, { "parent", nullptr },
+	                 { "children", json::array({ id(2), id(4) }) } });
+	ents.push_back({ { "uuid", id(2) }, { "name", "House" }, { "parent", id(1) },
+	                 { "children", json::array({ id(3) }) },
+	                 { "components", { { "transform", { { "position", { 50.0, 0.0, 50.0 } } } },
+	                                   { "mesh", json::object() } } } });
+	ents.push_back({ { "uuid", id(3) }, { "name", "Door" }, { "parent", id(2) },
+	                 { "components", { { "transform", { { "position", { 1.0, 0.0, 0.0 } } } },
+	                                   { "mesh", json::object() },
+	                                   { "streaming", { { "mode", 1 } } } } } });
+	ents.push_back({ { "uuid", id(4) }, { "name", "Shed" }, { "parent", id(1) },
+	                 { "components", { { "transform", { { "position", { 60.0, 0.0, 50.0 } } } },
+	                                   { "mesh", json::object() } } } });
+	HE::CellSplitOptions o;
+	o.cellSize = 100.0f;
+	o.dir      = "Content/W.cells";
+	const HE::CellSplitResult r = HE::splitSceneIntoCells(json{ { "version", "1.1" }, { "entities", ents } }, o);
+	REQUIRE(r.error.empty());
+	const std::set<std::string> base = namesIn(r.base);
+	CHECK(base.count("House") == 1);
+	CHECK(base.count("Door") == 1);
+	CHECK(base.count("Shed") == 0);
+	REQUIRE(r.cells.size() == 1);
+	CHECK(namesIn(r.cells[0].scene).count("Shed") == 1);
 }
 
 TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree moves only together with what it binds")
@@ -718,7 +793,7 @@ TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree mov
 	};
 
 	// `lampComponents` is what the Lamp beside the placement carries: a mesh (it can
-	// move) or a script (it cannot).
+	// move) or a camera (it cannot).
 	const auto split = [&](json lampComponents)
 	{
 		json ents = json::array();
@@ -761,7 +836,7 @@ TEST_CASE("splitSceneIntoCells: a placement whose bindings leave its subtree mov
 
 	SUBCASE("the Lamp cannot move: placement and Lamp both stay in the base")
 	{
-		const HE::CellSplitResult r = split({ { "script", { { "asset", id(77) } } } });
+		const HE::CellSplitResult r = split({ { "camera", json::object() } });
 		REQUIRE(r.error.empty());
 		REQUIRE(r.cells.size() == 1);
 		const std::set<std::string> inCell = namesIn(r.cells[0].scene), inBase = namesIn(r.base);
@@ -832,11 +907,11 @@ TEST_CASE("splitSceneIntoCells: what the base refers to inside a cell keeps it i
 	}
 	SUBCASE("a movable thing that names something in the base stays with it")
 	{
-		// A lamp whose mesh block carries the id of a pole in the base (a script keeps the pole
+		// A lamp whose mesh block carries the id of a pole in the base (a camera keeps the pole
 		// there). The field is made up, and it is the only thing that tells the lamp from a
 		// free one: that is the point of finding references by their value.
 		json lamp = { { "mesh", { { "partner", id(11) } } } };
-		json pole = { { "script", { { "asset", id(77) } } } };
+		json pole = { { "camera", json::object() } };
 		const auto r = world({ record(10, "Lamp", lamp), record(11, "Pole", pole, 60.0) });
 		REQUIRE(r.error.empty());
 		const auto base = namesIn(r.base);
@@ -930,4 +1005,49 @@ TEST_CASE("The decorative components that may stream come back from a cell as th
 	props.clipId        = HE::UUID::generate();
 	props.playbackSpeed = 0.5f;
 	comesBackFromACell("propertyanimator", props);
+}
+
+TEST_CASE("StreamingComponent: the switch survives the scene file and the Play snapshot, and the split reads it")
+{
+	HorizonWorld w;
+	const auto place = [&](const char* name, float x)
+	{
+		const Entity e = w.createEntity(name);
+		w.registry().get_or_emplace<TransformComponent>(e).position = { x, 0.0f, 50.0f };
+		w.registry().emplace<MeshComponent>(e);
+		return e;
+	};
+	const Entity kept = place("Kept", 50.0f);
+	const Entity free = place("Free", 60.0f);
+	place("Plain", 70.0f);
+	w.registry().emplace<StreamingComponent>(kept);   // the default: Resident
+	StreamingComponent automatic;
+	automatic.mode = StreamingComponent::Mode::Auto;
+	w.registry().emplace<StreamingComponent>(free, automatic);
+
+	// The Play snapshot (SceneSerializer's memory form, CBOR of the same structure)
+	// round-trips both modes: a switch lost at Stop would be a scene change nobody made.
+	SceneSerializer ser;
+	std::vector<uint8_t> bytes;
+	REQUIRE(ser.saveToMemory(w, bytes));
+	HorizonWorld back;
+	REQUIRE(ser.loadFromMemory(back, bytes));
+	int resident = 0, autoMode = 0;
+	for (auto [e, st] : back.registry().view<StreamingComponent>().each())
+		(st.mode == StreamingComponent::Mode::Resident ? resident : autoMode) += 1;
+	CHECK(resident == 1);
+	CHECK(autoMode == 1);
+
+	// The file the split reads: Kept stays, Free and Plain move.
+	HE::CellSplitOptions o;
+	o.cellSize = 100.0f;
+	o.dir      = "Content/W.cells";
+	const HE::CellSplitResult r = HE::splitSceneIntoCells(sceneJson(w), o);
+	REQUIRE(r.error.empty());
+	CHECK(namesIn(r.base).count("Kept") == 1);
+	REQUIRE(r.cells.size() == 1);
+	const std::set<std::string> cell = namesIn(r.cells[0].scene);
+	CHECK(cell.count("Free") == 1);
+	CHECK(cell.count("Plain") == 1);
+	CHECK(cell.count("Kept") == 0);
 }

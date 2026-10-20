@@ -21,6 +21,7 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
+#include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
 #include "HorizonScene/Components/InactiveComponent.h"     // the "Active" switch, a component like any other
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
@@ -151,6 +152,100 @@ namespace
 		id.hi = j[0].get<uint64_t>();
 		id.lo = j[1].get<uint64_t>();
 		return id;
+	}
+
+	// ── Foliage layers ───────────────────────────────────────────────────────
+	// One layer's fields. A component with ONE layer writes them flat into the
+	// "foliage" object, exactly the keys a scene had before layers existed, so an
+	// old scene saves byte for byte as it was; only two or more layers go into a
+	// "layers" array. Everything the old format did not have is written only when
+	// it differs from its default, which keeps that promise for every untouched
+	// layer. `visibleKey` names the layer's own switch: "visible" inside the
+	// array, "layerVisible" in the flat form, where "visible" has always been
+	// the component's (zone hiding).
+	json foliageLayerToJson(const FoliageLayer& l, const char* visibleKey)
+	{
+		const FoliageLayer def;
+		json j = {
+			{ "mesh",         uuidToJson(l.meshAssetId) },
+			{ "material",     uuidToJson(l.materialAssetId) },
+			{ "density",      l.density },
+			{ "seed",         l.seed },
+			{ "minScale",     l.minScale },
+			{ "maxScale",     l.maxScale },
+			{ "drawDistance", l.drawDistance },
+			{ "maskRes",      l.maskRes },
+		};
+		if (!l.name.empty())                        j["name"]           = l.name;
+		if (l.visible != def.visible)               j[visibleKey]       = l.visible;
+		if (l.bucketSize != def.bucketSize)         j["bucketSize"]     = l.bucketSize;
+		if (l.castsShadow != def.castsShadow)       j["castsShadow"]    = l.castsShadow;
+		if (l.contributesAO != def.contributesAO)   j["contributesAO"]  = l.contributesAO;
+		if (l.shadowDistance != def.shadowDistance) j["shadowDistance"] = l.shadowDistance;
+		if (l.lodHysteresis != def.lodHysteresis)   j["lodHysteresis"]  = l.lodHysteresis;
+		// Farther detail levels; a layer without any writes no key at all.
+		if (!l.lods.empty())
+		{
+			json lods = json::array();
+			for (const FoliageLod& d : l.lods)
+				lods.push_back({ { "mesh",     uuidToJson(d.meshAssetId) },
+				                 { "material", uuidToJson(d.materialAssetId) },
+				                 { "distance", d.distance },
+				                 { "density",  d.density } });
+			j["lods"] = std::move(lods);
+		}
+		// Painted density mask, the same base64 treatment as the terrain's
+		// layer weights: one byte per texel, absent when the layer is uniform.
+		if (!l.densityMask.empty())
+			j["densityMaskB64"] = base64Encode(l.densityMask.data(), l.densityMask.size());
+		return j;
+	}
+
+	FoliageLayer foliageLayerFromJson(const json& c, const char* visibleKey)
+	{
+		FoliageLayer l;
+		l.name            = c.value("name",           l.name);
+		l.visible         = c.value(visibleKey,       l.visible);
+		l.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
+		l.materialAssetId = jsonToUuid(c.value("material", json()));
+		l.density         = c.value("density",        l.density);
+		l.seed            = c.value("seed",           l.seed);
+		l.minScale        = c.value("minScale",       l.minScale);
+		l.maxScale        = c.value("maxScale",       l.maxScale);
+		l.drawDistance    = c.value("drawDistance",   l.drawDistance);
+		l.maskRes         = c.value("maskRes",        l.maskRes);
+		l.bucketSize      = c.value("bucketSize",     l.bucketSize);
+		l.castsShadow     = c.value("castsShadow",    l.castsShadow);
+		l.contributesAO   = c.value("contributesAO",  l.contributesAO);
+		l.shadowDistance  = c.value("shadowDistance", l.shadowDistance);
+		l.lodHysteresis   = std::max(0.0f, c.value("lodHysteresis", l.lodHysteresis));
+		if (c.contains("lods") && c["lods"].is_array())
+		{
+			for (const json& d : c["lods"])
+			{
+				if (!d.is_object() || l.lods.size() >= FoliageLayer::kMaxLods) continue;
+				FoliageLod lod;
+				lod.meshAssetId     = jsonToUuid(d.value("mesh",     json()));
+				lod.materialAssetId = jsonToUuid(d.value("material", json()));
+				lod.distance        = std::max(0.0f, d.value("distance", lod.distance));
+				lod.density         = std::clamp(d.value("density", lod.density), 0.0f, 1.0f);
+				l.lods.push_back(lod);
+			}
+			// The extraction walks the levels outwards; a hand-edited file may not.
+			std::stable_sort(l.lods.begin(), l.lods.end(),
+			                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+		}
+		if (c.contains("densityMaskB64") && c["densityMaskB64"].is_string())
+		{
+			l.densityMask = base64Decode(c["densityMaskB64"].get<std::string>());
+			// A truncated/mismatched blob would index out of bounds when
+			// sampled or painted — drop it (uniform scatter) rather than
+			// carry a half-sized mask.
+			if (l.densityMask.size() != static_cast<size_t>(l.maskRes) * l.maskRes)
+				l.densityMask.clear();
+		}
+		l.dirty = true; // regenerate instances after load
+		return l;
 	}
 
 	// An entity's stable identity. Every entity gets one in
@@ -370,7 +465,7 @@ namespace
 			for (const glm::vec3& p : rope->controlPoints) pts.push_back(vec3ToJson(p));
 			comps["rope"] = {
 				{ "visible",        rope->visible },
-				{ "points",         pts },
+				{ "points",         std::move(pts) },
 				{ "attachStart",    uuidToJson(rope->attachStart) },
 				{ "attachEnd",      uuidToJson(rope->attachEnd) },
 				{ "sag",            rope->sag },
@@ -393,7 +488,7 @@ namespace
 			json pts = json::array();
 			for (const glm::vec3& p : spline->controlPoints) pts.push_back(vec3ToJson(p));
 			comps["spline"] = {
-				{ "points", pts },
+				{ "points", std::move(pts) },
 				{ "closed", spline->closed },
 			};
 		}
@@ -484,7 +579,7 @@ namespace
 				{ "asset",      uuidToJson(s->scriptAssetId) },
 				{ "moduleName", s->moduleName },
 				{ "enabled",    s->enabled },
-				{ "properties", props },
+				{ "properties", std::move(props) },
 			};
 		}
 		if (auto* ss = registry.try_get<SaveStateComponent>(entity))
@@ -496,6 +591,9 @@ namespace
 				{ "saveScriptVars", ss->saveScriptVars },
 			};
 		}
+		// Where the entity lives in a split scene (the splitter reads it, CellSplit.cpp).
+		if (auto* st = registry.try_get<StreamingComponent>(entity))
+			comps["streaming"] = { { "mode", static_cast<int>(st->mode) } };
 		if (auto* pl = registry.try_get<PrefabInstanceComponent>(entity))
 		{
 			// Written like every other asset reference — [hi, lo] inside the
@@ -707,6 +805,21 @@ namespace
 						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
 						bj["underwaterCaustics"] = std::move(cj);
 					}
+					// The brush's bed (Thema 206 Schritt 9): only for a body it dug.
+					if (b.brushBed != HE::water::BrushBedParams{} || !b.brushPatch.empty())
+					{
+						json dj = { { "enabled", b.brushBed.enabled }, { "maxDepth", b.brushBed.maxDepth },
+						            { "slope", b.brushBed.slope }, { "roughness", b.brushBed.roughness } };
+						const HE::water::GroundPatch& bp = b.brushPatch;
+						if (!bp.empty())
+						{
+							dj["res"] = bp.res;
+							dj["rect"] = { bp.x0, bp.z0, bp.w, bp.h };
+							dj["deltaB64"] = base64Encode(reinterpret_cast<const uint8_t*>(bp.delta.data()),
+							                              bp.delta.size() * sizeof(float));
+						}
+						bj["brushBed"] = std::move(dj);
+					}
 					bodies.push_back(std::move(bj));
 				}
 				tc["waterBodies"] = std::move(bodies);
@@ -718,7 +831,7 @@ namespace
 				if (!cells.empty())
 					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
 			}
-			comps["terrain"] = tc;
+			comps["terrain"] = std::move(tc);
 		}
 		if (auto* a = registry.try_get<AudioSourceComponent>(entity))
 		{
@@ -945,7 +1058,7 @@ namespace
 			comps["animstatemachine"] = {
 				{ "stateMachineAsset", uuidToJson(sm->stateMachineAssetId) },
 				{ "currentStateName",  sm->currentStateName },
-				{ "params",            params },
+				{ "params",            std::move(params) },
 			};
 		}
 		if (auto* lod = registry.try_get<LODComponent>(entity))
@@ -954,26 +1067,23 @@ namespace
 			for (const auto& lvl : lod->levels)
 				levels.push_back({ { "meshId", uuidToJson(lvl.meshId) },
 				                   { "maxDistance", lvl.maxDistance } });
-			comps["lod"] = { { "levels", levels } };
+			comps["lod"] = { { "levels", std::move(levels) } };
 		}
 		if (auto* fol = registry.try_get<FoliageComponent>(entity))
 		{
-			json fj = {
-				{ "visible",      fol->visible },
-				{ "mesh",         uuidToJson(fol->meshAssetId) },
-				{ "material",     uuidToJson(fol->materialAssetId) },
-				{ "density",      fol->density },
-				{ "seed",         fol->seed },
-				{ "minScale",     fol->minScale },
-				{ "maxScale",     fol->maxScale },
-				{ "drawDistance", fol->drawDistance },
-				{ "maskRes",      fol->maskRes },
-			};
-			// Painted density mask, the same base64 treatment as the terrain's
-			// layer weights: one byte per texel, absent when the layer is uniform.
-			if (!fol->densityMask.empty())
-				fj["densityMaskB64"] = base64Encode(fol->densityMask.data(),
-				                                    fol->densityMask.size());
+			json fj;
+			if (fol->layers.size() == 1)
+			{
+				fj = foliageLayerToJson(fol->layers[0], "layerVisible");
+			}
+			else
+			{
+				json arr = json::array();
+				for (const FoliageLayer& l : fol->layers)
+					arr.push_back(foliageLayerToJson(l, "visible"));
+				fj["layers"] = std::move(arr);
+			}
+			fj["visible"] = fol->visible;
 			comps["foliage"] = std::move(fj);
 		}
 		if (auto* c = registry.try_get<UICanvasComponent>(entity))
@@ -1081,16 +1191,16 @@ namespace
 					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
 					    !HE::isTerrainGenerated(registry, child))                // + chunks, water
 						children.push_back(uuidToJson(entityUuid(registry, child)));
-				eJson["children"] = children;
+				eJson["children"] = std::move(children);
 			}
 
 			json comps = serializeComponents(registry, entity);
 			if (!comps.is_null())
-				eJson["components"] = comps;
+				eJson["components"] = std::move(comps);
 
-			entities.push_back(eJson);
+			entities.push_back(std::move(eJson));
 		}
-		scene["entities"] = entities;
+		scene["entities"] = std::move(entities);
 
 		// Level script (HorizonCode graph, one per scene). Stored as a nested
 		// object so the scene file stays readable; omitted when empty.
@@ -1453,6 +1563,17 @@ namespace
 			ss.saveScriptVars = c.value("saveScriptVars", ss.saveScriptVars);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
 		}
+		if (comps.contains("streaming"))
+		{
+			const json& c = comps["streaming"];
+			StreamingComponent st;
+			// An unknown mode (a newer editor's) is Resident: the safe side, the one that
+			// keeps the entity loaded.
+			const int mode = c.is_object() ? c.value("mode", static_cast<int>(st.mode)) : static_cast<int>(st.mode);
+			st.mode = mode == static_cast<int>(StreamingComponent::Mode::Auto) ? StreamingComponent::Mode::Auto
+			                                                                   : StreamingComponent::Mode::Resident;
+			registry.emplace_or_replace<StreamingComponent>(entity, st);
+		}
 		if (comps.contains("prefab"))
 		{
 			const json& c = comps["prefab"];
@@ -1735,6 +1856,40 @@ namespace
 							num("scale",     b.underwaterCaustics.scale);
 							num("speed",     b.underwaterCaustics.speed);
 							num("depth",     b.underwaterCaustics.depth);
+						}
+						if (bj.contains("brushBed") && bj["brushBed"].is_object())
+						{
+							const json& dj = bj["brushBed"];
+							if (dj.contains("enabled") && dj["enabled"].is_boolean()) b.brushBed.enabled = dj["enabled"].get<bool>();
+							const auto num = [&dj](const char* key, float& into)
+							{
+								if (dj.contains(key) && dj[key].is_number()) into = dj[key].get<float>();
+							};
+							num("maxDepth",  b.brushBed.maxDepth);
+							num("slope",     b.brushBed.slope);
+							num("roughness", b.brushBed.roughness);
+							if (dj.contains("res") && dj["res"].is_number_unsigned() &&
+							    dj.contains("rect") && dj["rect"].is_array() && dj["rect"].size() == 4 &&
+							    dj.contains("deltaB64") && dj["deltaB64"].is_string())
+							{
+								const json& r = dj["rect"];
+								bool ints = true;
+								for (const json& v : r) ints = ints && v.is_number_integer();
+								const std::vector<uint8_t> raw = base64Decode(dj["deltaB64"].get<std::string>());
+								if (ints && raw.size() % sizeof(float) == 0)
+								{
+									HE::water::GroundPatch& gp = b.brushPatch;
+									const auto clampInt = [](const json& v)
+									{
+										return static_cast<int>(std::clamp<long long>(v.get<long long>(), -1, 1 << 20));
+									};
+									gp.res = static_cast<uint32_t>(std::min<uint64_t>(dj["res"].get<uint64_t>(), 1u << 20));
+									gp.x0 = clampInt(r[0]); gp.z0 = clampInt(r[1]);
+									gp.w  = clampInt(r[2]); gp.h  = clampInt(r[3]);
+									gp.delta.resize(raw.size() / sizeof(float));
+									if (!raw.empty()) std::memcpy(gp.delta.data(), raw.data(), raw.size());
+								}
+							}
 						}
 						w.bodies.push_back(b);
 					}
@@ -2024,25 +2179,31 @@ namespace
 		{
 			const json& c = comps["foliage"];
 			FoliageComponent fol;
-			fol.visible         = c.value("visible",      fol.visible);
-			fol.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
-			fol.materialAssetId = jsonToUuid(c.value("material", json()));
-			fol.density         = c.value("density",      fol.density);
-			fol.seed            = c.value("seed",         fol.seed);
-			fol.minScale        = c.value("minScale",     fol.minScale);
-			fol.maxScale        = c.value("maxScale",     fol.maxScale);
-			fol.drawDistance    = c.value("drawDistance", fol.drawDistance);
-			fol.maskRes         = c.value("maskRes",      fol.maskRes);
-			if (c.contains("densityMaskB64") && c["densityMaskB64"].is_string())
+			fol.visible = c.value("visible", fol.visible);
+			if (c.contains("layers") && c["layers"].is_array())
 			{
-				fol.densityMask = base64Decode(c["densityMaskB64"].get<std::string>());
-				// A truncated/mismatched blob would index out of bounds when
-				// sampled or painted — drop it (uniform scatter) rather than
-				// carry a half-sized mask.
-				if (fol.densityMask.size() != static_cast<size_t>(fol.maskRes) * fol.maskRes)
-					fol.densityMask.clear();
+				fol.layers.clear();
+				for (const json& lj : c["layers"])
+				{
+					if (!lj.is_object()) continue;
+					if (fol.layers.size() >= FoliageComponent::kMaxLayers)
+					{
+						HE_LOG_WARN(Serialize, "Foliage: more than %zu layers on one landscape, "
+						                       "the rest are dropped", FoliageComponent::kMaxLayers);
+						break;
+					}
+					fol.layers.push_back(foliageLayerFromJson(lj, "visible"));
+				}
+				// Never empty (FoliageComponent's promise): a hand-edited empty
+				// list is one default layer, what "Add Component" gives.
+				if (fol.layers.empty()) fol.layers.emplace_back();
 			}
-			fol.dirty           = true; // regenerate instances after load
+			else
+			{
+				// The flat form: a scene from before layers, or one layer now.
+				fol.layers.assign(1, foliageLayerFromJson(c, "layerVisible"));
+			}
+			fol.dirty = true; // regenerate instances after load
 			registry.emplace_or_replace<FoliageComponent>(entity, std::move(fol));
 		}
 		if (comps.contains("animstatemachine"))
@@ -2585,16 +2746,16 @@ namespace
 					children.push_back(uuidToJson(entityUuid(registry, child)));
 				}
 				if (!children.empty())
-					eJson["children"] = children;
+					eJson["children"] = std::move(children);
 			}
 
 			json comps = serializeComponents(registry, entity);
 			if (!comps.is_null())
-				eJson["components"] = comps;
+				eJson["components"] = std::move(comps);
 
-			entArray.push_back(eJson);
+			entArray.push_back(std::move(eJson));
 		}
-		scene["entities"] = entArray;
+		scene["entities"] = std::move(entArray);
 		return scene;
 	}
 
@@ -2759,7 +2920,7 @@ namespace
 	X("collider",            ColliderComponent) \
 	X("joint",               JointComponent) \
 	X("characterController", CharacterControllerComponent) \
-	X("saveState",           SaveStateComponent) \
+	X("saveState",           SaveStateComponent) 	X("streaming",           StreamingComponent) \
 	X("prefab",              PrefabInstanceComponent) \
 	X("script",              ScriptComponent) \
 	X("environment",         EnvironmentComponent) \
@@ -3031,7 +3192,10 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
-		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline", "terrain",
+		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "spline",
+		// Where the entity lives in a split scene (StreamingComponent).
+		"streaming",
+		"terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",
@@ -3638,21 +3802,21 @@ bool SceneSerializer::importComponentText(HorizonWorld& world, Entity entity, co
     return true;
 }
 
-bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
-                                         const std::vector<uint8_t>& assetBlob,
-                                         PrefabSyncReport* report)
+// The sync proper, on a blob already parsed. syncPrefabInstances parses each
+// asset ONCE and hands the same tree to every placement of it: a thousand
+// placements of one prefab were a thousand identical CBOR parses (SCN-702).
+// `blobBytes` is only for the log line.
+static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const json& scene,
+                                     size_t blobBytes, SceneSerializer::PrefabSyncReport& rep)
 {
-    PrefabSyncReport  local;
-    PrefabSyncReport& rep = report ? *report : local;
     auto& registry = world.registry();
     if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
 
-    const json scene = json::from_cbor(assetBlob, /*strict=*/true, /*allow_exceptions=*/false);
     auto entities = scene.is_object() ? scene.find("entities") : scene.end();
     if (scene.is_discarded() || entities == scene.end() || !entities->is_array())
     {
         HE_LOG_ERROR(Serialize, "Prefab sync: the asset payload is not a readable subtree "
-                                "(%zu bytes) — instance left as it is", assetBlob.size());
+                                "(%zu bytes) — instance left as it is", blobBytes);
         return false;
     }
 
@@ -3731,17 +3895,17 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
     // root's own record can be "lost" only when the asset was rebuilt under a
     // new root id, and the root is the placement — it is never destroyed.
     {
-        auto recordPresent = [&](const HE::UUID& key)
-        {
-            for (const json* r : records)
-                if (entityKeyOf(*r) == key) return true;
-            return false;
-        };
+        // Asked per binding and per entity under it: a set, not a walk over
+        // the records that looks each one's uuid up again (SCN-702).
+        std::unordered_set<HE::UUID> recordKeys;
+        recordKeys.reserve(records.size());
+        for (const json* r : records) recordKeys.insert(entityKeyOf(*r));
+        auto recordPresent = [&](const HE::UUID& key) { return recordKeys.count(key) != 0; };
         // Bound by a placement other than this one and other than itself —
         // i.e. a record of a nested placement, not that placement's root.
         auto insideNestedPlacement = [&](Entity s)
         {
-            for (Entity r : prefabInstancesBinding(world, s))
+            for (Entity r : SceneSerializer::prefabInstancesBinding(world, s))
                 if (r != root && r != s) return true;
             return false;
         };
@@ -4037,6 +4201,19 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             std::vector<std::string> nestedProps;
             const NestedWrite mode = writeOf(k, &nestedProps);
             if (mode == NestedWrite::None) continue;
+            // The usual case — the template's block whole, no property kept
+            // from the instance — is compared as it stands; the deep copy below
+            // is only for a block that gets merged (or written).
+            const bool propOverride = std::any_of(work.overrides.begin(), work.overrides.end(),
+                [&](const PrefabInstanceComponent::Override& o)
+                { return o.templateEntity == key && o.component == k && !o.property.empty(); });
+            if (mode == NestedWrite::Full && !propOverride)
+            {
+                auto cur = iComps.find(k);
+                if (cur != iComps.end() && *cur == block) continue;
+                toApply[k] = block;
+                continue;
+            }
             json merged = block;
             if (mode == NestedWrite::Props)
             {
@@ -4113,6 +4290,19 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
     return true;
 }
 
+bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
+                                         const std::vector<uint8_t>& assetBlob,
+                                         PrefabSyncReport* report)
+{
+    PrefabSyncReport  local;
+    PrefabSyncReport& rep = report ? *report : local;
+    auto& registry = world.registry();
+    if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+
+    const json scene = json::from_cbor(assetBlob, /*strict=*/true, /*allow_exceptions=*/false);
+    return syncPrefabInstanceParsed(world, root, scene, assetBlob.size(), rep);
+}
+
 size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager& content,
                                             PrefabSyncReport* report)
 {
@@ -4122,22 +4312,32 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
 
     // Roots first, then blobs, then the sync: the pass creates entities, and
     // walking a view while creating would be walking a moving list. The blob
-    // is COPIED out of the content manager at once — getPrefab hands out a
+    // is PARSED out of the content manager at once — getPrefab hands out a
     // pointer into a dense vector that the next loadAsset (which ensureResident
-    // for the next asset may well be) invalidates together with the bytes.
+    // for the next asset may well be) invalidates together with the bytes —
+    // and once per asset, not once per placement of it. An empty blob stays
+    // "not in the content manager"; one that does not parse is refused by
+    // each placement's sync, with its log line, as before.
     std::vector<Entity> roots;
     for (auto e : registry.view<PrefabInstanceComponent>()) roots.push_back(e);
 
-    std::unordered_map<HE::UUID, std::vector<uint8_t>> blobs;
+    struct ParsedBlob
+    {
+        size_t bytes = 0;
+        json   scene;
+    };
+    std::unordered_map<HE::UUID, ParsedBlob> blobs;
     for (Entity e : roots)
     {
         const HE::UUID id = registry.get<PrefabInstanceComponent>(e).asset;
         if (id == HE::UUID{} || blobs.count(id)) continue;
         content.ensureResident(id);
-        if (const PrefabAsset* p = content.getPrefab(id))
-            blobs[id] = p->data;
-        else
-            blobs[id] = {};
+        ParsedBlob& b = blobs[id];
+        if (const PrefabAsset* p = content.getPrefab(id); p && !p->data.empty())
+        {
+            b.bytes = p->data.size();
+            b.scene = json::from_cbor(p->data, /*strict=*/true, /*allow_exceptions=*/false);
+        }
     }
 
     size_t synced = 0;
@@ -4146,7 +4346,7 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
         if (!registry.valid(e)) continue;
         const HE::UUID id = registry.get<PrefabInstanceComponent>(e).asset;
         auto it = blobs.find(id);
-        if (it == blobs.end() || it->second.empty())
+        if (it == blobs.end() || it->second.bytes == 0)
         {
             const auto* n = registry.try_get<NameComponent>(e);
             HE_LOG_WARN(Serialize, "Prefab sync: '%s' points at prefab {%016llx-%016llx}, which is "
@@ -4156,7 +4356,7 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
             ++rep.unresolvedAssets;
             continue;
         }
-        if (syncPrefabInstance(world, e, it->second, &rep)) ++synced;
+        if (syncPrefabInstanceParsed(world, e, it->second.scene, it->second.bytes, rep)) ++synced;
     }
     if (synced)
         HE_LOG_INFO(Serialize, "Prefab sync: %zu instance(s) — %zu component(s) applied, %zu removed, "

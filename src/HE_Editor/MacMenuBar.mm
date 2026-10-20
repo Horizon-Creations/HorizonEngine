@@ -240,11 +240,6 @@ void install()
 		[edit addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(heAddItem(edit, @"Select All",   C::SelectAll,   nil, 0, true));
 		s_gameOnlyItems.push_back(heAddItem(edit, @"Deselect All", C::DeselectAll, nil, 0, true));
-		[edit addItem:[NSMenuItem separatorItem]];
-		// The project's own settings, an editor tab like Preferences (which sits
-		// in the app menu, where macOS keeps an application's preferences). No
-		// key equivalent, for the reason the whole block has none.
-		heAddItem(edit, @"Project Settings…", C::ProjectSettings, nil, 0, true);
 	}
 
 	// ── Entity (game projects only — hidden whole in an application) ──────
@@ -338,19 +333,8 @@ void install()
 #endif
 	}
 
-	// ── Play ───────────────────────────────────────────────────────────────
-	// The toolbar's transport, with a fixed place in the bar. No key
-	// equivalents (⌘P and friends are read by the editor through SDL and
-	// rebindable in Preferences ▸ Shortcuts); the titles follow the state.
-	{
-		NSMenu* play = heAddSubmenu(main, @"Play");
-		s_toggleItems.push_back({ C::PlayToggle, 0,
-			heAddItem(play, @"Play",       C::PlayToggle,  nil, 0, true) });
-		s_toggleItems.push_back({ C::PauseToggle, 0,
-			heAddItem(play, @"Pause",      C::PauseToggle, nil, 0, true) });
-		heAddItem(play, @"Step Frame", C::StepFrame,   nil, 0, true);
-		heAddItem(play, @"Step Node",  C::StepNode,    nil, 0, true);
-	}
+	// No Play menu: the transport is the viewport toolbar's (and ⌘P and friends,
+	// rebindable in Preferences ▸ Shortcuts).
 
 	// ── Build ──────────────────────────────────────────────────────────────
 	{
@@ -485,7 +469,6 @@ void install()
 		// one would swallow the keystroke before the panel that is meant to
 		// answer it in context ever sees it, exactly like the Edit menu's ⌘Z.
 		heAddItem(help, @"Documentation",             C::Documentation,       nil, 0, false);
-		heAddItem(help, @"Search the Documentation…", C::SearchDocumentation, nil, 0, false);
 		heAddItem(help, @"Documentation (Website)",   C::DocumentationOnline, nil, 0, false);
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddToggle(help, @"Interactive Tutorial", C::OpenTutorial, false);

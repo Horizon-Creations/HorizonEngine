@@ -1,4 +1,5 @@
 #include "TutorialPanel.h"
+#include "NotificationStore.h"   // failures are notifications
 #include "TutorialSteps.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig, ProjectManager
 #include "EditorWidgets.h"       // dialog placement + the help-aware button
@@ -664,7 +665,9 @@ void renderWelcome(AppContext& ctx)
 			}
 			else
 			{
-				s_error = "Could not create the project there. Check the path and permissions.";
+				// An outcome, not a mistake in a field (those two stay inline): a notification.
+				HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
+				               "Check the path and permissions.");
 			}
 		}
 	}

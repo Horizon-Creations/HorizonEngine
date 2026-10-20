@@ -149,6 +149,9 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // chunk's LOD chain, so it too has to land before LOD picks.
     { HE_PROFILE_SCOPE_N("TerrainTess");    TerrainSystem::updateTessellation(world, cm, renderer, cameraPos); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
+    // Needs the levels LOD just chose (a seam is only mixed once both sides
+    // have picked theirs), so it is the one thing that runs after it.
+    { HE_PROFILE_SCOPE_N("TerrainSeams");   TerrainSystem::stitchSeams(world, cm, renderer); }
 
     pushProfilerSceneCounters(world, cm, gpuParticles);
 }
@@ -256,7 +259,11 @@ std::vector<HE::UUID> collectAssetRefsWhere(HorizonWorld& world, Keep keep)
     for (auto [e, c] : reg.view<MaterialComponent>().each())        if (keep(e)) add(c.materialAssetId);
     for (auto [e, c] : reg.view<SkeletalMeshComponent>().each())    if (keep(e)) add(c.meshAssetId);
     for (auto [e, c] : reg.view<ScriptComponent>().each())          if (keep(e)) add(c.scriptAssetId);
-    for (auto [e, c] : reg.view<FoliageComponent>().each())         if (keep(e)) { add(c.meshAssetId); add(c.materialAssetId); }
+    for (auto [e, c] : reg.view<FoliageComponent>().each())         if (keep(e)) for (const FoliageLayer& l : c.layers)
+    {
+        add(l.meshAssetId); add(l.materialAssetId);
+        for (const FoliageLod& d : l.lods) { add(d.meshAssetId); add(d.materialAssetId); }   // the far levels ship too
+    }
     for (auto [e, c] : reg.view<ParticleSystemComponent>().each())  if (keep(e)) add(c.particleAssetId);
     for (auto [e, c] : reg.view<AnimatorComponent>().each())        if (keep(e)) add(c.clipAssetId);
     for (auto [e, c] : reg.view<AnimatorBlendComponent>().each())   if (keep(e)) { add(c.clipAId); add(c.clipBId); }

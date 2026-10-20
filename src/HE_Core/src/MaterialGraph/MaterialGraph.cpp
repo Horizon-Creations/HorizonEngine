@@ -262,6 +262,10 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::WaterRipple, "Water Ripple", "Input",
           { { "Position", F::Vec2, 0 } },
           { { "Height", F::Float, 0 }, { "Slope", F::Vec2, 0 }, { "Foam", F::Float, 0 } }, 0 },
+
+        // ── v17: the sun, read from the lighting block ──
+        { MatNodeType::Sun, "Sun", "Input",
+          {}, { { "Direction", F::Vec3, 0 }, { "Color", F::Vec3, 0 } }, 0 },
     };
     return kReg;
 }
@@ -853,6 +857,13 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             decl = "vec3 " + v + " = vec3(heLight.sunColor.w, 0.0, heLight.ambient.w);"
                  + " float " + v + "_s = heLight.camPos.w;";
             pinExpr = { v, v + "_s", "(" + v + " * " + v + "_s)" };
+            break;
+
+        case MatNodeType::Sun:
+            // The same prefix channels Time (sunDir.w) already reads, so both stages
+            // have them. Unit by construction (dominantDirectionalLight).
+            decl = "vec3 " + v + " = heLight.sunDir.xyz; vec3 " + v + "_c = heLight.sunColor.rgb;";
+            pinExpr = { v, v + "_c" };
             break;
 
         case MatNodeType::Output:

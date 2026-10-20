@@ -182,3 +182,95 @@ TEST_CASE("NetSession: unregistered message id is dropped without error")
 
     CHECK(server.connections().size() == 1);
 }
+
+// ─── One frame per message, not per peer (NET-102) ───────────────────────────
+
+namespace {
+
+// Records what NetSession hands down; three peers are "connected" on the first
+// poll so the session's peer list has someone to broadcast to.
+class CaptureTransport final : public ITransport {
+public:
+    struct Sent { ConnectionId conn; std::vector<std::uint8_t> bytes; };
+    std::vector<Sent>     sent;
+    std::vector<NetEvent> pending{ { NetEventType::Connected, 1, {} },
+                                   { NetEventType::Connected, 2, {} },
+                                   { NetEventType::Connected, 3, {} } };
+
+    void update() override {}
+    void send(ConnectionId conn, const std::uint8_t* data, std::size_t len,
+              SendMode) override {
+        sent.push_back({ conn, std::vector<std::uint8_t>(data, data + len) });
+    }
+    bool poll(NetEvent& out) override {
+        if (pending.empty()) return false;
+        out = std::move(pending.front());
+        pending.erase(pending.begin());
+        return true;
+    }
+    void disconnect(ConnectionId) override {}
+    std::size_t connectionCount() const override { return 3; }
+};
+
+} // namespace
+
+TEST_CASE("NetSession: a frame is [id low][id high][payload], the same for every peer")
+{
+    CaptureTransport t;
+    NetSession s(&t, NetRole::Host);
+    s.pump();
+    REQUIRE(s.connections().size() == 3);
+
+    // Pinned by hand: id 0x1234 goes out low byte first; the payload's three
+    // bits 0b101 sit zero-padded in one byte behind it.
+    BitWriter partial;
+    partial.writeBits(0b101u, 3);
+    s.send(2, 0x1234, partial);
+    REQUIRE(t.sent.size() == 1);
+    CHECK(t.sent[0].conn == 2);
+    CHECK(t.sent[0].bytes == std::vector<std::uint8_t>{ 0x34, 0x12, 0x05 });
+
+    // No payload: just the id.
+    t.sent.clear();
+    s.send(1, 0xBEEF);
+    REQUIRE(t.sent.size() == 1);
+    CHECK(t.sent[0].bytes == std::vector<std::uint8_t>{ 0xEF, 0xBE });
+
+    // Broadcast, broadcast-except and sendTo hand every peer the identical frame.
+    BitWriter big;
+    big.writeBool(true);   // unaligned bulk write behind it
+    std::vector<std::uint8_t> blob(1000);
+    for (std::size_t i = 0; i < blob.size(); ++i) blob[i] = static_cast<std::uint8_t>(i * 7u);
+    big.writeBytes(blob.data(), blob.size());
+    std::vector<std::uint8_t> want{ 0x01, 0x02 };
+    big.appendTo(want);
+
+    t.sent.clear();
+    s.broadcast(0x0201, big);
+    REQUIRE(t.sent.size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(t.sent[i].conn == static_cast<ConnectionId>(i + 1));
+        CHECK(t.sent[i].bytes == want);
+    }
+
+    t.sent.clear();
+    s.broadcastExcept(2, 0x0201, big);
+    REQUIRE(t.sent.size() == 2);
+    CHECK(t.sent[0].conn == 1);
+    CHECK(t.sent[1].conn == 3);
+    CHECK(t.sent[0].bytes == want);
+    CHECK(t.sent[1].bytes == want);
+
+    t.sent.clear();
+    s.sendTo({ 3, 1 }, 0x0201, big);
+    REQUIRE(t.sent.size() == 2);
+    CHECK(t.sent[0].conn == 3);
+    CHECK(t.sent[1].conn == 1);
+    CHECK(t.sent[1].bytes == want);
+
+    // Nobody to send to is not an error.
+    t.sent.clear();
+    s.sendTo({}, 0x0201, big);
+    s.broadcastExcept(1, 0x0201, big);   // still two others
+    CHECK(t.sent.size() == 2);
+}

@@ -133,6 +133,9 @@ struct EditorConfig
 	bool  RewardsSoundProblem       = true; // under RewardsSound
 	bool  RewardsSoundDragDrop      = true; // HC graph drag and drop cues (EditorDragCues.h)
 	bool  RewardsProblemPulse  = true;   // V8/V9: the bell rings out, a failed node pulses
+	// Toasts (bottom-right) and critical dialogs for notifications. Off: everything
+	// goes to the notification centre (the footer bell) only. See NotificationStore.h.
+	bool  NotificationPopups   = true;
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 	bool  RewardsCounterTick   = true;   // V3: a number that rose lights up (under Progress)
 	bool  RewardsStreakTooltip = true;   // hovering the counters: the last 7 days (under Progress)
@@ -201,12 +204,6 @@ struct EditorConfig
 	// Play mode always has them (the component's own switch is the one to use there).
 	bool  WeatherSoundInEditor = true;
 
-	// Which graphics values the editor's viewport previews with, when the open
-	// project sets its own (ProjectSettings graphics.enabled): 0 = the project's
-	// (the default — what you see is what ships), 1 = this user's own values, for
-	// a machine that struggles with the project's bloom and GI. Never changes
-	// what an export writes. Persisted ("PreviewQualityMode").
-	int   PreviewQualityMode = 0;
 	// Runtime only, never saved: the graphics fields of this struct currently
 	// hold the PROJECT's values and not the user's (EditorApplication::
 	// syncGraphicsSource sets it every frame). The settings rows read it to lock

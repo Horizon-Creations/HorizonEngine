@@ -487,6 +487,19 @@ public:
     // the HeLighting/HeParams UBOs, and the offset is applied in world space.
     const Compiled& customVertex(uint64_t bodyHash, const std::string& body, Backend backend);
 
+    // Instanced twins of standardVertex / customVertex (Thema 182, plan 2e): one draw
+    // for a whole GeometryPass batch of a graph material, wind (WPO) included. The
+    // per-draw u.model / u.mvp come per instance instead:
+    //   Metal  a mat4 array at vertex buffer 5, {mvp, model} per instance (the
+    //          scene's k_instStride layout); the U block at buffer 1 still carries
+    //          color/flags/pbr. Same maths as the per-draw form.
+    //   others the model as vec4 attributes at locations 4-7 (divisor 1, the mesh
+    //          VAO's instance binding); u.mvp must hold the batch's viewProj.
+    // Varyings and the U block are the plain variant's, so every material fragment
+    // pairs with either form unchanged.
+    const Compiled& standardVertexInstanced(Backend backend);
+    const Compiled& customVertexInstanced(uint64_t bodyHash, const std::string& body, Backend backend);
+
     // ── Tessellation for the Displacement pin (Thema 207) ─────────────────────
     // `disp` is MaterialAsset::customShaderDispGlsl (settings line, declarations,
     // statements ending in `float heDisp`, see HE::matSplitDisplacement). The two
@@ -532,9 +545,9 @@ private:
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
 
-    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
+    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
-    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
+    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend, instanced)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)

@@ -63,7 +63,13 @@ public:
 
 	// The world that is captured for joiners and replaced on join. Must outlive
 	// any active session.
-	void setWorld(HorizonWorld* world) { m_world = world; }
+	void setWorld(HorizonWorld* world)
+	{
+		// A miss is "no entity of THIS world has the id": another world's
+		// revision numbers say nothing about it.
+		if (world != m_world) m_netMisses.clear();
+		m_world = world;
+	}
 
 	// Where "something happened that you did not do" goes — a peer that could
 	// not apply a delete, a request the host refused, a reimport somebody else's
@@ -1205,6 +1211,8 @@ private:
 	void noteRemoteReimport(HE::Net::ParticipantId by, const std::string& relPath);
 
 	HE::Ed::NotificationStore*      m_notes = nullptr;
+	// The current Failed status has been put in front of the user (announceFailure).
+	bool                            m_failureAnnounced = false;
 	std::vector<CreatedAssetNotice> m_createdNotices;
 	std::vector<PendingAssetOp>     m_pendingOps;     // host only
 	// The batch ids WE mint, and the one currently open. Per-controller, so two
@@ -1281,6 +1289,8 @@ private:
 	// session and wants the UI back now). Safe to call when nothing was taken.
 	void releaseNetworkResources(bool blocking);
 	void wireCallbacks();
+	// Tells the user, once, that the session failed (see the definition).
+	void announceFailure();
 	// Copy the persisted name/picture/client key into a session config. Called
 	// on every host and join, so the identity the user just edited is the one
 	// that goes on the wire.
@@ -1583,7 +1593,21 @@ private:
 	// Network id ↔ local ECS handle. The only source of truth about identity
 	// across peers; local-only entities (terrain chunks, environment lights) are
 	// simply absent from it.
-	std::vector<std::pair<std::uint64_t, std::uint32_t>> m_netIds;
+	//
+	// Two maps, not the vector of pairs it was (EDT-202): every lookup was a
+	// linear search, so seeding a world (netIdFor per entity, each searching
+	// all earlier entries) was quadratic, and the per-frame lookups (the held
+	// entity, every peer's selection, every remote transform) grew with the
+	// scene. The first entry for a key wins, as the first match of the old
+	// search did; rememberNetId keeps the two in step.
+	std::unordered_map<std::uint32_t, std::uint64_t> m_netByHandle;
+	std::unordered_map<std::uint64_t, std::uint32_t> m_handleByNet;
+	void rememberNetId(std::uint64_t netId, std::uint32_t entityHandle);
+	// Net ids a scan of the world did not find, with the world's
+	// entityIdRevision at the time. A peer selecting an entity this machine does
+	// not have used to scan the whole registry on every frame of the presence
+	// loop; while the revision stands, no entity can have gained that id.
+	std::unordered_map<std::uint64_t, std::uint64_t> m_netMisses;
 	std::vector<std::string> m_heldAssetLocks;
 	// Asset locks we asked for and no longer want, whose grant has not arrived
 	// yet. Only a client can be in this state, and only because releasing a lock

@@ -1,4 +1,5 @@
 #include "TypeAssetPanel.h"
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
@@ -39,7 +40,6 @@ struct PanelState
 	HE::UUID    assetId;
 	HE::StructDef structDef;
 	HE::EnumDef   enumDef;
-	std::string lastSaveError; // shown under the toolbar until the next save
 	// Per row (entry or field, index-parallel): its name as last saved, empty
 	// for a row added since. Rows are only ever appended or erased, never
 	// reordered, so the index is the row's identity for the life of the tab —
@@ -119,7 +119,6 @@ const char* fieldTypeLabel(PinType t)
 bool saveState(PanelState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
-	st.lastSaveError.clear();
 	auto& reg = HE::TypeRegistry::instance();
 	if (st.isEnum)
 	{
@@ -151,10 +150,10 @@ bool saveState(PanelState& st, AppContext& ctx)
 		st.structDef.assetPath = st.relPath;
 		if (reg.structWouldCycle(st.structDef))
 		{
-			st.lastSaveError =
-				"Not saved: a Struct field refers back to this struct (directly or "
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved",
+				"A Struct field refers back to this struct (directly or "
 				"through another struct) — that cycle would never finish. Remove the "
-				"circular field first.";
+				"circular field first.");
 			return false;
 		}
 		StructTypeAsset* a = ctx.contentManager->getStructTypeMutable(st.assetId);
@@ -262,13 +261,15 @@ void typeNamePicker(HE::StructField& f, bool& dirty, AppContext& ctx,
                     const std::string& excludePath)
 {
 	const bool wantEnum = f.type == PinType::Enum;
-	const auto  assets  = HcEditorUtil::listAssets(ctx.contentManager,
-		wantEnum ? HE::AssetType::EnumType : HE::AssetType::StructType);
 	const std::string shown = f.typeName.empty()
 		? std::string(wantEnum ? "Select an enum\xe2\x80\xa6" : "Select a struct\xe2\x80\xa6")
 		: std::filesystem::path(f.typeName).stem().string();
 	if (ImGui::BeginCombo("##typename", shown.c_str()))
 	{
+		// Only with the dropdown open: every Enum/Struct field draws one of
+		// these, and the closed ones never needed the list (EDT-1702).
+		const auto assets = HcEditorUtil::listAssets(ctx.contentManager,
+			wantEnum ? HE::AssetType::EnumType : HE::AssetType::StructType);
 		for (const auto& a : assets)
 		{
 			if (!wantEnum && a.path == excludePath) continue;
@@ -434,12 +435,6 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		bar.readout(nullptr, st.isEnum ? "Enum" : st.isTemplate ? "SaveGame Template" : "Struct", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, true)) saveState(st, ctx);
-	}
-	if (!st.lastSaveError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(220, 80, 80, 255));
-		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
-		ImGui::PopStyleColor();
 	}
 	if (!st.isTemplate && HE::TypeRegistry::instance().nameCollides(st.name, st.relPath))
 	{

@@ -126,4 +126,12 @@ namespace HE::Ed
 		std::uint64_t m_lastRevision = 0;
 		bool          m_haveRevision = false;
 	};
+
+	// ── Telling the user the safety net is down ──
+	// An autosave that cannot write used to be a log warning only, so a person who
+	// believes a crash is survivable finds out it is not after the crash. These
+	// raise (once per outage) and withdraw a notification for it; both autosaves
+	// share them. Safe from any thread.
+	void reportAutosaveFailure(const std::string& what, const std::string& why);
+	void reportAutosaveWorking();
 }

@@ -15,6 +15,7 @@ struct HpakReader::Toc
 {
     std::vector<EntryMeta> entries;
     uint64_t               hash = 0;   // FileHeader::tocHash it was validated against
+    uint32_t               version = Hpak::k_version; // FileHeader::version: which hash it uses
 };
 
 bool HpakReader::openShared(const std::string& path, std::shared_ptr<const Toc> toc)
@@ -37,7 +38,7 @@ bool HpakReader::openShared(const std::string& path, std::shared_ptr<const Toc> 
     Hpak::FileHeader hdr{};
     m_file.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
     if (!m_file || std::memcmp(hdr.magic, Hpak::k_magic, 4) != 0 ||
-        hdr.version != Hpak::k_version || hdr.tocHash != toc->hash ||
+        hdr.version != toc->version || hdr.tocHash != toc->hash ||
         hdr.entryCount != toc->entries.size())
     {
         HE_LOG_WARN(Pak, "Package '%s' changed since it was mounted (header differs)",
@@ -78,11 +79,13 @@ bool HpakReader::open(const std::string& path)
         HE_LOG_ERROR(Pak, "'%s' is not a HorizonEngine package (bad magic)", path.c_str());
         return false;
     }
-    if (hdr.version != Hpak::k_version)
+    if (hdr.version < Hpak::k_oldestVersion || hdr.version > Hpak::k_version)
     {
-        HE_LOG_ERROR(Pak, "Package '%s' has version %u, this build reads version %u — "
+        HE_LOG_ERROR(Pak, "Package '%s' has version %u, this build reads versions %u to %u — "
                           "re-export the project", path.c_str(),
-                     static_cast<unsigned>(hdr.version), static_cast<unsigned>(Hpak::k_version));
+                     static_cast<unsigned>(hdr.version),
+                     static_cast<unsigned>(Hpak::k_oldestVersion),
+                     static_cast<unsigned>(Hpak::k_version));
         return false;
     }
 
@@ -100,7 +103,7 @@ bool HpakReader::open(const std::string& path)
             return false;
         }
     }
-    if (Hpak::hash64(toc.data(), toc.size()) != hdr.tocHash)
+    if (Hpak::hash64ForVersion(hdr.version, toc.data(), toc.size()) != hdr.tocHash)
     {
         HE_LOG_ERROR(Pak, "Package '%s' has a corrupt table of contents (hash mismatch) — "
                           "the file is damaged or was modified", path.c_str());
@@ -110,6 +113,7 @@ bool HpakReader::open(const std::string& path)
 
     auto table = std::make_shared<Toc>();
     table->hash = hdr.tocHash;
+    table->version = hdr.version;
     table->entries.resize(hdr.entryCount);
     for (uint32_t i = 0; i < hdr.entryCount; ++i)
     {
@@ -232,7 +236,7 @@ const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
     // Content-hash check on the stored bytes (corruption detection). Verified here,
     // before either caller uses them — a corrupt entry must be repacked from source,
     // never carried verbatim into the next archive nor decoded into an asset.
-    if (Hpak::hash64(out.data(), out.size()) != e->contentHash)
+    if (Hpak::hash64ForVersion(m_toc->version, out.data(), out.size()) != e->contentHash)
     {
         HE_LOG_ERROR(Pak, "Package entry %016llx%016llx failed its content hash check — "
                           "the data is corrupt",
@@ -251,7 +255,10 @@ bool HpakReader::readStoredEntry(const HE::UUID& id, StoredEntry& out) const
     // No flag filtering here (unlike readEntry): this is the verbatim re-pack path,
     // and HpakWriter is the one that decides which flags it can carry over.
     out.origSize    = e->origSize;
-    out.contentHash = e->contentHash;
+    // In the CURRENT version's hash, because the writer copies it into a current
+    // package as is. The bytes were just verified, so rehashing them is safe.
+    out.contentHash = m_toc->version == Hpak::k_version
+                    ? e->contentHash : Hpak::hash64(out.data.data(), out.data.size());
     out.codec       = e->codec;
     out.flags       = e->flags;
     std::memcpy(out.nonce, e->nonce, sizeof(out.nonce));

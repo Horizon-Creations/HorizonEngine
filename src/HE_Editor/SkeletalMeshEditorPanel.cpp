@@ -90,6 +90,8 @@ static void commitSlots(AppContext& ctx, State& st, const HE::Ed::MeshMaterialSl
 	SkeletalMeshAsset* mesh = ctx.contentManager->getSkeletalMeshMutable(st.meshId);
 	if (!mesh) return;
 	HE::Ed::MeshMaterialSlots::applyTo(table, *mesh);
+	// Same as the static tab: the GPU copy holds the old material's texture.
+	if (ctx.renderer) ctx.renderer->InvalidateMesh(st.meshId);
 	if (ctx.contentManager->saveAsset(*mesh))
 		HE_LOG_INFO(Editor, "%s", ("SkeletalMeshEditor: saved material slots of '" + st.relPath + "'").c_str());
 	else

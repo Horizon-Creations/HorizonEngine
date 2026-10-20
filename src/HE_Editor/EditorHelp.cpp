@@ -177,6 +177,10 @@ namespace
 	  "Marks what a savegame keeps for this entity, so a saved game restores it "
 	  "as it was rather than as the scene file has it.",
 	  "", "scenes#scene-files" },
+	{ "Component/Streaming", "Streaming",
+	  "Where this entity lives when the scene is split into cells: in a cell that "
+	  "loads around the camera, or always loaded in the base scene.",
+	  "", "scenes#streaming" },
 	{ "Component/LOD", "LOD",
 	  "Swaps this entity's mesh for cheaper versions as the camera gets further "
 	  "away.",
@@ -251,7 +255,7 @@ namespace
 	{ "Material/Roughness", "",
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
 	  "that decides whether something reads as wet, polished or worn. On the "
-	  "engine water it is a parameter of its own: keep it low for sharp "
+	  "engine water it is the z component of Surface: keep it low for sharp "
 	  "reflections and a tight sun glint. Distant water is made rougher on top "
 	  "of it, the way the eye averages ripples it can no longer resolve.",
 	  "", "rendering#lighting" },
@@ -259,7 +263,9 @@ namespace
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
 	  "the transparent pass — so it no longer writes depth. On the engine water "
 	  "(already transparent) the parameter of that name is the opacity looking "
-	  "straight down into clear water; depth tint, Fresnel and foam raise it.",
+	  "straight down into clear water; depth tint, Fresnel and foam raise it. "
+	  "In the last metre before a landscape's shore it falls toward a quarter "
+	  "of itself as the water gets shallower, so the ground shows through.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
 	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
@@ -289,7 +295,11 @@ namespace
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
-	  "below the surface is not read yet.",
+	  "below the surface is not read yet (in the last metre before a landscape's "
+	  "shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
+	  "waterline the water fades in over this many metres of depth instead of "
+	  "ending in a hard edge (0 = hard, up to 0.7). w = shore foam: the lace "
+	  "along the waterline (0 = none, 1 = strong).",
 	  "", "materials#water" },
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "
@@ -311,19 +321,29 @@ namespace
 	  "steepnesses together also set how strong the irregular chop on top is: "
 	  "all three at 0 gives a flat surface.",
 	  "", "materials#water" },
-	{ "Material/FresnelPower", "",
-	  "How quickly the surface turns reflective toward grazing angles. 5 is "
-	  "physical water; lower values make the water mirror-like even when you "
-	  "look down into it.",
+	{ "Material/Surface", "",
+	  "The four plain surface numbers of the water in one row. x = Fresnel "
+	  "exponent (1 to 10): how quickly the surface turns reflective toward "
+	  "grazing angles, 5 is physical water, lower values make it mirror-like "
+	  "even when you look down into it. y = reflection (0 to 1): how strongly "
+	  "sky and scene reflection cover the water, it scales the Fresnel lift of "
+	  "the opacity and the specular strength, 0 leaves only the water colour. "
+	  "z = roughness (0 to 1): low gives sharp reflections and a tight sun "
+	  "glint, distant water is made rougher on top. w = specular (0 to 1): "
+	  "strength of the specular reflection for a non-metal (0.5 = F0 0.04), "
+	  "multiplied by the reflection; about 0.3 gives water's real F0 of 0.02.",
 	  "", "materials#water" },
-	{ "Material/Reflection", "",
-	  "How strongly sky and scene reflection cover the water. Scales both the "
-	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
-	  "the water colour.",
-	  "", "materials#water" },
-	{ "Material/Specular", "",
-	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
-	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
+	{ "Material/ShallowWater", "",
+	  "How water behaves in the last metre before a landscape's shore (a plane "
+	  "has no shore, so nothing changes there). x = clear depth in metres: "
+	  "from this much water on, Opacity is whole; shallower water lets the "
+	  "ground show through more. Raise it to see further into the shallows "
+	  "before the water turns opaque. y = tint start (0 to 1, shore closeness "
+	  "where 0 is a metre of water or more and 1 is none): where the depth tint "
+	  "has fully taken over the real depth, 0.5 is half a metre; further out it "
+	  "blends to the assumed depth in Turbidity. z = opacity floor (0 to 1): "
+	  "the share of Opacity left at no depth at all. w is reserved and does "
+	  "nothing yet.",
 	  "", "materials#water" },
 	{ "Material/Refraction", "",
 	  "How much the waves bend the view into the water: the depth tint and the "
@@ -865,6 +885,82 @@ namespace
 	{ "Foliage/Seed", "",
 	  "Which scatter pattern is generated. The same seed always produces the same "
 	  "layout, so nothing is saved per instance.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Layer", "Foliage Layer",
+	  "One kind of plant on this landscape — grass, a bush, a tree — with its own "
+	  "mesh, density, seed and painted mask. Click a layer to edit it below; the "
+	  "Landscape panel's Foliage brush paints the same layer. The number is how "
+	  "many instances it scattered.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Layer Visible", "Show Layer",
+	  "Draws this layer or hides it. The scatter is kept, so turning it back on "
+	  "is instant; nothing about where it grows changes.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Layer", "",
+	  "Adds an empty layer for another kind of plant and selects it. Give it a "
+	  "mesh to make it grow; it gets a seed of its own, so it does not grow in "
+	  "the same spots as the others.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Layer", "",
+	  "Removes the selected layer, its painted mask included (one undo step). "
+	  "The last layer cannot be removed — remove the component instead.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Name", "Layer Name",
+	  "What the layer is called in this list and in the Landscape panel. Empty "
+	  "shows it as \"Layer N\".",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cast Shadows", "",
+	  "Whether the layer casts shadows. Off saves a lot for short grass, whose "
+	  "shadow nobody sees.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Ambient Occlusion", "",
+	  "Whether the layer darkens the ground around it through screen-space "
+	  "ambient occlusion. Off for thin grass that would only add noise.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Shadow Distance", "",
+	  "Beyond this distance the layer stops casting shadows, in metres. 0 casts "
+	  "as far as it is drawn (Draw Distance).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Detail Levels", "",
+	  "What the layer turns into farther away: a simpler mesh, fewer plants, a "
+	  "cross card at the far end. The mesh above is drawn near the camera; each "
+	  "level takes over from its distance. Each plant picks its level by its own "
+	  "distance, so a whole patch never changes at once.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Level", "Add Detail Level",
+	  "Adds a farther detail level, halfway between the last one and the Draw "
+	  "Distance. Without a mesh of its own it draws the layer's mesh, so it can "
+	  "simply thin the layer out.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Level", "Remove Detail Level",
+	  "Removes this detail level; the level before it is then drawn out to the "
+	  "next one, or to the Draw Distance.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cross Card", "",
+	  "Uses the engine's cross card for this level: two crossed upright quads that "
+	  "show a picture of the plant. Give the level a material with that picture "
+	  "(alpha cut out) — it costs four quads per plant instead of the whole mesh.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Mesh", "Detail Level Mesh",
+	  "The mesh this level draws. Empty draws the layer's own mesh, which makes "
+	  "the level only thin the layer out (Level Density).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Material", "Detail Level Material",
+	  "The material for this level's mesh. Empty takes the LAYER's material (not "
+	  "the mesh's own), which is what a simpler mesh of the same plant wants.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Distance", "",
+	  "Where this level starts, in metres from the camera along the ground. A "
+	  "level that starts beyond the Draw Distance is never drawn.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Density", "",
+	  "Share of the layer's plants this level still draws: 1 all, 0.25 every "
+	  "fourth, 0 none. The plants kept are spread evenly over the landscape.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Hysteresis", "",
+	  "How far past a level boundary a plant keeps the level it had, in metres, "
+	  "so a camera that hovers on a boundary does not make plants flicker "
+	  "between two levels. The Draw Distance edge is not affected.",
 	  "", "scenes#foliage" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
@@ -1851,6 +1947,13 @@ namespace
 	  "onUpdate. The way to take one out of the picture without losing its "
 	  "property values.",
 	  "", "scripting#attach" },
+	{ "Streaming/Mode", "",
+	  "Resident keeps this entity in the base scene, always loaded, and with it "
+	  "everything in the same top-level group (its parents and their children): use "
+	  "it for what the level's logic needs at all times, a manager script or a "
+	  "waypoint a script looks up by name. Auto leaves the choice to the split. Takes "
+	  "effect the next time the scene is split.",
+	  "", "scenes#streaming" },
 	{ "Save State/Enabled", "",
 	  "Include this entity in savegames. Off, it is whatever the scene file says "
 	  "every time the game is loaded.",
@@ -2017,17 +2120,10 @@ namespace
 	  "menu or list, a field being typed into, a dialog and a fly-look in the "
 	  "viewport each take the Esc first, and the next press clears.",
 	  "Esc", "editor#outliner" },
-	{ "Edit/Project Settings", "",
-	  "Opens the project's own settings as an editor tab: its title and startup "
-	  "scene, shadows, physics rate and gravity, what the packaged build boots "
-	  "with, permissions, fonts, collision layers. Everything on it travels with "
-	  "the project and into the build you export — the opposite of Preferences, "
-	  "which follow the editor on this machine.",
-	  "", "editor#preferences" },
 	{ "Edit/Preferences", "",
-	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
-	  "tools. They belong to the editor, not to the project — that one has its "
-	  "own tab, Project Settings.",
+	  "Opens the settings as an editor tab: appearance, input, renderer, "
+	  "collaboration, tools, and the open project's own pages (Project, World, "
+	  "Online), which are saved in the project and not on this machine.",
 	  "Ctrl+,", "editor#preferences" },
 	{ "View/Toggle Fullscreen", "",
 	  "Fills the screen with the editor window. On a Mac the View menu's own "
@@ -3070,6 +3166,18 @@ namespace
 	  "Clears the bell without discarding the entries — they stay readable in "
 	  "the list.",
 	  "", "editor#notifications" },
+	{ "Notifications/Dismiss", "",
+	  "Closes this message without choosing any of its buttons. It stays in the "
+	  "notification centre (the bell in the footer), marked as read.",
+	  "", "editor#notifications" },
+	{ "Notifications/OK", "",
+	  "Closes this message. It stays in the notification centre (the bell in "
+	  "the footer), marked as read.",
+	  "", "editor#notifications" },
+	{ "Notifications/x", "",
+	  "Closes this popup now instead of waiting for it to fade. It stays in the "
+	  "notification centre (the bell in the footer), still unread.",
+	  "", "editor#notifications" },
 	{ "Notifications/Clear", "",
 	  "Discards every notification. Anything that still needs doing is not "
 	  "undone by this — only the reminder is gone.",
@@ -4035,6 +4143,14 @@ namespace
 	  "frame; dragging a node around stays silent. Same volume and mute as the "
 	  "other feedback sounds. Preview plays all five in a row.",
 	  "", "horizoncode#graphs" },
+	{ "Preferences/Feedback/Show Notification Popups", "",
+	  "On (the default): an important notification shows as a small card in the "
+	  "bottom-right corner for a few seconds without taking the keyboard, and a "
+	  "critical one as a dialog you have to acknowledge. Off: none of that — every "
+	  "notification goes to the notification centre only (the bell in the footer, "
+	  "which still counts and rings). Buttons like Join or Retry are then on the "
+	  "rows in the centre. Popups that are up when you switch this off close at once.",
+	  "", "editor#notifications" },
 	{ "Preferences/Feedback/Problem Pulse", "",
 	  "When a new problem arrives in the notifications, one thin ring widens "
 	  "around the footer bell and fades within about half a second; with "
@@ -4558,12 +4674,6 @@ namespace
 	  "global illumination. Only the preview changes: exporting still writes the "
 	  "project's values, and play mode follows the project.",
 	  "", "" },
-	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
-	  "Opens the Project Settings page of the repository: initialising it, the "
-	  "remote, GitHub setup and large files. The repository belongs to the "
-	  "project, so those controls travel with it and no longer sit here; git on "
-	  "this machine and the signed-in account stay on this page.",
-	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
 	  "On, the packaged build boots with the window and backend this editor's "
@@ -4896,6 +5006,12 @@ namespace
 	{ "Tool Setup/Retry", "Retry",
 	  "Runs the install for this tool again. The log of the failed run is still "
 	  "there until the new one starts.",
+	  "", "horizoncode#compiler" },
+	{ "Tool Setup/Cancel", "Cancel",
+	  "Ends the running install: winget and every installer it started are "
+	  "terminated. A half-finished Visual Studio setup can be left behind; Retry "
+	  "starts it again. An installer that runs with administrator rights may refuse "
+	  "to end, then the install stays listed as running until it exits.",
 	  "", "horizoncode#compiler" },
 	{ "Tool Setup/Show Log", "Show Log",
 	  "Opens the installer's output below the list, where the last lines say why "
@@ -7182,15 +7298,22 @@ namespace
 
 	// ── Landscape: the foliage brush ─────────────────────────────────────────
 	{ "Landscape/Foliage", "Foliage",
-	  "Paints where the landscape's foliage layer grows and where it must not. "
-	  "The brush writes a density mask over the ground: Grow lets the layer "
-	  "come up under the cursor, Erase clears it — a yard, a road, a lake. The "
-	  "instances follow the stroke while you drag.",
+	  "Paints where a foliage layer grows and where it must not. The brush "
+	  "writes the selected layer's density mask over the ground: Grow lets the "
+	  "layer come up under the cursor, Erase clears it — a yard, a road, a "
+	  "lake. The instances follow the stroke while you drag.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Add Foliage Layer", "",
 	  "Puts a Foliage component on the landscape, the same one Details' Add "
-	  "Component would. Give it a mesh next, or the brush paints a mask nobody "
-	  "can see.",
+	  "Component would, or — when it has one — another layer for another kind "
+	  "of plant, selected straight away. Give it a mesh next, or the brush "
+	  "paints a mask nobody can see.",
+	  "", "scenes#foliage" },
+	{ "Landscape/Foliage Layer", "Foliage Layer",
+	  "One kind of plant on this landscape — grass, a bush, a tree — each with "
+	  "its own mesh, density and mask. Click one to paint it; the brush, Density "
+	  "and the mask resets below act on the selected layer only. The number is "
+	  "how many instances it scattered; a dimmed name is a hidden layer.",
 	  "", "scenes#foliage" },
 	{ "Landscape/Density", "Foliage Density",
 	  "Instances per square metre for the layer, the same number as Density on "
@@ -7214,18 +7337,18 @@ namespace
 	  "than full is what makes a meadow thin out toward its edge.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Mask", "Mask Resolution",
-	  "How many texels per side the density mask has, from 32 to 2048, "
+	  "How many texels per side the selected layer's density mask has, from 32 to 2048, "
 	  "stretched over the whole landscape — the finer it is, the sharper an "
 	  "erased edge can be. Locked as soon as anything is painted, because "
 	  "changing it would throw the mask away; Reset Mask unlocks it again.",
 	  "", "scenes#foliage" },
 	{ "Landscape/Erase Everywhere", "",
-	  "Clears the whole mask, so the layer scatters nothing anywhere until you "
+	  "Clears the selected foliage layer's whole mask, so it scatters nothing anywhere until you "
 	  "Grow it back in. The way to start from bare ground and paint the meadows "
 	  "in, rather than erase the paths out. One undo step.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Reset Mask", "",
-	  "Throws the painted mask away entirely: the layer goes back to an even "
+	  "Throws the selected foliage layer's painted mask away entirely: it goes back to an even "
 	  "scatter over the whole landscape, as if nothing had been painted, and "
 	  "the mask resolution unlocks. One undo step, the whole mask.",
 	  "", "editor#landscape-mode" },
@@ -7275,23 +7398,48 @@ namespace
 	  "that water's level.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Dig Bed##water", "Dig Bed",
-	  "Also digs while you paint: the ground under the brush is lowered to a "
-	  "floor Depth below the water level, with the brush falloff as the bank. "
-	  "It digs only where the water is, so the pit never reaches past it: "
-	  "ground at the edge of a stroke stays as it is until the water has "
-	  "spread there, and ground above the water level is cut down to it "
-	  "the moment the water covers it. "
+	  "Also digs while you paint, and it is what makes the water look like water: "
+	  "the surface material shades by how deep the water is, so a pond on flat "
+	  "ground without a bed is nothing but shallow shore (clear, foamy, no body "
+	  "colour). The bed is dug from the shore, not from the brush: under the "
+	  "water the ground sinks by Slope metres for every metre from the shoreline "
+	  "until it is Max Depth below the surface, and stays there. Painting on or "
+	  "pushing the shore out digs the newly inner ground the same way, as far in "
+	  "as it takes to reach Max Depth. "
+	  "It digs only where the water is, so the pit never reaches past it; ground "
+	  "above the water level under the water is cut down to it at once. "
 	  "Where that leaves ground standing above the water (painting uphill), "
 	  "it is shaved into a dry bank that slopes down to the waterline, "
 	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
-	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
+	  "does not dig on forever. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Depth##water", "Bed Depth",
-	  "How far below the water level the bed is dug, in metres. Only used "
-	  "with Dig Bed.",
+	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
+	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "
+	  "again, back toward the height it had before the digging, at the brush's "
+	  "strength and profile. Only the brush's own digging is returned, and only "
+	  "where the water is gone: under water that is left, the bed stays. Ground you "
+	  "sculpted yourself afterwards keeps your changes. Off: erasing takes the water "
+	  "and leaves the hole. One undo step takes it back.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Max Depth##water", "Bed Max Depth",
+	  "The deepest the bed gets below the water level, in metres. It is reached at "
+	  "Max Depth / Slope metres from the shore (shown under the sliders) and held "
+	  "from there to the middle. Only used with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Slope##water", "Bed Slope",
+	  "How steeply the bed falls from the shore towards the middle: metres of depth "
+	  "per metre walked in. 0.25 drops a metre over four. A low slope gives a long "
+	  "gentle beach before the water is at full depth, a high one a steep drop-off "
+	  "close to the bank. Only used with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Bed Roughness##water", "Bed Roughness",
+	  "A little unevenness on the floor of the water, from 0 (smooth) to 1. It is a "
+	  "share of the depth at each point that a fixed pattern adds or takes away, so "
+	  "the shoreline itself stays clean and the same stroke always digs the same "
+	  "floor. Only used with Dig Bed.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Resolution##water", "Water Grid Resolution",
 	  "How many cells per side the landscape's water is stored in, from 32 to "
@@ -7397,17 +7545,20 @@ namespace
 	{ "Landscape/Refracted Light##wcau", "Refracted Light",
 	  "The moving net of bright lines the waves throw onto whatever lies below the "
 	  "surface while the camera is under water. It follows the same waves the "
-	  "water material draws (Physics/WaterWaves.h), so it moves with the swell you "
-	  "see from above, takes the sun's colour and is gone at night. It eases in "
-	  "over the first half metre of a dive, so crossing the waterline never pops. "
-	  "Intensity 0 turns it off and costs nothing.",
+	  "water material draws (Physics/WaterWaves.h) plus a fine chop, so it moves "
+	  "with the swell you see from above, takes the sun's colour and is gone at "
+	  "night. It is strongest in shallow water and fades out with depth; the light "
+	  "the lines gain is taken from the patches between them. It eases in over the "
+	  "first half metre of a dive, so crossing the waterline never pops. Intensity "
+	  "0 turns it off and costs nothing.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Intensity##wcau", "Refracted Light Intensity",
-	  "How bright the net is, as a multiple of the sun's light on the spot. 0 is "
-	  "off. Around 0.5 is a gentle shimmer; up to 4 for a stylised look.",
+	  "How bright the net is, as a multiple of the sun's light on the spot, and how "
+	  "much darker the patches between its lines get. 0 is off. Around 0.5 is a "
+	  "clear net on a sunny day; up to 4 for a stylised look.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Scale##wcau", "Refracted Light Scale",
-	  "The size of the net's cells. 1 matches the water material's own waves; 2 "
+	  "The size of the net's cells. At 1 they are around half a metre across; 2 "
 	  "makes the net twice as fine, 0.5 twice as wide.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Speed##wcau", "Refracted Light Speed",
@@ -7415,9 +7566,9 @@ namespace
 	  "them, 0 freezes the net.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Fade Depth##wcau", "Refracted Light Fade Depth",
-	  "The depth below the surface where the net has faded to about a third, the "
-	  "water swallowing the light on its way down. Beyond five times this depth "
-	  "nothing is shaded at all.",
+	  "The depth below the surface where the net is gone. It is at full strength in "
+	  "the shallows and eases out toward this depth, its lines growing wider and "
+	  "dimmer on the way. Deeper floors get no net at all.",
 	  "", "systems#water-physics" },
 
 	// ── The Environment window ───────────────────────────────────────────────
@@ -7500,6 +7651,16 @@ namespace
 	  "same UUID replaces the original and a new UUID is added, the packed "
 	  "startup scene included.",
 	  "", "export#mods" },
+	{ "Export/Development hotkeys", "",
+	  "The exported game answers two keys meant for testing: F10 shows a card in "
+	  "the top-right corner with frame times and the GPU time of each render "
+	  "pass, and V toggles VSync. The Development profile has it on, Shipping off "
+	  "- leave it off for the build players get. Works with any runtime, release "
+	  "builds included. The log says what the game did with the key. It also picks "
+	  "the engine SDK lib set every export compiles the game against: on the dev "
+	  "set, off the release set, which has no development code at all; the line "
+	  "under these settings says whether this editor has it.",
+	  "", "export#mods" },
 	{ "Export/Incremental packing", "",
 	  "Reuses the stored bytes of unchanged assets from the previous export at "
 	  "the same output directory instead of compressing them again, matched by a "
@@ -7511,7 +7672,10 @@ namespace
 	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "
 	  "GameInstance — into C++ and ships them as a compiled library. It needs "
 	  "cmake and a C++ toolchain on this machine and only runs for a Host target. "
-	  "The graphs ship as well either way, so by default anything that fails to "
+	  "The library is built against the same engine SDK and profile the export "
+	  "compiles the game from; it ships in the HorizonEngine folder beside the "
+	  "engine library, and the game refuses a library of another profile. The "
+	  "graphs ship as well either way, so by default anything that fails to "
 	  "translate simply runs interpreted.",
 	  "", "horizoncode#compiler" },
 	{ "Export/Interpret on failure", "",
@@ -7636,6 +7800,16 @@ namespace
 	  "export aimed at another platform, or one that shipped no game runtime at "
 	  "all, leaves it greyed out.",
 	  "", "export#shipped-files" },
+	{ "Build Window/Hide", "",
+	  "Puts this window away while the build keeps running. The footer shows its "
+	  "progress; click that to bring the window back. When the build ends with the "
+	  "window away, a notification says how it went.",
+	  "", "export#shipped-files" },
+	{ "Build Window/Cancel", "",
+	  "Stops the step that is compiling right now (the game from the engine SDK). "
+	  "A cancelled compile is a failed export: no prebuilt game ships in its place, "
+	  "and what was compiled so far is kept for the next export.",
+	  "", "export#shipped-files" },
 	{ "Build Window/Build Again", "",
 	  "Runs the same export once more with the settings the last run used, "
 	  "reporting into this window. Unlike the other two buttons it leaves the "
@@ -7674,7 +7848,8 @@ namespace
 	  "characters, dynamic bodies, audio sources. The game then loads the "
 	  "squares around its camera and drops the far ones; the things in a square "
 	  "keep their ids, so a placed prefab comes back as the same entities. Play "
-	  "in the editor shows only what stays in the scene. One undo step; save the "
+	  "in the editor streams the squares the same way, around the play camera. "
+	  "One undo step; save the "
 	  "scene to keep it. The scene has to have been saved once.",
 	  "", "editor#profiler" },
 	{ "Profiler/Merge Cells into the Scene", "",
@@ -9008,7 +9183,7 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Project Settings page that owns the setup: initialising the "
+	  "Opens Preferences \xe2\x96\xb8 Source Control, which owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },
@@ -9046,6 +9221,35 @@ namespace
 	{ "sc.commit.more", "More ways to commit",
 	  "Commit and push in one step, commit everything even though some files are "
 	  "ticked, or fold what is staged into the last commit.",
+	  "", "" },
+	{ "Team Sync/Sync Now", "",
+	  "Sends every change in the project folder that the team server does not have "
+	  "yet, and fetches what the others saved. Every save in the editor does this "
+	  "by itself a second later; the button is for files changed outside the "
+	  "editor (a script edited in an IDE, a texture exported from a paint program).",
+	  "", "" },
+	{ "Team Sync/Take the Team's Versions", "",
+	  "This copy has never synced with the team server, and the files listed differ "
+	  "from the team's. Replaces each of them with the team's version. Your copies "
+	  "are not uploaded: pick this for an old copy of the project.",
+	  "", "" },
+	{ "Team Sync/Keep Mine and Merge", "",
+	  "Uploads the listed files as your changes. The server merges each with the "
+	  "team's version: scenes by entity and settings by key keep both sides where "
+	  "they differ in different places; where both changed the same thing, and for "
+	  "graphs and binary assets, your version wins and the team's is kept on the "
+	  "server's horizon-conflicts branch.",
+	  "", "" },
+	{ "Team Sync/Create Project on Team Server", "",
+	  "Team admins only. Creates this project on the team server and uploads the "
+	  "project folder as its first revision. From then on every member's saves go "
+	  "through the server, which merges them.",
+	  "", "" },
+	{ "Team Sync/Open My Version", "",
+	  "Somebody's later save won over yours for this file. Downloads your version "
+	  "from the team server into Saved/TeamSync/Lost/ and shows that folder; the "
+	  "project keeps the winning version. To bring yours back, copy it over the "
+	  "project's file and save.",
 	  "", "" },
 	{ "Source Control Panel/Commit & Push", "",
 	  "Commits (the ticked files, or everything when none is ticked) and pushes the "
@@ -9545,6 +9749,8 @@ namespace
 		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
 		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The Source Control window when the team server keeps the history.
+		{ "Team Sync/",             "editor-collab", "Collaboration & Source Control", "Source control" },
 		// The reload question after a pull changed the open scene's file.
 		{ "Scene Changed/",         "editor-collab", "Collaboration & Source Control", "Scene changed on disk" },
 		// The bug reporter is neither collaboration nor source control: it
@@ -9567,7 +9773,7 @@ namespace
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
 		"Property Animator", "Sequence Player", "Particle System",
-		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
+		"Save State", "Streaming", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
 

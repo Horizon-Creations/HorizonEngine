@@ -1160,7 +1160,7 @@ void CollabController::wireCallbacks()
 			const std::uint32_t created = m_onRemoteCreate(parent, c.blob);
 			// instantiatePrefab mints a FRESH local handle — recording it here is
 			// exactly what makes handle-stable instantiation unnecessary.
-			if (created != 0) m_netIds.emplace_back(c.netId, created);
+			if (created != 0) rememberNetId(c.netId, created);
 			break;
 		}
 		case Kind::Destroyed:
@@ -1358,7 +1358,7 @@ void CollabController::wireCallbacks()
 				// wondering why the file is still there. Warning, not Problem:
 				// nothing is out of step, the host simply said no.
 				// An entity key is no path a note could open, so it carries none.
-				postNote(HE::Ed::NoteLevel::Warning,
+				postNote(HE::Ed::NoteLevel::Important,
 				         std::string("The host did not approve ") +
 				             (del ? "deleting \"" : "renaming \"") + name + "\".",
 				         {}, entity ? std::string() : path);
@@ -1591,7 +1591,7 @@ void CollabController::wireCallbacks()
 			if (reason == LockDenyReason::HeldByOther)
 				noteBackgroundWriteRaced(path, subject);
 			else
-				postNote(HE::Ed::NoteLevel::Problem,
+				postNote(HE::Ed::NoteLevel::Important,
 				         "The session refused the claim on \"" +
 				             std::filesystem::path(path).filename().string() +
 				             "\" after it had already been rewritten here.",
@@ -1638,10 +1638,10 @@ void CollabController::wireCallbacks()
 				std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path) !=
 					m_heldAssetLocks.end();
 			if (weAsked)
-				postNote(HE::Ed::NoteLevel::Warning, text, {}, path);
+				postNote(HE::Ed::NoteLevel::Important, text, {}, path);
 			else
 				postRemoteNote(l ? l->owner : HE::Net::kInvalidParticipant,
-				               HE::Ed::NoteLevel::Warning, text, {}, path);
+				               HE::Ed::NoteLevel::Important, text, {}, path);
 		}
 		// We do not hold it, so do not pretend we do.
 		if (subject == m_heldSubject) m_heldSubject = 0;
@@ -1765,7 +1765,9 @@ void CollabController::teardown()
 	m_snapshotGot   = 0;
 	m_snapshotTotal = 0;
 	m_heldSubject   = 0;
-	m_netIds.clear();
+	m_netByHandle.clear();
+	m_handleByNet.clear();
+	m_netMisses.clear();
 	m_lastComponentHashes.clear();
 	m_heldAssetLocks.clear();
 	// Revisions are numbered per session: participant ids are minted afresh by
@@ -1816,7 +1818,7 @@ void CollabController::teardown()
 		// emptied itself. Said once with a count rather than once per row: the
 		// interesting fact is that a decision was never made, not which files it
 		// was about.
-		postNote(HE::Ed::NoteLevel::Warning,
+		postNote(HE::Ed::NoteLevel::Important,
 		         m_pendingOps.size() == 1
 		             ? "A request was still waiting when the session ended."
 		             : std::to_string(m_pendingOps.size()) +
@@ -1842,7 +1844,7 @@ void CollabController::teardown()
 		// ones went unanswered is the whole point.
 		for (const OurOp& o : m_ourPendingOps)
 		{
-			postNote(HE::Ed::NoteLevel::Warning,
+			postNote(HE::Ed::NoteLevel::Important,
 			         "Nobody answered your request for \"" + o.name() +
 			             "\" before the session ended.",
 			         o.op == HE::Net::CollabSession::AssetOp::Edit
@@ -1882,6 +1884,11 @@ void CollabController::teardown()
 void CollabController::update(std::uint64_t nowMs)
 {
 	m_lastUpdateMs = nowMs;
+
+	// First, before any early-out below: a failure is set from a dozen places
+	// (a refused join, a dead relay, a dropped link) and this is the one place
+	// that sees all of them.
+	announceFailure();
 
 	// Before the early-out: while a session id is being looked up there is no
 	// transport yet, and that is exactly when the lookup result has to be
@@ -2162,6 +2169,49 @@ bool CollabController::retryJoinWithLargeAssets()
 	m_syncLargeAssets   = true;
 	m_largeAssetsPrompt = false;
 	return redialLastJoin("agreeing to large-asset sync and ");
+}
+
+// A failed session used to be one line of small red text in the Collaboration
+// window — which is closed whenever the failure matters most (the link drops
+// while you are modelling). The user is told in a dialog instead, once per
+// failure, with the way forward on it, and the notification centre keeps the row.
+void CollabController::announceFailure()
+{
+	constexpr const char* kKey = "collab.session";
+	if (m_status != Status::Failed)
+	{
+		// The failure is over (a retry started, the user dismissed it): its buttons
+		// would now act on a session that is no longer the one they were made for.
+		if (m_failureAnnounced && m_notes) m_notes->resolve(kKey);
+		m_failureAnnounced = false;
+		return;
+	}
+	if (m_failureAnnounced || m_error.empty() || !m_notes) return;
+	m_failureAnnounced = true;
+
+	HE::Ed::NoteSpec note;
+	note.level = HE::Ed::NoteLevel::Critical;
+	note.key   = kKey;
+	note.text  = m_error;
+	if (!m_removalNotice.empty())  note.title = "Removed from the session";
+	else if (m_isHost)             note.title = "Could not host the session";
+	else if (m_lastJoin.joined)    note.title = "Disconnected from the session";
+	else                           note.title = "Could not join the session";
+
+	// By value: the action runs from the next frame on and must not depend on the
+	// state of this failure as it is then. It re-checks, and a stale click is a no-op.
+	if (canRejoin())
+	{
+		note.actions.push_back({ "Rejoin", [this] { rejoinLastSession(); }, true });
+	}
+	else if (!m_isHost && m_lastJoin.valid && !m_lastJoin.banned && !m_largeAssetsPrompt &&
+	         m_removalNotice.empty() && m_status == Status::Failed)
+	{
+		note.actions.push_back({ "Try again", [this] {
+			if (m_status == Status::Failed) redialLastJoin("");
+		}, true });
+	}
+	m_notes->post(std::move(note));
 }
 
 bool CollabController::canRejoin() const
@@ -2651,12 +2701,31 @@ bool CollabController::publishTerrainPatch(std::uint32_t entityHandle,
 
 // ─── Structural replication ──────────────────────────────────────────────────
 
+namespace
+{
+// low64 of the uuid, top bit cleared: a v4 uuid's variant bits force lo's top
+// bit to 1, which would land every entity in the asset-subject space
+// (assetSubject sets the top bit precisely to keep the two apart). Zero would
+// collide with "no subject", so fold hi in as the escape hatch.
+std::uint64_t netIdOf(const EntityIdComponent& idc)
+{
+	std::uint64_t net = idc.id.lo & ~(1ull << 63);
+	if (net == 0) net = (idc.id.hi | 1ull) & ~(1ull << 63);
+	return net;
+}
+} // namespace
+
+void CollabController::rememberNetId(std::uint64_t netId, std::uint32_t entityHandle)
+{
+	m_netByHandle.emplace(entityHandle, netId);
+	m_handleByNet.emplace(netId, entityHandle);
+	m_netMisses.erase(netId);
+}
+
 std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
 {
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (handle == entityHandle) return net;
-	}
+	if (const auto it = m_netByHandle.find(entityHandle); it != m_netByHandle.end())
+		return it->second;
 
 	// The wire identity is derived from the entity's stable UUID — the one the
 	// scene format already carries — so every peer computes the SAME id from its
@@ -2680,43 +2749,54 @@ std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
 		idc = &reg.emplace<EntityIdComponent>(e,
 			EntityIdComponent{ HE::UUID::generate() });
 	}
-	// low64 of the uuid, top bit cleared: a v4 uuid's variant bits force lo's
-	// top bit to 1, which would land every entity in the asset-subject space
-	// (assetSubject sets the top bit precisely to keep the two apart). Zero
-	// would collide with "no subject", so fold hi in as the escape hatch.
-	std::uint64_t net = idc->id.lo & ~(1ull << 63);
-	if (net == 0) net = (idc->id.hi | 1ull) & ~(1ull << 63);
-
-	m_netIds.emplace_back(net, entityHandle);
+	const std::uint64_t net = netIdOf(*idc);
+	rememberNetId(net, entityHandle);
 	return net;
 }
 
 std::uint32_t CollabController::entityForNetId(std::uint64_t netId)
 {
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (net == netId) return handle;
-	}
+	if (const auto it = m_handleByNet.find(netId); it != m_handleByNet.end())
+		return it->second;
 
 	// Cache miss: resolve against the world. Linear over the id pool, but only
-	// on the first sighting of a subject — every later lookup hits the cache.
+	// on the first sighting of a subject — every later lookup hits the cache —
+	// and a subject nobody here has is scanned for once per change of the
+	// world's ids, not once per frame it is asked about.
 	if (!m_world) return 0;
+	const std::uint64_t revision = m_world->entityIdRevision();
+	if (const auto miss = m_netMisses.find(netId);
+	    miss != m_netMisses.end() && miss->second == revision)
+		return 0;
+
 	auto& reg = m_world->registry();
 	std::uint32_t found = 0;
 	reg.view<EntityIdComponent>().each([&](auto e, const EntityIdComponent& idc) {
-		std::uint64_t net = idc.id.lo & ~(1ull << 63);
-		if (net == 0) net = (idc.id.hi | 1ull) & ~(1ull << 63);
-		if (net == netId) found = static_cast<std::uint32_t>(entt::to_integral(e));
+		if (netIdOf(idc) == netId) found = static_cast<std::uint32_t>(entt::to_integral(e));
 	});
-	if (found != 0) m_netIds.emplace_back(netId, found);
-	return found;
+	if (found != 0)
+	{
+		rememberNetId(netId, found);
+		return found;
+	}
+	// Bounded: ids asked about and never found are few in practice (a peer's
+	// selection of something not here yet), but nothing else ever trims this.
+	if (m_netMisses.size() >= 4096) m_netMisses.clear();
+	m_netMisses[netId] = revision;
+	return 0;
 }
 
 void CollabController::forgetNetId(std::uint64_t netId)
 {
-	m_netIds.erase(std::remove_if(m_netIds.begin(), m_netIds.end(),
-	                              [netId](const auto& e) { return e.first == netId; }),
-	               m_netIds.end());
+	m_netMisses.erase(netId);
+	const auto it = m_handleByNet.find(netId);
+	if (it == m_handleByNet.end()) return;
+	// The handle's entry only if it names this id: a handle that was cached
+	// under another id first keeps that one, as it did in the vector.
+	if (const auto h = m_netByHandle.find(it->second);
+	    h != m_netByHandle.end() && h->second == netId)
+		m_netByHandle.erase(h);
+	m_handleByNet.erase(it);
 }
 
 void CollabController::seedNetIds()
@@ -2727,9 +2807,15 @@ void CollabController::seedNetIds()
 	// uuid can no longer be read from the registry, so the cache built here is
 	// the only place its wire identity survives. Runs on the client after the
 	// snapshot replaced its world, and on the host when it starts hosting.
-	m_netIds.clear();
+	m_netByHandle.clear();
+	m_handleByNet.clear();
+	m_netMisses.clear();
 	if (!m_world) return;
-	m_world->registry().view<entt::entity>().each([&](auto e) {
+	auto& reg = m_world->registry();
+	const std::size_t count = reg.storage<entt::entity>().size();
+	m_netByHandle.reserve(count);
+	m_handleByNet.reserve(count);
+	reg.view<entt::entity>().each([&](auto e) {
 		netIdFor(static_cast<std::uint32_t>(entt::to_integral(e)));
 	});
 }
@@ -2756,12 +2842,9 @@ bool CollabController::publishDestroy(std::uint32_t entityHandle)
 
 	// Look the id up WITHOUT minting one: an entity nobody ever knew about does
 	// not need a deletion broadcast.
-	std::uint64_t netId = 0;
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (handle == entityHandle) { netId = net; break; }
-	}
-	if (netId == 0) return false;
+	const auto known = m_netByHandle.find(entityHandle);
+	if (known == m_netByHandle.end()) return false;
+	const std::uint64_t netId = known->second;
 
 	HE::Net::CollabSession::StructuralChange c;
 	c.kind  = HE::Net::CollabSession::StructuralChange::Kind::Destroyed;
@@ -3168,7 +3251,7 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 	{
 		// OUR save, refused by OUR ceiling. Nothing a peer can repeat, and it is
 		// the answer to something the user just did — postNote, never the limit.
-		postNote(HE::Ed::NoteLevel::Problem,
+		postNote(HE::Ed::NoteLevel::Important,
 		         "\"" + name + "\" was not sent to the others.",
 		         "It is " + std::to_string(mb) + " MB and this machine will not send "
 		             "more than " + std::to_string(limit) + " MB in one file. Raise "
@@ -3188,7 +3271,7 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 	// one oversized file in a loop lands here once per save, so this is rate
 	// limited under the sender.
 	const std::string sender = who.empty() ? std::string("Someone") : who;
-	postRemoteNote(from, HE::Ed::NoteLevel::Problem,
+	postRemoteNote(from, HE::Ed::NoteLevel::Important,
 	         sender + " sent \"" + name + "\", and this machine refused it.",
 	         "It is " + std::to_string(mb) + " MB and this machine accepts at most " +
 	             std::to_string(limit) + " MB in one file — their limit is higher than "
@@ -3293,7 +3376,7 @@ void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,
 	// refuses every save of a file this size, so a colleague working on one
 	// oversized asset produces one of these per save. Rate limited under the
 	// refuser, which is also who the sentence names.
-	postRemoteNote(who, HE::Ed::NoteLevel::Problem,
+	postRemoteNote(who, HE::Ed::NoteLevel::Important,
 	         peer + " could not accept \"" + name + "\".",
 	         "It is " + std::to_string(mb) + " MB and " + peer + " accepts at most " +
 	             std::to_string(limit) + " MB in one file — their limit is lower than "
@@ -3475,7 +3558,7 @@ CollabController::beginBackgroundWrite(const std::string& relPath)
 	// a detail line that is false about the one thing it explains is worse than
 	// none. What is true either way is that the holder's copy would have been
 	// overwritten, which is the actual reason this was refused.
-	postNote(HE::Ed::NoteLevel::Problem,
+	postNote(HE::Ed::NoteLevel::Important,
 	         who + " is editing \"" + name + "\" — it was not reimported.",
 	         sessionSyncsLargeAssets()
 	             ? std::string("Reimporting would have rewritten the file underneath "
@@ -3504,7 +3587,7 @@ void CollabController::noteBackgroundWriteRaced(const std::string& relPath,
 	// Not rate-limited, although a deny is something another machine sends: it
 	// can only ever follow a background write somebody started HERE, so it is
 	// bounded by this user's own clicks and not by anything a peer can repeat.
-	postNote(HE::Ed::NoteLevel::Problem,
+	postNote(HE::Ed::NoteLevel::Important,
 	         who + " took \"" + name + "\" while it was being reimported here.",
 	         "The lock went to them a moment after this machine started writing, so "
 	         "the two copies may differ now. Ask them what they have, or take the "
@@ -3635,14 +3718,14 @@ void CollabController::verifyAppliedAssetOp(HE::Net::CollabSession::AssetOp op,
 	const std::string name = std::filesystem::path(relPath).filename().string();
 	if (op == Op::Delete)
 	{
-		postRemoteNote(by, HE::Ed::NoteLevel::Problem,
+		postRemoteNote(by, HE::Ed::NoteLevel::Important,
 		         "\"" + name + "\" was deleted in the session but is still here.",
 		         "Everyone else no longer has it. Remove it by hand, or the next "
 		         "source-control sync will disagree.",
 		         relPath);
 		return;
 	}
-	postRemoteNote(by, HE::Ed::NoteLevel::Problem,
+	postRemoteNote(by, HE::Ed::NoteLevel::Important,
 	         "\"" + name + "\" was renamed in the session but not on this machine.",
 	         newRelPath.empty()
 	             ? std::string("The file is still under its old name here.")
@@ -3770,7 +3853,7 @@ void CollabController::noteRemoteNotesDropped(HE::Net::ParticipantId from)
 	// named the wrong peer would be worse than one that named none. Two peers
 	// therefore produce two rows in a window rather than one — two is a bound,
 	// which is the whole point.
-	postNote(HE::Ed::NoteLevel::Warning,
+	postNote(HE::Ed::NoteLevel::Important,
 	         who + " is sending more messages than this list can show.",
 	         "Some of them are being dropped to keep it readable. This row appears "
 	         "once per burst, not once per dropped message — if it keeps coming "
@@ -4076,7 +4159,7 @@ void CollabController::approveOne(const PendingAssetOp& op)
 			m_assetNotice = "\"" +
 				std::filesystem::path(op.newPath).filename().string() +
 				"\" already exists — the rename was refused.";
-			postNote(HE::Ed::NoteLevel::Warning,
+			postNote(HE::Ed::NoteLevel::Important,
 			         "\"" + std::filesystem::path(op.newPath).filename().string() +
 			             "\" already exists here — the rename was refused.",
 			         "Approving it would have replaced that file on every machine.",

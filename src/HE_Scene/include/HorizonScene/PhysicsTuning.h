@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: the HE_PHYSICS_* overrides
 
 // How a physics step spends threads, collision steps and scratch memory (Thema 178).
 //
@@ -66,9 +67,12 @@ inline int resolveThreads(int requested, int envOverride, unsigned hardwareThrea
 }
 
 // HE_PHYSICS_THREADS as a number, or -1 when it is unset or not a whole number
-// of at least zero.
+// of at least zero. Always -1 in a release build (HE_FEATURE_ENV_OVERRIDES).
 inline int threadsFromEnv()
 {
+#if !HE_FEATURE_ENV_OVERRIDES
+    return -1;
+#else
     const char* text = std::getenv("HE_PHYSICS_THREADS");
     if (!text || !*text)
         return -1;
@@ -77,6 +81,7 @@ inline int threadsFromEnv()
     if (end == text || *end != '\0' || value < 0)
         return -1;
     return static_cast<int>(std::min<long>(value, kMaxThreads));
+#endif
 }
 
 // ── Collision steps ──────────────────────────────────────────────────────────
@@ -161,13 +166,18 @@ inline float buoyancyFactorFor(float waterDensity, float bodyDensity)
 }
 
 // HE_PHYSICS_WATER=0 in the environment starts a world with the water's effect on
-// bodies off (a server comparison, an A/B run); anything else leaves it on. -1 = not set.
+// bodies off (a server comparison, an A/B run); anything else leaves it on. -1 = not set,
+// and always -1 in a release build (HE_FEATURE_ENV_OVERRIDES).
 inline int waterFromEnv()
 {
+#if !HE_FEATURE_ENV_OVERRIDES
+    return -1;
+#else
     const char* text = std::getenv("HE_PHYSICS_WATER");
     if (!text || !*text)
         return -1;
     return (text[0] == '0' && text[1] == '\0') ? 0 : 1;
+#endif
 }
 
 } // namespace PhysicsTuning

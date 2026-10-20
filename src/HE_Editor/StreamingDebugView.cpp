@@ -1,8 +1,10 @@
 #include "StreamingDebugView.h"
+#include "NotificationStore.h"   // what a split or merge said is a notification
 #include "EditorApplication.h"   // AppContext, ProjectManager, EditorCamera
 #include "EditorUndo.h"
 #include "CollabController.h"    // no split or merge inside a session
 #include "ViewportPanel.h"       // the Streaming Cells show flag
+#include <HorizonScene/CellRuntime.h>
 #include <HorizonScene/CellSplit.h>
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -385,6 +387,18 @@ void drawScene(AppContext& ctx)
 	ImGui::TextDisabled("%s", t.path.c_str());
 }
 
+
+// What a split or merge said is a notification, said once (the slot is emptied):
+// "Not split: stop playing first" is a refusal, the rest is a result.
+static void postStreamingMessage(std::string& message)
+{
+	if (message.empty()) return;
+	const bool refused = message.rfind("Not ", 0) == 0;
+	HE::Ed::notify(refused ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
+	               "Streaming cells", message);
+	message.clear();
+}
+
 void drawCells(AppContext& ctx)
 {
 	ImGui::SeparatorText("Streaming cells");
@@ -403,8 +417,7 @@ void drawCells(AppContext& ctx)
 		ImGui::TextDisabled("This scene does not stream in cells: the game loads all of it at once. "
 		                    "Splitting moves its placed meshes, point and spot lights, static bodies, "
 		                    "decals and placed prefabs into one file per square; the game then loads "
-		                    "the squares around the camera. Play in the editor shows only what stays "
-		                    "in the scene.");
+		                    "the squares around the camera, and so does Play in the editor.");
 		static HE::CellSplitOptions s_options;
 		EditorWidgets::Row::dragFloat("Cell size (m)##cellsplit", &s_options.cellSize, 8.0f, 16.0f, 100000.0f, "%.0f");
 		EditorWidgets::Row::dragFloat("Load radius (m), 0 = 1.5 cells##cellsplit", &s_options.loadRadius, 8.0f,
@@ -415,7 +428,7 @@ void drawCells(AppContext& ctx)
 		ImGui::BeginDisabled(!editable);
 		if (EditorWidgets::button("Split into Streaming Cells")) splitOpenScene(ctx, s_options, s_message);
 		ImGui::EndDisabled();
-		if (!s_message.empty()) ImGui::TextUnformatted(s_message.c_str());
+		postStreamingMessage(s_message);
 		return;
 	}
 	uint64_t inCells = 0;
@@ -431,7 +444,20 @@ void drawCells(AppContext& ctx)
 	ImGui::BeginDisabled(!editable);
 	if (EditorWidgets::button("Merge Cells into the Scene")) mergeOpenScene(ctx, s_message);
 	ImGui::EndDisabled();
-	if (!s_message.empty()) ImGui::TextUnformatted(s_message.c_str());
+	postStreamingMessage(s_message);
+
+	// While playing, what the play session streams: the game's CellRuntime, run by
+	// the editor around the play camera (PlayCellStreaming).
+	if (ctx.isPlaying && ctx.playCells && ctx.playCells->active())
+	{
+		const HE::CellStreamer::Stats& st = ctx.playCells->streamer().stats();
+		ImGui::Text("Play: %zu cells built, %zu building, %zu reading; %zu loaded and %zu unloaded so far.",
+		            st.loaded, st.building, st.inFlight + st.ready, st.loadsDone, st.unloads);
+		if (st.failed || st.deferredForBodies || st.idCollisions)
+			ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f),
+			                   "%zu cells failed to load, %zu waits for room in the physics world, "
+			                   "%zu entities kept a fresh id.", st.failed, st.deferredForBodies, st.idCollisions);
+	}
 
 	if (!ctx.editorCamera) return;
 	const glm::dvec3 eye = glm::dvec3(ctx.editorCamera->position()) + ctx.world->origin();

@@ -124,7 +124,10 @@ namespace
         if (!bodiesEq(a, b)) return false;
         for (size_t i = 0; i < a.size(); ++i)
             if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog ||
-                a[i].underwaterCaustics != b[i].underwaterCaustics)
+                a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].brushBed != b[i].brushBed ||
+                a[i].brushPatch.res != b[i].brushPatch.res || a[i].brushPatch.x0 != b[i].brushPatch.x0 ||
+                a[i].brushPatch.z0 != b[i].brushPatch.z0 || a[i].brushPatch.w != b[i].brushPatch.w ||
+                a[i].brushPatch.h != b[i].brushPatch.h || a[i].brushPatch.delta != b[i].brushPatch.delta)
                 return false;
         return true;
     }
@@ -381,6 +384,28 @@ UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams&
     out.speed     = finite(p.speed) ? std::clamp(p.speed, 0.0f, kMaxCausticsSpeed) : d.speed;
     out.depth     = finite(p.depth) ? std::clamp(p.depth, kMinCausticsDepth, kMaxCausticsDepth) : d.depth;
     return out;
+}
+
+BrushBedParams clampBrushBed(const BrushBedParams& p)
+{
+    const BrushBedParams d;   // the defaults stand in for anything that is not a number
+    BrushBedParams out;
+    out.enabled   = p.enabled;
+    out.maxDepth  = finite(p.maxDepth) ? std::clamp(p.maxDepth, 0.0f, kMaxBedDepth) : d.maxDepth;
+    out.slope     = finite(p.slope) ? std::clamp(p.slope, kMinBedSlope, kMaxBedSlope) : d.slope;
+    out.roughness = finite(p.roughness) ? std::clamp(p.roughness, 0.0f, 1.0f) : d.roughness;
+    return out;
+}
+
+bool setBrushBed(TerrainComponent& tc, uint16_t id, const BrushBedParams& bed)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const BrushBedParams next = clampBrushBed(bed);
+    if (b->brushBed == next) return true;
+    b->brushBed = next;
+    ++tc.water.revision;
+    return true;
 }
 
 bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c)
@@ -959,6 +984,8 @@ void sanitize(TerrainComponent& tc)
         nb.physics = clampPhysics(nb.physics);
         nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);
         nb.underwaterCaustics = clampUnderwaterCaustics(nb.underwaterCaustics);
+        nb.brushBed = clampBrushBed(nb.brushBed);
+        if (!nb.brushPatch.empty() && !patchFits(nb.brushPatch, tc.resolution)) nb.brushPatch = GroundPatch{};
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

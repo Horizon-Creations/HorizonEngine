@@ -1,16 +1,18 @@
 #pragma once
 #include <imgui.h>
+#include "ProjectSettingsPanel.h"
 
 struct AppContext;
 struct EditorConfig;
 
 // ── Preferences tab + engine-settings catalog ────────────────────────────────
 // The Preferences UI is a full editor tab (Edit ▸ Preferences, Ctrl+,): a
-// category navigation on the left (Editor / Preview / Accounts & Connections /
-// Tools, each with pages) and the selected page's settings on the right. It replaced the
-// old modal popup. Everything here follows the EDITOR from project to project;
-// what belongs to the project is on the Project Settings tab
-// (ProjectSettingsPanel).
+// category navigation on the left (Editor / Project / World / Online / Preview /
+// Accounts & Connections / Tools, each with pages) and the selected page's
+// settings on the right. It replaced the old modal popup. The Editor, Preview,
+// Accounts and Tools groups follow the EDITOR from project to project; the
+// Project, World and Online groups edit the open PROJECT (their bodies are
+// ProjectSettingsPanel's) and write into it, not into config.json.
 //
 // The engine-settings catalog is shared with the Quick Settings dock panel:
 // every setting row carries a "pin" toggle in the Preferences tab, and Quick
@@ -20,21 +22,24 @@ struct EditorConfig;
 // World entity.)
 namespace EditorSettingsPanel
 {
-	// Project: the same rows on a page of the Project Settings tab, bound to a
+	// Project: the same rows drawn by a Project Settings page, bound to a
 	// config the caller hands in (DrawOptions::config) — no pin gutter, no
 	// category headings, never locked.
 	enum class SettingsMode { Preferences, QuickSettings, Project };
 
-	// Sub-pages of the Preferences tab (the left-hand navigation buttons). Four
-	// groups, in the order the rail lists them; everything here is about THIS
-	// editor and THIS user — what travels with a project lives on the Project
-	// Settings tab (ProjectSettingsPanel.h).
+	// Sub-pages of the Preferences tab (the left-hand navigation buttons), in the
+	// order the rail lists them. The Project / World / Online pages at the end of
+	// the enum belong to the open project (ProjectSettingsPanel.h); the rest are
+	// about THIS editor and THIS user.
 	enum class Page
 	{
 		// Editor — how the editor behaves and looks.
-		// Panels is the graph editors' and the widget designer's own switches;
-		// Shortcuts is the keyboard: every editor-wide chord, rebindable.
-		Appearance, Viewport, ContentBrowser, Autosave, Panels, Shortcuts, Feedback,
+		// Appearance carries the graph editors' and the widget designer's own
+		// switches under its rows (what used to be the Panels page). Input is the
+		// pointer, the gamepad and the keyboard: every editor-wide chord,
+		// rebindable. ProjectData is what the editor keeps about a project as it
+		// works on it: the content browser's scan and cache, and the autosave.
+		Appearance, Viewport, Input, ProjectData, Feedback,
 		// Preview — what the viewport is drawn with on this machine. EditorRenderer
 		// is the editor's own backend and frame pacing; ViewportQuality is the
 		// user's own graphics values — what a project that sets none previews
@@ -50,7 +55,16 @@ namespace EditorSettingsPanel
 		SourceControl, Team, RemoteControl,
 		// Tools — the status of the outside tools the editor needs.
 		Status,
+		// Project / World / Online — one page per ProjectSettingsPanel::Page.
+		ProjectGeneral, ProjectApplication, ProjectWindow, ProjectFonts,
+		ProjectPermissions,
+		WorldShadows, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
+		OnlineAntiCheat, OnlineMultiplayer,
 	};
+
+	// Open the tab on the page that draws `page` (what a "set it up in the
+	// project" button asks for; EditorUI forwards ProjectSettingsPanel's request).
+	void requestOpenProjectPage(ProjectSettingsPanel::Page page);
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
 	constexpr const char* kTabPath = "::Preferences::";
@@ -82,7 +96,7 @@ namespace EditorSettingsPanel
 	// exactly the rows named in `rows` whatever their category (the pages are not
 	// the catalogue's categories any more: Viewport Quality draws rows from three
 	// of them). `config` is the config the widgets edit — the editor's own by
-	// default, a scratch copy on the Project Settings pages, which write it back
+	// default, a scratch copy on the Project pages, which write it back
 	// into the project's block afterwards.
 	struct DrawOptions
 	{
@@ -92,11 +106,6 @@ namespace EditorSettingsPanel
 		EditorConfig*      config   = nullptr;
 	};
 	void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& options);
-
-	// The repository half of source control (init, remote, GitHub setup, large
-	// files): the repository belongs to the PROJECT, so it is drawn on the Project
-	// Settings tab's Source Control page and no longer on a Preferences page.
-	void DrawRepositorySection(AppContext& ctx);
 
 	// Fill the given tab rect with the Preferences tab (nav + content).
 	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);

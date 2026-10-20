@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"

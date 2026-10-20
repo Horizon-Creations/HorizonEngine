@@ -125,7 +125,11 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // v16: a client tells the host that it SAVED a document (sendDocSaved), so the
 // host persists the session's state at that moment. A v15 host drops the frame,
 // and the client's save would stay on the client's disk without anybody told.
-inline constexpr std::uint16_t kCollabProtocolVersion = 16;
+// v17: a landscape carries several foliage layers, each with its own density mask.
+// The masks travel as TerrainPatch fields 16 + layer (field 4 is gone), and the
+// component blob gains a "layers" list. A v16 peer drops the new fields and
+// reads a multi-layer component as one empty layer: a bump.
+inline constexpr std::uint16_t kCollabProtocolVersion = 17;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -1092,7 +1096,10 @@ private:
     void handOverLock(std::uint64_t subject, ParticipantId to);
     // Host: run the policy and answer the creator. True = go ahead and relay.
     bool arbitrateCreate(ConnectionId conn, const AssetUpdate& a);
-    void sendAssetChunks(ConnectionId conn, ParticipantId from, const AssetUpdate& a);
+    // Begin, chunks, End — each frame built once and handed to every target
+    // (NetSession::sendTo), not re-serialized per peer.
+    void sendAssetChunks(const std::vector<ConnectionId>& to, ParticipantId from,
+                         const AssetUpdate& a);
     void installAssetChunkHandlers();
     bool readAssetHeader(BitReader& r, AssetUpdate& out, std::uint32_t& outTotal,
                          std::uint32_t& outChunks) const;

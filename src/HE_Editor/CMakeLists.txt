@@ -277,6 +277,7 @@ add_executable(HorizonEditor WIN32
 	ContentBrowserPanel.cpp
 	NotificationStore.cpp
 	NotificationBar.cpp
+	NotificationPopups.cpp
 	# The project's to-do list (Config/TaskBoard.json): data and file only, no ImGui.
 	TaskBoard.cpp
 	# ...its team half: assignees and notices through a team link, no ImGui, no sockets.
@@ -306,6 +307,7 @@ add_executable(HorizonEditor WIN32
 	ProfilerPanel.cpp
 	ProfilerWidgets.cpp
 	StreamingDebugView.cpp
+	PlayCellStreaming.cpp
 	ConsolePanel.cpp
 	ConsoleView.cpp
 	EnvironmentPanel.cpp
@@ -330,6 +332,8 @@ add_executable(HorizonEditor WIN32
 	UndoHistoryPanel.cpp
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
+	ExportSdkBuild.cpp
+	ExportSdkGateUi.cpp
 	HcExecTrace.cpp
 	HcWatch.cpp
 	HcWatchPanel.cpp
@@ -356,6 +360,8 @@ add_executable(HorizonEditor WIN32
 	CollabUndo.cpp
 	TerrainSync.cpp
 	TeamController.cpp
+	TeamSyncController.cpp
+	TeamSyncView.cpp
 	TeamView.cpp
 	EngineContentSyncBar.cpp
 	McpStatusBar.cpp
@@ -602,8 +608,12 @@ he_bundle_crt(HorizonEditor "${DEPLOY_EDITOR}")
 # works from a downloaded editor: the exporter's findRuntimeBundle() looks for
 # <editorBaseDir>/Game/HorizonGame[.exe]. HorizonEditor depends on HorizonGame
 # (add_dependencies in the root CMakeLists), so DEPLOY_GAME is fully populated (exe +
-# engine DLLs + SDL3 + Python + CRT) by the time this POST_BUILD runs. Copy it wholesale.
+# engine DLLs + SDL3 + Python + CRT) by the time this POST_BUILD runs. Copy it wholesale,
+# into an emptied folder: copy_directory never deletes, and a tree built before the
+# HorizonEngine/ layout (Thema 211 step 10) kept the four flat engine libraries beside
+# it, which every export from this editor then shipped too.
 add_custom_command(TARGET HorizonEditor POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E rm -rf "${DEPLOY_EDITOR}/Game"
 	COMMAND ${CMAKE_COMMAND} -E copy_directory "${DEPLOY_GAME}" "${DEPLOY_EDITOR}/Game"
 	COMMENT "Bundling the game runtime into ${DEPLOY_EDITOR}/Game (for in-editor export)"
 	VERBATIM)
@@ -617,9 +627,12 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 #                            in the checkout's own layout, so <editor>/SDK is also
 #                            the HORIZON_ENGINE_DIR a C++ project's GameLogic
 #                            build asks for (engineRootFromSdk)
+#   SDK/src/HE_Scene/include <HorizonEngine/HorizonEngineApi.h> and HE::api: an
+#                            Engine Call node is a direct engine call (Thema 211
+#                            step 7)
 #   SDK/include/glm          HorizonCode.h includes <glm/glm.hpp>
 #   SDK/lib                  what the generated CMakeLists links: HorizonCore's
-#                            LINKER file — HorizonCore.lib (the import lib) on
+#                            and HorizonScene's LINKER files — the import libs on
 #                            Windows, the dylib/so elsewhere
 # All three from THIS build, the same one whose DLLs sit beside the editor; a
 # header or import lib from another tree is an ABI mismatch nobody sees until the
@@ -632,11 +645,15 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 		"${CMAKE_SOURCE_DIR}/src/HE_Core/include"
 		"${DEPLOY_EDITOR}/SDK/src/HE_Core/include"
 	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		"${CMAKE_SOURCE_DIR}/src/HE_Scene/include"
+		"${DEPLOY_EDITOR}/SDK/src/HE_Scene/include"
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
 		"${glm_SOURCE_DIR}/glm"
 		"${DEPLOY_EDITOR}/SDK/include/glm"
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}/SDK/lib"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		$<TARGET_LINKER_FILE:HorizonCore>
+		$<TARGET_LINKER_FILE:HorizonScene>
 		"${DEPLOY_EDITOR}/SDK/lib"
 	COMMENT "Staging the HorizonCode codegen SDK into ${DEPLOY_EDITOR}/SDK"
 	VERBATIM)
@@ -647,7 +664,7 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 # Written beside the editor binary; resolveSdk() reads it at export time.
 file(GENERATE
 	OUTPUT "$<TARGET_FILE_DIR:HorizonEditor>/he_sdk_config.json"
-	CONTENT "{\n  \"includeDirs\": [\"${CMAKE_SOURCE_DIR}/src/HE_Core/include\", \"${glm_SOURCE_DIR}\"],\n  \"libDir\": \"$<TARGET_FILE_DIR:HorizonCore>\"\n}\n")
+	CONTENT "{\n  \"includeDirs\": [\"${CMAKE_SOURCE_DIR}/src/HE_Core/include\", \"${CMAKE_SOURCE_DIR}/src/HE_Scene/include\", \"${glm_SOURCE_DIR}\"],\n  \"libDir\": \"$<TARGET_FILE_DIR:HorizonCore>\",\n  \"libDirs\": [\"$<TARGET_LINKER_FILE_DIR:HorizonScene>\"]\n}\n")
 
 # The Vulkan backend loads <exe dir>/Shaders/*.spv at runtime, and the D3D12
 # backend loads <exe dir>/Shaders/gi_*_hw.cso (DXR RayQuery kernels compiled by

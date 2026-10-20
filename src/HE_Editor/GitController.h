@@ -188,6 +188,13 @@ public:
 	{
 		return m_service.commitFiles(commit);
 	}
+	// Read-only: the new-branch dialog's per-keystroke check (GitService::
+	// requestCheckBranchName); the answer for exactly `name`, or nullptr.
+	void requestCheckBranchName(const std::string& name) { m_service.requestCheckBranchName(name); }
+	const HE::Sc::GitService::BranchNameCheck* branchNameCheck(const std::string& name) const
+	{
+		return m_service.branchNameCheck(name);
+	}
 	const std::filesystem::path& projectRoot() const { return m_projectRoot; }
 
 	// Status for a file given its ABSOLUTE path, which is what the Content
@@ -251,7 +258,9 @@ private:
 	void flushTeamServerPending(std::uint64_t nowMs);
 	// Posts a notification when the service reports an error it has not reported yet.
 	void reportNewError();
+	void reportNewInfo();
 	std::string m_notifiedError;
+	std::string m_notifiedInfo;
 
 	// Absolute → repository-relative with forward slashes, or empty when outside.
 	std::string toRepoRelative(const std::string& absolutePath) const;

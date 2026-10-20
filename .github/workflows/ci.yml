@@ -17,6 +17,14 @@ on:
   # (`gh workflow run CI --ref <branch>`), the way a Windows-only link error
   # is otherwise only ever seen on main.
   workflow_dispatch:
+    inputs:
+      # The engine SDK's release lib set is push-only like the app runtimes; a
+      # branch that changes how it is built asks for it here
+      # (`gh workflow run CI --ref <branch> -f release_sdk=true`).
+      release_sdk:
+        description: "Also build the engine SDK's release lib set (push-only otherwise)"
+        type: boolean
+        default: false
 
 # One run per branch: a newer push (or a bee's dispatch on a branch whose pull
 # request already runs) cancels the one still going. Four pushes to
@@ -75,7 +83,7 @@ jobs:
 
       - name: Tidy the workspace, keep the build tree (NN-WS03)
         if: runner.environment == 'self-hosted'
-        run: git clean -ffdx -e build/ -e package/
+        run: git clean -ffdx -e build/ -e build-sdk-release/ -e package/
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
@@ -523,6 +531,58 @@ jobs:
             fi
           done
 
+      # The engine SDK's release lib set (topic 222 step 4). Every export compiles its
+      # game from the SDK, and a Shipping export needs EngineSDK/lib/release, which
+      # only a HE_BUILD_PROFILE=release tree builds (the editor tree is dev; its
+      # build installed lib/dev). A whole second engine tree, like an app flavour,
+      # so push-only for the same reason; a dispatch asks for it with release_sdk.
+      #
+      # scripts/build_engine_sdk.py takes everything but the profile from the editor
+      # tree `build`: its HE_ENGINE_SDK_DIR (the same EngineSDK/ the dev set is in,
+      # beside Editor/; on macOS out/deploy, where package_macos.sh copies it from),
+      # its options and its FetchContent checkouts, so include/ keeps the stamp the
+      # dev set was installed with. Its own DEPLOY_DIR: nothing else of the release
+      # tree may land beside the editor. It fails when any lib set's stamp differs.
+      # Before the staging below and before the DMG; the DMG's editor build
+      # reinstalls lib/dev only and leaves lib/release in place.
+      - name: Build the engine SDK's release lib set
+        id: release_sdk
+        if: github.event_name == 'push' || inputs.release_sdk
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/build_engine_sdk.py \
+            --editor-tree "${{ github.workspace }}/build" \
+            --build-dir "${{ github.workspace }}/build-sdk-release" \
+            --jobs 4
+
+      # The engine SDK (topic 222): the editor build runs the HorizonSDK target, which
+      # installs it into $DEPLOY_ROOT/EngineSDK, beside Editor/. The unzipped editor
+      # looks for <editor>/EngineSDK (every export compiles its game from it), so it
+      # moves in as the runtimes do. Not push-only like those: every editor build
+      # installs it, so a missing folder means the dependency is gone again. When the
+      # step above ran, the package has to carry both lib sets with matching stamps.
+      - name: Stage the engine SDK into the editor package
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          DEPLOY_ROOT="${DEPLOY_ROOT:-package}"
+          # HorizonSDK installs into Editor/EngineSDK itself now; the move only
+          # serves a build tree whose cache still holds the old sibling path.
+          if [ -d "$DEPLOY_ROOT/EngineSDK" ]; then
+            rm -rf "$DEPLOY_ROOT/Editor/EngineSDK"
+            mv "$DEPLOY_ROOT/EngineSDK" "$DEPLOY_ROOT/Editor/EngineSDK"
+          fi
+          if [ ! -d "$DEPLOY_ROOT/Editor/EngineSDK" ]; then
+            echo "::error::$DEPLOY_ROOT/Editor/EngineSDK missing — HorizonEditor no longer builds HorizonSDK (cmake/HorizonSDK.cmake)"
+            exit 1
+          fi
+          echo "staged EngineSDK ($(ls "$DEPLOY_ROOT/Editor/EngineSDK/lib" | tr '\n' ' '))"
+          if [ "${{ steps.release_sdk.outcome }}" = "success" ]; then
+            PY=$(command -v python3 || command -v python)
+            "$PY" scripts/build_engine_sdk.py --verify "$DEPLOY_ROOT/Editor/EngineSDK" --require dev --require release
+          fi
+
       # .heproj file type (Thema 161): Windows and Linux have no installer, so the
       # registration is files inside the package, FileTypes/. The ctest case
       # heproj_file_types judged the SOURCE of those files; this judges what was
@@ -634,6 +694,13 @@ jobs:
             echo "::error::$dmg does not contain Contents/MacOS/HorizonUpdater — package_macos.sh only warns on this, it does not fail the build"
             exit 1
           fi
+
+      # The .app the DMG was made from (package_macos.sh leaves its staging in place)
+      # carries both engine SDK lib sets, and the dmg target's editor build, which
+      # reinstalled lib/dev after the release step, left their stamps equal.
+      - name: Check the engine SDK lib sets inside the macOS package
+        if: runner.os == 'macOS' && !cancelled() && steps.dmg.outcome == 'success' && steps.release_sdk.outcome == 'success'
+        run: python3 scripts/build_engine_sdk.py --verify out/dmg_staging/HorizonEditor.app/Contents/Resources/EngineSDK --require dev --require release
 
       - name: Upload macOS editor package
         if: runner.os == 'macOS'

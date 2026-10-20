@@ -6,6 +6,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "TeamController.h"
+#include "NotificationStore.h"
 #include "TeamView.h"
 
 #include <HorizonScene/HorizonWorld.h>
@@ -600,6 +601,15 @@ TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Pic
 	}));
 	CHECK(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(16)) == 1);
 
+	// A refused picture is a notification now, not a red line under the button.
+	// Installed for this case only and removed again whatever happens.
+	struct Notes
+	{
+		HE::Ed::NotificationStore store;
+		Notes()  { HE::Ed::setGlobalNotifications(&store); }
+		~Notes() { HE::Ed::setGlobalNotifications(nullptr); }
+	} notes;
+
 	// Choose Picture: the file the chooser hands over is decoded, scaled to
 	// 64 px and uploaded (op 17); then Change and Remove are offered.
 	TeamView::setPictureChooser([&] { return picture; });
@@ -610,7 +620,7 @@ TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Pic
 	panel();
 	REQUIRE(ui.find("Change Picture..."));
 	REQUIRE(ui.find("Remove Picture"));
-	CHECK(ui.form.profileError.empty());
+	CHECK(notes.store.snapshot().empty());
 	{
 		he_ui::Image img;
 		ImGui::GetIO().AddMousePosEvent(float(kPanelW) - 2.0f, float(kPanelH) - 2.0f);
@@ -620,11 +630,16 @@ TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Pic
 		dump(img, "team-panel-profile.bmp");
 	}
 
-	// A file that is not an image: said under the picture, nothing sent.
+	// A file that is not an image: said as a notification, nothing sent.
 	const int uploads = static_cast<int>(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(17)));
 	TeamView::setPictureChooser([&] { return picture + ".missing"; });
 	REQUIRE(ui.click(Surface::Panel, pump, "Change Picture..."));
-	CHECK(ui.form.profileError.find("could not be read as an image") != std::string::npos);
+	{
+		const auto rows = notes.store.snapshot();
+		REQUIRE(rows.size() == 1);
+		CHECK(rows[0].text == "That picture cannot be used");
+		CHECK(rows[0].detail.find("could not be read as an image") != std::string::npos);
+	}
 	CHECK(std::count(server.ops.begin(), server.ops.end(), std::uint8_t(17)) == uploads);
 
 	REQUIRE(ui.click(Surface::Panel, pump, "Remove Picture"));
@@ -632,7 +647,7 @@ TEST_CASE("Team UI: your profile — a colour swatch, a picture file, Remove Pic
 	panel();
 	REQUIRE(ui.find("Choose Picture..."));
 	CHECK(ui.find("Remove Picture") == nullptr);
-	CHECK(ui.form.profileError.empty());
+	CHECK(notes.store.snapshot().size() == 1);   // removing a picture says nothing more
 
 	TeamView::setPictureChooser({});
 	std::filesystem::remove(picture);

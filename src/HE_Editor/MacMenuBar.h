@@ -47,9 +47,6 @@ namespace MacMenuBar
 		// Edit ▸ Select All / Deselect All, on the scene's entities. No key
 		// equivalents either: ⌘A selects the text in a field being edited.
 		SelectAll, DeselectAll,
-		// Edit ▸ Project Settings…: the tab that edits the PROJECT (Preferences
-		// stays in the app menu and edits the editor).
-		ProjectSettings,
 		// ── Entity (game projects only) ──
 		// Entity ▸ Create ▸ <row>: arg() = index into OutlinerPanel's preset
 		// table, the same list the Outliner's right-click menu draws.

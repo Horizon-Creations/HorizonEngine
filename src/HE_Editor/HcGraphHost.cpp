@@ -903,6 +903,14 @@ GraphEditor::Model buildModel(const Host& h)
 				if (h.paramChoices) c = h.paramChoices(node, param);
 				if (c.empty()) c = HcEditorUtil::engineParamChoices(node, param, h.content);
 				return c;
+			},
+			// …and the per-frame question, answered without building either list
+			// (the host's lists are in-memory and small; the engine's can be every
+			// asset of a type in the project).
+			[&h](const HC::Node& node, const std::string& param)
+			{
+				return (h.paramChoices && !h.paramChoices(node, param).empty()) ||
+				       HcEditorUtil::engineParamHasChoices(node, param, h.content);
 			});
 		if (committed) h.onEdit(true); };
 	// Hovering a node shows what it does + its inputs/outputs, and F1 while it is

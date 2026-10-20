@@ -1,13 +1,18 @@
 #include "HorizonCode/HcCompiledLoader.h"
 #include <Diagnostics/Logger.h>
+#include <Platform/BuildProfile.h>
+
+#include <cstring>
 
 namespace HorizonCode {
 
 namespace {
 using ManifestFn = const CompiledClassEntry* (*)(int* count, const char** engineVersion);
+using ProfileFn  = const char* (*)();
 }
 
-bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::string& engineVersion)
+bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::string& engineVersion,
+                              const char* profile)
 {
     if (m_lib.isLoaded()) return true;   // process-lifetime: load once
 
@@ -42,6 +47,21 @@ bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::s
             ("HorizonCode: compiled classes were built for engine '" +
              std::string(baked ? baked : "?") + "' but this is '" + engineVersion +
              "' — running interpreted").c_str());
+        m_lib.unload();
+        return false;
+    }
+    // The profile handshake: the classes were compiled with their SDK lib set's
+    // HE_BUILD_PROFILE_* switches, and call into an engine that must have the
+    // same ones. Same version, other profile is still a mix.
+    const char* want = profile ? profile : HE::kBuildProfileName;
+    const auto profileFn = (ProfileFn)m_lib.getSymbol("HE_HorizonCodeGenProfile");
+    const char* built = profileFn ? profileFn() : nullptr;
+    if (!built || std::strcmp(built, want) != 0)
+    {
+        HE_LOG_ERROR(HorizonCode, "%s",
+            ("HorizonCode: compiled classes in '" + libPath.string() + "' were built for the '" +
+             std::string(built ? built : "unknown") + "' profile but this engine is '" + want +
+             "' — running interpreted; export the game again").c_str());
         m_lib.unload();
         return false;
     }

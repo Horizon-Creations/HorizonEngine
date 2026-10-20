@@ -34,8 +34,8 @@ namespace HE::Sc {
 
 // The absolute path of the git to launch, or nothing when there is none.
 // Cached after the first call and thread-safe. NEVER starts a process — only
-// PATH, the registry and file-existence checks — because it is reached from the
-// frame thread (SourceControlPanel's branch-name check runs git there).
+// PATH, the registry and file-existence checks — so that asking it never costs a
+// process start, even from the frame thread or on every GitService refresh.
 HE_SC_API std::optional<std::filesystem::path> gitExecutable();
 
 // Forget the cached answer, so the next gitExecutable() looks again. Called by

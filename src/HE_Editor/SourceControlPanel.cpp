@@ -9,8 +9,10 @@
 #include "GitController.h"
 #include "CollabController.h"     // who hosts the session, for the team-server notice
 #include "GitMissingDialog.h"      // the install remedy, when git is missing
+#include "TeamSyncView.h"          // the team-sync view, in team-server mode
 #include "ContentBrowserPanel.h"   // revealAsset: a changed file, shown in the Content Browser
 #include "EditorAssetTypeCache.h" // asset type of a .hasset, for the type icon and filter
+#include "SourceControlTree.h"    // the "Tree view" as clippable lines
 
 #include <Diagnostics/GlobalState.h>
 #include <SourceControl/GitCli.h>
@@ -28,6 +30,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -271,6 +274,9 @@ struct ChangeRow
 struct Model
 {
 	std::vector<ChangeRow> conflicts, staged, unstaged, untracked;
+	// The four lists as "Tree view" lines (SourceControlTree.h), section order:
+	// conflicts, staged, changes, new.
+	std::vector<HE::Ed::ChangeTree::Line> tree[4];
 	int         catCounts[kCatCount] = {};
 	std::size_t total       = 0;     // every dirty file, whatever the filter hides
 	std::size_t stagedTotal = 0;
@@ -331,6 +337,10 @@ void rebuildModel(const HE::Sc::RepoStatus& st)
 	std::sort(m.staged.begin(),    m.staged.end(),    byPath);
 	std::sort(m.unstaged.begin(),  m.unstaged.end(),  byPath);
 	std::sort(m.untracked.begin(), m.untracked.end(), byPath);
+	const std::vector<ChangeRow>* lists[4] = { &m.conflicts, &m.staged, &m.unstaged, &m.untracked };
+	for (int s = 0; s < 4; ++s)
+		m.tree[s] = HE::Ed::ChangeTree::build(static_cast<int>(lists[s]->size()),
+			[&](int i) -> const std::string& { return (*lists[s])[static_cast<std::size_t>(i)].path; });
 	s_model = std::move(m);
 }
 
@@ -469,8 +479,11 @@ RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
 		const char* letter = catLetter(r.cat);
 		const float fs = ImGui::GetFontSize() * 0.74f;
 		const ImVec2 ls = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, letter);
+		// White read 3.0:1 on the mesh amber and 3.4:1 on the texture teal, so
+		// the letter picks white or Ink by its tile.
+		const ImVec4 tile = ImGui::ColorConvertU32ToFloat4(catColour(r.cat));
 		dl->AddText(ImGui::GetFont(), fs, ImVec2(a.x + (s - ls.x) * 0.5f, a.y + (s - ls.y) * 0.5f),
-		            IM_COL32(255, 255, 255, 255), letter);
+		            HE::Ed::Theme::u32(HE::Ed::Theme::textOn(tile, ImVec4(1, 1, 1, 1))), letter);
 		x += s + 6.0f;
 	}
 
@@ -649,63 +662,59 @@ Bulk drawSectionHeader(const char* title, std::size_t count, bool& open, bool sh
 	return result;
 }
 
-struct DirNode
-{
-	std::map<std::string, DirNode> dirs;
-	std::vector<const ChangeRow*>  files;
-};
-
-void insertRow(DirNode& root, const ChangeRow& r)
-{
-	DirNode* node = &root;
-	std::size_t start = 0;
-	while (true)
-	{
-		const std::size_t slash = r.path.find('/', start);
-		if (slash == std::string::npos) { node->files.push_back(&r); return; }
-		node = &node->dirs[r.path.substr(start, slash - start)];
-		start = slash + 1;
-	}
-}
-
-template <class Fn>
-void drawDirNode(const std::string& name, const DirNode& node, Fn&& rowFn)
-{
-	// Single-child chains fold into one node ("Content/Meshes/Props"), the way VS Code
-	// does it.
-	const DirNode* n = &node;
-	std::string label = name;
-	while (n->files.empty() && n->dirs.size() == 1)
-	{
-		label += "/" + n->dirs.begin()->first;
-		n = &n->dirs.begin()->second;
-	}
-	ImGui::PushID(label.c_str());
-	if (ImGui::TreeNodeEx(label.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
-	{
-		for (const auto& [sub, child] : n->dirs) drawDirNode(sub, child, rowFn);
-		for (const ChangeRow* r : n->files) rowFn(*r);
-		ImGui::TreePop();
-	}
-	ImGui::PopID();
-}
+// Folded folders of the "Tree view", per section (conflicts, staged, changes, new),
+// by full path. Kept by the panel, not in ImGui's storage: a folded folder has to
+// survive the status refresh, and the clipper below never submits it while it is
+// out of view.
+std::unordered_set<std::string> s_foldedDirs[4];
 
 // One section's rows, as a tree or flat, with the results of every row gathered.
+// Both clipped: a freshly imported project can have thousands of untracked rows.
+// Every line is one frame high, a folder line too (FramePadding), so the clipper's
+// fixed step holds for the tree as well.
 template <class Fn>
-void drawRows(const std::vector<ChangeRow>& rows, Fn&& rowFn)
+void drawRows(int section, const std::vector<ChangeRow>& rows,
+              const std::vector<HE::Ed::ChangeTree::Line>& tree, Fn&& rowFn)
 {
+	const float step = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
 	if (s_treeView)
 	{
-		DirNode root;
-		for (const ChangeRow& r : rows) insertRow(root, r);
-		for (const auto& [name, sub] : root.dirs) drawDirNode(name, sub, rowFn);
-		for (const ChangeRow* r : root.files) rowFn(*r);
+		std::unordered_set<std::string>& folded = s_foldedDirs[section];
+		static std::vector<int> s_visible;
+		HE::Ed::ChangeTree::visible(tree, folded, s_visible);
+		const float indentStep = ImGui::GetStyle().IndentSpacing;
+		// Read after the loop: toggling a folder changes what is visible, and the
+		// clipper is still walking this frame's list.
+		const std::string* toggled = nullptr;
+		ImGuiListClipper clip;
+		clip.Begin(static_cast<int>(s_visible.size()), step);
+		while (clip.Step())
+			for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i)
+			{
+				const HE::Ed::ChangeTree::Line& l = tree[static_cast<std::size_t>(s_visible[static_cast<std::size_t>(i)])];
+				const float indent = static_cast<float>(l.depth) * indentStep;
+				if (indent > 0.0f) ImGui::Indent(indent);
+				if (l.row >= 0)
+					rowFn(rows[static_cast<std::size_t>(l.row)]);
+				else
+				{
+					const bool open = folded.count(l.key) == 0;
+					ImGui::PushID(l.key.c_str());
+					ImGui::SetNextItemOpen(open, ImGuiCond_Always);
+					if (ImGui::TreeNodeEx(l.label.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth |
+					                                        ImGuiTreeNodeFlags_FramePadding |
+					                                        ImGuiTreeNodeFlags_NoTreePushOnOpen) != open)
+						toggled = &l.key;
+					ImGui::PopID();
+				}
+				if (indent > 0.0f) ImGui::Unindent(indent);
+			}
+		if (toggled && !folded.erase(*toggled)) folded.insert(*toggled);
 	}
 	else
 	{
-		// Clipped: a freshly imported project can have thousands of untracked rows.
 		ImGuiListClipper clip;
-		clip.Begin(static_cast<int>(rows.size()), ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y);
+		clip.Begin(static_cast<int>(rows.size()), step);
 		while (clip.Step())
 			for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) rowFn(rows[static_cast<std::size_t>(i)]);
 	}
@@ -920,7 +929,7 @@ void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatu
 			}
 			if (!s_sectionOpen[idx]) return;
 			ImGui::PushID(idx);
-			drawRows(rows, [&](const ChangeRow& r) {
+			drawRows(idx, rows, m.tree[idx], [&](const ChangeRow& r) {
 				const RowResult res = drawRow(r, kind, showDir, mayWrite, m.root);
 				if (res.toggle)
 				{
@@ -1277,7 +1286,7 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	ImGui::Spacing();
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Open source-control settings…"))
-		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::SourceControl);
 }
 
 void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
@@ -1579,12 +1588,12 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	if (git->blockedByTeamServer())
 	{
 		drawTeamServerNotice(ctx, *git);
-		if (git->gitMissing() || (ctx.gitProbe && !ctx.gitProbe->gitFound) || !git->isRepo())
-		{
-			ImGui::End();
-			return;
-		}
-		ImGui::Spacing();
+		// The local .git is dormant in this mode (it froze at the switch): its
+		// changes, history, branches and fetch would all describe a history
+		// nobody writes any more, so the team's view replaces them.
+		if (ctx.teamSync) TeamSyncView::draw(*ctx.teamSync);
+		ImGui::End();
+		return;
 	}
 
 	// Before "not a repository": without git there is no telling, and a project
@@ -1622,7 +1631,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			                   "in Project Settings \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
 			if (EditorWidgets::button("Set up in Project Settings…", ImVec2(240.0f, 0.0f)))
-				ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::SourceControl);
 		}
 
 		// Errors are not printed here: GitController posts them to the notifications
@@ -1665,16 +1674,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		                   "others through the session.");
 		ImGui::PopStyleColor();
 	}
-	// Errors go to the notifications (GitController::reportNewError), not to red text
-	// in here; what stays is the plain outcome of the last thing that worked.
-	if (git->lastError().empty() && !git->lastInfo().empty())
-	{
-		// The one line here that was not already wrapped, and it is a whole
-		// sentence from git ("Fetched: 3 new commits on origin/main") in a panel
-		// docked at 420 px.
-		EditorWidgets::WrapText wrap;
-		ImGui::TextDisabled("%s", git->lastInfo().c_str());
-	}
+	// Neither errors nor the outcome of the last operation are printed here: both go
+	// to the notifications (GitController::reportNewError / reportNewInfo), where
+	// they are kept in the centre instead of sitting in a docked panel until the
+	// next operation replaces them.
 
 	// ── Tabs ─────────────────────────────────────────────────────────────────
 	// Changes, History and Branches each get the whole height instead of sharing it:
@@ -1753,15 +1756,27 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			                         s_branchName, sizeof(s_branchName));
 
 			// Validate while typing: git's own rules, asked of git, so the answer
-			// cannot drift from what the command will accept.
+			// cannot drift from what the command will accept. Asked on the git
+			// worker once per change of the text (never per frame, never on this
+			// thread); until the answer for exactly this text is in, nothing is
+			// claimed either way and Create waits for it.
+			static std::string s_branchNameAsked;
+			if (ImGui::IsWindowAppearing()) s_branchNameAsked.clear();   // branches may have changed since
 			const bool empty = s_branchName[0] == '\0';
 			bool nameOk = false, taken = false;
+			const HE::Sc::GitService::BranchNameCheck* check = nullptr;
 			if (!empty && !git->projectRoot().empty())
 			{
-				nameOk = HE::Sc::GitCli::isValidBranchName(git->projectRoot(), s_branchName);
-				taken  = nameOk && HE::Sc::GitCli::branchExists(git->projectRoot(), s_branchName);
+				if (s_branchNameAsked != s_branchName)
+				{
+					s_branchNameAsked = s_branchName;
+					git->requestCheckBranchName(s_branchNameAsked);
+				}
+				check = git->branchNameCheck(s_branchName);
+				nameOk = check && check->valid;
+				taken  = check && check->taken;
 			}
-			if (!empty && !nameOk)
+			if (!empty && check && !nameOk)
 				ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
 				                   "Not a usable branch name.");
 			else if (taken)

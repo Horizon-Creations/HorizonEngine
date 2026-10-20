@@ -30,6 +30,8 @@
 #include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
+#include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
@@ -37,6 +39,7 @@
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "EditorBackendChoice.h"   // HE_DUMP_RHI against the config's RHI
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
+#include "McpBridge.h"             // the listener m_mcp points at
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
@@ -55,6 +58,7 @@
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
+#include <Platform/ProjectWriteGate.h>   // the export lock: refuse a save while a pack is reading the files
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
 #include <Platform/Process.h>       // git config for the identity fix
 #include <Diagnostics/Log.h>
@@ -62,6 +66,10 @@
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
+#ifdef HE_HAVE_LIBSSH2
+static void installContentSyncFailureListener();   // defined with the SFTP probe below
+#endif
+static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handler, below
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -142,6 +150,7 @@
 #include <string>
 #include <array>
 #include <future>
+#include <thread>
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
@@ -362,13 +371,19 @@ std::string getRHIName(HE::RendererBackend backend)
 	}
 }
 
+EditorApplication::EditorApplication(std::string startupPath)
+	: HE::Application(std::move(startupPath))
+	, m_mcp(std::make_unique<HE::Ed::McpBridge>())
+{
+}
+
 EditorApplication::~EditorApplication()
 {
 	// Before any member goes: stopping the bridge reports every connection to
 	// the client-gone hooks, and the lock hook reaches m_mcpLocks and m_collab,
 	// which are not all declared before m_mcp. OnShutdown normally did this
 	// already, and stop() is then a no-op.
-	m_mcp.stop();
+	m_mcp->stop();
 }
 
 HE::ApplicationConfig EditorApplication::GetConfig() const
@@ -488,6 +503,24 @@ void EditorApplication::OnInit()
 	// into a log line nobody has open. Set before any callback below can fire.
 	m_collab.setNotifications(&m_notifications);
 	m_team.setNotifications(&m_notifications);
+	m_teamSync.setNotifications(&m_notifications);
+	m_teamSync.setOpenFolder([](const std::filesystem::path& dir) {
+		const std::string url = "file://" + dir.generic_string();
+		SDL_OpenURL(url.c_str());
+	});
+	// A file the editor holds unsaved edits for is not overwritten from the
+	// team server: written, its base would move to the teammate's version and
+	// the next save would replace that version silently. Left alone, the save
+	// is merged on the server against what it was edited from.
+	m_teamSync.setKeepLocal([this](const std::string& projectRelPath) {
+		const std::string root = projectRoot();
+		if (root.empty()) return false;
+		const std::filesystem::path full = (std::filesystem::path(root) / projectRelPath).lexically_normal();
+		if (!m_currentScenePath.empty() && m_undo.revision() != m_savedRevision &&
+		    std::filesystem::path(m_currentScenePath).lexically_normal() == full)
+			return true;
+		return EditorUI::tabHasUnsavedEdits(full.generic_string());
+	});
 
 	// The same channel, reachable from everywhere else: worker threads, download
 	// callbacks and static panel helpers post through HE::Ed::notify() because
@@ -508,6 +541,15 @@ void EditorApplication::OnInit()
 	// the user instead of scrolling past in a file they do not have open. It
 	// throttles itself — see NotificationStore::attachToEngineLog.
 	m_notifications.attachToEngineLog();
+	// The project's files are read by an export for as long as it runs: saves,
+	// imports and file operations are refused meanwhile (ProjectWriteGate.h).
+	HE::ProjectWriteGate::install(&BuildProgressDialog::exportRunning, &onProjectWriteRefused);
+
+#ifdef HE_HAVE_LIBSSH2
+	// And the EngineContent sync's own failures, which the library can only report
+	// to a listener — see installContentSyncFailureListener.
+	installContentSyncFailureListener();
+#endif
 
 	// The other reading of the same stream, and the complement of the bell: every
 	// record at every level, unthrottled, in a window (ConsolePanel.h). Attached
@@ -708,6 +750,9 @@ void EditorApplication::OnInit()
 			// keeps the session's state (CollabSettle.h); the session's own
 			// once-a-second autosave of a held tab is only traffic.
 			if (!m_collabAutosaveWrite) m_collab.noteLocalSave(relPath);
+			// With the team server keeping the history, a save is the moment to
+			// sync (debounced, so Save All is one revision).
+			if (!m_collabAutosaveWrite) m_teamSync.noteSaved();
 			// An application's preview shows the saved assets, so a save is the
 			// signal to rebuild it. Only for the kinds that change what the
 			// preview DOES — a texture or a font swaps itself in through the
@@ -1018,6 +1063,10 @@ void EditorApplication::OnInit()
 		// the snapshot left, which is exactly the parentage the peers share.
 		m_structureParent.clear();
 		m_structureUndeletable.clear();
+		m_structureUnsendable.clear();
+		// The records were just rebuilt: the next frame diffs against them.
+		m_structureGate.reset();
+		m_structureReparentPending = false;
 		// The level script came with the new scene, so the mirror describes a
 		// graph that no longer exists. Left alone, the next diff would report
 		// the difference between the two scenes' scripts as a local edit.
@@ -1309,6 +1358,11 @@ void EditorApplication::OnInit()
 			static_assert(sizeof(rp) == sizeof(rpRaw), "VkRenderPass size mismatch");
 			std::memcpy(&rp, &rpRaw, sizeof(rp));
 			vkInfo.PipelineInfoMain.RenderPass = rp;
+			// The renderer's pipeline cache (REN-808): ImGui builds one pipeline per
+			// viewport/platform window, those land in the persisted cache too.
+			const uint64_t pcRaw = vk->GetPipelineCache();
+			static_assert(sizeof(vkInfo.PipelineCache) == sizeof(pcRaw), "VkPipelineCache size mismatch");
+			std::memcpy(&vkInfo.PipelineCache, &pcRaw, sizeof(pcRaw));
 			ImGui_ImplSDL3_InitForVulkan(window()->GetNativeWindow());
 			ImGui_ImplVulkan_Init(&vkInfo);
 			m_imguiReady = true;
@@ -1515,6 +1569,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsSoundProblem          = globalstate.getCustomConfigBool("RewardsSoundProblem", m_editorConfig.RewardsSoundProblem);
 	m_editorConfig.RewardsSoundDragDrop         = globalstate.getCustomConfigBool("RewardsSoundDragDrop", m_editorConfig.RewardsSoundDragDrop);
 	m_editorConfig.RewardsProblemPulse          = globalstate.getCustomConfigBool("RewardsProblemPulse", m_editorConfig.RewardsProblemPulse);
+	m_editorConfig.NotificationPopups           = globalstate.getCustomConfigBool("NotificationPopups", m_editorConfig.NotificationPopups);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	m_editorConfig.RewardsCounterTick           = globalstate.getCustomConfigBool("RewardsCounterTick", m_editorConfig.RewardsCounterTick);
 	m_editorConfig.RewardsStreakTooltip         = globalstate.getCustomConfigBool("RewardsStreakTooltip", m_editorConfig.RewardsStreakTooltip);
@@ -1580,7 +1635,6 @@ void EditorApplication::OnInit()
 	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.WeatherSoundInEditor        = globalstate.getCustomConfigBool("WeatherSoundInEditor", m_editorConfig.WeatherSoundInEditor);
-	m_editorConfig.PreviewQualityMode          = globalstate.getCustomConfigInt("PreviewQualityMode", m_editorConfig.PreviewQualityMode);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
@@ -1939,22 +1993,10 @@ void EditorApplication::OnInit()
 		// leaving play (which creates and destroys the physics world) needs no
 		// rebinding. Outside play mode physics is null and those nodes no-op,
 		// which is the honest answer: nothing is simulating.
-		svc.callApi = [this](HorizonCode::InstanceId self, const std::string& id,
-		                     const std::vector<HorizonCode::Value>& args)
-			-> std::vector<HorizonCode::Value> {
-			const HE::api::ApiFn* fn = HE::api::find(id);
-			// An id the registry does not know is almost always an OLD graph whose
-			// EngineCall node names a row that has since been removed or renamed
-			// (widget.create and its three lifecycle siblings, most recently).
-			// Returning {} silently made that look like a call that simply did
-			// nothing. The codegen path already throws on it; only the interpreter
-			// was quiet. Deliberately NOT inside HE::api::find(): nullptr is
-			// ordinary control flow for its other callers, which run per frame
-			// while drawing.
-			if (!fn) {
-				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
-				return {};
-			}
+		//
+		// The Ctx a call runs against, for the dispatcher below and for compiled
+		// code calling HE::api directly — one builder, so the two cannot drift.
+		auto callCtx = [this](HorizonCode::InstanceId self) -> HE::api::Ctx {
 			// fs/save sandbox: the project's Saved/ directory (follows the loaded
 			// project; setSandboxRoot is a cheap string assign).
 			const std::string& projPath = m_projectManager.currentProject().path;
@@ -1980,9 +2022,31 @@ void EditorApplication::OnInit()
 			// So does the rest of the app-level half (audio, runtime, entity
 			// host, the object services and what "quit" means in this host):
 			// apiCtx() is the one place that fills it.
-			HE::api::Ctx c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(),
-			                        &contentManager(), self);
+			return apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager(), self);
+		};
+		svc.callApi = [callCtx](HorizonCode::InstanceId self, const std::string& id,
+		                     const std::vector<HorizonCode::Value>& args)
+			-> std::vector<HorizonCode::Value> {
+			const HE::api::ApiFn* fn = HE::api::find(id);
+			// An id the registry does not know is almost always an OLD graph whose
+			// EngineCall node names a row that has since been removed or renamed
+			// (widget.create and its three lifecycle siblings, most recently).
+			// Returning {} silently made that look like a call that simply did
+			// nothing. The codegen path already throws on it; only the interpreter
+			// was quiet. Deliberately NOT inside HE::api::find(): nullptr is
+			// ordinary control flow for its other callers, which run per frame
+			// while drawing.
+			if (!fn) {
+				HE_LOG_WARN(Script, "callApi: unknown engine api '%s' (removed or renamed?) - call skipped", id.c_str());
+				return {};
+			}
+			HE::api::Ctx c = callCtx(self);
 			return fn->invoke(c, args);
+		};
+		// Compiled HorizonCode calling HE::api directly (HE::api::Scope) gets
+		// the Ctx the dispatcher above builds, sandbox and grants included.
+		svc.apiCtx = [callCtx](HorizonCode::InstanceId self, HE::api::Ctx& out) {
+			out = callCtx(self);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
@@ -2297,6 +2361,16 @@ void EditorApplication::startToolchainProbe()
 	m_toolchainThread = std::thread([this]
 	{
 		HE::hccg::ToolchainProbe probe = HE::hccg::probeToolchain();
+		// HE_SIMULATE_MISSING_TOOLCHAIN=compiler|cmake|both: the probe reports
+		// that part missing, so the export's toolchain gate and Tool Setup can be
+		// checked on a machine that has everything (topic 222 step 3).
+		if (const char* sim = std::getenv("HE_SIMULATE_MISSING_TOOLCHAIN"); sim && *sim)
+		{
+			const std::string s = sim;
+			if (s == "cmake" || s == "both")    { probe.cmakeFound = false; probe.cmakeVersion.clear(); }
+			if (s == "compiler" || s == "both") { probe.compilerFound = false; probe.compilerId.clear();
+			                                      probe.detail = "simulated (HE_SIMULATE_MISSING_TOOLCHAIN)"; }
+		}
 		m_toolchainProbe = std::move(probe);
 		m_toolchainChecked.store(true, std::memory_order_release);
 	});
@@ -2320,12 +2394,12 @@ void EditorApplication::startClaudeProbe()
 	m_claudeSettleFrames = 0;
 	// Read HERE, on the frame thread, before anything can connect. The worker may
 	// not touch the bridge at all.
-	m_claudeAuthBaseline = m_mcp.authCount();
+	m_claudeAuthBaseline = m_mcp->authCount();
 
 	const char* basePtr = SDL_GetBasePath();
 	const std::filesystem::path base     = basePtr ? std::filesystem::path(basePtr)
 	                                               : std::filesystem::path();
-	const std::filesystem::path endpoint = m_mcp.endpointFile();
+	const std::filesystem::path endpoint = m_mcp->endpointFile();
 
 	m_claudeThread = std::thread([this, base, endpoint]
 	{
@@ -2352,8 +2426,8 @@ void EditorApplication::pollClaudeProbe()
 	// nothing else was invited during those seconds, and if a second client did
 	// authenticate in the same window, the honest reading of that is still "a
 	// client reached this editor while the check ran".
-	m_claudeResult.authSeen   = m_mcp.authCount() > m_claudeAuthBaseline;
-	m_claudeResult.authClient = m_mcp.lastAuthClient();
+	m_claudeResult.authSeen   = m_mcp->authCount() > m_claudeAuthBaseline;
+	m_claudeResult.authClient = m_mcp->lastAuthClient();
 	m_claudeState = 2;
 }
 
@@ -2374,6 +2448,111 @@ void EditorApplication::startGitProbe()
 }
 
 #ifdef HE_HAVE_LIBSSH2
+// ── A write the export lock turned away ─────────────────────────────────────
+// Called by whoever tried to change a file while an export runs (ProjectWriteGate),
+// possibly many times in a row — an autosave-style retry loop, a batch import — and
+// from any thread. One notification, re-armed at most every ten seconds, so the
+// reason is on screen when the user pressed Save and not a toast per attempt.
+static void onProjectWriteRefused(const char* what)
+{
+	static std::atomic<std::uint64_t> s_lastMs{ 0 };
+	const std::uint64_t now  = HE::Ed::NotificationStore::nowMs();
+	std::uint64_t       last = s_lastMs.load(std::memory_order_relaxed);
+	if (last != 0 && now - last < 10'000) return;
+	if (!s_lastMs.compare_exchange_strong(last, now)) return;
+
+	HE::Ed::NoteSpec note;
+	note.level  = HE::Ed::NoteLevel::Important;
+	note.title  = "Export in progress";
+	note.text   = "The project is locked until the export finishes — it is reading its files right now.";
+	note.detail = std::string("You tried to ") + (what ? what : "change a file") +
+	              ". Your edits stay open in the editor and can be saved afterwards.";
+	note.key    = "export.lock";
+	note.actions.push_back({ "Show Build", [] { BuildProgressDialog::requestOpen(); }, true });
+	HE::Ed::notify(std::move(note));
+}
+
+// ── EngineContent sync failures → notifications ──────────────────────────────
+// The library (HE_ContentSync) cannot talk to a user, and a worker thread that
+// fails ends in a log warning and a callback most callers ignore. Its listener is
+// installed once; it runs on whichever thread hit the failure, so everything here
+// goes through the thread-safe notify().
+//
+// Three of the four kinds are reported elsewhere, with the context only a caller
+// has, and are deliberately skipped here:
+//   • Manifest — the startup probe and the post-publish refresh say what the failure
+//     MEANS (offline, no cached catalogue, stale Content Browser).
+//   • Download, Explicit — the Content Browser says which click it was for.
+// What is left is what had no voice: files a scene pulled in by itself (Passive),
+// of which a project can need dozens — so they are one notification with a count,
+// not one toast per file — and the catalogue that could not be kept for offline use.
+static void onContentSyncFailure(const HE::Cs::SyncFailure& f)
+{
+	using HE::Cs::SyncFailureKind;
+	switch (f.kind)
+	{
+	case SyncFailureKind::Manifest:
+		return;
+
+	case SyncFailureKind::ManifestCache:
+	{
+		static std::atomic<bool> s_told{false};
+		if (s_told.exchange(true)) return;   // once per session: it will fail the same way again
+		HE::Ed::NoteSpec note;
+		note.level  = HE::Ed::NoteLevel::Important;
+		note.title  = "EngineContent";
+		note.text   = "The EngineContent catalogue could not be saved for offline use.";
+		note.detail = f.reason + " Without the cached copy, EngineContent will not appear "
+		              "when the server cannot be reached.";
+		note.key    = "contentsync.cache";
+		HE::Ed::notify(std::move(note));
+		return;
+	}
+
+	case SyncFailureKind::Download:
+	{
+		if (f.trigger == HE::Cs::DownloadTrigger::Explicit) return;
+		// A burst is one notification: a scene that references forty missing files
+		// produces forty of these within a second. The window restarts a minute
+		// after it opened, so a later, unrelated failure is a fresh entry.
+		static std::mutex     s_mutex;
+		static int            s_count = 0;
+		static std::uint64_t  s_windowStartMs = 0;
+		const std::uint64_t   now = HE::Ed::NotificationStore::nowMs();
+
+		HE::Ed::NoteSpec note;
+		note.level = HE::Ed::NoteLevel::Important;
+		note.title = "EngineContent download failed";
+		note.key   = "contentsync.download";
+		{
+			std::lock_guard<std::mutex> lock(s_mutex);
+			if (s_count == 0 || now - s_windowStartMs > 60'000) { s_count = 0; s_windowStartMs = now; }
+			++s_count;
+			if (s_count == 1)
+			{
+				note.text      = "\"" + std::filesystem::path(f.relativePath).filename().string() +
+				                 "\" could not be downloaded.";
+				note.assetPath = f.relativePath;
+			}
+			else
+			{
+				note.text = std::to_string(s_count) + " EngineContent files could not be downloaded.";
+			}
+		}
+		note.detail = "A scene references EngineContent that the server did not hand over" +
+		              (f.reason.empty() ? std::string(".") : ": " + f.reason + ".") +
+		              " It stays missing until a later attempt succeeds.";
+		HE::Ed::notify(std::move(note));
+		return;
+	}
+	}
+}
+
+static void installContentSyncFailureListener()
+{
+	HE::Cs::EngineContentSync::instance().setFailureListener(&onContentSyncFailure);
+}
+
 // The manifest's {path, uuid} pairs, reshaped into the network-agnostic DTO
 // GlobalState::refreshEngineFolder() accepts — see RemoteEngineAsset's comment
 // in DiagnosticsStructs.h for why HE_Core cannot take the manifest type itself.
@@ -2432,10 +2611,11 @@ void EditorApplication::startSftpProbe()
 		// user to ignore the bell before it has ever carried anything real.
 		if (probe.configured && !probe.reachable)
 		{
-			HE::Ed::notify(
-				haveManifest ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Problem,
-				"The EngineContent server could not be reached.",
-				(probe.detail.empty()
+			HE::Ed::NoteSpec note;
+			note.level = haveManifest ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
+			note.title = "EngineContent server unreachable";
+			note.text  = "The EngineContent server could not be reached.";
+			note.detail = (probe.detail.empty()
 					? std::string("The connection was refused or timed out.")
 					: probe.detail)
 				+ (haveManifest
@@ -2443,7 +2623,11 @@ void EditorApplication::startSftpProbe()
 					  "assets already downloaded still work, anything else cannot be "
 					  "fetched until the server is back."
 					: "  No catalogue is available, so no EngineContent can be browsed "
-					  "or downloaded this session."));
+					  "or downloaded this session.");
+			note.key = "contentsync.server";
+			// Runs on the main thread; the editor outlives the store that holds it.
+			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
+			HE::Ed::notify(std::move(note));
 		}
 		else if (probe.configured && !haveManifest)
 		{
@@ -2451,13 +2635,17 @@ void EditorApplication::startSftpProbe()
 			// a different fault (manifest missing, unreadable, or unparseable) and
 			// one the user cannot fix by checking their network.
 			const std::string why = HE::Cs::EngineContentSync::instance().lastManifestError();
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
-				"The EngineContent catalogue could not be read.",
-				std::string("The server accepted the login, but reading its manifest failed")
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Critical;
+			note.title  = "EngineContent catalogue unreadable";
+			note.text   = "The EngineContent catalogue could not be read.";
+			note.detail = std::string("The server accepted the login, but reading its manifest failed")
 				+ (why.empty() ? std::string(".") : std::string(": ") + why + ".")
 				+ "  There is no cached copy on this machine, so EngineContent will not "
-				  "appear in the Content Browser this session. Restarting the editor "
-				  "tries again.");
+				  "appear in the Content Browser until this works.";
+			note.key = "contentsync.server";
+			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
+			HE::Ed::notify(std::move(note));
 		}
 
 		if (haveManifest && gs && !engineContentPath.empty())
@@ -2496,14 +2684,22 @@ void EditorApplication::refreshEngineContentManifest()
 			// no longer matches the server — assets the publish removed still
 			// listed, ones it added still missing — with nothing on screen saying
 			// so until the next restart quietly fixes it.
-			HE::Ed::notify(HE::Ed::NoteLevel::Warning,
-				"The EngineContent catalogue could not be refreshed.",
-				"The change reached the server, but re-reading its manifest failed. "
-				"What the Content Browser shows under Engine is from before that "
-				"change until the connection recovers or the editor is restarted.");
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Important;
+			note.title  = "EngineContent catalogue out of date";
+			note.text   = "The EngineContent catalogue could not be refreshed.";
+			note.detail = "The change reached the server, but re-reading its manifest failed. "
+			              "What the Content Browser shows under Engine is from before that "
+			              "change until the connection recovers.";
+			note.key = "contentsync.server";
+			note.actions.push_back({ "Try again", [this] { refreshEngineContentManifest(); }, true });
+			HE::Ed::notify(std::move(note));
 			return;
 		}
 
+		// The "Try again" of an earlier failure worked, or the refresh simply did:
+		// whatever that notification said is no longer true.
+		HE::Ed::resolveNotification("contentsync.server");
 		gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
 		gs->refreshEngineFolder(engineContentPath, projectContentRoot);
 		m_sftpManifestReady.store(true, std::memory_order_release);
@@ -2631,6 +2827,7 @@ void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 		std::lock_guard<std::mutex> lk(m_installLogMutex);
 		m_installLog.clear();
 	}
+	m_installCtl.reset();
 	m_installFinished.store(false, std::memory_order_release);
 	m_installAttempted.store(false, std::memory_order_release);
 	m_installExit.store(0, std::memory_order_release);
@@ -2644,7 +2841,7 @@ void EditorApplication::startToolchainInstall(bool needCmake, bool needCompiler)
 			m_installLog += '\n';
 		};
 		const HE::hccg::ToolchainInstall res =
-			HE::hccg::installToolchain(needCmake, needCompiler, onLine);
+			HE::hccg::installToolchain(needCmake, needCompiler, onLine, &m_installCtl);
 		m_installAttempted.store(res.attempted, std::memory_order_release);
 		m_installExit.store(res.exitCode, std::memory_order_release);
 		m_installRunning.store(false, std::memory_order_release);
@@ -2716,7 +2913,7 @@ static void appendRootMotionPreview(HorizonWorld& world, ContentManager& cm,
 		clipId = (b->blendAlpha >= HE::kNotifyDominanceAlpha) ? b->clipBId : b->clipAId;
 	else if (const auto* sm = reg.try_get<AnimatorStateMachineComponent>(e))
 	{
-		for (const HE::AnimationState& s : sm->resolvedGraph.states)
+		for (const HE::AnimationState& s : sm->graph().states)
 			if (s.name == sm->currentStateName) { clipId = s.clipId; break; }
 	}
 	if (clipId == HE::UUID{}) return;
@@ -3248,23 +3445,11 @@ void EditorApplication::OnRender(float dt)
 				{
 					HE::Cs::EngineContentSync::instance().enqueueDownload(
 						remotePath, uuid, HE::Cs::DownloadTrigger::Passive,
-						[done, remotePath, enginePath](bool success)
+						[done](bool success)
 						{
-							// The PASSIVE route: a scene referenced this asset and
-							// the download was arranged on its behalf, so a failure
-							// reaches the user as a mesh that renders as nothing or
-							// a material that falls back to grey — with nothing
-							// anywhere naming the file. Saying which one did not
-							// arrive is the whole difference between "the scene
-							// looks wrong" and a fact somebody can act on.
-							if (!success)
-								HE::Ed::notify(HE::Ed::NoteLevel::Warning,
-									"\"" + std::filesystem::path(remotePath).filename().string()
-										+ "\" could not be downloaded.",
-									"A scene references this EngineContent asset, but it could "
-									"not be fetched from the server. It stays missing until a "
-									"later attempt succeeds.",
-									enginePath);
+							// The PASSIVE route's failure is reported by the sync's failure
+							// listener (onContentSyncFailure), as one notification with a
+							// count however many files a scene pulled in.
 							done(success);
 						});
 				});
@@ -3796,6 +3981,14 @@ void EditorApplication::OnRender(float dt)
 		// lag is visible. Same order as the packaged game, which is the point of a
 		// preview.
 		updatePlayCameraController(gameDt);
+
+		// Then the cells of a split scene, against the camera where it now stands
+		// (the game's order: after physics and the camera).
+		if (m_isPlaying && m_editorWorld && m_playCells)
+		{
+			HE_PROFILE_SCOPE_N("CellStreaming");
+			m_playCells->update(*m_editorWorld, gameDt);
+		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
@@ -4748,6 +4941,9 @@ void EditorApplication::OnRender(float dt)
 		// what keeps the peers from ending up under two different rules.
 		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.setMaxAssetMB(m_editorConfig.CollabMaxAssetMB);
+		// Same every-frame push (the call is a no-op unless the value changed): the
+		// switch in Preferences is live, and turning it off takes the open popups down.
+		m_notifications.setPopupsEnabled(m_editorConfig.NotificationPopups);
 		// Read when a session starts, so pushing it mid-session moves nothing.
 		m_collab.setRelayAddress(m_editorConfig.CollabRelayAddress);
 		// Pushed before the collab pump, which is where the session's state
@@ -4763,6 +4959,19 @@ void EditorApplication::OnRender(float dt)
 		// the team in the same frame, and a join the team server answered starts
 		// on a controller that has already settled this frame's state.
 		m_team.update(nowMs);
+		// After the team pump (its tickets and sc-head events land there) and
+		// the collab pump (the session role is this frame's). Files from the
+		// team server wait during Play.
+		{
+			const auto& sc = m_projectManager.currentProject().settings.sourceControl;
+			TeamSyncController::Project project;
+			project.root       = projectRoot();
+			project.teamServer = sc.teamServer();
+			project.team       = sc.team;
+			project.project    = sc.project;
+			for (const std::string& rel : m_teamSync.update(nowMs, project, m_isPlaying))
+				applyTeamSyncFile(rel);
+		}
 
 		// ── The MCP bridge ────────────────────────────────────────────────
 		// Here, and not elsewhere: after the collaboration pump, so a peer's edit
@@ -4780,13 +4989,13 @@ void EditorApplication::OnRender(float dt)
 		// that forgets to update it is a handler writing into a destroyed world.
 		// Set here, one line before the tools that read it can run.
 		m_commands.setWorld(m_editorWorld.get());
-		m_mcp.setPort(static_cast<std::uint16_t>(
+		m_mcp->setPort(static_cast<std::uint16_t>(
 			m_mcpEnvPort > 0 ? m_mcpEnvPort : m_editorConfig.McpPort));
 		// Pushed every frame, exactly like setLanDiscoveryEnabled above: the
 		// Preferences panel then only ever writes the config, and setEnabled
 		// ignores a value that has not changed, so this costs nothing.
-		m_mcp.setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
-		m_mcp.update(nowMs);
+		m_mcp->setEnabled(m_editorConfig.McpServerEnabled || m_mcpEnvEnabled);
+		m_mcp->update(nowMs);
 		// After the pump, because it is the pump that notices a client has gone —
 		// and a client going is what hands its locks back.
 		updateMcpLocks(nowMs);
@@ -4811,7 +5020,18 @@ void EditorApplication::OnRender(float dt)
 	if (const int sync = m_git.takeSyncMoment())
 		HE::Ed::Rewards::post(HE::Ed::Rewards::Moment::Committed, sync);
 
-		if (m_collab.inSession()) syncStructuralChanges();
+		// Out of a session the gate forgets what it saw, so the first pass of the
+		// next one runs whatever the epoch says.
+		if (m_collab.inSession()) syncStructuralChanges(nowMs);
+		else
+		{
+			// Nobody left to retry for: an entry carried into the next session
+			// would only keep its pass running on every frame.
+			m_structureGate.reset();
+			m_structureUnsendable.clear();
+			m_structureUndeletable.clear();
+			m_structureReparentPending = false;
+		}
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
 		// Landscapes, after the structural diff so a landscape created this frame
@@ -5156,186 +5376,16 @@ void EditorApplication::captureLiveFrameIfAsked()
 			("EditorApplication: live frame capture failed → " + std::string(s_out)).c_str());
 }
 
-void EditorApplication::dumpFrameHeadless()
+// ── The witness scenes of the headless dump ─────────────────────────────────
+// Every HE_DUMP_* block that builds a scene for one capture (sky, material,
+// water, landscape, lights, …), in the order dumpFrameHeadless ran them inline;
+// pulled out of that function unchanged (audit M9). Each is a no-op unless its
+// variable is set. Two ids leave it: the material-test material, which the
+// preview-path witness reuses, and the landscape layer material, which
+// HE_DUMP_LAYEREDIT and the GI refit witness edit after the warmup.
+void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTestId,
+                                               HE::UUID& s_layerMatId)
 {
-	if (m_dumpPath.empty() || m_dumpDone) return;
-	IRenderer* r = renderer();
-	if (!r)
-	{
-		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
-		m_dumpDone = true;
-		return;
-	}
-
-	// Render the scene into a fixed offscreen target a few times, bypassing the
-	// ImGui overlay and the window swap. Doing this here (before the paced main
-	// loop) means it works even when the window is occluded / App-Napped on
-	// macOS — where the normal loop throttles to a near-frozen frame rate and a
-	// loop-driven capture never fires.
-	r->SetOverlayCallback(nullptr);
-	{
-		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
-		// shot that proves a bloom A/B has any bloom in it to compare.
-		IRenderer::BloomSettings bloom{
-			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
-		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
-		r->SetBloomSettings(bloom);
-	}
-	{
-		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
-		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
-		// not depend on the Preferences state of whoever ran the editor last.
-		const bool dumpSSAO = [&]{
-			const char* v = std::getenv("HE_DUMP_SSAO");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
-		}();
-		r->SetSSAOSettings(IRenderer::SSAOSettings{
-			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
-			m_editorConfig.SSAOMethod});
-	}
-	{
-		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
-		// depth-of-field settings for this capture only, so he_shot.py can A/B
-		// the pass and move the focus plane without touching config.json.
-		IRenderer::DepthOfFieldSettings dof{
-			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
-			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
-		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
-		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
-		r->SetDepthOfFieldSettings(dof);
-	}
-	{
-		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
-		// settings for this capture only. The camera motion itself comes from
-		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
-		IRenderer::MotionBlurSettings mb{
-			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
-			m_editorConfig.MotionBlurMax};
-		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
-		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
-		r->SetMotionBlurSettings(mb);
-	}
-	r->SetShadowSettings(projectShadowSettings());
-	{
-		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
-		// the render scale and the specular-AA toggle for this capture only, so
-		// he_shot.py can A/B the modes without touching config.json.
-		IRenderer::AntiAliasingSettings aa;
-		aa.method             = m_editorConfig.AntiAliasing;
-		aa.sharpness          = m_editorConfig.AASharpness;
-		aa.renderScale        = m_editorConfig.RenderScale;
-		aa.specularAA         = m_editorConfig.SpecularAA;
-		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
-		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
-		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
-		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
-		// The effect is a fraction of a roughness unit at normal strength, so an
-		// A/B that can only toggle it proves nothing headless — being able to
-		// exaggerate is what makes "does this reach the shader at all?" answerable.
-		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
-		{
-			const float s = static_cast<float>(std::atof(v));
-			aa.specularAA         = s > 0.0f;
-			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
-		}
-		r->SetAntiAliasingSettings(aa);
-	}
-	{
-		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
-		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
-		// the editor's Preferences state leaking between captures.
-		const bool dumpGI = [&]{
-			const char* v = std::getenv("HE_DUMP_GI");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
-		}();
-		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
-		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
-		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
-		// mask's rays per pixel and its edge-aware filter on any backend.
-		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
-		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
-		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
-		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
-		// history 0.98, no spatial filter. Every backend renders its own.
-		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
-		{
-			gi.shadowRays    = 256;
-			gi.shadowHistory = 0.98f;
-			gi.shadowFilter  = false;
-		}
-		r->SetGISettings(gi);
-	}
-	{
-		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
-		// this capture only, so he_shot.py can A/B the culler: the two captures
-		// must be pixel-identical, only "dump counters" (visible=, occluded=)
-		// may differ.
-		const bool dumpOcc = [&]{
-			const char* v = std::getenv("HE_DUMP_OCCLUSION");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
-		}();
-		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
-	}
-	{
-		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
-		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
-		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
-		const bool dumpSSR = [&]{
-			const char* v = std::getenv("HE_DUMP_SSR");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
-		}();
-		IRenderer::SSRSettings ssr{
-			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
-		ssr.quality = m_editorConfig.SSRQuality;
-		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
-			ssr.quality = std::atoi(q);
-		r->SetSSRSettings(ssr);
-	}
-	{
-		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
-		// capture only (ray-traced-reflections A/B without touching config.json).
-		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
-		const bool dumpGR = [&]{
-			const char* v = std::getenv("HE_DUMP_GIREFL");
-			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
-		}();
-		IRenderer::GIReflectionSettings gr;
-		gr.enabled      = dumpGR;
-		gr.intensity    = m_editorConfig.GIReflIntensity;
-		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
-		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
-		gr.blur         = m_editorConfig.GIReflBlur;
-		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
-			gr.blur = std::atof(b) > 0.5;
-		gr.quality      = m_editorConfig.GIReflQuality;
-		gr.bounces      = m_editorConfig.GIReflBounces;
-		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
-			gr.quality = std::atoi(q);
-		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
-		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
-			gr.bounces = std::atoi(bc);
-		r->SetGIReflectionSettings(gr);
-	}
-	{
-		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
-		// only (he_shot Forward/Deferred A/B without touching config.json).
-		int path = m_editorConfig.RenderPath;
-		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
-			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
-		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
-			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
-	}
-	{
-		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
-		// the viewport's view mode for this capture. Explicitly Lit otherwise —
-		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
-		// is the same answer, but a capture should not depend on that.
-		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
-	}
-
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
 	// the scene environment so a headless dump exercises the sky features (stars /
 	// nebula / 3D clouds / contrails) that the default down-looking editor camera and
@@ -5449,7 +5499,6 @@ void EditorApplication::dumpFrameHeadless()
 	// scene whose MaterialAsset carries a custom shader, so the NORMAL render path
 	// (extractor → RenderObject.materialAssetId → ResolveMaterialShader → cross-compiled
 	// pipeline) draws it — witnessing the full asset→pixel path, not just an inline demo.
-	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
 	if (const char* mt = std::getenv("HE_DUMP_MATERIALTEST"); mt && *mt && m_editorWorld)
 	{
 		MaterialAsset mat;
@@ -6266,7 +6315,7 @@ void EditorApplication::dumpFrameHeadless()
 			reg.emplace<TransformComponent>(e, tc);
 			reg.emplace<MeshComponent>(e, MeshComponent{ planeId });
 			auto& wmc = reg.emplace<MaterialComponent>(e, MaterialComponent{ waterId });
-			// HE_DUMP_WATERPARAMS="FresnelPower=10;DeepColor=1,0,0": per-entity
+			// HE_DUMP_WATERPARAMS="Surface=10,0.8,0.08,0.3;DeepColor=1,0,0": per-entity
 			// overrides, the same MaterialComponent::paramOverrides the Details
 			// panel writes, so a shot pair can show what ONE knob does. Components
 			// left out keep the material's default.
@@ -7050,7 +7099,6 @@ void EditorApplication::dumpFrameHeadless()
 	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
 	// orange (7) — the last three on the weightmap's SECOND page, which the
 	// renderer uploads as the right half of the one heLandscapeWeights texture.
-	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -7402,6 +7450,7 @@ void EditorApplication::dumpFrameHeadless()
 	//   HE_DUMP_FOLIAGEMESH=cube|sphere  default cube
 	//   HE_DUMP_FOLIAGESCALE=<min>,<max> instance scale, default 0.5,1.0
 	//   HE_DUMP_FOLIAGESEED=<n>        scatter seed, default 42
+	//   HE_DUMP_FOLIAGELOD=<from>[:mesh[:density]],...  detail levels, see below
 	// The camera is the dump's own (HE_DUMP_CAMX/CAMY/CAMZ/PITCH/YAW); a view
 	// over the middle of the field is CAMX=0 CAMY=40 CAMZ=-120 PITCH=-20.
 	if (const char* ft = std::getenv("HE_DUMP_FOLIAGETEST"); ft && *ft && m_editorWorld)
@@ -7431,29 +7480,38 @@ void EditorApplication::dumpFrameHeadless()
 		ftc.dirty       = true;
 		reg.emplace<TerrainComponent>(land, ftc);
 		FoliageComponent fol;
-		fol.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
+		FoliageLayer&    fl = fol.layers[0];
+		fl.meshAssetId  = sphere ? HE::UUID{ 257ULL, 1ULL } : HE::kDefaultCubeMeshId;
 		// +0.5: the scatter takes int(area * density), and float rounding must
 		// not cost the last instance.
-		fol.density      = (static_cast<float>(want) + 0.5f) / (side * side);
-		fol.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
-		fol.minScale     = scaleMin;
-		fol.maxScale     = scaleMax;
-		fol.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
-		fol.dirty        = true;
+		fl.density      = (static_cast<float>(want) + 0.5f) / (side * side);
+		fl.seed         = static_cast<int>(envF("HE_DUMP_FOLIAGESEED", 42.0f));
+		fl.minScale     = scaleMin;
+		fl.maxScale     = scaleMax;
+		fl.drawDistance = envF("HE_DUMP_FOLIAGEDIST", 1.0e6f);
+		fl.dirty        = true;
 		// HE_DUMP_FOLIAGEMAT=graph: the layer carries a node-graph material (one flat
 		// magenta ConstColor, no animation) instead of the built-in PBR. A backend that
 		// instances the batch with its built-in program draws it grey; one that keeps
 		// the material draws it magenta, once per instance (Thema 163 Teil 2b, GL gate).
-		if (const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT"); fm && std::string_view(fm) == "graph")
+		// =wind adds a Wind Sway node on the WPO pin (the Foliage template's vertex), so
+		// the batch exercises the instanced WPO vertex (Thema 182, 2e). The offset is
+		// windSpeed * 0.1 m at the top of a 1 m bend: pin it with HE_DUMP_WINDSPEED and
+		// HE_SKY_TIME (the graph's clock), and A/B against HE_GRAPH_INSTANCING=0.
+		const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT");
+		const bool  windMat = fm && std::string_view(fm) == "wind";
+		if (fm && (std::string_view(fm) == "graph" || windMat))
 		{
 			MaterialAsset mat;
 			mat.type = HE::AssetType::Material;
-			mat.name = "FoliageGraphTest";
+			mat.name = windMat ? "FoliageWindTest" : "FoliageGraphTest";
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(col)->p[0] = 0.9f; g.findNode(col)->p[1] = 0.1f; g.findNode(col)->p[2] = 0.8f;
 			g.connect(col, 0, out, 0);
+			if (windMat)
+				g.connect(g.addNode(HE::MatNodeType::WindSway), 0, out, HE::kMatOutputWPOPin);
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
@@ -7462,7 +7520,44 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderDispGlsl = gen.displacementBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
-			fol.materialAssetId = contentManager().registerMaterial(std::move(mat));
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEMAT=%s (vertex body %zu chars)",
+			            fm, gen.vertexBody.size());
+			fl.materialAssetId = contentManager().registerMaterial(std::move(mat));
+		}
+		// HE_DUMP_FOLIAGELOD=<from>[:cube|sphere|card[:density]],... adds detail levels
+		// (Thema 182, 3a): e.g. "30:sphere,60:card:0.5". A level without a mesh only thins
+		// the layer's. "card" is the engine's cross-card FILE, loaded here so the witness
+		// also shows that it ships; the log line says whether it resolved.
+		if (const char* fd = std::getenv("HE_DUMP_FOLIAGELOD"); fd && *fd)
+		{
+			std::string spec(fd);
+			for (size_t at = 0; at < spec.size() && fl.lods.size() < FoliageLayer::kMaxLods;)
+			{
+				const size_t end = std::min(spec.find(',', at), spec.size());
+				const std::string item = spec.substr(at, end - at);
+				at = end + 1;
+				FoliageLod d;
+				d.distance = static_cast<float>(std::atof(item.c_str()));
+				const size_t c1 = item.find(':');
+				if (c1 != std::string::npos)
+				{
+					const size_t c2 = item.find(':', c1 + 1);
+					const std::string mesh = item.substr(c1 + 1, c2 == std::string::npos ? std::string::npos : c2 - c1 - 1);
+					if (mesh == "cube")   d.meshAssetId = HE::kDefaultCubeMeshId;
+					if (mesh == "sphere")   // an engine FILE too: not resident until loaded
+						d.meshAssetId = contentManager().loadAsset("Engine/Meshes/Sphere.hasset");
+					if (mesh == "card")
+					{
+						const HE::UUID card = contentManager().loadAsset("Engine/Meshes/CrossCard.hasset");
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD cross card %s",
+						            card == HE::kEngineCrossCardMeshId ? "loaded with its engine UUID" : "NOT loaded");
+						d.meshAssetId = HE::kEngineCrossCardMeshId;
+					}
+					if (c2 != std::string::npos) d.density = std::clamp(static_cast<float>(std::atof(item.c_str() + c2 + 1)), 0.0f, 1.0f);
+				}
+				fl.lods.push_back(d);
+			}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD %zu level(s) from '%s'", fl.lods.size(), fd);
 		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
@@ -7470,7 +7565,7 @@ void EditorApplication::dumpFrameHeadless()
 		FoliageSystem::update(*m_editorWorld);
 		const double scatterMs = std::chrono::duration<double, std::milli>(
 			std::chrono::steady_clock::now() - t0).count();
-		const FoliageComponent& placedFol = reg.get<FoliageComponent>(land);
+		const FoliageLayer& placedFol = reg.get<FoliageComponent>(land).layers[0];
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGETEST witness field added "
 			"(%zu instances placed of %ld asked, %s, %.0f m square, scale %.2f-%.2f, "
 			"drawDistance %.0f, scatter %.1f ms)",
@@ -7706,11 +7801,27 @@ void EditorApplication::dumpFrameHeadless()
 		ltc.seed        = 0;
 		ltc.dirty       = true;
 		ltc.water.res   = 256;
+		// HE_DUMP_WATERRES=<cells per side>: the water grid of the witness. 33 on this
+		// 128 m landscape is the 3.9 m cell of a real 1000 m landscape at res 256, which
+		// is what the shore contour is as coarse as (Thema 206 baseline).
+		if (const char* r = std::getenv("HE_DUMP_WATERRES"); r && *r)
+			ltc.water.res = static_cast<uint32_t>(std::clamp(std::atoi(r), 8, 1024));
 		if (bank)
 		{
 			// The ground, as a sculpted height field (terrain-local metres). 129 is
 			// 2^7+1, so TerrainSystem does not resample it.
 			const uint32_t hr = 129;
+			// HE_DUMP_WATERSLOPE=<m per m> (default 0.12) and HE_DUMP_WATERROUGH=<m> (default 0, a
+			// per-vertex jitter of the 1 m height field): a gentle beach with facet noise is what
+			// makes the shoreline of a flat sheet jagged, a steep smooth bank does not (Thema 206).
+			const float bankSlope = [] { const char* v = std::getenv("HE_DUMP_WATERSLOPE"); return v && *v ? static_cast<float>(std::atof(v)) : 0.12f; }();
+			const float bankRough = [] { const char* v = std::getenv("HE_DUMP_WATERROUGH"); return v && *v ? static_cast<float>(std::atof(v)) : 0.0f; }();
+			auto hashNoise = [](uint32_t a, uint32_t b) {
+				uint32_t h = a * 374761393u + b * 668265263u;
+				h = (h ^ (h >> 13)) * 1274126177u;
+				h ^= h >> 16;
+				return static_cast<float>(h & 0xffffu) / 32767.5f - 1.0f;   // -1..1
+			};
 			ltc.resolution = hr;
 			ltc.sculptHeights.assign(static_cast<size_t>(hr) * hr, 0.0f);
 			for (uint32_t zi = 0; zi < hr; ++zi)
@@ -7720,7 +7831,7 @@ void EditorApplication::dumpFrameHeadless()
 					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
 					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
 						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
-						               : 0.12f * x + 1.2f * std::sin(0.15f * z);
+						               : bankSlope * x + 10.0f * bankSlope * std::sin(0.15f * z) + bankRough * hashNoise(xi, zi);
 				}
 		}
 		if (const char* c = std::getenv("HE_DUMP_WATERCLIP"); c && *c)
@@ -8529,6 +8640,279 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "%s",
 			(std::string("EditorApplication: HE_DUMP_MOUNTAINTEST landscape added (") + mt + ")").c_str());
 	}
+
+	// ── Terrain LOD tick (HE_DUMP_TERRAINTICK=1, Thema 190) ──────────────────
+	// The dump renders straight from OnInit and never ticks the world, so every
+	// chunk stays at LOD0 and no tessellated level is built: a seam between two
+	// chunks at DIFFERENT detail never exists here. This runs the two systems
+	// that pick a chunk's level, from the dump camera, a few times (the refined
+	// level is built a few chunks per tick). HE_DUMP_LODSCALE sets every
+	// landscape's lodDistanceScale (0.1 = LOD steps every ~0.6 chunk widths),
+	// HE_DUMP_TESS its tessellationFactor (2 | 4). The log line counts the
+	// chunks per level — the witness that the seam under test is a mixed one.
+	if (const char* tt = std::getenv("HE_DUMP_TERRAINTICK"); tt && *tt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const char* ls = std::getenv("HE_DUMP_LODSCALE");
+		const char* ts = std::getenv("HE_DUMP_TESS");
+		for (auto [e, tc] : reg.view<TerrainComponent>().each())
+		{
+			if (ls && *ls) tc.lodDistanceScale   = static_cast<float>(std::atof(ls));
+			if (ts && *ts) tc.tessellationFactor = std::atoi(ts);
+			tc.dirty = true;
+		}
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		const glm::vec3 camPos = m_editorCamera.position();
+		for (int i = 0; i < std::max(1, std::atoi(tt)) * 8; ++i)
+		{
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			LODSystem::update(*m_editorWorld, camPos);
+			// HE_DUMP_NOSTITCH=1: the unstitched seams, for the A/B against the fix.
+			if (const char* ns = std::getenv("HE_DUMP_NOSTITCH"); !(ns && *ns == '1'))
+				TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+		}
+		int perLevel[5] = {};   // LOD0..3, refined
+		int stitched = 0;
+		for (auto [e, lod, cc] : reg.view<LODComponent, TerrainChunkComponent>().each())
+		{
+			++perLevel[lod.current == LODComponent::kRefined ? 4 : std::min<int>(lod.current, 3)];
+			if (lod.stitchedMeshId != HE::UUID{}) ++stitched;
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TERRAINTICK chunks LOD0=%d LOD1=%d LOD2=%d "
+			"LOD3=%d refined=%d stitched=%d (camera %.1f %.1f %.1f)", perLevel[0], perLevel[1],
+			perLevel[2], perLevel[3], perLevel[4], stitched, camPos.x, camPos.y, camPos.z);
+	}
+}
+
+void EditorApplication::dumpFrameHeadless()
+{
+	if (m_dumpPath.empty() || m_dumpDone) return;
+	IRenderer* r = renderer();
+	if (!r)
+	{
+		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
+		m_dumpDone = true;
+		return;
+	}
+
+	// Render the scene into a fixed offscreen target a few times, bypassing the
+	// ImGui overlay and the window swap. Doing this here (before the paced main
+	// loop) means it works even when the window is occluded / App-Napped on
+	// macOS — where the normal loop throttles to a near-frozen frame rate and a
+	// loop-driven capture never fires.
+	r->SetOverlayCallback(nullptr);
+	{
+		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
+		// shot that proves a bloom A/B has any bloom in it to compare.
+		IRenderer::BloomSettings bloom{
+			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
+		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
+		r->SetBloomSettings(bloom);
+	}
+	{
+		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
+		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
+		// not depend on the Preferences state of whoever ran the editor last.
+		const bool dumpSSAO = [&]{
+			const char* v = std::getenv("HE_DUMP_SSAO");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
+		}();
+		r->SetSSAOSettings(IRenderer::SSAOSettings{
+			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
+	}
+	{
+		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
+		// depth-of-field settings for this capture only, so he_shot.py can A/B
+		// the pass and move the focus plane without touching config.json.
+		IRenderer::DepthOfFieldSettings dof{
+			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
+		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
+		r->SetDepthOfFieldSettings(dof);
+	}
+	{
+		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
+		// settings for this capture only. The camera motion itself comes from
+		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
+		IRenderer::MotionBlurSettings mb{
+			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax};
+		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
+		r->SetMotionBlurSettings(mb);
+	}
+	r->SetShadowSettings(projectShadowSettings());
+	{
+		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
+		// the render scale and the specular-AA toggle for this capture only, so
+		// he_shot.py can A/B the modes without touching config.json.
+		IRenderer::AntiAliasingSettings aa;
+		aa.method             = m_editorConfig.AntiAliasing;
+		aa.sharpness          = m_editorConfig.AASharpness;
+		aa.renderScale        = m_editorConfig.RenderScale;
+		aa.specularAA         = m_editorConfig.SpecularAA;
+		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
+		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
+		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
+		// The effect is a fraction of a roughness unit at normal strength, so an
+		// A/B that can only toggle it proves nothing headless — being able to
+		// exaggerate is what makes "does this reach the shader at all?" answerable.
+		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
+		{
+			const float s = static_cast<float>(std::atof(v));
+			aa.specularAA         = s > 0.0f;
+			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
+		}
+		r->SetAntiAliasingSettings(aa);
+	}
+	{
+		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
+		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
+		// the editor's Preferences state leaking between captures.
+		const bool dumpGI = [&]{
+			const char* v = std::getenv("HE_DUMP_GI");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GlobalIlluminationEnabled;
+		}();
+		IRenderer::GISettings gi{ dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius };
+		gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(m_editorConfig.GIShadowQuality);
+		// HE_DUMP_GISHADOWRAYS=n / HE_DUMP_GISHADOWFILTER=0|1: A/B the shadow
+		// mask's rays per pixel and its edge-aware filter on any backend.
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWRAYS"); v && *v)   gi.shadowRays   = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_GISHADOWFILTER"); v && *v) gi.shadowFilter = std::atof(v) > 0.5;
+		// HE_GI_REFERENCE=1: the converged shadow mask the others are measured
+		// against (Thema 134, scripts/gi-shadow-repro/ana134.py) — 256 rays,
+		// history 0.98, no spatial filter. Every backend renders its own.
+		if (const char* v = std::getenv("HE_GI_REFERENCE"); v && *v && std::atof(v) > 0.5)
+		{
+			gi.shadowRays    = 256;
+			gi.shadowHistory = 0.98f;
+			gi.shadowFilter  = false;
+		}
+		r->SetGISettings(gi);
+	}
+	{
+		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
+		// this capture only, so he_shot.py can A/B the culler: the two captures
+		// must be pixel-identical, only "dump counters" (visible=, occluded=)
+		// may differ.
+		const bool dumpOcc = [&]{
+			const char* v = std::getenv("HE_DUMP_OCCLUSION");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
+		}();
+		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
+	}
+	{
+		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
+		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
+		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
+		const bool dumpSSR = [&]{
+			const char* v = std::getenv("HE_DUMP_SSR");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSREnabled;
+		}();
+		IRenderer::SSRSettings ssr{
+			dumpSSR, m_editorConfig.SSRIntensity, m_editorConfig.SSRMaxRoughness};
+		ssr.quality = m_editorConfig.SSRQuality;
+		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
+			ssr.quality = std::atoi(q);
+		r->SetSSRSettings(ssr);
+	}
+	{
+		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
+		// capture only (ray-traced-reflections A/B without touching config.json).
+		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
+		const bool dumpGR = [&]{
+			const char* v = std::getenv("HE_DUMP_GIREFL");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
+		}();
+		IRenderer::GIReflectionSettings gr;
+		gr.enabled      = dumpGR;
+		gr.intensity    = m_editorConfig.GIReflIntensity;
+		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
+		gr.blur         = m_editorConfig.GIReflBlur;
+		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
+			gr.blur = std::atof(b) > 0.5;
+		gr.quality      = m_editorConfig.GIReflQuality;
+		gr.bounces      = m_editorConfig.GIReflBounces;
+		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
+			gr.quality = std::atoi(q);
+		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
+		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
+			gr.bounces = std::atoi(bc);
+		r->SetGIReflectionSettings(gr);
+	}
+	{
+		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
+		// only (he_shot Forward/Deferred A/B without touching config.json).
+		int path = m_editorConfig.RenderPath;
+		if (const char* v = std::getenv("HE_DUMP_RENDERPATH"); v && *v)
+			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
+		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+	}
+	{
+		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
+		// the viewport's view mode for this capture. Explicitly Lit otherwise —
+		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
+		// is the same answer, but a capture should not depend on that.
+		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
+	}
+
+	// The witness scenes (HE_DUMP_SKYTEST … HE_DUMP_TERRAINTICK): what this
+	// capture shows, built before the environment push and the warmup below.
+	HE::UUID s_matTestId{}; // material-test id, reused by the preview-path witness below
+	HE::UUID s_layerMatId{}; // landscape layer material, re-authored after the warmup
+
+	// HE_DUMP_AUTOLANDARRIVE=<dir> (Thema 210): the auto material's three texture
+	// arrays arrive LATE, the way an EngineContent download lands them in the
+	// per-user cache while the editor runs. The three T_Landscape_*_Array.hasset
+	// are copied from <dir> into GlobalState::engineContentCacheDir() and loaded,
+	// either before the scene is built (HE_DUMP_AUTOLANDARRIVEAT=early) or halfway
+	// through the settle frames (=mid, the default), after the backend has
+	// already resolved the material's array slots once. Same files, same binary,
+	// only the moment differs: early is the first-load picture, mid is the
+	// "after the arrays were (re)loaded" one. Needs a private HOME whose cache
+	// lacks them and a deploy without them in EngineContent; it never overwrites
+	// a file that is already there.
+	const char* arriveDir = std::getenv("HE_DUMP_AUTOLANDARRIVE");
+	const char* arriveAt  = std::getenv("HE_DUMP_AUTOLANDARRIVEAT");
+	const bool  arriveWitness = arriveDir && *arriveDir;
+	const bool  arriveEarly   = arriveWitness && arriveAt && std::string_view(arriveAt) == "early";
+	auto arriveArrays = [&](const char* when)
+	{
+		namespace fs = std::filesystem;
+		for (const char* rel : { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
+		                         HE::kAutoLandscapeMaskArray })
+		{
+			const std::string relPath(rel);
+			const std::string leaf = fs::path(relPath).filename().string();
+			const fs::path dst = GlobalState::engineContentCacheDir()
+			                   / fs::path(relPath.substr(std::strlen("Engine/")));
+			std::error_code ec;
+			const bool before = fs::exists(contentManager().resolveAbsolutePath(relPath), ec);
+			if (!before)
+			{
+				fs::create_directories(dst.parent_path(), ec);
+				fs::copy_file(fs::path(arriveDir) / leaf, dst, fs::copy_options::skip_existing, ec);
+			}
+			const TextureAsset* t = contentManager().getTexture(contentManager().loadAsset(relPath));
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDARRIVE (%s) %s: %s, loaded %s "
+				"(%ux%u, %u layers, %u mips)", when, leaf.c_str(),
+				before ? "WAS ALREADY THERE" : (ec ? "copy FAILED" : "copied"),
+				t ? "yes" : "NO", t ? t->width : 0u, t ? t->height : 0u,
+				t ? t->layers : 0u, t ? t->mipLevels : 0u);
+		}
+		contentManager().noteContentChanged();
+	};
+	if (arriveEarly) arriveArrays("early, before the scene");
+
+	buildDumpWitnessScenes(r, s_matTestId, s_layerMatId);
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
@@ -9666,6 +10050,95 @@ void EditorApplication::dumpFrameHeadless()
 			settleFrames = atTod;
 		}
 	}
+	// HE_DUMP_PLAYCELLS=1 (with HE_DUMP_SKYTEST, e.g. CAMY=90 PITCH=-89): the witness
+	// that Play streams a split scene's cells (Thema 164 step 2c). A 13 x 13 grid of
+	// cubes, 10 m apart around the origin, is split into 40 m cells written to a temp
+	// folder, so the scene keeps none of them; the frame of that base goes to
+	// <dump>.edit.bmp. Then Play starts (its cells read from that folder), the play
+	// runtime runs until the cells around the play camera are built (load within 30 m,
+	// so the four squares at the origin and not the ring around them), and the dump's
+	// own capture is the play frame. After it Play stops, and the log says whether
+	// the cells went with it. Counts, not only pictures: cubes in the base, cells
+	// built, cubes in the play world, cubes after Stop.
+	bool playCellsWitness = false;
+	if (const char* pc = std::getenv("HE_DUMP_PLAYCELLS"); pc && *pc && m_editorWorld && !m_isPlaying)
+	{
+		auto& reg = m_editorWorld->registry();
+		for (int i = -6; i <= 6; ++i)
+			for (int k = -6; k <= 6; ++k)
+			{
+				auto e = m_editorWorld->createEntity("PlayCellCube");
+				TransformComponent tc;
+				tc.position = glm::vec3(10.0f * float(i) + 5.0f, 1.0f, 10.0f * float(k) + 5.0f);
+				tc.scale    = glm::vec3(3.0f);
+				reg.emplace<TransformComponent>(e, tc);
+				reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			}
+		auto countCubes = [&] { size_t n = 0; for (auto e : reg.view<MeshComponent>()) { (void)e; ++n; } return n; };
+		const size_t authored = countCubes();
+		const std::filesystem::path cellRoot = std::filesystem::temp_directory_path() / "he_dump_playcells";
+		std::error_code ec;
+		std::filesystem::remove_all(cellRoot, ec);
+		HE::CellSplitOptions o;
+		o.cellSize     = 40.0f;
+		o.loadRadius   = 30.0f;
+		o.unloadRadius = 40.0f;
+		o.lookaheadSec = 0.0f;
+		o.dir          = "PlayCells.cells";
+		const HE::CellSplitResult split = HE::splitWorldIntoCells(*m_editorWorld, o,
+			[&](const std::string& path, const std::string& text)
+			{
+				std::filesystem::create_directories((cellRoot / path).parent_path(), ec);
+				std::ofstream out(cellRoot / path, std::ios::binary | std::ios::trunc);
+				out << text;
+				return static_cast<bool>(out);
+			});
+		const size_t inBase = countCubes();
+		for (int i = 0; i < settleFrames; ++i) r->Render();
+		std::vector<uint8_t> editRgba;
+		uint32_t ew = 0, eh = 0;
+		const std::string editPath = m_dumpPath + ".edit.bmp";
+		const bool editOk = r->CaptureViewport(editRgba, ew, eh) && ew > 0 && eh > 0 &&
+		                    writeBMP(editPath, editRgba, ew, eh);
+
+		setPlayMode(true);
+		const bool played = m_isPlaying && m_playCells;
+		size_t built = 0, wanted = 0;
+		double ms = 0.0;
+		if (played)
+		{
+			// The same session, its cells read from the witness folder instead of a project.
+			m_playCells->begin([this] { return m_physicsWorld.get(); }, cellRoot);
+			glm::dvec3 eye(0.0);
+			HE::CellRuntime::cameraAnchor(*m_editorWorld, eye);
+			const auto t0 = std::chrono::steady_clock::now();
+			const auto until = t0 + std::chrono::seconds(20);
+			while (std::chrono::steady_clock::now() < until)
+			{
+				m_playCells->update(*m_editorWorld, 1.0f / 60.0f);
+				contentManager().pollAsyncResults(16, 2.0);
+				const HE::CellStreamer& cs = m_playCells->runtime().streamer();
+				wanted = 0;
+				for (const auto& v : cs.manifest().around(eye, cs.manifest().loadRadius))
+					if (v.reach == HE::CellManifest::View::Reach::Load) ++wanted;
+				const auto& st = cs.stats();
+				if (st.loaded >= wanted && st.inFlight == 0 && st.ready == 0 && st.building == 0) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+			built = m_playCells->runtime().streamer().stats().loaded;
+		}
+		playCellsWitness = played;
+		char line[512];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_PLAYCELLS %zu cubes authored, split into %zu cells (%s), %zu left in "
+			"the base; edit frame %s → %s; play %s, %zu of %zu wanted cells built in %.0f ms, %zu cubes in "
+			"the play world",
+			authored, split.cells.size(), split.error.empty() ? "ok" : split.error.c_str(), inBase,
+			editOk ? "written" : "NOT written", editPath.c_str(), played ? "started" : "did NOT start",
+			built, wanted, ms, countCubes());
+		HE_LOG_INFO(Editor, "%s", line);
+	}
 	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
 	// probe-grid refit witness. Halfway through the settle frames a second
 	// landscape appears beside the first, so the scene box leaves the fitted
@@ -9683,6 +10156,8 @@ void EditorApplication::dumpFrameHeadless()
 	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
 	for (int i = 0; i < settleFrames; ++i)
 	{
+		if (arriveWitness && !arriveEarly && i == settleFrames / 2)
+			arriveArrays(("mid, before settle frame " + std::to_string(i)).c_str());
 		if (repaintMidWitness && i == settleFrames / 2)
 		{
 			for (auto [te, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
@@ -9735,6 +10210,19 @@ void EditorApplication::dumpFrameHeadless()
 	else
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
+
+	// HE_DUMP_PLAYCELLS, second half: Stop, and what is left of the streamed cells.
+	if (playCellsWitness && m_isPlaying)
+	{
+		setPlayMode(false);
+		size_t cubes = 0;
+		for (auto e : m_editorWorld->registry().view<MeshComponent>()) { (void)e; ++cubes; }
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_PLAYCELLS after Stop: " + std::to_string(cubes) +
+			 " cubes in the edit world, cell runtime " +
+			 (m_playCells && m_playCells->runtime().active() ? "STILL ACTIVE" : "idle") +
+			 ", manifest " + (m_editorWorld->cellManifestJson().empty() ? "LOST" : "kept")).c_str());
+	}
 
 	// HE_DUMP_GPUTIME="frames[,WxH]": the pass-cost witness for backends whose GPU timer
 	// has no per-pass rows (D3D11, D3D12 and Vulkan time the whole frame only). AFTER the
@@ -9888,7 +10376,7 @@ void EditorApplication::dumpFrameHeadless()
 	{
 		if (!m_mcpToolsRegistered) setupMcpTools();
 		m_commands.setWorld(m_editorWorld.get());
-		const HE::Ed::McpTool* tool = m_mcp.registry().find("scene_screenshot");
+		const HE::Ed::McpTool* tool = m_mcp->registry().find("scene_screenshot");
 
 		auto diffPercent = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 			if (a.size() != b.size() || a.empty()) return 100.0;
@@ -10146,6 +10634,17 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// this is just "have we asked yet".
 		m_collab.beginAssetEditSession(key);
 
+		// The two editor-owned graphs are diffed when something says they were
+		// edited (or every quarter second regardless), not on every frame.
+		const bool editorOwned =
+			key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath;
+		if (editorOwned && !editorDocDiffDue(key, nowMs)) continue;
+
+		// Read before the diff below, which runs while we may not own the lock
+		// yet — the content-asset branch further down needs to know whether a
+		// claim that lands THIS frame is new, see the comment there.
+		const bool ownedBeforeDiff = m_collab.ownsAssetLock(key);
+
 		publishDocDeltas(tab.assetPath, key);
 
 		// The Level Script and the Game Instance graph have no panel dirty flag,
@@ -10154,7 +10653,7 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		// 2026-10-14.md section 3). For them "edited" is "the document differs
 		// from what the peers have seen". The diff waits in the mirror until the
 		// grant lands, and publishDocDeltas sends it then.
-		if (key == LevelScriptPanel::kTabPath || key == GameInstancePanel::kTabPath)
+		if (editorOwned)
 		{
 			if (!m_collab.inSession() || m_collab.ownsAssetLock(key)) continue;
 			bool edited = false;
@@ -10170,6 +10669,19 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 			continue;   // held by someone else, or the host has not answered yet
 		if (!m_collab.ownsAssetLock(key))
 			continue;   // claim in flight — the grant is one round trip away
+
+		// A HOST's claim above self-grants with no round trip, so it can land in
+		// THIS frame, right after the call above ran with ownsAssetLock() still
+		// false (and therefore sent nothing). The autosave below is about to
+		// clear this tab's dirty flag, and once it does, no later frame's diff
+		// will ever see owned and dirty together for this edit again — it would
+		// simply be skipped as "nothing of ours to send" forever, not merely
+		// delayed. Diffing again now, while dirty is still set, is what makes a
+		// fresh claim's own edit go out as a delta instead of only through the
+		// 1 s whole-file autosave. A client's grant is always at least one
+		// round trip (a frame) later, so ownedBeforeDiff is already true by the
+		// time its own diff runs with dirty still set, and this never fires.
+		if (!ownedBeforeDiff) publishDocDeltas(tab.assetPath, key);
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;
@@ -10196,6 +10708,14 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	{
 		const std::string key = *it;
 		if (!m_collab.inSession() || openRel.count(key)) { it = m_collabUntabbedEdits.erase(it); continue; }
+		if (!editorDocDiffDue(key, nowMs))
+		{
+			// Still ours to send: keep the claim (the release loop below gives
+			// back whatever is not in openRel).
+			openRel.insert(key);
+			++it;
+			continue;
+		}
 		publishDocDeltas(key, key);
 		bool edited = false;
 		for (const CollabDocSync::DocBinding& d : collabDocsForTab(key))
@@ -10230,6 +10750,19 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	for (const std::string& rel : openRel) m_docMirrorPaths.insert(rel);
 }
 
+bool EditorApplication::editorDocDiffDue(const std::string& key, std::uint64_t nowMs)
+{
+	const bool level = key == LevelScriptPanel::kTabPath;
+	CollabDocSync::DiffGate& gate = level ? m_levelScriptDiffGate : m_gameInstanceDiffGate;
+	const CollabDocSync::DocMirror& mirror = level ? m_levelScriptMirror : m_gameInstanceMirror;
+	// Both counters only grow, so their sum moves whenever either does.
+	const std::uint64_t signal = m_undo.revision() + m_editorDocEdits;
+	const bool owned = m_collab.ownsAssetLock(key);
+	if (!gate.due(signal, owned, mirror.seeded, nowMs)) return false;
+	gate.ran(signal, owned, nowMs);
+	return true;
+}
+
 // One tab's outgoing deltas.
 //
 // A diff serializes every item in the document, so this must NOT run for every
@@ -10251,7 +10784,9 @@ void EditorApplication::publishDocDeltas(const std::string& absPath,
 	// The two editor-owned graphs have no panel dirty flag — the level script is
 	// saved with the scene and the GameInstance graph writes itself on every edit
 	// — so they are diffed whenever we hold them. The diff is what decides whether
-	// anything actually changed, and it returns nothing when nothing did.
+	// anything actually changed, and it returns nothing when nothing did. HOW
+	// often that is asked is the per-frame caller's business (editorDocDiffDue):
+	// the MCP path calls this directly, before a mutation, and must always run.
 	const bool alwaysDiff = (key == LevelScriptPanel::kTabPath ||
 	                         key == GameInstancePanel::kTabPath);
 	const bool dirty = alwaysDiff || EditorUI::tabHasUnsavedEdits(absPath);
@@ -10334,7 +10869,7 @@ void EditorApplication::setupMcpTools()
 	// The endpoint file goes into the per-user data directory, NEVER into the
 	// project: a project directory is what ends up in git, and this file carries
 	// the token that authorises editing the scene.
-	m_mcp.setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
+	m_mcp->setEndpointFile(GlobalState::userDataDir() / "mcp-endpoint.json");
 
 	HE::Ed::McpEditorHooks hooks;
 	hooks.projectName = [this] { return m_projectManager.currentProject().name; };
@@ -10354,18 +10889,18 @@ void EditorApplication::setupMcpTools()
 		return n;
 	};
 
-	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
+	HE::Ed::registerCoreTools(m_mcp->registry(), std::move(hooks));
 
 	// A client going hands back the session locks IT took, and only those
 	// (plan §20.3) — not when the editor happens to have no client left.
-	m_mcp.registry().addClientGoneHook(
+	m_mcp->registry().addClientGoneHook(
 		[this](HE::Ed::McpClientId client) { releaseMcpLocksOf(client); });
 
 	// Placing and moving objects. Registered after the gateway is wired, because
 	// the tools capture a reference to it and the first `tools/call` may arrive
 	// in the same frame.
 	setupEditorCommands();
-	HE::Ed::registerEntityTools(m_mcp.registry(), m_commands);
+	HE::Ed::registerEntityTools(m_mcp->registry(), m_commands);
 
 	// Authoring HorizonCode. The tools take the documents as hooks rather than
 	// a pointer to this object for the same reason the two above do: a graph is
@@ -10447,6 +10982,7 @@ void EditorApplication::setupMcpTools()
 	};
 
 	hc.endEdit = [this](const std::string& key) {
+		++m_editorDocEdits;   // the diff gate's signal (editorDocDiffDue)
 		if (m_collab.inSession())
 		{
 			if (key == HE::Ed::kMcpDocLevelScript)
@@ -10508,7 +11044,7 @@ void EditorApplication::setupMcpTools()
 		return m_collab.assetLockedByOther(subject);
 	};
 
-	HE::Ed::registerHcTools(m_mcp.registry(), std::move(hc));
+	HE::Ed::registerHcTools(m_mcp->registry(), std::move(hc));
 
 	// The engine's own API, one tool per pure row of HE::api::registry(). No
 	// list here: what the engine registers is what a client can call, and the
@@ -10538,7 +11074,7 @@ void EditorApplication::setupMcpTools()
 		if (!m_editorWorld->registry().valid(e)) return {};
 		return HE::Ed::uuidOf(*m_editorWorld, e);
 	};
-	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
+	HE::Ed::registerApiTools(m_mcp->registry(), std::move(api));
 
 	// ── The files a project is made of ───────────────────────────────────────
 	// Resolve, list, create, delete, move. Hooks rather than a pointer to this
@@ -10654,7 +11190,7 @@ void EditorApplication::setupMcpTools()
 	};
 	assets.contentDirName = [] { return std::string("Content"); };
 
-	HE::Ed::registerAssetTools(m_mcp.registry(), contentManager(), std::move(assets));
+	HE::Ed::registerAssetTools(m_mcp->registry(), contentManager(), std::move(assets));
 
 	// ── The scene as a file ─────────────────────────────────────────────────
 	// The save/create/open half of the entity tools: without it a client could
@@ -10687,7 +11223,7 @@ void EditorApplication::setupMcpTools()
 	};
 	scene.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
 
-	HE::Ed::registerSceneTools(m_mcp.registry(), contentManager(), std::move(scene));
+	HE::Ed::registerSceneTools(m_mcp->registry(), contentManager(), std::move(scene));
 
 	// ── Shaping the ground ──────────────────────────────────────────────────
 	// Everything else about a terrain edit — undo, the publish to a session, the
@@ -10699,7 +11235,7 @@ void EditorApplication::setupMcpTools()
 		if (!m_editorWorld) return;
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), renderer());
 	};
-	HE::Ed::registerTerrainTools(m_mcp.registry(), m_commands, std::move(terrain));
+	HE::Ed::registerTerrainTools(m_mcp->registry(), m_commands, std::move(terrain));
 
 	// ── The widget tree of a UI Widget asset ────────────────────────────────
 	// The one hook worth reading twice is `liveTree`. A widget open in the
@@ -10726,7 +11262,7 @@ void EditorApplication::setupMcpTools()
 	widget.isDirty = [](const std::string& rel) {
 		return UIEditorPanel::isDirtyByContentPath(rel);
 	};
-	HE::Ed::registerWidgetTools(m_mcp.registry(), contentManager(), std::move(widget));
+	HE::Ed::registerWidgetTools(m_mcp->registry(), contentManager(), std::move(widget));
 
 	// ── What the game is played with ────────────────────────────────────────
 	// The opposite decision from the widget hooks above, and McpInputHooks says
@@ -10745,7 +11281,7 @@ void EditorApplication::setupMcpTools()
 	input.reloadFromDisk = [](const std::string& rel) {
 		return InputAssetPanel::reloadByContentPath(rel);
 	};
-	HE::Ed::registerInputTools(m_mcp.registry(), contentManager(), std::move(input));
+	HE::Ed::registerInputTools(m_mcp->registry(), contentManager(), std::move(input));
 
 	// ── What a surface looks like ───────────────────────────────────────────
 	// The same decision as the input tools above — an open tab with unsaved
@@ -10774,7 +11310,7 @@ void EditorApplication::setupMcpTools()
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
 	};
 	material.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
-	HE::Ed::registerMaterialTools(m_mcp.registry(), contentManager(), std::move(material));
+	HE::Ed::registerMaterialTools(m_mcp->registry(), contentManager(), std::move(material));
 
 	// ── The editor's unit of reuse ──────────────────────────────────────────
 	// The only tool family that takes both halves of the editor: the gateway,
@@ -10791,7 +11327,7 @@ void EditorApplication::setupMcpTools()
 		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
 	};
 	prefab.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
-	HE::Ed::registerPrefabTools(m_mcp.registry(), contentManager(), m_commands,
+	HE::Ed::registerPrefabTools(m_mcp->registry(), contentManager(), m_commands,
 	                            std::move(prefab));
 
 	// ── A project's own types ────────────────────────────────────────────────
@@ -10819,7 +11355,7 @@ void EditorApplication::setupMcpTools()
 			projectPath = projectPath.parent_path();
 		if (!projectPath.empty()) HE::writeCppTypesHeader(projectPath);
 	};
-	HE::Ed::registerTypeTools(m_mcp.registry(), contentManager(), std::move(types));
+	HE::Ed::registerTypeTools(m_mcp->registry(), contentManager(), std::move(types));
 
 	// ── An emitter's values ──────────────────────────────────────────────────
 	// The same four gates as material and types, plus the one thing a particle
@@ -10847,7 +11383,7 @@ void EditorApplication::setupMcpTools()
 		for (auto [e, ps] : m_editorWorld->registry().view<ParticleSystemComponent>().each())
 			if (ps.particleAssetId == id) ParticleSystem::markConfigDirty(ps);
 	};
-	HE::Ed::registerParticleTools(m_mcp.registry(), contentManager(), std::move(particles));
+	HE::Ed::registerParticleTools(m_mcp->registry(), contentManager(), std::move(particles));
 
 	// ── The animation assets ─────────────────────────────────────────────────
 	// Two panels behind one family, so the two tab questions dispatch on which
@@ -10875,7 +11411,7 @@ void EditorApplication::setupMcpTools()
 		for (auto [e, sm] : m_editorWorld->registry().view<AnimatorStateMachineComponent>().each())
 			if (sm.stateMachineAssetId == id) AnimationStateMachineSystem::markConfigDirty(sm);
 	};
-	HE::Ed::registerAnimatorTools(m_mcp.registry(), contentManager(), std::move(anim));
+	HE::Ed::registerAnimatorTools(m_mcp->registry(), contentManager(), std::move(anim));
 
 	// ── What a clip announces ────────────────────────────────────────────────
 	// Three gates instead of four, and the dirty one is asked differently: the
@@ -10893,7 +11429,7 @@ void EditorApplication::setupMcpTools()
 	clips.isDirty = [](const std::string& rel) {
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
-	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+	HE::Ed::registerClipTools(m_mcp->registry(), contentManager(), std::move(clips));
 
 	// ── A cutscene ───────────────────────────────────────────────────────────
 	// The four gates of the particle family, plus the one question only a
@@ -10919,7 +11455,7 @@ void EditorApplication::setupMcpTools()
 		isCamera = reg.all_of<CameraComponent>(e);
 		return true;
 	};
-	HE::Ed::registerSequenceTools(m_mcp.registry(), contentManager(), std::move(seq));
+	HE::Ed::registerSequenceTools(m_mcp->registry(), contentManager(), std::move(seq));
 
 	// ── Making the project run ───────────────────────────────────────────────
 	// The two Build menu actions and the window they both report into. Neither
@@ -10989,7 +11525,7 @@ void EditorApplication::setupMcpTools()
 			out.log.push_back(HE::Ed::McpBuildLogLine{ l.step, l.severity, l.text });
 		return out;
 	};
-	HE::Ed::registerBuildTools(m_mcp.registry(), std::move(build));
+	HE::Ed::registerBuildTools(m_mcp->registry(), std::move(build));
 
 	// ── The knobs ────────────────────────────────────────────────────────────
 	// Three of these hooks are the whole reason the settings tools are not just
@@ -11046,7 +11582,7 @@ void EditorApplication::setupMcpTools()
 		// pacer, the same call AppContext::setMaxFps makes.
 		if (what == "maxfps") setMaxFps(cfg.MaxFps);
 	};
-	HE::Ed::registerSettingsTools(m_mcp.registry(), std::move(settings));
+	HE::Ed::registerSettingsTools(m_mcp->registry(), std::move(settings));
 
 	// A picture of the scene. The renderer's still-on-request path is the hook,
 	// so the tool file never sees IRenderer beyond the camera struct — and the
@@ -11098,7 +11634,7 @@ void EditorApplication::setupMcpTools()
 	shot.screenshotDir = [] {
 		return (GlobalState::userDataDir() / "mcp-screenshots").string();
 	};
-	HE::Ed::registerScreenshotTools(m_mcp.registry(), std::move(shot));
+	HE::Ed::registerScreenshotTools(m_mcp->registry(), std::move(shot));
 
 	// The session. Reading it is always allowed; hosting, joining and leaving
 	// only when whoever started this editor said so for this run — see
@@ -11109,8 +11645,8 @@ void EditorApplication::setupMcpTools()
 	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
 		collab.controlAllowed = env[0] == '1';
 	// The team server is the way into a team session; same gate, same hooks.
-	HE::Ed::registerTeamTools(m_mcp.registry(), m_team, collab);
-	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
+	HE::Ed::registerTeamTools(m_mcp->registry(), m_team, collab);
+	HE::Ed::registerCollabTools(m_mcp->registry(), m_collab, std::move(collab));
 
 	// The task board. Its one copy and its one writer are the panel's
 	// (TaskBoardPanel.h, "Who owns the board"), so every hook goes there — a
@@ -11129,13 +11665,13 @@ void EditorApplication::setupMcpTools()
 	tasks.lastError = [] { return TaskBoardPanel::lastError(); };
 	tasks.author    = [] { return TaskBoardPanel::author(); };
 	tasks.team      = [] { return TaskBoardPanel::team(); };
-	HE::Ed::registerTaskBoardTools(m_mcp.registry(), std::move(tasks));
+	HE::Ed::registerTaskBoardTools(m_mcp->registry(), std::move(tasks));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not
 	// for correctness — but a meta-tool listed before the tools it drives reads
 	// backwards.
-	HE::Ed::registerBatchTool(m_mcp.registry());
+	HE::Ed::registerBatchTool(m_mcp->registry());
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
@@ -11226,11 +11762,11 @@ void EditorApplication::rememberMcpLock(std::uint64_t subject)
 	const auto nowMs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
-	m_mcpLocks.take(subject, m_mcp.registry().callingClient(), nowMs);
+	m_mcpLocks.take(subject, m_mcp->registry().callingClient(), nowMs);
 }
 
 // A client's connection is gone: its share goes back, and nobody else's. Runs
-// inside m_mcp.update(), where the bridge sees the close.
+// inside m_mcp->update(), where the bridge sees the close.
 void EditorApplication::releaseMcpLocksOf(HE::Ed::McpClientId client)
 {
 	for (const std::uint64_t subject : m_mcpLocks.clientGone(client))
@@ -11278,7 +11814,7 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 		m_mcpLocks.clear();
 		return;
 	}
-	if (m_mcp.clientCount() == 0)
+	if (m_mcp->clientCount() == 0)
 	{
 		// What is still booked here belongs to nobody who can disconnect: the
 		// anonymous caller (a tool invoked without the bridge). Every real
@@ -11313,10 +11849,25 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 	}
 }
 
-void EditorApplication::syncStructuralChanges()
+void EditorApplication::syncStructuralChanges(std::uint64_t nowMs)
 {
 	if (!m_editorWorld) return;
 	auto& reg = m_editorWorld->registry();
+
+	// Nothing created, destroyed or moved since the last pass and nothing
+	// waiting for a retry: the diff would find nothing (StructPassGate).
+	const std::uint64_t epoch = m_editorWorld->structureEpoch();
+	const bool pendingWork = !m_structureUnsendable.empty() ||
+	                         !m_structureUndeletable.empty() ||
+	                         m_structureReparentPending;
+	if (!m_structureGate.due(epoch, pendingWork, nowMs)) return;
+	m_structureGate.ran(epoch, nowMs);
+	m_structureReparentPending = false;
+	// A create still retrying for an entity that is gone by now (undone, a
+	// peer's destroy) never comes up in newSubtreeRoots again, so its entry
+	// would never leave — and would keep this pass running on every frame.
+	for (auto it = m_structureUnsendable.begin(); it != m_structureUnsendable.end(); )
+		it = reg.valid(it->first) ? std::next(it) : m_structureUnsendable.erase(it);
 
 	// Entities the engine generates per machine — terrain chunks regenerate from
 	// the TerrainComponent, environment lights belong to the Sky entity — must
@@ -11329,7 +11880,8 @@ void EditorApplication::syncStructuralChanges()
 		       HE::isTerrainGenerated(reg, e);
 	};
 
-	std::unordered_set<Entity> current;
+	std::unordered_set<Entity>& current = m_structureCurrent;
+	current.clear();
 	reg.view<entt::entity>().each([&](auto e) {
 		if (!isLocalOnly(e)) current.insert(e);
 	});
@@ -11415,7 +11967,7 @@ void EditorApplication::syncStructuralChanges()
 			const std::string name =
 				reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
 				                             : std::string("An entity");
-			m_notifications.post(HE::Ed::NoteLevel::Problem,
+			m_notifications.post(HE::Ed::NoteLevel::Critical,
 				"\"" + name + "\" could not be sent to the others.",
 				"It is too large for one message, or the connection dropped while it was "
 				"being created. It exists on this machine only, and nothing will retry. "
@@ -11461,7 +12013,13 @@ void EditorApplication::syncStructuralChanges()
 		// resolve to nothing on the far side, and the receiver would read that as
 		// "the world root". Wait for it; the record stays, so this comes up again.
 		if (m.to != entt::null && m.to != worldRoot && !m_structureKnown.count(m.to))
+		{
+			// Looked at again next frame only if that parent can still become
+			// known: one that is local-only never will, and would pin the pass
+			// to every frame (the fallback still looks once a second).
+			if (current.count(m.to)) m_structureReparentPending = true;
 			continue;
+		}
 
 		const std::uint64_t subject =
 			m_collab.subjectFor(static_cast<std::uint32_t>(entt::to_integral(m.entity)));
@@ -11481,7 +12039,7 @@ void EditorApplication::syncStructuralChanges()
 			const std::string name =
 				reg.all_of<NameComponent>(m.entity) ? reg.get<NameComponent>(m.entity).name
 				                                    : std::string("The entity");
-			m_notifications.post(HE::Ed::NoteLevel::Warning,
+			m_notifications.post(HE::Ed::NoteLevel::Important,
 				"\"" + name + "\" was not moved: " + lock->ownerName + " is editing it.",
 				"It stays where it was. Try again once they have deselected it.");
 			continue;
@@ -11502,6 +12060,8 @@ void EditorApplication::syncStructuralChanges()
 		if (m_collab.publishReparent(static_cast<std::uint32_t>(entt::to_integral(m.entity)),
 		                             wireHandle(m.to), t9))
 			m_structureParent[m.entity] = m.to;
+		else
+			m_structureReparentPending = true;
 	}
 
 	// ── Destroyed ──
@@ -11580,6 +12140,51 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 		return;
 	}
 	cm.loadAsset(relativePath);
+}
+
+void EditorApplication::applyTeamSyncFile(const std::string& projectRelPath)
+{
+	// TeamSyncService has written the file already (on this thread, after
+	// checking the local copy was the one it decided on). What is left is the
+	// reload applyAssetBytes does after its own write, for content assets.
+	const std::string root = projectRoot();
+	if (root.empty()) return;
+	const std::filesystem::path full = std::filesystem::path(root) / projectRelPath;
+	HE_LOG_INFO(Editor, "Team sync: %s came from the team server", projectRelPath.c_str());
+
+	// The open scene: a dirty one never gets here (setKeepLocal above keeps
+	// the server's version off the disk until the save merges it), so this one
+	// is clean and a teammate's save is simply shown, as the design says
+	// (section 6.3), without SceneDiskWatch's Reload / Keep question: there is
+	// nothing of the user's to keep.
+	if (!m_currentScenePath.empty() &&
+	    std::filesystem::path(m_currentScenePath).lexically_normal() == full.lexically_normal())
+	{
+		const std::string scene = m_currentScenePath;   // openScene rewrites it
+		openScene(scene);
+		SceneDiskWatch::remember(scene);
+		return;
+	}
+	std::error_code ec;
+	const std::filesystem::path contentRoot(contentManager().contentRoot());
+	const std::filesystem::path rel = std::filesystem::relative(full, contentRoot, ec);
+	const std::string relText = rel.generic_string();
+	if (ec || relText.empty() || relText.rfind("..", 0) == 0) return;   // not under Content
+	if (!std::filesystem::exists(full, ec)) return;                      // removed: nothing to re-read
+
+	ContentManager& cm = contentManager();
+	if (cm.isLoaded(relText))
+	{
+		const HE::UUID old = cm.idForPath(relText);
+		cm.unloadAsset(old);
+		const HE::UUID id = cm.loadAsset(relText);
+		if (!(id == HE::UUID{}))
+		{
+			m_reloadedByPeer.push_back(id);
+			m_hotReloadTimer = 1.5f;
+		}
+	}
+	EditorUI::reloadAssetTabFromDisk(full.generic_string());
 }
 
 // ─── Duplicate / cut / copy / paste / delete ──────────────────────────────────
@@ -11832,7 +12437,7 @@ std::vector<Entity> EditorApplication::withoutPeerHeld(const std::vector<Entity>
 		const std::string what = refused == 1
 			? "\"" + refusedName + "\" was not " + verb
 			: std::to_string(refused) + " entities were not " + verb;
-		m_notifications.post(HE::Ed::NoteLevel::Warning,
+		m_notifications.post(HE::Ed::NoteLevel::Important,
 			what + ": " + refusedHolder + " is editing it or something under it.",
 			"Nothing was removed for them on any machine. Try again once they have "
 			"deselected it.");
@@ -11906,6 +12511,7 @@ AppContext EditorApplication::makeContext()
 		.uiAudioEngine       = &m_uiAudio,
 		.gameInstanceGraph   = &m_gameInstanceGraph,
 		.commitGameInstance  = [this]{
+			++m_editorDocEdits;   // the diff gate's signal (editorDocDiffDue)
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
 			saveGameInstanceGraph();
 			// The GameInstance is what BUILDS an application's UI, so editing it
@@ -11938,6 +12544,7 @@ AppContext EditorApplication::makeContext()
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
 		.isPlaying           = m_isPlaying,
+		.playCells           = m_playCells ? &m_playCells->runtime() : nullptr,
 		.appLivePreview      = m_projectManager.currentProject().appProject,
 		// The toolbar button, and the ONE path that deliberately drops the
 		// state: it exists to get out of one.
@@ -12197,6 +12804,8 @@ AppContext EditorApplication::makeContext()
 		.toolchainInstallOk  = m_installFinished.load(std::memory_order_acquire)
 		                           && m_installAttempted.load(std::memory_order_acquire)
 		                           && m_installExit.load(std::memory_order_acquire) == 0,
+		.toolchainInstallControl = &m_installCtl,
+		.cancelToolchainInstall  = [this]{ m_installCtl.cancel.store(true, std::memory_order_release); },
 		.reloadGameLogic     = [this]{ return reloadGameLogic(); },
 		.gitProbe            = m_gitChecked.load(std::memory_order_acquire)
 		                           ? &m_gitProbe : nullptr,
@@ -12222,6 +12831,7 @@ AppContext EditorApplication::makeContext()
 		.claudeProbing       = m_claudeState == 1,
 		.recheckClaude       = [this]{ startClaudeProbe(); },
 		.git                 = &m_git,
+		.teamSync            = &m_teamSync,
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
 		.fpsHistoryOffset    = m_fpsHistoryOffset,
@@ -12286,7 +12896,7 @@ AppContext EditorApplication::makeContext()
 #endif
 		.collab              = &m_collab,
 		.team                = &m_team,
-		.mcp                 = &m_mcp,
+		.mcp                 = m_mcp.get(),
 		.mcpCameras          = &m_mcpCameras,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
@@ -12531,17 +13141,6 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_playReportOpen = false;
 		Logger::setSink(&hePlayLogSink, this);
-		// A scene split into streaming cells has the game load them around the camera
-		// (HE::CellStreamer, GameApplication::updateCellStreaming). Play runs in THIS
-		// world, which after a split holds only the base, and nothing in the editor
-		// streams cells (Thema 164, docs/entity-cell-streaming-plan-2026-10-10.md L7).
-		// Said here, after the sink is in, so the post-play report carries it and an
-		// apparently empty scene is explained.
-		if (!m_editorWorld->cellManifestJson().empty())
-			HE_LOG_WARN(Editor, "%s", "Play shows only the base of this scene: it is split into "
-			            "streaming cells, and the editor does not stream them while playing. Merge "
-			            "the cells back (Profiler > Streaming > Merge Cells into the Scene) to play "
-			            "all of it, or run the game build.");
 		// Edits made while playing are not undoable. Clearing here only opens the
 		// session with an empty history; what keeps it that way is makeContext
 		// withholding the undo system while m_isPlaying (so no panel records) and
@@ -12606,6 +13205,42 @@ void EditorApplication::setPlayMode(bool play)
 			const auto& physics = m_projectManager.currentProject().settings.physics;
 			m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
 		}
+		// A scene split into streaming cells streams them around the play camera, as
+		// the game does (HE::CellRuntime, the editor as its host). Begun here, before
+		// initialize(), together with the hold that keeps a body from falling through
+		// a floor whose cell is not built yet — the game's order in startPhysics.
+		if (!m_playCells) m_playCells = std::make_unique<PlayCellStreaming>(contentManager());
+		m_playCells->setApiCtx([this](HE::api::Ctx& c)
+		{
+			c = apiCtx(m_editorWorld.get(), m_physicsWorld.get(), &contentManager());
+		});
+		// A cell's scripts start when it is built and stop before it goes, as in the
+		// game (HE::startCellScripts / stopCellScripts). Asked per cell: the script
+		// context below is made after this, and reset after the cells went at Stop.
+		m_playCells->setScripts([this]
+		{
+			HE::CellScriptHosts h;
+			h.entities      = &m_entityHost;
+			h.text          = m_scriptContext.get();
+			h.textInstances = &m_scriptInstances;
+			h.runtime       = &m_gameInstance.runtime();
+			h.content       = &contentManager();
+			return h;
+		});
+		// Play as Host: the cells stand under every player's character, as on the
+		// game's host. The session lives as long as the editor.
+		m_playCells->setSession(&m_netSession);
+		m_playCells->begin([this] { return m_physicsWorld.get(); });
+		// The script API's streaming group (cellAt, isSettled, pin) asks this runtime
+		// while the session plays; taken away again at Stop. Before any script runs.
+		HE::api::streaming::install(&m_playCells->runtime());
+		m_physicsWorld->setRegionHold([this](const glm::vec3& p)
+		{
+			return m_editorWorld && HE::cellHolds(m_playCells->runtime().streamer(), *m_editorWorld, p);
+		}, [this]
+		{
+			return m_playCells->runtime().active();
+		});
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -12851,10 +13486,25 @@ void EditorApplication::setPlayMode(bool play)
 		m_gameInstance.fireShutdown();
 
 		setPlayMouseCaptured(false); // release the mouse when leaving play mode
+		// The streamed cells go first, while the physics world their bodies are in
+		// still stands; the snapshot below brings back the base the split left.
+		if (m_playCells) m_playCells->end(*m_editorWorld);
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
+		{
 			HE_LOG_ERROR(Editor, "%s",
 				"EditorApplication: play-mode restore failed — world may be empty");
+			// The edit scene is what the user is about to keep working in; an empty
+			// viewport with no word about it reads as "Play deleted my scene".
+			HE::Ed::NoteSpec note;
+			note.level  = HE::Ed::NoteLevel::Critical;
+			note.title  = "The scene could not be restored after Play";
+			note.text   = "The editor could not bring back the scene it had before Play, so "
+			              "the viewport may be empty or incomplete.";
+			note.detail = "Do not save over the scene file. Use Undo, or reopen the scene from "
+			              "disk to get back to your last saved version.";
+			m_notifications.post(std::move(note));
+		}
 		m_selection.clear();
 		m_editorWorld->markHierarchyDirty();
 		m_isPlaying = false;
@@ -12881,6 +13531,9 @@ void EditorApplication::setPlayMode(bool play)
 		HE::api::timer::cancelAll();
 		HE::api::fs::clearWatches();
 		HE::api::db::closeAll();
+		// The streaming group's runtime belongs to the session too; its pins went with
+		// the cells (PlayCellStreaming::end → CellRuntime::clear).
+		HE::api::streaming::install(nullptr);
 
 		// The entity host borrows the physics world and end() deliberately does
 		// not clear that pointer (the apps set it before begin()), so it is
@@ -12976,7 +13629,7 @@ void EditorApplication::restartAppPreview(bool keepState)
 	// emptied itself" is exactly the kind of thing somebody spends an hour on.
 	// Only when there WAS something to lose.
 	if (keepState && landed == 0 && !snapshot.elements.empty())
-		HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+		HE::Ed::notify(HE::Ed::NoteLevel::Important,
 		               "Live preview: none of what it was holding fitted the new layout",
 		               "Text, scroll positions and selections are back to what the assets "
 		               "were authored with. Elements that were deleted or retyped cannot "
@@ -12995,7 +13648,9 @@ void EditorApplication::syncGraphicsSource()
 {
 	const HE::ProjectGraphics* project =
 		m_projectLoaded ? &m_projectManager.currentProject().settings.graphics : nullptr;
-	const bool follow = project && project->enabled && m_editorConfig.PreviewQualityMode == 0;
+	// One set of graphics rows (Preferences ▸ Graphics): when the project sets its
+	// own, the viewport shows them — what you see is what ships.
+	const bool follow = project && project->enabled;
 	if (follow)
 	{
 		if (!m_graphicsFromProject)
@@ -13443,6 +14098,11 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
 
+	// An export is reading the project (ProjectWriteGate.h). Refused BEFORE the
+	// serialisation, and without the "Could not save" dialog below: nothing is wrong,
+	// the save simply has to wait, and the gate has already said so.
+	if (HE::ProjectWriteGate::refuse("save the scene")) return false;
+
 	// The file must not lag the assets it was built from — see the header.
 	// Before the write, so the sync's result IS what lands on disk; the world
 	// changes with it, which is what a human sees after the save anyway. An
@@ -13471,9 +14131,29 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 		// tells it to write its own copy (persistSessionScene). The host's own
 		// settle write is not a new save.
 		if (!m_settleWritingScene) m_collab.noteLocalSave(HE::Ed::CollabSettle::kSceneKey);
+		m_teamSync.noteSaved();
+		// A failure the user was told about is over.
+		m_notifications.resolve("scene.save");
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
+
+	// The log line above reaches the bell as a developer-style sentence; the user
+	// pressed Save and is owed an answer. A dialog, because their work is only in
+	// memory now — except for the host's own settle write inside a session, which
+	// is retried on its own and would otherwise reopen this every attempt.
+	HE::Ed::NoteSpec note;
+	note.level     = m_settleWritingScene ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Critical;
+	note.title     = "Could not save the scene";
+	note.text      = "\"" + std::filesystem::path(path).filename().string() +
+	                 "\" was not written. Your changes are still open in the editor.";
+	note.detail    = "Check that the folder exists, is writable and the disk is not full.";
+	note.assetPath = path;
+	note.key       = "scene.save";
+	// The controller and the editor die together, and the store only runs this from
+	// inside a frame.
+	note.actions.push_back({ "Retry", [this, path] { saveSceneToPath(path); }, true });
+	m_notifications.post(std::move(note));
 	return false;
 }
 
@@ -13697,6 +14377,18 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		m_currentScenePath.clear();
 		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to open scene from " + path).c_str());
+		// The world was cleared above and nothing replaced it, so the editor now shows
+		// an empty scene. Silence here reads as "the scene is empty".
+		HE::Ed::NoteSpec note;
+		note.level     = HE::Ed::NoteLevel::Critical;
+		note.title     = "Could not open the scene";
+		note.text      = "\"" + std::filesystem::path(path).filename().string() +
+		                 "\" could not be loaded, so the editor is showing an empty scene.";
+		note.detail    = "The file is unchanged. It may be damaged, from a newer version of the "
+		                 "editor, or have merge-conflict markers left in it.";
+		note.assetPath = path;
+		note.key       = "scene.open";
+		m_notifications.post(std::move(note));
 	}
 
 	m_selection.clear();
@@ -13921,7 +14613,7 @@ void EditorApplication::OnShutdown()
 	// reads a stale one connects to whatever the OS handed that port to next.
 	// The destructor would do it too — this is so it happens before the long
 	// teardown below rather than after it.
-	m_mcp.stop();
+	m_mcp->stop();
 
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process). Same rule
@@ -13999,6 +14691,9 @@ void EditorApplication::OnShutdown()
 	// a write through a dangling pointer. Deliberately AFTER the joins above, so
 	// everything those threads still had to say made it in.
 	m_notifications.detachFromEngineLog();
+#ifdef HE_HAVE_LIBSSH2
+	HE::Cs::EngineContentSync::instance().setFailureListener({});
+#endif
 	HE::Ed::setGlobalNotifications(nullptr);
 	// Same rule, same reason, same moment: after the joins, so a worker's last
 	// words still land, and before the ImGui teardown below.
@@ -14145,7 +14840,6 @@ void EditorApplication::writeEditorConfig()
 		m_graphicsFromProject = false;
 		m_editorConfig.GraphicsFromProject = false;
 	}
-	globalstate.setCustomConfigEntry("PreviewQualityMode",         m_editorConfig.PreviewQualityMode);
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;
@@ -14190,6 +14884,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsSoundProblem",        m_editorConfig.RewardsSoundProblem);
 	globalstate.setCustomConfigEntry("RewardsSoundDragDrop",       m_editorConfig.RewardsSoundDragDrop);
 	globalstate.setCustomConfigEntry("RewardsProblemPulse",        m_editorConfig.RewardsProblemPulse);
+	globalstate.setCustomConfigEntry("NotificationPopups",         m_editorConfig.NotificationPopups);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("RewardsCounterTick",         m_editorConfig.RewardsCounterTick);
 	globalstate.setCustomConfigEntry("RewardsStreakTooltip",       m_editorConfig.RewardsStreakTooltip);

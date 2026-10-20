@@ -34,7 +34,10 @@ bool filledButton(const char* label, const ImVec2& size,
 	ImGui::PushStyleColor(ImGuiCol_Button,        base);
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hovered);
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  active);
-	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+	// White on a dark fill, as it always was; on the amber of a primary button
+	// white reached 3.2:1 (2.4 hovered), so the fill picks its own label colour.
+	// The three fills are chosen so one label clears all of them (test_editor_theme).
+	ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::textOn(base, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)));
 	const bool pressed = ImGui::Button(label, size);
 	ImGui::PopStyleColor(4);
 	// Styled the same as an unstyled one for the purpose of help: the colour says
@@ -50,10 +53,12 @@ bool primaryButton(const char* label, const ImVec2& size)
 	// The brand amber: "this is the thing that happens" is the same statement
 	// whether it is a tool or a dialog's confirm.
 	using namespace HE::Ed::Theme;
+	// Ink on all three: pressed is only a shade deeper than rest, because at
+	// mix 0.80 neither Ink nor white reached 4.5:1 on it.
 	return filledButton(label, size,
 	                    Accent,
 	                    AccentHi,
-	                    mix(warm(0.10f), Accent, 0.80f));
+	                    mix(warm(0.10f), Accent, 0.90f));
 }
 
 bool dangerButton(const char* label, const ImVec2& size)
@@ -151,10 +156,12 @@ bool sectionHeaderAdd(const char* label, const char* id, const char* tooltip)
 
 bool dangerSmallButton(const char* label)
 {
+	// Red label on a red wash: the wash only deepens as far as the label stays
+	// at 4.5:1 on a popup. Hovered at 0.75 and pressed at 1.0 it was 3.0:1.
 	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.95f, 0.48f, 0.45f, 1.0f));
 	ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 0.20f));
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.66f, 0.23f, 0.23f, 0.75f));
-	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.66f, 0.23f, 0.23f, 0.32f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 0.50f));
 	const bool pressed = ImGui::SmallButton(label);
 	ImGui::PopStyleColor(4);
 	helpForLabel(label);

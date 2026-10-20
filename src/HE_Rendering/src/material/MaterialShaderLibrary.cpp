@@ -56,9 +56,25 @@ struct WpoBody
     const std::string& statements;
 };
 
-std::string assembleVertex(VertexInput input, const WpoBody* wpo)
+// `instanced` (Thema 182, plan 2e) emits the twin a GeometryPass batch draws in
+// ONE call: the per-draw u.model / u.mvp become the locals heModel / heMvp,
+// read per instance at the top of main(). Where they come from follows the
+// mesh-data split, exactly like the reflection pre-pass's instanced vertex:
+//   * Ssbo (Metal): a std430 mat4 array at binding 2 (pinned to vertex buffer
+//     5, the slot every instanced Metal draw binds), two matrices per instance
+//     in the scene's k_instStride layout {mvp, model}. Same maths as the
+//     per-draw form, so a batch draws what the per-instance loop drew.
+//   * Attributes (GL/D3D/Vulkan): the model as four vec4 at locations 4-7, the
+//     divisor-1 binding the mesh VAOs carry for the built-in instanced
+//     programs; u.mvp then holds the batch's viewProj and heMvp = u.mvp * model.
+// The U block stays as it is (the fragment stage declares the same block, and
+// GL links both stages into one program); u.model is unused in this form.
+// The non-instanced text is unchanged, byte for byte.
+std::string assembleVertex(VertexInput input, const WpoBody* wpo, bool instanced = false)
 {
     const bool ssbo = (input == VertexInput::Ssbo);
+    const char* M   = instanced ? "heModel" : "u.model";
+    const char* MVP = instanced ? "heMvp" : "u.mvp";
     // The WPO variants rebind the attributes to pos/nrm/uv so the graph body and
     // the shared tail below read the same names on either data path.
     const char* pos = (ssbo || wpo) ? "pos" : "aPos";
@@ -74,6 +90,12 @@ std::string assembleVertex(VertexInput input, const WpoBody* wpo)
         src += "layout(location = 0) in vec3 aPos;\n"
                "layout(location = 1) in vec3 aNormal;\n"
                "layout(location = 2) in vec2 aUV;\n";
+    if (instanced)
+        src += ssbo ? "layout(std430, set = 0, binding = 2) readonly buffer Inst { mat4 m[]; } inst;\n"
+                    : "layout(location = 4) in vec4 aInstCol0;\n"
+                      "layout(location = 5) in vec4 aInstCol1;\n"
+                      "layout(location = 6) in vec4 aInstCol2;\n"
+                      "layout(location = 7) in vec4 aInstCol3;\n";
     src += "layout(std140, set = 0, binding = 1) uniform U {\n"
            "    mat4 mvp; mat4 model; vec4 color; vec4 flags; vec4 pbr;\n"
            "} u;\n";
@@ -83,6 +105,11 @@ std::string assembleVertex(VertexInput input, const WpoBody* wpo)
            "layout(location = 2) out vec2 vUV;\n"
            "layout(location = 3) out vec3 vWorldPos;\n"
            "void main() {\n";
+    if (instanced)
+        src += ssbo ? "    mat4 heMvp   = inst.m[gl_InstanceIndex * 2];\n"
+                      "    mat4 heModel = inst.m[gl_InstanceIndex * 2 + 1];\n"
+                    : "    mat4 heModel = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);\n"
+                      "    mat4 heMvp   = u.mvp * heModel;\n";
     // Vertex fetch. The standard variants inline the UV into the vUV assignment;
     // the WPO variants want a named `uv` their body can read.
     if (ssbo)
@@ -96,16 +123,22 @@ std::string assembleVertex(VertexInput input, const WpoBody* wpo)
         src += "    vec3 pos = aPos;\n    vec3 nrm = aNormal;\n    vec2 uv = aUV;\n";
     src += "    vec4 wp";
     src += wpPad;
-    src += "= u.model * vec4(";
+    src += "= ";
+    src += M;
+    src += " * vec4(";
     src += pos;
     src += ", 1.0);\n";
     if (!wpo) // the WPO tail writes gl_Position last, from the offset position
     {
-        src += "    gl_Position = u.mvp * vec4(";
+        src += "    gl_Position = ";
+        src += MVP;
+        src += " * vec4(";
         src += pos;
         src += ", 1.0);\n";
     }
-    src += "    vNormal   = mat3(u.model) * ";
+    src += "    vNormal   = mat3(";
+    src += M;
+    src += ") * ";
     src += nrm;
     src += ";\n";
     src += "    vColor    = u.color.rgb;\n";
@@ -120,13 +153,22 @@ std::string assembleVertex(VertexInput input, const WpoBody* wpo)
         // transpose trick (exact for rigid transforms with uniform scale —
         // model^-1 ≈ model^T / |col0|²), so u.mvp keeps working.
         src += wpo->statements; // graph statements → `vec3 heWpo`
+        const std::string m = M, mvp = MVP;
         src += "    vWorldPos += heWpo;\n"
-               "    vec3 heObjWpo = (transpose(mat3(u.model)) * heWpo)\n"
-               "                  / max(dot(u.model[0].xyz, u.model[0].xyz), 1e-8);\n"
-               "    gl_Position = u.mvp * vec4(pos + heObjWpo, 1.0);\n";
+               "    vec3 heObjWpo = (transpose(mat3(" + m + ")) * heWpo)\n"
+               "                  / max(dot(" + m + "[0].xyz, " + m + "[0].xyz), 1e-8);\n"
+               "    gl_Position = " + mvp + " * vec4(pos + heObjWpo, 1.0);\n";
     }
     src += "}\n";
     return src;
+}
+
+// The instanced standard variants (graph materials without WPO in a batch).
+const std::string& standardVertexInstancedSource(VertexInput input)
+{
+    static const std::string kSsbo   = assembleVertex(VertexInput::Ssbo,       nullptr, true);
+    static const std::string kAttrib = assembleVertex(VertexInput::Attributes, nullptr, true);
+    return (input == VertexInput::Ssbo) ? kSsbo : kAttrib;
 }
 
 // The two standard variants: assembled once, then handed to the compiler as-is.
@@ -909,11 +951,15 @@ const char* wpoDeclarations()
 // Assemble the full canonical custom vertex around the graph body — see
 // assembleVertex at the top of this file, which emits this and the two standard
 // variants from one description.
-std::string buildCustomVertex(const std::string& body, bool ssbo)
+std::string buildCustomVertex(const std::string& body, bool ssbo, bool instanced = false)
 {
     const WpoBody wpo{ wpoDeclarations(), body };
-    return assembleVertex(ssbo ? VertexInput::Ssbo : VertexInput::Attributes, &wpo);
+    return assembleVertex(ssbo ? VertexInput::Ssbo : VertexInput::Attributes, &wpo, instanced);
 }
+
+// customVertexInstanced shares m_cvertCache with customVertex; the salt keeps
+// the two forms of one body apart.
+constexpr uint64_t kInstancedKeySalt = 0x1D57A9CEDB0B1E55ULL;
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::customVertex(
@@ -1231,6 +1277,28 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::tessEval(
     return m_tessCache.emplace(key, std::move(out)).first->second;
 }
 
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::customVertexInstanced(
+    uint64_t bodyHash, const std::string& body, Backend backend)
+{
+    // Same cache as customVertex, own key range.
+    const uint64_t key = (bodyHash ^ kInstancedKeySalt)
+                       ^ (0xC2B2AE3D27D4EB4FULL * (static_cast<uint64_t>(backend) + 1));
+    if (auto it = m_cvertCache.find(key); it != m_cvertCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(buildCustomVertex(body, /*ssbo=*/true, /*instanced=*/true),
+            Stage::Vertex,
+            { { Stage::Vertex, 0, 0, 0 }, { Stage::Vertex, 0, 1, 1 },
+              { Stage::Vertex, 0, 8, 2 }, { Stage::Vertex, 0, 9, 3 },
+              { Stage::Vertex, 0, 2, 5 } }));  // Inst {mvp, model} array → vertex buffer 5
+    else
+        out = toCompiled(compile(buildCustomVertex(body, /*ssbo=*/false, /*instanced=*/true),
+                                 Stage::Vertex, toTarget(backend)));
+    return m_cvertCache.emplace(key, std::move(out)).first->second;
+}
+
 bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID& materialId,
                                            uint64_t& hashOut, std::string& fragOut,
                                            std::string& vertBodyOut) const
@@ -1321,6 +1389,24 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::standardVertex(Bac
         out = toCompiled(compile(standardVertexSource(VertexInput::Attributes), Stage::Vertex,
                                  toTarget(backend)));
     }
+    return m_vertCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::standardVertexInstanced(Backend backend)
+{
+    // Same cache as standardVertex, own key range (that one is just (int)backend).
+    const int key = 0x100 + static_cast<int>(backend);
+    if (auto it = m_vertCache.find(key); it != m_vertCache.end()) return it->second;
+
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(standardVertexInstancedSource(VertexInput::Ssbo), Stage::Vertex,
+            { { Stage::Vertex, 0, 0, 0 }, { Stage::Vertex, 0, 1, 1 },
+              { Stage::Vertex, 0, 2, 5 } }));  // Inst {mvp, model} array → vertex buffer 5
+    else
+        out = toCompiled(compile(standardVertexInstancedSource(VertexInput::Attributes), Stage::Vertex,
+                                 toTarget(backend)));
     return m_vertCache.emplace(key, std::move(out)).first->second;
 }
 

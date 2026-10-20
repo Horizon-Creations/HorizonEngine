@@ -19,6 +19,24 @@ namespace
 // glslang's process init/teardown is global, not re-entrant — serialise it.
 std::mutex g_glslangMutex;
 
+// glslang initialised ONCE per process, torn down at exit (TLS-201). Every compile
+// used to pair InitializeProcess with FinalizeProcess, and the finalize throws away
+// the built-in symbol tables the next parse then rebuilds from scratch: that rebuild
+// was most of a small compile (~165 ms of it on an M-series Mac, Release). glslang
+// counts its clients (ShInitialize/ShFinalize), so code that brackets its own use
+// with Initialize/Finalize (two tests do) only moves the count and never tears the
+// tables down under us. Caller holds g_glslangMutex, which still serialises the
+// TShader/TProgram use itself.
+void ensureGlslangProcess()
+{
+    struct Process
+    {
+        Process()  { glslang::InitializeProcess(); }
+        ~Process() { glslang::FinalizeProcess(); }
+    };
+    static Process process;
+}
+
 EShLanguage toEsh(Stage s)
 {
     switch (s)
@@ -223,10 +241,9 @@ Result compile(const std::string& glsl, Stage stage, Target target)
         return r;
     }
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
         r.ok = spirvToSource(r.spirv, target, r.source, r.log);
-    glslang::FinalizeProcess();
     reportShaderResult("Shader compile", r.ok, r.log, glsl.size());
     return r;
 }
@@ -237,7 +254,7 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
 {
     Result r;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
     {
         try
@@ -278,7 +295,6 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
             r.log += '\n';
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Pinned-MSL shader compile", r.ok, r.log, glsl.size());
     return r;
 }
@@ -297,7 +313,7 @@ Result compileHlslImpl(const std::string& glsl, Stage stage, const std::vector<H
         return r;
     }
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
     {
         try
@@ -336,7 +352,6 @@ Result compileHlslImpl(const std::string& glsl, Stage stage, const std::vector<H
             r.log += '\n';
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Pinned-HLSL shader compile", r.ok, r.log, glsl.size());
     return r;
 }
@@ -359,7 +374,7 @@ Result compileGlslPinned(const std::string& glsl, Stage stage,
 {
     Result r;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
     {
         try
@@ -374,7 +389,6 @@ Result compileGlslPinned(const std::string& glsl, Stage stage,
             r.log += '\n';
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Pinned-GLSL430 shader compile", r.ok, r.log, glsl.size());
     return r;
 }
@@ -384,7 +398,7 @@ MultiResult compileMany(const std::string& glsl, Stage stage,
 {
     MultiResult mr;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, mr.spirv, mr.log))
     {
         mr.ok = true;
@@ -399,7 +413,6 @@ MultiResult compileMany(const std::string& glsl, Stage stage,
             mr.perTarget.push_back(std::move(r));
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Multi-target shader compile", mr.ok, mr.log, glsl.size());
     return mr;
 }

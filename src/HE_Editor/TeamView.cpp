@@ -10,6 +10,7 @@
 
 #if __has_include(<imgui.h>)
 #include "EditorHelp.h"      // "Team/<label>" for every control below
+#include "NotificationStore.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include <Net/CollabSession.h>    // kParticipantPalette, the colour presets
@@ -73,12 +74,9 @@ const char* statusText(TeamController::Status s)
 
 void collectNotices(TeamController& team, Form& form)
 {
+	(void)form;
 	TeamController::Notice n;
-	while (team.pollNotice(n))
-	{
-		form.recent.push_back(std::move(n));
-		if (form.recent.size() > Form::kRecent) form.recent.erase(form.recent.begin());
-	}
+	while (team.pollNotice(n)) {}
 }
 
 #if __has_include(<imgui.h>)
@@ -108,7 +106,6 @@ void probeRect(const char* label, const std::string& row, ImVec2 mn, ImVec2 mx)
 // open the "Team" help scope every control in this file is looked up under,
 // and scripts/editor_help_audit.py reads a file top to bottom.
 void drawStatus(TeamController& team);
-void drawRecent(const Form& form);
 void drawServerField(TeamController& team, const Settings& settings);
 void drawSignIn(TeamController& team, const Settings& settings, Form& form);
 void drawMembers(TeamController& team, Form& form);
@@ -151,7 +148,6 @@ void drawSettings(TeamController& team, const Settings& settings, Form& form)
 		ImGui::Spacing();
 		drawProfile(team, form);
 	}
-	drawRecent(form);
 }
 
 void drawPanel(TeamController& team, const Settings& settings, Form& form)
@@ -167,7 +163,6 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 		drawSignIn(team, settings, form);
 		EditorWidgets::hint("Members sign in with the name and password an admin gave them. "
 		                    "Create Team starts a new team with you as its admin.");
-		drawRecent(form);
 		return;
 	}
 
@@ -195,7 +190,6 @@ void drawPanel(TeamController& team, const Settings& settings, Form& form)
 	ImGui::Spacing();
 	if (team.signedIn()) drawProfile(team, form);
 	drawOwnPassword(team, form);
-	drawRecent(form);
 }
 
 float footerStatusWidth()
@@ -758,24 +752,8 @@ void drawStatus(TeamController& team)
 
 	if (s == TeamController::Status::SignedIn || s == TeamController::Status::Reconnecting)
 		EditorWidgets::hint("Team server %s", team.serverText().c_str());
-	if (!team.lastError().empty() && s != TeamController::Status::SignedIn)
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Bad);
-		ImGui::TextWrapped("%s", team.lastError().c_str());
-		ImGui::PopStyleColor();
-	}
-}
-
-void drawRecent(const Form& form)
-{
-	if (form.recent.empty()) return;
-	EditorWidgets::subHeading("Recent");
-	for (auto it = form.recent.rbegin(); it != form.recent.rend(); ++it)
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, it->error ? Theme::Warn : Theme::TextDim);
-		ImGui::TextWrapped("%s", it->text.c_str());
-		ImGui::PopStyleColor();
-	}
+	// The reason a sign-in failed is a notification (TeamController), not a red line
+	// here that stays after the sign-in form is gone.
 }
 
 bool connectionUp(TeamController::Status s)
@@ -1165,8 +1143,9 @@ void consumePicturePick(TeamController& team, Form& form)
 	s_pickPath.clear();
 	if (path.empty()) return;   // cancelled
 	std::string error;
-	if (team.setAvatarFromFile(path, error)) form.profileError.clear();
-	else                                     form.profileError = error;
+	if (!team.setAvatarFromFile(path, error))
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "That picture cannot be used", error);
+	(void)form;
 }
 
 // The presets the Collaboration window offers, None, and a free picker. A pick
@@ -1255,18 +1234,11 @@ void drawProfile(TeamController& team, Form& form)
 	probe("Use Collaboration Profile");
 	ImGui::EndGroup();
 
-	if (choose || remove || useCollab) form.profileError.clear();
 	if (choose)    openPictureDialog();
 	if (remove)    team.clearAvatar();
 	if (useCollab) team.useCollabProfile();
 
 	drawColourRow(team, colour);
-	if (!form.profileError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
-		ImGui::TextWrapped("%s", form.profileError.c_str());
-		ImGui::PopStyleColor();
-	}
 	EditorWidgets::hint("The team sees this picture and colour next to your name, on every "
 	                    "editor of theirs and yours. Use Collaboration Profile copies the ones "
 	                    "from the Collaboration window. In a session the host may still give you "

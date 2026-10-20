@@ -1,5 +1,6 @@
 #pragma once
 #include <JobSystem/JobSystem.h>
+#include <Types/UUID.h>
 #include <entt/entt.hpp>
 #include <glm/vec3.hpp>
 #include <cstddef>
@@ -175,6 +176,13 @@ public:
 		// construction the load goes ahead (the physics world logs what it cannot hold).
 		// Empty: no limit.
 		std::function<bool(uint32_t bodies)> bodiesFit;
+		// Asked, for a cell whose ids are kept (version 2), of every entity a slice is
+		// about to build, by the id stored in the file: true leaves it out, with
+		// everything below it — it is not created at all, so it gets no body, no
+		// asset load, and does not take a fresh id because the one it was saved with
+		// is still in the world. The session's tombstones (CellState): a thing
+		// destroyed while its cell was there, or taken out of the cell. Empty: all.
+		std::function<bool(const HE::UUID& id)> skip;
 	};
 
 	struct Stats
@@ -202,6 +210,9 @@ public:
 		// world had no room for its bodies (Hooks::bodiesFit). Cumulative since begin();
 		// a number that keeps growing is a world with too many bodies for the reserve.
 		size_t deferredForBodies = 0;
+		// Entities of the files that were not built because Hooks::skip left them out
+		// (with what hangs below them). Cumulative since begin().
+		size_t skipped = 0;
 	};
 
 	CellStreamer();
@@ -268,6 +279,11 @@ public:
 	bool         isLoaded(int x, int z) const;
 	// Its root exists and some slices are built, but not all.
 	bool         isBuilding(int x, int z) const;
+	// Whether the cell under construction with this root loads the ids its file
+	// stores (a version-2 cell; see "Identity" above), so that its entities are the
+	// same ones on every load. Asked from the slice hook; false for a root the
+	// streamer is not building.
+	bool         keepsIds(entt::entity root) const;
 	const CellManifest& manifest() const { return m_manifest; }
 
 private:

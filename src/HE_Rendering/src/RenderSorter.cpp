@@ -130,3 +130,12 @@ bool RenderSorter::depthInstancingEnabled()
 	}();
 	return on;
 }
+
+bool RenderSorter::graphInstancingEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_GRAPH_INSTANCING");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}

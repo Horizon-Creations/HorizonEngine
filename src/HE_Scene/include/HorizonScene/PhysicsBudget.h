@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_PHYSICS_BUDGET_MS
 
 // The time budget for the work AROUND Jolt's Update (Thema 178, step 3): the
 // characters' ExtendedUpdate, the bodies a streamed cell adds and removes, the
@@ -85,8 +86,12 @@ inline constexpr double kMaxFrameMs = 1000.0;
 
 // HE_PHYSICS_BUDGET_MS in the environment wins over the project, like
 // HE_PHYSICS_THREADS: negative = not set. 0 is a valid answer (no budget).
+// Always "not set" in a release build (HE_FEATURE_ENV_OVERRIDES).
 inline double frameMsFromEnv()
 {
+#if !HE_FEATURE_ENV_OVERRIDES
+    return -1.0;
+#else
     const char* text = std::getenv("HE_PHYSICS_BUDGET_MS");
     if (!text || !*text)
         return -1.0;
@@ -95,6 +100,7 @@ inline double frameMsFromEnv()
     if (end == text || *end != '\0' || !std::isfinite(value) || value < 0.0)
         return -1.0;
     return std::min(value, kMaxFrameMs);
+#endif
 }
 
 inline double resolveFrameMs(double requested, double envOverride)

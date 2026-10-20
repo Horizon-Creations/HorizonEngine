@@ -65,6 +65,12 @@ struct Reader {
         pos += 4;
         return true;
     }
+    bool u64(std::uint64_t& v) {
+        std::uint32_t hi = 0, lo = 0;
+        if (!u32(hi) || !u32(lo)) return false;
+        v = (std::uint64_t(hi) << 32) | lo;
+        return true;
+    }
     bool str(std::string& s) {
         std::uint8_t len = 0;
         if (!u8(len) || pos + len > n) return false;
@@ -460,6 +466,10 @@ void TeamClient::applyReply(Reply& reply, const std::uint8_t* body, std::size_t 
         case Op::IssueToken:
             if (!r.str(reply.token) || reply.token.empty()) break;
             return;
+        case Op::ScTicket:
+            if (n != kScTicketSize) break;
+            reply.ticket.assign(reinterpret_cast<const char*>(body), n);
+            return;
         case Op::AddMember:
         case Op::RemoveMember:
             listMembers();
@@ -557,6 +567,9 @@ void TeamClient::onEvent(const std::uint8_t* p, std::size_t n) {
             mergeProfiles();
             fetchAvatars();
             changed();
+            break;
+        case EventKind::ScHead:
+            ok = r.str(ev.project) && r.u64(ev.rev) && r.str(ev.member);
             break;
         default:
             // A newer server's event: skip it rather than drop the connection.
@@ -775,6 +788,12 @@ std::uint32_t TeamClient::revokeAllTokens(ReplyFn done) {
     return request(Op::RevokeAllTokens, {}, std::move(done));
 }
 
+std::uint32_t TeamClient::scTicket(const std::string& project, ReplyFn done) {
+    std::vector<std::uint8_t> f;
+    putStr8(f, project);
+    return request(Op::ScTicket, std::move(f), std::move(done));
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 std::string TeamClient::joinCodeForSession(const std::string& sessionId) {
@@ -842,7 +861,7 @@ const char* TeamClient::resultName(std::uint8_t result) {
         "ok", "bad-request", "invalid-name", "invalid-password", "member-exists",
         "no-such-member", "wrong-password", "not-admin", "last-admin", "full",
         "server-error", "not-online", "no-such-session", "not-host", "not-allowed",
-        "session-exists", "not-invited", "no-such-token",
+        "session-exists", "not-invited", "no-such-token", "no-such-project",
     };
     if (result < sizeof(kNames) / sizeof(kNames[0])) return kNames[result];
     if (result == std::uint8_t(Result::ConnectionLost)) return "connection-lost";
@@ -885,6 +904,7 @@ std::string TeamClient::describeResult(Result result, const std::string& text) {
         case Result::SessionExists:   return "That session id is already in use.";
         case Result::NotInvited:      return "There is no invitation to decline.";
         case Result::NoSuchToken:     return "That sign-in was already revoked.";
+        case Result::NoSuchProject:   return "The team has no such project on its server (a team admin creates it).";
         case Result::ConnectionLost:  return text.empty() ? std::string("The connection to the team server was lost.") : text;
         default:
             return withReason(std::string("The team server refused: ") +

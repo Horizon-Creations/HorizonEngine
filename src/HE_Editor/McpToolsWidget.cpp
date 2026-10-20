@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "McpToolCommon.h"            // the argument readers and the ONE confinement rule
 
@@ -202,21 +202,16 @@ Doc openDoc(ContentManager& content, const McpWidgetHooks& h, const json& args, 
 
 	if (forWrite)
 	{
-		if (p.engine) { d.failure = failEngineReadOnly(p.rel); return d; }
-		if (h.isPlaying && h.isPlaying())
+		// No dirty refusal: a dirty Designer tab is where the edit goes (below).
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running. A widget edited now is edited in the very "
+			"asset the running session is drawing from, and the Designer's undo "
+			"cannot reach it — so it is refused rather than half-applied. Ask the "
+			"user to stop play mode.",
+			nullptr };
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther, nullptr, kGate))
 		{
-			d.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running. A widget edited now is edited in the very "
-				"asset the running session is drawing from, and the Designer's undo "
-				"cannot reach it — so it is refused rather than half-applied. Ask the "
-				"user to stop play mode.");
-			return d;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			d.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
+			d.failure = std::move(*refused);
 			return d;
 		}
 	}

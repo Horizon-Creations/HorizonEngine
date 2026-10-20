@@ -3,6 +3,7 @@
 #include <Types/Defines.h>
 #include <glm/glm.hpp>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +19,10 @@
 // links (white) drive control flow; typed data links feed values evaluated on
 // demand. Functions carry an access modifier — public functions are callable
 // from gameplay scripts, private ones are graph-internal.
+
+// Defined in HE_Scene (HorizonScene/EngineApi.h). Context::apiCtx only passes a
+// reference to one on, so the interpreter never needs to see what is inside.
+namespace HE::api { struct Ctx; }
 
 namespace HorizonCode {
 
@@ -1283,6 +1288,13 @@ struct Context
     // the id is unknown. This is the seam that keeps the interpreter (HE_Core)
     // decoupled from the engine surface it drives.
     std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
+    // The same seam for a DIRECT call: fill `out` with the HE::api::Ctx that
+    // callApi would have built for this instance, so generated C++ can call
+    // HE::api::animator::setParam(ctx, …) itself instead of boxing its arguments
+    // through the registry (HorizonEngine/HorizonEngineApi.h, HE::api::Scope).
+    // False = nothing bound, `out` untouched: the null-Ctx tolerance then makes
+    // every direct call the no-op an unbound callApi is.
+    std::function<bool(HE::api::Ctx& out)> apiCtx;
 
     // Call a function on THIS instance that the running graph does not itself
     // declare — an INHERITED one. A class's graph only holds its own members,
@@ -1461,6 +1473,11 @@ class HE_API Runner
 {
 public:
     Runner(const Graph& graph, Context ctx);
+    // The same over a Context somebody else keeps and may hand to other
+    // Runners at the same time — the Runtime's one per instance and level. The
+    // Runner holds a share of it for its run, so it stays valid even if the
+    // instance is destroyed by the very graph running on it.
+    Runner(const Graph& graph, std::shared_ptr<const Context> ctx);
 
     // Fire every Event node whose name matches and whose element matches (an
     // Event bound to elem 0 fires for any element). `arg` feeds the event's
@@ -1524,7 +1541,10 @@ private:
     CallFrame* frameFor(int fnEntryId);
 
     const Graph& m_graph;
-    Context      m_ctx;
+    // Read-only by construction: a shared Context runs nested Runners at once,
+    // so nothing here may write it — the const reference is what says so.
+    std::shared_ptr<const Context> m_ctxHold;
+    const Context& m_ctx;
     Value        m_eventArg;
     int          m_steps = 0;
     // The step or depth limit has been reported for this run. Once: the outer

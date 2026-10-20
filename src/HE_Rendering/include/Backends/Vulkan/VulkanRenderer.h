@@ -2,7 +2,9 @@
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include "VulkanShaderManager.h"
+#include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
+#include <HorizonRendering/InstanceArena.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -10,11 +12,13 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GiBlasStore.h>
 #include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
 #include <vulkan/vulkan.h>
+#include <deque>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -42,6 +46,9 @@ public:
 	void*    GetDevice()         const;
 	void*    GetQueue()          const;
 	uint64_t GetRenderPass()     const;
+	// The renderer's VkPipelineCache (REN-808), for ImGui_ImplVulkan_InitInfo::PipelineCache;
+	// 0 with HE_VK_PIPELINE_CACHE=0.
+	uint64_t GetPipelineCache()  const;
 	uint32_t GetQueueFamily()    const;
 	uint32_t GetImageCount()     const;
 
@@ -153,7 +160,8 @@ private:
 	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
 	                                           const std::string& vertBody,
 	                                           const MaterialShaderVariant* precompiled,
-	                                           bool hdr, bool transparent, bool gbuffer = false);
+	                                           bool hdr, bool transparent, bool gbuffer = false,
+	                                           bool instanced = false);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -382,12 +390,33 @@ private:
 	InstanceBuf           m_instanceBuf[2];
 	static constexpr uint32_t k_maxInstances = 65536; // instance-buffer capacity (A3)
 	static constexpr uint32_t k_instStride   = 128;   // bytes per instance = 2 × mat4 (mvp, model)
-	// Next free slot in m_instanceBuf[m_currentFrame]. A member, not a DrawScene
-	// local: the shadow pass, runGi and runSSAO record their instanced depth
-	// draws into the SAME command buffer before the geometry pass, and the GPU
-	// reads every slot only at submit — so each pass takes slots of its own.
-	// Reset at the top of Render() and DrawViewportFrame().
-	uint32_t              m_instCursor = 0;
+	// Slots of m_instanceBuf[m_currentFrame] and its overflow chunks, handed out by
+	// m_instArena. A member, not a DrawScene local: the shadow pass, runGi and runSSAO
+	// record their instanced depth draws into the SAME command buffer before the
+	// geometry pass, and the GPU reads every slot only at submit — so each pass takes
+	// slots of its own. Reset at the top of Render() and DrawViewportFrame()
+	// (beginInstanceFrame).
+	// Instance arena (Thema 182, plan 2f; sizing step 8). Every instanced run of a frame
+	// takes its own slots (each shadow cascade, the SSAO/GI pre-passes, the scene), so
+	// foliage asks for several times its visible count; past k_maxInstances every run
+	// fell back to one draw per object (complete, but 56k draws at 100k plants). A full
+	// chunk now opens a further one; every slot's main buffer grows to what the largest
+	// frame asked. The sizing is HE::InstanceArena (shared with D3D12, tested in
+	// he_tests); its budget (512 MiB a frame, HE_INST_ARENA_MIB) bounds a frame. Overflow
+	// chunks and replaced main buffers age out in m_instRetired (swept at the top of
+	// Render(), like m_retiredViewports).
+	struct RetiredInstBuf { InstanceBuf b; int frames; };
+	std::vector<RetiredInstBuf> m_instRetired;
+	uint32_t              m_instMainCap[2] = {};  // m_instanceBuf[slot] size, in instances
+	InstanceBuf           m_instCur{};            // the chunk being filled (main or overflow)
+	HE::InstanceArena     m_instArena{ HE::InstanceArena::budgetFromEnv(k_instStride) };
+	uint32_t              m_instWant     = 0;     // main size the slots grow to (largest frame asked)
+	bool                  m_instArenaWarned = false;
+	bool createInstanceBuf(uint32_t instances, InstanceBuf& out);
+	void destroyInstanceBuf(InstanceBuf& b);
+	void beginInstanceFrame();
+	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
+	std::vector<glm::mat4> m_clusterScratch; // one cluster's world matrices (decal depth)
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
 	// G-buffer); the shadow layers keep m_shadowBatches.
 	RenderSorter::DepthBatchList m_preBatches;
@@ -534,7 +563,7 @@ private:
 	// dynamic offset. The GPU reads the ring only after submit, so nothing transfers inside a
 	// render pass (Thema 144 — this used to be vkCmdUpdateBuffer + a barrier per draw, both
 	// invalid in a render pass). Consequence: EVERY bind of m_frameUBO[].set passes one
-	// dynamic offset (m_sceneMatOffset). Cursor reset with m_instCursor (Render() and
+	// dynamic offset (m_sceneMatOffset). Cursor reset with the instance arena (Render() and
 	// DrawViewportFrame); a slot is never reused within a frame.
 	struct SceneMatData { float r, g, b, met; float rough, opacity, hasTex, noShadow; }; // scene.frag MatUBO
 	static_assert(sizeof(SceneMatData) == 32, "scene.frag's MatUBO is two vec4");
@@ -620,6 +649,7 @@ private:
 	// a miss is cached (view null → white default, no per-frame retry). InvalidateTexture
 	// drops the UUID key; a path-keyed loose asset is not hot-reloaded (same as GL).
 	std::unordered_map<std::string, MaterialTexVk> m_graphTexCache;
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its null-view misses were taken at (HE::forgetGraphTextureMisses)
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
 	std::vector<HE::UUID> m_pendingTexInval;
@@ -649,12 +679,123 @@ private:
 	void processPendingInvalidations();
 	void destroyMaterialTex(MaterialTexVk& mt);
 
+	// ── Asset upload path (REN-802/803) ─────────────────────────────────────
+	// Uploads record into ONE open upload command buffer and return at once; the
+	// copies are read from a persistent mapped staging ring (HE::vkup::StagingRing).
+	// submitGraphics() submits that buffer, with a fence of its own, in front of
+	// every graphics-queue submit, so whatever the next submit draws with is
+	// already copied (same queue: submission order + the batch's closing barrier).
+	// The batch's staging bytes come back once its fence has signalled. Before,
+	// every mesh and texture upload made its own staging buffer, submitted it and
+	// sat in vkQueueWaitIdle — N full GPU stalls in the frame that first draws a
+	// scene of N assets.
+	//
+	// Static mesh buffers are DEVICE_LOCAL and bound at an offset into 64 MB blocks
+	// (HE::vkup::RangeAllocator per block) instead of one host-visible
+	// vkAllocateMemory per buffer. Images keep a dedicated allocation each.
+	//
+	// HE_VK_UPLOAD_SYNC=1 brings back the old wait after every upload (same
+	// binary, for A/B and as a way out); HE_VK_UPLOAD_STATS=1 logs every batch.
+	// The totals are logged at shutdown either way.
+	struct PoolAlloc
+	{
+		VkDeviceMemory mem    = VK_NULL_HANDLE; // the block's memory (or a dedicated one)
+		VkDeviceSize   offset = 0;
+		VkDeviceSize   size   = 0;
+		int32_t        block  = -1;             // index into m_memBlocks, -1 = dedicated
+	};
+	struct MemBlock
+	{
+		VkDeviceMemory             mem  = VK_NULL_HANDLE; // null = slot free for reuse
+		uint32_t                   type = 0;
+		HE::vkup::RangeAllocator   ranges;
+	};
+	struct UploadBatch
+	{
+		VkCommandBuffer cb     = VK_NULL_HANDLE;
+		VkFence         fence  = VK_NULL_HANDLE;
+		uint64_t        ticket = 0;           // the staging ring's retire ticket
+		uint32_t        uploads = 0;
+		VkDeviceSize    bytes   = 0;
+		// Uploads the ring had no room for stage through a buffer of their own,
+		// freed with the batch.
+		std::vector<std::pair<VkBuffer, VkDeviceMemory>> ownStaging;
+	};
+	struct UploadStats
+	{
+		uint64_t meshes = 0, textures = 0, bytes = 0, batches = 0, ownStaging = 0;
+		uint64_t syncWaits = 0;
+		double   cpuMs = 0.0, waitMs = 0.0;
+	};
+	static constexpr VkDeviceSize k_stagingRingBytes = 32ull << 20;
+	static constexpr VkDeviceSize k_memBlockBytes    = 64ull << 20;
+	bool            allocPooled(const VkMemoryRequirements& req, VkMemoryPropertyFlags props, PoolAlloc& out);
+	void            freePooled(PoolAlloc& a);
+	// A DEVICE_LOCAL buffer from the pool, filled through the upload batch.
+	bool            createDeviceLocalBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const void* data,
+	                                        VkBuffer& buf, PoolAlloc& alloc);
+	void            destroyPooledBuffer(VkBuffer& buf, PoolAlloc& alloc);
+	bool            ensureUploadContext();
+	VkCommandBuffer uploadCmd();               // the open upload command buffer (opens one)
+	// Copies `size` bytes into staging memory the open batch owns; src/srcOffset
+	// is what a vkCmdCopyBuffer(ToImage) of that batch reads.
+	bool            stageUpload(const void* data, VkDeviceSize size, VkBuffer& src, VkDeviceSize& srcOffset);
+	void            flushUploads();            // submit the open batch (no wait)
+	void            retireUploads();           // recycle batches whose fence signalled
+	void            noteUpload(bool mesh, VkDeviceSize bytes, uint64_t startNs);
+	void            destroyUploadResources();
+	// Every vkQueueSubmit / vkDeviceWaitIdle of this file goes through these two,
+	// so no submit can run ahead of an upload it depends on, and nothing freed
+	// after a wait-idle is still referenced by an unsubmitted copy.
+	VkResult        submitGraphics(const VkSubmitInfo& si, VkFence fence);
+	void            deviceWaitIdle();
+	// ── Pipeline cache (REN-808) ────────────────────────────────────────────
+	// One VkPipelineCache for every vkCreate*Pipelines of this file (and ImGui's,
+	// GetPipelineCache()), read from <pref path>/vkpipelinecache/<vendor>_<device>.bin
+	// after createDevice() and written back at shutdown when it changed
+	// (VulkanPipelineCacheFile.h: header + driver blob, checked against the device).
+	// Before, the driver compiled every built-in pipeline at every start and every
+	// graph-material pipeline at its first draw, unless it kept a disk cache of its
+	// own. HE_VK_PIPELINE_CACHE=0 creates no cache (the old path, same binary, for
+	// A/B); HE_VK_PIPELINE_CACHE_DIR=<dir> moves the file. Every create goes through
+	// the two wrappers below, which time it: "[startup] Vulkan Initialize" and the
+	// shutdown line carry the totals.
+	VkResult        createGraphicsPipelines(uint32_t n, const VkGraphicsPipelineCreateInfo* ci,
+	                                        const VkAllocationCallbacks* alloc, VkPipeline* out);
+	VkResult        createComputePipelines(uint32_t n, const VkComputePipelineCreateInfo* ci,
+	                                       const VkAllocationCallbacks* alloc, VkPipeline* out);
+	void            createPipelineCache();
+	void            savePipelineCache();          // and destroy it
+	VkPipelineCache m_pipelineCache        = VK_NULL_HANDLE;
+	std::string     m_pipelineCachePath;
+	const char*     m_pipelineCacheState   = "off"; // what createPipelineCache found
+	size_t          m_pipelineCacheInBytes = 0;
+	uint64_t        m_pipelineCacheInHash  = 0;
+	uint32_t        m_pipelinesCreated     = 0;
+	double          m_pipelineMs           = 0.0;   // CPU time in vkCreate*Pipelines
+
+	std::vector<MemBlock>   m_memBlocks;
+	VkCommandPool           m_uploadPool     = VK_NULL_HANDLE;
+	VkBuffer                m_stageBuf       = VK_NULL_HANDLE;
+	VkDeviceMemory          m_stageMem       = VK_NULL_HANDLE;
+	uint8_t*                m_stageMapped    = nullptr;
+	HE::vkup::StagingRing   m_stageRing;
+	UploadBatch             m_upOpen;
+	bool                    m_upRecording    = false;
+	std::deque<UploadBatch> m_upInFlight;
+	std::vector<UploadBatch> m_upSpare;        // signalled batches: cb + fence for reuse
+	uint64_t                m_upTicket       = 0;
+	bool                    m_upContextTried = false;
+	bool                    m_upSync         = false; // HE_VK_UPLOAD_SYNC
+	bool                    m_upLogBatches   = false; // HE_VK_UPLOAD_STATS
+	UploadStats             m_upStats;
+
 	struct GpuMesh
 	{
 		VkBuffer       vbuf       = VK_NULL_HANDLE;
-		VkDeviceMemory vmem       = VK_NULL_HANDLE;
+		PoolAlloc      valloc;                     // null mem → borrowed handles (ribbons)
 		VkBuffer       ibuf       = VK_NULL_HANDLE;
-		VkDeviceMemory imem       = VK_NULL_HANDLE;
+		PoolAlloc      ialloc;
 		uint32_t       indexCount = 0;
 		HE::AABB       localBounds;
 		// Base-color texture (null → untextured, draws with m_whiteAlbedoSet + flat colour).
@@ -667,8 +808,8 @@ private:
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
 	bool createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
 	                       const std::vector<uint32_t>& indices);
-	// Upload tightly-packed RGBA8 pixels to a device-local sampled image + view via a
-	// one-shot command buffer (transition → copy → transition), mirroring the moon upload.
+	// Upload tightly-packed RGBA8 pixels to a device-local sampled image + view: the
+	// transition → copy → transition is recorded into the upload batch, no wait.
 	bool uploadRGBA8Image(const uint8_t* rgba, uint32_t w, uint32_t h,
 	                      VkImage& image, VkDeviceMemory& mem, VkImageView& view);
 	// Upload a cooked TextureAsset — RGBA8 or a block format (BC7/BC3) — with its full
@@ -1206,6 +1347,10 @@ private:
 	VkFramebuffer    m_reflPrepassFB = VK_NULL_HANDLE; // {ssaoPos, attr, ndc, ssaoPosDepth}
 	VkRenderPass     m_reflPrepassRP = VK_NULL_HANDLE; // 3 color + D16
 	VkPipeline       m_reflPrepassPipeline   = VK_NULL_HANDLE;
+	// Its instanced twin (Thema 182, 2f): a foliage cluster in ONE draw, the model per instance
+	// from the instance arena at binding 1 (reflPrepassVertexInstanced, {viewProj, view} in U).
+	// Optional: without it clusters go plant by plant through the slot ring below.
+	VkPipeline       m_reflPrepassInstPipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_reflPrepassSetLayout  = VK_NULL_HANDLE; // binding 1: U (dynamic)
 	VkPipelineLayout      m_reflPrepassPipeLayout = VK_NULL_HANDLE;
 	VkDescriptorPool      m_reflPrepassPool       = VK_NULL_HANDLE;
@@ -1269,11 +1414,7 @@ private:
 	// which is why GetCapabilities still reports supportsGlobalIllumination
 	// = false: flipping it on is the LAST step, once the full pipeline exists.
 	// Compute is core Vulkan, so no extension/feature gate is needed.
-	struct GIBlasRange
-	{
-		int32_t nodeOffset = 0, triOffset = 0;
-		bool    valid      = false;
-	};
+	using GIBlasRange = HE::GiBlasRange;
 	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
@@ -1287,7 +1428,7 @@ private:
 		void*          mapped = nullptr;
 		VkDeviceSize   size   = 0;
 	};
-	GIBlasRange  BuildGIBlas(const HE::UUID& meshId);
+	HE::GiBvh    BuildGIBvh(const HE::UUID& meshId);
 	void         updateGiAccel();  // lazy BLAS append + per-frame instance upload
 	void         destroyGiAccel();
 
@@ -1366,13 +1507,13 @@ private:
 	GiBuffer m_giTemporalUBO[3];
 	VkSampler m_giPointSampler = VK_NULL_HANDLE; // NEAREST clamp (G-buffer/raw/history reads)
 	// (Re)creates a host-visible STORAGE_BUFFER of at least `size` bytes and
-	// memcpys `data` into it. Grows by recreation; never shrinks.
+	// memcpys `data` into it. Grows by recreation (to `reserve` bytes when that
+	// is larger: headroom for an array that keeps growing); never shrinks.
+	// `from` > 0 copies only [from, size) — the rest is on the GPU already.
 	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
-	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
-	std::vector<HE::GiBvhNode>     m_giNodesCpu;
-	std::vector<HE::GiBvhTriangle> m_giTrisCpu;
-	bool     m_giBlasDirty = false;
+	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+	                            VkDeviceSize from = 0, VkDeviceSize reserve = 0);
+	HE::GiBlasStore m_giBlas;   // per-mesh BLASes, concatenated (GiBlasStore.h)
 	GiBuffer m_giNodeBuf;
 	GiBuffer m_giTriBuf;
 	// Instance data changes every frame while earlier frames may still be in
@@ -1463,13 +1604,13 @@ private:
 	// (scene.frag drives material from the per-draw UBO, not a texture).
 	struct GpuSkeletalMesh {
 		VkBuffer       vb          = VK_NULL_HANDLE;  // slot 0: interleaved pos+norm+uv
-		VkDeviceMemory vbMem       = VK_NULL_HANDLE;
+		PoolAlloc      vbAlloc;                       // device-local, see the upload path
 		VkBuffer       boneIdVb    = VK_NULL_HANDLE;  // slot 1: uvec4 bone IDs
-		VkDeviceMemory boneIdMem   = VK_NULL_HANDLE;
+		PoolAlloc      boneIdAlloc;
 		VkBuffer       boneWgtVb   = VK_NULL_HANDLE;  // slot 2: vec4 bone weights
-		VkDeviceMemory boneWgtMem  = VK_NULL_HANDLE;
+		PoolAlloc      boneWgtAlloc;
 		VkBuffer       ib          = VK_NULL_HANDLE;
-		VkDeviceMemory ibMem       = VK_NULL_HANDLE;
+		PoolAlloc      ibAlloc;
 		VkImageView    texView     = VK_NULL_HANDLE;  // base-color texture (set=2)
 		VkImage        texImage    = VK_NULL_HANDLE;
 		VkDeviceMemory texMem      = VK_NULL_HANDLE;

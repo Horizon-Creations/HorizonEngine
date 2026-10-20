@@ -1,4 +1,5 @@
 #include "CollabPanel.h"
+#include "NotificationStore.h"
 #include "EditorWidgets.h"    // primary/danger/cancel buttons
 #include "EditorHelp.h"       // "Collaboration Session/<label>" scope for the tooltips
 #include "EditorTheme.h"      // brand palette (emphasis text)
@@ -47,12 +48,6 @@ namespace
 	// they never chose.
 	char s_lanJoinCode[80] = "";
 
-	// Why the last picture could not be used, shown until the next attempt.
-	std::string s_avatarError;
-	// Set when agreeing to large-asset sync could not re-dial by itself, so the
-	// user is told the setting took effect and only the join is left to redo.
-	// Cleared the moment a join is started, since it is then out of date.
-	std::string s_joinRetryHint;
 	// Result slot for the picture file dialog. SDL may deliver the callback on
 	// another thread, so the flag is atomic and is set AFTER the path — the
 	// reader sees a complete path or no path at all, never half of one.
@@ -260,8 +255,6 @@ namespace
 			ImGui::SameLine();
 			ImGui::TextDisabled("(changes apply at the next join)");
 			ColorTakenNotice(ctx);
-			if (!s_avatarError.empty())
-				ImGui::TextColored(HE::Ed::Theme::Bad, "%s", s_avatarError.c_str());
 			return;
 		}
 
@@ -289,7 +282,6 @@ namespace
 		const bool hasPicture = CollabController::localIdentity().avatarSize > 0;
 		if (EditorWidgets::button(hasPicture ? "Change picture..." : "Choose picture..."))
 		{
-			s_avatarError.clear();
 			SDL_DialogFileFilter filters[] = {
 				{ "Images", "png;jpg;jpeg;bmp;tga;gif" },
 			};
@@ -317,12 +309,6 @@ namespace
 
 		DrawColorChoice(ctx, true);
 
-		if (!s_avatarError.empty())
-		{
-			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Bad);
-			ImGui::TextWrapped("%s", s_avatarError.c_str());
-			ImGui::PopStyleColor();
-		}
 	}
 
 	// ── "This session sends the big files — is that all right?" ──────────────
@@ -443,7 +429,8 @@ namespace
 					// this controller. The setting is on regardless, so joining
 					// again by hand now works; saying nothing would look like the
 					// button did nothing at all.
-					s_joinRetryHint = "The setting is on. Join the session again.";
+					HE::Ed::notify(HE::Ed::NoteLevel::Important, "Sync larger assets is on",
+					               "Join the session again — the retry had nothing to dial.");
 				}
 				collab->clearLargeAssetsPrompt();
 				ImGui::CloseCurrentPopup();
@@ -473,8 +460,10 @@ namespace
 		if (path.empty()) return;   // the user cancelled
 
 		std::string error;
-		if (!CollabController::setLocalAvatarFromFile(path, error)) s_avatarError = error;
-		else                                                        s_avatarError.clear();
+		// A refused picture is said as a notification, not as red text under the
+		// button that the next click erases.
+		if (!CollabController::setLocalAvatarFromFile(path, error))
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "That picture cannot be used", error);
 	}
 } // namespace
 #endif
@@ -769,7 +758,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						ImGui::BeginDisabled(s_lanJoinCode[0] == '\0');
 						if (EditorWidgets::primaryButton("Join this session"))
 						{
-							s_joinRetryHint.clear();
 							collab->joinSession(picked->address, picked->port,
 							                    s_lanJoinCode, s_displayName);
 						}
@@ -804,7 +792,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		ImGui::BeginDisabled(!canJoin);
 		if (EditorWidgets::primaryButton("Join"))
 		{
-			s_joinRetryHint.clear();
 			collab->joinBySessionId(s_joinSessionId, s_joinCode, s_displayName);
 		}
 		ImGui::EndDisabled();
@@ -812,8 +799,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// tooltip that only exists on the enabled control would never be seen.
 		if (!canJoin && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Both the session ID and the join code are required.");
-		if (!s_joinRetryHint.empty())
-			ImGui::TextColored(HE::Ed::Theme::Ok, "%s", s_joinRetryHint.c_str());
 
 		// Joining REPLACES the open scene, which a button labelled "Join" does
 		// not convey — say so before it happens, not after.
@@ -1334,36 +1319,11 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		if (EditorWidgets::button("Leave session")) collab->leave();
 	}
 
-	// Being thrown out looks exactly like the host's network dying unless it is
-	// said out loud, so it is said out loud — above the generic error below,
-	// which would otherwise be the only thing on screen.
-	if (!collab->removalNotice().empty())
-	{
-		EditorWidgets::WrapText wrap;
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
-		ImGui::TextWrapped("%s", collab->removalNotice().c_str());
-		ImGui::PopStyleColor();
-		if (ImGui::Button("OK##removal")) collab->clearRemovalNotice();
-	}
-
-	if (collab->status() == CollabController::Status::Failed &&
-	    !collab->lastError().empty())
-	{
-		EditorWidgets::WrapText wrap;
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Bad);
-		ImGui::TextWrapped("%s", collab->lastError().c_str());
-		ImGui::PopStyleColor();
-		// A dropped link is the one failure worth offering a way straight back
-		// into: the host catches a rejoiner up on everything it missed.
-		if (collab->canRejoin())
-		{
-			if (EditorWidgets::primaryButton("Rejoin")) collab->rejoinLastSession();
-			ImGui::SameLine();
-		}
-		if (EditorWidgets::button("Dismiss")) collab->leave();
-	}
+	// A session that failed, dropped or threw this editor out is NOT drawn here: it is
+	// a notification (CollabController::announceFailure — a dialog with Rejoin / Try
+	// again, kept as a row in the notification centre with the same buttons), so the
+	// panel stays a clean form instead of carrying a red line that outlives the
+	// moment it was about.
 
 	ImGui::End();
 #else

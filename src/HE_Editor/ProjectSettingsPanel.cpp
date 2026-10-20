@@ -42,6 +42,7 @@ bool takeOpenRequest()
 	s_openRequested = false;
 	return r;
 }
+Page requestedPage() { return s_page; }
 bool takeAudioMixerRequest()
 {
 	const bool r = s_audioMixerRequested;
@@ -77,7 +78,7 @@ void commitSettings(AppContext& ctx, ProjectData& p, const char* what)
 {
 	p.settings.clamp();
 	if (!ctx.projectManager->saveProjectSettings())
-		HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+		HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 		               std::string("Could not save the project's ") + what,
 		               HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
 }
@@ -154,7 +155,7 @@ void drawPermissionsPage(AppContext& ctx)
 		if (!ctx.projectManager->saveProject(p.path))
 			// Problem, not Warning: the panel now says one thing and the file
 			// another, and it stays that way until somebody acts.
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's permissions", p.path);
 	}
 }
@@ -314,7 +315,7 @@ void drawCollisionLayersPage(AppContext& ctx)
 	if (commit)
 	{
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's collision layers", p.path);
 		// And into the running simulation, so a matrix edited during play takes
 		// effect where it can be seen. PhysicsWorld copies the matrix into the
@@ -494,7 +495,7 @@ void drawApplicationPage(AppContext& ctx)
 		// Straight to disk, as on the other project pages: a value that is in the
 		// panel and not in the file is the state somebody loses an evening to.
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's application settings", p.path);
 	}
 }
@@ -584,7 +585,7 @@ void drawFontsPage(AppContext& ctx)
 		// Straight to disk, like the permissions page: a setting that is on in
 		// the panel and off in the file is the state somebody spends an evening on.
 		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's font settings", p.path);
 	}
 
@@ -705,7 +706,7 @@ void drawGeneralPage(AppContext& ctx)
 				{
 					p.startupScene = (fs::path(root) / "Content" / s).string();
 					if (!ctx.projectManager->saveProject(p.path))
-						HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+						HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 						               "Could not save the project's startup scene", p.path);
 				}
 				if (selected) ImGui::SetItemDefaultFocus();
@@ -720,7 +721,7 @@ void drawGeneralPage(AppContext& ctx)
 	if (commit) commitSettings(ctx, p, "general settings");
 }
 
-// ─── Rendering ▸ Defaults ────────────────────────────────────────────────────
+// ─── Project ▸ Game Window ────────────────────────────────────────────────────
 // What the packaged build boots with. Until a project says otherwise the export
 // takes the editor's Preferences (the way it always has); the switch at the top
 // is what makes the rows below the project's word instead.
@@ -793,128 +794,7 @@ void drawRenderDefaultsPage(AppContext& ctx)
 }
 
 // ─── Project ▸ Source Control ────────────────────────────────────────────────
-// The project's repository. Git itself and the signed-in account are Preferences
-// ▸ Source Control (this machine); init, remote and large files are this
-// project's, so they are here.
-void drawSourceControlPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Source Control");
-	hint("The repository of the open project: whether it has one, where it pushes, "
-	     "and which files go through Git LFS. Git on this machine and the GitHub "
-	     "account are in Preferences \xe2\x96\xb8 Source Control.");
-	ImGui::Spacing();
-	if (!openProject(ctx)) return;
-	EditorSettingsPanel::DrawRepositorySection(ctx);
-}
-
-// ─── Rendering ▸ Quality / Post-Processing / Reflections & GI ───────────────
-// The project's graphics block over the editor's own rows: the widgets are the
-// ones Preferences draws, bound to a scratch copy of the config that starts as
-// the project's values; whatever the edit changed is captured back into the
-// block and written through when no control is being dragged any more.
-void drawGraphicsPage(AppContext& ctx, EditorGraphics::RowSet rows)
-{
-	HE::Ed::Help::Scope helpScope("Project Graphics");
-	ProjectData* pp = openProject(ctx);
-	if (!pp) return;
-	ProjectData& p = *pp;
-	HE::ProjectGraphics& g = p.settings.graphics;
-
-	settingsFileHint(nullptr);
-
-	bool commit = false;
-	bool on = g.enabled;
-	if (EditorWidgets::checkbox("This project sets its own graphics", &on))
-	{
-		// Switching on starts from what the editor shows now, so nothing jumps.
-		if (on) EditorGraphics::capture(ctx.editorConfig, g);
-		g.enabled = on;
-		commit = true;
-	}
-	hint("Off, the exported build ships the graphics of whoever exports it, and the "
-	     "viewport previews with your own values (Preferences \xe2\x96\xb8 Viewport "
-	     "Quality) \xe2\x80\x94 the way every project worked so far.\n"
-	     "On, the rows below are the project's answer: they go into the build, and "
-	     "the viewport previews with them unless you chose to use your own values.");
-	ImGui::Spacing();
-
-	EditorConfig scratch = ctx.editorConfig;
-	if (g.enabled) EditorGraphics::apply(g, scratch);
-	const EditorConfig before = scratch;
-
-	ImGui::BeginDisabled(!g.enabled);
-	EditorSettingsPanel::DrawOptions o;
-	o.rows     = rows.keys;
-	o.rowCount = rows.count;
-	o.config   = &scratch;
-	EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Project, o);
-	ImGui::EndDisabled();
-
-	static bool s_dirty = false;
-	if (g.enabled && !EditorGraphics::same(before, scratch))
-	{
-		EditorGraphics::capture(scratch, g);
-		s_dirty = true;
-	}
-	// A drag changes the block every frame; the file is written once, when the
-	// hand lets go.
-	if (s_dirty && !ImGui::IsAnyItemActive())
-	{
-		s_dirty = false;
-		commit = true;
-	}
-	if (commit) commitSettings(ctx, p, "graphics settings");
-}
-
-void drawQualityPage(AppContext& ctx)         { drawGraphicsPage(ctx, EditorGraphics::qualityRows()); }
-void drawPostProcessingPage(AppContext& ctx)  { drawGraphicsPage(ctx, EditorGraphics::postProcessingRows()); }
-void drawReflectionsPage(AppContext& ctx)     { drawGraphicsPage(ctx, EditorGraphics::reflectionsAndGiRows()); }
-
-// ─── Input ───────────────────────────────────────────────────────────────────
-// The gamepad deadzones the game uses. The editor has its own (Preferences ▸
-// Viewport); the project's apply to the game in play mode and in the export.
-void drawInputPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Input");
-	ProjectData* pp = openProject(ctx);
-	if (!pp) return;
-	ProjectData& p = *pp;
-	HE::ProjectInputSettings& in = p.settings.input;
-
-	settingsFileHint(nullptr);
-
-	bool commit = false;
-	if (EditorWidgets::checkbox("This project sets its own deadzones", &in.enabled))
-	{
-		if (in.enabled)
-		{
-			in.stickDeadzone   = ctx.editorConfig.GamepadStickDeadzone;
-			in.triggerDeadzone = ctx.editorConfig.GamepadTriggerDeadzone;
-		}
-		commit = true;
-	}
-	hint("Off, the game uses the deadzones of the machine it runs on: your Preferences "
-	     "in the editor, the defaults in an exported build.\n"
-	     "On, play mode and the exported game both use the values below, so what "
-	     "you tuned is what ships.");
-	ImGui::Spacing();
-
-	ImGui::BeginDisabled(!in.enabled);
-	ImGui::SeparatorText("Gamepad");
-	Row::sliderFloat("Stick Deadzone##projstick", &in.stickDeadzone, 0.0f,
-	                 HE::ProjectInputSettings::kMaxDeadzone, "%.2f");
-	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	Row::sliderFloat("Trigger Deadzone##projtrigger", &in.triggerDeadzone, 0.0f,
-	                 HE::ProjectInputSettings::kMaxDeadzone, "%.2f");
-	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	hint("Radial deadzone: stick drift below this deflection reads as exactly zero, "
-	     "and intensity re-scales from the edge so full tilt still reaches 1.");
-	ImGui::EndDisabled();
-
-	if (commit) commitSettings(ctx, p, "input settings");
-}
-
-// ─── Rendering ▸ Shadows ─────────────────────────────────────────────────────
+// ─── World ▸ Shadows ─────────────────────────────────────────────────────
 // The directional light's cascaded shadow maps. The defaults are the constants
 // the extractor has always used, so a project that never opens this page draws
 // exactly what it drew.
@@ -1423,147 +1303,191 @@ void drawAudioBusesPage(AppContext& ctx)
 	EditorWidgets::helpForLabel("Open Audio Mixer");
 }
 
-// ─── Navigation + page plumbing ──────────────────────────────────────────────
+} // namespace
 
-struct NavItem  { Page page; const char* label; };
-struct NavGroup { const char* label; const NavItem* items; int count; };
+// ─── Page table ──────────────────────────────────────────────────────────────
 
-constexpr NavItem kProjectItems[] = {
-	{ Page::General,       "General" },
-	{ Page::Application,   "Application" },
-	{ Page::SourceControl, "Source Control" },
-	{ Page::Permissions,   "Permissions" },
-	{ Page::Fonts,         "Fonts" },
-};
-constexpr NavItem kRenderingItems[] = {
-	{ Page::RenderDefaults, "Window & Backend" },
-	{ Page::Quality,        "Quality" },
-	{ Page::PostProcessing, "Post-Processing" },
-	{ Page::Reflections,    "Reflections & GI" },
-	{ Page::Shadows,        "Shadows" },
-};
-constexpr NavItem kInputItems[] = {
-	{ Page::Input, "Gamepad" },
-};
-constexpr NavItem kPhysicsItems[] = {
-	{ Page::Simulation,      "Simulation" },
-	{ Page::CollisionLayers, "Collision Layers" },
-};
-constexpr NavItem kAudioItems[] = {
-	{ Page::AudioBuses, "Buses" },
-};
-constexpr NavItem kOnlineItems[] = {
-	{ Page::AntiCheat,   "Anti-Cheat" },
-	{ Page::Multiplayer, "Multiplayer" },
-};
-constexpr NavGroup kNavGroups[] = {
-	{ "Project",   kProjectItems,   IM_ARRAYSIZE(kProjectItems) },
-	{ "Rendering", kRenderingItems, IM_ARRAYSIZE(kRenderingItems) },
-	{ "Input",     kInputItems,     IM_ARRAYSIZE(kInputItems) },
-	{ "Physics",   kPhysicsItems,   IM_ARRAYSIZE(kPhysicsItems) },
-	{ "Audio",     kAudioItems,     IM_ARRAYSIZE(kAudioItems) },
-	{ "Online",    kOnlineItems,    IM_ARRAYSIZE(kOnlineItems) },
-};
-
-const char* pageTitle(Page p)
+const char* pageTitle(Page page)
 {
-	for (const NavGroup& g : kNavGroups)
-		for (int i = 0; i < g.count; ++i)
-			if (g.items[i].page == p) return g.items[i].label;
+	switch (page)
+	{
+	case Page::General:         return "General";
+	case Page::Application:     return "Application";
+	case Page::RenderDefaults:  return "Game Window";
+	case Page::Fonts:           return "Fonts";
+	case Page::Permissions:     return "Permissions";
+	case Page::Shadows:         return "Shadows";
+	case Page::Simulation:      return "Simulation";
+	case Page::CollisionLayers: return "Collision Layers";
+	case Page::AudioBuses:      return "Audio Buses";
+	case Page::AntiCheat:       return "Anti-Cheat";
+	case Page::Multiplayer:     return "Multiplayer";
+	}
 	return "";
 }
 
-} // namespace
-
-// ─── The Project Settings tab ────────────────────────────────────────────────
-
-void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
+void drawPage(AppContext& ctx, Page page)
 {
-	ImGui::SetNextWindowPos(pos);
-	ImGui::SetNextWindowSize(size);
-	ImGui::Begin("##ProjectSettingsTab", nullptr,
-		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-		ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
-
-	// ── Left: category rail — the Preferences rail, so the two tabs read as
-	// the same kind of thing ───────────────────────────────────────────────
-	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.09f, 0.095f, 1.0f));
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 12.0f));
-	ImGui::BeginChild("##projnav", ImVec2(210.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
-	                  ImGuiWindowFlags_NoScrollbar);
-	ImGui::PopStyleVar();
-	for (const NavGroup& group : kNavGroups)
-	{
-		if (&group != &kNavGroups[0]) { ImGui::Spacing(); ImGui::Spacing(); }
-		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-		ImGui::TextDisabled("%s", group.label);
-		if (ctx.fontSubheading) ImGui::PopFont();
-		ImGui::Spacing();
-		for (int i = 0; i < group.count; ++i)
-		{
-			const NavItem& item = group.items[i];
-			const bool active = s_page == item.page;
-			ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
-			ImGui::Indent(6.0f);
-			if (ImGui::Selectable(item.label, active, 0,
-			                      ImVec2(0.0f, ImGui::GetFrameHeight())))
-				s_page = item.page;
-			if (active)
-			{
-				const ImVec2 mn = ImGui::GetItemRectMin();
-				const ImVec2 mx = ImGui::GetItemRectMax();
-				ImGui::GetWindowDrawList()->AddRectFilled(
-					ImVec2(mn.x - 6.0f, mn.y + 3.0f), ImVec2(mn.x - 3.0f, mx.y - 3.0f),
-					HE::Ed::Theme::u32(HE::Ed::Theme::AccentHi), 2.0f);
-			}
-			ImGui::Unindent(6.0f);
-			ImGui::PopStyleVar();
-		}
-	}
-	ImGui::EndChild();
-	ImGui::PopStyleColor();
-
-	ImGui::SameLine();
-
-	// ── Right: the selected page ─────────────────────────────────────────────
-	ImGui::BeginChild("##projcontent", ImVec2(0.0f, 0.0f));
-
-	if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
-	ImGui::TextUnformatted(pageTitle(s_page));
-	if (ctx.fontHeading) ImGui::PopFont();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	const float footerH = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
-	ImGui::BeginChild("##projbody", ImVec2(0.0f, -footerH));
-	switch (s_page)
+	switch (page)
 	{
 	case Page::General:         drawGeneralPage(ctx);         break;
 	case Page::Application:     drawApplicationPage(ctx);     break;
-	case Page::SourceControl:   drawSourceControlPage(ctx);   break;
-	case Page::Permissions:     drawPermissionsPage(ctx);     break;
-	case Page::Fonts:           drawFontsPage(ctx);           break;
-	case Page::AntiCheat:       drawAntiCheatPage(ctx);       break;
-	case Page::Multiplayer:     drawMultiplayerPage(ctx);     break;
 	case Page::RenderDefaults:  drawRenderDefaultsPage(ctx);  break;
-	case Page::Quality:         drawQualityPage(ctx);         break;
-	case Page::PostProcessing:  drawPostProcessingPage(ctx);  break;
-	case Page::Reflections:     drawReflectionsPage(ctx);     break;
+	case Page::Fonts:           drawFontsPage(ctx);           break;
+	case Page::Permissions:     drawPermissionsPage(ctx);     break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
-	case Page::Input:           drawInputPage(ctx);           break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;
 	case Page::CollisionLayers: drawCollisionLayersPage(ctx); break;
 	case Page::AudioBuses:      drawAudioBusesPage(ctx);      break;
+	case Page::AntiCheat:       drawAntiCheatPage(ctx);       break;
+	case Page::Multiplayer:     drawMultiplayerPage(ctx);     break;
 	}
-	ImGui::EndChild();
+}
 
-	// ── Footer ───────────────────────────────────────────────────────────────
-	ImGui::Separator();
-	ImGui::TextDisabled("Project settings are saved the moment an edit ends.");
+// ─── Preferences ▸ Graphics ──────────────────────────────────────────────────
+// One set of rows. With no project open they are the editor's own values. With
+// one open, the checkbox at the top says whose they are: the editor's (what the
+// viewport previews with and an export ships when the project says nothing) or
+// the project's (they go into the build, and the viewport previews with them).
+// The widgets are the catalogue's own, bound to a scratch copy of the config
+// that starts as the project's values; whatever the edit changed is captured
+// back into the block and written through when no control is being dragged any
+// more.
+void drawGraphics(AppContext& ctx, const char* const* keys, int keyCount)
+{
+	EditorSettingsPanel::DrawOptions o;
+	o.rows     = keys;
+	o.rowCount = keyCount;
 
-	ImGui::EndChild();
-	ImGui::End();
+	ProjectData* pp = (ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
+		? &ctx.projectManager->currentProject() : nullptr;
+	if (!pp)
+	{
+		hint("Your own graphics values: what the viewport shows. A project can set "
+		     "its own once one is open.");
+		ImGui::Spacing();
+		EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Preferences, o);
+		return;
+	}
+	ProjectData& p = *pp;
+	HE::ProjectGraphics& g = p.settings.graphics;
+
+	bool commit = false;
+	{
+		HE::Ed::Help::Scope helpScope("Project Graphics");
+		bool on = g.enabled;
+		if (EditorWidgets::checkbox("This project sets its own graphics", &on))
+		{
+			// Switching on starts from what the editor shows now, so nothing jumps.
+			if (on) EditorGraphics::capture(ctx.editorConfig, g);
+			g.enabled = on;
+			commit = true;
+		}
+		hint("Off, these are your own values: the viewport shows them and an exported "
+		     "build ships the graphics of whoever exports it.\n"
+		     "On, they are the project's answer, saved in Config/ProjectSettings.json: "
+		     "they go into the build and the viewport previews with them.");
+	}
+	ImGui::Spacing();
+
+	if (!g.enabled)
+	{
+		if (commit) commitSettings(ctx, p, "graphics settings");
+		EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Preferences, o);
+		return;
+	}
+
+	EditorConfig scratch = ctx.editorConfig;
+	EditorGraphics::apply(g, scratch);
+	const EditorConfig before = scratch;
+
+	o.config = &scratch;
+	EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Project, o);
+
+	static bool s_dirty = false;
+	if (!EditorGraphics::same(before, scratch))
+	{
+		EditorGraphics::capture(scratch, g);
+		s_dirty = true;
+	}
+	// A drag changes the block every frame; the file is written once, when the
+	// hand lets go.
+	if (s_dirty && !ImGui::IsAnyItemActive())
+	{
+		s_dirty = false;
+		commit = true;
+	}
+	if (commit) commitSettings(ctx, p, "graphics settings");
+}
+
+// ─── Preferences ▸ Input: gamepad ────────────────────────────────────────────
+// The deadzones the game uses, bound like the graphics rows: the editor's own
+// until the project sets its own, which play mode and the export then use.
+void drawGamepad(AppContext& ctx)
+{
+	static const char* const kRows[] = { "gamepad" };
+	EditorSettingsPanel::DrawOptions o;
+	o.rows     = kRows;
+	o.rowCount = 1;
+
+	ProjectData* pp = (ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
+		? &ctx.projectManager->currentProject() : nullptr;
+	if (!pp)
+	{
+		EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Preferences, o);
+		return;
+	}
+	ProjectData& p = *pp;
+	HE::ProjectInputSettings& in = p.settings.input;
+
+	bool commit = false;
+	{
+		HE::Ed::Help::Scope helpScope("Input");
+		if (EditorWidgets::checkbox("This project sets its own deadzones", &in.enabled))
+		{
+			if (in.enabled)
+			{
+				in.stickDeadzone   = ctx.editorConfig.GamepadStickDeadzone;
+				in.triggerDeadzone = ctx.editorConfig.GamepadTriggerDeadzone;
+			}
+			commit = true;
+		}
+		hint("Off, the game uses the deadzones of the machine it runs on: these values "
+		     "in the editor, the defaults in an exported build.\n"
+		     "On, the rows below are the project's: play mode and the exported game "
+		     "both use them, so what you tuned is what ships.");
+	}
+	ImGui::Spacing();
+
+	if (!in.enabled)
+	{
+		if (commit) commitSettings(ctx, p, "input settings");
+		EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Preferences, o);
+		return;
+	}
+
+	EditorConfig scratch = ctx.editorConfig;
+	scratch.GamepadStickDeadzone   = in.stickDeadzone;
+	scratch.GamepadTriggerDeadzone = in.triggerDeadzone;
+	const float stickBefore   = scratch.GamepadStickDeadzone;
+	const float triggerBefore = scratch.GamepadTriggerDeadzone;
+
+	o.config = &scratch;
+	EditorSettingsPanel::DrawEngineSettings(ctx, EditorSettingsPanel::SettingsMode::Project, o);
+
+	static bool s_dirty = false;
+	if (scratch.GamepadStickDeadzone != stickBefore || scratch.GamepadTriggerDeadzone != triggerBefore)
+	{
+		in.stickDeadzone   = scratch.GamepadStickDeadzone;
+		in.triggerDeadzone = scratch.GamepadTriggerDeadzone;
+		s_dirty = true;
+	}
+	if (s_dirty && !ImGui::IsAnyItemActive())
+	{
+		s_dirty = false;
+		commit = true;
+	}
+	if (commit) commitSettings(ctx, p, "input settings");
 }
 #endif // HE_IMGUI_ENABLED
 

@@ -762,6 +762,101 @@ TEST_CASE("Live sync: a HorizonCode graph edit reaches the peer node by node")
     CHECK(client.beginAssetEdit(asset));
 }
 
+// EditorApplication::updateAssetCollabSync's content-asset branch (the one for
+// a class/widget HorizonCode graph, not the Level Script / GameInstance one)
+// runs, per open tab, in this order every frame: diff-and-maybe-send, then (if
+// the tab is dirty) claim the lock, then — once owned — the collab autosave,
+// which clears the tab's dirty flag. CollabSession::requestLock self-grants on
+// the HOST with no round trip, so the claim can land in the SAME frame as the
+// edit that asked for it, after the diff above already ran with owned still
+// false. Without a second diff right after the claim, the autosave clears
+// dirty before the NEXT frame's diff ever sees owned==true and dirty==true
+// together, and the edit that claimed the lock never goes out as a delta — on
+// the host only: a client's grant is always at least one round trip (a frame)
+// later, so its dirty flag is still set the first time its own diff sees
+// owned==true.
+//
+// EditorApplication.cpp is not linked into he_tests (see its own audit,
+// docs/collab-sync-audit-horizoncode-2026-10-14.md), so `frame()` below
+// reproduces its exact per-tab order by hand instead of calling it.
+TEST_CASE("Live sync: the host's edit on a freshly claimed lock reaches the client")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/Scripts/Door.hasset";
+
+    HorizonCode::Graph hostGraph, clientGraph;
+    CollabDocSync::DocMirror hostMirror, clientMirror;
+
+    client.onRemoteDocDeltas([&](const std::string& p,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        REQUIRE(p == asset);
+        auto doc = CollabDocSync::forHorizonCodeGraph(clientGraph);
+        CollabDocSync::applyDeltas(*doc, clientMirror, CollabDocSync::Scope::Primary, b);
+    });
+
+    host.beginAssetEditSession(asset);
+    client.beginAssetEditSession(asset);
+    using EditState = CollabController::AssetEditState;
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.assetEditState(asset)   == EditState::Editable &&
+               client.assetEditState(asset) == EditState::Editable;
+    }));
+
+    // Both tabs are open and watching before either edits — the "already open
+    // graph tab" the step asks for — seeded from the same (empty) content,
+    // same as EditorApplication's watching branch.
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(hostGraph),   hostMirror,
+                        CollabDocSync::Scope::Primary);
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(clientGraph), clientMirror,
+                        CollabDocSync::Scope::Primary);
+
+    // One frame of the content-asset branch for the host's tab, in its real
+    // order: diff while maybe not yet owning the lock, claim if the tab is
+    // dirty, diff AGAIN if the claim landed just now (the fix), then the
+    // autosave that clears dirty.
+    auto diffAndMaybeSend = [&](bool owned, bool dirty) {
+        if (owned && !dirty) return;
+        auto doc = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        std::vector<HE::Net::CollabSession::DocDelta> batch;
+        if (owned) CollabDocSync::diffInto(*doc, hostMirror, CollabDocSync::Scope::Primary, batch);
+        else if (!hostMirror.seeded) CollabDocSync::seed(*doc, hostMirror, CollabDocSync::Scope::Primary);
+        if (batch.empty()) return;
+        host.publishDocDeltas(asset, batch);
+    };
+
+    // Anna (the host) makes ONE edit on her already-open, still-unclaimed tab.
+    HorizonCode::Node ev; ev.type = HorizonCode::NodeType::Event; ev.s = "OnUse";
+    hostGraph.addNode(ev);
+    bool dirty = true;
+
+    const bool ownedBefore = host.ownsAssetLock(asset);
+    diffAndMaybeSend(ownedBefore, dirty);
+    REQUIRE(dirty);
+    REQUIRE(host.beginAssetEdit(asset));
+    REQUIRE(host.ownsAssetLock(asset));
+    if (!ownedBefore) diffAndMaybeSend(true, dirty);   // the fix
+    dirty = false;                                     // the collab autosave, same frame
+
+    REQUIRE(pumpUntil(host, client, [&] { return clientGraph.nodes.size() == 1; }));
+    CHECK(HorizonCode::toJson(clientGraph) == HorizonCode::toJson(hostGraph));
+}
+
 TEST_CASE("Live sync: the level script and the GameInstance graph travel like any document")
 {
     // Neither is a file under Content: the level script lives in the world (it
@@ -1337,7 +1432,7 @@ TEST_CASE("Reimport: refused while somebody else is holding the asset")
     CHECK(s.host.ownsAssetLock(asset));
 
     const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     // Naming the holder is what makes it actionable: the fix is to go and ask
     // Anna, not to click the menu item again.
     CHECK(n.text.find("Anna") != std::string::npos);
@@ -1476,7 +1571,7 @@ TEST_CASE("Collab: a denied request and an unanswered one both reach the user")
     REQUIRE(pumpUntil(s.host, s.client, [&] { return !notes.snapshot().empty(); }));
 
     const HE::Ed::Notification denied = findNote(notes, "Doomed.hasset");
-    CHECK(denied.level == HE::Ed::NoteLevel::Warning);
+    CHECK(denied.level == HE::Ed::NoteLevel::Important);
     CHECK(denied.text.find("did not approve") != std::string::npos);
 
     // And the other silence: an ask that was never answered at all. The session
@@ -1491,14 +1586,14 @@ TEST_CASE("Collab: a denied request and an unanswered one both reach the user")
 
     s.client.leave();
     const HE::Ed::Notification stranded = findNote(notes, "Forgotten.hasset");
-    CHECK(stranded.level == HE::Ed::NoteLevel::Warning);
+    CHECK(stranded.level == HE::Ed::NoteLevel::Important);
     CHECK(stranded.text.find("Nobody answered") != std::string::npos);
 
     // The host had a decision in front of it that it never made, and its queue
     // has just emptied itself — said once, with a count.
     s.host.leave();
     const HE::Ed::Notification unmade = findNote(hostNotes, "still waiting");
-    CHECK(unmade.level == HE::Ed::NoteLevel::Warning);
+    CHECK(unmade.level == HE::Ed::NoteLevel::Important);
 }
 
 TEST_CASE("Collab: a delete that did not happen here stops being silent")
@@ -1529,7 +1624,7 @@ TEST_CASE("Collab: a delete that did not happen here stops being silent")
     REQUIRE(pumpUntil(s.host, s.client, [&] { return !notes.snapshot().empty(); }));
 
     const HE::Ed::Notification n = findNote(notes, "Stubborn.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("still here") != std::string::npos);
     // The row points at something the user can actually open.
     CHECK(n.assetPath == file.string());
@@ -2336,7 +2431,7 @@ TEST_CASE("Transfer ceiling: a file over this machine's limit is not sent, and t
 
     CHECK_FALSE(bytesArrived);
     const HE::Ed::Notification n = findNote(hostNotes, "Marble.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("was not sent") != std::string::npos);
     // The three things a reader needs and cannot work out: how big it was, what
     // the limit is, and where that limit is changed. Without the last one this is
@@ -2384,7 +2479,7 @@ TEST_CASE("Transfer ceiling: the receiving machine refuses a file its sender was
     // and the notice has to say so, or the reader assumes a partial one landed.
     CHECK_FALSE(bytesArrived);
     const HE::Ed::Notification n = findNote(clientNotes, "Granite.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("Anna") != std::string::npos);          // who sent it
     CHECK(n.text.find("refused") != std::string::npos);
     CHECK(n.detail.find("their limit is higher") != std::string::npos);
@@ -2430,7 +2525,7 @@ TEST_CASE("Transfer ceiling: the sender is told when the far end would not take 
 
     CHECK_FALSE(bytesArrived);
     const HE::Ed::Notification n = findNote(clientNotes, "Basalt.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("Anna") != std::string::npos);           // who refused it
     CHECK(n.text.find("could not accept") != std::string::npos);
     CHECK(n.detail.find("2 MB") != std::string::npos);          // how big it was
@@ -2507,7 +2602,7 @@ TEST_CASE("Transfer ceiling: a third editor's refusal is carried back through th
     CHECK(caraGot == 0);
 
     const HE::Ed::Notification n = findNote(bobNotes, "Slate.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     // Named, and named correctly: the refusal came from Cara and was merely
     // carried by Anna. A message that blamed the messenger would send Bob to ask
     // the wrong person to change a setting.
@@ -2523,7 +2618,7 @@ TEST_CASE("Transfer ceiling: a third editor's refusal is carried back through th
     // Cara still gets her own side of it: her machine refused a file, and that is
     // a different sentence with a different fix from the one Bob is reading.
     const HE::Ed::Notification c = findNote(caraNotes, "Slate.hasset");
-    CHECK(c.level == HE::Ed::NoteLevel::Problem);
+    CHECK(c.level == HE::Ed::NoteLevel::Important);
     CHECK(c.text.find("refused") != std::string::npos);
 
     // And exactly one notice each: a refusal that could be refused in turn, or
@@ -2575,7 +2670,7 @@ TEST_CASE("Transfer ceiling: a refused CREATE is settled by the refusal, not lef
     REQUIRE(pumpUntil(s.host, s.client, [&] { return !clientNotes.snapshot().empty(); }));
 
     const HE::Ed::Notification n = findNote(clientNotes, "Fresh.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     // A create, so the clause about what they are left holding is the other one:
     // there is no older version over there to fall back on.
     CHECK(n.detail.find("does not exist at all") != std::string::npos);
@@ -2687,7 +2782,7 @@ TEST_CASE("Transfer ceiling: a PEER's refusal is not a verdict, so a pending cre
     CHECK(s.client.debugHasPendingCreate(key));
 
     // Told about it, though — the notification is the honest half and stays.
-    CHECK(findNote(clientNotes, "Peer.hasset").level == HE::Ed::NoteLevel::Problem);
+    CHECK(findNote(clientNotes, "Peer.hasset").level == HE::Ed::NoteLevel::Important);
 
     s.client.leave();
     s.host.leave();
@@ -2879,7 +2974,7 @@ TEST_CASE("Reimport: a claim that lost the race says so instead of diverging qui
     // A Problem, because two copies of that file may now differ and nothing else
     // in the editor will ever mention it — and it names who took it, because the
     // only way out is to go and ask them.
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.text.find("Anna") != std::string::npos);
     CHECK(n.text.find("reimported") != std::string::npos);
 
@@ -2956,7 +3051,7 @@ TEST_CASE("Notifications: one peer's flood is capped and summarised, another's i
     // summary becomes the flood it replaced.
     CHECK(summaryRows == 1);
     const HE::Ed::Notification summary = findNote(notes, "more messages than");
-    CHECK(summary.level == HE::Ed::NoteLevel::Warning);
+    CHECK(summary.level == HE::Ed::NoteLevel::Important);
     CHECK(summary.text.find("Anna") != std::string::npos);
 
     // Somebody else, in the same breath. The budget is per bucket for exactly
@@ -3031,7 +3126,7 @@ TEST_CASE("Notifications: what the user did themselves is never rate-limited")
     // it counted every single one. A throttled message would have stopped
     // counting at the budget.
     const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
-    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.level == HE::Ed::NoteLevel::Important);
     CHECK(n.count == tries);
     // And no summary row, because nothing was dropped. The needle has to be the
     // one the limiter actually writes: this said "was not shown", which was the
@@ -3852,6 +3947,10 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
             const HE::Net::LockInfo* l = anna.lockFor(subject);
             return l && l->owner == bob.localParticipant();
         }, 600000));
+        // Anna seeing the lock is not Bob knowing he holds it: publishTransform
+        // drops every send until his own table has the grant, and the five sends
+        // below are not retried (red on macOS CI, where the grant arrived later).
+        REQUIRE(tickUntil([&] { return bob.ownsLock(subject); }, 600000));
 
         // Bob drags the crate. Anna applies it, so the scene is the session's
         // change to keep. Bob keeps the crate selected (and locked) afterwards:
@@ -3884,4 +3983,239 @@ TEST_CASE("Settle: a client's save and a quiet scene reach the host's keep step"
     CHECK(keptOnBob.empty());
     bob.leave();
     anna.leave();
+}
+
+// ─── A failed session is a dialog, not a line of red text ────────────────────
+// The Collaboration window prints lastError() in small red text — in a window that
+// is closed exactly when a dropped link matters. A failure now also arrives as a
+// Critical notification (a modal), once, with the way forward on it, and is
+// withdrawn when the failure is over.
+
+TEST_CASE("Collab failure: a refused join is one Critical notification with Try again")
+{
+    CollabController host;   // deliberately no world set: it refuses every join
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    HE::Ed::NotificationStore notes;
+    client.setNotifications(&notes);
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Failed;
+    }));
+    // The announcement is made by the next frame's update(), whichever code set
+    // the failure.
+    client.update(1'000'000);
+    client.update(1'000'016);
+
+    HE::Ed::Notification n;
+    REQUIRE(notes.nextModal(n));
+    CHECK(n.level == HE::Ed::NoteLevel::Critical);
+    CHECK(n.title == "Could not join the session");
+    CHECK(n.text == client.lastError());
+    REQUIRE(n.actions.size() == 1);
+    CHECK(n.actions[0].label == "Try again");
+    CHECK(n.actions[0].primary);
+    // Once per failure: more frames do not stack more dialogs.
+    client.update(1'000'032);
+    CHECK(notes.snapshot().size() == 1);
+
+    // Dismissing it (Leave) ends the failure, and the buttons go with it.
+    client.leave();
+    client.update(1'000'048);
+    CHECK_FALSE(notes.nextModal(n));
+    const auto rows = notes.snapshot();
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].handled);
+    CHECK(rows[0].actions.empty());
+
+    host.leave();
+}
+
+TEST_CASE("Collab failure: the large-assets question is announced without a retry button")
+{
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/true));
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.largeAssetsPrompt(); }));
+    s.client.update(2'000'000);
+
+    HE::Ed::Notification n;
+    REQUIRE(notes.nextModal(n));
+    // Retrying with the same answer would be refused identically; the panel's own
+    // dialog is the answer to this one.
+    CHECK(n.actions.empty());
+    CHECK(n.text.find("considerably more data") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+}
+
+// ─── Audit 220 step 4: the net-id table and the structure gate ───────────────
+// EDT-202: m_netIds was a vector searched linearly, so seeding a world was
+// quadratic and every per-frame lookup grew with the scene. Now two maps and a
+// cache of misses keyed on the world's entityIdRevision. EDT-402/1601: the
+// structure diff runs when the world's structure epoch moved, while something
+// waits for a retry, or once a second.
+
+TEST_CASE("Net ids: a seeded world resolves every entity both ways")
+{
+    HorizonWorld world;
+    std::vector<Entity> made;
+    made.reserve(20000);
+    for (int i = 0; i < 20000; ++i) made.push_back(world.createEntity("E"));
+
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    std::size_t both = 0;
+    for (const Entity e : made)
+    {
+        const auto handle = static_cast<std::uint32_t>(entt::to_integral(e));
+        const std::uint64_t net = c.netIdFor(handle);
+        REQUIRE(net != 0);
+        // The wire id is the uuid's low half, top bit cleared — the same value
+        // every peer derives from its own copy.
+        CHECK(net == (world.entityId(e).lo & ~(1ull << 63)));
+        if (c.entityForNetId(net) == handle) ++both;
+    }
+    CHECK(both == made.size());
+}
+
+TEST_CASE("Net ids: an id nobody has is not found until an entity takes it")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Late");
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    // A peer's selection of something this machine does not have (yet).
+    const HE::UUID theirs{ 0x1234, 0x0000'0000'00C0'FFEEull };
+    const std::uint64_t net = theirs.lo & ~(1ull << 63);
+    CHECK(c.entityForNetId(net) == 0);
+    CHECK(c.entityForNetId(net) == 0);   // the cached miss answers the same
+
+    // The entity arrives (a create from that peer, a load): setEntityId goes
+    // through the registry's signals, the world's id revision moves, and the
+    // cached miss must not outlive it.
+    world.setEntityId(e, theirs);
+    CHECK(c.entityForNetId(net) == static_cast<std::uint32_t>(entt::to_integral(e)));
+}
+
+TEST_CASE("Net ids: a cached miss also yields to a raw emplace of the id")
+{
+    HorizonWorld world;
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    const HE::UUID id{ 7, 0x0000'0000'0000'BEEFull };
+    const std::uint64_t net = id.lo;
+    CHECK(c.entityForNetId(net) == 0);
+    // Not through createEntity/setEntityId: a raw create plus emplace, the way
+    // a deserializer or a test might. The id signal still fires.
+    auto& reg = world.registry();
+    const Entity raw = reg.create();
+    reg.emplace<EntityIdComponent>(raw, EntityIdComponent{ id });
+    CHECK(c.entityForNetId(net) == static_cast<std::uint32_t>(entt::to_integral(raw)));
+}
+
+TEST_CASE("Net ids: forgetting an id drops it both ways, and a recycled handle gets its own")
+{
+    HorizonWorld world;
+    const Entity a = world.createEntity("A");
+    CollabController c;
+    c.setWorld(&world);
+    c.seedNetIds();
+
+    const auto ha = static_cast<std::uint32_t>(entt::to_integral(a));
+    const std::uint64_t na = c.netIdFor(ha);
+    REQUIRE(c.entityForNetId(na) == ha);
+
+    world.destroyEntity(a);
+    c.forgetNetId(na);
+    CHECK(c.entityForNetId(na) == 0);
+    // The destroyed handle is not answered from the cache any more either.
+    CHECK(c.netIdFor(ha) == 0);
+
+    const Entity b = world.createEntity("B");   // reuses A's slot, new version
+    const auto hb = static_cast<std::uint32_t>(entt::to_integral(b));
+    const std::uint64_t nb = c.netIdFor(hb);
+    CHECK(nb != 0);
+    CHECK(nb != na);
+    CHECK(c.entityForNetId(nb) == hb);
+    CHECK(c.entityForNetId(na) == 0);
+}
+
+TEST_CASE("Structure gate: a fresh gate runs, an unchanged world does not")
+{
+    HorizonWorld world;
+    HE::Ed::StructPassGate gate;
+    std::uint64_t now = 5000;
+    REQUIRE(gate.due(world.structureEpoch(), false, now));
+    gate.ran(world.structureEpoch(), now);
+
+    // Sixty quiet frames: not one pass.
+    int passes = 0;
+    for (int f = 0; f < 60; ++f)
+    {
+        now += 16;
+        if (gate.due(world.structureEpoch(), false, now)) { ++passes; gate.ran(world.structureEpoch(), now); }
+    }
+    CHECK(passes == 0);
+}
+
+TEST_CASE("Structure gate: create, destroy, re-parent and sibling order each wake it")
+{
+    HorizonWorld world;
+    const Entity a = world.createEntity("A");
+    const Entity b = world.createEntity("B");
+    world.createEntity("S1");
+    const Entity s2 = world.createEntity("S2");
+    HE::Ed::StructPassGate gate;
+    const std::uint64_t now = 1000;
+    gate.ran(world.structureEpoch(), now);
+
+    const auto wakes = [&](auto&& change) {
+        change();
+        const bool due = gate.due(world.structureEpoch(), false, now + 16);
+        gate.ran(world.structureEpoch(), now + 16);
+        return due;
+    };
+    CHECK(wakes([&] { world.createEntity("C"); }));
+    CHECK(wakes([&] { REQUIRE(world.reparentEntity(b, a)); }));
+    CHECK(wakes([&] { REQUIRE(world.moveChild(s2, -1)); }));
+    CHECK(wakes([&] { world.destroyEntity(b); }));
+    CHECK(wakes([&] { world.clear(); }));
+    // And nothing more after the last one was seen.
+    CHECK_FALSE(gate.due(world.structureEpoch(), false, now + 32));
+}
+
+TEST_CASE("Structure gate: pending retries run every frame, the fallback once a second")
+{
+    HorizonWorld world;
+    HE::Ed::StructPassGate gate;
+    gate.ran(world.structureEpoch(), 1000);
+
+    // A create, re-parent or destroy waiting for a retry: kSendRetryFrames
+    // counts passes, so the pass has to keep running per frame.
+    CHECK(gate.due(world.structureEpoch(), /*pendingWork=*/true, 1016));
+
+    // What the epoch cannot see — a raw registry().create() — is the
+    // fallback's: not before the interval, and surely after it.
+    world.registry().create();
+    CHECK_FALSE(gate.due(world.structureEpoch(), false, 1000 + HE::Ed::StructPassGate::kFallbackMs - 1));
+    CHECK(gate.due(world.structureEpoch(), false, 1000 + HE::Ed::StructPassGate::kFallbackMs));
+
+    // A reset (session ended, world replaced) runs at once.
+    gate.reset();
+    CHECK(gate.due(world.structureEpoch(), false, 1001));
 }

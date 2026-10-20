@@ -81,7 +81,11 @@ public:
     const std::vector<ConnectionId>& connections() const { return m_connections; }
 
 private:
+    // [id low byte][id high byte][payload bytes]: the one place a frame is built.
+    // It does not depend on the recipient, so every multi-peer send builds it once.
     std::vector<std::uint8_t> frame(MessageId id, const BitWriter& payload) const;
+    void sendFrame(ConnectionId conn, MessageId id, const std::vector<std::uint8_t>& bytes,
+                   SendMode mode);
     void fanOut(const std::vector<ConnectionId>& to, MessageId id, const BitWriter& payload,
                 SendMode mode);
 

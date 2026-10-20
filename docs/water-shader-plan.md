@@ -230,11 +230,13 @@ zusammengehörige Paare = ein `ParamVec2`. Ein-/Aus-Schalter laufen über **Stat
 die keinen Slot kosten (sie erzeugen Shader-Permutationen, ein Ausschalten spart auch
 GPU-Zeit).
 
+> **Thema 206 Schritt 6:** `FresnelPower`/`Reflection`/`Roughness`/`Specular` (Zeilen 7 bis 10 unten) sind seitdem EIN Vec4 `Surface` (x/y/z/w in dieser Reihenfolge); dazu kommt `ShallowWater` (Uferflachwasser, siehe `docs/water-shallow-params-2026-10-20.md`). Die Tabelle unten ist der Stand vor Schritt 6.
+
 | # | Name (Param-Knoten) | Typ | Komponenten | Gruppe | braucht neuen Knoten? |
 |---|---|---|---|---|---|
 | 1 | `ShallowColor` Flachwasserfarbe | Color | rgb | Farbe | — |
 | 2 | `DeepColor` Tiefwasserfarbe | Color | rgb | Farbe | — |
-| 3 | `Turbidity` Trübung/Absorption | Vec2 | x = Absorption pro Meter, y = Tiefe (m) bis volle Tiefenfarbe | Farbe | SceneDepth |
+| 3 | `Turbidity` Trübung/Absorption | Vec2 (seit §14 Vec4) | x = Absorption pro Meter, y = Tiefe (m) bis volle Tiefenfarbe | Farbe | SceneDepth |
 | 4 | `WaveA` Wellenebene 1 | Vec4 | x = Richtung (Grad), y = Geschwindigkeit (m/s), z = Skalierung (Wellenlänge m), w = Stärke | Wellen | — |
 | 5 | `WaveB` Wellenebene 2 | Vec4 | wie WaveA | Wellen | — |
 | 6 | `WaveC` Wellenebene 3 (fein) | Vec4 | wie WaveA | Wellen | — |
@@ -279,7 +281,7 @@ Geprüft in `tests/test_engine_materials.cpp`. Abweichungen von der Tabelle oben
 | Name | Typ | Komponenten (wie gebaut) | Default |
 |---|---|---|---|
 | `ShallowColor` / `DeepColor` | Color | rgb | (0.10, 0.42, 0.45) / (0.01, 0.07, 0.12) |
-| `Turbidity` | Vec2 | x = Absorption pro m, y = **angenommene** Wassertiefe (m) | (0.35, 3.0) |
+| `Turbidity` | Vec2 (seit §14 Vec4) | x = Absorption pro m, y = **angenommene** Wassertiefe (m) | (0.35, 3.0) |
 | `WaveA/B/C` | Vec4 | x = Richtung (Grad, 0 = +X, 90 = +Z), y = Tempo (m/s), z = Wellenlänge (m), w = **Steilheit** (Höhe/Wellenlänge, die Normale sieht nur die Steigung) | (30, 1.2, 8, 0.25) / (310, 0.8, 3.5, 0.18) / (100, 0.5, 1.2, 0.12) |
 | `FresnelPower` | Float 1..10 | Exponent eines eigenen Fresnel aus der **Wellen**normale (der Fresnel-Knoten backt seinen Exponenten und liest `vNormal`) | 5 |
 | `Reflection` | Float 0..1 | hebt die Deckkraft mit Fresnel an und skaliert Specular (F0) | 0.8 |
@@ -669,7 +671,7 @@ Neue Defaults (alle 15 Knöpfe, Test-Tabelle `kWaterKnobs` ist nachgezogen):
 |---|---|---|
 | `ShallowColor` | 0.10, 0.42, 0.45 | 0.045, 0.20, 0.22 |
 | `DeepColor` | 0.01, 0.07, 0.12 | 0.004, 0.028, 0.052 |
-| `Turbidity` | 0.35, 3.0 | 0.45, 4.0 |
+| `Turbidity` | 0.35, 3.0 | 0.45, 4.0 (§14: dazu z = 0.35 Uferbreite, w = 0.7 Uferschaum, Vec4) |
 | `WaveA` | 30, 1.2, 8, 0.25 | 20, 1.0, 14, 0.07 |
 | `WaveB` | 310, 0.8, 3.5, 0.18 | 335, 0.8, 5, 0.10 |
 | `WaveC` | 100, 0.5, 1.2, 0.12 | 70, 0.5, 1.6, 0.09 |
@@ -867,3 +869,11 @@ womöglich noch nicht). CI auf dem Zweig: noch nicht gelaufen (Eintrag unten, we
 - Das Website-Handbuch (`HC-Website`, `materials.html#water`) kennt weder `Variation` noch die Defaults
   und das Bild von Schritt 7. Wer `build_docs_bundle.py` neu laufen lässt, ohne den Absatz „No
   repeating pattern" in der HTML nachzutragen, verliert ihn aus `he-docs.json`.
+
+## 13. Bestandsaufnahme Thema 206 (Ufer, Referenzbilder, Baseline)
+
+Ufer-Zickzack, Referenzbilder, Baseline-Screenshots und Plan für Wellen/Normalen/Transparenz: `docs/water-realistic-baseline-2026-10-20.md` (Handoff-Abschnitt).
+
+## 14. Weiches Ufer (Thema 206 Schritt 2)
+
+Tiefe je Eckpunkt im Mesh (Normale), Alpha-Rampe + Schaumsaum im Material, `Turbidity` hat jetzt zwei Komponenten mehr (z = Uferbreite in m, w = Uferschaum; Default `0.45, 4.0, 0.35, 0.7`): `docs/water-shore-soft-2026-10-20.md`.

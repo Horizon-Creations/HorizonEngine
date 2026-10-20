@@ -63,14 +63,6 @@ namespace TeamView
 		std::string oldPassword;
 		std::string changedPassword;
 
-		// Your profile: why the last picture could not be used.
-		std::string profileError;
-
-		// The controller's notices, newest last, so the window can say what
-		// happened to a press (a refusal arrives a few frames later).
-		std::vector<TeamController::Notice> recent;
-		static constexpr std::size_t kRecent = 6;
-
 		void wipeSecrets();
 	};
 
@@ -81,9 +73,11 @@ namespace TeamView
 	// "Signed in", "Connecting…", … — the status line both surfaces show.
 	const char* statusText(TeamController::Status s);
 
-	// Moves the controller's notices into form.recent (bounded). Called by
-	// drawPanel(); the Preferences page calls it too so a refused sign-in is
-	// explained where it was pressed.
+	// Empties the controller's notice queue. What it holds is also posted to the
+	// notification channel (TeamController::notice), which is where the user reads
+	// it — a refusal, an invitation, someone joining — so the window no longer lists
+	// it a second time. Called by drawPanel() and the Preferences page so the queue
+	// does not fill up behind a window nobody opens.
 	void collectNotices(TeamController& team, Form& form);
 
 	// Preferences ▸ Team: the server field (with the parse check under it) and

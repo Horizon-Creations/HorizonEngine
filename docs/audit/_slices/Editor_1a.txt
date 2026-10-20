@@ -1,0 +1,16 @@
+src/HE_Editor/AnimatorStateMachineEditorPanel.cpp
+src/HE_Editor/AnimatorStateMachineEditorPanel.h
+src/HE_Editor/AppMetadataRows.cpp
+src/HE_Editor/AppMetadataRows.h
+src/HE_Editor/AssetAutosave.cpp
+src/HE_Editor/AssetAutosave.h
+src/HE_Editor/AssetRecoveryDialog.cpp
+src/HE_Editor/AssetRecoveryDialog.h
+src/HE_Editor/AssetStubWriter.cpp
+src/HE_Editor/AssetStubWriter.h
+src/HE_Editor/AssetThumbnailCache.cpp
+src/HE_Editor/AssetThumbnailCache.h
+src/HE_Editor/AudioEditorPanel.cpp
+src/HE_Editor/AudioEditorPanel.h
+src/HE_Editor/AudioMixerPanel.cpp
+src/HE_Editor/AudioMixerPanel.h

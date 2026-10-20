@@ -1,4 +1,5 @@
 #include "GitCloneDialog.h"
+#include "NotificationStore.h"   // the clone result is a notification
 #include "EditorApplication.h"        // AppContext, GitController
 #include "EditorHelp.h"               // "Source Control/<label>" for its controls
 #include "EditorWidgets.h"            // pinDialogToEditorWindow, WrapText, buttons
@@ -339,15 +340,25 @@ void Draw(AppContext& ctx)
 				}
 			}
 
+			// Why the list could not be loaded is a notification, said once per attempt;
+			// the section only says there is no list to pick from.
+			static std::string s_listReported;
 			if (git->listingRepos())
 			{
+				s_listReported.clear();
 				ImGui::Spacing();
 				ImGui::TextDisabled("Loading your repositories…");
 			}
 			else if (git->repoListLoaded() && !git->repoListError().empty())
 			{
+				if (s_listReported != git->repoListError())
+				{
+					s_listReported = git->repoListError();
+					HE::Ed::notify(HE::Ed::NoteLevel::Important,
+					               "Could not list your repositories", git->repoListError());
+				}
 				ImGui::Spacing();
-				errorText(git->repoListError());
+				ImGui::TextDisabled("No repository list is available. Paste a clone URL below instead.");
 			}
 
 			// ── 2. Pick one ──────────────────────────────────────────────────
@@ -462,6 +473,15 @@ void Draw(AppContext& ctx)
 				{
 					s_resultHandled = true;
 					if (!root.empty()) s_projectFile = findProjectFile(root);
+					// The outcome is a notification, said once per result (a retry of the
+					// LFS download resets s_resultHandled and says it again).
+					if (!git->cloneError().empty())
+						HE::Ed::notify(HE::Ed::NoteLevel::Important,
+						               root.empty() ? "Clone failed" : "Clone finished with a problem",
+						               git->cloneError(), root.string());
+					else
+						HE::Ed::notify(HE::Ed::NoteLevel::Info, "Repository cloned",
+						               git->cloneInfo(), root.string());
 					// Clean success with a project in it: straight on to it.
 					if (!root.empty() && git->cloneError().empty() && !s_projectFile.empty())
 					{
@@ -473,10 +493,11 @@ void Draw(AppContext& ctx)
 				if (!close)
 				{
 					ImGui::Spacing();
-					if (!git->cloneError().empty()) errorText(git->cloneError());
-					else if (!git->cloneInfo().empty())
-						ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s",
-						                   git->cloneInfo().c_str());
+					// What happened is in the notification; what is left here is what the
+					// buttons below act on.
+					if (!git->cloneError().empty())
+						ImGui::TextDisabled(root.empty() ? "The clone did not complete."
+						                                 : "Some large files were not downloaded.");
 
 					if (!root.empty())
 					{
