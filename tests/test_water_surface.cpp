@@ -1685,10 +1685,10 @@ TEST_CASE("Water soft shore: the shore-proximity readback survives a landscape's
                 CHECK_FALSE(oldDecode(world) == doctest::Approx(e).epsilon(0.02));    // the bug: wrong past 0 deg
         }
 
-        // A non-uniform scale on the landscape (sx != sy, e.g. 2:1): the shader has no way
-        // to see the object's scale, so BOTH decodes are off by that ratio — the fix only
-        // closes the rotation case, not this one, and says so (not a silent full failure
-        // like the rotation zero-out: e stays a bounded, graceful stretch of the gradient).
+        // A non-uniform scale on the landscape (sx != sy, e.g. 2:1): the SHADER FORMULA
+        // alone has no way to see the object's scale, so both decodes are off by that
+        // ratio here. SurfaceOptions::shoreTiltScale (WaterMesh.h) closes this at bake
+        // time instead — see the end-to-end test below.
         if (e > 0.0f)
         {
             const glm::mat3 s(2.0f, 0, 0,  0, 1.0f, 0,  0, 0, 3.0f);
@@ -1696,6 +1696,49 @@ TEST_CASE("Water soft shore: the shore-proximity readback survives a landscape's
             CHECK(newDecode(scaled) == doctest::Approx(2.0f * e).epsilon(1e-3));
         }
     }
+}
+
+TEST_CASE("Water soft shore: a non-uniform landscape scale is pre-compensated at bake time (Thema 206 Schritt 8)")
+{
+    // End to end: bake with shoreTiltScale set the way WaterSurface.cpp sets it
+    // (shoreTiltScaleOf = sy/sx of the landscape's own world matrix), then put the baked
+    // normal through the SAME transform the renderer's vertex stage applies
+    // (mat3(uModel) * n, normalized) and decode with the new (rotation-robust) formula.
+    // The recovered e matches the UNSCALED e: the bake-time compensation and the shader's
+    // sx/sy error cancel exactly, for any heading.
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float) { return 0.04f * x; });
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 0.3f);
+
+    const float gain = HE::water::kShoreNormalGain;
+    auto newDecode = [&](const glm::vec3& n) { return std::sqrt(n.x * n.x + n.z * n.z) / (n.y * gain); };
+
+    for (const float sx : { 0.5f, 1.0f, 2.0f })
+        for (const float sy : { 0.5f, 1.0f, 3.0f })
+            for (const float deg : { 0.0f, 50.0f, 90.0f, 170.0f })
+            {
+                water::SurfaceOptions opt = softShore();
+                opt.shoreTiltScale = sy / sx;
+                const Built scaled = build(tc, id, opt);
+                REQUIRE(scaled.s.shoreVertices > 0);
+
+                const glm::mat3 r(glm::rotate(glm::mat4(1.0f), glm::radians(deg), glm::vec3(0, 1, 0)));
+                const glm::mat3 s(sx, 0, 0,  0, sy, 0,  0, 0, sx);   // Z follows X: no rotation/Z-scale coupling to track
+                const glm::mat3 m = r * s;
+
+                const StaticMeshAsset& bm = scaled.s.mesh;
+                size_t checked = 0;
+                for (uint32_t i = 0; i < bm.vertices.size() / 3; ++i)
+                {
+                    const glm::vec3 baked(bm.normals[i * 3], bm.normals[i * 3 + 1], bm.normals[i * 3 + 2]);
+                    const float eBaked = proximityOf(scaled.s.mesh, i) / opt.shoreTiltScale;   // what the mesh carries, undone
+                    if (eBaked <= 0.0f) continue;                                               // open water: nothing to recover
+                    const glm::vec3 world = glm::normalize(m * baked);
+                    CHECK(newDecode(world) == doctest::Approx(eBaked).epsilon(0.02));
+                    ++checked;
+                }
+                CHECK(checked > 0);
+            }
 }
 
 TEST_CASE("Water soft shore: an island's bridged hole and a round bank stay watertight")

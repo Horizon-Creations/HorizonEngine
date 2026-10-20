@@ -617,7 +617,11 @@ uint64_t surfaceHash(const Lattice& l, float level, const SurfaceOptions& opt)
     h = fnv(h, static_cast<uint64_t>(l.g.size()));
     if (!l.g.empty()) h = fnv(h, l.g.data(), l.g.size() * sizeof(float));
     // Only when on, so a mesh without the soft shore keeps the hash it always had.
-    if (opt.shoreFade && !l.g.empty()) { h = fnv(h, static_cast<uint32_t>(1)); h = fnv(h, opt.shoreOvershoot); }
+    if (opt.shoreFade && !l.g.empty())
+    {
+        h = fnv(h, static_cast<uint32_t>(1)); h = fnv(h, opt.shoreOvershoot);
+        h = fnv(h, opt.shoreTiltScale);   // the landscape's own scale bakes into the tilt
+    }
     return h;
 }
 
@@ -718,8 +722,10 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
             m.vertices.push_back(z);
             // +Y; with the soft shore a tilt in x says how shallow the water is here
             // (kShoreNormalGain, Physics/WaterWaves.h). The material reads it back.
+            // shoreTiltScale pre-compensates for the landscape's own non-uniform scale,
+            // see SurfaceOptions above.
             const float e = fade ? prox[k] : 0.0f;
-            m.normals.push_back(e * HE::water::kShoreNormalGain);
+            m.normals.push_back(e * HE::water::kShoreNormalGain * opt.shoreTiltScale);
             m.normals.push_back(1.0f);
             m.normals.push_back(0.0f);
             if (e > 0.0f) ++out.shoreVertices;

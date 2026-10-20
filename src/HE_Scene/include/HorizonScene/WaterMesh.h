@@ -200,6 +200,14 @@ namespace HE::water
         // interpolates faithfully. Needs the ground (clipToGround), else it does nothing.
         // Off = the plain contour triangulation, normal +Y everywhere, bit for bit.
         bool      shoreFade = false;
+        // Pre-compensation for the landscape's own non-uniform X/Z-vs-Y world scale
+        // (Thema 206 Schritt 8): the material reads e back off the WORLD normal
+        // (mat3(uModel) * n, normalized), which scales the baked tilt by sx/sy before the
+        // shader ever sees it — the shader has no uniform to undo that with. The caller
+        // (WaterSurface.cpp) sets this to the landscape's own sy/sx so the BAKED tilt
+        // already cancels it: default 1 keeps every mesh without a scaled landscape (and
+        // every existing test) byte for bit what it was.
+        float     shoreTiltScale = 1.0f;
     };
 
     // Not `Surface`: that is WaterQuery.h's answer for a point, in the same

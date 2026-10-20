@@ -863,9 +863,11 @@ Mb waterMaterial()
     // Read as the tilt's magnitude in the XZ plane, not x alone: a landscape rotated about Y
     // moves the baked tilt between x and z (zeroing a raw x/y read at 90°) but leaves
     // sqrt(x^2+z^2) exactly where it was, since the local normal only ever had one horizontal
-    // component to begin with. A non-uniform X/Z-vs-Y scale on the landscape still scales e by
-    // that ratio — the shader has no way to see the object's scale to undo it — but that is a
-    // stretched gradient, not the hard on/off the rotation case used to be.
+    // component to begin with. A non-uniform X/Z-vs-Y scale on the landscape also scales this
+    // read by sx/sy, since mat3(uModel) is what every backend's vertex stage puts the normal
+    // through (MaterialShaderLibrary.cpp) — the shader itself still can't see that scale to
+    // undo it, so the mesh bakes the inverse ratio in instead (SurfaceOptions::shoreTiltScale,
+    // WaterMesh.h/WaterSurface.cpp's shoreTiltScaleOf), and the two cancel.
     constexpr float kShoreGain  = HE::water::kShoreNormalGain;
     constexpr float kShoreDepth = HE::water::kShoreFadeDepth;
     const int shoreX2  = m.op(T::Multiply, Pin{ gs, 0 }, Pin{ gs, 0 }, 44, 11);

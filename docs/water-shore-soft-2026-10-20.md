@@ -29,6 +29,7 @@ Die Queen hat deshalb Option A freigegeben (Tiefe ins Mesh backen, keine Rendere
    einen Eckpunkt dorthin legen, wo `e` bei 0 sättigt. Beispiele: Mulde 607 -> 1898 Dreiecke (res 256),
    80 -> 1236 (res 33); See r=200 m mit sanfter Böschung 874 -> 1292, 22 ms Bauzeit.
 4. **Material** (`MatGen/main.cpp`, Block "Soft shore" ~890): `e = n.x / n.y / gain`, Tiefe `(1-e) * 1 m`.
+   (Schritt 8: `e = len(n.xz) / n.y / gain` — siehe Handoff unten, der Stand hier ist der von Schritt 2.)
    Breite `w` und Schaum kommen aus den freien Komponenten von `Turbidity` (jetzt `ParamVec4`,
    Default `0.45, 4.0, 0.35, 0.7`; alle 16 Parameter-Slots sind belegt): z = Uferbreite in m (0 = hart, bis 0,7),
    w = Uferschaum 0..1.
@@ -71,10 +72,16 @@ mit Tiefe linear/ohne T-Stücke, Insel mit Brücke, großer See), `*test_engine_
   `EditorDeps/EngineContent/Materials/Water.hasset`, `tests/test_water_surface.cpp`, `tests/test_engine_materials.cpp`,
   `EditorHelp.cpp` (Tooltip), `he-docs.json` (Engine Water), `scripts/shore_edge_sharpness.py`.
 - **Verified:** siehe Messung oben (Bild, md5, Tests). `Water.hasset` zweimal `mat_gen` byte-gleich, EditorDeps = Deploy.
+- **Fixed in Schritt 8 (2026-10-20):** Y-Drehung und ungleiche X/Z-vs-Y-Skalierung der Landschaft brachen den
+  Kanal (`n.x / n.y`, bei 90° wieder harte Kante, bei ungleicher Skalierung ein falsches `e`) — behoben über
+  `len(n.xz)` statt `n.x` (rotationsfest) plus `SurfaceOptions::shoreTiltScale` (WaterMesh.h/WaterSurface.cpp
+  `shoreTiltScaleOf`, bäckt `sy/sx` der Landschafts-Weltmatrix in die Neigung ein, kompensiert `mat3(uModel)`
+  im Shader). Nur numerisch verifiziert (tests/test_water_surface.cpp, C++-Nachbau der Dekodierformel gegen
+  eine Welt-Normale), kein gerendertes Bild einer gedrehten/skalierten Landschaft.
 - **Not verified:** Insel/Brücke im gerenderten Bild (nur der Test `bridged hole` deckt `refineShore` über eine
-  Ohrenschnitt-Brücke; kein Baseline-View hat eine Insel), Landschaft mit Y-Drehung oder ungleicher Skalierung (der Kanal
-  reist in der WELT-Normalen `mat3(model) * n`: eine Drehung um Y schiebt die Neigung von x nach z, bei 90° ist das Ufer wieder
-  hart; ungleiche Skalierung ändert das x/y-Verhältnis und damit `e`; alle Zeugen und Tests laufen ohne Drehung/Skalierung),
+  Ohrenschnitt-Brücke; kein Baseline-View hat eine Insel), gerendertes Bild einer gedrehten/skalierten
+  Landschaft (siehe Schritt 8 oben — nur numerisch getestet), ein Eltern-Scherfall (Rotation UND ungleiche
+  Skalierung auf verschiedenen Ebenen der Hierarchie, nicht abgedeckt),
   D3D11/D3D12/Vulkan (Schritt 5; dieselbe Graph-/Vertex-Quelle, aber nie gerendert), echte
   1-km-Landschaft mit Terrain-LOD (Witness: 1-m-Höhenfeld, LOD0), unsichtbarer Schatten/GI mit der Normalen-Neigung,
   GPU-Zeit des Mehr-Dreiecks-Meshes, Sculpt-Neubau im Editor interaktiv.
