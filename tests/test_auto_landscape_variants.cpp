@@ -101,9 +101,9 @@ int variantOfCell(int32_t cx, int32_t cy, uint32_t seed, int variants)
 
 TEST_CASE("Groups unwired: the array nodes emit exactly the text they always did")
 {
-	// FNV-1a of glsl + "\n//GB\n" + glslGBuffer, taken from the build BEFORE the Groups pin existed
-	// (scripts: tools/glsldump, same graph). Any change here changes every existing graph's text
-	// and with it their pipeline caches.
+	// FNV-1a of glsl + "\n//GB\n" + glslGBuffer of makeArrayGraph() through generateFragment, taken
+	// from a build of e6d4920d, the commit before the Groups pin existed. Any change here changes
+	// every existing graph's text and with it their pipeline caches.
 	for (const bool plain : { false, true })
 	{
 		CAPTURE(plain);
