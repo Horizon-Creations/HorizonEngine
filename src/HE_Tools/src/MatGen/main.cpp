@@ -1102,7 +1102,12 @@ Mb displacementDemoMaterial()
 
     const int disp  = m.op(T::Multiply, quilt, height, 7, 3);
     const int base  = m.op3(T::Lerp, groove, top, quilt, 7, 1);
-    const int rough = m.op3(T::Lerp, m.k(0.85f, 6, 6), m.k(0.5f, 6, 7), quilt, 7, 6);
+    // Two constants made in one argument list would take their ids in the order the
+    // compiler happens to evaluate it (Clang first-first, MSVC and GCC last-first), so
+    // the .hasset would differ per platform: name them in order.
+    const int roughB  = m.k(0.5f, 6, 7);
+    const int roughA  = m.k(0.85f, 6, 6);
+    const int rough = m.op3(T::Lerp, roughA, roughB, quilt, 7, 6);
 
     const int out = m.node(T::Output, 9, 3);
     MatGraphNode& o = *m.g.findNode(out);

@@ -1130,41 +1130,75 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
     (void)pinExpr;
     switch (n.type)
     {
+        // A node with several inputs emits the nodes behind them as a side effect of
+        // inputExpr, so the ORDER of the calls is the order of the statements (and of
+        // the numbering and the parameter slots). Operands of one expression are
+        // unsequenced: MSVC and GCC run the last operand first, Clang the first. The
+        // locals below fix it to last-textual-first — the order the shipped
+        // .hasset files were baked in — so the shader no longer depends on the compiler.
         case MatNodeType::Add:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " + " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " + " + b + ";"; break;
+        }
         case MatNodeType::Multiply:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " * " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " * " + b + ";"; break;
+        }
         case MatNodeType::Lerp:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3)
-                 + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string t = inputExpr(c, sc, n, 2, F::Float), b = inputExpr(c, sc, n, 1, F::Vec3),
+                              a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = mix(" + a + ", " + b + ", " + t + ");"; break;
+        }
         case MatNodeType::OneMinus:
             decl = "vec3 " + v + " = vec3(1.0) - " + inputExpr(c, sc, n, 0, F::Vec3) + ";"; break;
         case MatNodeType::Power:
-            decl = "float " + v + " = pow(max(" + inputExpr(c, sc, n, 0, F::Float) + ", 0.0), " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string e = inputExpr(c, sc, n, 1, F::Float), b = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = pow(max(" + b + ", 0.0), " + e + ");"; break;
+        }
         case MatNodeType::Saturate:
             decl = "vec3 " + v + " = clamp(" + inputExpr(c, sc, n, 0, F::Vec3) + ", 0.0, 1.0);"; break;
         case MatNodeType::DotProduct:
-            decl = "float " + v + " = dot(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "float " + v + " = dot(" + a + ", " + b + ");"; break;
+        }
         case MatNodeType::Sine:
             decl = "float " + v + " = sin(" + inputExpr(c, sc, n, 0, F::Float) + ");"; break;
         case MatNodeType::Combine3:
-            decl = "vec3 " + v + " = vec3(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string z = inputExpr(c, sc, n, 2, F::Float), y = inputExpr(c, sc, n, 1, F::Float),
+                              x = inputExpr(c, sc, n, 0, F::Float);
+            decl = "vec3 " + v + " = vec3(" + x + ", " + y + ", " + z + ");"; break;
+        }
         case MatNodeType::Subtract:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " - " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " - " + b + ";"; break;
+        }
         case MatNodeType::Divide:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " / max("
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", vec3(1e-5));"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " / max(" + b + ", vec3(1e-5));"; break;
+        }
         case MatNodeType::Absolute:
             decl = "vec3 " + v + " = abs(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Fract:
             decl = "vec3 " + v + " = fract(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Smoothstep:
-            decl = "float " + v + " = smoothstep(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string x = inputExpr(c, sc, n, 2, F::Float), e1 = inputExpr(c, sc, n, 1, F::Float),
+                              e0 = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = smoothstep(" + e0 + ", " + e1 + ", " + x + ");"; break;
+        }
         case MatNodeType::Step:
-            decl = "float " + v + " = step(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string x = inputExpr(c, sc, n, 1, F::Float), e = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = step(" + e + ", " + x + ");"; break;
+        }
         case MatNodeType::Normalize3:
             decl = "vec3 " + v + " = normalize(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         default: return false;
@@ -1183,38 +1217,60 @@ HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNod
             decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";";
             pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
             break;
+        // Sequenced last-textual-first, see emitMathNode.
         case MatNodeType::CombineRGBA:
-            decl = "vec4 " + v + " = vec4(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ", "
-                 + inputExpr(c, sc, n, 3, F::Float) + ");"; break;
+        {
+            const std::string w = inputExpr(c, sc, n, 3, F::Float), z = inputExpr(c, sc, n, 2, F::Float),
+                              y = inputExpr(c, sc, n, 1, F::Float), x = inputExpr(c, sc, n, 0, F::Float);
+            decl = "vec4 " + v + " = vec4(" + x + ", " + y + ", " + z + ", " + w + ");"; break;
+        }
         case MatNodeType::If:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 2, F::Vec3) + ", "
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", step(0.5, "
-                 + inputExpr(c, sc, n, 0, F::Float) + "));"; break;
+        {
+            // The text names pin 2, 1, 0 in that order, so last-first is pin 0, 1, 2.
+            const std::string cond = inputExpr(c, sc, n, 0, F::Float), yes = inputExpr(c, sc, n, 1, F::Vec3),
+                              no = inputExpr(c, sc, n, 2, F::Vec3);
+            decl = "vec3 " + v + " = mix(" + no + ", " + yes + ", step(0.5, " + cond + "));"; break;
+        }
         case MatNodeType::Greater:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > " + b + ");"; break;
+        }
         case MatNodeType::Less:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " < "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " < " + b + ");"; break;
+        }
         case MatNodeType::GreaterEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " >= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " >= " + b + ");"; break;
+        }
         case MatNodeType::LessEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " <= " + b + ");"; break;
+        }
         case MatNodeType::Equal:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") < 1e-4);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(abs(" + a + " - " + b + ") < 1e-4);"; break;
+        }
         case MatNodeType::NotEqual:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") >= 1e-4);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(abs(" + a + " - " + b + ") >= 1e-4);"; break;
+        }
         case MatNodeType::And:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 && "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > 0.5 && " + b + " > 0.5);"; break;
+        }
         case MatNodeType::Or:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 || "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > 0.5 || " + b + " > 0.5);"; break;
+        }
         case MatNodeType::Not:
             decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
         default: return false;
@@ -1230,20 +1286,24 @@ HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphN
     switch (n.type)
     {
         case MatNodeType::Panner:
-            decl = "vec2 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec2) + " + vec2("
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float)
-                 + ") * heLight.sunDir.w;"; break;
+        {
+            const std::string sy = inputExpr(c, sc, n, 2, F::Float), sx = inputExpr(c, sc, n, 1, F::Float),
+                              uv = inputExpr(c, sc, n, 0, F::Vec2);
+            decl = "vec2 " + v + " = " + uv + " + vec2(" + sx + ", " + sy + ") * heLight.sunDir.w;"; break;
+        }
         case MatNodeType::ValueNoise:
+        {
             c.usesNoise = true;
-            decl = "float " + v + " = heValueNoise(" + uvInput(c, sc, n, 0) + " * "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "float " + v + " = heValueNoise(" + uv + " * " + freq + ");"; break;
+        }
         case MatNodeType::Fbm:
         {
             // p[0] = 1 → the integer-hash fbm (see heFbmI); 0 keeps the old text.
             const bool robust = n.p[0] > 0.5f;
             (robust ? c.usesNoiseI : c.usesNoise) = true;
-            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uvInput(c, sc, n, 0)
-                 + " * " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uv + " * " + freq + ");"; break;
         }
         case MatNodeType::Checker:
         {
