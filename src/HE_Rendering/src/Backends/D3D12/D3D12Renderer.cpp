@@ -6995,6 +6995,12 @@ struct D3D12RendererImpl
         // b,0) for the GI-reflection kernel (giHitEmissive). They are the former
         // pad words, so the struct stays 96 bytes and the shadow/probe kernels and
         // the DXR blobs (which declare the same GiInst) keep reading it unchanged.
+        // Only meaningful in giReflInstancesCpu/giReflInstanceSB (the reflection-
+        // only copy, graph material folded in via HE::giInstanceSurface) —
+        // giInstancesCpu/giInstanceSB, what the shadow/probe kernels read, keeps
+        // obj.baseColor regardless of whether reflections are on (Thema 191 step
+        // 11: a shared buffer here made the diffuse-GI bounce colour change
+        // whenever reflections got toggled).
         int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
     };
     static_assert(sizeof(GIInstanceGpu) == 96, "HLSL GiInst is 96 bytes (invTransform + baseColor + offsets)");
@@ -7081,6 +7087,15 @@ struct D3D12RendererImpl
     ComPtr<ID3D12Resource> giInstanceSB[k_frameCount];
     uint8_t*               giInstancePtr[k_frameCount]{};
     UINT                   giInstanceCapacity[k_frameCount]{};
+    // The GI-reflection kernel's own copy of the ring above: folded graph-
+    // material colour (HE::giInstanceSurface) instead of obj.baseColor, only
+    // built/uploaded while giReflEnabled. Kept separate from
+    // giInstancesCpu/giInstanceSB so enabling reflections never changes what
+    // the shadow/probe kernels bounce (Thema 191 step 11).
+    std::vector<GIInstanceGpu>     giReflInstancesCpu;
+    ComPtr<ID3D12Resource> giReflInstanceSB[k_frameCount];
+    uint8_t*               giReflInstancePtr[k_frameCount]{};
+    UINT                   giReflInstanceCapacity[k_frameCount]{};
 
     // Screen-space targets (half-res) + probe atlases, with tracked states.
     int giShadowW = 0, giShadowH = 0;
@@ -7259,6 +7274,7 @@ struct D3D12RendererImpl
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
+        giReflInstancesCpu.clear();
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
             if (const GIBlasRange* r = giBlas.find(id)) return *r;
@@ -7295,24 +7311,27 @@ struct D3D12RendererImpl
             inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
+            giInstancesCpu.push_back(inst);
             if (giReflEnabled)
             {
                 // The shared per-instance surface (HE::giInstanceSurface): a graph
                 // material's folded BaseColor/Emissive instead of the mesh's own
                 // colour, which is plain white for every graph material and would
-                // make each of them reflect white. Only while reflections are on,
-                // so the GI-only image stays exactly what it was; the probe field
-                // then bounces the same colours the mirrors show. Roughness and
-                // metallic of the HIT are not carried: the GL kernel (one segment,
-                // no bounce loop) does not read them either.
+                // make each of them reflect white. Written into giReflInstancesCpu
+                // only (the reflection kernel's own buffer) — giInstancesCpu above
+                // keeps obj.baseColor regardless, so the GI-only image really does
+                // stay exactly what it was. Roughness and metallic of the HIT are
+                // not carried: the GL kernel (one segment, no bounce loop) does not
+                // read them either.
                 const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm);
-                inst.baseColor  = glm::vec4(surf.albedo, 1.0f);
-                inst.emissiveRG = static_cast<int32_t>(
+                GIInstanceGpu reflInst = inst;
+                reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
+                reflInst.emissiveRG = static_cast<int32_t>(
                     glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
-                inst.emissiveB  = static_cast<int32_t>(
+                reflInst.emissiveB  = static_cast<int32_t>(
                     glm::packHalf2x16(glm::vec2(surf.emissive.b, 0.0f)));
+                giReflInstancesCpu.push_back(reflInst);
             }
-            giInstancesCpu.push_back(inst);
 
 #if HE_D3D12_DXR
             if (hwAll)
@@ -7377,6 +7396,28 @@ struct D3D12RendererImpl
                         static_cast<size_t>(giInstanceCount) * sizeof(GIInstanceGpu));
         if (!giNodeSB || !giTriSB || !giInstanceSB[fi]) giInstanceCount = 0;
 
+        // The GI-reflection kernel's own ring, same growth convention — only
+        // kept current while reflections are enabled (runGiReflections doesn't
+        // dispatch otherwise).
+        if (giReflEnabled && !giReflInstancesCpu.empty())
+        {
+            const UINT reflNeed = static_cast<UINT>(giReflInstancesCpu.size());
+            if (reflNeed > giReflInstanceCapacity[fi] || !giReflInstanceSB[fi])
+            {
+                if (giReflInstanceSB[fi])
+                    m_retiredTextures.emplace_back(std::move(giReflInstanceSB[fi]), retireN);
+                const UINT cap = std::max({ reflNeed, giReflInstanceCapacity[fi] * 2u, 64u });
+                giReflInstancePtr[fi] = nullptr;
+                giReflInstanceSB[fi]  = createUploadBuffer(
+                    static_cast<UINT64>(cap) * sizeof(GIInstanceGpu),
+                    reinterpret_cast<void**>(&giReflInstancePtr[fi]));
+                giReflInstanceCapacity[fi] = giReflInstanceSB[fi] ? cap : 0;
+            }
+            if (giReflInstancePtr[fi])
+                std::memcpy(giReflInstancePtr[fi], giReflInstancesCpu.data(),
+                            static_cast<size_t>(reflNeed) * sizeof(GIInstanceGpu));
+        }
+
 #if HE_D3D12_DXR
         // HW path: upload this frame slot's TLAS instance array (upload-heap
         // ring slot, grown on demand — the slot's fence was waited in Render()).
@@ -7422,9 +7463,14 @@ struct D3D12RendererImpl
                 m_retiredTextures.emplace_back(std::move(giInstanceSB[f]), retireN);
             giInstancePtr[f]      = nullptr;
             giInstanceCapacity[f] = 0;
+            if (giReflInstanceSB[f])
+                m_retiredTextures.emplace_back(std::move(giReflInstanceSB[f]), retireN);
+            giReflInstancePtr[f]      = nullptr;
+            giReflInstanceCapacity[f] = 0;
         }
         giBlas.clear();
         giInstancesCpu.clear();
+        giReflInstancesCpu.clear();
         giInstanceCount = 0;
     }
 
@@ -8299,7 +8345,8 @@ struct D3D12RendererImpl
         if (!giReflPSO || !giReflBlurPSO || !giReflMixPSO || !giReflCB[fi] || !giReflFsCB[fi])
             return false;
         ensureGiReflTargets();
-        if (!giReflRawTex || !giNodeSB || !giTriSB || !giInstanceSB[fi] || giInstanceCount == 0)
+        if (!giReflRawTex || !giNodeSB || !giTriSB || !giInstanceSB[fi] || !giReflInstanceSB[fi] ||
+            giInstanceCount == 0)
             return false;
 
         const HE::GIReflTier tier = HE::giReflTierFor(giReflQuality, giReflBlurEnabled);
@@ -8373,7 +8420,10 @@ struct D3D12RendererImpl
             cl->SetComputeRootDescriptorTable(2, giSrvGpu(k_giReflCompute));
             cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(4, giTriSB->GetGPUVirtualAddress());
-            cl->SetComputeRootShaderResourceView(5, giInstanceSB[fi]->GetGPUVirtualAddress());
+            // The reflection-only copy (folded graph-material colour), NOT
+            // giInstanceSB — the shadow/probe kernels read that one and must
+            // not see it change when reflections toggle (Thema 191 step 11).
+            cl->SetComputeRootShaderResourceView(5, giReflInstanceSB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(6, giSrvGpu(k_giReflUav));
             cl->Dispatch(static_cast<UINT>((giShadowW + 7) / 8), static_cast<UINT>((giShadowH + 7) / 8), 1);
             // UAV write -> pixel-shader sampling (blur / mix / the materials).

@@ -10880,6 +10880,14 @@ void VulkanRenderer::updateGiAccel()
     // castsShadow only, UNculled (rays go in arbitrary directions).
     std::vector<GIInstanceGpu> instances;
     instances.reserve(m_renderWorld.objects.size());
+    // gi_refl.comp's own copy (m_giReflInstanceBuf), same order/index as
+    // `instances` — only built while reflections are on. Keeping the folded
+    // graph-material colour out of `instances` means gi_probe.comp's bounce
+    // colour never changes just because reflections got toggled (Thema 191
+    // step 11; `instances` alone feeds gi_shadow.comp/gi_probe.comp/the DXR
+    // InstanceId mapping, unchanged from before this feature existed).
+    std::vector<GIInstanceGpu> reflInstances;
+    if (m_giReflEnabled) reflInstances.reserve(m_renderWorld.objects.size());
     auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
     {
         if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
@@ -10923,24 +10931,27 @@ void VulkanRenderer::updateGiAccel()
         inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
+        instances.push_back(inst);
         if (m_giReflEnabled)
         {
             // The shared per-instance surface (HE::giInstanceSurface): a graph
             // material's folded BaseColor/Emissive instead of the mesh's own
             // colour, which is plain white for every graph material and would
-            // make each of them reflect white. Only while reflections are on,
-            // so the GI-only image stays exactly what it was; the probe field
-            // then bounces the same colours the mirrors show. Roughness and
-            // metallic of the HIT are not carried: gi_refl.comp (one segment,
-            // no bounce loop) does not read them either (matches D3D11/D3D12/GL).
+            // make each of them reflect white. Written into reflInstances only
+            // (gi_refl.comp's own buffer) — `instances` above keeps
+            // obj.baseColor regardless, so the GI-only image really does stay
+            // exactly what it was. Roughness and metallic of the HIT are not
+            // carried: gi_refl.comp (one segment, no bounce loop) does not
+            // read them either (matches D3D11/D3D12/GL).
             const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, m_contentManager);
-            inst.baseColor   = glm::vec4(surf.albedo, 1.0f);
-            inst.emissiveRG  = static_cast<int32_t>(
+            GIInstanceGpu reflInst = inst;
+            reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
+            reflInst.emissiveRG = static_cast<int32_t>(
                 glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
-            inst.emissiveB   = static_cast<int32_t>(
+            reflInst.emissiveB  = static_cast<int32_t>(
                 glm::packHalf2x16(glm::vec2(surf.emissive.b, 0.0f)));
+            reflInstances.push_back(reflInst);
         }
-        instances.push_back(inst);
         if (logInst)
             HE_LOG_INFO(RHI, "VulkanRenderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
                         "baseColor (%.3f, %.3f, %.3f)", instances.size() - 1,
@@ -11009,6 +11020,11 @@ void VulkanRenderer::updateGiAccel()
                         instances.size() * sizeof(GIInstanceGpu)))
         return;
     m_giInstanceCount = static_cast<int>(instances.size());
+    // gi_refl.comp's own ring, same slot convention — only kept current while
+    // reflections are enabled (runGiReflections doesn't run otherwise).
+    if (m_giReflEnabled)
+        uploadGiBuffer(m_giReflInstanceBuf[m_currentFrame], reflInstances.data(),
+                       reflInstances.size() * sizeof(GIInstanceGpu));
 
     // HW path: upload this frame's TLAS instance array (host-visible ring slot,
     // device-address usage for the AS build input). Failure just means SW
@@ -11037,6 +11053,7 @@ void VulkanRenderer::destroyGiAccel()
     destroy(m_giNodeBuf);
     destroy(m_giTriBuf);
     for (GiBuffer& b : m_giInstanceBuf) destroy(b);
+    for (GiBuffer& b : m_giReflInstanceBuf) destroy(b);
     m_giBlas.clear();
     m_giInstanceCount = 0;
 
@@ -12899,7 +12916,7 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid)
     if (!m_giReflRaw.img || !m_giNodeBuf.buf || !m_giTriBuf.buf || m_giInstanceCount == 0) return false;
 
     const uint32_t fi = m_currentFrame;
-    if (!m_giReflSet[fi]) return false;
+    if (!m_giReflSet[fi] || !m_giReflInstanceBuf[fi].buf) return false;
     const HE::GIReflTier tier = HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled);
 
     // ── Rewrite this frame slot's compute set (fence already waited) ────────
@@ -12932,7 +12949,10 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid)
     {
         VkDescriptorBufferInfo nodesBI{ m_giNodeBuf.buf, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo trisBI { m_giTriBuf.buf,  0, VK_WHOLE_SIZE };
-        VkDescriptorBufferInfo instBI { m_giInstanceBuf[fi].buf, 0, VK_WHOLE_SIZE };
+        // The reflection-only copy (folded graph-material colour), NOT
+        // m_giInstanceBuf — gi_probe.comp reads that one and must not see it
+        // change when reflections toggle (Thema 191 step 11).
+        VkDescriptorBufferInfo instBI { m_giReflInstanceBuf[fi].buf, 0, VK_WHOLE_SIZE };
         VkDescriptorImageInfo  posII  { m_giPointSampler, m_giGBufPos.view,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  normII { m_giPointSampler, m_giGBufNorm.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  irrII  { m_giPointSampler,

@@ -1413,9 +1413,13 @@ private:
 		// emissiveRG / emissiveB hold the hit's emissive as packed halves (r,g
 		// and b,0) for gi_refl.comp's giHitEmissive — the former pad words, so
 		// the struct stays 96 bytes and the shadow/probe kernels (which only
-		// read nodeOffset/triOffset) keep reading it unchanged. Only written
-		// by updateGiAccel while reflections are enabled (HE::giInstanceSurface
-		// is not free, and the GI-only image must stay exactly what it was).
+		// read nodeOffset/triOffset) keep reading it unchanged. Only meaningful
+		// in m_giReflInstanceBuf (updateGiAccel's reflection-only copy, with the
+		// graph material folded in via HE::giInstanceSurface) — m_giInstanceBuf,
+		// the one gi_shadow.comp/gi_probe.comp read, keeps obj.baseColor
+		// regardless of whether reflections are on (Thema 191 step 11: a shared
+		// buffer here made the diffuse-GI bounce colour change whenever
+		// reflections got toggled).
 		int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
 	};
 	static_assert(sizeof(GIInstanceGpu) == 96, "gi_*.comp's GiInst is 96 bytes (invTransform + baseColor + offsets)");
@@ -1536,6 +1540,11 @@ private:
 	// bones UBO ring.
 	GiBuffer m_giInstanceBuf[3]; // k_maxFramesInFlight (static_assert at use site)
 	int      m_giInstanceCount = 0;
+	// gi_refl.comp's own copy of the ring above: folded graph-material colour
+	// (HE::giInstanceSurface) instead of obj.baseColor, only built/uploaded
+	// while m_giReflEnabled. Kept separate from m_giInstanceBuf so enabling
+	// reflections never changes what gi_probe.comp bounces (Thema 191 step 11).
+	GiBuffer m_giReflInstanceBuf[3];
 
 	// ── Hardware ray tracing (VK_KHR_ray_query in compute) ──────────────────
 	// When the device offers VK_KHR_acceleration_structure + VK_KHR_ray_query
