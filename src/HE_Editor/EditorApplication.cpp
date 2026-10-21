@@ -101,6 +101,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
+#include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -7631,6 +7632,82 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
+
+		// HE_DUMP_AUTOLANDMESHES=tuft,pebble,rocka,rockb,rockc,snowdrift (Thema 180 Schritt 5): a
+		// Foliage component on this landscape with one layer per named kind, each filled by its
+		// preset (LayerMeshPresets.h) and so drawn through the foliage cluster path. Every level
+		// file is loaded here (engine files are not resident by themselves, and a mesh the
+		// extractor cannot read gets no box, so its clusters would never cull); the log line says
+		// how many levels came with their engine UUID. The presets assume a terrain at y=0:
+		// Snow Drift's heightMin is moved up with the snow line of this witness.
+		//   HE_DUMP_AUTOLANDMESHDENS=<f>   multiplies every layer's density (default 1): the two
+		//                                  instance counts of the draw-count measurement
+		//   HE_DUMP_AUTOLANDMESHSHADOW=0   no layer casts a shadow or counts for AO: the control for
+		//                                  "the shadow and AO passes draw the instances" (an A/B on
+		//                                  the same binary; the SHADOW knob does not switch every
+		//                                  backend's pass off). =1 makes every layer cast and count.
+		//   HE_DUMP_AUTOLANDMESHRULES=0    drops every layer's placement rules, so a rock stands on
+		//                                  the plain too and its shadow falls on flat ground
+		// Camera that shows plain, slope and plateau: CAMX=-30 CAMY=312 CAMZ=-50 PITCH=-18 YAW=30.
+		if (const char* lm = std::getenv("HE_DUMP_AUTOLANDMESHES"); lm && *lm)
+		{
+			const char* ds = std::getenv("HE_DUMP_AUTOLANDMESHDENS");
+			const float densMul = ds && *ds ? std::max(0.0f, static_cast<float>(std::atof(ds))) : 1.0f;
+			FoliageComponent fol;
+			const std::string spec(lm);
+			int made = 0, levelsAsked = 0, levelsLoaded = 0;
+			for (size_t at = 0; at < spec.size();)
+			{
+				const size_t end = std::min(spec.find(',', at), spec.size());
+				std::string item = spec.substr(at, end - at);
+				at = end + 1;
+				for (char& ch : item) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+				static const std::pair<const char*, HE::LayerMeshKind> kinds[] = {
+					{ "tuft", HE::LayerMeshKind::Tuft },     { "pebble", HE::LayerMeshKind::Pebble },
+					{ "rocka", HE::LayerMeshKind::RockA },   { "rockb", HE::LayerMeshKind::RockB },
+					{ "rockc", HE::LayerMeshKind::RockC },   { "snowdrift", HE::LayerMeshKind::SnowDrift } };
+				const HE::LayerMeshKind* kind = nullptr;
+				for (const auto& kv : kinds) if (item == kv.first) kind = &kv.second;
+				if (!kind) continue;
+				FoliageLayer* layer = made == 0 ? &fol.layers[0] : fol.addLayer();
+				if (!layer) break;
+				++made;
+				HE::applyLayerMeshPreset(*layer, *kind);
+				layer->density *= densMul;
+				if (const char* ru = std::getenv("HE_DUMP_AUTOLANDMESHRULES"); ru && *ru && std::atoi(ru) == 0)
+				{
+					layer->slopeMin = 0.0f; layer->slopeMax = 1.0f;
+					layer->heightMin = -FoliageLayer::kNoHeightLimit; layer->heightMax = FoliageLayer::kNoHeightLimit;
+				}
+				if (const char* sh = std::getenv("HE_DUMP_AUTOLANDMESHSHADOW"); sh && *sh)
+				{
+					const bool on = std::atoi(sh) != 0;
+					layer->castsShadow = on; layer->contributesAO = on;
+					if (on && layer->shadowDistance <= 0.0f) layer->shadowDistance = 60.0f;
+				}
+				if (*kind == HE::LayerMeshKind::SnowDrift)
+					layer->heightMin = snowHeight + 6.0f;
+				for (int n = 0; n < HE::layerMeshLevelCount(*kind); ++n)
+				{
+					++levelsAsked;
+					const HE::UUID got = contentManager().loadAsset(HE::layerMeshLevelPath(*kind, n));
+					if (got == HE::layerMeshLevelId(*kind, n)) ++levelsLoaded;
+				}
+			}
+			reg.emplace<FoliageComponent>(land, fol);
+			FoliageSystem::update(*m_editorWorld);
+			const FoliageComponent& placed = reg.get<FoliageComponent>(land);
+			size_t total = 0;
+			std::string per;
+			for (const FoliageLayer& pl : placed.layers)
+			{
+				total += pl.cachedInstances.size();
+				per += (per.empty() ? "" : ", ") + pl.name + " " + std::to_string(pl.cachedInstances.size());
+			}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMESHES %d layer(s), %d of %d level mesh(es) "
+				"loaded with their engine UUID, density x%.2f, %zu instances (%s)",
+				made, levelsLoaded, levelsAsked, densMul, total, per.c_str());
+		}
 
 		// HE_DUMP_AUTOLANDMIRROR=1 (Thema 173): two mirrors on the plain, for the
 		// GI-reflection question "does a mirror show the sky and the auto

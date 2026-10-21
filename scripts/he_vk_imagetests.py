@@ -272,6 +272,37 @@ CASES = {
         "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
                        ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
     },
+    # Layer meshes on the instancing path (Thema 180 Schritt 5, docs/auto-landscape-material-2-instancing-2026-10-21.md):
+    # the six preset meshes (tuft, pebble, rocks A/B/C, snow drift - engine FILES, loaded by the
+    # witness) scattered over the Auto Landscape witness relief with the default terrain
+    # material, seen from above. "off" has no layer; x4 and x16 scatter four and sixteen times
+    # the preset density. The verdicts: the meshes are in the picture (off vs x4 differs), all
+    # 16 level files came with their engine UUID (a mesh that is not resident is never culled
+    # and a backend draws a fallback), the cluster path ran (the FoliageExtract line), and the
+    # draw count does not follow the instance count: x16 carries ~4x the instances (triangles)
+    # of x4 in the same number of draws (`flat`: draws may differ by at most the tolerance,
+    # triangles must grow). Measured on Metal and OpenGL (macOS, 21.10.2026), top-down view:
+    # draws 9 (off) / 20 (x4) / 20 (x16), triangles 78336 / 436732 / 1534532, identical on both
+    # backends; off vs x4 mean |d| 1.7 (Metal) and 2.1 (GL), so 0.8 is about half. D3D12 counts
+    # the shadow cascades in its draws (docs/foliage-instancing-lod-plan-2026-10-10.md 17.4),
+    # which is why the verdict compares x4 with x16 and never with off.
+    "layer_meshes": {
+        "base": {"AUTOLAND": "builtin", "SKYTEST": "1", "CAMX": "-20", "CAMY": "345", "CAMZ": "0",
+                 "PITCH": "-89", "YAW": "0", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "AA": "0", "RENDERPATH": "0"},
+        "variants": {
+            "off": {"dump": {}},
+            "x4":  {"dump": {"AUTOLANDMESHES": "tuft,pebble,rocka,rockb,rockc,snowdrift",
+                             "AUTOLANDMESHDENS": "4"}, "env": {"HE_FOLIAGE_STATS": "1"}},
+            "x16": {"dump": {"AUTOLANDMESHES": "tuft,pebble,rocka,rockb,rockc,snowdrift",
+                             "AUTOLANDMESHDENS": "16"}, "env": {"HE_FOLIAGE_STATS": "1"}},
+        },
+        "pairs": [("off", "x4", 0.8), ("x4", "x16", None)],
+        "require": {v: ["HE_DUMP_AUTOLANDMESHES 6 layer(s), 16 of 16 level mesh(es) loaded with their engine UUID",
+                        "FoliageExtract: 6 layer(s)"] for v in ("x4", "x16")},
+        "forbid": {v: ["HE_DUMP_AUTOLANDMESHES 6 layer(s), 0 of", "cluster(s) for 0 of"] for v in ("x4", "x16")},
+        "flat": [("x4", "x16", 2)],
+    },
     # Black GI stripes (Thema 159, docs/gi-stripes-vulkan-d3d-ursache-2026-10-07.md):
     # the GI sun-shadow mask starts its rays at the GI G-buffer position + 5 cm
     # along the normal. While that position was RGBA16F, its ULP at y = 300
@@ -427,6 +458,7 @@ LOG_MARK_ARMED  = "frame dump armed"
 LOG_MARK_DUMPED = "frame dumped ("
 RE_DEVICE       = re.compile(r"VulkanRenderer: device 0 of \d+: (.*)")
 RE_VALIDATION   = re.compile(r"Vulkan validation: (.*)")
+RE_COUNTERS     = re.compile(r"dump counters \S+ draws=(\d+) tris=(\d+)")
 
 
 # ── BMP ──────────────────────────────────────────────────────────────────────
@@ -522,7 +554,7 @@ def judge_probe(rgb, channel):
 
 
 # ── One shot ─────────────────────────────────────────────────────────────────
-def run_shot(editor, outdir, name, dump_kv, env_kv, timeout):
+def run_shot(editor, outdir, name, dump_kv, env_kv, timeout, rhi="Vulkan"):
     bmp = outdir / f"{name}.bmp"
     log = outdir / f"{name}.log"
     home = outdir / "_homes" / name
@@ -539,7 +571,7 @@ def run_shot(editor, outdir, name, dump_kv, env_kv, timeout):
     env.setdefault("HE_COLLAB_OFFLINE", "1")
     env.setdefault("HE_HIDDEN_WINDOW", "1")
     env.setdefault("HE_SKY_TIME", "10")
-    env["HE_DUMP_RHI"] = "Vulkan"
+    env["HE_DUMP_RHI"] = rhi
     env["HE_DUMP_PATH"] = str(bmp)
     env["HE_DUMP_QUIT"] = "1"
     for k, v in dump_kv.items():
@@ -590,6 +622,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--cases", default=",".join(CASES))
     ap.add_argument("--timeout", type=int, default=900, help="seconds per shot")
+    ap.add_argument("--rhi", default="Vulkan",
+                    help="backend to force (HE_DUMP_RHI): Vulkan (default), D3D11, D3D12. The cases are "
+                         "backend-neutral picture and log verdicts; Vulkan-only checks (device name, "
+                         "validation) need --require-device '' on the others")
     ap.add_argument("--require-device", default="llvmpipe",
                     help="substring the logged Vulkan device name must contain ('' = any)")
     args = ap.parse_args()
@@ -618,7 +654,7 @@ def main():
         shots, problems = {}, []
         for vname, v in spec["variants"].items():
             dump_kv = dict(spec["base"]); dump_kv.update(v.get("dump", {}))
-            shot = run_shot(editor, outdir, f"{case}_{vname}", dump_kv, v.get("env", {}), args.timeout)
+            shot = run_shot(editor, outdir, f"{case}_{vname}", dump_kv, v.get("env", {}), args.timeout, args.rhi)
             shots[vname] = shot
             img = shot.get("image")
             print(f"  {vname:10s} {shot['seconds']:7.1f} s  exit={shot['exit_code']}"
@@ -659,6 +695,10 @@ def main():
             for needle in spec.get("forbid", {}).get(vname, []):
                 if needle in shot["_log"]:
                     problems.append(f"{vname}: log has '{needle}'")
+            cm = RE_COUNTERS.findall(shot["_log"])
+            if cm:
+                shot["draws"], shot["tris"] = int(cm[-1][0]), int(cm[-1][1])
+                print(f"      dump counters: draws={shot['draws']} tris={shot['tris']}")
             samples = spec.get("samples", {}).get(vname)
             if samples:
                 p = {k: probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy, r=4)
@@ -699,6 +739,20 @@ def main():
                       f"energy {e} → {'ok' if ok else 'FAIL'} (max {mx})")
                 if not ok:
                     problems.append(f"{vname}: stripes in '{label}', energy {e} > {mx}")
+
+        # `flat` (a, b, tolerance): b carries more triangles than a (more instances) in at most
+        # `tolerance` more draws - the draw count follows the meshes in play, not the plants.
+        for a, b, tol in spec.get("flat", []):
+            sa, sb = shots.get(a, {}), shots.get(b, {})
+            if "draws" not in sa or "draws" not in sb:
+                problems.append(f"{a}/{b}: no 'dump counters' line to compare draws")
+                continue
+            ok = sb["draws"] <= sa["draws"] + tol and sb["tris"] > sa["tris"]
+            print(f"  flat {a} -> {b}: draws {sa['draws']} -> {sb['draws']} (tolerance +{tol}), "
+                  f"tris {sa['tris']} -> {sb['tris']} -> {'ok' if ok else 'FAIL'}")
+            if not ok:
+                problems.append(f"{a} -> {b}: draws {sa['draws']} -> {sb['draws']} (tolerance +{tol}), "
+                                f"tris {sa['tris']} -> {sb['tris']}: the draw count follows the instances")
 
         pairs = []
         for pair in spec["pairs"]:

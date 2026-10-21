@@ -201,6 +201,8 @@ add_executable(he_tests
     test_foliage_layers.cpp
     # Placement rules of a foliage layer (Thema 180 S4): slope, height, paint weight, determinism.
     test_foliage_rules.cpp
+    # The layer meshes through the instancing path (Thema 180 S5): boxes, flat draw count, passes.
+    test_layer_mesh_instancing.cpp
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
