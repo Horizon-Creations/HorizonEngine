@@ -3656,6 +3656,7 @@ void EditorApplication::OnRender(float dt)
 			if (s_grBlurOv && *s_grBlurOv) gr.blur    = std::atof(s_grBlurOv) > 0.5;
 			if (s_grQualOv && *s_grQualOv) gr.quality = std::atoi(s_grQualOv);
 			if (s_grBncOv  && *s_grBncOv)  gr.bounces = std::atoi(s_grBncOv);
+			gr.enabled = gr.enabled && renderer()->GetCapabilities().supportsGIReflections;
 			renderer()->SetGIReflectionSettings(gr);
 		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
@@ -8753,6 +8754,7 @@ void EditorApplication::dumpFrameHeadless()
 		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
 		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
 			gr.bounces = std::atoi(bc);
+		gr.enabled = gr.enabled && r->GetCapabilities().supportsGIReflections;
 		r->SetGIReflectionSettings(gr);
 	}
 	{
