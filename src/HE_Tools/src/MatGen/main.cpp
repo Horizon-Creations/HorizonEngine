@@ -58,9 +58,11 @@ using namespace HE;
 // Well-known UUID base for the built-in materials. `hi` stays far below the
 // version-4 bit pattern UUID::generate() enforces and clear of the DefaultAssets
 // sentinels, mesh_gen's 0x100, widget_gen's 0x200 and matfn_gen's 0x300 block.
-constexpr uint64_t kMatBaseHi = 0x0000000000000400ULL;
+// Not 0x400: landscape_tex_gen owns 0x400..0x41F, and one UUID names ONE asset in
+// the ContentManager (Water used to be {0x400, 1} next to T_Landscape_Grass_Albedo).
+constexpr uint64_t kMatBaseHi = 0x0000000000000600ULL;
 static_assert(kEngineWaterMaterialId.hi == kMatBaseHi + 0 && kEngineWaterMaterialId.lo == 1,
-              "Water is entry 0 of the 0x400 block — DefaultAssets.h must agree");
+              "Water is entry 0 of the 0x600 block — DefaultAssets.h must agree");
 
 constexpr float kColStep = 230.0f;
 constexpr float kRowStep = 110.0f;
