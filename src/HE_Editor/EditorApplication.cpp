@@ -7500,11 +7500,16 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// HE_SKY_TIME (the graph's clock), and A/B against HE_GRAPH_INSTANCING=0.
 		const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT");
 		const bool  windMat = fm && std::string_view(fm) == "wind";
-		if (fm && (std::string_view(fm) == "graph" || windMat))
+		// =displace puts a constant height (HE_DUMP_DISPCONST metres, default 0.1) on the
+		// Displacement pin: on a tessellating GL the batch must draw per instance as
+		// patches, not as one GL_TRIANGLES instanced call a tessellation program rejects
+		// (Thema 207, step 9). A/B against HE_TESSELLATION=0 (untessellated, instanced).
+		const bool  dispMat = fm && std::string_view(fm) == "displace";
+		if (fm && (std::string_view(fm) == "graph" || windMat || dispMat))
 		{
 			MaterialAsset mat;
 			mat.type = HE::AssetType::Material;
-			mat.name = windMat ? "FoliageWindTest" : "FoliageGraphTest";
+			mat.name = windMat ? "FoliageWindTest" : dispMat ? "FoliageDisplaceTest" : "FoliageGraphTest";
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
@@ -7512,6 +7517,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			g.connect(col, 0, out, 0);
 			if (windMat)
 				g.connect(g.addNode(HE::MatNodeType::WindSway), 0, out, HE::kMatOutputWPOPin);
+			if (dispMat)
+			{
+				const char* dc = std::getenv("HE_DUMP_DISPCONST");
+				const int height = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(height)->p[0] = (dc && *dc) ? static_cast<float>(std::atof(dc)) : 0.1f;
+				g.connect(height, 0, out, HE::kMatOutputDisplacementPin);
+				HE::MatTessSettings& t = g.findNode(out)->tess;
+				t.maxFactor = 8.0f; t.fadeNear = 20.0f; t.fadeFar = 60.0f; t.maxDisplacement = 1.0f;
+			}
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;

@@ -3807,6 +3807,20 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
 	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
+	// A displacement material gets no instanced twin (yet): DrawGraphBatchInstanced draws
+	// GL_TRIANGLES, which a program with tessellation stages rejects (GL_INVALID_OPERATION,
+	// the batch vanishes). The batch falls back to the per-instance loop, which draws the
+	// plain program as GL_PATCHES (MaterialPrimitive). Tessellated instancing would pass
+	// GL_PATCHES there and is a step of its own. The twin shares the plain program's
+	// displacement body (m_tessDispByKey is filed under `key`), so without this return it
+	// would link TCS/TES too.
+	if (instanced && m_tessSupported && m_tessDispByKey.count(key))
+	{
+		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: no instanced twin for a displacement material, "
+			"its batches draw per instance (tessellated)");
+		m_materialPrograms[progKey] = 0;
+		return 0;
+	}
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
