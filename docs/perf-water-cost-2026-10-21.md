@@ -9,7 +9,7 @@
 1. **The drop below 10 FPS does not reproduce.** Worst measured frame with the water graph live: GPU 17.8 ms (display locked) / 12.3 ms (display awake), at 2840x1528, camera 3 m over a 120 m lake. With the player's config
    (deferred, GI diffuse on; GI reflections on or off makes no difference) 19.2 ms for the whole GPU frame, 12.8 ms of it in the water's `Scene` pass. At twice the render scale (17 MP) the `Scene` pass is 18.8 ms.
 2. **Every earlier "water is free" number measured the white fallback, not the water shader.** In this harness (and on any Mac with the EngineContentCache) `getMaterial({0x400,1})` is null while `isLoaded` is true: the UUID
-   collision of Thema 230 (water material = `T_Landscape_Grass_Albedo`). Witness section 1. Thema 237's "water costs 0 ms" (its section 5/6 caveat) is explained by this. Everything in sections 2 to 4 was therefore measured with an **empty `HOME`** (no cache), where the graph is live.
+   collision of Thema 230 (water material = `T_Landscape_Grass_Albedo`). Witness section 1. Thema 237's "water costs 0 ms" (its section 5/6 caveat) is consistent with this (almost certainly explained by it; its cells were not rerun with the witness). Everything in sections 2 to 4 was therefore measured with an **empty `HOME`** (no cache), where the graph is live.
 3. **The cost is the water fragment shader, linear in covered pixels, and it is large only where the sheet fills the view.** Scene pass at scale 1 (4.3 MP): 2.4 ms without water, 11.4 ms with it (3 m up); 17 MP: 18.8 ms. At 130+ m the lake costs 0.0 ms, at 30 m about 8.6 ms (whole-frame GPU).
 4. **Biggest single part: the four chop layers** (12 FBM reads per pixel): -2.8 ms (25 %) at scale 1, -7.1 ms (38 %) at scale 2 when removed. Then the six wave trains with hex bombing (~1.4 ms), the underside `If` (both branches are computed, ~0.95 ms), foam (~0.8), caustics (~0.3, noise level), shore readback (0.6 at scale 1, 0.0 at scale 2: noise level). Lighting and blend of the sheet itself are cheap (`lean` variant 3.0 ms vs 2.4 ms without water).
 5. **CPU: nothing.** `WaterSurface::update` builds the mesh once (frame 3, 60 to 115 ms once, 5128 vertices) and is idle afterwards; the only CPU scope that changes with water is `Metal::NextDrawable`/`WaitForFrame` (present throttle of the locked display).
@@ -75,7 +75,7 @@ Editor settings with the fallback water (default editor, `settings-*`, deferred 
 | lean (no waves, chop, caustics, foam, underside) | 2.98 | | 8.71 | |
 | asset deleted (white fallback) | 2.18 | | 5.57 | |
 
-Reading: the parts are only partly additive (removing chop alone saves 2.8 ms, removing everything saves 8.4 ms at scale 1); the sheet itself (lighting, blend, shore tint) is ~0.6 ms at scale 1. The `trivial` variant (flat colour, **not** in the table) was not trivial: the underside's emissive still pulls the whole wave chain in, so it cost as much as the shipped graph (10.4 ms).
+Reading: the parts are far from additive (removing chop alone saves 2.8 ms, removing everything saves 8.4 ms at scale 1; caustics + foam + underside cost 4.3 ms with the wave trains in (`nochop` 8.59 -> `waves-only` 4.34) but ~1.0 ms with them out (`nowaves` 3.96 -> `lean` 2.98), while their single toggles sum to ~2.0). That points at occupancy / register pressure of the big shader, not pure ALU: check it before assuming that fewer FBM reads are a linear win. The deltas against no water are lower bounds (those rows ran at a lower GPU clock); the sheet itself (lighting, blend, shore tint) is ~0.6 ms at scale 1. The `trivial` variant (flat colour, **not** in the table) was not trivial: the underside's emissive still pulls the whole wave chain in, so it cost nearly as much as the shipped graph (10.4 vs 11.2 ms at scale 1, 14.5 vs 18.7 at scale 2).
 ShallowWater is a parameter (`Vec4`), not a pass: its cost is inside "shore/tint", at most 0.6 ms.
 
 ## 5. What differs from the reported case (the drop does not reproduce)
@@ -86,7 +86,7 @@ ShallowWater is a parameter (`Vec4`), not a pass: its cost is inside "shore/tint
 
 ## 6. Not measured
 
-Ripple rings (the `Water Ripple` loop runs up to 16 rings once a body splashes; every run here had 0 rings), the Catania scene with the live graph, `HorizonGame`, battery / low-power / thermal throttling, a moving camera, several overlapping bodies (overdraw), D3D11/D3D12/Vulkan (not verifiable on this Mac), OpenGL beyond one pair, the 3D viewport's pixel count,
+Whether the exported `HorizonGame` loads the EngineContentCache at all (237: the HOME-based cache supplies arrays when the deploy has none; the pak path may differ), ripple rings (the `Water Ripple` loop runs up to 16 rings once a body splashes; every run here had 0 rings), the Catania scene with the live graph, `HorizonGame`, battery / low-power / thermal throttling, a moving camera, several overlapping bodies (overdraw), D3D11/D3D12/Vulkan (not verifiable on this Mac), OpenGL beyond one pair, the 3D viewport's pixel count,
 Thema 234 (puddle flicker; no link found, none excluded), the editor's own UI cost (CPU p50 10 to 14 ms in every cell, unchanged by water).
 
 ## Handoff
@@ -97,6 +97,7 @@ Commit: this doc, `scripts/perf/{gen_water_scene,water_matrix,water_table}.py`, 
 **Decisions taken:** empty `HOME` + plain terrain for all live-graph numbers; Scene pass at scale 1 and 2 instead of whole-frame GPU (locked display); toggles by regenerating `Water.hasset` from a temporary `mat_gen` patch (sources reverted, deploy restored to the shipped asset). **Only suggested:** the levers below.
 
 **Next steps, in order (step 2):**
+0. Ask the reporter ONE question first: when the FPS drops, is the water WHITE or does it show waves/foam? White -> the graph is not running for them (UUID collision), look elsewhere (section 5); shaded -> the graph is live for them (which build/pak?) and the table in section 4 is the fix list.
 1. Tell the queen: the 230 fix turns the graph on for everyone (+9 to +12 ms Scene at 4.3 MP). Do not merge it without a cost cut, or merge both together.
 2. Reproduce the reporter first: ask which build/backend/scene/resolution; run `water_matrix.py base --home <empty> --plain` against their numbers. If their cost is 5x ours, force 16 ripple rings (temporary fill of `WaterRippleBlock` in the extractor) and run the Catania scene with the live graph (copy `/tmp/he237/scenes`, empty `HOME`).
 3. Levers by measured size: (a) chop: one gradient-noise read per layer instead of three FBM reads (12 -> 4 reads, up to -2/3 of 2.8 / 7.1 ms), or fewer layers/octaves in the mid field; (b) a real branch on `below` (a camera-level uniform) instead of `If` computing both sides (-0.95 / -1.9 ms); (c) near/far material variants by distance so the 30 m+ sheet runs the `lean` graph (cost 3.0 vs 11.4 ms); (d) foam FBMs only where `crest` is high.
