@@ -70,7 +70,7 @@ def metrics(s, sc):
 runs = defaultdict(lambda: defaultdict(list))   # group -> cell -> [metrics]
 for p in sorted(glob.glob(f"{R}/*.summary.json")):
     label = os.path.basename(p)[: -len(".summary.json")]
-    m = re.fullmatch(r"(mesh|var|detail|mem)(2x)?-(.+)-r(\d+)", label)
+    m = re.fullmatch(r"(mesh|var|detail|mem|memgl)(2x)?-(.+)-r(\d+)", label)
     if not m:
         continue
     s, sc = load(label)
@@ -192,3 +192,46 @@ def pass_table(group, title):
 
 pass_table("detail2x", "Tabelle 3b: GPU-Zeit je Pass (Detailed-Capture, RenderScale 2), ms")
 pass_table("detail", "Tabelle 3: GPU-Zeit je Pass (Detailed-Capture, RenderScale 1), ms")
+
+
+def slow_frames_ms(label, upto=6):
+    """Sum of the busy time of the first slow frames ('[startup] app slow frame=N busyMs=X'): terrain build, texture
+    array upload, material warm-up. Frame 1 (window, device) is not included."""
+    tot = 0.0
+    try:
+        for l in open(f"{R}/{label}.log", errors="replace"):
+            m = re.search(r"app slow frame=(\d+) busyMs=([\d.]+)", l)
+            if m and 2 <= int(m.group(1)) <= upto:
+                tot += float(m.group(2))
+    except OSError:
+        return None
+    return tot
+
+
+def mem_table(group, title, array_mb):
+    by = defaultdict(list)
+    for p in sorted(glob.glob(f"{R}/{group}-*-r*.summary.json")):
+        label = os.path.basename(p)[: -len(".summary.json")]
+        m = re.fullmatch(r"%s-(.+)-r(\d+)" % re.escape(group), label)
+        if m:
+            by[m.group(1)].append(label)
+    if not by:
+        return
+    print(f"### {title}\n")
+    print("| Format (V = 3, 3 Arrays) | Läufe | Arrays im Speicher MB | RSS-Spitze je Lauf, min..max MB (Median) | Scene-Pass p50 ms | Tonemap p50 ms (Takt-Zeuge) | Scene / Tonemap | GPU Σ Pässe p50 ms | CPU-Frame p50 ms | Slow-Frames 2-6 Σ ms (Start: Terrain, Upload, Warm-up) |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    for cell in ["V3-rgba8", "V3-astc", "V3-bc7", "V3-bc3"]:
+        if cell not in by:
+            continue
+        rs = [load(l)[0] for l in by[cell]]
+        sc_ = [r["gpuPassPercentiles"]["Scene"]["p50"] for r in rs if r.get("gpuPassPercentiles")]
+        rm = [(r.get("rssMB") or {}).get("max") for r in rs]
+        tm_ = [r["gpuPassPercentiles"]["Tonemap"]["p50"] for r in rs if r.get("gpuPassPercentiles")]
+        print(f"| {cell[3:]} | {len(rs)} | {array_mb.get(cell[3:], '–')} | {min(rm):.0f}..{max(rm):.0f} ({med(rm):.0f}) "
+              f"| {f(med(sc_))} | {f(med(tm_))} | {f(med([a / b for a, b in zip(sc_, tm_)]), 1)} | {f(med([r.get('gpuMs_median') for r in rs]))} "
+              f"| {f(med([(r.get('cpuMs') or {}).get('p50') for r in rs]))} | {f(med([slow_frames_ms(l) for l in by[cell]]), 0)} |")
+    print()
+
+
+MB = {"rgba8": "873 (3 x 290,8)", "astc": "218 (3 x 72,7)", "bc7": "218 (3 x 72,7)", "bc3": "218 (3 x 72,7)"}
+mem_table("mem2x", "Tabelle 4: Texturformate der Arrays auf Metal (nach dem GI-Slice-Means-Fix)", MB)

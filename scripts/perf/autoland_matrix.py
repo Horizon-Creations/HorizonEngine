@@ -35,7 +35,10 @@ REPO = Path(__file__).resolve().parent.parent.parent
 CAPTURE = REPO / "scripts" / "he_perf_capture.py"
 GEN = REPO / "scripts" / "perf" / "gen_autoland_scene.py"
 SCENES = Path("/tmp/al2/scenes")
-PROJ = {"A": "/tmp/al2/projA/Test/Test.heproj", "B": "/tmp/al2/projB/Test/Test.heproj"}
+PROJ = {"A": "/tmp/al2/projA/Test/Test.heproj", "B": "/tmp/al2/projB/Test/Test.heproj",
+        # V = 3 arrays cooked by tests/test_bench_landscape_arrays.cpp (HE_BENCH_ARRAYS_OUT), one project per format
+        "astc": "/tmp/al2/proj_astc/Test/Test.heproj", "bc7": "/tmp/al2/proj_bc7/Test/Test.heproj",
+        "bc3": "/tmp/al2/proj_bc3/Test/Test.heproj"}
 CAM = "0,10,-20,0,-0.2"            # 15 m over the ground, looking along +Z with the hills ahead
 
 # name -> (extent, density | None for "no layer meshes", extra generator flags)
@@ -56,6 +59,11 @@ CELLS = {
                ("s512-off", "s512-off", "A"), ("s512-x1", "s512-x1", "A"), ("s512-x4", "s512-x4", "A"),
                ("s512-x4ns", "s512-x4ns", "A"),
                ("s128-off-V3", "s128-off", "B"), ("s512-off-V3", "s512-off", "B"), ("s128-x4-V3", "s128-x4", "B")],
+    # texture formats of the V = 3 arrays (RGBA8 = project B), Metal, --detailed; scene without layer meshes so the
+    # terrain material is the only reader of the arrays. (name, scene, project, rhi)
+    "mem": [(f"V3-{n}", "s128-off", p, "Metal") for n, p in (("rgba8", "B"), ("astc", "astc"), ("bc7", "bc7"), ("bc3", "bc3"))],
+    # the same on OpenGL (the Mac's GL 4.1 has RGTC and S3TC, no BPTC: BC3 is the format it can take), whole-frame GPU time
+    "memgl": [(f"V3-{n}", "s128-off", p, "OpenGL") for n, p in (("rgba8", "B"), ("bc3", "bc3"))],
 }
 FOREIGN = re.compile(r"\b(cc1|clang|clang\+\+|ninja|make|cmake|ld|HorizonEditor|HorizonGame|he_tests|rustc|swift-frontend)\b")
 
@@ -139,7 +147,7 @@ def ensure_scene(name):
     return path
 
 
-def one_run(label, scene, proj, out, detailed, warmup, frames, env, scale=1.0, retries=2):
+def one_run(label, scene, proj, out, detailed, warmup, frames, env, scale=1.0, rhi="Metal", retries=2):
     cond = out / f"{label}.conditions.txt"
     for attempt in range(retries + 1):
         if not wait_quiet():
@@ -150,6 +158,7 @@ def one_run(label, scene, proj, out, detailed, warmup, frames, env, scale=1.0, r
                "--set", "ViewportGroundGrid=false", "--timeout", "400"]
         if scale != 1.0:
             cmd += ["--set", f"RenderScale={scale}"]
+        cmd += ["--rhi", rhi]
         if not detailed:
             cmd.append("--no-counters")
         else:
@@ -204,18 +213,19 @@ def main():
     if a.only:
         keep = set(a.only.split(","))
         cells = [c for c in cells if c[0] in keep]
-    detailed = a.group == "detail"
+    detailed = a.group in ("detail", "mem")
     reps = a.reps
     env = ["HE_FOLIAGE_STATS=1"] if detailed else []
     for rep in range(1, reps + 1):
         order = cells if rep % 2 == 1 else cells[::-1]
-        for name, scene, proj in order:
+        for name, scene, proj, *rest in order:
+            rhi = rest[0] if rest else "Metal"
             grp = a.group if a.scale == 1.0 else f"{a.group}{a.scale:g}x"
             label = f"{grp}-{name}-r{rep}"
             if (out / f"{label}.summary.json").exists():
                 continue
             print(f"[{time.strftime('%H:%M:%S')}] {label}", flush=True)
-            one_run(label, ensure_scene(scene), proj, out, detailed, a.warmup, a.frames, env, a.scale)
+            one_run(label, ensure_scene(scene), proj, out, detailed, a.warmup, a.frames, env, a.scale, rhi)
 
 
 if __name__ == "__main__":
