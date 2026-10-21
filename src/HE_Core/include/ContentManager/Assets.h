@@ -574,16 +574,56 @@ struct FontAsset : public RuntimeAsset
 //   BC7      — desktop D3D11/D3D12/Vulkan + OpenGL 4.2+ (Windows/Linux); best RGBA quality.
 //   BC3      — DXT5; the universal desktop fallback, incl. macOS OpenGL 4.1 (S3TC),
 //              which samples neither ASTC nor BC7.
-// Every block format here is 16 bytes per 4x4 block, so a level's byte size is
-// ceil(w/4)*ceil(h/4)*16 and the row stride is ceil(w/4)*16 — identical math for
-// all three. Levels are concatenated in `data` exactly like the RGBA8 mip chain
-// (level 0 first), so a backend that can't sample the format just ignores it.
-enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1, BC7 = 2, BC3 = 3 };
+//   BC1      — DXT1, opaque RGB at 8 bytes per block (half of BC3). Albedo without alpha.
+//   BC4      — one channel (R), 8 bytes per block. Single-channel data: roughness, height, AO.
+//   BC5      — two channels (R, G), 16 bytes per block. Tangent-space normals as XY: it
+//              stores NO Z, so a normal read as .xyz gets z = 0 (reconstruct it in the
+//              shader). Sampled as (r, g, 0, 1); BC4 as (r, 0, 0, 1).
+// Every block format covers a 4x4 texel block; the block size is
+// textureFormatBlockBytes() (8 for BC1/BC4, 16 for the rest), so a level's byte size is
+// ceil(w/4)*ceil(h/4)*blockBytes (textureLevelBytes) and the row stride is
+// ceil(w/4)*blockBytes. Levels are concatenated in `data` exactly like the RGBA8 mip
+// chain (level 0 first), so a backend that can't sample the format just ignores it.
+// The value is written as the TXMI format byte: new formats are only ever APPENDED.
+enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1, BC7 = 2, BC3 = 3,
+                                     BC1 = 4, BC4 = 5, BC5 = 6 };
 
-// True for the block-compressed TextureFormat values (all 16 B / 4x4 block).
+// True for the block-compressed TextureFormat values (all cover a 4x4 texel block).
 inline bool textureFormatIsBlock4x4(TextureFormat f)
 {
-	return f == TextureFormat::ASTC_4x4 || f == TextureFormat::BC7 || f == TextureFormat::BC3;
+	return f == TextureFormat::ASTC_4x4 || f == TextureFormat::BC7 || f == TextureFormat::BC3
+	    || f == TextureFormat::BC1      || f == TextureFormat::BC4 || f == TextureFormat::BC5;
+}
+
+// Bytes per 4x4 block: 8 for BC1/BC4, 16 for ASTC/BC7/BC3/BC5, 0 for RGBA8 (not a block
+// format; four bytes per texel instead).
+inline uint32_t textureFormatBlockBytes(TextureFormat f)
+{
+	if (!textureFormatIsBlock4x4(f)) return 0;
+	return (f == TextureFormat::BC1 || f == TextureFormat::BC4) ? 8u : 16u;
+}
+
+// Bytes of ONE mip level of w x h texels in format `f` (RGBA8: w*h*4).
+inline size_t textureLevelBytes(TextureFormat f, uint32_t w, uint32_t h)
+{
+	const uint32_t bb = textureFormatBlockBytes(f);
+	if (bb == 0) return static_cast<size_t>(w) * h * 4;
+	return static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * bb;
+}
+
+inline const char* textureFormatName(TextureFormat f)
+{
+	switch (f)
+	{
+	case TextureFormat::RGBA8:    return "RGBA8";
+	case TextureFormat::ASTC_4x4: return "ASTC 4x4";
+	case TextureFormat::BC7:      return "BC7";
+	case TextureFormat::BC3:      return "BC3";
+	case TextureFormat::BC1:      return "BC1";
+	case TextureFormat::BC4:      return "BC4";
+	case TextureFormat::BC5:      return "BC5";
+	}
+	return "unknown";
 }
 
 struct TextureAsset : public RuntimeAsset
@@ -612,7 +652,8 @@ struct TextureAsset : public RuntimeAsset
 	// the other, EACH with its own full mip chain (slice 0 levels 0..n-1, then
 	// slice 1 …) — D3D's subresource order, and slice 0 stays the leading bytes,
 	// so a consumer that knows nothing of arrays reads slice 0 as a 2D texture.
-	// RGBA8 only for now (HE::buildTextureArray). Written to the TXMI tail only
+	// Built RGBA8 (HE::buildTextureArray); the pack-time cook can turn it into a
+	// block format, every slice and level encoded on its own. Written to the TXMI tail only
 	// when > 1, so every 2D asset keeps its exact bytes.
 	uint32_t             layers    = 1;
 };

@@ -308,6 +308,8 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
+    test_texture_bcn.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp

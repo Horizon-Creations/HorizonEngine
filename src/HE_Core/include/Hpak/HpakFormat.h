@@ -205,8 +205,9 @@ struct PackSettings {
     bool cook = false;
     // Additionally block-compress RGBA8 textures at pack time to this HE::TextureFormat
     // value (kept as a raw uint8_t so this low-level header needn't include Assets.h):
-    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3. Each needs its encoder in the
-    // build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC / HE_HAVE_STB_DXT); on a missing encoder or
+    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3, 4 = BC1, 5 = BC4 (R only), 6 = BC5
+    // (R and G only). Each needs its encoder in the build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC /
+    // HE_HAVE_STB_DXT, which covers BC1/BC3/BC4/BC5). Texture arrays are cooked too; on a missing encoder or
     // an encode failure the cook silently keeps RGBA8 + baked mipmaps. The chosen format
     // must match what the target's GPU can sample — the editor picks it per target/backend.
     uint8_t textureCompression = 0;

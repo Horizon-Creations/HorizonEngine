@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <Renderer/UIRenderObject.h>
@@ -4511,7 +4512,7 @@ struct D3D11RendererImpl
     }
 
     // Create an immutable base-color texture + SRV from a cooked TextureAsset — RGBA8
-    // or a block format (BC7/BC3) — with its full pre-baked mip chain (one immutable
+    // or a block format (BC7/BC3/BC1/BC4/BC5) — with its full pre-baked mip chain (one immutable
     // subresource per level). Returns a null SRV when the asset is unusable or this
     // device can't sample the shipped format (→ flat). Shared by every base-color
     // upload site (static/skeletal mesh, override material). Block formats need no
@@ -4524,7 +4525,7 @@ struct D3D11RendererImpl
     // are unchanged; the null SRV desc below inherits the resource format.
     //
     // asArray (Thema 158) = a Texture2DArray SRV for a sampler2DArray heTexP slot: every
-    // slice of a texture-array asset (RGBA8, HE::buildTextureArray layout -- slice-major,
+    // slice of a texture-array asset (RGBA8 or a block format, HE::buildTextureArray layout -- slice-major,
     // which IS D3D's subresource order), or a plain 2D asset as one slice. An array
     // asset WITHOUT asArray reads its leading bytes, i.e. slice 0, as a 2D texture.
     // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
@@ -4539,28 +4540,41 @@ struct D3D11RendererImpl
         if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return srv;
 
         const bool srgb = tex->srgb && honourSrgb;
-        DXGI_FORMAT fmt; bool isBlock; UINT blockBytes = 16;
+        DXGI_FORMAT fmt; bool isBlock;
         switch (tex->format)
         {
         case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
         case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
         case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC1:   fmt = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB      : DXGI_FORMAT_BC1_UNORM;      isBlock = true;  break;
+        // BC4 / BC5 have no sRGB twin: they carry data (single channel, normal XY).
+        case TextureFormat::BC4:   fmt = DXGI_FORMAT_BC4_UNORM; isBlock = true; break;
+        case TextureFormat::BC5:   fmt = DXGI_FORMAT_BC5_UNORM; isBlock = true; break;
         default: return srv; // ASTC / unknown → D3D can't sample it
         }
         // BC is core on FL11, but stay defensive: skip if the driver can't sample it.
+        // A format the CPU can expand (BC1/BC3/BC4/BC5) is uploaded as RGBA8 instead.
         if (isBlock)
         {
             UINT sup = 0;
             if (FAILED(device->CheckFormatSupport(fmt, &sup)) ||
                 !(sup & D3D11_FORMAT_SUPPORT_TEXTURE2D))
-                return srv;
+            {
+                TextureAsset rgba;
+                if (!HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+                    return srv;
+                HE_LOG_WARN(RHI, "D3D11Renderer: device can't sample %s textures; uploading them as RGBA8",
+                            textureFormatName(tex->format));
+                return createAlbedoSRV(&rgba, asArray, honourSrgb);
+            }
         }
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
         // One immutable subresource per mip (level 0 first), per slice (D3D order:
         // subresource = mip + slice * mips). Row pitch: block formats are
-        // blocks-per-row × 16 B; RGBA8 is width × 4 B.
-        if (layers > 1 && isBlock) return srv; // arrays are RGBA8 only
+        // blocks-per-row × the block size (8 B BC1/BC4, 16 B otherwise); RGBA8 is
+        // width × 4 B. The slices of an array are stored back to back, each with its chain.
+        const UINT blockBytes = textureFormatBlockBytes(tex->format);
         std::vector<D3D11_SUBRESOURCE_DATA> srd(static_cast<size_t>(mips) * layers);
         size_t off = 0;
         for (UINT s = 0; s < layers; ++s)
@@ -4569,8 +4583,7 @@ struct D3D11RendererImpl
             for (UINT l = 0; l < mips; ++l)
             {
                 const UINT rowPitch = isBlock ? ((lw + 3) / 4) * blockBytes : lw * 4;
-                const size_t bytes  = isBlock ? static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes
-                                              : static_cast<size_t>(lw) * lh * 4;
+                const size_t bytes  = textureLevelBytes(tex->format, lw, lh);
                 if (off + bytes > tex->data.size()) return {}; // truncated payload
                 D3D11_SUBRESOURCE_DATA& d = srd[static_cast<size_t>(s) * mips + l];
                 d.pSysMem          = tex->data.data() + off;

@@ -16,7 +16,7 @@ namespace
 // notice a change in the CODE that produced the entry; this is how it is told.
 // "Incremental" off in the export dialog (or no --cache for the packer) is the
 // manual escape hatch.
-constexpr uint8_t kPackPipelineVersion = 3; // 3: hpak v3 hash (manifest hashes changed)
+constexpr uint8_t kPackPipelineVersion = 4; // 3: hpak v3 hash (manifest hashes changed); 4: texture arrays are cooked too
 
 bool loadPakManifest(const std::filesystem::path& path,
                      uint64_t expectPakTocHash, uint64_t expectSettingsFp,

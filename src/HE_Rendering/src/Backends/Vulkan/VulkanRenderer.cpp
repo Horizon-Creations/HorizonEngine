@@ -4,6 +4,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -8011,7 +8012,7 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
     return true;
 }
 
-// Upload a cooked TextureAsset (RGBA8 or block-compressed BC7/BC3) with its full
+// Upload a cooked TextureAsset (RGBA8 or block-compressed BC7/BC3/BC1/BC4/BC5) with its full
 // pre-baked mip chain to a device-local sampled image + view. All levels are staged
 // into one buffer and copied per-mip; block formats use no runtime mip generation.
 // Returns false when the device can't sample the shipped format (→ untextured draw).
@@ -8040,24 +8041,40 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     case TextureFormat::RGBA8: vkFmt = srgb ? VK_FORMAT_R8G8B8A8_SRGB   : VK_FORMAT_R8G8B8A8_UNORM;  isBlock = false; break;
     case TextureFormat::BC7:   vkFmt = srgb ? VK_FORMAT_BC7_SRGB_BLOCK  : VK_FORMAT_BC7_UNORM_BLOCK; isBlock = true;  break;
     case TextureFormat::BC3:   vkFmt = srgb ? VK_FORMAT_BC3_SRGB_BLOCK  : VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
+    // BC1 as the opaque RGB variant (alpha reads 1), like GL's RGB_S3TC_DXT1.
+    case TextureFormat::BC1:   vkFmt = srgb ? VK_FORMAT_BC1_RGB_SRGB_BLOCK : VK_FORMAT_BC1_RGB_UNORM_BLOCK; isBlock = true; break;
+    // BC4 / BC5 have no sRGB twin: they carry data (single channel, normal XY).
+    case TextureFormat::BC4:   vkFmt = VK_FORMAT_BC4_UNORM_BLOCK; isBlock = true; break;
+    case TextureFormat::BC5:   vkFmt = VK_FORMAT_BC5_UNORM_BLOCK; isBlock = true; break;
     default: return false;
     }
     // Texture ARRAY (Thema 158): every slice of a layers > 1 asset, one after the
     // other in the staging buffer exactly as HE::buildTextureArray stores them
-    // (slice-major, each slice with its full chain). RGBA8 only. A 2D asset in an
+    // (slice-major, each slice with its full chain), RGBA8 or a block format. A 2D asset in an
     // array slot is one slice; an array asset in a 2D slot reads slice 0 -- its
     // leading bytes -- through the plain path below.
     const uint32_t layers = asArray ? std::max<uint32_t>(1, tex->layers) : 1;
-    if (layers > 1 && (isBlock || !HE::textureArrayPayloadValid(*tex))) return false;
-    // Device must actually sample this format (BC support is optional in Vulkan).
+    if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false;
+    // Device must actually sample this format (BC support is optional in Vulkan). A
+    // format the CPU can expand (BC1/BC3/BC4/BC5) is uploaded as RGBA8 instead of
+    // leaving the draw untextured.
     VkFormatProperties fp{};
     vkGetPhysicalDeviceFormatProperties(m_physDevice, vkFmt, &fp);
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) return false;
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+    {
+        TextureAsset rgba;
+        if (!isBlock || !HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+            return false;
+        HE_LOG_WARN(RHI, "VulkanRenderer: device can't sample %s textures; uploading them as RGBA8",
+                    textureFormatName(tex->format));
+        return uploadTextureImage(&rgba, image, memory, view, asArray, honourSrgb);
+    }
 
-    // Per-level byte size + running offsets (level 0 first). Block: 16 B/4x4 block.
-    auto levelBytes = [isBlock](uint32_t w, uint32_t h) -> VkDeviceSize {
-        return isBlock ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * 16
-                       : static_cast<VkDeviceSize>(w) * h * 4;
+    // Per-level byte size + running offsets (level 0 first). Block: 8 B (BC1/BC4) or
+    // 16 B per 4x4 block.
+    const TextureFormat texFmt = tex->format;
+    auto levelBytes = [texFmt](uint32_t w, uint32_t h) -> VkDeviceSize {
+        return static_cast<VkDeviceSize>(textureLevelBytes(texFmt, w, h));
     };
     std::vector<VkDeviceSize> offsets(mips);
     VkDeviceSize total = 0;
@@ -8135,8 +8152,9 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
       for (uint32_t l = 0; l < mips; ++l)
       {
         VkBufferImageCopy region{};
-        // Multiple of 16 for blocks; a multiple of 4 for RGBA8 (the only array
-        // format). stageOff is 16-aligned, so the sum keeps both.
+        // Must be a multiple of the texel block size: 8 or 16 for blocks, 4 for RGBA8.
+        // stageOff is 16-aligned and every level/slice size is a whole number of
+        // blocks, so the sum keeps it.
         region.bufferOffset     = stageOff + s * sliceBytes + offsets[l];
         region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, s, 1 };
         region.imageExtent      = { lw, lh, 1 };

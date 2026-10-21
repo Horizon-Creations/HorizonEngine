@@ -4,6 +4,7 @@
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
+#include <ContentManager/TextureBlockDecode.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 
 #include <algorithm>
@@ -64,6 +65,14 @@ int giAutoLandscapeParams(const MaterialAsset& ma,
 bool giAutoLandscapeSliceMeans(const TextureAsset& t, GiLandscape& out)
 {
 	if (t.layers < 5 || !textureArrayPayloadValid(t)) return false;
+	// This reads RGBA8 texels. A block-compressed array (BC1/BC3/BC4/BC5) is expanded
+	// first; BC7 and ASTC have no CPU decoder here, so the GI keeps its default colours.
+	if (t.format != ::TextureFormat::RGBA8)
+	{
+		TextureAsset rgba;
+		return textureFormatCpuDecodable(t.format) && decodeTextureToRGBA8(t, rgba)
+		    && giAutoLandscapeSliceMeans(rgba, out);
+	}
 	// Smallest level with both sides ≤ 16 (or the last one stored).
 	uint32_t level = 0, w = t.width, h = t.height;
 	while (level + 1 < t.mipLevels && (w > 16 || h > 16))
