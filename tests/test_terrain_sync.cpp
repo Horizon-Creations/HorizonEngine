@@ -787,6 +787,21 @@ TEST_CASE("Landscape sync: a peer's change to how a layer is drawn sticks, and t
 	net.deliver();
 	CHECK(cf.layers[0].seed == 1234);
 	CHECK(cf.layers[0].dirty);
+
+	// A placement rule (Thema 180) decides which candidates stay: it is a scatter input
+	// too, or the receiver would keep a scatter made without the rule.
+	FoliageSystem::update(client->world);
+	REQUIRE_FALSE(cf.layers[0].dirty);
+	net.tick();
+	hf.layers[0].slopeMin = 0.2f;
+	hf.layers[0].heightMax = 5.0f;
+	hf.layers[0].weightLayer = 2;
+	net.collect(*host);
+	net.deliver();
+	CHECK(cf.layers[0].slopeMin == doctest::Approx(0.2f));
+	CHECK(cf.layers[0].heightMax == doctest::Approx(5.0f));
+	CHECK(cf.layers[0].weightLayer == 2);
+	CHECK(cf.layers[0].dirty);
 }
 
 TEST_CASE("Landscape sync: a layer that arrives with its mask is not overtaken by the mask")

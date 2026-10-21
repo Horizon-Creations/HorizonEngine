@@ -1,0 +1,17 @@
+== detail-s128-off-r1  2026-10-21 05:53:39  attempt 1
+before:
+  uptime:    load averages: 2.59 2.61 2.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.6% Python; 11.0% io.tailscale.ipn.macsys.network-extension; 10.3% coreaudiod; 9.0% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.31 2.55 2.39
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      50.1% pairedsyncd; 14.5% Dock; 13.5% coreaudiod; 8.0% clion
+  foreign:   none

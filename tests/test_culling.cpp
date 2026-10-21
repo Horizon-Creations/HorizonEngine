@@ -4035,6 +4035,77 @@ TEST_CASE("GI auto landscape: recognised by its parameter names, slice means sRG
 	CHECK_FALSE(HE::giAutoLandscapeSliceMeans(t, L));
 }
 
+TEST_CASE("GI auto landscape: slice means read each layer's first VARIANT, and a block array is decoded one level at a time (Thema 180 Schritt 6)")
+{
+	// 13 slices = 4 layers x 3 variants + WetGround (Thema 180 Schritt 3). The first variant of Grass,
+	// Dirt, Rock, Snow sits at 0, 3, 6, 9, WetGround at 12; every other slice is a black decoy, so a
+	// reader that takes slices 0..4 (the V = 1 layout) sees Grass, black, black, Dirt, black.
+	constexpr uint32_t kSize = 32, kMips = 6, kDepth = 13;
+	const uint8_t cols[5][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 255 }, { 255, 0, 255 } };
+	auto colourOf = [&](uint32_t slice, int out[3])
+	{
+		out[0] = out[1] = out[2] = 0;
+		for (int g = 0; g < 5; ++g)
+			if (slice == static_cast<uint32_t>(HE::autoLandscapeSliceOf(g, 0, kDepth)))
+				for (int c = 0; c < 3; ++c) out[c] = cols[g][c];
+	};
+	const auto expectMeans = [&](const HE::GiLandscape& L, const char* what)
+	{
+		CAPTURE(std::string(what));
+		for (int g = 0; g < 4; ++g)
+			CHECK(near3(glm::vec3(L.layerColor[g]), glm::vec3(cols[g][0], cols[g][1], cols[g][2]) / 255.0f));
+		CHECK(near3(glm::vec3(L.autoWet), glm::vec3(cols[4][0], cols[4][1], cols[4][2]) / 255.0f * 0.675f));
+	};
+
+	// RGBA8.
+	TextureAsset rgba;
+	rgba.width = rgba.height = kSize; rgba.channels = 4; rgba.mipLevels = kMips; rgba.layers = kDepth;
+	rgba.srgb = false;
+	const size_t rgbaSlice = HE::textureArraySliceBytes(kSize, kSize, kMips);
+	rgba.data.resize(rgbaSlice * kDepth);
+	for (uint32_t s = 0; s < kDepth; ++s)
+	{
+		int c[3]; colourOf(s, c);
+		for (size_t i = 0; i < rgbaSlice; i += 4)
+		{
+			uint8_t* p = rgba.data.data() + s * rgbaSlice + i;
+			p[0] = static_cast<uint8_t>(c[0]); p[1] = static_cast<uint8_t>(c[1]); p[2] = static_cast<uint8_t>(c[2]); p[3] = 255;
+		}
+	}
+	HE::GiLandscape L;
+	REQUIRE(HE::giAutoLandscapeSliceMeans(rgba, L));
+	expectMeans(L, "RGBA8, V = 3");
+
+	// BC1: every 4x4 block of every level is one solid colour (both endpoints equal, indices 0), so the
+	// decode is exact for these colours. The slice bytes are what the packer writes (textureArraySliceBytes).
+	TextureAsset bc1 = rgba;
+	bc1.format = ::TextureFormat::BC1;
+	const size_t bc1Slice = HE::textureArraySliceBytes(kSize, kSize, kMips, ::TextureFormat::BC1);
+	bc1.data.assign(bc1Slice * kDepth, 0);
+	for (uint32_t s = 0; s < kDepth; ++s)
+	{
+		int c[3]; colourOf(s, c);
+		const uint16_t c565 = static_cast<uint16_t>(((c[0] >> 3) << 11) | ((c[1] >> 2) << 5) | (c[2] >> 3));
+		uint8_t* at = bc1.data.data() + s * bc1Slice;
+		for (uint32_t l = 0, w = kSize, h = kSize; l < kMips; ++l, w = std::max(1u, w >> 1), h = std::max(1u, h >> 1))
+			for (uint32_t b = 0, n = ((w + 3) / 4) * ((h + 3) / 4); b < n; ++b, at += 8)
+			{
+				at[0] = at[2] = static_cast<uint8_t>(c565 & 255);
+				at[1] = at[3] = static_cast<uint8_t>(c565 >> 8);
+			}
+	}
+	REQUIRE(HE::textureArrayPayloadValid(bc1));
+	HE::GiLandscape Lb;
+	REQUIRE(HE::giAutoLandscapeSliceMeans(bc1, Lb));
+	expectMeans(Lb, "BC1, V = 3");
+
+	// BC7 / ASTC have no CPU decoder: the GI keeps its default colours.
+	TextureAsset bc7 = bc1;
+	bc7.format = ::TextureFormat::BC7;
+	bc7.data.assign(HE::textureArraySliceBytes(kSize, kSize, kMips, ::TextureFormat::BC7) * kDepth, 0);
+	CHECK_FALSE(HE::giAutoLandscapeSliceMeans(bc7, Lb));
+}
+
 TEST_CASE("GI auto landscape: the three kernel copies carry the reference's masks (Thema 173)")
 {
 	// No GPU under ctest: pin the copies of HE::giAutoLandscapeAlbedo in the

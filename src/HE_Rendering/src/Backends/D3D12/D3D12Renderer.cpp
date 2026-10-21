@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -4362,7 +4363,7 @@ struct D3D12RendererImpl
     // the graph project textures, whose views live in the material ring instead.
     //
     // asArray (Thema 158): a texture ARRAY resource for a sampler2DArray slot — every
-    // slice of a layers > 1 asset (RGBA8, HE::buildTextureArray layout: slice-major,
+    // slice of a layers > 1 asset (RGBA8 or a block format, HE::buildTextureArray layout: slice-major,
     // each slice with its chain, which IS D3D's subresource order, so the copy below
     // walks it unchanged), or a plain 2D asset as one slice.
     // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
@@ -4374,7 +4375,7 @@ struct D3D12RendererImpl
         if (!cl || !tex) return false;
         if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
         const UINT layers = asArray ? std::max<UINT>(1, tex->layers) : 1;
-        if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false; // RGBA8 only
+        if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false;
 
         const bool srgb = tex->srgb && honourSrgb;
         DXGI_FORMAT fmt; bool isBlock;
@@ -4383,6 +4384,10 @@ struct D3D12RendererImpl
         case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
         case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
         case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC1:   fmt = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB      : DXGI_FORMAT_BC1_UNORM;      isBlock = true;  break;
+        // BC4 / BC5 have no sRGB twin: they carry data (single channel, normal XY).
+        case TextureFormat::BC4:   fmt = DXGI_FORMAT_BC4_UNORM; isBlock = true; break;
+        case TextureFormat::BC5:   fmt = DXGI_FORMAT_BC5_UNORM; isBlock = true; break;
         default: return false; // ASTC / unknown → D3D can't sample it
         }
         if (isBlock) // BC is core on FL11, but stay defensive.
@@ -4390,7 +4395,15 @@ struct D3D12RendererImpl
             D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{ fmt };
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
                 !(fs.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D))
-                return false;
+            {
+                // A format the CPU can expand (BC1/BC3/BC4/BC5) is uploaded as RGBA8 instead.
+                TextureAsset rgba;
+                if (!HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+                    return false;
+                HE_LOG_WARN(RHI, "D3D12Renderer: device can't sample %s textures; uploading them as RGBA8",
+                            textureFormatName(tex->format));
+                return uploadTexture2D(cl, &rgba, outTex, asArray, honourSrgb);
+            }
         }
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;

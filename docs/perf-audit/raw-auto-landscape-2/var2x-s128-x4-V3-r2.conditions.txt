@@ -1,0 +1,17 @@
+== var2x-s128-x4-V3-r2  2026-10-21 05:21:09  attempt 1
+before:
+  uptime:    load averages: 2.71 2.41 2.29
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      132.0% clion; 20.2% Python; 9.0% coreaudiod; 5.3% dasd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.32 2.35 2.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       84
+  power:     Now drawing from 'AC Power'
+  busy:      12.6% Dock; 11.0% coreaudiod; 8.5% clion; 5.5% locationd
+  foreign:   none

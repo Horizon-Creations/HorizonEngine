@@ -8,6 +8,7 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_auto_landscape_variants.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
@@ -198,6 +199,10 @@ add_executable(he_tests
     test_foliage_cluster.cpp
     # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
     test_foliage_layers.cpp
+    # Placement rules of a foliage layer (Thema 180 S4): slope, height, paint weight, determinism.
+    test_foliage_rules.cpp
+    # The layer meshes through the instancing path (Thema 180 S5): boxes, flat draw count, passes.
+    test_layer_mesh_instancing.cpp
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
@@ -305,6 +310,10 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
+    test_texture_bcn.cpp
+    # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
+    test_bench_landscape_arrays.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
