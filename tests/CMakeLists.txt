@@ -383,6 +383,8 @@ add_executable(he_tests
     # The same probe through a bundled (quoted) cmake — what a packaged editor
     # runs, and what cmd.exe /c used to cut apart (Thema 96).
     test_toolchain_quoting.cpp
+    # Recheck after Tool Setup installed cmake must not serve the cached "not found".
+    test_toolchain_recheck.cpp
     test_toolchain_vswhere.cpp
     test_crypto_x25519.cpp
     test_net_bitstream.cpp
