@@ -75,6 +75,34 @@ struct FoliageLayer {
     // frame. Not applied at drawDistance, which stays the hard edge it always was.
     float lodHysteresis = 2.0f;
 
+    // ── Placement rules (a layer's mesh grows only where the ground fits) ───
+    // The landscape material shows grass, dirt, rock and snow by slope, height
+    // and noise in its pixel shader; a pebble, a rock or a tuft of grass has to
+    // stand where that surface is visible, so the CPU scatter judges the same
+    // things. Every default is "no rule" (the layer scatters as it did before
+    // the rules existed); the serializer writes a field only when it differs.
+    // A rule only REJECTS candidates, the survivors keep the pose they have in
+    // the unruled layout (like the density mask), and changing one re-scatters
+    // this layer alone.
+    //
+    // Steepness of the ground, 1 - N.y (the landscape material's own measure):
+    // 0 flat, ~0.29 a 45 degree hillside, 1 a wall. A candidate stays when
+    // slopeMin <= steepness <= slopeMax.
+    float slopeMin = 0.0f;
+    float slopeMax = 1.0f;
+    // World-space height of the ground (the terrain entity's own height added),
+    // in metres: heightMin <= y <= heightMax.
+    static constexpr float kNoHeightLimit = 10000.0f;
+    float heightMin = -kNoHeightLimit;
+    float heightMax =  kNoHeightLimit;
+    // The paint layer whose weight gates the scatter: 0..3 are the channels of
+    // TerrainComponent::layerWeights, 4..7 of layerWeights2; -1 = ignore the
+    // paint. A candidate is kept with the probability the layer's weight gives
+    // at that spot (255 = always, 0 = never), so a rock layer painted onto
+    // "Rock" grows rocks on the rock and thins out at its edge. An unpainted
+    // landscape (no weightmap) counts as layer 0 fully, like the shader does.
+    int   weightLayer = -1;
+
     // ── Runtime (not serialised) ────────────────────────────────────────────
     // Per-instance model matrices as the scatter produced them: WORLD space at
     // scatter time (origin = the terrain entity's position), in generation order.

@@ -183,6 +183,12 @@ namespace
 		if (l.contributesAO != def.contributesAO)   j["contributesAO"]  = l.contributesAO;
 		if (l.shadowDistance != def.shadowDistance) j["shadowDistance"] = l.shadowDistance;
 		if (l.lodHysteresis != def.lodHysteresis)   j["lodHysteresis"]  = l.lodHysteresis;
+		// Placement rules (slope, height, paint weight): a layer without any writes none.
+		if (l.slopeMin != def.slopeMin)             j["slopeMin"]       = l.slopeMin;
+		if (l.slopeMax != def.slopeMax)             j["slopeMax"]       = l.slopeMax;
+		if (l.heightMin != def.heightMin)           j["heightMin"]      = l.heightMin;
+		if (l.heightMax != def.heightMax)           j["heightMax"]      = l.heightMax;
+		if (l.weightLayer != def.weightLayer)       j["weightLayer"]    = l.weightLayer;
 		// Farther detail levels; a layer without any writes no key at all.
 		if (!l.lods.empty())
 		{
@@ -219,6 +225,13 @@ namespace
 		l.contributesAO   = c.value("contributesAO",  l.contributesAO);
 		l.shadowDistance  = c.value("shadowDistance", l.shadowDistance);
 		l.lodHysteresis   = std::max(0.0f, c.value("lodHysteresis", l.lodHysteresis));
+		l.slopeMin        = std::clamp(c.value("slopeMin", l.slopeMin), 0.0f, 1.0f);
+		l.slopeMax        = std::clamp(c.value("slopeMax", l.slopeMax), 0.0f, 1.0f);
+		l.heightMin       = std::clamp(c.value("heightMin", l.heightMin), -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit);
+		l.heightMax       = std::clamp(c.value("heightMax", l.heightMax), -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit);
+		// Out of range = no paint rule (a hand-edited file, or a peer with more layers).
+		l.weightLayer     = c.value("weightLayer", l.weightLayer);
+		if (l.weightLayer < 0 || l.weightLayer >= kTerrainMaxLayers) l.weightLayer = -1;
 		if (c.contains("lods") && c["lods"].is_array())
 		{
 			for (const json& d : c["lods"])

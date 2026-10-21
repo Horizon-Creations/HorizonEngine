@@ -1,5 +1,6 @@
 #include "HorizonScene/FoliageSystem.h"
 #include "HorizonScene/FoliagePaint.h"
+#include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
@@ -135,6 +136,47 @@ namespace
         return store;
     }
 
+    // Distance between the two height samples a slope is taken from: one terrain
+    // cell, so the slope is that of the surface the mesh actually draws (and not of
+    // the noise between two of its vertices).
+    float terrainSlopeStep(const TerrainComponent& tc)
+    {
+        const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
+        return std::max(0.1f, std::max(tc.sizeX, tc.sizeZ) / static_cast<float>(res - 1));
+    }
+
+    // 1 - N.y of the ground at a terrain-local spot (central differences): 0 flat,
+    // ~0.29 for 45 degrees, the landscape material's own steepness measure.
+    float steepnessAt(const TerrainComponent& tc, float lx, float lz, float step)
+    {
+        // The two samples stay on the terrain (terrainHeightAt clamps outside it, which
+        // would halve the slope along the rim): shorter baseline there, same division.
+        const float hx = tc.sizeX * 0.5f, hz = tc.sizeZ * 0.5f;
+        const float x0 = std::max(lx - step, -hx), x1 = std::min(lx + step, hx);
+        const float z0 = std::max(lz - step, -hz), z1 = std::min(lz + step, hz);
+        const float gx = x1 > x0 ? (terrainHeightAt(tc, x1, lz) - terrainHeightAt(tc, x0, lz)) / (x1 - x0) : 0.0f;
+        const float gz = z1 > z0 ? (terrainHeightAt(tc, lx, z1) - terrainHeightAt(tc, lx, z0)) / (z1 - z0) : 0.0f;
+        return 1.0f - 1.0f / std::sqrt(1.0f + gx * gx + gz * gz);
+    }
+
+    // The painted weight of paint layer `layer` (0..7) at a terrain-local spot,
+    // 0..1, from the texel it falls in. An unpainted landscape is layer 0 fully:
+    // the same default the shader falls back to.
+    float layerWeightAt(const TerrainComponent& tc, int layer, float lx, float lz)
+    {
+        if (tc.layerWeights.empty()) return layer == 0 ? 1.0f : 0.0f;
+        const uint32_t wr = tc.weightRes;
+        if (wr == 0 || tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return 0.0f;
+        const auto texel = [wr](float v, float size) {
+            return static_cast<uint32_t>(std::clamp(static_cast<int>((v / size + 0.5f) * static_cast<float>(wr)),
+                                                    0, static_cast<int>(wr) - 1));
+        };
+        uint8_t w[kTerrainMaxLayers] = {};
+        if (!TerrainPaint::texelWeights(tc, texel(lx, tc.sizeX), texel(lz, tc.sizeZ), w))
+            return layer == 0 ? 1.0f : 0.0f;   // a short blob: as unpainted
+        return static_cast<float>(w[layer]) / 255.0f;
+    }
+
     // One layer's scatter: the layout every layer always had, from the layer's own
     // seed, density, scale range and mask. Writes cachedInstances and store.
     void scatterLayer(entt::registry& registry, entt::entity entity, size_t li,
@@ -190,6 +232,15 @@ namespace
         // thins, it never reshuffles what stays.
         const bool     masked   = !layer.densityMask.empty();
         const uint32_t keepSalt = static_cast<uint32_t>(layer.seed) * 0x9E3779B9u;
+        // The placement rules (FoliageLayer::slopeMin ..): rejection too, after
+        // the mask, with a hash of their own so the survivors keep their pose.
+        const bool     sloped    = layer.slopeMin > 0.0f || layer.slopeMax < 1.0f;
+        const bool     highRule  = layer.heightMin > -FoliageLayer::kNoHeightLimit
+                                || layer.heightMax <  FoliageLayer::kNoHeightLimit;
+        const bool     weighted  = layer.weightLayer >= 0 && layer.weightLayer < kTerrainMaxLayers;
+        const bool     ruled     = sloped || highRule || weighted;
+        const uint32_t weightSalt = keepSalt ^ 0x68E31DA4u;
+        const float    slopeStep  = terrainSlopeStep(terrain);
         int placed = 0;
 
         uint32_t rngState = static_cast<uint32_t>(layer.seed) ^ 0xABCD1234u;
@@ -210,6 +261,25 @@ namespace
                 if (keep <= 0.0f || u >= keep) continue;
             }
             const float ly = terrainHeightAt(terrain, lx, lz);
+            if (ruled)
+            {
+                // Hard limits first: no roll, the same answer for the same ground.
+                if (origin.y + ly < layer.heightMin || origin.y + ly > layer.heightMax) continue;
+                if (sloped)
+                {
+                    const float s = steepnessAt(terrain, lx, lz, slopeStep);
+                    if (s < layer.slopeMin || s > layer.slopeMax) continue;
+                }
+                if (weighted)
+                {
+                    // Own roll (own salt): a mask and a weight on one layer must not
+                    // draw the same number, or the two would only ever overlap.
+                    uint32_t roll = wangHash(static_cast<uint32_t>(i) ^ weightSalt);
+                    const float u = randFloat(roll);
+                    const float keep = layerWeightAt(terrain, layer.weightLayer, lx, lz);
+                    if (keep <= 0.0f || u >= keep) continue;
+                }
+            }
 
             // The terrain-local pose, built exactly as the world one always was:
             // translate, rotate about Y, scale. Rotating and scaling never touch the

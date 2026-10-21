@@ -921,6 +921,55 @@ namespace
 	  "Beyond this distance the layer stops casting shadows, in metres. 0 casts "
 	  "as far as it is drawn (Draw Distance).",
 	  "", "scenes#foliage" },
+	{ "Foliage/Mesh Preset", "",
+	  "One of the engine's own layer meshes: a grass tuft, a pebble, three boulder "
+	  "shapes, a drift of snow. Each comes with detail levels and with settings that "
+	  "suit its size. Pick one, then press Apply Preset.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Apply Preset", "",
+	  "Fills this layer from the chosen preset: the mesh and its detail levels, "
+	  "density, scale, shadow flags and the placement rules (rocks on the steep, "
+	  "snow above the snow line, tufts and pebbles on the flat). It overwrites "
+	  "those fields, one undo step brings them back; the seed and any painted "
+	  "mask stay. Use one layer per kind, a second boulder shape is a second layer.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Placement", "",
+	  "Where the layer may grow, judged on the ground itself: how steep it is, how "
+	  "high it lies and how much of a paint layer is there. A rule only removes "
+	  "spots, the plants that stay keep their place and size, and the layer scatters "
+	  "again when you let go of a field. The defaults are no rule at all. Use it to "
+	  "put pebbles on dirt, rocks on the steep and tufts of grass on the flat, "
+	  "where the landscape material shows that surface.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Slope Min", "",
+	  "Smallest steepness of the ground the layer grows on. Steepness is 1 minus "
+	  "the up-component of the ground normal, as the landscape material measures "
+	  "it: 0 is flat, about 0.29 a 45 degree hillside, 1 a wall. Raise it to keep "
+	  "the layer off flat ground (rocks on a slope).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Slope Max", "",
+	  "Largest steepness of the ground the layer grows on (see Slope Min). Lower "
+	  "it to keep the layer off cliffs: tufts of grass on the flat and gentle "
+	  "only. 1 means no upper limit.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Height Min", "",
+	  "Lowest ground height the layer grows on, in metres of world height (the "
+	  "landscape's own height included). \"no limit\" is the default.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Height Max", "",
+	  "Highest ground height the layer grows on, in metres of world height. Set it "
+	  "to keep grass off the mountain tops, or Height Min for snow chunks that "
+	  "belong to the peaks. \"no limit\" is the default.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Paint Layer", "",
+	  "Ties the layer to one of the landscape's paint layers (the ones the Layers "
+	  "brush paints): the layer grows with the probability the paint gives at each "
+	  "spot, fully where that layer is painted solid and thinning out toward its "
+	  "edge. Off ignores the paint. Layers are numbered from 0, as the material "
+	  "names them (with the Auto Landscape material: 1 Grass, 2 Dirt, 3 Rock, "
+	  "4 Snow). A landscape nobody painted counts as Layer 0 everywhere. "
+	  "Painting re-scatters the layers that use this.",
+	  "", "scenes#foliage" },
 	{ "Foliage/Detail Levels", "",
 	  "What the layer turns into farther away: a simpler mesh, fewer plants, a "
 	  "cross card at the far end. The mesh above is drawn near the camera; each "
