@@ -159,8 +159,9 @@ namespace
     Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
     Window::~Window()                        { Shutdown(); }
 
-    void Window::Init(const WindowProps& props)
+    void Window::Init(const WindowProps& requested)
     {
+        WindowProps props = requested;
         m_width  = props.width;
         m_height = props.height;
         m_api    = props.api;
@@ -245,10 +246,14 @@ namespace
         // into that too-small window. Multiplying by the content scale is a
         // no-op on the platforms that need none and the whole fix on the two
         // that do.
+        // SDL is up, so the displays can be asked: the owner may swap in a
+        // remembered rectangle now (WindowProps::resolveRect).
+        if (m_isPrimary && props.resolveRect) props.resolveRect(props);
+
         const float contentScale = m_isPrimary
             ? SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()) : 1.0f;
         uint32_t createW = props.width, createH = props.height;
-        if (contentScale > 1.0f)
+        if (contentScale > 1.0f && !props.restoreRect)
         {
             createW = static_cast<uint32_t>(props.width  * contentScale + 0.5f);
             createH = static_cast<uint32_t>(props.height * contentScale + 0.5f);
@@ -279,6 +284,15 @@ namespace
                         props.title.c_str(), createW, createH,
                         static_cast<unsigned long long>(flags), SDL_GetError());
             throw std::runtime_error("SDL_CreateWindow failed: " + std::string(SDL_GetError()));
+        }
+
+        if (props.restoreRect)
+        {
+            if (props.restorePosition) SDL_SetWindowPosition(m_window, props.x, props.y);
+            else                       SDL_SetWindowPosition(m_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+            // Still hidden here (the splash is up), so the maximized frame is
+            // there when the window first appears instead of animating open.
+            if (props.startMaximized) SDL_MaximizeWindow(m_window);
         }
 
         // m_width/m_height are the logical (points) size — asked for above, but

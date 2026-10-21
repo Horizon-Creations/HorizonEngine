@@ -96,6 +96,9 @@ add_executable(he_tests
     # HE_DUMP_RHI against the config's RHI: the forced backend is the one the
     # editor keeps after OnInit, or its first UI frame crashes (Thema 124, A6).
     test_editor_backend_choice.cpp
+    # Window size/position/maximized remembered across starts: the pure rules,
+    # incl. the fall-back when the saved monitor is gone.
+    test_editor_window_placement.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.

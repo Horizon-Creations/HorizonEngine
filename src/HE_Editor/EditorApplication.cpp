@@ -387,6 +387,41 @@ EditorApplication::~EditorApplication()
 	m_mcp->stop();
 }
 
+// The remembered window (config.json keys WindowX/Y/W/H/Maximized). A config
+// from before this existed has none of them: WindowW stays 0 → not valid.
+static HE::Ed::SavedWindowPlacement loadSavedWindowPlacement(const GlobalState& gs)
+{
+	HE::Ed::SavedWindowPlacement s;
+	s.normal.x  = gs.getCustomConfigInt("WindowX", 0);
+	s.normal.y  = gs.getCustomConfigInt("WindowY", 0);
+	s.normal.w  = gs.getCustomConfigInt("WindowW", 0);
+	s.normal.h  = gs.getCustomConfigInt("WindowH", 0);
+	s.maximized = gs.getCustomConfigBool("WindowMaximized", false);
+	s.valid     = s.normal.w > 0 && s.normal.h > 0;
+	return s;
+}
+
+// Usable bounds of every display, primary first. Needs SDL's video subsystem,
+// which Window::Init has up by the time resolveRect runs.
+static std::vector<HE::Ed::PlacementRect> usableDisplayRects()
+{
+	std::vector<HE::Ed::PlacementRect> out;
+	const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+	int n = 0;
+	SDL_DisplayID* ids = SDL_GetDisplays(&n);
+	auto add = [&](SDL_DisplayID id)
+	{
+		SDL_Rect r{};
+		if (SDL_GetDisplayUsableBounds(id, &r) && r.w > 0 && r.h > 0)
+			out.push_back({ r.x, r.y, r.w, r.h });
+	};
+	if (primary) add(primary);
+	for (int i = 0; ids && i < n; ++i)
+		if (ids[i] != primary) add(ids[i]);
+	SDL_free(ids);
+	return out;
+}
+
 HE::ApplicationConfig EditorApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
@@ -395,6 +430,27 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	cfg.windowprops.height = 900;
 	cfg.windowprops.vsync  = true;
 	cfg.windowprops.mode   = HE::WindowMode::Windowed;
+	// Last session's size, position and maximized state. Not in a hidden run:
+	// that is a script's window, and it must neither move nor depend on where
+	// the person last left theirs. Wayland cannot report or set a position, so
+	// there only the size and the maximized state come back.
+	if (!HE::hiddenWindowRequested())
+	{
+		const HE::Ed::SavedWindowPlacement saved = loadSavedWindowPlacement(*m_globalState);
+		cfg.windowprops.resolveRect = [saved](HE::WindowProps& wp)
+		{
+			const HE::Ed::ResolvedWindowPlacement r =
+				HE::Ed::resolveWindowPlacement(saved, usableDisplayRects());
+			if (!r.applied) return;
+			const char* drv = SDL_GetCurrentVideoDriver();
+			wp.restoreRect     = true;
+			wp.restorePosition = r.setPosition && !(drv && std::strcmp(drv, "wayland") == 0);
+			wp.x = r.rect.x;  wp.y = r.rect.y;
+			wp.width  = static_cast<uint32_t>(r.rect.w);
+			wp.height = static_cast<uint32_t>(r.rect.h);
+			wp.startMaximized = r.maximized;
+		};
+	}
 	// The config's RHI, unless HE_DUMP_RHI forces another one (EditorBackendChoice.h).
 	cfg.backend = HE::Ed::resolveEditorBackend(m_globalState->getSelectedRHI(),
 	                                           std::getenv("HE_DUMP_RHI"));
@@ -3057,6 +3113,25 @@ void EditorApplication::OnRender(float dt)
 #ifdef HE_IMGUI_ENABLED
 	if (m_imguiReady) healStuckImGuiKeys(dt);
 #endif
+	// Where the window is, for the next start (hidden runs never record one).
+	if (!HE::hiddenWindowRequested())
+	{
+		if (SDL_Window* sw = window() ? window()->GetNativeWindow() : nullptr)
+		{
+			if (!m_windowPlacementSeeded)
+			{
+				m_windowPlacement.seed(loadSavedWindowPlacement(GlobalState::getInstance()));
+				m_windowPlacementSeeded = true;
+			}
+			const SDL_WindowFlags f = SDL_GetWindowFlags(sw);
+			HE::Ed::PlacementRect cur;
+			SDL_GetWindowPosition(sw, &cur.x, &cur.y);
+			SDL_GetWindowSize(sw, &cur.w, &cur.h);
+			m_windowPlacement.observe((f & SDL_WINDOW_MAXIMIZED) != 0,
+			                          (f & SDL_WINDOW_FULLSCREEN) != 0,
+			                          (f & SDL_WINDOW_MINIMIZED) != 0, cur);
+		}
+	}
 	// A script asked to quit. Honoured here, between frames, because the request
 	// arrives from inside a running graph and stopping play destroys the runtime
 	// that graph is executing in. setPlayMode already no-ops when not playing.
@@ -14824,6 +14899,20 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
+	// Only a real, watched window writes its placement; the tracker holds back
+	// when it never saw a stable one, so an old value is not overwritten by none.
+	if (m_windowPlacementSeeded && !HE::hiddenWindowRequested())
+	{
+		const HE::Ed::SavedWindowPlacement wp = m_windowPlacement.result();
+		if (wp.valid)
+		{
+			globalstate.setCustomConfigEntry("WindowX",         wp.normal.x);
+			globalstate.setCustomConfigEntry("WindowY",         wp.normal.y);
+			globalstate.setCustomConfigEntry("WindowW",         wp.normal.w);
+			globalstate.setCustomConfigEntry("WindowH",         wp.normal.h);
+			globalstate.setCustomConfigEntry("WindowMaximized", wp.maximized);
+		}
+	}
 	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);
 	// Persist the last editor camera view so it is restored next launch. Only when the
 	// camera was actually used this session (otherwise keep any previously-saved view).

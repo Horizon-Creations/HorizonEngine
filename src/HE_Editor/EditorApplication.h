@@ -5,6 +5,7 @@
 #include "Types/Enums.h"
 #include "ProjectManager.h"
 #include "EditorUndo.h"
+#include "EditorWindowPlacement.h"
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
@@ -879,6 +880,10 @@ private:
 	// only to keep McpBridge.h out of this header; it stays in this slot for
 	// the destruction order above.
 	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
+	// The primary window's size/position/maximized, watched every frame and
+	// written to config.json by writeEditorConfig (EditorWindowPlacement.h).
+	HE::Ed::WindowPlacementTracker m_windowPlacement;
+	bool m_windowPlacementSeeded = false;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.
