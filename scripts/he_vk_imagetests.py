@@ -27,6 +27,13 @@ Exit code 0 = every selected case passed, 1 = a case failed, 2 = usage.
 """
 import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 
+# The case headers and verdicts print box-drawing characters and arrows. On a Windows runner stdout is
+# cp1252 and the first header raised UnicodeEncodeError (run 39532559913: the D3D11/D3D12 layer-mesh step
+# died before it rendered anything). Write UTF-8 whatever the console says.
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
 # ── Cases ────────────────────────────────────────────────────────────────────
 # Each case: shared HE_DUMP_* keys (`base`), then named variants that add keys
 # (`dump`) or raw environment (`env`). `pairs` are the A/B comparisons;
