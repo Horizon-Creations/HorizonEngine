@@ -22,8 +22,10 @@ fünf Backends ist Schritt 5).
 * Serializer: fünf Schlüssel, nur geschrieben wenn ≠ Vorgabe; beim Lesen geklemmt (`weightLayer` außerhalb 0..7 → −1). Eine unberührte Schicht speichert
   dieselben Schlüssel wie vorher (`test_foliage_layers.cpp:124` unverändert grün).
 * Keine neuen Komponentenschlüssel: `"foliage"` steht in `isKnownComponentKey`, der X-Liste und `kComponentScopes` (`"Foliage"`) schon.
-* Collab: die Felder sind Skalare im Komponentenblob (`TerrainSync::serializeWithoutGrids` entfernt nur die Raster), reisen also ohne Änderung mit.
-  Ein neues Raster gibt es nicht.
+* Collab: die Felder sind Skalare im Komponentenblob (`TerrainSync::serializeWithoutGrids` legt nur die Raster beiseite), reisen also mit. Ein neues
+  Raster gibt es nicht. **Eine Stelle brauchte Code:** `restoreFoliage` (`TerrainSync.cpp:~318`) behält beim Empfänger die alte Streuung, wenn die
+  Streu-Eingaben gleich sind (`sameScatter`); die fünf Regelfelder fehlten dort, ein Peer, der eine Regel ändert, hätte beim Empfänger die alte
+  Streuung stehen lassen. Aufgenommen, Test in `test_terrain_sync.cpp` („a peer's change to how a layer is drawn sticks, and the scatter stays“).
 
 ## 2. Die Meshes (`mesh_gen`, UUIDs ab `0x109`)
 
