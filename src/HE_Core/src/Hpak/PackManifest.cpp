@@ -16,7 +16,7 @@ namespace
 // notice a change in the CODE that produced the entry; this is how it is told.
 // "Incremental" off in the export dialog (or no --cache for the packer) is the
 // manual escape hatch.
-constexpr uint8_t kPackPipelineVersion = 4; // 3: hpak v3 hash (manifest hashes changed); 4: texture arrays are cooked too
+constexpr uint8_t kPackPipelineVersion = 3; // 3: hpak v3 hash (manifest hashes changed)
 
 bool loadPakManifest(const std::filesystem::path& path,
                      uint64_t expectPakTocHash, uint64_t expectSettingsFp,
@@ -115,10 +115,11 @@ uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
     // cook toggle (bit0) + texture-compression target (bits1-3) + its quality
-    // (bits4-5) → changing any of them re-packs; a quality change that did not
+    // (bits4-5) + cook-the-arrays (bit6) → changing any of them re-packs; a quality change that did not
     // would leave the previous export's blocks in the pak, encoded at the old one.
     buf[3] = static_cast<uint8_t>((s.cook ? 1 : 0) | ((s.textureCompression & 0x7) << 1)
-                                  | ((s.textureQuality & 0x3) << 4));
+                                  | ((s.textureQuality & 0x3) << 4)
+                                  | ((s.cookTextureArrays ? 1 : 0) << 6));
     std::memcpy(buf + 4, &s.shaderBackends, 4); // precompiled-shader backend set → re-pack materials
     std::memcpy(buf + 8, s.key, 32);  // all-zero when not encrypting
     buf[8 + 32] = kPackPipelineVersion;

@@ -761,12 +761,13 @@ static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t 
 // here at pack time), degrading to RGBA8 whenever that encoder isn't built or a level
 // fails to encode. BC4 keeps only R and BC5 only R and G of the source.
 //
-// A texture ARRAY (layers > 1) arrives with its mip chains already baked per slice
+// A texture ARRAY (layers > 1) is only cooked when PackSettings::cookTextureArrays asks
+// for it. It arrives with its mip chains already baked per slice
 // (HE::buildTextureArray), so its levels are not rebuilt: every slice and level is
 // encoded as it stands, `layers` and `mipLevels` are kept, and the payload is the
 // slice-major concatenation HE::textureArraySliceBytes describes for `format`.
 static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
-                                        uint8_t quality)
+                                        uint8_t quality, bool cookArrays)
 {
     const HAsset::Reader::Chunk* tm = nullptr;
     const HAsset::Reader::Chunk* px = nullptr;
@@ -851,7 +852,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     {
         // Only an RGBA8 array that is to be compressed is touched; anything else ships
         // as it is (already cooked, already compressed, or no target set).
-        if (targetFormat == 0 || srcFormat != 0 || channels != 4 || width == 0 || height == 0)
+        if (!cookArrays || targetFormat == 0 || srcFormat != 0 || channels != 4 || width == 0 || height == 0)
             return {};
         count = std::max<uint32_t>(1, existingMips);
         if (px->data.size() != static_cast<size_t>(layers) * HE::textureArraySliceBytes(width, height, count))
@@ -914,14 +915,14 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
 // their full mip chain baked into PIXL. Unknown/uncookable assets pass through
 // unchanged. Must be lossless w.r.t. what the runtime uploads.
 static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob, uint8_t textureCompression,
-                                        uint8_t textureQuality)
+                                        uint8_t textureQuality, bool cookTextureArrays)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
     const HE::AssetType type = static_cast<HE::AssetType>(r.assetType());
     if (type == HE::AssetType::Texture)
     {
-        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality);
+        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality, cookTextureArrays);
         return cooked.empty() ? blob : cooked;
     }
     if (type != HE::AssetType::StaticMesh) return blob;
@@ -1236,7 +1237,8 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         // ── The pipeline, recording what it looked at ───────────────────────────
         Hpak::PackDeps deps;
         std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath, &deps);
-        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality);
+        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality,
+                                                 settings.cookTextureArrays);
         // After every rewrite above (each of which copies META through verbatim)
         // and BEFORE the hash below: the incremental cache keys on these bytes, so
         // stripping later would leave entries packed by an older build matching

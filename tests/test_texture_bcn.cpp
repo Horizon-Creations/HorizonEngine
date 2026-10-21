@@ -48,7 +48,8 @@ TextureAsset rampTexture(uint32_t w, uint32_t h, int phase = 0)
 
 // Save `src` to a scratch dir, pack it with texture compression `fmt`, load the pak
 // back and return the cooked asset (copied: the ContentManager goes out of scope).
-bool cookViaPak(TextureAsset src, uint8_t fmt, uint8_t quality, const char* tag, TextureAsset& out)
+bool cookViaPak(TextureAsset src, uint8_t fmt, uint8_t quality, const char* tag, TextureAsset& out,
+                bool cookArrays = true)
 {
 	namespace fs = std::filesystem;
 	const fs::path dir = fs::temp_directory_path() / (std::string("he_bcn_") + tag);
@@ -61,6 +62,7 @@ bool cookViaPak(TextureAsset src, uint8_t fmt, uint8_t quality, const char* tag,
 	Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true;
 	s.textureCompression = fmt;
 	s.textureQuality     = quality;
+	s.cookTextureArrays  = cookArrays;
 	HpakWriter packer; packer.addDirectory(dir, s);
 	const fs::path pak = fs::temp_directory_path() / (std::string("he_bcn_") + tag + ".hpak");
 	if (!packer.write(pak.string())) return false;
@@ -409,10 +411,29 @@ TEST_CASE("Cook: an array that is already compressed, or has no target, ships un
 
 	// Packing the BC array again must not encode blocks as if they were RGBA8.
 	TextureAsset bc, again;
-	REQUIRE(cookViaPak(arr, 2, 0, "arrfirst", bc));           // BC7 where built, else RGBA8: either way valid
+	REQUIRE(cookViaPak(arr, 3, 0, "arrfirst", bc));
+	REQUIRE(bc.format == TextureFormat::BC3);
 	REQUIRE(cookViaPak(bc, 4, 0, "arrsecond", again));
 	CHECK(again.format == bc.format);
 	CHECK(again.data == bc.data);
+}
+
+TEST_CASE("Cook: arrays ship RGBA8 unless PackSettings::cookTextureArrays asks, 2D textures are unaffected")
+{
+	const TextureAsset s0 = rampTexture(8, 8, 0), s1 = rampTexture(8, 8, 30);
+	TextureAsset arr;
+	REQUIRE(HE::buildTextureArray({ &s0, &s1 }, arr, true));
+	arr.type = HE::AssetType::Texture; arr.name = "off_arr"; arr.path = "off_arr.hasset";
+
+	TextureAsset off;
+	REQUIRE(cookViaPak(arr, 3, 0, "arroff", off, /*cookArrays=*/false));
+	CHECK(off.format == TextureFormat::RGBA8);           // as every export did before arrays could be cooked
+	CHECK(off.layers == 2);
+	CHECK(off.data == arr.data);
+
+	TextureAsset flat;
+	REQUIRE(cookViaPak(rampTexture(8, 8), 3, 0, "flatoff", flat, /*cookArrays=*/false));
+	CHECK(flat.format == TextureFormat::BC3);
 }
 
 #endif // HE_HAVE_STB_DXT
