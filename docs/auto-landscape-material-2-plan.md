@@ -464,15 +464,15 @@ müssen gleiche Blöcke dekodieren; verglichen wird deshalb immer „gleiches As
 
 ## 10. Zuordnung zu den Schritten
 
-| Schritt | Trägt aus diesem Entwurf |
-|---|---|
-| Vorab (Queen) | Merge von `origin/release/0.7.0` (D8), Konflikt in `tests/test_material_graph.cpp` |
-| 2: BCn-Encoder und Upload | §7.4, §7.5 (Entscheidung D6, Manifest-Frage), Tests ohne GPU, Probe Apple-GL sRGB und kleine Mips |
-| 3: mehr Texturen und Variation | §5, §6 (Groups-Pin, Variantenbits, Z-Rekonstruktion §7.3), Arrays V = 3 aus den Quellen (§12) |
-| 4: Meshes erzeugen und platzieren | §8.2, §8.3 (`mesh_gen`, `FoliageLayer`-Felder, CPU-Zwilling) |
-| 5: Instancing anbinden | §8.4, §8.5, Draw-Zahl belegen (nach dem Merge ist der Pfad da; es geht um Verdrahtung und Nachweis auf allen fünf Backends) |
-| 6: Audit | `scripts/he_perf_capture.py`, `scripts/he_perf_tables.py`, Muster `docs/perf-audit/*`; auf Windows `--rhi` und `R:scripts/perf/foliage_ladder_win.py`. Pass-p50 an/aus. Keine Zahlen in diesem Dokument |
-| 7: Verifikation | voller Build und Tests im Vordergrund, Doku nachziehen |
+| Schritt | Trägt aus diesem Entwurf | Stand (Schritt 11, 2026-10-21) |
+|---|---|---|
+| Vorab (Queen) | Merge von `origin/release/0.7.0` (D8), Konflikt in `tests/test_material_graph.cpp` | erledigt (`e6d4920d`, Schritt 9) |
+| 2: BCn-Encoder und Upload | §7.4, §7.5 (Entscheidung D6, Manifest-Frage), Tests ohne GPU, Probe Apple-GL sRGB und kleine Mips | Schritt 2 abgebrochen, in Schritt 10 neu gemacht: BC1/BC4/BC5, Encoder, Array-Cooking (nur mit `cookTextureArrays`), Decoder, Upload auf fünf Backends. Route B (§7.5, Geschwister-Assets je Familie) und Format je Karte **nicht** gebaut |
+| 3: mehr Texturen und Variation | §5, §6 (Groups-Pin, Variantenbits, Z-Rekonstruktion §7.3), Arrays V = 3 aus den Quellen (§12) | Groups-Pin, `heBombGridV`, 4V+1-Arrays und Packer gebaut; echte V = 3-Fotos nicht gepackt. Z-Rekonstruktion (§7.3) nicht gebaut |
+| 4: Meshes erzeugen und platzieren | §8.2, §8.3 (`mesh_gen`, `FoliageLayer`-Felder, CPU-Zwilling) | Regeln (Hang, Höhe, Malgewicht) und 16 Meshes gebaut; `surface`-Regel und CPU-Rauschzwilling **nicht** |
+| 5: Instancing anbinden | §8.4, §8.5, Draw-Zahl belegen | kein Backend-Code nötig (Cluster-Pfad trägt es); Draw-Zahl flach auf Metal und OpenGL belegt; D3D/Vulkan nur über CI; Meshes ohne eigenes Material (§8.5 offen) |
+| 6: Audit | `scripts/he_perf_capture.py`, `scripts/he_perf_tables.py`, Muster `docs/perf-audit/*` | Metal-Audit mit Messwerten: `docs/perf-audit/auto-landscape-material-2-audit-2026-10-21.md`; D3D/Vulkan-Zeiten und OpenGL-Live-Capture offen |
+| 7/11: Verifikation | voller Build und Tests im Vordergrund, Doku nachziehen | `docs/auto-landscape-material-2-verification-2026-10-21.md` |
 
 ---
 
@@ -487,7 +487,8 @@ müssen gleiche Blöcke dekodieren; verglichen wird deshalb immer „gleiches As
 - **Kleine Mips in Blockformaten** auf allen fünf Backends: zu prüfen (4).
 - **Graph-Material-Meshes im exportierten Forward-Spiel** schleifen (Anfrage 105 offen).
 - **Die GI-Näherung** kann Texturknoten nicht falten (`approxFoldNode`, Textur-Doku §10.5); Variantentexturen ändern daran nichts. Layer-Meshes sind aus der GI ausgenommen.
-- **CI auf diesem Zweig ist rot** (Lauf 38038013020 auf `7b8a1b9b`, Windows, macOS, Linux), vorbestehend und nicht aus diesem Schritt; Ursache vermutlich der fehlende Merge mit `release/0.7.0`, nicht untersucht.
+- **CI auf diesem Zweig:** der rote Lauf 38038013020 (auf `7b8a1b9b`, vor dem Merge) ist überholt. Lauf 39548430947 auf `fbc999fd` ist grün (Windows, macOS, Linux, Linux · Vulkan (lavapipe)); `ab87f6cb` danach ändert nur ein Audit-Dokument. Dass das Windows-Layer-Mesh-Bildtest-Schritt D3D11/D3D12 wirklich gerendert hat, ist daraus **nicht** ablesbar (der Schritt ist `continue-on-error`; Artefakt `layer-mesh-shots-windows` nicht angesehen). **Hardware-Smoke-Test auf NN-WS03: offen.**
+- **Stand Schritte 2-10:** siehe die Spalte „Stand“ in §10 und die Verifikation unter `docs/auto-landscape-material-2-verification-2026-10-21.md`.
 - **Zeilennummern** der Textur-Doku (§8.2 `:8920`, `:5895` usw.) sind veraltet; diese Datei nennt die aktuellen.
 
 ---

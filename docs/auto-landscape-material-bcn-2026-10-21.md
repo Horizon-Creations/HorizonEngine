@@ -57,7 +57,7 @@ from the RGBA8 source, or decode a small level at load).
 
 ## Not verified
 
-- **D3D11, D3D12**: no Windows toolchain here; the diff was read, not compiled. Windows CI is the judge.
+- **D3D11, D3D12**: no Windows toolchain here; the diff was read, not compiled. Windows CI is the judge. *Update (step 11): CI run 39548430947 on `fbc999fd` is green for Windows, Linux and Linux · Vulkan (lavapipe), so the D3D11/D3D12/Vulkan changes compile there. That is a compile result only, no BCn upload ran on a GPU.*
 - **Vulkan, D3D at run time** (images, the RGBA8 fallback branch on a device without BC), Metal BC1/BC4/BC5 (Apple Silicon takes ASTC; the BC paths need an Intel/AMD Mac), Linux CI.
 - The GL fallback branch (decode to RGBA8) was not executed: this GL supports everything it is asked.
 - Encode speed of BC1/BC3 vs BC7 on 2K arrays: not measured.

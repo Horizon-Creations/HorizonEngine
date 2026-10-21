@@ -64,7 +64,7 @@ its rules put it on the ground that suits it`.
   `InspectorPanel.cpp` (Placement + Preset rows), `EditorHelp.cpp` (8 entries), `tests/test_foliage_rules.cpp`.
 - **Verified:** `he_tests --source-file='*test_foliage_rules.cpp'` 11/11 (macOS release); `editor_help_audit.py --check` 1212/1212; `mesh_gen` run twice, byte-equal;
   full `he_tests` run: see the result post.
-- **Not verified:** the meshes were never drawn (no image: step 5 draws them instanced and shows them); the inspector rows were compiled, not looked at
+- **Not verified:** *(update, step 11: step 5 drew them on Metal/OpenGL, `HorizonEditor` is built in the step-11 full build)* the meshes were never drawn (no image: step 5 draws them instanced and shows them); the inspector rows were compiled, not looked at
   (no UI test added); the editor target `HorizonEditor` was not built (its sources compile in `he_tests`); a window/GPU run.
 - **Decisions taken:** rules only (slope, height, paint weight); `surface` enum and its CPU noise twin (`heHashI2`/`heFbmI`, plan §8.3) and the „Match Auto
   Material“ button left for later; one mesh = one layer (plan D7), no mesh sub-list; mesh levels are separate files with consecutive ids, not LODs inside a
