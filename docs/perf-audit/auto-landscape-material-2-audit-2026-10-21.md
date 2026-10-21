@@ -2,7 +2,7 @@
 
 Stand 21.10.2026, MacBook Air M5 (10 Kerne, 24 GB), Metal. Bezug: `../auto-landscape-material-2-plan.md` (Schritt 6), `../auto-landscape-material-2-variants-2026-10-21.md`,
 `../auto-landscape-material-2-instancing-2026-10-21.md`, `../auto-landscape-material-bcn-2026-10-21.md`. Rohdaten: `raw-auto-landscape-2/` (`*.summary.json`, `*.scopes.json`,
-`*.conditions.txt`, `*.log`, `tables.md` = die Tabellen dieses Dokuments, `bench-array-formats.txt`, `binaries.txt`, `ci-run-39532559913-excerpt.txt`). Bild: `img-auto-landscape-2/live_s128_x4.png`.
+`*.conditions.txt`, `*.log`; die 3-MB-`*.profile.json` der Läufe sind bewusst nicht im Repo, `*.scopes.json` hält die Scope-p50 daraus; `tables.md` = die Tabellen dieses Dokuments, `bench-array-formats.txt`, `binaries.txt`, `ci-run-39532559913-excerpt.txt`). Bild: `img-auto-landscape-2/live_s128_x4.png`.
 **Alle Zeiten sind M5/Metal. Direct3D 11, Direct3D 12 und Vulkan wurden nicht gemessen** (kein Windows-Rechner online, NN-WS03 offline); was von dort kommt, steht in Abschnitt 8 und ist als CI gekennzeichnet.
 
 ## 0. Kurzfassung
