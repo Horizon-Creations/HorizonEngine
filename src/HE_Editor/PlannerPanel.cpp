@@ -1232,8 +1232,10 @@ void drawBoard(const Database& db, const View& view)
 	}
 
 	const UUID dbId = db.id, groupId = group->id;
-	// Lanes: "No value" first, then the options in the order the property lists them.
-	std::vector<UUID> lanes{ UUID{} };
+	// Lanes: the options in the order the property lists them, "No value" first only while a row has none
+	// (the Task Board's tasks always have a status, so it never shows there).
+	std::vector<UUID> lanes;
+	if (dbId != tasksDatabaseId() && !db.column(view, UUID{}).empty()) lanes.push_back(UUID{});
 	for (const SelectOption& o : group->options) lanes.push_back(o.id);
 
 	const float cardH = ImGui::GetTextLineHeight() * 2.0f + ImGui::GetStyle().FramePadding.y * 4.0f;
