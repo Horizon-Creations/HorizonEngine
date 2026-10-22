@@ -11,6 +11,7 @@
 #include "../src/HE_Rendering/src/FoliageExtract.h"
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/FoliageComponent.h>
@@ -20,7 +21,10 @@
 #include <ContentManager/DefaultAssets.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 namespace
@@ -232,10 +236,6 @@ TEST_CASE("Foliage extract: a standing camera replays the previous extract and n
 // across a 512 m landscape with five layers (the s512_x4 scene's order of magnitude) and prints the
 // median ExtractFoliage per call, one thread against the pool.
 //   he_tests --no-skip -tc="*Foliage extract bench*"
-#include <chrono>
-#include <sys/resource.h>
-#include <cstdio>
-#include <HorizonScene/Components/TerrainComponent.h>
 namespace
 {
 	double timeExtractMs(RenderExtractor& ex, Landscape& f, const glm::vec3& cam)
@@ -249,14 +249,9 @@ namespace
 		ex.extract(f.world, rw, 16.0f / 9.0f, &c);
 		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	}
-	// User + system CPU time of the whole process, ms: what the machine paid, however it was shared.
-	double cpuMs()
-	{
-		rusage u{};
-		getrusage(RUSAGE_SELF, &u);
-		return (static_cast<double>(u.ru_utime.tv_sec + u.ru_stime.tv_sec) * 1e3)
-		     + (static_cast<double>(u.ru_utime.tv_usec + u.ru_stime.tv_usec) * 1e-3);
-	}
+	// CPU time of the whole process, ms (std::clock: CPU time on POSIX, wall time since start on Windows;
+	// only the skipped benches read it).
+	double cpuMs() { return 1e3 * static_cast<double>(std::clock()) / static_cast<double>(CLOCKS_PER_SEC); }
 	double median(std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; }
 }
 
@@ -364,7 +359,6 @@ TEST_CASE("Foliage scatter: layers scattered together are the layers scattered a
 
 // ── Bench (not run by default): the sky noise volume's cost (Thema 238) ───────────
 // he_tests --no-skip -tc="*SkyNoise3D bench*"   (the bytes are pinned in test_culling.cpp)
-#include <HorizonRendering/SkyNoise3D.h>
 TEST_CASE("SkyNoise3D bench: wall and CPU time of the 256^3 volume" * doctest::skip())
 {
 	for (int round = 0; round < 3; ++round)

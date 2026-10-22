@@ -2,7 +2,7 @@
 
 22.10.2026, MacBook Air M5 (10 cores), **Metal measured, OpenGL picture-checked, D3D11/D3D12/Vulkan not touched or run** (the changed files are
 shared code, see section 5). Follows `cpu-threading-audit-2026-10-22.md` (Schritt 1). Raw reports: `perf-audit/raw-cpu-threading/step2/`
-(`summary.txt` = every run, `*.report.txt` = `thread_timeline_report.py` output).
+(`summary.txt` = every run (the baseline binary was a copy of this tree's own deploy before the change: its reports have no `ExtractFoliageStraddlers` worker lane, the new ones do), `*.report.txt` = `thread_timeline_report.py` output).
 
 ## 1. What changed (all default-on, each with an off switch)
 
@@ -37,8 +37,10 @@ rotated terrain too, and the replay against a walk over stops with every kind of
   of this session (a build of this tree next to the other bee's editor) gave 0.772 ms again; the same binary on a quiet machine gives 0.27 ms, 50 to
   56 ms and 1.07 ms. Shares quoted in the audit overstate the foliage cost by about 2.8x; the ranking of the items is unchanged but their absolute gain
   is smaller than the audit's table says.
-* A moving-camera bench exists (`he_tests --no-skip -tc="*Foliage extract bench*"`, 524k instances, one thread vs pool, alternating per step): 0.73 vs
-  0.43 ms whole extract on a quiet machine; it was inconclusive while the machine ran at load 11 to 14 (other bees building), so it is not quoted above.
+* A moving-camera bench exists (`he_tests --no-skip -tc="*Foliage extract bench*"`: 524k instances in 5 layers, camera walking 600 steps, one thread and
+  pool alternating per step so load lands on both): whole `RenderExtractor::extract` median **0.68 ms one thread, 0.28 ms pool** (3 runs, 0.66/0.25,
+  0.68/0.28, 0.68/0.28; total CPU per extract 0.66 vs 0.72 ms, so the pool buys wall time, not CPU). While the machine ran at load 11 to 14 the same
+  bench gave 1.3 vs 1.3 ms: the pool only helps when cores are free. The old code is not in this binary, so "one thread" is the new serial fallback.
 
 ## 3. Verification
 
