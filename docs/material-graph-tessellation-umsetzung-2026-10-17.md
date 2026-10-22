@@ -84,7 +84,7 @@ Review-Fund: `GetOrBuildMaterialProgram` suchte den Displacement-Body unter dem 
 
 ## Schritt 10: Merge von release/0.7.0 (PR #182)
 
-Merge-Commit auf dem Zweig, `origin/release/0.7.0` @ 12be6adc eingeflossen (kein Rebase, kein Force-Push).
+Merge-Commit auf dem Zweig, `origin/release/0.7.0` @ 12be6adc eingeflossen, danach noch @ 193d524b (Planner P0, sauber, keine Konflikte); kein Rebase, kein Force-Push.
 
 ## Handoff
 
