@@ -2293,3 +2293,80 @@ TEST_CASE("planner ui: Delete Page asks once, deletes, and the question goes awa
 	CHECK(ws->findPage(id) == nullptr);
 	CHECK(ImGui::GetCurrentContext()->OpenPopupStack.Size == 0);
 }
+
+TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes one, an undated row gets dates by dragging, names are typed in place")
+{
+	Harness harness;
+	Project proj("he_planner_ui_timeline_steps");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	REQUIRE(click(ctx, "New Database"));
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID dbId = PlannerPanel::selectedDatabase();
+	UUID start, end, undated;
+	REQUIRE(ws->edit(dbId, [&](Database& db) {
+		start = db.addProperty("Start", PropertyType::Date)->id;
+		end   = db.addProperty("End", PropertyType::Date)->id;
+		undated = db.addRow("Loose", "Tester", 1000)->id;
+		return true;
+	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "Add View"));
+	idle(ctx);
+	REQUIRE(click(ctx, "+ Timeline"));
+	idle(ctx);
+	const std::int64_t today = taskNowMs() / 86400000;
+
+	// New Step: a dated row from today for three days, in the file, with its title waiting to be typed.
+	const std::size_t before = ws->find(dbId)->rows.size();
+	REQUIRE(click(ctx, "New Row"));   // "New Step" in a timeline
+	idle(ctx);
+	REQUIRE(ws->find(dbId)->rows.size() == before + 1);
+	const Row& made = ws->find(dbId)->rows.back();
+	CHECK(made.title == "New step");
+	std::int64_t ms = 0;
+	REQUIRE(ws->find(dbId)->date(made.id, start, ms));
+	CHECK(ms / 86400000 == today);
+	REQUIRE(ws->find(dbId)->date(made.id, end, ms));
+	CHECK(ms / 86400000 == today + 2);
+	CHECK(PlannerPanel::controlRect("timeline:rename").x1 > PlannerPanel::controlRect("timeline:rename").x0);
+	CHECK(PlannerPanel::controlRect("bar:New step").x1 > 0);
+
+	// The last lane: dragging across four days makes a step covering exactly those days.
+	const PlannerPanel::Rect lane = PlannerPanel::controlRect("timeline:new");
+	const PlannerPanel::Rect bar = PlannerPanel::controlRect("bar:New step");
+	REQUIRE(lane.x1 > lane.x0);
+	const float y = centre(lane).y;
+	const float x0 = bar.x0 + 12.0f + 24.0f * 5, x1 = x0 + 24.0f * 3;   // day today+5 .. today+8
+	dragTo(ctx, ImVec2(x0, y), ImVec2(x1, y));
+	idle(ctx);
+	REQUIRE(ws->find(dbId)->rows.size() == before + 2);
+	const Row& dragged = ws->find(dbId)->rows.back();
+	REQUIRE(ws->find(dbId)->date(dragged.id, start, ms));
+	CHECK(ms / 86400000 == today + 5);
+	REQUIRE(ws->find(dbId)->date(dragged.id, end, ms));
+	CHECK(ms / 86400000 == today + 8);
+
+	// A row without dates has a lane of its own: a drag across it sets them.
+	const PlannerPanel::Rect loose = PlannerPanel::controlRect("lane:Loose");
+	REQUIRE(loose.x1 > loose.x0);
+	const float ly = centre(loose).y;
+	dragTo(ctx, ImVec2(x0, ly), ImVec2(x1, ly));
+	idle(ctx);
+	REQUIRE(ws->find(dbId)->date(undated, start, ms));
+	CHECK(ms / 86400000 == today + 5);
+	REQUIRE(ws->find(dbId)->date(undated, end, ms));
+	CHECK(ms / 86400000 == today + 8);
+	CHECK(PlannerPanel::controlRect("lane:Loose").x1 <= 0);   // it has a bar now
+
+	// Zoom segments and Today.
+	REQUIRE(click(ctx, "zoom:Weeks"));
+	idle(ctx);
+	const PlannerPanel::Rect wide = PlannerPanel::controlRect("bar:Loose");
+	CHECK(wide.x1 - wide.x0 == doctest::Approx(4 * 12.0f));
+	REQUIRE(click(ctx, "zoom:Days"));
+	REQUIRE(click(ctx, "timeline:today"));
+	idle(ctx);
+}

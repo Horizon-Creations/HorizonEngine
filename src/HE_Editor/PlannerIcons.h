@@ -15,7 +15,7 @@ namespace Theme = HE::Ed::Theme;
 
 // Drawn with the draw list, so they are crisp at any scale, take the theme's colours and need no files.
 enum class Icon { Note, Frame, AddCard, Undo, Redo, ZoomIn, ZoomOut, Fit, Map, Export, Duplicate, Align, Snap, Colour, Trash,
-	              Plus, Table, Kanban, Timeline, Calendar, Search, Filter, Sliders, Page, Whiteboard };
+	              Plus, Table, Kanban, Timeline, Calendar, Search, Filter, Sliders, Page, Whiteboard, Gear };
 
 inline void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, ImU32 col, ImU32 fill = 0)
 {
@@ -109,6 +109,15 @@ inline void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, ImU32 col, ImU32 fill 
 	case Icon::Colour:
 		if (fill) dl->AddCircleFilled(c, 0.78f * s, fill);
 		dl->AddCircle(c, 0.78f * s, col, 0, t);
+		break;
+	case Icon::Gear:
+		dl->AddCircle(c, 0.36f * s, col, 0, t);
+		for (int k = 0; k < 8; ++k)
+		{
+			const float a = static_cast<float>(k) * 0.785398f;
+			L(std::cos(a) * 0.62f, std::sin(a) * 0.62f, std::cos(a) * 0.98f, std::sin(a) * 0.98f);
+		}
+		dl->AddCircle(c, 0.62f * s, col, 0, t);
 		break;
 	case Icon::Plus:
 		L(-0.8f, 0, 0.8f, 0);
