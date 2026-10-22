@@ -2490,6 +2490,14 @@ TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New 
 	REQUIRE(ws->find(data)->rows.size() == 2);
 	CHECK(PlannerPanel::selectedRow() == ws->find(data)->rows.back().id);
 	CHECK(PlannerPanel::controlRect("cal-chip:New event").x1 > 0);
+	// The details are a flyover, not a column: the calendar keeps its width.
+	REQUIRE(PlannerPanel::controlRect("flyover:close").x1 > 0);
+	shotTo(ctx, "planner_event_flyover");
+	CHECK(PlannerPanel::controlRect("drawer-drop").x1 <= 0);
+	REQUIRE(click(ctx, "flyover:close"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedRow() == UUID{});
+	CHECK(PlannerPanel::controlRect("flyover:close").x1 <= 0);
 	PlannerPanel::showCalendarMonth(2026, 10);
 	idle(ctx);
 	const PlannerPanel::Rect plus = PlannerPanel::controlRect("cal-add:day:2026-10-15");

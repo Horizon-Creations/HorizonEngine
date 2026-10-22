@@ -324,3 +324,10 @@ Verified: `he_tests --test-case="planner*"` 93/93 + `*help*`, HorizonEditor buil
 - Tab bar (`PlannerPanel.cpp` `drawTabs`): one tab per open table/timeline/board/calendar/page/whiteboard (`s_tabs`, folded from the selection each frame, so any way of selecting opens it once or switches); x closes the tab (not the last), "+" lists everything and opens-or-switches. The old per-data view tabs and "Add View" popup are gone; views are made from the sidebar (`New Timeline` ... then "data:<name>").
 - New Step / New Event / New Item (primary button per view kind; all `note("New Row")`): `newDated` adds Start/End (timeline) or Date (calendar) columns to the data when it has none, so the button always shows something; the calendar also has a + in a hovered day (`cal-add:day:<iso>`) and double-click; a board card goes into the first lane. Tasks has no dates (the Task Board file has none): timeline/calendar are disabled for it in the "data" list and their New buttons are disabled.
 Open: tabs are not saved across editor restarts; MCP tools still say "database".
+
+## Handoff (Stand Flyover, gleiche Höhen)
+
+Verified: `he_tests --test-case="planner*,*help*"` 130/130, HorizonEditor builds, audit clean; headless shot of the calendar with the flyover. Not verified: real editor.
+- Tabs draw their own hover/selected background inside their width (no overlap, 6 px gap).
+- Row details: a table keeps the docked drawer; timeline, calendar and board show them in a flyover window (`##rowflyover`, opens beside the last click, x or Esc closes: `flyover:close`).
+- Toolbars: `toolButton`, the zoom segments, the calendar's arrows and the whiteboard header all use `ImGui::GetFrameHeight()`; the calendar's Start/End/Colour combos moved into a Settings popup; Previous/Next are chevron icon buttons.

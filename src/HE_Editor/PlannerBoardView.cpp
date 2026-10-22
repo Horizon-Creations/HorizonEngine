@@ -818,44 +818,46 @@ void draw(const Services& services, const UUID& boardId)
 	// The view's controls at the right of the title: history, zoom, overview, picture.
 	bool fit = false, actual = false, zoomIn = false, zoomOut = false;
 	{
-		const float groupW = 28 * 7 + 56 + 2 * 13 + 9 * 8;
+		const float fh = ImGui::GetFrameHeight();   // every control in the row is as tall as the title field
+		const ImVec2 bs(fh, fh);
+		const float groupW = ImGui::GetFrameHeight() * 7 + 56 + 2 * 13 + 9 * 8;
 		ImGui::SameLine();
 		ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 12.0f, ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - groupW));
-		if (iconButton("Undo", Icon::Undo, false, canUndo(boardId), "Planner/Undo")) undoOrRedo(boardId, true);
+		if (iconButton("Undo", Icon::Undo, false, canUndo(boardId), "Planner/Undo", false, 0, bs)) undoOrRedo(boardId, true);
 		services.note("Undo");
 		ImGui::SameLine();
-		if (iconButton("Redo", Icon::Redo, false, canRedo(boardId), "Planner/Redo")) undoOrRedo(boardId, false);
+		if (iconButton("Redo", Icon::Redo, false, canRedo(boardId), "Planner/Redo", false, 0, bs)) undoOrRedo(boardId, false);
 		services.note("Redo");
 		iconSeparator();
-		zoomOut = iconButton("Zoom Out", Icon::ZoomOut, false, true, "Planner/Zoom Out");
+		zoomOut = iconButton("Zoom Out", Icon::ZoomOut, false, true, "Planner/Zoom Out", false, 0, bs);
 		services.note("Zoom Out");
 		ImGui::SameLine();
 		{
 			// The zoom: click it to go back to 100%.
 			ImGui::PushID("zoomvalue");
 			const ImVec2 p = ImGui::GetCursorScreenPos();
-			actual = ImGui::InvisibleButton("##z", ImVec2(56, 28));
+			actual = ImGui::InvisibleButton("##z", ImVec2(56, fh));
 			if (ImGui::IsItemHovered())
-				ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 56, p.y + 28), Theme::u32(Theme::warm(0.28f)), 7.0f);
+				ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 56, p.y + fh), Theme::u32(Theme::warm(0.28f)), 7.0f);
 			char buf[16];
 			std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::lround(view.zoom * 100.0)));
 			const ImVec2 ts = ImGui::CalcTextSize(buf);
-			ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + (56 - ts.x) * 0.5f, p.y + (28 - ts.y) * 0.5f), Theme::u32(Theme::Text), buf);
+			ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + (56 - ts.x) * 0.5f, p.y + (fh - ts.y) * 0.5f), Theme::u32(Theme::Text), buf);
 			EditorWidgets::helpForKey("Planner/100%");
 			ImGui::PopID();
 			services.note("100%");
 		}
 		ImGui::SameLine();
-		zoomIn = iconButton("Zoom In", Icon::ZoomIn, false, true, "Planner/Zoom In");
+		zoomIn = iconButton("Zoom In", Icon::ZoomIn, false, true, "Planner/Zoom In", false, 0, bs);
 		services.note("Zoom In");
 		ImGui::SameLine();
-		fit = iconButton("Fit", Icon::Fit, false, true, "Planner/Fit");
+		fit = iconButton("Fit", Icon::Fit, false, true, "Planner/Fit", false, 0, bs);
 		services.note("Fit");
 		iconSeparator();
-		if (iconButton("Map", Icon::Map, s_minimap, true, "Planner/Map")) s_minimap = !s_minimap;
+		if (iconButton("Map", Icon::Map, s_minimap, true, "Planner/Map", false, 0, bs)) s_minimap = !s_minimap;
 		services.note("Map");
 		ImGui::SameLine();
-		if (iconButton("Export PNG", Icon::Export, false, true, "Planner/Export PNG"))
+		if (iconButton("Export PNG", Icon::Export, false, true, "Planner/Export PNG", false, 0, bs))
 		{
 			const Services copy = services;   // the post runs after this frame's services are gone
 			services.post([=] {

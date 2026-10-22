@@ -3266,6 +3266,9 @@ namespace
 	{ "Planner/New Item", "New Item",
 	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
 	  "", "" },
+	{ "Planner/Close Details", "Close Details",
+	  "Closes the details of this row (Esc does too). The row stays as it is.",
+	  "", "" },
 	{ "Planner/Undo", "Undo",
 	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "
 	  "the history is not saved with the project.",

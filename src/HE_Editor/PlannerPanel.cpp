@@ -51,6 +51,8 @@ namespace
 Workspace s_ws;
 UUID      s_dbId, s_viewId;
 ViewKind  s_newKind = ViewKind::Table;   // what the "new ... of" popup is making
+ImVec2    s_flyAt(0, 0);         // where the details flyover opens: beside the last click
+UUID      s_flyRow;              // the row the flyover was last placed for
 UUID      s_deleteData;          // the data a "Delete Data" confirmation is about
 bool      s_deleteDataOpen = false;
 std::string s_search;
@@ -179,7 +181,7 @@ bool sidebarSection(const char* title, const char* newName, const char* helpKey)
 bool toolButton(const char* helpKey, const char* label, PlannerIcons::Icon icon, bool active)
 {
 	const float textW = ImGui::CalcTextSize(label).x;
-	const ImVec2 size(textW + 40.0f, 26.0f);
+	const ImVec2 size(textW + 40.0f, ImGui::GetFrameHeight());
 	const ImVec2 p = ImGui::GetCursorScreenPos();
 	ImGui::PushID(label);
 	const bool clicked = ImGui::InvisibleButton("##tool", size);
@@ -2961,29 +2963,6 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			ImGui::EndCombo();
 		}
 	}
-	if (view->kind == ViewKind::Calendar)
-	{
-		// The month shown, and a way back to today.
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Previous")) post([] { stepMonth(-1); });
-		note("cal:previous");
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Today"))
-			post([] {
-				int d = 0;
-				splitDay(dayOf(taskNowMs()), s_calYear, s_calMonth, d);
-			});
-		ImGui::SameLine();
-		if (EditorWidgets::smallButton("Next")) post([] { stepMonth(1); });
-		note("cal:next");
-		ImGui::SameLine();
-		if (s_calMonth != 0)
-		{
-			static const char* const kMonths[] = { "January", "February", "March", "April", "May", "June", "July",
-			                                       "August", "September", "October", "November", "December" };
-			ImGui::TextUnformatted((std::string(kMonths[s_calMonth - 1]) + " " + std::to_string(s_calYear)).c_str());
-		}
-	}
 	if (view->kind == ViewKind::Timeline)
 	{
 		// How wide a day is, a way back to today, and the rarely changed settings in a popup.
@@ -2996,16 +2975,17 @@ void drawDatabase(AppContext& ctx, const Database& db)
 				const float w = ImGui::CalcTextSize(names[i]).x + 22.0f;
 				const ImVec2 p = ImGui::GetCursorScreenPos();
 				ImGui::PushID(i);
-				if (ImGui::InvisibleButton("##zoom", ImVec2(w, 26.0f))) s_tlZoom = i;
+				const float bh = ImGui::GetFrameHeight();
+				if (ImGui::InvisibleButton("##zoom", ImVec2(w, bh))) s_tlZoom = i;
 				const bool on = s_tlZoom == i, hov = ImGui::IsItemHovered();
 				EditorWidgets::helpForKey("Planner/Timeline Zoom");
 				note(std::string("zoom:") + names[i]);
 				ImGui::PopID();
 				ImDrawList* dl = ImGui::GetWindowDrawList();
 				const ImDrawFlags flags = i == 0 ? ImDrawFlags_RoundCornersLeft : i == 2 ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersNone;
-				dl->AddRectFilled(p, ImVec2(p.x + w, p.y + 26.0f),
+				dl->AddRectFilled(p, ImVec2(p.x + w, p.y + bh),
 				                  Theme::u32(on ? Theme::alpha(Theme::Accent, 0.30f) : Theme::warm(hov ? 0.28f : 0.18f)), 7.0f, flags);
-				dl->AddText(ImVec2(p.x + 11.0f, p.y + (26.0f - ImGui::GetFontSize()) * 0.5f),
+				dl->AddText(ImVec2(p.x + 11.0f, p.y + (bh - ImGui::GetFontSize()) * 0.5f),
 				            Theme::u32(on ? Theme::AccentBright : Theme::Text), names[i]);
 			}
 		}
@@ -3057,39 +3037,72 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	}
 	if (view->kind == ViewKind::Calendar)
 	{
-		// Which Date property the days come from; the colour comes from a Select.
-		auto dateCombo = [&](const char* id, const char* none, const UUID& current, bool isEnd) {
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(140);
-			const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
-			if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
-			if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
-				editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
-			for (const Property& p : db.properties)
-				if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
-				{
-					const UUID pid = p.id;
-					editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
-				}
-			ImGui::EndCombo();
-		};
-		dateCombo("##tlstart", "Date", view->dateProperty, false);
-		note("timeline:start");
-		dateCombo("##tlend", "End", view->endProperty, true);
+		// The month shown with arrows either side, a way back to today, and the rarely changed settings in a popup.
+		const float bh = ImGui::GetFrameHeight();
 		ImGui::SameLine();
-		ImGui::SetNextItemWidth(140);
-		const Property* colour = db.findProperty(view->groupBy);
-		if (ImGui::BeginCombo("##tlcolour", colour ? colour->name.c_str() : "Colour by"))
+		if (PlannerIcons::iconButton("Previous", PlannerIcons::Icon::ChevronLeft, false, true, "Planner/Previous", false, 0, ImVec2(bh, bh))) post([] { stepMonth(-1); });
+		note("cal:previous");
+		ImGui::SameLine(0, 2);
 		{
-			if (ImGui::Selectable("(none)", colour == nullptr))
-				editView(dbId, viewId, [](View& v) { v.groupBy = UUID{}; return true; });
-			for (const Property& p : db.properties)
-				if (p.type == PropertyType::Select && ImGui::Selectable(p.name.c_str(), colour == &p))
-				{
-					const UUID pid = p.id;
-					editView(dbId, viewId, [pid](View& v) { v.groupBy = pid; return true; });
-				}
-			ImGui::EndCombo();
+			static const char* const kMonths[] = { "January", "February", "March", "April", "May", "June", "July",
+			                                       "August", "September", "October", "November", "December" };
+			const std::string label = s_calMonth != 0 ? std::string(kMonths[s_calMonth - 1]) + " " + std::to_string(s_calYear) : std::string("   ");
+			const float w = 150.0f;
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			ImGui::Dummy(ImVec2(w, bh));
+			const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+			ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (bh - ts.y) * 0.5f), Theme::u32(Theme::Text), label.c_str());
+		}
+		ImGui::SameLine(0, 2);
+		if (PlannerIcons::iconButton("Next", PlannerIcons::Icon::ChevronRight, false, true, "Planner/Next", false, 0, ImVec2(bh, bh))) post([] { stepMonth(1); });
+		note("cal:next");
+		ImGui::SameLine();
+		if (toolButton("Planner/Today", "Today", PlannerIcons::Icon::Calendar, false))
+			post([] {
+				int d = 0;
+				splitDay(dayOf(taskNowMs()), s_calYear, s_calMonth, d);
+			});
+		ImGui::SameLine();
+		if (toolButton("Planner/Timeline Settings", "Settings", PlannerIcons::Icon::Gear, false)) ImGui::OpenPopup("##calsettings");
+		note("timeline:settings");
+		if (ImGui::BeginPopup("##calsettings"))
+		{
+			auto dateCombo = [&](const char* label, const char* id, const char* none, const UUID& current, bool isEnd) {
+				ImGui::TextUnformatted(label);
+				ImGui::SameLine(90);
+				ImGui::SetNextItemWidth(160);
+				const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
+				if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
+				if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
+					editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
+				for (const Property& p : db.properties)
+					if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
+					{
+						const UUID pid = p.id;
+						editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
+					}
+				ImGui::EndCombo();
+			};
+			dateCombo("Day from", "##tlstart", "Date", view->dateProperty, false);
+			note("timeline:start");
+			dateCombo("Until", "##tlend", "End", view->endProperty, true);
+			ImGui::TextUnformatted("Colour by");
+			ImGui::SameLine(90);
+			ImGui::SetNextItemWidth(160);
+			const Property* colour = db.findProperty(view->groupBy);
+			if (ImGui::BeginCombo("##tlcolour", colour ? colour->name.c_str() : "Nothing"))
+			{
+				if (ImGui::Selectable("(none)", colour == nullptr))
+					editView(dbId, viewId, [](View& v) { v.groupBy = UUID{}; return true; });
+				for (const Property& p : db.properties)
+					if (p.type == PropertyType::Select && ImGui::Selectable(p.name.c_str(), colour == &p))
+					{
+						const UUID pid = p.id;
+						editView(dbId, viewId, [pid](View& v) { v.groupBy = pid; return true; });
+					}
+				ImGui::EndCombo();
+			}
+			ImGui::EndPopup();
 		}
 	}
 	// The rows this view shows: its own filters and sorts, plus the search box.
@@ -3103,7 +3116,10 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	const Row* open = db.findRow(s_selRow);
 	if (!open) s_selRow = UUID{};
 	constexpr float kDrawerW = 380.0f;
-	ImGui::BeginChild("##plannerbody", ImVec2(open ? -(kDrawerW + ImGui::GetStyle().ItemSpacing.x) : 0.0f, 0.0f),
+	// A table keeps the details beside it; a timeline, calendar or board shows them in a flyover next to
+	// where you clicked, so the plan keeps its whole width.
+	const bool docked = open && view->kind == ViewKind::Table;
+	ImGui::BeginChild("##plannerbody", ImVec2(docked ? -(kDrawerW + ImGui::GetStyle().ItemSpacing.x) : 0.0f, 0.0f),
 	                  ImGuiChildFlags_None);
 	switch (view->kind)
 	{
@@ -3116,12 +3132,46 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		break;
 	}
 	ImGui::EndChild();
-	if (open)
+	if (docked)
 	{
 		ImGui::SameLine();
 		ImGui::BeginChild("##plannerdrawer", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
 		drawDrawer(db, *open);
 		ImGui::EndChild();
+	}
+	else if (open)
+	{
+		const ImGuiIO& io = ImGui::GetIO();
+		const bool newRow = !(s_flyRow == s_selRow);
+		s_flyRow = s_selRow;
+		if (newRow) s_flyAt = io.MousePos;   // where the click was
+		const ImVec2 wmin = ImGui::GetWindowPos(), wmax(wmin.x + ImGui::GetWindowWidth(), wmin.y + ImGui::GetWindowHeight());
+		const ImVec2 at(std::clamp(s_flyAt.x + 14.0f, wmin.x + 8.0f, std::max(wmin.x + 8.0f, wmax.x - kDrawerW - 8.0f)),
+		                std::clamp(s_flyAt.y + 8.0f, wmin.y + 8.0f, std::max(wmin.y + 8.0f, wmax.y - 320.0f)));
+		ImGui::SetNextWindowPos(at, newRow ? ImGuiCond_Always : ImGuiCond_Appearing);
+		ImGui::SetNextWindowSizeConstraints(ImVec2(kDrawerW, 160.0f), ImVec2(kDrawerW, std::max(320.0f, wmax.y - wmin.y - 16.0f)));
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, Theme::alpha(Theme::warm(0.11f), 0.985f));
+		ImGui::PushStyleColor(ImGuiCol_Border, Theme::warm(0.34f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+		bool closeFly = false;
+		if (ImGui::Begin("##rowflyover", nullptr,
+		                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			ImGui::TextDisabled("Details");
+			ImGui::SameLine(ImGui::GetWindowWidth() - 36.0f);
+			if (PlannerIcons::iconButton("Close Details", PlannerIcons::Icon::Close, false, true, "Planner/Close Details", false, 0, ImVec2(22, 22))) closeFly = true;
+			note("flyover:close");
+			if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Escape)) closeFly = true;
+			ImGui::Separator();
+			note("flyover");
+			drawDrawer(db, *open);
+		}
+		ImGui::End();
+		ImGui::PopStyleVar(3);
+		ImGui::PopStyleColor(2);
+		if (closeFly) s_selRow = UUID{};
 	}
 }
 
@@ -3517,7 +3567,7 @@ void drawTabs()
 		PlannerIcons::Icon ic;
 		tabInfo(t, n, ic);
 		widths.push_back(std::min(220.0f, ImGui::CalcTextSize(n.c_str()).x + 56.0f));
-		total += widths.back() + 2.0f;
+		total += widths.back() + 6.0f;
 	}
 	const float scale = total > avail && total > 0 ? avail / total : 1.0f;
 
@@ -3535,10 +3585,13 @@ void drawTabs()
 		ImGui::PushID(static_cast<int>(i));
 		ImGui::SetCursorScreenPos(ImVec2(x, row0.y));
 		ImGui::SetNextItemAllowOverlap();
-		if (ImGui::Selectable("##tab", selected, ImGuiSelectableFlags_AllowOverlap, ImVec2(w, 28.0f))) selectTab(t);
+		if (ImGui::InvisibleButton("##tab", ImVec2(w, 28.0f))) selectTab(t);
 		note(std::string(t.kind == 0 ? "view:" : t.kind == 1 ? "page-tab:" : "board-tab:") + name);
 		const bool hover = ImGui::IsItemHovered();
 		ImDrawList* dl = ImGui::GetWindowDrawList();
+		// Drawn here, within the tab's own width, so neighbours never overlap (a Selectable paints past its edges).
+		if (selected || hover)
+			dl->AddRectFilled(ImVec2(x, row0.y), ImVec2(x + w, row0.y + 28.0f), Theme::u32(selected ? Theme::alpha(Theme::Accent, 0.16f) : Theme::warm(0.16f)), 6.0f);
 		PlannerIcons::drawIcon(dl, icon, ImVec2(x + 15, row0.y + 14), Theme::u32(selected ? Theme::AccentBright : Theme::TextDim));
 		dl->PushClipRect(ImVec2(x, row0.y), ImVec2(x + w - (s_tabs.size() > 1 ? 22.0f : 6.0f), row0.y + 28), true);
 		dl->AddText(ImVec2(x + 28, row0.y + (28.0f - ImGui::GetFontSize()) * 0.5f), Theme::u32(selected ? Theme::Text : Theme::TextDim), name.c_str());
@@ -3561,7 +3614,7 @@ void drawTabs()
 			}
 		}
 		ImGui::PopID();
-		x += w + 2.0f;
+		x += w + 6.0f;
 	}
 	// The + lists everything there is to open.
 	ImGui::SetCursorScreenPos(ImVec2(x + 4.0f, row0.y + 1.0f));
@@ -3832,6 +3885,7 @@ void reset()
 	s_focusAtEnd = false;
 	s_blockEdits.clear();
 	s_tabs.clear();
+	s_flyRow = UUID{};
 }
 
 } // namespace PlannerPanel
