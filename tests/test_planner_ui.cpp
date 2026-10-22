@@ -2544,3 +2544,54 @@ TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New 
 	REQUIRE(group != nullptr);
 	CHECK(kd->select(kd->rows[0].id, group->id) == group->options.front().id);
 }
+
+TEST_CASE("planner ui board: a double-click on a row or page card opens it; a colour recolours the link, not the card")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_links");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	newTable(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID dbId = PlannerPanel::selectedDatabase();
+	UUID rowId;
+	REQUIRE(ws->edit(dbId, [&](Database& db) { rowId = db.addRow("Find the key", "Tester", 1000)->id; return true; }));
+	const UUID pageId = ws->createPage("Level concept")->id;
+	BoardFixture f = openBoard(ctx);
+	UUID rowCard, pageCard;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& b) {
+		Node* r = b.addNode(NodeType::Row, 100, 100, 260, 80, "", 1);
+		r->database = dbId;
+		r->row = rowId;
+		rowCard = r->id;
+		Node* p = b.addNode(NodeType::Page, 100, 260, 260, 80, "", 1);
+		p->page = pageId;
+		pageCard = p->id;
+		return true;
+	}));
+	idle(ctx);
+
+	// A colour on a link card is kept on the card, and the card is still drawn (its name is where it was).
+	REQUIRE(click(ctx, "node:Find the key"));
+	REQUIRE(click(ctx, "Color"));
+	idle(ctx);
+	REQUIRE(click(ctx, "swatch:green"));
+	CHECK(f.ws->findBoard(f.id)->findNode(rowCard)->color == "green");
+	shotTo(ctx, "planner_board_link_green");
+
+	// Double-click: the row's page opens in a tab of its own, then the page card's page.
+	const PlannerPanel::Rect rc = PlannerPanel::controlRect("node:Find the key");
+	REQUIRE(rc.x1 > rc.x0);
+	doubleClickAt(ctx, centre(rc));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedBoard() == UUID{});
+	CHECK(PlannerPanel::selectedPage() == rowId);
+	PlannerPanel::selectBoard(f.id);
+	idle(ctx);
+	const PlannerPanel::Rect pc = PlannerPanel::controlRect("node:Level concept");
+	REQUIRE(pc.x1 > pc.x0);
+	doubleClickAt(ctx, centre(pc));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == pageId);
+}

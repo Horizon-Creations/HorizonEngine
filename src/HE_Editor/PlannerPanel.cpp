@@ -106,6 +106,7 @@ void openPage(const UUID& rowId, const UUID& dbId)
 	s_ws.openRowPage(rowId, dbId);
 	s_pageId = rowId;
 	s_pageDb = dbId;
+	s_boardId = UUID{};   // a whiteboard shows before a page: leave it, or the page never appears
 }
 
 std::vector<std::function<void()>> s_posted;

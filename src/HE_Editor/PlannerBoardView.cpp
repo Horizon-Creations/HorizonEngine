@@ -560,7 +560,9 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 	}
 	else
 	{
-		const ImVec4 fill = coloured ? tint : Theme::warm(0.20f);
+		// A link keeps a neutral card: a colour recolours its accent (bar, glyph, name), not the background.
+		const bool isLink = n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object;
+		const ImVec4 fill = coloured && !isLink ? tint : Theme::warm(0.20f);
 		dl->AddRectFilled(ImVec2(a.x + 2 * z, a.y + 3 * z), ImVec2(b.x + 2 * z, b.y + 3 * z), IM_COL32(0, 0, 0, 60), round);
 		dl->AddRectFilled(a, b, Theme::u32(fill), round);
 		dl->AddRect(a, b, selected ? Theme::u32(Theme::AccentBright) : Theme::u32(Theme::warm(0.32f)), round, 0, selected ? 2.5f : 1.0f);
@@ -596,7 +598,7 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 	if (n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object)
 	{
 		const bool missing = linkMissing(ws, n);
-		const ImVec4 linkCol = missing ? Theme::Bad : ImVec4(0.50f, 0.74f, 1.0f, 1.0f);
+		const ImVec4 linkCol = missing ? Theme::Bad : coloured ? tint : ImVec4(0.50f, 0.74f, 1.0f, 1.0f);
 		const bool hot = s_hoverNode == n.id;
 		// A wash of the link colour over the card, a bar down its left side.
 		dl->AddRectFilled(a, b, Theme::u32(Theme::alpha(linkCol, hot ? 0.20f : 0.11f)), round);
