@@ -2592,7 +2592,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	for (const View& v : db.views)
 	{
 		pushUuid(v.id);
-		const float w = ImGui::CalcTextSize(v.name.c_str()).x + 40.0f;
+		const float w = ImGui::CalcTextSize(v.name.c_str()).x + 44.0f;
 		const ImVec2 p = ImGui::GetCursorScreenPos();
 		const bool selected = v.id == s_viewId;
 		if (ImGui::Selectable("##viewtab", selected, 0, ImVec2(w, 26.0f))) s_viewId = v.id;
@@ -2623,7 +2623,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			ImGui::EndPopup();
 		}
 		ImGui::PopID();
-		ImGui::SameLine(0, 2);
+		ImGui::SameLine(0, 10);
 	}
 	if (PlannerIcons::iconButton("Add View", PlannerIcons::Icon::Plus, false, true, "Planner/Add View", false, 0, ImVec2(26, 26)))
 		ImGui::OpenPopup("##addview");
@@ -2894,6 +2894,7 @@ void sidebarPages(const std::vector<Page*>& all, const UUID& parent, int depth)
 		if (ImGui::BeginPopupContextItem("##pagemenu"))
 		{
 			if (EditorWidgets::dangerMenuItem("Delete Page")) s_deletePage = p->id;
+			note("menu:Delete Page");
 			ImGui::EndPopup();
 		}
 		if (depth > 0) ImGui::Unindent(static_cast<float>(depth) * 12.0f);
@@ -2970,7 +2971,8 @@ void drawSidebar(AppContext& ctx)
 		}
 		ImGui::PopID();
 	}
-	if (!(s_deleteBoard == UUID{}))
+	// Opened once: asking again every frame would bring it back after the answer.
+	if (!(s_deleteBoard == UUID{}) && !s_deleteBoardOpen)
 	{
 		ImGui::OpenPopup("##confirmDeleteBoard");
 		s_deleteBoardOpen = true;
@@ -2983,6 +2985,7 @@ void drawSidebar(AppContext& ctx)
 		if (EditorWidgets::dangerButton("Delete"))
 		{
 			const UUID gone = s_deleteBoard;
+			s_deleteBoard = UUID{};
 			post([=] {
 				s_ws.removeBoard(gone);
 				PlannerBoardView::forget(gone);
@@ -2991,13 +2994,15 @@ void drawSidebar(AppContext& ctx)
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
-		if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+		if (EditorWidgets::cancelButton("Cancel")) { s_deleteBoard = UUID{}; ImGui::CloseCurrentPopup(); }
 		ImGui::EndPopup();
 	}
 	else if (s_deleteBoardOpen)
 		s_deleteBoardOpen = false;
 	if (!s_deleteBoardOpen) s_deleteBoard = UUID{};
-	if (!(s_deletePage == UUID{}))
+	if (s_deleteBoard == UUID{} && s_deleteBoardOpen && !ImGui::IsPopupOpen("##confirmDeleteBoard")) s_deleteBoardOpen = false;
+	// Opened once: asking again every frame would bring it back after the answer.
+	if (!(s_deletePage == UUID{}) && !s_deletePageOpen)
 	{
 		ImGui::OpenPopup("##confirmDeletePage");
 		s_deletePageOpen = true;
@@ -3007,9 +3012,12 @@ void drawSidebar(AppContext& ctx)
 		const Page* doomed = s_ws.findPage(s_deletePage);
 		ImGui::Text("Delete \"%s\"?", doomed ? doomed->title.c_str() : "");
 		ImGui::TextDisabled("Its sub-pages go with it. Source control has the previous version.");
-		if (EditorWidgets::dangerButton("Delete"))
+		const bool confirmed = EditorWidgets::dangerButton("Delete");
+		note("confirm:Delete Page");
+		if (confirmed)
 		{
 			const UUID gone = s_deletePage;
+			s_deletePage = UUID{};
 			post([=] {
 				s_ws.removePage(gone);
 				if (s_pageId == gone) s_pageId = s_pageDb = UUID{};
@@ -3017,7 +3025,7 @@ void drawSidebar(AppContext& ctx)
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
-		if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+		if (EditorWidgets::cancelButton("Cancel")) { s_deletePage = UUID{}; ImGui::CloseCurrentPopup(); }
 		ImGui::EndPopup();
 	}
 	else if (s_deletePageOpen)

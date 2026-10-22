@@ -24,6 +24,7 @@
 #include <HorizonScene/HorizonWorld.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>   // the open popups, between frames
 
 #include <algorithm>
 #include <cstdlib>
@@ -2260,4 +2261,35 @@ TEST_CASE("planner ui board: the pinch zooms at the cursor and the zoom buttons 
 	REQUIRE(click(ctx, "100%"));
 	idle(ctx);
 	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(1.0));
+}
+
+TEST_CASE("planner ui: Delete Page asks once, deletes, and the question goes away")
+{
+	Harness harness;
+	Project proj("he_planner_ui_delete_page");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws != nullptr);
+	Page* made = ws->createPage("Doomed");
+	REQUIRE(made != nullptr);
+	const UUID id = made->id;
+	idle(ctx);
+
+	const PlannerPanel::Rect row = PlannerPanel::controlRect("page:Doomed");
+	REQUIRE(row.x1 > row.x0);
+	ImGui::GetIO().AddMousePosEvent(centre(row).x, centre(row).y);
+	frame(ctx, false);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Right, true);
+	frame(ctx, false);
+	ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Right, false);
+	settle(ctx);
+	REQUIRE(click(ctx, "menu:Delete Page"));
+	idle(ctx);
+	REQUIRE(ImGui::GetCurrentContext()->OpenPopupStack.Size > 0);   // between frames: any popup
+	REQUIRE(click(ctx, "confirm:Delete Page"));
+	idle(ctx, 6);
+	CHECK(ws->findPage(id) == nullptr);
+	CHECK(ImGui::GetCurrentContext()->OpenPopupStack.Size == 0);
 }
