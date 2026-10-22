@@ -6,10 +6,12 @@
 #include "EditorWidgets.h"
 #include "Planner.h"
 #include "PlannerImport.h"
+#include "PlannerTasks.h"
 #include "PlannerWorkspace.h"
 #include "ProjectManager.h"
 #include "TaskBoard.h"
 #include "TaskBoardPanel.h"
+#include "TaskBoardTeam.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>   // InputText over std::string
@@ -43,7 +45,6 @@ namespace
 Workspace s_ws;
 UUID      s_dbId, s_viewId;
 std::string s_search;
-std::string s_notice;
 
 // The text field being typed in: which cell, and what is in it so far. A cell
 // shows the stored value until it is activated, then this, and writes when it
@@ -61,6 +62,14 @@ std::string s_newOption, s_newProperty, s_renameView;
 int         s_newPropertyType = 0;
 UUID        s_armedDelete;        // the property whose "Delete Property" was pressed once
 UUID        s_renamingView;
+
+// The context of the frame being drawn: the chips, drops and jumps of the links
+// need the world, the content manager and the selection.
+AppContext* s_ctx = nullptr;
+// The row whose details are open on the right; none when {}.
+UUID        s_selRow;
+std::string s_comment;
+UUID        s_commentFor;
 
 std::vector<std::function<void()>> s_posted;
 void post(std::function<void()> fn) { s_posted.push_back(std::move(fn)); }
@@ -174,13 +183,15 @@ std::vector<std::string> splitNames(const std::string& text)
 // A text field that writes only when it is left. `shown` is what the stored
 // value looks like; `commit` gets the new text. Returns true when it committed.
 bool textCell(const char* id, const EditKey& key, const std::string& shown,
-              const std::function<void(const std::string&)>& commit, const char* hint = nullptr)
+              const std::function<void(const std::string&)>& commit, const char* hint = nullptr,
+              float multilineHeight = 0.0f)
 {
 	const bool mine = s_editing && s_editKey == key;
 	std::string text = mine ? s_editBuf : shown;
 	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool typed = hint ? ImGui::InputTextWithHint(id, hint, &text)
-	                        : ImGui::InputText(id, &text);
+	const bool typed = multilineHeight > 0.0f ? ImGui::InputTextMultiline(id, &text, ImVec2(-FLT_MIN, multilineHeight))
+	                 : hint                   ? ImGui::InputTextWithHint(id, hint, &text)
+	                                          : ImGui::InputText(id, &text);
 	if (ImGui::IsItemActivated()) { s_editing = true; s_editKey = key; s_editBuf = shown; }
 	if (typed) { s_editing = true; s_editKey = key; s_editBuf = text; }
 	if (ImGui::IsItemDeactivatedAfterEdit())
@@ -195,6 +206,135 @@ bool textCell(const char* id, const EditKey& key, const std::string& shown,
 }
 
 // ── Cells ────────────────────────────────────────────────────────────────────
+
+// ── Engine links ─────────────────────────────────────────────────────────────
+
+// The links of a row, with the mark that the target is gone. That mark is
+// runtime state of the Task Board's own links and not part of the database.
+std::vector<TaskLink> linksOf(const Database& db, const UUID& rowId, const UUID& propId)
+{
+	std::vector<TaskLink> links = db.links(rowId, propId);
+	if (s_ws.isExternal(db.id) && s_ctx)
+		if (TaskBoard* b = TaskBoardPanel::board(*s_ctx))
+			if (const Task* t = b->find(rowId))
+				for (TaskLink& l : links)
+					for (const TaskLink& o : t->links)
+						if (o.sameTarget(l)) { l.orphaned = o.orphaned; break; }
+	return links;
+}
+
+// Adds the links the row does not have yet.
+void addLinks(const UUID& dbId, const UUID& rowId, const UUID& propId, std::vector<TaskLink> added)
+{
+	if (added.empty()) return;
+	post([=] {
+		s_ws.edit(dbId, [&](Database& d) {
+			std::vector<TaskLink> all = d.links(rowId, propId);
+			bool any = false;
+			for (const TaskLink& l : added)
+				if (std::none_of(all.begin(), all.end(), [&](const TaskLink& o) { return o.sameTarget(l); }))
+				{
+					all.push_back(l);
+					any = true;
+				}
+			return any && d.setLinks(rowId, propId, all, taskNowMs());
+		});
+	});
+}
+
+void removeLinkFrom(const UUID& dbId, const UUID& rowId, const UUID& propId, const TaskLink& link)
+{
+	post([=] {
+		s_ws.edit(dbId, [&](Database& d) {
+			std::vector<TaskLink> all = d.links(rowId, propId);
+			const auto it = std::find_if(all.begin(), all.end(), [&](const TaskLink& o) { return o.sameTarget(link); });
+			if (it == all.end()) return false;
+			all.erase(it);
+			return d.setLinks(rowId, propId, all, taskNowMs());
+		});
+	});
+}
+
+// The chips in a table cell, on one line, and the cell as the drop target for an
+// asset, a scene or an entity. What does not fit is cut off.
+void linksCell(const Database& db, const Row& row, const Property& p)
+{
+	AppContext& ctx = *s_ctx;
+	const UUID dbId = db.id, rowId = row.id, propId = p.id;
+	const std::vector<TaskLink> links = linksOf(db, rowId, propId);
+
+	const ImVec2 at = ImGui::GetCursorScreenPos();
+	const float  w  = ImGui::GetContentRegionAvail().x;
+	const float  fh = ImGui::GetFrameHeight();
+	const float  h  = std::floor(fh * 0.9f);
+	ImGui::InvisibleButton("##linkdrop", ImVec2(w, fh));
+	note("links:" + row.title);
+	addLinks(dbId, rowId, propId, TaskBoardPanel::acceptDroppedLinks(ctx));
+	if (ImGui::GetDragDropPayload())
+		ImGui::GetWindowDrawList()->AddRect(at, ImVec2(at.x + w, at.y + fh), Theme::u32(Theme::AccentBright), 4.0f);
+
+	if (links.empty())
+	{
+		ImGui::GetWindowDrawList()->AddText(ImVec2(at.x + 4.0f, at.y + (fh - ImGui::GetTextLineHeight()) * 0.5f),
+		                                    Theme::u32(Theme::TextDim), "Drop an asset, scene or entity");
+		return;
+	}
+	ImGui::SetCursorScreenPos(ImVec2(at.x, at.y + (fh - h) * 0.5f));
+	float used = 0.0f;
+	for (std::size_t i = 0; i < links.size(); ++i)
+	{
+		const float want = TaskBoardPanel::linkChipWidth(links[i], 170.0f, h);
+		if (used + want > w) break;
+		if (i > 0) ImGui::SameLine(0, 4.0f);
+		if (TaskBoardPanel::linkChip(ctx, links[i], static_cast<int>(i), 170.0f, h))
+			TaskBoardPanel::jumpToLink(ctx, links[i]);
+		note("chip:" + row.title + ":" + std::to_string(i));
+		used += want + 4.0f;
+	}
+}
+
+// ── Assignees: from the team's roster, and only with a team ──────────────────
+// Without a team server there is nobody to pick from, and a name typed by hand
+// would reach nobody: the Tasks cell is then plain text.
+void assigneesCell(const Database& db, const Row& row, const Property& p)
+{
+	const UUID dbId = db.id, rowId = row.id, propId = p.id;
+	const std::vector<std::string> have = db.people(rowId, propId);
+	HE::TaskBoardTeam* team = TaskBoardPanel::team();
+	if (!team || !team->connected())
+	{
+		ImGui::TextDisabled("%s", joinNames(have).c_str());
+		return;
+	}
+	std::string preview = joinNames(have);
+	if (preview.empty()) preview = "Nobody";
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool open = ImGui::BeginCombo("##assignedTo", preview.c_str());
+	note("assignees:" + row.title);
+	if (!open) return;
+	for (const HE::TaskTeamMember& m : team->members())
+	{
+		const bool on = std::any_of(have.begin(), have.end(),
+		                            [&](const std::string& a) { return HE::sameTaskMember(a, m.name); });
+		const std::string label = m.name + (m.online ? "" : "  (offline)") + "##member";
+		ImGui::PushID(m.name.c_str());
+		// Stays open: assigning two people is two ticks, not two trips.
+		const bool picked = ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_NoAutoClosePopups);
+		note("member:" + m.name);
+		if (picked)
+		{
+			std::vector<std::string> next;
+			for (const std::string& a : have)
+				if (!HE::sameTaskMember(a, m.name)) next.push_back(a);
+			if (!on) next.push_back(m.name);
+			post([=] {
+				s_ws.edit(dbId, [&](Database& d) { return d.setPeople(rowId, propId, next, taskNowMs()); });
+			});
+		}
+		ImGui::PopID();
+	}
+	ImGui::EndCombo();
+}
 
 void editCell(const Database& db, const Row& row, const Property& p)
 {
@@ -242,6 +382,11 @@ void editCell(const Database& db, const Row& row, const Property& p)
 		}, "YYYY-MM-DD");
 		break;
 	case PropertyType::Person:
+		if (s_ws.isExternal(dbId))
+		{
+			assigneesCell(db, row, p);
+			break;
+		}
 		textCell("##cell", key, joinNames(db.people(rowId, propId)), [=](const std::string& v) {
 			edit([=](Database& d) { return d.setPeople(rowId, propId, splitNames(v), taskNowMs()); });
 		}, "Names, separated by commas");
@@ -338,14 +483,8 @@ void editCell(const Database& db, const Row& row, const Property& p)
 		break;
 	}
 	case PropertyType::EngineLink:
-	{
-		// Read-only for now: what each link was called when it was made.
-		std::string text;
-		for (const TaskLink& l : db.links(rowId, propId))
-			text += (text.empty() ? "" : ", ") + (l.label.empty() ? std::string("(link)") : l.label);
-		ImGui::TextDisabled("%s", text.c_str());
+		linksCell(db, row, p);
 		break;
-	}
 	case PropertyType::Other:
 		ImGui::TextDisabled("(%s: not supported by this editor)", p.typeOther.c_str());
 		break;
@@ -554,6 +693,7 @@ void drawPropertiesPopup(const Database& db, const View& view)
 		                                                        : kTypeNames[static_cast<int>(p.type)]);
 		ImGui::SameLine();
 		const bool armed = s_armedDelete == pid;
+		ImGui::BeginDisabled(s_ws.isExternal(dbId));   // the Task Board's columns are fixed
 		if (EditorWidgets::dangerSmallButton(armed ? "Really delete?" : "Delete Property"))
 		{
 			if (armed)
@@ -564,9 +704,11 @@ void drawPropertiesPopup(const Database& db, const View& view)
 			else
 				s_armedDelete = pid;
 		}
+		ImGui::EndDisabled();
 		ImGui::PopID();
 	}
 	ImGui::Separator();
+	ImGui::BeginDisabled(s_ws.isExternal(dbId));
 	ImGui::SetNextItemWidth(150);
 	ImGui::InputTextWithHint("##newprop", "New property", &s_newProperty);
 	ImGui::SameLine();
@@ -585,6 +727,8 @@ void drawPropertiesPopup(const Database& db, const View& view)
 		s_newProperty.clear();
 		post([=] { s_ws.edit(dbId, [&](Database& d) { return d.addProperty(name, type) != nullptr; }); });
 	}
+	ImGui::EndDisabled();
+	if (s_ws.isExternal(dbId)) ImGui::TextDisabled("The Tasks columns are fixed: the Task Board keeps them.");
 }
 
 // ── The table ────────────────────────────────────────────────────────────────
@@ -663,6 +807,9 @@ void drawTable(const Database& db, const View& view, const std::vector<std::size
 
 			ImGui::TableSetColumnIndex(0);
 			const UUID dbId = db.id, rowId = row.id;
+			if (ImGui::SmallButton("Open")) s_selRow = rowId;
+			note("open:" + row.title);
+			ImGui::SameLine();
 			textCell("##title", { rowId, UUID{} }, row.title, [=](const std::string& title) {
 				post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setTitle(rowId, title, taskNowMs()); }); });
 			}, "Untitled");
@@ -793,7 +940,7 @@ void drawBoard(const Database& db, const View& view)
 			const float  w  = ImGui::GetContentRegionAvail().x;
 			ImDrawList*  dl = ImGui::GetWindowDrawList();
 			dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + cardH), Theme::u32(Theme::warm(0.17f)), 4.0f);
-			ImGui::Selectable("##card", false, 0, ImVec2(w, cardH));
+			if (ImGui::Selectable("##card", row.id == s_selRow, 0, ImVec2(w, cardH))) s_selRow = row.id;
 			note("card:" + row.title);
 			if (ImGui::BeginDragDropSource())
 			{
@@ -835,6 +982,186 @@ void drawBoard(const Database& db, const View& view)
 		ImGui::PopID();
 	}
 	ImGui::EndTable();
+}
+
+// ── The details of one row ───────────────────────────────────────────────────
+
+// The links of a row with room to work: each chip with its x, a drop zone that
+// says what it takes, and the three ways to link what is selected.
+void linksEditor(const Database& db, const Row& row, const Property& p)
+{
+	AppContext& ctx = *s_ctx;
+	const UUID dbId = db.id, rowId = row.id, propId = p.id;
+	const std::vector<TaskLink> links = linksOf(db, rowId, propId);
+
+	// Chips flow left to right and wrap; each with its x to unlink.
+	const float chipH = std::floor(ImGui::GetFrameHeight() * 0.9f);
+	const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+	const float x0 = ImGui::GetCursorScreenPos().x;
+	const float rmW = ImGui::GetFrameHeight();
+	for (std::size_t i = 0; i < links.size(); ++i)
+	{
+		const float maxW = std::max(chipH * 2.0f, std::min(220.0f, right - x0 - rmW - 2.0f));
+		const float want = TaskBoardPanel::linkChipWidth(links[i], maxW, chipH);
+		if (i > 0 && ImGui::GetItemRectMax().x + 8.0f + want + 2.0f + rmW <= right) ImGui::SameLine(0, 8.0f);
+		if (TaskBoardPanel::linkChip(ctx, links[i], static_cast<int>(i), maxW, chipH))
+			TaskBoardPanel::jumpToLink(ctx, links[i]);
+		note("drawer-chip:" + std::to_string(i));
+		ImGui::SameLine(0, 2.0f);
+		ImGui::PushID(static_cast<int>(i));
+		if (ImGui::SmallButton("x")) removeLinkFrom(dbId, rowId, propId, links[i]);
+		ImGui::PopID();
+	}
+	// The drop zone, spelled out: a target that says what it takes is what makes
+	// the gesture findable.
+	{
+		const ImVec2 at = ImGui::GetCursorScreenPos();
+		const float  w  = ImGui::GetContentRegionAvail().x;
+		const float  h  = ImGui::GetFrameHeight() * 1.4f;
+		ImGui::Dummy(ImVec2(w, h));
+		addLinks(dbId, rowId, propId, TaskBoardPanel::acceptDroppedLinks(ctx));
+		note("drawer-drop");
+		const bool dragging = ImGui::GetDragDropPayload() != nullptr;
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddRect(at, ImVec2(at.x + w, at.y + h),
+		            Theme::u32(dragging ? Theme::AccentBright : Theme::TextDim), 4.0f, 0, dragging ? 2.0f : 1.0f);
+		const char* hint = "Drop an asset, a scene or an entity here";
+		const ImVec2 hs = ImGui::CalcTextSize(hint);
+		dl->PushClipRect(at, ImVec2(at.x + w, at.y + h), true);
+		dl->AddText(ImVec2(at.x + std::max(6.0f, (w - hs.x) * 0.5f), at.y + (h - hs.y) * 0.5f),
+		            ImGui::GetColorU32(ImGuiCol_TextDisabled), hint);
+		dl->PopClipRect();
+	}
+	ImGui::BeginDisabled(!(ctx.world && !ctx.selection.empty()));
+	if (EditorWidgets::button("Link Selection"))
+		addLinks(dbId, rowId, propId, TaskBoardPanel::selectionLinks(ctx));
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	TaskLink sceneLink;
+	const bool haveScene = TaskBoardPanel::currentSceneLink(ctx, sceneLink);
+	ImGui::BeginDisabled(!haveScene);
+	if (EditorWidgets::button("Link Scene")) addLinks(dbId, rowId, propId, { sceneLink });
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (EditorWidgets::button("Link Panel")) ImGui::OpenPopup("##linkPanel");
+	if (ImGui::BeginPopup("##linkPanel"))
+	{
+		for (const char* name : TaskBoardPanel::linkablePanels())
+			if (ImGui::Selectable(name, false)) addLinks(dbId, rowId, propId, { TaskLink::panelLink(name, name) });
+		ImGui::EndPopup();
+	}
+}
+
+// What happened to a task, and a box to say something about it. The history is
+// the board's: it is not part of the database.
+void taskHistory(const UUID& rowId)
+{
+	AppContext& ctx = *s_ctx;
+	TaskBoard* b = TaskBoardPanel::board(ctx);
+	const Task* t = b ? b->find(rowId) : nullptr;
+	if (!t) return;
+	if (s_commentFor != rowId) { s_commentFor = rowId; s_comment.clear(); }
+
+	EditorWidgets::subHeading("History");
+	ImGui::TextDisabled("Created by %s, %s", t->createdBy.empty() ? "someone" : t->createdBy.c_str(),
+	                    taskTimeToIso(t->createdMs).substr(0, 16).c_str());
+	const std::size_t shown = std::min<std::size_t>(t->updates.size(), 6);
+	{
+		EditorWidgets::WrapText wrap;
+		for (std::size_t i = t->updates.size() - shown; i < t->updates.size(); ++i)
+		{
+			const TaskUpdate& u = t->updates[i];
+			std::string what;
+			switch (u.kind)
+			{
+			case TaskUpdateKind::Status: what = "set it to " + u.status; break;
+			case TaskUpdateKind::Assignment:
+			{
+				what = "assigned it to ";
+				for (std::size_t k = 0; k < u.assignees.size(); ++k) what += (k ? ", " : "") + u.assignees[k];
+				if (u.assignees.empty()) what = "unassigned it";
+				break;
+			}
+			case TaskUpdateKind::Comment: what = "commented"; break;
+			default:                      what = u.kindOther; break;
+			}
+			ImGui::TextDisabled("%s  %s %s", taskTimeToIso(u.timeMs).substr(0, 16).c_str(), u.author.c_str(), what.c_str());
+			if (!u.text.empty()) { ImGui::Indent(); ImGui::TextUnformatted(u.text.c_str()); ImGui::Unindent(); }
+		}
+	}
+	ImGui::SetNextItemWidth(std::max(60.0f, ImGui::GetContentRegionAvail().x - 120.0f));
+	ImGui::InputTextWithHint("##taskComment", "Write a comment", &s_comment);
+	note("comment-field");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(s_comment.empty());
+	if (EditorWidgets::button("Add Comment"))
+	{
+		const std::string text = s_comment;
+		s_comment.clear();
+		post([=] {
+			TaskBoardPanel::edit(*s_ctx, [&](TaskBoard& bb) {
+				return bb.comment(rowId, TaskBoardPanel::author(), text, taskNowMs()) != nullptr;
+			});
+		});
+	}
+	note("Add Comment");
+	ImGui::EndDisabled();
+}
+
+void drawDrawer(const Database& db, const Row& row)
+{
+	const UUID dbId = db.id, rowId = row.id;
+	const bool tasks = s_ws.isExternal(dbId);
+	const UUID descriptionId = derivedId("property", "Description");
+	pushUuid(rowId);
+
+	textCell("##drawertitle", { rowId, UUID{ 0, 3 } }, row.title, [=](const std::string& title) {
+		post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setTitle(rowId, title, taskNowMs()); }); });
+	}, "Untitled");
+	note("drawer:title");
+	if (ImGui::SmallButton("Close")) s_selRow = UUID{};
+	note("drawer:close");
+	ImGui::Separator();
+
+	for (const Property& p : db.properties)
+	{
+		pushUuid(p.id);
+		ImGui::TextDisabled("%s", p.name.c_str());
+		if (p.type == PropertyType::EngineLink)
+			linksEditor(db, row, p);
+		else if (tasks && p.id == descriptionId)
+		{
+			const UUID pid = p.id;
+			textCell("##description", { rowId, pid }, db.text(rowId, pid), [=](const std::string& v) {
+				post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setText(rowId, pid, v, taskNowMs()); }); });
+			}, nullptr, ImGui::GetTextLineHeight() * 4.0f);
+			note("drawer:description");
+		}
+		else
+			editCell(db, row, p);
+		ImGui::PopID();
+	}
+
+	if (tasks) taskHistory(rowId);
+
+	ImGui::Spacing();
+	if (EditorWidgets::dangerButton("Delete Row")) ImGui::OpenPopup("##confirmDeleteRow");
+	if (ImGui::BeginPopup("##confirmDeleteRow"))
+	{
+		ImGui::Text("Delete \"%s\"?", row.title.c_str());
+		ImGui::TextDisabled(tasks ? "It goes from the board and from Config/TaskBoard.json."
+		                          : "It goes from the database and from any relation that pointed at it.");
+		if (EditorWidgets::dangerButton("Delete"))
+		{
+			post([=] { s_ws.edit(dbId, [&](Database& d) { return d.removeRow(rowId); }); });
+			s_selRow = UUID{};
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+	ImGui::PopID();
 }
 
 // ── One database ─────────────────────────────────────────────────────────────
@@ -945,11 +1272,6 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			ImGui::EndCombo();
 		}
 	}
-	if (!s_notice.empty())
-	{
-		ImGui::TextColored(Theme::Ok, "%s", s_notice.c_str());
-	}
-
 	// The rows this view shows: its own filters and sorts, plus the search box.
 	View effective = *view;
 	if (!s_search.empty())
@@ -957,6 +1279,12 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	const std::vector<std::size_t> idx = db.query(effective);
 	s_stats.rows = static_cast<int>(idx.size());
 
+	// The table or the board, and on its right the details of one row.
+	const Row* open = db.findRow(s_selRow);
+	if (!open) s_selRow = UUID{};
+	constexpr float kDrawerW = 380.0f;
+	ImGui::BeginChild("##plannerbody", ImVec2(open ? -(kDrawerW + ImGui::GetStyle().ItemSpacing.x) : 0.0f, 0.0f),
+	                  ImGuiChildFlags_None);
 	switch (view->kind)
 	{
 	case ViewKind::Table: drawTable(db, effective, idx); break;
@@ -965,31 +1293,71 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		ImGui::TextDisabled("This view type is not available in this editor yet.");
 		break;
 	}
+	ImGui::EndChild();
+	if (open)
+	{
+		ImGui::SameLine();
+		ImGui::BeginChild("##plannerdrawer", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+		drawDrawer(db, *open);
+		ImGui::EndChild();
+	}
 }
 
 // ── The sidebar ──────────────────────────────────────────────────────────────
 
-void importTasks(AppContext& ctx)
+// What the others did to tasks that concern you. Only once something has come
+// in; the bell has the same lines, this list is the one that takes you to the task.
+void drawTeamNotices(AppContext& ctx)
 {
-	TaskBoard* board = TaskBoardPanel::board(ctx);
-	if (!board)
+	HE::TaskBoardTeam* team = TaskBoardPanel::team();
+	if (!team || team->recent().empty()) return;
+	ImGui::Spacing();
+	int fresh = 0;
+	for (const auto& r : team->recent()) fresh += r.atMs > TaskBoardPanel::teamSeen();
+	const bool openList = EditorWidgets::smallButton("From the Team");
+	note("From the Team");
+	// Under the button, not at the mouse, where it would cover it.
+	const ImVec2 listAt(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 2.0f);
+	if (openList)
 	{
-		s_notice = "No project is open.";
-		return;
+		ImGui::OpenPopup("##fromTeam");
+		TaskBoardPanel::markTeamSeen(team->recent().front().atMs);
 	}
-	if (!s_ws.ensure(tasksDatabaseId(), "Tasks", [](Database& db) { ensureTasksSchema(db); }))
-		return;   // the workspace says why (lastError)
-	ImportResult r;
-	s_ws.edit(tasksDatabaseId(), [&](Database& db) {
-		r = importTaskBoard(*board, db);
-		return r.added + r.updated > 0;
-	});
-	s_dbId   = tasksDatabaseId();
-	s_viewId = UUID{};
-	char buf[160];
-	std::snprintf(buf, sizeof(buf), "Imported %d new and updated %d of %d tasks from the Task Board.",
-	              r.added, r.updated, static_cast<int>(board->tasks.size()));
-	s_notice = buf;
+	ImGui::SameLine();
+	if (fresh > 0) ImGui::TextColored(Theme::AccentBright, "%d new", fresh);
+	else           ImGui::TextDisabled("%d", static_cast<int>(team->recent().size()));
+	ImGui::SetNextWindowPos(listAt, ImGuiCond_Appearing);
+	if (!ImGui::BeginPopup("##fromTeam")) return;
+	TaskBoard* board = TaskBoardPanel::board(ctx);
+	int row = 0;
+	for (const auto& r : team->recent())
+	{
+		const bool here = board && board->find(r.notice.task) != nullptr;
+		ImGui::PushID(row++);
+		const bool clicked = ImGui::Selectable(r.text.c_str(), false, here ? 0 : ImGuiSelectableFlags_Disabled);
+		note("team-row:" + std::to_string(row - 1));
+		if (clicked && here) openTask(r.notice.task);
+		ImGui::PopID();
+		if (!r.notice.text.empty())
+		{
+			ImGui::Indent();
+			ImGui::TextDisabled("%s", r.notice.text.c_str());
+			ImGui::Unindent();
+		}
+		// A task created on another machine is on this board after the next pull;
+		// until then there is nothing to open. One from another of the team's
+		// projects is on that project's board.
+		if (!here)
+		{
+			ImGui::Indent();
+			if (!r.notice.project.empty() && r.notice.project != TaskBoardPanel::projectName())
+				ImGui::TextDisabled("In project %s.", r.notice.project.c_str());
+			else
+				ImGui::TextDisabled("Not on this board yet: pull to see it.");
+			ImGui::Unindent();
+		}
+	}
+	ImGui::EndPopup();
 }
 
 void drawSidebar(AppContext& ctx)
@@ -1023,9 +1391,9 @@ void drawSidebar(AppContext& ctx)
 			}
 		});
 	note("New Database");
-	if (EditorWidgets::button("Import Task Board", ImVec2(-FLT_MIN, 0))) post([&ctx] { importTasks(ctx); });
-	note("Import Task Board");
 	if (EditorWidgets::button("Reload", ImVec2(-FLT_MIN, 0))) post([] { s_ws.poll(true); });
+
+	drawTeamNotices(ctx);
 
 	for (const Workspace::Unreadable& u : s_ws.unreadable())
 	{
@@ -1043,10 +1411,12 @@ void drawSidebar(AppContext& ctx)
 
 void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
+	s_ctx = &ctx;
 	Workspace* ws = workspace(ctx);
 	if (ws)
 	{
 		s_ws.setAuthor(TaskBoardPanel::author());
+		TaskBoardPanel::refreshOrphans(ctx);
 		s_ws.poll();
 	}
 	s_stats = {};
@@ -1092,12 +1462,27 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		ImGui::TextUnformatted(s_ws.lastError().c_str());
 		ImGui::PopStyleColor();
 	}
+	if (!TaskBoardPanel::lastError().empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+		{
+			EditorWidgets::WrapText wrap(ImGui::GetContentRegionAvail().x);
+			ImGui::TextUnformatted(TaskBoardPanel::lastError().c_str());
+		}
+		ImGui::PopStyleColor();
+		if (EditorWidgets::smallButton("Reload Tasks")) post([&ctx] { TaskBoardPanel::reloadBoard(ctx); });
+		if (TaskBoardPanel::hasUnsavedEdit())
+		{
+			ImGui::SameLine();
+			if (EditorWidgets::smallButton("Retry Save")) post([] { TaskBoardPanel::retrySave(); });
+		}
+	}
 	if (const Database* db = s_ws.find(s_dbId))
 		drawDatabase(ctx, *db);
 	else
 	{
 		ImGui::Spacing();
-		ImGui::TextDisabled("Make a database with New Database, or copy the Task Board's tasks into one with Import Task Board.");
+		ImGui::TextDisabled("Make a database with New Database. The project's tasks are in Tasks.");
 	}
 	ImGui::EndChild();
 	ImGui::End();
@@ -1126,6 +1511,38 @@ Workspace* workspace(AppContext& ctx)
 		return nullptr;
 	}
 	s_ws.setProject(root);
+
+	// Tasks is the Task Board seen through the Planner (PlannerTasks.h).
+	AppContext* pctx = &ctx;
+	Workspace::External tasks;
+	tasks.id         = tasksDatabaseId();
+	tasks.name       = "Tasks";
+	tasks.generation = [] { return TaskBoardPanel::generation(); };
+	tasks.refresh    = [pctx](Database& db) {
+		if (const TaskBoard* b = TaskBoardPanel::board(*pctx)) refreshTasks(db, *b);
+		else refreshTasks(db, TaskBoard{});
+	};
+	tasks.apply = [pctx](const Database& before, const Database& after, std::string& err) {
+		bool ok = true, changed = false;
+		const bool saved = TaskBoardPanel::edit(*pctx, [&](TaskBoard& board) {
+			std::string why;
+			if (!applyTasksEdit(before, after, board, TaskBoardPanel::author(), taskNowMs(), changed, why))
+			{
+				err = why;
+				ok  = false;
+				return false;
+			}
+			return changed;
+		});
+		if (!ok) return false;
+		if (changed && !saved)
+		{
+			err = TaskBoardPanel::lastError();
+			return false;
+		}
+		return true;
+	};
+	s_ws.setExternal(std::move(tasks));
 	return &s_ws;
 }
 
@@ -1134,7 +1551,16 @@ UUID selectedDatabase() { return s_dbId; }
 UUID selectedView() { return s_viewId; }
 DrawStats lastDrawStats() { return s_stats; }
 const std::string& lastError() { return s_ws.lastError(); }
-const std::string& notice() { return s_notice; }
+
+void openTask(const UUID& id)
+{
+	s_dbId   = tasksDatabaseId();
+	s_viewId = UUID{};
+	s_selRow = id;
+	TaskBoardPanel::selectTask(id);
+}
+
+UUID selectedRow() { return s_selRow; }
 
 Rect controlRect(const std::string& name)
 {
@@ -1147,7 +1573,10 @@ void reset()
 	s_ws = Workspace{};
 	s_dbId = s_viewId = UUID{};
 	s_search.clear();
-	s_notice.clear();
+	s_selRow = UUID{};
+	s_comment.clear();
+	s_commentFor = UUID{};
+	s_ctx = nullptr;
 	s_editing = false;
 	s_editBuf.clear();
 	s_posted.clear();

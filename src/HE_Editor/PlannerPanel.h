@@ -16,12 +16,18 @@ namespace HE::Planner { class Workspace; }
 // Config/Planner); this file is the window on top of it. See
 // docs/planner-plan-2026-10-22.md.
 //
-// Left: the project's databases, "New Database", "Import Task Board". Right: the
-// selected database as a table (sort by a header, filter, search, hide columns,
-// edit every cell in place) or as board lanes of a select property (drag a card
-// to another lane to change its value). The Task Board stays where it is until
-// the planner has taken it over (P1b); "Import Task Board" copies its tasks into
-// the database "Tasks" (PlannerImport.h), as often as you like.
+// Left: the project's databases and "New Database". Right: the selected database
+// as a table (sort by a header, filter, search, hide columns, edit every cell in
+// place) or as board lanes of a select property (drag a card to another lane to
+// change its value), and, for the row you open, its details.
+//
+// ── Tasks replaces the Task Board window ──────────────────────────────────────
+// The database "Tasks" is the project's task list (PlannerTasks.h): rows come
+// from the Task Board's file and edits go back to it, so the footer, the MCP
+// tools and the team bridge keep working on one list. Its row details have what
+// the old window had: the description, the links as chips (click to jump, drop
+// an asset, scene or entity to link), assignees from the team, the history and
+// a comment box. Window ▸ Task Board and the footer open this tab.
 //
 // ── Who owns the databases ────────────────────────────────────────────────────
 // This file does, through one HE::Planner::Workspace per editor: loaded for the
@@ -45,6 +51,11 @@ namespace PlannerPanel
 	void selectDatabase(const HE::UUID& id);
 	HE::UUID selectedDatabase();
 	HE::UUID selectedView();
+	// Show Tasks with this task's details open (the footer's click, a "From the
+	// Team" row, Window ▸ Task Board). The caller brings the tab forward.
+	void openTask(const HE::UUID& id);
+	// The row whose details are open; {} for none.
+	HE::UUID selectedRow();
 
 	// What the last frame drew: rows the selected view has, and how many of them
 	// were laid out (a long table only draws what is on screen).
@@ -59,8 +70,6 @@ namespace PlannerPanel
 
 	// Why the last load or save failed, empty when it did not.
 	const std::string& lastError();
-	// The line under the toolbar after an import ("Imported 3 tasks ...").
-	const std::string& notice();
 
 	// Forget everything (project closed, tests).
 	void reset();

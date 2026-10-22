@@ -119,15 +119,12 @@ add_executable(he_tests
     # The Watch window, driven the same way: sections and rows from a real
     # runtime stopped at a breakpoint, Go to Node raising the reveal.
     test_hc_watch_ui.cpp
-    # The Task Board window, driven the same way: cards from a real board in a
-    # real project, links dropped onto them, chips that select and jump.
-    test_taskboard_ui.cpp
     # The board's footer widget in a stand-in footer: one line tall in every
     # state, kept out of the middle, and its list ticks tasks off on disk.
     test_taskboard_footer_ui.cpp
-    # The Planner tab, driven the same way: a database from New Database or from
-    # the Task Board, a title typed into a cell, a header sort, a card dragged
-    # to another lane.
+    # The Planner tab, driven the same way: Tasks is the Task Board (a new row, a
+    # title typed into a cell, links dropped on it and chips that jump, a pull under
+    # it, assignees from a team), a header sort, a card dragged to another lane.
     test_planner_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
@@ -686,6 +683,7 @@ add_executable(he_tests
     # The Planner over the same helpers (test_planner.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/Planner.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerImport.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerTasks.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerWorkspace.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
@@ -910,9 +908,9 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
-    # The Task Board window, for test_taskboard_ui.cpp: same AppContext, same
-    # per-file HE_IMGUI_ENABLED. It reads TaskBoard, EditorCommands and the
-    # thumbnail cache, all already here.
+    # The Task Board's data core and link chips (the window is the Planner's now):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. It reads TaskBoard,
+    # EditorCommands and the thumbnail cache, all already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
     # And its footer widget, for test_taskboard_footer_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
@@ -1011,7 +1009,6 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
-    test_taskboard_ui.cpp
     # Builds an AppContext for TaskBoardPanel::board/edit: its layout must be
     # the one the panel was compiled with.
     test_mcp_tools_taskboard.cpp

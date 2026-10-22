@@ -4,23 +4,22 @@
 #include <string_view>
 
 // ── The Task Board as a Planner database ─────────────────────────────────────
-// The Planner replaces the Task Board (docs/planner-plan-2026-10-22.md). Until
-// the board's panel, footer and MCP tools move over (P1b), the board stays the
-// place tasks are kept and this copies them into the database "Tasks", where
-// the Planner shows them as a table and as lanes.
+// The schema and the rows of the database "Tasks": what a task looks like as a
+// row. PlannerTasks.h keeps that database in step with the Task Board (the
+// Planner replaced the Task Board's window, P1b); this is the part that builds
+// it: the properties and views, and a board's tasks as rows.
 //
 // ── Fixed ids ─────────────────────────────────────────────────────────────────
-// Every id the import creates — the database, its properties, their options and
-// the two views — is derived from a NAME, not generated. Two teammates who each
-// press "Import Task Board" get the same ids, so the two files git sees are one
-// file with two sets of rows to merge, not two unrelated "Tasks" databases. A
-// row's id is the task's id, so importing again finds the row again.
+// Every id here — the database, its properties, their options and the two views —
+// is derived from a NAME, not generated. Two teammates who each open the Planner
+// get the same ids, so the two view files git sees are one file to merge, not two
+// unrelated "Tasks" databases. A row's id is the task's id.
 //
-// ── Importing again ───────────────────────────────────────────────────────────
+// ── Importing into a database that has rows ───────────────────────────────────
 // Adds the tasks that are not in the database and refreshes a row only when its
-// task changed AFTER the row did (task.modifiedMs > row.modifiedMs). An edit
-// made in the Planner stamps the row with the time of the edit, so it wins over
-// an older board and is not overwritten by pressing Import twice.
+// task changed AFTER the row did (task.modifiedMs > row.modifiedMs). The Tasks
+// database is rebuilt from an empty row list, so every task is new to it; the
+// rule is for a database that kept rows (a P1-era file).
 //
 // What does not come across: a task's history (comments, status and assignment
 // updates) stays in Config/TaskBoard.json, which the import never touches.

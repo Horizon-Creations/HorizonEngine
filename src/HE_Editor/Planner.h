@@ -169,6 +169,10 @@ public:
 	std::vector<Property> properties;
 	std::vector<Row>      rows;      // file order; views sort a copy of the indices
 	std::vector<View>     views;
+	// False for a database whose rows live somewhere else (the Tasks database is
+	// a view of the Task Board): toJson() then writes the schema and the views
+	// but no rows. Runtime state, never read from or written to a file.
+	bool                  persistRows = true;
 
 	// ── Schema ───────────────────────────────────────────────────────────────
 	Property*       addProperty(std::string name, PropertyType type);

@@ -435,7 +435,7 @@ void install()
 		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
 		heAddToggle(window, @"Watch",                 C::ToggleWatch,         false);
-		heAddToggle(window, @"Task Board",            C::ToggleTaskBoard,     false);
+		heAddItem(window, @"Task Board",              C::OpenTaskBoard,       nil, 0, true);
 		// The secondary scene viewports, ticked while open like the panels above.
 		{
 			[window addItem:[NSMenuItem separatorItem]];

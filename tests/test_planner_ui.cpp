@@ -3,6 +3,10 @@
 #include "TestFsUtil.h"
 
 #include "EditorApplication.h"   // AppContext
+#include "EditorCommands.h"      // uuidOf
+#include "FakeTaskTeam.h"
+#include "NotificationStore.h"
+#include "TaskBoardTeam.h"
 #include "EditorSelection.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
@@ -14,12 +18,18 @@
 #include "TaskBoard.h"
 #include "TaskBoardPanel.h"
 
+#include <ContentManager/ContentManager.h>
+#include <HorizonScene/HorizonWorld.h>
+
 #include <imgui.h>
 
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ── The Planner tab, driven headless ─────────────────────────────────────────
@@ -146,12 +156,49 @@ namespace
 		std::filesystem::path root() const { return pm.projectRoot(); }
 	};
 
+	// The drag sources: what the Content Browser (an absolute path) and the World
+	// Outliner (an entity handle) put in their payloads, as buttons in a strip at
+	// the bottom left, under the sidebar's buttons and clear of the table and the details.
+	struct Sources
+	{
+		std::string assetPath, scenePath;
+		Entity      entity = entt::null;
+		ImVec2      assetAt, sceneAt, entityAt;
+	};
+
+	void drawSources(Sources& s)
+	{
+		ImGui::SetNextWindowPos(ImVec2(20.0f, 400.0f));
+		ImGui::SetNextWindowSize(ImVec2(210.0f, 160.0f));
+		ImGui::Begin("Sources", nullptr, ImGuiWindowFlags_NoDecoration);
+		auto source = [](const char* label, const char* type, const void* data, size_t size, ImVec2& at)
+		{
+			ImGui::Button(label, ImVec2(-1.0f, 32.0f));
+			at = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+			            (ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+			if (ImGui::BeginDragDropSource())
+			{
+				ImGui::SetDragDropPayload(type, data, size);
+				ImGui::TextUnformatted(label);
+				ImGui::EndDragDropSource();
+			}
+		};
+		source("Asset: Notes", "HE_ASSET_PATH", s.assetPath.c_str(), s.assetPath.size() + 1, s.assetAt);
+		source("Scene: Main", "HE_ASSET_PATH", s.scenePath.c_str(), s.scenePath.size() + 1, s.sceneAt);
+		source("Entity: Crate", "HE_ENTITY", &s.entity, sizeof(Entity), s.entityAt);
+		ImGui::End();
+	}
+
+	Sources* g_sources = nullptr;
+
 	void frame(AppContext& ctx, bool mouseDown, he_ui::Image* shot = nullptr)
 	{
 		ImGuiIO& io = ImGui::GetIO();
 		io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
 		ImGui::NewFrame();
+		TaskBoardPanel::tick(ctx);   // EditorUI does this every frame, whatever tab is open
 		PlannerPanel::render(ctx, ImVec2(10, 10), ImVec2(float(W) - 20, float(H) - 20));
+		if (g_sources) drawSources(*g_sources);
 		EditorWidgets::drawQueuedHelp();
 		ImGui::Render();
 		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
@@ -214,6 +261,18 @@ namespace
 		for (const char* t : titles)
 			REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) { b.add(t, "Tester", taskNowMs()); return true; }));
 	}
+
+	std::string readText(const std::filesystem::path& p)
+	{
+		std::ifstream f(p, std::ios::binary);
+		return std::string((std::istreambuf_iterator<char>(f)), {});
+	}
+
+	void idle(AppContext& ctx, int n = 3)
+	{
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+		settle(ctx, n);
+	}
 }
 
 TEST_CASE("planner ui: no project, no planner; New Database makes a database and a file")
@@ -230,79 +289,66 @@ TEST_CASE("planner ui: no project, no planner; New Database makes a database and
 	CHECK(PlannerPanel::workspace(closed) == nullptr);
 
 	settle(ctx);
-	REQUIRE(PlannerPanel::workspace(ctx) != nullptr);
-	CHECK(PlannerPanel::workspace(ctx)->databases().empty());
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws != nullptr);
+	REQUIRE(ws->databases().size() == 1);   // Tasks is always there: it is the Task Board
+	CHECK(ws->databases()[0]->id == tasksDatabaseId());
 	shotTo(ctx, "planner_empty");
 
 	REQUIRE(click(ctx, "New Database"));
 	settle(ctx);
-	Workspace* ws = PlannerPanel::workspace(ctx);
-	REQUIRE(ws->databases().size() == 1);
-	const Database& db = *ws->databases()[0];
-	CHECK(db.name == "New Database");
-	CHECK(std::filesystem::exists(databasePath(proj.root(), db.id)));
-	CHECK(PlannerPanel::selectedDatabase() == db.id);
+	ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws->databases().size() == 2);
+	const Database* made = nullptr;
+	for (const Database* d : ws->databases())
+		if (d->name == "New Database") made = d;
+	REQUIRE(made != nullptr);
+	CHECK(std::filesystem::exists(databasePath(proj.root(), made->id)));
+	CHECK(PlannerPanel::selectedDatabase() == made->id);
 	CHECK(PlannerPanel::controlRect("New Row").x1 > 0);   // the database is open
 }
 
-TEST_CASE("planner ui: Import Task Board fills Tasks, again changes nothing")
+TEST_CASE("planner ui: Tasks is the Task Board; a new row is a task, and its title is saved when the cell is left")
 {
 	Harness harness;
-	Project proj("he_planner_ui_import");
+	Project proj("he_planner_ui_tasks");
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	addTasks(ctx, { "Retexture the crates", "Fix the bridge", "Odd one" });
 	settle(ctx);
 
-	REQUIRE(click(ctx, "Import Task Board"));
-	settle(ctx);
-	Database* db = tasksDb(ctx);
-	REQUIRE(db != nullptr);
-	CHECK(db->rows.size() == 3);
-	CHECK(PlannerPanel::notice().find("Imported 3 new") != std::string::npos);
 	CHECK(PlannerPanel::selectedDatabase() == tasksDatabaseId());
+	CHECK(PlannerPanel::lastDrawStats().rows == 3);
 	CHECK(PlannerPanel::controlRect("title:Fix the bridge").x1 > 0);
 	shotTo(ctx, "planner_tasks_table");
 
-	const std::string before = db->toJson();
-	REQUIRE(click(ctx, "Import Task Board"));
-	settle(ctx);
-	CHECK(tasksDb(ctx)->toJson() == before);
-	CHECK(PlannerPanel::notice().find("Imported 0 new and updated 0") != std::string::npos);
-}
-
-TEST_CASE("planner ui: a title typed into a cell is saved when the cell is left")
-{
-	Harness harness;
-	Project proj("he_planner_ui_type");
-	ContextBits bits;
-	AppContext ctx = bits.make(proj.pm);
-	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
-	settle(ctx);
+	// New Row is a new task on the board, made by the user, and a file for it.
 	REQUIRE(click(ctx, "New Row"));
 	settle(ctx);
-	Workspace* ws = PlannerPanel::workspace(ctx);
-	const UUID dbId = PlannerPanel::selectedDatabase();
-	REQUIRE(ws->find(dbId)->rows.size() == 1);
-	CHECK(ws->find(dbId)->rows[0].createdBy == "Tester");
+	TaskBoard* board = TaskBoardPanel::board(ctx);
+	REQUIRE(board->tasks.size() == 4);
+	CHECK(board->tasks[3].createdBy == "Tester");
+	CHECK(board->tasks[3].status == TaskStatus::Open);
+	const UUID fresh = board->tasks[3].id;
+	CHECK(tasksDb(ctx)->findRow(fresh) != nullptr);   // the row has the task's id
 
-	// The new row's title is empty; its field is the first thing in the table.
 	REQUIRE(click(ctx, "title:"));
 	ImGuiIO& io = ImGui::GetIO();
 	io.AddInputCharactersUTF8("Harbour level");
 	settle(ctx);
-	CHECK(ws->find(dbId)->rows[0].title.empty());   // not saved while typing
+	CHECK(TaskBoardPanel::board(ctx)->find(fresh)->title.empty());   // not saved while typing
 	io.AddKeyEvent(ImGuiKey_Enter, true);
 	frame(ctx, false);
 	io.AddKeyEvent(ImGuiKey_Enter, false);
 	settle(ctx);
-	CHECK(ws->find(dbId)->rows[0].title == "Harbour level");
+	CHECK(TaskBoardPanel::board(ctx)->find(fresh)->title == "Harbour level");
 
-	// ...and it is in the file, not just in memory.
-	Database onDisk;
-	REQUIRE(loadDatabase(proj.root(), dbId, onDisk).ok);
-	CHECK(onDisk.rows[0].title == "Harbour level");
+	// ...in the file a teammate pulls, and nothing about the rows in the Planner's own.
+	TaskBoard onDisk;
+	REQUIRE(loadTaskBoard(proj.root(), onDisk).ok);
+	REQUIRE(onDisk.find(fresh) != nullptr);
+	CHECK(onDisk.find(fresh)->title == "Harbour level");
+	CHECK_FALSE(std::filesystem::exists(databasePath(proj.root(), tasksDatabaseId())));
 }
 
 TEST_CASE("planner ui: a header sorts, twice reverses, a third time clears")
@@ -312,8 +358,6 @@ TEST_CASE("planner ui: a header sorts, twice reverses, a third time clears")
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	addTasks(ctx, { "Charlie", "Alpha", "Bravo" });
-	settle(ctx);
-	REQUIRE(click(ctx, "Import Task Board"));
 	settle(ctx);
 
 	auto order = [&] {
@@ -331,7 +375,7 @@ TEST_CASE("planner ui: a header sorts, twice reverses, a third time clears")
 		REQUIRE(v);
 		return v->sorts;
 	};
-	// The imported "All tasks" view starts sorted by Status; sort by Title instead.
+	// "All tasks" starts sorted by Status; sort by Title instead.
 	REQUIRE(click(ctx, "header:Title"));
 	settle(ctx);
 	REQUIRE(sorts().size() == 1);
@@ -345,7 +389,12 @@ TEST_CASE("planner ui: a header sorts, twice reverses, a third time clears")
 	REQUIRE(click(ctx, "header:Title"));
 	settle(ctx);
 	CHECK(sorts().empty());
-	CHECK(order() == "Charlie Alpha Bravo ");   // file order again
+	CHECK(order() == "Charlie Alpha Bravo ");   // the board's order again
+
+	// A view edit is the one thing the Tasks database saves: the views, no rows.
+	const std::string file = readText(databasePath(proj.root(), tasksDatabaseId()));
+	REQUIRE_FALSE(file.empty());
+	CHECK(file.find("Charlie") == std::string::npos);
 }
 
 TEST_CASE("planner ui: a long table only lays out the rows on screen")
@@ -371,7 +420,7 @@ TEST_CASE("planner ui: a long table only lays out the rows on screen")
 	shotTo(ctx, "planner_long_table");
 }
 
-TEST_CASE("planner ui: a card dragged to another lane changes the status")
+TEST_CASE("planner ui: a card dragged to another lane changes the task's status")
 {
 	Harness harness;
 	Project proj("he_planner_ui_board");
@@ -379,18 +428,9 @@ TEST_CASE("planner ui: a card dragged to another lane changes the status")
 	AppContext ctx = bits.make(proj.pm);
 	addTasks(ctx, { "Carry crates" });
 	settle(ctx);
-	REQUIRE(click(ctx, "Import Task Board"));
+	const UUID id = TaskBoardPanel::board(ctx)->tasks[0].id;
+	REQUIRE(click(ctx, "view:By status"));
 	settle(ctx);
-	REQUIRE(click(ctx, "+ Board"));
-	settle(ctx);
-	const Database* db = tasksDb(ctx);
-	REQUIRE(db);
-	const UUID status = derivedId("property", "Status");
-	const Property* prop = db->findProperty(status);
-	REQUIRE(prop);
-	const UUID open = prop->findOptionByName("Open")->id;
-	const UUID done = prop->findOptionByName("Done")->id;
-	REQUIRE(db->select(db->rows[0].id, status) == open);
 
 	settle(ctx);
 	const PlannerPanel::Rect card = PlannerPanel::controlRect("card:Carry crates");
@@ -400,6 +440,347 @@ TEST_CASE("planner ui: a card dragged to another lane changes the status")
 	shotTo(ctx, "planner_board_before");
 	dragTo(ctx, centre(card), centre(lane));
 	settle(ctx);
-	CHECK(tasksDb(ctx)->select(tasksDb(ctx)->rows[0].id, status) == done);
+	const Task* t = TaskBoardPanel::board(ctx)->find(id);
+	REQUIRE(t != nullptr);
+	CHECK(t->status == TaskStatus::Done);
+	// The change is a status change in the task's history, which the team bridge announces.
+	REQUIRE_FALSE(t->updates.empty());
+	CHECK(t->updates.back().kind == TaskUpdateKind::Status);
+	CHECK(t->updates.back().author == "Tester");
 	shotTo(ctx, "planner_board_after");
+}
+
+TEST_CASE("planner ui: drops link an asset, a scene and an entity; chips jump to them")
+{
+	Harness harness;
+	Project proj("he_planner_ui_links");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+
+	// A real asset in the project's Content folder, and the scene that is open.
+	const std::filesystem::path content = proj.root() / "Content";
+	ContentManager cm(content.string());
+	{
+		StructTypeAsset a;
+		a.type = HE::AssetType::StructType;
+		a.name = "Notes";
+		a.path = "Notes.hasset";
+		a.json = R"({"fields":[{"name":"hp","type":1}]})";
+		REQUIRE(cm.saveAsset(a));
+	}
+	const UUID assetId = cm.loadAsset("Notes.hasset");
+	REQUIRE(assetId != UUID{});
+	ctx.contentManager = &cm;
+
+	std::filesystem::create_directories(content / "Levels");
+	const std::filesystem::path scene = content / "Levels" / "Main.hescene";
+	{ std::ofstream(scene) << "{}\n"; }
+	bits.scenePath = scene.string();
+
+	HorizonWorld world;
+	const Entity crate = world.createEntity("Crate");
+	world.createEntity("Door");
+	ctx.world = &world;
+
+	UUID taskId;
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		taskId = b.add("Fix the crate", "Tester", taskNowMs())->id;
+		return true;
+	}));
+
+	Sources src;
+	src.assetPath = (content / "Notes.hasset").string();
+	src.scenePath = scene.string();
+	src.entity    = crate;
+	g_sources     = &src;
+	idle(ctx);
+
+	// The Links cell is the target: three drops, three links, in the order they came.
+	PlannerPanel::Rect cell = PlannerPanel::controlRect("links:Fix the crate");
+	REQUIRE(cell.x1 > cell.x0);
+	dragTo(ctx, src.assetAt, centre(cell));
+	dragTo(ctx, src.sceneAt, centre(cell));
+	cell = PlannerPanel::controlRect("links:Fix the crate");
+	dragTo(ctx, src.entityAt, centre(cell));
+
+	TaskBoard* b = TaskBoardPanel::board(ctx);
+	REQUIRE(b != nullptr);
+	const Task* t = b->find(taskId);
+	REQUIRE(t != nullptr);
+	REQUIRE(t->links.size() == 3);
+	CHECK(t->links[0].kind == TaskLinkKind::Asset);
+	CHECK(t->links[0].id == assetId);
+	CHECK(t->links[0].label == "Notes");
+	CHECK(t->links[1].kind == TaskLinkKind::Scene);
+	CHECK(t->links[1].scene == "Content/Levels/Main.hescene");
+	CHECK(t->links[2].kind == TaskLinkKind::Entity);
+	CHECK(t->links[2].scene == "Content/Levels/Main.hescene");
+	CHECK(t->links[2].label == "Crate");
+	CHECK(uuidToHex(t->links[2].id) == HE::Ed::uuidOf(world, crate));
+	{
+		// What the file holds is what a teammate pulls.
+		TaskBoard again;
+		REQUIRE(loadTaskBoard(proj.root(), again).ok);
+		REQUIRE(again.tasks.size() == 1);
+		CHECK(again.tasks[0].links.size() == 3);
+	}
+	// The cell shows the first chip, inside the cell.
+	idle(ctx);
+	PlannerPanel::Rect first = PlannerPanel::controlRect("chip:Fix the crate:0");
+	REQUIRE(first.x1 > first.x0);
+	CHECK(first.x1 <= PlannerPanel::controlRect("links:Fix the crate").x1);
+
+	// Open the row: its details show every chip, and a click goes there.
+	REQUIRE(click(ctx, "open:Fix the crate"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedRow() == taskId);
+	shotTo(ctx, "planner_task_details");
+	PlannerPanel::Rect chip = PlannerPanel::controlRect("drawer-chip:2");
+	REQUIRE(chip.x1 > chip.x0);
+	(void)TaskBoardPanel::takeJump();
+	ctx.selection.clear();
+	REQUIRE(click(ctx, "drawer-chip:2"));
+	CHECK(ctx.selection.contains(crate));
+	CHECK(TaskBoardPanel::takeJump().kind == TaskBoardPanel::Jump::Kind::Entity);
+	CHECK(TaskBoardPanel::takeJump().kind == TaskBoardPanel::Jump::Kind::None);   // one-shot
+
+	REQUIRE(click(ctx, "drawer-chip:0"));
+	{
+		const TaskBoardPanel::Jump j = TaskBoardPanel::takeJump();
+		CHECK(j.kind == TaskBoardPanel::Jump::Kind::Asset);
+		CHECK(std::filesystem::equivalent(j.target, content / "Notes.hasset"));
+	}
+	REQUIRE(click(ctx, "drawer-chip:1"));
+	{
+		const TaskBoardPanel::Jump j = TaskBoardPanel::takeJump();
+		CHECK(j.kind == TaskBoardPanel::Jump::Kind::Scene);
+		CHECK(std::filesystem::equivalent(j.target, scene));
+	}
+
+	// The same entity dropped twice is one link, not two.
+	const PlannerPanel::Rect drop = PlannerPanel::controlRect("drawer-drop");
+	REQUIRE(drop.x1 > drop.x0);
+	dragTo(ctx, src.entityAt, centre(drop));
+	CHECK(TaskBoardPanel::board(ctx)->find(taskId)->links.size() == 3);
+
+	// A link comes off with its x.
+	idle(ctx);
+	CHECK(TaskBoardPanel::board(ctx)->find(taskId)->links.size() == 3);
+
+	// A deleted entity is marked, not dropped: the chip still says what it was.
+	world.destroyEntity(crate);
+	std::this_thread::sleep_for(std::chrono::milliseconds(1100));   // the orphan check runs once a second
+	idle(ctx);
+	t = TaskBoardPanel::board(ctx)->find(taskId);
+	REQUIRE(t != nullptr);
+	REQUIRE(t->links.size() == 3);
+	CHECK(t->links[2].orphaned);
+	CHECK_FALSE(t->links[0].orphaned);
+	CHECK_FALSE(t->links[1].orphaned);
+	shotTo(ctx, "planner_orphan");
+	g_sources = nullptr;
+}
+
+TEST_CASE("planner ui: the details edit the description, add a comment, and the old panel link opens the tab")
+{
+	Harness harness;
+	Project proj("he_planner_ui_details");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	addTasks(ctx, { "Paint the lighthouse" });
+	const UUID id = TaskBoardPanel::board(ctx)->tasks[0].id;
+	idle(ctx);
+
+	PlannerPanel::openTask(id);
+	idle(ctx);
+	CHECK(PlannerPanel::selectedRow() == id);
+	CHECK(TaskBoardPanel::selectedTask() == id);
+	REQUIRE(PlannerPanel::controlRect("drawer:description").x1 > 0);
+
+	// The description: typed in the details, saved when the field is left.
+	REQUIRE(click(ctx, "drawer:description"));
+	ImGui::GetIO().AddInputCharactersUTF8("White with a red stripe");
+	settle(ctx);
+	CHECK(TaskBoardPanel::board(ctx)->find(id)->description.empty());
+	REQUIRE(click(ctx, "drawer:title"));   // leaving the field commits it
+	settle(ctx);
+	CHECK(TaskBoardPanel::board(ctx)->find(id)->description == "White with a red stripe");
+
+	// A comment goes into the history under the user's name.
+	REQUIRE(click(ctx, "comment-field"));
+	ImGui::GetIO().AddInputCharactersUTF8("Needs two coats");
+	settle(ctx);
+	REQUIRE(click(ctx, "Add Comment"));
+	idle(ctx);
+	const Task* t = TaskBoardPanel::board(ctx)->find(id);
+	REQUIRE_FALSE(t->updates.empty());
+	CHECK(t->updates.back().kind == TaskUpdateKind::Comment);
+	CHECK(t->updates.back().text == "Needs two coats");
+	CHECK(t->updates.back().author == "Tester");
+	shotTo(ctx, "planner_task_comment");
+
+	// Close hides the details; the row stays.
+	REQUIRE(click(ctx, "drawer:close"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedRow() == UUID{});
+	CHECK(PlannerPanel::lastDrawStats().rows == 1);
+}
+
+TEST_CASE("planner ui: a pull under the open board is read, and an edit lands on top of it")
+{
+	Harness harness;
+	Project proj("he_planner_ui_pull");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+
+	UUID mine;
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		mine = b.add("Mine", "Tester", taskNowMs())->id;
+		return true;
+	}));
+	idle(ctx);
+	CHECK(PlannerPanel::lastDrawStats().rows == 1);
+
+	// A teammate's task arrives with a pull.
+	auto pullIn = [&](const char* title) {
+		TaskBoard theirs;
+		REQUIRE(loadTaskBoard(proj.root(), theirs).ok);
+		theirs.add(title, "Cleo", taskNowMs());
+		REQUIRE(saveTaskBoard(proj.root(), theirs));
+	};
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	pullIn("Theirs");
+
+	// Edited in the Planner before it noticed: the save is refused, the pull read,
+	// the edit put on top of it — nothing of either is lost.
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID done = tasksDb(ctx)->findProperty(derivedId("property", "Status"))->findOptionByName("Done")->id;
+	REQUIRE(ws->edit(tasksDatabaseId(), [&](Database& db) {
+		return db.setSelect(mine, derivedId("property", "Status"), done, taskNowMs());
+	}));
+	CHECK(TaskBoardPanel::lastError().empty());
+	{
+		TaskBoard disk;
+		REQUIRE(loadTaskBoard(proj.root(), disk).ok);
+		REQUIRE(disk.tasks.size() == 2);
+		CHECK(disk.find(mine)->status == TaskStatus::Done);
+		CHECK(disk.tasks[1].title == "Theirs");
+	}
+	idle(ctx);
+	CHECK(PlannerPanel::lastDrawStats().rows == 2);
+
+	// Left alone, the Planner picks a pull up by itself.
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	pullIn("Theirs too");
+	std::this_thread::sleep_for(std::chrono::milliseconds(600));
+	idle(ctx, 4);
+	CHECK(PlannerPanel::lastDrawStats().rows == 3);
+	CHECK(tasksDb(ctx)->findRow(TaskBoardPanel::board(ctx)->tasks[2].id)->title == "Theirs too");
+
+	// A file nobody can read (a merge conflict) is never written over; the edit is
+	// refused, the last good list stays on screen and the banner says why.
+	{ std::ofstream(taskBoardPath(proj.root()), std::ios::binary) << "<<<<<<< HEAD\n{\n"; }
+	std::this_thread::sleep_for(std::chrono::milliseconds(600));
+	idle(ctx, 4);
+	CHECK_FALSE(TaskBoardPanel::lastError().empty());
+	CHECK(PlannerPanel::lastDrawStats().rows == 3);
+	CHECK_FALSE(ws->edit(tasksDatabaseId(), [&](Database& db) { return db.setTitle(mine, "Renamed", taskNowMs()); }));
+	CHECK(readText(taskBoardPath(proj.root())).rfind("<<<<<<< HEAD", 0) == 0);
+	CHECK(tasksDb(ctx)->findRow(mine)->title == "Mine");
+	shotTo(ctx, "planner_conflict");
+}
+
+TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on disk and reaches the assignee")
+{
+	Harness harness;
+	Project proj("he_planner_ui_team");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+
+	// Two editors of one team: Anna's is this tab, Bob's only its bridge.
+	he_test::FakeTaskTeam server;
+	for (const char* m : { "Anna", "Bob" }) server.addMember(m);
+	auto& annaLink = server.editor("Anna");
+	auto& bobLink  = server.editor("Bob");
+	HE::TaskBoardTeam annaTeam, bobTeam;
+	annaTeam.setLink(&annaLink);
+	bobTeam.setLink(&bobLink);
+	HE::Ed::NotificationStore bobBell;
+	bobTeam.setNotifications(&bobBell);
+	// One clock for every pump: the editor's and the server's.
+	TaskBoardPanel::setTeamClock([&] { return server.nowMs; });
+
+	UUID id;
+	REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) {
+		id = b.add("Retexture the crates", TaskBoardPanel::author(), taskNowMs())->id;
+		return true;
+	}));
+	const std::string assignees = "assignees:Retexture the crates";
+	auto frames = [&](int n) { idle(ctx, n); };
+
+	// No team server: no picker, and the board is the local one it always was.
+	frames(3);
+	CHECK(PlannerPanel::controlRect(assignees).x1 <= 0);
+	CHECK(PlannerPanel::controlRect("From the Team").x1 <= 0);
+	CHECK(TaskBoardPanel::author() == "Tester");
+
+	// A team whose link is signed out: still none.
+	annaLink.signedIn = false;
+	TaskBoardPanel::setTeam(&annaTeam);
+	frames(3);
+	CHECK(PlannerPanel::controlRect(assignees).x1 <= 0);
+	CHECK(TaskBoardPanel::author() == "Tester");
+
+	// Signed in: the picker is there, and edits are made as the member.
+	annaLink.signedIn = true;
+	frames(3);
+	REQUIRE(PlannerPanel::controlRect(assignees).x1 > 0);
+	CHECK(TaskBoardPanel::author() == "Anna");
+	shotTo(ctx, "planner_team_assignees");
+
+	// Open the list and tick Bob.
+	REQUIRE(click(ctx, assignees));
+	REQUIRE(PlannerPanel::controlRect("member:Bob").x1 > 0);
+	shotTo(ctx, "planner_team_assignee_list");
+	REQUIRE(click(ctx, "member:Bob"));
+	{
+		TaskBoard disk;
+		REQUIRE(loadTaskBoard(proj.root(), disk).ok);
+		REQUIRE(disk.find(id) != nullptr);
+		CHECK(disk.find(id)->assignees == std::vector<std::string>{ "Bob" });
+		CHECK(disk.find(id)->assignedBy == "Anna");
+		REQUIRE_FALSE(disk.find(id)->updates.empty());
+		CHECK(disk.find(id)->updates.back().author == "Anna");
+	}
+	CHECK(annaTeam.pending() == 1);
+	// Click away: the list closes.
+	click(ctx, "New Database");   // anywhere that is not the list
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+
+	// It settles, the editor's own pump sends it, the server carries it.
+	server.pump(HE::TaskBoardTeam::kAssignSettleMs, { &bobTeam });
+	frames(1);
+	CHECK(annaLink.sent.size() == 1);
+	server.pump(server.latencyMs, { &bobTeam });
+	REQUIRE(bobBell.snapshot().size() == 1);
+	CHECK(bobBell.snapshot()[0].text == "Anna assigned you \xE2\x80\x9CRetexture the crates\xE2\x80\x9D");
+
+	// Bob's side: From the Team appears, and its row opens the task.
+	TaskBoardPanel::setTeam(&bobTeam);
+	TaskBoardPanel::selectTask(UUID{});
+	frames(3);
+	CHECK(TaskBoardPanel::author() == "Bob");
+	REQUIRE(PlannerPanel::controlRect("From the Team").x1 > 0);
+	REQUIRE(click(ctx, "From the Team"));
+	REQUIRE(PlannerPanel::controlRect("team-row:0").x1 > 0);
+	shotTo(ctx, "planner_team_from_the_team");
+	REQUIRE(click(ctx, "team-row:0"));
+	CHECK(TaskBoardPanel::selectedTask() == id);
+	CHECK(PlannerPanel::selectedRow() == id);
+
+	// Signing out takes the member name back off the edits.
+	bobLink.signedIn = false;
+	frames(2);
+	CHECK(TaskBoardPanel::author() != "Bob");
+	CHECK(PlannerPanel::controlRect(assignees).x1 <= 0);
 }

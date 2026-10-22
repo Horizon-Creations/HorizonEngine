@@ -282,6 +282,7 @@ add_executable(HorizonEditor WIN32
 	# ImGui; it shares TaskBoard's JSON helpers (TaskBoardJson.h).
 	Planner.cpp
 	PlannerImport.cpp
+	PlannerTasks.cpp
 	PlannerWorkspace.cpp
 	# ...and the editor tab on top of them (Window > Planner).
 	PlannerPanel.cpp

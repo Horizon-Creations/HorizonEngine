@@ -38,6 +38,12 @@ void writeBytes(const fs::path& p, const std::string& text)
 
 constexpr std::int64_t kT0 = 1760000000000;
 
+std::string readFileText(const fs::path& p)
+{
+	std::ifstream in(p, std::ios::binary);
+	return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 TaskBoard sampleBoard()
 {
 	TaskBoard b;
@@ -278,4 +284,231 @@ TEST_CASE("planner workspace: ensure creates the Tasks database once, and import
 	again.setProject(tp.root);
 	REQUIRE(again.find(tasksDatabaseId()));
 	CHECK(again.find(tasksDatabaseId())->rows.size() == 3);
+}
+
+// ── The Tasks database as a projection of the Task Board (PlannerTasks.h) ────
+
+#include "PlannerTasks.h"
+
+namespace
+{
+
+// A board in memory with a change counter, standing in for TaskBoardPanel: the
+// workspace reads rows from it and writes edits to it through two functions.
+struct FakeSource
+{
+	TaskBoard board;
+	unsigned  gen = 1;
+	std::string author = "Tester";
+	std::int64_t now = kT0 + 5000;
+	bool refuse = false;
+
+	Workspace::External external()
+	{
+		Workspace::External e;
+		e.id   = tasksDatabaseId();
+		e.name = "Tasks";
+		e.refresh    = [this](Database& db) { refreshTasks(db, board); };
+		e.generation = [this] { return gen; };
+		e.apply = [this](const Database& before, const Database& after, std::string& err) {
+			if (refuse) { err = "refused"; return false; }
+			bool changed = false;
+			const bool ok = applyTasksEdit(before, after, board, author, now++, changed, err);
+			if (changed) ++gen;
+			return ok;
+		};
+		return e;
+	}
+};
+
+UUID prop(const char* name) { return derivedId("property", name); }
+const Task* byTitle(const TaskBoard& b, const char* title)
+{
+	for (const Task& t : b.tasks) if (t.title == title) return &t;
+	return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("planner tasks: the board is shown as rows, the schema is fixed")
+{
+	FakeSource src;
+	src.board = sampleBoard();
+	Database db;
+	refreshTasks(db, src.board);
+	CHECK(db.id == tasksDatabaseId());
+	CHECK(db.rows.size() == 3);
+	CHECK_FALSE(db.persistRows);
+
+	// A column somebody added is not kept (there is nowhere to put its cells).
+	db.addProperty("Estimate", PropertyType::Number);
+	refreshTasks(db, src.board);
+	CHECK(db.findPropertyByName("Estimate") == nullptr);
+	CHECK(db.properties.size() == 5);
+
+	// The file holds the schema and the views, never the rows.
+	CHECK(db.toJson().find("Retexture the crates") == std::string::npos);
+	CHECK(db.toJson().find("\"rows\": []") != std::string::npos);
+}
+
+TEST_CASE("planner tasks: edits become the board calls the team bridge listens to")
+{
+	FakeSource src;
+	src.board = sampleBoard();
+	const UUID crates = src.board.tasks[0].id;
+	const std::size_t updatesBefore = src.board.tasks[0].updates.size();
+	Database before;
+	refreshTasks(before, src.board);
+
+	auto edit = [&](const std::function<void(Database&)>& fn) {
+		Database after = before;
+		fn(after);
+		bool changed = false;
+		std::string err;
+		REQUIRE(applyTasksEdit(before, after, src.board, "Anna", kT0 + 9000, changed, err));
+		const bool did = changed;
+		refreshTasks(before, src.board);
+		return did;
+	};
+
+	// A new title is not a story: the history gets nothing, the task is stamped.
+	CHECK(edit([&](Database& d) { d.setTitle(crates, "Retexture the wooden crates", kT0 + 9000); }));
+	CHECK(src.board.find(crates)->title == "Retexture the wooden crates");
+	CHECK(src.board.find(crates)->updates.size() == updatesBefore);
+	CHECK(src.board.find(crates)->modifiedMs == kT0 + 9000);
+
+	// A status change appends the update the bridge keys on, under the author.
+	const Property* st = before.findProperty(prop("Status"));
+	const UUID done = st->findOptionByName("Done")->id;
+	CHECK(edit([&](Database& d) { d.setSelect(crates, prop("Status"), done, kT0 + 9000); }));
+	const Task* t = src.board.find(crates);
+	CHECK(t->status == TaskStatus::Done);
+	REQUIRE(t->updates.size() == updatesBefore + 1);
+	CHECK(t->updates.back().kind == TaskUpdateKind::Status);
+	CHECK(t->updates.back().author == "Anna");
+
+	// Assignees: an Assignment update with the whole new list.
+	CHECK(edit([&](Database& d) { d.setPeople(crates, prop("Assignees"), { "Carol" }, kT0 + 9000); }));
+	t = src.board.find(crates);
+	CHECK(t->assignees == std::vector<std::string>{ "Carol" });
+	CHECK(t->updates.back().kind == TaskUpdateKind::Assignment);
+	CHECK(t->assignedBy == "Anna");
+
+	// Priority, description, links in and out.
+	const UUID urgent = before.findProperty(prop("Priority"))->findOptionByName("Urgent")->id;
+	CHECK(edit([&](Database& d) {
+		d.setSelect(crates, prop("Priority"), urgent, kT0 + 9000);
+		d.setText(crates, prop("Description"), "Now with moss", kT0 + 9000);
+		d.setLinks(crates, prop("Links"), { TaskLink::panelLink("Console", "Console") }, kT0 + 9000);
+	}));
+	t = src.board.find(crates);
+	CHECK(t->priority == TaskPriority::Urgent);
+	CHECK(t->description == "Now with moss");
+	REQUIRE(t->links.size() == 1);   // the scene link went, the panel link came
+	CHECK(t->links[0].kind == TaskLinkKind::Panel);
+
+	// Nothing changed: nothing written.
+	CHECK_FALSE(edit([&](Database&) {}));
+
+	// A status word this build does not know is kept as the word it was.
+	CHECK(edit([&](Database& d) {
+		const SelectOption* o = d.addOption(prop("Status"), "needs-art");
+		d.setSelect(crates, prop("Status"), o->id, kT0 + 9000);
+	}));
+	CHECK(src.board.find(crates)->status == TaskStatus::Other);
+	CHECK(src.board.find(crates)->statusOther == "needs-art");
+}
+
+TEST_CASE("planner tasks: a new row is a new task with the row's id, a deleted row is a deleted task")
+{
+	FakeSource src;
+	src.board = sampleBoard();
+	Database before;
+	refreshTasks(before, src.board);
+
+	Database after = before;
+	const UUID fresh = after.addRow("Paint the lighthouse", "Anna", kT0 + 9000)->id;
+	after.removeRow(src.board.tasks[1].id);
+	bool changed = false;
+	std::string err;
+	REQUIRE(applyTasksEdit(before, after, src.board, "Anna", kT0 + 9000, changed, err));
+	CHECK(changed);
+	CHECK(src.board.tasks.size() == 3);
+	const Task* t = byTitle(src.board, "Paint the lighthouse");
+	REQUIRE(t);
+	CHECK(t->id == fresh);
+	CHECK(t->createdBy == "Anna");
+	CHECK(t->status == TaskStatus::Open);
+	CHECK(t->updates.empty());   // a new task has no history yet
+	CHECK(byTitle(src.board, "Fix the bridge") == nullptr);
+
+	// Columns added or deleted: refused, the board untouched.
+	Database wider = before;
+	wider.addProperty("Estimate", PropertyType::Number);
+	const std::string snapshot = src.board.toJson();
+	CHECK_FALSE(applyTasksEdit(before, wider, src.board, "Anna", kT0, changed, err));
+	CHECK(err.find("fixed set of columns") != std::string::npos);
+	CHECK(src.board.toJson() == snapshot);
+	Database narrower = before;
+	narrower.removeProperty(prop("Links"));
+	CHECK_FALSE(applyTasksEdit(before, narrower, src.board, "Anna", kT0, changed, err));
+}
+
+TEST_CASE("planner tasks: the workspace writes edits to the board and keeps only the views")
+{
+	TempProject tp;
+	FakeSource src;
+	src.board = sampleBoard();
+	Workspace ws;
+	ws.setProject(tp.root);
+	ws.setExternal(src.external());
+
+	Database* tasks = ws.find(tasksDatabaseId());
+	REQUIRE(tasks);
+	CHECK(tasks->rows.size() == 3);
+	CHECK_FALSE(fs::exists(databasePath(tp.root, tasksDatabaseId())));   // nothing to save yet
+	CHECK_FALSE(ws.remove(tasksDatabaseId()));
+	CHECK_FALSE(ws.lastError().empty());
+
+	// An edit on a row reaches the board, and what the board made of it comes back.
+	const UUID bridge = src.board.tasks[1].id;
+	const UUID done = tasks->findProperty(prop("Status"))->findOptionByName("Done")->id;
+	REQUIRE(ws.edit(tasksDatabaseId(), [&](Database& db) { return db.setSelect(bridge, prop("Status"), done, kT0 + 1); }));
+	CHECK(src.board.find(bridge)->status == TaskStatus::Done);
+	CHECK(ws.find(tasksDatabaseId())->select(bridge, prop("Status")) == done);
+	CHECK_FALSE(fs::exists(databasePath(tp.root, tasksDatabaseId())));   // a row edit writes no database file
+
+	// A view edit is saved, without rows.
+	REQUIRE(ws.edit(tasksDatabaseId(), [&](Database& db) {
+		db.views[0].sorts = { { UUID{}, true } };
+		return true;
+	}));
+	REQUIRE(fs::exists(databasePath(tp.root, tasksDatabaseId())));
+	const std::string file = readFileText(databasePath(tp.root, tasksDatabaseId()));
+	CHECK(file.find("Fix the bridge") == std::string::npos);
+	CHECK(file.find("\"descending\": true") != std::string::npos);
+
+	// A refused change leaves the database as it was.
+	const std::size_t props = ws.find(tasksDatabaseId())->properties.size();
+	CHECK_FALSE(ws.edit(tasksDatabaseId(), [](Database& db) { db.addProperty("Estimate", PropertyType::Number); return true; }));
+	CHECK(ws.find(tasksDatabaseId())->properties.size() == props);
+	CHECK(ws.lastError().find("fixed set of columns") != std::string::npos);
+	src.refuse = true;
+	CHECK_FALSE(ws.edit(tasksDatabaseId(), [&](Database& db) { return db.setTitle(bridge, "x", kT0 + 2); }));
+	CHECK(ws.find(tasksDatabaseId())->findRow(bridge)->title == "Fix the bridge");
+
+	// The board changes elsewhere (the footer, an MCP tool, a pull): poll reads it.
+	src.refuse = false;
+	src.board.setTitle(src.board.tasks[0].id, "Changed on the board", kT0 + 7000);
+	++src.gen;
+	CHECK(ws.poll(true));
+	CHECK(ws.find(tasksDatabaseId())->findRow(src.board.tasks[0].id)->title == "Changed on the board");
+
+	// A new session: the rows come from the board again, the views from the file.
+	Workspace again;
+	again.setProject(tp.root);
+	again.setExternal(src.external());
+	REQUIRE(again.find(tasksDatabaseId()));
+	CHECK(again.find(tasksDatabaseId())->rows.size() == 3);
+	CHECK(again.find(tasksDatabaseId())->views[0].sorts.size() == 1);
 }

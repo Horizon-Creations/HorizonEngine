@@ -1256,11 +1256,14 @@ std::string Database::toJson() const
 	for (const View& v : views) vs.push_back(writeView(v));
 	j["views"] = std::move(vs);
 	ojson rs = ojson::array();
-	for (const Row& r : rows) rs.push_back(writeRow(r));
-	for (const std::string& raw : m_unreadableRows)
+	if (persistRows)
 	{
-		ojson e = ojson::parse(raw, nullptr, /*allow_exceptions=*/false);
-		if (!e.is_discarded()) rs.push_back(std::move(e));
+		for (const Row& r : rows) rs.push_back(writeRow(r));
+		for (const std::string& raw : m_unreadableRows)
+		{
+			ojson e = ojson::parse(raw, nullptr, /*allow_exceptions=*/false);
+			if (!e.is_discarded()) rs.push_back(std::move(e));
+		}
 	}
 	j["rows"] = std::move(rs);
 	TJ::appendExtras(j, m_extraJson);

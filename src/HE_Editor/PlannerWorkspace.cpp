@@ -46,10 +46,48 @@ void Workspace::loadAll()
 			m_unreadable.push_back({ id, r.error });
 			continue;
 		}
+		afterLoad(e);
 		stamp(e);
 		m_entries.push_back(std::move(e));
 	}
+	attachExternal();
 	++m_generation;
+}
+
+void Workspace::afterLoad(Entry& e)
+{
+	if (!isExternal(e.db.id)) return;
+	e.db.persistRows = false;
+	m_ext.refresh(e.db);
+	e.extGen = m_ext.generation ? m_ext.generation() : 0;
+}
+
+void Workspace::attachExternal()
+{
+	if (!isExternal(m_ext.id) || m_root.empty() || entryFor(m_ext.id)) return;
+	// No file yet (or one that cannot be read, which stays listed and is never
+	// written over): the database exists in memory, with the schema and the
+	// default views, and is written when a view changes.
+	Entry e;
+	e.db.id   = m_ext.id;
+	e.db.name = m_ext.name;
+	afterLoad(e);
+	m_entries.push_back(std::move(e));
+	++m_generation;
+}
+
+void Workspace::setExternal(External ext)
+{
+	m_ext = std::move(ext);
+	if (!m_ext.refresh) return;
+	attachExternal();
+	// A file loaded before the source was installed (setProject came first): the
+	// database is adopted now, its rows replaced by the source's.
+	if (Entry* e = entryFor(m_ext.id); e && e->db.persistRows)
+	{
+		afterLoad(*e);
+		++m_generation;
+	}
 }
 
 void Workspace::setProject(const fs::path& root)
@@ -126,6 +164,11 @@ Database* Workspace::ensure(const UUID& id, const std::string& name,
 
 bool Workspace::remove(const UUID& id)
 {
+	if (isExternal(id))
+	{
+		m_error = "The Tasks database is the Task Board and cannot be deleted.";
+		return false;
+	}
 	const auto it = std::find_if(m_entries.begin(), m_entries.end(),
 	                             [&](const Entry& e) { return e.db.id == id; });
 	if (it == m_entries.end()) return false;
@@ -144,6 +187,35 @@ bool Workspace::edit(const UUID& id, const std::function<bool(Database&)>& fn)
 {
 	Entry* e = entryFor(id);
 	if (!e) return false;
+
+	if (isExternal(id))
+	{
+		const Database before = e->db;
+		if (!fn(e->db)) return false;
+		std::string err;
+		if (!m_ext.apply(before, e->db, err))
+		{
+			e->db = before;   // the source refused: the database stays as it was
+			m_error = err;
+			++m_generation;
+			return false;
+		}
+		// The source is the truth: take back what it made of the change.
+		m_ext.refresh(e->db);
+		e->extGen = m_ext.generation ? m_ext.generation() : 0;
+		++m_generation;
+		if (before.toJson() == e->db.toJson()) { m_error.clear(); return true; }   // rows only
+		std::string saveErr;
+		if (!saveDatabase(m_root, e->db, &saveErr))
+		{
+			m_error = saveErr;
+			return false;
+		}
+		stamp(*e);
+		m_error.clear();
+		return true;
+	}
+
 	if (!fn(e->db)) return false;   // nothing changed, nothing to save
 	++m_generation;
 
@@ -184,13 +256,29 @@ bool Workspace::poll(bool force)
 
 	bool changed = false;
 
+	// The external source changed behind our back (the footer ticked a task off,
+	// an MCP tool, a pull): its rows are read again.
+	if (isExternal(m_ext.id))
+		if (Entry* e = entryFor(m_ext.id))
+		{
+			const unsigned gen = m_ext.generation ? m_ext.generation() : 0;
+			if (gen != e->extGen)
+			{
+				m_ext.refresh(e->db);
+				e->extGen = gen;
+				changed = true;
+			}
+		}
+
 	// Databases that changed or went away.
 	for (std::size_t i = 0; i < m_entries.size();)
 	{
 		Entry& e = m_entries[i];
 		if (!changedOnDisk(e)) { ++i; continue; }
 		std::error_code ec;
-		if (!fs::exists(databasePath(m_root, e.db.id), ec))
+		const bool hasFile = fs::exists(databasePath(m_root, e.db.id), ec);
+		if (!hasFile && isExternal(e.db.id)) { ++i; continue; }   // lives in memory until a view changes
+		if (!hasFile)
 		{
 			m_entries.erase(m_entries.begin() + static_cast<std::ptrdiff_t>(i));
 			changed = true;
@@ -201,6 +289,7 @@ bool Workspace::poll(bool force)
 		if (r.ok)
 		{
 			e.db = std::move(fresh);
+			afterLoad(e);
 			stamp(e);
 			m_unreadable.erase(std::remove_if(m_unreadable.begin(), m_unreadable.end(),
 			                   [&](const Unreadable& u) { return u.id == e.db.id; }), m_unreadable.end());
@@ -235,6 +324,7 @@ bool Workspace::poll(bool force)
 			continue;
 		}
 		if (it != m_unreadable.end()) m_unreadable.erase(it);
+		afterLoad(e);
 		stamp(e);
 		m_entries.push_back(std::move(e));
 		changed = true;

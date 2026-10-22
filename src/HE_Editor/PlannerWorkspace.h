@@ -72,6 +72,27 @@ public:
 	const std::string& lastError() const { return m_error; }
 	void clearError() { m_error.clear(); }
 
+	// ── A database whose rows live somewhere else ────────────────────────────
+	// The Tasks database is a view of the Task Board (PlannerTasks.h): its rows
+	// are read from the board and its edits are written to the board, and only
+	// its views are saved here. `refresh` fills the database from the source
+	// (and must set persistRows to false); `apply` turns an edit (the database
+	// before and after it) into the source's own change and returns false, with
+	// the reason in `error`, when it cannot; `generation` is the source's change
+	// counter, polled to notice changes made elsewhere (the footer, the MCP
+	// tools, a pull). Installed once per project and re-installed freely: only
+	// the functions are replaced.
+	struct External
+	{
+		UUID                                       id;
+		std::string                                name;
+		std::function<void(Database&)>             refresh;
+		std::function<bool(const Database&, const Database&, std::string&)> apply;
+		std::function<unsigned()>                  generation;
+	};
+	void setExternal(External ext);
+	bool isExternal(const UUID& id) const { return m_ext.id == id && m_ext.refresh != nullptr; }
+
 	// The name edits are recorded under (a new row's createdBy).
 	void setAuthor(std::string name) { m_author = std::move(name); }
 	const std::string& author() const { return m_author; }
@@ -82,9 +103,12 @@ private:
 		Database                         db;
 		std::filesystem::file_time_type  mtime{};
 		std::uintmax_t                   size = 0;
+		unsigned                         extGen = 0;   // the external source's generation it shows
 	};
 
 	void loadAll();
+	void attachExternal();
+	void afterLoad(Entry& e);
 	void stamp(Entry& e) const;
 	bool changedOnDisk(const Entry& e) const;
 	Entry* entryFor(const UUID& id);
@@ -94,6 +118,7 @@ private:
 	std::vector<Unreadable> m_unreadable;
 	std::string             m_error;
 	std::string             m_author;
+	External                m_ext;
 	unsigned                m_generation = 0;
 	std::chrono::steady_clock::time_point m_nextPoll{};
 };

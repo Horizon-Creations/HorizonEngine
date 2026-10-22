@@ -68,29 +68,32 @@ schon eine Datenbank mit einem festen Schema.
 Block-Editor in ImGui ist der aufwendigste Teil (Cursor, Auswahl, Undo): zuerst nur Absatz,
 Ueberschrift, Liste, Checkliste, Engine-Link. Zeitleiste braucht eigenes Zeichnen (kein Widget).
 
-## Handoff (Stand P1, 2026-10-22)
-**Fertig:** P0 (siehe `src/HE_Editor/Planner.{h,cpp}`, `test_planner.cpp`) und P1 ohne P1b.
-- `PlannerImport.{h,cpp}`: Task Board -> Datenbank "Tasks". Alle Ids (Datenbank, Properties, Optionen, Views) sind aus
-  Namen abgeleitet (`derivedId`), damit zwei Rechner dieselbe Datei erzeugen. Zeilen-Id = Task-Id. Erneuter Import: neue
-  Tasks dazu, vorhandene nur wenn `task.modifiedMs > row.modifiedMs` (Planner-Edits gewinnen). Historie/Kommentare kommen
-  nicht mit (bleiben in `TaskBoard.json`).
-- `PlannerWorkspace.{h,cpp}` (ImGui-frei): alle Datenbanken des Projekts, ein Schreiber, `edit()` laedt bei fremd
-  geaenderter Datei neu und wendet die Aenderung einmal erneut an, `poll()` nimmt Pulls auf, unlesbare Dateien werden
-  gelistet und nie ueberschrieben.
-- `PlannerPanel.{h,cpp}`: virtueller Tab `::Planner::`. Seitenleiste (Datenbanken, New Database, Import Task Board,
-  Reload), Views als Reiter (Tabelle, Board, `+ Table`/`+ Board`, Rechtsklick: umbenennen/loeschen), New Row, Suche,
-  Filter-Popup, Properties-Popup (sichtbar, umbenennen, loeschen mit Bestaetigung, neu), Tabelle mit Header-Sortierung und
-  Clipper, Zellen-Editor je Typ, Board mit Drag zwischen Lanes. Edits werden gepostet und nach dem Zeichnen angewendet.
-- Verdrahtung: `EditorUI.cpp` (Include, Ctrl+S-Fallback, Tab-Dispatch, `Window > Planner`, `MC::OpenPlanner`),
-  `MacMenuBar.{h,mm}`, `EditorHelp.cpp` (`Planner/...`, `Window/Planner`), `scripts/editor_help_audit.py` (PlannerPanel.cpp
-  im Bereich interface). Sitzungs-Wiederherstellung geht ohne Aenderung: `restoreOpenTabs` nimmt jeden Pfad mit ':' am Anfang.
-**Geprueft (macOS, Release):** `test_planner` 15, `test_planner_workspace` 8, `test_planner_ui` 6 Faelle gruen (Import,
-Tippen in Zelle, Sortieren, 3000 Zeilen mit Clipper, Karte in andere Lane ziehen); Frames in `HE_UI_DUMP_DIR` angesehen.
-`EditorUI.cpp` und `MacMenuBar.mm` per `-fsyntax-only` geprueft, der Editor selbst nicht gebaut/gestartet. Help-Audit 0 offen.
-**Nicht gemacht:** P1b (Task-Board-Fenster, Footer, MCP, Team-Hinweise auf den Planner umstellen, altes Fenster
-entfernen); Seiten/Bloecke im Tab (P3; eine Zeile oeffnet noch keine Page); Relationen und Engine-Links nur lesbar
-(Zuweisen per Drag aus Content Browser/Outliner fehlt); Zeitleiste/Kalender; Reihenfolge der Datenbanken (jetzt nach
-Name); Windows/Linux nicht gebaut. Select-Zelle zeigt den Farbpunkt nur im Menue.
-**Naechste Schritte:** 1. Editor bauen und den Tab einmal von Hand oeffnen (Window > Planner, Tab schliessen, Editor
-neu starten: kommt er wieder?). 2. P1b: erst `TaskBoardPanel::board()`-Nutzer inventarisieren (Footer, MCP-Tools,
-`TaskBoardTeam`, Chip-Spruenge in EditorUI ~2780), dann Adapter. 3. P2 (Engine-Link per Drag, Relationen, Zeitleiste).
+## Handoff (Stand P1b, 2026-10-22)
+**Entschieden (Variante A):** Die Aufgaben bleiben in `Config/TaskBoard.json` (TaskBoard/`TaskBoardPanel::edit` ist der eine
+Schreiber); "Tasks" im Planner ist eine **Projektion**. Gruende: Footer, MCP-Tools und Team-Bruecke haengen an Task-Historie
+(`TaskUpdate`), die in einer Zeile keinen Platz hat. Preis: Tasks hat feste Spalten (Status, Priority, Assignees, Description,
+Links); `Config/TaskBoard.json` bleibt die Aufgabendatei. Variante B (Planner als Wahrheit) waere spaeter ein eigener Schritt.
+**Fertig:**
+- `PlannerTasks.{h,cpp}`: `refreshTasks()` (Board -> Zeilen, Schema fest) und `applyTasksEdit()` (Datenbank-Edit -> TaskBoard-Aufrufe:
+  Status -> `setStatus` mit Update, Titel -> kein Update, Zuweisung -> `assign`, Links per `sameTarget`, neue Zeile = `add` mit Zeilen-Id,
+  Zeile loeschen = `remove`; Spalten hinzufuegen/loeschen wird abgelehnt).
+- `Workspace::External` (setExternal): Quelle fuer Zeilen, `apply` fuer Edits, `generation` zum Abfragen; die Tasks-Datei
+  speichert nur Views (`Database::persistRows=false`); `remove(Tasks)` abgelehnt; unlesbare Datei wird nie ueberschrieben.
+- `TaskBoardPanel` ist nur noch Datenkern + Link-Werkzeug: `tick()` (Team pumpen, Entity-Sprung, jede Frame aus EditorUI),
+  `generation()` (steigt auch bei Edits), `reloadBoard/retrySave`, `linkChip/acceptDroppedLinks/jumpToLink`. Fenster, Karten,
+  Details entfernt. `Jump::Panel` auf "Task Board"/"Planner" oeffnet den Planner-Tab.
+- `PlannerPanel`: Zeilen-Details rechts (Beschreibung, Links als Chips mit x, Drop-Zone, Link Selection/Scene/Panel, Verlauf,
+  Kommentar, Delete Row), Links-Zelle mit Drop-Ziel und Chips, Assignees-Auswahl aus dem Team (nur mit Team), "From the Team",
+  Banner mit Reload Tasks/Retry Save, Spalten von Tasks gesperrt. Import-Knopf entfernt.
+- `EditorUI`/`MacMenuBar`: `Window > Task Board` oeffnet Planner auf Tasks (`MC::OpenTaskBoard`), Footer-Klick oeffnet Tab mit der
+  gewaehlten Aufgabe, `s_showTaskBoard` und `PanelOpenTaskBoard` entfernt (alte Configs ignorieren den Schluessel).
+- Help: alte "Task Board/*"-Fenstereintraege raus, `Planner/*` dazu, Footer-Eintraege bleiben; Audit 0 offen.
+**Tests:** `test_taskboard_ui.cpp` ist weg, seine Faelle sind in `test_planner_ui.cpp` portiert (Drops + Chips + Sprung + Orphan, Pull unter
+offenem Board + Merge-Konflikt, Assignees nur mit Team + Benachrichtigung + From the Team, Lane-Drag, neue Zeile/Titel). Neu:
+`PlannerTasks`/External-Faelle in `test_planner_workspace.cpp`. `test_taskboard_team`, `_footer_ui`, `test_mcp_tools_taskboard`,
+`test_task_board` unveraendert gruen (Beweis, dass die Bruecke die Edits weiter sieht). `HorizonEditor` gebaut (Release, macOS).
+**Nicht geprueft:** der Editor wurde nicht gestartet (Tab von Hand oeffnen/schliessen/Neustart, Footer-Klick, `Window > Task Board`
+in der nativen Menueleiste); Windows/Linux nicht gebaut; die Handbuchquellen unter `EditorDeps/Docs` enthalten keinen Treffer fuer "Task Board" (die Website-Docs `HorizonEngineDocs/` nicht geprueft).
+**Offen/Naechste Schritte:** 1. Editor einmal von Hand durchklicken (siehe oben). 2. Website-Docs (`HorizonEngineDocs/`) auf das Task-Board-Fenster pruefen.
+3. P2: Relationen und Engine-Links in beliebigen Datenbanken per Drag zuweisen (fuer Tasks geht es schon), Zeitleiste, Kalender.
+4. P3: Seiten/Bloecke, eine Zeile oeffnet dann eine Page. 5. Spaeter: Planner als Wahrheit (Variante B) mit Historie je Zeile.
