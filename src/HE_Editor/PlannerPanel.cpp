@@ -1496,10 +1496,19 @@ void drawDrawer(const Database& db, const Row& row)
 	if (tasks) taskHistory(rowId);
 
 	ImGui::Spacing();
-	if (EditorWidgets::dangerButton("Delete Row")) ImGui::OpenPopup("##confirmDeleteRow");
+	// The button says what the thing is in the view it was opened from: a step, an event, a card or a row.
+	const View* openedIn = db.findView(s_viewId);
+	const ViewKind openedKind = openedIn ? openedIn->kind : ViewKind::Table;
+	bool askDelete = false;
+	if (openedKind == ViewKind::Timeline)      askDelete = EditorWidgets::dangerButton("Delete Step");
+	else if (openedKind == ViewKind::Calendar) askDelete = EditorWidgets::dangerButton("Delete Event");
+	else if (openedKind == ViewKind::Board)    askDelete = EditorWidgets::dangerButton("Delete Card");
+	else                                       askDelete = EditorWidgets::dangerButton("Delete Row");
+	note("drawer:delete");
+	if (askDelete) ImGui::OpenPopup("##confirmDeleteRow");
 	if (ImGui::BeginPopup("##confirmDeleteRow"))
 	{
-		ImGui::Text("Delete \"%s\"?", row.title.c_str());
+		ImGui::Text("Delete \"%s\"?", row.title.empty() ? "Untitled" : row.title.c_str());
 		ImGui::TextDisabled(tasks ? "It goes from the board and from Config/TaskBoard.json."
 		                          : "It goes from the database and from any relation that pointed at it.");
 		if (EditorWidgets::dangerButton("Delete"))
@@ -3348,7 +3357,7 @@ void drawSidebar(AppContext& ctx)
 		if (ImGui::BeginPopup("##confirmDeleteData"))
 		{
 			const Database* doomed = s_ws.find(s_deleteData);
-			ImGui::Text("Delete \"%s\" and its rows?", doomed ? doomed->name.c_str() : "");
+			ImGui::Text("Delete \"%s\" and its rows?", doomed ? (doomed->name.empty() ? "Untitled" : doomed->name.c_str()) : "");
 			ImGui::TextDisabled("Source control has the previous version.");
 			if (EditorWidgets::dangerButton("Delete"))
 			{
@@ -3416,7 +3425,7 @@ void drawSidebar(AppContext& ctx)
 	if (ImGui::BeginPopup("##confirmDeleteBoard"))
 	{
 		const Board* doomed = s_ws.findBoard(s_deleteBoard);
-		ImGui::Text("Delete \"%s\"?", doomed ? doomed->title.c_str() : "");
+		ImGui::Text("Delete \"%s\"?", doomed ? (doomed->title.empty() ? "Untitled" : doomed->title.c_str()) : "");
 		ImGui::TextDisabled("Source control has the previous version.");
 		if (EditorWidgets::dangerButton("Delete"))
 		{
@@ -3446,7 +3455,7 @@ void drawSidebar(AppContext& ctx)
 	if (ImGui::BeginPopup("##confirmDeletePage"))
 	{
 		const Page* doomed = s_ws.findPage(s_deletePage);
-		ImGui::Text("Delete \"%s\"?", doomed ? doomed->title.c_str() : "");
+		ImGui::Text("Delete \"%s\"?", doomed ? (doomed->title.empty() ? "Untitled" : doomed->title.c_str()) : "");
 		ImGui::TextDisabled("Its sub-pages go with it. Source control has the previous version.");
 		const bool confirmed = EditorWidgets::dangerButton("Delete");
 		note("confirm:Delete Page");

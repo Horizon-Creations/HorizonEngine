@@ -3329,6 +3329,15 @@ namespace
 	  "Removes this row from the database, and from any relation that pointed "
 	  "at it. There is no undo for it; source control has the previous version.",
 	  "", "" },
+	{ "Planner/Delete Step", "Delete Step",
+	  "Removes this step from the data behind the timeline (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Event", "Delete Event",
+	  "Removes this event from the data behind the calendar (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Card", "Delete Card",
+	  "Removes this card from the data behind the board (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
 	{ "Planner/Delete View", "Delete View",
 	  "Removes this view. The rows and properties stay; a database always keeps "
 	  "at least one view.",
