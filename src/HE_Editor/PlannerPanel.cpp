@@ -1545,22 +1545,49 @@ std::string s_tlRenameBuf;
 bool        s_tlRenameFocus = false;
 bool        s_tlGoToday     = false;   // scroll the timeline so today is in view
 
-// A new row dated from day `d0` to `d1` (the End only with an End property), titled and ready to rename.
-void createStep(const UUID& dbId, const UUID& startId, const UUID& endId, std::int64_t d0, std::int64_t d1)
+// A new row dated from day `d0` to `d1` for the timeline or calendar view `viewId`. A view whose data has no Date
+// column yet gets one (Start and End for a timeline, Date for a calendar), so the button always shows something.
+// The new row is opened for a title (typed in place on a timeline, in the details otherwise).
+void newDated(const UUID& dbId, const UUID& viewId, std::int64_t d0, std::int64_t d1, bool renameInPlace)
 {
 	post([=] {
 		UUID made;
 		s_ws.edit(dbId, [&](Database& d) {
-			Row* r = d.addRow("New step", s_ws.author(), taskNowMs());
+			View* v = d.findView(viewId);
+			if (!v) return false;
+			const bool timeline = v->kind == ViewKind::Timeline;
+			auto isDate = [&](const UUID& id) { const Property* p = d.findProperty(id); return p && p->type == PropertyType::Date; };
+			auto otherDate = [&](const UUID& not1) {
+				for (const Property& p : d.properties)
+					if (p.type == PropertyType::Date && !(p.id == not1)) return p.id;
+				return UUID{};
+			};
+			if (!isDate(v->dateProperty))
+			{
+				const UUID found = otherDate(UUID{});
+				v->dateProperty = found == UUID{} ? d.addProperty(timeline ? "Start" : "Date", PropertyType::Date)->id : found;
+			}
+			if (timeline && !isDate(v->endProperty))
+			{
+				const UUID found = otherDate(v->dateProperty);
+				v->endProperty = found == UUID{} ? d.addProperty("End", PropertyType::Date)->id : found;
+			}
+			Row* r = d.addRow(timeline ? "New step" : "New event", s_ws.author(), taskNowMs());
 			if (!r) return false;
 			made = r->id;
-			if (!(startId == UUID{})) d.setDate(made, startId, d0 * kDayMs, taskNowMs());
-			if (!(startId == UUID{}) && !(endId == UUID{}) && d1 > d0) d.setDate(made, endId, d1 * kDayMs, taskNowMs());
+			d.setDate(made, v->dateProperty, d0 * kDayMs, taskNowMs());
+			if (timeline && d1 > d0) d.setDate(made, v->endProperty, d1 * kDayMs, taskNowMs());
 			return true;
 		});
-		s_tlRename = made;
-		s_tlRenameBuf = "New step";
-		s_tlRenameFocus = true;
+		if (made == UUID{}) return;
+		if (renameInPlace)
+		{
+			s_tlRename = made;
+			s_tlRenameBuf = "New step";
+			s_tlRenameFocus = true;
+		}
+		else
+			s_selRow = made;
 	});
 }
 
@@ -1856,7 +1883,7 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 			dl->AddText(ImVec2(p.x + 30.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::TextDim),
 			            "Add a step: drag across the days");
 		}
-		if (made) createStep(db.id, startP->id, endP ? endP->id : UUID{}, g0, g1);
+		if (made) newDated(db.id, view.id, g0, g1, true);
 	}
 	if (s_tlGoToday)
 	{
@@ -2663,16 +2690,18 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 			char key[32];
 			std::snprintf(key, sizeof(key), "day:%04d-%02d-%02d", y, m, dnum);
 			note(key);
-			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			bool cellHover = false, overPlus = false;
+			ImVec2 plusAt;
 			{
-				const UUID dbId = db.id, pid = dateP->id;
-				const std::int64_t ms = day * kDayMs;
-				post([=] {
-					s_ws.edit(dbId, [&](Database& d) {
-						Row* r = d.addRow("", s_ws.author(), taskNowMs());
-						return r && d.setDate(r->id, pid, ms, taskNowMs());
-					});
-				});
+				// A + in the corner of the hovered day makes an event there (a double-click anywhere on it does too).
+				cellHover = ImGui::IsItemHovered();
+				const ImVec2 plusA(p.x + cellW - 26.0f, p.y + 3.0f), plusB(p.x + cellW - 4.0f, p.y + 25.0f);
+				s_rects[std::string("cal-add:") + key] = Rect{ plusA.x, plusA.y, plusB.x, plusB.y };
+				const ImVec2 mp = ImGui::GetIO().MousePos;
+				overPlus = cellHover && mp.x >= plusA.x && mp.x <= plusB.x && mp.y >= plusA.y && mp.y <= plusB.y;
+				plusAt = ImVec2((plusA.x + plusB.x) * 0.5f, (plusA.y + plusB.y) * 0.5f);
+				if (cellHover && (overPlus ? ImGui::IsMouseClicked(ImGuiMouseButton_Left) : ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) && db.id != tasksDatabaseId())
+					newDated(db.id, view.id, day, day, false);
 			}
 			if (ImGui::BeginDragDropTarget())
 			{
@@ -2704,6 +2733,8 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 			std::snprintf(num, sizeof(num), "%d", dnum);
 			dl->AddText(ImVec2(p.x + 6.0f, p.y + 3.0f),
 			            Theme::u32(day == today ? Theme::Warn : otherMonth ? Theme::TextDim : Theme::Text), num);
+			if (cellHover)
+				PlannerIcons::drawIcon(dl, PlannerIcons::Icon::Plus, plusAt, Theme::u32(overPlus ? Theme::AccentBright : Theme::TextDim));
 
 			// The rows on this day, as many as fit.
 			const int fit = std::max(0, static_cast<int>((cellH - fh - 6.0f) / (chipH + 2.0f)));
@@ -2838,84 +2869,54 @@ void drawDatabase(AppContext& ctx, const Database& db)
 				});
 			});
 		}, "Untitled", 0.0f, 240.0f);
-		ImGui::TextDisabled("%d rows, %d views. Other tables, timelines and boards can show the same rows:", static_cast<int>(db.rows.size()), static_cast<int>(db.views.size()));
-		ImGui::TextDisabled("use the + beside the views below.");
-		ImGui::EndPopup();
-	}
-
-	// Views as tabs.
-	for (const View& v : db.views)
-	{
-		pushUuid(v.id);
-		const float w = ImGui::CalcTextSize(v.name.c_str()).x + 44.0f;
-		const ImVec2 p = ImGui::GetCursorScreenPos();
-		const bool selected = v.id == s_viewId;
-		if (ImGui::Selectable("##viewtab", selected, 0, ImVec2(w, 26.0f))) s_viewId = v.id;
-		{
-			ImDrawList* dl = ImGui::GetWindowDrawList();
-			const ImU32 ink = Theme::u32(selected ? Theme::AccentBright : Theme::TextDim);
-			PlannerIcons::drawIcon(dl, viewIcon(v.kind), ImVec2(p.x + 15, p.y + 13), ink);
-			dl->AddText(ImVec2(p.x + 28, p.y + (26.0f - ImGui::GetFontSize()) * 0.5f), Theme::u32(selected ? Theme::Text : Theme::TextDim), v.name.c_str());
-			if (selected) dl->AddRectFilled(ImVec2(p.x + 4, p.y + 24), ImVec2(p.x + w - 4, p.y + 26), Theme::u32(Theme::Accent), 1.0f);
-		}
-		note("view:" + v.name);
-		if (ImGui::BeginPopupContextItem("##viewmenu"))
-		{
-			const UUID vid = v.id;
-			ImGui::TextDisabled("Rename");
-			textCell("##viewname", { vid, UUID{ 0, 9 } }, v.name, [=](const std::string& name) {
-				editView(dbId, vid, [name](View& vv) {
-					if (name.empty()) return false;
-					vv.name = name;
-					return true;
-				});
-			});
-			if (EditorWidgets::dangerMenuItem("Delete View", db.views.size() > 1))
-				post([=] {
-					s_ws.edit(dbId, [&](Database& d) { return d.removeView(vid); });
-					if (s_viewId == vid) s_viewId = UUID{};
-				});
-			ImGui::EndPopup();
-		}
-		ImGui::PopID();
-		ImGui::SameLine(0, 10);
-	}
-	if (PlannerIcons::iconButton("Add View", PlannerIcons::Icon::Plus, false, true, "Planner/Add View", false, 0, ImVec2(26, 26)))
-		ImGui::OpenPopup("##addview");
-	note("Add View");
-	if (ImGui::BeginPopup("##addview"))
-	{
-		ImGui::TextDisabled("Show this data as a");
-		const struct { ViewKind kind; const char* name; const char* key; PlannerIcons::Icon icon; } kinds[] = {
-			{ ViewKind::Table, "Table", "Planner/+ Table", PlannerIcons::Icon::Table },
-			{ ViewKind::Board, "Board", "Planner/+ Board", PlannerIcons::Icon::Kanban },
-			{ ViewKind::Timeline, "Timeline", "Planner/+ Timeline", PlannerIcons::Icon::Timeline },
-			{ ViewKind::Calendar, "Calendar", "Planner/+ Calendar", PlannerIcons::Icon::Calendar } };
-		for (const auto& k : kinds)
-		{
-			const ImVec2 p = ImGui::GetCursorScreenPos();
-			if (ImGui::Selectable((std::string("      ") + k.name).c_str())) newView(k.kind, dbId);
-			PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), k.icon, ImVec2(p.x + 12, p.y + ImGui::GetTextLineHeight() * 0.5f + 1), Theme::u32(Theme::TextDim));
-			EditorWidgets::helpForKey(k.key);
-			note(std::string("+ ") + k.name);
-		}
+		ImGui::TextDisabled("%d rows, %d views.", static_cast<int>(db.rows.size()), static_cast<int>(db.views.size()));
+		ImGui::TextDisabled("Another table, timeline, board or calendar can show");
+		ImGui::TextDisabled("the same rows: + in its sidebar section, \"data\" choice.");
 		ImGui::EndPopup();
 	}
 
 	if (!view) return;
 	const UUID viewId = view->id;
 
-	// Toolbar.
+	// Toolbar: the button makes what this view shows. Tasks has no dates (the Task Board file has none), so a
+	// timeline or calendar cannot add to it.
+	const std::int64_t today = dayOf(taskNowMs());
+	const bool noDates = dbId == tasksDatabaseId();
 	if (view->kind == ViewKind::Timeline)
 	{
-		// A step is a row with dates: it starts today and shows at once, ready to be named.
-		const Property* sp = db.findProperty(view->dateProperty);
-		const bool hasStart = sp && sp->type == PropertyType::Date;
-		const Property* ep = view->endProperty == UUID{} ? nullptr : db.findProperty(view->endProperty);
-		if (EditorWidgets::primaryButton("New Step"))
+		ImGui::BeginDisabled(noDates);
+		if (EditorWidgets::primaryButton("New Step")) newDated(dbId, view->id, today, today + 2, true);
+		ImGui::EndDisabled();
+	}
+	else if (view->kind == ViewKind::Calendar)
+	{
+		ImGui::BeginDisabled(noDates);
+		if (EditorWidgets::primaryButton("New Event"))
 		{
-			const std::int64_t today = dayOf(taskNowMs());
-			createStep(dbId, hasStart ? sp->id : UUID{}, ep && ep->type == PropertyType::Date ? ep->id : UUID{}, today, today + 2);
+			int y = 0, m = 0, dn = 0;
+			splitDay(today, y, m, dn);
+			// Today when it is on the month shown, else the first day of that month.
+			newDated(dbId, view->id, (s_calMonth == 0 || (y == s_calYear && m == s_calMonth)) ? today : firstOfMonth(s_calYear, s_calMonth), 0, false);
+		}
+		ImGui::EndDisabled();
+	}
+	else if (view->kind == ViewKind::Board)
+	{
+		if (EditorWidgets::primaryButton("New Card"))
+		{
+			const UUID groupId = view->groupBy;
+			post([=] {
+				UUID made;
+				s_ws.edit(dbId, [&](Database& d) {
+					Row* r = d.addRow("New card", s_ws.author(), taskNowMs());
+					if (!r) return false;
+					made = r->id;
+					const Property* g = d.findProperty(groupId);
+					if (g && g->type == PropertyType::Select && !g->options.empty()) d.setSelect(made, groupId, g->options.front().id, taskNowMs());
+					return true;
+				});
+				if (!(made == UUID{})) s_selRow = made;
+			});
 		}
 	}
 	else if (EditorWidgets::primaryButton("New Row"))
@@ -3276,8 +3277,12 @@ void drawSidebar(AppContext& ctx)
 			for (Database* db : s_ws.databases())
 			{
 				ImGui::PushID(db);
-				if (ImGui::Selectable((db->name.empty() ? std::string("Untitled") : db->name).c_str())) newView(s_newKind, db->id);
+				// Tasks is the Task Board file, which has no dates: nothing to lay out on a timeline or calendar.
+				const bool noDates = db->id == tasksDatabaseId() && (s_newKind == ViewKind::Timeline || s_newKind == ViewKind::Calendar);
+				if (ImGui::Selectable((db->name.empty() ? std::string("Untitled") : db->name).c_str(), false, noDates ? ImGuiSelectableFlags_Disabled : 0))
+					newView(s_newKind, db->id);
 				note("data:" + db->name);
+				if (noDates && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("The Task Board has no dates");
 				ImGui::SameLine();
 				ImGui::TextDisabled("%d rows", static_cast<int>(db->rows.size()));
 				ImGui::PopID();
@@ -3436,6 +3441,179 @@ void drawSidebar(AppContext& ctx)
 
 // ── The tab ──────────────────────────────────────────────────────────────────
 
+// ── Open things, as tabs ──────────────────────────────────────────────────────
+// Whatever is open (a table, a timeline, a board, a calendar, a page, a whiteboard) has one tab; opening
+// something that is open switches to it. The tabs follow the selection: whatever is selected is open.
+struct Tab { int kind = -1; UUID a, b; };   // 0 view (a: data, b: view), 1 page (a: page, b: its data or none), 2 whiteboard (a)
+std::vector<Tab> s_tabs;
+
+bool sameTab(const Tab& x, const Tab& y) { return x.kind == y.kind && x.a == y.a && x.b == y.b; }
+
+Tab currentTab()
+{
+	Tab t;
+	if (!(s_boardId == UUID{})) { t.kind = 2; t.a = s_boardId; }
+	else if (!(s_pageId == UUID{})) { t.kind = 1; t.a = s_pageId; t.b = s_pageDb; }
+	else if (const Database* db = s_ws.find(s_dbId))
+		if (const View* v = db->findView(s_viewId)) { t.kind = 0; t.a = db->id; t.b = v->id; }
+	return t;
+}
+
+void selectTab(const Tab& t)
+{
+	s_boardId = s_pageId = s_pageDb = UUID{};
+	if (t.kind == 0) { s_dbId = t.a; s_viewId = t.b; }
+	if (t.kind == 1) { s_pageId = t.a; s_pageDb = t.b; }
+	if (t.kind == 2) s_boardId = t.a;
+}
+
+// A tab's name and glyph; false when what it stood for is gone.
+bool tabInfo(const Tab& t, std::string& name, PlannerIcons::Icon& icon)
+{
+	if (t.kind == 0)
+	{
+		const Database* db = s_ws.find(t.a);
+		const View* v = db ? db->findView(t.b) : nullptr;
+		if (!v) return false;
+		name = v->name.empty() ? std::string("Untitled") : v->name;
+		icon = viewIcon(v->kind);
+		return true;
+	}
+	if (t.kind == 1)
+	{
+		const Page* p = s_ws.findPage(t.a);
+		if (!p) return false;
+		name = p->title.empty() ? std::string("Untitled") : p->title;
+		icon = PlannerIcons::Icon::Page;
+		return true;
+	}
+	if (t.kind == 2)
+	{
+		const Board* b = s_ws.findBoard(t.a);
+		if (!b) return false;
+		name = b->title.empty() ? std::string("Untitled board") : b->title;
+		icon = PlannerIcons::Icon::Whiteboard;
+		return true;
+	}
+	return false;
+}
+
+void drawTabs()
+{
+	const Tab cur = currentTab();
+	if (cur.kind >= 0 && std::none_of(s_tabs.begin(), s_tabs.end(), [&](const Tab& t) { return sameTab(t, cur); })) s_tabs.push_back(cur);
+	{
+		std::string n;
+		PlannerIcons::Icon ic;
+		s_tabs.erase(std::remove_if(s_tabs.begin(), s_tabs.end(), [&](const Tab& t) { return !tabInfo(t, n, ic); }), s_tabs.end());
+	}
+
+	const float avail = ImGui::GetContentRegionAvail().x - 80.0f;   // room for the + and the reload button
+	std::vector<float> widths;
+	float total = 0;
+	for (const Tab& t : s_tabs)
+	{
+		std::string n;
+		PlannerIcons::Icon ic;
+		tabInfo(t, n, ic);
+		widths.push_back(std::min(220.0f, ImGui::CalcTextSize(n.c_str()).x + 56.0f));
+		total += widths.back() + 2.0f;
+	}
+	const float scale = total > avail && total > 0 ? avail / total : 1.0f;
+
+	const ImVec2 row0 = ImGui::GetCursorScreenPos();
+	float x = row0.x;
+	int close = -1;
+	for (std::size_t i = 0; i < s_tabs.size(); ++i)
+	{
+		const Tab& t = s_tabs[i];
+		std::string name;
+		PlannerIcons::Icon icon;
+		tabInfo(t, name, icon);
+		const float w = std::max(70.0f, widths[i] * scale);
+		const bool selected = sameTab(t, cur);
+		ImGui::PushID(static_cast<int>(i));
+		ImGui::SetCursorScreenPos(ImVec2(x, row0.y));
+		ImGui::SetNextItemAllowOverlap();
+		if (ImGui::Selectable("##tab", selected, ImGuiSelectableFlags_AllowOverlap, ImVec2(w, 28.0f))) selectTab(t);
+		note(std::string(t.kind == 0 ? "view:" : t.kind == 1 ? "page-tab:" : "board-tab:") + name);
+		const bool hover = ImGui::IsItemHovered();
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		PlannerIcons::drawIcon(dl, icon, ImVec2(x + 15, row0.y + 14), Theme::u32(selected ? Theme::AccentBright : Theme::TextDim));
+		dl->PushClipRect(ImVec2(x, row0.y), ImVec2(x + w - (s_tabs.size() > 1 ? 22.0f : 6.0f), row0.y + 28), true);
+		dl->AddText(ImVec2(x + 28, row0.y + (28.0f - ImGui::GetFontSize()) * 0.5f), Theme::u32(selected ? Theme::Text : Theme::TextDim), name.c_str());
+		dl->PopClipRect();
+		if (selected) dl->AddRectFilled(ImVec2(x + 4, row0.y + 26), ImVec2(x + w - 4, row0.y + 28), Theme::u32(Theme::Accent), 1.0f);
+		if (s_tabs.size() > 1)
+		{
+			// The x closes the tab (not the thing: it is still in the sidebar).
+			ImGui::SetCursorScreenPos(ImVec2(x + w - 22.0f, row0.y + 6.0f));
+			if (ImGui::InvisibleButton("##close", ImVec2(16, 16))) close = static_cast<int>(i);
+			note("close:" + name);
+			const bool overX = ImGui::IsItemHovered();
+			if (overX) dl->AddRectFilled(ImVec2(x + w - 22.0f, row0.y + 6.0f), ImVec2(x + w - 6.0f, row0.y + 22.0f), Theme::u32(Theme::warm(0.30f)), 4.0f);
+			if (hover || selected || overX)
+			{
+				const ImVec2 c(x + w - 14.0f, row0.y + 14.0f);
+				const ImU32 ink = Theme::u32(overX ? Theme::Text : Theme::TextDim);
+				dl->AddLine(ImVec2(c.x - 3, c.y - 3), ImVec2(c.x + 3, c.y + 3), ink, 1.5f);
+				dl->AddLine(ImVec2(c.x - 3, c.y + 3), ImVec2(c.x + 3, c.y - 3), ink, 1.5f);
+			}
+		}
+		ImGui::PopID();
+		x += w + 2.0f;
+	}
+	// The + lists everything there is to open.
+	ImGui::SetCursorScreenPos(ImVec2(x + 4.0f, row0.y + 1.0f));
+	if (PlannerIcons::iconButton("Open", PlannerIcons::Icon::Plus, false, true, "Planner/Open", false, 0, ImVec2(26, 26))) ImGui::OpenPopup("##openthing");
+	note("Open");
+	if (ImGui::BeginPopup("##openthing"))
+	{
+		auto entry = [&](const Tab& t) {
+			std::string name;
+			PlannerIcons::Icon icon;
+			if (!tabInfo(t, name, icon)) return;
+			const bool isOpen = std::any_of(s_tabs.begin(), s_tabs.end(), [&](const Tab& o) { return sameTab(o, t); });
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			ImGui::PushID(name.c_str());
+			if (ImGui::Selectable((std::string("      ") + name).c_str(), sameTab(t, cur))) selectTab(t);
+			note("open:" + name);
+			PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), icon, ImVec2(p.x + 12, p.y + ImGui::GetTextLineHeight() * 0.5f + 1),
+			                       Theme::u32(isOpen ? Theme::AccentBright : Theme::TextDim));
+			ImGui::PopID();
+		};
+		const struct { ViewKind kind; const char* title; } kinds[] = { { ViewKind::Table, "Tables" }, { ViewKind::Timeline, "Timelines" },
+		                                                              { ViewKind::Board, "Boards" }, { ViewKind::Calendar, "Calendars" } };
+		bool any = false;
+		for (const auto& k : kinds)
+		{
+			bool head = false;
+			for (Database* db : s_ws.databases())
+				for (const View& v : db->views)
+					if (v.kind == k.kind)
+					{
+						if (!head) { ImGui::TextDisabled("%s", k.title); head = true; }
+						entry(Tab{ 0, db->id, v.id });
+						any = true;
+					}
+		}
+		if (!s_ws.pages().empty()) { ImGui::TextDisabled("Pages"); any = true; }
+		for (Page* pg : s_ws.pages()) entry(Tab{ 1, pg->id, UUID{} });
+		if (!s_ws.boards().empty()) { ImGui::TextDisabled("Whiteboards"); any = true; }
+		for (Board* b : s_ws.boards()) entry(Tab{ 2, b->id, UUID{} });
+		if (!any) ImGui::TextDisabled("Nothing to open yet.");
+		ImGui::EndPopup();
+	}
+	ImGui::SetCursorScreenPos(ImVec2(row0.x, row0.y + 32.0f));
+	ImGui::Dummy(ImVec2(1, 1));
+	if (close >= 0)
+	{
+		const bool wasCurrent = sameTab(s_tabs[static_cast<std::size_t>(close)], cur);
+		s_tabs.erase(s_tabs.begin() + close);
+		if (wasCurrent && !s_tabs.empty()) selectTab(s_tabs[std::min<std::size_t>(static_cast<std::size_t>(close), s_tabs.size() - 1)]);
+	}
+}
+
 void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
 	s_ctx = &ctx;
@@ -3490,6 +3668,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		note("Reload");
 		ImGui::SetCursorPos(back);
 	}
+	drawTabs();
 	if (!s_ws.lastError().empty())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Bad);
@@ -3652,6 +3831,7 @@ void reset()
 	s_deletePageOpen = false;
 	s_focusAtEnd = false;
 	s_blockEdits.clear();
+	s_tabs.clear();
 }
 
 } // namespace PlannerPanel

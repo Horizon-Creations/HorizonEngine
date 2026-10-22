@@ -3090,8 +3090,8 @@ namespace
 	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or one you "
 	  "changed outside the editor.",
 	  "", "" },
-	{ "Planner/Add View", "Add View",
-	  "Adds another view of this database: a table, a board of lanes, a timeline or a calendar. Each view keeps its own filters and sorting.",
+	{ "Planner/Open", "Open",
+	  "Lists everything you can open: tables, timelines, boards, calendars, pages and whiteboards. Each is open once; picking one that is open takes you to its tab. The x on a tab closes the tab, not the thing.",
 	  "", "" },
 	{ "Planner/+ Table", "+ Table",
 	  "Adds a table view to this database: rows down, one column per property. "
@@ -3259,6 +3259,12 @@ namespace
 	  "", "" },
 	{ "Planner/Delete Data", "Delete Data",
 	  "Deletes the data behind a view that is its only one, with all its rows, after you confirm. Source control has the previous version.",
+	  "", "" },
+	{ "Planner/New Event", "New Event",
+	  "Adds an event on today (or the first day of the month shown) and opens it. A + in the corner of a day, or a double-click on it, makes one there.",
+	  "", "" },
+	{ "Planner/New Card", "New Card",
+	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
 	  "", "" },
 	{ "Planner/Undo", "Undo",
 	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "

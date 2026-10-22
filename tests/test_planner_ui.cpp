@@ -442,7 +442,7 @@ TEST_CASE("planner ui: a card dragged to another lane changes the task's status"
 	addTasks(ctx, { "Carry crates" });
 	settle(ctx);
 	const UUID id = TaskBoardPanel::board(ctx)->tasks[0].id;
-	REQUIRE(click(ctx, "view:By status"));
+	REQUIRE(click(ctx, "item:By status"));
 	settle(ctx);
 
 	settle(ctx);
@@ -894,9 +894,9 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	}));
 	idle(ctx);
 
-	REQUIRE(click(ctx, "Add View"));
+	REQUIRE(click(ctx, "New Timeline"));
 	idle(ctx);
-	REQUIRE(click(ctx, "+ Timeline"));
+	REQUIRE(click(ctx, "data:Untitled table"));
 	idle(ctx);
 	const View* v = ws->find(dbId)->findView(PlannerPanel::selectedView());
 	REQUIRE(v != nullptr);
@@ -1234,9 +1234,9 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 		return true;
 	}));
 	idle(ctx);
-	REQUIRE(click(ctx, "Add View"));
+	REQUIRE(click(ctx, "New Calendar"));
 	idle(ctx);
-	REQUIRE(click(ctx, "+ Calendar"));
+	REQUIRE(click(ctx, "data:Untitled table"));
 	REQUIRE(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->endProperty = end; return true; }));
 	PlannerPanel::showCalendarMonth(2026, 10);
 	idle(ctx);
@@ -2326,9 +2326,9 @@ TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes o
 		return true;
 	}));
 	idle(ctx);
-	REQUIRE(click(ctx, "Add View"));
+	REQUIRE(click(ctx, "New Timeline"));
 	idle(ctx);
-	REQUIRE(click(ctx, "+ Timeline"));
+	REQUIRE(click(ctx, "data:Untitled table"));
 	idle(ctx);
 	const std::int64_t today = taskNowMs() / 86400000;
 
@@ -2434,4 +2434,96 @@ TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their
 	const Property* status = kanban->findProperty(kanban->views[0].groupBy);
 	REQUIRE(status != nullptr);
 	CHECK(status->options.size() == 3);
+}
+
+TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New Card make something at once")
+{
+	Harness harness;
+	Project proj("he_planner_ui_tabs");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws != nullptr);
+
+	// A table, then a timeline and a calendar on the same data: three entries, three tabs, one database.
+	newTable(ctx);
+	const UUID data = PlannerPanel::selectedDatabase();
+	REQUIRE(click(ctx, "New Timeline"));
+	settle(ctx);
+	REQUIRE(click(ctx, "data:Untitled table"));
+	settle(ctx);
+	REQUIRE(click(ctx, "New Calendar"));
+	settle(ctx);
+	REQUIRE(click(ctx, "data:Untitled table"));
+	settle(ctx);
+	CHECK(ws->databases().size() == 2);
+	CHECK(ws->find(data)->views.size() == 3);
+	CHECK(PlannerPanel::controlRect("view:Untitled table").x1 > 0);
+	CHECK(PlannerPanel::controlRect("view:Untitled table timeline").x1 > 0);
+	CHECK(PlannerPanel::controlRect("view:Untitled table calendar").x1 > 0);
+
+	// Opening what is open switches to it and adds no tab.
+	REQUIRE(click(ctx, "item:Untitled table timeline"));
+	settle(ctx);
+	CHECK(ws->find(data)->findView(PlannerPanel::selectedView())->kind == ViewKind::Timeline);
+	REQUIRE(click(ctx, "item:Untitled table timeline"));
+	settle(ctx);
+	int tabs = 0;
+	for (const char* n : { "view:Untitled table", "view:Untitled table timeline", "view:Untitled table calendar" })
+		tabs += PlannerPanel::controlRect(n).x1 > 0;
+	CHECK(tabs == 3);
+
+	// The data has no date column yet; New Step adds Start and End and shows the step.
+	REQUIRE(ws->find(data)->properties.empty());
+	REQUIRE(click(ctx, "New Row"));
+	idle(ctx);
+	CHECK(ws->find(data)->properties.size() >= 2);
+	REQUIRE(ws->find(data)->rows.size() == 1);
+	CHECK(PlannerPanel::controlRect("bar:New step").x1 > 0);
+
+	// The calendar: New Event lands on a day of the month shown; the + of a day makes another.
+	REQUIRE(click(ctx, "view:Untitled table calendar"));
+	settle(ctx);
+	REQUIRE(click(ctx, "New Row"));   // "New Event" here
+	idle(ctx);
+	REQUIRE(ws->find(data)->rows.size() == 2);
+	CHECK(PlannerPanel::selectedRow() == ws->find(data)->rows.back().id);
+	CHECK(PlannerPanel::controlRect("cal-chip:New event").x1 > 0);
+	PlannerPanel::showCalendarMonth(2026, 10);
+	idle(ctx);
+	const PlannerPanel::Rect plus = PlannerPanel::controlRect("cal-add:day:2026-10-15");
+	REQUIRE(plus.x1 > plus.x0);
+	ImGui::GetIO().AddMousePosEvent(centre(plus).x, centre(plus).y);
+	settle(ctx);
+	REQUIRE(click(ctx, "cal-add:day:2026-10-15"));
+	idle(ctx);
+	CHECK(ws->find(data)->rows.size() == 3);
+
+	// Closing a tab closes the tab, not the view.
+	REQUIRE(click(ctx, "close:Untitled table calendar"));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("view:Untitled table calendar").x1 <= 0);
+	CHECK(PlannerPanel::controlRect("item:Untitled table calendar").x1 > 0);
+	CHECK(ws->find(data)->views.size() == 3);
+	// The + opens it again.
+	REQUIRE(click(ctx, "Open"));
+	idle(ctx);
+	REQUIRE(click(ctx, "open:Untitled table calendar"));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("view:Untitled table calendar").x1 > 0);
+
+	// A board: New Card puts the card in the first lane.
+	REQUIRE(click(ctx, "New Kanban"));
+	settle(ctx);
+	REQUIRE(click(ctx, "data:new"));
+	settle(ctx);
+	const UUID kanban = PlannerPanel::selectedDatabase();
+	REQUIRE(click(ctx, "New Row"));   // "New Card" here
+	idle(ctx);
+	REQUIRE(ws->find(kanban)->rows.size() == 1);
+	const Database* kd = ws->find(kanban);
+	const Property* group = kd->findProperty(kd->views[0].groupBy);
+	REQUIRE(group != nullptr);
+	CHECK(kd->select(kd->rows[0].id, group->id) == group->options.front().id);
 }
