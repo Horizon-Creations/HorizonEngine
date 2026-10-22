@@ -180,3 +180,35 @@ Wochenansicht im Kalender; Zeitleiste ohne Zoom/Resize; Relation: Klick zur Ziel
 **Offen:** Kalender nur Monate (keine Wochenansicht); Seiten per Ziehen in der Seitenleiste verschachteln; Zeilenseiten in der Seiten-Link-Auswahl;
 Zeitleiste: Start-Rand ziehen, Heute-Sprung; Variante B fuer Tasks (Planner als Wahrheit, Historie je Zeile); Live-Zusammenarbeit ueber den Team-Server;
 Markdown-Export/CSV; MCP-Tools fuer den Planner.
+
+## Handoff (Stand MCP-Tools, 2026-10-22)
+**Fertig:** `McpToolsPlanner.cpp` (`registerPlannerTools`, Hooks `McpPlannerHooks` in `McpToolHooks.h`) und `PlannerMarkdown.{h,cpp}`.
+Tools: `planner_overview`, `planner_read_database` (View-Filter/Sortierung, search, limit/offset), `planner_add_row`, `planner_update_row`,
+`planner_delete_row`, `planner_create_database`, `planner_add_property`, `planner_read_page`, `planner_write_page` (Markdown, replace/append,
+neue Seite mit title/parent, Zeilenseiten per database+row), `planner_delete_page`. Alles laeuft ueber den einen `Workspace` des Tabs
+(`EditorApplication.cpp`: `m_mcpPlannerCtx` haelt den AppContext, den die Tasks-Datenbank zum Erreichen des Task Boards braucht), also zeigt der offene Tab
+Aenderungen sofort; "Tasks" geht ueber den Board-Schreiber (Status-Aenderung = Verlaufseintrag, Titel = keiner). Werte als Namen (Select-Optionen, Daten
+YYYY-MM-DD, Relationen per Titel/Id, Engine-Links als {kind,id|scene|panel,label}); ein Wert, der nicht passt, verweigert die ganze Aenderung und nennt die Felder
+(Probelauf auf einer Kopie). Markdown-Dialekt: siehe Kopf von `PlannerMarkdown.h`.
+**Tests:** `test_planner_markdown` 4, `test_mcp_tools_planner` 7 gruen; Planner-/Task-Board-Tests unveraendert gruen; `HorizonEditor` gebaut.
+**Nicht geprueft:** Aufruf ueber einen echten MCP-Client gegen den laufenden Editor (Rezept: `docs/mcp-editor-integration-plan.md`); Volllauf nicht wiederholt.
+**Offen:** Whiteboard (naechster Schritt, siehe unten); keine Planner-Tools fuer Ansichten (Filter/Sortierung anlegen), Datenbank/Seite umbenennen/loeschen.
+
+## Whiteboard (Plan, 2026-10-22, noch nichts gebaut)
+Wunsch (Connor): "Boards" als freie Flaeche wie ein Whiteboard, mit Nodes mit Text und Bildern.
+**Was es ist:** ein dritter Dokumenttyp neben Datenbank und Seite: ein **Whiteboard** (unendliche Flaeche) mit Karten (Nodes) und Verbindungen (Edges).
+Nicht zu verwechseln mit der Board-Ansicht einer Datenbank (Lanes).
+**Datei:** `Config/Planner/Boards/<id>.json`, gleiche Regeln wie Seiten/Datenbanken (eine Datei je Board, UUIDs, verlustfrei, unbekannte Schluessel bleiben,
+nie ueber unlesbare/fremd geaenderte Datei speichern). Inhalt: `nodes[]` {id, type, x, y, w, h, color, text, ...typspezifisch}, `edges[]` {id, from, to, label?, arrow?},
+`groups`/Rahmen als Node-Typ `frame`. Sicht (Pan/Zoom) wird nicht in die Datei geschrieben.
+**Node-Typen:** `text` (Karte mit Text, Markdown-Kurzform), `image` (Bild), `object` (Engine-Objekt: Asset/Szene/Entity/Panel, Chip + Sprung), `row` (Karte einer Datenbank-Zeile,
+Klick oeffnet sie), `page` (Karte einer Seite), `frame` (beschriftete Gruppe, zieht Inhalt mit).
+**Bilder (Entscheidung noetig):** (a) Texture-Assets des Projekts per UUID referenzieren (wie Engine-Links, kein Duplikat, geht mit Content Browser Drag); (b) hineingezogene/eingefuegte
+Bilddateien nach `Config/Planner/Media/<hex>.png` kopieren (reist mit Git, LFS-Frage bei grossen Dateien). Empfehlung: beides, (a) bevorzugt, (b) fuer Screenshots/Moodboards;
+Miniaturen ueber den vorhandenen `AssetThumbnailCache`/Texturpfad des Editors.
+**Bedienung (Canvas im Tab):** Pan (Leertaste+Ziehen / Mittelmaustaste / Trackpad), Zoom (Strg+Rad / Pinch), Auswahl (Klick, Shift, Aufziehrahmen), Verschieben/Groesse per Griffe, Doppelklick
+auf leere Flaeche = neue Textkarte, von Kartenrand auf andere Karte ziehen = Verbindung, Drop aus Content Browser/Outliner = Karte, Einfuegen aus Zwischenablage (Text/Bild),
+Farben, Raster-Einrasten, Minimap. **Undo/Redo** gibt es im Planner noch nicht; fuer ein Whiteboard fast Pflicht (Befehlsstapel je Dokument).
+**MCP:** `planner_read_board` / `planner_write_board` (Nodes/Edges als JSON, Auto-Layout fuer Nodes ohne Position), damit Claude Ideen als Board anlegen kann.
+**Phasen:** W0 Modell + Datei + Workspace + Tests (ImGui-frei) | W1 Canvas: Pan/Zoom, Textkarten, Verschieben/Groesse, Verbindungen, Undo | W2 Bilder (Asset-Referenz, Drop, Einfuegen, Medien-Ordner) |
+W3 Objekt-/Zeilen-/Seitenkarten, Rahmen | W4 MCP-Tools, Minimap, Export als PNG.

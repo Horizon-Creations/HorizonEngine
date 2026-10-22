@@ -220,6 +220,9 @@ add_executable(HorizonEditor WIN32
 	# The task board as tools: list, create, update, assign (team only) and the
 	# team's notices, all through the Task Board panel's one writer.
 	McpToolsTaskBoard.cpp
+	# The Planner as tools (planner_*): databases, rows and pages, through the tab's one workspace.
+	McpToolsPlanner.cpp
+	PlannerMarkdown.cpp
 	# The clients' cameras in the viewport: a frustum with the connection number
 	# (debug lines) and a tag over the frame (ImGui), the presence marker's split.
 	McpCameraGizmos.cpp

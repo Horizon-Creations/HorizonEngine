@@ -342,6 +342,9 @@ add_executable(he_tests
     test_planner.cpp
     # ...its workspace and the Task Board import (ImGui-free).
     test_planner_workspace.cpp
+    # The Planner as tools: the Markdown a page speaks, and planner_* over a real workspace.
+    test_planner_markdown.cpp
+    test_mcp_tools_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
     test_taskboard_team.cpp
@@ -666,6 +669,10 @@ add_executable(he_tests
     # The task tools, with the Task Board panel's real board behind one editor
     # and a second editor's bridge on the fake team (test_mcp_tools_taskboard.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTaskBoard.cpp
+    # The Planner tools and the Markdown they speak (test_mcp_tools_planner.cpp,
+    # test_planner_markdown.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsPlanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerMarkdown.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp

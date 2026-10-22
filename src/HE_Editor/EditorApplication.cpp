@@ -28,6 +28,7 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
+#include "PlannerPanel.h"                    // ...and the Planner tools reach the tab's workspace through this one
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
@@ -11844,6 +11845,16 @@ void EditorApplication::setupMcpTools()
 	tasks.author    = [] { return TaskBoardPanel::author(); };
 	tasks.team      = [] { return TaskBoardPanel::team(); };
 	HE::Ed::registerTaskBoardTools(m_mcp->registry(), std::move(tasks));
+
+	// The Planner: the same one workspace the tab draws from (PlannerPanel::workspace), so
+	// the tools and the open tab are one copy of the databases and one writer of the files.
+	HE::Ed::McpPlannerHooks planner;
+	planner.workspace = [this] {
+		if (!m_mcpPlannerCtx) m_mcpPlannerCtx = std::make_unique<AppContext>(makeContext());
+		return PlannerPanel::workspace(*m_mcpPlannerCtx);
+	};
+	planner.author = [] { return TaskBoardPanel::author(); };
+	HE::Ed::registerPlannerTools(m_mcp->registry(), std::move(planner));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not
