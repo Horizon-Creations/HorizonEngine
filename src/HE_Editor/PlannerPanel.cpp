@@ -2,6 +2,7 @@
 
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"
+#include "EditorInput.h"       // the trackpad pinch on the timeline
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "Planner.h"
@@ -1560,31 +1561,10 @@ std::int64_t dayOf(std::int64_t ms)
 	return ms >= 0 ? ms / kDayMs : -((-ms + kDayMs - 1) / kDayMs);
 }
 
-// The bar being dragged: which row, and by how many days so far. Written when the
-// button is let go, so a click that does not move writes nothing.
-struct BarDrag
-{
-	UUID row;
-	int  days = 0;
-};
-BarDrag s_barDrag;
-BarDrag s_barResize;   // the right edge of a bar being dragged: the days its End moves by
-
-// How wide a day is: days, weeks, months (the labels thin out to match).
-int         s_tlZoom = 0;
-const float kZoomDayW[]    = { 24.0f, 12.0f, 5.0f };
-const char* const kZoomNames[] = { "Days", "Weeks", "Months" };
-
-// Steps: made by a button, or by dragging across the days; named in place.
-UUID        s_tlRename;            // the step whose title is being typed in the timeline
-std::string s_tlRenameBuf;
-bool        s_tlRenameFocus = false;
-bool        s_tlGoToday     = false;   // scroll the timeline so today is in view
-
 // A new row dated from day `d0` to `d1` for the timeline or calendar view `viewId`. A view whose data has no Date
 // column yet gets one (Start and End for a timeline, Date for a calendar), so the button always shows something.
 // The new row is opened for a title (typed in place on a timeline, in the details otherwise).
-void newDated(const UUID& dbId, const UUID& viewId, std::int64_t d0, std::int64_t d1, bool renameInPlace)
+void newDated(const UUID& dbId, const UUID& viewId, std::int64_t d0, std::int64_t d1)
 {
 	post([=] {
 		UUID made;
@@ -1603,7 +1583,8 @@ void newDated(const UUID& dbId, const UUID& viewId, std::int64_t d0, std::int64_
 				const UUID found = otherDate(UUID{});
 				v->dateProperty = found == UUID{} ? d.addProperty(timeline ? "Start" : "Date", PropertyType::Date)->id : found;
 			}
-			if (timeline && !isDate(v->endProperty))
+			// A timeline always has an End; a calendar gets one when the event covers more than a day.
+			if ((timeline || d1 > d0) && !isDate(v->endProperty))
 			{
 				const UUID found = otherDate(v->dateProperty);
 				v->endProperty = found == UUID{} ? d.addProperty("End", PropertyType::Date)->id : found;
@@ -1612,75 +1593,83 @@ void newDated(const UUID& dbId, const UUID& viewId, std::int64_t d0, std::int64_
 			if (!r) return false;
 			made = r->id;
 			d.setDate(made, v->dateProperty, d0 * kDayMs, taskNowMs());
-			if (timeline && d1 > d0) d.setDate(made, v->endProperty, d1 * kDayMs, taskNowMs());
+			if (d1 > d0 && isDate(v->endProperty)) d.setDate(made, v->endProperty, d1 * kDayMs, taskNowMs());
 			return true;
 		});
-		if (made == UUID{}) return;
-		if (renameInPlace)
-		{
-			s_tlRename = made;
-			s_tlRenameBuf = "New step";
-			s_tlRenameFocus = true;
-		}
-		else
-			s_selRow = made;
+		if (!(made == UUID{})) s_selRow = made;   // its details open, to name it
 	});
 }
 
-// A drag across a lane (or a click on it) picks a range of days; true once the button is let go, with the
-// range. While it is held a ghost bar shows what would be made, and a hovered lane lights the day under the mouse.
-bool dayGesture(float gridX, float dayW, std::int64_t lo, std::int64_t today, int clickDays, const ImVec2& rowMin, float rowH,
-                std::int64_t& d0, std::int64_t& d1)
+// ── The timeline: a time axis ────────────────────────────────────────────────
+// Time runs left to right on one axis. An event on one day is a node (a diamond and its name), one with an End
+// is a bar; events that would overlap sit in the next lane. The wheel (a trackpad's pinch) zooms at the cursor, a
+// drag on the background pans, a drag on an event moves it and a drag on a bar's ends resizes it, a double-click
+// on the axis makes an event there. Rows without a date wait in the tray under the axis: drag one onto the axis.
+
+struct TlState { double left = 0; float scrollY = 0; bool placed = false; };   // per view: the day at the left edge
+std::unordered_map<UUID, TlState> s_tlViews;
+float  s_tlPpd = 24.0f;       // pixels per day: the zoom
+double s_tlPending = 0;       // a zoom the toolbar asked for (pixels per day), applied around the middle
+bool   s_tlGoToday = false, s_tlFit = false;
+constexpr float kTlMinPpd = 1.5f, kTlMaxPpd = 240.0f, kTlLaneH = 34.0f, kTlRulerH = 46.0f;
+const float kZoomDayW[]        = { 24.0f, 12.0f, 5.0f };
+const char* const kZoomNames[] = { "Days", "Weeks", "Months" };
+
+// What a drag on an event does: 1 moves it, 2 pulls its start, 3 pulls its end; by `days`.
+struct DateDrag { UUID row; int mode = 0; int days = 0; };
+DateDrag s_tlDrag;
+DateDrag s_calDrag;
+
+int weekdayOf(std::int64_t day) { return static_cast<int>(((day % 7) + 7 + 3) % 7); }   // 0 Monday ... 6 Sunday
+
+// Move a row's dates (mode 1), or pull its Start (2) or End (3), by whole days. A row without an End gets one.
+void shiftDates(const UUID& dbId, const UUID& rowId, const UUID& startId, const UUID& endId, int mode, int days)
 {
-	const ImGuiIO& io = ImGui::GetIO();
-	auto dayAt = [&](float x) { return x < gridX ? today : lo + static_cast<std::int64_t>(std::floor((x - gridX) / dayW)); };
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	const bool active = ImGui::IsItemActive();
-	if (active || ImGui::IsItemDeactivated())
-	{
-		const std::int64_t a = dayAt(io.MouseClickedPos[0].x), b = dayAt(io.MousePos.x);
-		d0 = std::min(a, b);
-		d1 = std::max(a, b);
-		const bool dragged = std::abs(io.MousePos.x - io.MouseClickedPos[0].x) >= 3.0f;
-		if (!dragged) d1 = d0 + clickDays;
-		if (active)
-		{
-			const float x0 = gridX + static_cast<float>(d0 - lo) * dayW, x1 = gridX + static_cast<float>(d1 - lo + 1) * dayW;
-			dl->AddRectFilled(ImVec2(x0, rowMin.y + 3.0f), ImVec2(x1, rowMin.y + rowH - 3.0f), Theme::u32(Theme::alpha(Theme::Accent, 0.40f)), 4.0f);
-			dl->AddRect(ImVec2(x0, rowMin.y + 3.0f), ImVec2(x1, rowMin.y + rowH - 3.0f), Theme::u32(Theme::AccentBright), 4.0f);
-			return false;
-		}
-		return ImGui::IsMouseReleased(ImGuiMouseButton_Left) || !ImGui::IsMouseDown(ImGuiMouseButton_Left);
-	}
-	if (ImGui::IsItemHovered() && io.MousePos.x >= gridX)
-	{
-		const float x0 = gridX + static_cast<float>(dayAt(io.MousePos.x) - lo) * dayW;
-		dl->AddRectFilled(ImVec2(x0, rowMin.y + 2.0f), ImVec2(x0 + dayW, rowMin.y + rowH - 2.0f), Theme::u32(Theme::warm(0.26f)), 3.0f);
-	}
-	return false;
+	if (days == 0 || mode == 0) return;
+	post([=] {
+		s_ws.edit(dbId, [&](Database& d) {
+			std::int64_t s = 0, e = 0;
+			if (!d.date(rowId, startId, s)) return false;
+			const bool hasEnd = !(endId == UUID{}) && d.date(rowId, endId, e);
+			const std::int64_t shift = static_cast<std::int64_t>(days) * kDayMs, now = taskNowMs();
+			bool any = false;
+			if (mode == 1)
+			{
+				any |= d.setDate(rowId, startId, s + shift, now);
+				if (hasEnd) any |= d.setDate(rowId, endId, e + shift, now);
+			}
+			else if (mode == 2)
+			{
+				const std::int64_t end = hasEnd ? e : s;
+				any |= d.setDate(rowId, startId, std::min(s + shift, end), now);
+				if (!hasEnd && !(endId == UUID{})) any |= d.setDate(rowId, endId, end, now);
+			}
+			else if (!(endId == UUID{}))
+				any |= d.setDate(rowId, endId, std::max(s, (hasEnd ? e : s) + shift), now);
+			return any;
+		});
+	});
 }
 
-// A row per line, a day per column: a bar from the row's Start date to its End date
-// (one day when it has no End), the days drawn across the top and today marked.
-// Drag a bar to move it; click it, or its title, to open the row. Rows without a
-// Start date are listed at the end.
+const char* const kMonthsShort[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
 void drawTimeline(const Database& db, const View& view, const std::vector<std::size_t>& idx)
 {
 	const Property* startP = db.findProperty(view.dateProperty);
 	if (!startP || startP->type != PropertyType::Date)
 	{
-		ImGui::TextDisabled("Pick a Date property for Start above. Add one with Properties if there is none.");
+		ImGui::TextDisabled("This timeline has no dates yet. New Step adds Start and End columns and the first step.");
 		return;
 	}
 	const Property* endP = view.endProperty == UUID{} ? nullptr : db.findProperty(view.endProperty);
 	if (endP && endP->type != PropertyType::Date) endP = nullptr;
 	const Property* colourP = db.findProperty(view.groupBy);
 	if (colourP && colourP->type != PropertyType::Select) colourP = nullptr;
+	const bool tasksData = db.id == tasksDatabaseId();
 
-	struct Bar { std::size_t row; std::int64_t a, b; };
-	std::vector<Bar> bars;
+	struct Ev { std::size_t row; std::int64_t a, b; bool span; float labelW; int lane; };
+	std::vector<Ev> evs;
 	std::vector<std::size_t> undated;
-	std::int64_t lo = INT64_MAX, hi = INT64_MIN;
 	for (const std::size_t i : idx)
 	{
 		const Row& r = db.rows[i];
@@ -1689,244 +1678,312 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 		const std::int64_t a = dayOf(s);
 		std::int64_t b = a;
 		if (endP && db.date(r.id, endP->id, e)) b = std::max(a, dayOf(e));
-		bars.push_back({ i, a, b });
-		lo = std::min(lo, a);
-		hi = std::max(hi, b);
+		evs.push_back({ i, a, b, b > a, ImGui::CalcTextSize(r.title.empty() ? "Untitled" : r.title.c_str()).x, 0 });
 	}
 	const std::int64_t today = dayOf(taskNowMs());
-	if (bars.empty()) lo = hi = today;
-	lo = std::min(lo, today) - 3;
-	hi = std::max(hi, today) + 10;
-	if (hi - lo < 30) hi = lo + 30;
-
-	const float fh = ImGui::GetFrameHeight();
-	const float dayW = kZoomDayW[std::clamp(s_tlZoom, 0, 2)], titleW = 220.0f, rowH = fh + 6.0f, headH = fh * 2.0f;
-	const int   days = static_cast<int>(hi - lo + 1);
-	const float totalW = titleW + static_cast<float>(days) * dayW;
-
-	ImGui::BeginChild("##timeline", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	const ImVec2 origin = ImGui::GetCursorScreenPos();
-	const ImVec2 clipA = dl->GetClipRectMin(), clipB = dl->GetClipRectMax();
-	const float  gridX = origin.x + titleW;
-
-	// The days across the top: the month where it starts, then each day's number.
-	for (int d = 0; d < days; ++d)
+	TlState& st = s_tlViews[view.id];
+	if (!st.placed)
 	{
-		const float x = gridX + static_cast<float>(d) * dayW;
-		if (x + dayW < clipA.x || x > clipB.x) continue;
-		const std::string iso = taskTimeToIso((lo + d) * kDayMs);
-		if (iso.substr(8, 2) == "01" || d == 0)
-			dl->AddText(ImVec2(x + 3.0f, origin.y), Theme::u32(Theme::TextHeading), iso.substr(0, 7).c_str());
-		// Every day while days are wide enough to read, the Mondays at the middle zoom, none at the smallest.
-		const bool monday = (lo + d + 3) % 7 == 0;
-		if (dayW >= 20.0f || (dayW >= 10.0f && monday))
-			dl->AddText(ImVec2(x + 3.0f, origin.y + fh), Theme::u32(lo + d == today ? Theme::Warn : Theme::TextDim),
-			            iso.substr(8, 2).c_str());
-		else if (lo + d == today)
-			dl->AddRectFilled(ImVec2(x, origin.y + fh), ImVec2(x + dayW, origin.y + headH), Theme::u32(Theme::Warn));
-		dl->AddLine(ImVec2(x, origin.y + fh), ImVec2(x, origin.y + headH), Theme::u32(Theme::warm(0.20f)));
+		std::int64_t first = today;
+		for (const Ev& e : evs) first = std::min(first, e.a);
+		st.left = static_cast<double>(first) - 2.0;
+		st.placed = true;
 	}
-	ImGui::Dummy(ImVec2(totalW, headH));
-	note("timeline:header");
 
-	// A row per bar, then the rows with no date.
-	const int total = static_cast<int>(bars.size() + undated.size());
-	const float todayX = gridX + static_cast<float>(today - lo) * dayW;
-	ImGuiListClipper clipper;
-	clipper.Begin(total, rowH);
-	while (clipper.Step())
-		for (int n = clipper.DisplayStart; n < clipper.DisplayEnd; ++n)
-		{
-			const bool dated = n < static_cast<int>(bars.size());
-			const std::size_t ri = dated ? bars[static_cast<std::size_t>(n)].row
-			                             : undated[static_cast<std::size_t>(n) - bars.size()];
-			const Row& row = db.rows[ri];
-			++s_stats.rowsDrawn;
-			pushUuid(row.id);
-			const ImVec2 p = ImGui::GetCursorScreenPos();
-			if (n % 2 == 0)
-				dl->AddRectFilled(p, ImVec2(origin.x + totalW, p.y + rowH), Theme::u32(Theme::warm(0.085f)));
-			dl->AddRectFilled(ImVec2(todayX, p.y), ImVec2(todayX + dayW, p.y + rowH),
-			                  Theme::u32(Theme::alpha(Theme::Warn, 0.10f)));
-			{
-				// The days as faint lines (each day while they are wide, else the Mondays).
-				const int d0 = std::max(0, static_cast<int>(std::floor((clipA.x - gridX) / dayW)));
-				const int d1 = std::min(days, static_cast<int>(std::ceil((clipB.x - gridX) / dayW)) + 1);
-				for (int d = d0; d < d1; ++d)
-					if (dayW >= 20.0f || (lo + d + 3) % 7 == 0)
-					{
-						const float x = gridX + static_cast<float>(d) * dayW;
-						dl->AddLine(ImVec2(x, p.y), ImVec2(x, p.y + rowH), Theme::u32(Theme::warm(0.15f)));
-					}
-			}
+	const float trayH = undated.empty() ? 0.0f : 46.0f;
+	ImGui::BeginChild("##timeline", ImVec2(0, std::max(100.0f, ImGui::GetContentRegionAvail().y - trayH)), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 origin = ImGui::GetCursorScreenPos(), size = ImGui::GetContentRegionAvail();
+	const ImVec2 corner(origin.x + size.x, origin.y + size.y);
 
-			// The title: a click opens the row, a double-click renames it here.
-			if (s_tlRename == row.id)
-			{
-				ImGui::SetNextItemWidth(titleW - 10.0f);
-				if (s_tlRenameFocus) { ImGui::SetKeyboardFocusHere(); s_tlRenameFocus = false; }
-				ImGui::InputText("##tlrename", &s_tlRenameBuf, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-				note("timeline:rename");
-				if (ImGui::IsItemDeactivated())
-				{
-					const UUID dbId = db.id, rowId = row.id;
-					const std::string title = s_tlRenameBuf;
-					s_tlRename = UUID{};
-					post([=] { s_ws.edit(dbId, [&](Database& d) { return !title.empty() && d.setTitle(rowId, title, taskNowMs()); }); });
-				}
-			}
-			else
-			{
-				if (ImGui::Selectable("##title", row.id == s_selRow, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(titleW - 4.0f, rowH - 2.0f)))
-				{
-					s_selRow = row.id;
-					if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-					{
-						s_tlRename = row.id;
-						s_tlRenameBuf = row.title;
-						s_tlRenameFocus = true;
-					}
-				}
-				note("step:" + row.title);
-				dl->PushClipRect(p, ImVec2(p.x + titleW - 8.0f, p.y + rowH), true);
-				dl->AddText(ImVec2(p.x + 4.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f),
-				            Theme::u32(row.title.empty() ? Theme::TextDim : Theme::Text),
-				            row.title.empty() ? "Untitled" : row.title.c_str());
-				dl->PopClipRect();
-			}
-
-			if (dated)
-			{
-				const Bar& bar = bars[static_cast<std::size_t>(n)];
-				const float x0 = gridX + static_cast<float>(bar.a - lo) * dayW;
-				const float w  = static_cast<float>(bar.b - bar.a + 1) * dayW;
-				ImGui::SetCursorScreenPos(ImVec2(x0, p.y + 3.0f));
-				ImGui::SetNextItemAllowOverlap();   // the right edge is a handle of its own, on top
-				ImGui::InvisibleButton("##bar", ImVec2(w, rowH - 6.0f));
-				note("bar:" + row.title);
-				const bool active = ImGui::IsItemActive();
-				if (releasedWithoutDrag())
-					s_selRow = row.id;
-				if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
-				{
-					s_barDrag.row  = row.id;
-					s_barDrag.days = static_cast<int>(std::lround(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x / dayW));
-				}
-				const bool moving = s_barDrag.row == row.id && s_barDrag.days != 0;
-				if (ImGui::IsItemDeactivated())
-				{
-					if (moving)
-					{
-						const UUID dbId = db.id, rowId = row.id, sid = startP->id, eid = endP ? endP->id : UUID{};
-						const std::int64_t shift = s_barDrag.days * kDayMs;
-						post([=] {
-							s_ws.edit(dbId, [&](Database& d) {
-								std::int64_t ms = 0;
-								bool any = false;
-								if (d.date(rowId, sid, ms)) any |= d.setDate(rowId, sid, ms + shift, taskNowMs());
-								if (eid != UUID{} && d.date(rowId, eid, ms)) any |= d.setDate(rowId, eid, ms + shift, taskNowMs());
-								return any;
-							});
-						});
-					}
-					s_barDrag = BarDrag{};
-				}
-				const float shownX = x0 + (moving ? static_cast<float>(s_barDrag.days) * dayW : 0.0f);
-
-				// The right edge: drag it to change the End date (with an End property to change).
-				float shownW = w;
-				if (endP)
-				{
-					const float handleW = std::min(8.0f, w * 0.5f);
-					ImGui::SetCursorScreenPos(ImVec2(x0 + w - handleW, p.y + 3.0f));
-					ImGui::InvisibleButton("##resize", ImVec2(handleW, rowH - 6.0f));
-					note("bar-end:" + row.title);
-					if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-					if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
-					{
-						s_barResize.row  = row.id;
-						s_barResize.days = static_cast<int>(std::lround(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x / dayW));
-					}
-					const bool resizing = s_barResize.row == row.id && s_barResize.days != 0;
-					if (ImGui::IsItemDeactivated())
-					{
-						if (resizing)
-						{
-							const UUID dbId = db.id, rowId = row.id, sid = startP->id, eid = endP->id;
-							const std::int64_t shift = s_barResize.days * kDayMs;
-							post([=] {
-								s_ws.edit(dbId, [&](Database& d) {
-									std::int64_t start = 0, end = 0;
-									if (!d.date(rowId, sid, start)) return false;
-									if (!d.date(rowId, eid, end)) end = start;   // no End yet: it starts at the Start
-									return d.setDate(rowId, eid, std::max(start, end + shift), taskNowMs());
-								});
-							});
-						}
-						s_barResize = BarDrag{};
-					}
-					if (resizing) shownW = std::max(dayW, w + static_cast<float>(s_barResize.days) * dayW);
-				}
-				ImVec4 colour = Theme::Accent;
-				if (colourP)
-					if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
-				dl->AddRectFilled(ImVec2(shownX, p.y + 3.0f), ImVec2(shownX + shownW, p.y + rowH - 3.0f),
-				                  Theme::u32(Theme::alpha(colour, active || ImGui::IsItemHovered() ? 0.95f : 0.75f)), 4.0f);
-				dl->PushClipRect(ImVec2(shownX, p.y), ImVec2(shownX + shownW, p.y + rowH), true);
-				dl->AddText(ImVec2(shownX + 5.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::Ink),
-				            row.title.c_str());
-				dl->PopClipRect();
-			}
-			else
-			{
-				// No dates yet: drag across the days to give it some (a click picks the day).
-				ImGui::SetCursorScreenPos(ImVec2(gridX, p.y + 1.0f));
-				ImGui::InvisibleButton("##lane", ImVec2(totalW - titleW, rowH - 2.0f));
-				note("lane:" + row.title);
-				std::int64_t g0 = 0, g1 = 0;
-				if (dayGesture(gridX, dayW, lo, today, endP ? 2 : 0, p, rowH, g0, g1))
-				{
-					const UUID dbId = db.id, rowId = row.id, sid = startP->id, eid = endP ? endP->id : UUID{};
-					post([=] {
-						s_ws.edit(dbId, [&](Database& d) {
-							bool any = d.setDate(rowId, sid, g0 * kDayMs, taskNowMs());
-							if (!(eid == UUID{}) && g1 > g0) any |= d.setDate(rowId, eid, g1 * kDayMs, taskNowMs());
-							return any;
-						});
-					});
-				}
-				else if (!ImGui::IsItemActive())
-					dl->AddText(ImVec2(gridX + 6.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f),
-					            Theme::u32(Theme::TextDim), "drag across the days to set dates");
-			}
-
-			ImGui::SetCursorScreenPos(p);
-			ImGui::Dummy(ImVec2(totalW, rowH));
-			ImGui::PopID();
-		}
-
-	// The last lane makes a step: drag across the days it should cover, or click a day.
+	// Zooms and jumps the toolbar asked for, around the middle of what is shown.
+	if (s_tlPending > 0)
 	{
-		const ImVec2 p = ImGui::GetCursorScreenPos();
-		ImGui::InvisibleButton("##newstep", ImVec2(totalW, rowH));
-		note("timeline:new");
-		std::int64_t g0 = 0, g1 = 0;
-		const bool made = dayGesture(gridX, dayW, lo, today, endP ? 2 : 0, p, rowH, g0, g1);
-		if (!ImGui::IsItemActive())
-		{
-			PlannerIcons::drawIcon(dl, PlannerIcons::Icon::Plus, ImVec2(p.x + 14.0f, p.y + rowH * 0.5f), Theme::u32(Theme::TextDim));
-			dl->AddText(ImVec2(p.x + 30.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::TextDim),
-			            "Add a step: drag across the days");
-		}
-		if (made) newDated(db.id, view.id, g0, g1, true);
+		const double mid = st.left + size.x * 0.5 / s_tlPpd;
+		s_tlPpd = static_cast<float>(std::clamp(s_tlPending, double(kTlMinPpd), double(kTlMaxPpd)));
+		st.left = mid - size.x * 0.5 / s_tlPpd;
+		s_tlPending = 0;
 	}
 	if (s_tlGoToday)
 	{
+		st.left = static_cast<double>(today) + 0.5 - size.x * 0.5 / s_tlPpd;
 		s_tlGoToday = false;
-		ImGui::SetScrollX(std::max(0.0f, titleW + static_cast<float>(today - lo) * dayW - ImGui::GetWindowWidth() * 0.4f));
 	}
+	if (s_tlFit)
+	{
+		s_tlFit = false;
+		if (!evs.empty())
+		{
+			std::int64_t lo = evs.front().a, hi = evs.front().b;
+			for (const Ev& e : evs) { lo = std::min(lo, e.a); hi = std::max(hi, e.b); }
+			s_tlPpd = static_cast<float>(std::clamp((size.x - 120.0) / static_cast<double>(hi - lo + 2), double(kTlMinPpd), double(kTlMaxPpd)));
+			st.left = static_cast<double>(lo) - 60.0 / s_tlPpd;
+		}
+	}
+
+	// The background: pans when dragged, makes an event when double-clicked, takes a row dropped from the tray.
+	ImGui::SetNextItemAllowOverlap();
+	ImGui::InvisibleButton("##tlbg", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+	note("timeline:canvas");
+	const bool bgHover = ImGui::IsItemHovered(), bgActive = ImGui::IsItemActive();
+	auto dayAtX = [&](float x) { return static_cast<std::int64_t>(std::floor(st.left + (x - origin.x) / s_tlPpd)); };
+	if (ImGui::BeginDragDropTarget())
+	{
+		if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_PLANNER_ROW"))
+			if (pl->DataSize == static_cast<int>(sizeof(UUID)))
+			{
+				const UUID rowId = *static_cast<const UUID*>(pl->Data);
+				const UUID dbId = db.id, sid = startP->id;
+				const std::int64_t day = dayAtX(io.MousePos.x);
+				post([=] {
+					s_ws.edit(dbId, [&](Database& d) { return d.setDate(rowId, sid, day * kDayMs, taskNowMs()); });
+				});
+			}
+		ImGui::EndDragDropTarget();
+	}
+	if (bgHover && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !tasksData)
+		newDated(db.id, view.id, dayAtX(io.MousePos.x), dayAtX(io.MousePos.x));
+
+	auto zoomAt = [&](float mx, double factor) {
+		const double day = st.left + (mx - origin.x) / s_tlPpd;
+		s_tlPpd = static_cast<float>(std::clamp(s_tlPpd * factor, double(kTlMinPpd), double(kTlMaxPpd)));
+		st.left = day - (mx - origin.x) / s_tlPpd;
+	};
+	if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && s_tlDrag.mode == 0)
+	{
+		if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f) zoomAt(io.MousePos.x, std::max(0.1, 1.0 + pinch * 2.0));
+		if (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f)
+		{
+			if (!EditorInput::trackpadActive() || io.KeyCtrl || io.KeySuper) zoomAt(io.MousePos.x, std::pow(1.1, static_cast<double>(io.MouseWheel)));
+			else { st.left -= io.MouseWheelH * 30.0 / s_tlPpd; st.scrollY -= io.MouseWheel * 30.0f; }
+		}
+	}
+	if (bgActive)
+	{
+		st.left -= io.MouseDelta.x / s_tlPpd;
+		st.scrollY -= io.MouseDelta.y;
+	}
+	const float ppd = s_tlPpd;
+	auto X = [&](double day) { return origin.x + static_cast<float>((day - st.left) * ppd); };
+
+	// Lanes: events that would overlap (a node counts with its name) go to the next one.
+	std::sort(evs.begin(), evs.end(), [](const Ev& x, const Ev& y) { return x.a != y.a ? x.a < y.a : x.b > y.b; });
+	std::vector<double> laneEnd;
+	for (Ev& e : evs)
+	{
+		const double x0 = static_cast<double>(e.a) * ppd;
+		const double x1 = e.span ? static_cast<double>(e.b + 1) * ppd : (static_cast<double>(e.a) + 0.5) * ppd + 21.0 + e.labelW;
+		std::size_t l = 0;
+		while (l < laneEnd.size() && laneEnd[l] + 6.0 > x0) ++l;
+		if (l == laneEnd.size()) laneEnd.push_back(x1);
+		laneEnd[l] = std::max(laneEnd[l], x1);
+		e.lane = static_cast<int>(l);
+	}
+	const float lanesTop = origin.y + kTlRulerH;
+	const float maxScroll = std::max(0.0f, static_cast<float>(laneEnd.size()) * kTlLaneH + 24.0f + kTlRulerH - size.y);
+	st.scrollY = std::clamp(st.scrollY, 0.0f, maxScroll);
+
+	dl->PushClipRect(origin, corner, true);
+	const std::int64_t d0 = static_cast<std::int64_t>(std::floor(st.left)) - 1;
+	const std::int64_t d1 = static_cast<std::int64_t>(std::ceil(st.left + size.x / ppd)) + 1;
+
+	// Weekends and today in the lanes.
+	if (ppd >= 12.0f)
+		for (std::int64_t d = d0; d <= d1; ++d)
+			if (weekdayOf(d) >= 5) dl->AddRectFilled(ImVec2(X(d), lanesTop), ImVec2(X(d + 1), corner.y), Theme::u32(Theme::warm(0.075f)));
+	dl->AddRectFilled(ImVec2(X(today), origin.y), ImVec2(X(today + 1), corner.y), Theme::u32(Theme::alpha(Theme::Warn, 0.09f)));
+
+	// The ruler: months (years when zoomed far out) above, the days (weeks, months) below.
+	dl->AddRectFilled(origin, ImVec2(corner.x, lanesTop), Theme::u32(Theme::warm(0.10f)));
+	const ImU32 gridCol = Theme::u32(Theme::warm(0.13f)), tickCol = Theme::u32(Theme::warm(0.40f));
+	if (ppd >= 3.5f)
+	{
+		int step = 14;
+		for (const int s : { 1, 2, 7, 14 }) if (static_cast<float>(s) * ppd >= 28.0f) { step = s; break; }
+		for (std::int64_t d = d0; d <= d1; ++d)
+		{
+			const bool tick = step <= 2 ? (d % step == 0) : (weekdayOf(d) == 0 && (step == 7 || ((d + 3) / 7) % 2 == 0));
+			const std::string iso = taskTimeToIso(d * kDayMs);
+			const float x = X(d);
+			if (tick)
+			{
+				dl->AddLine(ImVec2(x, lanesTop - 12.0f), ImVec2(x, lanesTop), tickCol);
+				dl->AddLine(ImVec2(x, lanesTop), ImVec2(x, corner.y), gridCol);
+				static const char* const kWd[] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+				std::string label = iso.substr(8, 2);
+				if (ppd >= 56.0f) label = std::string(kWd[weekdayOf(d)]) + " " + label;
+				dl->AddText(ImVec2(x + 3.0f, lanesTop - 28.0f), Theme::u32(d == today ? Theme::Warn : Theme::TextDim), label.c_str());
+			}
+			if (iso.compare(8, 2, "01") == 0 || d == d0)
+			{
+				dl->AddLine(ImVec2(x, origin.y), ImVec2(x, lanesTop), tickCol);
+				if (iso.compare(8, 2, "01") == 0) dl->AddLine(ImVec2(x, lanesTop), ImVec2(x, corner.y), Theme::u32(Theme::warm(0.24f)));
+				const int mon = std::clamp(std::atoi(iso.substr(5, 2).c_str()), 1, 12);
+				dl->AddText(ImVec2(std::max(x, origin.x) + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading),
+				            (std::string(kMonthsShort[mon - 1]) + " " + iso.substr(0, 4)).c_str());
+			}
+		}
+	}
+	else
+	{
+		for (std::int64_t d = d0; d <= d1; ++d)
+		{
+			const std::string iso = taskTimeToIso(d * kDayMs);
+			if (iso.compare(8, 2, "01") != 0) continue;
+			const float x = X(d);
+			const int mon = std::clamp(std::atoi(iso.substr(5, 2).c_str()), 1, 12);
+			dl->AddLine(ImVec2(x, lanesTop - 14.0f), ImVec2(x, corner.y), mon == 1 ? Theme::u32(Theme::warm(0.28f)) : gridCol);
+			dl->AddText(ImVec2(x + 3.0f, lanesTop - 28.0f), Theme::u32(Theme::TextDim), kMonthsShort[mon - 1]);
+			if (mon == 1)
+			{
+				dl->AddLine(ImVec2(x, origin.y), ImVec2(x, lanesTop), tickCol);
+				dl->AddText(ImVec2(x + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading), iso.substr(0, 4).c_str());
+			}
+		}
+	}
+	dl->AddLine(ImVec2(X(today), origin.y), ImVec2(X(today), corner.y), Theme::u32(Theme::alpha(Theme::Warn, 0.7f)), 1.5f);
+	dl->AddLine(ImVec2(origin.x, lanesTop), ImVec2(corner.x, lanesTop), Theme::u32(Theme::warm(0.30f)));
+	dl->PopClipRect();
+
+	// The events.
+	const float laneTop = lanesTop + 12.0f - st.scrollY;
+	dl->PushClipRect(ImVec2(origin.x, lanesTop), corner, true);
+	for (const Ev& e : evs)
+	{
+		const Row& row = db.rows[e.row];
+		const std::string title = row.title.empty() ? std::string("Untitled") : row.title;
+		const bool dragging = s_tlDrag.row == row.id && s_tlDrag.mode != 0;
+		std::int64_t a = e.a, b = e.b;
+		if (dragging)
+		{
+			if (s_tlDrag.mode == 1) { a += s_tlDrag.days; b += s_tlDrag.days; }
+			else if (s_tlDrag.mode == 2) a = std::min(a + s_tlDrag.days, b);
+			else b = std::max(b + s_tlDrag.days, a);
+		}
+		const bool asSpan = b > a;
+		const float y = laneTop + static_cast<float>(e.lane) * kTlLaneH;
+		if (y + kTlLaneH < lanesTop || y > corner.y) continue;
+		ImVec4 colour = Theme::Accent;
+		if (colourP)
+			if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
+		const bool selected = row.id == s_selRow;
+
+		ImVec2 hitA, hitB;
+		float bx0 = 0, bx1 = 0;
+		if (asSpan)
+		{
+			bx0 = X(a) + 1.0f;
+			bx1 = std::max(bx0 + 12.0f, X(b + 1) - 1.0f);
+			hitA = ImVec2(bx0, y + 4.0f);
+			hitB = ImVec2(bx1, y + kTlLaneH - 6.0f);
+		}
+		else
+		{
+			const float cx = X(static_cast<double>(a) + 0.5);
+			hitA = ImVec2(cx - 10.0f, y + 4.0f);
+			hitB = ImVec2(cx + 20.0f + e.labelW, y + kTlLaneH - 6.0f);
+		}
+		if (hitB.x < origin.x || hitA.x > corner.x) continue;
+		++s_stats.rowsDrawn;
+		pushUuid(row.id);
+		ImGui::SetCursorScreenPos(hitA);
+		ImGui::SetNextItemAllowOverlap();   // a bar's ends are handles of their own, on top
+		ImGui::InvisibleButton("##ev", ImVec2(hitB.x - hitA.x, hitB.y - hitA.y));
+		note("bar:" + row.title);
+		const bool hov = ImGui::IsItemHovered(), act = ImGui::IsItemActive();
+		if (hov || act) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+		if (releasedWithoutDrag()) s_selRow = row.id;
+		if (act && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
+			s_tlDrag = { row.id, 1, static_cast<int>(std::lround(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x / ppd)) };
+		if (ImGui::IsItemDeactivated() && s_tlDrag.row == row.id && s_tlDrag.mode == 1)
+		{
+			shiftDates(db.id, row.id, startP->id, endP ? endP->id : UUID{}, 1, s_tlDrag.days);
+			s_tlDrag = DateDrag{};
+		}
+
+		if (asSpan)
+		{
+			dl->AddRectFilled(hitA, hitB, Theme::u32(Theme::alpha(colour, hov || act ? 0.97f : 0.82f)), 6.0f);
+			if (selected) dl->AddRect(hitA, hitB, Theme::u32(Theme::AccentBright), 6.0f, 0, 2.0f);
+			dl->PushClipRect(ImVec2(hitA.x + 4.0f, hitA.y), ImVec2(hitB.x - 4.0f, hitB.y), true);
+			dl->AddText(ImVec2(std::max(hitA.x, origin.x) + 8.0f, hitA.y + (hitB.y - hitA.y - ImGui::GetTextLineHeight()) * 0.5f),
+			            Theme::u32(Theme::Ink), title.c_str());
+			dl->PopClipRect();
+			// The ends, to pull: only a bar with an End column can have them.
+			if (endP && !tasksData)
+			{
+				const float hw = std::min(9.0f, (bx1 - bx0) * 0.3f);
+				for (int side = 0; side < 2; ++side)
+				{
+					ImGui::SetCursorScreenPos(ImVec2(side == 0 ? bx0 : bx1 - hw, hitA.y));
+					ImGui::InvisibleButton(side == 0 ? "##rs" : "##re", ImVec2(hw, hitB.y - hitA.y));
+					note(std::string(side == 0 ? "bar-start:" : "bar-end:") + row.title);
+					if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+					if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
+						s_tlDrag = { row.id, side == 0 ? 2 : 3, static_cast<int>(std::lround(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x / ppd)) };
+					if (ImGui::IsItemDeactivated() && s_tlDrag.row == row.id && s_tlDrag.mode == (side == 0 ? 2 : 3))
+					{
+						shiftDates(db.id, row.id, startP->id, endP->id, s_tlDrag.mode, s_tlDrag.days);
+						s_tlDrag = DateDrag{};
+					}
+					if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+					{
+						const float gx = side == 0 ? bx0 + 3.0f : bx1 - 3.0f;
+						dl->AddLine(ImVec2(gx, hitA.y + 6.0f), ImVec2(gx, hitB.y - 6.0f), Theme::u32(Theme::Ink), 2.0f);
+					}
+				}
+			}
+		}
+		else
+		{
+			const float cx = X(static_cast<double>(a) + 0.5), cy = y + kTlLaneH * 0.5f - 1.0f;
+			const ImVec2 dia[4] = { ImVec2(cx, cy - 8.0f), ImVec2(cx + 8.0f, cy), ImVec2(cx, cy + 8.0f), ImVec2(cx - 8.0f, cy) };
+			dl->AddConvexPolyFilled(dia, 4, Theme::u32(Theme::alpha(colour, hov || act ? 1.0f : 0.9f)));
+			dl->AddPolyline(dia, 4, selected ? Theme::u32(Theme::AccentBright) : Theme::u32(Theme::warm(0.08f)), ImDrawFlags_Closed, selected ? 2.0f : 1.0f);
+			dl->AddText(ImVec2(cx + 14.0f, cy - ImGui::GetTextLineHeight() * 0.5f), Theme::u32(selected ? Theme::AccentBright : Theme::Text), title.c_str());
+		}
+		ImGui::PopID();
+	}
+	dl->PopClipRect();
+	if (evs.empty() && undated.empty())
+		dl->AddText(ImVec2(origin.x + 20.0f, lanesTop + 20.0f), Theme::u32(Theme::TextDim), "Double-click the axis to make an event, or press New Step.");
 	ImGui::EndChild();
+
+	// Rows with no date: drag one onto the axis to place it, or click it to open it.
+	if (!undated.empty())
+	{
+		ImGui::BeginChild("##tltray", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+		ImDrawList* tdl = ImGui::GetWindowDrawList();
+		const float ty = ImGui::GetCursorScreenPos().y;
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextDisabled("Not on the timeline yet:");
+		for (const std::size_t ri : undated)
+		{
+			const Row& row = db.rows[ri];
+			const std::string title = row.title.empty() ? std::string("Untitled") : row.title;
+			++s_stats.rowsDrawn;
+			ImGui::SameLine();
+			pushUuid(row.id);
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			const ImVec2 sz(ImGui::CalcTextSize(title.c_str()).x + 20.0f, ImGui::GetFrameHeight());
+			ImGui::InvisibleButton("##chip", sz);
+			note("undated:" + row.title);
+			if (releasedWithoutDrag()) s_selRow = row.id;   // on release: opening on the press would put the details in the way of a drag
+			if (ImGui::BeginDragDropSource())
+			{
+				ImGui::SetDragDropPayload("HE_PLANNER_ROW", &row.id, sizeof(UUID));
+				ImGui::TextUnformatted(title.c_str());
+				ImGui::EndDragDropSource();
+			}
+			tdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), Theme::u32(Theme::warm(ImGui::IsItemHovered() ? 0.30f : 0.20f)), 7.0f);
+			tdl->AddText(ImVec2(p.x + 10.0f, p.y + (sz.y - ImGui::GetFontSize()) * 0.5f), Theme::u32(Theme::Text), title.c_str());
+			ImGui::PopID();
+		}
+		(void)ty;
+		ImGui::EndChild();
+	}
 }
 
 // ── Pages ────────────────────────────────────────────────────────────────────
@@ -2710,6 +2767,49 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 		dl->AddText(ImVec2(origin.x + c * cellW + 6.0f, origin.y + 2.0f), Theme::u32(Theme::TextDim), kWeekdays[c]);
 
 	const float chipH = fh * 0.85f;
+	auto dayAtPos = [&](ImVec2 pos) {
+		const int col = std::clamp(static_cast<int>(std::floor((pos.x - origin.x) / cellW)), 0, 6);
+		const int wk  = std::clamp(static_cast<int>(std::floor((pos.y - origin.y - headH) / cellH)), 0, 5);
+		return gridStart + wk * 7 + col;
+	};
+	const ImGuiIO& io = ImGui::GetIO();
+	const bool noDates = db.id == tasksDatabaseId();
+
+	// A span of days as a bar across the weeks it covers (a segment per week), square where it carries on.
+	// `lane` gives each week its own row of bars; a negative lane is a ghost, drawn on top of the cells.
+	auto drawSegment = [&](std::int64_t a, std::int64_t b, std::int64_t weekStart, int lane, const ImVec4& colour, float alpha, bool outline,
+	                       const char* label, bool startsHere, bool endsHere, ImVec2& outA, ImVec2& outB) {
+		const int wk = static_cast<int>((weekStart - gridStart) / 7);
+		const std::int64_t sa = std::max(a, weekStart), sb = std::min(b, weekStart + 6);
+		const float x0 = origin.x + static_cast<float>(sa - weekStart) * cellW + 3.0f;
+		const float x1 = origin.x + static_cast<float>(sb - weekStart + 1) * cellW - 3.0f;
+		const float y0 = origin.y + headH + static_cast<float>(wk) * cellH + fh + 2.0f + static_cast<float>(lane) * (chipH + 2.0f);
+		outA = ImVec2(x0, y0);
+		outB = ImVec2(x1, y0 + chipH);
+		const ImDrawFlags flags = (startsHere ? ImDrawFlags_RoundCornersLeft : ImDrawFlags_RoundCornersNone) |
+		                          (endsHere ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersNone);
+		dl->AddRectFilled(outA, outB, Theme::u32(Theme::alpha(colour, alpha)), 4.0f, flags);
+		if (outline) dl->AddRect(outA, outB, Theme::u32(Theme::AccentBright), 4.0f, flags, 1.5f);
+		if (label)
+		{
+			dl->PushClipRect(outA, outB, true);
+			dl->AddText(ImVec2(x0 + 5.0f, y0 + (chipH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::Ink), label);
+			dl->PopClipRect();
+		}
+	};
+	auto drawSpanGhost = [&](std::int64_t a, std::int64_t b, const ImVec4& colour) {
+		for (int wk = 0; wk < 6; ++wk)
+		{
+			const std::int64_t ws0 = gridStart + wk * 7;
+			if (b < ws0 || a > ws0 + 6) continue;
+			ImVec2 pa, pb;
+			drawSegment(a, b, ws0, 0, colour, 0.45f, true, nullptr, a >= ws0, b <= ws0 + 6, pa, pb);
+		}
+	};
+
+	// The days: a drag across them makes an event over exactly those days, a double-click or the + one day.
+	bool createGhost = false;
+	std::int64_t createA = 0, createB = 0;
 	for (int week = 0; week < 6; ++week)
 		for (int c = 0; c < 7; ++c)
 		{
@@ -2718,47 +2818,31 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 			splitDay(day, y, m, dnum);
 			const ImVec2 p(origin.x + c * cellW, origin.y + headH + week * cellH);
 			ImGui::PushID(static_cast<int>(week * 7 + c));
-
-			// The day itself: the target for a drag, and a double-click makes a row.
 			ImGui::SetCursorScreenPos(p);
-			ImGui::SetNextItemAllowOverlap();   // the rows on this day sit on top of it and take the clicks
+			ImGui::SetNextItemAllowOverlap();   // the bars on this day sit on top of it and take the clicks
 			ImGui::InvisibleButton("##day", ImVec2(cellW, cellH));
 			char key[32];
 			std::snprintf(key, sizeof(key), "day:%04d-%02d-%02d", y, m, dnum);
 			note(key);
-			bool cellHover = false, overPlus = false;
-			ImVec2 plusAt;
+			const bool cellHover = ImGui::IsItemHovered();
+			const ImVec2 plusA(p.x + cellW - 26.0f, p.y + 3.0f), plusB(p.x + cellW - 4.0f, p.y + 25.0f);
+			s_rects[std::string("cal-add:") + key] = Rect{ plusA.x, plusA.y, plusB.x, plusB.y };
+			const bool overPlus = cellHover && io.MousePos.x >= plusA.x && io.MousePos.x <= plusB.x && io.MousePos.y >= plusA.y && io.MousePos.y <= plusB.y;
+			const ImVec2 plusAt((plusA.x + plusB.x) * 0.5f, (plusA.y + plusB.y) * 0.5f);
+			if (!noDates && cellHover && (overPlus ? ImGui::IsMouseClicked(ImGuiMouseButton_Left) : ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)))
+				newDated(db.id, view.id, day, day);
+			if (!noDates && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
 			{
-				// A + in the corner of the hovered day makes an event there (a double-click anywhere on it does too).
-				cellHover = ImGui::IsItemHovered();
-				const ImVec2 plusA(p.x + cellW - 26.0f, p.y + 3.0f), plusB(p.x + cellW - 4.0f, p.y + 25.0f);
-				s_rects[std::string("cal-add:") + key] = Rect{ plusA.x, plusA.y, plusB.x, plusB.y };
-				const ImVec2 mp = ImGui::GetIO().MousePos;
-				overPlus = cellHover && mp.x >= plusA.x && mp.x <= plusB.x && mp.y >= plusA.y && mp.y <= plusB.y;
-				plusAt = ImVec2((plusA.x + plusB.x) * 0.5f, (plusA.y + plusB.y) * 0.5f);
-				if (cellHover && (overPlus ? ImGui::IsMouseClicked(ImGuiMouseButton_Left) : ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) && db.id != tasksDatabaseId())
-					newDated(db.id, view.id, day, day, false);
+				const std::int64_t da = dayAtPos(io.MouseClickedPos[0]), dbb = dayAtPos(io.MousePos);
+				createGhost = true;
+				createA = std::min(da, dbb);
+				createB = std::max(da, dbb);
 			}
-			if (ImGui::BeginDragDropTarget())
+			if (!noDates && ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+			    std::abs(io.MousePos.x - io.MouseClickedPos[0].x) + std::abs(io.MousePos.y - io.MouseClickedPos[0].y) >= 6.0f)
 			{
-				if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_PLANNER_DAY"))
-					if (pl->DataSize == static_cast<int>(sizeof(UUID)))
-					{
-						const UUID rowId = *static_cast<const UUID*>(pl->Data);
-						const UUID dbId = db.id, sid = dateP->id, eid = endP ? endP->id : UUID{};
-						post([=] {
-							s_ws.edit(dbId, [&](Database& d) {
-								std::int64_t ms = 0;
-								if (!d.date(rowId, sid, ms)) return false;
-								const std::int64_t shift = (day - dayOf(ms)) * kDayMs;
-								if (shift == 0) return false;
-								bool any = d.setDate(rowId, sid, ms + shift, taskNowMs());
-								if (eid != UUID{} && d.date(rowId, eid, ms)) any |= d.setDate(rowId, eid, ms + shift, taskNowMs());
-								return any;
-							});
-						});
-					}
-				ImGui::EndDragDropTarget();
+				const std::int64_t da = dayAtPos(io.MouseClickedPos[0]), dbb = dayAtPos(io.MousePos);
+				if (da != dbb) newDated(db.id, view.id, std::min(da, dbb), std::max(da, dbb));
 			}
 
 			const bool otherMonth = m != s_calMonth;
@@ -2769,52 +2853,108 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 			std::snprintf(num, sizeof(num), "%d", dnum);
 			dl->AddText(ImVec2(p.x + 6.0f, p.y + 3.0f),
 			            Theme::u32(day == today ? Theme::Warn : otherMonth ? Theme::TextDim : Theme::Text), num);
-			if (cellHover)
+			if (cellHover && !noDates)
 				PlannerIcons::drawIcon(dl, PlannerIcons::Icon::Plus, plusAt, Theme::u32(overPlus ? Theme::AccentBright : Theme::TextDim));
-
-			// The rows on this day, as many as fit.
-			const int fit = std::max(0, static_cast<int>((cellH - fh - 6.0f) / (chipH + 2.0f)));
-			int shown = 0, more = 0;
-			for (const Span& sp : spans)
-			{
-				if (day < sp.a || day > sp.b) continue;
-				if (shown >= fit) { ++more; continue; }
-				const Row& row = db.rows[sp.row];
-				ImGui::PushID(static_cast<int>(sp.row));
-				const ImVec2 cp(p.x + 3.0f, p.y + fh + 2.0f + shown * (chipH + 2.0f));
-				ImGui::SetCursorScreenPos(cp);
-				ImGui::InvisibleButton("##chip", ImVec2(cellW - 6.0f, chipH));
-				note("cal-chip:" + row.title);
-				// Opens when the button is let go without having been dragged: opening on the
-				// press would move the grid under the cursor in the middle of a drag.
-				if (releasedWithoutDrag())
-					s_selRow = row.id;
-				if (ImGui::BeginDragDropSource())
-				{
-					ImGui::SetDragDropPayload("HE_PLANNER_DAY", &row.id, sizeof(UUID));
-					ImGui::TextUnformatted(row.title.empty() ? "Untitled" : row.title.c_str());
-					ImGui::EndDragDropSource();
-				}
-				ImVec4 colour = Theme::Accent;
-				if (colourP)
-					if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
-				dl->AddRectFilled(cp, ImVec2(cp.x + cellW - 6.0f, cp.y + chipH),
-				                  Theme::u32(Theme::alpha(colour, ImGui::IsItemHovered() ? 0.95f : 0.75f)), 3.0f);
-				dl->PushClipRect(cp, ImVec2(cp.x + cellW - 6.0f, cp.y + chipH), true);
-				dl->AddText(ImVec2(cp.x + 4.0f, cp.y + (chipH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::Ink),
-				            row.title.empty() ? "Untitled" : row.title.c_str());
-				dl->PopClipRect();
-				ImGui::PopID();
-				++shown;
-			}
-			if (more > 0)
-			{
-				char buf[24];
-				std::snprintf(buf, sizeof(buf), "+%d more", more);
-				dl->AddText(ImVec2(p.x + 6.0f, p.y + cellH - ImGui::GetTextLineHeight() - 2.0f), Theme::u32(Theme::TextDim), buf);
-			}
 			ImGui::PopID();
 		}
+
+	// The events, as bars that carry on across the days (and the weeks) they cover.
+	const int fit = std::max(0, static_cast<int>((cellH - fh - 6.0f) / (chipH + 2.0f)));
+	std::vector<int> hiddenOnDay(42, 0);
+	for (int week = 0; week < 6; ++week)
+	{
+		const std::int64_t ws0 = gridStart + week * 7;
+		struct Seg { const Span* sp; std::int64_t a, b; int lane; };
+		std::vector<Seg> segs;
+		for (const Span& sp : spans)
+			if (sp.b >= ws0 && sp.a <= ws0 + 6) segs.push_back({ &sp, std::max(sp.a, ws0), std::min(sp.b, ws0 + 6), 0 });
+		std::stable_sort(segs.begin(), segs.end(), [](const Seg& x, const Seg& y) { return x.a != y.a ? x.a < y.a : x.b > y.b; });
+		std::vector<std::int64_t> laneEnd;
+		for (Seg& sg : segs)
+		{
+			std::size_t l = 0;
+			while (l < laneEnd.size() && laneEnd[l] >= sg.a) ++l;
+			if (l == laneEnd.size()) laneEnd.push_back(sg.b);
+			laneEnd[l] = sg.b;
+			sg.lane = static_cast<int>(l);
+		}
+		for (const Seg& sg : segs)
+		{
+			if (sg.lane >= fit)
+			{
+				for (std::int64_t d = sg.a; d <= sg.b; ++d) ++hiddenOnDay[static_cast<std::size_t>(week * 7 + (d - ws0))];
+				continue;
+			}
+			const Row& row = db.rows[sg.sp->row];
+			const std::string title = row.title.empty() ? std::string("Untitled") : row.title;
+			ImGui::PushID(static_cast<int>(sg.sp->row));
+			ImGui::PushID(week);
+			ImVec4 colour = Theme::Accent;
+			if (colourP)
+				if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
+			const bool startsHere = sg.sp->a >= ws0, endsHere = sg.sp->b <= ws0 + 6;
+			ImVec2 pa, pb;
+			// Where the bar is: the item first (it is the same rectangle), then what it looks like.
+			drawSegment(sg.a, sg.b, ws0, sg.lane, colour, 0.0f, false, nullptr, startsHere, endsHere, pa, pb);
+			ImGui::SetCursorScreenPos(pa);
+			ImGui::SetNextItemAllowOverlap();   // the right end is a handle of its own
+			ImGui::InvisibleButton("##chip", ImVec2(pb.x - pa.x, pb.y - pa.y));
+			if (startsHere) note("cal-chip:" + row.title);
+			const bool hov = ImGui::IsItemHovered(), act = ImGui::IsItemActive();
+			if (releasedWithoutDrag()) s_selRow = row.id;
+			// Dragged to another day, the bar moves by that many days (also across weeks).
+			if (act && !noDates && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
+				s_calDrag = { row.id, 1, static_cast<int>(dayAtPos(io.MousePos) - dayAtPos(io.MouseClickedPos[0])) };
+			if (ImGui::IsItemDeactivated() && s_calDrag.row == row.id && s_calDrag.mode == 1)
+			{
+				shiftDates(db.id, row.id, dateP->id, endP ? endP->id : UUID{}, 1, s_calDrag.days);
+				s_calDrag = DateDrag{};
+			}
+			const bool selected = row.id == s_selRow;
+			drawSegment(sg.a, sg.b, ws0, sg.lane, colour, hov || act ? 0.97f : 0.8f, selected, title.c_str(), startsHere, endsHere, pa, pb);
+			// The right end of the last piece: pull it to give the event more days or fewer.
+			if (endsHere && !noDates)
+			{
+				ImGui::SetCursorScreenPos(ImVec2(pb.x - 8.0f, pa.y));
+				ImGui::InvisibleButton("##end", ImVec2(8.0f, pb.y - pa.y));
+				note("cal-end:" + row.title);
+				if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+				{
+					ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+					dl->AddLine(ImVec2(pb.x - 4.0f, pa.y + 4.0f), ImVec2(pb.x - 4.0f, pb.y - 4.0f), Theme::u32(Theme::Ink), 2.0f);
+				}
+				if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
+					s_calDrag = { row.id, 3, static_cast<int>(dayAtPos(io.MousePos) - dayAtPos(io.MouseClickedPos[0])) };
+				if (ImGui::IsItemDeactivated() && s_calDrag.row == row.id && s_calDrag.mode == 3)
+				{
+					shiftDates(db.id, row.id, dateP->id, endP ? endP->id : UUID{}, 3, s_calDrag.days);
+					s_calDrag = DateDrag{};
+				}
+			}
+			ImGui::PopID();
+			ImGui::PopID();
+		}
+	}
+	for (int i = 0; i < 42; ++i)
+		if (hiddenOnDay[static_cast<std::size_t>(i)] > 0)
+		{
+			char buf[24];
+			std::snprintf(buf, sizeof(buf), "+%d more", hiddenOnDay[static_cast<std::size_t>(i)]);
+			const ImVec2 p(origin.x + (i % 7) * cellW, origin.y + headH + (i / 7) * cellH);
+			dl->AddText(ImVec2(p.x + 6.0f, p.y + cellH - ImGui::GetTextLineHeight() - 2.0f), Theme::u32(Theme::TextDim), buf);
+		}
+
+	// What a drag would do, drawn over the days.
+	if (createGhost) drawSpanGhost(createA, createB, ImVec4(Theme::Accent));
+	if (s_calDrag.mode != 0)
+		for (const Span& sp : spans)
+			if (db.rows[sp.row].id == s_calDrag.row)
+			{
+				std::int64_t a = sp.a, b = sp.b;
+				if (s_calDrag.mode == 1) { a += s_calDrag.days; b += s_calDrag.days; }
+				else b = std::max(a, b + s_calDrag.days);
+				drawSpanGhost(a, b, ImVec4(Theme::Accent));
+			}
 	ImGui::SetCursorScreenPos(origin);
 	ImGui::Dummy(ImVec2(cellW * 7.0f, headH + cellH * 6.0f));
 	ImGui::EndChild();
@@ -2921,7 +3061,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	if (view->kind == ViewKind::Timeline)
 	{
 		ImGui::BeginDisabled(noDates);
-		if (EditorWidgets::primaryButton("New Step")) newDated(dbId, view->id, today, today + 2, true);
+		if (EditorWidgets::primaryButton("New Step")) newDated(dbId, view->id, today, today + 2);
 		ImGui::EndDisabled();
 	}
 	else if (view->kind == ViewKind::Calendar)
@@ -2932,7 +3072,8 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			int y = 0, m = 0, dn = 0;
 			splitDay(today, y, m, dn);
 			// Today when it is on the month shown, else the first day of that month.
-			newDated(dbId, view->id, (s_calMonth == 0 || (y == s_calYear && m == s_calMonth)) ? today : firstOfMonth(s_calYear, s_calMonth), 0, false);
+			const std::int64_t day = (s_calMonth == 0 || (y == s_calYear && m == s_calMonth)) ? today : firstOfMonth(s_calYear, s_calMonth);
+			newDated(dbId, view->id, day, day);
 		}
 		ImGui::EndDisabled();
 	}
@@ -3010,8 +3151,8 @@ void drawDatabase(AppContext& ctx, const Database& db)
 				const ImVec2 p = ImGui::GetCursorScreenPos();
 				ImGui::PushID(i);
 				const float bh = ImGui::GetFrameHeight();
-				if (ImGui::InvisibleButton("##zoom", ImVec2(w, bh))) s_tlZoom = i;
-				const bool on = s_tlZoom == i, hov = ImGui::IsItemHovered();
+				if (ImGui::InvisibleButton("##zoom", ImVec2(w, bh))) s_tlPending = kZoomDayW[i];
+				const bool on = std::abs(s_tlPpd - kZoomDayW[i]) < 0.5f, hov = ImGui::IsItemHovered();
 				EditorWidgets::helpForKey("Planner/Timeline Zoom");
 				note(std::string("zoom:") + names[i]);
 				ImGui::PopID();
@@ -3026,6 +3167,18 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		ImGui::SameLine();
 		if (toolButton("Planner/Today", "Today", PlannerIcons::Icon::Calendar, false)) s_tlGoToday = true;
 		note("timeline:today");
+		{
+			const float bh = ImGui::GetFrameHeight();
+			ImGui::SameLine();
+			if (PlannerIcons::iconButton("Timeline Zoom Out", PlannerIcons::Icon::ZoomOut, false, true, "Planner/Zoom Out", false, 0, ImVec2(bh, bh))) s_tlPending = s_tlPpd / 1.5f;
+			note("timeline:zoomout");
+			ImGui::SameLine(0, 2);
+			if (PlannerIcons::iconButton("Timeline Zoom In", PlannerIcons::Icon::ZoomIn, false, true, "Planner/Zoom In", false, 0, ImVec2(bh, bh))) s_tlPending = s_tlPpd * 1.5f;
+			note("timeline:zoomin");
+			ImGui::SameLine(0, 2);
+			if (PlannerIcons::iconButton("Timeline Fit", PlannerIcons::Icon::Fit, false, true, "Planner/Fit", false, 0, ImVec2(bh, bh))) s_tlFit = true;
+			note("timeline:fit");
+		}
 		ImGui::SameLine();
 		if (toolButton("Planner/Timeline Settings", "Settings", PlannerIcons::Icon::Gear, false)) ImGui::OpenPopup("##tlsettings");
 		note("timeline:settings");
@@ -3878,7 +4031,7 @@ UUID selectedRow() { return s_selRow; }
 void showCalendarMonth(int year, int month) { s_calYear = year; s_calMonth = std::clamp(month, 1, 12); }
 int  calendarYear() { return s_calYear; }
 int  calendarMonth() { return s_calMonth; }
-void setTimelineZoom(int level) { s_tlZoom = std::clamp(level, 0, 2); }
+void setTimelineZoom(int level) { s_tlPpd = kZoomDayW[std::clamp(level, 0, 2)]; s_tlPending = 0; }
 
 void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; s_boardId = UUID{}; }
 void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text,
@@ -3935,8 +4088,10 @@ void reset()
 	s_boardId = s_deleteBoard = UUID{};
 	s_deleteBoardOpen = false;
 	PlannerBoardView::reset();
-	s_tlZoom = 0;
-	s_barDrag = s_barResize = BarDrag{};
+	s_tlPpd = 24.0f;
+	s_tlPending = 0;
+	s_tlViews.clear();
+	s_tlDrag = s_calDrag = DateDrag{};
 	s_deletePageOpen = false;
 	s_focusAtEnd = false;
 	s_blockEdits.clear();

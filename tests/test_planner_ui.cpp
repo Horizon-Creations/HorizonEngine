@@ -922,15 +922,15 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	CHECK(v->endProperty == end);
 	shotTo(ctx, "planner_timeline");
 
-	// Alpha runs five days, Beta one; Gamma has no start date and no bar.
+	// Alpha runs five days: a bar. Beta is one day: a node. Gamma has no start date: it waits in the tray.
 	const PlannerPanel::Rect ra = PlannerPanel::controlRect("bar:Alpha");
 	const PlannerPanel::Rect rb = PlannerPanel::controlRect("bar:Beta");
 	REQUIRE(ra.x1 > ra.x0);
 	REQUIRE(rb.x1 > rb.x0);
-	CHECK(ra.x1 - ra.x0 == doctest::Approx(5 * 24.0f));
-	CHECK(rb.x1 - rb.x0 == doctest::Approx(24.0f));
-	CHECK(rb.x0 - ra.x0 == doctest::Approx(6 * 24.0f));
+	CHECK(ra.x1 - ra.x0 == doctest::Approx(5 * 24.0f - 2.0f));   // a day is 24 pixels, the bar is inset a pixel each side
+	CHECK(rb.x0 > ra.x1);
 	CHECK(PlannerPanel::controlRect("bar:Gamma").x1 <= 0);
+	CHECK(PlannerPanel::controlRect("undated:Gamma").x1 > 0);
 	CHECK(PlannerPanel::lastDrawStats().rows == 3);
 	CHECK(PlannerPanel::lastDrawStats().rowsDrawn == 3);
 
@@ -965,7 +965,7 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	idle(ctx);
 	{
 		const PlannerPanel::Rect ra2 = PlannerPanel::controlRect("bar:Alpha");
-		CHECK(ra2.x1 - ra2.x0 == doctest::Approx(7 * 12.0f));
+		CHECK(ra2.x1 - ra2.x0 == doctest::Approx(7 * 12.0f - 2.0f));
 	}
 	PlannerPanel::setTimelineZoom(0);
 	idle(ctx);
@@ -1273,7 +1273,10 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 	const PlannerPanel::Rect chipA = PlannerPanel::controlRect("cal-chip:Alpha");
 	const PlannerPanel::Rect chipB = PlannerPanel::controlRect("cal-chip:Beta");
 	CHECK(inside(chipA, d20));
-	CHECK(inside(chipB, d22));   // Beta runs 20-22: its last chip is on the 22nd
+	// Beta runs 20-22: one bar across the three days, not a chip on each.
+	CHECK(chipB.x0 >= d20.x0);
+	CHECK(chipB.x1 <= d22.x1);
+	CHECK(chipB.x1 - chipB.x0 > 2.0f * (d20.x1 - d20.x0));
 	CHECK(PlannerPanel::controlRect("cal-chip:Gamma").x1 <= 0);
 
 	// Navigation.
@@ -1309,6 +1312,35 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 	REQUIRE(db->rows.size() == 4);
 	REQUIRE(db->date(db->rows[3].id, when, ms));
 	CHECK(ms == day("2026-10-05T00:00:00.000Z"));
+
+	// A drag across the 8th to the 10th makes an event over those three days.
+	if (PlannerPanel::controlRect("flyover:close").x1 > 0) REQUIRE(click(ctx, "flyover:close"));   // the new row's details cover the grid
+	idle(ctx);
+	dragTo(ctx, centre(PlannerPanel::controlRect("day:2026-10-08")), centre(PlannerPanel::controlRect("day:2026-10-10")));
+	idle(ctx);
+	db = ws->find(dbId);
+	REQUIRE(db->rows.size() == 5);
+	REQUIRE(db->date(db->rows[4].id, when, ms));
+	CHECK(ms == day("2026-10-08T00:00:00.000Z"));
+	REQUIRE(db->date(db->rows[4].id, end, ms));
+	CHECK(ms == day("2026-10-10T00:00:00.000Z"));
+	const PlannerPanel::Rect span = PlannerPanel::controlRect("cal-chip:New event");
+	CHECK(span.x1 - span.x0 > 2.0f * (PlannerPanel::controlRect("day:2026-10-08").x1 - PlannerPanel::controlRect("day:2026-10-08").x0));
+
+	// Its right end pulled to the 13th: three more days, across into the next week.
+	if (PlannerPanel::controlRect("flyover:close").x1 > 0) REQUIRE(click(ctx, "flyover:close"));
+	{
+		const PlannerPanel::Rect handle = PlannerPanel::controlRect("cal-end:New event");
+		REQUIRE(handle.x1 > handle.x0);
+		dragTo(ctx, centre(handle), centre(PlannerPanel::controlRect("day:2026-10-13")));
+		idle(ctx);
+		db = ws->find(dbId);
+		REQUIRE(db->date(db->rows[4].id, end, ms));
+		INFO("end is " << taskTimeToIso(ms));
+		CHECK(ms == day("2026-10-13T00:00:00.000Z"));
+		REQUIRE(db->date(db->rows[4].id, when, ms));
+		CHECK(ms == day("2026-10-08T00:00:00.000Z"));   // the start stayed
+	}
 }
 
 TEST_CASE("planner ui pages: a block dragged by its handle lands before or after another")
@@ -2348,7 +2380,7 @@ TEST_CASE("planner ui: Delete Page asks once, deletes, and the question goes awa
 	CHECK(ImGui::GetCurrentContext()->OpenPopupStack.Size == 0);
 }
 
-TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes one, an undated row gets dates by dragging, names are typed in place")
+TEST_CASE("planner ui: timeline events - New Step, a double-click on the axis, dragging, zoom and pan, undated rows dropped from the tray")
 {
 	Harness harness;
 	Project proj("he_planner_ui_timeline_steps");
@@ -2356,7 +2388,6 @@ TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes o
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
 	newTable(ctx);
-	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
 	UUID start, end, undated;
@@ -2372,57 +2403,96 @@ TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes o
 	REQUIRE(click(ctx, "data:Untitled table"));
 	idle(ctx);
 	const std::int64_t today = taskNowMs() / 86400000;
+	std::int64_t ms = 0;
 
-	// New Step: a dated row from today for three days, in the file, with its title waiting to be typed.
+	// New Step: an event from today for three days, in the file, with its details open to name it.
 	const std::size_t before = ws->find(dbId)->rows.size();
 	REQUIRE(click(ctx, "New Row"));   // "New Step" in a timeline
 	idle(ctx);
 	REQUIRE(ws->find(dbId)->rows.size() == before + 1);
 	const Row& made = ws->find(dbId)->rows.back();
 	CHECK(made.title == "New step");
-	std::int64_t ms = 0;
 	REQUIRE(ws->find(dbId)->date(made.id, start, ms));
 	CHECK(ms / 86400000 == today);
 	REQUIRE(ws->find(dbId)->date(made.id, end, ms));
 	CHECK(ms / 86400000 == today + 2);
-	CHECK(PlannerPanel::controlRect("timeline:rename").x1 > PlannerPanel::controlRect("timeline:rename").x0);
-	CHECK(PlannerPanel::controlRect("bar:New step").x1 > 0);
-
-	// The last lane: dragging across four days makes a step covering exactly those days.
-	const PlannerPanel::Rect lane = PlannerPanel::controlRect("timeline:new");
+	CHECK(PlannerPanel::selectedRow() == made.id);
+	CHECK(PlannerPanel::controlRect("flyover:close").x1 > 0);
 	const PlannerPanel::Rect bar = PlannerPanel::controlRect("bar:New step");
-	REQUIRE(lane.x1 > lane.x0);
-	const float y = centre(lane).y;
-	const float x0 = bar.x0 + 12.0f + 24.0f * 5, x1 = x0 + 24.0f * 3;   // day today+5 .. today+8
-	dragTo(ctx, ImVec2(x0, y), ImVec2(x1, y));
+	REQUIRE(bar.x1 > bar.x0);
+	CHECK(bar.x1 - bar.x0 == doctest::Approx(3 * 24.0f - 2.0f));
+	REQUIRE(click(ctx, "flyover:close"));
+	idle(ctx);
+
+	// A double-click on the empty axis makes a one-day event there: a node.
+	const PlannerPanel::Rect canvas = PlannerPanel::controlRect("timeline:canvas");
+	REQUIRE(canvas.x1 > canvas.x0);
+	const ImVec2 spot(bar.x0 + 24.0f * 6 + 12.0f, canvas.y1 - 60.0f);   // today + 6
+	ImGui::GetIO().AddMousePosEvent(spot.x, spot.y);
+	frame(ctx, false);
+	frame(ctx, false);
+	frame(ctx, true);
+	frame(ctx, false);
+	frame(ctx, true);
+	frame(ctx, false);
 	idle(ctx);
 	REQUIRE(ws->find(dbId)->rows.size() == before + 2);
-	const Row& dragged = ws->find(dbId)->rows.back();
-	REQUIRE(ws->find(dbId)->date(dragged.id, start, ms));
-	CHECK(ms / 86400000 == today + 5);
-	REQUIRE(ws->find(dbId)->date(dragged.id, end, ms));
-	CHECK(ms / 86400000 == today + 8);
+	REQUIRE(ws->find(dbId)->date(ws->find(dbId)->rows.back().id, start, ms));
+	CHECK(ms / 86400000 == today + 6);
+	CHECK(PlannerPanel::controlRect("bar:New step").x1 > 0);   // a node: its hit area is the diamond and its name
+	REQUIRE(click(ctx, "flyover:close"));
+	idle(ctx);
+	{
+		// Name it, so the two events can be told apart.
+		const UUID marker = ws->find(dbId)->rows.back().id;
+		REQUIRE(ws->edit(dbId, [&](Database& db) { return db.setTitle(marker, "Marker", 5); }));
+		idle(ctx);
+		CHECK(PlannerPanel::controlRect("bar:Marker").x1 > 0);
+	}
 
-	// A row without dates has a lane of its own: a drag across it sets them.
-	const PlannerPanel::Rect loose = PlannerPanel::controlRect("lane:Loose");
-	REQUIRE(loose.x1 > loose.x0);
-	const float ly = centre(loose).y;
-	dragTo(ctx, ImVec2(x0, ly), ImVec2(x1, ly));
+	// The wheel zooms at the cursor (the day under it stays under it); a drag on the background pans.
+	{
+		const PlannerPanel::Rect c = PlannerPanel::controlRect("timeline:canvas");
+		const ImVec2 at(c.x0 + 300.0f, c.y1 - 100.0f);
+		ImGui::GetIO().AddMousePosEvent(at.x, at.y);
+		settle(ctx);
+		const PlannerPanel::Rect b0 = PlannerPanel::controlRect("bar:New step");
+		ImGui::GetIO().AddMouseWheelEvent(0.0f, 3.0f);
+		frame(ctx, false);
+		settle(ctx);
+		const PlannerPanel::Rect b1 = PlannerPanel::controlRect("bar:New step");
+		CHECK(b1.x1 - b1.x0 > (b0.x1 - b0.x0) * 1.2f);   // wider: zoomed in
+		// Drag the background 100 pixels to the right: everything moves with the hand.
+		const float x1 = b1.x0;
+		dragTo(ctx, ImVec2(c.x0 + 200.0f, c.y1 - 100.0f), ImVec2(c.x0 + 300.0f, c.y1 - 100.0f));
+		idle(ctx);
+		CHECK(PlannerPanel::controlRect("bar:New step").x0 == doctest::Approx(x1 + 100.0f).epsilon(0.02));
+	}
+
+	// A row without dates sits in the tray; dropped on the axis it gets its Start there.
+	const PlannerPanel::Rect chip = PlannerPanel::controlRect("undated:Loose");
+	REQUIRE(chip.x1 > chip.x0);
+	const PlannerPanel::Rect c2 = PlannerPanel::controlRect("timeline:canvas");
+	dragTo(ctx, centre(chip), ImVec2(c2.x0 + 200.0f, c2.y1 - 150.0f));
 	idle(ctx);
 	REQUIRE(ws->find(dbId)->date(undated, start, ms));
-	CHECK(ms / 86400000 == today + 5);
-	REQUIRE(ws->find(dbId)->date(undated, end, ms));
-	CHECK(ms / 86400000 == today + 8);
-	CHECK(PlannerPanel::controlRect("lane:Loose").x1 <= 0);   // it has a bar now
+	CHECK(PlannerPanel::controlRect("undated:Loose").x1 <= 0);   // it is on the axis now
+	CHECK(PlannerPanel::controlRect("bar:Loose").x1 > 0);
 
-	// Zoom segments and Today.
+	// Zoom segments, the buttons and Today.
 	REQUIRE(click(ctx, "zoom:Weeks"));
 	idle(ctx);
-	const PlannerPanel::Rect wide = PlannerPanel::controlRect("bar:Loose");
-	CHECK(wide.x1 - wide.x0 == doctest::Approx(4 * 12.0f));
+	const PlannerPanel::Rect wk = PlannerPanel::controlRect("bar:New step");
+	CHECK(wk.x1 - wk.x0 == doctest::Approx(3 * 12.0f - 2.0f));
+	REQUIRE(click(ctx, "timeline:zoomin"));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("bar:New step").x1 - PlannerPanel::controlRect("bar:New step").x0 == doctest::Approx(3 * 18.0f - 2.0f));
+	REQUIRE(click(ctx, "timeline:fit"));
+	idle(ctx);
 	REQUIRE(click(ctx, "zoom:Days"));
 	REQUIRE(click(ctx, "timeline:today"));
 	idle(ctx);
+	CHECK(PlannerPanel::controlRect("bar:New step").x1 > 0);
 }
 
 TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their own data or on data that exists")
@@ -2448,7 +2518,7 @@ TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their
 	CHECK(tl.kind == ViewKind::Timeline);
 	CHECK(tl.dateProperty != UUID{});
 	CHECK(tl.endProperty != UUID{});
-	CHECK(PlannerPanel::controlRect("timeline:new").x1 > 0);   // the timeline is drawn
+	CHECK(PlannerPanel::controlRect("timeline:canvas").x1 > 0);   // the timeline is drawn
 	CHECK(PlannerPanel::controlRect("item:Untitled timeline").x1 > 0);
 
 	// There is no kanban category: boards are the whiteboards. The data of a timeline is shown as a calendar too.
