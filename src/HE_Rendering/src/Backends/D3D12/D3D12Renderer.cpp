@@ -9032,6 +9032,10 @@ struct D3D12RendererImpl
         rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         ComPtr<ID3D12Resource> res;
+        // A buffer always starts in COMMON: the runtime ignores any other InitialState (and the debug layer says so,
+        // once per buffer). UAV use promotes it from COMMON on first use, as it did before. Only the acceleration-
+        // structure state is a real initial state a buffer can be created in.
+        if (state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) state = D3D12_RESOURCE_STATE_COMMON;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
                    state, nullptr, IID_PPV_ARGS(&res))))
             return nullptr;
