@@ -294,7 +294,7 @@ Verified: `he_tests --test-case="planner*"` 88/88 (new: `test_mcp_tools_planner.
 
 - MCP (`McpToolsPlanner.cpp`): `planner_create_board`, `planner_read_board`, `planner_add_board_card` (text/frame/page/row), `planner_update_board_card`, `planner_delete_board_card`, `planner_connect_board_cards`, `planner_delete_board_arrow`; `planner_overview` now lists `whiteboards`. No image cards or PNG export over MCP (export needs the UI's font atlas on the main thread).
 - Minimap (`PlannerBoardView.cpp`, 180x120 bottom right, "Map" checkbox): click/drag centres the view; it takes the mouse there (`overMap`).
-- Export: `exportPng` draws the board into its own `ImDrawList` and rasterises it with `tests/ImGuiSoftwareRaster` (already compiled into the editor for EditorUiShot), `hePngWrite`; file `<project>/Exports/Planner/<title>.png`, longest side <= 4096, notification with the path. Texture-asset pictures show their label.
+- Export: `exportPng` draws the board into its own `ImDrawList` and rasterises it with `tests/ImGuiSoftwareRaster` (already compiled into the editor for EditorUiShot), `hePngWrite`; file `<project>/Export/Planner/<title>.png`, longest side <= 4096, notification with the path. Texture-asset pictures show their label.
 - Fixed on the way: `n->id` was read after `sendToBack` moved the vector (a new frame selected / returned the wrong card), in `createNode` and the MCP tool.
 Open: unused-media cleanup, board-title undo, pasted frames on top of cards, align ignores frame contents, MCP image cards / export, calendar week view, timeline start-edge drag, sidebar page nesting by drag, live collaboration, real-editor test and Windows/Linux builds.
 
@@ -331,3 +331,10 @@ Verified: `he_tests --test-case="planner*,*help*"` 130/130, HorizonEditor builds
 - Tabs draw their own hover/selected background inside their width (no overlap, 6 px gap).
 - Row details: a table keeps the docked drawer; timeline, calendar and board show them in a flyover window (`##rowflyover`, opens beside the last click, x or Esc closes: `flyover:close`).
 - Toolbars: `toolButton`, the zoom segments, the calendar's arrows and the whiteboard header all use `ImGui::GetFrameHeight()`; the calendar's Start/End/Colour combos moved into a Settings popup; Previous/Next are chevron icon buttons.
+
+## Handoff (Stand Export-Text, Link-Karten)
+
+Verified: `he_tests --test-case="planner*,*help*"`, HorizonEditor builds, audit clean; looked at an exported PNG (wrapped text, link card, arrow label). Not verified: the export in the real editor (the bug was probably the font atlas: it is a GPU texture there, its CPU pixels are not readable, so glyphs came out as white blocks; the new path does not use the atlas at all).
+- Export text: `PlannerFontText.h/.cpp` lays text out and blends glyphs from the UI font's own TTF data (`ImFont::Sources[0]->FontData`, stb_truetype in its own TU: its rect-pack types clash with imgui_internal.h). `drawNode`/edge labels call `putText`, which draws via ImGui on the canvas and collects runs in `s_textSink` during an export.
+- Export folder: `<project>/Export/Planner/<board title>.png` (the project's `Export` folder exists already). With `HE_UI_DUMP_DIR` the UI test copies the PNG there.
+- Link cards (Row, Page, Object): wash and bar in the link colour (red when the target is gone), glyph (table / page / cube), the name in the link colour and underlined under the mouse, what it is under it (data name, "Page", Asset/Scene/Entity/Editor panel), an arrow out, hand cursor. Double-click opens, as before.

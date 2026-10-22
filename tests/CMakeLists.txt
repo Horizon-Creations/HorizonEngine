@@ -934,6 +934,7 @@ add_executable(he_tests
     # The Planner tab, for test_planner_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads the Planner (already here) and the Task Board.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
@@ -1037,6 +1038,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     test_taskboard_footer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     test_planner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp

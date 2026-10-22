@@ -2204,7 +2204,16 @@ TEST_CASE("planner ui board: the minimap pans, Map hides it, Export PNG writes t
 	const std::filesystem::path file = PlannerBoardView::exportPathFor(proj.root(), "Level 1: the \"keep\"");
 	CHECK(file.filename() == "Level 1_ the _keep_.png");
 	std::string err;
+	// A page, a row and a text card with a long text, to see how links and wrapped text come out.
+	const UUID pageId = f.ws->createPage("Level concept")->id;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		Node* pg = bd.addNode(NodeType::Page, 100, 260, 260, 80, "", 2);
+		pg->page = pageId;
+		bd.addNode(NodeType::Text, 400, 260, 240, 120, "A long text that has to wrap onto several lines inside its card, with words of all sizes.", 2);
+		return true;
+	}));
 	REQUIRE_MESSAGE(PlannerBoardView::exportPng(services, f.id, file, &err), err);
+	if (const char* dump = std::getenv("HE_UI_DUMP_DIR")) std::filesystem::copy_file(file, std::filesystem::path(dump) / "planner_board_export.png", std::filesystem::copy_options::overwrite_existing);
 	int w = 0, h = 0, ch = 0;
 	unsigned char* px = stbi_load(file.string().c_str(), &w, &h, &ch, 4);
 	REQUIRE(px != nullptr);

@@ -8,6 +8,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "NotificationStore.h"
+#include "PlannerFontText.h"
 #include "PlannerIcons.h"
 #include "PlannerPanel.h"
 #include "PlannerWorkspace.h"
@@ -499,6 +500,49 @@ std::string labelOfNode(Workspace& ws, const Node& n)
 	}
 }
 
+// ── Text: the canvas lets ImGui draw it; the export collects it and draws it itself ─────────────
+struct SunkText { ImVec2 pos; float size; ImU32 col; std::string text; float wrapW; ImVec2 cmin, cmax; };
+std::vector<SunkText>* s_textSink = nullptr;
+UUID s_hoverNode;   // the card under the mouse (a link underlines)
+
+void putText(ImDrawList* dl, float size, ImVec2 pos, ImU32 col, const std::string& text, float wrapW, ImVec2 cmin, ImVec2 cmax)
+{
+	if (s_textSink) { s_textSink->push_back({ pos, size, col, text, wrapW, cmin, cmax }); return; }
+	dl->PushClipRect(cmin, cmax, true);
+	dl->AddText(ImGui::GetFont(), size, pos, col, text.c_str(), nullptr, wrapW);
+	dl->PopClipRect();
+}
+
+// What a link card says under its name.
+std::string linkKind(Workspace& ws, const Node& n)
+{
+	switch (n.type)
+	{
+	case NodeType::Row:
+	{
+		const Database* db = ws.find(n.database);
+		return db ? (db->name.empty() ? std::string("Row") : db->name) : std::string("not found");
+	}
+	case NodeType::Page: return ws.findPage(n.page) ? "Page" : "not found";
+	default:
+		switch (n.link.kind)
+		{
+		case TaskLinkKind::Asset:  return "Asset";
+		case TaskLinkKind::Scene:  return "Scene";
+		case TaskLinkKind::Entity: return "Entity";
+		case TaskLinkKind::Panel:  return "Editor panel";
+		default:                   return "Link";
+		}
+	}
+}
+
+bool linkMissing(Workspace& ws, const Node& n)
+{
+	if (n.type == NodeType::Row) { const Database* db = ws.find(n.database); return !db || !db->findRow(n.row); }
+	if (n.type == NodeType::Page) return !ws.findPage(n.page);
+	return false;
+}
+
 void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const Rect2& shown, bool selected, bool editing)
 {
 	ImVec2 a, b;
@@ -540,30 +584,52 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 				dl->AddImage(pic.tex, p0, ImVec2(p0.x + dw, p0.y + dh));
 			}
 			if (!editing && captionH > 0 && fontSize >= 5.0f)
-			{
-				dl->PushClipRect(a, b, true);
-				dl->AddText(ImGui::GetFont(), fontSize, ImVec2(a.x + pad, b.y - pad - fontSize * 1.2f),
-				            Theme::u32(coloured ? Theme::Ink : Theme::Text), n.text.c_str(), nullptr, std::max(10.0f, (b.x - a.x) - 2 * pad));
-				dl->PopClipRect();
-			}
+				putText(dl, fontSize, ImVec2(a.x + pad, b.y - pad - fontSize * 1.2f), Theme::u32(coloured ? Theme::Ink : Theme::Text), n.text,
+				        std::max(10.0f, (b.x - a.x) - 2 * pad), a, b);
 			return;
 		}
 	}
 	if (editing) return;   // the field over it draws the text
 
+	// A card that stands for something in the editor is a link: a coloured bar and glyph, the name in the link
+	// colour (underlined under the mouse), what it is under it, and an arrow out.
+	if (n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object)
+	{
+		const bool missing = linkMissing(ws, n);
+		const ImVec4 linkCol = missing ? Theme::Bad : ImVec4(0.50f, 0.74f, 1.0f, 1.0f);
+		const bool hot = s_hoverNode == n.id;
+		// A wash of the link colour over the card, a bar down its left side.
+		dl->AddRectFilled(a, b, Theme::u32(Theme::alpha(linkCol, hot ? 0.20f : 0.11f)), round);
+		dl->AddRectFilled(a, ImVec2(a.x + 5.0f * z, b.y), Theme::u32(Theme::alpha(linkCol, 0.95f)), round, ImDrawFlags_RoundCornersLeft);
+		const float midY = (a.y + b.y) * 0.5f;
+		const PlannerIcons::Icon icon = n.type == NodeType::Row ? PlannerIcons::Icon::Table
+		                              : n.type == NodeType::Page ? PlannerIcons::Icon::Page : PlannerIcons::Icon::Cube;
+		PlannerIcons::drawIcon(dl, icon, ImVec2(a.x + 24.0f * z, midY), Theme::u32(linkCol), 0, std::max(0.4f, 1.25f * z));
+		PlannerIcons::drawIcon(dl, PlannerIcons::Icon::ArrowOut, ImVec2(b.x - 16.0f * z, a.y + 16.0f * z),
+		                       Theme::u32(Theme::alpha(linkCol, hot ? 1.0f : 0.7f)), 0, std::max(0.4f, z));
+		if (fontSize < 5.0f) return;
+		const std::string label = labelOfNode(ws, n);
+		const std::string kind = linkKind(ws, n);
+		const float textX = a.x + 44.0f * z, room = std::max(10.0f, b.x - textX - 30.0f * z);
+		const float subSize = fontSize * 0.82f;
+		const float blockH = fontSize + subSize + 3.0f * z;
+		const float titleY = midY - blockH * 0.5f;
+		putText(dl, fontSize, ImVec2(textX, titleY), Theme::u32(linkCol), label, room, a, b);
+		if (hot || selected)
+		{
+			const float w = std::min(room, ImGui::CalcTextSize(label.c_str()).x * z);
+			dl->AddLine(ImVec2(textX, titleY + fontSize + 1.0f * z), ImVec2(textX + w, titleY + fontSize + 1.0f * z), Theme::u32(linkCol), std::max(1.0f, z));
+		}
+		putText(dl, subSize, ImVec2(textX, titleY + fontSize + 3.0f * z), Theme::u32(Theme::TextDim), kind, room, a, b);
+		return;
+	}
+
 	if (fontSize < 5.0f) return;
 	const std::string label = labelOfNode(ws, n);
 	const ImU32 ink = Theme::u32(n.type == NodeType::Frame ? Theme::TextHeading : (coloured ? Theme::Ink : Theme::Text));
 	const float pad = 8.0f * z;
-	std::string prefix;
-	if (n.type == NodeType::Row)    prefix = "Row: ";
-	if (n.type == NodeType::Page)   prefix = "Page: ";
-	if (n.type == NodeType::Object) prefix = "";
-	if (n.type == NodeType::Image)  prefix = n.asset == UUID{} && n.media.empty() ? "Image: " : "Image (not shown): ";
-	dl->PushClipRect(a, b, true);
-	dl->AddText(ImGui::GetFont(), fontSize, ImVec2(a.x + pad, a.y + pad), ink, (prefix + label).c_str(), nullptr,
-	            std::max(10.0f, (b.x - a.x) - 2 * pad));
-	dl->PopClipRect();
+	const std::string prefix = n.type == NodeType::Image ? (n.asset == UUID{} && n.media.empty() ? "Image: " : "Image (not shown): ") : std::string();
+	putText(dl, fontSize, ImVec2(a.x + pad, a.y + pad), ink, prefix + label, std::max(10.0f, (b.x - a.x) - 2 * pad), a, b);
 }
 
 void drawArrowHead(ImDrawList* dl, ImVec2 tip, ImVec2 from, float size, ImU32 col)
@@ -642,6 +708,19 @@ void reset()
 }
 
 
+// Draws the collected texts into the picture from the UI font's own file data (PlannerFontText.h): the glyphs
+// of ImGui's atlas live on the GPU in the editor, and a picture of the board must not depend on them.
+void blitTexts(he_ui::Image& img, const std::vector<SunkText>& texts)
+{
+	ImFont* font = ImGui::GetFont();
+	const ImFontConfig* src = font && font->Sources.Size > 0 ? font->Sources[0] : nullptr;
+	if (!src || !src->FontData || !img.valid()) return;
+	std::vector<PlannerFontText::Run> runs;
+	for (const SunkText& t : texts)
+		runs.push_back({ t.pos.x, t.pos.y, t.size, t.col, t.text, t.wrapW, t.cmin.x, t.cmin.y, t.cmax.x, t.cmax.y });
+	PlannerFontText::draw(static_cast<const unsigned char*>(src->FontData), src->FontNo, img.rgba.data(), img.width, img.height, runs);
+}
+
 // ── Export ───────────────────────────────────────────────────────────────────
 std::filesystem::path exportPathFor(const std::filesystem::path& projectRoot, const std::string& boardTitle)
 {
@@ -650,7 +729,7 @@ std::filesystem::path exportPathFor(const std::filesystem::path& projectRoot, co
 		name += (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '-' || c == '_') ? c : '_';
 	while (!name.empty() && name.back() == ' ') name.pop_back();
 	if (name.empty()) name = "Whiteboard";
-	return projectRoot / "Exports" / "Planner" / (name + ".png");
+	return projectRoot / "Export" / "Planner" / (name + ".png");
 }
 
 bool exportPng(const Services& services, const UUID& boardId, const std::filesystem::path& file, std::string* error)
@@ -672,6 +751,9 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 	S = &services;
 	std::unordered_map<std::string, MediaTex> pictures;
 	s_exportTex = &pictures;
+	std::vector<SunkText> texts;   // ImGui's font atlas is the GPU's in the editor: the text is drawn below, from the font file
+	s_textSink = &texts;
+	s_hoverNode = UUID{};
 
 	ImDrawList dl(ImGui::GetDrawListSharedData());
 	dl._ResetForNewFrame();
@@ -698,10 +780,12 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 		if (!e.label.empty())
 		{
 			const ImVec2 mid((pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f);
-			const ImVec2 ts = ImGui::CalcTextSize(e.label.c_str());
+			const float z = static_cast<float>(zoom);
+			const ImVec2 ts(ImGui::CalcTextSize(e.label.c_str()).x * z, ImGui::GetFontSize() * z);
 			dl.AddRectFilled(ImVec2(mid.x - ts.x * 0.5f - 4, mid.y - ts.y * 0.5f - 2), ImVec2(mid.x + ts.x * 0.5f + 4, mid.y + ts.y * 0.5f + 2),
 			                 Theme::u32(Theme::warm(0.12f)), 4.0f);
-			dl.AddText(ImVec2(mid.x - ts.x * 0.5f, mid.y - ts.y * 0.5f), Theme::u32(Theme::Text), e.label.c_str());
+			putText(&dl, ImGui::GetFontSize() * z, ImVec2(mid.x - ts.x * 0.5f, mid.y - ts.y * 0.5f), Theme::u32(Theme::Text), e.label, 0.0f,
+			        ImVec2(0, 0), ImVec2(static_cast<float>(W), static_cast<float>(H)));
 		}
 	}
 	for (const Node& n : board->nodes)
@@ -746,7 +830,9 @@ bool exportPng(const Services& services, const UUID& boardId, const std::filesys
 	data.CmdListsCount = 1;
 	data.TotalVtxCount = dl.VtxBuffer.Size;
 	data.TotalIdxCount = dl.IdxBuffer.Size;
-	const he_ui::Image img = he_ui::rasterize(&data, W, H, IM_COL32(26, 24, 21, 255));
+	he_ui::Image img = he_ui::rasterize(&data, W, H, IM_COL32(26, 24, 21, 255));
+	s_textSink = nullptr;
+	blitTexts(img, texts);
 	data.CmdLists.clear();   // dl is ours; the data does not own it
 
 	for (const auto& [from, to] : atlases) if (to != from) he_ui::unregisterTexture(to);
@@ -1083,6 +1169,11 @@ void draw(const Services& services, const UUID& boardId)
 		}
 		services.noteRect("edge:" + e.label, ImVec2(mid.x - 3, mid.y - 3), ImVec2(mid.x + 3, mid.y + 3));
 	}
+
+	// The card under the mouse: a link underlines and the cursor says it opens.
+	s_hoverNode = hovered && s_drag == Drag::None && !editing ? board->hitTest(mx, my) : UUID{};
+	if (const Node* hot = s_hoverNode == UUID{} ? nullptr : board->findNode(s_hoverNode))
+		if (hot->type == NodeType::Row || hot->type == NodeType::Page || hot->type == NodeType::Object) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
 	// ── Cards (only those on screen) ──
 	const Rect2 visible{ view.x, view.y, size.x / view.zoom, size.y / view.zoom };

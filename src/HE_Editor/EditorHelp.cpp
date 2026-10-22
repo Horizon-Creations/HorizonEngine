@@ -3225,7 +3225,7 @@ namespace
 	  "Shows or hides the overview in the bottom right corner of the board: every card as a small box and the part you see as an outline. Click or drag in it to go there.",
 	  "", "" },
 	{ "Planner/Export PNG", "Export PNG",
-	  "Saves the whole board as a picture in the project's Exports/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
+	  "Saves the whole board as a picture in the project's Export/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
 	  "", "" },
 	{ "Planner/Zoom In", "Zoom In",
 	  "Zooms in around the middle of what you see. The trackpad's pinch and Cmd/Ctrl+scroll zoom at the cursor.",

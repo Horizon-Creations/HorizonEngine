@@ -4,6 +4,7 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cmath>
 
 // ── The Planner's icons ──────────────────────────────────────────────────────
@@ -15,12 +16,12 @@ namespace Theme = HE::Ed::Theme;
 
 // Drawn with the draw list, so they are crisp at any scale, take the theme's colours and need no files.
 enum class Icon { Note, Frame, AddCard, Undo, Redo, ZoomIn, ZoomOut, Fit, Map, Export, Duplicate, Align, Snap, Colour, Trash,
-	              Plus, Table, Kanban, Timeline, Calendar, Search, Filter, Sliders, Page, Whiteboard, Gear, Close, ChevronLeft, ChevronRight };
+	              Plus, Table, Kanban, Timeline, Calendar, Search, Filter, Sliders, Page, Whiteboard, Gear, Close, ChevronLeft, ChevronRight, ArrowOut, Cube };
 
-inline void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, ImU32 col, ImU32 fill = 0)
+inline void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, ImU32 col, ImU32 fill = 0, float scale = 1.0f)
 {
-	constexpr float s = 8.0f;   // half the glyph's width
-	constexpr float t = 1.6f;   // stroke
+	const float s = 8.0f * scale;   // half the glyph's width
+	const float t = std::max(1.2f, 1.6f * scale);   // stroke
 	auto P = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
 	auto L = [&](float x0, float y0, float x1, float y1) { dl->AddLine(P(x0, y0), P(x1, y1), col, t); };
 	switch (icon)
@@ -130,6 +131,22 @@ inline void drawIcon(ImDrawList* dl, Icon icon, ImVec2 c, ImU32 col, ImU32 fill 
 	case Icon::ChevronRight:
 		L(-0.4f, -0.8f, 0.4f, 0.0f);
 		L(0.4f, 0.0f, -0.4f, 0.8f);
+		break;
+	case Icon::ArrowOut:
+		L(-0.6f, 0.6f, 0.6f, -0.6f);
+		L(-0.1f, -0.6f, 0.6f, -0.6f);
+		L(0.6f, -0.6f, 0.6f, 0.1f);
+		break;
+	case Icon::Cube:
+		L(0.0f, -1.0f, 0.9f, -0.5f);
+		L(0.9f, -0.5f, 0.0f, 0.0f);
+		L(0.0f, 0.0f, -0.9f, -0.5f);
+		L(-0.9f, -0.5f, 0.0f, -1.0f);
+		L(-0.9f, -0.5f, -0.9f, 0.5f);
+		L(-0.9f, 0.5f, 0.0f, 1.0f);
+		L(0.0f, 1.0f, 0.9f, 0.5f);
+		L(0.9f, 0.5f, 0.9f, -0.5f);
+		L(0.0f, 0.0f, 0.0f, 1.0f);
 		break;
 	case Icon::Plus:
 		L(-0.8f, 0, 0.8f, 0);

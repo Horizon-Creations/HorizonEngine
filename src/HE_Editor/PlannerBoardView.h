@@ -68,7 +68,7 @@ struct Services
 // most 4096 pixels on the longer side. Pictures from the Planner's media folder are in it; a Texture
 // asset shows as its label. False with `error` set when the board is empty or the file cannot be written.
 bool exportPng(const Services& services, const HE::UUID& boardId, const std::filesystem::path& file, std::string* error = nullptr);
-// Where the button writes: <project>/Exports/Planner/<board title>.png (the title made safe for a file name).
+// Where the button writes: <project>/Export/Planner/<board title>.png (the title made safe for a file name).
 std::filesystem::path exportPathFor(const std::filesystem::path& projectRoot, const std::string& boardTitle);
 
 bool wantsFileDrop(const std::string& path, float x, float y);
