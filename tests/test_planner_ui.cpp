@@ -2020,3 +2020,121 @@ TEST_CASE("planner ui board: assets, scenes and entities dropped from the editor
 	CHECK(PlannerPanel::controlRect("node:Notes").x1 > 0);
 	CHECK(PlannerPanel::controlRect("node:Crate").x1 > 0);
 }
+
+TEST_CASE("planner ui board: copy, paste and duplicate, align, snap, page and row cards, frame titles")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_arrange");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	struct ClipboardGuard { ~ClipboardGuard() { PlannerPanel::setClipboardForTest({}, {}, {}); } } guard;
+
+	UUID a, b, fr;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		a  = bd.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1)->id;
+		b  = bd.addNode(NodeType::Text, 400, 140, 200, 100, "beta", 1)->id;
+		fr = bd.addNode(NodeType::Frame, 20, 20, 700, 400, "Plan", 1)->id;
+		bd.sendToBack(fr, 1);
+		bd.addEdge(a, b, "then", 1);
+		return true;
+	}));
+	idle(ctx);
+
+	// Select both cards, copy, paste: two new cards and the arrow between them, selected.
+	std::string clip;
+	PlannerPanel::setClipboardForTest({}, [&] { return clip; }, [&](const std::string& t) { clip = t; });
+	REQUIRE(click(ctx, "node:alpha"));
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(ImGuiMod_Shift, true);
+		REQUIRE(click(ctx, "node:beta"));
+		io.AddKeyEvent(ImGuiMod_Shift, false);
+	}
+	REQUIRE(PlannerBoardView::selection().size() == 2);
+	keyPress(ctx, ImGuiKey_C, true);
+	CHECK_FALSE(clip.empty());
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	keyPress(ctx, ImGuiKey_V, true);
+	{
+		const Board* bd = f.ws->findBoard(f.id);
+		CHECK(bd->nodes.size() == 5);
+		CHECK(bd->edges.size() == 2);
+		CHECK(PlannerBoardView::selection().size() == 2);
+		CHECK(bd->findNode(PlannerBoardView::selection()[0])->text.size() > 0);
+	}
+	// Undo takes the paste away in one step; a second paste lands further on than the first.
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	keyPress(ctx, ImGuiKey_V, true);
+	const double firstX = f.ws->findBoard(f.id)->nodes.back().x;
+	keyPress(ctx, ImGuiKey_V, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.back().x > firstX);
+
+	// Duplicate (button) makes copies of what is selected.
+	const std::size_t before = f.ws->findBoard(f.id)->nodes.size();
+	REQUIRE(click(ctx, "Duplicate"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == before + 2);
+
+	// Align: the Align button opens the choices.
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		std::vector<UUID> extra;   // the copies lie on top of their originals
+		for (const Node& n : bd.nodes)
+			if (n.id != a && n.id != b && n.id != fr) extra.push_back(n.id);
+		for (const UUID& id : extra) bd.removeNode(id, 2);
+		bd.moveNode(b, 500, 300, 2);
+		return true;
+	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "node:alpha"));
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(ImGuiMod_Shift, true);
+		REQUIRE(click(ctx, "node:beta"));
+		io.AddKeyEvent(ImGuiMod_Shift, false);
+	}
+	REQUIRE(click(ctx, "Align"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(100));   // opening the choices changes nothing
+	REQUIRE(click(ctx, "Align Left"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(b)->x == doctest::Approx(100));
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->findNode(b)->x == doctest::Approx(500));
+
+	// Snap: a card dragged with Snap on lands on the 20-unit grid.
+	REQUIRE(click(ctx, "Snap"));
+	REQUIRE(click(ctx, "node:alpha"));
+	{
+		const PlannerPanel::Rect r = PlannerPanel::controlRect("node:alpha");
+		dragScreen(ctx, centre(r), ImVec2(centre(r).x + 33, centre(r).y + 27));
+	}
+	const Node* na = f.ws->findBoard(f.id)->findNode(a);
+	CHECK(std::fmod(na->x, 20.0) == doctest::Approx(0).epsilon(0.0001));
+	CHECK(std::fmod(na->y, 20.0) == doctest::Approx(0).epsilon(0.0001));
+
+	// A page gets a card from the Add menu; a double-click on it opens the page.
+	const UUID page = f.ws->createPage("Level concept")->id;
+	idle(ctx);
+	REQUIRE(click(ctx, "Add"));
+	idle(ctx);
+	REQUIRE(click(ctx, "add:Level concept"));
+	idle(ctx);
+	{
+		const Board* bd = f.ws->findBoard(f.id);
+		REQUIRE(bd->nodes.back().type == NodeType::Page);
+		CHECK(bd->nodes.back().page == page);
+	}
+	const PlannerPanel::Rect pc = PlannerPanel::controlRect("node:Level concept");
+	REQUIRE(pc.x1 > pc.x0);
+	doubleClickAt(ctx, centre(pc));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == page);
+
+	// Back on the board, a double-click on the frame's empty part edits its title.
+	PlannerPanel::selectBoard(f.id);
+	idle(ctx);
+	doubleClickAt(ctx, canvasPoint(40, 40));
+	CHECK(PlannerPanel::controlRect("edit").x1 > PlannerPanel::controlRect("edit").x0);
+}

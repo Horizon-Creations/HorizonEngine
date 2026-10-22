@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -339,6 +340,119 @@ bool Board::bounds(Rect2& out) const
 }
 
 // ── Edges ────────────────────────────────────────────────────────────────────
+
+int Board::alignNodes(const std::vector<UUID>& ids, Align how, std::int64_t nowMs)
+{
+	double lo_x = 1e300, hi_x = -1e300, lo_y = 1e300, hi_y = -1e300;
+	std::vector<Node*> picked;
+	for (const UUID& id : ids)
+		if (Node* n = findNode(id)) picked.push_back(n);
+	if (picked.size() < 2) return 0;
+	for (const Node* n : picked)
+	{
+		lo_x = std::min(lo_x, n->x); hi_x = std::max(hi_x, n->x + n->w);
+		lo_y = std::min(lo_y, n->y); hi_y = std::max(hi_y, n->y + n->h);
+	}
+	int moved = 0;
+	for (Node* n : picked)
+	{
+		double nx = n->x, ny = n->y;
+		switch (how)
+		{
+		case Align::Left:    nx = lo_x; break;
+		case Align::Right:   nx = hi_x - n->w; break;
+		case Align::CentreH: nx = (lo_x + hi_x) * 0.5 - n->w * 0.5; break;
+		case Align::Top:     ny = lo_y; break;
+		case Align::Bottom:  ny = hi_y - n->h; break;
+		case Align::CentreV: ny = (lo_y + hi_y) * 0.5 - n->h * 0.5; break;
+		}
+		if (nx != n->x || ny != n->y) { n->x = nx; n->y = ny; ++moved; }
+	}
+	if (moved) modifiedMs = nowMs;
+	return moved;
+}
+
+int Board::distributeNodes(const std::vector<UUID>& ids, bool horizontal, std::int64_t nowMs)
+{
+	std::vector<Node*> picked;
+	for (const UUID& id : ids)
+		if (Node* n = findNode(id)) picked.push_back(n);
+	if (picked.size() < 3) return 0;
+	auto lo  = [&](const Node* n) { return horizontal ? n->x : n->y; };
+	auto len = [&](const Node* n) { return horizontal ? n->w : n->h; };
+	std::stable_sort(picked.begin(), picked.end(), [&](const Node* a, const Node* b) { return lo(a) < lo(b); });
+	double span = lo(picked.back()) + len(picked.back()) - lo(picked.front()), used = 0;
+	for (const Node* n : picked) used += len(n);
+	const double gap = (span - used) / static_cast<double>(picked.size() - 1);
+	double at = lo(picked.front());
+	int moved = 0;
+	for (Node* n : picked)
+	{
+		if (lo(n) != at) { (horizontal ? n->x : n->y) = at; ++moved; }
+		at += len(n) + gap;
+	}
+	if (moved) modifiedMs = nowMs;
+	return moved;
+}
+
+int Board::snapNodes(const std::vector<UUID>& ids, double grid, std::int64_t nowMs)
+{
+	if (grid <= 0) return 0;
+	int moved = 0;
+	for (const UUID& id : ids)
+		if (Node* n = findNode(id))
+		{
+			const double nx = std::round(n->x / grid) * grid, ny = std::round(n->y / grid) * grid;
+			if (nx != n->x || ny != n->y) { n->x = nx; n->y = ny; ++moved; }
+		}
+	if (moved) modifiedMs = nowMs;
+	return moved;
+}
+
+BoardClip copyNodes(const Board& board, const std::vector<UUID>& ids)
+{
+	BoardClip clip;
+	for (const Node& n : board.nodes)   // board order keeps the stacking
+		if (std::find(ids.begin(), ids.end(), n.id) != ids.end()) clip.nodes.push_back(n);
+	for (const Edge& e : board.edges)
+	{
+		const auto in = [&](const UUID& id) {
+			return std::any_of(clip.nodes.begin(), clip.nodes.end(), [&](const Node& n) { return n.id == id; });
+		};
+		if (in(e.from) && in(e.to)) clip.edges.push_back(e);
+	}
+	return clip;
+}
+
+std::vector<UUID> pasteNodes(Board& board, const BoardClip& clip, double dx, double dy, std::int64_t nowMs)
+{
+	std::vector<UUID> made;
+	std::vector<std::pair<UUID, UUID>> remap;
+	for (const Node& src : clip.nodes)
+	{
+		Node n = src;
+		n.id = UUID::generate();
+		n.x += dx;
+		n.y += dy;
+		remap.emplace_back(src.id, n.id);
+		made.push_back(n.id);
+		board.nodes.push_back(std::move(n));
+	}
+	const auto mapped = [&](const UUID& id) {
+		for (const auto& r : remap) if (r.first == id) return r.second;
+		return UUID{};
+	};
+	for (const Edge& src : clip.edges)
+	{
+		Edge e = src;
+		e.id = UUID::generate();
+		e.from = mapped(src.from);
+		e.to = mapped(src.to);
+		board.edges.push_back(std::move(e));
+	}
+	if (!made.empty()) board.modifiedMs = nowMs;
+	return made;
+}
 
 Edge* Board::addEdge(const UUID& from, const UUID& to, std::string label, std::int64_t nowMs)
 {

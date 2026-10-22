@@ -6,6 +6,7 @@
 #include "EditorHelp.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "PlannerPanel.h"
 #include "PlannerWorkspace.h"
 #include "TaskBoardPanel.h"      // the links a Content Browser / Outliner drop stands for
 #include "vendor/stb_image.h"
@@ -71,6 +72,12 @@ struct DroppedFile { std::string path; ImVec2 at; };
 std::vector<DroppedFile> s_dropped;
 ImVec2 s_canvasMin(0, 0), s_canvasMax(0, 0);
 int    s_canvasFrame = -100;        // the frame the canvas was last drawn in
+
+bool        s_snap = false;              // moves and resizes land on the grid
+constexpr double kGrid = 20.0;
+BoardClip   s_clip;                      // Copy: cards (and the arrows between them) waiting to be pasted
+int         s_pasteCount = 0;            // each paste of one copy lands a little further on
+constexpr const char* kClipMarker = "HorizonEngine/board-cards";   // what Copy leaves on the system clipboard
 
 UUID        s_editNode;                  // the card whose text is being typed
 std::string s_editBuf;
@@ -335,8 +342,67 @@ void placeLink(const UUID& boardId, const TaskLink& link, double cx, double cy)
 	placeCard(boardId, NodeType::Object, cx, cy, 240, 80, [=](Node& n) { n.link = link; });
 }
 
+void copySelection(const UUID& boardId)
+{
+	const Board* b = S->ws->findBoard(boardId);
+	if (!b || s_sel.empty()) return;
+	s_clip = copyNodes(*b, s_sel);
+	s_pasteCount = 0;
+	if (S->setClipboardText) S->setClipboardText(kClipMarker);
+}
+
+void pasteClip(const UUID& boardId, const BoardClip& clip, double offset)
+{
+	if (clip.empty()) return;
+	auto made = std::make_shared<std::vector<UUID>>();
+	change(boardId, [=](Board& b) {
+		*made = pasteNodes(b, clip, offset, offset, taskNowMs());
+		return !made->empty();
+	}, [=] {
+		s_sel = *made;
+		s_selEdge = UUID{};
+	});
+}
+
+void duplicateSelection(const UUID& boardId)
+{
+	const Board* b = S->ws->findBoard(boardId);
+	if (!b || s_sel.empty()) return;
+	pasteClip(boardId, copyNodes(*b, s_sel), 30.0);
+}
+
+void alignSelection(const UUID& boardId, Board::Align how)
+{
+	const std::vector<UUID> ids = s_sel;
+	change(boardId, [=](Board& b) { return b.alignNodes(ids, how, taskNowMs()) > 0; });
+}
+
+void distributeSelection(const UUID& boardId, bool horizontal)
+{
+	const std::vector<UUID> ids = s_sel;
+	change(boardId, [=](Board& b) { return b.distributeNodes(ids, horizontal, taskNowMs()) > 0; });
+}
+
+// A card for a page or a row of a database.
+void addPageCard(const UUID& boardId, const UUID& page, double cx, double cy)
+{
+	placeCard(boardId, NodeType::Page, cx, cy, 240, 80, [=](Node& n) { n.page = page; });
+}
+
+void addRowCard(const UUID& boardId, const UUID& database, const UUID& row, double cx, double cy)
+{
+	placeCard(boardId, NodeType::Row, cx, cy, 240, 80, [=](Node& n) { n.database = database; n.row = row; });
+}
+
 void paste(const UUID& boardId, double cx, double cy)
 {
+	// Cards copied in the editor: Copy left the marker where a picture or text would be.
+	if (!s_clip.empty() && S->clipboardText && S->clipboardText() == kClipMarker)
+	{
+		++s_pasteCount;
+		pasteClip(boardId, s_clip, 30.0 * s_pasteCount);
+		return;
+	}
 	std::string bytes, ext;
 	if (S->clipboardImage && S->clipboardImage(bytes, ext) && !bytes.empty() && !S->root.empty())
 	{
@@ -594,6 +660,73 @@ void draw(const Services& services, const UUID& boardId)
 	ImGui::EndDisabled();
 	services.note("Delete");
 
+	// The second row of the toolbar: what is made of cards in hand and how they sit.
+	if (EditorWidgets::button("Add")) ImGui::OpenPopup("##addcard");
+	services.note("Add");
+	if (ImGui::BeginPopup("##addcard"))
+	{
+		ImGui::TextDisabled("Page");
+		int shown = 0;
+		for (Page* p : wsp->pages())
+		{
+			if (++shown > 40) { ImGui::TextDisabled("..."); break; }
+			ImGui::PushID(p);
+			if (ImGui::Selectable(p->title.empty() ? "Untitled" : p->title.c_str())) addPageCard(boardId, p->id, centreX, centreY);
+			services.note("add:" + p->title);
+			ImGui::PopID();
+		}
+		for (Database* db : wsp->databases())
+		{
+			if (!ImGui::BeginMenu(db->name.empty() ? "Untitled" : db->name.c_str())) continue;
+			int rows = 0;
+			for (const Row& r : db->rows)
+			{
+				if (++rows > 60) { ImGui::TextDisabled("..."); break; }
+				ImGui::PushID(&r);
+				if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str())) addRowCard(boardId, db->id, r.id, centreX, centreY);
+				services.note("add:" + db->name + ":" + r.title);
+				ImGui::PopID();
+			}
+			ImGui::EndMenu();
+		}
+		ImGui::EndPopup();
+	}
+	ImGui::SameLine();
+	ImGui::BeginDisabled(s_sel.empty());
+	if (EditorWidgets::button("Duplicate")) duplicateSelection(boardId);
+	ImGui::EndDisabled();
+	services.note("Duplicate");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(s_sel.size() < 2);
+	if (EditorWidgets::button("Align")) ImGui::OpenPopup("##align");
+	ImGui::EndDisabled();
+	services.note("Align");
+	if (ImGui::BeginPopup("##align"))
+	{
+		if (EditorWidgets::selectable("Align Left"))       alignSelection(boardId, Board::Align::Left);
+		services.note("Align Left");
+		if (EditorWidgets::selectable("Align Center"))     alignSelection(boardId, Board::Align::CentreH);
+		services.note("Align Center");
+		if (EditorWidgets::selectable("Align Right"))      alignSelection(boardId, Board::Align::Right);
+		services.note("Align Right");
+		if (EditorWidgets::selectable("Align Top"))        alignSelection(boardId, Board::Align::Top);
+		services.note("Align Top");
+		if (EditorWidgets::selectable("Align Middle"))     alignSelection(boardId, Board::Align::CentreV);
+		services.note("Align Middle");
+		if (EditorWidgets::selectable("Align Bottom"))     alignSelection(boardId, Board::Align::Bottom);
+		services.note("Align Bottom");
+		ImGui::BeginDisabled(s_sel.size() < 3);
+		if (EditorWidgets::selectable("Distribute Horizontally")) distributeSelection(boardId, true);
+		services.note("Distribute Horizontally");
+		if (EditorWidgets::selectable("Distribute Vertically"))   distributeSelection(boardId, false);
+		services.note("Distribute Vertically");
+		ImGui::EndDisabled();
+		ImGui::EndPopup();
+	}
+	ImGui::SameLine();
+	EditorWidgets::checkbox("Snap", &s_snap);
+	services.note("Snap");
+
 	// Colours for what is selected.
 	ImGui::SameLine();
 	ImGui::BeginDisabled(s_sel.empty());
@@ -625,7 +758,6 @@ void draw(const Services& services, const UUID& boardId)
 	if (const Edge* e = board->findEdge(s_selEdge))
 	{
 		if (!(s_labelFor == e->id) || !ImGui::IsAnyItemActive()) { s_labelFor = e->id; s_labelBuf = e->label; }
-		ImGui::SameLine();
 		ImGui::SetNextItemWidth(160);
 		ImGui::InputTextWithHint("##edgelabel", "Arrow label", &s_labelBuf);
 		if (ImGui::IsItemDeactivatedAfterEdit() && s_labelBuf != e->label)
@@ -747,9 +879,20 @@ void draw(const Services& services, const UUID& boardId)
 	// What is shown where: a card being moved or resized is drawn at its new place.
 	ImVec2 mouseDelta(io.MousePos.x - s_dragStart.x, io.MousePos.y - s_dragStart.y);
 	const bool movingNow = s_drag == Drag::Move && s_dragMoved;
+	// With Snap the card in hand lands on the grid and the others keep their distance to it.
+	auto draggedBy = [&]() {
+		double dx = mouseDelta.x / view.zoom, dy = mouseDelta.y / view.zoom;
+		if (s_snap && !s_dragNodes.empty())
+			if (const Node* lead = board->findNode(has(s_dragNodes, s_dragHit) ? s_dragHit : s_dragNodes.front()))
+			{
+				dx = std::round((lead->x + dx) / kGrid) * kGrid - lead->x;
+				dy = std::round((lead->y + dy) / kGrid) * kGrid - lead->y;
+			}
+		return ImVec2(static_cast<float>(dx), static_cast<float>(dy));
+	};
 	auto shownRect = [&](const Node& n) {
 		Rect2 r = n.rect();
-		if (movingNow && has(s_dragNodes, n.id)) { r.x += mouseDelta.x / view.zoom; r.y += mouseDelta.y / view.zoom; }
+		if (movingNow && has(s_dragNodes, n.id)) { const ImVec2 d = draggedBy(); r.x += d.x; r.y += d.y; }
 		if (s_drag == Drag::Resize && n.id == s_resizeNode) r = s_resizeTo;
 		return r;
 	};
@@ -977,6 +1120,22 @@ void draw(const Services& services, const UUID& boardId)
 			s_editFocus = true;
 			s_sel = { hit };
 		}
+		else if (n->type == NodeType::Page || n->type == NodeType::Row)
+		{
+			// These cards stand for something in the Planner: the double-click goes there.
+			const NodeType type = n->type;
+			const UUID page = n->page, db = n->database, row = n->row;
+			services.post([=] {
+				if (type == NodeType::Page) PlannerPanel::selectPage(page);
+				else PlannerPanel::openRowPage(db, row);
+			});
+		}
+		else if (n->type == NodeType::Object && services.ctx)
+		{
+			const TaskLink link = n->link;
+			AppContext* ctx = services.ctx;
+			services.post([=] { TaskBoardPanel::jumpToLink(*ctx, link); });
+		}
 		s_drag = Drag::None;
 	}
 
@@ -991,9 +1150,10 @@ void draw(const Services& services, const UUID& boardId)
 		const Rect2& f = s_resizeFrom;
 		const double fixedX = (s_resizeCorner == 0 || s_resizeCorner == 3) ? f.x + f.w : f.x;
 		const double fixedY = (s_resizeCorner == 0 || s_resizeCorner == 1) ? f.y + f.h : f.y;
-		double nx = std::min(mx, fixedX - Board::kMinSize), ny = std::min(my, fixedY - Board::kMinSize);
-		if (s_resizeCorner == 1 || s_resizeCorner == 2) nx = std::max(mx, fixedX + Board::kMinSize);
-		if (s_resizeCorner == 2 || s_resizeCorner == 3) ny = std::max(my, fixedY + Board::kMinSize);
+		const double gx = s_snap ? std::round(mx / kGrid) * kGrid : mx, gy = s_snap ? std::round(my / kGrid) * kGrid : my;
+		double nx = std::min(gx, fixedX - Board::kMinSize), ny = std::min(gy, fixedY - Board::kMinSize);
+		if (s_resizeCorner == 1 || s_resizeCorner == 2) nx = std::max(gx, fixedX + Board::kMinSize);
+		if (s_resizeCorner == 2 || s_resizeCorner == 3) ny = std::max(gy, fixedY + Board::kMinSize);
 		s_resizeTo = { std::min(nx, fixedX), std::min(ny, fixedY), std::abs(nx - fixedX), std::abs(ny - fixedY) };
 	}
 	if (s_drag == Drag::Marquee && ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -1030,7 +1190,8 @@ void draw(const Services& services, const UUID& boardId)
 			if (s_dragMoved)
 			{
 				const std::vector<UUID> ids = s_dragNodes;
-				const double dx = mouseDelta.x / view.zoom, dy = mouseDelta.y / view.zoom;
+				const ImVec2 d = draggedBy();
+				const double dx = d.x, dy = d.y;
 				change(boardId, [=](Board& b) { return b.moveNodesBy(ids, dx, dy, taskNowMs()) > 0; });
 			}
 			else if (!s_dragShift && s_sel.size() > 1 && !(s_dragHit == UUID{}))
@@ -1086,6 +1247,9 @@ void draw(const Services& services, const UUID& boardId)
 		}
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_Z)) undoOrRedo(boardId, !io.KeyShift);
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_Y)) undoOrRedo(boardId, false);
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_C)) copySelection(boardId);
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_X)) { copySelection(boardId); deleteSelection(boardId); }
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_D)) duplicateSelection(boardId);
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_V))
 		{
 			// Where the cursor is when it is over the canvas, else the middle of what is shown.

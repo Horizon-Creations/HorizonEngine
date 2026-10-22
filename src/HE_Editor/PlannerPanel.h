@@ -79,7 +79,8 @@ namespace PlannerPanel
 	void setTimelineZoom(int level);
 
 	// Replace the system clipboard the whiteboard pastes from (tests); empty functions restore it.
-	void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text);
+	void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text,
+	                         std::function<void(const std::string&)> setText = {});
 
 	// Show a standalone page, or the page of a row ("Open Page" in the row's details;
 	// the page exists in memory until it has a block). {} when a database is shown.

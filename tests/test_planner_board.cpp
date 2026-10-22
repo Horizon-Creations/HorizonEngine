@@ -502,3 +502,72 @@ TEST_CASE("planner board history: undo and redo walk the snapshots; a new change
 	while (many.undo(b, target)) ++steps;
 	CHECK(steps == BoardHistory::kLimit);
 }
+
+TEST_CASE("planner board: align, distribute and snap move cards, copy and paste make new ids with the arrows between")
+{
+	Board b;
+	const UUID a = b.addNode(NodeType::Text, 10, 10, 100, 50, "a", kNow)->id;
+	const UUID c = b.addNode(NodeType::Text, 210, 90, 60, 40, "c", kNow)->id;
+	const UUID m = b.addNode(NodeType::Text, 70, 200, 40, 40, "m", kNow)->id;
+
+	CHECK(b.alignNodes({ a }, Board::Align::Left, kNow) == 0);   // one card has nothing to line up with
+	CHECK(b.alignNodes({ a, c, m }, Board::Align::Left, kNow) == 2);
+	CHECK(b.findNode(c)->x == doctest::Approx(10));
+	CHECK(b.findNode(m)->x == doctest::Approx(10));
+	CHECK(b.alignNodes({ a, c, m }, Board::Align::Left, kNow) == 0);   // already there
+	b.alignNodes({ a, c, m }, Board::Align::Bottom, kNow);
+	CHECK(b.findNode(a)->y + 50 == doctest::Approx(240));
+	CHECK(b.findNode(c)->y + 40 == doctest::Approx(240));
+	b.alignNodes({ a, c }, Board::Align::CentreH, kNow);
+	CHECK(b.findNode(c)->x + 30 == doctest::Approx(b.findNode(a)->x + 50));
+
+	// Distribute: equal gaps, the outer two stay.
+	Board d;
+	const UUID p = d.addNode(NodeType::Text, 0, 0, 20, 20, "", kNow)->id;
+	const UUID q = d.addNode(NodeType::Text, 30, 0, 20, 20, "", kNow)->id;
+	const UUID r = d.addNode(NodeType::Text, 180, 0, 20, 20, "", kNow)->id;
+	CHECK(d.distributeNodes({ p, q }, true, kNow) == 0);
+	CHECK(d.distributeNodes({ p, q, r }, true, kNow) == 1);
+	CHECK(d.findNode(q)->x == doctest::Approx(90));
+	CHECK(d.findNode(p)->x == doctest::Approx(0));
+	CHECK(d.findNode(r)->x == doctest::Approx(180));
+
+	// Snap.
+	d.moveNode(q, 93, 7, kNow);
+	CHECK(d.snapNodes({ q }, 20, kNow) == 1);
+	CHECK(d.findNode(q)->x == doctest::Approx(100));
+	CHECK(d.findNode(q)->y == doctest::Approx(0));
+	CHECK(d.snapNodes({ q }, 20, kNow) == 0);
+
+	// Copy keeps the cards and the arrows between two copied cards, paste gives new ids and an offset.
+	Board s;
+	const UUID x = s.addNode(NodeType::Page, 0, 0, 100, 50, "", kNow)->id;
+	const UUID y = s.addNode(NodeType::Text, 200, 0, 100, 50, "y", kNow)->id;
+	const UUID z = s.addNode(NodeType::Text, 400, 0, 100, 50, "z", kNow)->id;
+	s.addEdge(x, y, "to y", kNow);
+	s.addEdge(y, z, "to z", kNow);
+	s.findNode(x)->page = UUID::generate();
+	const BoardClip clip = copyNodes(s, { y, x });
+	REQUIRE(clip.nodes.size() == 2);
+	CHECK(clip.nodes[0].id == x);   // board order, not selection order
+	REQUIRE(clip.edges.size() == 1);
+	CHECK(clip.edges[0].label == "to y");
+
+	const std::vector<UUID> made = pasteNodes(s, clip, 30, 40, kNow);
+	REQUIRE(made.size() == 2);
+	CHECK(s.nodes.size() == 5);
+	CHECK(s.edges.size() == 3);
+	CHECK(made[0] != x);
+	CHECK(s.findNode(made[0])->x == doctest::Approx(30));
+	CHECK(s.findNode(made[0])->y == doctest::Approx(40));
+	CHECK(s.findNode(made[0])->page == s.findNode(x)->page);
+	const Edge& copy = s.edges.back();
+	CHECK(copy.from == made[0]);
+	CHECK(copy.to == made[1]);
+	// The same copy pastes again, and into another board.
+	CHECK(pasteNodes(s, clip, 60, 80, kNow).size() == 2);
+	Board other;
+	CHECK(pasteNodes(other, clip, 0, 0, kNow).size() == 2);
+	CHECK(other.edges.size() == 1);
+	CHECK(pasteNodes(other, BoardClip{}, 0, 0, kNow).empty());
+}

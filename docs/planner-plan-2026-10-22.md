@@ -274,3 +274,16 @@ TIFF/other formats, in which case paste falls through to text.
 Decisions: copies go to Config/Planner/Media (hash name, dedupes); Texture assets are never copied.
 Next steps: W3 (create object/row/page cards from a menu, frame titles, align/snap, copy/paste/duplicate of cards),
 W4 (MCP board tools, minimap, PNG export), unused-media cleanup, board title undo.
+
+## Handoff (Stand Whiteboard W3)
+
+Verified: `he_tests --test-case="planner*"` 86/86 (new: `test_planner_board.cpp` align/distribute/snap/copy-paste,
+`test_planner_ui.cpp` "copy, paste and duplicate, align, snap, page and row cards, frame titles"), HorizonEditor
+builds, help audit clean. Not verified: real editor feel (snap while dragging, the Add popup with many rows), row cards
+(only the page card path is tested), Windows/Linux.
+
+- Board model (`PlannerBoard.h/.cpp`): `Board::alignNodes/distributeNodes/snapNodes`, `BoardClip`, `copyNodes`, `pasteNodes` (new ids, arrows between copied cards kept).
+- View (`PlannerBoardView.cpp`): second toolbar row (Add popup of pages and per-database rows, Duplicate, Align popup, Snap checkbox, colours, Fit, 100%); the arrow-label row is now its own line. Keys Cmd/Ctrl+C/X/V/D. Copy leaves the marker `HorizonEngine/board-cards` on the system clipboard (replaces a picture, so paste knows to use `s_clip`); `Services::setClipboardText`, test hook `setClipboardForTest(image, text, setText)`.
+- Snap (20 units): the card in hand lands on the grid, the others keep their offset; resize snaps the corner.
+- Double-click: Page/Row card opens it (`PlannerPanel::selectPage/openRowPage`, posted), Object card jumps (`TaskBoardPanel::jumpToLink`); frame titles are edited by double-click as before.
+Open: pasted frames come out on top of cards (no sendToBack); align ignores what lies inside a frame; W4 (MCP board tools, minimap, PNG export), unused-media cleanup, board-title undo.

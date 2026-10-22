@@ -2464,6 +2464,7 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 
 std::function<bool(std::string&, std::string&)> s_clipImage;   // a test's clipboard; empty = the system's
 std::function<std::string()>                    s_clipText;
+std::function<void(const std::string&)>         s_clipSet;
 
 void drawBoardTab(AppContext& ctx)
 {
@@ -2500,6 +2501,7 @@ void drawBoardTab(AppContext& ctx)
 		SDL_free(t);
 		return out;
 	};
+	services.setClipboardText = s_clipSet ? s_clipSet : [](const std::string& t) { SDL_SetClipboardText(t.c_str()); };
 	PlannerBoardView::draw(services, s_boardId);
 }
 
@@ -3155,10 +3157,12 @@ int  calendarMonth() { return s_calMonth; }
 void setTimelineZoom(int level) { s_tlZoom = std::clamp(level, 0, 2); }
 
 void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; s_boardId = UUID{}; }
-void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text)
+void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text,
+                         std::function<void(const std::string&)> setText)
 {
 	s_clipImage = std::move(image);
 	s_clipText  = std::move(text);
+	s_clipSet   = std::move(setText);
 }
 
 void selectBoard(const UUID& id) { s_boardId = id; s_pageId = s_pageDb = UUID{}; }

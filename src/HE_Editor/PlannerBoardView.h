@@ -29,6 +29,9 @@ namespace HE::Planner { class Workspace; }
 //                                                            or an entity becomes an object card
 //   a picture file dropped on the canvas, Cmd/Ctrl+V         a picture card (copied to Config/Planner/Media);
 //                                                            pasted text becomes a text card
+//   Cmd/Ctrl+C, X, V, D                                      copy, cut, paste and duplicate the selected cards
+//                                                            (with the arrows between them; also into another board)
+//   Add, Align, Snap in the toolbar                          a card for a page or a row, line cards up, a 20-unit grid
 //   Delete, Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Y), Cmd/Ctrl+A, Esc
 //
 // Edits that come out of the drawing code are POSTED and applied after the window has been
@@ -52,6 +55,7 @@ struct Services
 	// picture and its extension ("png"); clipboardText the plain text. Empty/false when there is none.
 	std::function<bool(std::string&, std::string&)> clipboardImage;
 	std::function<std::string()>                   clipboardText;
+	std::function<void(const std::string&)>        setClipboardText;   // Copy leaves a marker there (it replaces a picture)
 };
 
 // A file let go over the window (the application's drop event). True when it is a picture, the
