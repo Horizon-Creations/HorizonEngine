@@ -84,6 +84,39 @@ void note(const std::string& name)
 	s_rects[name] = { a.x, a.y, b.x, b.y };
 }
 
+// A small square button with a glyph drawn on it (the editor has no icon font),
+// explained by the help entry `helpKey`. True when clicked.
+bool iconButton(const char* id, const char* helpKey, const std::function<void(ImDrawList*, ImVec2, float, ImU32)>& glyph)
+{
+	const float side = ImGui::GetFrameHeight();
+	const bool clicked = ImGui::InvisibleButton(id, ImVec2(side, side));
+	const bool hovered = ImGui::IsItemHovered();
+	EditorWidgets::helpForKey(helpKey);
+	const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(a, z, ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_ButtonActive
+	                                           : hovered              ? ImGuiCol_ButtonHovered
+	                                                                  : ImGuiCol_Button), 4.0f);
+	glyph(dl, ImVec2((a.x + z.x) * 0.5f, (a.y + z.y) * 0.5f), side * 0.27f, Theme::u32(Theme::Text));
+	return clicked;
+}
+
+// The circular arrow of "read it again".
+void refreshGlyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col)
+{
+	const float a0 = 0.7f, a1 = 5.3f;
+	dl->PathArcTo(c, r, a0, a1);
+	dl->PathStroke(col, 0, 1.8f);
+	const ImVec2 tip(c.x + r * std::cos(a1), c.y + r * std::sin(a1));
+	// An arrowhead at the open end, pointing along the arc.
+	const float tx = -std::sin(a1), ty = std::cos(a1);
+	const float nx = std::cos(a1), ny = std::sin(a1);
+	const float h = r * 0.9f;
+	dl->AddTriangleFilled(ImVec2(tip.x + tx * h, tip.y + ty * h),
+	                      ImVec2(tip.x - nx * h * 0.7f, tip.y - ny * h * 0.7f),
+	                      ImVec2(tip.x + nx * h * 0.7f, tip.y + ny * h * 0.7f), col);
+}
+
 const char* const kTypeNames[] = { "Text", "Number", "Checkbox", "Date", "Select", "Multi-select",
                                    "Person", "Relation", "Engine link", "URL" };
 constexpr int kTypeCount = 10;   // one per PropertyType before Other
@@ -184,11 +217,11 @@ std::vector<std::string> splitNames(const std::string& text)
 // value looks like; `commit` gets the new text. Returns true when it committed.
 bool textCell(const char* id, const EditKey& key, const std::string& shown,
               const std::function<void(const std::string&)>& commit, const char* hint = nullptr,
-              float multilineHeight = 0.0f)
+              float multilineHeight = 0.0f, float width = -FLT_MIN)
 {
 	const bool mine = s_editing && s_editKey == key;
 	std::string text = mine ? s_editBuf : shown;
-	ImGui::SetNextItemWidth(-FLT_MIN);
+	ImGui::SetNextItemWidth(width);
 	const bool typed = multilineHeight > 0.0f ? ImGui::InputTextMultiline(id, &text, ImVec2(-FLT_MIN, multilineHeight))
 	                 : hint                   ? ImGui::InputTextWithHint(id, hint, &text)
 	                                          : ImGui::InputText(id, &text);
@@ -634,7 +667,6 @@ void drawFilterPopup(const Database& db, const View& view)
 			}
 			else
 			{
-				ImGui::SetNextItemWidth(150);
 				textCell("##fvalue", { viewId, UUID{ 0, i + 1 } }, operandText(prop, f), [=](const std::string& text) {
 					const std::string json = operandJson(prop, text);
 					editView(dbId, viewId, [i, json](View& v) {
@@ -642,7 +674,7 @@ void drawFilterPopup(const Database& db, const View& view)
 						v.filters[i].valueJson = json;
 						return true;
 					});
-				});
+				}, nullptr, 0.0f, 150.0f);
 			}
 		}
 		ImGui::SameLine();
@@ -677,7 +709,6 @@ void drawPropertiesPopup(const Database& db, const View& view)
 				return true;
 			});
 		ImGui::SameLine();
-		ImGui::SetNextItemWidth(160);
 		textCell("##pname", { dbId, pid }, p.name, [=](const std::string& name) {
 			post([=] {
 				s_ws.edit(dbId, [&](Database& d) {
@@ -687,7 +718,7 @@ void drawPropertiesPopup(const Database& db, const View& view)
 					return true;
 				});
 			});
-		});
+		}, nullptr, 0.0f, 160.0f);
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", p.type == PropertyType::Other ? p.typeOther.c_str()
 		                                                        : kTypeNames[static_cast<int>(p.type)]);
@@ -1036,13 +1067,13 @@ void linksEditor(const Database& db, const Row& row, const Property& p)
 	if (EditorWidgets::button("Link Selection"))
 		addLinks(dbId, rowId, propId, TaskBoardPanel::selectionLinks(ctx));
 	ImGui::EndDisabled();
-	ImGui::SameLine();
 	TaskLink sceneLink;
 	const bool haveScene = TaskBoardPanel::currentSceneLink(ctx, sceneLink);
+	ImGui::SameLine();
 	ImGui::BeginDisabled(!haveScene);
 	if (EditorWidgets::button("Link Scene")) addLinks(dbId, rowId, propId, { sceneLink });
 	ImGui::EndDisabled();
-	ImGui::SameLine();
+	// Link Panel on its own line: three buttons do not fit side by side in the details.
 	if (EditorWidgets::button("Link Panel")) ImGui::OpenPopup("##linkPanel");
 	if (ImGui::BeginPopup("##linkPanel"))
 	{
@@ -1115,31 +1146,49 @@ void drawDrawer(const Database& db, const Row& row)
 	const UUID descriptionId = derivedId("property", "Description");
 	pushUuid(rowId);
 
+	// The title in the heading font, the way to close at its right edge.
+	const float closeW = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+	if (s_ctx && s_ctx->fontHeading) ImGui::PushFont(s_ctx->fontHeading);
 	textCell("##drawertitle", { rowId, UUID{ 0, 3 } }, row.title, [=](const std::string& title) {
 		post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setTitle(rowId, title, taskNowMs()); }); });
-	}, "Untitled");
+	}, "Untitled", 0.0f, -closeW);
+	if (s_ctx && s_ctx->fontHeading) ImGui::PopFont();
 	note("drawer:title");
-	if (ImGui::SmallButton("Close")) s_selRow = UUID{};
+	ImGui::SameLine();
+	if (ImGui::SmallButton("x")) s_selRow = UUID{};
 	note("drawer:close");
-	ImGui::Separator();
+	ImGui::Spacing();
 
-	for (const Property& p : db.properties)
+	// The properties as a two-column list: the name, then its value.
+	if (db.properties.empty())
+		ImGui::TextDisabled("No properties yet. Add some with Properties.");
+	else if (ImGui::BeginTable("##props", 2, ImGuiTableFlags_NoSavedSettings))
 	{
-		pushUuid(p.id);
-		ImGui::TextDisabled("%s", p.name.c_str());
-		if (p.type == PropertyType::EngineLink)
-			linksEditor(db, row, p);
-		else if (tasks && p.id == descriptionId)
+		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+		ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+		for (const Property& p : db.properties)
 		{
-			const UUID pid = p.id;
-			textCell("##description", { rowId, pid }, db.text(rowId, pid), [=](const std::string& v) {
-				post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setText(rowId, pid, v, taskNowMs()); }); });
-			}, nullptr, ImGui::GetTextLineHeight() * 4.0f);
-			note("drawer:description");
+			pushUuid(p.id);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextDisabled("%s", p.name.c_str());
+			ImGui::TableSetColumnIndex(1);
+			if (p.type == PropertyType::EngineLink)
+				linksEditor(db, row, p);
+			else if (tasks && p.id == descriptionId)
+			{
+				const UUID pid = p.id;
+				textCell("##description", { rowId, pid }, db.text(rowId, pid), [=](const std::string& v) {
+					post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setText(rowId, pid, v, taskNowMs()); }); });
+				}, nullptr, ImGui::GetTextLineHeight() * 4.0f);
+				note("drawer:description");
+			}
+			else
+				editCell(db, row, p);
+			ImGui::PopID();
 		}
-		else
-			editCell(db, row, p);
-		ImGui::PopID();
+		ImGui::EndTable();
 	}
 
 	if (tasks) taskHistory(rowId);
@@ -1170,7 +1219,6 @@ void drawDatabase(AppContext& ctx, const Database& db)
 {
 	const UUID dbId = db.id;
 	if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
-	ImGui::SetNextItemWidth(360);
 	textCell("##dbname", { dbId, UUID{} }, db.name, [=](const std::string& name) {
 		post([=] {
 			s_ws.edit(dbId, [&](Database& d) {
@@ -1179,7 +1227,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 				return true;
 			});
 		});
-	}, "Untitled database");
+	}, "Untitled database", 0.0f, 360.0f);
 	if (ctx.fontHeading) ImGui::PopFont();
 	ImGui::SameLine();
 	ImGui::TextDisabled("%d rows", static_cast<int>(db.rows.size()));
@@ -1391,7 +1439,6 @@ void drawSidebar(AppContext& ctx)
 			}
 		});
 	note("New Database");
-	if (EditorWidgets::button("Reload", ImVec2(-FLT_MIN, 0))) post([] { s_ws.poll(true); });
 
 	drawTeamNotices(ctx);
 
@@ -1455,6 +1502,14 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 
 	ImGui::SameLine();
 	ImGui::BeginChild("##plannermain", ImVec2(0, 0), ImGuiChildFlags_None);
+	{
+		// Reload: a small icon in the corner, where it is findable and out of the way.
+		const ImVec2 back = ImGui::GetCursorPos();
+		ImGui::SetCursorPos(ImVec2(ImGui::GetWindowContentRegionMax().x - ImGui::GetFrameHeight(), back.y));
+		if (iconButton("##reload", "Planner/Reload", refreshGlyph)) post([] { s_ws.poll(true); });
+		note("Reload");
+		ImGui::SetCursorPos(back);
+	}
 	if (!s_ws.lastError().empty())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Bad);
