@@ -1,6 +1,9 @@
 #pragma once
 #include <imgui.h>
 
+#include <functional>
+#include <string>
+
 #include <Types/UUID.h>
 
 #include <string>
@@ -74,6 +77,9 @@ namespace PlannerPanel
 	int  calendarMonth();
 	// How wide a day is on a timeline: 0 days, 1 weeks, 2 months.
 	void setTimelineZoom(int level);
+
+	// Replace the system clipboard the whiteboard pastes from (tests); empty functions restore it.
+	void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text);
 
 	// Show a standalone page, or the page of a row ("Open Page" in the row's details;
 	// the page exists in memory until it has a block). {} when a database is shown.

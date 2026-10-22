@@ -28,6 +28,7 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
+#include "PlannerBoardView.h"
 #include "PlannerPanel.h"                    // ...and the Planner tools reach the tab's workspace through this one
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
@@ -15231,6 +15232,16 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
 		}
+	}
+
+	// ── A picture let go over the Planner's whiteboard ──────────────────────
+	// It becomes a card there (PlannerBoardView.h); only a picture over the drawn canvas, so a
+	// project dropped anywhere else is still opened below.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data && event.drop.windowID != 0 &&
+	    PlannerBoardView::wantsFileDrop(event.drop.data, event.drop.x, event.drop.y))
+	{
+		PlannerBoardView::dropFile(event.drop.data, event.drop.x, event.drop.y);
+		return true;
 	}
 
 	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────

@@ -1890,3 +1890,133 @@ TEST_CASE("planner ui board: boards switch cleanly; delete asks first; a pull un
 	// Undo after a pull does not take the pulled card away (it was not ours to undo).
 	REQUIRE(f.ws->findBoard(f.id)->nodes.size() == 2);
 }
+
+TEST_CASE("planner ui board: Cmd+V pastes text as a card and a picture as a copied file; a picture file dropped on the canvas is one too")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_images");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+
+	struct ClipboardGuard { ~ClipboardGuard() { PlannerPanel::setClipboardForTest({}, {}); } } guard;
+
+	// Text on the clipboard: a text card with it.
+	PlannerPanel::setClipboardForTest({}, [] { return std::string("remember the key"); });
+	keyPress(ctx, ImGuiKey_V, /*ctrl=*/true);
+	{
+		const Board* b = f.ws->findBoard(f.id);
+		REQUIRE(b->nodes.size() == 1);
+		CHECK(b->nodes[0].type == NodeType::Text);
+		CHECK(b->nodes[0].text == "remember the key");
+		CHECK(PlannerBoardView::selection() == std::vector<UUID>{ b->nodes[0].id });
+	}
+
+	// A picture beats text: its bytes are copied under Config/Planner/Media and the card names the copy.
+	const std::string bytes = std::string("\x89PNG\r\n\x1a\n") + std::string(64, 'p');
+	PlannerPanel::setClipboardForTest([&](std::string& out, std::string& ext) { out = bytes; ext = "png"; return true; },
+	                                  [] { return std::string("ignored"); });
+	keyPress(ctx, ImGuiKey_V, true);
+	std::string media;
+	{
+		const Board* b = f.ws->findBoard(f.id);
+		REQUIRE(b->nodes.size() == 2);
+		const Node& n = b->nodes[1];
+		CHECK(n.type == NodeType::Image);
+		CHECK(n.asset == UUID{});
+		REQUIRE_FALSE(n.media.empty());
+		media = n.media;
+		CHECK(std::filesystem::exists(mediaPath(proj.root(), media)));
+		CHECK(n.w > 0);
+		// The card is in the file, so a teammate who pulls it gets the name (the picture comes with the folder).
+		Board onDisk;
+		REQUIRE(loadBoard(proj.root(), f.id, onDisk).ok);
+		REQUIRE(onDisk.nodes.size() == 2);
+		CHECK(onDisk.nodes[1].media == media);
+	}
+	// Pasting the same picture again is a second card on the same file.
+	keyPress(ctx, ImGuiKey_V, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	CHECK(f.ws->findBoard(f.id)->nodes[2].media == media);
+	CHECK(listMedia(proj.root()).size() == 1);
+
+	// An empty clipboard changes nothing; undo takes the last card away.
+	PlannerPanel::setClipboardForTest([](std::string&, std::string&) { return false; }, [] { return std::string(); });
+	keyPress(ctx, ImGuiKey_V, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 2);
+
+	// A file dropped from the system: a picture over the canvas is taken, other files and other places are not.
+	const std::filesystem::path pic = proj.root() / "dropped.png";
+	{ std::ofstream out(pic, std::ios::binary); out << std::string("\x89PNG\r\n\x1a\n") << std::string(80, 'd'); }
+	const PlannerPanel::Rect canvas = PlannerPanel::controlRect("canvas");
+	const ImVec2 inside = canvasPoint(300, 200);
+	CHECK(PlannerBoardView::wantsFileDrop(pic.string(), inside.x, inside.y));
+	CHECK_FALSE(PlannerBoardView::wantsFileDrop(pic.string(), canvas.x0 - 5, canvas.y0 + 5));
+	CHECK_FALSE(PlannerBoardView::wantsFileDrop((proj.root() / "notes.txt").string(), inside.x, inside.y));
+	PlannerBoardView::dropFile(pic.string(), inside.x, inside.y);
+	idle(ctx);
+	{
+		const Board* b = f.ws->findBoard(f.id);
+		REQUIRE(b->nodes.size() == 3);
+		const Node& n = b->nodes[2];
+		CHECK(n.type == NodeType::Image);
+		CHECK_FALSE(n.media.empty());
+		// Centred where it was let go.
+		CHECK(n.x + n.w * 0.5 == doctest::Approx(300).epsilon(0.02));
+		CHECK(n.y + n.h * 0.5 == doctest::Approx(200).epsilon(0.02));
+		CHECK(std::filesystem::exists(mediaPath(proj.root(), n.media)));
+	}
+	// A drop on a tab that does not show the board is not wanted.
+	PlannerPanel::selectDatabase(tasksDatabaseId());
+	idle(ctx, 4);
+	CHECK_FALSE(PlannerBoardView::wantsFileDrop(pic.string(), inside.x, inside.y));
+}
+
+TEST_CASE("planner ui board: assets, scenes and entities dropped from the editor's panels become object cards")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_objects");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+
+	const std::filesystem::path content = proj.root() / "Content";
+	ContentManager cm(content.string());
+	{
+		StructTypeAsset a;
+		a.type = HE::AssetType::StructType;
+		a.name = "Notes";
+		a.path = "Notes.hasset";
+		a.json = R"({"fields":[{"name":"hp","type":1}]})";
+		REQUIRE(cm.saveAsset(a));
+	}
+	REQUIRE(cm.loadAsset("Notes.hasset") != UUID{});
+	ctx.contentManager = &cm;
+	HorizonWorld world;
+	const Entity crate = world.createEntity("Crate");
+	ctx.world = &world;
+
+	BoardFixture f = openBoard(ctx);
+	Sources src;
+	src.assetPath = (content / "Notes.hasset").string();
+	src.entity    = crate;
+	g_sources     = &src;
+	idle(ctx);
+
+	dragTo(ctx, src.assetAt, canvasPoint(300, 150));
+	dragTo(ctx, src.entityAt, canvasPoint(300, 400));
+	g_sources = nullptr;
+
+	const Board* b = f.ws->findBoard(f.id);
+	REQUIRE(b->nodes.size() == 2);
+	CHECK(b->nodes[0].type == NodeType::Object);
+	CHECK(b->nodes[0].link.kind == TaskLinkKind::Asset);
+	CHECK(b->nodes[0].link.label == "Notes");
+	CHECK(b->nodes[0].x + b->nodes[0].w * 0.5 == doctest::Approx(300).epsilon(0.05));
+	CHECK(b->nodes[1].type == NodeType::Object);
+	CHECK(b->nodes[1].link.kind == TaskLinkKind::Entity);
+	CHECK(b->nodes[1].link.label == "Crate");
+	CHECK(PlannerPanel::controlRect("node:Notes").x1 > 0);
+	CHECK(PlannerPanel::controlRect("node:Crate").x1 > 0);
+}

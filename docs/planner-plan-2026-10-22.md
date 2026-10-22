@@ -251,3 +251,26 @@ Windows/Linux nicht gebaut.
 **Offen:** W2 Bilder (Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Datei-Drop, Vorschau mit `AssetThumbnailCache`/Textur aus `Config/Planner/Media`);
 W3 Objekt-/Zeilen-/Seitenkarten anlegen (Drop aus Outliner, "Open" in Details/Seite als Karte), Rahmen-Titel, Ausrichten/Raster-Einrasten, Kopieren/Einfuegen/Duplizieren;
 W4 MCP-Tools fuer Boards, Minimap, Export als PNG; Undo fuer Titel; Mehrfachauswahl-Groesse; Mausrad-Zoom-Gefuehl pruefen.
+
+## Handoff (Stand Whiteboard W2)
+
+Pictures on the whiteboard. Verified: `he_tests --test-case="planner*"` 84/84 (two new UI tests in
+`tests/test_planner_ui.cpp`: paste + file drop; asset/entity drop), `HorizonEditor` builds, help audit clean.
+**Not verified**: the picture actually drawn (no renderer in tests, so `pictureOf` returns nothing there), the
+real system clipboard (`SDL_GetClipboardData` with image/png, jpeg, bmp, webp, in `PlannerPanel.cpp` drawBoardTab)
+and a real OS file drop. Try all three in the editor first. macOS Finder/screenshot clipboards may only offer
+TIFF/other formats, in which case paste falls through to text.
+
+- Preview: `PlannerBoardView.cpp` `pictureOf` (Texture asset: `AssetThumbnailCache::image`; media: stb_image
+  + `renderer->CreateImGuiTexture`, cached per name in `s_mediaTex`, destroyed in `reset()`), drawn letterboxed in
+  `drawNode` with the caption below. Without a picture the card shows the old label ("Image (not shown): ...").
+- Creating cards: `placeCard`, `placeMediaImage`, `placeLink` (Texture asset -> Image with UUID, anything else ->
+  Object card), `paste` (picture beats text), size from the picture (`cardSizeFor`, long side 320).
+- Content Browser/Outliner drop: right after `##canvas` via `TaskBoardPanel::acceptDroppedLinks`.
+- OS file drop: `EditorApplication.cpp` (before the .heproj block) asks `PlannerBoardView::wantsFileDrop(path, x, y)`
+  (picture extension + canvas drawn in the last 2 frames + inside it), then `dropFile`; the canvas imports it next frame.
+- Test hook: `PlannerPanel::setClipboardForTest`.
+
+Decisions: copies go to Config/Planner/Media (hash name, dedupes); Texture assets are never copied.
+Next steps: W3 (create object/row/page cards from a menu, frame titles, align/snap, copy/paste/duplicate of cards),
+W4 (MCP board tools, minimap, PNG export), unused-media cleanup, board title undo.

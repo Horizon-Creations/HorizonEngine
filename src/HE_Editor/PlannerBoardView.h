@@ -3,6 +3,7 @@
 
 #include <imgui.h>
 
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -24,6 +25,10 @@ namespace HE::Planner { class Workspace; }
 //   drag a corner handle of a single selected card           resize
 //   drag from a dot on a selected or hovered card to another connect them
 //   double-click empty space / a card                        new card there / edit its text
+//   a Texture asset from the Content Browser                 a picture card (referenced by UUID); any other asset, a scene
+//                                                            or an entity becomes an object card
+//   a picture file dropped on the canvas, Cmd/Ctrl+V         a picture card (copied to Config/Planner/Media);
+//                                                            pasted text becomes a text card
 //   Delete, Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Y), Cmd/Ctrl+A, Esc
 //
 // Edits that come out of the drawing code are POSTED and applied after the window has been
@@ -41,7 +46,20 @@ struct Services
 	// Remember where the item just submitted is, under a name a test can ask for.
 	std::function<void(const std::string&)>        note;
 	std::function<void(const std::string&, ImVec2, ImVec2)> noteRect;
+	// The project folder (pictures pasted or dropped in are copied to Config/Planner/Media under it).
+	std::filesystem::path                          root;
+	// The clipboard, behind two functions so a test can fill it. clipboardImage gives the bytes of a
+	// picture and its extension ("png"); clipboardText the plain text. Empty/false when there is none.
+	std::function<bool(std::string&, std::string&)> clipboardImage;
+	std::function<std::string()>                   clipboardText;
 };
+
+// A file let go over the window (the application's drop event). True when it is a picture, the
+// board's canvas was drawn in the last frames and (x, y) - window points - is inside it, so the
+// application should hand the file over and not use it for anything else; the card appears in the
+// next frame.
+bool wantsFileDrop(const std::string& path, float x, float y);
+void dropFile(const std::string& path, float x, float y);
 
 // Toolbar and canvas for the board; call inside a window, with the panel's help scope open.
 void draw(const Services& services, const HE::UUID& boardId);
