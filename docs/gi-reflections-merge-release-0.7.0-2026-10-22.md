@@ -4,7 +4,8 @@ PR #183 (`claude/global-illumination-reflections` -> `release/0.7.0`) conflicted
 release after PR #182 (topic 207, material tessellation/displacement) landed. This is a
 plain merge of `origin/release/0.7.0` @ `8d091257` into the topic branch (no rebase, no force).
 While I worked release advanced to `8da78bce` (two Planner commits, only `src/HE_Editor/Planner*`
-and planner tests); that was merged as a second merge commit, no conflicts.
+and planner tests); that was merged as a second merge commit, and a third one for `9a7323d0` (Planner W4; also touches
+`EditorApplication.cpp`/`EditorHelp.cpp`, auto-merged, `editor_help_audit.py --check` still passes with 2032 entries). No conflicts in either.
 
 ## Conflicts
 
