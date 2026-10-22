@@ -3,6 +3,7 @@
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
@@ -32,11 +33,41 @@ Workspace::Entry* Workspace::entryFor(const UUID& id)
 	return nullptr;
 }
 
+void Workspace::stampPage(PageEntry& e) const
+{
+	std::error_code ec;
+	const fs::path file = pagePath(m_root, e.page.id);
+	e.onDisk = fs::exists(file, ec);
+	e.mtime  = e.onDisk ? fs::last_write_time(file, ec) : fs::file_time_type{};
+	e.size   = e.onDisk ? fs::file_size(file, ec) : 0;
+}
+
+Workspace::PageEntry* Workspace::pageEntryFor(const UUID& id)
+{
+	for (PageEntry& e : m_pages)
+		if (e.page.id == id) return &e;
+	return nullptr;
+}
+
 void Workspace::loadAll()
 {
 	m_entries.clear();
 	m_unreadable.clear();
+	m_pages.clear();
+	m_unreadablePages.clear();
 	if (m_root.empty()) return;
+	for (const UUID& id : listPages(m_root))
+	{
+		PageEntry e;
+		const Database::LoadResult r = loadPage(m_root, id, e.page);
+		if (!r.ok)
+		{
+			m_unreadablePages.push_back({ id, r.error });
+			continue;
+		}
+		stampPage(e);
+		m_pages.push_back(std::move(e));
+	}
 	for (const UUID& id : listDatabases(m_root))
 	{
 		Entry e;
@@ -179,8 +210,137 @@ bool Workspace::remove(const UUID& id)
 		return false;
 	}
 	m_entries.erase(it);
+	// The pages of its rows go with it.
+	std::vector<UUID> rowPages;
+	for (const PageEntry& e : m_pages)
+		if (e.page.parent == id) rowPages.push_back(e.page.id);
+	for (const UUID& pid : rowPages) removePage(pid);
 	++m_generation;
 	return true;
+}
+
+// ── Pages ────────────────────────────────────────────────────────────────────
+
+std::vector<Page*> Workspace::pages()
+{
+	std::vector<Page*> out;
+	for (PageEntry& e : m_pages) out.push_back(&e.page);
+	auto lowered = [](std::string t) {
+		for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return t;
+	};
+	std::sort(out.begin(), out.end(), [&](const Page* a, const Page* b) {
+		const std::string x = lowered(a->title), y = lowered(b->title);
+		if (x != y) return x < y;
+		return a->id.hi != b->id.hi ? a->id.hi < b->id.hi : a->id.lo < b->id.lo;
+	});
+	return out;
+}
+
+Page* Workspace::findPage(const UUID& id)
+{
+	PageEntry* e = pageEntryFor(id);
+	return e ? &e->page : nullptr;
+}
+
+Page* Workspace::createPage(std::string title, const UUID& parent)
+{
+	if (m_root.empty()) return nullptr;
+	PageEntry e;
+	e.page.id        = UUID::generate();
+	e.page.title     = std::move(title);
+	e.page.parent    = parent;
+	e.page.createdBy = m_author;
+	e.page.createdMs = e.page.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	std::string err;
+	if (!savePage(m_root, e.page, &err))
+	{
+		m_error = err;
+		return nullptr;
+	}
+	stampPage(e);
+	m_pages.push_back(std::move(e));
+	++m_generation;
+	return &m_pages.back().page;
+}
+
+Page* Workspace::openRowPage(const UUID& rowId, const UUID& databaseId)
+{
+	if (PageEntry* e = pageEntryFor(rowId)) return &e->page;
+	if (m_root.empty()) return nullptr;
+	// A file that exists but cannot be read is not "no page": a fresh one over it
+	// would be the overwrite the loader refuses.
+	for (const Unreadable& u : m_unreadablePages)
+		if (u.id == rowId)
+		{
+			m_error = "the page file cannot be read (" + u.error + ")";
+			return nullptr;
+		}
+	PageEntry e;
+	e.page.id        = rowId;
+	e.page.parent    = databaseId;
+	e.page.createdBy = m_author;
+	e.page.createdMs = e.page.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	stampPage(e);   // not on disk: savePage writes nothing for it until it has a block
+	m_pages.push_back(std::move(e));
+	++m_generation;
+	return &m_pages.back().page;
+}
+
+bool Workspace::removePage(const UUID& id)
+{
+	// The pages under it first (a sub-page's parent is the page).
+	std::vector<UUID> below;
+	for (const PageEntry& e : m_pages)
+		if (e.page.parent == id) below.push_back(e.page.id);
+	for (const UUID& child : below) removePage(child);
+
+	const auto it = std::find_if(m_pages.begin(), m_pages.end(),
+	                             [&](const PageEntry& e) { return e.page.id == id; });
+	if (it == m_pages.end()) return false;
+	std::string err;
+	if (!deletePage(m_root, id, &err))
+	{
+		m_error = err;
+		return false;
+	}
+	m_pages.erase(it);
+	++m_generation;
+	return true;
+}
+
+bool Workspace::editPage(const UUID& id, const std::function<bool(Page&)>& fn)
+{
+	PageEntry* e = pageEntryFor(id);
+	if (!e) return false;
+	if (!fn(e->page)) return false;
+	++m_generation;
+
+	std::string err;
+	if (savePage(m_root, e->page, &err))
+	{
+		stampPage(*e);
+		m_error.clear();
+		return true;
+	}
+	// The file moved under us (a pull): take what arrived, put the change on top, once.
+	Page fresh;
+	const Database::LoadResult r = loadPage(m_root, id, fresh);
+	if (r.ok)
+	{
+		e->page = std::move(fresh);
+		if (fn(e->page) && savePage(m_root, e->page, &err))
+		{
+			stampPage(*e);
+			++m_generation;
+			m_error.clear();
+			return true;
+		}
+	}
+	m_error = err.empty() ? r.error : err;
+	return false;
 }
 
 bool Workspace::edit(const UUID& id, const std::function<bool(Database&)>& fn)
@@ -327,6 +487,52 @@ bool Workspace::poll(bool force)
 		afterLoad(e);
 		stamp(e);
 		m_entries.push_back(std::move(e));
+		changed = true;
+	}
+
+	// Pages that changed, appeared or went away (a pull).
+	for (std::size_t i = 0; i < m_pages.size();)
+	{
+		PageEntry& e = m_pages[i];
+		std::error_code ec;
+		const fs::path file = pagePath(m_root, e.page.id);
+		const bool has = fs::exists(file, ec);
+		if (!has && !e.onDisk) { ++i; continue; }   // an empty row page that lives in memory
+		if (!has)
+		{
+			m_pages.erase(m_pages.begin() + static_cast<std::ptrdiff_t>(i));
+			changed = true;
+			continue;
+		}
+		if (e.onDisk && fs::last_write_time(file, ec) == e.mtime && fs::file_size(file, ec) == e.size) { ++i; continue; }
+		Page fresh;
+		const Database::LoadResult r = loadPage(m_root, e.page.id, fresh);
+		if (r.ok) e.page = std::move(fresh);
+		else m_error = "Config/Planner/Pages/" + uuidToHex(e.page.id) + ".json cannot be read (" + r.error +
+		               "). Fix the file; nothing is saved to it until then.";
+		stampPage(e);
+		changed = true;
+		++i;
+	}
+	for (const UUID& id : listPages(m_root))
+	{
+		if (pageEntryFor(id)) continue;
+		PageEntry e;
+		const Database::LoadResult r = loadPage(m_root, id, e.page);
+		auto it = std::find_if(m_unreadablePages.begin(), m_unreadablePages.end(),
+		                       [&](const Unreadable& u) { return u.id == id; });
+		if (!r.ok)
+		{
+			if (it == m_unreadablePages.end())
+			{
+				m_unreadablePages.push_back({ id, r.error });
+				changed = true;
+			}
+			continue;
+		}
+		if (it != m_unreadablePages.end()) m_unreadablePages.erase(it);
+		stampPage(e);
+		m_pages.push_back(std::move(e));
 		changed = true;
 	}
 

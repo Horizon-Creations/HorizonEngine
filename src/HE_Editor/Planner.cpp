@@ -1351,6 +1351,110 @@ bool Page::moveBlock(const UUID& bid, const UUID& newParent, std::size_t index, 
 	return true;
 }
 
+Block* Page::addBlockAfter(const UUID& after, BlockType type, std::string text, std::int64_t nowMs)
+{
+	Block b;
+	b.id   = UUID::generate();
+	b.type = type;
+	b.text = std::move(text);
+	std::vector<Block>* owner = &blocks;
+	std::size_t at = blocks.size();
+	if (!isNull(after))
+	{
+		std::size_t index = 0;
+		if (!locate(blocks, after, owner, index)) return nullptr;
+		at = index + 1;
+	}
+	owner->insert(owner->begin() + static_cast<std::ptrdiff_t>(at), std::move(b));
+	modifiedMs = nowMs;
+	return &(*owner)[at];
+}
+
+bool Page::setBlockType(const UUID& bid, BlockType type, std::int64_t nowMs)
+{
+	Block* b = findBlock(bid);
+	if (!b || type == BlockType::Other) return false;
+	b->type = type;
+	b->typeOther.clear();
+	modifiedMs = nowMs;
+	return true;
+}
+
+bool Page::setBlockText(const UUID& bid, std::string text, std::int64_t nowMs)
+{
+	Block* b = findBlock(bid);
+	if (!b) return false;
+	b->text = std::move(text);
+	modifiedMs = nowMs;
+	return true;
+}
+
+bool Page::setBlockChecked(const UUID& bid, bool checked, std::int64_t nowMs)
+{
+	Block* b = findBlock(bid);
+	if (!b) return false;
+	b->checked = checked;
+	modifiedMs = nowMs;
+	return true;
+}
+
+bool Page::indentBlock(const UUID& bid, std::int64_t nowMs)
+{
+	std::vector<Block>* owner = nullptr;
+	std::size_t at = 0;
+	if (!locate(blocks, bid, owner, at) || at == 0) return false;
+	Block moved = std::move((*owner)[at]);
+	owner->erase(owner->begin() + static_cast<std::ptrdiff_t>(at));
+	(*owner)[at - 1].children.push_back(std::move(moved));
+	modifiedMs = nowMs;
+	return true;
+}
+
+namespace
+{
+
+bool outdentIn(std::vector<Block>& list, const UUID& id)
+{
+	for (std::size_t i = 0; i < list.size(); ++i)
+	{
+		std::vector<Block>& kids = list[i].children;
+		for (std::size_t j = 0; j < kids.size(); ++j)
+			if (kids[j].id == id)
+			{
+				// It takes its younger siblings along as its own children, so what was
+				// below it on the page stays below it.
+				Block moved = std::move(kids[j]);
+				for (std::size_t k = j + 1; k < kids.size(); ++k) moved.children.push_back(std::move(kids[k]));
+				kids.erase(kids.begin() + static_cast<std::ptrdiff_t>(j), kids.end());
+				list.insert(list.begin() + static_cast<std::ptrdiff_t>(i) + 1, std::move(moved));
+				return true;
+			}
+		if (outdentIn(kids, id)) return true;
+	}
+	return false;
+}
+
+} // namespace
+
+bool Page::outdentBlock(const UUID& bid, std::int64_t nowMs)
+{
+	if (!outdentIn(blocks, bid)) return false;
+	modifiedMs = nowMs;
+	return true;
+}
+
+bool Page::moveBlockBy(const UUID& bid, int delta, std::int64_t nowMs)
+{
+	std::vector<Block>* owner = nullptr;
+	std::size_t at = 0;
+	if (delta == 0 || !locate(blocks, bid, owner, at)) return false;
+	const long to = static_cast<long>(at) + delta;
+	if (to < 0 || to >= static_cast<long>(owner->size())) return false;
+	std::swap((*owner)[at], (*owner)[static_cast<std::size_t>(to)]);
+	modifiedMs = nowMs;
+	return true;
+}
+
 Page::LoadResult Page::fromJson(std::string_view text)
 {
 	*this = Page{};

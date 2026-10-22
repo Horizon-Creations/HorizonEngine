@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-// ── The open project's Planner databases, loaded, edited and saved ───────────
+// ── The open project's Planner databases and pages, loaded, edited and saved ──
 // What TaskBoardPanel's Store is for the board: ONE copy of every database in
 // the editor and one writer of its file. ImGui-free, so the tab, the MCP tools
 // later on and the tests all go through the same door.
@@ -44,6 +44,25 @@ public:
 	std::vector<Database*> databases();
 	Database*       find(const UUID& id);
 	const std::vector<Unreadable>& unreadable() const { return m_unreadable; }
+
+	// ── Pages ────────────────────────────────────────────────────────────────
+	// Every page of the project (Config/Planner/Pages), by title then id. Includes
+	// the pages of database rows (their parent is the database); the sidebar lists
+	// only those with no parent. Valid until the next create/remove/poll.
+	std::vector<Page*> pages();
+	Page*              findPage(const UUID& id);
+	const std::vector<Unreadable>& unreadablePages() const { return m_unreadablePages; }
+	// A new top-level page (or one under `parent`), saved at once. nullptr when the
+	// file could not be written.
+	Page* createPage(std::string title, const UUID& parent = {});
+	// The page of a database row: the file's, or an empty one that exists only in
+	// memory until it gets a block (a row is a page the moment you open it, but
+	// opening it must not add a file to the project).
+	Page* openRowPage(const UUID& rowId, const UUID& databaseId);
+	bool  removePage(const UUID& id);   // also the pages under it
+	// Apply `fn` to the page and save it, the way edit() does for a database: a pull
+	// under the open page is read and the change applied on top of it, once.
+	bool  editPage(const UUID& id, const std::function<bool(Page&)>& fn);
 
 	// A new, empty database (one table view) saved at once. nullptr when the
 	// file could not be written; lastError() says why.
@@ -98,6 +117,14 @@ public:
 	const std::string& author() const { return m_author; }
 
 private:
+	struct PageEntry
+	{
+		Page                             page;
+		std::filesystem::file_time_type  mtime{};
+		std::uintmax_t                   size = 0;
+		bool                             onDisk = false;   // a file was there when last looked at
+	};
+
 	struct Entry
 	{
 		Database                         db;
@@ -107,6 +134,8 @@ private:
 	};
 
 	void loadAll();
+	void stampPage(PageEntry& e) const;
+	PageEntry* pageEntryFor(const UUID& id);
 	void attachExternal();
 	void afterLoad(Entry& e);
 	void stamp(Entry& e) const;
@@ -116,6 +145,8 @@ private:
 	std::filesystem::path   m_root;
 	std::vector<Entry>      m_entries;
 	std::vector<Unreadable> m_unreadable;
+	std::vector<PageEntry>  m_pages;
+	std::vector<Unreadable> m_unreadablePages;
 	std::string             m_error;
 	std::string             m_author;
 	External                m_ext;

@@ -512,3 +512,129 @@ TEST_CASE("planner tasks: the workspace writes edits to the board and keeps only
 	CHECK(again.find(tasksDatabaseId())->rows.size() == 3);
 	CHECK(again.find(tasksDatabaseId())->views[0].sorts.size() == 1);
 }
+
+// ── Pages ────────────────────────────────────────────────────────────────────
+
+TEST_CASE("planner workspace pages: create, edit, reload from disk")
+{
+	TempProject tp;
+	Workspace ws;
+	ws.setProject(tp.root);
+	CHECK(ws.pages().empty());
+
+	Page* page = ws.createPage("Game design");
+	REQUIRE(page);
+	const UUID id = page->id;
+	CHECK(fs::exists(pagePath(tp.root, id)));
+	CHECK(ws.findPage(id)->parent == UUID{});
+
+	UUID block;
+	REQUIRE(ws.editPage(id, [&](Page& p) { block = p.addBlock(BlockType::Heading1, "Pillars", kT0)->id; return true; }));
+	CHECK_FALSE(ws.editPage(id, [](Page&) { return false; }));
+	CHECK_FALSE(ws.editPage(UUID::generate(), [](Page&) { return true; }));
+
+	Workspace other;
+	other.setProject(tp.root);
+	REQUIRE(other.findPage(id));
+	CHECK(other.findPage(id)->title == "Game design");
+	REQUIRE(other.findPage(id)->findBlock(block));
+	CHECK(other.findPage(id)->findBlock(block)->text == "Pillars");
+
+	// Sorted by title, case-insensitive; a sub-page keeps its parent.
+	Page* sub = ws.createPage("alpha notes", id);
+	REQUIRE(sub);
+	ws.createPage("Zeta");
+	const std::vector<Page*> sorted = ws.pages();
+	REQUIRE(sorted.size() == 3);
+	CHECK(sorted[0]->title == "alpha notes");
+	CHECK(sorted[0]->parent == id);
+	CHECK(sorted[2]->title == "Zeta");
+
+	// Removing a page takes its sub-pages and their files.
+	const UUID subId = ws.findPage(id) ? sub->id : UUID{};
+	CHECK(ws.removePage(id));
+	CHECK(ws.findPage(id) == nullptr);
+	CHECK(ws.findPage(subId) == nullptr);
+	CHECK_FALSE(fs::exists(pagePath(tp.root, id)));
+	CHECK_FALSE(fs::exists(pagePath(tp.root, subId)));
+	CHECK_FALSE(ws.removePage(id));
+}
+
+TEST_CASE("planner workspace pages: a row's page exists in memory until it has a block")
+{
+	TempProject tp;
+	Workspace ws;
+	ws.setProject(tp.root);
+	const UUID dbId = ws.create("Features")->id;
+	UUID row;
+	ws.edit(dbId, [&](Database& db) { row = db.addRow("Harbour", "Anna", kT0)->id; return true; });
+
+	Page* page = ws.openRowPage(row, dbId);
+	REQUIRE(page);
+	CHECK(page->id == row);
+	CHECK(page->parent == dbId);
+	CHECK_FALSE(fs::exists(pagePath(tp.root, row)));   // opening a row adds no file
+	CHECK(ws.openRowPage(row, dbId) == page);
+	CHECK_FALSE(ws.poll(true));                        // and the poll does not throw it away
+	REQUIRE(ws.findPage(row));
+
+	REQUIRE(ws.editPage(row, [&](Page& p) { p.addBlock(BlockType::Paragraph, "Foggy harbour", kT0); return true; }));
+	CHECK(fs::exists(pagePath(tp.root, row)));
+
+	// Deleting the database takes its rows' pages with it.
+	CHECK(ws.remove(dbId));
+	CHECK(ws.findPage(row) == nullptr);
+	CHECK_FALSE(fs::exists(pagePath(tp.root, row)));
+}
+
+TEST_CASE("planner workspace pages: a pull under the open page is read, the edit lands on top")
+{
+	TempProject tp;
+	Workspace ws;
+	ws.setProject(tp.root);
+	const UUID id = ws.createPage("Notes")->id;
+	ws.editPage(id, [&](Page& p) { p.addBlock(BlockType::Paragraph, "mine", kT0); return true; });
+
+	Workspace teammate;
+	teammate.setProject(tp.root);
+	REQUIRE(teammate.editPage(id, [&](Page& p) { p.addBlock(BlockType::Paragraph, "theirs", kT0 + 1); return true; }));
+
+	REQUIRE(ws.editPage(id, [&](Page& p) { p.addBlock(BlockType::Paragraph, "mine too", kT0 + 2); return true; }));
+	std::vector<std::string> texts;
+	for (const Block& b : ws.findPage(id)->blocks) texts.push_back(b.text);
+	CHECK(texts == std::vector<std::string>{ "mine", "theirs", "mine too" });
+	CHECK(ws.lastError().empty());
+}
+
+TEST_CASE("planner workspace pages: poll takes in new, changed and removed files, and lists unreadable ones")
+{
+	TempProject tp;
+	Workspace ws;
+	ws.setProject(tp.root);
+	Workspace teammate;
+	teammate.setProject(tp.root);
+
+	const UUID id = teammate.createPage("From a pull")->id;
+	CHECK(ws.poll(true));
+	REQUIRE(ws.findPage(id));
+
+	teammate.editPage(id, [&](Page& p) { p.title = "Renamed"; return true; });
+	CHECK(ws.poll(true));
+	CHECK(ws.findPage(id)->title == "Renamed");
+
+	teammate.removePage(id);
+	CHECK(ws.poll(true));
+	CHECK(ws.findPage(id) == nullptr);
+
+	const UUID bad = UUID::generate();
+	writeBytes(pagePath(tp.root, bad), "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> x\n");
+	CHECK(ws.poll(true));
+	REQUIRE(ws.unreadablePages().size() == 1);
+	CHECK(ws.unreadablePages()[0].id == bad);
+	CHECK(ws.openRowPage(bad, UUID::generate()) == nullptr);   // not a page to start over
+	writeBytes(pagePath(tp.root, bad), "{\"title\": \"Fixed\"}");
+	CHECK(ws.poll(true));
+	CHECK(ws.unreadablePages().empty());
+	REQUIRE(ws.findPage(bad));
+	CHECK(ws.findPage(bad)->title == "Fixed");
+}

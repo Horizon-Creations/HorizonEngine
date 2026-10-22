@@ -112,3 +112,27 @@ in der nativen Menueleiste); Windows/Linux nicht gebaut; die Handbuchquellen unt
 gebaut. Alle anderen Task-Board-Tests gruen. **Nicht geprueft:** Editor nicht gestartet; Windows/Linux nicht gebaut.
 **Offen:** Kalenderansicht; Zeitleiste ohne Zoom und ohne Resize der Balken; Relation zeigt nur Titel (kein Klick zur Zielzeile);
 P3 (Seiten/Bloecke, eine Zeile oeffnet eine Page); Tasks-Spalten bleiben fest; Reihenfolge der Datenbanken nach Name.
+
+## Handoff (Stand P3, 2026-10-22)
+**Fertig:** Seiten und Bloecke.
+- Modell (`Planner.{h,cpp}`): `Page::addBlockAfter/setBlockType/setBlockText/setBlockChecked/indentBlock/outdentBlock/moveBlockBy`
+  (Ausruecken nimmt die juengeren Geschwister als Kinder mit).
+- `Workspace`: `pages()`, `findPage`, `createPage(title, parent)`, `openRowPage(row, db)` (nur im Speicher, bis der erste Block
+  da ist: `savePage` schreibt nichts fuer eine leere Seite ohne Titel), `removePage` (samt Unterseiten), `editPage` (Pull unter
+  der offenen Seite wird gelesen, Edit einmal darauf neu angewendet), `poll` fuer Seiten, unlesbare Seiten gelistet und nie ueberschrieben;
+  `remove(db)` nimmt die Zeilenseiten mit.
+- `PlannerPanel`: Seitenleiste "Pages" (Baum nach `parent`, Rechtsklick Delete Page mit Bestaetigung, New Page), Seitenansicht mit
+  Titel, Block-Editor (Enter = naechster Block, Strg/Umschalt+Enter Zeilenumbruch, Markdown-Kuerzel `# ## ### - * 1. [] > --- ```` auf
+  einem Absatz, Enter auf leerem Listenpunkt beendet die Liste, Backspace im leeren Block loescht ihn), Block-Menue (⋮): Turn into, Add Block Below,
+  Move Up/Down, Indent/Outdent, Delete Block; Engine-Objekt-Block (Drop, Chip, Sprung), Datenbank-Ansicht-Block (erste 8 Zeilen,
+  Klick oeffnet die Zeilenseite), Drop auf die Seite haengt Engine-Objekte an. Jede Zeile: "Open Page" in den Details, Eigenschaften
+  oben (`drawPropertyTable`, gemeinsam mit den Details), Back fuehrt zur Datenbank. Zeile loeschen loescht auch ihre Seite.
+- Help: `Planner/New Page`, `Open Page`, `Add Block`, `Turn into`, `Add Block Below`, `Move Up/Down`, `Indent`, `Outdent`, `Delete Block`,
+  `Delete Page`; Audit 0 offen.
+**Tests:** `test_planner_ui` 16 Faelle (neu: Seite schreiben, Block-Menue, Zeilenseite erst mit Block gespeichert, Drop + Datenbank-Block),
+`test_planner_workspace` 16, `test_planner` 16; Task-Board-Tests unveraendert gruen; `HorizonEditor` gebaut.
+**Nicht geprueft:** Editor nicht gestartet (Schriftgroessen der Ueberschriften, Code-Schrift, Fokus per Tastatur im echten Editor);
+Windows/Linux nicht gebaut; Volllauf von he_tests nach P3 nicht wiederholt.
+**Offen:** Seiten-Links (Block "Seite") und Unterseiten per UI anlegen; Bloecke per Ziehen umordnen; Pfeiltasten zwischen Bloecken;
+Kalenderansicht; Zeitleiste ohne Zoom/Resize; Relation: Klick zur Zielzeile; Variante B (Planner als Wahrheit fuer Tasks) mit Historie je Zeile;
+Live-Zusammenarbeit ueber den Team-Server.

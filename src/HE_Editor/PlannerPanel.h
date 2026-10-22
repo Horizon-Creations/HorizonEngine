@@ -16,10 +16,18 @@ namespace HE::Planner { class Workspace; }
 // Config/Planner); this file is the window on top of it. See
 // docs/planner-plan-2026-10-22.md.
 //
-// Left: the project's databases and "New Database". Right: the selected database
+// Left: the project's databases and pages ("New Database", "New Page"). Right: the selected database
 // as a table (sort by a header, filter, search, hide columns, edit every cell in
 // place) or as board lanes of a select property (drag a card to another lane to
 // change its value), and, for the row you open, its details.
+//
+// ── Pages ─────────────────────────────────────────────────────────────────────
+// A page is a tree of blocks (text, headings, lists, to-dos, quotes, callouts, code,
+// dividers, an engine object, a database view), written like a document: Enter makes
+// the next block, Markdown shortcuts turn a paragraph into a heading or a list, the
+// "..." at a block's left turns it into another kind or moves it. Every database
+// row is a page too ("Open Page" in its details), with its properties on top; the
+// design document and level concepts are standalone pages in the sidebar.
 //
 // ── Tasks replaces the Task Board window ──────────────────────────────────────
 // The database "Tasks" is the project's task list (PlannerTasks.h): rows come
@@ -56,6 +64,11 @@ namespace PlannerPanel
 	void openTask(const HE::UUID& id);
 	// The row whose details are open; {} for none.
 	HE::UUID selectedRow();
+	// Show a standalone page, or the page of a row ("Open Page" in the row's details;
+	// the page exists in memory until it has a block). {} when a database is shown.
+	void selectPage(const HE::UUID& id);
+	void openRowPage(const HE::UUID& databaseId, const HE::UUID& rowId);
+	HE::UUID selectedPage();
 
 	// What the last frame drew: rows the selected view has, and how many of them
 	// were laid out (a long table only draws what is on screen).

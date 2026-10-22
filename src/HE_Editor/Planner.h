@@ -304,6 +304,21 @@ public:
 	// or one of its descendants.
 	bool         moveBlock(const UUID& id, const UUID& newParent, std::size_t index, std::int64_t nowMs);
 
+	// ── What the block editor does ───────────────────────────────────────────
+	// A new block right after `after`, at its level ({} = at the end of the page).
+	// nullptr when `after` is not a block of this page. The pointer is good until
+	// the page changes again.
+	Block*       addBlockAfter(const UUID& after, BlockType type, std::string text, std::int64_t nowMs);
+	bool         setBlockType(const UUID& id, BlockType type, std::int64_t nowMs);
+	bool         setBlockText(const UUID& id, std::string text, std::int64_t nowMs);
+	bool         setBlockChecked(const UUID& id, bool checked, std::int64_t nowMs);
+	// Makes the block the last child of the block above it (false for the first at
+	// its level), or takes it out of its parent to follow it (false at top level).
+	bool         indentBlock(const UUID& id, std::int64_t nowMs);
+	bool         outdentBlock(const UUID& id, std::int64_t nowMs);
+	// One place up or down among its siblings; false at either end.
+	bool         moveBlockBy(const UUID& id, int delta, std::int64_t nowMs);
+
 	using LoadResult = Database::LoadResult;
 	LoadResult  fromJson(std::string_view text);
 	std::string toJson() const;

@@ -633,3 +633,58 @@ TEST_CASE("planner page keeps unknown blocks and keys")
 	REQUIRE(second.fromJson(out).ok);
 	CHECK(second.toJson() == out);
 }
+
+TEST_CASE("planner page: what the block editor does to the tree")
+{
+	Page page;
+	page.id = UUID::generate();
+	const UUID a = page.addBlock(BlockType::Paragraph, "a", kNow)->id;
+	const UUID c = page.addBlock(BlockType::Paragraph, "c", kNow)->id;
+
+	// A block right after another, at its level; {} appends.
+	const UUID b = page.addBlockAfter(a, BlockType::Todo, "b", kNow + 1)->id;
+	CHECK(page.blocks.size() == 3);
+	CHECK(page.blocks[1].id == b);
+	CHECK(page.blocks[2].id == c);
+	CHECK(page.addBlockAfter(UUID{}, BlockType::Heading1, "end", kNow + 2) != nullptr);
+	CHECK(page.blocks.back().text == "end");
+	CHECK(page.addBlockAfter(UUID::generate(), BlockType::Paragraph, "x", kNow) == nullptr);
+
+	// Type, text, checked.
+	CHECK(page.setBlockType(b, BlockType::Quote, kNow + 3));
+	CHECK(page.findBlock(b)->type == BlockType::Quote);
+	CHECK_FALSE(page.setBlockType(b, BlockType::Other, kNow));
+	CHECK(page.setBlockText(b, "bb", kNow + 4));
+	CHECK(page.setBlockChecked(b, true, kNow + 5));
+	CHECK(page.findBlock(b)->text == "bb");
+	CHECK(page.findBlock(b)->checked);
+	CHECK(page.modifiedMs == kNow + 5);
+
+	// Indent: under the block above; the first at its level cannot.
+	CHECK_FALSE(page.indentBlock(a, kNow));
+	CHECK(page.indentBlock(b, kNow + 6));
+	CHECK(page.blocks.size() == 3);
+	REQUIRE(page.findBlock(a)->children.size() == 1);
+	CHECK(page.findBlock(a)->children[0].id == b);
+	// A child after a child indents again under its older sibling.
+	const UUID b2 = page.addBlockAfter(b, BlockType::Paragraph, "b2", kNow + 7)->id;
+	CHECK(page.indentBlock(b2, kNow + 8));
+	CHECK(page.findBlock(b)->children.size() == 1);
+
+	// Outdent: back out, and what was below it follows as its children.
+	CHECK(page.outdentBlock(b2, kNow + 9));
+	CHECK(page.findBlock(b)->children.empty());
+	CHECK(page.findBlock(a)->children.size() == 2);
+	CHECK(page.outdentBlock(b, kNow + 10));
+	CHECK(page.blocks[1].id == b);
+	CHECK(page.findBlock(b)->children.size() == 1);   // b2 stayed below b
+	CHECK_FALSE(page.outdentBlock(a, kNow));          // top level: nothing to leave
+
+	// Up and down among siblings, not past either end.
+	CHECK(page.moveBlockBy(c, -1, kNow + 11));
+	CHECK(page.blocks[1].id == c);
+	CHECK_FALSE(page.moveBlockBy(a, -1, kNow));
+	CHECK(page.moveBlockBy(a, 1, kNow + 12));
+	CHECK(page.blocks[1].id == a);
+	CHECK_FALSE(page.moveBlockBy(page.blocks.back().id, 1, kNow));
+}

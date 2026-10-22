@@ -912,3 +912,249 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	idle(ctx);
 	CHECK(PlannerPanel::controlRect("bar:Alpha").x1 <= 0);
 }
+
+namespace
+{
+	void pressEnter(AppContext& ctx)
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(ImGuiKey_Enter, true);
+		frame(ctx, false);
+		io.AddKeyEvent(ImGuiKey_Enter, false);
+		settle(ctx);
+	}
+
+	void typeText(AppContext& ctx, const char* text)
+	{
+		ImGui::GetIO().AddInputCharactersUTF8(text);
+		settle(ctx);
+	}
+
+	const Page* currentPage(AppContext& ctx)
+	{
+		Workspace* ws = PlannerPanel::workspace(ctx);
+		return ws ? ws->findPage(PlannerPanel::selectedPage()) : nullptr;
+	}
+}
+
+TEST_CASE("planner ui pages: New Page, a title, blocks written like a document")
+{
+	Harness harness;
+	Project proj("he_planner_ui_page");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	REQUIRE(currentPage(ctx) != nullptr);
+	const UUID pageId = currentPage(ctx)->id;
+	CHECK(std::filesystem::exists(pagePath(proj.root(), pageId)));
+	CHECK(currentPage(ctx)->parent == UUID{});
+
+	// The title is saved when the field is left.
+	REQUIRE(click(ctx, "page:title"));
+	// "Untitled" goes (the click lands past its end, so Backspace eats from the end).
+	for (int i = 0; i < 8; ++i)
+	{
+		ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, true);
+		frame(ctx, false);
+		ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, false);
+		frame(ctx, false);
+	}
+	typeText(ctx, "Game design");
+	pressEnter(ctx);
+	CHECK(currentPage(ctx)->title == "Game design");
+	CHECK(PlannerPanel::controlRect("page:Game design").x1 > 0);   // the sidebar says so too
+
+	// Add Block puts the cursor in a new block; Enter makes the next one.
+	REQUIRE(click(ctx, "add-block"));
+	settle(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 1);
+	typeText(ctx, "Pillars");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 2);
+	CHECK(currentPage(ctx)->blocks[0].text == "Pillars");
+	CHECK(currentPage(ctx)->blocks[0].type == BlockType::Paragraph);
+
+	// Markdown shortcuts: "# " makes a heading, "[] " a to-do that goes on as a to-do.
+	typeText(ctx, "# Overview");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 3);
+	CHECK(currentPage(ctx)->blocks[1].type == BlockType::Heading1);
+	CHECK(currentPage(ctx)->blocks[1].text == "Overview");
+	typeText(ctx, "[] Ship alpha");
+	pressEnter(ctx);
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);
+	CHECK(currentPage(ctx)->blocks[2].type == BlockType::Todo);
+	CHECK(currentPage(ctx)->blocks[2].text == "Ship alpha");
+	CHECK(currentPage(ctx)->blocks[3].type == BlockType::Todo);   // the list goes on
+	pressEnter(ctx);   // Enter on an empty item ends the list
+	REQUIRE(currentPage(ctx)->blocks.size() == 4);
+	CHECK(currentPage(ctx)->blocks[3].type == BlockType::Paragraph);
+	shotTo(ctx, "planner_page");
+
+	// The to-do's box ticks it.
+	REQUIRE(PlannerPanel::controlRect("check:2").x1 > 0);
+	REQUIRE(click(ctx, "check:2"));
+	CHECK(currentPage(ctx)->blocks[2].checked);
+
+	// Backspace in an empty block takes it away.
+	REQUIRE(click(ctx, "block:3"));
+	typeText(ctx, "x");
+	ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, true);
+	frame(ctx, false);
+	ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, false);
+	settle(ctx);
+	CHECK(currentPage(ctx)->blocks.size() == 4);   // "x" went; the block is empty again
+	ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, true);
+	frame(ctx, false);
+	ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, false);
+	settle(ctx);
+	CHECK(currentPage(ctx)->blocks.size() == 3);
+
+	// Everything is in the file a teammate pulls.
+	Page onDisk;
+	REQUIRE(loadPage(proj.root(), pageId, onDisk).ok);
+	CHECK(onDisk.title == "Game design");
+	REQUIRE(onDisk.blocks.size() == 3);
+	CHECK(onDisk.blocks[1].text == "Overview");
+	CHECK(onDisk.blocks[2].checked);
+}
+
+TEST_CASE("planner ui pages: a block's menu moves and deletes it")
+{
+	Harness harness;
+	Project proj("he_planner_ui_blockmenu");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [](Page& p) {
+		p.addBlock(BlockType::Paragraph, "first", 1);
+		p.addBlock(BlockType::Paragraph, "second", 2);
+		p.addBlock(BlockType::Paragraph, "third", 3);
+		return true;
+	}));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "block-menu:0"));
+	REQUIRE(click(ctx, "menu:Move Down"));
+	CHECK(ws->findPage(pageId)->blocks[0].text == "second");
+	CHECK(ws->findPage(pageId)->blocks[1].text == "first");
+
+	REQUIRE(click(ctx, "block-menu:1"));
+	REQUIRE(click(ctx, "menu:Indent"));   // "first" under "second"
+	REQUIRE(ws->findPage(pageId)->blocks.size() == 2);
+	CHECK(ws->findPage(pageId)->blocks[0].children.size() == 1);
+	idle(ctx);
+	shotTo(ctx, "planner_page_indent");
+
+	REQUIRE(click(ctx, "block-menu:1"));
+	REQUIRE(click(ctx, "menu:Outdent"));
+	CHECK(ws->findPage(pageId)->blocks.size() == 3);
+
+	REQUIRE(click(ctx, "block-menu:2"));
+	REQUIRE(click(ctx, "menu:Delete Block"));
+	CHECK(ws->findPage(pageId)->blocks.size() == 2);
+	CHECK(ws->findPage(pageId)->blocks[1].text == "first");
+}
+
+TEST_CASE("planner ui pages: a row opens as a page that is saved only once it has a block")
+{
+	Harness harness;
+	Project proj("he_planner_ui_rowpage");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	addTasks(ctx, { "Paint the lighthouse" });
+	const UUID id = TaskBoardPanel::board(ctx)->tasks[0].id;
+	idle(ctx);
+
+	REQUIRE(click(ctx, "open:Paint the lighthouse"));
+	idle(ctx);
+	REQUIRE(click(ctx, "Open Page"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == id);
+	REQUIRE(currentPage(ctx) != nullptr);
+	CHECK(currentPage(ctx)->parent == tasksDatabaseId());
+	CHECK_FALSE(std::filesystem::exists(pagePath(proj.root(), id)));   // opening adds no file
+	shotTo(ctx, "planner_row_page");
+
+	REQUIRE(click(ctx, "add-block"));
+	settle(ctx);
+	typeText(ctx, "White with a red stripe");
+	pressEnter(ctx);
+	CHECK(std::filesystem::exists(pagePath(proj.root(), id)));
+
+	// A new session sees the block; the page of a deleted task goes with it.
+	{
+		Workspace again;
+		again.setProject(proj.root());
+		REQUIRE(again.findPage(id));
+		CHECK(again.findPage(id)->blocks[0].text == "White with a red stripe");
+	}
+	REQUIRE(click(ctx, "page:back"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == UUID{});
+	CHECK(PlannerPanel::selectedDatabase() == tasksDatabaseId());
+	CHECK(PlannerPanel::lastDrawStats().rows == 1);
+}
+
+TEST_CASE("planner ui pages: a drop adds an engine object, and a database view block opens rows as pages")
+{
+	Harness harness;
+	Project proj("he_planner_ui_pageblocks");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+
+	const std::filesystem::path content = proj.root() / "Content";
+	ContentManager cm(content.string());
+	{
+		StructTypeAsset a;
+		a.type = HE::AssetType::StructType;
+		a.name = "Notes";
+		a.path = "Notes.hasset";
+		a.json = R"({"fields":[{"name":"hp","type":1}]})";
+		REQUIRE(cm.saveAsset(a));
+	}
+	const UUID assetId = cm.loadAsset("Notes.hasset");
+	ctx.contentManager = &cm;
+	addTasks(ctx, { "Paint the lighthouse" });
+	const UUID taskId = TaskBoardPanel::board(ctx)->tasks[0].id;
+
+	Sources src;
+	src.assetPath = (content / "Notes.hasset").string();
+	g_sources = &src;
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+
+	// Dropped on the page: a new block with the asset, whose chip jumps to it.
+	const PlannerPanel::Rect drop = PlannerPanel::controlRect("page-drop");
+	REQUIRE(drop.x1 > drop.x0);
+	dragTo(ctx, src.assetAt, centre(drop));
+	REQUIRE(currentPage(ctx)->blocks.size() == 1);
+	CHECK(currentPage(ctx)->blocks[0].type == BlockType::EngineLink);
+	CHECK(currentPage(ctx)->blocks[0].link.id == assetId);
+	idle(ctx);
+	(void)TaskBoardPanel::takeJump();
+	REQUIRE(click(ctx, "link-chip:0"));
+	CHECK(TaskBoardPanel::takeJump().kind == TaskBoardPanel::Jump::Kind::Asset);
+
+	// A database view block lists the rows; a row opens as a page.
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [](Page& p) {
+		Block* b = p.addBlock(BlockType::DatabaseView, "", 5);
+		b->database = tasksDatabaseId();
+		return true;
+	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "embedded-row:Paint the lighthouse"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == taskId);
+	g_sources = nullptr;
+}

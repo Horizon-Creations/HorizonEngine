@@ -22,6 +22,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -71,6 +72,20 @@ AppContext* s_ctx = nullptr;
 UUID        s_selRow;
 std::string s_comment;
 UUID        s_commentFor;
+
+// The page being edited instead of a database: a row's page (its id is the row's,
+// s_pageDb the database) or a standalone one. {} = a database is shown.
+UUID        s_pageId, s_pageDb;
+UUID        s_focusBlock;    // the block whose text field gets the keyboard next frame
+UUID        s_deletePage;    // the page a "Delete Page" confirmation is about
+bool        s_deletePageOpen = false;
+
+void openPage(const UUID& rowId, const UUID& dbId)
+{
+	s_ws.openRowPage(rowId, dbId);
+	s_pageId = rowId;
+	s_pageDb = dbId;
+}
 
 std::vector<std::function<void()>> s_posted;
 void post(std::function<void()> fn) { s_posted.push_back(std::move(fn)); }
@@ -837,7 +852,10 @@ void deleteRowMenu(const Database& db, const Row& row)
 	{
 		const UUID dbId = db.id, rowId = row.id;
 		if (EditorWidgets::dangerMenuItem("Delete Row"))
-			post([=] { s_ws.edit(dbId, [&](Database& d) { return d.removeRow(rowId); }); });
+			post([=] {
+				s_ws.edit(dbId, [&](Database& d) { return d.removeRow(rowId); });
+				s_ws.removePage(rowId);
+			});
 		ImGui::EndPopup();
 	}
 }
@@ -1196,27 +1214,13 @@ void taskHistory(const UUID& rowId)
 	ImGui::EndDisabled();
 }
 
-void drawDrawer(const Database& db, const Row& row)
+// The properties of a row as a two-column list: the name, then its value. Shared by
+// the details and by the row's page.
+void drawPropertyTable(const Database& db, const Row& row)
 {
 	const UUID dbId = db.id, rowId = row.id;
 	const bool tasks = s_ws.isExternal(dbId);
 	const UUID descriptionId = derivedId("property", "Description");
-	pushUuid(rowId);
-
-	// The title in the heading font, the way to close at its right edge.
-	const float closeW = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
-	if (s_ctx && s_ctx->fontHeading) ImGui::PushFont(s_ctx->fontHeading);
-	textCell("##drawertitle", { rowId, UUID{ 0, 3 } }, row.title, [=](const std::string& title) {
-		post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setTitle(rowId, title, taskNowMs()); }); });
-	}, "Untitled", 0.0f, -closeW);
-	if (s_ctx && s_ctx->fontHeading) ImGui::PopFont();
-	note("drawer:title");
-	ImGui::SameLine();
-	if (ImGui::SmallButton("x")) s_selRow = UUID{};
-	note("drawer:close");
-	ImGui::Spacing();
-
-	// The properties as a two-column list: the name, then its value.
 	if (db.properties.empty())
 		ImGui::TextDisabled("No properties yet. Add some with Properties.");
 	else if (ImGui::BeginTable("##props", 2, ImGuiTableFlags_NoSavedSettings))
@@ -1248,6 +1252,32 @@ void drawDrawer(const Database& db, const Row& row)
 		ImGui::EndTable();
 	}
 
+}
+
+void drawDrawer(const Database& db, const Row& row)
+{
+	const UUID dbId = db.id, rowId = row.id;
+	const bool tasks = s_ws.isExternal(dbId);
+	const UUID descriptionId = derivedId("property", "Description");
+	pushUuid(rowId);
+
+	// The title in the heading font, the way to close at its right edge.
+	const float closeW = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+	if (s_ctx && s_ctx->fontHeading) ImGui::PushFont(s_ctx->fontHeading);
+	textCell("##drawertitle", { rowId, UUID{ 0, 3 } }, row.title, [=](const std::string& title) {
+		post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setTitle(rowId, title, taskNowMs()); }); });
+	}, "Untitled", 0.0f, -closeW);
+	if (s_ctx && s_ctx->fontHeading) ImGui::PopFont();
+	note("drawer:title");
+	ImGui::SameLine();
+	if (ImGui::SmallButton("x")) s_selRow = UUID{};
+	note("drawer:close");
+	if (EditorWidgets::button("Open Page")) post([=] { openPage(rowId, dbId); });
+	note("Open Page");
+	ImGui::Spacing();
+
+	drawPropertyTable(db, row);
+
 	if (tasks) taskHistory(rowId);
 
 	ImGui::Spacing();
@@ -1259,7 +1289,10 @@ void drawDrawer(const Database& db, const Row& row)
 		                          : "It goes from the database and from any relation that pointed at it.");
 		if (EditorWidgets::dangerButton("Delete"))
 		{
-			post([=] { s_ws.edit(dbId, [&](Database& d) { return d.removeRow(rowId); }); });
+			post([=] {
+				s_ws.edit(dbId, [&](Database& d) { return d.removeRow(rowId); });
+				s_ws.removePage(rowId);
+			});
 			s_selRow = UUID{};
 			ImGui::CloseCurrentPopup();
 		}
@@ -1434,6 +1467,523 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 			ImGui::Dummy(ImVec2(totalW, rowH));
 			ImGui::PopID();
 		}
+	ImGui::EndChild();
+}
+
+// ── Pages ────────────────────────────────────────────────────────────────────
+
+struct BlockKind { BlockType type; const char* label; };
+const BlockKind kBlockKinds[] = {
+	{ BlockType::Paragraph, "Text" },          { BlockType::Heading1, "Heading 1" },
+	{ BlockType::Heading2, "Heading 2" },      { BlockType::Heading3, "Heading 3" },
+	{ BlockType::Bullet, "Bulleted list" },    { BlockType::Numbered, "Numbered list" },
+	{ BlockType::Todo, "To-do" },              { BlockType::Quote, "Quote" },
+	{ BlockType::Callout, "Callout" },         { BlockType::Code, "Code" },
+	{ BlockType::Divider, "Divider" },         { BlockType::EngineLink, "Engine object" },
+	{ BlockType::DatabaseView, "Database view" },
+};
+
+bool isListType(BlockType t)
+{
+	return t == BlockType::Bullet || t == BlockType::Numbered || t == BlockType::Todo;
+}
+
+// What a paragraph turns into when it starts like Markdown: "# ", "## ", "### ",
+// "- ", "1. ", "[] ", "> ", "---" and three backticks.
+bool shortcutType(const std::string& text, BlockType& type, std::string& rest)
+{
+	struct Rule { const char* prefix; BlockType type; };
+	static const Rule rules[] = {
+		{ "### ", BlockType::Heading3 }, { "## ", BlockType::Heading2 }, { "# ", BlockType::Heading1 },
+		{ "- ", BlockType::Bullet },     { "* ", BlockType::Bullet },    { "1. ", BlockType::Numbered },
+		{ "[] ", BlockType::Todo },      { "[ ] ", BlockType::Todo },    { "> ", BlockType::Quote },
+	};
+	if (text == "---") { type = BlockType::Divider; rest.clear(); return true; }
+	if (text == "```") { type = BlockType::Code;    rest.clear(); return true; }
+	for (const Rule& r : rules)
+		if (text.rfind(r.prefix, 0) == 0)
+		{
+			type = r.type;
+			rest = text.substr(std::strlen(r.prefix));
+			return true;
+		}
+	return false;
+}
+
+struct FlatBlock { const Block* block; int depth; int number; };
+
+void flattenBlocks(const std::vector<Block>& list, int depth, std::vector<FlatBlock>& out)
+{
+	int number = 0;
+	for (const Block& b : list)
+	{
+		number = b.type == BlockType::Numbered ? number + 1 : 0;
+		out.push_back({ &b, depth, number });
+		flattenBlocks(b.children, depth + 1, out);
+	}
+}
+
+// Everything a block edit changes, in one saved step: the text (with a Markdown
+// shortcut applied to a paragraph), and, on Enter, the block that follows.
+void commitBlockText(const UUID& pageId, const UUID& blockId, std::string text, bool enter)
+{
+	post([=] {
+		s_ws.editPage(pageId, [&](Page& page) {
+			Block* b = page.findBlock(blockId);
+			if (!b) return false;
+			bool changed = false;
+			std::string value = text;
+			BlockType shortcut = BlockType::Paragraph;
+			std::string rest;
+			if (b->type == BlockType::Paragraph && shortcutType(value, shortcut, rest))
+			{
+				changed |= page.setBlockType(blockId, shortcut, taskNowMs());
+				value = rest;
+			}
+			if (b->text != value) changed |= page.setBlockText(blockId, value, taskNowMs());
+			if (enter)
+			{
+				const BlockType type = b->type;
+				if (isListType(type) && value.empty())
+				{
+					changed |= page.setBlockType(blockId, BlockType::Paragraph, taskNowMs());   // Enter on an empty item ends the list
+					s_focusBlock = blockId;                                                      // and the cursor stays
+				}
+				else if (type != BlockType::Divider)
+				{
+					Block* made = page.addBlockAfter(blockId, isListType(type) ? type : BlockType::Paragraph, "", taskNowMs());
+					if (made) { s_focusBlock = made->id; changed = true; }
+				}
+			}
+			return changed;
+		});
+	});
+}
+
+// The block's text as a word-wrapped field that grows with what is typed. Writes when
+// it is left, and on Enter (Ctrl/Shift+Enter is a new line). `prevId` is the block
+// above, for Backspace on an empty one.
+void blockText(const Page& page, const Block& b, int index, float width, const UUID& prevId)
+{
+	const UUID pageId = page.id, blockId = b.id;
+	const EditKey key{ pageId, blockId };
+	const bool mine = s_editing && s_editKey == key;
+	std::string text = mine ? s_editBuf : b.text;
+	const std::string before = text;
+
+	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 3.0f));
+	ImFont* font = nullptr;
+	if (s_ctx)
+		font = b.type == BlockType::Heading1 ? s_ctx->fontHeading
+		     : b.type == BlockType::Heading2 ? s_ctx->fontSubheading
+		     : b.type == BlockType::Code     ? s_ctx->codeFont : nullptr;
+	if (font) ImGui::PushFont(font);
+	const float wrapW = std::max(40.0f, width - 8.0f);
+	const float textH = std::max(ImGui::GetTextLineHeight(),
+	                             ImGui::CalcTextSize((text + " ").c_str(), nullptr, false, wrapW).y);
+	const float h = textH + ImGui::GetStyle().FramePadding.y * 2.0f + 2.0f;
+
+	if (b.type == BlockType::Callout || b.type == BlockType::Code)
+	{
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + width, p.y + h),
+		                                          Theme::u32(b.type == BlockType::Code ? Theme::warm(0.06f) : Theme::warm(0.16f)), 4.0f);
+	}
+	if (b.type == BlockType::Quote)
+	{
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 3.0f, p.y + h), Theme::u32(Theme::Accent));
+	}
+	if (s_focusBlock == blockId)
+	{
+		ImGui::SetKeyboardFocusHere();
+		s_focusBlock = UUID{};
+	}
+	ImGui::SetNextItemWidth(width);
+	const ImGuiInputTextFlags flags = ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_EnterReturnsTrue |
+	                                  ImGuiInputTextFlags_CtrlEnterForNewLine | ImGuiInputTextFlags_NoHorizontalScroll;
+	const bool entered = ImGui::InputTextMultiline("##text", &text, ImVec2(width, h), flags);
+	note("block:" + std::to_string(index));
+	if (font) ImGui::PopFont();
+	ImGui::PopStyleVar(2);
+	ImGui::PopStyleColor();
+
+	if (ImGui::IsItemActivated()) { s_editing = true; s_editKey = key; s_editBuf = b.text; }
+	if (text != before) { s_editing = true; s_editKey = key; s_editBuf = text; }
+	const bool left = ImGui::IsItemDeactivatedAfterEdit();
+	if (entered || left)
+	{
+		s_editing = false;
+		commitBlockText(pageId, blockId, text, entered);
+	}
+	else if (ImGui::IsItemDeactivated()) s_editing = false;
+
+	// Backspace in an empty block takes the block away and moves up one.
+	if (ImGui::IsItemActive() && before.empty() && text.empty() && b.children.empty() &&
+	    ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
+	{
+		post([=] {
+			s_ws.editPage(pageId, [&](Page& page) { return page.removeBlock(blockId, taskNowMs()); });
+			s_focusBlock = prevId;
+		});
+		s_editing = false;
+	}
+}
+
+// The "..." button of a block: turn it into another kind, move it, delete it.
+void blockMenu(const Page& page, const Block& b, int index)
+{
+	const UUID pageId = page.id, blockId = b.id;
+	const float side = ImGui::GetFrameHeight() * 0.8f;
+	const bool clicked = ImGui::InvisibleButton("##handle", ImVec2(side, ImGui::GetFrameHeight()));
+	const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+	const ImVec2 c((a.x + z.x) * 0.5f, (a.y + z.y) * 0.5f);
+	const ImU32 col = Theme::u32(ImGui::IsItemHovered() ? Theme::Text : Theme::TextDim);
+	for (int i = -1; i <= 1; ++i) ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(c.x, c.y + i * 5.0f), 1.6f, col);
+	note("block-menu:" + std::to_string(index));
+	if (clicked) ImGui::OpenPopup("##blockmenu");
+	if (!ImGui::BeginPopup("##blockmenu")) return;
+
+	auto change = [&](std::function<bool(Page&)> fn) {
+		post([=] { s_ws.editPage(pageId, fn); });
+	};
+	if (ImGui::BeginMenu("Turn into"))
+	{
+		for (const BlockKind& k : kBlockKinds)
+			if (ImGui::MenuItem(k.label, nullptr, b.type == k.type))
+			{
+				const BlockType t = k.type;
+				change([=](Page& p) { return p.setBlockType(blockId, t, taskNowMs()); });
+			}
+		ImGui::EndMenu();
+	}
+	if (EditorWidgets::menuItem("Add Block Below"))
+		post([=] {
+			s_ws.editPage(pageId, [&](Page& p) {
+				Block* made = p.addBlockAfter(blockId, BlockType::Paragraph, "", taskNowMs());
+				if (made) s_focusBlock = made->id;
+				return made != nullptr;
+			});
+		});
+	ImGui::Separator();
+	if (EditorWidgets::menuItem("Move Up"))   change([=](Page& p) { return p.moveBlockBy(blockId, -1, taskNowMs()); });
+	note("menu:Move Up");
+	if (EditorWidgets::menuItem("Move Down")) change([=](Page& p) { return p.moveBlockBy(blockId, 1, taskNowMs()); });
+	note("menu:Move Down");
+	if (EditorWidgets::menuItem("Indent"))    change([=](Page& p) { return p.indentBlock(blockId, taskNowMs()); });
+	note("menu:Indent");
+	if (EditorWidgets::menuItem("Outdent"))   change([=](Page& p) { return p.outdentBlock(blockId, taskNowMs()); });
+	note("menu:Outdent");
+	ImGui::Separator();
+	if (EditorWidgets::dangerMenuItem("Delete Block"))
+		change([=](Page& p) { return p.removeBlock(blockId, taskNowMs()); });
+	note("menu:Delete Block");
+	ImGui::EndPopup();
+}
+
+// An engine object on the page: a chip that jumps there, or a drop zone to fill it.
+void linkBlock(const Page& page, const Block& b, int index, float width)
+{
+	AppContext& ctx = *s_ctx;
+	const UUID pageId = page.id, blockId = b.id;
+	const bool empty = b.link.id == UUID{} && b.link.scene.empty() && b.link.panel.empty();
+	const float h = std::floor(ImGui::GetFrameHeight() * 1.1f);
+	if (!empty)
+	{
+		if (TaskBoardPanel::linkChip(ctx, b.link, index, std::min(width - 30.0f, 360.0f), h))
+			TaskBoardPanel::jumpToLink(ctx, b.link);
+		note("link-chip:" + std::to_string(index));
+		ImGui::SameLine(0, 4.0f);
+		if (ImGui::SmallButton("x"))
+			post([=] {
+				s_ws.editPage(pageId, [&](Page& p) {
+					Block* x = p.findBlock(blockId);
+					if (!x) return false;
+					x->link = TaskLink{};
+					p.modifiedMs = taskNowMs();
+					return true;
+				});
+			});
+		return;
+	}
+	const ImVec2 at = ImGui::GetCursorScreenPos();
+	ImGui::Dummy(ImVec2(width, h * 1.3f));
+	note("link-drop:" + std::to_string(index));
+	const std::vector<TaskLink> dropped = TaskBoardPanel::acceptDroppedLinks(ctx);
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const bool dragging = ImGui::GetDragDropPayload() != nullptr;
+	dl->AddRect(at, ImVec2(at.x + width, at.y + h * 1.3f), Theme::u32(dragging ? Theme::AccentBright : Theme::TextDim), 4.0f);
+	const char* hint = "Drop an asset, a scene or an entity here";
+	dl->AddText(ImVec2(at.x + 8.0f, at.y + (h * 1.3f - ImGui::GetTextLineHeight()) * 0.5f),
+	            ImGui::GetColorU32(ImGuiCol_TextDisabled), hint);
+	if (!dropped.empty())
+	{
+		const TaskLink link = dropped.front();
+		post([=] {
+			s_ws.editPage(pageId, [&](Page& p) {
+				Block* x = p.findBlock(blockId);
+				if (!x) return false;
+				x->link = link;
+				p.modifiedMs = taskNowMs();
+				return true;
+			});
+		});
+	}
+}
+
+// A database view on the page: pick one, then see its first rows.
+void databaseBlock(const Page& page, const Block& b, float width)
+{
+	const UUID pageId = page.id, blockId = b.id;
+	const Database* db = s_ws.find(b.database);
+	if (!db)
+	{
+		ImGui::SetNextItemWidth(std::min(width, 260.0f));
+		if (ImGui::BeginCombo("##blockdb", "Choose a database"))
+		{
+			for (const Database* d : s_ws.databases())
+				if (ImGui::Selectable((d->name + "##pick").c_str()))
+				{
+					const UUID dbId = d->id;
+					post([=] {
+						s_ws.editPage(pageId, [&](Page& p) {
+							Block* x = p.findBlock(blockId);
+							if (!x) return false;
+							x->database = dbId;
+							x->view = UUID{};
+							p.modifiedMs = taskNowMs();
+							return true;
+						});
+					});
+				}
+			ImGui::EndCombo();
+		}
+		return;
+	}
+	const View* view = db->findView(b.view);
+	if (!view && !db->views.empty()) view = &db->views.front();
+	ImGui::TextDisabled("%s", db->name.c_str());
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Open"))
+	{
+		const UUID dbId = db->id;
+		post([=] { s_pageId = UUID{}; s_dbId = dbId; s_viewId = UUID{}; });
+	}
+	if (!view) return;
+	const std::vector<std::size_t> idx = db->query(*view);
+	std::vector<const Property*> cols;
+	for (const Property& p : db->properties)
+		if (!isHidden(*view, p.id) && cols.size() < 3) cols.push_back(&p);
+	if (ImGui::BeginTable("##embedded", 1 + static_cast<int>(cols.size()),
+	                      ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Title");
+		for (const Property* p : cols) ImGui::TableSetupColumn(p->name.c_str());
+		ImGui::TableHeadersRow();
+		const std::size_t shown = std::min<std::size_t>(idx.size(), 8);
+		for (std::size_t i = 0; i < shown; ++i)
+		{
+			const Row& r = db->rows[idx[i]];
+			pushUuid(r.id);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str(), false))
+			{
+				const UUID dbId = db->id, rowId = r.id;
+				post([=] { openPage(rowId, dbId); });
+			}
+			note("embedded-row:" + r.title);
+			for (std::size_t c = 0; c < cols.size(); ++c)
+			{
+				ImGui::TableSetColumnIndex(static_cast<int>(c) + 1);
+				ImGui::TextUnformatted(summary(*db, r, *cols[c]).c_str());
+			}
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+	if (idx.size() > 8) ImGui::TextDisabled("and %d more", static_cast<int>(idx.size() - 8));
+}
+
+// The page's blocks, one per line, children indented.
+void drawBlocks(const Page& page)
+{
+	const UUID pageId = page.id;
+	std::vector<FlatBlock> flat;
+	flattenBlocks(page.blocks, 0, flat);
+
+	const float fh = ImGui::GetFrameHeight();
+	const float handleW = fh * 0.8f + 4.0f;
+	const float prefixW = fh * 1.0f;
+	UUID prevId;
+	for (std::size_t i = 0; i < flat.size(); ++i)
+	{
+		const Block& b = *flat[i].block;
+		const UUID blockId = b.id;
+		pushUuid(blockId);
+		const float indent = static_cast<float>(flat[i].depth) * 26.0f;
+		const float avail = ImGui::GetContentRegionAvail().x;
+		if (indent > 0) ImGui::Indent(indent);
+
+		blockMenu(page, b, static_cast<int>(i));
+		ImGui::SameLine(0, 4.0f);
+
+		if (b.type == BlockType::Divider)
+		{
+			ImGui::AlignTextToFramePadding();
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			ImGui::Dummy(ImVec2(avail - indent - handleW, fh));
+			ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x, p.y + fh * 0.5f), ImVec2(p.x + avail - indent - handleW, p.y + fh * 0.5f),
+			                                    Theme::u32(Theme::TextDim));
+		}
+		else if (b.type == BlockType::EngineLink)
+			linkBlock(page, b, static_cast<int>(i), avail - indent - handleW);
+		else if (b.type == BlockType::DatabaseView)
+		{
+			ImGui::BeginGroup();
+			databaseBlock(page, b, avail - indent - handleW);
+			ImGui::EndGroup();
+		}
+		else
+		{
+			// A marker before the text for lists and to-dos.
+			float used = 0.0f;
+			if (b.type == BlockType::Bullet || b.type == BlockType::Numbered)
+			{
+				ImGui::AlignTextToFramePadding();
+				if (b.type == BlockType::Bullet) ImGui::TextUnformatted("\xE2\x80\xA2");
+				else                             ImGui::Text("%d.", flat[i].number);
+				ImGui::SameLine(0, 6.0f);
+				used = prefixW;
+			}
+			else if (b.type == BlockType::Todo)
+			{
+				bool on = b.checked;
+				if (EditorWidgets::checkbox("##todo", &on))
+					post([=] { s_ws.editPage(pageId, [&](Page& p) { return p.setBlockChecked(blockId, on, taskNowMs()); }); });
+				note("check:" + std::to_string(i));
+				ImGui::SameLine(0, 6.0f);
+				used = prefixW;
+			}
+			if (b.type == BlockType::Todo && b.checked) ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextDim);
+			blockText(page, b, static_cast<int>(i), avail - indent - handleW - used - 8.0f, prevId);
+			if (b.type == BlockType::Todo && b.checked) ImGui::PopStyleColor();
+		}
+		if (indent > 0) ImGui::Unindent(indent);
+		ImGui::PopID();
+		prevId = blockId;
+	}
+
+	// Below the last block: a way to add one, and a place to drop an object.
+	ImGui::Spacing();
+	if (EditorWidgets::smallButton("Add Block"))
+		post([=] {
+			s_ws.editPage(pageId, [&](Page& p) {
+				Block* made = p.addBlockAfter(UUID{}, BlockType::Paragraph, "", taskNowMs());
+				if (made) s_focusBlock = made->id;
+				return made != nullptr;
+			});
+		});
+	note("add-block");
+	if (page.blocks.empty())
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("Type # for a heading, - for a list, [] for a to-do, --- for a divider.");
+	}
+	{
+		AppContext& ctx = *s_ctx;
+		const ImVec2 at = ImGui::GetCursorScreenPos();
+		const float w = ImGui::GetContentRegionAvail().x;
+		const float h = fh * 1.5f;
+		ImGui::Dummy(ImVec2(w, h));
+		note("page-drop");
+		const std::vector<TaskLink> dropped = TaskBoardPanel::acceptDroppedLinks(ctx);
+		const bool dragging = ImGui::GetDragDropPayload() != nullptr;
+		if (dragging)
+		{
+			ImGui::GetWindowDrawList()->AddRect(at, ImVec2(at.x + w, at.y + h), Theme::u32(Theme::AccentBright), 4.0f, 0, 2.0f);
+			ImGui::GetWindowDrawList()->AddText(ImVec2(at.x + 10.0f, at.y + (h - ImGui::GetTextLineHeight()) * 0.5f),
+			                                    ImGui::GetColorU32(ImGuiCol_TextDisabled), "Drop to add it to the page");
+		}
+		if (!dropped.empty())
+			post([=] {
+				s_ws.editPage(pageId, [&](Page& p) {
+					bool any = false;
+					for (const TaskLink& l : dropped)
+						if (Block* made = p.addBlockAfter(UUID{}, BlockType::EngineLink, "", taskNowMs())) { made->link = l; any = true; }
+					return any;
+				});
+			});
+	}
+}
+
+// The page of a row (with its properties) or a standalone one.
+void drawPage(AppContext& ctx)
+{
+	Page* page = s_ws.findPage(s_pageId);
+	if (!page) { s_pageId = s_pageDb = UUID{}; return; }
+	const UUID pageId = page->id;
+	const bool rowPage = !(s_pageDb == UUID{});
+	const Database* db = rowPage ? s_ws.find(s_pageDb) : nullptr;
+	const Row* row = db ? db->findRow(pageId) : nullptr;
+	if (rowPage && !row)
+	{
+		// The row is gone (deleted, or a pull took it): the page has nothing to hang on.
+		s_pageId = s_pageDb = UUID{};
+		return;
+	}
+
+	if (rowPage)
+	{
+		if (EditorWidgets::smallButton("Back"))
+			post([=] { s_dbId = db ? db->id : UUID{}; s_pageId = s_pageDb = UUID{}; });
+		note("page:back");
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", db->name.c_str());
+	}
+
+	// The title: the row's, or the page's own.
+	const float titleW = std::min(640.0f, ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight() * 2.0f);
+	if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
+	if (rowPage)
+	{
+		const UUID dbId = db->id;
+		textCell("##pagetitle", { pageId, UUID{ 0, 4 } }, row->title, [=](const std::string& t) {
+			post([=] { s_ws.edit(dbId, [&](Database& d) { return d.setTitle(pageId, t, taskNowMs()); }); });
+		}, "Untitled", 0.0f, titleW);
+	}
+	else
+		textCell("##pagetitle", { pageId, UUID{ 0, 4 } }, page->title, [=](const std::string& t) {
+			post([=] { s_ws.editPage(pageId, [&](Page& p) {
+				if (p.title == t) return false;
+				p.title = t;
+				p.modifiedMs = taskNowMs();
+				return true;
+			}); });
+		}, "Untitled", 0.0f, titleW);
+	if (ctx.fontHeading) ImGui::PopFont();
+	note("page:title");
+	ImGui::Spacing();
+
+	ImGui::BeginChild("##pagebody", ImVec2(0, 0), ImGuiChildFlags_None);
+	const float column = std::min(820.0f, ImGui::GetContentRegionAvail().x);
+	if (rowPage)
+	{
+		ImGui::PushItemWidth(column);
+		if (ImGui::BeginChild("##pageprops", ImVec2(column, 0), ImGuiChildFlags_AutoResizeY))
+		{
+			drawPropertyTable(*db, *row);
+			ImGui::EndChild();
+		}
+		else ImGui::EndChild();
+		ImGui::PopItemWidth();
+		ImGui::Separator();
+	}
+	ImGui::BeginChild("##pageblocks", ImVec2(column, 0), ImGuiChildFlags_None);
+	drawBlocks(*page);
+	ImGui::EndChild();
 	ImGui::EndChild();
 }
 
@@ -1688,6 +2238,32 @@ void drawTeamNotices(AppContext& ctx)
 	ImGui::EndPopup();
 }
 
+// The pages without a parent, and under each the pages that name it as theirs.
+void sidebarPages(const std::vector<Page*>& all, const UUID& parent, int depth)
+{
+	for (const Page* p : all)
+	{
+		if (!(p->parent == parent)) continue;
+		pushUuid(p->id);
+		if (depth > 0) ImGui::Indent(static_cast<float>(depth) * 12.0f);
+		const std::string label = (p->title.empty() ? std::string("Untitled") : p->title) + "##page";
+		if (ImGui::Selectable(label.c_str(), p->id == s_pageId && s_pageDb == UUID{}))
+		{
+			s_pageId = p->id;
+			s_pageDb = UUID{};
+		}
+		note("page:" + p->title);
+		if (ImGui::BeginPopupContextItem("##pagemenu"))
+		{
+			if (EditorWidgets::dangerMenuItem("Delete Page")) s_deletePage = p->id;
+			ImGui::EndPopup();
+		}
+		if (depth > 0) ImGui::Unindent(static_cast<float>(depth) * 12.0f);
+		sidebarPages(all, p->id, depth + 1);
+		ImGui::PopID();
+	}
+}
+
 void drawSidebar(AppContext& ctx)
 {
 	if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
@@ -1699,10 +2275,11 @@ void drawSidebar(AppContext& ctx)
 	{
 		pushUuid(db->id);
 		const std::string label = (db->name.empty() ? std::string("Untitled database") : db->name) + "##db";
-		if (ImGui::Selectable(label.c_str(), db->id == s_dbId))
+		if (ImGui::Selectable(label.c_str(), db->id == s_dbId && s_pageId == UUID{}))
 		{
 			s_dbId   = db->id;
 			s_viewId = UUID{};
+			s_pageId = s_pageDb = UUID{};
 		}
 		note("database:" + db->name);
 		ImGui::PopID();
@@ -1719,6 +2296,46 @@ void drawSidebar(AppContext& ctx)
 			}
 		});
 	note("New Database");
+
+	// Pages: write-ups that are not a row of anything (the design document, a level concept).
+	ImGui::Spacing();
+	ImGui::TextDisabled("Pages");
+	sidebarPages(s_ws.pages(), UUID{}, 0);
+	if (EditorWidgets::button("New Page", ImVec2(-FLT_MIN, 0)))
+		post([] {
+			if (Page* page = s_ws.createPage("Untitled"))
+			{
+				s_pageId = page->id;
+				s_pageDb = UUID{};
+			}
+		});
+	note("New Page");
+	if (!(s_deletePage == UUID{}))
+	{
+		ImGui::OpenPopup("##confirmDeletePage");
+		s_deletePageOpen = true;
+	}
+	if (ImGui::BeginPopup("##confirmDeletePage"))
+	{
+		const Page* doomed = s_ws.findPage(s_deletePage);
+		ImGui::Text("Delete \"%s\"?", doomed ? doomed->title.c_str() : "");
+		ImGui::TextDisabled("Its sub-pages go with it. Source control has the previous version.");
+		if (EditorWidgets::dangerButton("Delete"))
+		{
+			const UUID gone = s_deletePage;
+			post([=] {
+				s_ws.removePage(gone);
+				if (s_pageId == gone) s_pageId = s_pageDb = UUID{};
+			});
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+	else if (s_deletePageOpen)
+		s_deletePageOpen = false;
+	if (!s_deletePageOpen) s_deletePage = UUID{};
 
 	drawTeamNotices(ctx);
 
@@ -1812,12 +2429,14 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			if (EditorWidgets::smallButton("Retry Save")) post([] { TaskBoardPanel::retrySave(); });
 		}
 	}
-	if (const Database* db = s_ws.find(s_dbId))
+	if (!(s_pageId == UUID{}))
+		drawPage(ctx);
+	else if (const Database* db = s_ws.find(s_dbId))
 		drawDatabase(ctx, *db);
 	else
 	{
 		ImGui::Spacing();
-		ImGui::TextDisabled("Make a database with New Database. The project's tasks are in Tasks.");
+		ImGui::TextDisabled("Make a database with New Database or a write-up with New Page. The project's tasks are in Tasks.");
 	}
 	ImGui::EndChild();
 	ImGui::End();
@@ -1881,7 +2500,7 @@ Workspace* workspace(AppContext& ctx)
 	return &s_ws;
 }
 
-void selectDatabase(const UUID& id) { s_dbId = id; s_viewId = UUID{}; }
+void selectDatabase(const UUID& id) { s_dbId = id; s_viewId = UUID{}; s_pageId = s_pageDb = UUID{}; }
 UUID selectedDatabase() { return s_dbId; }
 UUID selectedView() { return s_viewId; }
 DrawStats lastDrawStats() { return s_stats; }
@@ -1896,6 +2515,10 @@ void openTask(const UUID& id)
 }
 
 UUID selectedRow() { return s_selRow; }
+
+void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; }
+void openRowPage(const UUID& dbId, const UUID& rowId) { openPage(rowId, dbId); }
+UUID selectedPage() { return s_pageId; }
 
 Rect controlRect(const std::string& name)
 {
@@ -1919,6 +2542,8 @@ void reset()
 	s_stats = {};
 	s_armedDelete = UUID{};
 	s_newRelationTarget = UUID{};
+	s_pageId = s_pageDb = s_focusBlock = s_deletePage = UUID{};
+	s_deletePageOpen = false;
 }
 
 } // namespace PlannerPanel

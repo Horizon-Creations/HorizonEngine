@@ -3103,6 +3103,48 @@ namespace
 	  "\"blocked by\" between two tasks. Pick another database in the list to "
 	  "point at its rows instead.",
 	  "", "" },
+	{ "Planner/New Page", "New Page",
+	  "Makes an empty page in the sidebar: a write-up for the design document, a "
+	  "level concept, playtest notes. Saved in Config/Planner/Pages, so it travels "
+	  "with the project through source control.",
+	  "", "" },
+	{ "Planner/Open Page", "Open Page",
+	  "Opens this row as a page: its properties on top, and below them a "
+	  "document you write in blocks. The page is saved only once it has a block.",
+	  "", "" },
+	{ "Planner/Add Block", "Add Block",
+	  "Adds an empty text block at the end of the page and puts the cursor in it. "
+	  "Enter in a block makes the next one; type # for a heading, - for a list, "
+	  "[] for a to-do, > for a quote, --- for a divider.",
+	  "", "" },
+	{ "Planner/Turn into", "Turn into",
+	  "Changes this block into another kind: text, heading, list, to-do, quote, "
+	  "callout, code, divider, an engine object or a database view. The text stays.",
+	  "", "" },
+	{ "Planner/Add Block Below", "Add Block Below",
+	  "Adds an empty text block right under this one, at the same level.",
+	  "", "" },
+	{ "Planner/Move Up", "Move Up",
+	  "Moves this block one place up among the blocks at its level.",
+	  "", "" },
+	{ "Planner/Move Down", "Move Down",
+	  "Moves this block one place down among the blocks at its level.",
+	  "", "" },
+	{ "Planner/Indent", "Indent",
+	  "Makes this block a child of the block above it, shown indented under it.",
+	  "", "" },
+	{ "Planner/Outdent", "Outdent",
+	  "Takes this block out of its parent, so it follows the parent at the level "
+	  "above. The blocks that came after it stay under it.",
+	  "", "" },
+	{ "Planner/Delete Block", "Delete Block",
+	  "Removes this block and the blocks indented under it. Backspace in an empty "
+	  "block does the same. Source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Page", "Delete Page",
+	  "Deletes this page, its sub-pages and their files after you confirm. Source "
+	  "control has the previous version.",
+	  "", "" },
 	{ "Planner/+ Timeline", "+ Timeline",
 	  "Adds a timeline view: a row per line and a day per column, a bar from "
 	  "each row's Start date to its End date. Drag a bar to move the row's "
