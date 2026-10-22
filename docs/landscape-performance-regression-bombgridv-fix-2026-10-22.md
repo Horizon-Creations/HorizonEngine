@@ -1,14 +1,14 @@
 # Landscape regression: the V=1 variant cost of `heBombGridV` is gone (Thema 237, Schritt 3)
 
 22.10.2026, same MacBook Air M5 / Catania scene / `--detailed` loop as `landscape-performance-regression-asset-attribution-2026-10-22.md`
-(Metal, 5.2 MP, GI on, 200 warm-up + 600 frames, AC power, display held awake with `keepawake.sh`). Raw data: `perf-audit/raw-landscape-regression/d23*`,
+(Metal, 5.2 MP, GI on, 200 warm-up + 600 frames, AC power, display held awake with `keepawake.sh`). Raw data: `perf-audit/raw-landscape-regression/d23*` (the `*.profile.json` of these runs, ~447k lines each, exist only locally and are left untracked, as for d22),
 shader dumps: `perf-audit/raw-landscape-regression/shader-dump-d23/`.
 
 ## 0. Result
 
 1. **Confirmed in the shader, and fixed.** `M_AutoLandscape` with the `Groups` pin wired (`8f3a6e47`) emits per read a runtime `V`, three clamped slice ints and `textureGrad` taps whose
    array slice comes from the hash. With the 5-slice cache arrays (V = 1) that always selects slice = layer, but the GPU pays for it: **SSAO column 8.42 ms -> 6.94 ms (-1.48 ms), sum of passes 24.55 -> 22.98 ms**
-   (n = 3 each, interleaved, same build otherwise). That is below the 7.3 ms the step aimed at and even 0.08 ms under the "variants off" oracle.
+   (n = 3 each, interleaved, same build otherwise). That is below the 7.3 ms the step aimed at and indistinguishable from the "variants off" oracle within this series' noise (6.94 against 7.02; 6.93 against 7.01 in the earlier series).
 2. **The fix:** a branch on `V == 1` around the reads of every Groups-wired array node. `V == 1` takes the plain taps (`vec3(t, <v>_l)`, the layer itself, text of the pre-Groups read);
    `V > 1` takes the slices the hash picked (unchanged code). `V` is derived from `textureSize(...).z`, so it is the same for the whole draw: a uniform branch, no divergence.
    `MaterialGraph.cpp`, `emitBombNode`. The Groups-unwired text is byte-identical (FNV pin in `test_auto_landscape_variants.cpp` still green).
@@ -67,7 +67,7 @@ Deterministic frame (GI/AA/SSAO off, private HOME with the real 5-slice cache ar
   material for Metal, GLSL 4.10, GLSL ES 3.00, GLSL 4.30, HLSL and SPIR-V. Counts in the variants test changed on purpose: `textureGrad(heTexP` is 12 (grouped graph) and 72 (auto material) in the *text* now (once per
   side of the branch; still 6 and 36 reads per pixel), plus `_V == 1) {` = 2 / 12 and `_s0))` = 2 / 12 (the slice is read on the `V > 1` side only).
 * Full `he_tests`: 5681 of 5684 pass. Failing: `Disk registry: scanContentDirectory ...` (`test_hpak.cpp:1188`, 6 == 2) **fails identically on the unchanged tree** (rebuilt without the patch, same failure);
-  two `test_profiler.cpp` cases failed in the first full run (tests dir as cwd) and pass from the build dir. None touch the material code.
+  two `test_profiler.cpp` cases failed in the first full run (tests dir as cwd) and pass from the build dir. The hpak case writes `/tmp/he_registry`, which other bees' parallel `he_tests` runs share, but it also fails when run alone here, so that is not the whole story. None touch the material code.
 * HLSL: the generated `lit.hlsl` goes through `glslangValidator -D -V -e main -S frag` and `spirv-val` clean; a deliberately broken copy is rejected (negative control). Not `fxc`/`D3DCompile`.
 
 ## 4. V > 1 still the same shader behaviour
@@ -79,8 +79,10 @@ Deterministic frame (GI/AA/SSAO off, private HOME with the real 5-slice cache ar
 
 **Done (verified):** shader dump (`shader-dump-d23/`, section 1); cost source narrowed by experiment (not the slice ALU; the hash-dependent slice); fix in `MaterialGraph.cpp` (`emitBombNode`); Metal SSAO 8.42 -> 6.94 ms, Σ 24.55 -> 22.98 (n = 3, interleaved, AC);
 Metal and OpenGL pixel check at V = 1 and V = 4; variants test + material graph test green, FNV pin untouched; HLSL through glslang + spirv-val; full `he_tests` (one pre-existing failure, section 3).
-**Not verified:** D3D11, D3D12, Vulkan on hardware (cannot run on this Mac; they get the same GLSL, which cross-compiles to HLSL/SPIR-V in the test; no FXC/DXC run); the cost with real V > 1 arrays; why the hash-dependent slice is slow;
-the Windows player's backend (request 146). The 8f3a6e47 *asset* is unchanged (the generated shader text comes from the graph at load), so no matgen / hasset regeneration was needed.
+**Not verified:** the exported/packed game (all runs are the editor loop; no export was built or measured); D3D11, D3D12, Vulkan on hardware (cannot run on this Mac; they get the same GLSL, which cross-compiles to HLSL/SPIR-V in the test; no FXC/DXC run); the cost with real V > 1 arrays; why the hash-dependent slice is slow;
+the Windows player's backend (request 146). The 8f3a6e47 *asset* is unchanged and was not regenerated: the hasset embeds baked GLSL (it contains `heBombGrid`), but `ContentManager::loadAsset` (ContentManager.cpp ~684) regenerates it from the graph on every load of a base material
+whose functions are on the machine, and the tripwire in `test_material_graph.cpp:3529` pins only the graph, which did not change. The runs above used the committed asset, so the regeneration path is what they measured. The stale baked text is used only
+while a function asset is still downloading, and by a packed build only if the exporter baked it from an unregenerated material (`ExportDialogPanel.cpp` bakes from the loaded material; read, not run).
 **Decisions:** branch around the reads instead of cheaper maths (measured: only the branch helps); the `V > 1` side stays the old code; the opt-in shader dump lives in the variants test; experiment toggle removed again.
 **Next steps:** (1) Oct 8 -> Oct 10 engine Scene +1.8 ms (step 4 of the topic); (2) when real V > 1 arrays ship, measure their cost (the `V > 1` side costs what `8f3a6e47` cost, ~1.4 ms Metal): idea, compute `V` and the three slices once per
 layer instead of per node (Albedo/Normal/Mask of a layer share the grid; their arrays have the same depth), or a lower-precision variant pick; (3) the remaining 0.36 ms of `0d7cdf09` (puddles, SSAO +0.23).
