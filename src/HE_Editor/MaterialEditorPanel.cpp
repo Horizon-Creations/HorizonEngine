@@ -239,6 +239,7 @@ void regenerateMaterial(State& st, AppContext& ctx)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
+	mat->customShaderDispGlsl = gen.displacementBody;
 	st.complexity = estimateComplexity(st.lastGlsl);
 	// Live master→variants propagation: re-derive every loaded instance of this material.
 	ctx.contentManager->syncMaterialInstancesOf(st.relPath);
@@ -251,6 +252,17 @@ void regenerateMaterial(State& st, AppContext& ctx)
 	const auto& chk = s_checkLib.fragment(std::hash<std::string>{}(st.lastGlsl),
 	                                      st.lastGlsl, HE::MaterialShaderLibrary::Backend::Metal);
 	st.compileLog = chk.ok ? std::string() : chk.log;
+	// The Displacement pin's domain stage compiles on its own (scope "ds"), so a
+	// graph can be fine as a fragment and still fail there. SPIR-V is plain glslang,
+	// so this runs on a Metal editor too, where the stage itself never draws.
+	if (!gen.displacementBody.empty())
+	{
+		const auto& ds = s_checkLib.tessEval(std::hash<std::string>{}(gen.displacementBody),
+		                                     gen.displacementBody,
+		                                     HE::MaterialShaderLibrary::Backend::SpirV);
+		if (!ds.ok)
+			st.compileLog += (st.compileLog.empty() ? "" : "\n") + std::string("Displacement: ") + ds.log;
+	}
 }
 
 void applyToMaterial(State& st, AppContext& ctx)
@@ -1022,6 +1034,55 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		}
 	}
 	return committed;
+}
+
+// ── Displacement pin (Thema 207) ──────────────────────────────────────────────
+// The link into the Output node's Displacement pin, or null when it is not wired.
+const HE::MatGraphLink* displacementLink(const MaterialGraph& g, int outId)
+{
+	for (const HE::MatGraphLink& l : g.links)
+		if (l.dstNode == outId && l.dstPin == HE::kMatOutputDisplacementPin) return &l;
+	return nullptr;
+}
+
+// The type the registry gives the pin that feeds Displacement. Reroutes are
+// followed to what feeds them; a FunctionCall's outputs are not known here and
+// count as Float, so they never warn. The pin is a Float: anything wider is cut
+// to its first component (x, or red of a texture), which the codegen does
+// silently, so the editor is the one place that can say it.
+MatPinType displacementSourceType(const MaterialGraph& g, int outId)
+{
+	const HE::MatGraphLink* l = displacementLink(g, outId);
+	for (int hop = 0; l && hop < 64; ++hop)
+	{
+		const MatGraphNode* src = g.findNode(l->srcNode);
+		if (!src || src->type == MatNodeType::FunctionCall) break;
+		if (src->type != MatNodeType::Reroute)
+		{
+			const auto& outs = HE::matNodeDesc(src->type).outputs;
+			return l->srcPin >= 0 && l->srcPin < (int)outs.size() ? outs[l->srcPin].type
+			                                                      : MatPinType::Float;
+		}
+		const HE::MatGraphLink* in = nullptr;
+		for (const HE::MatGraphLink& r : g.links)
+			if (r.dstNode == src->id) { in = &r; break; }
+		l = in;
+	}
+	return MatPinType::Float;
+}
+
+const char* backendLabel(HE::RendererBackend b)
+{
+	switch (b)
+	{
+		case HE::RendererBackend::OpenGL:   return "OpenGL";
+		case HE::RendererBackend::D3D11:    return "D3D11";
+		case HE::RendererBackend::D3D12:    return "D3D12";
+		case HE::RendererBackend::Vulkan:   return "Vulkan";
+		case HE::RendererBackend::Metal:    return "Metal";
+		case HE::RendererBackend::Software: return "Software";
+		default:                            return "this renderer";
+	}
 }
 
 // ── Pin list for the shared canvas ────────────────────────────────────────────
@@ -2321,6 +2382,86 @@ void render(AppContext& ctx, const std::string& assetPath,
 				}
 				ImGui::EndPopup();
 			}
+
+			// Tessellation — exists only while the Displacement pin is wired, which is
+			// also the only time its settings reach the shader. The cell turns amber
+			// where the pin has no effect (a backend without tessellation, or a UI
+			// material), so a flat preview reads as "not here", not as a broken graph.
+			if (displacementLink(st.graph, outN->id))
+			{
+				const bool uiDomain  = outN->p[3] > 0.5f;
+				const bool tessHere  = ctx.renderer && ctx.renderer->SupportsTessellation();
+				const bool effective = tessHere && !uiDomain;
+				const bool truncated = displacementSourceType(st.graph, outN->id) != MatPinType::Float;
+				const char* backend  = backendLabel(ctx.backend);
+				char tip[256];
+				if (uiDomain)
+					std::snprintf(tip, sizeof(tip), "Displacement is ignored: a User Interface material is never tessellated");
+				else if (!tessHere)
+					std::snprintf(tip, sizeof(tip), "Displacement has no effect on %s (no tessellation): the mesh draws flat", backend);
+				else
+					std::snprintf(tip, sizeof(tip), "Displacement pin: tessellation settings (tessellated on %s)", backend);
+
+				bar.group();
+				const bool open = effective
+					? bar.item("##tess", T::iconMountain, "Tessellation", false, true, tip)
+					: bar.itemTinted("##tess", T::iconWarning, "Tessellation", T::kWarn, true, tip);
+				if (open) ImGui::OpenPopup("##tessPopup");
+				bar.endGroup();
+
+				if (ImGui::BeginPopup("##tessPopup"))
+				{
+					HE::Ed::Help::Scope helpScope("Material Settings");
+					{
+						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 22.0f);
+						if (uiDomain)
+							ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(T::kWarn),
+								"A User Interface material ignores the Displacement pin.");
+						else if (!tessHere)
+							ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(T::kWarn),
+								"Not tessellated on %s: the pin has no effect here and the "
+								"preview shows the flat mesh. It deforms on backends with "
+								"tessellation.", backend);
+						else
+							ImGui::TextDisabled("Tessellated on %s. Height in metres along the "
+							                    "surface normal.", backend);
+						// A note, not a warning: the registry types every Math node as a
+						// vector, so texture × scale (the usual height graph) lands here
+						// too, and there x is what was meant.
+						if (truncated)
+							ImGui::TextDisabled("Displacement is one number: of the wired "
+							                    "vector only the first component (x, or red "
+							                    "of a texture) is used.");
+					}
+					ImGui::Separator();
+					// Committed edits go through matSanitizeTess, so the node holds what
+					// the shader bakes (Fade Far above Fade Near, factor in 1..64).
+					HE::MatTessSettings& t = outN->tess;
+					bool tessEdit = false;
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Max Factor", &t.maxFactor, 0.1f, 1.0f, HE::kMatTessMaxFactor, "%.0f");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Max Factor");
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Fade Near", &t.fadeNear, 0.1f, 0.0f, 10000.0f, "%.1f m");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Fade Near");
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Fade Far", &t.fadeFar, 0.1f, 0.0f, 10000.0f, "%.1f m");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Fade Far");
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Max Displacement", &t.maxDisplacement, 0.005f, 0.0f, 100.0f, "%.3f m");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Max Displacement");
+					if (tessEdit)
+					{
+						t = HE::matSanitizeTess(t);
+						headerEdit = true;
+					}
+					ImGui::EndPopup();
+				}
+			}
 		}
 
 		if (st.isInstance && mat)
@@ -2457,9 +2598,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 					}
 				}
 				// Asked of the text the GPU is about to run (the swapped-in source
-				// for a node preview), fragment and WPO vertex stage both.
+				// for a node preview): fragment, WPO vertex and displacement stage. The
+				// last only moves where the backend tessellates; elsewhere a Time-driven
+				// height would re-render the same flat ball every frame.
+				const bool tessHere = ctx.renderer->SupportsTessellation();
 				const bool usesTime = HE::matGlslUsesTime(mat->customShaderFragGlsl)
-				                   || HE::matGlslUsesTime(mat->customShaderVertGlsl);
+				                   || HE::matGlslUsesTime(mat->customShaderVertGlsl)
+				                   || (tessHere && HE::matGlslUsesTime(mat->customShaderDispGlsl));
 				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
 					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape,
 					st.previewMeshId, previewClock);
@@ -2545,6 +2690,22 @@ void render(AppContext& ctx, const std::string& assetPath,
 			else
 				pdl->AddText(ImVec2(org.x + av.x * 0.5f - 28.0f, org.y + av.y * 0.5f - 6.0f),
 					IM_COL32(150, 150, 150, 255), "(preview)");
+
+			// A wired Displacement pin on a backend that does not tessellate: the
+			// ball above is the flat mesh, and says so, rather than looking like a
+			// graph whose height does nothing.
+			if (tex && !st.isFunction && mat && !mat->customShaderDispGlsl.empty() &&
+			    !(ctx.renderer && ctx.renderer->SupportsTessellation()))
+			{
+				char note[96];
+				std::snprintf(note, sizeof(note), "Displacement not shown on %s",
+				              backendLabel(ctx.backend));
+				const ImVec2 ts = ImGui::CalcTextSize(note);
+				const ImVec2 p0(org.x + 6.0f, org.y + av.y - ts.y - 10.0f);
+				pdl->AddRectFilled(p0, ImVec2(p0.x + ts.x + 8.0f, p0.y + ts.y + 4.0f),
+				                   IM_COL32(0, 0, 0, 150), 3.0f);
+				pdl->AddText(ImVec2(p0.x + 4.0f, p0.y + 2.0f), EditorToolbar::kWarn, note);
+			}
 
 			// Orbit interaction over the whole preview area (an invisible button on top).
 			ImGui::SetCursorScreenPos(org);

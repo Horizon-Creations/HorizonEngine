@@ -3386,6 +3386,18 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", m_forwardClustered
 		? "OpenGLRenderer: graph materials use clustered lighting (SSBO 4/5/6)"
 		: "OpenGLRenderer: graph materials use the 8-light window (GL < 4.3 or HE_FORWARD_CLUSTER=0)");
+	// Displacement tessellation (Thema 207): core since GL 4.0, so macOS (4.1)
+	// has it too. HE_TESSELLATION=0 turns it off for an A/B against the fallback,
+	// which draws exactly what an unconnected pin draws. Patches are always
+	// triangles; nothing else on GL draws patches, so the state is set once.
+	m_tessSupported = GLAD_GL_VERSION_4_0 != 0 && glPatchParameteri != nullptr;
+	if (const char* t = std::getenv("HE_TESSELLATION"); t && *t && std::atoi(t) == 0)
+		m_tessSupported = false;
+	if (m_tessSupported)
+		glPatchParameteri(GL_PATCH_VERTICES, 3);
+	HE_LOG_INFO(RHI, "%s", m_tessSupported
+		? "OpenGLRenderer: displacement materials tessellate (GL 4.0+)"
+		: "OpenGLRenderer: no tessellation (GL < 4.0 or HE_TESSELLATION=0), displacement is ignored");
 
 	// Deferred-path debug/headless knobs (mirrors the Metal backend):
 	// HE_RENDER_PATH=1/deferred forces the path without touching config,
@@ -3599,14 +3611,27 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
                                            std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody)) return false;
+	foldDisplacement(materialId, key);
+	return true;
 }
 
 bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                              std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody)) return false;
+	foldDisplacement(materialId, key);
+	return true;
+}
+
+void OpenGLRenderer::foldDisplacement(const HE::UUID& materialId, uint64_t& key)
+{
+	if (!m_tessSupported) return; // the fallback: the unconnected pin's key and program
+	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	if (!ma || ma->customShaderDispGlsl.empty()) return;
+	key ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+	m_tessDispByKey.try_emplace(key, ma->customShaderDispGlsl);
 }
 
 // Build (or fetch) a GL program for a material's custom fragment. The shared library
@@ -3783,6 +3808,20 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
 	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
+	// A displacement material gets no instanced twin (yet): DrawGraphBatchInstanced draws
+	// GL_TRIANGLES, which a program with tessellation stages rejects (GL_INVALID_OPERATION,
+	// the batch vanishes). The batch falls back to the per-instance loop, which draws the
+	// plain program as GL_PATCHES (MaterialPrimitive). Tessellated instancing would pass
+	// GL_PATCHES there and is a step of its own. The twin shares the plain program's
+	// displacement body (m_tessDispByKey is filed under `key`), so without this return it
+	// would link TCS/TES too.
+	if (instanced && m_tessSupported && m_tessDispByKey.count(key))
+	{
+		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: no instanced twin for a displacement material, "
+			"its batches draw per instance (tessellated)");
+		m_materialPrograms[progKey] = 0;
+		return 0;
+	}
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
@@ -3811,6 +3850,24 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
 		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
+	};
+	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
+	// the rest of the program. Cross-compiled even next to a PRECOMPILED pair (a pak
+	// carries no tessellation stages yet), so without shaderc the material simply
+	// draws untessellated — the fallback, never a missing draw.
+	const std::string* disp = nullptr;
+	if (m_tessSupported)
+		if (auto it = m_tessDispByKey.find(key); it != m_tessDispByKey.end()) disp = &it->second;
+	std::string tcSrc, teSrc;
+	auto tessStages = [&](Backend b) {
+		tcSrc.clear(); teSrc.clear();
+		if (!disp) return;
+		const uint64_t h = std::hash<std::string>{}(*disp);
+		const auto& tc = m_matShaderLib.tessControl(h, *disp, b);
+		const auto& te = m_matShaderLib.tessEval(h, *disp, b);
+		if (tc.ok && te.ok) { tcSrc = tc.source; teSrc = te.source; return; }
+		HE_LOG_WARN(RHI, "%s", (std::string("OpenGLRenderer: displacement stages failed to cross-compile, "
+			"drawing the material untessellated\n") + tc.log + te.log).c_str());
 	};
 	if (precompiled)
 		usePrecompiled(clustered);
@@ -3888,8 +3945,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// Fast path: a linked binary cached from a previous launch — skips the
 		// GLSL compile + link entirely. Only when the driver supports binaries.
 		const bool cacheable = glProgramBinarySupported();
+		// The tessellation stages are part of the program, so part of its cache
+		// key (a two-stage binary must never answer for a four-stage key).
+		const std::string vertKey = tcSrc.empty() ? vertSrc
+			: vertSrc + "\x1d" + tcSrc + "\x1d" + teSrc;
 		const std::filesystem::path cachePath =
-			cacheable ? glProgramCachePath(vertSrc, fragSrc) : std::filesystem::path{};
+			cacheable ? glProgramCachePath(vertKey, fragSrc) : std::filesystem::path{};
 		if (cacheable)
 			if (GLuint cached = glTryLoadCachedProgram(cachePath))
 			{
@@ -3899,14 +3960,33 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 				return cached;
 			}
 
+		// Tessellation stages first: a driver that rejects them leaves the material
+		// to the two-stage program (the caller retries without), not to an exception.
+		GLuint tcs = 0, tes = 0;
+		if (!tcSrc.empty())
+		{
+			try
+			{
+				tcs = CompileStage(GL_TESS_CONTROL_SHADER,    tcSrc.c_str());
+				tes = CompileStage(GL_TESS_EVALUATION_SHADER, teSrc.c_str());
+			}
+			catch (const std::exception& e)
+			{
+				if (tcs) glDeleteShader(tcs);
+				HE_LOG_ERROR(RHI, "%s", e.what());
+				return 0u;
+			}
+		}
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
 		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
 		if (cacheable) glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 		glAttachShader(prog, vs);
+		if (tcs) { glAttachShader(prog, tcs); glAttachShader(prog, tes); }
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
+		if (tcs) { glDeleteShader(tcs); glDeleteShader(tes); }
 		GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
 		if (!linked)
 		{
@@ -3928,7 +4008,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		return prog;
 	};
 
-	unsigned int program = ok ? linkSources() : 0;
+	// Link; a program the tessellation stages broke is linked again without them
+	// (displacement ignored, logged once — this program is cached either way).
+	auto linkWithTess = [&](Backend tessBackend) -> unsigned int {
+		tessStages(tessBackend);
+		unsigned int p = ok ? linkSources() : 0;
+		if (!p && ok && !tcSrc.empty())
+		{
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: material program with tessellation stages failed, "
+				"drawing it untessellated");
+			tcSrc.clear(); teSrc.clear();
+			p = linkSources();
+		}
+		return p;
+	};
+	unsigned int program = linkWithTess(clustered ? Backend::GLSL430 : Backend::GLSL410);
 	if (!program && clustered)
 	{
 		// The GLSL 4.30 pair (cross-compiled or baked) but the driver rejected
@@ -3938,8 +4032,10 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		clustered = false;
 		if (precompiled) usePrecompiled(false);
 		else             crossCompile(Backend::GLSL410, false);
-		program = ok ? linkSources() : 0;
+		program = linkWithTess(Backend::GLSL410);
 	}
+	if (program && !tcSrc.empty())
+		m_tessPrograms.insert(program); // drawn as GL_PATCHES (MaterialPrimitive)
 	if (!ok)
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
@@ -9300,7 +9396,7 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	}
 
 	glBindVertexArray(drawVAO);
-	glDrawElements(GL_TRIANGLES, drawIdxCount, GL_UNSIGNED_INT, nullptr);
+	glDrawElements(MaterialPrimitive(prog), drawIdxCount, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 	glActiveTexture(GL_TEXTURE0);
 	return true;
@@ -10511,6 +10607,8 @@ void OpenGLRenderer::Shutdown()
 	// variants), and a cleanup that skipped them there would simply leak.
 	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
 	m_materialPrograms.clear();
+	m_tessPrograms.clear(); // ids are reused once deleted
+	m_tessDispByKey.clear();
 	for (auto& [k, prog] : m_uiMaterialPrograms) if (prog) glDeleteProgram(prog);
 	m_uiMaterialPrograms.clear();
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
@@ -12150,7 +12248,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
-						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						glDrawElements(MaterialPrimitive(gbProg), indexCount, GL_UNSIGNED_INT, indexOffset);
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
@@ -12457,7 +12555,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
-						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						glDrawElements(MaterialPrimitive(matProg), indexCount, GL_UNSIGNED_INT, indexOffset);
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
@@ -12754,7 +12852,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
+					glDrawElements(MaterialPrimitive(t.matProg), t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 					continue;
@@ -13053,7 +13151,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glActiveTexture(GL_TEXTURE17);
 					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
+					glDrawElements(MaterialPrimitive(t.matProg), t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);

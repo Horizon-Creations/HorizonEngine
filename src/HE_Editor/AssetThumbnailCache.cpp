@@ -201,6 +201,7 @@ namespace
 		if (gen.glsl.empty()) return {};
 		sm->customShaderFragGlsl = gen.glsl;
 		sm->customShaderVertGlsl = gen.vertexBody;
+		sm->customShaderDispGlsl = gen.displacementBody;
 		sm->shaderParamData.clear();
 		for (const auto& slot : gen.params)
 			sm->shaderParamData.insert(sm->shaderParamData.end(), slot.value, slot.value + 4);
