@@ -86,6 +86,7 @@ PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLS
 HLSL_PRELUDE_OF = {
     "kGiShadowCSHLSL": "kGiTraversalHLSL",
     "kGiProbeCSHLSL": "kGiTraversalHLSL",
+    "kGiReflCSHLSL": "kGiTraversalHLSL",
     "kSkyPSHLSL": "kSkyFuncHLSL",
     "kSkyPSHLSL12": "kSkyFuncHLSL",  # D3D12Renderer.cpp:1564 — D3D12's own sky PS copy
     "kSceneHLSL": "kSkyFuncHLSL",
@@ -100,7 +101,7 @@ GLSL_PRELUDE_OF = {
 # call sites in D3D11Renderer.cpp / D3D12Renderer.cpp.
 HLSL_ENTRY_PROFILE = {
     "GiGBufVS": "vs_5_0", "GiGBufVSInstanced": "vs_5_0", "GiGBufPS": "ps_5_0",
-    "GiProbeCS": "cs_5_0", "GiShadowCS": "cs_5_0",
+    "GiProbeCS": "cs_5_0", "GiShadowCS": "cs_5_0", "GiReflCS": "cs_5_0",
     "PSLine": "ps_5_0", "VSLine": "vs_5_0",
     "PSMain": "ps_5_0", "VSMain": "vs_5_0",
     "VSMainInstanced": "vs_5_0", "VSMainSkinned": "vs_5_0", "VSDepth": "vs_5_0",

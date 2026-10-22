@@ -8,6 +8,7 @@
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
+#include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
 #include <HorizonRendering/SkyNoise3D.h>     // shared procedural sky/cloud noise volume
 #include <HorizonRendering/SkyFrameParams.h> // shared cloud wind vector
 #include <HorizonRendering/SkyShaderSource.h> // kSkyFS + kSkyFuncGLSL, shared with Vulkan/D3D
@@ -6969,8 +6970,8 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// the cone and the kernel collapses rays to 1 with no cone — the ray ladder
 	// read 1/1/4 on GL and 1/2/4 on Metal for the same setting. Derive it from
 	// the ray count instead, exactly as Metal derives `jitter = rays > 1`.
-	const float giReflRays = m_giReflQuality >= 2 ? 4.0f
-	                       : (m_giReflQuality >= 1 ? 2.0f : 1.0f);
+	const float giReflRays = static_cast<float>(
+		HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled).rays);
 	glUniform4f(loc("uFrame"), m_giReflFrameSeed, static_cast<float>(width),
 	            static_cast<float>(height), (giReflRays > 1.0f) ? 1.0f : 0.0f);
 	if (lights.count > 0)
@@ -7083,12 +7084,10 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		// for the part of the lobe the rays did not sample, so a tier that traces
 		// four of them needs a quarter of the filter. Holding it constant across
 		// tiers made the better tier measurably softer.
-		const float reach = std::clamp(
-			1.0f + (kGIReflLobeScreenPx * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f))
-			     / (resDiv * std::max(giReflRays, 1.0f)), 1.0f, 512.0f);
-		const int   levels = std::clamp(
-			static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
-		const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+		const HE::GIReflBlurReach br = HE::giReflBlurReachFor(
+			m_giReflMaxRoughness, static_cast<int>(giReflRays), static_cast<int>(resDiv));
+		const int   levels = br.levels;
+		const float unit   = br.unit;
 		glUseProgram(m_giReflBlurProgram);
 		const GLint uSrc = glGetUniformLocation(m_giReflBlurProgram, "uSrc");
 		const GLint uDir = glGetUniformLocation(m_giReflBlurProgram, "uDir");
