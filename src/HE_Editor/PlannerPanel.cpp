@@ -14,6 +14,7 @@
 #include "TaskBoardTeam.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>          // the text field's cursor, for the arrow keys between blocks
 #include <misc/cpp/imgui_stdlib.h>   // InputText over std::string
 
 #include <nlohmann/json.hpp>
@@ -64,6 +65,7 @@ int         s_newPropertyType = 0;
 UUID        s_armedDelete;        // the property whose "Delete Property" was pressed once
 UUID        s_renamingView;
 UUID        s_newRelationTarget;   // the database a new Relation property points at; {} = this one
+bool        s_roomyCells = false;  // cells drawn with room below them (details, a row's page): relations list their rows as links
 
 // The context of the frame being drawn: the chips, drops and jumps of the links
 // need the world, the content manager and the selection.
@@ -79,6 +81,13 @@ UUID        s_pageId, s_pageDb;
 UUID        s_focusBlock;    // the block whose text field gets the keyboard next frame
 UUID        s_deletePage;    // the page a "Delete Page" confirmation is about
 bool        s_deletePageOpen = false;
+UUID        s_cursorBlock;           // the block whose cursor is placed as soon as its field is active
+bool        s_cursorAtEnd = false;
+bool        s_focusAtEnd = false;   // the cursor goes to the end of the block that gets the keyboard (moving up), else to its start
+// What has been typed into blocks and not yet committed, by block: the field a
+// click or an arrow key moves away from still has to be committed after the field
+// it moves to has started, so one shared buffer would lose the first one's text.
+std::unordered_map<UUID, std::string> s_blockEdits;
 
 void openPage(const UUID& rowId, const UUID& dbId)
 {
@@ -411,7 +420,8 @@ void relationCell(const Database& db, const Row& row, const Property& p)
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	const bool open = ImGui::BeginCombo("##relation", preview.c_str());
 	note("relation:" + row.title);
-	if (!open) return;
+	if (open)
+	{
 	if (!target)
 		ImGui::TextDisabled("The database this points at is gone.");
 	else if (target->rows.size() <= (target == &db ? 1u : 0u))
@@ -436,6 +446,31 @@ void relationCell(const Database& db, const Row& row, const Property& p)
 			ImGui::PopID();
 		}
 	ImGui::EndCombo();
+	}
+
+	// Where there is room (the details, a row's page), the linked rows are links that go there.
+	if (s_roomyCells && target)
+		for (const UUID& id : have)
+		{
+			const Row* r = target->findRow(id);
+			if (!r) continue;
+			pushUuid(id);
+			ImGui::PushStyleColor(ImGuiCol_Text, Theme::AccentHi);
+			const bool clicked = ImGui::Selectable((titleOf(*r) + "##goto").c_str(), false);
+			ImGui::PopStyleColor();
+			note("relation-open:" + r->title);
+			if (clicked)
+			{
+				const UUID targetDb = target->id, targetRow = id;
+				post([=] {
+					s_pageId = s_pageDb = UUID{};
+					s_dbId = targetDb;
+					s_viewId = UUID{};
+					s_selRow = targetRow;
+				});
+			}
+			ImGui::PopID();
+		}
 }
 
 void editCell(const Database& db, const Row& row, const Property& p)
@@ -1256,7 +1291,11 @@ void drawPropertyTable(const Database& db, const Row& row)
 				note("drawer:description");
 			}
 			else
+			{
+				s_roomyCells = true;
 				editCell(db, row, p);
+				s_roomyCells = false;
+			}
 			ImGui::PopID();
 		}
 		ImGui::EndTable();
@@ -1330,6 +1369,12 @@ struct BarDrag
 	int  days = 0;
 };
 BarDrag s_barDrag;
+BarDrag s_barResize;   // the right edge of a bar being dragged: the days its End moves by
+
+// How wide a day is: days, weeks, months (the labels thin out to match).
+int         s_tlZoom = 0;
+const float kZoomDayW[]    = { 24.0f, 12.0f, 5.0f };
+const char* const kZoomNames[] = { "Days", "Weeks", "Months" };
 
 // A row per line, a day per column: a bar from the row's Start date to its End date
 // (one day when it has no End), the days drawn across the top and today marked.
@@ -1371,7 +1416,7 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 	if (hi - lo < 30) hi = lo + 30;
 
 	const float fh = ImGui::GetFrameHeight();
-	const float dayW = 24.0f, titleW = 220.0f, rowH = fh + 6.0f, headH = fh * 2.0f;
+	const float dayW = kZoomDayW[std::clamp(s_tlZoom, 0, 2)], titleW = 220.0f, rowH = fh + 6.0f, headH = fh * 2.0f;
 	const int   days = static_cast<int>(hi - lo + 1);
 	const float totalW = titleW + static_cast<float>(days) * dayW;
 
@@ -1389,8 +1434,13 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 		const std::string iso = taskTimeToIso((lo + d) * kDayMs);
 		if (iso.substr(8, 2) == "01" || d == 0)
 			dl->AddText(ImVec2(x + 3.0f, origin.y), Theme::u32(Theme::TextHeading), iso.substr(0, 7).c_str());
-		dl->AddText(ImVec2(x + 3.0f, origin.y + fh), Theme::u32(lo + d == today ? Theme::Warn : Theme::TextDim),
-		            iso.substr(8, 2).c_str());
+		// Every day while days are wide enough to read, the Mondays at the middle zoom, none at the smallest.
+		const bool monday = (lo + d + 3) % 7 == 0;
+		if (dayW >= 20.0f || (dayW >= 10.0f && monday))
+			dl->AddText(ImVec2(x + 3.0f, origin.y + fh), Theme::u32(lo + d == today ? Theme::Warn : Theme::TextDim),
+			            iso.substr(8, 2).c_str());
+		else if (lo + d == today)
+			dl->AddRectFilled(ImVec2(x, origin.y + fh), ImVec2(x + dayW, origin.y + headH), Theme::u32(Theme::Warn));
 		dl->AddLine(ImVec2(x, origin.y + fh), ImVec2(x, origin.y + headH), Theme::u32(Theme::warm(0.20f)));
 	}
 	ImGui::Dummy(ImVec2(totalW, headH));
@@ -1430,6 +1480,7 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 				const float x0 = gridX + static_cast<float>(bar.a - lo) * dayW;
 				const float w  = static_cast<float>(bar.b - bar.a + 1) * dayW;
 				ImGui::SetCursorScreenPos(ImVec2(x0, p.y + 3.0f));
+				ImGui::SetNextItemAllowOverlap();   // the right edge is a handle of its own, on top
 				ImGui::InvisibleButton("##bar", ImVec2(w, rowH - 6.0f));
 				note("bar:" + row.title);
 				const bool active = ImGui::IsItemActive();
@@ -1460,12 +1511,47 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 					s_barDrag = BarDrag{};
 				}
 				const float shownX = x0 + (moving ? static_cast<float>(s_barDrag.days) * dayW : 0.0f);
+
+				// The right edge: drag it to change the End date (with an End property to change).
+				float shownW = w;
+				if (endP)
+				{
+					const float handleW = std::min(8.0f, w * 0.5f);
+					ImGui::SetCursorScreenPos(ImVec2(x0 + w - handleW, p.y + 3.0f));
+					ImGui::InvisibleButton("##resize", ImVec2(handleW, rowH - 6.0f));
+					note("bar-end:" + row.title);
+					if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+					if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
+					{
+						s_barResize.row  = row.id;
+						s_barResize.days = static_cast<int>(std::lround(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x / dayW));
+					}
+					const bool resizing = s_barResize.row == row.id && s_barResize.days != 0;
+					if (ImGui::IsItemDeactivated())
+					{
+						if (resizing)
+						{
+							const UUID dbId = db.id, rowId = row.id, sid = startP->id, eid = endP->id;
+							const std::int64_t shift = s_barResize.days * kDayMs;
+							post([=] {
+								s_ws.edit(dbId, [&](Database& d) {
+									std::int64_t start = 0, end = 0;
+									if (!d.date(rowId, sid, start)) return false;
+									if (!d.date(rowId, eid, end)) end = start;   // no End yet: it starts at the Start
+									return d.setDate(rowId, eid, std::max(start, end + shift), taskNowMs());
+								});
+							});
+						}
+						s_barResize = BarDrag{};
+					}
+					if (resizing) shownW = std::max(dayW, w + static_cast<float>(s_barResize.days) * dayW);
+				}
 				ImVec4 colour = Theme::Accent;
 				if (colourP)
 					if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
-				dl->AddRectFilled(ImVec2(shownX, p.y + 3.0f), ImVec2(shownX + w, p.y + rowH - 3.0f),
+				dl->AddRectFilled(ImVec2(shownX, p.y + 3.0f), ImVec2(shownX + shownW, p.y + rowH - 3.0f),
 				                  Theme::u32(Theme::alpha(colour, active || ImGui::IsItemHovered() ? 0.95f : 0.75f)), 4.0f);
-				dl->PushClipRect(ImVec2(shownX, p.y), ImVec2(shownX + w, p.y + rowH), true);
+				dl->PushClipRect(ImVec2(shownX, p.y), ImVec2(shownX + shownW, p.y + rowH), true);
 				dl->AddText(ImVec2(shownX + 5.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::Ink),
 				            row.title.c_str());
 				dl->PopClipRect();
@@ -1574,12 +1660,12 @@ void commitBlockText(const UUID& pageId, const UUID& blockId, std::string text, 
 // The block's text as a word-wrapped field that grows with what is typed. Writes when
 // it is left, and on Enter (Ctrl/Shift+Enter is a new line). `prevId` is the block
 // above, for Backspace on an empty one.
-void blockText(const Page& page, const Block& b, int index, float width, const UUID& prevId)
+void blockText(const Page& page, const Block& b, int index, float width, const UUID& prevId, const UUID& nextId)
 {
 	const UUID pageId = page.id, blockId = b.id;
-	const EditKey key{ pageId, blockId };
-	const bool mine = s_editing && s_editKey == key;
-	std::string text = mine ? s_editBuf : b.text;
+	const auto pending = s_blockEdits.find(blockId);
+	const bool hadPending = pending != s_blockEdits.end();
+	std::string text = hadPending ? pending->second : b.text;
 	const std::string before = text;
 
 	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
@@ -1607,10 +1693,24 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 		const ImVec2 p = ImGui::GetCursorScreenPos();
 		ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 3.0f, p.y + h), Theme::u32(Theme::Accent));
 	}
+	bool focusNow = false;
 	if (s_focusBlock == blockId)
 	{
 		ImGui::SetKeyboardFocusHere();
 		s_focusBlock = UUID{};
+		focusNow = true;
+	}
+	// Where the cursor was before this frame's keys moved it: the first or the last
+	// line of the block decides whether an arrow key leaves it.
+	bool onFirstLine = false, onLastLine = false;
+	if (ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetID("##text")))
+	{
+		const int cursor = std::clamp(state->GetCursorPos(), 0, static_cast<int>(text.size()));
+		const float lineH = ImGui::GetTextLineHeight();
+		const float above = ImGui::CalcTextSize((text.substr(0, static_cast<std::size_t>(cursor)) + " ").c_str(), nullptr, false, wrapW).y;
+		const float all   = ImGui::CalcTextSize((text + " ").c_str(), nullptr, false, wrapW).y;
+		onFirstLine = above < lineH * 1.5f;
+		onLastLine  = all - above < lineH * 0.5f;
 	}
 	ImGui::SetNextItemWidth(width);
 	const ImGuiInputTextFlags flags = ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_EnterReturnsTrue |
@@ -1621,15 +1721,41 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 	ImGui::PopStyleVar(2);
 	ImGui::PopStyleColor();
 
-	if (ImGui::IsItemActivated()) { s_editing = true; s_editKey = key; s_editBuf = b.text; }
-	if (text != before) { s_editing = true; s_editKey = key; s_editBuf = text; }
-	const bool left = ImGui::IsItemDeactivatedAfterEdit();
+	// The keyboard focus takes a frame to arrive: the cursor is placed once the field is active.
+	if (focusNow) { s_cursorBlock = blockId; s_cursorAtEnd = s_focusAtEnd; }
+	if (s_cursorBlock == blockId && ImGui::IsItemActive())
+		if (ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetItemID()))
+		{
+			const int at = s_cursorAtEnd ? static_cast<int>(text.size()) : 0;
+			state->SetSelection(at, at);
+			s_cursorBlock = UUID{};
+		}
+	if (text != before) s_blockEdits[blockId] = text;
+	// Left with something typed in an earlier frame. ImGui's own "deactivated after edit"
+	// is not reliable when another field takes the focus earlier in the same frame, so
+	// the pending text is what says it.
+	const bool left = hadPending && !ImGui::IsItemActive() && !entered;
 	if (entered || left)
 	{
-		s_editing = false;
+		s_blockEdits.erase(blockId);
 		commitBlockText(pageId, blockId, text, entered);
 	}
-	else if (ImGui::IsItemDeactivated()) s_editing = false;
+	else if (ImGui::IsItemDeactivated()) s_blockEdits.erase(blockId);
+
+	// An arrow key past the first or last line goes to the block above or below.
+	if (ImGui::IsItemActive() && !entered)
+	{
+		if (onFirstLine && !(prevId == UUID{}) && ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
+		{
+			s_focusBlock = prevId;
+			s_focusAtEnd = true;
+		}
+		else if (onLastLine && !(nextId == UUID{}) && ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
+		{
+			s_focusBlock = nextId;
+			s_focusAtEnd = false;
+		}
+	}
 
 	// Backspace in an empty block takes the block away and moves up one.
 	if (ImGui::IsItemActive() && before.empty() && text.empty() && b.children.empty() &&
@@ -1638,8 +1764,9 @@ void blockText(const Page& page, const Block& b, int index, float width, const U
 		post([=] {
 			s_ws.editPage(pageId, [&](Page& page) { return page.removeBlock(blockId, taskNowMs()); });
 			s_focusBlock = prevId;
+			s_focusAtEnd = true;
 		});
-		s_editing = false;
+		s_blockEdits.erase(blockId);
 	}
 }
 
@@ -1903,6 +2030,19 @@ void drawBlocks(const Page& page)
 	const float fh = ImGui::GetFrameHeight();
 	const float handleW = fh * 0.8f + 4.0f;
 	const float prefixW = fh * 1.0f;
+	// The blocks the cursor can be put in: the arrow keys and Backspace skip the rest.
+	auto hasText = [](BlockType t) {
+		return t != BlockType::Divider && t != BlockType::EngineLink && t != BlockType::DatabaseView && t != BlockType::PageLink;
+	};
+	std::vector<UUID> nextText(flat.size());
+	{
+		UUID later;
+		for (std::size_t i = flat.size(); i-- > 0;)
+		{
+			nextText[i] = later;
+			if (hasText(flat[i].block->type)) later = flat[i].block->id;
+		}
+	}
 	UUID prevId;
 	for (std::size_t i = 0; i < flat.size(); ++i)
 	{
@@ -1957,7 +2097,7 @@ void drawBlocks(const Page& page)
 				used = prefixW;
 			}
 			if (b.type == BlockType::Todo && b.checked) ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextDim);
-			blockText(page, b, static_cast<int>(i), avail - indent - handleW - used - 8.0f, prevId);
+			blockText(page, b, static_cast<int>(i), avail - indent - handleW - used - 8.0f, prevId, nextText[i]);
 			if (b.type == BlockType::Todo && b.checked) ImGui::PopStyleColor();
 		}
 		ImGui::EndGroup();
@@ -1984,7 +2124,7 @@ void drawBlocks(const Page& page)
 		}
 		if (indent > 0) ImGui::Unindent(indent);
 		ImGui::PopID();
-		prevId = blockId;
+		if (hasText(b.type)) prevId = blockId;
 	}
 
 	// Below the last block: a way to add one, and a place to drop an object.
@@ -2495,6 +2635,18 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		dateCombo("##tlstart", view->kind == ViewKind::Calendar ? "Date" : "Start", view->dateProperty, false);
 		note("timeline:start");
 		dateCombo("##tlend", "End", view->endProperty, true);
+		if (view->kind == ViewKind::Timeline)
+		{
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(90);
+			if (ImGui::BeginCombo("##tlzoom", kZoomNames[std::clamp(s_tlZoom, 0, 2)]))
+			{
+				for (int i = 0; i < 3; ++i)
+					if (ImGui::Selectable(kZoomNames[i], i == s_tlZoom)) s_tlZoom = i;
+				ImGui::EndCombo();
+			}
+			note("timeline:zoom");
+		}
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(140);
 		const Property* colour = db.findProperty(view->groupBy);
@@ -2882,6 +3034,7 @@ UUID selectedRow() { return s_selRow; }
 void showCalendarMonth(int year, int month) { s_calYear = year; s_calMonth = std::clamp(month, 1, 12); }
 int  calendarYear() { return s_calYear; }
 int  calendarMonth() { return s_calMonth; }
+void setTimelineZoom(int level) { s_tlZoom = std::clamp(level, 0, 2); }
 
 void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; }
 void openRowPage(const UUID& dbId, const UUID& rowId) { openPage(rowId, dbId); }
@@ -2911,7 +3064,11 @@ void reset()
 	s_newRelationTarget = UUID{};
 	s_pageId = s_pageDb = s_focusBlock = s_deletePage = UUID{};
 	s_calYear = s_calMonth = 0;
+	s_tlZoom = 0;
+	s_barDrag = s_barResize = BarDrag{};
 	s_deletePageOpen = false;
+	s_focusAtEnd = false;
+	s_blockEdits.clear();
 }
 
 } // namespace PlannerPanel

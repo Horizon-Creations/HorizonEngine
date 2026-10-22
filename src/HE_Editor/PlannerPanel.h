@@ -68,6 +68,8 @@ namespace PlannerPanel
 	void showCalendarMonth(int year, int month);
 	int  calendarYear();
 	int  calendarMonth();
+	// How wide a day is on a timeline: 0 days, 1 weeks, 2 months.
+	void setTimelineZoom(int level);
 
 	// Show a standalone page, or the page of a row ("Open Page" in the row's details;
 	// the page exists in memory until it has a block). {} when a database is shown.

@@ -163,3 +163,20 @@ Relation: Klick zur Zielzeile; Variante B fuer Tasks; Live-Zusammenarbeit; Edito
 fremder "page"-Schluessel), Workspace 16, Task-Board-Tests gruen, Audit 0 offen, `HorizonEditor` gebaut. Volllauf nicht wiederholt.
 **Offen:** Pfeiltasten zwischen Bloecken; Block "Seite" fuer Zeilenseiten in der Auswahl (nur freie Seiten); Seiten per Ziehen in der Seitenleiste verschachteln;
 Wochenansicht im Kalender; Zeitleiste ohne Zoom/Resize; Relation: Klick zur Zielzeile; Variante B fuer Tasks; Live-Zusammenarbeit; Editor nicht gestartet, Windows/Linux nicht gebaut.
+
+## Handoff (Stand Relationen, Pfeiltasten, Zeitleiste, 2026-10-22)
+**Fertig:**
+- Relationen: in den Details und auf der Zeilenseite stehen die verknuepften Zeilen als Links unter dem Auswahlfeld; ein Klick oeffnet die Zielzeile
+  (Datenbank wird gewechselt, Details offen). In Tabellenzellen bleibt es beim Auswahlfeld.
+- Pfeiltasten im Block-Editor: Hoch auf der ersten, Runter auf der letzten Zeile eines Blocks geht zum Block darueber/darunter (Trenner, Engine-Objekt,
+  Datenbank- und Seiten-Link-Bloecke werden uebersprungen); der Cursor kommt beim Hochgehen und bei Backspace ans Ende, beim Runtergehen an den Anfang.
+- **Fehler behoben:** In einem Block getippter Text ging verloren, wenn man danach einen Block ANKLICKTE, der weiter oben steht (gemeinsamer Edit-Puffer,
+  ImGuis "deactivated after edit" ist unzuverlaessig, wenn ein frueheres Feld im selben Frame den Fokus nimmt). Jetzt Puffer je Block, "verlassen" = es gibt
+  getippten Text aus einem frueheren Frame und das Feld ist nicht mehr aktiv. Regressionstest dazu.
+- Zeitleiste: Zoom (Days/Weeks/Months, Combo in der Toolbar, `setTimelineZoom` fuer Tests), rechter Rand eines Balkens ziehen aendert das End-Datum
+  (mit End-Property; ohne End-Zelle beginnt es am Start).
+**Tests:** `test_planner_ui` 23 Faelle (neu: Relation oeffnen, Pfeiltasten, Edit bleibt beim Anklicken, Resize + Zoom in der Zeitleiste), Audit 0 offen,
+`HorizonEditor` gebaut, Task-Board-Tests gruen. Volllauf nicht wiederholt. Editor nicht gestartet, Windows/Linux nicht gebaut.
+**Offen:** Kalender nur Monate (keine Wochenansicht); Seiten per Ziehen in der Seitenleiste verschachteln; Zeilenseiten in der Seiten-Link-Auswahl;
+Zeitleiste: Start-Rand ziehen, Heute-Sprung; Variante B fuer Tasks (Planner als Wahrheit, Historie je Zeile); Live-Zusammenarbeit ueber den Team-Server;
+Markdown-Export/CSV; MCP-Tools fuer den Planner.

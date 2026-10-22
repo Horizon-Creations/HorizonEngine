@@ -913,6 +913,28 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	REQUIRE(click(ctx, "bar:Alpha"));
 	CHECK(ws->find(dbId)->toJson() == before);
 
+	// The right edge of Alpha: two days further, and the End date follows. A drag of the
+	// edge is not a click and not a move.
+	{
+		const PlannerPanel::Rect edge = PlannerPanel::controlRect("bar-end:Alpha");
+		REQUIRE(edge.x1 > edge.x0);
+		dragTo(ctx, centre(edge), ImVec2(centre(edge).x + 48.0f, centre(edge).y));
+		idle(ctx);
+		REQUIRE(ws->find(dbId)->date(a, end, ms));
+		CHECK(ms == day("2026-10-26T00:00:00.000Z"));
+		REQUIRE(ws->find(dbId)->date(a, start, ms));
+		CHECK(ms == day("2026-10-20T00:00:00.000Z"));   // the Start stayed
+	}
+	// Weeks: a day is half as wide, seven days of Alpha are 84 pixels.
+	PlannerPanel::setTimelineZoom(1);
+	idle(ctx);
+	{
+		const PlannerPanel::Rect ra2 = PlannerPanel::controlRect("bar:Alpha");
+		CHECK(ra2.x1 - ra2.x0 == doctest::Approx(7 * 12.0f));
+	}
+	PlannerPanel::setTimelineZoom(0);
+	idle(ctx);
+
 	// Without a Start date there is nothing to draw, and the view says so.
 	CHECK(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->dateProperty = UUID{}; return true; }));
 	idle(ctx);
@@ -1363,4 +1385,103 @@ TEST_CASE("planner ui pages: a page link block offers the pages, then shows the 
 	CHECK(onDisk.blocks[0].page == notes);
 	REQUIRE(click(ctx, "page-link:0"));
 	CHECK(PlannerPanel::selectedPage() == notes);
+}
+
+TEST_CASE("planner ui: a linked row in a relation opens that row")
+{
+	Harness harness;
+	Project proj("he_planner_ui_relopen");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	REQUIRE(click(ctx, "New Database"));
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID dbId = PlannerPanel::selectedDatabase();
+	UUID alpha, beta;
+	REQUIRE(ws->edit(dbId, [&](Database& db) {
+		Property* p = db.addProperty("Blocked by", PropertyType::Relation);
+		p->relationDb = db.id;
+		const UUID pid = p->id;
+		alpha = db.addRow("Alpha", "Tester", 1000)->id;
+		beta  = db.addRow("Beta", "Tester", 1001)->id;
+		return db.setRelation(alpha, pid, { beta }, 1);
+	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "open:Alpha"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedRow() == alpha);
+	REQUIRE(PlannerPanel::controlRect("relation-open:Beta").x1 > 0);
+	REQUIRE(click(ctx, "relation-open:Beta"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedRow() == beta);
+	CHECK(PlannerPanel::selectedDatabase() == dbId);
+}
+
+TEST_CASE("planner ui pages: the arrow keys leave a block past its first or last line")
+{
+	Harness harness;
+	Project proj("he_planner_ui_arrows");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [](Page& p) {
+		p.addBlock(BlockType::Paragraph, "first", 1);
+		p.addBlock(BlockType::Divider, "", 2);   // no text: the arrows skip it
+		p.addBlock(BlockType::Paragraph, "second", 3);
+		return true;
+	}));
+	idle(ctx);
+	auto press = [&](ImGuiKey key) {
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(key, true);
+		frame(ctx, false);
+		io.AddKeyEvent(key, false);
+		settle(ctx);
+	};
+	REQUIRE(click(ctx, "block:0"));   // a click right of the text: the cursor is at its end
+	press(ImGuiKey_DownArrow);
+	typeText(ctx, "!");
+	press(ImGuiKey_UpArrow);   // leaving a block commits what was typed in it
+	REQUIRE(ws->findPage(pageId)->blocks.size() == 3);
+	CHECK(ws->findPage(pageId)->blocks[2].text == "!second");   // down went past the divider; the cursor was at its start
+	CHECK(ws->findPage(pageId)->blocks[0].text == "first");
+	typeText(ctx, "?");   // up came in at the end of "first"
+	// At the top of the page there is nothing above: the key stays in the block.
+	press(ImGuiKey_UpArrow);
+	typeText(ctx, "#");
+	REQUIRE(click(ctx, "page:title"));   // leaving commits again
+	CHECK(ws->findPage(pageId)->blocks[0].text == "first?#");
+	CHECK(ws->findPage(pageId)->blocks[2].text == "!second");
+}
+
+TEST_CASE("planner ui pages: text typed in a block is kept when another block is clicked")
+{
+	Harness harness;
+	Project proj("he_planner_ui_blockkeep");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [](Page& p) {
+		p.addBlock(BlockType::Paragraph, "one", 1);
+		p.addBlock(BlockType::Paragraph, "two", 2);
+		return true;
+	}));
+	idle(ctx);
+
+	// The second block is edited, then the FIRST is clicked: the first draws before the
+	// second, so it has taken the focus by the time the second notices it lost it.
+	REQUIRE(click(ctx, "block:1"));
+	typeText(ctx, "!");
+	REQUIRE(click(ctx, "block:0"));
+	CHECK(ws->findPage(pageId)->blocks[1].text == "two!");
+	CHECK(ws->findPage(pageId)->blocks[0].text == "one");
 }
