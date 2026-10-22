@@ -218,11 +218,13 @@ const View* preferredView(const Database& db)
 	return db.views.empty() ? nullptr : &db.views.front();
 }
 
-// Tasks is one thing: its sidebar entry is the board, the table of the same tasks is a tab away (the + of the tab bar).
+// Tasks is one thing: one sidebar entry, named Tasks, opening its preferred view; its other views (the table, the
+// board) are tabs away (the + of the tab bar). It cannot be deleted.
 bool hiddenInSidebar(const Database& db, const View& v)
 {
-	if (db.id != tasksDatabaseId() || v.kind != ViewKind::Table) return false;
-	return std::any_of(db.views.begin(), db.views.end(), [](const View& o) { return o.kind == ViewKind::Board; });
+	if (db.id != tasksDatabaseId()) return false;
+	const View* pref = preferredView(db);
+	return !pref || !(pref->id == v.id);
 }
 
 // The circular arrow of "read it again".
@@ -3299,7 +3301,6 @@ void drawSidebar(AppContext& ctx)
 		const struct { ViewKind kind; const char* title; const char* newName; const char* key; } kinds[] = {
 			{ ViewKind::Table, "TABLES", "New Table", "Planner/New Table" },
 			{ ViewKind::Timeline, "TIMELINES", "New Timeline", "Planner/New Timeline" },
-			{ ViewKind::Board, "BOARDS", "New Kanban", "Planner/New Kanban" },
 			{ ViewKind::Calendar, "CALENDARS", "New Calendar", "Planner/New Calendar" } };
 		for (const auto& k : kinds)
 		{
@@ -3311,10 +3312,13 @@ void drawSidebar(AppContext& ctx)
 			for (Database* db : s_ws.databases())
 				for (const View& v : db->views)
 				{
-					if (v.kind != k.kind || hiddenInSidebar(*db, v)) continue;
+					// A board is a table shown in lanes: it lists with the tables (there are whiteboards for free-form boards).
+					const bool here = k.kind == ViewKind::Table ? (v.kind == ViewKind::Table || v.kind == ViewKind::Board) : v.kind == k.kind;
+					if (!here || hiddenInSidebar(*db, v)) continue;
+					const bool isTasks = db->id == tasksDatabaseId();
 					pushUuid(v.id);
-					const std::string label = v.name.empty() ? std::string("Untitled") : v.name;
-					const bool open = db->id == s_dbId && v.id == s_viewId && s_pageId == UUID{} && s_boardId == UUID{};
+					const std::string label = isTasks ? std::string("Tasks") : v.name.empty() ? std::string("Untitled") : v.name;
+					const bool open = (isTasks ? db->id == s_dbId : db->id == s_dbId && v.id == s_viewId) && s_pageId == UUID{} && s_boardId == UUID{};
 					if (sidebarRow("##view", viewIcon(v.kind), label, open))
 					{
 						s_dbId   = db->id;
@@ -3322,11 +3326,11 @@ void drawSidebar(AppContext& ctx)
 						s_pageId = s_pageDb = UUID{};
 						s_boardId = UUID{};
 					}
-					note("item:" + v.name);
+					note("item:" + label);
 					if (ImGui::IsItemHovered())
 						ImGui::SetTooltip("Data: %s (%d rows, %d views)", db->name.c_str(), static_cast<int>(db->rows.size()),
 						                  static_cast<int>(db->views.size()));
-					if (ImGui::BeginPopupContextItem("##viewitemmenu"))
+					if (!isTasks && ImGui::BeginPopupContextItem("##viewitemmenu"))
 					{
 						const UUID dbId = db->id, vid = v.id;
 						if (db->views.size() > 1)
@@ -3662,14 +3666,14 @@ void drawTabs()
 			ImGui::PopID();
 		};
 		const struct { ViewKind kind; const char* title; } kinds[] = { { ViewKind::Table, "Tables" }, { ViewKind::Timeline, "Timelines" },
-		                                                              { ViewKind::Board, "Boards" }, { ViewKind::Calendar, "Calendars" } };
+		                                                              { ViewKind::Calendar, "Calendars" } };
 		bool any = false;
 		for (const auto& k : kinds)
 		{
 			bool head = false;
 			for (Database* db : s_ws.databases())
 				for (const View& v : db->views)
-					if (v.kind == k.kind)
+					if (v.kind == k.kind || (k.kind == ViewKind::Table && v.kind == ViewKind::Board))
 					{
 						if (!head) { ImGui::TextDisabled("%s", k.title); head = true; }
 						entry(Tab{ 0, db->id, v.id });

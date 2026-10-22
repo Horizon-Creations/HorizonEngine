@@ -457,7 +457,7 @@ TEST_CASE("planner ui: a card dragged to another lane changes the task's status"
 	addTasks(ctx, { "Carry crates" });
 	settle(ctx);
 	const UUID id = TaskBoardPanel::board(ctx)->tasks[0].id;
-	REQUIRE(click(ctx, "item:By status"));
+	REQUIRE(click(ctx, "item:Tasks"));
 	settle(ctx);
 
 	settle(ctx);
@@ -807,7 +807,7 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	REQUIRE(PlannerPanel::controlRect("From the Team").x1 > 0);
 	// The assignee picker left the focus on its popup, which blocks hovering elsewhere until a click lands:
 	// a click on a sidebar entry takes the focus back.
-	REQUIRE(click(ctx, "item:By status"));
+	REQUIRE(click(ctx, "item:Tasks"));
 	REQUIRE(click(ctx, "From the Team"));
 	REQUIRE(PlannerPanel::controlRect("team-row:0").x1 > 0);
 	shotTo(ctx, "planner_team_from_the_team");
@@ -2451,30 +2451,18 @@ TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their
 	CHECK(PlannerPanel::controlRect("timeline:new").x1 > 0);   // the timeline is drawn
 	CHECK(PlannerPanel::controlRect("item:Untitled timeline").x1 > 0);
 
-	// A kanban board on the same data: a second entry in the sidebar, the same rows. The board needs a Select to
-	// group by; the data has none, so it shows its hint, and the row count is shared.
+	// There is no kanban category: boards are the whiteboards. The data of a timeline is shown as a calendar too.
+	CHECK(PlannerPanel::controlRect("New Kanban").x1 <= 0);
 	REQUIRE(ws->edit(roadmap, [&](Database& db) { db.addRow("Ship alpha", "Tester", 1000); return true; }));
-	REQUIRE(click(ctx, "New Kanban"));
+	REQUIRE(click(ctx, "New Calendar"));
 	settle(ctx);
 	REQUIRE(click(ctx, "data:Untitled timeline"));
 	settle(ctx);
 	CHECK(PlannerPanel::selectedDatabase() == roadmap);
 	REQUIRE(ws->find(roadmap)->views.size() == 2);
-	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Board);
+	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Calendar);
 	CHECK(ws->databases().size() == 2);   // Tasks and the one just made: no second database
-	CHECK(PlannerPanel::controlRect("item:Untitled timeline board").x1 > 0);
-
-	// A board on new data brings a Status column with its three lanes.
-	REQUIRE(click(ctx, "New Kanban"));
-	settle(ctx);
-	REQUIRE(click(ctx, "data:new"));
-	settle(ctx);
-	const Database* kanban = ws->find(PlannerPanel::selectedDatabase());
-	REQUIRE(kanban != nullptr);
-	REQUIRE(kanban->views.size() == 1);
-	const Property* status = kanban->findProperty(kanban->views[0].groupBy);
-	REQUIRE(status != nullptr);
-	CHECK(status->options.size() == 3);
+	CHECK(PlannerPanel::controlRect("item:Untitled timeline calendar").x1 > 0);
 }
 
 TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New Card make something at once")
@@ -2562,19 +2550,14 @@ TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New 
 	idle(ctx);
 	CHECK(PlannerPanel::controlRect("view:Untitled table calendar").x1 > 0);
 
-	// A board: New Card puts the card in the first lane.
-	REQUIRE(click(ctx, "New Kanban"));
+	// Tasks, under the tables, opens as its board: New Item puts a task in the first lane.
+	REQUIRE(click(ctx, "item:Tasks"));
 	settle(ctx);
-	REQUIRE(click(ctx, "data:new"));
-	settle(ctx);
-	const UUID kanban = PlannerPanel::selectedDatabase();
-	REQUIRE(click(ctx, "New Row"));   // "New Card" here
+	CHECK(PlannerPanel::selectedDatabase() == tasksDatabaseId());
+	const std::size_t tasksBefore = ws->find(tasksDatabaseId())->rows.size();
+	REQUIRE(click(ctx, "New Row"));   // "New Item" here
 	idle(ctx);
-	REQUIRE(ws->find(kanban)->rows.size() == 1);
-	const Database* kd = ws->find(kanban);
-	const Property* group = kd->findProperty(kd->views[0].groupBy);
-	REQUIRE(group != nullptr);
-	CHECK(kd->select(kd->rows[0].id, group->id) == group->options.front().id);
+	CHECK(ws->find(tasksDatabaseId())->rows.size() == tasksBefore + 1);
 }
 
 TEST_CASE("planner ui board: a double-click on a row card shows the row in its view and on a page card opens the page; a colour recolours the link, not the card")
@@ -2669,7 +2652,7 @@ TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; t
 	REQUIRE(open != nullptr);
 	CHECK(open->kind == ViewKind::Board);
 	CHECK(open->name == "By status");
-	CHECK(PlannerPanel::controlRect("item:By status").x1 > 0);
+	CHECK(PlannerPanel::controlRect("item:Tasks").x1 > 0);
 	CHECK(PlannerPanel::controlRect("item:All tasks").x1 <= 0);
 	CHECK(PlannerPanel::controlRect("New Row").x1 > 0);   // "New Item" on a board
 
