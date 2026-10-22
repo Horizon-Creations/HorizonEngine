@@ -68,22 +68,29 @@ schon eine Datenbank mit einem festen Schema.
 Block-Editor in ImGui ist der aufwendigste Teil (Cursor, Auswahl, Undo): zuerst nur Absatz,
 Ueberschrift, Liste, Checkliste, Engine-Link. Zeitleiste braucht eigenes Zeichnen (kein Widget).
 
-## Handoff (Stand P0, 2026-10-22)
-**Fertig und geprueft:** P0. `src/HE_Editor/Planner.{h,cpp}` (namespace `HE::Planner`, ImGui-frei):
-`Database` (Properties, Zeilen, Views, typisierte Zellen, `query()`/`column()` mit Filter/Sort/Gruppe,
-Kaskaden beim Loeschen), `Page` (Block-Baum, `moveBlock`), Dateien `Config/Planner/Databases|Pages/<hex>.json`
-(`load*/save*/delete*/list*`), gleiche Schutzregeln wie TaskBoard (nie ueber unlesbare oder fremd
-geaenderte Datei speichern, Temp+Rename, unbekannte Keys/Typen/Zellen bleiben). Zellen sind das JSON,
-das in der Datei steht (`Cell.json`), Zugriff ueber `setText/setSelect/...`.
-`TaskBoardJson.h` macht die JSON-Helfer aus `TaskBoard.cpp` nutzbar (Tuer am Dateiende, TaskBoard sonst unveraendert).
-Tests: `tests/test_planner.cpp` (15 Faelle, 337 Pruefungen, gruen), dazu `test_task_board`, `_team`, `_ui`,
-`_footer_ui`, `test_mcp_tools_taskboard` weiter gruen (he_tests im Release-Build, macOS). `editor_help_audit.py --check` ok.
-**Entschieden:** eine Datei je Datenbank/Seite; Zeile = Page mit gleicher Id; Filter/Sort mit Property `{}` = Titel;
-Select-Sortierung nach Option-Reihenfolge; nicht auswertbarer Filter blendet nichts aus.
-**Nicht gemacht / nicht geprueft:** keine UI, kein Tab, kein Menue; Windows/Linux nicht gebaut; keine Reihenfolge der
-Seitenleiste (Verzeichnis nach Id sortiert, Index-Datei kommt mit dem Tab); Zeilen-Zellen werden linear gesucht
-(bei tausenden Zeilen eine Map pro Zeile); `TaskBoard.cpp` und `Planner.cpp` teilen JSON-Helfer nur ueber die Tuer.
-**Naechste Schritte (P1):** 1. `PlannerPanel` + `::Planner::`-Tab nach Muster `GameInstancePanel`
-(EditorUI.cpp ~2445/4262/4516, Menue ~3131, Sitzungs-Wiederherstellung suchen). 2. Tabellenansicht ueber `query()`,
-Eigenschaftstypen-Editoren. 3. Import `TaskBoard.json` -> Datenbank "Tasks" mit festen Option-Ids (wiederholbar).
-4. Hilfe-Eintraege in `EditorHelp.cpp`.
+## Handoff (Stand P1, 2026-10-22)
+**Fertig:** P0 (siehe `src/HE_Editor/Planner.{h,cpp}`, `test_planner.cpp`) und P1 ohne P1b.
+- `PlannerImport.{h,cpp}`: Task Board -> Datenbank "Tasks". Alle Ids (Datenbank, Properties, Optionen, Views) sind aus
+  Namen abgeleitet (`derivedId`), damit zwei Rechner dieselbe Datei erzeugen. Zeilen-Id = Task-Id. Erneuter Import: neue
+  Tasks dazu, vorhandene nur wenn `task.modifiedMs > row.modifiedMs` (Planner-Edits gewinnen). Historie/Kommentare kommen
+  nicht mit (bleiben in `TaskBoard.json`).
+- `PlannerWorkspace.{h,cpp}` (ImGui-frei): alle Datenbanken des Projekts, ein Schreiber, `edit()` laedt bei fremd
+  geaenderter Datei neu und wendet die Aenderung einmal erneut an, `poll()` nimmt Pulls auf, unlesbare Dateien werden
+  gelistet und nie ueberschrieben.
+- `PlannerPanel.{h,cpp}`: virtueller Tab `::Planner::`. Seitenleiste (Datenbanken, New Database, Import Task Board,
+  Reload), Views als Reiter (Tabelle, Board, `+ Table`/`+ Board`, Rechtsklick: umbenennen/loeschen), New Row, Suche,
+  Filter-Popup, Properties-Popup (sichtbar, umbenennen, loeschen mit Bestaetigung, neu), Tabelle mit Header-Sortierung und
+  Clipper, Zellen-Editor je Typ, Board mit Drag zwischen Lanes. Edits werden gepostet und nach dem Zeichnen angewendet.
+- Verdrahtung: `EditorUI.cpp` (Include, Ctrl+S-Fallback, Tab-Dispatch, `Window > Planner`, `MC::OpenPlanner`),
+  `MacMenuBar.{h,mm}`, `EditorHelp.cpp` (`Planner/...`, `Window/Planner`), `scripts/editor_help_audit.py` (PlannerPanel.cpp
+  im Bereich interface). Sitzungs-Wiederherstellung geht ohne Aenderung: `restoreOpenTabs` nimmt jeden Pfad mit ':' am Anfang.
+**Geprueft (macOS, Release):** `test_planner` 15, `test_planner_workspace` 8, `test_planner_ui` 6 Faelle gruen (Import,
+Tippen in Zelle, Sortieren, 3000 Zeilen mit Clipper, Karte in andere Lane ziehen); Frames in `HE_UI_DUMP_DIR` angesehen.
+`EditorUI.cpp` und `MacMenuBar.mm` per `-fsyntax-only` geprueft, der Editor selbst nicht gebaut/gestartet. Help-Audit 0 offen.
+**Nicht gemacht:** P1b (Task-Board-Fenster, Footer, MCP, Team-Hinweise auf den Planner umstellen, altes Fenster
+entfernen); Seiten/Bloecke im Tab (P3; eine Zeile oeffnet noch keine Page); Relationen und Engine-Links nur lesbar
+(Zuweisen per Drag aus Content Browser/Outliner fehlt); Zeitleiste/Kalender; Reihenfolge der Datenbanken (jetzt nach
+Name); Windows/Linux nicht gebaut. Select-Zelle zeigt den Farbpunkt nur im Menue.
+**Naechste Schritte:** 1. Editor bauen und den Tab einmal von Hand oeffnen (Window > Planner, Tab schliessen, Editor
+neu starten: kommt er wieder?). 2. P1b: erst `TaskBoardPanel::board()`-Nutzer inventarisieren (Footer, MCP-Tools,
+`TaskBoardTeam`, Chip-Spruenge in EditorUI ~2780), dann Adapter. 3. P2 (Engine-Link per Drag, Relationen, Zeitleiste).

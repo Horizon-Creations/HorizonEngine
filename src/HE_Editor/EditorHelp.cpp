@@ -2288,6 +2288,12 @@ namespace
 	  "The graph that outlives every scene: the app-wide state a level change "
 	  "must not reset.",
 	  "", "horizoncode#hosts" },
+	{ "Window/Planner", "",
+	  "Project planning for the game: databases of features, bugs, tasks and "
+	  "milestones, shown as a table or as lanes, kept in Config/Planner so they "
+	  "travel with the project through source control. Opens as a tab, so the "
+	  "content gets the whole window.",
+	  "", "editor#menus" },
 	// ── The Entity menu ──────────────────────────────────────────────────────
 	// The viewport's and the Outliner's right-click verbs with a fixed address.
 	// Same actions, same sentences in spirit as "Viewport Menu/…" — written
@@ -3070,6 +3076,76 @@ namespace
 	  "goes through as usual.",
 	  "", "horizoncode#debugging" },
 
+	// ── Planner ──────────────────────────────────────────────────────────────
+	// The planning tab (Window > Planner). The databases, rows, property names
+	// and options are the project's own data, built at run time; the fixed
+	// controls are the sidebar, the view bar and the toolbar.
+	{ "Planner/New Database", "New Database",
+	  "Makes an empty database with one table view and saves it into "
+	  "Config/Planner/Databases. Rename it at the top, then add columns with "
+	  "Properties.",
+	  "", "" },
+	{ "Planner/Import Task Board", "Import Task Board",
+	  "Copies the Task Board's tasks into the database Tasks: status, priority, "
+	  "assignees, description and links. Safe to press again: it adds new tasks "
+	  "and refreshes only those the board changed after you last touched them "
+	  "here. The Task Board itself is not changed.",
+	  "", "" },
+	{ "Planner/Reload", "Reload",
+	  "Reads the databases from disk again, for a file that could not be read "
+	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or one you "
+	  "changed outside the editor.",
+	  "", "" },
+	{ "Planner/+ Table", "+ Table",
+	  "Adds a table view to this database: rows down, one column per property. "
+	  "Each view keeps its own filters, sorting and hidden columns.",
+	  "", "" },
+	{ "Planner/+ Board", "+ Board",
+	  "Adds a board view: one lane per option of a Select property, a card per "
+	  "row. Drag a card to another lane to change its value.",
+	  "", "" },
+	{ "Planner/New Row", "New Row",
+	  "Adds an empty row at the end and saves it. Type its title in the first "
+	  "column; click a cell to fill in the rest.",
+	  "", "" },
+	{ "Planner/Filter", "Filter",
+	  "Choose which rows this view shows. All conditions must hold. The filter "
+	  "belongs to the view and is saved with it; the search box beside it is "
+	  "temporary.",
+	  "", "" },
+	{ "Planner/Add Filter", "Add Filter",
+	  "Adds a condition to this view: pick a property, how to compare it and "
+	  "the value.",
+	  "", "" },
+	{ "Planner/Properties", "Properties",
+	  "The columns of this database: show or hide each in this view, rename "
+	  "them, delete them, or add a new one with a type (text, number, checkbox, "
+	  "date, select, multi-select, person, relation, engine link, URL).",
+	  "", "" },
+	{ "Planner/Add Property", "Add Property",
+	  "Adds a column of the chosen type to the database. Every row gets an "
+	  "empty cell for it.",
+	  "", "" },
+	{ "Planner/Title", "Title",
+	  "The row's name. Click the header to sort by it: once ascending, twice "
+	  "descending, a third time to clear the sort. Every other column header "
+	  "works the same way.",
+	  "", "" },
+	{ "Planner/Delete Row", "Delete Row",
+	  "Removes this row from the database, and from any relation that pointed "
+	  "at it. There is no undo for it; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete View", "Delete View",
+	  "Removes this view. The rows and properties stay; a database always keeps "
+	  "at least one view.",
+	  "", "" },
+	{ "Planner/Delete Property", "Delete Property",
+	  "Deletes the column and its value in every row. Press twice to confirm; "
+	  "source control has the previous version.",
+	  "", "" },
+	{ "Planner/Search titles", "Search titles",
+	  "Shows only rows whose title contains this text. Not saved with the view.",
+	  "", "" },
 	// ── Task Board ───────────────────────────────────────────────────────────
 	// The project's to-do list. The cards, the chips and the panel names in
 	// Link Panel are the board's own data, built at run time; the fixed
@@ -9629,6 +9705,7 @@ namespace
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
 		{ "Task Board/",       "editor-interface", "Editor Interface", "Task Board" },
+		{ "Planner/",          "editor-interface", "Editor Interface", "Planner" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },

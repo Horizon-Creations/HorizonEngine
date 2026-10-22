@@ -10,6 +10,7 @@
 #include "UIEditorPanel.h"
 #include "LevelScriptPanel.h"
 #include "GameInstancePanel.h"
+#include "PlannerPanel.h"               // Window > Planner (project planning, an editor tab)
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "TypeAssetPanel.h"
@@ -2444,6 +2445,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
+		    || path == PlannerPanel::kTabPath
 		    || path == EditorSettingsPanel::kTabPath)
 		{
 			doSaveScene();
@@ -3133,6 +3135,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::OpenGameInstance:
 				if (ctx.projectLoaded) openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
 				break;
+			case MC::OpenPlanner:
+				if (ctx.projectLoaded) openVirtualTab("Planner", PlannerPanel::kTabPath);
+				break;
 			case MC::ToggleLandscapeTools: toggleLandscapeTools();                          break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
@@ -3511,6 +3516,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
+        if (EditorWidgets::menuItem("Planner", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Planner", PlannerPanel::kTabPath);
         if (!appProj)
         {
             ImGui::Separator();
@@ -4265,6 +4272,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)
             GameInstancePanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == PlannerPanel::kTabPath)
+            PlannerPanel::render(ctx, tabPos, tabSize);
         else
             assetPanelFor(tabPath).render(ctx, tabPath, tabPos, tabSize);
 
