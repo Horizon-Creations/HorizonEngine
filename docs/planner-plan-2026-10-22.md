@@ -212,3 +212,21 @@ Farben, Raster-Einrasten, Minimap. **Undo/Redo** gibt es im Planner noch nicht; 
 **MCP:** `planner_read_board` / `planner_write_board` (Nodes/Edges als JSON, Auto-Layout fuer Nodes ohne Position), damit Claude Ideen als Board anlegen kann.
 **Phasen:** W0 Modell + Datei + Workspace + Tests (ImGui-frei) | W1 Canvas: Pan/Zoom, Textkarten, Verschieben/Groesse, Verbindungen, Undo | W2 Bilder (Asset-Referenz, Drop, Einfuegen, Medien-Ordner) |
 W3 Objekt-/Zeilen-/Seitenkarten, Rahmen | W4 MCP-Tools, Minimap, Export als PNG.
+
+## Handoff (Stand Whiteboard W0, 2026-10-22)
+**Entschieden (Connor):** Bilder beides: Texture-Assets des Projekts per UUID referenzieren (`Node::asset`) UND eingefuegte/hineingezogene Dateien nach
+`Config/Planner/Media` kopieren (`Node::media`, Name = Inhalts-Hash + Endung, gleiches Bild zweimal = eine Datei).
+**Fertig (W0, ImGui-frei):**
+- `PlannerBoard.{h,cpp}`: `Board` mit `Node` (Typen text, image, object, row, page, frame; Position/Groesse in Board-Einheiten, Reihenfolge = Stapel, letzter oben)
+  und `Edge` (from, to, label, arrow). Operationen: addNode, move/moveNodesBy/resize (Mindestgroesse 24), Text/Farbe, bringToFront/sendToBack, removeNode (nimmt Kanten mit),
+  addEdge (nicht auf sich selbst, nicht doppelt, Enden muessen da sein), hitTest (Karten schlagen Rahmen), nodesIn (Auswahlrechteck), nodesInside (Rahmen nimmt Inhalt mit), bounds.
+  Datei `Config/Planner/Boards/<hex>.json`, gleiche Regeln wie Seiten/Datenbanken (byte-identisch, unbekannte Typen/Schluessel bleiben, auch ein "page"-Schluessel an einem
+  Text-Knoten; nie ueber unlesbare/fremd geaenderte Datei speichern). Typ-spezifische Schluessel gelten nur fuer ihren Typ.
+- Medien: `importMediaFile/importMediaBytes` (png, jpg, jpeg, gif, bmp, webp, tga; max 64 MB; Temp + Rename), `mediaPath` (lehnt Pfadtricks ab), `listMedia`.
+- `PlannerFile.h`: die gemeinsamen Datei-Regeln (aus `Planner.cpp`) fuer weitere Dokumenttypen.
+- `Workspace`: `boards()`, `findBoard`, `createBoard`, `removeBoard`, `editBoard` (Pull unter dem offenen Board wird gelesen, Edit einmal darauf), `poll`, `unreadableBoards`.
+**Tests:** `test_planner_board` 8 Faelle gruen (Modell, Datei, Unbekanntes, beschaedigte Datei, Medien, Workspace); Planner-Tests unveraendert gruen; `HorizonEditor` gebaut.
+**Nicht gemacht:** keine UI (W1), keine MCP-Tools fuer Boards, kein Undo, keine Aufraeumfunktion fuer ungenutzte Medien.
+**Naechste Schritte (W1):** Canvas im Tab: Seitenleiste "Boards", Pan/Zoom (Leertaste+Ziehen, Mittelmaus, Strg+Rad), Textkarten (Doppelklick leer = neu, Doppelklick Karte = Text bearbeiten),
+Auswahl (Klick, Shift, Aufziehrahmen), Verschieben/Groesse per Griffe, Verbindungen vom Kartenrand, Farben, Loeschen; Zeichnen nur sichtbarer Karten; Undo/Redo je Board (Befehlsstapel).
+Danach W2 (Bilder: Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Vorschau mit `AssetThumbnailCache`).

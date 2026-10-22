@@ -42,6 +42,22 @@ void Workspace::stampPage(PageEntry& e) const
 	e.size   = e.onDisk ? fs::file_size(file, ec) : 0;
 }
 
+void Workspace::stampBoard(BoardEntry& e) const
+{
+	std::error_code ec;
+	const fs::path file = boardPath(m_root, e.board.id);
+	const bool has = fs::exists(file, ec);
+	e.mtime = has ? fs::last_write_time(file, ec) : fs::file_time_type{};
+	e.size  = has ? fs::file_size(file, ec) : 0;
+}
+
+Workspace::BoardEntry* Workspace::boardEntryFor(const UUID& id)
+{
+	for (BoardEntry& e : m_boards)
+		if (e.board.id == id) return &e;
+	return nullptr;
+}
+
 Workspace::PageEntry* Workspace::pageEntryFor(const UUID& id)
 {
 	for (PageEntry& e : m_pages)
@@ -55,7 +71,21 @@ void Workspace::loadAll()
 	m_unreadable.clear();
 	m_pages.clear();
 	m_unreadablePages.clear();
+	m_boards.clear();
+	m_unreadableBoards.clear();
 	if (m_root.empty()) return;
+	for (const UUID& id : listBoards(m_root))
+	{
+		BoardEntry e;
+		const Database::LoadResult r = loadBoard(m_root, id, e.board);
+		if (!r.ok)
+		{
+			m_unreadableBoards.push_back({ id, r.error });
+			continue;
+		}
+		stampBoard(e);
+		m_boards.push_back(std::move(e));
+	}
 	for (const UUID& id : listPages(m_root))
 	{
 		PageEntry e;
@@ -343,6 +373,98 @@ bool Workspace::editPage(const UUID& id, const std::function<bool(Page&)>& fn)
 	return false;
 }
 
+// ── Whiteboards ──────────────────────────────────────────────────────────────
+
+std::vector<Board*> Workspace::boards()
+{
+	std::vector<Board*> out;
+	for (BoardEntry& e : m_boards) out.push_back(&e.board);
+	auto lowered = [](std::string t) {
+		for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return t;
+	};
+	std::sort(out.begin(), out.end(), [&](const Board* a, const Board* b) {
+		const std::string x = lowered(a->title), y = lowered(b->title);
+		if (x != y) return x < y;
+		return a->id.hi != b->id.hi ? a->id.hi < b->id.hi : a->id.lo < b->id.lo;
+	});
+	return out;
+}
+
+Board* Workspace::findBoard(const UUID& id)
+{
+	BoardEntry* e = boardEntryFor(id);
+	return e ? &e->board : nullptr;
+}
+
+Board* Workspace::createBoard(std::string title)
+{
+	if (m_root.empty()) return nullptr;
+	BoardEntry e;
+	e.board.id        = UUID::generate();
+	e.board.title     = std::move(title);
+	e.board.createdBy = m_author;
+	e.board.createdMs = e.board.modifiedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	std::string err;
+	if (!saveBoard(m_root, e.board, &err))
+	{
+		m_error = err;
+		return nullptr;
+	}
+	stampBoard(e);
+	m_boards.push_back(std::move(e));
+	++m_generation;
+	return &m_boards.back().board;
+}
+
+bool Workspace::removeBoard(const UUID& id)
+{
+	const auto it = std::find_if(m_boards.begin(), m_boards.end(), [&](const BoardEntry& e) { return e.board.id == id; });
+	if (it == m_boards.end()) return false;
+	std::string err;
+	if (!deleteBoard(m_root, id, &err))
+	{
+		m_error = err;
+		return false;
+	}
+	m_boards.erase(it);
+	++m_generation;
+	return true;
+}
+
+bool Workspace::editBoard(const UUID& id, const std::function<bool(Board&)>& fn)
+{
+	BoardEntry* e = boardEntryFor(id);
+	if (!e) return false;
+	if (!fn(e->board)) return false;
+	++m_generation;
+
+	std::string err;
+	if (saveBoard(m_root, e->board, &err))
+	{
+		stampBoard(*e);
+		m_error.clear();
+		return true;
+	}
+	// The file moved under us (a pull): take what arrived, put the change on top, once.
+	Board fresh;
+	const Database::LoadResult r = loadBoard(m_root, id, fresh);
+	if (r.ok)
+	{
+		e->board = std::move(fresh);
+		if (fn(e->board) && saveBoard(m_root, e->board, &err))
+		{
+			stampBoard(*e);
+			++m_generation;
+			m_error.clear();
+			return true;
+		}
+	}
+	m_error = err.empty() ? r.error : err;
+	return false;
+}
+
 bool Workspace::edit(const UUID& id, const std::function<bool(Database&)>& fn)
 {
 	Entry* e = entryFor(id);
@@ -533,6 +655,50 @@ bool Workspace::poll(bool force)
 		if (it != m_unreadablePages.end()) m_unreadablePages.erase(it);
 		stampPage(e);
 		m_pages.push_back(std::move(e));
+		changed = true;
+	}
+
+	// Boards that changed, appeared or went away (a pull).
+	for (std::size_t i = 0; i < m_boards.size();)
+	{
+		BoardEntry& e = m_boards[i];
+		std::error_code ec;
+		const fs::path file = boardPath(m_root, e.board.id);
+		if (!fs::exists(file, ec))
+		{
+			m_boards.erase(m_boards.begin() + static_cast<std::ptrdiff_t>(i));
+			changed = true;
+			continue;
+		}
+		if (fs::last_write_time(file, ec) == e.mtime && fs::file_size(file, ec) == e.size) { ++i; continue; }
+		Board fresh;
+		const Database::LoadResult r = loadBoard(m_root, e.board.id, fresh);
+		if (r.ok) e.board = std::move(fresh);
+		else m_error = "Config/Planner/Boards/" + uuidToHex(e.board.id) + ".json cannot be read (" + r.error +
+		               "). Fix the file; nothing is saved to it until then.";
+		stampBoard(e);
+		changed = true;
+		++i;
+	}
+	for (const UUID& id : listBoards(m_root))
+	{
+		if (boardEntryFor(id)) continue;
+		BoardEntry e;
+		const Database::LoadResult r = loadBoard(m_root, id, e.board);
+		auto it = std::find_if(m_unreadableBoards.begin(), m_unreadableBoards.end(),
+		                       [&](const Unreadable& u) { return u.id == id; });
+		if (!r.ok)
+		{
+			if (it == m_unreadableBoards.end())
+			{
+				m_unreadableBoards.push_back({ id, r.error });
+				changed = true;
+			}
+			continue;
+		}
+		if (it != m_unreadableBoards.end()) m_unreadableBoards.erase(it);
+		stampBoard(e);
+		m_boards.push_back(std::move(e));
 		changed = true;
 	}
 

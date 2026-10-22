@@ -344,6 +344,7 @@ add_executable(he_tests
     test_planner_workspace.cpp
     # The Planner as tools: the Markdown a page speaks, and planner_* over a real workspace.
     test_planner_markdown.cpp
+    test_planner_board.cpp
     test_mcp_tools_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
@@ -697,6 +698,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerImport.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerTasks.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerWorkspace.cpp
+    # The Whiteboard: nodes, edges, their file and the media folder (test_planner_board.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoard.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
