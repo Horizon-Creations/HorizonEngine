@@ -126,7 +126,7 @@ whether the new water shader was compiled in the water cells; pre-Oct-8 builds (
 
 **Next steps, in order:**
 1. Ask the player (or read their last run) which backend the game runs: if OpenGL, the work is the GL path (`glBufferSubData` flushes, `Render` 32 ms), not Metal. A GL bisect needs >= 5 repetitions per build and the adapter plugged in.
-2. Separate `8f3a6e47` from `0d7cdf09`: build only `matgen` at both commits (small tool, `src/HE_Tools/src/MatGen`), put each `M_AutoLandscape.hasset` into `/tmp/he237/cur_oldmat/Editor/EngineContent/Materials/` and run `cell.sh ... det` (3 runs). Same trick for the Oct 8 -> Oct 10 step (b1010a with the b218 asset).
+2. (DONE in `landscape-performance-regression-asset-attribution-2026-10-22.md`: 8f3a6e47's asset +1.3 ms, 0d7cdf09's +0.35 ms; Oct 8 -> 10 = +1.25 asset / +1.8 engine.) Separate `8f3a6e47` from `0d7cdf09`: build only `matgen` at both commits (small tool, `src/HE_Tools/src/MatGen`), put each `M_AutoLandscape.hasset` into `/tmp/he237/cur_oldmat/Editor/EngineContent/Materials/` and run `cell.sh ... det` (3 runs). Same trick for the Oct 8 -> Oct 10 step (b1010a with the b218 asset).
 3. Explain why the SSAO pass (8.6 ms) depends on the terrain material and ignores `SSAOEnabled=false` in the editor-loop capture; this is the single biggest landscape-specific pass.
 4. The clouds (12.7 ms at 5.2 MP, `cloudQuality 1`) are the biggest cost; a half-res or temporally reprojected cloud pass is the lever (plan in `sky-weather-perf-plan`), independent of this regression.
 5. For Thema 235: reproduce on the player's scene with the player's `Water.hasset` before assuming a link.
