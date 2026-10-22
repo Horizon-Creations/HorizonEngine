@@ -3,6 +3,8 @@
 PR #183 (`claude/global-illumination-reflections` -> `release/0.7.0`) conflicted with
 release after PR #182 (topic 207, material tessellation/displacement) landed. This is a
 plain merge of `origin/release/0.7.0` @ `8d091257` into the topic branch (no rebase, no force).
+While I worked release advanced to `8da78bce` (two Planner commits, only `src/HE_Editor/Planner*`
+and planner tests); that was merged as a second merge commit, no conflicts.
 
 ## Conflicts
 
@@ -29,7 +31,7 @@ tests/test_culling.cpp). Semantic overlap was checked by reading, see Verified.
   - `scripts/validate_embedded_shaders.py`: GLSL 58/58 compile; `editor_help_audit.py --check`: 1236/1236, 0 missing.
   - `VulkanRenderer.cpp` `-fsyntax-only` against MoltenVK headers (HE_VULKAN_ENABLED) is clean; negative control (renamed `ensureGiReflTargets` in a copy) errors as expected.
   - GI-related symbol counts (`GIRefl|giRefl`) in VulkanRenderer.cpp (148), D3D12Renderer.cpp (173), D3D11Renderer.cpp (112) are identical before and after the merge. `GIReflectionTier.h`, `scripts/runtime_size.py`, `scripts/validate_embedded_shaders.py`, `docs/gi-reflections-*` have no diff against the pre-merge branch.
-  - `HorizonEditor` build: see the result post / commit message (started after the tests; EditorApplication.cpp was auto-merged).
+  - `HorizonEditor` was NOT linked: the target also builds the engine SDK release lib set (a second full engine build, ~740 steps), which I stopped. Instead `EditorApplication.cpp.o` (the auto-merged editor file with the capability gate) was compiled on the final tree, rc 0, 0 errors. The he_tests run above was on the tree after the first merge (before the Planner merge); the Planner merge did not touch any GI or renderer file, and was not re-tested.
 - **Not verified:** D3D11/D3D12 compile (no toolchain on the Mac; Windows CI is the check); HLSL validation (fxc missing here, so the HLSL half of `validate_embedded_shaders.py` was skipped); MSL (metal toolchain missing); no GPU/visual run of Vulkan or D3D after the merge; Vulkan layout tracking (`heGIReflFwd` ping-pong) not re-run on device, only confirmed unchanged by symbol count and syntax check.
 - **Decisions taken:** keep both sides in the D3D11 hunk; no changes to release's code.
 - **Decisions suggested, not taken:** none.
