@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -3551,6 +3553,42 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	// unpainted terrain reads the automatic distribution.
 	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
 	CHECK(m->parentMaterialPath.empty());
+}
+
+TEST_CASE("The baked GLSL in the shipped M_AutoLandscape.hasset is what the codegen makes today")
+{
+	// The packer (HpakWriter) ships the fragment text stored IN the file and never
+	// regenerates it; only an editor load does. So a codegen change (Thema 237: the
+	// V == 1 branch of heBombGridV) that is not followed by a re-run of the generator
+	// reaches the editor but not an exported game. The tripwire above pins the graph
+	// only. A load always regenerates, so the stored text is read from the file bytes: the
+	// strings of a .hasset chunk are stored verbatim, the fresh text must be inside it.
+	const std::filesystem::path file = std::filesystem::path(HE_EDITOR_DEPS_DIR) /
+		"EngineContent" / "Materials" / "M_AutoLandscape.hasset";
+	REQUIRE(std::filesystem::exists(file));
+	std::ifstream in(file, std::ios::binary);
+	const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	const std::filesystem::path dir = file.parent_path();
+	ContentManager fresh(dir.string());
+	fresh.setEngineContentRoot(dir.parent_path().string());
+	const MaterialAsset* f = fresh.getMaterial(fresh.loadAsset("M_AutoLandscape.hasset"));
+	REQUIRE(f);
+	REQUIRE(!f->customShaderFragGlsl.empty());
+	CHECK_MESSAGE(bytes.find(f->customShaderFragGlsl) != std::string::npos,
+	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
+
+	// What the exporter does with that text (ExportDialogPanel): one variant per backend.
+	// No GPU involved; D3D11/D3D12/Vulkan only get this cross-compile on a Mac.
+	HE::MaterialShaderLibrary lib;
+	for (uint8_t v = 0; v <= static_cast<uint8_t>(HE::RendererBackend::Metal); ++v)
+	{
+		MaterialShaderVariant var;
+		std::string error;
+		std::vector<std::string> warnings;
+		CHECK_MESSAGE(HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
+		                                            f->customShaderFragGlsl, "", var, error, warnings),
+		              "backend ", static_cast<int>(v), ": ", error);
+	}
 }
 
 TEST_CASE("The shipped weather functions are exactly what the builders make, and the landscape material resolves them")
