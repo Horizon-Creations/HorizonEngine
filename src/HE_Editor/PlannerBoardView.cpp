@@ -4,9 +4,11 @@
 #include "EditorApplication.h"   // AppContext
 #include "EditorAssetTypeCache.h"
 #include "EditorHelp.h"
+#include "EditorInput.h"       // the trackpad pinch
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "NotificationStore.h"
+#include "PlannerIcons.h"
 #include "PlannerPanel.h"
 #include "PlannerWorkspace.h"
 #include "TaskBoardPanel.h"      // the links a Content Browser / Outliner drop stands for
@@ -239,6 +241,30 @@ void setColour(const UUID& boardId, const std::string& word)
 			if (const Node* n = b.findNode(id); n && n->color != word) any |= b.setNodeColor(id, word, taskNowMs());
 		return any;
 	});
+}
+
+using namespace PlannerIcons;
+
+// What the floating bars look like: a rounded plate over the canvas.
+bool beginPlate(const char* id, ImVec2 at, ImVec2 size)
+{
+	ImGui::SetCursorScreenPos(at);
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::alpha(Theme::warm(0.11f), 0.97f));
+	ImGui::PushStyleColor(ImGuiCol_Border, Theme::warm(0.30f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5, 5));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 4));
+	const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+	                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+	return open;
+}
+
+void endPlate()
+{
+	ImGui::EndChild();
+	ImGui::PopStyleVar(4);
+	ImGui::PopStyleColor(2);
 }
 
 // ── Pictures ─────────────────────────────────────────────────────────────────
@@ -788,138 +814,61 @@ void draw(const Services& services, const UUID& boardId)
 	services.note("board:title");
 
 	const double centreX = view.x + s_canvasSize.x * 0.5 / view.zoom, centreY = view.y + s_canvasSize.y * 0.5 / view.zoom;
-	ImGui::SameLine();
-	if (EditorWidgets::primaryButton("New Card")) createNode(boardId, NodeType::Text, centreX, centreY);
-	services.note("New Card");
-	ImGui::SameLine();
-	if (EditorWidgets::button("New Frame")) createNode(boardId, NodeType::Frame, centreX, centreY);
-	services.note("New Frame");
-	ImGui::SameLine();
-	ImGui::BeginDisabled(!canUndo(boardId));
-	if (EditorWidgets::button("Undo")) undoOrRedo(boardId, true);
-	ImGui::EndDisabled();
-	services.note("Undo");
-	ImGui::SameLine();
-	ImGui::BeginDisabled(!canRedo(boardId));
-	if (EditorWidgets::button("Redo")) undoOrRedo(boardId, false);
-	ImGui::EndDisabled();
-	services.note("Redo");
-	ImGui::SameLine();
-	ImGui::BeginDisabled(s_sel.empty() && s_selEdge == UUID{});
-	if (EditorWidgets::dangerButton("Delete")) deleteSelection(boardId);
-	ImGui::EndDisabled();
-	services.note("Delete");
 
-	// The second row of the toolbar: what is made of cards in hand and how they sit.
-	if (EditorWidgets::button("Add")) ImGui::OpenPopup("##addcard");
-	services.note("Add");
-	if (ImGui::BeginPopup("##addcard"))
+	// The view's controls at the right of the title: history, zoom, overview, picture.
+	bool fit = false, actual = false, zoomIn = false, zoomOut = false;
 	{
-		ImGui::TextDisabled("Page");
-		int shown = 0;
-		for (Page* p : wsp->pages())
+		const float groupW = 28 * 7 + 56 + 2 * 13 + 9 * 8;
+		ImGui::SameLine();
+		ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 12.0f, ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - groupW));
+		if (iconButton("Undo", Icon::Undo, false, canUndo(boardId), "Planner/Undo")) undoOrRedo(boardId, true);
+		services.note("Undo");
+		ImGui::SameLine();
+		if (iconButton("Redo", Icon::Redo, false, canRedo(boardId), "Planner/Redo")) undoOrRedo(boardId, false);
+		services.note("Redo");
+		iconSeparator();
+		zoomOut = iconButton("Zoom Out", Icon::ZoomOut, false, true, "Planner/Zoom Out");
+		services.note("Zoom Out");
+		ImGui::SameLine();
 		{
-			if (++shown > 40) { ImGui::TextDisabled("..."); break; }
-			ImGui::PushID(p);
-			if (ImGui::Selectable(p->title.empty() ? "Untitled" : p->title.c_str())) addPageCard(boardId, p->id, centreX, centreY);
-			services.note("add:" + p->title);
+			// The zoom: click it to go back to 100%.
+			ImGui::PushID("zoomvalue");
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			actual = ImGui::InvisibleButton("##z", ImVec2(56, 28));
+			if (ImGui::IsItemHovered())
+				ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 56, p.y + 28), Theme::u32(Theme::warm(0.28f)), 7.0f);
+			char buf[16];
+			std::snprintf(buf, sizeof buf, "%d%%", static_cast<int>(std::lround(view.zoom * 100.0)));
+			const ImVec2 ts = ImGui::CalcTextSize(buf);
+			ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + (56 - ts.x) * 0.5f, p.y + (28 - ts.y) * 0.5f), Theme::u32(Theme::Text), buf);
+			EditorWidgets::helpForKey("Planner/100%");
 			ImGui::PopID();
+			services.note("100%");
 		}
-		for (Database* db : wsp->databases())
+		ImGui::SameLine();
+		zoomIn = iconButton("Zoom In", Icon::ZoomIn, false, true, "Planner/Zoom In");
+		services.note("Zoom In");
+		ImGui::SameLine();
+		fit = iconButton("Fit", Icon::Fit, false, true, "Planner/Fit");
+		services.note("Fit");
+		iconSeparator();
+		if (iconButton("Map", Icon::Map, s_minimap, true, "Planner/Map")) s_minimap = !s_minimap;
+		services.note("Map");
+		ImGui::SameLine();
+		if (iconButton("Export PNG", Icon::Export, false, true, "Planner/Export PNG"))
 		{
-			if (!ImGui::BeginMenu(db->name.empty() ? "Untitled" : db->name.c_str())) continue;
-			int rows = 0;
-			for (const Row& r : db->rows)
-			{
-				if (++rows > 60) { ImGui::TextDisabled("..."); break; }
-				ImGui::PushID(&r);
-				if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str())) addRowCard(boardId, db->id, r.id, centreX, centreY);
-				services.note("add:" + db->name + ":" + r.title);
-				ImGui::PopID();
-			}
-			ImGui::EndMenu();
+			const Services copy = services;   // the post runs after this frame's services are gone
+			services.post([=] {
+				const std::filesystem::path file = exportPathFor(copy.root, copy.ws->findBoard(boardId) ? copy.ws->findBoard(boardId)->title : std::string());
+				std::string err;
+				if (copy.root.empty()) err = "no project is open";
+				else if (exportPng(copy, boardId, file, &err))
+					HE::Ed::notify(HE::Ed::NoteLevel::Info, "Whiteboard exported", file.string());
+				if (!err.empty()) HE::Ed::notify(HE::Ed::NoteLevel::Important, "Whiteboard not exported: " + err);
+			});
 		}
-		ImGui::EndPopup();
+		services.note("Export PNG");
 	}
-	ImGui::SameLine();
-	ImGui::BeginDisabled(s_sel.empty());
-	if (EditorWidgets::button("Duplicate")) duplicateSelection(boardId);
-	ImGui::EndDisabled();
-	services.note("Duplicate");
-	ImGui::SameLine();
-	ImGui::BeginDisabled(s_sel.size() < 2);
-	if (EditorWidgets::button("Align")) ImGui::OpenPopup("##align");
-	ImGui::EndDisabled();
-	services.note("Align");
-	if (ImGui::BeginPopup("##align"))
-	{
-		if (EditorWidgets::selectable("Align Left"))       alignSelection(boardId, Board::Align::Left);
-		services.note("Align Left");
-		if (EditorWidgets::selectable("Align Center"))     alignSelection(boardId, Board::Align::CentreH);
-		services.note("Align Center");
-		if (EditorWidgets::selectable("Align Right"))      alignSelection(boardId, Board::Align::Right);
-		services.note("Align Right");
-		if (EditorWidgets::selectable("Align Top"))        alignSelection(boardId, Board::Align::Top);
-		services.note("Align Top");
-		if (EditorWidgets::selectable("Align Middle"))     alignSelection(boardId, Board::Align::CentreV);
-		services.note("Align Middle");
-		if (EditorWidgets::selectable("Align Bottom"))     alignSelection(boardId, Board::Align::Bottom);
-		services.note("Align Bottom");
-		ImGui::BeginDisabled(s_sel.size() < 3);
-		if (EditorWidgets::selectable("Distribute Horizontally")) distributeSelection(boardId, true);
-		services.note("Distribute Horizontally");
-		if (EditorWidgets::selectable("Distribute Vertically"))   distributeSelection(boardId, false);
-		services.note("Distribute Vertically");
-		ImGui::EndDisabled();
-		ImGui::EndPopup();
-	}
-	ImGui::SameLine();
-	EditorWidgets::checkbox("Snap", &s_snap);
-	services.note("Snap");
-	ImGui::SameLine();
-	EditorWidgets::checkbox("Map", &s_minimap);
-	services.note("Map");
-	ImGui::SameLine();
-	if (EditorWidgets::button("Export PNG"))
-	{
-		const Services copy = services;   // the post runs after this frame's services are gone
-		services.post([=] {
-			const std::filesystem::path file = exportPathFor(copy.root, copy.ws->findBoard(boardId) ? copy.ws->findBoard(boardId)->title : std::string());
-			std::string err;
-			if (copy.root.empty()) err = "no project is open";
-			else if (exportPng(copy, boardId, file, &err))
-				HE::Ed::notify(HE::Ed::NoteLevel::Info, "Whiteboard exported", file.string());
-			if (!err.empty()) HE::Ed::notify(HE::Ed::NoteLevel::Important, "Whiteboard not exported: " + err);
-		});
-	}
-	services.note("Export PNG");
-
-	// Colours for what is selected.
-	ImGui::SameLine();
-	ImGui::BeginDisabled(s_sel.empty());
-	for (int i = -1; i < static_cast<int>(std::size(kSwatches)); ++i)
-	{
-		const std::string word = i < 0 ? std::string{} : kSwatches[i].word;
-		ImGui::SameLine(0, 3.0f);
-		ImGui::PushID(i);
-		if (ImGui::ColorButton("##swatch", i < 0 ? Theme::warm(0.20f) : kSwatches[i].colour,
-		                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoDragDrop,
-		                       ImVec2(18, 18)))
-			setColour(boardId, word);
-		EditorWidgets::helpForKey("Planner/Card color");
-		services.note("swatch:" + (word.empty() ? std::string("none") : word));
-		ImGui::PopID();
-	}
-	ImGui::EndDisabled();
-
-	ImGui::SameLine();
-	const bool fit = EditorWidgets::button("Fit");
-	services.note("Fit");
-	ImGui::SameLine();
-	const bool actual = EditorWidgets::button("100%");
-	services.note("100%");
-	ImGui::SameLine();
-	ImGui::TextDisabled("%d%%", static_cast<int>(std::lround(view.zoom * 100.0)));
 
 	// An arrow that is selected has a label and a head.
 	if (const Edge* e = board->findEdge(s_selEdge))
@@ -991,6 +940,13 @@ void draw(const Services& services, const UUID& boardId)
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 
+	if (zoomIn || zoomOut)
+	{
+		const double cx = view.x + size.x * 0.5 / view.zoom, cy = view.y + size.y * 0.5 / view.zoom;
+		view.zoom = std::clamp(view.zoom * (zoomIn ? 1.25 : 0.8), kMinZoom, kMaxZoom);
+		view.x = cx - size.x * 0.5 / view.zoom;
+		view.y = cy - size.y * 0.5 / view.zoom;
+	}
 	if (fit)
 	{
 		Rect2 r;
@@ -1011,6 +967,16 @@ void draw(const Services& services, const UUID& boardId)
 		view.y = cy - size.y * 0.5;
 	}
 
+	// The trackpad's pinch zooms at the cursor (EditorInput.h: on macOS the native magnify event).
+	if (hovered && !editing)
+		if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
+		{
+			double mx, my;
+			Xf{ origin, view }.toWorld(io.MousePos, mx, my);
+			view.zoom = std::clamp(view.zoom * std::max(0.1, 1.0 + pinch * 2.0), kMinZoom, kMaxZoom);
+			view.x = mx - (io.MousePos.x - origin.x) / view.zoom;
+			view.y = my - (io.MousePos.y - origin.y) / view.zoom;
+		}
 	// Scroll pans; with Ctrl or Cmd it zooms at the cursor.
 	if (hovered && !editing && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
 	{
@@ -1448,6 +1414,144 @@ void draw(const Services& services, const UUID& boardId)
 		dl->AddRect(toMap(view.x, view.y), toMap(view.x + size.x / view.zoom, view.y + size.y / view.zoom), Theme::u32(Theme::AccentBright), 0, 0, 1.5f);
 		dl->PopClipRect();
 		services.noteRect("map", mapMin, mapMax);
+	}
+
+	// ── The floating tools ──
+	{
+		// Left: what makes cards.
+		if (beginPlate("##palette", ImVec2(origin.x + 12, origin.y + 12), ImVec2(40, 4 * 28 + 3 * 4 + 10 + 12)))
+		{
+			if (iconButton("New Card", Icon::Note, false, true, "Planner/New Card")) createNode(boardId, NodeType::Text, centreX, centreY);
+			services.note("New Card");
+			if (iconButton("New Frame", Icon::Frame, false, true, "Planner/New Frame")) createNode(boardId, NodeType::Frame, centreX, centreY);
+			services.note("New Frame");
+			if (iconButton("Add", Icon::AddCard, false, true, "Planner/Add")) ImGui::OpenPopup("##addcard");
+			services.note("Add");
+			if (ImGui::BeginPopup("##addcard"))
+			{
+				ImGui::TextDisabled("Page");
+				int shown = 0;
+				for (Page* p : wsp->pages())
+				{
+					if (++shown > 40) { ImGui::TextDisabled("..."); break; }
+					ImGui::PushID(p);
+					if (ImGui::Selectable(p->title.empty() ? "Untitled" : p->title.c_str())) addPageCard(boardId, p->id, centreX, centreY);
+					services.note("add:" + p->title);
+					ImGui::PopID();
+				}
+				for (Database* db : wsp->databases())
+				{
+					if (!ImGui::BeginMenu(db->name.empty() ? "Untitled" : db->name.c_str())) continue;
+					int rows = 0;
+					for (const Row& r : db->rows)
+					{
+						if (++rows > 60) { ImGui::TextDisabled("..."); break; }
+						ImGui::PushID(&r);
+						if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str())) addRowCard(boardId, db->id, r.id, centreX, centreY);
+						services.note("add:" + db->name + ":" + r.title);
+						ImGui::PopID();
+					}
+					ImGui::EndMenu();
+				}
+				ImGui::EndPopup();
+			}
+			if (iconButton("Snap", Icon::Snap, s_snap, true, "Planner/Snap")) s_snap = !s_snap;
+			services.note("Snap");
+		}
+		endPlate();
+
+		// Over the selection: what can be done to it.
+		const bool anyCards = !s_sel.empty(), anyEdge = !(s_selEdge == UUID{});
+		if ((anyCards || anyEdge) && s_drag == Drag::None && !editing)
+		{
+			const int buttons = anyCards ? (s_sel.size() >= 2 ? 4 : 3) : 1;
+			const ImVec2 barSize(buttons * 28.0f + (buttons - 1) * 2.0f + 10.0f + (anyCards ? 16.0f : 0.0f), 38.0f);
+			ImVec2 at(origin.x + size.x * 0.5f - barSize.x * 0.5f, origin.y + 12);
+			if (anyCards)
+			{
+				float x0 = FLT_MAX, y0 = FLT_MAX, x1 = -FLT_MAX, y1 = -FLT_MAX;
+				for (const Node& n : board->nodes)
+					if (has(s_sel, n.id))
+					{
+						ImVec2 a, b;
+						xf.rectToScreen(shownRect(n), a, b);
+						x0 = std::min(x0, a.x); y0 = std::min(y0, a.y); x1 = std::max(x1, b.x); y1 = std::max(y1, b.y);
+					}
+				at = ImVec2((x0 + x1) * 0.5f - barSize.x * 0.5f, y0 - barSize.y - 8.0f);
+				if (at.y < origin.y + 8) at.y = std::min(y1 + 8.0f, origin.y + size.y - barSize.y - 8.0f);
+			}
+			at.x = std::clamp(at.x, origin.x + 60.0f, std::max(origin.x + 60.0f, origin.x + size.x - barSize.x - 8.0f));
+			at.y = std::clamp(at.y, origin.y + 8.0f, std::max(origin.y + 8.0f, origin.y + size.y - barSize.y - 8.0f));
+			if (beginPlate("##selbar", at, barSize))
+			{
+				if (anyCards)
+				{
+					ImU32 fill = 0;
+					if (const Node* first = board->findNode(s_sel[0]))
+					{
+						ImVec4 tint{};
+						if (colourOf(first->color, tint)) fill = Theme::u32(tint);
+					}
+					if (iconButton("Color", Icon::Colour, false, true, "Planner/Card color", false, fill)) ImGui::OpenPopup("##colours");
+					services.note("Color");
+					if (ImGui::BeginPopup("##colours"))
+					{
+						for (int i = -1; i < static_cast<int>(std::size(kSwatches)); ++i)
+						{
+							const std::string word = i < 0 ? std::string{} : kSwatches[i].word;
+							if (i >= 0) ImGui::SameLine(0, 4.0f);
+							ImGui::PushID(i);
+							if (ImGui::ColorButton("##swatch", i < 0 ? Theme::warm(0.20f) : kSwatches[i].colour,
+							                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoDragDrop,
+							                       ImVec2(22, 22)))
+							{
+								setColour(boardId, word);
+								ImGui::CloseCurrentPopup();
+							}
+							EditorWidgets::helpForKey("Planner/Card color");
+							services.note("swatch:" + (word.empty() ? std::string("none") : word));
+							ImGui::PopID();
+						}
+						ImGui::EndPopup();
+					}
+					ImGui::SameLine();
+					if (iconButton("Duplicate", Icon::Duplicate, false, true, "Planner/Duplicate")) duplicateSelection(boardId);
+					services.note("Duplicate");
+					if (s_sel.size() >= 2)
+					{
+						ImGui::SameLine();
+						if (iconButton("Align", Icon::Align, false, true, "Planner/Align")) ImGui::OpenPopup("##align");
+						services.note("Align");
+						if (ImGui::BeginPopup("##align"))
+						{
+							if (EditorWidgets::selectable("Align Left"))       alignSelection(boardId, Board::Align::Left);
+							services.note("Align Left");
+							if (EditorWidgets::selectable("Align Center"))     alignSelection(boardId, Board::Align::CentreH);
+							services.note("Align Center");
+							if (EditorWidgets::selectable("Align Right"))      alignSelection(boardId, Board::Align::Right);
+							services.note("Align Right");
+							if (EditorWidgets::selectable("Align Top"))        alignSelection(boardId, Board::Align::Top);
+							services.note("Align Top");
+							if (EditorWidgets::selectable("Align Middle"))     alignSelection(boardId, Board::Align::CentreV);
+							services.note("Align Middle");
+							if (EditorWidgets::selectable("Align Bottom"))     alignSelection(boardId, Board::Align::Bottom);
+							services.note("Align Bottom");
+							ImGui::BeginDisabled(s_sel.size() < 3);
+							if (EditorWidgets::selectable("Distribute Horizontally")) distributeSelection(boardId, true);
+							services.note("Distribute Horizontally");
+							if (EditorWidgets::selectable("Distribute Vertically"))   distributeSelection(boardId, false);
+							services.note("Distribute Vertically");
+							ImGui::EndDisabled();
+							ImGui::EndPopup();
+						}
+					}
+					iconSeparator();
+				}
+				if (iconButton("Delete", Icon::Trash, false, true, "Planner/Delete", true)) deleteSelection(boardId);
+				services.note("Delete");
+			}
+			endPlate();
+		}
 	}
 
 	// ── Keys ──

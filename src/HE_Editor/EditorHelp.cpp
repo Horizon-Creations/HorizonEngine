@@ -3090,6 +3090,9 @@ namespace
 	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or one you "
 	  "changed outside the editor.",
 	  "", "" },
+	{ "Planner/Add View", "Add View",
+	  "Adds another view of this database: a table, a board of lanes, a timeline or a calendar. Each view keeps its own filters and sorting.",
+	  "", "" },
 	{ "Planner/+ Table", "+ Table",
 	  "Adds a table view to this database: rows down, one column per property. "
 	  "Each view keeps its own filters, sorting and hidden columns.",
@@ -3223,6 +3226,12 @@ namespace
 	  "", "" },
 	{ "Planner/Export PNG", "Export PNG",
 	  "Saves the whole board as a picture in the project's Exports/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
+	  "", "" },
+	{ "Planner/Zoom In", "Zoom In",
+	  "Zooms in around the middle of what you see. The trackpad's pinch and Cmd/Ctrl+scroll zoom at the cursor.",
+	  "", "" },
+	{ "Planner/Zoom Out", "Zoom Out",
+	  "Zooms out around the middle of what you see.",
 	  "", "" },
 	{ "Planner/Undo", "Undo",
 	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "

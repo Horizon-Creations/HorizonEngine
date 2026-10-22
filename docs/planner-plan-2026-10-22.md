@@ -297,3 +297,13 @@ Verified: `he_tests --test-case="planner*"` 88/88 (new: `test_mcp_tools_planner.
 - Export: `exportPng` draws the board into its own `ImDrawList` and rasterises it with `tests/ImGuiSoftwareRaster` (already compiled into the editor for EditorUiShot), `hePngWrite`; file `<project>/Exports/Planner/<title>.png`, longest side <= 4096, notification with the path. Texture-asset pictures show their label.
 - Fixed on the way: `n->id` was read after `sendToBack` moved the vector (a new frame selected / returned the wrong card), in `createNode` and the MCP tool.
 Open: unused-media cleanup, board-title undo, pasted frames on top of cards, align ignores frame contents, MCP image cards / export, calendar week view, timeline start-edge drag, sidebar page nesting by drag, live collaboration, real-editor test and Windows/Linux builds.
+
+## Handoff (Stand Redesign der Planner-Oberfläche)
+
+Verified: `he_tests --test-case="planner*"` 89/89 and `*help*` 37/37, HorizonEditor builds, help audit clean; looked at headless shots (sidebar, table toolbar, whiteboard). Not verified: the pinch on a real trackpad (the test sets `EditorInput::detail::g_pinchFrame`; the hook itself is the other canvases' and unchanged), look and feel in the real editor.
+
+- Icons: `PlannerIcons.h` (header only, glyphs drawn with ImDrawList, no files: the editor has no icon font and I did not download any). Add a glyph = one `case` in `drawIcon`.
+- Whiteboard (`PlannerBoardView.cpp`): header with undo/redo, zoom -, 100%, +, fit, map, export at the right; floating tool plate (card, frame, add page/row, snap) at the top left; floating bar over the selection (colour popup, duplicate, align when 2+, delete). Pinch zooms at the cursor. Control names for tests unchanged, except the colour swatches now sit in the "Color" popup.
+- Sidebar (`PlannerPanel.cpp`): section titles DATABASES / PAGES / BOARDS with a "+" each (same `note` names as the old buttons), rows with a glyph and an accent bar when open.
+- Database: view tabs with a glyph per kind and an underline; "Add View" (+) popup replaces the four "+ X" buttons (tests: click "Add View", then "+ Timeline"); search field with a magnifier; Filter/Properties as glyph buttons (Filter shows the count and lights up while a filter is on). Pages: Add Block / New Sub-page as glyph buttons.
+Not touched: the table cells, row drawer, calendar/timeline/board-lane drawing, page blocks, the Task Board footer.

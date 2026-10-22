@@ -8,6 +8,7 @@
 #include "NotificationStore.h"
 #include "TaskBoardTeam.h"
 #include "EditorSelection.h"
+#include "EditorInput.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "Planner.h"
@@ -879,6 +880,8 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	}));
 	idle(ctx);
 
+	REQUIRE(click(ctx, "Add View"));
+	idle(ctx);
 	REQUIRE(click(ctx, "+ Timeline"));
 	idle(ctx);
 	const View* v = ws->find(dbId)->findView(PlannerPanel::selectedView());
@@ -1216,6 +1219,8 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 		db.setDate(beta, end,   day("2026-10-22T00:00:00.000Z"), 1);
 		return true;
 	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "Add View"));
 	idle(ctx);
 	REQUIRE(click(ctx, "+ Calendar"));
 	REQUIRE(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->endProperty = end; return true; }));
@@ -1817,13 +1822,18 @@ TEST_CASE("planner ui board: a rectangle selects, colours apply, a frame moves w
 	idle(ctx);
 
 	// A rectangle drawn over empty space round both cards (the press must start on nothing).
-	dragScreen(ctx, canvasPoint(20, 20), canvasPoint(800, 400));
+	// (From the far corner: the tool palette sits over the near one.)
+	dragScreen(ctx, canvasPoint(800, 400), canvasPoint(20, 20));
 	CHECK(PlannerBoardView::selection().size() == 3);
-	// Colour what is selected.
+	// Colour what is selected: the bar over the selection opens the colours.
+	REQUIRE(click(ctx, "Color"));
+	idle(ctx);
 	REQUIRE(click(ctx, "swatch:yellow"));
 	CHECK(f.ws->findBoard(f.id)->findNode(inside)->color == "yellow");
 	CHECK(f.ws->findBoard(f.id)->findNode(outside)->color == "yellow");
 	shotTo(ctx, "planner_board_selected");
+	REQUIRE(click(ctx, "Color"));
+	idle(ctx);
 	REQUIRE(click(ctx, "swatch:none"));
 	CHECK(f.ws->findBoard(f.id)->findNode(inside)->color.empty());
 
@@ -2200,4 +2210,54 @@ TEST_CASE("planner ui board: the minimap pans, Map hides it, Export PNG writes t
 	CHECK_FALSE(PlannerBoardView::exportPng(services, empty->id, proj.root() / "never.png", &err));
 	CHECK_FALSE(err.empty());
 	CHECK_FALSE(std::filesystem::exists(proj.root() / "never.png"));
+}
+
+TEST_CASE("planner ui board: the pinch zooms at the cursor and the zoom buttons step the zoom")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_pinch");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+
+	// A spread of the fingers over the canvas zooms in; the world point under the cursor stays under it.
+	const ImVec2 at = canvasPoint(300, 200);
+	ImGui::GetIO().AddMousePosEvent(at.x, at.y);
+	settle(ctx);
+	const PlannerBoardView::ViewState before = PlannerBoardView::viewOf(f.id);
+	EditorInput::detail::g_pinchFrame = 0.2f;
+	frame(ctx, false);
+	EditorInput::detail::g_pinchFrame = 0.0f;
+	settle(ctx);
+	const PlannerBoardView::ViewState after = PlannerBoardView::viewOf(f.id);
+	CHECK(after.zoom > before.zoom * 1.2);
+	const PlannerPanel::Rect c = PlannerPanel::controlRect("canvas");
+	CHECK(after.x + (at.x - c.x0) / after.zoom == doctest::Approx(300).epsilon(0.01));
+	CHECK(after.y + (at.y - c.y0) / after.zoom == doctest::Approx(200).epsilon(0.01));
+
+	// A pinch together zooms out; one that is not over the canvas does nothing.
+	EditorInput::detail::g_pinchFrame = -0.2f;
+	frame(ctx, false);
+	EditorInput::detail::g_pinchFrame = 0.0f;
+	settle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).zoom < after.zoom);
+	ImGui::GetIO().AddMousePosEvent(5, 5);
+	settle(ctx);
+	const double z = PlannerBoardView::viewOf(f.id).zoom;
+	EditorInput::detail::g_pinchFrame = 0.3f;
+	frame(ctx, false);
+	EditorInput::detail::g_pinchFrame = 0.0f;
+	settle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(z));
+
+	// The buttons: + and - step by a quarter, the percentage goes back to 100.
+	REQUIRE(click(ctx, "Zoom In"));
+	idle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(z * 1.25));
+	REQUIRE(click(ctx, "Zoom Out"));
+	idle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(z));
+	REQUIRE(click(ctx, "100%"));
+	idle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(1.0));
 }

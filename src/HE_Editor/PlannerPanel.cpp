@@ -7,6 +7,7 @@
 #include "Planner.h"
 #include "PlannerBoard.h"
 #include "PlannerBoardView.h"
+#include "PlannerIcons.h"
 #include "PlannerImport.h"
 #include "PlannerTasks.h"
 #include "PlannerWorkspace.h"
@@ -139,6 +140,67 @@ bool iconButton(const char* id, const char* helpKey, const std::function<void(Im
 	                                                                  : ImGuiCol_Button), 4.0f);
 	glyph(dl, ImVec2((a.x + z.x) * 0.5f, (a.y + z.y) * 0.5f), side * 0.27f, Theme::u32(Theme::Text));
 	return clicked;
+}
+
+// ── The panel's own controls: rows with a glyph, tabs, tool buttons ──────────
+// A row of the sidebar: glyph, name, a bar at the left while it is open.
+bool sidebarRow(const char* id, PlannerIcons::Icon icon, const std::string& label, bool selected)
+{
+	constexpr float h = 26.0f;
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	const float w = ImGui::GetContentRegionAvail().x;
+	const bool clicked = ImGui::Selectable(id, selected, 0, ImVec2(0, h));
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	if (selected) dl->AddRectFilled(ImVec2(p.x, p.y + 5), ImVec2(p.x + 3, p.y + h - 5), Theme::u32(Theme::Accent), 2.0f);
+	PlannerIcons::drawIcon(dl, icon, ImVec2(p.x + 16, p.y + h * 0.5f), Theme::u32(selected ? Theme::AccentBright : Theme::TextDim));
+	dl->PushClipRect(p, ImVec2(p.x + w - 4, p.y + h), true);
+	dl->AddText(ImVec2(p.x + 32, p.y + (h - ImGui::GetFontSize()) * 0.5f), Theme::u32(selected ? Theme::TextHeading : Theme::Text), label.c_str());
+	dl->PopClipRect();
+	return clicked;
+}
+
+// A section title with a "+" at its right edge.
+bool sidebarSection(const char* title, const char* newName, const char* helpKey)
+{
+	ImGui::Dummy(ImVec2(0, 4));
+	const float w = ImGui::GetContentRegionAvail().x;
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("%s", title);
+	ImGui::SameLine(w - 20);
+	const bool clicked = PlannerIcons::iconButton(newName, PlannerIcons::Icon::Plus, false, true, helpKey, false, 0, ImVec2(24, 24));
+	note(newName);
+	return clicked;
+}
+
+// A button with a glyph and a name, for the toolbars. `active` while a filter or the like is on.
+bool toolButton(const char* helpKey, const char* label, PlannerIcons::Icon icon, bool active)
+{
+	const float textW = ImGui::CalcTextSize(label).x;
+	const ImVec2 size(textW + 40.0f, 26.0f);
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	ImGui::PushID(label);
+	const bool clicked = ImGui::InvisibleButton("##tool", size);
+	const bool hov = ImGui::IsItemHovered();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y),
+	                  Theme::u32(active ? Theme::alpha(Theme::Accent, hov ? 0.34f : 0.24f) : Theme::warm(hov ? 0.28f : 0.18f)), 7.0f);
+	const ImU32 ink = Theme::u32(active ? Theme::AccentBright : Theme::Text);
+	PlannerIcons::drawIcon(dl, icon, ImVec2(p.x + 15, p.y + size.y * 0.5f), ink);
+	dl->AddText(ImVec2(p.x + 28, p.y + (size.y - ImGui::GetFontSize()) * 0.5f), ink, label);
+	EditorWidgets::helpForKey(helpKey);
+	ImGui::PopID();
+	return clicked;
+}
+
+PlannerIcons::Icon viewIcon(ViewKind k)
+{
+	switch (k)
+	{
+	case ViewKind::Board:    return PlannerIcons::Icon::Kanban;
+	case ViewKind::Timeline: return PlannerIcons::Icon::Timeline;
+	case ViewKind::Calendar: return PlannerIcons::Icon::Calendar;
+	default:                 return PlannerIcons::Icon::Table;
+	}
 }
 
 // The circular arrow of "read it again".
@@ -2135,7 +2197,7 @@ void drawBlocks(const Page& page)
 
 	// Below the last block: a way to add one, and a place to drop an object.
 	ImGui::Spacing();
-	if (EditorWidgets::smallButton("Add Block"))
+	if (toolButton("Planner/Add Block", "Add Block", PlannerIcons::Icon::Plus, false))
 		post([=] {
 			s_ws.editPage(pageId, [&](Page& p) {
 				Block* made = p.addBlockAfter(UUID{}, BlockType::Paragraph, "", taskNowMs());
@@ -2145,7 +2207,7 @@ void drawBlocks(const Page& page)
 		});
 	note("add-block");
 	ImGui::SameLine();
-	if (EditorWidgets::smallButton("New Sub-page"))
+	if (toolButton("Planner/New Sub-page", "New Sub-page", PlannerIcons::Icon::Page, false))
 		post([=] {
 			Page* child = s_ws.createPage("Untitled", pageId);
 			if (!child) return;
@@ -2530,9 +2592,17 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	for (const View& v : db.views)
 	{
 		pushUuid(v.id);
-		if (ImGui::Selectable(v.name.c_str(), v.id == s_viewId, 0,
-		                      ImVec2(ImGui::CalcTextSize(v.name.c_str()).x + 24.0f, 0)))
-			s_viewId = v.id;
+		const float w = ImGui::CalcTextSize(v.name.c_str()).x + 40.0f;
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		const bool selected = v.id == s_viewId;
+		if (ImGui::Selectable("##viewtab", selected, 0, ImVec2(w, 26.0f))) s_viewId = v.id;
+		{
+			ImDrawList* dl = ImGui::GetWindowDrawList();
+			const ImU32 ink = Theme::u32(selected ? Theme::AccentBright : Theme::TextDim);
+			PlannerIcons::drawIcon(dl, viewIcon(v.kind), ImVec2(p.x + 15, p.y + 13), ink);
+			dl->AddText(ImVec2(p.x + 28, p.y + (26.0f - ImGui::GetFontSize()) * 0.5f), Theme::u32(selected ? Theme::Text : Theme::TextDim), v.name.c_str());
+			if (selected) dl->AddRectFilled(ImVec2(p.x + 4, p.y + 24), ImVec2(p.x + w - 4, p.y + 26), Theme::u32(Theme::Accent), 1.0f);
+		}
 		note("view:" + v.name);
 		if (ImGui::BeginPopupContextItem("##viewmenu"))
 		{
@@ -2553,55 +2623,49 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			ImGui::EndPopup();
 		}
 		ImGui::PopID();
-		ImGui::SameLine();
+		ImGui::SameLine(0, 2);
 	}
-	if (EditorWidgets::button("+ Table"))
-		post([=] {
-			s_ws.edit(dbId, [&](Database& d) { s_viewId = d.addView("Table", ViewKind::Table)->id; return true; });
+	if (PlannerIcons::iconButton("Add View", PlannerIcons::Icon::Plus, false, true, "Planner/Add View", false, 0, ImVec2(26, 26)))
+		ImGui::OpenPopup("##addview");
+	note("Add View");
+	if (ImGui::BeginPopup("##addview"))
+	{
+		auto entry = [&](const char* name, const char* helpKey, PlannerIcons::Icon icon, const std::function<void(Database&)>& make) {
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			if (ImGui::Selectable((std::string("      ") + name).c_str()))
+				post([=] { s_ws.edit(dbId, [&](Database& d) { make(d); return true; }); });
+			PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), icon, ImVec2(p.x + 12, p.y + ImGui::GetTextLineHeight() * 0.5f + 1), Theme::u32(Theme::TextDim));
+			EditorWidgets::helpForKey(helpKey);
+			note(std::string("+ ") + name);
+		};
+		ImGui::TextDisabled("Add a view");
+		entry("Table", "Planner/+ Table", PlannerIcons::Icon::Table, [](Database& d) { s_viewId = d.addView("Table", ViewKind::Table)->id; });
+		entry("Board", "Planner/+ Board", PlannerIcons::Icon::Kanban, [](Database& d) {
+			View* v = d.addView("Board", ViewKind::Board);
+			s_viewId = v->id;
+			for (const Property& p : d.properties)
+				if (p.type == PropertyType::Select) { v->groupBy = p.id; break; }
 		});
-	note("+ Table");
-	ImGui::SameLine();
-	if (EditorWidgets::button("+ Board"))
-		post([=] {
-			s_ws.edit(dbId, [&](Database& d) {
-				View* v = d.addView("Board", ViewKind::Board);
-				s_viewId = v->id;
-				for (const Property& p : d.properties)
-					if (p.type == PropertyType::Select) { v->groupBy = p.id; break; }
-				return true;
-			});
+		entry("Timeline", "Planner/+ Timeline", PlannerIcons::Icon::Timeline, [](Database& d) {
+			View* v = d.addView("Timeline", ViewKind::Timeline);
+			s_viewId = v->id;
+			// Start and End default to the first two Date properties.
+			int found = 0;
+			for (const Property& p : d.properties)
+				if (p.type == PropertyType::Date)
+				{
+					(found == 0 ? v->dateProperty : v->endProperty) = p.id;
+					if (++found == 2) break;
+				}
 		});
-	note("+ Board");
-	ImGui::SameLine();
-	if (EditorWidgets::button("+ Timeline"))
-		post([=] {
-			s_ws.edit(dbId, [&](Database& d) {
-				View* v = d.addView("Timeline", ViewKind::Timeline);
-				s_viewId = v->id;
-				// Start and End default to the first two Date properties.
-				int found = 0;
-				for (const Property& p : d.properties)
-					if (p.type == PropertyType::Date)
-					{
-						(found == 0 ? v->dateProperty : v->endProperty) = p.id;
-						if (++found == 2) break;
-					}
-				return true;
-			});
+		entry("Calendar", "Planner/+ Calendar", PlannerIcons::Icon::Calendar, [](Database& d) {
+			View* v = d.addView("Calendar", ViewKind::Calendar);
+			s_viewId = v->id;
+			for (const Property& p : d.properties)
+				if (p.type == PropertyType::Date) { v->dateProperty = p.id; break; }
 		});
-	note("+ Timeline");
-	ImGui::SameLine();
-	if (EditorWidgets::button("+ Calendar"))
-		post([=] {
-			s_ws.edit(dbId, [&](Database& d) {
-				View* v = d.addView("Calendar", ViewKind::Calendar);
-				s_viewId = v->id;
-				for (const Property& p : d.properties)
-					if (p.type == PropertyType::Date) { v->dateProperty = p.id; break; }
-				return true;
-			});
-		});
-	note("+ Calendar");
+		ImGui::EndPopup();
+	}
 
 	if (!view) return;
 	const UUID viewId = view->id;
@@ -2613,16 +2677,23 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		});
 	note("New Row");
 	ImGui::SameLine();
-	ImGui::SetNextItemWidth(180);
-	ImGui::InputTextWithHint("##search", "Search titles", &s_search);
+	ImGui::SetNextItemWidth(200);
+	{
+		// A magnifier inside the field, at its left.
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(28.0f, ImGui::GetStyle().FramePadding.y));
+		ImGui::InputTextWithHint("##search", "Search titles", &s_search);
+		ImGui::PopStyleVar();
+		const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+		PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), PlannerIcons::Icon::Search, ImVec2(a.x + 15, (a.y + z.y) * 0.5f), Theme::u32(Theme::TextDim));
+	}
 	ImGui::SameLine();
 	const std::string filterLabel = view->filters.empty() ? std::string("Filter")
-	                                : "Filter (" + std::to_string(view->filters.size()) + ")";
-	if (ImGui::Button(filterLabel.c_str())) ImGui::OpenPopup("##filters");
+	                                : "Filter " + std::to_string(view->filters.size());
+	if (toolButton("Planner/Filter", filterLabel.c_str(), PlannerIcons::Icon::Filter, !view->filters.empty())) ImGui::OpenPopup("##filters");
 	note("Filter");
 	if (ImGui::BeginPopup("##filters")) { drawFilterPopup(db, *view); ImGui::EndPopup(); }
 	ImGui::SameLine();
-	if (EditorWidgets::button("Properties")) ImGui::OpenPopup("##properties");
+	if (toolButton("Planner/Properties", "Properties", PlannerIcons::Icon::Sliders, false)) ImGui::OpenPopup("##properties");
 	note("Properties");
 	if (ImGui::BeginPopup("##properties")) { drawPropertiesPopup(db, *view); ImGui::EndPopup(); }
 	else s_armedDelete = UUID{};
@@ -2812,8 +2883,8 @@ void sidebarPages(const std::vector<Page*>& all, const UUID& parent, int depth)
 		if (!(p->parent == parent)) continue;
 		pushUuid(p->id);
 		if (depth > 0) ImGui::Indent(static_cast<float>(depth) * 12.0f);
-		const std::string label = (p->title.empty() ? std::string("Untitled") : p->title) + "##page";
-		if (ImGui::Selectable(label.c_str(), p->id == s_pageId && s_pageDb == UUID{} && s_boardId == UUID{}))
+		const std::string label = p->title.empty() ? std::string("Untitled") : p->title;
+		if (sidebarRow("##page", PlannerIcons::Icon::Page, label, p->id == s_pageId && s_pageDb == UUID{} && s_boardId == UUID{}))
 		{
 			s_pageId = p->id;
 			s_pageDb = UUID{};
@@ -2838,11 +2909,19 @@ void drawSidebar(AppContext& ctx)
 	if (ctx.fontSubheading) ImGui::PopFont();
 	ImGui::Spacing();
 
+	if (sidebarSection("DATABASES", "New Database", "Planner/New Database"))
+		post([] {
+			if (Database* db = s_ws.create("New Database"))
+			{
+				s_dbId   = db->id;
+				s_viewId = UUID{};
+			}
+		});
 	for (Database* db : s_ws.databases())
 	{
 		pushUuid(db->id);
-		const std::string label = (db->name.empty() ? std::string("Untitled database") : db->name) + "##db";
-		if (ImGui::Selectable(label.c_str(), db->id == s_dbId && s_pageId == UUID{} && s_boardId == UUID{}))
+		const std::string label = db->name.empty() ? std::string("Untitled database") : db->name;
+		if (sidebarRow("##db", PlannerIcons::Icon::Table, label, db->id == s_dbId && s_pageId == UUID{} && s_boardId == UUID{}))
 		{
 			s_dbId   = db->id;
 			s_viewId = UUID{};
@@ -2853,23 +2932,9 @@ void drawSidebar(AppContext& ctx)
 		ImGui::PopID();
 	}
 	if (s_ws.databases().empty()) ImGui::TextDisabled("No databases yet.");
-	ImGui::Spacing();
-
-	if (EditorWidgets::button("New Database", ImVec2(-FLT_MIN, 0)))
-		post([] {
-			if (Database* db = s_ws.create("New Database"))
-			{
-				s_dbId   = db->id;
-				s_viewId = UUID{};
-			}
-		});
-	note("New Database");
 
 	// Pages: write-ups that are not a row of anything (the design document, a level concept).
-	ImGui::Spacing();
-	ImGui::TextDisabled("Pages");
-	sidebarPages(s_ws.pages(), UUID{}, 0);
-	if (EditorWidgets::button("New Page", ImVec2(-FLT_MIN, 0)))
+	if (sidebarSection("PAGES", "New Page", "Planner/New Page"))
 		post([] {
 			if (Page* page = s_ws.createPage("Untitled"))
 			{
@@ -2877,16 +2942,22 @@ void drawSidebar(AppContext& ctx)
 				s_pageDb = UUID{};
 			}
 		});
-	note("New Page");
+	sidebarPages(s_ws.pages(), UUID{}, 0);
 
 	// Whiteboards: cards and arrows on a free surface.
-	ImGui::Spacing();
-	ImGui::TextDisabled("Boards");
+	if (sidebarSection("BOARDS", "New Board", "Planner/New Board"))
+		post([] {
+			if (Board* board = s_ws.createBoard("Untitled board"))
+			{
+				s_boardId = board->id;
+				s_pageId = s_pageDb = UUID{};
+			}
+		});
 	for (Board* b : s_ws.boards())
 	{
 		pushUuid(b->id);
-		const std::string label = (b->title.empty() ? std::string("Untitled board") : b->title) + "##board";
-		if (ImGui::Selectable(label.c_str(), b->id == s_boardId))
+		const std::string label = b->title.empty() ? std::string("Untitled board") : b->title;
+		if (sidebarRow("##board", PlannerIcons::Icon::Whiteboard, label, b->id == s_boardId))
 		{
 			s_boardId = b->id;
 			s_pageId = s_pageDb = UUID{};
@@ -2899,15 +2970,6 @@ void drawSidebar(AppContext& ctx)
 		}
 		ImGui::PopID();
 	}
-	if (EditorWidgets::button("New Board", ImVec2(-FLT_MIN, 0)))
-		post([] {
-			if (Board* board = s_ws.createBoard("Untitled board"))
-			{
-				s_boardId = board->id;
-				s_pageId = s_pageDb = UUID{};
-			}
-		});
-	note("New Board");
 	if (!(s_deleteBoard == UUID{}))
 	{
 		ImGui::OpenPopup("##confirmDeleteBoard");
