@@ -3263,7 +3263,7 @@ namespace
 	{ "Planner/New Event", "New Event",
 	  "Adds an event on today (or the first day of the month shown) and opens it. A + in the corner of a day, or a double-click on it, makes one there.",
 	  "", "" },
-	{ "Planner/New Card", "New Card",
+	{ "Planner/New Item", "New Item",
 	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
 	  "", "" },
 	{ "Planner/Undo", "Undo",

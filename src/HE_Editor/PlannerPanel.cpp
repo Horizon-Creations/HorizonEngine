@@ -2902,7 +2902,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	}
 	else if (view->kind == ViewKind::Board)
 	{
-		if (EditorWidgets::primaryButton("New Card"))
+		if (EditorWidgets::primaryButton("New Item"))
 		{
 			const UUID groupId = view->groupBy;
 			post([=] {
