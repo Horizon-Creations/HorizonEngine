@@ -1487,7 +1487,8 @@ void drawPropertyTable(const Database& db, const Row& row)
 
 }
 
-void drawDrawer(const Database& db, const Row& row)
+// `closeButton`: the docked column has no header of its own, so it carries the x; the flyover's header has one.
+void drawDrawer(const Database& db, const Row& row, bool closeButton)
 {
 	const UUID dbId = db.id, rowId = row.id;
 	const bool tasks = s_ws.isExternal(dbId);
@@ -1502,9 +1503,12 @@ void drawDrawer(const Database& db, const Row& row)
 	}, "Untitled", 0.0f, -closeW);
 	if (s_ctx && s_ctx->fontHeading) ImGui::PopFont();
 	note("drawer:title");
-	ImGui::SameLine();
-	if (ImGui::SmallButton("x")) s_selRow = UUID{};
-	note("drawer:close");
+	if (closeButton)
+	{
+		ImGui::SameLine();
+		if (ImGui::SmallButton("x")) s_selRow = UUID{};
+		note("drawer:close");
+	}
 	if (EditorWidgets::button("Open Page")) post([=] { openPage(rowId, dbId); });
 	note("Open Page");
 	ImGui::Spacing();
@@ -3164,7 +3168,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	{
 		ImGui::SameLine();
 		ImGui::BeginChild("##plannerdrawer", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
-		drawDrawer(db, *open);
+		drawDrawer(db, *open, true);
 		ImGui::EndChild();
 	}
 	else if (open)
@@ -3194,7 +3198,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Escape)) closeFly = true;
 			ImGui::Separator();
 			note("flyover");
-			drawDrawer(db, *open);
+			drawDrawer(db, *open, false);
 		}
 		ImGui::End();
 		ImGui::PopStyleVar(3);
