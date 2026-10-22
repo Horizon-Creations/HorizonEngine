@@ -220,10 +220,20 @@ namespace
 		ImGui::GetIO().AddMousePosEvent(p.x, p.y);
 		frame(ctx, false);
 		frame(ctx, false);
+		frame(ctx, false);
 		frame(ctx, true);
 		frame(ctx, false);
 		frame(ctx, false);
 		return true;
+	}
+
+	// A new table on data of its own: the + of the TABLES section, then the first choice.
+	void newTable(AppContext& ctx)
+	{
+		REQUIRE(click(ctx, "New Table"));
+		settle(ctx);
+		REQUIRE(click(ctx, "data:new"));
+		settle(ctx);
 	}
 
 	void dragTo(AppContext& ctx, ImVec2 from, ImVec2 to)
@@ -298,13 +308,13 @@ TEST_CASE("planner ui: no project, no planner; New Database makes a database and
 	CHECK(ws->databases()[0]->id == tasksDatabaseId());
 	shotTo(ctx, "planner_empty");
 
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	ws = PlannerPanel::workspace(ctx);
 	REQUIRE(ws->databases().size() == 2);
 	const Database* made = nullptr;
 	for (const Database* d : ws->databases())
-		if (d->name == "New Database") made = d;
+		if (d->name == "Untitled table") made = d;
 	REQUIRE(made != nullptr);
 	CHECK(std::filesystem::exists(databasePath(proj.root(), made->id)));
 	CHECK(PlannerPanel::selectedDatabase() == made->id);
@@ -407,7 +417,7 @@ TEST_CASE("planner ui: a long table only lays out the rows on screen")
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
@@ -778,6 +788,9 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	frames(3);
 	CHECK(TaskBoardPanel::author() == "Bob");
 	REQUIRE(PlannerPanel::controlRect("From the Team").x1 > 0);
+	// The assignee picker left the focus on its popup, which blocks hovering elsewhere until a click lands:
+	// a click on a sidebar entry takes the focus back.
+	REQUIRE(click(ctx, "item:All tasks"));
 	REQUIRE(click(ctx, "From the Team"));
 	REQUIRE(PlannerPanel::controlRect("team-row:0").x1 > 0);
 	shotTo(ctx, "planner_team_from_the_team");
@@ -826,7 +839,7 @@ TEST_CASE("planner ui: a relation cell lists the rows it can point at and ticks 
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
@@ -858,7 +871,7 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
@@ -1199,7 +1212,7 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
@@ -1401,7 +1414,7 @@ TEST_CASE("planner ui: a linked row in a relation opens that row")
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
@@ -2301,7 +2314,7 @@ TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes o
 	ContextBits bits;
 	AppContext ctx = bits.make(proj.pm);
 	settle(ctx);
-	REQUIRE(click(ctx, "New Database"));
+	newTable(ctx);
 	settle(ctx);
 	Workspace* ws = PlannerPanel::workspace(ctx);
 	const UUID dbId = PlannerPanel::selectedDatabase();
@@ -2369,4 +2382,56 @@ TEST_CASE("planner ui: timeline steps - New Step, a drag across the days makes o
 	REQUIRE(click(ctx, "zoom:Days"));
 	REQUIRE(click(ctx, "timeline:today"));
 	idle(ctx);
+}
+
+TEST_CASE("planner ui: tables, timelines, boards and calendars are made on their own data or on data that exists")
+{
+	Harness harness;
+	Project proj("he_planner_ui_kinds");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	REQUIRE(ws != nullptr);
+
+	// A timeline on data of its own: Start and End are there, and it is the open view.
+	REQUIRE(click(ctx, "New Timeline"));
+	settle(ctx);
+	REQUIRE(click(ctx, "data:new"));
+	settle(ctx);
+	const UUID roadmap = PlannerPanel::selectedDatabase();
+	REQUIRE(ws->find(roadmap) != nullptr);
+	CHECK(ws->find(roadmap)->name == "Untitled timeline");
+	REQUIRE(ws->find(roadmap)->views.size() == 1);
+	const View& tl = ws->find(roadmap)->views[0];
+	CHECK(tl.kind == ViewKind::Timeline);
+	CHECK(tl.dateProperty != UUID{});
+	CHECK(tl.endProperty != UUID{});
+	CHECK(PlannerPanel::controlRect("timeline:new").x1 > 0);   // the timeline is drawn
+	CHECK(PlannerPanel::controlRect("item:Untitled timeline").x1 > 0);
+
+	// A kanban board on the same data: a second entry in the sidebar, the same rows. The board needs a Select to
+	// group by; the data has none, so it shows its hint, and the row count is shared.
+	REQUIRE(ws->edit(roadmap, [&](Database& db) { db.addRow("Ship alpha", "Tester", 1000); return true; }));
+	REQUIRE(click(ctx, "New Kanban"));
+	settle(ctx);
+	REQUIRE(click(ctx, "data:Untitled timeline"));
+	settle(ctx);
+	CHECK(PlannerPanel::selectedDatabase() == roadmap);
+	REQUIRE(ws->find(roadmap)->views.size() == 2);
+	CHECK(ws->find(roadmap)->views[1].kind == ViewKind::Board);
+	CHECK(ws->databases().size() == 2);   // Tasks and the one just made: no second database
+	CHECK(PlannerPanel::controlRect("item:Untitled timeline board").x1 > 0);
+
+	// A board on new data brings a Status column with its three lanes.
+	REQUIRE(click(ctx, "New Kanban"));
+	settle(ctx);
+	REQUIRE(click(ctx, "data:new"));
+	settle(ctx);
+	const Database* kanban = ws->find(PlannerPanel::selectedDatabase());
+	REQUIRE(kanban != nullptr);
+	REQUIRE(kanban->views.size() == 1);
+	const Property* status = kanban->findProperty(kanban->views[0].groupBy);
+	REQUIRE(status != nullptr);
+	CHECK(status->options.size() == 3);
 }

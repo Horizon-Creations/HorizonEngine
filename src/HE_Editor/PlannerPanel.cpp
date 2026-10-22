@@ -50,6 +50,9 @@ namespace
 
 Workspace s_ws;
 UUID      s_dbId, s_viewId;
+ViewKind  s_newKind = ViewKind::Table;   // what the "new ... of" popup is making
+UUID      s_deleteData;          // the data a "Delete Data" confirmation is about
+bool      s_deleteDataOpen = false;
 std::string s_search;
 
 // The text field being typed in: which cell, and what is in it so far. A cell
@@ -697,6 +700,98 @@ void editView(const UUID& dbId, const UUID& viewId, std::function<bool(View&)> f
 			View* v = d.findView(viewId);
 			return v && fn(*v);
 		});
+	});
+}
+
+// ── Tables, timelines, boards and calendars are the things you make; the data behind them is shared ──
+const char* kindWord(ViewKind k)
+{
+	switch (k)
+	{
+	case ViewKind::Board:    return "board";
+	case ViewKind::Timeline: return "timeline";
+	case ViewKind::Calendar: return "calendar";
+	default:                 return "table";
+	}
+}
+
+// A view of `kind` with what it needs picked from the data: a Select to group a board by, the Date
+// properties a timeline runs between, the one a calendar is laid out by.
+View* addConfiguredView(Database& d, ViewKind kind, const std::string& name)
+{
+	View* v = d.addView(name, kind);
+	if (!v) return nullptr;
+	if (kind == ViewKind::Board)
+		for (const Property& p : d.properties)
+			if (p.type == PropertyType::Select) { v->groupBy = p.id; break; }
+	if (kind == ViewKind::Timeline)
+	{
+		int found = 0;
+		for (const Property& p : d.properties)
+			if (p.type == PropertyType::Date)
+			{
+				(found == 0 ? v->dateProperty : v->endProperty) = p.id;
+				if (++found == 2) break;
+			}
+	}
+	if (kind == ViewKind::Calendar)
+		for (const Property& p : d.properties)
+			if (p.type == PropertyType::Date) { v->dateProperty = p.id; break; }
+	return v;
+}
+
+// Columns a fresh timeline, board or calendar needs to be of any use at once.
+void prepareData(Database& d, ViewKind kind)
+{
+	if (kind == ViewKind::Board)
+	{
+		const UUID status = d.addProperty("Status", PropertyType::Select)->id;
+		d.addOption(status, "To do", "gray");
+		d.addOption(status, "Doing", "blue");
+		d.addOption(status, "Done", "green");
+	}
+	if (kind == ViewKind::Timeline)
+	{
+		d.addProperty("Start", PropertyType::Date);
+		d.addProperty("End", PropertyType::Date);
+	}
+	if (kind == ViewKind::Calendar) d.addProperty("Date", PropertyType::Date);
+}
+
+// Make a table, timeline, board or calendar and open it: on new data of its own, or on data that exists
+// (then it is one more way of looking at the same rows).
+void newView(ViewKind kind, const UUID& existing)
+{
+	post([=] {
+		UUID db = existing, view;
+		if (db == UUID{})
+		{
+			Database* made = s_ws.create(std::string("Untitled ") + kindWord(kind));
+			if (!made) return;
+			db = made->id;
+			s_ws.edit(db, [&](Database& d) {
+				prepareData(d, kind);
+				View* nv = addConfiguredView(d, kind, d.name);
+				if (!nv) return false;
+				view = nv->id;
+				std::vector<UUID> starting;   // the table view a new database begins with
+				for (const View& v : d.views)
+					if (!(v.id == view)) starting.push_back(v.id);
+				for (const UUID& id : starting) d.removeView(id);
+				return true;
+			});
+		}
+		else
+			s_ws.edit(db, [&](Database& d) {
+				View* nv = addConfiguredView(d, kind, d.name + " " + kindWord(kind));
+				if (!nv) return false;
+				view = nv->id;
+				return true;
+			});
+		s_dbId = db;
+		s_viewId = view;
+		s_pageId = s_pageDb = UUID{};
+		s_boardId = UUID{};
 	});
 }
 
@@ -2708,23 +2803,47 @@ void drawBoardTab(AppContext& ctx)
 void drawDatabase(AppContext& ctx, const Database& db)
 {
 	const UUID dbId = db.id;
-	if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
-	textCell("##dbname", { dbId, UUID{} }, db.name, [=](const std::string& name) {
-		post([=] {
-			s_ws.edit(dbId, [&](Database& d) {
-				if (name.empty() || name == d.name) return false;
-				d.name = name;
-				return true;
-			});
-		});
-	}, "Untitled database", 0.0f, 360.0f);
-	if (ctx.fontHeading) ImGui::PopFont();
-	ImGui::SameLine();
-	ImGui::TextDisabled("%d rows", static_cast<int>(db.rows.size()));
-
-	// Views as tabs.
+	// Which view is open: the one the sidebar picked, else the first.
 	const View* view = db.findView(s_viewId);
 	if (!view && !db.views.empty()) { s_viewId = db.views.front().id; view = &db.views.front(); }
+
+	// What you opened is a table, a timeline, a board or a calendar: its name is the title. The data it
+	// shows has a name too, behind the button.
+	if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
+	if (view)
+	{
+		const UUID vid = view->id;
+		textCell("##viewtitle", { vid, UUID{ 0, 10 } }, view->name, [=](const std::string& name) {
+			editView(dbId, vid, [name](View& vv) {
+				if (name.empty() || name == vv.name) return false;
+				vv.name = name;
+				return true;
+			});
+		}, "Untitled", 0.0f, 360.0f);
+	}
+	if (ctx.fontHeading) ImGui::PopFont();
+	ImGui::SameLine();
+	if (toolButton("Planner/Data", (std::string("Data: ") + (db.name.empty() ? "Untitled" : db.name)).c_str(), PlannerIcons::Icon::Table, false))
+		ImGui::OpenPopup("##datamenu");
+	note("data:menu");
+	if (ImGui::BeginPopup("##datamenu"))
+	{
+		ImGui::TextDisabled("The data behind this view");
+		textCell("##dbname", { dbId, UUID{} }, db.name, [=](const std::string& name) {
+			post([=] {
+				s_ws.edit(dbId, [&](Database& d) {
+					if (name.empty() || name == d.name) return false;
+					d.name = name;
+					return true;
+				});
+			});
+		}, "Untitled", 0.0f, 240.0f);
+		ImGui::TextDisabled("%d rows, %d views. Other tables, timelines and boards can show the same rows:", static_cast<int>(db.rows.size()), static_cast<int>(db.views.size()));
+		ImGui::TextDisabled("use the + beside the views below.");
+		ImGui::EndPopup();
+	}
+
+	// Views as tabs.
 	for (const View& v : db.views)
 	{
 		pushUuid(v.id);
@@ -2766,40 +2885,20 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	note("Add View");
 	if (ImGui::BeginPopup("##addview"))
 	{
-		auto entry = [&](const char* name, const char* helpKey, PlannerIcons::Icon icon, const std::function<void(Database&)>& make) {
+		ImGui::TextDisabled("Show this data as a");
+		const struct { ViewKind kind; const char* name; const char* key; PlannerIcons::Icon icon; } kinds[] = {
+			{ ViewKind::Table, "Table", "Planner/+ Table", PlannerIcons::Icon::Table },
+			{ ViewKind::Board, "Board", "Planner/+ Board", PlannerIcons::Icon::Kanban },
+			{ ViewKind::Timeline, "Timeline", "Planner/+ Timeline", PlannerIcons::Icon::Timeline },
+			{ ViewKind::Calendar, "Calendar", "Planner/+ Calendar", PlannerIcons::Icon::Calendar } };
+		for (const auto& k : kinds)
+		{
 			const ImVec2 p = ImGui::GetCursorScreenPos();
-			if (ImGui::Selectable((std::string("      ") + name).c_str()))
-				post([=] { s_ws.edit(dbId, [&](Database& d) { make(d); return true; }); });
-			PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), icon, ImVec2(p.x + 12, p.y + ImGui::GetTextLineHeight() * 0.5f + 1), Theme::u32(Theme::TextDim));
-			EditorWidgets::helpForKey(helpKey);
-			note(std::string("+ ") + name);
-		};
-		ImGui::TextDisabled("Add a view");
-		entry("Table", "Planner/+ Table", PlannerIcons::Icon::Table, [](Database& d) { s_viewId = d.addView("Table", ViewKind::Table)->id; });
-		entry("Board", "Planner/+ Board", PlannerIcons::Icon::Kanban, [](Database& d) {
-			View* v = d.addView("Board", ViewKind::Board);
-			s_viewId = v->id;
-			for (const Property& p : d.properties)
-				if (p.type == PropertyType::Select) { v->groupBy = p.id; break; }
-		});
-		entry("Timeline", "Planner/+ Timeline", PlannerIcons::Icon::Timeline, [](Database& d) {
-			View* v = d.addView("Timeline", ViewKind::Timeline);
-			s_viewId = v->id;
-			// Start and End default to the first two Date properties.
-			int found = 0;
-			for (const Property& p : d.properties)
-				if (p.type == PropertyType::Date)
-				{
-					(found == 0 ? v->dateProperty : v->endProperty) = p.id;
-					if (++found == 2) break;
-				}
-		});
-		entry("Calendar", "Planner/+ Calendar", PlannerIcons::Icon::Calendar, [](Database& d) {
-			View* v = d.addView("Calendar", ViewKind::Calendar);
-			s_viewId = v->id;
-			for (const Property& p : d.properties)
-				if (p.type == PropertyType::Date) { v->dateProperty = p.id; break; }
-		});
+			if (ImGui::Selectable((std::string("      ") + k.name).c_str())) newView(k.kind, dbId);
+			PlannerIcons::drawIcon(ImGui::GetWindowDrawList(), k.icon, ImVec2(p.x + 12, p.y + ImGui::GetTextLineHeight() * 0.5f + 1), Theme::u32(Theme::TextDim));
+			EditorWidgets::helpForKey(k.key);
+			note(std::string("+ ") + k.name);
+		}
 		ImGui::EndPopup();
 	}
 
@@ -3117,29 +3216,103 @@ void drawSidebar(AppContext& ctx)
 	if (ctx.fontSubheading) ImGui::PopFont();
 	ImGui::Spacing();
 
-	if (sidebarSection("DATABASES", "New Database", "Planner/New Database"))
-		post([] {
-			if (Database* db = s_ws.create("New Database"))
-			{
-				s_dbId   = db->id;
-				s_viewId = UUID{};
-			}
-		});
-	for (Database* db : s_ws.databases())
+	// Tables, timelines, boards and calendars: one entry per view, each kind under its own title. Views of the
+	// same data sit under different titles; the tooltip says which data an entry shows.
 	{
-		pushUuid(db->id);
-		const std::string label = db->name.empty() ? std::string("Untitled database") : db->name;
-		if (sidebarRow("##db", PlannerIcons::Icon::Table, label, db->id == s_dbId && s_pageId == UUID{} && s_boardId == UUID{}))
+		const struct { ViewKind kind; const char* title; const char* newName; const char* key; } kinds[] = {
+			{ ViewKind::Table, "TABLES", "New Table", "Planner/New Table" },
+			{ ViewKind::Timeline, "TIMELINES", "New Timeline", "Planner/New Timeline" },
+			{ ViewKind::Board, "BOARDS", "New Kanban", "Planner/New Kanban" },
+			{ ViewKind::Calendar, "CALENDARS", "New Calendar", "Planner/New Calendar" } };
+		for (const auto& k : kinds)
 		{
-			s_dbId   = db->id;
-			s_viewId = UUID{};
-			s_pageId = s_pageDb = UUID{};
-			s_boardId = UUID{};
+			if (sidebarSection(k.title, k.newName, k.key))
+			{
+				s_newKind = k.kind;
+				ImGui::OpenPopup("##newdata");
+			}
+			for (Database* db : s_ws.databases())
+				for (const View& v : db->views)
+				{
+					if (v.kind != k.kind) continue;
+					pushUuid(v.id);
+					const std::string label = v.name.empty() ? std::string("Untitled") : v.name;
+					const bool open = db->id == s_dbId && v.id == s_viewId && s_pageId == UUID{} && s_boardId == UUID{};
+					if (sidebarRow("##view", viewIcon(v.kind), label, open))
+					{
+						s_dbId   = db->id;
+						s_viewId = v.id;
+						s_pageId = s_pageDb = UUID{};
+						s_boardId = UUID{};
+					}
+					note("item:" + v.name);
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Data: %s (%d rows, %d views)", db->name.c_str(), static_cast<int>(db->rows.size()),
+						                  static_cast<int>(db->views.size()));
+					if (ImGui::BeginPopupContextItem("##viewitemmenu"))
+					{
+						const UUID dbId = db->id, vid = v.id;
+						if (db->views.size() > 1)
+						{
+							if (EditorWidgets::dangerMenuItem("Delete View"))
+								post([=] {
+									s_ws.edit(dbId, [&](Database& d) { return d.removeView(vid); });
+									if (s_viewId == vid) s_viewId = UUID{};
+								});
+						}
+						else if (EditorWidgets::dangerMenuItem("Delete Data", !(dbId == tasksDatabaseId())))
+							s_deleteData = dbId;
+						ImGui::EndPopup();
+					}
+					ImGui::PopID();
+				}
 		}
-		note("database:" + db->name);
-		ImGui::PopID();
+		if (ImGui::BeginPopup("##newdata"))
+		{
+			ImGui::TextDisabled("A %s of", kindWord(s_newKind));
+			if (ImGui::Selectable("New data")) newView(s_newKind, UUID{});
+			note("data:new");
+			if (!s_ws.databases().empty()) ImGui::Separator();
+			for (Database* db : s_ws.databases())
+			{
+				ImGui::PushID(db);
+				if (ImGui::Selectable((db->name.empty() ? std::string("Untitled") : db->name).c_str())) newView(s_newKind, db->id);
+				note("data:" + db->name);
+				ImGui::SameLine();
+				ImGui::TextDisabled("%d rows", static_cast<int>(db->rows.size()));
+				ImGui::PopID();
+			}
+			ImGui::EndPopup();
+		}
+		if (!(s_deleteData == UUID{}) && !s_deleteDataOpen)
+		{
+			ImGui::OpenPopup("##confirmDeleteData");
+			s_deleteDataOpen = true;
+		}
+		if (ImGui::BeginPopup("##confirmDeleteData"))
+		{
+			const Database* doomed = s_ws.find(s_deleteData);
+			ImGui::Text("Delete \"%s\" and its rows?", doomed ? doomed->name.c_str() : "");
+			ImGui::TextDisabled("Source control has the previous version.");
+			if (EditorWidgets::dangerButton("Delete"))
+			{
+				const UUID gone = s_deleteData;
+				s_deleteData = UUID{};
+				post([=] {
+					s_ws.remove(gone);
+					if (s_dbId == gone) { s_dbId = UUID{}; s_viewId = UUID{}; }
+				});
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel")) { s_deleteData = UUID{}; ImGui::CloseCurrentPopup(); }
+			ImGui::EndPopup();
+		}
+		else if (s_deleteDataOpen)
+			s_deleteDataOpen = false;
+		if (!s_deleteDataOpen) s_deleteData = UUID{};
 	}
-	if (s_ws.databases().empty()) ImGui::TextDisabled("No databases yet.");
+	if (s_ws.databases().empty()) ImGui::TextDisabled("Nothing yet: make a table or a timeline with a +.");
 
 	// Pages: write-ups that are not a row of anything (the design document, a level concept).
 	if (sidebarSection("PAGES", "New Page", "Planner/New Page"))
@@ -3153,7 +3326,7 @@ void drawSidebar(AppContext& ctx)
 	sidebarPages(s_ws.pages(), UUID{}, 0);
 
 	// Whiteboards: cards and arrows on a free surface.
-	if (sidebarSection("BOARDS", "New Board", "Planner/New Board"))
+	if (sidebarSection("WHITEBOARDS", "New Board", "Planner/New Board"))
 		post([] {
 			if (Board* board = s_ws.createBoard("Untitled board"))
 			{

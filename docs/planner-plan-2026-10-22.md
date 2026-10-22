@@ -307,3 +307,12 @@ Verified: `he_tests --test-case="planner*"` 89/89 and `*help*` 37/37, HorizonEdi
 - Sidebar (`PlannerPanel.cpp`): section titles DATABASES / PAGES / BOARDS with a "+" each (same `note` names as the old buttons), rows with a glyph and an accent bar when open.
 - Database: view tabs with a glyph per kind and an underline; "Add View" (+) popup replaces the four "+ X" buttons (tests: click "Add View", then "+ Timeline"); search field with a magnifier; Filter/Properties as glyph buttons (Filter shows the count and lights up while a filter is on). Pages: Add Block / New Sub-page as glyph buttons.
 Not touched: the table cells, row drawer, calendar/timeline/board-lane drawing, page blocks, the Task Board footer.
+
+## Handoff (Stand Timeline-Schritte, Tabellen/Timelines/Boards als eigene Dinge)
+
+Verified: `he_tests --test-case="planner*"` 92/92 and `*help*`, HorizonEditor builds, help audit clean. Not verified: the real editor (drag across the days with a mouse, the new sidebar).
+
+- Timeline (`PlannerPanel.cpp` drawTimeline/`createStep`/`dayGesture`): "New Step" (today, 3 days, title typed in place); the last lane makes a step by dragging across the days (a click = 3 days); a row without dates has its own lane, a drag gives it dates; double-click a title renames in place; segmented Days/Weeks/Months, Today, Settings popup (Start/End/Colour by).
+- Sidebar by kind: TABLES, TIMELINES, BOARDS (kanban), CALENDARS, PAGES, WHITEBOARDS, each with a "+". One entry per view; the tooltip names its data. A "+" of a view kind opens "A <kind> of": New data (a timeline gets Start/End, a board a Status Select with three options, a calendar a Date column) or any data that exists (then it is one more view of the same rows, `newView`/`addConfiguredView`/`prepareData`). The title of an open view is the view's name; "Data: X" opens the data's name. Deleting: context menu Delete View (when the data has several views) or Delete Data (confirm; not for Tasks). The model is unchanged (Database + Views); only the vocabulary and entry points moved.
+- Tests: `newTable(ctx)` helper (New Table + data:new); a click right after an assignee popup is lost until another click takes the focus back (ImGui blocks hovering while a popup is the nav window), see the "From the Team" test.
+Open: linking beyond relations (a timeline step linking a table row on other data = Relation property; whiteboard cards already link rows/pages), page blocks that embed a view (exist) could use the new "data" choice, MCP tools still say "database".
