@@ -209,6 +209,22 @@ PlannerIcons::Icon viewIcon(ViewKind k)
 	}
 }
 
+// The view a data set opens on: the Task Board's tasks are shown by status (the board), everything else on its first.
+const View* preferredView(const Database& db)
+{
+	if (db.id == tasksDatabaseId())
+		for (const View& v : db.views)
+			if (v.kind == ViewKind::Board) return &v;
+	return db.views.empty() ? nullptr : &db.views.front();
+}
+
+// Tasks is one thing: its sidebar entry is the board, the table of the same tasks is a tab away (the + of the tab bar).
+bool hiddenInSidebar(const Database& db, const View& v)
+{
+	if (db.id != tasksDatabaseId() || v.kind != ViewKind::Table) return false;
+	return std::any_of(db.views.begin(), db.views.end(), [](const View& o) { return o.kind == ViewKind::Board; });
+}
+
 // The circular arrow of "read it again".
 void refreshGlyph(ImDrawList* dl, ImVec2 c, float r, ImU32 col)
 {
@@ -2848,7 +2864,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	const UUID dbId = db.id;
 	// Which view is open: the one the sidebar picked, else the first.
 	const View* view = db.findView(s_viewId);
-	if (!view && !db.views.empty()) { s_viewId = db.views.front().id; view = &db.views.front(); }
+	if (!view) { view = preferredView(db); if (view) s_viewId = view->id; }
 
 	// What you opened is a table, a timeline, a board or a calendar: its name is the title. The data it
 	// shows has a name too, behind the button.
@@ -3295,7 +3311,7 @@ void drawSidebar(AppContext& ctx)
 			for (Database* db : s_ws.databases())
 				for (const View& v : db->views)
 				{
-					if (v.kind != k.kind) continue;
+					if (v.kind != k.kind || hiddenInSidebar(*db, v)) continue;
 					pushUuid(v.id);
 					const std::string label = v.name.empty() ? std::string("Untitled") : v.name;
 					const bool open = db->id == s_dbId && v.id == s_viewId && s_pageId == UUID{} && s_boardId == UUID{};
@@ -3712,6 +3728,11 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		s_dbId   = all.empty() ? UUID{} : all.front()->id;
 		s_viewId = UUID{};
 	}
+	// A selected data set without a (valid) view opens on the one it prefers.
+	if (s_boardId == UUID{} && s_pageId == UUID{})
+		if (const Database* db = s_ws.find(s_dbId))
+			if (!db->findView(s_viewId))
+				if (const View* v = preferredView(*db)) s_viewId = v->id;
 
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, Theme::warm(0.075f));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 12.0f));
@@ -3830,6 +3851,7 @@ Workspace* workspace(AppContext& ctx)
 void selectDatabase(const UUID& id) { s_dbId = id; s_viewId = UUID{}; s_pageId = s_pageDb = UUID{}; s_boardId = UUID{}; }
 UUID selectedDatabase() { return s_dbId; }
 UUID selectedView() { return s_viewId; }
+void selectView(const UUID& databaseId, const UUID& viewId) { s_dbId = databaseId; s_viewId = viewId; s_pageId = s_pageDb = UUID{}; s_boardId = UUID{}; }
 DrawStats lastDrawStats() { return s_stats; }
 const std::string& lastError() { return s_ws.lastError(); }
 

@@ -66,6 +66,8 @@ namespace PlannerPanel
 	void selectDatabase(const HE::UUID& id);
 	HE::UUID selectedDatabase();
 	HE::UUID selectedView();
+	// Show one view of a database (what a tab or the sidebar does).
+	void selectView(const HE::UUID& databaseId, const HE::UUID& viewId);
 	// Show Tasks with this task's details open (the footer's click, a "From the
 	// Team" row, Window ▸ Task Board). The caller brings the tab forward.
 	void openTask(const HE::UUID& id);

@@ -269,10 +269,25 @@ namespace
 		return ws ? ws->find(tasksDatabaseId()) : nullptr;
 	}
 
+	void idle(AppContext& ctx, int n = 3);
+
+	// Tasks open as the board (By status); most of these tests work in the table, so they show it.
+	void showTasksTable(AppContext& ctx)
+	{
+		idle(ctx, 3);
+		Workspace* ws = PlannerPanel::workspace(ctx);
+		const Database* db = ws ? ws->find(tasksDatabaseId()) : nullptr;
+		REQUIRE(db != nullptr);
+		for (const View& v : db->views)
+			if (v.kind == ViewKind::Table) { PlannerPanel::selectView(db->id, v.id); break; }
+		idle(ctx, 2);
+	}
+
 	void addTasks(AppContext& ctx, std::initializer_list<const char*> titles)
 	{
 		for (const char* t : titles)
 			REQUIRE(TaskBoardPanel::edit(ctx, [&](TaskBoard& b) { b.add(t, "Tester", taskNowMs()); return true; }));
+		showTasksTable(ctx);
 	}
 
 	std::string readText(const std::filesystem::path& p)
@@ -281,7 +296,7 @@ namespace
 		return std::string((std::istreambuf_iterator<char>(f)), {});
 	}
 
-	void idle(AppContext& ctx, int n = 3)
+	void idle(AppContext& ctx, int n)
 	{
 		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 		settle(ctx, n);
@@ -506,7 +521,7 @@ TEST_CASE("planner ui: drops link an asset, a scene and an entity; chips jump to
 	src.scenePath = scene.string();
 	src.entity    = crate;
 	g_sources     = &src;
-	idle(ctx);
+	showTasksTable(ctx);
 
 	// The Links cell is the target: three drops, three links, in the order they came.
 	PlannerPanel::Rect cell = PlannerPanel::controlRect("links:Fix the crate");
@@ -609,6 +624,7 @@ TEST_CASE("planner ui: the details edit the description, add a comment, and the 
 	idle(ctx);
 
 	PlannerPanel::openTask(id);
+	showTasksTable(ctx);
 	idle(ctx);
 	CHECK(PlannerPanel::selectedRow() == id);
 	CHECK(TaskBoardPanel::selectedTask() == id);
@@ -734,6 +750,7 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	}));
 	const std::string assignees = "assignees:Retexture the crates";
 	auto frames = [&](int n) { idle(ctx, n); };
+	showTasksTable(ctx);
 
 	// No team server: no picker, and the board is the local one it always was.
 	frames(3);
@@ -790,7 +807,7 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	REQUIRE(PlannerPanel::controlRect("From the Team").x1 > 0);
 	// The assignee picker left the focus on its popup, which blocks hovering elsewhere until a click lands:
 	// a click on a sidebar entry takes the focus back.
-	REQUIRE(click(ctx, "item:All tasks"));
+	REQUIRE(click(ctx, "item:By status"));
 	REQUIRE(click(ctx, "From the Team"));
 	REQUIRE(PlannerPanel::controlRect("team-row:0").x1 > 0);
 	shotTo(ctx, "planner_team_from_the_team");
@@ -2636,4 +2653,30 @@ TEST_CASE("planner ui board: dragging with the right button pans")
 	CHECK(v.x == doctest::Approx(-80.0));   // the board followed the hand
 	CHECK(v.y == doctest::Approx(-40.0));
 	CHECK(f.ws->findBoard(f.id)->nodes.empty());   // and made nothing
+}
+
+TEST_CASE("planner ui: Tasks opens as By status, with no separate table entry; the table is one + away")
+{
+	Harness harness;
+	Project proj("he_planner_ui_tasks_board");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const Database* tasks = ws->find(tasksDatabaseId());
+	REQUIRE(tasks != nullptr);
+	const View* open = tasks->findView(PlannerPanel::selectedView());
+	REQUIRE(open != nullptr);
+	CHECK(open->kind == ViewKind::Board);
+	CHECK(open->name == "By status");
+	CHECK(PlannerPanel::controlRect("item:By status").x1 > 0);
+	CHECK(PlannerPanel::controlRect("item:All tasks").x1 <= 0);
+	CHECK(PlannerPanel::controlRect("New Row").x1 > 0);   // "New Item" on a board
+
+	REQUIRE(click(ctx, "Open"));
+	idle(ctx);
+	REQUIRE(click(ctx, "open:All tasks"));
+	idle(ctx);
+	CHECK(tasks->findView(PlannerPanel::selectedView())->kind == ViewKind::Table);
+	CHECK(PlannerPanel::controlRect("view:All tasks").x1 > 0);
 }
