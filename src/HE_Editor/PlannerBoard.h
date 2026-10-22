@@ -147,6 +147,40 @@ private:
 	friend bool saveBoard(const std::filesystem::path&, Board&, std::string*);
 };
 
+// ── Undo and redo ────────────────────────────────────────────────────────────
+// The editor's, per open board, never written to a file. Each step is a snapshot of
+// what the board held before a change (cards and arrows; the title and the file's
+// bookkeeping are not undone). `undo` and `redo` hand back the state to restore and keep
+// the one they replace for the way back; applying it is the caller's: assigning a snapshot
+// is idempotent, so a save that is retried after a pull restores the same thing twice.
+struct BoardSnapshot
+{
+	std::vector<Node> nodes;
+	std::vector<Edge> edges;
+};
+
+BoardSnapshot snapshotOf(const Board& board);
+void          restore(Board& board, const BoardSnapshot& snapshot, std::int64_t nowMs);
+
+class BoardHistory
+{
+public:
+	static constexpr std::size_t kLimit = 100;
+
+	// `before` is the board as it was before a change that did happen. Forgets the redo
+	// stack (a new change ends that future) and the oldest step beyond kLimit.
+	void record(BoardSnapshot before);
+	bool canUndo() const { return !m_undo.empty(); }
+	bool canRedo() const { return !m_redo.empty(); }
+	// The state to go back to, with `current` kept for redo; false when there is none.
+	bool undo(const Board& current, BoardSnapshot& target);
+	bool redo(const Board& current, BoardSnapshot& target);
+	void clear() { m_undo.clear(); m_redo.clear(); }
+
+private:
+	std::vector<BoardSnapshot> m_undo, m_redo;
+};
+
 // ── The files ────────────────────────────────────────────────────────────────
 std::filesystem::path boardPath(const std::filesystem::path& projectRoot, const UUID& id);
 std::vector<UUID>     listBoards(const std::filesystem::path& projectRoot);

@@ -441,3 +441,64 @@ TEST_CASE("planner workspace boards: create, edit, reload, remove, and a pull un
 	CHECK(ws.findBoard(id) == nullptr);
 	CHECK_FALSE(ws.removeBoard(id));
 }
+
+TEST_CASE("planner board history: undo and redo walk the snapshots; a new change ends the redo future")
+{
+	Board b;
+	BoardHistory h;
+	CHECK_FALSE(h.canUndo());
+	CHECK_FALSE(h.canRedo());
+	BoardSnapshot target;
+	CHECK_FALSE(h.undo(b, target));
+	CHECK_FALSE(h.redo(b, target));
+
+	// Three changes, each recorded as the state before it.
+	h.record(snapshotOf(b));
+	const UUID a = b.addNode(NodeType::Text, 0, 0, 100, 50, "a", kNow)->id;
+	h.record(snapshotOf(b));
+	const UUID c = b.addNode(NodeType::Text, 200, 0, 100, 50, "c", kNow)->id;
+	h.record(snapshotOf(b));
+	b.addEdge(a, c, "x", kNow);
+	CHECK(h.canUndo());
+
+	REQUIRE(h.undo(b, target));   // the edge goes
+	restore(b, target, kNow + 1);
+	CHECK(b.edges.empty());
+	CHECK(b.nodes.size() == 2);
+	REQUIRE(h.undo(b, target));   // c goes
+	restore(b, target, kNow + 2);
+	CHECK(b.nodes.size() == 1);
+	CHECK(b.modifiedMs == kNow + 2);
+	CHECK(h.canRedo());
+	REQUIRE(h.redo(b, target));   // c comes back
+	restore(b, target, kNow + 3);
+	CHECK(b.nodes.size() == 2);
+	CHECK(b.edges.empty());
+
+	// A new change ends the future that was left.
+	h.record(snapshotOf(b));
+	b.moveNode(a, 5, 5, kNow + 4);
+	CHECK_FALSE(h.canRedo());
+	REQUIRE(h.undo(b, target));
+	restore(b, target, kNow + 5);
+	CHECK(b.findNode(a)->x == 0);
+	REQUIRE(h.redo(b, target));
+	restore(b, target, kNow + 6);
+	CHECK(b.findNode(a)->x == 5);
+
+	// Restoring is plain assignment: doing it twice (a save retried after a pull) is the same.
+	restore(b, target, kNow + 7);
+	CHECK(b.findNode(a)->x == 5);
+	CHECK(b.nodes.size() == 2);
+
+	// The oldest steps go beyond the limit.
+	BoardHistory many;
+	for (std::size_t i = 0; i < BoardHistory::kLimit + 20; ++i)
+	{
+		many.record(snapshotOf(b));
+		b.moveNode(a, static_cast<double>(i), 0, kNow);
+	}
+	std::size_t steps = 0;
+	while (many.undo(b, target)) ++steps;
+	CHECK(steps == BoardHistory::kLimit);
+}

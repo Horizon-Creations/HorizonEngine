@@ -289,6 +289,7 @@ add_executable(HorizonEditor WIN32
 	PlannerWorkspace.cpp
 	PlannerBoard.cpp
 	# ...and the editor tab on top of them (Window > Planner).
+	PlannerBoardView.cpp
 	PlannerPanel.cpp
 	# The project's to-do list (Config/TaskBoard.json): data and file only, no ImGui.
 	TaskBoard.cpp

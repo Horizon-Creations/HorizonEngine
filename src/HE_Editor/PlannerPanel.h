@@ -29,6 +29,10 @@ namespace HE::Planner { class Workspace; }
 // row is a page too ("Open Page" in its details), with its properties on top; the
 // design document and level concepts are standalone pages in the sidebar.
 //
+// ── Whiteboards ───────────────────────────────────────────────────────────────
+// "Boards" in the sidebar: cards and arrows on a free surface, with pan, zoom, move, resize,
+// text edited in place, arrows dragged from a dot on a card, and undo (PlannerBoardView.h).
+//
 // ── Tasks replaces the Task Board window ──────────────────────────────────────
 // The database "Tasks" is the project's task list (PlannerTasks.h): rows come
 // from the Task Board's file and edits go back to it, so the footer, the MCP
@@ -76,6 +80,9 @@ namespace PlannerPanel
 	void selectPage(const HE::UUID& id);
 	void openRowPage(const HE::UUID& databaseId, const HE::UUID& rowId);
 	HE::UUID selectedPage();
+	// Show a whiteboard (the sidebar click, from code); {} when a database or a page is shown.
+	void selectBoard(const HE::UUID& id);
+	HE::UUID selectedBoard();
 
 	// What the last frame drew: rows the selected view has, and how many of them
 	// were laid out (a long table only draws what is on screen).

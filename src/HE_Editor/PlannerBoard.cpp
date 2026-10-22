@@ -470,6 +470,42 @@ std::string Board::toJson() const
 	return TJ::dumpDocument(j);
 }
 
+// ── Undo and redo ────────────────────────────────────────────────────────────
+
+BoardSnapshot snapshotOf(const Board& board) { return { board.nodes, board.edges }; }
+
+void restore(Board& board, const BoardSnapshot& snapshot, std::int64_t nowMs)
+{
+	board.nodes = snapshot.nodes;
+	board.edges = snapshot.edges;
+	board.modifiedMs = nowMs;
+}
+
+void BoardHistory::record(BoardSnapshot before)
+{
+	m_undo.push_back(std::move(before));
+	if (m_undo.size() > kLimit) m_undo.erase(m_undo.begin());
+	m_redo.clear();
+}
+
+bool BoardHistory::undo(const Board& current, BoardSnapshot& target)
+{
+	if (m_undo.empty()) return false;
+	target = std::move(m_undo.back());
+	m_undo.pop_back();
+	m_redo.push_back(snapshotOf(current));
+	return true;
+}
+
+bool BoardHistory::redo(const Board& current, BoardSnapshot& target)
+{
+	if (m_redo.empty()) return false;
+	target = std::move(m_redo.back());
+	m_redo.pop_back();
+	m_undo.push_back(snapshotOf(current));
+	return true;
+}
+
 // ── The files ────────────────────────────────────────────────────────────────
 
 std::filesystem::path boardPath(const std::filesystem::path& projectRoot, const UUID& id)

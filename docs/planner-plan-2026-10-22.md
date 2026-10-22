@@ -230,3 +230,24 @@ W3 Objekt-/Zeilen-/Seitenkarten, Rahmen | W4 MCP-Tools, Minimap, Export als PNG.
 **Naechste Schritte (W1):** Canvas im Tab: Seitenleiste "Boards", Pan/Zoom (Leertaste+Ziehen, Mittelmaus, Strg+Rad), Textkarten (Doppelklick leer = neu, Doppelklick Karte = Text bearbeiten),
 Auswahl (Klick, Shift, Aufziehrahmen), Verschieben/Groesse per Griffe, Verbindungen vom Kartenrand, Farben, Loeschen; Zeichnen nur sichtbarer Karten; Undo/Redo je Board (Befehlsstapel).
 Danach W2 (Bilder: Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Vorschau mit `AssetThumbnailCache`).
+
+## Handoff (Stand Whiteboard W1, 2026-10-22)
+**Fertig (W1):** der Canvas im Tab.
+- `BoardHistory` (ImGui-frei, `PlannerBoard.{h,cpp}`): Undo/Redo als Schnappschuesse (Karten + Pfeile), 100 Schritte, je Board, nicht gespeichert; Wiederherstellen ist Zuweisung
+  (idempotent, falls ein Speichern nach einem Pull wiederholt wird). `snapshotOf`/`restore`.
+- `PlannerBoardView.{h,cpp}`: Toolbar (Titel, New Card, New Frame, Undo, Redo, Delete, 7 Farben + "keine", Fit, 100 %, Zoomanzeige, bei gewaehltem Pfeil Beschriftung + Arrow)
+  und Canvas: Raster, Pan (Scroll, Mittelmaus, Leertaste+Ziehen), Zoom an der Maus (Strg/Cmd+Scroll, 0,1x bis 4x), Auswahl (Klick, Shift, Aufziehrahmen),
+  Verschieben (ein Rahmen nimmt, was ganz in ihm liegt, mit), Groesse per Eckgriffe (nie unter 24), Pfeile per Ziehen von einem Punkt am Kartenrand auf eine andere Karte
+  (nicht doppelt, nicht auf sich selbst), Pfeil anklicken = auswaehlen, Doppelklick leer = neue Karte (Cursor drin), Doppelklick Karte = Text in place, Delete/Backspace,
+  Strg/Cmd+Z, +Shift oder +Y, Strg/Cmd+A, Esc. Nur sichtbare Karten werden gezeichnet. Karten der Typen image/object/row/page werden schon als Karte mit Beschriftung
+  dargestellt (Bild-Vorschau und Anlegen dieser Typen kommen in W2/W3).
+- `PlannerPanel`: Seitenleiste "Boards" (Liste, New Board, Rechtsklick Delete Board mit Bestaetigung), Board ersetzt Datenbank/Seite im Hauptbereich, unlesbare Boards rot gelistet.
+  Jede Aenderung laeuft durch `Workspace::editBoard` (Pull unter dem offenen Board wird gelesen und die Aenderung einmal darauf angewendet).
+**Fehler beim Bauen gefunden und behoben:** ein Ziehen, das im selben Frame beginnt, mass vom Start des vorigen Ziehens und galt als Verschiebung (Klick = leerer Undo-Schritt).
+**Tests:** `test_planner_ui` 29 Faelle (neu 6 fuer das Whiteboard: Karte anlegen und tippen, Titel, Verschieben + Undo/Redo per Knopf und Taste + gespeicherte Datei, Eckgriffe,
+Pfeile, Pfeil-Beschriftung, Loeschen mit Pfeilen + Undo, Scroll/Zoom an der Maus/Mittelmaus-Pan/Fit/100 %, Rahmen, Farben, 2000 Karten gezeichnet < 20, Board-Wechsel, Pull),
+`test_planner_board` 9, Help-Audit 0 offen, `HorizonEditor` gebaut. Volllauf nicht wiederholt. Editor nicht gestartet (Gefuehl von Zoom/Pan mit Trackpad/Maus ungeprueft);
+Windows/Linux nicht gebaut.
+**Offen:** W2 Bilder (Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Datei-Drop, Vorschau mit `AssetThumbnailCache`/Textur aus `Config/Planner/Media`);
+W3 Objekt-/Zeilen-/Seitenkarten anlegen (Drop aus Outliner, "Open" in Details/Seite als Karte), Rahmen-Titel, Ausrichten/Raster-Einrasten, Kopieren/Einfuegen/Duplizieren;
+W4 MCP-Tools fuer Boards, Minimap, Export als PNG; Undo fuer Titel; Mehrfachauswahl-Groesse; Mausrad-Zoom-Gefuehl pruefen.

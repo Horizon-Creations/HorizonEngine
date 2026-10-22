@@ -1485,3 +1485,408 @@ TEST_CASE("planner ui pages: text typed in a block is kept when another block is
 	CHECK(ws->findPage(pageId)->blocks[1].text == "two!");
 	CHECK(ws->findPage(pageId)->blocks[0].text == "one");
 }
+
+// ── The whiteboard ───────────────────────────────────────────────────────────
+
+#include "PlannerBoardView.h"
+
+namespace
+{
+	// A board in the project, shown; the view at the origin at 100 %.
+	struct BoardFixture
+	{
+		Workspace* ws = nullptr;
+		UUID       id;
+	};
+
+	BoardFixture openBoard(AppContext& ctx)
+	{
+		BoardFixture f;
+		idle(ctx);
+		REQUIRE(click(ctx, "New Board"));
+		idle(ctx);
+		f.ws = PlannerPanel::workspace(ctx);
+		f.id = PlannerPanel::selectedBoard();
+		REQUIRE(f.ws->findBoard(f.id) != nullptr);
+		PlannerBoardView::setView(f.id, { 0, 0, 1.0 });
+		idle(ctx);
+		return f;
+	}
+
+	ImVec2 canvasPoint(double wx, double wy)
+	{
+		const PlannerPanel::Rect c = PlannerPanel::controlRect("canvas");
+		const PlannerBoardView::ViewState v = PlannerBoardView::viewOf(PlannerPanel::selectedBoard());
+		return ImVec2(c.x0 + static_cast<float>((wx - v.x) * v.zoom), c.y0 + static_cast<float>((wy - v.y) * v.zoom));
+	}
+
+	void pressMouse(ImGuiMouseButton button, bool down) { ImGui::GetIO().AddMouseButtonEvent(button, down); }
+
+	void doubleClickAt(AppContext& ctx, ImVec2 p)
+	{
+		ImGui::GetIO().AddMousePosEvent(p.x, p.y);
+		frame(ctx, false);
+		frame(ctx, false);
+		frame(ctx, true);
+		frame(ctx, false);
+		frame(ctx, true);
+		frame(ctx, false);
+		settle(ctx);
+	}
+
+	// A drag with the left button, from a screen point to another.
+	void dragScreen(AppContext& ctx, ImVec2 from, ImVec2 to) { dragTo(ctx, from, to); idle(ctx); }
+
+	void keyPress(AppContext& ctx, ImGuiKey key, bool ctrl = false, bool shift = false)
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMousePosEvent(centre(PlannerPanel::controlRect("canvas")).x, centre(PlannerPanel::controlRect("canvas")).y);
+		if (ctrl)  io.AddKeyEvent(ImGuiMod_Ctrl, true);
+		if (shift) io.AddKeyEvent(ImGuiMod_Shift, true);
+		io.AddKeyEvent(key, true);
+		frame(ctx, false);
+		io.AddKeyEvent(key, false);
+		if (ctrl)  io.AddKeyEvent(ImGuiMod_Ctrl, false);
+		if (shift) io.AddKeyEvent(ImGuiMod_Shift, false);
+		settle(ctx);
+	}
+
+	const Node* nodeTexted(Workspace* ws, const UUID& board, const char* text)
+	{
+		const Board* b = ws->findBoard(board);
+		for (const Node& n : b->nodes)
+			if (n.text == text) return &n;
+		return nullptr;
+	}
+}
+
+TEST_CASE("planner ui board: New Board makes a file; a double-click makes a card and typing fills it")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_new");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	CHECK(std::filesystem::exists(boardPath(proj.root(), f.id)));
+	CHECK(PlannerPanel::controlRect("canvas").x1 > 0);
+	shotTo(ctx, "planner_board_empty");
+
+	// Double-click empty space: a card centred there, the cursor in it.
+	doubleClickAt(ctx, canvasPoint(300, 200));
+	REQUIRE(f.ws->findBoard(f.id)->nodes.size() == 1);
+	const Node& n = f.ws->findBoard(f.id)->nodes[0];
+	CHECK(n.type == NodeType::Text);
+	CHECK(n.x == doctest::Approx(300 - 120));
+	CHECK(n.y == doctest::Approx(200 - 60));
+	CHECK(PlannerBoardView::selection() == std::vector<UUID>{ n.id });
+	typeText(ctx, "Fog rolls in at dusk");
+	// Clicking away commits it.
+	click(ctx, "canvas");
+	idle(ctx);
+	REQUIRE(f.ws->findBoard(f.id)->nodes.size() == 1);
+	CHECK(f.ws->findBoard(f.id)->nodes[0].text == "Fog rolls in at dusk");
+	CHECK(PlannerBoardView::canUndo(f.id));
+
+	// It is in the file a teammate pulls.
+	Board onDisk;
+	REQUIRE(loadBoard(proj.root(), f.id, onDisk).ok);
+	REQUIRE(onDisk.nodes.size() == 1);
+	CHECK(onDisk.nodes[0].text == "Fog rolls in at dusk");
+	shotTo(ctx, "planner_board_card");
+
+	// The toolbar's New Card puts one in the middle of what is seen; the title is saved when left.
+	REQUIRE(click(ctx, "New Card"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 2);
+	REQUIRE(click(ctx, "board:title"));
+	for (int i = 0; i < 14; ++i)   // "Untitled board" goes
+	{
+		ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, true);
+		frame(ctx, false);
+		ImGui::GetIO().AddKeyEvent(ImGuiKey_Backspace, false);
+		frame(ctx, false);
+	}
+	typeText(ctx, "Harbour ideas");
+	click(ctx, "canvas");
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->title == "Harbour ideas");
+}
+
+TEST_CASE("planner ui board: dragging moves a card, undo and redo walk it back and forth")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_move");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	UUID a;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& b) { a = b.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1)->id; return true; }));
+	idle(ctx);
+
+	const PlannerPanel::Rect r = PlannerPanel::controlRect("node:alpha");
+	REQUIRE(r.x1 > r.x0);
+	dragScreen(ctx, centre(r), ImVec2(centre(r).x + 150, centre(r).y + 60));
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(250));
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->y == doctest::Approx(160));
+	CHECK(PlannerBoardView::selection() == std::vector<UUID>{ a });
+	CHECK(PlannerBoardView::canUndo(f.id));
+	Board onDisk;
+	REQUIRE(loadBoard(proj.root(), f.id, onDisk).ok);
+	CHECK(onDisk.findNode(a)->x == doctest::Approx(250));
+
+	// A click that does not move writes nothing and adds no step.
+	const std::string before = f.ws->findBoard(f.id)->toJson();
+	REQUIRE(click(ctx, "node:alpha"));
+	CHECK(f.ws->findBoard(f.id)->toJson() == before);
+
+	// Undo and redo, by the buttons and by the keys.
+	REQUIRE(click(ctx, "Undo"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(100));
+	CHECK(PlannerBoardView::canRedo(f.id));
+	REQUIRE(click(ctx, "Redo"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(250));
+	keyPress(ctx, ImGuiKey_Z, /*ctrl=*/true);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(100));
+	keyPress(ctx, ImGuiKey_Z, /*ctrl=*/true, /*shift=*/true);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(250));
+	// Undo is saved: the file says so.
+	keyPress(ctx, ImGuiKey_Z, true);
+	REQUIRE(loadBoard(proj.root(), f.id, onDisk).ok);
+	CHECK(onDisk.findNode(a)->x == doctest::Approx(100));
+}
+
+TEST_CASE("planner ui board: corner handle resizes, arrows are dragged from a dot, delete takes the arrows with the card")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_arrows");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	UUID a, b;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		a = bd.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1)->id;
+		b = bd.addNode(NodeType::Text, 500, 120, 200, 100, "beta", 1)->id;
+		return true;
+	}));
+	idle(ctx);
+
+	// Select one card: its handles appear; drag the south-east corner.
+	REQUIRE(click(ctx, "node:alpha"));
+	const PlannerPanel::Rect se = PlannerPanel::controlRect("handle:se");
+	REQUIRE(se.x1 > se.x0);
+	dragScreen(ctx, centre(se), ImVec2(centre(se).x + 100, centre(se).y + 50));
+	const Node* alpha = f.ws->findBoard(f.id)->findNode(a);
+	CHECK(alpha->x == doctest::Approx(100));
+	CHECK(alpha->y == doctest::Approx(100));
+	CHECK(alpha->w == doctest::Approx(300));
+	CHECK(alpha->h == doctest::Approx(150));
+	// The north-west corner moves the other way and never shrinks below the minimum.
+	const PlannerPanel::Rect nw = PlannerPanel::controlRect("handle:nw");
+	REQUIRE(nw.x1 > nw.x0);
+	dragScreen(ctx, centre(nw), ImVec2(centre(nw).x + 1000, centre(nw).y + 1000));
+	alpha = f.ws->findBoard(f.id)->findNode(a);
+	CHECK(alpha->w == doctest::Approx(Board::kMinSize));
+	CHECK(alpha->h == doctest::Approx(Board::kMinSize));
+	REQUIRE(click(ctx, "Undo"));
+	REQUIRE(click(ctx, "Undo"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->w == doctest::Approx(200));
+
+	// An arrow: from the east dot of alpha onto beta.
+	REQUIRE(click(ctx, "node:alpha"));
+	const PlannerPanel::Rect dot = PlannerPanel::controlRect("dot:E");
+	REQUIRE(dot.x1 > dot.x0);
+	dragScreen(ctx, centre(dot), centre(PlannerPanel::controlRect("node:beta")));
+	REQUIRE(f.ws->findBoard(f.id)->edges.size() == 1);
+	CHECK(f.ws->findBoard(f.id)->edges[0].from == a);
+	CHECK(f.ws->findBoard(f.id)->edges[0].to == b);
+	shotTo(ctx, "planner_board_arrow");
+	// The same arrow again is refused; one onto the card itself too.
+	REQUIRE(click(ctx, "node:alpha"));
+	dragScreen(ctx, centre(PlannerPanel::controlRect("dot:E")), centre(PlannerPanel::controlRect("node:beta")));
+	CHECK(f.ws->findBoard(f.id)->edges.size() == 1);
+
+	// Click the arrow: its label and head can be set.
+	const UUID edgeId = f.ws->findBoard(f.id)->edges[0].id;
+	REQUIRE(click(ctx, "edge:"));
+	CHECK(PlannerBoardView::selectedEdge() == edgeId);
+	REQUIRE(click(ctx, "edge:label"));
+	typeText(ctx, "leads to");
+	click(ctx, "canvas");
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->edges[0].label == "leads to");
+
+	// Delete a card: its arrows go with it; undo brings both back.
+	REQUIRE(click(ctx, "node:beta"));
+	keyPress(ctx, ImGuiKey_Delete);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 1);
+	CHECK(f.ws->findBoard(f.id)->edges.empty());
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 2);
+	CHECK(f.ws->findBoard(f.id)->edges.size() == 1);
+}
+
+TEST_CASE("planner ui board: scroll pans, Ctrl+scroll zooms at the cursor, Fit shows everything")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_view");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& b) {
+		b.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1);
+		b.addNode(NodeType::Text, 3000, 2000, 200, 100, "far away", 1);
+		return true;
+	}));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("node:far away").x1 <= 0);   // off screen: not drawn
+
+	// Scroll pans by the wheel (down moves the view down).
+	ImGuiIO& io = ImGui::GetIO();
+	const ImVec2 mid = centre(PlannerPanel::controlRect("canvas"));
+	io.AddMousePosEvent(mid.x, mid.y);
+	frame(ctx, false);
+	io.AddMouseWheelEvent(0.0f, -2.0f);
+	frame(ctx, false);
+	settle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).y == doctest::Approx(60.0));
+
+	// Ctrl + wheel zooms and keeps the world point under the cursor.
+	double wx = 0, wy = 0;
+	{
+		const PlannerBoardView::ViewState v = PlannerBoardView::viewOf(f.id);
+		const PlannerPanel::Rect c = PlannerPanel::controlRect("canvas");
+		wx = v.x + (mid.x - c.x0) / v.zoom;
+		wy = v.y + (mid.y - c.y0) / v.zoom;
+	}
+	io.AddKeyEvent(ImGuiMod_Ctrl, true);
+	io.AddMouseWheelEvent(0.0f, 3.0f);
+	frame(ctx, false);
+	io.AddKeyEvent(ImGuiMod_Ctrl, false);
+	settle(ctx);
+	const PlannerBoardView::ViewState zoomed = PlannerBoardView::viewOf(f.id);
+	CHECK(zoomed.zoom == doctest::Approx(std::pow(1.1, 3.0)));
+	{
+		const PlannerPanel::Rect c = PlannerPanel::controlRect("canvas");
+		CHECK(zoomed.x + (mid.x - c.x0) / zoomed.zoom == doctest::Approx(wx).epsilon(0.001));
+		CHECK(zoomed.y + (mid.y - c.y0) / zoomed.zoom == doctest::Approx(wy).epsilon(0.001));
+	}
+
+	// Pan with the middle button.
+	const PlannerBoardView::ViewState before = PlannerBoardView::viewOf(f.id);
+	io.AddMousePosEvent(mid.x, mid.y);
+	frame(ctx, false);
+	pressMouse(ImGuiMouseButton_Middle, true);
+	frame(ctx, false);
+	io.AddMousePosEvent(mid.x + 100, mid.y + 40);
+	frame(ctx, false);
+	pressMouse(ImGuiMouseButton_Middle, false);
+	frame(ctx, false);
+	settle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).x == doctest::Approx(before.x - 100 / before.zoom));
+	CHECK(PlannerBoardView::viewOf(f.id).y == doctest::Approx(before.y - 40 / before.zoom));
+
+	// Fit: both cards are in view.
+	REQUIRE(click(ctx, "Fit"));
+	idle(ctx);
+	CHECK(PlannerBoardView::lastStats().nodes == 2);
+	CHECK(PlannerBoardView::lastStats().drawn == 2);
+	CHECK(PlannerBoardView::viewOf(f.id).zoom < 1.0);
+	shotTo(ctx, "planner_board_fit");
+	REQUIRE(click(ctx, "100%"));
+	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(1.0));
+}
+
+TEST_CASE("planner ui board: a rectangle selects, colours apply, a frame moves what is inside it, only visible cards are drawn")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_select");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	UUID frameId, inside, outside;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& b) {
+		frameId = b.addNode(NodeType::Frame, 40, 40, 400, 300, "Level 1", 1)->id;
+		inside  = b.addNode(NodeType::Text, 80, 100, 160, 80, "inside", 1)->id;
+		outside = b.addNode(NodeType::Text, 600, 100, 160, 80, "outside", 1)->id;
+		return true;
+	}));
+	idle(ctx);
+
+	// A rectangle drawn over empty space round both cards (the press must start on nothing).
+	dragScreen(ctx, canvasPoint(20, 20), canvasPoint(800, 400));
+	CHECK(PlannerBoardView::selection().size() == 3);
+	// Colour what is selected.
+	REQUIRE(click(ctx, "swatch:yellow"));
+	CHECK(f.ws->findBoard(f.id)->findNode(inside)->color == "yellow");
+	CHECK(f.ws->findBoard(f.id)->findNode(outside)->color == "yellow");
+	shotTo(ctx, "planner_board_selected");
+	REQUIRE(click(ctx, "swatch:none"));
+	CHECK(f.ws->findBoard(f.id)->findNode(inside)->color.empty());
+
+	// Click empty space: nothing is selected. Then drag the frame: its contents follow.
+	dragScreen(ctx, canvasPoint(900, 380), canvasPoint(910, 390));   // a tiny rectangle on nothing
+	CHECK(PlannerBoardView::selection().empty());
+	const PlannerPanel::Rect fr = PlannerPanel::controlRect("node:Level 1");
+	REQUIRE(fr.x1 > fr.x0);
+	dragScreen(ctx, ImVec2(fr.x0 + 6, fr.y1 - 6), ImVec2(fr.x0 + 6 + 100, fr.y1 - 6 + 50));   // the empty corner of the frame
+	CHECK(f.ws->findBoard(f.id)->findNode(frameId)->x == doctest::Approx(140));
+	CHECK(f.ws->findBoard(f.id)->findNode(inside)->x == doctest::Approx(180));
+	CHECK(f.ws->findBoard(f.id)->findNode(inside)->y == doctest::Approx(150));
+	CHECK(f.ws->findBoard(f.id)->findNode(outside)->x == doctest::Approx(600));   // not inside: it stays
+
+	// Many cards: only those in view are laid out.
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& b) {
+		for (int i = 0; i < 2000; ++i) b.addNode(NodeType::Text, 2000.0 + (i % 50) * 300, 2000.0 + (i / 50) * 200, 240, 120, "card " + std::to_string(i), 1);
+		return true;
+	}));
+	idle(ctx);
+	CHECK(PlannerBoardView::lastStats().nodes == 2003);
+	CHECK(PlannerBoardView::lastStats().drawn < 20);
+}
+
+TEST_CASE("planner ui board: boards switch cleanly; delete asks first; a pull under the open board is read")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_switch");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& b) { b.title = "First"; b.addNode(NodeType::Text, 100, 100, 200, 100, "one", 1); return true; }));
+	idle(ctx);
+	REQUIRE(click(ctx, "node:one"));
+	CHECK(PlannerBoardView::selection().size() == 1);
+
+	// A second board: the selection of the first means nothing there.
+	REQUIRE(click(ctx, "New Board"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedBoard() != f.id);
+	CHECK(PlannerBoardView::selection().empty());
+	REQUIRE(f.ws->boards().size() == 2);
+
+	// Back to the first by the sidebar; a database or a page replaces the board.
+	REQUIRE(click(ctx, "board:First"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedBoard() == f.id);
+	PlannerPanel::selectDatabase(tasksDatabaseId());
+	idle(ctx);
+	CHECK(PlannerPanel::selectedBoard() == UUID{});
+	CHECK(PlannerPanel::controlRect("canvas").x1 <= 0);
+	PlannerPanel::selectBoard(f.id);
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("canvas").x1 > 0);
+
+	// A teammate's card arrives with a pull; the open board shows it.
+	{
+		Workspace other;
+		other.setProject(proj.root());
+		REQUIRE(other.editBoard(f.id, [](Board& b) { b.addNode(NodeType::Text, 400, 100, 200, 100, "theirs", 2); return true; }));
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(600));
+	idle(ctx, 4);
+	CHECK(PlannerPanel::controlRect("node:theirs").x1 > 0);
+	// Undo after a pull does not take the pulled card away (it was not ours to undo).
+	REQUIRE(f.ws->findBoard(f.id)->nodes.size() == 2);
+}
