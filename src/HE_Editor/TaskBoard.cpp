@@ -1,4 +1,5 @@
 #include "TaskBoard.h"
+#include "TaskBoardJson.h"
 
 #include <Diagnostics/Log.h>
 
@@ -911,5 +912,20 @@ bool saveTaskBoard(const std::filesystem::path& projectRoot, TaskBoard& board,
 	board.m_diskBytes   = text;
 	return true;
 }
+
+// ── The door for the Planner (TaskBoardJson.h) ───────────────────────────────
+
+namespace TaskJson
+{
+void readString(const ojson& j, const char* key, std::string& out) { HE::readString(j, key, out); }
+void readStrings(const ojson& j, const char* key, std::vector<std::string>& out) { HE::readStrings(j, key, out); }
+bool readUuid(const ojson& j, const char* key, UUID& out) { return HE::readUuid(j, key, out); }
+void readTime(const ojson& j, const char* key, std::int64_t& out) { HE::readTime(j, key, out); }
+std::string extrasOf(const ojson& obj, std::initializer_list<std::string_view> known) { return HE::extrasOf(obj, known); }
+void appendExtras(ojson& out, const std::string& extraJson) { HE::appendExtras(out, extraJson); }
+std::string dumpDocument(const ojson& j) { return HE::dumpDocument(j); }
+TaskLink readLink(const ojson& j) { return HE::readLink(j); }
+ojson    writeLink(const TaskLink& l) { return HE::writeLink(l); }
+} // namespace TaskJson
 
 } // namespace HE
