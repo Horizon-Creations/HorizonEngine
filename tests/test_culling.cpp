@@ -16,6 +16,7 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonRendering/GiLandscape.h>
+#include <HorizonRendering/GiInstanceSurface.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -3953,6 +3954,37 @@ bool near3(const glm::vec3& a, const glm::vec3& b, float eps = 1e-4f)
 	return glm::all(glm::lessThan(glm::abs(a - b), glm::vec3(eps)));
 }
 } // namespace
+
+TEST_CASE("GI auto landscape: a backend without the per-hit kernel gets the ground colour, not white")
+{
+	// D3D11, D3D12 and Vulkan shade a landscape chunk from one flat colour (HE::giInstanceSurface). The CPU fold
+	// cannot fold the auto material's texture-array BaseColor, so that colour was plain white.
+	HE::GiLandscape L = autoLandFixture();
+	std::vector<HE::GiLandscape> lands{ L };
+	RenderObject chunk;
+	chunk.landscapeIndex = 0;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	// Without the scene's landscapes it stays what it was: the object's own colour.
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr).albedo, { 1, 1, 1 }));
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, nullptr).albedo, { 1, 1, 1 }));
+	// With them: grass on flat ground, whatever the snow line (a flat colour cannot know the height).
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 0, 0 }));
+	// Dirt Amount mixes dirt into the ground.
+	lands[0].autoSlope.z = 0.5f;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.5f, 0.5f, 0 }));
+	// The instance tint still multiplies.
+	chunk.instanceTint = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.25f, 0.5f, 0 }));
+	// A chunk of no landscape, a bad index and a painted landscape keep their own colour.
+	RenderObject plain;
+	CHECK(near3(HE::giInstanceSurface(plain, nullptr, &lands).albedo, { 1, 1, 1 }));
+	chunk.landscapeIndex = 3;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+	lands[0].layerCount = 2;
+	chunk.landscapeIndex = 0;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+}
 
 TEST_CASE("GI auto landscape: the hit colour follows the material's slope and height masks")
 {

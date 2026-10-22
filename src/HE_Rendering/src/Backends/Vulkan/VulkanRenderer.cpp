@@ -11066,7 +11066,7 @@ void VulkanRenderer::updateGiAccel()
             // exactly what it was. Roughness and metallic of the HIT are not
             // carried: gi_refl.comp (one segment, no bounce loop) does not
             // read them either (matches D3D11/D3D12/GL).
-            const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, m_contentManager);
+            const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, m_contentManager, &m_renderWorld.landscapes);
             GIInstanceGpu reflInst = inst;
             reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
             reflInst.emissiveRG = static_cast<int32_t>(

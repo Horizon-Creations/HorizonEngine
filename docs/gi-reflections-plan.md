@@ -800,3 +800,18 @@ Wenn der Blur wieder an soll: Checkbox, oder `GIReflBlur = true` als Default in
 `EditorApplication.h`. Ohne ihn ist die Reflexion auf rauen Flächen wieder
 verrauscht — er ist kein Schmuck, sondern das, was die nicht gesampelten Teile
 der Lobe ersetzt.
+
+## D3D11 / D3D12 / Vulkan: Materialfarbe in der Reflexion (Nachtrag 2026-10-23)
+
+**Symptom:** Auf D3D und Vulkan spiegelten Landscape und Objekte nur den weißen Fallback.
+**Befund:** D3D12 und Vulkan lösen die Instanzfarbe seit Thema 191 über `HE::giInstanceSurface` auf (eigene Reflexions-Instanzkopie),
+**D3D11 nicht** — dort stand `obj.baseColor` (weiß für jedes Material) im Reflexions-Kernel. Und keiner der drei hat den
+GL/Metal-Treffer-Pfad für Landschaften (`GiLandscape`, Slope/Höhe/Paint pro Treffer): der Fold kann die Textur-Array-BaseColor der
+Auto-Landschaft nicht falten → weiß.
+**Fix:** (1) D3D11 bekommt wie D3D12 `giReflInstancesCpu`/`giReflInstanceSB` (Material-Albedo + Emissive, nur für den Reflexions-Kernel;
+GI-only-Bild bleibt unverändert). (2) `giInstanceSurface(obj, cm, landscapes)`: ein Auto-Landschafts-Chunk bekommt als flache Farbe den
+Boden (Gras ↔ Erde nach Dirt Amount, flach, ohne Schnee) aus den Scheiben-Mitteln des Extractors; übergeben von D3D11, D3D12, Vulkan.
+**Verifiziert:** `he_tests` (neuer Test in `test_culling.cpp`), Vulkan per `-fsyntax-only` (MoltenVK-Header), HorizonRendering baut.
+**Nicht verifiziert:** D3D11/D3D12/Vulkan zur Laufzeit (kein Windows hier), D3D-Quellen nicht übersetzt.
+**Offen (braucht die Kernel-Portierung + Gerät):** Hang-Fels, Schnee auf Gipfeln und Paint-Bänder per Texel in den Reflexions-Kerneln von
+D3D/Vulkan (`GiLandscape`-Puffer + `landIndex` in der Instanz, Weightmaps als SRVs/Descriptor-Array).

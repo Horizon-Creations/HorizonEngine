@@ -7359,7 +7359,7 @@ struct D3D12RendererImpl
                 // stay exactly what it was. Roughness and metallic of the HIT are
                 // not carried: the GL kernel (one segment, no bounce loop) does not
                 // read them either.
-                const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm);
+                const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm, &rw.landscapes);
                 GIInstanceGpu reflInst = inst;
                 reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
                 reflInst.emissiveRG = static_cast<int32_t>(

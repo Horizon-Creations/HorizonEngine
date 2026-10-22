@@ -18,6 +18,7 @@
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
 #include <HorizonRendering/GiBlasStore.h>    // GI: per-mesh BLAS cache in the concatenated arrays
+#include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo / emissive (all backends)
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays/blur reach per quality tier (all backends)
@@ -3130,7 +3131,10 @@ struct D3D11RendererImpl
     {
         glm::mat4 invTransform;
         glm::vec4 baseColor;
-        int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+        // emissiveRG / emissiveB: the hit's emissive as packed halves (r,g and b,0) for the GI-reflection
+        // kernel — the former pad words, so the struct stays 96 bytes (same as D3D12). Only filled in
+        // giReflInstancesCpu, the reflection-only copy; giInstancesCpu (shadow/probe) keeps obj.baseColor.
+        int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
     };
     static constexpr int   kGIProbeOctSize     = 8;
 
@@ -3156,9 +3160,10 @@ struct D3D11RendererImpl
 
     HE::GiBlasStore                giBlas;   // per-mesh BLASes, concatenated (GiBlasStore.h)
     std::vector<GIInstanceGpu>     giInstancesCpu;
+    std::vector<GIInstanceGpu>     giReflInstancesCpu;   // same order; graph-material colour folded in (reflections only)
     int  giInstanceCount = 0;
-    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB;
-    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV;
+    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB, giReflInstanceSB;
+    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV, giReflInstanceSRV;
     size_t giNodeCap = 0, giTriCap = 0;   // node/tri buffer capacities in elements
 
     int giShadowW = 0, giShadowH = 0;
@@ -3281,6 +3286,7 @@ struct D3D11RendererImpl
         // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
+        giReflInstancesCpu.clear();
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
             if (const GIBlasRange* r = giBlas.find(id)) return *r;
@@ -3308,6 +3314,20 @@ struct D3D11RendererImpl
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
             giInstancesCpu.push_back(inst);
+            if (giReflEnabled)
+            {
+                // The shared per-instance surface (HE::giInstanceSurface): a graph material's folded
+                // BaseColor / Emissive (an auto landscape's ground colour) instead of the mesh's own colour,
+                // which is plain white for every material and made each of them reflect white. Reflection
+                // buffer only: giInstancesCpu keeps obj.baseColor, so the GI-only image does not change
+                // when reflections are toggled (as on D3D12 and Vulkan).
+                const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm, &rw.landscapes);
+                GIInstanceGpu reflInst = inst;
+                reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
+                reflInst.emissiveRG = static_cast<int32_t>(glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
+                reflInst.emissiveB  = static_cast<int32_t>(glm::packHalf2x16(glm::vec2(surf.emissive.b, 0.0f)));
+                giReflInstancesCpu.push_back(reflInst);
+            }
             if (logInst)
                 HE_LOG_INFO(RHI, "D3D11Renderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
                             "baseColor (%.3f, %.3f, %.3f)", giInstancesCpu.size() - 1,
@@ -3350,14 +3370,18 @@ struct D3D11RendererImpl
         }
         makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
                sizeof(GIInstanceGpu), giInstanceSB, giInstanceSRV);
+        if (giReflEnabled)
+            makeSB(giReflInstancesCpu.data(), static_cast<UINT>(giReflInstancesCpu.size()),
+                   sizeof(GIInstanceGpu), giReflInstanceSB, giReflInstanceSRV);
+        else { giReflInstanceSB.Reset(); giReflInstanceSRV.Reset(); }
         if (!giNodeSRV || !giTriSRV || !giInstanceSRV) giInstanceCount = 0;
     }
 
     void destroyGiAccel()
     {
         HE_PROFILE_SCOPE_N("D3D11::GiDropAccel");
-        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset();
-        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset();
+        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset(); giReflInstanceSB.Reset();
+        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset(); giReflInstanceSRV.Reset();
         giNodeCap = giTriCap = 0;
         giBlas.clear();
         giInstancesCpu.clear();
@@ -4108,8 +4132,10 @@ struct D3D11RendererImpl
             ctx->CSSetShader(giReflCS.Get(), nullptr, 0);
             ID3D11ShaderResourceView* atlasIrr = atlasesValid ? giIrrSRV.Get() : nullptr;
             ID3D11ShaderResourceView* atlasVis = atlasesValid ? giVisSRV.Get() : nullptr;
+            // The reflection kernel reads the reflection-only instance copy (graph-material colours).
             ID3D11ShaderResourceView* srvs[7] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
-                                                  giNodeSRV.Get(), giTriSRV.Get(), giInstanceSRV.Get(),
+                                                  giNodeSRV.Get(), giTriSRV.Get(),
+                                                  giReflInstanceSRV ? giReflInstanceSRV.Get() : giInstanceSRV.Get(),
                                                   atlasIrr, atlasVis };
             ctx->CSSetShaderResources(0, 7, srvs);
             ID3D11Buffer* cbs[2] = { giReflCB.Get(), giCountCB.Get() };
