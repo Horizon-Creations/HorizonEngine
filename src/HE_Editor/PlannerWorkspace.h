@@ -1,5 +1,6 @@
 #pragma once
 #include "Planner.h"
+#include "PlannerBoard.h"
 
 #include <chrono>
 #include <cstdint>
@@ -64,6 +65,19 @@ public:
 	// under the open page is read and the change applied on top of it, once.
 	bool  editPage(const UUID& id, const std::function<bool(Page&)>& fn);
 
+	// ── Whiteboards ──────────────────────────────────────────────────────────
+	// Every board of the project (Config/Planner/Boards), by title then id. Valid until the
+	// next create/remove/poll.
+	std::vector<Board*> boards();
+	Board*              findBoard(const UUID& id);
+	const std::vector<Unreadable>& unreadableBoards() const { return m_unreadableBoards; }
+	// A new, empty board saved at once. nullptr when the file could not be written.
+	Board* createBoard(std::string title);
+	bool   removeBoard(const UUID& id);
+	// Apply `fn` to the board and save it, as edit() does for a database: a pull under the
+	// open board is read and the change applied on top of it, once.
+	bool   editBoard(const UUID& id, const std::function<bool(Board&)>& fn);
+
 	// A new, empty database (one table view) saved at once. nullptr when the
 	// file could not be written; lastError() says why.
 	Database* create(std::string name);
@@ -117,6 +131,13 @@ public:
 	const std::string& author() const { return m_author; }
 
 private:
+	struct BoardEntry
+	{
+		Board                            board;
+		std::filesystem::file_time_type  mtime{};
+		std::uintmax_t                   size = 0;
+	};
+
 	struct PageEntry
 	{
 		Page                             page;
@@ -135,6 +156,8 @@ private:
 
 	void loadAll();
 	void stampPage(PageEntry& e) const;
+	void stampBoard(BoardEntry& e) const;
+	BoardEntry* boardEntryFor(const UUID& id);
 	PageEntry* pageEntryFor(const UUID& id);
 	void attachExternal();
 	void afterLoad(Entry& e);
@@ -147,6 +170,8 @@ private:
 	std::vector<Unreadable> m_unreadable;
 	std::vector<PageEntry>  m_pages;
 	std::vector<Unreadable> m_unreadablePages;
+	std::vector<BoardEntry> m_boards;
+	std::vector<Unreadable> m_unreadableBoards;
 	std::string             m_error;
 	std::string             m_author;
 	External                m_ext;

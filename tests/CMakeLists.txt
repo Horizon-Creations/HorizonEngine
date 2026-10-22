@@ -344,6 +344,10 @@ add_executable(he_tests
     test_planner.cpp
     # ...its workspace and the Task Board import (ImGui-free).
     test_planner_workspace.cpp
+    # The Planner as tools: the Markdown a page speaks, and planner_* over a real workspace.
+    test_planner_markdown.cpp
+    test_planner_board.cpp
+    test_mcp_tools_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
     test_taskboard_team.cpp
@@ -668,6 +672,10 @@ add_executable(he_tests
     # The task tools, with the Task Board panel's real board behind one editor
     # and a second editor's bridge on the fake team (test_mcp_tools_taskboard.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTaskBoard.cpp
+    # The Planner tools and the Markdown they speak (test_mcp_tools_planner.cpp,
+    # test_planner_markdown.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsPlanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerMarkdown.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -692,6 +700,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerImport.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerTasks.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerWorkspace.cpp
+    # The Whiteboard: nodes, edges, their file and the media folder (test_planner_board.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoard.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
@@ -923,6 +933,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     # The Planner tab, for test_planner_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads the Planner (already here) and the Task Board.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
@@ -1025,6 +1036,7 @@ set_source_files_properties(
     test_mcp_tools_taskboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     test_taskboard_footer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     test_planner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp

@@ -180,3 +180,74 @@ Wochenansicht im Kalender; Zeitleiste ohne Zoom/Resize; Relation: Klick zur Ziel
 **Offen:** Kalender nur Monate (keine Wochenansicht); Seiten per Ziehen in der Seitenleiste verschachteln; Zeilenseiten in der Seiten-Link-Auswahl;
 Zeitleiste: Start-Rand ziehen, Heute-Sprung; Variante B fuer Tasks (Planner als Wahrheit, Historie je Zeile); Live-Zusammenarbeit ueber den Team-Server;
 Markdown-Export/CSV; MCP-Tools fuer den Planner.
+
+## Handoff (Stand MCP-Tools, 2026-10-22)
+**Fertig:** `McpToolsPlanner.cpp` (`registerPlannerTools`, Hooks `McpPlannerHooks` in `McpToolHooks.h`) und `PlannerMarkdown.{h,cpp}`.
+Tools: `planner_overview`, `planner_read_database` (View-Filter/Sortierung, search, limit/offset), `planner_add_row`, `planner_update_row`,
+`planner_delete_row`, `planner_create_database`, `planner_add_property`, `planner_read_page`, `planner_write_page` (Markdown, replace/append,
+neue Seite mit title/parent, Zeilenseiten per database+row), `planner_delete_page`. Alles laeuft ueber den einen `Workspace` des Tabs
+(`EditorApplication.cpp`: `m_mcpPlannerCtx` haelt den AppContext, den die Tasks-Datenbank zum Erreichen des Task Boards braucht), also zeigt der offene Tab
+Aenderungen sofort; "Tasks" geht ueber den Board-Schreiber (Status-Aenderung = Verlaufseintrag, Titel = keiner). Werte als Namen (Select-Optionen, Daten
+YYYY-MM-DD, Relationen per Titel/Id, Engine-Links als {kind,id|scene|panel,label}); ein Wert, der nicht passt, verweigert die ganze Aenderung und nennt die Felder
+(Probelauf auf einer Kopie). Markdown-Dialekt: siehe Kopf von `PlannerMarkdown.h`.
+**Tests:** `test_planner_markdown` 4, `test_mcp_tools_planner` 7 gruen; Planner-/Task-Board-Tests unveraendert gruen; `HorizonEditor` gebaut.
+**Nicht geprueft:** Aufruf ueber einen echten MCP-Client gegen den laufenden Editor (Rezept: `docs/mcp-editor-integration-plan.md`); Volllauf nicht wiederholt.
+**Offen:** Whiteboard (naechster Schritt, siehe unten); keine Planner-Tools fuer Ansichten (Filter/Sortierung anlegen), Datenbank/Seite umbenennen/loeschen.
+
+## Whiteboard (Plan, 2026-10-22, noch nichts gebaut)
+Wunsch (Connor): "Boards" als freie Flaeche wie ein Whiteboard, mit Nodes mit Text und Bildern.
+**Was es ist:** ein dritter Dokumenttyp neben Datenbank und Seite: ein **Whiteboard** (unendliche Flaeche) mit Karten (Nodes) und Verbindungen (Edges).
+Nicht zu verwechseln mit der Board-Ansicht einer Datenbank (Lanes).
+**Datei:** `Config/Planner/Boards/<id>.json`, gleiche Regeln wie Seiten/Datenbanken (eine Datei je Board, UUIDs, verlustfrei, unbekannte Schluessel bleiben,
+nie ueber unlesbare/fremd geaenderte Datei speichern). Inhalt: `nodes[]` {id, type, x, y, w, h, color, text, ...typspezifisch}, `edges[]` {id, from, to, label?, arrow?},
+`groups`/Rahmen als Node-Typ `frame`. Sicht (Pan/Zoom) wird nicht in die Datei geschrieben.
+**Node-Typen:** `text` (Karte mit Text, Markdown-Kurzform), `image` (Bild), `object` (Engine-Objekt: Asset/Szene/Entity/Panel, Chip + Sprung), `row` (Karte einer Datenbank-Zeile,
+Klick oeffnet sie), `page` (Karte einer Seite), `frame` (beschriftete Gruppe, zieht Inhalt mit).
+**Bilder (Entscheidung noetig):** (a) Texture-Assets des Projekts per UUID referenzieren (wie Engine-Links, kein Duplikat, geht mit Content Browser Drag); (b) hineingezogene/eingefuegte
+Bilddateien nach `Config/Planner/Media/<hex>.png` kopieren (reist mit Git, LFS-Frage bei grossen Dateien). Empfehlung: beides, (a) bevorzugt, (b) fuer Screenshots/Moodboards;
+Miniaturen ueber den vorhandenen `AssetThumbnailCache`/Texturpfad des Editors.
+**Bedienung (Canvas im Tab):** Pan (Leertaste+Ziehen / Mittelmaustaste / Trackpad), Zoom (Strg+Rad / Pinch), Auswahl (Klick, Shift, Aufziehrahmen), Verschieben/Groesse per Griffe, Doppelklick
+auf leere Flaeche = neue Textkarte, von Kartenrand auf andere Karte ziehen = Verbindung, Drop aus Content Browser/Outliner = Karte, Einfuegen aus Zwischenablage (Text/Bild),
+Farben, Raster-Einrasten, Minimap. **Undo/Redo** gibt es im Planner noch nicht; fuer ein Whiteboard fast Pflicht (Befehlsstapel je Dokument).
+**MCP:** `planner_read_board` / `planner_write_board` (Nodes/Edges als JSON, Auto-Layout fuer Nodes ohne Position), damit Claude Ideen als Board anlegen kann.
+**Phasen:** W0 Modell + Datei + Workspace + Tests (ImGui-frei) | W1 Canvas: Pan/Zoom, Textkarten, Verschieben/Groesse, Verbindungen, Undo | W2 Bilder (Asset-Referenz, Drop, Einfuegen, Medien-Ordner) |
+W3 Objekt-/Zeilen-/Seitenkarten, Rahmen | W4 MCP-Tools, Minimap, Export als PNG.
+
+## Handoff (Stand Whiteboard W0, 2026-10-22)
+**Entschieden (Connor):** Bilder beides: Texture-Assets des Projekts per UUID referenzieren (`Node::asset`) UND eingefuegte/hineingezogene Dateien nach
+`Config/Planner/Media` kopieren (`Node::media`, Name = Inhalts-Hash + Endung, gleiches Bild zweimal = eine Datei).
+**Fertig (W0, ImGui-frei):**
+- `PlannerBoard.{h,cpp}`: `Board` mit `Node` (Typen text, image, object, row, page, frame; Position/Groesse in Board-Einheiten, Reihenfolge = Stapel, letzter oben)
+  und `Edge` (from, to, label, arrow). Operationen: addNode, move/moveNodesBy/resize (Mindestgroesse 24), Text/Farbe, bringToFront/sendToBack, removeNode (nimmt Kanten mit),
+  addEdge (nicht auf sich selbst, nicht doppelt, Enden muessen da sein), hitTest (Karten schlagen Rahmen), nodesIn (Auswahlrechteck), nodesInside (Rahmen nimmt Inhalt mit), bounds.
+  Datei `Config/Planner/Boards/<hex>.json`, gleiche Regeln wie Seiten/Datenbanken (byte-identisch, unbekannte Typen/Schluessel bleiben, auch ein "page"-Schluessel an einem
+  Text-Knoten; nie ueber unlesbare/fremd geaenderte Datei speichern). Typ-spezifische Schluessel gelten nur fuer ihren Typ.
+- Medien: `importMediaFile/importMediaBytes` (png, jpg, jpeg, gif, bmp, webp, tga; max 64 MB; Temp + Rename), `mediaPath` (lehnt Pfadtricks ab), `listMedia`.
+- `PlannerFile.h`: die gemeinsamen Datei-Regeln (aus `Planner.cpp`) fuer weitere Dokumenttypen.
+- `Workspace`: `boards()`, `findBoard`, `createBoard`, `removeBoard`, `editBoard` (Pull unter dem offenen Board wird gelesen, Edit einmal darauf), `poll`, `unreadableBoards`.
+**Tests:** `test_planner_board` 8 Faelle gruen (Modell, Datei, Unbekanntes, beschaedigte Datei, Medien, Workspace); Planner-Tests unveraendert gruen; `HorizonEditor` gebaut.
+**Nicht gemacht:** keine UI (W1), keine MCP-Tools fuer Boards, kein Undo, keine Aufraeumfunktion fuer ungenutzte Medien.
+**Naechste Schritte (W1):** Canvas im Tab: Seitenleiste "Boards", Pan/Zoom (Leertaste+Ziehen, Mittelmaus, Strg+Rad), Textkarten (Doppelklick leer = neu, Doppelklick Karte = Text bearbeiten),
+Auswahl (Klick, Shift, Aufziehrahmen), Verschieben/Groesse per Griffe, Verbindungen vom Kartenrand, Farben, Loeschen; Zeichnen nur sichtbarer Karten; Undo/Redo je Board (Befehlsstapel).
+Danach W2 (Bilder: Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Vorschau mit `AssetThumbnailCache`).
+
+## Handoff (Stand Whiteboard W1, 2026-10-22)
+**Fertig (W1):** der Canvas im Tab.
+- `BoardHistory` (ImGui-frei, `PlannerBoard.{h,cpp}`): Undo/Redo als Schnappschuesse (Karten + Pfeile), 100 Schritte, je Board, nicht gespeichert; Wiederherstellen ist Zuweisung
+  (idempotent, falls ein Speichern nach einem Pull wiederholt wird). `snapshotOf`/`restore`.
+- `PlannerBoardView.{h,cpp}`: Toolbar (Titel, New Card, New Frame, Undo, Redo, Delete, 7 Farben + "keine", Fit, 100 %, Zoomanzeige, bei gewaehltem Pfeil Beschriftung + Arrow)
+  und Canvas: Raster, Pan (Scroll, Mittelmaus, Leertaste+Ziehen), Zoom an der Maus (Strg/Cmd+Scroll, 0,1x bis 4x), Auswahl (Klick, Shift, Aufziehrahmen),
+  Verschieben (ein Rahmen nimmt, was ganz in ihm liegt, mit), Groesse per Eckgriffe (nie unter 24), Pfeile per Ziehen von einem Punkt am Kartenrand auf eine andere Karte
+  (nicht doppelt, nicht auf sich selbst), Pfeil anklicken = auswaehlen, Doppelklick leer = neue Karte (Cursor drin), Doppelklick Karte = Text in place, Delete/Backspace,
+  Strg/Cmd+Z, +Shift oder +Y, Strg/Cmd+A, Esc. Nur sichtbare Karten werden gezeichnet. Karten der Typen image/object/row/page werden schon als Karte mit Beschriftung
+  dargestellt (Bild-Vorschau und Anlegen dieser Typen kommen in W2/W3).
+- `PlannerPanel`: Seitenleiste "Boards" (Liste, New Board, Rechtsklick Delete Board mit Bestaetigung), Board ersetzt Datenbank/Seite im Hauptbereich, unlesbare Boards rot gelistet.
+  Jede Aenderung laeuft durch `Workspace::editBoard` (Pull unter dem offenen Board wird gelesen und die Aenderung einmal darauf angewendet).
+**Fehler beim Bauen gefunden und behoben:** ein Ziehen, das im selben Frame beginnt, mass vom Start des vorigen Ziehens und galt als Verschiebung (Klick = leerer Undo-Schritt).
+**Tests:** `test_planner_ui` 29 Faelle (neu 6 fuer das Whiteboard: Karte anlegen und tippen, Titel, Verschieben + Undo/Redo per Knopf und Taste + gespeicherte Datei, Eckgriffe,
+Pfeile, Pfeil-Beschriftung, Loeschen mit Pfeilen + Undo, Scroll/Zoom an der Maus/Mittelmaus-Pan/Fit/100 %, Rahmen, Farben, 2000 Karten gezeichnet < 20, Board-Wechsel, Pull),
+`test_planner_board` 9, Help-Audit 0 offen, `HorizonEditor` gebaut. Volllauf nicht wiederholt. Editor nicht gestartet (Gefuehl von Zoom/Pan mit Trackpad/Maus ungeprueft);
+Windows/Linux nicht gebaut.
+**Offen:** W2 Bilder (Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Datei-Drop, Vorschau mit `AssetThumbnailCache`/Textur aus `Config/Planner/Media`);
+W3 Objekt-/Zeilen-/Seitenkarten anlegen (Drop aus Outliner, "Open" in Details/Seite als Karte), Rahmen-Titel, Ausrichten/Raster-Einrasten, Kopieren/Einfuegen/Duplizieren;
+W4 MCP-Tools fuer Boards, Minimap, Export als PNG; Undo fuer Titel; Mehrfachauswahl-Groesse; Mausrad-Zoom-Gefuehl pruefen.

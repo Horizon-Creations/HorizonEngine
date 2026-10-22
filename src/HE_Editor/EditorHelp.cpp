@@ -3166,6 +3166,46 @@ namespace
 	{ "Planner/Next", "Next",
 	  "Shows the month after the one on screen.",
 	  "", "" },
+	{ "Planner/New Board", "New Board",
+	  "Makes an empty whiteboard: a free surface for cards and arrows, for ideas "
+	  "that a document is too tidy for. Saved in Config/Planner/Boards.",
+	  "", "" },
+	{ "Planner/Delete Board", "Delete Board",
+	  "Deletes this whiteboard and its file after you confirm. Source control has "
+	  "the previous version.",
+	  "", "" },
+	{ "Planner/New Card", "New Card",
+	  "Adds a text card in the middle of what you see and puts the cursor in it. "
+	  "Double-click empty space to make one there instead.",
+	  "", "" },
+	{ "Planner/New Frame", "New Frame",
+	  "Adds a frame: a titled rectangle behind the cards. A frame moves with "
+	  "everything that lies wholly inside it.",
+	  "", "" },
+	{ "Planner/Undo", "Undo",
+	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "
+	  "the history is not saved with the project.",
+	  "", "" },
+	{ "Planner/Redo", "Redo",
+	  "Puts back what Undo took away (Shift+Cmd/Ctrl+Z).",
+	  "", "" },
+	{ "Planner/Delete", "Delete",
+	  "Removes the selected cards, or the selected arrow. Cards take the arrows that "
+	  "ended at them along. Delete or Backspace does the same.",
+	  "", "" },
+	{ "Planner/Card color", "",
+	  "Colours the selected cards. The first square takes the colour away.",
+	  "", "" },
+	{ "Planner/Fit", "Fit",
+	  "Zooms and scrolls so that every card is in view.",
+	  "", "" },
+	{ "Planner/100%", "100%",
+	  "Back to normal size, around the middle of what you see.",
+	  "", "" },
+	{ "Planner/Arrow", "Arrow",
+	  "Whether the selected arrow has a head at the end. Click an arrow to select it, "
+	  "then give it a label in the field beside this.",
+	  "", "" },
 	{ "Planner/+ Timeline", "+ Timeline",
 	  "Adds a timeline view: a row per line and a day per column, a bar from "
 	  "each row's Start date to its End date. Drag a bar to move the row's "

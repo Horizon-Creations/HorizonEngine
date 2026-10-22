@@ -1,5 +1,6 @@
 #include "Planner.h"
 #include "TaskBoardJson.h"
+#include "PlannerFile.h"
 
 #include <Diagnostics/Log.h>
 
@@ -1623,5 +1624,31 @@ bool deletePage(const std::filesystem::path& projectRoot, const UUID& id, std::s
 {
 	return deleteFile(pagePath(projectRoot, id), error);
 }
+
+namespace detail
+{
+
+std::vector<UUID> listDir(const std::filesystem::path& dir) { return HE::Planner::listDir(dir); }
+
+Database::LoadResult loadFile(const std::filesystem::path& path, const char* what, const ParseFn& parse,
+                              const std::function<void()>& reset, bool& hadFile, std::string& bytes)
+{
+	return HE::Planner::loadFile(path, what, parse, reset, hadFile, bytes);
+}
+
+bool saveFile(const std::filesystem::path& path, const char* what, const std::string& text, bool nothingToSay,
+              const ParseFn& parse, bool& hadFile, std::string& bytes, std::string* error)
+{
+	return HE::Planner::saveFile(path, what, text, nothingToSay, parse, hadFile, bytes, error);
+}
+
+bool deleteFile(const std::filesystem::path& path, std::string* error) { return HE::Planner::deleteFile(path, error); }
+
+bool openDocument(std::string_view text, const char* listKey, ojson& out, int& version, Database::LoadResult& r)
+{
+	return HE::Planner::openDocument(text, listKey, out, version, r);
+}
+
+} // namespace detail
 
 } // namespace HE::Planner

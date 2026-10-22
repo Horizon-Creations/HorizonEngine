@@ -880,6 +880,9 @@ private:
 	// only to keep McpBridge.h out of this header; it stays in this slot for
 	// the destruction order above.
 	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
+	// The context the Planner tools hand to PlannerPanel::workspace(): the Tasks database keeps
+	// a pointer to it (to reach the Task Board), so it has to outlive the tool call.
+	std::unique_ptr<AppContext> m_mcpPlannerCtx;
 	// The primary window's size/position/maximized, watched every frame and
 	// written to config.json by writeEditorConfig (EditorWindowPlacement.h).
 	HE::Ed::WindowPlacementTracker m_windowPlacement;

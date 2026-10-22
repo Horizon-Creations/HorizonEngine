@@ -26,6 +26,7 @@
 class ContentManager;
 namespace HorizonCode { struct Graph; }
 namespace HE { struct UIWidgetTree; class TaskBoard; class TaskBoardTeam; }
+namespace HE::Planner { class Workspace; }
 // The three types the build and settings hooks speak, all at global scope and
 // all behind headers this one refuses to pull in: ProjectManager.h drags HE_Tools
 // in, EditorConfig.h is the editor's own. A hook signature only needs the name.
@@ -1411,6 +1412,31 @@ struct McpTaskBoardHooks
 };
 
 void registerTaskBoardTools(McpToolRegistry& registry, McpTaskBoardHooks hooks);
+
+// ─── The Planner ─────────────────────────────────────────────────────────────
+// Databases, rows and pages of the open project (Planner.h) for a script or a
+// model: `planner_overview` lists them, `planner_read_database` reads rows (a
+// view's filters and sorts apply), `planner_add_row` / `planner_update_row` /
+// `planner_delete_row` change them, `planner_create_database` and
+// `planner_add_property` shape a database, `planner_read_page` /
+// `planner_write_page` / `planner_delete_page` read and write pages as Markdown
+// (PlannerMarkdown.h).
+//
+// Every change goes through the editor's one HE::Planner::Workspace, the same
+// writer the Planner tab uses — so a change shows in the open tab at once, the
+// files are written the way the tab writes them, and the database "Tasks" (a
+// view of the Task Board, PlannerTasks.h) is edited through the board's own
+// writer, with its history and the team's notices. A second Workspace over the
+// same files would refuse or overwrite the tab's saves.
+struct McpPlannerHooks
+{
+	// The open project's workspace, or null with no project open.
+	std::function<HE::Planner::Workspace*()> workspace;
+	// The name new rows and pages are recorded under.
+	std::function<std::string()> author;
+};
+
+void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks);
 
 // ─── The team server ─────────────────────────────────────────────────────────
 // `team_status` reads what the Team panel shows (sign-in state, members with

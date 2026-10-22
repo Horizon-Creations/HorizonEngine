@@ -5,6 +5,8 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "Planner.h"
+#include "PlannerBoard.h"
+#include "PlannerBoardView.h"
 #include "PlannerImport.h"
 #include "PlannerTasks.h"
 #include "PlannerWorkspace.h"
@@ -81,6 +83,9 @@ UUID        s_pageId, s_pageDb;
 UUID        s_focusBlock;    // the block whose text field gets the keyboard next frame
 UUID        s_deletePage;    // the page a "Delete Page" confirmation is about
 bool        s_deletePageOpen = false;
+UUID        s_boardId;           // the whiteboard shown instead of a database or a page; {} = none
+UUID        s_deleteBoard;       // the board a "Delete Board" confirmation is about
+bool        s_deleteBoardOpen = false;
 UUID        s_cursorBlock;           // the block whose cursor is placed as soon as its field is active
 bool        s_cursorAtEnd = false;
 bool        s_focusAtEnd = false;   // the cursor goes to the end of the block that gets the keyboard (moving up), else to its start
@@ -2454,6 +2459,20 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 	ImGui::EndChild();
 }
 
+// ── A whiteboard ─────────────────────────────────────────────────────────────
+
+void drawBoardTab(AppContext& ctx)
+{
+	if (!s_ws.findBoard(s_boardId)) { s_boardId = UUID{}; return; }
+	PlannerBoardView::Services services;
+	services.ws   = &s_ws;
+	services.ctx  = &ctx;
+	services.post = [](std::function<void()> fn) { post(std::move(fn)); };
+	services.note = [](const std::string& name) { note(name); };
+	services.noteRect = [](const std::string& name, ImVec2 a, ImVec2 b) { s_rects[name] = { a.x, a.y, b.x, b.y }; };
+	PlannerBoardView::draw(services, s_boardId);
+}
+
 // ── One database ─────────────────────────────────────────────────────────────
 
 void drawDatabase(AppContext& ctx, const Database& db)
@@ -2762,10 +2781,11 @@ void sidebarPages(const std::vector<Page*>& all, const UUID& parent, int depth)
 		pushUuid(p->id);
 		if (depth > 0) ImGui::Indent(static_cast<float>(depth) * 12.0f);
 		const std::string label = (p->title.empty() ? std::string("Untitled") : p->title) + "##page";
-		if (ImGui::Selectable(label.c_str(), p->id == s_pageId && s_pageDb == UUID{}))
+		if (ImGui::Selectable(label.c_str(), p->id == s_pageId && s_pageDb == UUID{} && s_boardId == UUID{}))
 		{
 			s_pageId = p->id;
 			s_pageDb = UUID{};
+			s_boardId = UUID{};
 		}
 		note("page:" + p->title);
 		if (ImGui::BeginPopupContextItem("##pagemenu"))
@@ -2790,11 +2810,12 @@ void drawSidebar(AppContext& ctx)
 	{
 		pushUuid(db->id);
 		const std::string label = (db->name.empty() ? std::string("Untitled database") : db->name) + "##db";
-		if (ImGui::Selectable(label.c_str(), db->id == s_dbId && s_pageId == UUID{}))
+		if (ImGui::Selectable(label.c_str(), db->id == s_dbId && s_pageId == UUID{} && s_boardId == UUID{}))
 		{
 			s_dbId   = db->id;
 			s_viewId = UUID{};
 			s_pageId = s_pageDb = UUID{};
+			s_boardId = UUID{};
 		}
 		note("database:" + db->name);
 		ImGui::PopID();
@@ -2825,6 +2846,63 @@ void drawSidebar(AppContext& ctx)
 			}
 		});
 	note("New Page");
+
+	// Whiteboards: cards and arrows on a free surface.
+	ImGui::Spacing();
+	ImGui::TextDisabled("Boards");
+	for (Board* b : s_ws.boards())
+	{
+		pushUuid(b->id);
+		const std::string label = (b->title.empty() ? std::string("Untitled board") : b->title) + "##board";
+		if (ImGui::Selectable(label.c_str(), b->id == s_boardId))
+		{
+			s_boardId = b->id;
+			s_pageId = s_pageDb = UUID{};
+		}
+		note("board:" + b->title);
+		if (ImGui::BeginPopupContextItem("##boardmenu"))
+		{
+			if (EditorWidgets::dangerMenuItem("Delete Board")) s_deleteBoard = b->id;
+			ImGui::EndPopup();
+		}
+		ImGui::PopID();
+	}
+	if (EditorWidgets::button("New Board", ImVec2(-FLT_MIN, 0)))
+		post([] {
+			if (Board* board = s_ws.createBoard("Untitled board"))
+			{
+				s_boardId = board->id;
+				s_pageId = s_pageDb = UUID{};
+			}
+		});
+	note("New Board");
+	if (!(s_deleteBoard == UUID{}))
+	{
+		ImGui::OpenPopup("##confirmDeleteBoard");
+		s_deleteBoardOpen = true;
+	}
+	if (ImGui::BeginPopup("##confirmDeleteBoard"))
+	{
+		const Board* doomed = s_ws.findBoard(s_deleteBoard);
+		ImGui::Text("Delete \"%s\"?", doomed ? doomed->title.c_str() : "");
+		ImGui::TextDisabled("Source control has the previous version.");
+		if (EditorWidgets::dangerButton("Delete"))
+		{
+			const UUID gone = s_deleteBoard;
+			post([=] {
+				s_ws.removeBoard(gone);
+				PlannerBoardView::forget(gone);
+				if (s_boardId == gone) s_boardId = UUID{};
+			});
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+	else if (s_deleteBoardOpen)
+		s_deleteBoardOpen = false;
+	if (!s_deleteBoardOpen) s_deleteBoard = UUID{};
 	if (!(s_deletePage == UUID{}))
 	{
 		ImGui::OpenPopup("##confirmDeletePage");
@@ -2854,6 +2932,14 @@ void drawSidebar(AppContext& ctx)
 
 	drawTeamNotices(ctx);
 
+	for (const Workspace::Unreadable& u : s_ws.unreadableBoards())
+	{
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Bad);
+		EditorWidgets::WrapText wrap(ImGui::GetContentRegionAvail().x);
+		ImGui::Text("board %s.json cannot be read: %s", uuidToHex(u.id).substr(0, 8).c_str(), u.error.c_str());
+		ImGui::PopStyleColor();
+	}
 	for (const Workspace::Unreadable& u : s_ws.unreadable())
 	{
 		ImGui::Spacing();
@@ -2944,7 +3030,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			if (EditorWidgets::smallButton("Retry Save")) post([] { TaskBoardPanel::retrySave(); });
 		}
 	}
-	if (!(s_pageId == UUID{}))
+	if (!(s_boardId == UUID{}))
+		drawBoardTab(ctx);
+	else if (!(s_pageId == UUID{}))
 		drawPage(ctx);
 	else if (const Database* db = s_ws.find(s_dbId))
 		drawDatabase(ctx, *db);
@@ -3015,7 +3103,7 @@ Workspace* workspace(AppContext& ctx)
 	return &s_ws;
 }
 
-void selectDatabase(const UUID& id) { s_dbId = id; s_viewId = UUID{}; s_pageId = s_pageDb = UUID{}; }
+void selectDatabase(const UUID& id) { s_dbId = id; s_viewId = UUID{}; s_pageId = s_pageDb = UUID{}; s_boardId = UUID{}; }
 UUID selectedDatabase() { return s_dbId; }
 UUID selectedView() { return s_viewId; }
 DrawStats lastDrawStats() { return s_stats; }
@@ -3036,7 +3124,9 @@ int  calendarYear() { return s_calYear; }
 int  calendarMonth() { return s_calMonth; }
 void setTimelineZoom(int level) { s_tlZoom = std::clamp(level, 0, 2); }
 
-void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; }
+void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; s_boardId = UUID{}; }
+void selectBoard(const UUID& id) { s_boardId = id; s_pageId = s_pageDb = UUID{}; }
+UUID selectedBoard() { return s_boardId; }
 void openRowPage(const UUID& dbId, const UUID& rowId) { openPage(rowId, dbId); }
 UUID selectedPage() { return s_pageId; }
 
@@ -3064,6 +3154,9 @@ void reset()
 	s_newRelationTarget = UUID{};
 	s_pageId = s_pageDb = s_focusBlock = s_deletePage = UUID{};
 	s_calYear = s_calMonth = 0;
+	s_boardId = s_deleteBoard = UUID{};
+	s_deleteBoardOpen = false;
+	PlannerBoardView::reset();
 	s_tlZoom = 0;
 	s_barDrag = s_barResize = BarDrag{};
 	s_deletePageOpen = false;
