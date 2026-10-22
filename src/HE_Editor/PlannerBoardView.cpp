@@ -989,7 +989,7 @@ void draw(const Services& services, const UUID& boardId)
 	const ImVec2 size = ImGui::GetContentRegionAvail();
 	s_canvasSize = size;
 	ImGui::SetNextItemAllowOverlap();   // a card being typed in sits on top of it
-	ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+	ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
 	// The minimap sits in the bottom right corner and takes the mouse there.
 	const ImVec2 mapSize(180, 120);
 	const ImVec2 mapMin(origin.x + size.x - mapSize.x - 10, origin.y + size.y - mapSize.y - 10);
@@ -1067,10 +1067,11 @@ void draw(const Services& services, const UUID& boardId)
 			view.x = mx - (io.MousePos.x - origin.x) / view.zoom;
 			view.y = my - (io.MousePos.y - origin.y) / view.zoom;
 		}
-	// Scroll pans; with Ctrl or Cmd it zooms at the cursor.
+	// The mouse wheel zooms at the cursor. A trackpad's two-finger scroll pans instead (Ctrl or Cmd with it zooms), as on
+	// the editor's other canvases.
 	if (hovered && !editing && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
 	{
-		if (io.KeyCtrl || io.KeySuper)
+		if (!EditorInput::trackpadActive() || io.KeyCtrl || io.KeySuper)
 		{
 			double mx, my;
 			Xf{ origin, view }.toWorld(io.MousePos, mx, my);
@@ -1088,7 +1089,8 @@ void draw(const Services& services, const UUID& boardId)
 	static ViewState panFrom;
 	const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
 	if (hovered && s_drag == Drag::None &&
-	    (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) || (space && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))
+	    (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+	     (space && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))
 	{
 		s_drag = Drag::Pan;
 		s_dragStart = io.MousePos;
@@ -1098,7 +1100,7 @@ void draw(const Services& services, const UUID& boardId)
 	{
 		view.x = panFrom.x - (io.MousePos.x - s_dragStart.x) / view.zoom;
 		view.y = panFrom.y - (io.MousePos.y - s_dragStart.y) / view.zoom;
-		if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_drag = Drag::None;
+		if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Right) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_drag = Drag::None;
 	}
 
 	const Xf xf{ origin, view };

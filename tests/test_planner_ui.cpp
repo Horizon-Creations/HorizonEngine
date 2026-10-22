@@ -1763,15 +1763,18 @@ TEST_CASE("planner ui board: scroll pans, Ctrl+scroll zooms at the cursor, Fit s
 	idle(ctx);
 	CHECK(PlannerPanel::controlRect("node:far away").x1 <= 0);   // off screen: not drawn
 
-	// Scroll pans by the wheel (down moves the view down).
+	// A trackpad's scroll pans (down moves the view down).
 	ImGuiIO& io = ImGui::GetIO();
 	const ImVec2 mid = centre(PlannerPanel::controlRect("canvas"));
 	io.AddMousePosEvent(mid.x, mid.y);
 	frame(ctx, false);
+	EditorInput::detail::g_trackpadActive = true;
 	io.AddMouseWheelEvent(0.0f, -2.0f);
 	frame(ctx, false);
 	settle(ctx);
+	EditorInput::detail::g_trackpadActive = false;
 	CHECK(PlannerBoardView::viewOf(f.id).y == doctest::Approx(60.0));
+
 
 	// Ctrl + wheel zooms and keeps the world point under the cursor.
 	double wx = 0, wy = 0;
@@ -1817,6 +1820,18 @@ TEST_CASE("planner ui board: scroll pans, Ctrl+scroll zooms at the cursor, Fit s
 	shotTo(ctx, "planner_board_fit");
 	REQUIRE(click(ctx, "100%"));
 	CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(1.0));
+
+	// A mouse's wheel zooms at the cursor with no key held; it does not scroll.
+	{
+		io.AddMousePosEvent(mid.x, mid.y);
+		settle(ctx);
+		const double yBefore = PlannerBoardView::viewOf(f.id).y;
+		io.AddMouseWheelEvent(0.0f, 2.0f);
+		frame(ctx, false);
+		settle(ctx);
+		CHECK(PlannerBoardView::viewOf(f.id).zoom == doctest::Approx(1.1 * 1.1));
+		CHECK(PlannerBoardView::viewOf(f.id).y != doctest::Approx(yBefore));   // zoomed about the cursor
+	}
 }
 
 TEST_CASE("planner ui board: a rectangle selects, colours apply, a frame moves what is inside it, only visible cards are drawn")
@@ -2594,4 +2609,28 @@ TEST_CASE("planner ui board: a double-click on a row or page card opens it; a co
 	doubleClickAt(ctx, centre(pc));
 	idle(ctx);
 	CHECK(PlannerPanel::selectedPage() == pageId);
+}
+
+TEST_CASE("planner ui board: dragging with the right button pans")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_rightpan");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	const ImVec2 from = canvasPoint(300, 300);
+	ImGuiIO& io = ImGui::GetIO();
+	io.AddMousePosEvent(from.x, from.y);
+	settle(ctx);
+	io.AddMouseButtonEvent(ImGuiMouseButton_Right, true);
+	frame(ctx, false);
+	io.AddMousePosEvent(from.x + 80.0f, from.y + 40.0f);
+	frame(ctx, false);
+	frame(ctx, false);
+	io.AddMouseButtonEvent(ImGuiMouseButton_Right, false);
+	settle(ctx);
+	const PlannerBoardView::ViewState v = PlannerBoardView::viewOf(f.id);
+	CHECK(v.x == doctest::Approx(-80.0));   // the board followed the hand
+	CHECK(v.y == doctest::Approx(-40.0));
+	CHECK(f.ws->findBoard(f.id)->nodes.empty());   // and made nothing
 }

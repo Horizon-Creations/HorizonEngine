@@ -19,7 +19,8 @@ namespace HE::Planner { class Workspace; }
 // Workspace (editBoard), so a pull under the open board is read and the change lands on top.
 //
 // Gestures
-//   scroll / drag with the middle button / Space + drag    pan        Ctrl (Cmd) + scroll    zoom at the cursor
+//   drag with the right or middle button / Space + drag    pan        mouse wheel    zoom at the cursor
+//   trackpad: two-finger scroll pans, pinch or Ctrl (Cmd) + scroll zooms
 //   click a card, Shift+click, drag a rectangle              select
 //   drag a selected card                                     move (a frame takes what is inside it)
 //   drag a corner handle of a single selected card           resize

@@ -3228,7 +3228,7 @@ namespace
 	  "Saves the whole board as a picture in the project's Export/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
 	  "", "" },
 	{ "Planner/Zoom In", "Zoom In",
-	  "Zooms in around the middle of what you see. The trackpad's pinch and Cmd/Ctrl+scroll zoom at the cursor.",
+	  "Zooms in around the middle of what you see. The mouse wheel and the trackpad's pinch zoom at the cursor. Drag with the right or middle mouse button to pan.",
 	  "", "" },
 	{ "Planner/Zoom Out", "Zoom Out",
 	  "Zooms out around the middle of what you see.",
