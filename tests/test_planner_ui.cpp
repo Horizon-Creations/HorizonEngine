@@ -784,3 +784,131 @@ TEST_CASE("planner ui: Assignees only with a signed-in team; a pick assigns on d
 	CHECK(TaskBoardPanel::author() != "Bob");
 	CHECK(PlannerPanel::controlRect(assignees).x1 <= 0);
 }
+
+TEST_CASE("planner ui: without a team, assignees are typed names kept on the board")
+{
+	Harness harness;
+	Project proj("he_planner_ui_names");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	addTasks(ctx, { "Paint the lighthouse" });
+	const UUID id = TaskBoardPanel::board(ctx)->tasks[0].id;
+	idle(ctx);
+
+	REQUIRE(PlannerPanel::controlRect("cell:Assignees").x1 > 0);
+	REQUIRE(click(ctx, "cell:Assignees"));
+	ImGui::GetIO().AddInputCharactersUTF8("Anna, Bob");
+	settle(ctx);
+	CHECK(TaskBoardPanel::board(ctx)->find(id)->assignees.empty());   // not saved while typing
+	ImGuiIO& io = ImGui::GetIO();
+	io.AddKeyEvent(ImGuiKey_Enter, true);
+	frame(ctx, false);
+	io.AddKeyEvent(ImGuiKey_Enter, false);
+	idle(ctx);
+	const Task* t = TaskBoardPanel::board(ctx)->find(id);
+	CHECK(t->assignees == std::vector<std::string>{ "Anna", "Bob" });
+	CHECK(t->assignedBy == "Tester");
+	REQUIRE_FALSE(t->updates.empty());
+	CHECK(t->updates.back().kind == TaskUpdateKind::Assignment);
+}
+
+TEST_CASE("planner ui: a relation cell lists the rows it can point at and ticks them")
+{
+	Harness harness;
+	Project proj("he_planner_ui_relation");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	REQUIRE(click(ctx, "New Database"));
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID dbId = PlannerPanel::selectedDatabase();
+	UUID blockedBy, alpha, beta;
+	REQUIRE(ws->edit(dbId, [&](Database& db) {
+		Property* p = db.addProperty("Blocked by", PropertyType::Relation);
+		p->relationDb = db.id;
+		blockedBy = p->id;
+		alpha = db.addRow("Alpha", "Tester", 1000)->id;
+		beta  = db.addRow("Beta", "Tester", 1001)->id;
+		return true;
+	}));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "relation:Alpha"));
+	REQUIRE(PlannerPanel::controlRect("relrow:Beta").x1 > 0);
+	CHECK(PlannerPanel::controlRect("relrow:Alpha").x1 <= 0);   // a row does not point at itself
+	REQUIRE(click(ctx, "relrow:Beta"));
+	CHECK(ws->find(dbId)->relation(alpha, blockedBy) == std::vector<UUID>{ beta });
+	shotTo(ctx, "planner_relation");
+	REQUIRE(click(ctx, "relrow:Beta"));   // the list stays open; a second click unticks
+	CHECK(ws->find(dbId)->relation(alpha, blockedBy).empty());
+}
+
+TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar moves its dates")
+{
+	Harness harness;
+	Project proj("he_planner_ui_timeline");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	REQUIRE(click(ctx, "New Database"));
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID dbId = PlannerPanel::selectedDatabase();
+	auto day = [](const char* iso) {
+		std::int64_t ms = 0;
+		REQUIRE(taskTimeFromIso(iso, ms));
+		return ms;
+	};
+	UUID start, end, a, b, c;
+	REQUIRE(ws->edit(dbId, [&](Database& db) {
+		start = db.addProperty("Start", PropertyType::Date)->id;
+		end   = db.addProperty("End", PropertyType::Date)->id;
+		a = db.addRow("Alpha", "Tester", 1000)->id;
+		b = db.addRow("Beta", "Tester", 1001)->id;
+		c = db.addRow("Gamma", "Tester", 1002)->id;
+		db.setDate(a, start, day("2026-10-20T00:00:00.000Z"), 1);
+		db.setDate(a, end,   day("2026-10-24T00:00:00.000Z"), 1);
+		db.setDate(b, start, day("2026-10-26T00:00:00.000Z"), 1);
+		return true;
+	}));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "+ Timeline"));
+	idle(ctx);
+	const View* v = ws->find(dbId)->findView(PlannerPanel::selectedView());
+	REQUIRE(v != nullptr);
+	CHECK(v->kind == ViewKind::Timeline);
+	CHECK(v->dateProperty == start);   // the first two Date properties
+	CHECK(v->endProperty == end);
+	shotTo(ctx, "planner_timeline");
+
+	// Alpha runs five days, Beta one; Gamma has no start date and no bar.
+	const PlannerPanel::Rect ra = PlannerPanel::controlRect("bar:Alpha");
+	const PlannerPanel::Rect rb = PlannerPanel::controlRect("bar:Beta");
+	REQUIRE(ra.x1 > ra.x0);
+	REQUIRE(rb.x1 > rb.x0);
+	CHECK(ra.x1 - ra.x0 == doctest::Approx(5 * 24.0f));
+	CHECK(rb.x1 - rb.x0 == doctest::Approx(24.0f));
+	CHECK(rb.x0 - ra.x0 == doctest::Approx(6 * 24.0f));
+	CHECK(PlannerPanel::controlRect("bar:Gamma").x1 <= 0);
+	CHECK(PlannerPanel::lastDrawStats().rows == 3);
+	CHECK(PlannerPanel::lastDrawStats().rowsDrawn == 3);
+
+	// Drag Beta three days to the right: its start moves, and the row opens.
+	dragTo(ctx, centre(rb), ImVec2(centre(rb).x + 72.0f, centre(rb).y));
+	idle(ctx);
+	std::int64_t ms = 0;
+	REQUIRE(ws->find(dbId)->date(b, start, ms));
+	CHECK(ms == day("2026-10-29T00:00:00.000Z"));
+	CHECK(PlannerPanel::selectedRow() == b);
+	// A click that does not move writes nothing.
+	const std::string before = ws->find(dbId)->toJson();
+	REQUIRE(click(ctx, "bar:Alpha"));
+	CHECK(ws->find(dbId)->toJson() == before);
+
+	// Without a Start date there is nothing to draw, and the view says so.
+	CHECK(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->dateProperty = UUID{}; return true; }));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("bar:Alpha").x1 <= 0);
+}

@@ -62,6 +62,7 @@ std::string s_newOption, s_newProperty, s_renameView;
 int         s_newPropertyType = 0;
 UUID        s_armedDelete;        // the property whose "Delete Property" was pressed once
 UUID        s_renamingView;
+UUID        s_newRelationTarget;   // the database a new Relation property points at; {} = this one
 
 // The context of the frame being drawn: the chips, drops and jumps of the links
 // need the world, the content manager and the selection.
@@ -326,19 +327,16 @@ void linksCell(const Database& db, const Row& row, const Property& p)
 	}
 }
 
-// ── Assignees: from the team's roster, and only with a team ──────────────────
-// Without a team server there is nobody to pick from, and a name typed by hand
-// would reach nobody: the Tasks cell is then plain text.
+// ── Assignees: from the team's roster, with a team ───────────────────────────
+// Without a team server there is nobody to pick from: the Tasks cell is then a
+// text field like any Person property (a name typed by hand reaches nobody, it is
+// only kept on the board).
 void assigneesCell(const Database& db, const Row& row, const Property& p)
 {
 	const UUID dbId = db.id, rowId = row.id, propId = p.id;
 	const std::vector<std::string> have = db.people(rowId, propId);
 	HE::TaskBoardTeam* team = TaskBoardPanel::team();
-	if (!team || !team->connected())
-	{
-		ImGui::TextDisabled("%s", joinNames(have).c_str());
-		return;
-	}
+	if (!team || !team->connected()) return;   // the caller types names instead
 	std::string preview = joinNames(have);
 	if (preview.empty()) preview = "Nobody";
 	ImGui::SetNextItemWidth(-FLT_MIN);
@@ -366,6 +364,52 @@ void assigneesCell(const Database& db, const Row& row, const Property& p)
 		}
 		ImGui::PopID();
 	}
+	ImGui::EndCombo();
+}
+
+// ── Relations: rows of another database (or this one) ───────────────────────
+
+// A combo that lists the target database's rows; a click ticks or unticks one.
+void relationCell(const Database& db, const Row& row, const Property& p)
+{
+	const UUID dbId = db.id, rowId = row.id, propId = p.id;
+	const Database* target = (p.relationDb == UUID{} || p.relationDb == db.id) ? &db : s_ws.find(p.relationDb);
+	const std::vector<UUID> have = db.relation(rowId, propId);
+	auto titleOf = [](const Row& r) { return r.title.empty() ? std::string("Untitled") : r.title; };
+
+	std::string preview;
+	for (const UUID& id : have)
+	{
+		const Row* r = target ? target->findRow(id) : nullptr;
+		preview += (preview.empty() ? "" : ", ") + (r ? titleOf(*r) : std::string("?"));
+	}
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool open = ImGui::BeginCombo("##relation", preview.c_str());
+	note("relation:" + row.title);
+	if (!open) return;
+	if (!target)
+		ImGui::TextDisabled("The database this points at is gone.");
+	else if (target->rows.size() <= (target == &db ? 1u : 0u))
+		ImGui::TextDisabled("There are no rows to point at yet.");
+	else
+		for (const Row& t : target->rows)
+		{
+			if (target == &db && t.id == rowId) continue;   // a row does not point at itself
+			pushUuid(t.id);
+			const bool on = std::find(have.begin(), have.end(), t.id) != have.end();
+			if (ImGui::Selectable(titleOf(t).c_str(), on, ImGuiSelectableFlags_NoAutoClosePopups))
+			{
+				std::vector<UUID> next = have;
+				const UUID tid = t.id;
+				if (on) next.erase(std::remove(next.begin(), next.end(), tid), next.end());
+				else    next.push_back(tid);
+				post([=] {
+					s_ws.edit(dbId, [&](Database& d) { return d.setRelation(rowId, propId, next, taskNowMs()); });
+				});
+			}
+			note("relrow:" + t.title);
+			ImGui::PopID();
+		}
 	ImGui::EndCombo();
 }
 
@@ -415,7 +459,9 @@ void editCell(const Database& db, const Row& row, const Property& p)
 		}, "YYYY-MM-DD");
 		break;
 	case PropertyType::Person:
-		if (s_ws.isExternal(dbId))
+		// Tasks with a team: pick from its roster. Without one, names are typed like
+		// in any database (kept on the board, announced to nobody).
+		if (s_ws.isExternal(dbId) && TaskBoardPanel::team() && TaskBoardPanel::team()->connected())
 		{
 			assigneesCell(db, row, p);
 			break;
@@ -502,19 +548,8 @@ void editCell(const Database& db, const Row& row, const Property& p)
 		break;
 	}
 	case PropertyType::Relation:
-	{
-		// Read-only for now: the titles of the rows it points at, where the target is
-		// this same database, else just how many.
-		const std::vector<UUID> to = db.relation(rowId, propId);
-		std::string text;
-		for (const UUID& id : to)
-		{
-			const Row* r = p.relationDb == db.id ? db.findRow(id) : nullptr;
-			text += (text.empty() ? "" : ", ") + (r ? r->title : std::string("?"));
-		}
-		ImGui::TextDisabled("%s", text.c_str());
+		relationCell(db, row, p);
 		break;
-	}
 	case PropertyType::EngineLink:
 		linksCell(db, row, p);
 		break;
@@ -750,13 +785,35 @@ void drawPropertiesPopup(const Database& db, const View& view)
 			if (ImGui::Selectable(kTypeNames[i], i == s_newPropertyType)) s_newPropertyType = i;
 		ImGui::EndCombo();
 	}
+	if (s_newPropertyType == static_cast<int>(PropertyType::Relation))
+	{
+		// A relation points at the rows of a database: this one, or another.
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(140);
+		const Database* chosen = s_newRelationTarget == UUID{} ? nullptr : s_ws.find(s_newRelationTarget);
+		if (ImGui::BeginCombo("##reltarget", chosen ? chosen->name.c_str() : "This database"))
+		{
+			if (ImGui::Selectable("This database", chosen == nullptr)) s_newRelationTarget = UUID{};
+			for (const Database* other : s_ws.databases())
+				if (other->id != dbId && ImGui::Selectable((other->name + "##target").c_str(), other == chosen))
+					s_newRelationTarget = other->id;
+			ImGui::EndCombo();
+		}
+	}
 	ImGui::SameLine();
 	if (EditorWidgets::button("Add Property") && !s_newProperty.empty())
 	{
 		const std::string name = s_newProperty;
 		const PropertyType type = static_cast<PropertyType>(s_newPropertyType);
+		const UUID target = s_newRelationTarget;
 		s_newProperty.clear();
-		post([=] { s_ws.edit(dbId, [&](Database& d) { return d.addProperty(name, type) != nullptr; }); });
+		post([=] {
+			s_ws.edit(dbId, [&](Database& d) {
+				Property* np = d.addProperty(name, type);
+				if (np && type == PropertyType::Relation) np->relationDb = target == UUID{} ? d.id : target;
+				return np != nullptr;
+			});
+		});
 	}
 	ImGui::EndDisabled();
 	if (s_ws.isExternal(dbId)) ImGui::TextDisabled("The Tasks columns are fixed: the Task Board keeps them.");
@@ -1213,6 +1270,173 @@ void drawDrawer(const Database& db, const Row& row)
 	ImGui::PopID();
 }
 
+// ── The timeline ─────────────────────────────────────────────────────────────
+
+constexpr std::int64_t kDayMs = 86400000;
+
+std::int64_t dayOf(std::int64_t ms)
+{
+	return ms >= 0 ? ms / kDayMs : -((-ms + kDayMs - 1) / kDayMs);
+}
+
+// The bar being dragged: which row, and by how many days so far. Written when the
+// button is let go, so a click that does not move writes nothing.
+struct BarDrag
+{
+	UUID row;
+	int  days = 0;
+};
+BarDrag s_barDrag;
+
+// A row per line, a day per column: a bar from the row's Start date to its End date
+// (one day when it has no End), the days drawn across the top and today marked.
+// Drag a bar to move it; click it, or its title, to open the row. Rows without a
+// Start date are listed at the end.
+void drawTimeline(const Database& db, const View& view, const std::vector<std::size_t>& idx)
+{
+	const Property* startP = db.findProperty(view.dateProperty);
+	if (!startP || startP->type != PropertyType::Date)
+	{
+		ImGui::TextDisabled("Pick a Date property for Start above. Add one with Properties if there is none.");
+		return;
+	}
+	const Property* endP = view.endProperty == UUID{} ? nullptr : db.findProperty(view.endProperty);
+	if (endP && endP->type != PropertyType::Date) endP = nullptr;
+	const Property* colourP = db.findProperty(view.groupBy);
+	if (colourP && colourP->type != PropertyType::Select) colourP = nullptr;
+
+	struct Bar { std::size_t row; std::int64_t a, b; };
+	std::vector<Bar> bars;
+	std::vector<std::size_t> undated;
+	std::int64_t lo = INT64_MAX, hi = INT64_MIN;
+	for (const std::size_t i : idx)
+	{
+		const Row& r = db.rows[i];
+		std::int64_t s = 0, e = 0;
+		if (!db.date(r.id, startP->id, s)) { undated.push_back(i); continue; }
+		const std::int64_t a = dayOf(s);
+		std::int64_t b = a;
+		if (endP && db.date(r.id, endP->id, e)) b = std::max(a, dayOf(e));
+		bars.push_back({ i, a, b });
+		lo = std::min(lo, a);
+		hi = std::max(hi, b);
+	}
+	const std::int64_t today = dayOf(taskNowMs());
+	if (bars.empty()) lo = hi = today;
+	lo = std::min(lo, today) - 3;
+	hi = std::max(hi, today) + 10;
+	if (hi - lo < 30) hi = lo + 30;
+
+	const float fh = ImGui::GetFrameHeight();
+	const float dayW = 24.0f, titleW = 220.0f, rowH = fh + 6.0f, headH = fh * 2.0f;
+	const int   days = static_cast<int>(hi - lo + 1);
+	const float totalW = titleW + static_cast<float>(days) * dayW;
+
+	ImGui::BeginChild("##timeline", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	const ImVec2 clipA = dl->GetClipRectMin(), clipB = dl->GetClipRectMax();
+	const float  gridX = origin.x + titleW;
+
+	// The days across the top: the month where it starts, then each day's number.
+	for (int d = 0; d < days; ++d)
+	{
+		const float x = gridX + static_cast<float>(d) * dayW;
+		if (x + dayW < clipA.x || x > clipB.x) continue;
+		const std::string iso = taskTimeToIso((lo + d) * kDayMs);
+		if (iso.substr(8, 2) == "01" || d == 0)
+			dl->AddText(ImVec2(x + 3.0f, origin.y), Theme::u32(Theme::TextHeading), iso.substr(0, 7).c_str());
+		dl->AddText(ImVec2(x + 3.0f, origin.y + fh), Theme::u32(lo + d == today ? Theme::Warn : Theme::TextDim),
+		            iso.substr(8, 2).c_str());
+		dl->AddLine(ImVec2(x, origin.y + fh), ImVec2(x, origin.y + headH), Theme::u32(Theme::warm(0.20f)));
+	}
+	ImGui::Dummy(ImVec2(totalW, headH));
+	note("timeline:header");
+
+	// A row per bar, then the rows with no date.
+	const int total = static_cast<int>(bars.size() + undated.size());
+	const float todayX = gridX + static_cast<float>(today - lo) * dayW;
+	ImGuiListClipper clipper;
+	clipper.Begin(total, rowH);
+	while (clipper.Step())
+		for (int n = clipper.DisplayStart; n < clipper.DisplayEnd; ++n)
+		{
+			const bool dated = n < static_cast<int>(bars.size());
+			const std::size_t ri = dated ? bars[static_cast<std::size_t>(n)].row
+			                             : undated[static_cast<std::size_t>(n) - bars.size()];
+			const Row& row = db.rows[ri];
+			++s_stats.rowsDrawn;
+			pushUuid(row.id);
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			if (n % 2 == 0)
+				dl->AddRectFilled(p, ImVec2(origin.x + totalW, p.y + rowH), Theme::u32(Theme::warm(0.085f)));
+			dl->AddRectFilled(ImVec2(todayX, p.y), ImVec2(todayX + dayW, p.y + rowH),
+			                  Theme::u32(Theme::alpha(Theme::Warn, 0.10f)));
+
+			// The title, a button that opens the row.
+			if (ImGui::Selectable("##title", row.id == s_selRow, 0, ImVec2(titleW - 4.0f, rowH - 2.0f))) s_selRow = row.id;
+			dl->PushClipRect(p, ImVec2(p.x + titleW - 8.0f, p.y + rowH), true);
+			dl->AddText(ImVec2(p.x + 4.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f),
+			            Theme::u32(row.title.empty() ? Theme::TextDim : Theme::Text),
+			            row.title.empty() ? "Untitled" : row.title.c_str());
+			dl->PopClipRect();
+
+			if (dated)
+			{
+				const Bar& bar = bars[static_cast<std::size_t>(n)];
+				const float x0 = gridX + static_cast<float>(bar.a - lo) * dayW;
+				const float w  = static_cast<float>(bar.b - bar.a + 1) * dayW;
+				ImGui::SetCursorScreenPos(ImVec2(x0, p.y + 3.0f));
+				ImGui::InvisibleButton("##bar", ImVec2(w, rowH - 6.0f));
+				note("bar:" + row.title);
+				const bool active = ImGui::IsItemActive();
+				if (ImGui::IsItemActivated()) s_selRow = row.id;
+				if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
+				{
+					s_barDrag.row  = row.id;
+					s_barDrag.days = static_cast<int>(std::lround(ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x / dayW));
+				}
+				const bool moving = s_barDrag.row == row.id && s_barDrag.days != 0;
+				if (ImGui::IsItemDeactivated())
+				{
+					if (moving)
+					{
+						const UUID dbId = db.id, rowId = row.id, sid = startP->id, eid = endP ? endP->id : UUID{};
+						const std::int64_t shift = s_barDrag.days * kDayMs;
+						post([=] {
+							s_ws.edit(dbId, [&](Database& d) {
+								std::int64_t ms = 0;
+								bool any = false;
+								if (d.date(rowId, sid, ms)) any |= d.setDate(rowId, sid, ms + shift, taskNowMs());
+								if (eid != UUID{} && d.date(rowId, eid, ms)) any |= d.setDate(rowId, eid, ms + shift, taskNowMs());
+								return any;
+							});
+						});
+					}
+					s_barDrag = BarDrag{};
+				}
+				const float shownX = x0 + (moving ? static_cast<float>(s_barDrag.days) * dayW : 0.0f);
+				ImVec4 colour = Theme::Accent;
+				if (colourP)
+					if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
+				dl->AddRectFilled(ImVec2(shownX, p.y + 3.0f), ImVec2(shownX + w, p.y + rowH - 3.0f),
+				                  Theme::u32(Theme::alpha(colour, active || ImGui::IsItemHovered() ? 0.95f : 0.75f)), 4.0f);
+				dl->PushClipRect(ImVec2(shownX, p.y), ImVec2(shownX + w, p.y + rowH), true);
+				dl->AddText(ImVec2(shownX + 5.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::Ink),
+				            row.title.c_str());
+				dl->PopClipRect();
+			}
+			else
+				dl->AddText(ImVec2(gridX + 6.0f, p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f),
+				            Theme::u32(Theme::TextDim), "no start date");
+
+			ImGui::SetCursorScreenPos(p);
+			ImGui::Dummy(ImVec2(totalW, rowH));
+			ImGui::PopID();
+		}
+	ImGui::EndChild();
+}
+
 // ── One database ─────────────────────────────────────────────────────────────
 
 void drawDatabase(AppContext& ctx, const Database& db)
@@ -1280,6 +1504,24 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			});
 		});
 	note("+ Board");
+	ImGui::SameLine();
+	if (EditorWidgets::button("+ Timeline"))
+		post([=] {
+			s_ws.edit(dbId, [&](Database& d) {
+				View* v = d.addView("Timeline", ViewKind::Timeline);
+				s_viewId = v->id;
+				// Start and End default to the first two Date properties.
+				int found = 0;
+				for (const Property& p : d.properties)
+					if (p.type == PropertyType::Date)
+					{
+						(found == 0 ? v->dateProperty : v->endProperty) = p.id;
+						if (++found == 2) break;
+					}
+				return true;
+			});
+		});
+	note("+ Timeline");
 
 	if (!view) return;
 	const UUID viewId = view->id;
@@ -1320,6 +1562,43 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			ImGui::EndCombo();
 		}
 	}
+	if (view->kind == ViewKind::Timeline)
+	{
+		// Which Date properties the bars start and end at; the lane colour comes from a Select.
+		auto dateCombo = [&](const char* id, const char* none, const UUID& current, bool isEnd) {
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(140);
+			const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
+			if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
+			if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
+				editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
+			for (const Property& p : db.properties)
+				if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
+				{
+					const UUID pid = p.id;
+					editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
+				}
+			ImGui::EndCombo();
+		};
+		dateCombo("##tlstart", "Start", view->dateProperty, false);
+		note("timeline:start");
+		dateCombo("##tlend", "End", view->endProperty, true);
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(140);
+		const Property* colour = db.findProperty(view->groupBy);
+		if (ImGui::BeginCombo("##tlcolour", colour ? colour->name.c_str() : "Colour by"))
+		{
+			if (ImGui::Selectable("(none)", colour == nullptr))
+				editView(dbId, viewId, [](View& v) { v.groupBy = UUID{}; return true; });
+			for (const Property& p : db.properties)
+				if (p.type == PropertyType::Select && ImGui::Selectable(p.name.c_str(), colour == &p))
+				{
+					const UUID pid = p.id;
+					editView(dbId, viewId, [pid](View& v) { v.groupBy = pid; return true; });
+				}
+			ImGui::EndCombo();
+		}
+	}
 	// The rows this view shows: its own filters and sorts, plus the search box.
 	View effective = *view;
 	if (!s_search.empty())
@@ -1337,6 +1616,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	{
 	case ViewKind::Table: drawTable(db, effective, idx); break;
 	case ViewKind::Board: drawBoard(db, effective);      break;
+	case ViewKind::Timeline: drawTimeline(db, effective, idx); break;
 	default:
 		ImGui::TextDisabled("This view type is not available in this editor yet.");
 		break;
@@ -1638,6 +1918,7 @@ void reset()
 	s_rects.clear();
 	s_stats = {};
 	s_armedDelete = UUID{};
+	s_newRelationTarget = UUID{};
 }
 
 } // namespace PlannerPanel

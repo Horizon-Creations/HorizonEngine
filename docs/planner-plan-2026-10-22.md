@@ -97,3 +97,18 @@ in der nativen Menueleiste); Windows/Linux nicht gebaut; die Handbuchquellen unt
 **Offen/Naechste Schritte:** 1. Editor einmal von Hand durchklicken (siehe oben). 2. Website-Docs (`HorizonEngineDocs/`) auf das Task-Board-Fenster pruefen.
 3. P2: Relationen und Engine-Links in beliebigen Datenbanken per Drag zuweisen (fuer Tasks geht es schon), Zeitleiste, Kalender.
 4. P3: Seiten/Bloecke, eine Zeile oeffnet dann eine Page. 5. Spaeter: Planner als Wahrheit (Variante B) mit Historie je Zeile.
+
+## Handoff (Stand P2, 2026-10-22)
+**Fertig:**
+- Assignees in Tasks: mit angemeldetem Team Auswahl aus dem Roster (wie vorher), ohne Team getippte Namen wie in jeder Datenbank
+  (nur auf dem Board gespeichert, `assign` mit Verlaufseintrag, niemand wird benachrichtigt).
+- Relationen: Zelle mit Auswahlliste der Zeilen der Zieldatenbank (haken/enthaken, eine Zeile zeigt nie auf sich selbst);
+  "Add Property" fragt bei Typ Relation nach der Zieldatenbank ("This database" oder eine andere).
+- Zeitleiste (`ViewKind::Timeline`): `+ Timeline`, Start/End (Date-Properties) und "Colour by" (Select) im Toolbar, ein Tag je
+  Spalte, Balken von Start bis End (ohne End ein Tag), Heute-Markierung, Zeilen ohne Start unten als "no start date", Balken
+  ziehen verschiebt Start und End, Klick auf Balken/Titel oeffnet die Zeile. Zeilen per Clipper.
+- Engine-Links in beliebigen Datenbanken: Zelle und Details sind generisch (Drop, Chips, Sprung), nicht nur in Tasks.
+**Tests:** `test_planner_ui` 12 Faelle (neu: getippte Assignees, Relationszelle, Zeitleiste), Help-Audit 0 offen, `HorizonEditor`
+gebaut. Alle anderen Task-Board-Tests gruen. **Nicht geprueft:** Editor nicht gestartet; Windows/Linux nicht gebaut.
+**Offen:** Kalenderansicht; Zeitleiste ohne Zoom und ohne Resize der Balken; Relation zeigt nur Titel (kein Klick zur Zielzeile);
+P3 (Seiten/Bloecke, eine Zeile oeffnet eine Page); Tasks-Spalten bleiben fest; Reihenfolge der Datenbanken nach Name.

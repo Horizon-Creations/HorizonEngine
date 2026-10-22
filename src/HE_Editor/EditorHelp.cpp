@@ -3098,6 +3098,16 @@ namespace
 	  "Adds a board view: one lane per option of a Select property, a card per "
 	  "row. Drag a card to another lane to change its value.",
 	  "", "" },
+	{ "Planner/This database", "This database",
+	  "Makes the relation point at rows of this same database, for things like "
+	  "\"blocked by\" between two tasks. Pick another database in the list to "
+	  "point at its rows instead.",
+	  "", "" },
+	{ "Planner/+ Timeline", "+ Timeline",
+	  "Adds a timeline view: a row per line and a day per column, a bar from "
+	  "each row's Start date to its End date. Drag a bar to move the row's "
+	  "dates; click it to open the row. Pick the Date properties above.",
+	  "", "" },
 	{ "Planner/New Row", "New Row",
 	  "Adds an empty row at the end and saves it. Type its title in the first "
 	  "column; click a cell to fill in the rest.",
