@@ -119,6 +119,16 @@ public:
 	// The rectangle round every node; false for an empty board.
 	bool        bounds(Rect2& out) const;
 
+	// ── Arranging ────────────────────────────────────────────────────────────
+	// Line the cards up on the selection's outer edge / middle (a frame is moved by its own
+	// rectangle; what lies inside it is the caller's to carry). The number moved.
+	enum class Align { Left, CentreH, Right, Top, CentreV, Bottom };
+	int         alignNodes(const std::vector<UUID>& ids, Align how, std::int64_t nowMs);
+	// Equal gaps between three or more cards, the outermost two stay where they are.
+	int         distributeNodes(const std::vector<UUID>& ids, bool horizontal, std::int64_t nowMs);
+	// Moves each of `ids` so its top left lies on the grid; the number moved.
+	int         snapNodes(const std::vector<UUID>& ids, double grid, std::int64_t nowMs);
+
 	// ── Edges ────────────────────────────────────────────────────────────────
 	// nullptr for a node that is not there, an arrow from a node to itself, or one that
 	// exists already (same two nodes, same direction).
@@ -146,6 +156,21 @@ private:
 	friend Database::LoadResult loadBoard(const std::filesystem::path&, const UUID&, Board&);
 	friend bool saveBoard(const std::filesystem::path&, Board&, std::string*);
 };
+
+// ── Copy, paste, duplicate ───────────────────────────────────────────────────
+// Cards and the arrows that run between two of them, detached from any board (the editor's
+// clipboard for cards). Pasting makes new ids, so the same copy can be pasted again and
+// into another board.
+struct BoardClip
+{
+	std::vector<Node> nodes;
+	std::vector<Edge> edges;
+	bool empty() const { return nodes.empty(); }
+};
+
+BoardClip         copyNodes(const Board& board, const std::vector<UUID>& ids);
+// New cards offset by (dx, dy) on top; returns their ids in the clip's order.
+std::vector<UUID> pasteNodes(Board& board, const BoardClip& clip, double dx, double dy, std::int64_t nowMs);
 
 // ── Undo and redo ────────────────────────────────────────────────────────────
 // The editor's, per open board, never written to a file. Each step is a snapshot of

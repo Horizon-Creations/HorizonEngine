@@ -251,3 +251,49 @@ Windows/Linux nicht gebaut.
 **Offen:** W2 Bilder (Asset-Drop aus dem Content Browser, Einfuegen aus der Zwischenablage ueber `importMediaBytes`, Datei-Drop, Vorschau mit `AssetThumbnailCache`/Textur aus `Config/Planner/Media`);
 W3 Objekt-/Zeilen-/Seitenkarten anlegen (Drop aus Outliner, "Open" in Details/Seite als Karte), Rahmen-Titel, Ausrichten/Raster-Einrasten, Kopieren/Einfuegen/Duplizieren;
 W4 MCP-Tools fuer Boards, Minimap, Export als PNG; Undo fuer Titel; Mehrfachauswahl-Groesse; Mausrad-Zoom-Gefuehl pruefen.
+
+## Handoff (Stand Whiteboard W2)
+
+Pictures on the whiteboard. Verified: `he_tests --test-case="planner*"` 84/84 (two new UI tests in
+`tests/test_planner_ui.cpp`: paste + file drop; asset/entity drop), `HorizonEditor` builds, help audit clean.
+**Not verified**: the picture actually drawn (no renderer in tests, so `pictureOf` returns nothing there), the
+real system clipboard (`SDL_GetClipboardData` with image/png, jpeg, bmp, webp, in `PlannerPanel.cpp` drawBoardTab)
+and a real OS file drop. Try all three in the editor first. macOS Finder/screenshot clipboards may only offer
+TIFF/other formats, in which case paste falls through to text.
+
+- Preview: `PlannerBoardView.cpp` `pictureOf` (Texture asset: `AssetThumbnailCache::image`; media: stb_image
+  + `renderer->CreateImGuiTexture`, cached per name in `s_mediaTex`, destroyed in `reset()`), drawn letterboxed in
+  `drawNode` with the caption below. Without a picture the card shows the old label ("Image (not shown): ...").
+- Creating cards: `placeCard`, `placeMediaImage`, `placeLink` (Texture asset -> Image with UUID, anything else ->
+  Object card), `paste` (picture beats text), size from the picture (`cardSizeFor`, long side 320).
+- Content Browser/Outliner drop: right after `##canvas` via `TaskBoardPanel::acceptDroppedLinks`.
+- OS file drop: `EditorApplication.cpp` (before the .heproj block) asks `PlannerBoardView::wantsFileDrop(path, x, y)`
+  (picture extension + canvas drawn in the last 2 frames + inside it), then `dropFile`; the canvas imports it next frame.
+- Test hook: `PlannerPanel::setClipboardForTest`.
+
+Decisions: copies go to Config/Planner/Media (hash name, dedupes); Texture assets are never copied.
+Next steps: W3 (create object/row/page cards from a menu, frame titles, align/snap, copy/paste/duplicate of cards),
+W4 (MCP board tools, minimap, PNG export), unused-media cleanup, board title undo.
+
+## Handoff (Stand Whiteboard W3)
+
+Verified: `he_tests --test-case="planner*"` 86/86 (new: `test_planner_board.cpp` align/distribute/snap/copy-paste,
+`test_planner_ui.cpp` "copy, paste and duplicate, align, snap, page and row cards, frame titles"), HorizonEditor
+builds, help audit clean. Not verified: real editor feel (snap while dragging, the Add popup with many rows), row cards
+(only the page card path is tested), Windows/Linux.
+
+- Board model (`PlannerBoard.h/.cpp`): `Board::alignNodes/distributeNodes/snapNodes`, `BoardClip`, `copyNodes`, `pasteNodes` (new ids, arrows between copied cards kept).
+- View (`PlannerBoardView.cpp`): second toolbar row (Add popup of pages and per-database rows, Duplicate, Align popup, Snap checkbox, colours, Fit, 100%); the arrow-label row is now its own line. Keys Cmd/Ctrl+C/X/V/D. Copy leaves the marker `HorizonEngine/board-cards` on the system clipboard (replaces a picture, so paste knows to use `s_clip`); `Services::setClipboardText`, test hook `setClipboardForTest(image, text, setText)`.
+- Snap (20 units): the card in hand lands on the grid, the others keep their offset; resize snaps the corner.
+- Double-click: Page/Row card opens it (`PlannerPanel::selectPage/openRowPage`, posted), Object card jumps (`TaskBoardPanel::jumpToLink`); frame titles are edited by double-click as before.
+Open: pasted frames come out on top of cards (no sendToBack); align ignores what lies inside a frame; W4 (MCP board tools, minimap, PNG export), unused-media cleanup, board-title undo.
+
+## Handoff (Stand Whiteboard W4)
+
+Verified: `he_tests --test-case="planner*"` 88/88 (new: `test_mcp_tools_planner.cpp` whiteboard tool test; `test_planner_ui.cpp` minimap + Export PNG), HorizonEditor builds, help audit clean. I looked at an exported PNG (cards, text, arrow, label drawn). Not verified: the buttons in the real editor, pictures inside an export (media pictures use the CPU rasteriser's `registerTexture`; untested), minimap feel on a big board.
+
+- MCP (`McpToolsPlanner.cpp`): `planner_create_board`, `planner_read_board`, `planner_add_board_card` (text/frame/page/row), `planner_update_board_card`, `planner_delete_board_card`, `planner_connect_board_cards`, `planner_delete_board_arrow`; `planner_overview` now lists `whiteboards`. No image cards or PNG export over MCP (export needs the UI's font atlas on the main thread).
+- Minimap (`PlannerBoardView.cpp`, 180x120 bottom right, "Map" checkbox): click/drag centres the view; it takes the mouse there (`overMap`).
+- Export: `exportPng` draws the board into its own `ImDrawList` and rasterises it with `tests/ImGuiSoftwareRaster` (already compiled into the editor for EditorUiShot), `hePngWrite`; file `<project>/Exports/Planner/<title>.png`, longest side <= 4096, notification with the path. Texture-asset pictures show their label.
+- Fixed on the way: `n->id` was read after `sendToBack` moved the vector (a new frame selected / returned the wrong card), in `createNode` and the MCP tool.
+Open: unused-media cleanup, board-title undo, pasted frames on top of cards, align ignores frame contents, MCP image cards / export, calendar week view, timeline start-edge drag, sidebar page nesting by drag, live collaboration, real-editor test and Windows/Linux builds.

@@ -11,6 +11,7 @@
 #include "McpToolHooks.h"
 #include "McpToolRegistry.h"
 #include "Planner.h"
+#include "PlannerBoard.h"
 #include "PlannerImport.h"
 #include "PlannerTasks.h"
 #include "PlannerWorkspace.h"
@@ -102,9 +103,11 @@ TEST_CASE("planner tools: registered with schemas; readers do not mutate; no pro
 {
 	TempProject tp;
 	Tools t(tp.root);
-	const char* const readers[] = { "planner_overview", "planner_read_database", "planner_read_page" };
+	const char* const readers[] = { "planner_overview", "planner_read_database", "planner_read_page", "planner_read_board" };
 	const char* const writers[] = { "planner_add_row", "planner_update_row", "planner_delete_row", "planner_create_database",
-	                                "planner_add_property", "planner_write_page", "planner_delete_page" };
+	                                "planner_add_property", "planner_write_page", "planner_delete_page", "planner_create_board",
+	                                "planner_add_board_card", "planner_update_board_card", "planner_delete_board_card",
+	                                "planner_connect_board_cards", "planner_delete_board_arrow" };
 	for (const char* name : readers)
 	{
 		const auto* tool = t.registry.find(name);
@@ -459,4 +462,77 @@ TEST_CASE("planner tools: Tasks is the Task Board — rows are tasks, status cha
 	CHECK(source.board.tasks[0].statusOther == "needs-art");
 	t.ok("planner_delete_row", json{ { "database", "Tasks" }, { "row", "Retexture all crates" } });
 	CHECK(source.board.tasks.empty());
+}
+
+TEST_CASE("planner tools: a whiteboard is made, filled with cards and arrows, changed and read back, all in its file")
+{
+	TempProject tp;
+	Tools t(tp.root);
+	const json made = t.ok("planner_create_board", json{ { "title", "Level 1" } });
+	const std::string boardId = made["id"];
+	CHECK(t.ok("planner_overview")["whiteboards"].size() == 1);
+
+	// A page and a row to put on it.
+	const json page = t.ok("planner_write_page", json{ { "title", "Design" }, { "markdown", "hello" } });
+	const json db = t.ok("planner_create_database", json{ { "name", "Quests" } });
+	const json row = t.ok("planner_add_row", json{ { "database", "Quests" }, { "title", "Find the key" } });
+
+	const json a = t.ok("planner_add_board_card", json{ { "board", "Level 1" }, { "text", "Start" }, { "x", 10 }, { "y", 20 }, { "color", "Yellow" } });
+	const json b = t.ok("planner_add_board_card", json{ { "board", boardId }, { "text", "End" }, { "x", 400 }, { "y", 20 } });
+	const json frame = t.ok("planner_add_board_card", json{ { "board", boardId }, { "type", "frame" }, { "text", "Act 1" }, { "w", 600 }, { "h", 300 } });
+	const json pc = t.ok("planner_add_board_card", json{ { "board", boardId }, { "type", "page" }, { "page", "Design" }, { "x", 0 }, { "y", 200 } });
+	const json rc = t.ok("planner_add_board_card", json{ { "board", boardId }, { "type", "row" }, { "database", "Quests" }, { "row", "find the key" } });
+	CHECK(a["color"] == "yellow");
+	CHECK(pc["page"]["title"] == "Design");
+	CHECK(rc["row"]["title"] == "Find the key");
+	CHECK(frame["type"] == "frame");
+	(void)page; (void)db; (void)row;
+
+	const json arrow = t.ok("planner_connect_board_cards", json{ { "board", boardId }, { "from", a["id"] }, { "to", b["id"] }, { "label", "then" } });
+	CHECK(arrow["arrow"] == true);
+	// The same two again, and an arrow to itself, are refused.
+	CHECK(t.call("planner_connect_board_cards", json{ { "board", boardId }, { "from", a["id"] }, { "to", b["id"] } }).isError);
+	CHECK(t.call("planner_connect_board_cards", json{ { "board", boardId }, { "from", a["id"] }, { "to", a["id"] } }).isError);
+
+	t.ok("planner_update_board_card", json{ { "board", boardId }, { "card", a["id"] }, { "text", "Begin" }, { "x", 50 }, { "color", "" } });
+	const json read = t.ok("planner_read_board", json{ { "board", "Level 1" } });
+	REQUIRE(read["nodes"].size() == 5);
+	REQUIRE(read["edges"].size() == 1);
+	bool found = false;
+	for (const json& n : read["nodes"])
+		if (n["id"] == a["id"])
+		{
+			found = true;
+			CHECK(n["text"] == "Begin");
+			CHECK(n["x"] == 50);
+			CHECK(n["y"] == 20);
+			CHECK_FALSE(n.contains("color"));
+		}
+	CHECK(found);
+
+	// What the file holds is what a teammate pulls.
+	{
+		Board onDisk;
+		UUID id;
+		REQUIRE(uuidFromHex(boardId, id));
+		REQUIRE(loadBoard(tp.root, id, onDisk).ok);
+		CHECK(onDisk.nodes.size() == 5);
+		CHECK(onDisk.edges.size() == 1);
+	}
+
+	t.ok("planner_delete_board_arrow", json{ { "board", boardId }, { "arrow", arrow["id"] } });
+	CHECK(t.ok("planner_read_board", json{ { "board", boardId } })["edges"].empty());
+	t.ok("planner_connect_board_cards", json{ { "board", boardId }, { "from", a["id"] }, { "to", b["id"] } });
+	// Deleting a card takes its arrows along.
+	t.ok("planner_delete_board_card", json{ { "board", boardId }, { "card", a["id"] } });
+	const json after = t.ok("planner_read_board", json{ { "board", boardId } });
+	CHECK(after["nodes"].size() == 4);
+	CHECK(after["edges"].empty());
+
+	// Refusals say what was wrong.
+	CHECK(t.call("planner_read_board", json{ { "board", "nope" } }).errorCode == "not_found");
+	CHECK(t.call("planner_add_board_card", json{ { "board", boardId }, { "type", "image" } }).errorCode == "invalid_payload");
+	CHECK(t.call("planner_add_board_card", json{ { "board", boardId }, { "type", "page" }, { "page", "missing" } }).isError);
+	CHECK(t.call("planner_update_board_card", json{ { "board", boardId }, { "card", a["id"] } }).errorCode == "not_found");
+	CHECK(t.call("planner_create_board", json{ { "title", "" } }).errorCode == "invalid_payload");
 }

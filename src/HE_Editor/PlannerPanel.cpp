@@ -15,6 +15,7 @@
 #include "TaskBoardPanel.h"
 #include "TaskBoardTeam.h"
 
+#include <SDL3/SDL.h>   // the clipboard
 #include <imgui.h>
 #include <imgui_internal.h>          // the text field's cursor, for the arrow keys between blocks
 #include <misc/cpp/imgui_stdlib.h>   // InputText over std::string
@@ -2461,6 +2462,10 @@ void drawCalendar(const Database& db, const View& view, const std::vector<std::s
 
 // ── A whiteboard ─────────────────────────────────────────────────────────────
 
+std::function<bool(std::string&, std::string&)> s_clipImage;   // a test's clipboard; empty = the system's
+std::function<std::string()>                    s_clipText;
+std::function<void(const std::string&)>         s_clipSet;
+
 void drawBoardTab(AppContext& ctx)
 {
 	if (!s_ws.findBoard(s_boardId)) { s_boardId = UUID{}; return; }
@@ -2470,6 +2475,33 @@ void drawBoardTab(AppContext& ctx)
 	services.post = [](std::function<void()> fn) { post(std::move(fn)); };
 	services.note = [](const std::string& name) { note(name); };
 	services.noteRect = [](const std::string& name, ImVec2 a, ImVec2 b) { s_rects[name] = { a.x, a.y, b.x, b.y }; };
+	services.root = s_ws.project();
+	// The system clipboard: a picture in one of the formats a screenshot tool or a browser leaves, else text.
+	services.clipboardImage = s_clipImage ? s_clipImage : [](std::string& bytes, std::string& ext) {
+		static const struct { const char* mime; const char* ext; } kFormats[] = {
+			{ "image/png", "png" }, { "image/jpeg", "jpg" }, { "image/bmp", "bmp" }, { "image/webp", "webp" } };
+		for (const auto& f : kFormats)
+		{
+			if (!SDL_HasClipboardData(f.mime)) continue;
+			size_t size = 0;
+			if (void* data = SDL_GetClipboardData(f.mime, &size))
+			{
+				bytes.assign(static_cast<const char*>(data), size);
+				SDL_free(data);
+				ext = f.ext;
+				if (!bytes.empty()) return true;
+			}
+		}
+		return false;
+	};
+	services.clipboardText = s_clipText ? s_clipText : []() -> std::string {
+		if (!SDL_HasClipboardText()) return {};
+		char* t = SDL_GetClipboardText();
+		std::string out = t ? t : "";
+		SDL_free(t);
+		return out;
+	};
+	services.setClipboardText = s_clipSet ? s_clipSet : [](const std::string& t) { SDL_SetClipboardText(t.c_str()); };
 	PlannerBoardView::draw(services, s_boardId);
 }
 
@@ -3125,6 +3157,14 @@ int  calendarMonth() { return s_calMonth; }
 void setTimelineZoom(int level) { s_tlZoom = std::clamp(level, 0, 2); }
 
 void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; s_boardId = UUID{}; }
+void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, std::function<std::string()> text,
+                         std::function<void(const std::string&)> setText)
+{
+	s_clipImage = std::move(image);
+	s_clipText  = std::move(text);
+	s_clipSet   = std::move(setText);
+}
+
 void selectBoard(const UUID& id) { s_boardId = id; s_pageId = s_pageDb = UUID{}; }
 UUID selectedBoard() { return s_boardId; }
 void openRowPage(const UUID& dbId, const UUID& rowId) { openPage(rowId, dbId); }

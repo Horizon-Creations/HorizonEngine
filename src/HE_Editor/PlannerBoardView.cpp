@@ -1,18 +1,30 @@
 #include "PlannerBoardView.h"
 
+#include "AssetThumbnailCache.h"   // a Texture asset's full-size picture
 #include "EditorApplication.h"   // AppContext
+#include "EditorAssetTypeCache.h"
 #include "EditorHelp.h"
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
+#include "NotificationStore.h"
+#include "PlannerPanel.h"
 #include "PlannerWorkspace.h"
+#include "TaskBoardPanel.h"      // the links a Content Browser / Outliner drop stands for
+#include "vendor/stb_image.h"
+#include "../../tests/ImGuiSoftwareRaster.h"   // the CPU rasteriser the editor already carries (EditorUiShot)
+
+#include <Application/AppIcon.h>      // hePngWrite
+#include <Renderer/IRenderer.h>   // CreateImGuiTexture
 
 #include <imgui.h>
+#include <imgui_internal.h>   // a draw list of our own for the export
 #include <misc/cpp/imgui_stdlib.h>   // InputText over std::string
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 
@@ -54,6 +66,25 @@ int         s_resizeCorner = 0;          // 0 nw, 1 ne, 2 se, 3 sw
 Rect2       s_resizeFrom;
 Rect2       s_resizeTo;
 UUID        s_connectFrom;               // Connect
+
+// Pictures: a media file's texture is made the first time a card shows it. A failed try is kept
+// (null handle) so a missing file is not read again every frame.
+struct MediaTex { ImTextureID id = 0; float w = 0, h = 0; bool tried = false; IRenderer* renderer = nullptr; };
+std::unordered_map<std::string, MediaTex> s_mediaTex;
+
+// Files let go over the window, waiting for the next frame's canvas to turn them into cards.
+struct DroppedFile { std::string path; ImVec2 at; };
+std::vector<DroppedFile> s_dropped;
+ImVec2 s_canvasMin(0, 0), s_canvasMax(0, 0);
+int    s_canvasFrame = -100;        // the frame the canvas was last drawn in
+
+bool        s_minimap = true;            // the overview in the canvas corner
+bool        s_mapDrag = false;           // a press that began inside it
+bool        s_snap = false;              // moves and resizes land on the grid
+constexpr double kGrid = 20.0;
+BoardClip   s_clip;                      // Copy: cards (and the arrows between them) waiting to be pasted
+int         s_pasteCount = 0;            // each paste of one copy lands a little further on
+constexpr const char* kClipMarker = "HorizonEngine/board-cards";   // what Copy leaves on the system clipboard
 
 UUID        s_editNode;                  // the card whose text is being typed
 std::string s_editBuf;
@@ -161,8 +192,8 @@ void createNode(const UUID& boardId, NodeType type, double centreX, double centr
 	auto made = std::make_shared<UUID>();
 	change(boardId, [=](Board& b) {
 		Node* n = b.addNode(type, centreX - w * 0.5, centreY - h * 0.5, w, h, "", taskNowMs());
-		if (frame) b.sendToBack(n->id, taskNowMs());
-		*made = n->id;
+		*made = n->id;   // before sendToBack: that moves the cards in the vector
+		if (frame) b.sendToBack(*made, taskNowMs());
 		return true;
 	}, [=] {
 		s_sel = { *made };
@@ -210,6 +241,216 @@ void setColour(const UUID& boardId, const std::string& word)
 	});
 }
 
+// ── Pictures ─────────────────────────────────────────────────────────────────
+struct Pic { ImTextureID tex = 0; float w = 0, h = 0; };
+
+// While exporting: media pictures go to the CPU rasteriser instead of the GPU, assets are not drawn.
+std::unordered_map<std::string, MediaTex>* s_exportTex = nullptr;
+
+Pic pictureOf(const Node& n)
+{
+	Pic p;
+	if (s_exportTex)
+	{
+		if (n.media.empty() || !(n.asset == UUID{}) || !S) return p;
+		MediaTex& m = (*s_exportTex)[n.media];
+		if (!m.tried)
+		{
+			m.tried = true;
+			const std::filesystem::path file = mediaPath(S->root, n.media);
+			int w = 0, h = 0, ch = 0;
+			if (!file.empty())
+				if (unsigned char* px = stbi_load(file.string().c_str(), &w, &h, &ch, 4))
+				{
+					m.id = he_ui::registerTexture(px, w, h);
+					m.w = static_cast<float>(w);
+					m.h = static_cast<float>(h);
+					stbi_image_free(px);
+				}
+		}
+		return { m.id, m.w, m.h };
+	}
+	if (!(n.asset == UUID{}))
+	{
+		if (!S || !S->ctx || !S->ctx->contentManager) return p;
+		const std::string rel = S->ctx->contentManager->pathForId(n.asset);
+		if (rel.empty()) return p;
+		uint32_t w = 0, h = 0;
+		if (void* t = AssetThumbnailCache::image(S->ctx->contentManager->resolveAbsolutePath(rel), &w, &h))
+			p = { static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(t)), static_cast<float>(w), static_cast<float>(h) };
+		return p;
+	}
+	if (n.media.empty() || !S || !S->ctx || !S->ctx->renderer) return p;
+	MediaTex& m = s_mediaTex[n.media];
+	if (!m.tried)
+	{
+		m.tried = true;
+		const std::filesystem::path file = mediaPath(S->root, n.media);
+		int w = 0, h = 0, ch = 0;
+		if (!file.empty())
+			if (unsigned char* px = stbi_load(file.string().c_str(), &w, &h, &ch, 4))
+			{
+				if (void* handle = S->ctx->renderer->CreateImGuiTexture(px, w, h))
+				{
+					m.id = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(handle));
+					m.w = static_cast<float>(w);
+					m.h = static_cast<float>(h);
+					m.renderer = S->ctx->renderer;
+				}
+				stbi_image_free(px);
+			}
+	}
+	return { m.id, m.w, m.h };
+}
+
+// A new picture card is as big as the picture, down to at most this on its longer side.
+void cardSizeFor(int pw, int ph, double& w, double& h)
+{
+	constexpr double kLongest = 320.0, kCaption = 8.0;
+	if (pw <= 0 || ph <= 0) { w = 240; h = 160; return; }
+	const double k = std::min(1.0, kLongest / std::max(pw, ph));
+	w = std::max(60.0, pw * k) + 2 * kCaption;
+	h = std::max(40.0, ph * k) + 2 * kCaption;
+}
+
+// A card of `type` centred on (cx, cy); `fill` sets what the type needs. It is selected afterwards.
+void placeCard(const UUID& boardId, NodeType type, double cx, double cy, double w, double h,
+               std::function<void(Node&)> fill)
+{
+	auto made = std::make_shared<UUID>();
+	change(boardId, [=](Board& b) {
+		Node* n = b.addNode(type, cx - w * 0.5, cy - h * 0.5, w, h, "", taskNowMs());
+		if (fill) fill(*n);
+		*made = n->id;
+		return true;
+	}, [=] {
+		s_sel = { *made };
+		s_selEdge = UUID{};
+	});
+}
+
+void placeMediaImage(const UUID& boardId, const std::string& name, double cx, double cy)
+{
+	int w = 0, h = 0, ch = 0;
+	const std::filesystem::path file = mediaPath(S->root, name);
+	if (!file.empty()) stbi_info(file.string().c_str(), &w, &h, &ch);
+	double cw, chh;
+	cardSizeFor(w, h, cw, chh);
+	placeCard(boardId, NodeType::Image, cx, cy, cw, chh, [=](Node& n) { n.media = name; });
+}
+
+// A picture file (a drop) or the clipboard's picture becomes a card; false when it was not one.
+bool importPictureFile(const UUID& boardId, const std::filesystem::path& file, double cx, double cy)
+{
+	if (S->root.empty()) return false;
+	const std::string name = importMediaFile(S->root, file, nullptr);
+	if (name.empty()) return false;
+	placeMediaImage(boardId, name, cx, cy);
+	return true;
+}
+
+// A link from the Content Browser or the Outliner: a Texture asset is shown as a picture, the
+// rest stands as a card that names it.
+void placeLink(const UUID& boardId, const TaskLink& link, double cx, double cy)
+{
+	if (link.kind == TaskLinkKind::Asset && S->ctx && S->ctx->contentManager)
+	{
+		const std::string rel = S->ctx->contentManager->pathForId(link.id);
+		const std::string abs = rel.empty() ? std::string{} : S->ctx->contentManager->resolveAbsolutePath(rel);
+		if (!abs.empty() && EditorAssetTypeCache::assetTypeOf(abs) == AssetType::Texture)
+		{
+			uint32_t pw = 0, ph = 0;
+			AssetThumbnailCache::image(abs, &pw, &ph);
+			double w, h;
+			cardSizeFor(static_cast<int>(pw), static_cast<int>(ph), w, h);
+			const UUID id = link.id;
+			const std::string label = link.label;
+			placeCard(boardId, NodeType::Image, cx, cy, w, h, [=](Node& n) { n.asset = id; n.text = label; });
+			return;
+		}
+	}
+	placeCard(boardId, NodeType::Object, cx, cy, 240, 80, [=](Node& n) { n.link = link; });
+}
+
+void copySelection(const UUID& boardId)
+{
+	const Board* b = S->ws->findBoard(boardId);
+	if (!b || s_sel.empty()) return;
+	s_clip = copyNodes(*b, s_sel);
+	s_pasteCount = 0;
+	if (S->setClipboardText) S->setClipboardText(kClipMarker);
+}
+
+void pasteClip(const UUID& boardId, const BoardClip& clip, double offset)
+{
+	if (clip.empty()) return;
+	auto made = std::make_shared<std::vector<UUID>>();
+	change(boardId, [=](Board& b) {
+		*made = pasteNodes(b, clip, offset, offset, taskNowMs());
+		return !made->empty();
+	}, [=] {
+		s_sel = *made;
+		s_selEdge = UUID{};
+	});
+}
+
+void duplicateSelection(const UUID& boardId)
+{
+	const Board* b = S->ws->findBoard(boardId);
+	if (!b || s_sel.empty()) return;
+	pasteClip(boardId, copyNodes(*b, s_sel), 30.0);
+}
+
+void alignSelection(const UUID& boardId, Board::Align how)
+{
+	const std::vector<UUID> ids = s_sel;
+	change(boardId, [=](Board& b) { return b.alignNodes(ids, how, taskNowMs()) > 0; });
+}
+
+void distributeSelection(const UUID& boardId, bool horizontal)
+{
+	const std::vector<UUID> ids = s_sel;
+	change(boardId, [=](Board& b) { return b.distributeNodes(ids, horizontal, taskNowMs()) > 0; });
+}
+
+// A card for a page or a row of a database.
+void addPageCard(const UUID& boardId, const UUID& page, double cx, double cy)
+{
+	placeCard(boardId, NodeType::Page, cx, cy, 240, 80, [=](Node& n) { n.page = page; });
+}
+
+void addRowCard(const UUID& boardId, const UUID& database, const UUID& row, double cx, double cy)
+{
+	placeCard(boardId, NodeType::Row, cx, cy, 240, 80, [=](Node& n) { n.database = database; n.row = row; });
+}
+
+void paste(const UUID& boardId, double cx, double cy)
+{
+	// Cards copied in the editor: Copy left the marker where a picture or text would be.
+	if (!s_clip.empty() && S->clipboardText && S->clipboardText() == kClipMarker)
+	{
+		++s_pasteCount;
+		pasteClip(boardId, s_clip, 30.0 * s_pasteCount);
+		return;
+	}
+	std::string bytes, ext;
+	if (S->clipboardImage && S->clipboardImage(bytes, ext) && !bytes.empty() && !S->root.empty())
+	{
+		const std::string name = importMediaBytes(S->root, bytes, ext, nullptr);
+		if (!name.empty()) { placeMediaImage(boardId, name, cx, cy); return; }
+	}
+	const std::string text = S->clipboardText ? S->clipboardText() : std::string{};
+	if (text.empty()) return;
+	placeCard(boardId, NodeType::Text, cx, cy, 240, 120, [=](Node& n) { n.text = text; });
+}
+
+bool isPictureFile(const std::string& path)
+{
+	std::string ext = std::filesystem::path(path).extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".bmp" || ext == ".webp" || ext == ".tga";
+}
+
 // ── Drawing the cards ────────────────────────────────────────────────────────
 std::string labelOfNode(Workspace& ws, const Node& n)
 {
@@ -254,9 +495,36 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 		dl->AddRectFilled(a, b, Theme::u32(fill), round);
 		dl->AddRect(a, b, selected ? Theme::u32(Theme::AccentBright) : Theme::u32(Theme::warm(0.32f)), round, 0, selected ? 2.5f : 1.0f);
 	}
+	const float fontSize = ImGui::GetFontSize() * z;
+
+	if (n.type == NodeType::Image)
+	{
+		const Pic pic = pictureOf(n);
+		if (pic.tex && pic.w > 0 && pic.h > 0)
+		{
+			const float pad = 8.0f * z;
+			const float captionH = n.text.empty() ? 0.0f : fontSize * 1.5f;
+			const ImVec2 lo(a.x + pad, a.y + pad), hi(b.x - pad, b.y - pad - captionH);
+			const float aw = hi.x - lo.x, ah = hi.y - lo.y;
+			if (aw > 2 && ah > 2)
+			{
+				const float k = std::min(aw / pic.w, ah / pic.h);
+				const float dw = pic.w * k, dh = pic.h * k;
+				const ImVec2 p0(lo.x + (aw - dw) * 0.5f, lo.y + (ah - dh) * 0.5f);
+				dl->AddImage(pic.tex, p0, ImVec2(p0.x + dw, p0.y + dh));
+			}
+			if (!editing && captionH > 0 && fontSize >= 5.0f)
+			{
+				dl->PushClipRect(a, b, true);
+				dl->AddText(ImGui::GetFont(), fontSize, ImVec2(a.x + pad, b.y - pad - fontSize * 1.2f),
+				            Theme::u32(coloured ? Theme::Ink : Theme::Text), n.text.c_str(), nullptr, std::max(10.0f, (b.x - a.x) - 2 * pad));
+				dl->PopClipRect();
+			}
+			return;
+		}
+	}
 	if (editing) return;   // the field over it draws the text
 
-	const float fontSize = ImGui::GetFontSize() * z;
 	if (fontSize < 5.0f) return;
 	const std::string label = labelOfNode(ws, n);
 	const ImU32 ink = Theme::u32(n.type == NodeType::Frame ? Theme::TextHeading : (coloured ? Theme::Ink : Theme::Text));
@@ -265,7 +533,7 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 	if (n.type == NodeType::Row)    prefix = "Row: ";
 	if (n.type == NodeType::Page)   prefix = "Page: ";
 	if (n.type == NodeType::Object) prefix = "";
-	if (n.type == NodeType::Image)  prefix = "Image: ";
+	if (n.type == NodeType::Image)  prefix = n.asset == UUID{} && n.media.empty() ? "Image: " : "Image (not shown): ";
 	dl->PushClipRect(a, b, true);
 	dl->AddText(ImGui::GetFont(), fontSize, ImVec2(a.x + pad, a.y + pad), ink, (prefix + label).c_str(), nullptr,
 	            std::max(10.0f, (b.x - a.x) - 2 * pad));
@@ -318,8 +586,24 @@ void forget(const UUID& board)
 	}
 }
 
+bool wantsFileDrop(const std::string& path, float x, float y)
+{
+	if (!isPictureFile(path)) return false;
+	if (!ImGui::GetCurrentContext() || ImGui::GetFrameCount() - s_canvasFrame > 2) return false;
+	return x >= s_canvasMin.x && x <= s_canvasMax.x && y >= s_canvasMin.y && y <= s_canvasMax.y;
+}
+
+void dropFile(const std::string& path, float x, float y)
+{
+	s_dropped.push_back({ path, ImVec2(x, y) });
+}
+
 void reset()
 {
+	for (auto& kv : s_mediaTex)
+		if (kv.second.id && kv.second.renderer) kv.second.renderer->DestroyImGuiTexture(reinterpret_cast<void*>(static_cast<uintptr_t>(kv.second.id)));
+	s_mediaTex.clear();
+	s_dropped.clear();
 	s_views.clear();
 	s_history.clear();
 	s_sel.clear();
@@ -329,6 +613,126 @@ void reset()
 	s_stats = {};
 	s_editBuf.clear();
 	s_editFocus = false;
+}
+
+
+// ── Export ───────────────────────────────────────────────────────────────────
+std::filesystem::path exportPathFor(const std::filesystem::path& projectRoot, const std::string& boardTitle)
+{
+	std::string name;
+	for (char c : boardTitle)
+		name += (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '-' || c == '_') ? c : '_';
+	while (!name.empty() && name.back() == ' ') name.pop_back();
+	if (name.empty()) name = "Whiteboard";
+	return projectRoot / "Exports" / "Planner" / (name + ".png");
+}
+
+bool exportPng(const Services& services, const UUID& boardId, const std::filesystem::path& file, std::string* error)
+{
+	auto fail = [&](const std::string& why) { if (error) *error = why; return false; };
+	const Board* board = services.ws ? services.ws->findBoard(boardId) : nullptr;
+	if (!board) return fail("no such whiteboard");
+	Rect2 r;
+	if (!board->bounds(r)) return fail("the whiteboard is empty");
+	if (!ImGui::GetCurrentContext()) return fail("no UI context");
+
+	constexpr double kMargin = 40.0, kLongest = 4096.0;
+	const double worldW = r.w + 2 * kMargin, worldH = r.h + 2 * kMargin;
+	const double zoom = std::clamp(std::min(2.0, kLongest / std::max(worldW, worldH)), 0.05, 2.0);
+	const int W = std::max(1, static_cast<int>(std::ceil(worldW * zoom))), H = std::max(1, static_cast<int>(std::ceil(worldH * zoom)));
+	const Xf xf{ ImVec2(0, 0), ViewState{ r.x - kMargin, r.y - kMargin, zoom } };
+
+	const Services* const savedServices = S;
+	S = &services;
+	std::unordered_map<std::string, MediaTex> pictures;
+	s_exportTex = &pictures;
+
+	ImDrawList dl(ImGui::GetDrawListSharedData());
+	dl._ResetForNewFrame();
+	dl.PushTexture(ImGui::GetIO().Fonts->TexRef);
+	dl.PushClipRect(ImVec2(0, 0), ImVec2(static_cast<float>(W), static_cast<float>(H)), false);
+
+	// Arrows under the cards' text but over frames: the same order the canvas draws in.
+	for (const Node& n : board->nodes)
+		if (n.type == NodeType::Frame) drawNode(&dl, xf, *services.ws, n, n.rect(), false, false);
+	for (const Edge& e : board->edges)
+	{
+		const Node* from = board->findNode(e.from);
+		const Node* to = board->findNode(e.to);
+		if (!from || !to) continue;
+		double ax, ay, bx, by;
+		anchorOf(*from, to->x + to->w * 0.5, to->y + to->h * 0.5, ax, ay);
+		anchorOf(*to, from->x + from->w * 0.5, from->y + from->h * 0.5, bx, by);
+		const ImVec2 pa = xf.toScreen(ax, ay), pb = xf.toScreen(bx, by);
+		ImVec4 col = Theme::TextDim;
+		colourOf(e.color, col);
+		const ImU32 c = Theme::u32(col);
+		dl.AddLine(pa, pb, c, 2.0f);
+		if (e.arrow) drawArrowHead(&dl, pb, pa, 11.0f, c);
+		if (!e.label.empty())
+		{
+			const ImVec2 mid((pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f);
+			const ImVec2 ts = ImGui::CalcTextSize(e.label.c_str());
+			dl.AddRectFilled(ImVec2(mid.x - ts.x * 0.5f - 4, mid.y - ts.y * 0.5f - 2), ImVec2(mid.x + ts.x * 0.5f + 4, mid.y + ts.y * 0.5f + 2),
+			                 Theme::u32(Theme::warm(0.12f)), 4.0f);
+			dl.AddText(ImVec2(mid.x - ts.x * 0.5f, mid.y - ts.y * 0.5f), Theme::u32(Theme::Text), e.label.c_str());
+		}
+	}
+	for (const Node& n : board->nodes)
+		if (n.type != NodeType::Frame) drawNode(&dl, xf, *services.ws, n, n.rect(), false, false);
+
+	// The rasteriser reads CPU textures: the font atlas is copied, the pictures are already there.
+	std::vector<std::pair<ImTextureID, ImTextureID>> atlases;
+	auto cpuAtlas = [&](ImTextureID id) {
+		for (const auto& [from, to] : atlases)
+			if (from == id) return to;
+		ImTextureID to = id;
+		for (ImTextureData* t : ImGui::GetPlatformIO().Textures)
+		{
+			if (!t || t->GetTexID() != id || !t->Pixels || t->Width <= 0 || t->Height <= 0) continue;
+			const size_t count = static_cast<size_t>(t->Width) * static_cast<size_t>(t->Height);
+			std::vector<std::uint8_t> rgba(count * 4);
+			for (size_t i = 0; i < count; ++i)
+			{
+				if (t->BytesPerPixel == 1) { rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 255; rgba[i * 4 + 3] = t->Pixels[i]; }
+				else std::memcpy(&rgba[i * 4], &t->Pixels[i * 4], 4);
+			}
+			to = he_ui::registerTexture(rgba.data(), t->Width, t->Height);
+			break;
+		}
+		atlases.emplace_back(id, to);
+		return to;
+	};
+	auto isPicture = [&](ImTextureID id) {
+		for (const auto& kv : pictures) if (kv.second.id == id && id) return true;
+		return false;
+	};
+	for (ImDrawCmd& cmd : dl.CmdBuffer)
+		if (!cmd.UserCallback && !isPicture(cmd.GetTexID())) cmd.TexRef = ImTextureRef(cpuAtlas(cmd.GetTexID()));
+
+	ImDrawData data;
+	data.Valid = true;
+	data.DisplayPos = ImVec2(0, 0);
+	data.DisplaySize = ImVec2(static_cast<float>(W), static_cast<float>(H));
+	data.FramebufferScale = ImVec2(1, 1);
+	data.Textures = nullptr;
+	data.CmdLists.push_back(&dl);
+	data.CmdListsCount = 1;
+	data.TotalVtxCount = dl.VtxBuffer.Size;
+	data.TotalIdxCount = dl.IdxBuffer.Size;
+	const he_ui::Image img = he_ui::rasterize(&data, W, H, IM_COL32(26, 24, 21, 255));
+	data.CmdLists.clear();   // dl is ours; the data does not own it
+
+	for (const auto& [from, to] : atlases) if (to != from) he_ui::unregisterTexture(to);
+	for (auto& kv : pictures) if (kv.second.id) he_ui::unregisterTexture(kv.second.id);
+	s_exportTex = nullptr;
+	S = savedServices;
+
+	if (!img.valid()) return fail("the picture could not be drawn");
+	std::error_code ec;
+	std::filesystem::create_directories(file.parent_path(), ec);
+	if (!hePngWrite(file, img.rgba.data(), img.width, img.height)) return fail("could not write " + file.string());
+	return true;
 }
 
 // ── The toolbar and the canvas ───────────────────────────────────────────────
@@ -406,6 +810,90 @@ void draw(const Services& services, const UUID& boardId)
 	ImGui::EndDisabled();
 	services.note("Delete");
 
+	// The second row of the toolbar: what is made of cards in hand and how they sit.
+	if (EditorWidgets::button("Add")) ImGui::OpenPopup("##addcard");
+	services.note("Add");
+	if (ImGui::BeginPopup("##addcard"))
+	{
+		ImGui::TextDisabled("Page");
+		int shown = 0;
+		for (Page* p : wsp->pages())
+		{
+			if (++shown > 40) { ImGui::TextDisabled("..."); break; }
+			ImGui::PushID(p);
+			if (ImGui::Selectable(p->title.empty() ? "Untitled" : p->title.c_str())) addPageCard(boardId, p->id, centreX, centreY);
+			services.note("add:" + p->title);
+			ImGui::PopID();
+		}
+		for (Database* db : wsp->databases())
+		{
+			if (!ImGui::BeginMenu(db->name.empty() ? "Untitled" : db->name.c_str())) continue;
+			int rows = 0;
+			for (const Row& r : db->rows)
+			{
+				if (++rows > 60) { ImGui::TextDisabled("..."); break; }
+				ImGui::PushID(&r);
+				if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str())) addRowCard(boardId, db->id, r.id, centreX, centreY);
+				services.note("add:" + db->name + ":" + r.title);
+				ImGui::PopID();
+			}
+			ImGui::EndMenu();
+		}
+		ImGui::EndPopup();
+	}
+	ImGui::SameLine();
+	ImGui::BeginDisabled(s_sel.empty());
+	if (EditorWidgets::button("Duplicate")) duplicateSelection(boardId);
+	ImGui::EndDisabled();
+	services.note("Duplicate");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(s_sel.size() < 2);
+	if (EditorWidgets::button("Align")) ImGui::OpenPopup("##align");
+	ImGui::EndDisabled();
+	services.note("Align");
+	if (ImGui::BeginPopup("##align"))
+	{
+		if (EditorWidgets::selectable("Align Left"))       alignSelection(boardId, Board::Align::Left);
+		services.note("Align Left");
+		if (EditorWidgets::selectable("Align Center"))     alignSelection(boardId, Board::Align::CentreH);
+		services.note("Align Center");
+		if (EditorWidgets::selectable("Align Right"))      alignSelection(boardId, Board::Align::Right);
+		services.note("Align Right");
+		if (EditorWidgets::selectable("Align Top"))        alignSelection(boardId, Board::Align::Top);
+		services.note("Align Top");
+		if (EditorWidgets::selectable("Align Middle"))     alignSelection(boardId, Board::Align::CentreV);
+		services.note("Align Middle");
+		if (EditorWidgets::selectable("Align Bottom"))     alignSelection(boardId, Board::Align::Bottom);
+		services.note("Align Bottom");
+		ImGui::BeginDisabled(s_sel.size() < 3);
+		if (EditorWidgets::selectable("Distribute Horizontally")) distributeSelection(boardId, true);
+		services.note("Distribute Horizontally");
+		if (EditorWidgets::selectable("Distribute Vertically"))   distributeSelection(boardId, false);
+		services.note("Distribute Vertically");
+		ImGui::EndDisabled();
+		ImGui::EndPopup();
+	}
+	ImGui::SameLine();
+	EditorWidgets::checkbox("Snap", &s_snap);
+	services.note("Snap");
+	ImGui::SameLine();
+	EditorWidgets::checkbox("Map", &s_minimap);
+	services.note("Map");
+	ImGui::SameLine();
+	if (EditorWidgets::button("Export PNG"))
+	{
+		const Services copy = services;   // the post runs after this frame's services are gone
+		services.post([=] {
+			const std::filesystem::path file = exportPathFor(copy.root, copy.ws->findBoard(boardId) ? copy.ws->findBoard(boardId)->title : std::string());
+			std::string err;
+			if (copy.root.empty()) err = "no project is open";
+			else if (exportPng(copy, boardId, file, &err))
+				HE::Ed::notify(HE::Ed::NoteLevel::Info, "Whiteboard exported", file.string());
+			if (!err.empty()) HE::Ed::notify(HE::Ed::NoteLevel::Important, "Whiteboard not exported: " + err);
+		});
+	}
+	services.note("Export PNG");
+
 	// Colours for what is selected.
 	ImGui::SameLine();
 	ImGui::BeginDisabled(s_sel.empty());
@@ -437,7 +925,6 @@ void draw(const Services& services, const UUID& boardId)
 	if (const Edge* e = board->findEdge(s_selEdge))
 	{
 		if (!(s_labelFor == e->id) || !ImGui::IsAnyItemActive()) { s_labelFor = e->id; s_labelBuf = e->label; }
-		ImGui::SameLine();
 		ImGui::SetNextItemWidth(160);
 		ImGui::InputTextWithHint("##edgelabel", "Arrow label", &s_labelBuf);
 		if (ImGui::IsItemDeactivatedAfterEdit() && s_labelBuf != e->label)
@@ -464,8 +951,42 @@ void draw(const Services& services, const UUID& boardId)
 	s_canvasSize = size;
 	ImGui::SetNextItemAllowOverlap();   // a card being typed in sits on top of it
 	ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
-	const bool hovered = ImGui::IsItemHovered();
+	// The minimap sits in the bottom right corner and takes the mouse there.
+	const ImVec2 mapSize(180, 120);
+	const ImVec2 mapMin(origin.x + size.x - mapSize.x - 10, origin.y + size.y - mapSize.y - 10);
+	const ImVec2 mapMax(mapMin.x + mapSize.x, mapMin.y + mapSize.y);
+	const bool mapOn = s_minimap && !board->nodes.empty() && size.x > mapSize.x * 2 && size.y > mapSize.y * 2;
+	const bool overMap = mapOn && io.MousePos.x >= mapMin.x && io.MousePos.x <= mapMax.x && io.MousePos.y >= mapMin.y && io.MousePos.y <= mapMax.y;
+	const bool hovered = ImGui::IsItemHovered() && !overMap && !s_mapDrag;
 	services.noteRect("canvas", origin, ImVec2(origin.x + size.x, origin.y + size.y));
+	s_canvasMin = origin;
+	s_canvasMax = ImVec2(origin.x + size.x, origin.y + size.y);
+	s_canvasFrame = ImGui::GetFrameCount();
+
+	// What is dropped on the canvas: assets, scenes and entities from the editor's panels (right
+	// after the item they are dropped on), and files from the system that arrived since last frame.
+	{
+		const ImGuiIO& dio = ImGui::GetIO();
+		const Xf dropXf{ origin, view };
+		if (services.ctx)
+		{
+			const std::vector<TaskLink> links = TaskBoardPanel::acceptDroppedLinks(*services.ctx);
+			double dx, dy;
+			dropXf.toWorld(dio.MousePos, dx, dy);
+			double step = 0;
+			for (const TaskLink& l : links) { placeLink(boardId, l, dx + step, dy + step); step += 28.0 / view.zoom; }
+		}
+		std::vector<DroppedFile> files;
+		files.swap(s_dropped);
+		double step = 0;
+		for (const DroppedFile& f : files)
+		{
+			if (!isPictureFile(f.path)) continue;
+			double fx, fy;
+			dropXf.toWorld(f.at, fx, fy);
+			if (importPictureFile(boardId, f.path, fx + step, fy + step)) step += 28.0 / view.zoom;
+		}
+	}
 	const bool editing = !(s_editNode == UUID{});
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
@@ -531,9 +1052,20 @@ void draw(const Services& services, const UUID& boardId)
 	// What is shown where: a card being moved or resized is drawn at its new place.
 	ImVec2 mouseDelta(io.MousePos.x - s_dragStart.x, io.MousePos.y - s_dragStart.y);
 	const bool movingNow = s_drag == Drag::Move && s_dragMoved;
+	// With Snap the card in hand lands on the grid and the others keep their distance to it.
+	auto draggedBy = [&]() {
+		double dx = mouseDelta.x / view.zoom, dy = mouseDelta.y / view.zoom;
+		if (s_snap && !s_dragNodes.empty())
+			if (const Node* lead = board->findNode(has(s_dragNodes, s_dragHit) ? s_dragHit : s_dragNodes.front()))
+			{
+				dx = std::round((lead->x + dx) / kGrid) * kGrid - lead->x;
+				dy = std::round((lead->y + dy) / kGrid) * kGrid - lead->y;
+			}
+		return ImVec2(static_cast<float>(dx), static_cast<float>(dy));
+	};
 	auto shownRect = [&](const Node& n) {
 		Rect2 r = n.rect();
-		if (movingNow && has(s_dragNodes, n.id)) { r.x += mouseDelta.x / view.zoom; r.y += mouseDelta.y / view.zoom; }
+		if (movingNow && has(s_dragNodes, n.id)) { const ImVec2 d = draggedBy(); r.x += d.x; r.y += d.y; }
 		if (s_drag == Drag::Resize && n.id == s_resizeNode) r = s_resizeTo;
 		return r;
 	};
@@ -761,6 +1293,22 @@ void draw(const Services& services, const UUID& boardId)
 			s_editFocus = true;
 			s_sel = { hit };
 		}
+		else if (n->type == NodeType::Page || n->type == NodeType::Row)
+		{
+			// These cards stand for something in the Planner: the double-click goes there.
+			const NodeType type = n->type;
+			const UUID page = n->page, db = n->database, row = n->row;
+			services.post([=] {
+				if (type == NodeType::Page) PlannerPanel::selectPage(page);
+				else PlannerPanel::openRowPage(db, row);
+			});
+		}
+		else if (n->type == NodeType::Object && services.ctx)
+		{
+			const TaskLink link = n->link;
+			AppContext* ctx = services.ctx;
+			services.post([=] { TaskBoardPanel::jumpToLink(*ctx, link); });
+		}
 		s_drag = Drag::None;
 	}
 
@@ -775,9 +1323,10 @@ void draw(const Services& services, const UUID& boardId)
 		const Rect2& f = s_resizeFrom;
 		const double fixedX = (s_resizeCorner == 0 || s_resizeCorner == 3) ? f.x + f.w : f.x;
 		const double fixedY = (s_resizeCorner == 0 || s_resizeCorner == 1) ? f.y + f.h : f.y;
-		double nx = std::min(mx, fixedX - Board::kMinSize), ny = std::min(my, fixedY - Board::kMinSize);
-		if (s_resizeCorner == 1 || s_resizeCorner == 2) nx = std::max(mx, fixedX + Board::kMinSize);
-		if (s_resizeCorner == 2 || s_resizeCorner == 3) ny = std::max(my, fixedY + Board::kMinSize);
+		const double gx = s_snap ? std::round(mx / kGrid) * kGrid : mx, gy = s_snap ? std::round(my / kGrid) * kGrid : my;
+		double nx = std::min(gx, fixedX - Board::kMinSize), ny = std::min(gy, fixedY - Board::kMinSize);
+		if (s_resizeCorner == 1 || s_resizeCorner == 2) nx = std::max(gx, fixedX + Board::kMinSize);
+		if (s_resizeCorner == 2 || s_resizeCorner == 3) ny = std::max(gy, fixedY + Board::kMinSize);
 		s_resizeTo = { std::min(nx, fixedX), std::min(ny, fixedY), std::abs(nx - fixedX), std::abs(ny - fixedY) };
 	}
 	if (s_drag == Drag::Marquee && ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -814,7 +1363,8 @@ void draw(const Services& services, const UUID& boardId)
 			if (s_dragMoved)
 			{
 				const std::vector<UUID> ids = s_dragNodes;
-				const double dx = mouseDelta.x / view.zoom, dy = mouseDelta.y / view.zoom;
+				const ImVec2 d = draggedBy();
+				const double dx = d.x, dy = d.y;
 				change(boardId, [=](Board& b) { return b.moveNodesBy(ids, dx, dy, taskNowMs()) > 0; });
 			}
 			else if (!s_dragShift && s_sel.size() > 1 && !(s_dragHit == UUID{}))
@@ -856,6 +1406,50 @@ void draw(const Services& services, const UUID& boardId)
 		s_dragNodes.clear();
 	}
 
+	// ── The minimap ──
+	if (mapOn)
+	{
+		Rect2 world{ view.x, view.y, size.x / view.zoom, size.y / view.zoom };   // everything and what is on screen
+		Rect2 bb;
+		if (board->bounds(bb))
+		{
+			const double x0 = std::min(world.x, bb.x), y0 = std::min(world.y, bb.y);
+			const double x1 = std::max(world.x + world.w, bb.x + bb.w), y1 = std::max(world.y + world.h, bb.y + bb.h);
+			world = { x0, y0, x1 - x0, y1 - y0 };
+		}
+		const double pad = std::max(world.w, world.h) * 0.04;
+		world = { world.x - pad, world.y - pad, world.w + 2 * pad, world.h + 2 * pad };
+		const double k = std::min(mapSize.x / world.w, mapSize.y / world.h);
+		const ImVec2 inner(static_cast<float>(world.w * k), static_cast<float>(world.h * k));
+		const ImVec2 o(mapMin.x + (mapSize.x - inner.x) * 0.5f, mapMin.y + (mapSize.y - inner.y) * 0.5f);
+		auto toMap = [&](double wx, double wy) { return ImVec2(o.x + static_cast<float>((wx - world.x) * k), o.y + static_cast<float>((wy - world.y) * k)); };
+
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overMap) s_mapDrag = true;
+		if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_mapDrag = false;
+		if (s_mapDrag)
+		{
+			// The press puts the middle of the screen where it is.
+			const double wx = world.x + (io.MousePos.x - o.x) / k, wy = world.y + (io.MousePos.y - o.y) / k;
+			view.x = wx - size.x * 0.5 / view.zoom;
+			view.y = wy - size.y * 0.5 / view.zoom;
+		}
+
+		dl->AddRectFilled(mapMin, mapMax, Theme::u32(Theme::alpha(Theme::warm(0.08f), 0.92f)), 6.0f);
+		dl->AddRect(mapMin, mapMax, Theme::u32(Theme::warm(0.32f)), 6.0f);
+		dl->PushClipRect(mapMin, mapMax, true);
+		for (const Node& n : board->nodes)
+		{
+			ImVec4 tint{};
+			const bool coloured = colourOf(n.color, tint);
+			const ImVec2 a = toMap(n.x, n.y), b = toMap(n.x + n.w, n.y + n.h);
+			if (n.type == NodeType::Frame) dl->AddRect(a, b, Theme::u32(coloured ? tint : Theme::warm(0.4f)));
+			else dl->AddRectFilled(a, b, Theme::u32(coloured ? tint : Theme::warm(0.45f)));
+		}
+		dl->AddRect(toMap(view.x, view.y), toMap(view.x + size.x / view.zoom, view.y + size.y / view.zoom), Theme::u32(Theme::AccentBright), 0, 0, 1.5f);
+		dl->PopClipRect();
+		services.noteRect("map", mapMin, mapMax);
+	}
+
 	// ── Keys ──
 	if ((hovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) && !io.WantTextInput && !editing)
 	{
@@ -870,6 +1464,16 @@ void draw(const Services& services, const UUID& boardId)
 		}
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_Z)) undoOrRedo(boardId, !io.KeyShift);
 		if (mod && ImGui::IsKeyPressed(ImGuiKey_Y)) undoOrRedo(boardId, false);
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_C)) copySelection(boardId);
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_X)) { copySelection(boardId); deleteSelection(boardId); }
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_D)) duplicateSelection(boardId);
+		if (mod && ImGui::IsKeyPressed(ImGuiKey_V))
+		{
+			// Where the cursor is when it is over the canvas, else the middle of what is shown.
+			double px = view.x + size.x * 0.5 / view.zoom, py = view.y + size.y * 0.5 / view.zoom;
+			if (hovered) Xf{ origin, view }.toWorld(io.MousePos, px, py);
+			paste(boardId, px, py);
+		}
 	}
 
 	dl->PopClipRect();

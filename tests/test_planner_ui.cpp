@@ -18,6 +18,7 @@
 #include "TaskBoard.h"
 #include "TaskBoardPanel.h"
 
+#include "vendor/stb_image.h"
 #include <ContentManager/ContentManager.h>
 #include <HorizonScene/HorizonWorld.h>
 
@@ -1889,4 +1890,314 @@ TEST_CASE("planner ui board: boards switch cleanly; delete asks first; a pull un
 	CHECK(PlannerPanel::controlRect("node:theirs").x1 > 0);
 	// Undo after a pull does not take the pulled card away (it was not ours to undo).
 	REQUIRE(f.ws->findBoard(f.id)->nodes.size() == 2);
+}
+
+TEST_CASE("planner ui board: Cmd+V pastes text as a card and a picture as a copied file; a picture file dropped on the canvas is one too")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_images");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+
+	struct ClipboardGuard { ~ClipboardGuard() { PlannerPanel::setClipboardForTest({}, {}); } } guard;
+
+	// Text on the clipboard: a text card with it.
+	PlannerPanel::setClipboardForTest({}, [] { return std::string("remember the key"); });
+	keyPress(ctx, ImGuiKey_V, /*ctrl=*/true);
+	{
+		const Board* b = f.ws->findBoard(f.id);
+		REQUIRE(b->nodes.size() == 1);
+		CHECK(b->nodes[0].type == NodeType::Text);
+		CHECK(b->nodes[0].text == "remember the key");
+		CHECK(PlannerBoardView::selection() == std::vector<UUID>{ b->nodes[0].id });
+	}
+
+	// A picture beats text: its bytes are copied under Config/Planner/Media and the card names the copy.
+	const std::string bytes = std::string("\x89PNG\r\n\x1a\n") + std::string(64, 'p');
+	PlannerPanel::setClipboardForTest([&](std::string& out, std::string& ext) { out = bytes; ext = "png"; return true; },
+	                                  [] { return std::string("ignored"); });
+	keyPress(ctx, ImGuiKey_V, true);
+	std::string media;
+	{
+		const Board* b = f.ws->findBoard(f.id);
+		REQUIRE(b->nodes.size() == 2);
+		const Node& n = b->nodes[1];
+		CHECK(n.type == NodeType::Image);
+		CHECK(n.asset == UUID{});
+		REQUIRE_FALSE(n.media.empty());
+		media = n.media;
+		CHECK(std::filesystem::exists(mediaPath(proj.root(), media)));
+		CHECK(n.w > 0);
+		// The card is in the file, so a teammate who pulls it gets the name (the picture comes with the folder).
+		Board onDisk;
+		REQUIRE(loadBoard(proj.root(), f.id, onDisk).ok);
+		REQUIRE(onDisk.nodes.size() == 2);
+		CHECK(onDisk.nodes[1].media == media);
+	}
+	// Pasting the same picture again is a second card on the same file.
+	keyPress(ctx, ImGuiKey_V, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	CHECK(f.ws->findBoard(f.id)->nodes[2].media == media);
+	CHECK(listMedia(proj.root()).size() == 1);
+
+	// An empty clipboard changes nothing; undo takes the last card away.
+	PlannerPanel::setClipboardForTest([](std::string&, std::string&) { return false; }, [] { return std::string(); });
+	keyPress(ctx, ImGuiKey_V, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 2);
+
+	// A file dropped from the system: a picture over the canvas is taken, other files and other places are not.
+	const std::filesystem::path pic = proj.root() / "dropped.png";
+	{ std::ofstream out(pic, std::ios::binary); out << std::string("\x89PNG\r\n\x1a\n") << std::string(80, 'd'); }
+	const PlannerPanel::Rect canvas = PlannerPanel::controlRect("canvas");
+	const ImVec2 inside = canvasPoint(300, 200);
+	CHECK(PlannerBoardView::wantsFileDrop(pic.string(), inside.x, inside.y));
+	CHECK_FALSE(PlannerBoardView::wantsFileDrop(pic.string(), canvas.x0 - 5, canvas.y0 + 5));
+	CHECK_FALSE(PlannerBoardView::wantsFileDrop((proj.root() / "notes.txt").string(), inside.x, inside.y));
+	PlannerBoardView::dropFile(pic.string(), inside.x, inside.y);
+	idle(ctx);
+	{
+		const Board* b = f.ws->findBoard(f.id);
+		REQUIRE(b->nodes.size() == 3);
+		const Node& n = b->nodes[2];
+		CHECK(n.type == NodeType::Image);
+		CHECK_FALSE(n.media.empty());
+		// Centred where it was let go.
+		CHECK(n.x + n.w * 0.5 == doctest::Approx(300).epsilon(0.02));
+		CHECK(n.y + n.h * 0.5 == doctest::Approx(200).epsilon(0.02));
+		CHECK(std::filesystem::exists(mediaPath(proj.root(), n.media)));
+	}
+	// A drop on a tab that does not show the board is not wanted.
+	PlannerPanel::selectDatabase(tasksDatabaseId());
+	idle(ctx, 4);
+	CHECK_FALSE(PlannerBoardView::wantsFileDrop(pic.string(), inside.x, inside.y));
+}
+
+TEST_CASE("planner ui board: assets, scenes and entities dropped from the editor's panels become object cards")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_objects");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+
+	const std::filesystem::path content = proj.root() / "Content";
+	ContentManager cm(content.string());
+	{
+		StructTypeAsset a;
+		a.type = HE::AssetType::StructType;
+		a.name = "Notes";
+		a.path = "Notes.hasset";
+		a.json = R"({"fields":[{"name":"hp","type":1}]})";
+		REQUIRE(cm.saveAsset(a));
+	}
+	REQUIRE(cm.loadAsset("Notes.hasset") != UUID{});
+	ctx.contentManager = &cm;
+	HorizonWorld world;
+	const Entity crate = world.createEntity("Crate");
+	ctx.world = &world;
+
+	BoardFixture f = openBoard(ctx);
+	Sources src;
+	src.assetPath = (content / "Notes.hasset").string();
+	src.entity    = crate;
+	g_sources     = &src;
+	idle(ctx);
+
+	dragTo(ctx, src.assetAt, canvasPoint(300, 150));
+	dragTo(ctx, src.entityAt, canvasPoint(300, 400));
+	g_sources = nullptr;
+
+	const Board* b = f.ws->findBoard(f.id);
+	REQUIRE(b->nodes.size() == 2);
+	CHECK(b->nodes[0].type == NodeType::Object);
+	CHECK(b->nodes[0].link.kind == TaskLinkKind::Asset);
+	CHECK(b->nodes[0].link.label == "Notes");
+	CHECK(b->nodes[0].x + b->nodes[0].w * 0.5 == doctest::Approx(300).epsilon(0.05));
+	CHECK(b->nodes[1].type == NodeType::Object);
+	CHECK(b->nodes[1].link.kind == TaskLinkKind::Entity);
+	CHECK(b->nodes[1].link.label == "Crate");
+	CHECK(PlannerPanel::controlRect("node:Notes").x1 > 0);
+	CHECK(PlannerPanel::controlRect("node:Crate").x1 > 0);
+}
+
+TEST_CASE("planner ui board: copy, paste and duplicate, align, snap, page and row cards, frame titles")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_arrange");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	struct ClipboardGuard { ~ClipboardGuard() { PlannerPanel::setClipboardForTest({}, {}, {}); } } guard;
+
+	UUID a, b, fr;
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		a  = bd.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1)->id;
+		b  = bd.addNode(NodeType::Text, 400, 140, 200, 100, "beta", 1)->id;
+		fr = bd.addNode(NodeType::Frame, 20, 20, 700, 400, "Plan", 1)->id;
+		bd.sendToBack(fr, 1);
+		bd.addEdge(a, b, "then", 1);
+		return true;
+	}));
+	idle(ctx);
+
+	// Select both cards, copy, paste: two new cards and the arrow between them, selected.
+	std::string clip;
+	PlannerPanel::setClipboardForTest({}, [&] { return clip; }, [&](const std::string& t) { clip = t; });
+	REQUIRE(click(ctx, "node:alpha"));
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(ImGuiMod_Shift, true);
+		REQUIRE(click(ctx, "node:beta"));
+		io.AddKeyEvent(ImGuiMod_Shift, false);
+	}
+	REQUIRE(PlannerBoardView::selection().size() == 2);
+	keyPress(ctx, ImGuiKey_C, true);
+	CHECK_FALSE(clip.empty());
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	keyPress(ctx, ImGuiKey_V, true);
+	{
+		const Board* bd = f.ws->findBoard(f.id);
+		CHECK(bd->nodes.size() == 5);
+		CHECK(bd->edges.size() == 2);
+		CHECK(PlannerBoardView::selection().size() == 2);
+		CHECK(bd->findNode(PlannerBoardView::selection()[0])->text.size() > 0);
+	}
+	// Undo takes the paste away in one step; a second paste lands further on than the first.
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 3);
+	keyPress(ctx, ImGuiKey_V, true);
+	const double firstX = f.ws->findBoard(f.id)->nodes.back().x;
+	keyPress(ctx, ImGuiKey_V, true);
+	CHECK(f.ws->findBoard(f.id)->nodes.back().x > firstX);
+
+	// Duplicate (button) makes copies of what is selected.
+	const std::size_t before = f.ws->findBoard(f.id)->nodes.size();
+	REQUIRE(click(ctx, "Duplicate"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == before + 2);
+
+	// Align: the Align button opens the choices.
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		std::vector<UUID> extra;   // the copies lie on top of their originals
+		for (const Node& n : bd.nodes)
+			if (n.id != a && n.id != b && n.id != fr) extra.push_back(n.id);
+		for (const UUID& id : extra) bd.removeNode(id, 2);
+		bd.moveNode(b, 500, 300, 2);
+		return true;
+	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "node:alpha"));
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(ImGuiMod_Shift, true);
+		REQUIRE(click(ctx, "node:beta"));
+		io.AddKeyEvent(ImGuiMod_Shift, false);
+	}
+	REQUIRE(click(ctx, "Align"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(a)->x == doctest::Approx(100));   // opening the choices changes nothing
+	REQUIRE(click(ctx, "Align Left"));
+	idle(ctx);
+	CHECK(f.ws->findBoard(f.id)->findNode(b)->x == doctest::Approx(100));
+	keyPress(ctx, ImGuiKey_Z, true);
+	CHECK(f.ws->findBoard(f.id)->findNode(b)->x == doctest::Approx(500));
+
+	// Snap: a card dragged with Snap on lands on the 20-unit grid.
+	REQUIRE(click(ctx, "Snap"));
+	REQUIRE(click(ctx, "node:alpha"));
+	{
+		const PlannerPanel::Rect r = PlannerPanel::controlRect("node:alpha");
+		dragScreen(ctx, centre(r), ImVec2(centre(r).x + 33, centre(r).y + 27));
+	}
+	const Node* na = f.ws->findBoard(f.id)->findNode(a);
+	CHECK(std::fmod(na->x, 20.0) == doctest::Approx(0).epsilon(0.0001));
+	CHECK(std::fmod(na->y, 20.0) == doctest::Approx(0).epsilon(0.0001));
+
+	// A page gets a card from the Add menu; a double-click on it opens the page.
+	const UUID page = f.ws->createPage("Level concept")->id;
+	idle(ctx);
+	REQUIRE(click(ctx, "Add"));
+	idle(ctx);
+	REQUIRE(click(ctx, "add:Level concept"));
+	idle(ctx);
+	{
+		const Board* bd = f.ws->findBoard(f.id);
+		REQUIRE(bd->nodes.back().type == NodeType::Page);
+		CHECK(bd->nodes.back().page == page);
+	}
+	const PlannerPanel::Rect pc = PlannerPanel::controlRect("node:Level concept");
+	REQUIRE(pc.x1 > pc.x0);
+	doubleClickAt(ctx, centre(pc));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == page);
+
+	// Back on the board, a double-click on the frame's empty part edits its title.
+	PlannerPanel::selectBoard(f.id);
+	idle(ctx);
+	doubleClickAt(ctx, canvasPoint(40, 40));
+	CHECK(PlannerPanel::controlRect("edit").x1 > PlannerPanel::controlRect("edit").x0);
+}
+
+TEST_CASE("planner ui board: the minimap pans, Map hides it, Export PNG writes the whole board")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_export");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		UUID a = bd.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1)->id;
+		UUID b = bd.addNode(NodeType::Text, 3000, 2000, 200, 100, "far away", 1)->id;
+		bd.addEdge(a, b, "then", 1);
+		return true;
+	}));
+	idle(ctx);
+
+	// The minimap is there; a click in its far corner pans the view toward the far card.
+	PlannerPanel::Rect map = PlannerPanel::controlRect("map");
+	REQUIRE(map.x1 > map.x0);
+	const double x0 = PlannerBoardView::viewOf(f.id).x;
+	ImGui::GetIO().AddMousePosEvent(map.x1 - 12, map.y1 - 12);
+	frame(ctx, false);
+	frame(ctx, true);
+	frame(ctx, false);
+	settle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).x > x0 + 1000);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 2);   // and it made no card and no selection
+	CHECK(PlannerBoardView::selection().empty());
+
+	REQUIRE(click(ctx, "Map"));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("map").x1 <= PlannerPanel::controlRect("map").x0);
+
+	// Export: a PNG of the whole board, 4096 at most, with something drawn in it.
+	PlannerBoardView::Services services;
+	services.ws   = f.ws;
+	services.ctx  = &ctx;
+	services.root = proj.root();
+	const std::filesystem::path file = PlannerBoardView::exportPathFor(proj.root(), "Level 1: the \"keep\"");
+	CHECK(file.filename() == "Level 1_ the _keep_.png");
+	std::string err;
+	REQUIRE_MESSAGE(PlannerBoardView::exportPng(services, f.id, file, &err), err);
+	int w = 0, h = 0, ch = 0;
+	unsigned char* px = stbi_load(file.string().c_str(), &w, &h, &ch, 4);
+	REQUIRE(px != nullptr);
+	CHECK(w > 100);
+	CHECK(h > 100);
+	CHECK(std::max(w, h) <= 4096);
+	CHECK(w > h);   // 3200 x 2100 units
+	int differing = 0;
+	for (int i = 0; i < w * h; ++i)
+		if (px[i * 4] != 26 || px[i * 4 + 1] != 24 || px[i * 4 + 2] != 21) ++differing;
+	stbi_image_free(px);
+	CHECK(differing > 500);
+
+	// An empty board has nothing to export.
+	const Board* empty = f.ws->createBoard("Empty");
+	REQUIRE(empty != nullptr);
+	CHECK_FALSE(PlannerBoardView::exportPng(services, empty->id, proj.root() / "never.png", &err));
+	CHECK_FALSE(err.empty());
+	CHECK_FALSE(std::filesystem::exists(proj.root() / "never.png"));
 }
