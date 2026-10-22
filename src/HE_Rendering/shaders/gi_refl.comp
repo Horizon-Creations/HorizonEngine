@@ -27,7 +27,13 @@ struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 // pad words D3D11/D3D12's GiInst repurposes, only written by the host while
 // reflections are enabled (updateGiAccel); the shadow/probe kernels never
 // read them.
+// baseColor.a = the instance's landscape index + 1 (0 = not a landscape chunk) — written by the host into the
+// reflection-only copy, where the shadow/probe kernels never look.
 struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; };
+// Painted / auto landscape — HE::GiLandscape (GiLandscape.h), host mirror VulkanRenderer::GILandGpu (192 bytes).
+// cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count (< 0 = auto landscape: layer = Grass/Dirt/Rock/Snow
+// means, autoWet/autoSlope/autoSnow as in GiLandscape.h).
+struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; vec4 autoWet; vec4 autoSlope; vec4 autoSnow; };
 
 layout(std430, set = 0, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
 layout(std430, set = 0, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
@@ -37,6 +43,8 @@ layout(set = 0, binding = 4) uniform sampler2D uGNorm; // prepass world normal, 
 layout(set = 0, binding = 5) uniform sampler2D uGIIrr; // DDGI irradiance atlas (dummy when GI diffuse is off)
 layout(set = 0, binding = 6) uniform sampler2D uGIVis; // DDGI visibility atlas
 layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D uOut; // rgb radiance, a confidence
+layout(std430, set = 0, binding = 9) readonly buffer GiLands { GiLand giLands[]; };
+layout(set = 0, binding = 10) uniform sampler2D uLandWeights[4];   // one per landscape, in giLands order
 layout(set = 0, binding = 8) uniform GiReflUBO {
     vec4 uCamPos;      // xyz = camera world position
     vec4 uSunDir;      // xyz = direction TOWARD the sun, w = local light count
@@ -205,6 +213,24 @@ vec3 giHitNormal(int inst, int tri, vec3 rayDir)
     return (dot(nW, rayDir) > 0.0) ? -nW : nW;
 }
 
+// Auto landscape material at a hit: the graph's masks from the hit's slope and world height over the slices' mean
+// colours. Mirrors HE::giAutoLandscapeAlbedo (GiLandscape.h) and the GL/Metal kernels line for line.
+vec3 giAutoLandAlbedo(int li, vec3 pos, vec3 n)
+{
+    float slope = clamp(1.0 - n.y, 0.0, 1.0);
+    float rs = giLands[li].autoSlope.x, rb = giLands[li].autoSlope.y;
+    float dirt  = clamp(giLands[li].autoSlope.z + smoothstep(rs - rb, rs, slope), 0.0, 1.0);
+    vec3 ground = mix(giLands[li].layer[0].rgb, giLands[li].layer[1].rgb, dirt);
+    float rock  = smoothstep(rs, rs + rb, slope);
+    vec3 s1     = mix(ground, giLands[li].layer[2].rgb, rock);
+    float snow  = smoothstep(giLands[li].autoSnow.x, giLands[li].autoSnow.x + giLands[li].autoSnow.y, pos.y)
+                * (1.0 - smoothstep(giLands[li].autoSnow.z, giLands[li].autoSnow.z + 0.1, slope));
+    vec3 s2     = mix(s1, giLands[li].layer[3].rgb, snow);
+    float pms   = giLands[li].autoSlope.w;
+    float flat_ = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
+    return mix(s2, giLands[li].autoWet.rgb, giLands[li].autoWet.w * flat_);
+}
+
 // The hit's emissive: two halves per lane (r,g in .z; b in .w's low half).
 vec3 giHitEmissive(int inst)
 {
@@ -361,6 +387,36 @@ void main()
         vec3 hitPos = origin + Rs * dist;
         vec3 hitN   = giHitNormal(hitInst, tri, Rs);
         vec3 albedo = giInsts[hitInst].baseColor.rgb;
+        // Landscape hit: the colour at THIS point instead of one flat colour for the whole terrain. A landscape
+        // is a heightfield over an axis-aligned local rect whose mesh UVs are linear in it, so the hit POSITION
+        // recovers the UV (no per-vertex UV in the BVH). An auto landscape (cfg.w < 0) has no paint: its colour
+        // follows the hit's slope and height (hitN faces the ray). Mirrors the GL and Metal kernels.
+        int li = int(giInsts[hitInst].baseColor.a + 0.5) - 1;
+        if (li >= 0 && li < 4 && li < giLands.length())
+        {
+            if (giLands[li].cfg.w < -0.5)
+                albedo = giAutoLandAlbedo(li, hitPos, hitN);
+            else if (int(giLands[li].cfg.w) > 0)
+            {
+                vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
+                vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
+                // A constant index per branch: dynamic sampler-array indexing is a device feature.
+                vec4 lw = (li == 0) ? textureLod(uLandWeights[0], luv, 0.0)
+                        : (li == 1) ? textureLod(uLandWeights[1], luv, 0.0)
+                        : (li == 2) ? textureLod(uLandWeights[2], luv, 0.0)
+                                    : textureLod(uLandWeights[3], luv, 0.0);
+                vec3 lsum = vec3(0.0);
+                float wsum = 0.0;
+                int layers = int(giLands[li].cfg.w);
+                for (int k = 0; k < layers && k < 4; ++k)
+                {
+                    if (lw[k] <= 0.0) continue;
+                    lsum += giLands[li].layer[k].rgb * lw[k];
+                    wsum += lw[k];
+                }
+                albedo = (wsum > 1e-4) ? lsum / wsum : giLands[li].layer[0].rgb;
+            }
+        }
 
         // Hit shading: emissive first (a glowing object shows in a mirror
         // even unlit; the probe field deliberately does not carry it), then

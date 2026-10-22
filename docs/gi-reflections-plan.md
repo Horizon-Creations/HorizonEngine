@@ -815,3 +815,22 @@ Boden (Gras ↔ Erde nach Dirt Amount, flach, ohne Schnee) aus den Scheiben-Mitt
 **Nicht verifiziert:** D3D11/D3D12/Vulkan zur Laufzeit (kein Windows hier), D3D-Quellen nicht übersetzt.
 **Offen (braucht die Kernel-Portierung + Gerät):** Hang-Fels, Schnee auf Gipfeln und Paint-Bänder per Texel in den Reflexions-Kerneln von
 D3D/Vulkan (`GiLandscape`-Puffer + `landIndex` in der Instanz, Weightmaps als SRVs/Descriptor-Array).
+
+### Nachtrag 2: Landschafts-Kernel auf D3D11/D3D12/Vulkan (2026-10-23)
+
+Die Reflexions-Kernel von D3D und Vulkan lesen jetzt wie GL/Metal die Landschaft pro Treffer (Auto: Hang-Fels, Schnee, Pfützen aus
+Neigung und Höhe; gemalt: Weightmap pro Texel). Vertrag: `HE::GiLandscape`-Tabelle (`GILandGpu`, 192 Byte, Cap `kGiMaxLandscapes` = 4)
++ vier Weightmaps; der Index kommt als **Landschaftsslot + 1 in `baseColor.a` der Reflexions-Instanzkopie** (0 = keine), die
+Shadow-/Probe-Kernel sehen die Kopie nicht.
+- **Vulkan** (`gi_refl.comp`, `VulkanRenderer.cpp`): Binding 9 = Tabelle (SSBO), 10 = `sampler2D[4]`; Views per `resolveGraphTexture`, Sampler `m_albedoSampler`; `textureLod` (Compute hat keine Ableitungen).
+- **D3D** (`HlslSources.h` `kGiReflCSHLSL`): `t7` = Tabelle, `t8..t11` = Weightmaps.
+  - D3D11: `giLandSB/SRV`, Slots 7..11 beim Dispatch (`dummyTexture` als Lückenfüller).
+  - D3D12: Root-SRV `t7` (derselbe Root-Parameter wie die DXR-TLAS, die der SW-Kernel nie nennt) = Tabelle; neuer Root-Parameter 8 = SRV-Tabelle `t8..t11` auf Heap-Slots 41..44; die Weightmaps werden im Dispatch aufgelöst (`resolveGraphTexture(cl, …)`), für die Dispatch-Dauer von PIXEL_SHADER_RESOURCE nach PIXEL|NON_PIXEL und danach zurück.
+- Fallback bleibt die flache Farbe (`giInstanceSurface(obj, cm, landscapes)`): über dem Cap, ohne Weightmap, ohne Tabelle.
+
+**Verifiziert:** `gi_refl.comp` mit `glslc --target-env=vulkan1.1` und glslang kompiliert; der HLSL-Kernel (Traversal + Refl) mit
+glslang (`-D -V -e GiReflCS`); `VulkanRenderer.cpp` per `-fsyntax-only` (MoltenVK-Header); `GILandGpu`-`static_assert`s (192 Byte).
+**Nicht verifiziert:** alles zur Laufzeit; D3D11/D3D12-Quellen sind auf dem Mac nicht übersetzbar, FXC hat den HLSL nicht gesehen.
+**Worauf beim Windows-Test achten:** (1) D3D12: Debug-Layer-Meldungen zu Root-Parameter 8 / t7 / Resource-Barrieren der Weightmaps;
+(2) Vulkan: Validation zu Binding 10 (4 Deskriptoren, Layout SHADER_READ_ONLY) und zum Descriptor-Pool (`k_maxFramesInFlight*8+12`);
+(3) Reflexion einer Auto-Landschaft: Fels am Hang, Schnee oberhalb der Schneegrenze; einer gemalten: Paint-Bänder.

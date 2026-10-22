@@ -19,6 +19,7 @@
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / blur reach per quality tier (all backends)
 #include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo / emissive (all backends)
+#include <HorizonRendering/GiLandscape.h>       // GI reflections: painted / auto landscape at a hit (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
@@ -7040,6 +7041,16 @@ struct D3D12RendererImpl
         int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
     };
     static_assert(sizeof(GIInstanceGpu) == 96, "HLSL GiInst is 96 bytes (invTransform + baseColor + offsets)");
+    // Painted / auto landscape for the reflection kernel — HE::GiLandscape (GiLandscape.h); the HLSL's GiLand,
+    // 192 bytes (kGiReflCSHLSL). Same contract and cap (HE::kGiMaxLandscapes) as the GL and Metal paths.
+    struct GILandGpu
+    {
+        glm::mat4 worldToLocal{1.0f};
+        glm::vec4 cfg{0.0f};   // xy = 1/size, z = uvTiling, w = layer count (< 0 = auto)
+        glm::vec4 layer[4]{};
+        glm::vec4 autoWet{0.0f}, autoSlope{0.0f}, autoSnow{0.0f};
+    };
+    static_assert(sizeof(GILandGpu) == 192, "HLSL GiLand is 192 bytes");
     static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; pipeline failure clears it
@@ -7129,6 +7140,14 @@ struct D3D12RendererImpl
     // giInstancesCpu/giInstanceSB so enabling reflections never changes what
     // the shadow/probe kernels bounce (Thema 191 step 11).
     std::vector<GIInstanceGpu>     giReflInstancesCpu;
+    // The landscape table (root SRV t7 of the trace) and the weightmap each entry samples (a null id = auto: no
+    // weightmap). The weightmaps are resolved at the dispatch, where the command list is (a first use uploads).
+    std::vector<GILandGpu> giLandsCpu;
+    std::vector<HE::UUID>  giLandWeightIds;
+    ContentManager*        giLandCm = nullptr;
+    ComPtr<ID3D12Resource> giLandSB[k_frameCount];
+    uint8_t*               giLandPtr[k_frameCount]{};
+    UINT                   giLandCapacity[k_frameCount]{};
     ComPtr<ID3D12Resource> giReflInstanceSB[k_frameCount];
     uint8_t*               giReflInstancePtr[k_frameCount]{};
     UINT                   giReflInstanceCapacity[k_frameCount]{};
@@ -7217,7 +7236,9 @@ struct D3D12RendererImpl
     //  [32..34] blur level n>0, H pass:           blur, blur, gbufNorm
     //  [35..37] blur V pass:                      ping, ping, gbufNorm
     //  [38..40] mix with blur:                    raw,  blur, gbufNorm
-    static constexpr UINT k_giSrvSlots   = 41;
+    //  [41..44] landscape weightmaps, the trace's table 2 (t8..t11; null views for an auto entry / none)
+    static constexpr UINT k_giSrvSlots   = 45;
+    static constexpr UINT k_giReflLand   = 41;
     static constexpr UINT k_giReflCompute = 23; // table base of the trace dispatch
     static constexpr UINT k_giReflUav     = 27;
     static constexpr UINT k_giReflTabRaw  = 29;
@@ -7311,6 +7332,31 @@ struct D3D12RendererImpl
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
         giReflInstancesCpu.clear();
+        // Landscape table for the reflection kernel: an entry per terrain the extractor found, so a hit reads the
+        // paint / the slope and height instead of one flat colour for the whole terrain. `landRemap` maps the
+        // extractor's index to the table's (-1 = left out: over the cap; it keeps the flat colour).
+        giLandsCpu.clear();
+        giLandWeightIds.clear();
+        giLandCm = cm;
+        std::vector<int> landRemap(rw.landscapes.size(), -1);
+        if (giReflEnabled)
+            for (size_t i = 0; i < rw.landscapes.size(); ++i)
+            {
+                if (static_cast<int>(giLandsCpu.size()) >= HE::kGiMaxLandscapes) break;
+                const HE::GiLandscape& ls = rw.landscapes[i];
+                const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+                if (!autoLand && ls.weightmapId == HE::UUID{}) continue;   // nothing to sample: keep the flat colour
+                GILandGpu g;
+                g.worldToLocal = ls.worldToLocal;
+                g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling, static_cast<float>(ls.layerCount));
+                for (int k = 0; k < 4; ++k) g.layer[k] = ls.layerColor[k];
+                g.autoWet   = ls.autoWet;
+                g.autoSlope = ls.autoSlope;
+                g.autoSnow  = ls.autoSnow;
+                landRemap[i] = static_cast<int>(giLandsCpu.size());
+                giLandsCpu.push_back(g);
+                giLandWeightIds.push_back(autoLand ? HE::UUID{} : ls.weightmapId);
+            }
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
             if (const GIBlasRange* r = giBlas.find(id)) return *r;
@@ -7361,7 +7407,10 @@ struct D3D12RendererImpl
                 // read them either.
                 const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm, &rw.landscapes);
                 GIInstanceGpu reflInst = inst;
-                reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
+                // .a = the landscape table index + 1 (0 = none); the kernel never reads it as an alpha.
+                const int landSlot = (obj.landscapeIndex >= 0 && obj.landscapeIndex < static_cast<int32_t>(landRemap.size()))
+                                         ? landRemap[static_cast<size_t>(obj.landscapeIndex)] : -1;
+                reflInst.baseColor  = glm::vec4(surf.albedo, static_cast<float>(landSlot + 1));
                 reflInst.emissiveRG = static_cast<int32_t>(
                     glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
                 reflInst.emissiveB  = static_cast<int32_t>(
@@ -7453,6 +7502,28 @@ struct D3D12RendererImpl
                 std::memcpy(giReflInstancePtr[fi], giReflInstancesCpu.data(),
                             static_cast<size_t>(reflNeed) * sizeof(GIInstanceGpu));
         }
+        if (giReflEnabled)
+        {
+            // The landscape table's ring slot, same growth convention. Never empty: a root SRV needs an address, and
+            // the kernel gates every read on the table's size and the instance's index.
+            const UINT landNeed = static_cast<UINT>(std::max<size_t>(giLandsCpu.size(), 1));
+            if (landNeed > giLandCapacity[fi] || !giLandSB[fi])
+            {
+                if (giLandSB[fi])
+                    m_retiredTextures.emplace_back(std::move(giLandSB[fi]), retireN);
+                const UINT cap = std::max({ landNeed, giLandCapacity[fi] * 2u, 4u });
+                giLandPtr[fi] = nullptr;
+                giLandSB[fi]  = createUploadBuffer(static_cast<UINT64>(cap) * sizeof(GILandGpu),
+                                                   reinterpret_cast<void**>(&giLandPtr[fi]));
+                giLandCapacity[fi] = giLandSB[fi] ? cap : 0;
+            }
+            if (giLandPtr[fi])
+            {
+                const GILandGpu dummy{};
+                std::memcpy(giLandPtr[fi], giLandsCpu.empty() ? &dummy : giLandsCpu.data(),
+                            static_cast<size_t>(landNeed) * sizeof(GILandGpu));
+            }
+        }
 
 #if HE_D3D12_DXR
         // HW path: upload this frame slot's TLAS instance array (upload-heap
@@ -7503,7 +7574,13 @@ struct D3D12RendererImpl
                 m_retiredTextures.emplace_back(std::move(giReflInstanceSB[f]), retireN);
             giReflInstancePtr[f]      = nullptr;
             giReflInstanceCapacity[f] = 0;
+            if (giLandSB[f])
+                m_retiredTextures.emplace_back(std::move(giLandSB[f]), retireN);
+            giLandPtr[f]      = nullptr;
+            giLandCapacity[f] = 0;
         }
+        giLandsCpu.clear();
+        giLandWeightIds.clear();
         giBlas.clear();
         giInstancesCpu.clear();
         giReflInstancesCpu.clear();
@@ -7583,7 +7660,14 @@ struct D3D12RendererImpl
             uavRange.BaseShaderRegister                = 0;
             uavRange.OffsetInDescriptorsFromTableStart = 0;
 
-            D3D12_ROOT_PARAMETER params[8]{};
+            // [8] SRV table t8..t11 = the four landscape weightmaps of the reflection trace (heap slots k_giReflLand..).
+            D3D12_DESCRIPTOR_RANGE landRange{};
+            landRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            landRange.NumDescriptors                    = 4;
+            landRange.BaseShaderRegister                = 8;
+            landRange.OffsetInDescriptorsFromTableStart = 0;
+
+            D3D12_ROOT_PARAMETER params[9]{};
             params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[0].Descriptor       = { 0, 0 };
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -7615,6 +7699,12 @@ struct D3D12RendererImpl
             params[7].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
             params[7].Descriptor       = { 7, 0 }; // t7
             params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            // The reflection trace (SW kernel only, which never names the TLAS) binds its landscape TABLE to this
+            // same root SRV: a root SRV is just a buffer address, whether it names a structured buffer or a TLAS.
+            params[8].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[8].DescriptorTable.NumDescriptorRanges = 1;
+            params[8].DescriptorTable.pDescriptorRanges   = &landRange;
+            params[8].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
 
             // s1 = linear + clamp, for the reflection kernel's probe-atlas taps (the
             // shading-side Chebyshev sampler is bilinear; a compute shader has no
@@ -7626,7 +7716,7 @@ struct D3D12RendererImpl
             linSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             linSamp.MaxLOD           = D3D12_FLOAT32_MAX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 8; rsd.pParameters = params;
+            rsd.NumParameters = 9; rsd.pParameters = params;
             rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &linSamp;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
@@ -8381,7 +8471,7 @@ struct D3D12RendererImpl
         if (!giReflPSO || !giReflBlurPSO || !giReflMixPSO || !giReflCB[fi] || !giReflFsCB[fi])
             return false;
         ensureGiReflTargets();
-        if (!giReflRawTex || !giNodeSB || !giTriSB || !giInstanceSB[fi] || !giReflInstanceSB[fi] ||
+        if (!giReflRawTex || !giNodeSB || !giTriSB || !giInstanceSB[fi] || !giReflInstanceSB[fi] || !giLandSB[fi] ||
             giInstanceCount == 0)
             return false;
 
@@ -8461,7 +8551,33 @@ struct D3D12RendererImpl
             // not see it change when reflections toggle (Thema 191 step 11).
             cl->SetComputeRootShaderResourceView(5, giReflInstanceSB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(6, giSrvGpu(k_giReflUav));
+            // The landscape table (root SRV t7) and its weightmaps (table t8..t11). A weightmap is resolved here, where
+            // the command list is; the material draws leave it in PIXEL_SHADER_RESOURCE only, which a compute read
+            // is not allowed to see, so it goes to the combined read state for the dispatch and back afterwards.
+            ID3D12Resource* landTex[4] = {};
+            if (giLandSB[fi])
+                cl->SetComputeRootShaderResourceView(7, giLandSB[fi]->GetGPUVirtualAddress());
+            for (UINT k = 0; k < 4; ++k)
+            {
+                if (k < giLandWeightIds.size() && !(giLandWeightIds[k] == HE::UUID{}))
+                    landTex[k] = resolveGraphTexture(cl, giLandWeightIds[k], {}, giLandCm);
+                if (landTex[k]) srvForTexture(landTex[k], giSrvCpu(k_giReflLand + k));
+                else            srvIntoHeapSlot(nullptr, DXGI_FORMAT_R8G8B8A8_UNORM, giSrvCpu(k_giReflLand + k));   // a valid null view
+            }
+            ID3D12Resource* landBarriered[4] = {};
+            for (UINT k = 0; k < 4; ++k)
+            {
+                if (!landTex[k]) continue;
+                bool seen = false;
+                for (UINT j = 0; j < k; ++j) seen = seen || landBarriered[j] == landTex[k];
+                if (seen) continue;
+                landBarriered[k] = landTex[k];
+                barrier12(cl, landTex[k], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kBoth);
+            }
+            cl->SetComputeRootDescriptorTable(8, giSrvGpu(k_giReflLand));
             cl->Dispatch(static_cast<UINT>((giShadowW + 7) / 8), static_cast<UINT>((giShadowH + 7) / 8), 1);
+            for (UINT k = 0; k < 4; ++k)
+                if (landBarriered[k]) barrier12(cl, landBarriered[k], kBoth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             // UAV write -> pixel-shader sampling (blur / mix / the materials).
             toState(giReflRawTex.Get(), giReflRawState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }

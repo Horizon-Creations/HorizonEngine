@@ -11011,6 +11011,38 @@ void VulkanRenderer::updateGiAccel()
     // InstanceId mapping, unchanged from before this feature existed).
     std::vector<GIInstanceGpu> reflInstances;
     if (m_giReflEnabled) reflInstances.reserve(m_renderWorld.objects.size());
+    // Landscape table for gi_refl.comp: an entry (and its weightmap view) per terrain the extractor found, so a hit
+    // reads the paint / the slope and height instead of one flat colour for the whole terrain. Same contract and
+    // cap as the GL and Metal paths; the extractor's index maps to the table's through `landRemap` (-1 = left
+    // out: over the cap, or its weightmap is not resident yet — it keeps the flat colour).
+    std::vector<GILandGpu> lands;
+    std::vector<int>       landRemap(m_renderWorld.landscapes.size(), -1);
+    if (m_giReflEnabled)
+    {
+        for (VkImageView& v : m_giLandWeightView) v = VK_NULL_HANDLE;
+        for (size_t i = 0; i < m_renderWorld.landscapes.size(); ++i)
+        {
+            if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
+            const HE::GiLandscape& ls = m_renderWorld.landscapes[i];
+            const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+            VkImageView wm = m_whiteAlbedoView;   // an auto entry has no weightmap: its unit is never sampled
+            if (!autoLand)
+            {
+                wm = resolveGraphTexture(ls.weightmapId, {});
+                if (!wm) continue;
+            }
+            GILandGpu g;
+            g.worldToLocal = ls.worldToLocal;
+            g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling, static_cast<float>(ls.layerCount));
+            for (int k = 0; k < 4; ++k) g.layer[k] = ls.layerColor[k];
+            g.autoWet   = ls.autoWet;
+            g.autoSlope = ls.autoSlope;
+            g.autoSnow  = ls.autoSnow;
+            landRemap[i] = static_cast<int>(lands.size());
+            m_giLandWeightView[lands.size()] = wm;
+            lands.push_back(g);
+        }
+    }
     auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
     {
         if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
@@ -11068,7 +11100,10 @@ void VulkanRenderer::updateGiAccel()
             // read them either (matches D3D11/D3D12/GL).
             const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, m_contentManager, &m_renderWorld.landscapes);
             GIInstanceGpu reflInst = inst;
-            reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
+            // .a carries the landscape table index + 1 (0 = none); gi_refl.comp never reads it as an alpha.
+            const int landSlot = (obj.landscapeIndex >= 0 && obj.landscapeIndex < static_cast<int32_t>(landRemap.size()))
+                                     ? landRemap[static_cast<size_t>(obj.landscapeIndex)] : -1;
+            reflInst.baseColor  = glm::vec4(surf.albedo, static_cast<float>(landSlot + 1));
             reflInst.emissiveRG = static_cast<int32_t>(
                 glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
             reflInst.emissiveB  = static_cast<int32_t>(
@@ -11146,8 +11181,15 @@ void VulkanRenderer::updateGiAccel()
     // gi_refl.comp's own ring, same slot convention — only kept current while
     // reflections are enabled (runGiReflections doesn't run otherwise).
     if (m_giReflEnabled)
+    {
         uploadGiBuffer(m_giReflInstanceBuf[m_currentFrame], reflInstances.data(),
                        reflInstances.size() * sizeof(GIInstanceGpu));
+        // Never size 0: an empty storage-buffer binding is a validation error, and the kernel gates every read on
+        // giLands.length() and the instance's table index anyway.
+        const GILandGpu dummy{};
+        uploadGiBuffer(m_giLandBuf[m_currentFrame], lands.empty() ? &dummy : lands.data(),
+                       std::max<size_t>(lands.size(), 1) * sizeof(GILandGpu));
+    }
 
     // HW path: upload this frame's TLAS instance array (host-visible ring slot,
     // device-address usage for the AS build input). Failure just means SW
@@ -11177,6 +11219,7 @@ void VulkanRenderer::destroyGiAccel()
     destroy(m_giTriBuf);
     for (GiBuffer& b : m_giInstanceBuf) destroy(b);
     for (GiBuffer& b : m_giReflInstanceBuf) destroy(b);
+    for (GiBuffer& b : m_giLandBuf) destroy(b);
     m_giBlas.clear();
     m_giInstanceCount = 0;
 
@@ -12701,7 +12744,10 @@ void VulkanRenderer::createGiReflPipelines()
         return r;
     };
     // gi_refl.comp: 0-2 SSBOs, 3-6 samplers (gPos/gNorm/gIIrr/gIVis), 7 the
-    // trace's storage image, 8 the UBO.
+    // trace's storage image, 8 the UBO, 9 the landscape table (SSBO), 10 the
+    // four landscape weightmaps (a sampler array).
+    VkDescriptorSetLayoutBinding landWeights = bindOf(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+    landWeights.descriptorCount = 4;
     bool ok = makeDSL({
         bindOf(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
@@ -12712,6 +12758,8 @@ void VulkanRenderer::createGiReflPipelines()
         bindOf(6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),   // landscape table
+        landWeights,                                                                          // 10: 4 weightmaps
     }, m_giReflDSL);
     // gi_refl_blur.frag / gi_refl_mix.frag: 3 samplers (blur uses only binding
     // 0; shared layout, unused bindings hold valid views — same convention as
@@ -12846,8 +12894,8 @@ void VulkanRenderer::createGiReflPipelines()
     // "tables" (raw/ping/blur/mix — rewritten only by ensureGiReflTargets, not
     // per frame; only the push-constant stride/floor changes between draws).
     VkDescriptorPoolSize ps[4] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 3 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 4 + 4 * 3 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 4 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 + 4 * 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 1 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 1 },
     };
@@ -13039,7 +13087,7 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid)
     if (!m_giReflRaw.img || !m_giNodeBuf.buf || !m_giTriBuf.buf || m_giInstanceCount == 0) return false;
 
     const uint32_t fi = m_currentFrame;
-    if (!m_giReflSet[fi] || !m_giReflInstanceBuf[fi].buf) return false;
+    if (!m_giReflSet[fi] || !m_giReflInstanceBuf[fi].buf || !m_giLandBuf[fi].buf) return false;
     const HE::GIReflTier tier = HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled);
 
     // ── Rewrite this frame slot's compute set (fence already waited) ────────
@@ -13086,7 +13134,14 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid)
             irrValid ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  outII  { VK_NULL_HANDLE, m_giReflRaw.view, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorBufferInfo uboBI  { m_giReflUBO[fi].buf, 0, sizeof(GiReflUBOData) };
-        VkWriteDescriptorSet w[9]{};
+        VkDescriptorBufferInfo landBI { m_giLandBuf[fi].buf, 0, VK_WHOLE_SIZE };
+        // The four weightmap slots: the table's views, the white fallback behind them (all four must be valid).
+        VkSampler landSampler = m_albedoSampler ? m_albedoSampler : (m_ssrLinearSampler ? m_ssrLinearSampler : m_giPointSampler);
+        VkDescriptorImageInfo landII[4];
+        for (int k = 0; k < 4; ++k)
+            landII[k] = { landSampler, m_giLandWeightView[k] ? m_giLandWeightView[k] : m_whiteAlbedoView,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[11]{};
         auto wBuf = [&](int idx, uint32_t b, VkDescriptorType t, const VkDescriptorBufferInfo* bi)
         { w[idx] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[idx].dstSet = m_giReflSet[fi];
           w[idx].dstBinding = b; w[idx].descriptorCount = 1; w[idx].descriptorType = t; w[idx].pBufferInfo = bi; };
@@ -13102,7 +13157,11 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid)
         wImg(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &visII);
         wImg(7, 7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &outII);
         wBuf(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &uboBI);
-        vkUpdateDescriptorSets(m_device, 9, w, 0, nullptr);
+        wBuf(9, 9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &landBI);
+        w[10] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[10].dstSet = m_giReflSet[fi];
+        w[10].dstBinding = 10; w[10].descriptorCount = 4;
+        w[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[10].pImageInfo = landII;
+        vkUpdateDescriptorSets(m_device, 11, w, 0, nullptr);
     }
 
     // ── 1. Trace ─────────────────────────────────────────────────────────────

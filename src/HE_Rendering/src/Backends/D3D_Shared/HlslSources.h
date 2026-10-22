@@ -1345,7 +1345,8 @@ void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 // Gaps against GL, all deliberate for the first D3D port:
 //  · no baked sky for a ray that misses (a miss writes confidence 0, and the
 //    composite keeps the sky-cube term — GL's own behaviour without the bake);
-//  · no painted-landscape albedo (the D3D GiInst has no landscape index);
+//  · landscapes: the reflection-only instance copy carries the landscape table index + 1 in baseColor.a (0 = not a
+//    landscape chunk); t7 is the table (HE::GiLandscape, GiLandscape.h), t8..t11 the four painted weightmaps;
 //  · no bounce loop (GL has none either: one segment).
 // The receiver's roughness is norm.a of the prepass (GiGBufPS); the hit's
 // emissive travels in GiInst.offsets.z/.w as two packed halves (the struct stays
@@ -1373,7 +1374,35 @@ Texture2D<float2>   uGIVis  : register(t6); // DDGI visibility atlas
 RWTexture2D<float4> uOut    : register(u0); // rgb radiance, a confidence
 SamplerState        uLinSamp : register(s1); // linear + clamp
 
+// Painted / auto landscape — HE::GiLandscape; host mirror GILandGpu (192 bytes). cfg: xy = 1/(sizeX,sizeZ),
+// z = uvTiling, w = layer count (< 0 = auto landscape: layer = Grass/Dirt/Rock/Snow means, autoWet/autoSlope/
+// autoSnow as in GiLandscape.h).
+struct GiLand { float4x4 worldToLocal; float4 cfg; float4 layer[4]; float4 autoWet; float4 autoSlope; float4 autoSnow; };
+StructuredBuffer<GiLand> giLands : register(t7);
+Texture2D<float4> uLandW0 : register(t8);   // one weightmap per landscape, in giLands order
+Texture2D<float4> uLandW1 : register(t9);
+Texture2D<float4> uLandW2 : register(t10);
+Texture2D<float4> uLandW3 : register(t11);
+
 static const int kOctSize = 8; // must match the host's kGIProbeOctSize
+
+// Auto landscape material at a hit: the graph's masks from the hit's slope and world height over the slices' mean
+// colours. Mirrors HE::giAutoLandscapeAlbedo (GiLandscape.h) and the GL/Metal/Vulkan kernels line for line.
+float3 giAutoLandAlbedo(GiLand L, float3 pos, float3 n)
+{
+    float slope = saturate(1.0 - n.y);
+    float rs = L.autoSlope.x, rb = L.autoSlope.y;
+    float dirt  = saturate(L.autoSlope.z + smoothstep(rs - rb, rs, slope));
+    float3 ground = lerp(L.layer[0].rgb, L.layer[1].rgb, dirt);
+    float rock  = smoothstep(rs, rs + rb, slope);
+    float3 s1   = lerp(ground, L.layer[2].rgb, rock);
+    float snow  = smoothstep(L.autoSnow.x, L.autoSnow.x + L.autoSnow.y, pos.y)
+                * (1.0 - smoothstep(L.autoSnow.z, L.autoSnow.z + 0.1, slope));
+    float3 s2   = lerp(s1, L.layer[3].rgb, snow);
+    float pms   = L.autoSlope.w;
+    float flat_ = (1.0 - smoothstep(0.2 * pms, pms, slope)) * (1.0 - snow);
+    return lerp(s2, L.autoWet.rgb, L.autoWet.w * flat_);
+}
 
 // Closest hit with the triangle index (the shadow/probe kernels use the cheaper
 // pair above and fake the normal with -rayDir; a mirror needs the real one).
@@ -1603,6 +1632,40 @@ void GiReflCS(uint3 gid3 : SV_DispatchThreadID)
         float3 hitPos = origin + Rs * dist;
         float3 hitN   = giHitNormal(hitInst, tri, Rs);
         float3 albedo = giInsts[hitInst].baseColor.rgb;
+        // Landscape hit: the colour at THIS point instead of one flat colour for the whole terrain. A landscape is
+        // a heightfield over an axis-aligned local rect whose mesh UVs are linear in it, so the hit POSITION
+        // recovers the UV (no per-vertex UV in the BVH). An auto landscape (cfg.w < 0) has no paint: its colour
+        // follows the hit's slope and height (hitN faces the ray). Mirrors the GL, Metal and Vulkan kernels.
+        {
+            int li = int(giInsts[hitInst].baseColor.a + 0.5) - 1;
+            uint nLands, strideLands;
+            giLands.GetDimensions(nLands, strideLands);
+            if (li >= 0 && li < 4 && uint(li) < nLands)
+            {
+                GiLand L = giLands[li];
+                if (L.cfg.w < -0.5)
+                    albedo = giAutoLandAlbedo(L, hitPos, hitN);
+                else if (int(L.cfg.w) > 0)
+                {
+                    float3 lp  = mul(L.worldToLocal, float4(hitPos, 1.0)).xyz;
+                    float2 luv = (float2(lp.x, lp.z) * L.cfg.xy + 0.5) * L.cfg.z;
+                    float4 lw  = (li == 0) ? uLandW0.SampleLevel(uLinSamp, luv, 0)
+                               : (li == 1) ? uLandW1.SampleLevel(uLinSamp, luv, 0)
+                               : (li == 2) ? uLandW2.SampleLevel(uLinSamp, luv, 0)
+                                           : uLandW3.SampleLevel(uLinSamp, luv, 0);
+                    float3 lsum = float3(0.0, 0.0, 0.0);
+                    float  wsum = 0.0;
+                    int layers = int(L.cfg.w);
+                    for (int k = 0; k < layers && k < 4; ++k)
+                    {
+                        if (lw[k] <= 0.0) continue;
+                        lsum += L.layer[k].rgb * lw[k];
+                        wsum += lw[k];
+                    }
+                    albedo = (wsum > 1e-4) ? lsum / wsum : L.layer[0].rgb;
+                }
+            }
+        }
 
         // Hit shading: emissive first (a glowing object shows in a mirror even
         // unlit; the probe field deliberately does not carry it), then the sun,

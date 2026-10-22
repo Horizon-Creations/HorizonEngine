@@ -1555,6 +1555,19 @@ private:
 	// while m_giReflEnabled. Kept separate from m_giInstanceBuf so enabling
 	// reflections never changes what gi_probe.comp bounces (Thema 191 step 11).
 	GiBuffer m_giReflInstanceBuf[3];
+	// Painted / auto landscapes for gi_refl.comp (HE::GiLandscape, GiLandscape.h): one table entry each, capped at
+	// HE::kGiMaxLandscapes, with a weightmap view per entry (the white fallback for an auto entry or one not
+	// resident). Only kept current while m_giReflEnabled. Mirrors the kernel's GiLand — 192 bytes, std430.
+	struct GILandGpu
+	{
+		glm::mat4 worldToLocal{1.0f};
+		glm::vec4 cfg{0.0f};       // xy = 1/size, z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};
+		glm::vec4 autoWet{0.0f}, autoSlope{0.0f}, autoSnow{0.0f};
+	};
+	static_assert(sizeof(GILandGpu) == 192, "gi_refl.comp's GiLand is 192 bytes");
+	GiBuffer    m_giLandBuf[3];
+	VkImageView m_giLandWeightView[4] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
 	// ── Hardware ray tracing (VK_KHR_ray_query in compute) ──────────────────
 	// When the device offers VK_KHR_acceleration_structure + VK_KHR_ray_query

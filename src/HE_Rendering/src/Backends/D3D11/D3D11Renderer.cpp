@@ -19,6 +19,7 @@
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
 #include <HorizonRendering/GiBlasStore.h>    // GI: per-mesh BLAS cache in the concatenated arrays
 #include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo / emissive (all backends)
+#include <HorizonRendering/GiLandscape.h>       // GI reflections: painted / auto landscape at a hit (all backends)
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays/blur reach per quality tier (all backends)
@@ -3136,6 +3137,16 @@ struct D3D11RendererImpl
         // giReflInstancesCpu, the reflection-only copy; giInstancesCpu (shadow/probe) keeps obj.baseColor.
         int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
     };
+    // Painted / auto landscape for the reflection kernel — HE::GiLandscape (GiLandscape.h); the HLSL's GiLand,
+    // 192 bytes (kGiReflCSHLSL). Same contract and cap (HE::kGiMaxLandscapes) as the GL and Metal paths.
+    struct GILandGpu
+    {
+        glm::mat4 worldToLocal{1.0f};
+        glm::vec4 cfg{0.0f};   // xy = 1/size, z = uvTiling, w = layer count (< 0 = auto)
+        glm::vec4 layer[4]{};
+        glm::vec4 autoWet{0.0f}, autoSlope{0.0f}, autoSnow{0.0f};
+    };
+    static_assert(sizeof(GILandGpu) == 192, "HLSL GiLand is 192 bytes");
     static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; compile failure clears it
@@ -3162,8 +3173,9 @@ struct D3D11RendererImpl
     std::vector<GIInstanceGpu>     giInstancesCpu;
     std::vector<GIInstanceGpu>     giReflInstancesCpu;   // same order; graph-material colour folded in (reflections only)
     int  giInstanceCount = 0;
-    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB, giReflInstanceSB;
-    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV, giReflInstanceSRV;
+    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB, giReflInstanceSB, giLandSB;
+    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV, giReflInstanceSRV, giLandSRV;
+    ID3D11ShaderResourceView*        giLandWeightSRV[4] = {};   // the table's weightmaps (owned by graphTexCache), this frame
     size_t giNodeCap = 0, giTriCap = 0;   // node/tri buffer capacities in elements
 
     int giShadowW = 0, giShadowH = 0;
@@ -3287,6 +3299,36 @@ struct D3D11RendererImpl
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
         giReflInstancesCpu.clear();
+        // Landscape table for the reflection kernel: an entry (and its weightmap) per terrain the extractor found,
+        // so a hit reads the paint / the slope and height instead of one flat colour for the whole terrain.
+        // `landRemap` maps the extractor's index to the table's (-1 = left out: over the cap, or its weightmap is
+        // not resident yet; it keeps the flat colour).
+        std::vector<GILandGpu> lands;
+        std::vector<int>       landRemap(rw.landscapes.size(), -1);
+        for (ID3D11ShaderResourceView*& v : giLandWeightSRV) v = nullptr;
+        if (giReflEnabled)
+            for (size_t i = 0; i < rw.landscapes.size(); ++i)
+            {
+                if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
+                const HE::GiLandscape& ls = rw.landscapes[i];
+                const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+                ID3D11ShaderResourceView* wm = dummyTexture.Get();   // an auto entry has no weightmap: never sampled
+                if (!autoLand)
+                {
+                    wm = resolveGraphTexture(ls.weightmapId, {}, cm);
+                    if (!wm) continue;
+                }
+                GILandGpu g;
+                g.worldToLocal = ls.worldToLocal;
+                g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling, static_cast<float>(ls.layerCount));
+                for (int k = 0; k < 4; ++k) g.layer[k] = ls.layerColor[k];
+                g.autoWet   = ls.autoWet;
+                g.autoSlope = ls.autoSlope;
+                g.autoSnow  = ls.autoSnow;
+                landRemap[i] = static_cast<int>(lands.size());
+                giLandWeightSRV[lands.size()] = wm;
+                lands.push_back(g);
+            }
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
             if (const GIBlasRange* r = giBlas.find(id)) return *r;
@@ -3323,7 +3365,10 @@ struct D3D11RendererImpl
                 // when reflections are toggled (as on D3D12 and Vulkan).
                 const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm, &rw.landscapes);
                 GIInstanceGpu reflInst = inst;
-                reflInst.baseColor  = glm::vec4(surf.albedo, 1.0f);
+                // .a = the landscape table index + 1 (0 = none); the kernel never reads it as an alpha.
+                const int landSlot = (obj.landscapeIndex >= 0 && obj.landscapeIndex < static_cast<int32_t>(landRemap.size()))
+                                         ? landRemap[static_cast<size_t>(obj.landscapeIndex)] : -1;
+                reflInst.baseColor  = glm::vec4(surf.albedo, static_cast<float>(landSlot + 1));
                 reflInst.emissiveRG = static_cast<int32_t>(glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
                 reflInst.emissiveB  = static_cast<int32_t>(glm::packHalf2x16(glm::vec2(surf.emissive.b, 0.0f)));
                 giReflInstancesCpu.push_back(reflInst);
@@ -3374,14 +3419,23 @@ struct D3D11RendererImpl
             makeSB(giReflInstancesCpu.data(), static_cast<UINT>(giReflInstancesCpu.size()),
                    sizeof(GIInstanceGpu), giReflInstanceSB, giReflInstanceSRV);
         else { giReflInstanceSB.Reset(); giReflInstanceSRV.Reset(); }
+        if (giReflEnabled)
+        {
+            // Never an empty buffer: the kernel gates every read on the table's size and the instance's index.
+            const GILandGpu dummy{};
+            makeSB(lands.empty() ? &dummy : lands.data(), static_cast<UINT>(std::max<size_t>(lands.size(), 1)),
+                   sizeof(GILandGpu), giLandSB, giLandSRV);
+        }
+        else { giLandSB.Reset(); giLandSRV.Reset(); }
         if (!giNodeSRV || !giTriSRV || !giInstanceSRV) giInstanceCount = 0;
     }
 
     void destroyGiAccel()
     {
         HE_PROFILE_SCOPE_N("D3D11::GiDropAccel");
-        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset(); giReflInstanceSB.Reset();
-        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset(); giReflInstanceSRV.Reset();
+        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset(); giReflInstanceSB.Reset(); giLandSB.Reset();
+        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset(); giReflInstanceSRV.Reset(); giLandSRV.Reset();
+        for (ID3D11ShaderResourceView*& v : giLandWeightSRV) v = nullptr;
         giNodeCap = giTriCap = 0;
         giBlas.clear();
         giInstancesCpu.clear();
@@ -4133,11 +4187,17 @@ struct D3D11RendererImpl
             ID3D11ShaderResourceView* atlasIrr = atlasesValid ? giIrrSRV.Get() : nullptr;
             ID3D11ShaderResourceView* atlasVis = atlasesValid ? giVisSRV.Get() : nullptr;
             // The reflection kernel reads the reflection-only instance copy (graph-material colours).
-            ID3D11ShaderResourceView* srvs[7] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
-                                                  giNodeSRV.Get(), giTriSRV.Get(),
-                                                  giReflInstanceSRV ? giReflInstanceSRV.Get() : giInstanceSRV.Get(),
-                                                  atlasIrr, atlasVis };
-            ctx->CSSetShaderResources(0, 7, srvs);
+            // t7 = the landscape table, t8..t11 its weightmaps (the white dummy behind them: every slot a valid SRV).
+            ID3D11ShaderResourceView* srvs[12] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
+                                                   giNodeSRV.Get(), giTriSRV.Get(),
+                                                   giReflInstanceSRV ? giReflInstanceSRV.Get() : giInstanceSRV.Get(),
+                                                   atlasIrr, atlasVis,
+                                                   giLandSRV.Get(),
+                                                   giLandWeightSRV[0] ? giLandWeightSRV[0] : dummyTexture.Get(),
+                                                   giLandWeightSRV[1] ? giLandWeightSRV[1] : dummyTexture.Get(),
+                                                   giLandWeightSRV[2] ? giLandWeightSRV[2] : dummyTexture.Get(),
+                                                   giLandWeightSRV[3] ? giLandWeightSRV[3] : dummyTexture.Get() };
+            ctx->CSSetShaderResources(0, 12, srvs);
             ID3D11Buffer* cbs[2] = { giReflCB.Get(), giCountCB.Get() };
             ctx->CSSetConstantBuffers(0, 2, cbs);
             ID3D11UnorderedAccessView* uavs[1] = { giReflRawUAV.Get() };
@@ -4147,8 +4207,8 @@ struct D3D11RendererImpl
             ctx->Dispatch(static_cast<UINT>((giReflW + 7) / 8), static_cast<UINT>((giReflH + 7) / 8), 1);
             ID3D11UnorderedAccessView* nullUavs[1] = {};
             ctx->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
-            ID3D11ShaderResourceView* nullSrvs[7] = {};
-            ctx->CSSetShaderResources(0, 7, nullSrvs);
+            ID3D11ShaderResourceView* nullSrvs[12] = {};
+            ctx->CSSetShaderResources(0, 12, nullSrvs);
             ctx->CSSetShader(nullptr, nullptr, 0);
         }
 
