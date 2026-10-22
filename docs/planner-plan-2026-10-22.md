@@ -149,3 +149,17 @@ fehlte); jetzt Test dafuer.
 (`test_hpak` Disk registry, zwei `EngineProfiler`-Faelle), alles andere gruen.
 **Offen:** Kalender zeigt nur Monate (keine Wochenansicht), Zeitleiste ohne Zoom/Resize; Seiten-Links/Unterseiten per UI; Bloecke per Ziehen umordnen;
 Relation: Klick zur Zielzeile; Variante B fuer Tasks; Live-Zusammenarbeit; Editor nicht gestartet, Windows/Linux nicht gebaut.
+
+## Handoff (Stand Seiten-Links, Unterseiten, Block-Ziehen, 2026-10-22)
+**Fertig:**
+- Modell: `BlockType::PageLink` ("page-link", Feld `Block::page`; auf anderen Bloecken bleibt ein "page"-Schluessel unbekannter Schluessel und
+  wird zurueckgeschrieben), `Page::moveBlockNear(id, target, after)` (vor/nach einem Block auf dessen Ebene, Kinder gehen mit, nicht in den eigenen Teilbaum).
+- Panel: Seiten-Link-Block (Auswahl der Seiten, solange er nirgends hinzeigt; dann der Titel als Link, x loest ihn; "Page not found" bei fehlender Ziel-Seite),
+  "Turn into > Page link", `New Sub-page` (legt die Seite mit `parent` = diese Seite an und haengt einen Link-Block ans Ende; in der Seitenleiste
+  eingerueckt), `Back` bei Unterseiten fuehrt zur Eltern-Seite, Bloecke ziehen: das Griff-Symbol (⋮) ist Drag-Quelle, jede Blockzeile Ziel
+  (obere Haelfte = davor, untere = danach, Linie als Vorschau); ein Klick ohne Ziehen oeffnet weiter das Menue.
+- Help: `Planner/New Sub-page`, `Turn into` ergaenzt.
+**Tests:** `test_planner_ui` 20 Faelle (neu: Block ziehen, Unterseite + Zurueck, Seiten-Link waehlen und folgen), `test_planner` 17 (moveBlockNear, PageLink-Round-Trip,
+fremder "page"-Schluessel), Workspace 16, Task-Board-Tests gruen, Audit 0 offen, `HorizonEditor` gebaut. Volllauf nicht wiederholt.
+**Offen:** Pfeiltasten zwischen Bloecken; Block "Seite" fuer Zeilenseiten in der Auswahl (nur freie Seiten); Seiten per Ziehen in der Seitenleiste verschachteln;
+Wochenansicht im Kalender; Zeitleiste ohne Zoom/Resize; Relation: Klick zur Zielzeile; Variante B fuer Tasks; Live-Zusammenarbeit; Editor nicht gestartet, Windows/Linux nicht gebaut.

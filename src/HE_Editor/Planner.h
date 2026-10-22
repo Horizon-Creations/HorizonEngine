@@ -70,7 +70,7 @@ enum class ViewKind : std::uint8_t { Table, Board, Timeline, Calendar, Other };
 enum class BlockType : std::uint8_t
 {
 	Paragraph, Heading1, Heading2, Heading3, Bullet, Numbered, Todo, Quote, Callout,
-	Divider, Code, EngineLink, DatabaseView, Other
+	Divider, Code, EngineLink, DatabaseView, PageLink, Other
 };
 
 const char* propertyTypeName(PropertyType t);   // "text", "number", "checkbox", "date", "select",
@@ -78,7 +78,7 @@ bool        propertyTypeFromName(std::string_view n, PropertyType& out);   // "m
 const char* viewKindName(ViewKind k);           // "table", "board", "timeline", "calendar"
 bool        viewKindFromName(std::string_view n, ViewKind& out);
 const char* blockTypeName(BlockType t);         // "paragraph", "heading-1".."heading-3", "bullet", "numbered",
-bool        blockTypeFromName(std::string_view n, BlockType& out);         // "todo", "quote", "callout", "divider", "code", "engine-link", "database-view"
+bool        blockTypeFromName(std::string_view n, BlockType& out);         // "todo", "quote", "callout", "divider", "code", "engine-link", "database-view", "page-link"
 
 // ── Database ─────────────────────────────────────────────────────────────────
 
@@ -275,6 +275,7 @@ struct Block
 	TaskLink    link;              // EngineLink: the object (kind Asset/Entity/Scene/Panel)
 	UUID        database;          // DatabaseView: which database…
 	UUID        view;              // …and which of its views ({} = its first)
+	UUID        page;              // PageLink: the page it points at
 	std::vector<Block> children;   // indented under this one
 	std::string extraJson;
 };
@@ -318,6 +319,10 @@ public:
 	bool         outdentBlock(const UUID& id, std::int64_t nowMs);
 	// One place up or down among its siblings; false at either end.
 	bool         moveBlockBy(const UUID& id, int delta, std::int64_t nowMs);
+	// Drag and drop: the block goes right before or right after `target`, at
+	// target's level, taking its children along. False for the same block, for a
+	// target inside the block itself, or an unknown id.
+	bool         moveBlockNear(const UUID& id, const UUID& target, bool after, std::int64_t nowMs);
 
 	using LoadResult = Database::LoadResult;
 	LoadResult  fromJson(std::string_view text);

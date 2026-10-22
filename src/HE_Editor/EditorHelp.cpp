@@ -3119,7 +3119,13 @@ namespace
 	  "", "" },
 	{ "Planner/Turn into", "Turn into",
 	  "Changes this block into another kind: text, heading, list, to-do, quote, "
-	  "callout, code, divider, an engine object or a database view. The text stays.",
+	  "callout, code, divider, an engine object, a database view or a link to "
+	  "another page. The text stays.",
+	  "", "" },
+	{ "Planner/New Sub-page", "New Sub-page",
+	  "Makes a page under this one and adds a link to it at the end of this page. "
+	  "The sub-page also shows under this page in the sidebar; deleting this page "
+	  "deletes it too.",
 	  "", "" },
 	{ "Planner/Add Block Below", "Add Block Below",
 	  "Adds an empty text block right under this one, at the same level.",

@@ -1491,7 +1491,7 @@ const BlockKind kBlockKinds[] = {
 	{ BlockType::Todo, "To-do" },              { BlockType::Quote, "Quote" },
 	{ BlockType::Callout, "Callout" },         { BlockType::Code, "Code" },
 	{ BlockType::Divider, "Divider" },         { BlockType::EngineLink, "Engine object" },
-	{ BlockType::DatabaseView, "Database view" },
+	{ BlockType::DatabaseView, "Database view" }, { BlockType::PageLink, "Page link" },
 };
 
 bool isListType(BlockType t)
@@ -1654,7 +1654,14 @@ void blockMenu(const Page& page, const Block& b, int index)
 	const ImU32 col = Theme::u32(ImGui::IsItemHovered() ? Theme::Text : Theme::TextDim);
 	for (int i = -1; i <= 1; ++i) ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(c.x, c.y + i * 5.0f), 1.6f, col);
 	note("block-menu:" + std::to_string(index));
-	if (clicked) ImGui::OpenPopup("##blockmenu");
+	// The handle is also what you take hold of to move the block.
+	if (ImGui::BeginDragDropSource())
+	{
+		ImGui::SetDragDropPayload("HE_PLANNER_BLOCK", &blockId, sizeof(UUID));
+		ImGui::TextUnformatted(b.text.empty() ? "Block" : b.text.c_str());
+		ImGui::EndDragDropSource();
+	}
+	if (clicked && releasedWithoutDrag()) ImGui::OpenPopup("##blockmenu");
 	if (!ImGui::BeginPopup("##blockmenu")) return;
 
 	auto change = [&](std::function<bool(Page&)> fn) {
@@ -1818,6 +1825,74 @@ void databaseBlock(const Page& page, const Block& b, float width)
 	if (idx.size() > 8) ImGui::TextDisabled("and %d more", static_cast<int>(idx.size() - 8));
 }
 
+// Go to a page: a row's page opens with its database, any other as itself.
+void goToPage(const UUID& id)
+{
+	const Page* p = s_ws.findPage(id);
+	if (!p) return;
+	if (s_ws.find(p->parent)) openPage(id, p->parent);
+	else
+	{
+		s_pageId = id;
+		s_pageDb = UUID{};
+	}
+}
+
+// A link to another page: a choice of pages while it points nowhere, then the page's
+// title as a link.
+void pageLinkBlock(const Page& page, const Block& b, int index, float width)
+{
+	const UUID pageId = page.id, blockId = b.id;
+	auto setTarget = [=](const UUID& target) {
+		post([=] {
+			s_ws.editPage(pageId, [&](Page& p) {
+				Block* x = p.findBlock(blockId);
+				if (!x) return false;
+				x->page = target;
+				p.modifiedMs = taskNowMs();
+				return true;
+			});
+		});
+	};
+	if (b.page == UUID{})
+	{
+		ImGui::SetNextItemWidth(std::min(width, 260.0f));
+		if (ImGui::BeginCombo("##blockpage", "Choose a page"))
+		{
+			for (const Page* p : s_ws.pages())
+			{
+				if (p->id == pageId || s_ws.find(p->parent)) continue;   // not itself, not a row's page
+				pushUuid(p->id);
+				if (ImGui::Selectable((p->title.empty() ? std::string("Untitled") : p->title).c_str())) setTarget(p->id);
+				note("pick-page:" + p->title);
+				ImGui::PopID();
+			}
+			ImGui::EndCombo();
+		}
+		note("page-link:" + std::to_string(index));
+		return;
+	}
+	const Page* target = s_ws.findPage(b.page);
+	if (!target)
+		ImGui::TextDisabled("Page not found");
+	else
+	{
+		const std::string title = target->title.empty() ? std::string("Untitled") : target->title;
+		ImGui::PushStyleColor(ImGuiCol_Text, Theme::AccentHi);
+		const float w = std::min(width - ImGui::GetFrameHeight() * 1.5f, ImGui::CalcTextSize(title.c_str()).x + 24.0f);
+		const bool clicked = ImGui::Selectable((title + "##open").c_str(), false, 0, ImVec2(std::max(w, 40.0f), 0));
+		ImGui::PopStyleColor();
+		note("page-link:" + std::to_string(index));
+		if (clicked)
+		{
+			const UUID id = target->id;
+			post([=] { goToPage(id); });
+		}
+	}
+	ImGui::SameLine(0, 4.0f);
+	if (ImGui::SmallButton("x")) setTarget(UUID{});
+}
+
 // The page's blocks, one per line, children indented.
 void drawBlocks(const Page& page)
 {
@@ -1837,6 +1912,7 @@ void drawBlocks(const Page& page)
 		const float indent = static_cast<float>(flat[i].depth) * 26.0f;
 		const float avail = ImGui::GetContentRegionAvail().x;
 		if (indent > 0) ImGui::Indent(indent);
+		ImGui::BeginGroup();
 
 		blockMenu(page, b, static_cast<int>(i));
 		ImGui::SameLine(0, 4.0f);
@@ -1857,6 +1933,8 @@ void drawBlocks(const Page& page)
 			databaseBlock(page, b, avail - indent - handleW);
 			ImGui::EndGroup();
 		}
+		else if (b.type == BlockType::PageLink)
+			pageLinkBlock(page, b, static_cast<int>(i), avail - indent - handleW);
 		else
 		{
 			// A marker before the text for lists and to-dos.
@@ -1882,6 +1960,28 @@ void drawBlocks(const Page& page)
 			blockText(page, b, static_cast<int>(i), avail - indent - handleW - used - 8.0f, prevId);
 			if (b.type == BlockType::Todo && b.checked) ImGui::PopStyleColor();
 		}
+		ImGui::EndGroup();
+		// A block dropped on this row goes before it (upper half) or after it (lower half).
+		if (ImGui::BeginDragDropTarget())
+		{
+			if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload(
+			        "HE_PLANNER_BLOCK", ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect))
+				if (pl->DataSize == static_cast<int>(sizeof(UUID)))
+				{
+					const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+					const bool after = ImGui::GetMousePos().y > (a.y + z.y) * 0.5f;
+					const float y = after ? z.y : a.y;
+					ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x, y), ImVec2(z.x, y), Theme::u32(Theme::AccentBright), 2.0f);
+					if (pl->IsDelivery())
+					{
+						const UUID moved = *static_cast<const UUID*>(pl->Data);
+						post([=] {
+							s_ws.editPage(pageId, [&](Page& p) { return p.moveBlockNear(moved, blockId, after, taskNowMs()); });
+						});
+					}
+				}
+			ImGui::EndDragDropTarget();
+		}
 		if (indent > 0) ImGui::Unindent(indent);
 		ImGui::PopID();
 		prevId = blockId;
@@ -1898,6 +1998,21 @@ void drawBlocks(const Page& page)
 			});
 		});
 	note("add-block");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("New Sub-page"))
+		post([=] {
+			Page* child = s_ws.createPage("Untitled", pageId);
+			if (!child) return;
+			const UUID childId = child->id;
+			// The new page is linked from here, so it can be found again.
+			s_ws.editPage(pageId, [&](Page& p) {
+				Block* made = p.addBlockAfter(UUID{}, BlockType::PageLink, "", taskNowMs());
+				if (!made) return false;
+				made->page = childId;
+				return true;
+			});
+		});
+	note("new-subpage");
 	if (page.blocks.empty())
 	{
 		ImGui::SameLine();
@@ -1953,6 +2068,18 @@ void drawPage(AppContext& ctx)
 		note("page:back");
 		ImGui::SameLine();
 		ImGui::TextDisabled("%s", db->name.c_str());
+	}
+	else if (const Page* parent = s_ws.findPage(page->parent))
+	{
+		// A sub-page: the way back is the page it hangs under.
+		if (EditorWidgets::smallButton("Back"))
+		{
+			const UUID parentId = parent->id;
+			post([=] { goToPage(parentId); });
+		}
+		note("page:parent");
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", parent->title.empty() ? "Untitled" : parent->title.c_str());
 	}
 
 	// The title: the row's, or the page's own.

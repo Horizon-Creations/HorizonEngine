@@ -688,3 +688,54 @@ TEST_CASE("planner page: what the block editor does to the tree")
 	CHECK(page.blocks[1].id == a);
 	CHECK_FALSE(page.moveBlockBy(page.blocks.back().id, 1, kNow));
 }
+
+TEST_CASE("planner page: blocks dropped before or after another, and page links")
+{
+	Page page;
+	page.id = UUID::generate();
+	const UUID a = page.addBlock(BlockType::Paragraph, "a", kNow)->id;
+	const UUID b = page.addBlock(BlockType::Paragraph, "b", kNow)->id;
+	const UUID c = page.addBlock(BlockType::Paragraph, "c", kNow)->id;
+	const UUID d = page.addBlock(BlockType::Paragraph, "d", kNow, c)->id;   // a child of c
+	auto order = [&] {
+		std::string out;
+		for (const Block& x : page.blocks) out += x.text;
+		return out;
+	};
+
+	CHECK(page.moveBlockNear(a, c, true, kNow + 1));    // a after c
+	CHECK(order() == "bca");
+	CHECK(page.moveBlockNear(a, b, false, kNow + 2));   // a before b
+	CHECK(order() == "abc");
+	CHECK(page.moveBlockNear(c, a, false, kNow + 3));   // c, with its child, to the front
+	CHECK(order() == "cab");
+	CHECK(page.findBlock(d) != nullptr);
+	CHECK(page.blocks[0].children.size() == 1);
+
+	// Into a level: before a child puts the block among the children.
+	CHECK(page.moveBlockNear(b, d, false, kNow + 4));
+	CHECK(page.findBlock(c)->children.size() == 2);
+	CHECK(page.findBlock(c)->children[0].id == b);
+
+	CHECK_FALSE(page.moveBlockNear(a, a, true, kNow));
+	CHECK_FALSE(page.moveBlockNear(c, d, true, kNow));   // not into its own child
+	CHECK_FALSE(page.moveBlockNear(UUID::generate(), a, true, kNow));
+	CHECK_FALSE(page.moveBlockNear(a, UUID::generate(), true, kNow));
+
+	// A page link keeps its target through the file.
+	const UUID target = UUID::generate();
+	Block* link = page.addBlock(BlockType::PageLink, "", kNow + 5);
+	link->page = target;
+	const UUID linkId = link->id;
+	Page back;
+	REQUIRE(back.fromJson(page.toJson()).ok);
+	REQUIRE(back.findBlock(linkId));
+	CHECK(back.findBlock(linkId)->type == BlockType::PageLink);
+	CHECK(back.findBlock(linkId)->page == target);
+	CHECK(back.toJson() == page.toJson());
+
+	// On any other block a "page" key is somebody's own and stays as it was.
+	Page foreign;
+	REQUIRE(foreign.fromJson(R"({"blocks": [{"id": "55555555555555555555555555555555", "type": "synced", "page": "x"}]})").ok);
+	CHECK(foreign.toJson().find("\"page\": \"x\"") != std::string::npos);
+}

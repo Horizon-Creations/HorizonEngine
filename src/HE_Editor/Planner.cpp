@@ -44,7 +44,7 @@ const char* const kPropertyNames[] = { "text", "number", "checkbox", "date", "se
 const char* const kViewNames[]     = { "table", "board", "timeline", "calendar" };
 const char* const kBlockNames[]    = { "paragraph", "heading-1", "heading-2", "heading-3", "bullet",
                                        "numbered", "todo", "quote", "callout", "divider", "code",
-                                       "engine-link", "database-view" };
+                                       "engine-link", "database-view", "page-link" };
 
 bool isSelectType(PropertyType t) { return t == PropertyType::Select || t == PropertyType::MultiSelect; }
 
@@ -280,14 +280,22 @@ Block readBlock(const ojson& j, int& dropped, std::unordered_set<UUID>& seen)
 	if (const auto it = j.find("link"); it != j.end() && it->is_object()) b.link = TJ::readLink(*it);
 	TJ::readUuid(j, "database", b.database);
 	TJ::readUuid(j, "view", b.view);
+	// "page" is this build's key for a page link only; on any other block it is
+	// somebody's unknown key and stays where it was.
+	const bool pageLink = b.type == BlockType::PageLink;
+	if (pageLink) TJ::readUuid(j, "page", b.page);
 	if (const auto it = j.find("children"); it != j.end() && it->is_array())
 		for (const ojson& e : *it)
 		{
 			if (!e.is_object()) { ++dropped; continue; }
 			b.children.push_back(readBlock(e, dropped, seen));
 		}
-	b.extraJson = TJ::extrasOf(j, { "id", "type", "text", "checked", "language", "link",
-	                                "database", "view", "children" });
+	if (pageLink)
+		b.extraJson = TJ::extrasOf(j, { "id", "type", "text", "checked", "language", "link",
+		                                "database", "view", "page", "children" });
+	else
+		b.extraJson = TJ::extrasOf(j, { "id", "type", "text", "checked", "language", "link",
+		                                "database", "view", "children" });
 	return b;
 }
 
@@ -305,6 +313,7 @@ ojson writeBlock(const Block& b)
 		writeUuidIf(j, "database", b.database);
 		writeUuidIf(j, "view", b.view);
 	}
+	if (b.type == BlockType::PageLink) writeUuidIf(j, "page", b.page);
 	if (!b.children.empty())
 	{
 		ojson kids = ojson::array();
@@ -1451,6 +1460,26 @@ bool Page::moveBlockBy(const UUID& bid, int delta, std::int64_t nowMs)
 	const long to = static_cast<long>(at) + delta;
 	if (to < 0 || to >= static_cast<long>(owner->size())) return false;
 	std::swap((*owner)[at], (*owner)[static_cast<std::size_t>(to)]);
+	modifiedMs = nowMs;
+	return true;
+}
+
+bool Page::moveBlockNear(const UUID& bid, const UUID& target, bool after, std::int64_t nowMs)
+{
+	if (bid == target) return false;
+	std::vector<Block>* owner = nullptr;
+	std::size_t at = 0;
+	if (!locate(blocks, bid, owner, at)) return false;
+	if (findIn((*owner)[at].children, target)) return false;   // into itself
+	std::vector<Block>* other = nullptr;
+	std::size_t where = 0;
+	if (!locate(blocks, target, other, where)) return false;
+
+	Block moved = std::move((*owner)[at]);
+	owner->erase(owner->begin() + static_cast<std::ptrdiff_t>(at));
+	// The vectors may have shifted under the erase: find the target again.
+	if (!locate(blocks, target, other, where)) return false;
+	other->insert(other->begin() + static_cast<std::ptrdiff_t>(where + (after ? 1 : 0)), std::move(moved));
 	modifiedMs = nowMs;
 	return true;
 }

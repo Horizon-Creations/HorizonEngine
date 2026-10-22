@@ -1251,3 +1251,116 @@ TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a 
 	REQUIRE(db->date(db->rows[3].id, when, ms));
 	CHECK(ms == day("2026-10-05T00:00:00.000Z"));
 }
+
+TEST_CASE("planner ui pages: a block dragged by its handle lands before or after another")
+{
+	Harness harness;
+	Project proj("he_planner_ui_blockdrag");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID pageId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(pageId, [](Page& p) {
+		p.addBlock(BlockType::Paragraph, "a", 1);
+		p.addBlock(BlockType::Paragraph, "b", 2);
+		p.addBlock(BlockType::Paragraph, "c", 3);
+		return true;
+	}));
+	idle(ctx);
+	auto order = [&] {
+		std::string out;
+		for (const Block& b : ws->findPage(pageId)->blocks) out += b.text;
+		return out;
+	};
+
+	// The lower half of the last block: "a" goes after "c".
+	const PlannerPanel::Rect c = PlannerPanel::controlRect("block:2");
+	REQUIRE(c.x1 > c.x0);
+	dragTo(ctx, centre(PlannerPanel::controlRect("block-menu:0")), ImVec2(centre(c).x, c.y1 - 1.0f));
+	idle(ctx);
+	CHECK(order() == "bca");
+
+	// The upper half of the first: "a" goes before "b".
+	const PlannerPanel::Rect b = PlannerPanel::controlRect("block:0");
+	dragTo(ctx, centre(PlannerPanel::controlRect("block-menu:2")), ImVec2(centre(b).x, b.y0 + 1.0f));
+	idle(ctx);
+	CHECK(order() == "abc");
+	CHECK_FALSE(ImGui::GetDragDropPayload());
+
+	// A press and release on the handle without a drag is still the menu.
+	REQUIRE(click(ctx, "block-menu:1"));
+	CHECK(PlannerPanel::controlRect("menu:Move Up").x1 > 0);
+}
+
+TEST_CASE("planner ui pages: a sub-page is linked from its parent, and the way back is the parent")
+{
+	Harness harness;
+	Project proj("he_planner_ui_subpage");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	REQUIRE(click(ctx, "New Page"));
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID parentId = PlannerPanel::selectedPage();
+	REQUIRE(ws->editPage(parentId, [](Page& p) { p.title = "Design"; return true; }));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "new-subpage"));
+	idle(ctx);
+	REQUIRE(ws->pages().size() == 2);
+	const Page* parent = ws->findPage(parentId);
+	REQUIRE(parent->blocks.size() == 1);
+	CHECK(parent->blocks[0].type == BlockType::PageLink);
+	const UUID childId = parent->blocks[0].page;
+	REQUIRE(ws->findPage(childId) != nullptr);
+	CHECK(ws->findPage(childId)->parent == parentId);
+	CHECK(std::filesystem::exists(pagePath(proj.root(), childId)));
+	shotTo(ctx, "planner_subpage_parent");
+
+	// The link opens the sub-page; Back returns to the parent.
+	REQUIRE(click(ctx, "page-link:0"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == childId);
+	REQUIRE(PlannerPanel::controlRect("page:parent").x1 > 0);
+	shotTo(ctx, "planner_subpage");
+	REQUIRE(click(ctx, "page:parent"));
+	idle(ctx);
+	CHECK(PlannerPanel::selectedPage() == parentId);
+
+	// Deleting the parent deletes the sub-page too (the workspace keeps that rule).
+	CHECK(ws->removePage(parentId));
+	CHECK(ws->findPage(childId) == nullptr);
+}
+
+TEST_CASE("planner ui pages: a page link block offers the pages, then shows the one chosen")
+{
+	Harness harness;
+	Project proj("he_planner_ui_pagelink");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	idle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID notes = ws->createPage("Notes")->id;
+	const UUID home = ws->createPage("Home")->id;
+	PlannerPanel::selectPage(home);
+	REQUIRE(ws->editPage(home, [](Page& p) { p.addBlock(BlockType::PageLink, "", 1); return true; }));
+	idle(ctx);
+
+	REQUIRE(click(ctx, "page-link:0"));   // the chooser
+	REQUIRE(PlannerPanel::controlRect("pick-page:Notes").x1 > 0);
+	CHECK(PlannerPanel::controlRect("pick-page:Home").x1 <= 0);   // not itself
+	REQUIRE(click(ctx, "pick-page:Notes"));
+	idle(ctx);
+	CHECK(ws->findPage(home)->blocks[0].page == notes);
+
+	// The link goes to the page; it survives in the file.
+	Page onDisk;
+	REQUIRE(loadPage(proj.root(), home, onDisk).ok);
+	CHECK(onDisk.blocks[0].page == notes);
+	REQUIRE(click(ctx, "page-link:0"));
+	CHECK(PlannerPanel::selectedPage() == notes);
+}
