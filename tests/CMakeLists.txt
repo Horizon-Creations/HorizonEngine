@@ -209,6 +209,8 @@ add_executable(he_tests
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
+    # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
+    test_foliage_parallel.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp

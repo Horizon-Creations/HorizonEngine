@@ -13890,6 +13890,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 	// The baked sky only changes with the sun direction — skip the rebuild + upload
 	// when it hasn't moved.
 	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 1e-4f) return;
+	HE_PROFILE_SCOPE_N("Metal::SkyEnvRebake");   // the main-thread cost of one sun move (Thema 238)
 	m_skyEnvSunDir = sunDir; m_skyEnvValid = true;
 	id<MTLTexture> cube = (__bridge id<MTLTexture>)m_skyEnvCube;
 	constexpr int N = 128;

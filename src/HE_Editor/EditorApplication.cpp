@@ -14425,6 +14425,7 @@ void EditorApplication::pushEnvironment(float dt)
 void EditorApplication::warmupWorldMaterials()
 {
 	if (!m_editorWorld || !renderer()) return;
+	HE_PROFILE_SCOPE_N("WarmupWorldMaterials");   // 6.7 s of the editor's cold first frame (Thema 238)
 	std::vector<HE::UUID> ids = SceneSystems::collectAssetRefs(*m_editorWorld);
 	// The billboard icons of lights, cameras and audio sources are graph materials
 	// no component references; the first frame that showed one cross-compiled it
