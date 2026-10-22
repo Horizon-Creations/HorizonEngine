@@ -1363,7 +1363,7 @@ void draw(const Services& services, const UUID& boardId)
 			const UUID page = n->page, db = n->database, row = n->row;
 			services.post([=] {
 				if (type == NodeType::Page) PlannerPanel::selectPage(page);
-				else PlannerPanel::openRowPage(db, row);
+				else PlannerPanel::openRowInView(db, row);
 			});
 		}
 		else if (n->type == NodeType::Object && services.ctx)

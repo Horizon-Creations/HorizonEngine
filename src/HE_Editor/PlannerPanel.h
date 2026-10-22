@@ -86,6 +86,9 @@ namespace PlannerPanel
 	// the page exists in memory until it has a block). {} when a database is shown.
 	void selectPage(const HE::UUID& id);
 	void openRowPage(const HE::UUID& databaseId, const HE::UUID& rowId);
+	// Show a row where it lives: a view of its data that is already open (else the first one), with the row's details
+	// out (the flyover, or the column beside a table). What a reference to a row on a whiteboard opens.
+	void openRowInView(const HE::UUID& databaseId, const HE::UUID& rowId);
 	HE::UUID selectedPage();
 	// Show a whiteboard (the sidebar click, from code); {} when a database or a page is shown.
 	void selectBoard(const HE::UUID& id);

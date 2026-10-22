@@ -3860,6 +3860,20 @@ void setClipboardForTest(std::function<bool(std::string&, std::string&)> image, 
 void selectBoard(const UUID& id) { s_boardId = id; s_pageId = s_pageDb = UUID{}; }
 UUID selectedBoard() { return s_boardId; }
 void openRowPage(const UUID& dbId, const UUID& rowId) { openPage(rowId, dbId); }
+
+void openRowInView(const UUID& dbId, const UUID& rowId)
+{
+	const Database* db = s_ws.find(dbId);
+	if (!db || !db->findRow(rowId) || db->views.empty()) { openPage(rowId, dbId); return; }
+	// A view of this data that is open already, else its first.
+	UUID view = db->views.front().id;
+	for (const Tab& t : s_tabs)
+		if (t.kind == 0 && t.a == dbId && db->findView(t.b)) { view = t.b; break; }
+	s_boardId = s_pageId = s_pageDb = UUID{};
+	s_dbId = dbId;
+	s_viewId = view;
+	s_selRow = rowId;
+}
 UUID selectedPage() { return s_pageId; }
 
 Rect controlRect(const std::string& name)

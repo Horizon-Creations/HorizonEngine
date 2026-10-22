@@ -2560,7 +2560,7 @@ TEST_CASE("planner ui: tabs hold what is open once; New Step, New Event and New 
 	CHECK(kd->select(kd->rows[0].id, group->id) == group->options.front().id);
 }
 
-TEST_CASE("planner ui board: a double-click on a row or page card opens it; a colour recolours the link, not the card")
+TEST_CASE("planner ui board: a double-click on a row card shows the row in its view and on a page card opens the page; a colour recolours the link, not the card")
 {
 	Harness harness;
 	Project proj("he_planner_ui_board_links");
@@ -2600,8 +2600,11 @@ TEST_CASE("planner ui board: a double-click on a row or page card opens it; a co
 	REQUIRE(rc.x1 > rc.x0);
 	doubleClickAt(ctx, centre(rc));
 	idle(ctx);
+	// A row opens where it lives: its table, with its details out; not its page.
 	CHECK(PlannerPanel::selectedBoard() == UUID{});
-	CHECK(PlannerPanel::selectedPage() == rowId);
+	CHECK(PlannerPanel::selectedPage() == UUID{});
+	CHECK(PlannerPanel::selectedDatabase() == dbId);
+	CHECK(PlannerPanel::selectedRow() == rowId);
 	PlannerPanel::selectBoard(f.id);
 	idle(ctx);
 	const PlannerPanel::Rect pc = PlannerPanel::controlRect("node:Level concept");
