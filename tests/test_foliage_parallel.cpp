@@ -361,3 +361,18 @@ TEST_CASE("Foliage scatter: layers scattered together are the layers scattered a
 	CHECK(mut.revision == rev + 1);
 	CHECK(mut.layers[1].store);
 }
+
+// ── Bench (not run by default): the sky noise volume's cost (Thema 238) ───────────
+// he_tests --no-skip -tc="*SkyNoise3D bench*"   (the bytes are pinned in test_culling.cpp)
+#include <HorizonRendering/SkyNoise3D.h>
+TEST_CASE("SkyNoise3D bench: wall and CPU time of the 256^3 volume" * doctest::skip())
+{
+	for (int round = 0; round < 3; ++round)
+	{
+		const double c0 = cpuMs();
+		const auto t0 = std::chrono::steady_clock::now();
+		const std::vector<uint16_t> v = HE::BuildSkyNoise3D(256);
+		const double wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		std::printf("[bench] BuildSkyNoise3D(256): wall %.0f ms, CPU %.0f ms (%zu values)\n", wall, cpuMs() - c0, v.size());
+	}
+}

@@ -1,0 +1,31 @@
+/tmp/cta2/out/p3_s512_x4_r1.json
+  window 3330 ms, 1 lane(s), 13500 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 13500 busy=   3328.9 ms (100.0% of window)  Render x250 3295.8ms, OnRender x250 22.2ms, PollEvents x250 10.6ms, GameLogicTick x250 0.2ms, SwapBuffers x250 0.1ms
+
+== main thread: busy 3329 ms of 3330 = 100.0%; WaitForFrame 3098 ms (93.0%); work 231 ms (6.9%)
+  depth-0 scopes (total ms, share of work):
+    Render                                 198.1 ms   85.7% of work
+    OnRender                                22.2 ms    9.6% of work
+    PollEvents                              10.6 ms    4.6% of work
+    GameLogicTick                            0.2 ms    0.1% of work
+    SwapBuffers                              0.1 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                   3097.7 ms
+    Metal::EncodeScene                      78.0 ms
+    Metal::EncodeShadowMap                  28.4 ms
+    Metal::EncodeSSAO                       23.2 ms
+    Metal::ExtractFrame                     11.3 ms
+    SceneSystemsTick                         5.9 ms
+    Metal::Commit                            2.8 ms
+    PhysicsStep                              1.7 ms
+    WeatherAudio                             0.3 ms
+    CellStreaming                            0.1 ms
+    Metal::EncodeCloudShadow                 0.1 ms
+    Metal::EncodeSkyViewLut                  0.0 ms
+    ScriptUpdate                             0.0 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 0.81 p90 0.97 p99 3.47 max 13.43 ms over 250 frames; dump cpuMs p50 11.14
+
+== no worker lane in the dump: no pool task ran a profiler scope during the capture
