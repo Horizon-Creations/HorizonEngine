@@ -9,6 +9,7 @@ add_executable(he_tests
     test_scene_pick.cpp
     test_material_graph.cpp
     test_material_tessellation.cpp
+    test_auto_landscape_variants.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
@@ -96,6 +97,9 @@ add_executable(he_tests
     # HE_DUMP_RHI against the config's RHI: the forced backend is the one the
     # editor keeps after OnInit, or its first UI frame crashes (Thema 124, A6).
     test_editor_backend_choice.cpp
+    # Window size/position/maximized remembered across starts: the pure rules,
+    # incl. the fall-back when the saved monitor is gone.
+    test_editor_window_placement.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
@@ -203,6 +207,10 @@ add_executable(he_tests
     test_foliage_cluster.cpp
     # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
     test_foliage_layers.cpp
+    # Placement rules of a foliage layer (Thema 180 S4): slope, height, paint weight, determinism.
+    test_foliage_rules.cpp
+    # The layer meshes through the instancing path (Thema 180 S5): boxes, flat draw count, passes.
+    test_layer_mesh_instancing.cpp
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
@@ -310,6 +318,10 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
+    test_texture_bcn.cpp
+    # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
+    test_bench_landscape_arrays.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp

@@ -1,0 +1,17 @@
+== var2x-s128-off-V3-r2  2026-10-21 05:22:59  attempt 1
+before:
+  uptime:    load averages: 2.17 2.38 2.29
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      19.7% Python; 9.5% coreaudiod; 4.4% claude; 4.3% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.00 2.33 2.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% Dock; 12.0% coreaudiod; 6.7% clion; 4.1% WindowServer
+  foreign:   none

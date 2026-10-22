@@ -3,6 +3,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the context cannot sample them
 #include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
@@ -8600,6 +8601,12 @@ bool OpenGLRenderer::EnsureDecalProgram()
 #ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
 #  define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
 #endif
+#ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
+#  define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
+#endif
+#ifndef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+#  define GL_COMPRESSED_SRGB_S3TC_DXT1_EXT 0x8C4C
+#endif
 
 namespace {
 
@@ -8639,6 +8646,66 @@ bool glSupportsS3tc()
 	return has;
 }
 
+// BC4/BC5 (RED_RGTC1 / RG_RGTC2): core since GL 3.0, so it is never listed as an
+// extension on a 3.0+ context (macOS GL 4.1 lists none and takes both; measured
+// with glCompressedTexImage3D on a 2D array). The extension names cover a context
+// below 3.0 that still ships it.
+bool glSupportsRgtc()
+{
+	static const bool has = [] {
+		GLint major = 0;
+		glGetIntegerv(GL_MAJOR_VERSION, &major);
+		if (major >= 3) return true;
+		return glHasExtension("GL_ARB_texture_compression_rgtc")
+		    || glHasExtension("GL_EXT_texture_compression_rgtc");
+	}();
+	return has;
+}
+
+// The GL internalformat for a block TextureFormat, or 0 when this context can't
+// sample it (ASTC never; BC7 below GL 4.2, i.e. Apple GL). RGTC has no sRGB twin, so
+// BC4/BC5 ignore the flag (they carry data: roughness, height, normal XY).
+GLenum glBlockInternalFormat(TextureFormat f, bool srgb)
+{
+	switch (f)
+	{
+	case TextureFormat::BC7:
+		if (!glSupportsBptc()) return 0;
+		return srgb ? GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM : GL_COMPRESSED_RGBA_BPTC_UNORM;
+	case TextureFormat::BC3:
+		if (!glSupportsS3tc()) return 0;
+		return srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+	case TextureFormat::BC1:
+		if (!glSupportsS3tc()) return 0;
+		return srgb ? GL_COMPRESSED_SRGB_S3TC_DXT1_EXT : GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+	case TextureFormat::BC4:
+		return glSupportsRgtc() ? GL_COMPRESSED_RED_RGTC1 : 0;
+	case TextureFormat::BC5:
+		return glSupportsRgtc() ? GL_COMPRESSED_RG_RGTC2 : 0;
+	default:
+		return 0;
+	}
+}
+
+// A block-compressed asset this context can't sample but the CPU can expand (BC1,
+// BC3, BC4, BC5): one log line per format, then the caller uploads the RGBA8 copy
+// instead of leaving the draw flat. Returns false when there is no decode (BC7 on
+// Apple GL, ASTC) — the caller bails as before.
+bool glDecodeUnsupportedBlock(const TextureAsset* tex, TextureAsset& rgba)
+{
+	if (!HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+		return false;
+	static bool warned[8] = {};
+	const size_t f = static_cast<size_t>(tex->format);
+	if (f < 8 && !warned[f])
+	{
+		warned[f] = true;
+		HE_LOG_WARN(RHI, "OpenGLRenderer: this GL context can't sample %s textures; uploading them as RGBA8",
+		            textureFormatName(tex->format));
+	}
+	return true;
+}
+
 // Upload a TextureAsset (RGBA8 or a cooked block format) to a fresh GL texture and
 // return its id (0 if unusable / the GPU can't sample the shipped format). Cooked
 // textures ship a pre-baked mip chain — for block formats there is no runtime mip
@@ -8660,19 +8727,18 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
 	const bool srgb = tex->srgb && honourSrgb;
 
-	// Resolve the block format's GL internalformat, or bail (→ flat) when this GL
-	// context can't sample it. ASTC is Metal-only and never shipped to GL.
+	// Resolve the block format's GL internalformat, or fall back to an RGBA8 copy when
+	// this GL context can't sample it (BC7 and ASTC have no CPU decoder → flat). ASTC
+	// is Metal-only and never shipped to GL.
 	GLenum blockFmt = 0;
-	switch (tex->format)
+	if (tex->format != TextureFormat::RGBA8)
 	{
-	case TextureFormat::RGBA8: break;
-	case TextureFormat::BC7:
-		if (!glSupportsBptc()) return 0;
-		blockFmt = srgb ? GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM : GL_COMPRESSED_RGBA_BPTC_UNORM; break;
-	case TextureFormat::BC3:
-		if (!glSupportsS3tc()) return 0;
-		blockFmt = srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
-	default: return 0; // ASTC_4x4 / unknown → GL can't sample it
+		blockFmt = glBlockInternalFormat(tex->format, srgb);
+		if (blockFmt == 0)
+		{
+			TextureAsset rgba;
+			return glDecodeUnsupportedBlock(tex, rgba) ? uploadTextureAssetGL(&rgba, honourSrgb) : 0;
+		}
 	}
 	const GLenum rgbaFmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 
@@ -8682,11 +8748,11 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 
 	if (blockFmt != 0)
 	{
-		// Pre-baked, pre-compressed mip chain (16 B / 4x4 block, level 0 first).
+		// Pre-baked, pre-compressed mip chain (8 or 16 B / 4x4 block, level 0 first).
 		size_t off = 0; uint32_t lw = static_cast<uint32_t>(tex->width), lh = static_cast<uint32_t>(tex->height);
 		for (uint32_t l = 0; l < mips; ++l)
 		{
-			const size_t bytes = static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+			const size_t bytes = textureLevelBytes(tex->format, lw, lh);
 			if (off + bytes > tex->data.size()) break; // truncated payload guard
 			glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), blockFmt,
 			                       static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
@@ -8724,44 +8790,76 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 }
 
 // The GL_TEXTURE_2D_ARRAY twin of uploadTextureAssetGL for a sampler2DArray heTexP
-// slot (Thema 158). A texture ARRAY asset (layers > 1, RGBA8, HE::buildTextureArray
-// layout: slice-major, each slice with its own chain) uploads every stored level of
-// every slice — no glGenerateMipmap, so GL samples the very levels D3D/Vulkan/Metal
-// do. A plain 2D asset in an array slot becomes a ONE-slice array, mipped the way
-// uploadTextureAssetGL mips it. 0 = unusable (block formats are not array-capable
-// yet) → the caller binds the white array.
+// slot (Thema 158). A texture ARRAY asset (layers > 1, HE::buildTextureArray layout:
+// slice-major, each slice with its own chain) uploads every stored level of every
+// slice — no glGenerateMipmap, so GL samples the very levels D3D/Vulkan/Metal do. A
+// plain 2D asset in an array slot becomes a ONE-slice array, mipped the way
+// uploadTextureAssetGL mips it. Block formats (BC1/BC3/BC4/BC5/BC7) upload per level
+// through glCompressedTexImage3D. 0 = unusable → the caller binds the white array.
 unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 {
-	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
-	    || tex->format != TextureFormat::RGBA8)
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
 		return 0;
 	const bool     isArray = tex->layers > 1;
 	if (isArray && !HE::textureArrayPayloadValid(*tex)) return 0;
 	const uint32_t layers  = isArray ? tex->layers : 1;
 	const uint32_t mips    = tex->mipLevels > 0 ? tex->mipLevels : 1;
-	const GLenum   fmt     = tex->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 	const uint32_t w = tex->width, h = tex->height;
-	if (!isArray && tex->data.size() < HE::textureArraySliceBytes(w, h, mips)) return 0;
+	if (!isArray && tex->data.size() < HE::textureArraySliceBytes(w, h, mips, tex->format)) return 0;
+
+	GLenum blockFmt = 0;
+	if (tex->format != TextureFormat::RGBA8)
+	{
+		blockFmt = glBlockInternalFormat(tex->format, tex->srgb);
+		if (blockFmt == 0)
+		{
+			TextureAsset rgba;
+			return glDecodeUnsupportedBlock(tex, rgba) ? uploadTextureArrayGL(&rgba) : 0;
+		}
+	}
+	const GLenum   fmt     = tex->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 
 	unsigned int id = 0;
 	glGenTextures(1, &id);
 	glBindTexture(GL_TEXTURE_2D_ARRAY, id);
 	uint32_t lw = w, lh = h;
+	std::vector<uint8_t> gather; // one level of every slice, contiguous (block formats)
 	for (uint32_t l = 0; l < mips; ++l)
 	{
-		glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), static_cast<GLint>(fmt),
-		             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
-		             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		for (uint32_t s = 0; s < layers; ++s)
-			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), 0, 0, static_cast<GLint>(s),
-			                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE,
-			                tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l));
+		if (blockFmt != 0)
+		{
+			// glCompressedTexImage3D takes the whole level, slices back to back; the asset
+			// stores slice-major, so collect this level from each slice first. (A null data
+			// pointer to allocate and then fill per slice is not portable for compressed
+			// formats, the uncompressed path below can do that.)
+			const size_t levelBytes = textureLevelBytes(tex->format, lw, lh);
+			gather.resize(levelBytes * layers);
+			for (uint32_t s = 0; s < layers; ++s)
+				std::memcpy(gather.data() + levelBytes * s,
+				            tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l, tex->format),
+				            levelBytes);
+			glCompressedTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), blockFmt,
+			                       static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
+			                       0, static_cast<GLsizei>(gather.size()), gather.data());
+		}
+		else
+		{
+			glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), static_cast<GLint>(fmt),
+			             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
+			             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			for (uint32_t s = 0; s < layers; ++s)
+				glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), 0, 0, static_cast<GLint>(s),
+				                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE,
+				                tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l));
+		}
 		lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
 	}
 	if (mips > 1)
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips - 1));
-	else
+	else if (blockFmt == 0)
 		glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // a loose single-level 2D asset, as for 2D
+	else
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0); // compressed data can't be mipped on the GPU
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);

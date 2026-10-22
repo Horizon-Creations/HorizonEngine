@@ -103,6 +103,19 @@ constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000
 // carries a picture of the plant. Content path "Engine/Meshes/CrossCard.hasset".
 constexpr UUID kEngineCrossCardMeshId = { 0x0000000000000108ULL, 0x0000000000000001ULL };
 
+// What a landscape layer scatters (FoliageLayer, Thema 180): a tuft of grass, a
+// pebble, three boulder shapes, a drift of snow. Each kind is a run of detail
+// levels, level 0 (nearest) first, the levels' ids consecutive: the id is that of
+// level 0 plus the level. Pivot at the ground, the foot a little below it. Content
+// path "Engine/Meshes/<Name>.hasset" with Name Tuft, TuftLod1, TuftLod2, Pebble,
+// PebbleLod1, RockA .. RockCLod2, SnowDrift, SnowDriftLod1; written by mesh_gen.
+constexpr UUID kEngineTuftMeshId      = { 0x0000000000000109ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEnginePebbleMeshId    = { 0x000000000000010CULL, 0x0000000000000001ULL };   // 2 levels
+constexpr UUID kEngineRockAMeshId     = { 0x000000000000010EULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineRockBMeshId     = { 0x0000000000000111ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineRockCMeshId     = { 0x0000000000000114ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineSnowDriftMeshId = { 0x0000000000000117ULL, 0x0000000000000001ULL };   // 2 levels
+
 // ── Engine weather sounds (FILES, not registered here) ──────────────────────
 // The sounds WeatherComponent plays when none of its sound slots is set, so a
 // project gets rain, wind, snow, storm and thunder without a file of its own.

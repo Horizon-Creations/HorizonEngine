@@ -1,0 +1,17 @@
+== mesh2x-s128-x4ns-r2  2026-10-21 05:12:04  attempt 1
+before:
+  uptime:    load averages: 2.38 2.20 2.25
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      81.2% clion; 50.5% diskimagesiod; 48.5% imageplaygroundd; 34.3% stickersd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.07 2.14 2.23
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      50.0% (facetimemessages); 13.9% Dock; 13.0% coreaudiod; 6.9% WindowServer
+  foreign:   none

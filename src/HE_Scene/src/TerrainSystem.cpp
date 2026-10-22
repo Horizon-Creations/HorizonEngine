@@ -74,6 +74,16 @@ namespace
         tc.avgLayerWeights[0] = 1.0f;
     }
 
+    // A foliage layer that grows by a paint layer's weight (FoliageLayer::weightLayer)
+    // was scattered over the paint as it stood; a stroke moves where it may grow.
+    // Only those layers re-scatter: the others do not look at the weights.
+    void markWeightGatedFoliage(entt::registry& reg, entt::entity te)
+    {
+        if (auto* fol = reg.try_get<FoliageComponent>(te))
+            for (FoliageLayer& l : fol->layers)
+                if (l.weightLayer >= 0) l.dirty = true;
+    }
+
     // Mean painted weight per layer over the whole terrain, normalised to Σ = 1 —
     // one scan per PAINT (not per frame), which is what makes it affordable for
     // the flat-shaded consumers (GI hits) to reproduce the terrain's colour.
@@ -418,6 +428,7 @@ namespace TerrainSystem
             if (tc.layerWeights.empty())
             {
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
+                if (tc.weightsDirty) markWeightGatedFoliage(reg, te);   // painted -> cleared (undo, reset)
                 tc.weightsDirty = false;
                 setUnpaintedLayerAverage(tc);
                 continue;
@@ -435,6 +446,7 @@ namespace TerrainSystem
                            && cm.getTexture(tc.weightmapTextureId) != nullptr;
             if (have && !tc.weightsDirty) continue;
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
+            markWeightGatedFoliage(reg, te);
 
             uint32_t texW = 0, texH = 0;
             TextureAsset tex;

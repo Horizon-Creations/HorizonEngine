@@ -390,6 +390,37 @@ jobs:
           HE_NET_LOOPBACK_ONLY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: ctest --test-dir build --output-on-failure -j4
 
+      # Layer meshes through the foliage instancing path on the two D3D backends
+      # (Thema 180 Schritt 5): scripts/he_vk_imagetests.py's layer_meshes case with
+      # --rhi, the headless frame dump of the editor just built. On NN-WS03 that is
+      # real hardware, on a hosted runner WARP; the case is picture and log verdicts
+      # (meshes in the picture, all level files resident, cluster path ran, draws flat
+      # while the triangle count grows), nothing Vulkan-specific. Informational for now:
+      # nobody has seen this step on a Windows machine yet, so a red one is data for the
+      # next step (read the uploaded metrics.json), not a reason to fail the build.
+      - name: Layer-mesh image test (D3D11, D3D12)
+        if: ${{ runner.os == 'Windows' && !cancelled() && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          $rc = 0
+          foreach ($rhi in 'D3D11', 'D3D12') {
+            & $py scripts/he_vk_imagetests.py --editor package/Editor/HorizonEditor.exe `
+              --out "layer-mesh-shots/$rhi" --cases layer_meshes --rhi $rhi --require-device ''
+            if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+          }
+          exit $rc
+
+      - name: Upload layer-mesh image-test shots (Windows)
+        if: ${{ runner.os == 'Windows' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer-mesh-shots-windows
+          path: layer-mesh-shots/
+          if-no-files-found: ignore
+
       # Self-update's live leg (Thema 186 Schritt 4): a real SftpClient/libssh2
       # session against a real server, not a mock or a directory-backed stand-in.
       # test_selfupdate.cpp's two "live" cases (docs/editor-selfupdate-sftp-design.md,

@@ -318,7 +318,11 @@ void restoreFoliage(FoliageComponent& n, FoliageComponent&& o)
 		const bool sameScatter = !maskCame && nl.maskRes == ol.maskRes &&
 		                         nl.meshAssetId == ol.meshAssetId && nl.density == ol.density &&
 		                         nl.seed == ol.seed && nl.minScale == ol.minScale &&
-		                         nl.maxScale == ol.maxScale && nl.bucketSize == ol.bucketSize;
+		                         nl.maxScale == ol.maxScale && nl.bucketSize == ol.bucketSize &&
+		                         // the placement rules decide which candidates stay (Thema 180)
+		                         nl.slopeMin == ol.slopeMin && nl.slopeMax == ol.slopeMax &&
+		                         nl.heightMin == ol.heightMin && nl.heightMax == ol.heightMax &&
+		                         nl.weightLayer == ol.weightLayer;
 		if (!sameScatter) continue;   // the loader left it dirty: it re-scatters
 		nl.cachedInstances = std::move(ol.cachedInstances);
 		nl.store           = std::move(ol.store);

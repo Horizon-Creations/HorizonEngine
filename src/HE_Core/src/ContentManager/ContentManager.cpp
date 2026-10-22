@@ -4,6 +4,7 @@
 #include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_ENGINE_CONTENT_EDITABLE
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
+#include "MaterialGraph/AutoLandscapeMaterial.h" // the three auto landscape array paths
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
@@ -17,6 +18,7 @@
 #include <nlohmann/json.hpp>             // parse the pak's __asset_index__ / __asset_types__
 #include <Types/TypeRegistry.h>          // struct/enum defs mirror into the registry on load
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -1847,6 +1849,30 @@ const MaterialAsset* ContentManager::resolveMaterialRef(HE::UUID bakedId, const 
 	return nullptr;
 }
 
+// The three auto landscape arrays must be exactly as deep: the material takes V = depth / 4 from
+// each array on its own, so an Albedo array of 13 slices beside a 5-slice Normal array would pair
+// a grass variant with another layer's normal map. They are written together by landscape_tex_gen;
+// a mixed set (a stale download, a half-copied folder) is reported once, by the renderer's own
+// path to the texture, so all five backends say it the same way.
+static void noteLandscapeArrayDepth(const std::string& path, const TextureAsset* t)
+{
+	if (!t || t->layers == 0) return;
+	static std::atomic<uint32_t> depth[3] = {};
+	static std::atomic<bool> warned{ false };
+	const char* const names[3] = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
+	                               HE::kAutoLandscapeMaskArray };
+	for (int i = 0; i < 3; ++i)
+	{
+		if (path != names[i]) continue;
+		depth[i].store(t->layers);
+		const uint32_t a = depth[0].load(), b = depth[1].load(), c = depth[2].load();
+		if (a && b && c && (a != b || b != c) && !warned.exchange(true))
+			HE_LOG_WARN(Asset, "Auto landscape arrays differ in depth (Albedo %u, Normal %u, Mask %u slices): "
+			            "the variants of a layer will not line up across the maps", a, b, c);
+		return;
+	}
+}
+
 const TextureAsset* ContentManager::resolveTextureRef(HE::UUID bakedId, const std::string& path)
 {
 	if (bakedId != HE::UUID{})
@@ -1855,7 +1881,11 @@ const TextureAsset* ContentManager::resolveTextureRef(HE::UUID bakedId, const st
 		return getTexture(bakedId);
 	}
 	if (!path.empty())
-		return getTexture(loadAsset(path));
+	{
+		const TextureAsset* t = getTexture(loadAsset(path));
+		noteLandscapeArrayDepth(path, t);
+		return t;
+	}
 	return nullptr;
 }
 

@@ -1,0 +1,17 @@
+== mem2x-V3-rgba8-r2  2026-10-21 06:48:29  attempt 1
+before:
+  uptime:    load averages: 3.45 3.03 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      19.3% Python; 14.5% Python; 10.0% coreaudiod; 8.4% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.27 3.02 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       87
+  power:     Now drawing from 'AC Power'
+  busy:      10.9% coreaudiod; 10.5% Dock; 8.4% clion; 5.4% WindowServer
+  foreign:   none

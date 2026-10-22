@@ -101,6 +101,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
+#include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -386,6 +387,41 @@ EditorApplication::~EditorApplication()
 	m_mcp->stop();
 }
 
+// The remembered window (config.json keys WindowX/Y/W/H/Maximized). A config
+// from before this existed has none of them: WindowW stays 0 → not valid.
+static HE::Ed::SavedWindowPlacement loadSavedWindowPlacement(const GlobalState& gs)
+{
+	HE::Ed::SavedWindowPlacement s;
+	s.normal.x  = gs.getCustomConfigInt("WindowX", 0);
+	s.normal.y  = gs.getCustomConfigInt("WindowY", 0);
+	s.normal.w  = gs.getCustomConfigInt("WindowW", 0);
+	s.normal.h  = gs.getCustomConfigInt("WindowH", 0);
+	s.maximized = gs.getCustomConfigBool("WindowMaximized", false);
+	s.valid     = s.normal.w > 0 && s.normal.h > 0;
+	return s;
+}
+
+// Usable bounds of every display, primary first. Needs SDL's video subsystem,
+// which Window::Init has up by the time resolveRect runs.
+static std::vector<HE::Ed::PlacementRect> usableDisplayRects()
+{
+	std::vector<HE::Ed::PlacementRect> out;
+	const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+	int n = 0;
+	SDL_DisplayID* ids = SDL_GetDisplays(&n);
+	auto add = [&](SDL_DisplayID id)
+	{
+		SDL_Rect r{};
+		if (SDL_GetDisplayUsableBounds(id, &r) && r.w > 0 && r.h > 0)
+			out.push_back({ r.x, r.y, r.w, r.h });
+	};
+	if (primary) add(primary);
+	for (int i = 0; ids && i < n; ++i)
+		if (ids[i] != primary) add(ids[i]);
+	SDL_free(ids);
+	return out;
+}
+
 HE::ApplicationConfig EditorApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
@@ -394,6 +430,27 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	cfg.windowprops.height = 900;
 	cfg.windowprops.vsync  = true;
 	cfg.windowprops.mode   = HE::WindowMode::Windowed;
+	// Last session's size, position and maximized state. Not in a hidden run:
+	// that is a script's window, and it must neither move nor depend on where
+	// the person last left theirs. Wayland cannot report or set a position, so
+	// there only the size and the maximized state come back.
+	if (!HE::hiddenWindowRequested())
+	{
+		const HE::Ed::SavedWindowPlacement saved = loadSavedWindowPlacement(*m_globalState);
+		cfg.windowprops.resolveRect = [saved](HE::WindowProps& wp)
+		{
+			const HE::Ed::ResolvedWindowPlacement r =
+				HE::Ed::resolveWindowPlacement(saved, usableDisplayRects());
+			if (!r.applied) return;
+			const char* drv = SDL_GetCurrentVideoDriver();
+			wp.restoreRect     = true;
+			wp.restorePosition = r.setPosition && !(drv && std::strcmp(drv, "wayland") == 0);
+			wp.x = r.rect.x;  wp.y = r.rect.y;
+			wp.width  = static_cast<uint32_t>(r.rect.w);
+			wp.height = static_cast<uint32_t>(r.rect.h);
+			wp.startMaximized = r.maximized;
+		};
+	}
 	// The config's RHI, unless HE_DUMP_RHI forces another one (EditorBackendChoice.h).
 	cfg.backend = HE::Ed::resolveEditorBackend(m_globalState->getSelectedRHI(),
 	                                           std::getenv("HE_DUMP_RHI"));
@@ -3056,6 +3113,25 @@ void EditorApplication::OnRender(float dt)
 #ifdef HE_IMGUI_ENABLED
 	if (m_imguiReady) healStuckImGuiKeys(dt);
 #endif
+	// Where the window is, for the next start (hidden runs never record one).
+	if (!HE::hiddenWindowRequested())
+	{
+		if (SDL_Window* sw = window() ? window()->GetNativeWindow() : nullptr)
+		{
+			if (!m_windowPlacementSeeded)
+			{
+				m_windowPlacement.seed(loadSavedWindowPlacement(GlobalState::getInstance()));
+				m_windowPlacementSeeded = true;
+			}
+			const SDL_WindowFlags f = SDL_GetWindowFlags(sw);
+			HE::Ed::PlacementRect cur;
+			SDL_GetWindowPosition(sw, &cur.x, &cur.y);
+			SDL_GetWindowSize(sw, &cur.w, &cur.h);
+			m_windowPlacement.observe((f & SDL_WINDOW_MAXIMIZED) != 0,
+			                          (f & SDL_WINDOW_FULLSCREEN) != 0,
+			                          (f & SDL_WINDOW_MINIMIZED) != 0, cur);
+		}
+	}
 	// A script asked to quit. Honoured here, between frames, because the request
 	// arrives from inside a running graph and stopping play destroys the runtime
 	// that graph is executing in. setPlayMode already no-ops when not playing.
@@ -7618,7 +7694,19 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
-		constexpr float kBaseY = 300.0f, kPlateau = 40.0f;
+		constexpr float kBaseY = 300.0f;
+		// HE_DUMP_AUTOLANDHEIGHT / HE_DUMP_AUTOLANDRAMP (metres): the plateau height and the
+		// width of the smoothstep ramp. The defaults (40 / 32) are the steep ramp every
+		// earlier witness used; a gentle hillside (e.g. 12 / 48) shows how a puddle meets
+		// a slope that bends slowly (Thema 180 Schritt 8).
+		auto envMetres = [](const char* name, float def)
+		{
+			const char* v = std::getenv(name);
+			const float f = (v && *v) ? static_cast<float>(std::atof(v)) : def;
+			return f > 0.0f ? f : def;
+		};
+		const float kPlateau = envMetres("HE_DUMP_AUTOLANDHEIGHT", 40.0f);
+		const float kRamp    = envMetres("HE_DUMP_AUTOLANDRAMP", 32.0f);
 		const float snowHeight = kBaseY + 20.0f;
 
 		HE::UUID amId{};
@@ -7694,7 +7782,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
 			{
 				const float x = -64.0f + static_cast<float>(xi);
-				const float t = std::clamp((x + 24.0f) / 32.0f, 0.0f, 1.0f);
+				const float t = std::clamp((x + 24.0f) / kRamp, 0.0f, 1.0f);
 				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
 					kPlateau * t * t * (3.0f - 2.0f * t);
 			}
@@ -7709,6 +7797,82 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			al, what.c_str(), ma ? ma->graphTexturePaths.size() : size_t(0),
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
+
+		// HE_DUMP_AUTOLANDMESHES=tuft,pebble,rocka,rockb,rockc,snowdrift (Thema 180 Schritt 5): a
+		// Foliage component on this landscape with one layer per named kind, each filled by its
+		// preset (LayerMeshPresets.h) and so drawn through the foliage cluster path. Every level
+		// file is loaded here (engine files are not resident by themselves, and a mesh the
+		// extractor cannot read gets no box, so its clusters would never cull); the log line says
+		// how many levels came with their engine UUID. The presets assume a terrain at y=0:
+		// Snow Drift's heightMin is moved up with the snow line of this witness.
+		//   HE_DUMP_AUTOLANDMESHDENS=<f>   multiplies every layer's density (default 1): the two
+		//                                  instance counts of the draw-count measurement
+		//   HE_DUMP_AUTOLANDMESHSHADOW=0   no layer casts a shadow or counts for AO: the control for
+		//                                  "the shadow and AO passes draw the instances" (an A/B on
+		//                                  the same binary; the SHADOW knob does not switch every
+		//                                  backend's pass off). =1 makes every layer cast and count.
+		//   HE_DUMP_AUTOLANDMESHRULES=0    drops every layer's placement rules, so a rock stands on
+		//                                  the plain too and its shadow falls on flat ground
+		// Camera that shows plain, slope and plateau: CAMX=-30 CAMY=312 CAMZ=-50 PITCH=-18 YAW=30.
+		if (const char* lm = std::getenv("HE_DUMP_AUTOLANDMESHES"); lm && *lm)
+		{
+			const char* ds = std::getenv("HE_DUMP_AUTOLANDMESHDENS");
+			const float densMul = ds && *ds ? std::max(0.0f, static_cast<float>(std::atof(ds))) : 1.0f;
+			FoliageComponent fol;
+			const std::string spec(lm);
+			int made = 0, levelsAsked = 0, levelsLoaded = 0;
+			for (size_t at = 0; at < spec.size();)
+			{
+				const size_t end = std::min(spec.find(',', at), spec.size());
+				std::string item = spec.substr(at, end - at);
+				at = end + 1;
+				for (char& ch : item) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+				static const std::pair<const char*, HE::LayerMeshKind> kinds[] = {
+					{ "tuft", HE::LayerMeshKind::Tuft },     { "pebble", HE::LayerMeshKind::Pebble },
+					{ "rocka", HE::LayerMeshKind::RockA },   { "rockb", HE::LayerMeshKind::RockB },
+					{ "rockc", HE::LayerMeshKind::RockC },   { "snowdrift", HE::LayerMeshKind::SnowDrift } };
+				const HE::LayerMeshKind* kind = nullptr;
+				for (const auto& kv : kinds) if (item == kv.first) kind = &kv.second;
+				if (!kind) continue;
+				FoliageLayer* layer = made == 0 ? &fol.layers[0] : fol.addLayer();
+				if (!layer) break;
+				++made;
+				HE::applyLayerMeshPreset(*layer, *kind);
+				layer->density *= densMul;
+				if (const char* ru = std::getenv("HE_DUMP_AUTOLANDMESHRULES"); ru && *ru && std::atoi(ru) == 0)
+				{
+					layer->slopeMin = 0.0f; layer->slopeMax = 1.0f;
+					layer->heightMin = -FoliageLayer::kNoHeightLimit; layer->heightMax = FoliageLayer::kNoHeightLimit;
+				}
+				if (const char* sh = std::getenv("HE_DUMP_AUTOLANDMESHSHADOW"); sh && *sh)
+				{
+					const bool on = std::atoi(sh) != 0;
+					layer->castsShadow = on; layer->contributesAO = on;
+					if (on && layer->shadowDistance <= 0.0f) layer->shadowDistance = 60.0f;
+				}
+				if (*kind == HE::LayerMeshKind::SnowDrift)
+					layer->heightMin = snowHeight + 6.0f;
+				for (int n = 0; n < HE::layerMeshLevelCount(*kind); ++n)
+				{
+					++levelsAsked;
+					const HE::UUID got = contentManager().loadAsset(HE::layerMeshLevelPath(*kind, n));
+					if (got == HE::layerMeshLevelId(*kind, n)) ++levelsLoaded;
+				}
+			}
+			reg.emplace<FoliageComponent>(land, fol);
+			FoliageSystem::update(*m_editorWorld);
+			const FoliageComponent& placed = reg.get<FoliageComponent>(land);
+			size_t total = 0;
+			std::string per;
+			for (const FoliageLayer& pl : placed.layers)
+			{
+				total += pl.cachedInstances.size();
+				per += (per.empty() ? "" : ", ") + pl.name + " " + std::to_string(pl.cachedInstances.size());
+			}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDMESHES %d layer(s), %d of %d level mesh(es) "
+				"loaded with their engine UUID, density x%.2f, %zu instances (%s)",
+				made, levelsLoaded, levelsAsked, densMul, total, per.c_str());
+		}
 
 		// HE_DUMP_AUTOLANDMIRROR=1 (Thema 173): two mirrors on the plain, for the
 		// GI-reflection question "does a mirror show the sky and the auto
@@ -14827,6 +14991,20 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);
 	globalstate.setCustomConfigEntry("UiFontScale",                m_editorConfig.UiFontScale);
+	// Only a real, watched window writes its placement; the tracker holds back
+	// when it never saw a stable one, so an old value is not overwritten by none.
+	if (m_windowPlacementSeeded && !HE::hiddenWindowRequested())
+	{
+		const HE::Ed::SavedWindowPlacement wp = m_windowPlacement.result();
+		if (wp.valid)
+		{
+			globalstate.setCustomConfigEntry("WindowX",         wp.normal.x);
+			globalstate.setCustomConfigEntry("WindowY",         wp.normal.y);
+			globalstate.setCustomConfigEntry("WindowW",         wp.normal.w);
+			globalstate.setCustomConfigEntry("WindowH",         wp.normal.h);
+			globalstate.setCustomConfigEntry("WindowMaximized", wp.maximized);
+		}
+	}
 	globalstate.setCustomConfigEntry("EditorCameraSpeed",          m_editorConfig.EditorCameraSpeed);
 	// Persist the last editor camera view so it is restored next launch. Only when the
 	// camera was actually used this session (otherwise keep any previously-saved view).

@@ -1,0 +1,17 @@
+== detail2x-s512-x1-r3  2026-10-21 05:51:11  attempt 1
+before:
+  uptime:    load averages: 3.20 2.39 2.30
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.6% Python; 15.8% Python; 9.7% coreaudiod; 8.5% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.61 2.53 2.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      13.4% Dock; 13.0% coreaudiod; 9.3% clion; 5.7% claude
+  foreign:   none

@@ -1,0 +1,17 @@
+== detail2x-s512-x1-r2  2026-10-21 05:46:04  attempt 1
+before:
+  uptime:    load averages: 2.08 2.33 2.30
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.2% Python; 11.6% Python; 10.0% coreaudiod; 9.8% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.48 2.40 2.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      10.7% coreaudiod; 5.9% Dock; 5.9% clion; 3.1% WindowServer
+  foreign:   none
