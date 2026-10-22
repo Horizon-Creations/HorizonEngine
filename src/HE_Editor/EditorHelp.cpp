@@ -3145,6 +3145,21 @@ namespace
 	  "Deletes this page, its sub-pages and their files after you confirm. Source "
 	  "control has the previous version.",
 	  "", "" },
+	{ "Planner/+ Calendar", "+ Calendar",
+	  "Adds a calendar view: a month in a grid, each row on the day of its Date "
+	  "property (on every day up to its End, if you pick one). Drag a row onto "
+	  "another day to move it, double-click a day to add a row there, click a row "
+	  "to open it.",
+	  "", "" },
+	{ "Planner/Previous", "Previous",
+	  "Shows the month before the one on screen.",
+	  "", "" },
+	{ "Planner/Today", "Today",
+	  "Jumps the calendar back to the current month.",
+	  "", "" },
+	{ "Planner/Next", "Next",
+	  "Shows the month after the one on screen.",
+	  "", "" },
 	{ "Planner/+ Timeline", "+ Timeline",
 	  "Adds a timeline view: a row per line and a day per column, a bar from "
 	  "each row's Start date to its End date. Drag a bar to move the row's "

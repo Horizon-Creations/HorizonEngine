@@ -136,3 +136,16 @@ Windows/Linux nicht gebaut; Volllauf von he_tests nach P3 nicht wiederholt.
 **Offen:** Seiten-Links (Block "Seite") und Unterseiten per UI anlegen; Bloecke per Ziehen umordnen; Pfeiltasten zwischen Bloecken;
 Kalenderansicht; Zeitleiste ohne Zoom/Resize; Relation: Klick zur Zielzeile; Variante B (Planner als Wahrheit fuer Tasks) mit Historie je Zeile;
 Live-Zusammenarbeit ueber den Team-Server.
+
+## Handoff (Stand Kalender, 2026-10-22)
+**Fertig:** Kalenderansicht (`ViewKind::Calendar`): `+ Calendar`, Monat als Raster (Montag zuerst, immer sechs Wochen), Date/End/Colour by im
+Toolbar, Previous/Today/Next mit Monatsname, Zeilen auf jedem Tag von Date bis End, "+N more" wenn es nicht passt, Ziehen auf einen anderen
+Tag verschiebt Date und End, Doppelklick auf einen Tag legt eine Zeile mit diesem Datum an, Klick oeffnet die Zeile. `PlannerPanel::showCalendarMonth/
+calendarYear/calendarMonth` fuer Tests. Zeilen werden jetzt beim Loslassen ohne Ziehen geoeffnet (Kalender, Zeitleiste), nicht beim Druecken;
+sonst verschiebt sich das Raster unter dem Cursor mitten im Ziehen.
+**Fehler gefunden und behoben:** Chips in der Links-Zelle der Tabelle bekamen keine Klicks (die Drop-Flaeche darunter nahm sie, `SetNextItemAllowOverlap`
+fehlte); jetzt Test dafuer.
+**Tests:** `test_planner_ui` 17 Faelle, Help-Audit 0 offen, `HorizonEditor` gebaut. Volllauf: 3 bekannte, vom Planner unabhaengige Fehlschlaege
+(`test_hpak` Disk registry, zwei `EngineProfiler`-Faelle), alles andere gruen.
+**Offen:** Kalender zeigt nur Monate (keine Wochenansicht), Zeitleiste ohne Zoom/Resize; Seiten-Links/Unterseiten per UI; Bloecke per Ziehen umordnen;
+Relation: Klick zur Zielzeile; Variante B fuer Tasks; Live-Zusammenarbeit; Editor nicht gestartet, Windows/Linux nicht gebaut.

@@ -100,6 +100,15 @@ void note(const std::string& name)
 	s_rects[name] = { a.x, a.y, b.x, b.y };
 }
 
+// The left button was just let go over this item and had not been dragged: a click, not
+// the end of a drag. (A drag ends on the same frame, over whatever is under the cursor.)
+bool releasedWithoutDrag()
+{
+	const ImGuiIO& io = ImGui::GetIO();
+	return ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+	       io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= io.MouseDragThreshold * io.MouseDragThreshold;
+}
+
 // A small square button with a glyph drawn on it (the editor has no icon font),
 // explained by the help entry `helpKey`. True when clicked.
 bool iconButton(const char* id, const char* helpKey, const std::function<void(ImDrawList*, ImVec2, float, ImU32)>& glyph)
@@ -316,6 +325,7 @@ void linksCell(const Database& db, const Row& row, const Property& p)
 	const float  w  = ImGui::GetContentRegionAvail().x;
 	const float  fh = ImGui::GetFrameHeight();
 	const float  h  = std::floor(fh * 0.9f);
+	ImGui::SetNextItemAllowOverlap();   // the chips sit on top of the drop zone and take the clicks
 	ImGui::InvisibleButton("##linkdrop", ImVec2(w, fh));
 	note("links:" + row.title);
 	addLinks(dbId, rowId, propId, TaskBoardPanel::acceptDroppedLinks(ctx));
@@ -1423,7 +1433,8 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 				ImGui::InvisibleButton("##bar", ImVec2(w, rowH - 6.0f));
 				note("bar:" + row.title);
 				const bool active = ImGui::IsItemActive();
-				if (ImGui::IsItemActivated()) s_selRow = row.id;
+				if (releasedWithoutDrag())
+					s_selRow = row.id;
 				if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f))
 				{
 					s_barDrag.row  = row.id;
@@ -1987,6 +1998,195 @@ void drawPage(AppContext& ctx)
 	ImGui::EndChild();
 }
 
+// ── The calendar ─────────────────────────────────────────────────────────────
+
+int  s_calYear = 0, s_calMonth = 0;   // the month shown; 0 = not chosen yet (today's)
+
+void splitDay(std::int64_t day, int& y, int& m, int& d)
+{
+	const std::string iso = taskTimeToIso(day * kDayMs);
+	y = std::atoi(iso.substr(0, 4).c_str());
+	m = std::atoi(iso.substr(5, 2).c_str());
+	d = std::atoi(iso.substr(8, 2).c_str());
+}
+
+std::int64_t firstOfMonth(int y, int m)
+{
+	char buf[40];
+	std::snprintf(buf, sizeof(buf), "%04d-%02d-01T00:00:00.000Z", y, m);
+	std::int64_t ms = 0;
+	taskTimeFromIso(buf, ms);
+	return dayOf(ms);
+}
+
+void stepMonth(int delta)
+{
+	int m = s_calMonth + delta, y = s_calYear;
+	while (m < 1)  { m += 12; --y; }
+	while (m > 12) { m -= 12; ++y; }
+	s_calYear = y;
+	s_calMonth = m;
+}
+
+// A month in a grid, Monday first, six weeks so it does not jump in height. A row
+// shows on every day from its Date to its End (on its Date alone without one).
+// Drag a row onto another day to move it; double-click a day to add a row there;
+// click a row to open it.
+void drawCalendar(const Database& db, const View& view, const std::vector<std::size_t>& idx)
+{
+	const Property* dateP = db.findProperty(view.dateProperty);
+	if (!dateP || dateP->type != PropertyType::Date)
+	{
+		ImGui::TextDisabled("Pick a Date property above. Add one with Properties if there is none.");
+		return;
+	}
+	const Property* endP = view.endProperty == UUID{} ? nullptr : db.findProperty(view.endProperty);
+	if (endP && endP->type != PropertyType::Date) endP = nullptr;
+	const Property* colourP = db.findProperty(view.groupBy);
+	if (colourP && colourP->type != PropertyType::Select) colourP = nullptr;
+
+	const std::int64_t today = dayOf(taskNowMs());
+	if (s_calMonth == 0)
+	{
+		int d = 0;
+		splitDay(today, s_calYear, s_calMonth, d);
+	}
+	const std::int64_t first = firstOfMonth(s_calYear, s_calMonth);
+	const std::int64_t gridStart = first - ((first % 7 + 7 + 3) % 7);   // 1970-01-01 was a Thursday; weeks start on Monday
+
+	struct Span { std::size_t row; std::int64_t a, b; };
+	std::vector<Span> spans;
+	for (const std::size_t i : idx)
+	{
+		const Row& r = db.rows[i];
+		std::int64_t s = 0, e = 0;
+		if (!db.date(r.id, dateP->id, s)) continue;
+		const std::int64_t a = dayOf(s);
+		std::int64_t b = a;
+		if (endP && db.date(r.id, endP->id, e)) b = std::max(a, dayOf(e));
+		spans.push_back({ i, a, b });
+	}
+
+	ImGui::BeginChild("##calendar", ImVec2(0, 0), ImGuiChildFlags_None);
+	const float fh = ImGui::GetFrameHeight();
+	const float headH = fh + 4.0f;
+	const ImVec2 avail = ImGui::GetContentRegionAvail();
+	const float cellW = std::max(60.0f, avail.x / 7.0f);
+	const float cellH = std::max(fh * 4.0f, (avail.y - headH) / 6.0f);
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+
+	static const char* const kWeekdays[] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+	for (int c = 0; c < 7; ++c)
+		dl->AddText(ImVec2(origin.x + c * cellW + 6.0f, origin.y + 2.0f), Theme::u32(Theme::TextDim), kWeekdays[c]);
+
+	const float chipH = fh * 0.85f;
+	for (int week = 0; week < 6; ++week)
+		for (int c = 0; c < 7; ++c)
+		{
+			const std::int64_t day = gridStart + week * 7 + c;
+			int y = 0, m = 0, dnum = 0;
+			splitDay(day, y, m, dnum);
+			const ImVec2 p(origin.x + c * cellW, origin.y + headH + week * cellH);
+			ImGui::PushID(static_cast<int>(week * 7 + c));
+
+			// The day itself: the target for a drag, and a double-click makes a row.
+			ImGui::SetCursorScreenPos(p);
+			ImGui::SetNextItemAllowOverlap();   // the rows on this day sit on top of it and take the clicks
+			ImGui::InvisibleButton("##day", ImVec2(cellW, cellH));
+			char key[32];
+			std::snprintf(key, sizeof(key), "day:%04d-%02d-%02d", y, m, dnum);
+			note(key);
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
+				const UUID dbId = db.id, pid = dateP->id;
+				const std::int64_t ms = day * kDayMs;
+				post([=] {
+					s_ws.edit(dbId, [&](Database& d) {
+						Row* r = d.addRow("", s_ws.author(), taskNowMs());
+						return r && d.setDate(r->id, pid, ms, taskNowMs());
+					});
+				});
+			}
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_PLANNER_DAY"))
+					if (pl->DataSize == static_cast<int>(sizeof(UUID)))
+					{
+						const UUID rowId = *static_cast<const UUID*>(pl->Data);
+						const UUID dbId = db.id, sid = dateP->id, eid = endP ? endP->id : UUID{};
+						post([=] {
+							s_ws.edit(dbId, [&](Database& d) {
+								std::int64_t ms = 0;
+								if (!d.date(rowId, sid, ms)) return false;
+								const std::int64_t shift = (day - dayOf(ms)) * kDayMs;
+								if (shift == 0) return false;
+								bool any = d.setDate(rowId, sid, ms + shift, taskNowMs());
+								if (eid != UUID{} && d.date(rowId, eid, ms)) any |= d.setDate(rowId, eid, ms + shift, taskNowMs());
+								return any;
+							});
+						});
+					}
+				ImGui::EndDragDropTarget();
+			}
+
+			const bool otherMonth = m != s_calMonth;
+			dl->AddRectFilled(p, ImVec2(p.x + cellW, p.y + cellH),
+			                  Theme::u32(day == today ? Theme::alpha(Theme::Warn, 0.12f) : Theme::warm(otherMonth ? 0.07f : 0.095f)));
+			dl->AddRect(p, ImVec2(p.x + cellW, p.y + cellH), Theme::u32(Theme::warm(0.20f)));
+			char num[8];
+			std::snprintf(num, sizeof(num), "%d", dnum);
+			dl->AddText(ImVec2(p.x + 6.0f, p.y + 3.0f),
+			            Theme::u32(day == today ? Theme::Warn : otherMonth ? Theme::TextDim : Theme::Text), num);
+
+			// The rows on this day, as many as fit.
+			const int fit = std::max(0, static_cast<int>((cellH - fh - 6.0f) / (chipH + 2.0f)));
+			int shown = 0, more = 0;
+			for (const Span& sp : spans)
+			{
+				if (day < sp.a || day > sp.b) continue;
+				if (shown >= fit) { ++more; continue; }
+				const Row& row = db.rows[sp.row];
+				ImGui::PushID(static_cast<int>(sp.row));
+				const ImVec2 cp(p.x + 3.0f, p.y + fh + 2.0f + shown * (chipH + 2.0f));
+				ImGui::SetCursorScreenPos(cp);
+				ImGui::InvisibleButton("##chip", ImVec2(cellW - 6.0f, chipH));
+				note("cal-chip:" + row.title);
+				// Opens when the button is let go without having been dragged: opening on the
+				// press would move the grid under the cursor in the middle of a drag.
+				if (releasedWithoutDrag())
+					s_selRow = row.id;
+				if (ImGui::BeginDragDropSource())
+				{
+					ImGui::SetDragDropPayload("HE_PLANNER_DAY", &row.id, sizeof(UUID));
+					ImGui::TextUnformatted(row.title.empty() ? "Untitled" : row.title.c_str());
+					ImGui::EndDragDropSource();
+				}
+				ImVec4 colour = Theme::Accent;
+				if (colourP)
+					if (const SelectOption* o = colourP->findOption(db.select(row.id, colourP->id))) colour = colorOf(o->color);
+				dl->AddRectFilled(cp, ImVec2(cp.x + cellW - 6.0f, cp.y + chipH),
+				                  Theme::u32(Theme::alpha(colour, ImGui::IsItemHovered() ? 0.95f : 0.75f)), 3.0f);
+				dl->PushClipRect(cp, ImVec2(cp.x + cellW - 6.0f, cp.y + chipH), true);
+				dl->AddText(ImVec2(cp.x + 4.0f, cp.y + (chipH - ImGui::GetTextLineHeight()) * 0.5f), Theme::u32(Theme::Ink),
+				            row.title.empty() ? "Untitled" : row.title.c_str());
+				dl->PopClipRect();
+				ImGui::PopID();
+				++shown;
+			}
+			if (more > 0)
+			{
+				char buf[24];
+				std::snprintf(buf, sizeof(buf), "+%d more", more);
+				dl->AddText(ImVec2(p.x + 6.0f, p.y + cellH - ImGui::GetTextLineHeight() - 2.0f), Theme::u32(Theme::TextDim), buf);
+			}
+			ImGui::PopID();
+		}
+	ImGui::SetCursorScreenPos(origin);
+	ImGui::Dummy(ImVec2(cellW * 7.0f, headH + cellH * 6.0f));
+	ImGui::EndChild();
+}
+
 // ── One database ─────────────────────────────────────────────────────────────
 
 void drawDatabase(AppContext& ctx, const Database& db)
@@ -2072,6 +2272,18 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			});
 		});
 	note("+ Timeline");
+	ImGui::SameLine();
+	if (EditorWidgets::button("+ Calendar"))
+		post([=] {
+			s_ws.edit(dbId, [&](Database& d) {
+				View* v = d.addView("Calendar", ViewKind::Calendar);
+				s_viewId = v->id;
+				for (const Property& p : d.properties)
+					if (p.type == PropertyType::Date) { v->dateProperty = p.id; break; }
+				return true;
+			});
+		});
+	note("+ Calendar");
 
 	if (!view) return;
 	const UUID viewId = view->id;
@@ -2112,7 +2324,30 @@ void drawDatabase(AppContext& ctx, const Database& db)
 			ImGui::EndCombo();
 		}
 	}
-	if (view->kind == ViewKind::Timeline)
+	if (view->kind == ViewKind::Calendar)
+	{
+		// The month shown, and a way back to today.
+		ImGui::SameLine();
+		if (EditorWidgets::smallButton("Previous")) post([] { stepMonth(-1); });
+		note("cal:previous");
+		ImGui::SameLine();
+		if (EditorWidgets::smallButton("Today"))
+			post([] {
+				int d = 0;
+				splitDay(dayOf(taskNowMs()), s_calYear, s_calMonth, d);
+			});
+		ImGui::SameLine();
+		if (EditorWidgets::smallButton("Next")) post([] { stepMonth(1); });
+		note("cal:next");
+		ImGui::SameLine();
+		if (s_calMonth != 0)
+		{
+			static const char* const kMonths[] = { "January", "February", "March", "April", "May", "June", "July",
+			                                       "August", "September", "October", "November", "December" };
+			ImGui::TextUnformatted((std::string(kMonths[s_calMonth - 1]) + " " + std::to_string(s_calYear)).c_str());
+		}
+	}
+	if (view->kind == ViewKind::Timeline || view->kind == ViewKind::Calendar)
 	{
 		// Which Date properties the bars start and end at; the lane colour comes from a Select.
 		auto dateCombo = [&](const char* id, const char* none, const UUID& current, bool isEnd) {
@@ -2130,7 +2365,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 				}
 			ImGui::EndCombo();
 		};
-		dateCombo("##tlstart", "Start", view->dateProperty, false);
+		dateCombo("##tlstart", view->kind == ViewKind::Calendar ? "Date" : "Start", view->dateProperty, false);
 		note("timeline:start");
 		dateCombo("##tlend", "End", view->endProperty, true);
 		ImGui::SameLine();
@@ -2167,6 +2402,7 @@ void drawDatabase(AppContext& ctx, const Database& db)
 	case ViewKind::Table: drawTable(db, effective, idx); break;
 	case ViewKind::Board: drawBoard(db, effective);      break;
 	case ViewKind::Timeline: drawTimeline(db, effective, idx); break;
+	case ViewKind::Calendar: drawCalendar(db, effective, idx); break;
 	default:
 		ImGui::TextDisabled("This view type is not available in this editor yet.");
 		break;
@@ -2516,6 +2752,10 @@ void openTask(const UUID& id)
 
 UUID selectedRow() { return s_selRow; }
 
+void showCalendarMonth(int year, int month) { s_calYear = year; s_calMonth = std::clamp(month, 1, 12); }
+int  calendarYear() { return s_calYear; }
+int  calendarMonth() { return s_calMonth; }
+
 void selectPage(const UUID& id) { s_pageId = id; s_pageDb = UUID{}; }
 void openRowPage(const UUID& dbId, const UUID& rowId) { openPage(rowId, dbId); }
 UUID selectedPage() { return s_pageId; }
@@ -2543,6 +2783,7 @@ void reset()
 	s_armedDelete = UUID{};
 	s_newRelationTarget = UUID{};
 	s_pageId = s_pageDb = s_focusBlock = s_deletePage = UUID{};
+	s_calYear = s_calMonth = 0;
 	s_deletePageOpen = false;
 }
 

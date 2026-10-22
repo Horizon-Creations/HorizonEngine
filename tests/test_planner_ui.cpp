@@ -529,6 +529,10 @@ TEST_CASE("planner ui: drops link an asset, a scene and an entity; chips jump to
 	PlannerPanel::Rect first = PlannerPanel::controlRect("chip:Fix the crate:0");
 	REQUIRE(first.x1 > first.x0);
 	CHECK(first.x1 <= PlannerPanel::controlRect("links:Fix the crate").x1);
+	// The chip in the cell takes the click, not the drop zone underneath it.
+	(void)TaskBoardPanel::takeJump();
+	REQUIRE(click(ctx, "chip:Fix the crate:0"));
+	CHECK(TaskBoardPanel::takeJump().kind == TaskBoardPanel::Jump::Kind::Asset);
 
 	// Open the row: its details show every chip, and a click goes there.
 	REQUIRE(click(ctx, "open:Fix the crate"));
@@ -901,6 +905,8 @@ TEST_CASE("planner ui: a timeline draws a bar per dated row, and a dragged bar m
 	std::int64_t ms = 0;
 	REQUIRE(ws->find(dbId)->date(b, start, ms));
 	CHECK(ms == day("2026-10-29T00:00:00.000Z"));
+	CHECK(PlannerPanel::selectedRow() == UUID{});   // a drag is not a click: the row does not open
+	REQUIRE(click(ctx, "bar:Beta"));
 	CHECK(PlannerPanel::selectedRow() == b);
 	// A click that does not move writes nothing.
 	const std::string before = ws->find(dbId)->toJson();
@@ -1157,4 +1163,91 @@ TEST_CASE("planner ui pages: a drop adds an engine object, and a database view b
 	idle(ctx);
 	CHECK(PlannerPanel::selectedPage() == taskId);
 	g_sources = nullptr;
+}
+
+TEST_CASE("planner ui: a calendar shows rows on their days, a drag moves one, a double-click adds one")
+{
+	Harness harness;
+	Project proj("he_planner_ui_calendar");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	settle(ctx);
+	REQUIRE(click(ctx, "New Database"));
+	settle(ctx);
+	Workspace* ws = PlannerPanel::workspace(ctx);
+	const UUID dbId = PlannerPanel::selectedDatabase();
+	auto day = [](const char* iso) {
+		std::int64_t ms = 0;
+		REQUIRE(taskTimeFromIso(iso, ms));
+		return ms;
+	};
+	UUID when, end, alpha, beta;
+	REQUIRE(ws->edit(dbId, [&](Database& db) {
+		when = db.addProperty("When", PropertyType::Date)->id;
+		end  = db.addProperty("Until", PropertyType::Date)->id;
+		alpha = db.addRow("Alpha", "Tester", 1000)->id;
+		beta  = db.addRow("Beta", "Tester", 1001)->id;
+		db.addRow("Gamma", "Tester", 1002);   // no date: not on the calendar
+		db.setDate(alpha, when, day("2026-10-20T00:00:00.000Z"), 1);
+		db.setDate(beta, when,  day("2026-10-20T00:00:00.000Z"), 1);
+		db.setDate(beta, end,   day("2026-10-22T00:00:00.000Z"), 1);
+		return true;
+	}));
+	idle(ctx);
+	REQUIRE(click(ctx, "+ Calendar"));
+	REQUIRE(ws->edit(dbId, [&](Database& db) { db.findView(PlannerPanel::selectedView())->endProperty = end; return true; }));
+	PlannerPanel::showCalendarMonth(2026, 10);
+	idle(ctx);
+	const View* v = ws->find(dbId)->findView(PlannerPanel::selectedView());
+	REQUIRE(v != nullptr);
+	CHECK(v->kind == ViewKind::Calendar);
+	CHECK(v->dateProperty == when);
+	shotTo(ctx, "planner_calendar");
+
+	auto inside = [](const PlannerPanel::Rect& inner, const PlannerPanel::Rect& outer) {
+		return inner.x0 >= outer.x0 && inner.x1 <= outer.x1 && inner.y0 >= outer.y0 && inner.y1 <= outer.y1;
+	};
+	const PlannerPanel::Rect d20 = PlannerPanel::controlRect("day:2026-10-20");
+	const PlannerPanel::Rect d22 = PlannerPanel::controlRect("day:2026-10-22");
+	REQUIRE(d20.x1 > d20.x0);
+	REQUIRE(d22.x1 > d22.x0);
+	const PlannerPanel::Rect chipA = PlannerPanel::controlRect("cal-chip:Alpha");
+	const PlannerPanel::Rect chipB = PlannerPanel::controlRect("cal-chip:Beta");
+	CHECK(inside(chipA, d20));
+	CHECK(inside(chipB, d22));   // Beta runs 20-22: its last chip is on the 22nd
+	CHECK(PlannerPanel::controlRect("cal-chip:Gamma").x1 <= 0);
+
+	// Navigation.
+	CHECK(PlannerPanel::calendarMonth() == 10);
+	REQUIRE(click(ctx, "cal:next"));
+	CHECK(PlannerPanel::calendarMonth() == 11);
+	REQUIRE(click(ctx, "cal:previous"));
+	REQUIRE(click(ctx, "cal:previous"));
+	CHECK(PlannerPanel::calendarMonth() == 9);
+	PlannerPanel::showCalendarMonth(2026, 10);
+	idle(ctx);
+
+	// Drag Alpha to the 27th: its date moves.
+	const PlannerPanel::Rect d27 = PlannerPanel::controlRect("day:2026-10-27");
+	REQUIRE(d27.x1 > d27.x0);
+	dragTo(ctx, centre(PlannerPanel::controlRect("cal-chip:Alpha")), centre(d27));
+	idle(ctx);
+	std::int64_t ms = 0;
+	REQUIRE(ws->find(dbId)->date(alpha, when, ms));
+	CHECK(ms == day("2026-10-27T00:00:00.000Z"));
+
+	// A double-click on the 5th adds a row dated that day.
+	const ImVec2 p = centre(PlannerPanel::controlRect("day:2026-10-05"));
+	ImGui::GetIO().AddMousePosEvent(p.x, p.y);
+	frame(ctx, false);
+	frame(ctx, false);
+	frame(ctx, true);
+	frame(ctx, false);
+	frame(ctx, true);
+	frame(ctx, false);
+	idle(ctx);
+	const Database* db = ws->find(dbId);
+	REQUIRE(db->rows.size() == 4);
+	REQUIRE(db->date(db->rows[3].id, when, ms));
+	CHECK(ms == day("2026-10-05T00:00:00.000Z"));
 }

@@ -64,6 +64,11 @@ namespace PlannerPanel
 	void openTask(const HE::UUID& id);
 	// The row whose details are open; {} for none.
 	HE::UUID selectedRow();
+	// The month the calendar view shows (0 = not chosen yet: today's, once it is drawn).
+	void showCalendarMonth(int year, int month);
+	int  calendarYear();
+	int  calendarMonth();
+
 	// Show a standalone page, or the page of a row ("Open Page" in the row's details;
 	// the page exists in memory until it has a block). {} when a database is shown.
 	void selectPage(const HE::UUID& id);
