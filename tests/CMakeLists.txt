@@ -332,6 +332,8 @@ add_executable(he_tests
     test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
+    # The Planner's databases and pages and their files (Config/Planner/*).
+    test_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
     test_taskboard_team.cpp
@@ -675,6 +677,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     # The task board's data and its project file (test_task_board.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
+    # The Planner over the same helpers (test_planner.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Planner.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
