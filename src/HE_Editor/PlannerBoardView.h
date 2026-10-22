@@ -31,6 +31,8 @@ namespace HE::Planner { class Workspace; }
 //                                                            pasted text becomes a text card
 //   Cmd/Ctrl+C, X, V, D                                      copy, cut, paste and duplicate the selected cards
 //                                                            (with the arrows between them; also into another board)
+//   Map, Export PNG in the toolbar                           a minimap in the corner (click or drag in it to go there);
+//                                                            the whole board as a picture
 //   Add, Align, Snap in the toolbar                          a card for a page or a row, line cards up, a 20-unit grid
 //   Delete, Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Y), Cmd/Ctrl+A, Esc
 //
@@ -62,6 +64,13 @@ struct Services
 // board's canvas was drawn in the last frames and (x, y) - window points - is inside it, so the
 // application should hand the file over and not use it for anything else; the card appears in the
 // next frame.
+// The whole board as a PNG (the "Export PNG" button): every card and arrow, a margin round them, at
+// most 4096 pixels on the longer side. Pictures from the Planner's media folder are in it; a Texture
+// asset shows as its label. False with `error` set when the board is empty or the file cannot be written.
+bool exportPng(const Services& services, const HE::UUID& boardId, const std::filesystem::path& file, std::string* error = nullptr);
+// Where the button writes: <project>/Exports/Planner/<board title>.png (the title made safe for a file name).
+std::filesystem::path exportPathFor(const std::filesystem::path& projectRoot, const std::string& boardTitle);
+
 bool wantsFileDrop(const std::string& path, float x, float y);
 void dropFile(const std::string& path, float x, float y);
 

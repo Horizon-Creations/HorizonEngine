@@ -3218,6 +3218,12 @@ namespace
 	{ "Planner/Snap", "Snap",
 	  "While on, moving or resizing a card puts it on a grid of 20 units.",
 	  "", "" },
+	{ "Planner/Map", "Map",
+	  "Shows or hides the overview in the bottom right corner of the board: every card as a small box and the part you see as an outline. Click or drag in it to go there.",
+	  "", "" },
+	{ "Planner/Export PNG", "Export PNG",
+	  "Saves the whole board as a picture in the project's Exports/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
+	  "", "" },
 	{ "Planner/Undo", "Undo",
 	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "
 	  "the history is not saved with the project.",

@@ -287,3 +287,13 @@ builds, help audit clean. Not verified: real editor feel (snap while dragging, t
 - Snap (20 units): the card in hand lands on the grid, the others keep their offset; resize snaps the corner.
 - Double-click: Page/Row card opens it (`PlannerPanel::selectPage/openRowPage`, posted), Object card jumps (`TaskBoardPanel::jumpToLink`); frame titles are edited by double-click as before.
 Open: pasted frames come out on top of cards (no sendToBack); align ignores what lies inside a frame; W4 (MCP board tools, minimap, PNG export), unused-media cleanup, board-title undo.
+
+## Handoff (Stand Whiteboard W4)
+
+Verified: `he_tests --test-case="planner*"` 88/88 (new: `test_mcp_tools_planner.cpp` whiteboard tool test; `test_planner_ui.cpp` minimap + Export PNG), HorizonEditor builds, help audit clean. I looked at an exported PNG (cards, text, arrow, label drawn). Not verified: the buttons in the real editor, pictures inside an export (media pictures use the CPU rasteriser's `registerTexture`; untested), minimap feel on a big board.
+
+- MCP (`McpToolsPlanner.cpp`): `planner_create_board`, `planner_read_board`, `planner_add_board_card` (text/frame/page/row), `planner_update_board_card`, `planner_delete_board_card`, `planner_connect_board_cards`, `planner_delete_board_arrow`; `planner_overview` now lists `whiteboards`. No image cards or PNG export over MCP (export needs the UI's font atlas on the main thread).
+- Minimap (`PlannerBoardView.cpp`, 180x120 bottom right, "Map" checkbox): click/drag centres the view; it takes the mouse there (`overMap`).
+- Export: `exportPng` draws the board into its own `ImDrawList` and rasterises it with `tests/ImGuiSoftwareRaster` (already compiled into the editor for EditorUiShot), `hePngWrite`; file `<project>/Exports/Planner/<title>.png`, longest side <= 4096, notification with the path. Texture-asset pictures show their label.
+- Fixed on the way: `n->id` was read after `sendToBack` moved the vector (a new frame selected / returned the wrong card), in `createNode` and the MCP tool.
+Open: unused-media cleanup, board-title undo, pasted frames on top of cards, align ignores frame contents, MCP image cards / export, calendar week view, timeline start-edge drag, sidebar page nesting by drag, live collaboration, real-editor test and Windows/Linux builds.

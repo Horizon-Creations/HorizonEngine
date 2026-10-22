@@ -18,6 +18,7 @@
 #include "TaskBoard.h"
 #include "TaskBoardPanel.h"
 
+#include "vendor/stb_image.h"
 #include <ContentManager/ContentManager.h>
 #include <HorizonScene/HorizonWorld.h>
 
@@ -2137,4 +2138,66 @@ TEST_CASE("planner ui board: copy, paste and duplicate, align, snap, page and ro
 	idle(ctx);
 	doubleClickAt(ctx, canvasPoint(40, 40));
 	CHECK(PlannerPanel::controlRect("edit").x1 > PlannerPanel::controlRect("edit").x0);
+}
+
+TEST_CASE("planner ui board: the minimap pans, Map hides it, Export PNG writes the whole board")
+{
+	Harness harness;
+	Project proj("he_planner_ui_board_export");
+	ContextBits bits;
+	AppContext ctx = bits.make(proj.pm);
+	BoardFixture f = openBoard(ctx);
+	REQUIRE(f.ws->editBoard(f.id, [&](Board& bd) {
+		UUID a = bd.addNode(NodeType::Text, 100, 100, 200, 100, "alpha", 1)->id;
+		UUID b = bd.addNode(NodeType::Text, 3000, 2000, 200, 100, "far away", 1)->id;
+		bd.addEdge(a, b, "then", 1);
+		return true;
+	}));
+	idle(ctx);
+
+	// The minimap is there; a click in its far corner pans the view toward the far card.
+	PlannerPanel::Rect map = PlannerPanel::controlRect("map");
+	REQUIRE(map.x1 > map.x0);
+	const double x0 = PlannerBoardView::viewOf(f.id).x;
+	ImGui::GetIO().AddMousePosEvent(map.x1 - 12, map.y1 - 12);
+	frame(ctx, false);
+	frame(ctx, true);
+	frame(ctx, false);
+	settle(ctx);
+	CHECK(PlannerBoardView::viewOf(f.id).x > x0 + 1000);
+	CHECK(f.ws->findBoard(f.id)->nodes.size() == 2);   // and it made no card and no selection
+	CHECK(PlannerBoardView::selection().empty());
+
+	REQUIRE(click(ctx, "Map"));
+	idle(ctx);
+	CHECK(PlannerPanel::controlRect("map").x1 <= PlannerPanel::controlRect("map").x0);
+
+	// Export: a PNG of the whole board, 4096 at most, with something drawn in it.
+	PlannerBoardView::Services services;
+	services.ws   = f.ws;
+	services.ctx  = &ctx;
+	services.root = proj.root();
+	const std::filesystem::path file = PlannerBoardView::exportPathFor(proj.root(), "Level 1: the \"keep\"");
+	CHECK(file.filename() == "Level 1_ the _keep_.png");
+	std::string err;
+	REQUIRE_MESSAGE(PlannerBoardView::exportPng(services, f.id, file, &err), err);
+	int w = 0, h = 0, ch = 0;
+	unsigned char* px = stbi_load(file.string().c_str(), &w, &h, &ch, 4);
+	REQUIRE(px != nullptr);
+	CHECK(w > 100);
+	CHECK(h > 100);
+	CHECK(std::max(w, h) <= 4096);
+	CHECK(w > h);   // 3200 x 2100 units
+	int differing = 0;
+	for (int i = 0; i < w * h; ++i)
+		if (px[i * 4] != 26 || px[i * 4 + 1] != 24 || px[i * 4 + 2] != 21) ++differing;
+	stbi_image_free(px);
+	CHECK(differing > 500);
+
+	// An empty board has nothing to export.
+	const Board* empty = f.ws->createBoard("Empty");
+	REQUIRE(empty != nullptr);
+	CHECK_FALSE(PlannerBoardView::exportPng(services, empty->id, proj.root() / "never.png", &err));
+	CHECK_FALSE(err.empty());
+	CHECK_FALSE(std::filesystem::exists(proj.root() / "never.png"));
 }

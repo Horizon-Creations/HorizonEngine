@@ -2,6 +2,7 @@
 #include "McpToolHooks.h"
 
 #include "Planner.h"
+#include "PlannerBoard.h"
 #include "PlannerMarkdown.h"
 #include "PlannerWorkspace.h"
 
@@ -491,6 +492,77 @@ Page* pageFrom(Workspace& ws, const json& args, ToolResult& fail)
 	return nullptr;
 }
 
+
+// ── Whiteboards ──────────────────────────────────────────────────────────────
+
+Board* findBoardByKey(Workspace& ws, const std::string& key)
+{
+	UUID id;
+	if (uuidFromHex(key, id)) return ws.findBoard(id);
+	Board* found = nullptr;
+	for (Board* b : ws.boards())
+		if (sameName(b->title, key))
+		{
+			if (found) return nullptr;
+			found = b;
+		}
+	return found;
+}
+
+Board* boardFrom(Workspace& ws, const json& args, ToolResult& fail)
+{
+	const std::string key = strArg(args, "board");
+	Board* b = findBoardByKey(ws, key);
+	if (!b) fail = ToolResult::fail("not_found", "no whiteboard '" + key + "' (or two share the title: use the id) — planner_overview lists them");
+	return b;
+}
+
+json nodeJson(Workspace& ws, const Node& n)
+{
+	json j{ { "id", uuidToHex(n.id) }, { "type", nodeTypeName(n.type) }, { "x", n.x }, { "y", n.y }, { "w", n.w }, { "h", n.h } };
+	if (!n.color.empty()) j["color"] = n.color;
+	if (!n.text.empty()) j["text"] = n.text;
+	if (n.type == NodeType::Page)
+	{
+		const Page* p = ws.findPage(n.page);
+		j["page"] = json{ { "id", uuidToHex(n.page) }, { "title", p ? p->title : std::string("(not found)") } };
+	}
+	if (n.type == NodeType::Row)
+	{
+		const Database* db = ws.find(n.database);
+		const Row* r = db ? db->findRow(n.row) : nullptr;
+		j["row"] = json{ { "database", uuidToHex(n.database) }, { "row", uuidToHex(n.row) }, { "title", r ? r->title : std::string("(not found)") } };
+	}
+	if (n.type == NodeType::Image)
+	{
+		if (!(n.asset == UUID{})) j["asset"] = uuidToHex(n.asset);
+		if (!n.media.empty()) j["media"] = n.media;
+	}
+	if (n.type == NodeType::Object) j["label"] = n.link.label;
+	return j;
+}
+
+json edgeJson(const Edge& e)
+{
+	json j{ { "id", uuidToHex(e.id) }, { "from", uuidToHex(e.from) }, { "to", uuidToHex(e.to) }, { "arrow", e.arrow } };
+	if (!e.label.empty()) j["label"] = e.label;
+	return j;
+}
+
+json boardSummary(const Board& b)
+{
+	return json{ { "id", uuidToHex(b.id) }, { "title", b.title }, { "cards", b.nodes.size() }, { "arrows", b.edges.size() } };
+}
+
+// A card of this board by id.
+Node* nodeFrom(Board& b, const std::string& key, ToolResult& fail)
+{
+	UUID id;
+	Node* n = uuidFromHex(key, id) ? b.findNode(id) : nullptr;
+	if (!n) fail = ToolResult::fail("not_found", "no card '" + key + "' on this whiteboard — planner_read_board lists them");
+	return n;
+}
+
 } // namespace
 
 void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
@@ -518,8 +590,10 @@ void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
 				unreadable.push_back(json{ { "kind", "database" }, { "id", uuidToHex(u.id) }, { "error", u.error } });
 			for (const Workspace::Unreadable& u : ws->unreadablePages())
 				unreadable.push_back(json{ { "kind", "page" }, { "id", uuidToHex(u.id) }, { "error", u.error } });
+			json boards = json::array();
+			for (Board* b : ws->boards()) boards.push_back(boardSummary(*b));
 			return ToolResult::ok(json{ { "databases", std::move(dbs) }, { "pages", std::move(pages) },
-			                            { "unreadable", std::move(unreadable) } });
+			                            { "whiteboards", std::move(boards) }, { "unreadable", std::move(unreadable) } });
 		};
 		registry.add(std::move(t));
 	}
@@ -976,6 +1050,264 @@ void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
 			const std::string title = page->title;
 			if (!ws->removePage(id)) return ToolResult::fail("save_failed", "the page was not deleted: " + ws->lastError());
 			return ToolResult::ok(json{ { "deleted", uuidToHex(id) }, { "title", title } });
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_create_board ─────────────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_create_board";
+		t.description = "Make a new, empty Planner whiteboard (Window > Planner, Boards in the sidebar).";
+		t.inputSchema = objectSchema(json{ { "title", stringProp("The board's title.") } }, { "title" });
+		t.mutates = true;
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			const std::string title = strArg(args, "title");
+			if (title.empty()) return invalid("title is empty");
+			Board* b = ws->createBoard(title);
+			if (!b) return ToolResult::fail("save_failed", "the whiteboard was not made: " + ws->lastError());
+			return ToolResult::ok(boardSummary(*b));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_read_board ───────────────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_read_board";
+		t.description =
+			"A Planner whiteboard: its cards (id, type text/image/object/row/page/frame, position and size in "
+			"board units with y pointing down, colour, text; pages and rows with their titles) and its arrows "
+			"(from/to card ids, label). A frame groups the cards that lie wholly inside it.";
+		t.inputSchema = objectSchema(json{ { "board", stringProp("The board's id or unique title.") } }, { "board" });
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			ToolResult fail;
+			Board* b = boardFrom(*ws, args, fail);
+			if (!b) return fail;
+			json nodes = json::array(), edges = json::array();
+			for (const Node& n : b->nodes) nodes.push_back(nodeJson(*ws, n));
+			for (const Edge& e : b->edges) edges.push_back(edgeJson(e));
+			json out = boardSummary(*b);
+			out["nodes"] = std::move(nodes);
+			out["edges"] = std::move(edges);
+			return ToolResult::ok(std::move(out));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_add_board_card ───────────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_add_board_card";
+		t.description =
+			"Add a card to a whiteboard. type: text (default), frame (a titled rectangle; `text` is the title), "
+			"page (give `page`, a page's id or title) or row (give `database` and `row`, a row's id or title). "
+			"Position (x, y = the top left) and size are in board units; default size 240x120 (frame 480x320).";
+		t.inputSchema = objectSchema(json{
+			{ "board",    stringProp("The board's id or unique title.") },
+			{ "type",     stringProp("text, frame, page or row. Default text.") },
+			{ "text",     stringProp("The card's text, or the frame's title.") },
+			{ "x",        json{ { "type", "number" } } },
+			{ "y",        json{ { "type", "number" } } },
+			{ "w",        json{ { "type", "number" } } },
+			{ "h",        json{ { "type", "number" } } },
+			{ "color",    stringProp("A colour word (red, orange, yellow, green, teal, blue, purple, pink) or empty.") },
+			{ "page",     stringProp("For type page: the page's id or unique title.") },
+			{ "database", stringProp("For type row: the database's id or name.") },
+			{ "row",      stringProp("For type row: the row's id or title.") },
+		}, { "board" });
+		t.mutates = true;
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			ToolResult fail;
+			Board* b0 = boardFrom(*ws, args, fail);
+			if (!b0) return fail;
+			const UUID boardId = b0->id;
+			const std::string typeWord = lower(strArg(args, "type").empty() ? "text" : strArg(args, "type"));
+			NodeType type;
+			if (!nodeTypeFromName(typeWord, type) || (type != NodeType::Text && type != NodeType::Frame && type != NodeType::Page && type != NodeType::Row))
+				return invalid("type must be text, frame, page or row");
+			UUID page, dbId, rowId;
+			if (type == NodeType::Page)
+			{
+				Page* p = pageFrom(*ws, json{ { "page", strArg(args, "page") } }, fail);
+				if (!p) return fail;
+				page = p->id;
+			}
+			if (type == NodeType::Row)
+			{
+				Database* db = findDatabase(*ws, strArg(args, "database"));
+				if (!db) return ToolResult::fail("not_found", "no database '" + strArg(args, "database") + "' — planner_overview lists them");
+				const std::string rk = strArg(args, "row");
+				UUID rid;
+				const Row* row = uuidFromHex(rk, rid) ? db->findRow(rid) : nullptr;
+				if (!row)
+					for (const Row& r : db->rows)
+						if (sameName(r.title, rk)) { row = &r; break; }
+				if (!row) return ToolResult::fail("not_found", "no row '" + rk + "' in " + db->name);
+				dbId = db->id;
+				rowId = row->id;
+			}
+			const bool frame = type == NodeType::Frame;
+			const double w = numArg(args, "w", frame ? 480 : 240), h = numArg(args, "h", frame ? 320 : 120);
+			const double x = numArg(args, "x", 0), y = numArg(args, "y", 0);
+			const std::string text = strArg(args, "text"), color = lower(strArg(args, "color"));
+			UUID made;
+			if (!ws->editBoard(boardId, [&](Board& b) {
+				    Node* n = b.addNode(type, x, y, w, h, text, taskNowMs());
+				    n->color = color;
+				    n->page = page;
+				    n->database = dbId;
+				    n->row = rowId;
+				    made = n->id;   // before sendToBack: that moves the cards in the vector
+				    if (frame) b.sendToBack(made, taskNowMs());
+				    return true;
+			    }))
+				return ToolResult::fail("save_failed", "the card was not added: " + ws->lastError());
+			const Board* b = ws->findBoard(boardId);
+			return ToolResult::ok(nodeJson(*ws, *b->findNode(made)));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_update_board_card ────────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_update_board_card";
+		t.description = "Change a whiteboard card: its text, colour, position or size (only what is given). `color` empty clears it. A frame does not carry its cards along.";
+		t.inputSchema = objectSchema(json{
+			{ "board", stringProp("The board's id or unique title.") },
+			{ "card",  stringProp("The card's id (planner_read_board).") },
+			{ "text",  stringProp("New text / title.") },
+			{ "color", stringProp("A colour word or empty.") },
+			{ "x", json{ { "type", "number" } } }, { "y", json{ { "type", "number" } } },
+			{ "w", json{ { "type", "number" } } }, { "h", json{ { "type", "number" } } },
+		}, { "board", "card" });
+		t.mutates = true;
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			ToolResult fail;
+			Board* b0 = boardFrom(*ws, args, fail);
+			if (!b0) return fail;
+			const UUID boardId = b0->id;
+			Node* n0 = nodeFrom(*b0, strArg(args, "card"), fail);
+			if (!n0) return fail;
+			const UUID cardId = n0->id;
+			if (!ws->editBoard(boardId, [&](Board& b) {
+				    Node* n = b.findNode(cardId);
+				    if (!n) return false;
+				    const std::int64_t now = taskNowMs();
+				    if (args.contains("text"))  b.setNodeText(cardId, strArg(args, "text"), now);
+				    if (args.contains("color")) b.setNodeColor(cardId, lower(strArg(args, "color")), now);
+				    if (args.contains("x") || args.contains("y") || args.contains("w") || args.contains("h"))
+					    b.resizeNode(cardId, numArg(args, "x", n->x), numArg(args, "y", n->y), numArg(args, "w", n->w), numArg(args, "h", n->h), now);
+				    return true;
+			    }))
+				return ToolResult::fail("save_failed", "the card was not changed: " + ws->lastError());
+			return ToolResult::ok(nodeJson(*ws, *ws->findBoard(boardId)->findNode(cardId)));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_delete_board_card ────────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_delete_board_card";
+		t.description = "Delete a card from a whiteboard, with the arrows that end at it. Source control has the previous version.";
+		t.inputSchema = objectSchema(json{
+			{ "board", stringProp("The board's id or unique title.") },
+			{ "card",  stringProp("The card's id.") },
+		}, { "board", "card" });
+		t.mutates = true;
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			ToolResult fail;
+			Board* b0 = boardFrom(*ws, args, fail);
+			if (!b0) return fail;
+			const UUID boardId = b0->id;
+			Node* n0 = nodeFrom(*b0, strArg(args, "card"), fail);
+			if (!n0) return fail;
+			const UUID cardId = n0->id;
+			if (!ws->editBoard(boardId, [&](Board& b) { return b.removeNode(cardId, taskNowMs()); }))
+				return ToolResult::fail("save_failed", "the card was not deleted: " + ws->lastError());
+			return ToolResult::ok(json{ { "deleted", uuidToHex(cardId) } });
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_connect_board_cards ──────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_connect_board_cards";
+		t.description = "Draw an arrow between two cards of a whiteboard (from -> to), optionally labelled and without a head. The same two cards in the same direction have one arrow only.";
+		t.inputSchema = objectSchema(json{
+			{ "board", stringProp("The board's id or unique title.") },
+			{ "from",  stringProp("The card the arrow starts at (id).") },
+			{ "to",    stringProp("The card it ends at (id).") },
+			{ "label", stringProp("Text on the arrow.") },
+			{ "arrow", json{ { "type", "boolean" }, { "description", "An arrowhead at `to` (default true)." } } },
+		}, { "board", "from", "to" });
+		t.mutates = true;
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			ToolResult fail;
+			Board* b0 = boardFrom(*ws, args, fail);
+			if (!b0) return fail;
+			const UUID boardId = b0->id;
+			Node* f = nodeFrom(*b0, strArg(args, "from"), fail);
+			if (!f) return fail;
+			const UUID from = f->id;
+			Node* tn = nodeFrom(*b0, strArg(args, "to"), fail);
+			if (!tn) return fail;
+			const UUID to = tn->id;
+			if (from == to) return invalid("an arrow needs two different cards");
+			const std::string label = strArg(args, "label");
+			const bool head = boolArg(args, "arrow", true);
+			UUID made;
+			if (!ws->editBoard(boardId, [&](Board& b) {
+				    Edge* e = b.addEdge(from, to, label, taskNowMs());
+				    if (!e) return false;
+				    e->arrow = head;
+				    made = e->id;
+				    return true;
+			    }))
+				return ToolResult::fail("refused", "no arrow was added: there is one from that card to that already, or the board could not be saved (" + ws->lastError() + ")");
+			return ToolResult::ok(edgeJson(*ws->findBoard(boardId)->findEdge(made)));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── planner_delete_board_arrow ───────────────────────────────────────────
+	{
+		McpTool t;
+		t.name        = "planner_delete_board_arrow";
+		t.description = "Delete an arrow from a whiteboard (its id from planner_read_board).";
+		t.inputSchema = objectSchema(json{
+			{ "board", stringProp("The board's id or unique title.") },
+			{ "arrow", stringProp("The arrow's id.") },
+		}, { "board", "arrow" });
+		t.mutates = true;
+		t.handler = [hooks](const json& args) -> ToolResult {
+			Workspace* ws = workspaceOf(hooks);
+			if (!ws) return failNoProject();
+			ToolResult fail;
+			Board* b0 = boardFrom(*ws, args, fail);
+			if (!b0) return fail;
+			const UUID boardId = b0->id;
+			UUID eid;
+			if (!uuidFromHex(strArg(args, "arrow"), eid) || !b0->findEdge(eid))
+				return ToolResult::fail("not_found", "no arrow '" + strArg(args, "arrow") + "' on this whiteboard");
+			if (!ws->editBoard(boardId, [&](Board& b) { return b.removeEdge(eid, taskNowMs()); }))
+				return ToolResult::fail("save_failed", "the arrow was not deleted: " + ws->lastError());
+			return ToolResult::ok(json{ { "deleted", uuidToHex(eid) } });
 		};
 		registry.add(std::move(t));
 	}
