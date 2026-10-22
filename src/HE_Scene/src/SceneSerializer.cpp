@@ -183,6 +183,12 @@ namespace
 		if (l.contributesAO != def.contributesAO)   j["contributesAO"]  = l.contributesAO;
 		if (l.shadowDistance != def.shadowDistance) j["shadowDistance"] = l.shadowDistance;
 		if (l.lodHysteresis != def.lodHysteresis)   j["lodHysteresis"]  = l.lodHysteresis;
+		// Placement rules (slope, height, paint weight): a layer without any writes none.
+		if (l.slopeMin != def.slopeMin)             j["slopeMin"]       = l.slopeMin;
+		if (l.slopeMax != def.slopeMax)             j["slopeMax"]       = l.slopeMax;
+		if (l.heightMin != def.heightMin)           j["heightMin"]      = l.heightMin;
+		if (l.heightMax != def.heightMax)           j["heightMax"]      = l.heightMax;
+		if (l.weightLayer != def.weightLayer)       j["weightLayer"]    = l.weightLayer;
 		// Farther detail levels; a layer without any writes no key at all.
 		if (!l.lods.empty())
 		{
@@ -219,6 +225,13 @@ namespace
 		l.contributesAO   = c.value("contributesAO",  l.contributesAO);
 		l.shadowDistance  = c.value("shadowDistance", l.shadowDistance);
 		l.lodHysteresis   = std::max(0.0f, c.value("lodHysteresis", l.lodHysteresis));
+		l.slopeMin        = std::clamp(c.value("slopeMin", l.slopeMin), 0.0f, 1.0f);
+		l.slopeMax        = std::clamp(c.value("slopeMax", l.slopeMax), 0.0f, 1.0f);
+		l.heightMin       = std::clamp(c.value("heightMin", l.heightMin), -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit);
+		l.heightMax       = std::clamp(c.value("heightMax", l.heightMax), -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit);
+		// Out of range = no paint rule (a hand-edited file, or a peer with more layers).
+		l.weightLayer     = c.value("weightLayer", l.weightLayer);
+		if (l.weightLayer < 0 || l.weightLayer >= kTerrainMaxLayers) l.weightLayer = -1;
 		if (c.contains("lods") && c["lods"].is_array())
 		{
 			for (const json& d : c["lods"])
@@ -804,6 +817,21 @@ namespace
 						if (b.underwaterCaustics.speed     != d.speed)     cj["speed"]     = b.underwaterCaustics.speed;
 						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
 						bj["underwaterCaustics"] = std::move(cj);
+					}
+					// The brush's bed (Thema 206 Schritt 9): only for a body it dug.
+					if (b.brushBed != HE::water::BrushBedParams{} || !b.brushPatch.empty())
+					{
+						json dj = { { "enabled", b.brushBed.enabled }, { "maxDepth", b.brushBed.maxDepth },
+						            { "slope", b.brushBed.slope }, { "roughness", b.brushBed.roughness } };
+						const HE::water::GroundPatch& bp = b.brushPatch;
+						if (!bp.empty())
+						{
+							dj["res"] = bp.res;
+							dj["rect"] = { bp.x0, bp.z0, bp.w, bp.h };
+							dj["deltaB64"] = base64Encode(reinterpret_cast<const uint8_t*>(bp.delta.data()),
+							                              bp.delta.size() * sizeof(float));
+						}
+						bj["brushBed"] = std::move(dj);
 					}
 					bodies.push_back(std::move(bj));
 				}
@@ -1841,6 +1869,40 @@ namespace
 							num("scale",     b.underwaterCaustics.scale);
 							num("speed",     b.underwaterCaustics.speed);
 							num("depth",     b.underwaterCaustics.depth);
+						}
+						if (bj.contains("brushBed") && bj["brushBed"].is_object())
+						{
+							const json& dj = bj["brushBed"];
+							if (dj.contains("enabled") && dj["enabled"].is_boolean()) b.brushBed.enabled = dj["enabled"].get<bool>();
+							const auto num = [&dj](const char* key, float& into)
+							{
+								if (dj.contains(key) && dj[key].is_number()) into = dj[key].get<float>();
+							};
+							num("maxDepth",  b.brushBed.maxDepth);
+							num("slope",     b.brushBed.slope);
+							num("roughness", b.brushBed.roughness);
+							if (dj.contains("res") && dj["res"].is_number_unsigned() &&
+							    dj.contains("rect") && dj["rect"].is_array() && dj["rect"].size() == 4 &&
+							    dj.contains("deltaB64") && dj["deltaB64"].is_string())
+							{
+								const json& r = dj["rect"];
+								bool ints = true;
+								for (const json& v : r) ints = ints && v.is_number_integer();
+								const std::vector<uint8_t> raw = base64Decode(dj["deltaB64"].get<std::string>());
+								if (ints && raw.size() % sizeof(float) == 0)
+								{
+									HE::water::GroundPatch& gp = b.brushPatch;
+									const auto clampInt = [](const json& v)
+									{
+										return static_cast<int>(std::clamp<long long>(v.get<long long>(), -1, 1 << 20));
+									};
+									gp.res = static_cast<uint32_t>(std::min<uint64_t>(dj["res"].get<uint64_t>(), 1u << 20));
+									gp.x0 = clampInt(r[0]); gp.z0 = clampInt(r[1]);
+									gp.w  = clampInt(r[2]); gp.h  = clampInt(r[3]);
+									gp.delta.resize(raw.size() / sizeof(float));
+									if (!raw.empty()) std::memcpy(gp.delta.data(), raw.data(), raw.size());
+								}
+							}
 						}
 						w.bodies.push_back(b);
 					}

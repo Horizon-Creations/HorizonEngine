@@ -445,6 +445,15 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
     return w;
 }
 
+// Chop strengths relative to `drive` (the summed steepness), see the chop layers in waterMaterial.
+constexpr float kChopBase = 0.3f, kChopMid = 0.9f, kChopFine = 0.8f, kChopFiner = 0.55f;
+
+// Shallow water (Thema 206 step 4), defaults of the ShallowWater parameter (step 6).
+// The tint depth follows the real shore depth for e above 0 (water shallower than one metre)
+// and has fully taken over at e = kShallowTintE (half a metre); the Opacity floor falls to
+// kShallowOpacity of itself at no depth and is whole again from kShallowClearDepth metres.
+constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 0.8f;
+
 // ── Fine ripples ─────────────────────────────────────────────────────────────
 // The slope of a drifting FBM height field, by finite differences — the plan's
 // "Normal from Height by hand" (§6), three noise reads per layer. Sines alone,
@@ -638,9 +647,13 @@ Mb waterMaterial()
         "Water colour where the view ray through the water is short (looking straight down).", 0);
     const int deep = m.param(T::ParamColor, "DeepColor", { 0.004f, 0.028f, 0.052f }, "Color",
         "Water colour where the view ray through the water is long (toward the horizon).", 1);
-    const int turb = m.param(T::ParamVec2, "Turbidity", { 0.45f, 4.0f }, "Color",
+    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.35f, 0.7f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
-        "y = water depth in metres the tint assumes (no scene depth is read yet).", 2);
+        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last metre "
+        "before a landscape's shore the real depth takes over, so shallows are clear). "
+        "z = shore width: the water fades in over this many metres of depth at the water's "
+        "edge (0 = a hard edge, up to 0.7). w = shore foam: the lace along the water's edge "
+        "(0 = none, 1 = strong). Needs the water mesh of a landscape; a plane has no shore.", 2);
     // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
     // the water physics follows (WaterQuery), so retuning the water here retunes
     // the surface a crate floats on with it.
@@ -655,20 +668,37 @@ Mb waterMaterial()
     const int waveC = m.param(T::ParamVec4, "WaveC", { wc.directionDeg, wc.speed, wc.length, wc.steepness }, "Waves",
         "Fine ripples. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Also sets the strength of the chop on top.", 5);
-    const int fresPow = m.param(T::ParamFloat, "FresnelPower", { 5.0f }, "Surface",
-        "Fresnel exponent: how quickly the surface turns reflective toward grazing angles "
-        "(5 = physical water).", 6, 1.0f, 10.0f);
-    const int refl = m.param(T::ParamFloat, "Reflection", { 0.8f }, "Surface",
-        "How strongly sky and scene reflection cover the water: scales the Fresnel lift of "
-        "the opacity and the specular F0.", 7, 0.0f, 1.0f);
-    const int rough = m.param(T::ParamFloat, "Roughness", { 0.08f }, "Surface",
-        "Surface roughness. Low = sharp reflections and a tight sun glint. Distant water "
-        "is made rougher on top of this.", 8, 0.0f, 1.0f);
-    const int spec = m.param(T::ParamFloat, "Specular", { 0.3f }, "Surface",
-        "Dielectric specular (0.5 = F0 0.04). Multiplied by Reflection; ~0.3 gives water's F0 0.02.",
-        9, 0.0f, 1.0f);
+    // The four plain floats share one slot (Thema 206 step 6): each used only .x of a whole
+    // Vec4 slot, and all sixteen were taken. Slider ranges of the old floats, for the tooltip:
+    // FresnelPower 1..10, the other three 0..1.
+    const int surf = m.param(T::ParamVec4, "Surface", { 5.0f, 0.8f, 0.08f, 0.3f }, "Surface",
+        "x = Fresnel exponent (1..10): how quickly the surface turns reflective toward grazing "
+        "angles (5 = physical water). "
+        "y = reflection (0..1): how strongly sky and scene reflection cover the water, scales the "
+        "Fresnel lift of the opacity and the specular F0. "
+        "z = roughness (0..1): low = sharp reflections and a tight sun glint, distant water is "
+        "made rougher on top of this. "
+        "w = dielectric specular (0..1): 0.5 = F0 0.04, multiplied by reflection, ~0.3 gives "
+        "water's F0 0.02.", 6);
+    // Shallow water (Thema 206 step 4): the tint and the Opacity floor follow the real shore
+    // depth in the last metre before a landscape's shore. Defaults reproduce the step 4 constants.
+    const int shallowW = m.param(T::ParamVec4, "ShallowWater", { kShallowClearDepth, kShallowTintE, kShallowOpacity, 0.0f }, "Surface",
+        "Shore shallows (need the water mesh of a landscape; a plane has no shore, no effect). "
+        "x = clear depth (m, 0..1): from this much water on the opacity floor is whole, "
+        "shallower water lets the ground show through more. "
+        "y = tint start (0..1, shore closeness: 0 = a metre of water or more, 1 = none): "
+        "where the depth tint has fully taken over the real depth, 0.5 = half a metre; "
+        "further out it blends to the assumed depth (Turbidity.y). "
+        "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
+        "w = reserved, no effect yet.", 7);
+    const int sfs = m.un(T::SplitRGBA, surf, 1, 20);
+    const Pin fresPow{ sfs, 0 }, refl{ sfs, 1 }, rough{ sfs, 2 }, spec{ sfs, 3 };
+    const int shs = m.un(T::SplitRGBA, shallowW, 1, 22);
+    const Pin clearDepth{ shs, 0 }, tintStart{ shs, 1 }, opacFloor{ shs, 2 };
     const int opac = m.param(T::ParamFloat, "Opacity", { 0.5f }, "Surface",
-        "Opacity looking straight down into clear water. Depth tint, Fresnel and foam raise it.",
+        "Opacity looking straight down into clear water. Depth tint, Fresnel and foam raise it. "
+        "In the last metre before a landscape's shore it falls toward a quarter of itself as the "
+        "water gets shallower, so the ground shows through.",
         10, 0.0f, 1.0f);
     const int refr = m.param(T::ParamFloat, "Refraction", { 0.3f }, "Surface",
         "How much the waves bend the view into the water: moves the depth tint and the caustics "
@@ -693,7 +723,8 @@ Mb waterMaterial()
     const int wps  = m.un(T::SplitRGBA, wp, 1, 16);
     const Pin px{ wps, 0 }, pz{ wps, 2 };
     const int time = m.node(T::Time, 0, 17);
-    const int geoN = m.node(T::NormalWS, 0, 18);
+    const int geoN = m.node(T::NormalWS, 0, 18);      // the mesh normal; n.x also carries the shore (see "Soft shore")
+    const int gs   = m.un(T::SplitRGBA, geoN, 1, 18);
     const int view = m.node(T::ViewDir, 0, 19);
     const int dist = m.node(T::CameraDistance, 0, 20);
 
@@ -702,7 +733,13 @@ Mb waterMaterial()
     const int fadeB = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(60.0f, 17, 21), m.k(220.0f, 17, 21.5f), dist, 18, 21), 19, 21);
     const int fadeC = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(25.0f, 17, 22), m.k(110.0f, 17, 22.5f), dist, 18, 22), 19, 22);
     const int fadeR = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(14.0f, 17, 23), m.k(70.0f, 17, 23.5f), dist, 18, 23), 19, 23);
-    const Pin fB{ fadeB }, fC{ fadeC }, fR{ fadeR };
+    // The two finest chop layers (below) are a few centimetres to a decimetre per noise
+    // octave, so they go under a pixel much sooner than the coarse chop: each gets its
+    // own, shorter fade. The footprint of a pixel at 25° grazing is ~2.4x its width, which
+    // is why 0.17 m cells are gone by ~14 m and 0.4 m cells by ~40 m.
+    const int fadeF = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(7.0f, 17, 24), m.k(40.0f, 17, 24.5f), dist, 18, 24), 19, 24);
+    const int fadeG = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(3.0f, 17, 25), m.k(14.0f, 17, 25.5f), dist, 18, 25), 19, 25);
+    const Pin fB{ fadeB }, fC{ fadeC }, fR{ fadeR }, fF{ fadeF }, fG{ fadeG };
 
     // Gusts: slow large patches where the sea is rougher and where it is calmer.
     // Without them the same texture repeats evenly to the horizon. The same field
@@ -744,28 +781,38 @@ Mb waterMaterial()
     m.comment("Wave B and its companion", 1, 34, 15, 8);
     m.comment("Wave C (ripples) and its companion", 1, 42, 15, 8);
 
-    // Chop: two layers of drifting noise slope, one riding each of the two
-    // shorter wave knobs' direction. Strength follows the sum of the three
-    // steepnesses, so flat waves (w = 0) mean flat water.
+    // Chop: four layers of drifting noise slope, from 2.6 m down to 0.17 m per noise
+    // cell. Reference 29 (open sea from above) is not a few waves with some noise on top:
+    // it is short, irregular wavelets at EVERY scale from a metre to a hand's width, each
+    // lit only on its flank, with calm glassy patches between. Two layers left the near
+    // field a smooth dark sheet with sparse glints; the finer layers fill the gap down to
+    // what a pixel can still resolve (each fades out sooner, see fadeF / fadeG), and they
+    // ride different directions and speeds so the pattern does not crawl as one. Strength
+    // follows the sum of the three steepnesses, so flat waves (w = 0) mean flat water.
     const int sA = m.un(T::SplitRGBA, waveA, 17, 26);
     const int sB = m.un(T::SplitRGBA, waveB, 17, 27);
     const int sC = m.un(T::SplitRGBA, waveC, 17, 28);
     const Pin drive = m.sum({ Pin{ sA, 3 }, Pin{ sB, 3 }, Pin{ sC, 3 } }, 18, 26);
-    const int ampBase = m.op(T::Multiply, drive, m.k(0.2f, 20, 26), 21, 26);
+    const int ampBase = m.op(T::Multiply, drive, m.k(kChopBase, 20, 26), 21, 26);
     const int amp1    = m.op(T::Multiply, ampBase, fR, 22, 26);
-    const int amp2    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(0.55f, 22, 27), 22, 27), fR, 23, 27);
-    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,
-                                m.op(T::Multiply, b.dirX, m.op(T::Multiply, b.speed, m.k(0.55f, 24, 29), 25, 29), 26, 29),
-                                m.op(T::Multiply, b.dirZ, m.op(T::Multiply, b.speed, m.k(0.55f, 24, 30), 25, 30), 26, 30),
-                                amp1, 24, 31);
-    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,
-                                m.op(T::Multiply, c.dirX, m.op(T::Multiply, c.speed, m.k(0.9f, 24, 36), 25, 36), 26, 36),
-                                m.op(T::Multiply, c.dirZ, m.op(T::Multiply, c.speed, m.k(0.9f, 24, 37), 25, 37), 26, 37),
-                                amp2, 24, 38);
+    const int amp2    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopMid, 22, 27), 22, 27), fR, 23, 27);
+    const int amp3    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopFine, 22, 28), 22, 28), fF, 23, 28);
+    const int amp4    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopFiner, 22, 29), 22, 29), fG, 23, 29);
+    auto drift = [&](const Wave& w, float speed, float col, float row) {
+        return std::pair<Pin, Pin>{
+            m.op(T::Multiply, w.dirX, m.op(T::Multiply, w.speed, m.k(speed, col, row), col + 1, row), col + 2, row),
+            m.op(T::Multiply, w.dirZ, m.op(T::Multiply, w.speed, m.k(speed, col, row + 1), col + 1, row + 1), col + 2, row + 1) };
+    };
+    const auto d1 = drift(b, 0.55f, 24, 29), d2 = drift(c, 0.9f, 24, 36);
+    const auto d3 = drift(b, -0.8f, 24, 43), d4 = drift(c, -1.3f, 24, 50);
+    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, 24, 31);
+    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, 24, 38);
+    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, 24, 45);
+    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, 24, 52);
     m.comment("Chop (noise slope, finite differences)", 24, 29, 8, 14);
 
-    const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x };
-    const Pin slopesZ[] = { a.slopeZ, a2.slopeZ, b.slopeZ, b2.slopeZ, c.slopeZ, c2.slopeZ, r1.z, r2.z };
+    const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x, r3.x, r4.x };
+    const Pin slopesZ[] = { a.slopeZ, a2.slopeZ, b.slopeZ, b2.slopeZ, c.slopeZ, c2.slopeZ, r1.z, r2.z, r3.z, r4.z };
     // The rings the water physics raised where a body went into or out of the surface
     // (the Water Ripple node, which reads the lighting block the engine fills). Their
     // slope is one more term of the SAME sum, so it leans the one normalised wave normal
@@ -784,8 +831,13 @@ Mb waterMaterial()
     const int sz    = m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesZ), std::end(slopesZ)), 41, 28), gust, 44, 28),
                            ringZ, 45, 28);
     const int tilt  = m.node(T::Combine3, 45, 27);
-    m.link(sx, tilt, 0);
-    m.link(sz, tilt, 2);                                     // Y stays 0
+    // The mesh normal's x tilt is the shore proximity, not a slope: it goes into the
+    // tilt too, so subtracting the tilt leaves the wave slope alone (0 off a landscape).
+    // A landscape rotated about Y moves that tilt out of x and into z (and back), so
+    // both components get the same treatment — whatever the rotation did to it, it is
+    // still exactly (gs.x, gs.z) and subtracting that cancels it regardless of heading.
+    m.link(m.op(T::Add, sx, Pin{ gs, 0 }, 45, 25), tilt, 0);
+    m.link(m.op(T::Add, sz, Pin{ gs, 2 }, 45, 29), tilt, 2);
     const int waveN = m.un(T::Normalize3, m.op(T::Subtract, geoN, tilt, 46, 27), 47, 27);
 
     // Fresnel off the WAVE normal with an exposed exponent. The Fresnel node
@@ -804,12 +856,48 @@ Mb waterMaterial()
     const int crest = m.op(T::Add, m.op(T::Multiply, m.op(T::Divide, sumH, sumS, 21, 17), m.k(0.5f, 21, 18), 22, 17),
                            m.k(0.5f, 22, 18), 23, 17);
 
+    // The water's depth under this pixel, as far as the mesh knows it (see "Soft shore"
+    // below): e = 1 at the waterline falling to 0 at kShoreFadeDepth metres of water, read
+    // from the normal's x tilt. Nothing deeper than that is visible here; on a plane (and in
+    // open water) e = 0, the depth is the full fade depth and everything built on it is neutral.
+    // Read as the tilt's magnitude in the XZ plane, not x alone: a landscape rotated about Y
+    // moves the baked tilt between x and z (zeroing a raw x/y read at 90°) but leaves
+    // sqrt(x^2+z^2) exactly where it was, since the local normal only ever had one horizontal
+    // component to begin with. A non-uniform X/Z-vs-Y scale on the landscape also scales this
+    // read by sx/sy, since mat3(uModel) is what every backend's vertex stage puts the normal
+    // through (MaterialShaderLibrary.cpp) — the shader itself still can't see that scale to
+    // undo it, so the mesh bakes the inverse ratio in instead (SurfaceOptions::shoreTiltScale,
+    // WaterMesh.h/WaterSurface.cpp's shoreTiltScaleOf), and the two cancel.
+    constexpr float kShoreGain  = HE::water::kShoreNormalGain;
+    constexpr float kShoreDepth = HE::water::kShoreFadeDepth;
+    const int shoreX2  = m.op(T::Multiply, Pin{ gs, 0 }, Pin{ gs, 0 }, 44, 11);
+    const int shoreZ2  = m.op(T::Multiply, Pin{ gs, 2 }, Pin{ gs, 2 }, 44, 12);
+    const int shoreMag = m.op(T::Power, m.op(T::Add, shoreX2, shoreZ2, 45, 11), m.k(0.5f, 45, 12), 46, 11);
+    const int shoreE  = m.un(T::Saturate, m.op(T::Divide, shoreMag, m.op(T::Multiply, Pin{ gs, 1 }, m.k(kShoreGain, 47, 13), 48, 13), 49, 12), 50, 12);
+    const int shoreD  = m.op(T::Multiply, m.un(T::OneMinus, shoreE, 51, 12), m.k(kShoreDepth, 51, 13), 52, 12);
+
     // Water body: transmittance exp(-absorption · depth / cos) along the view ray,
     // with the ray bent toward the wave normal by Refraction.
     const int ts    = m.un(T::SplitRGBA, turb, 16, 5);
     const int refrN = m.un(T::Normalize3, m.op3(T::Lerp, geoN, waveN, refr, 21, 5), 22, 5);
     const int ndvR  = m.un(T::Saturate, m.op(T::DotProduct, refrN, view, 23, 5), 24, 5);
-    const int path  = m.op(T::Divide, Pin{ ts, 1 }, m.op(T::Add, ndvR, m.k(0.05f, 24, 6), 25, 5), 26, 5);
+    // The depth the tint assumes is Turbidity.y (a guess, no scene depth is read), until the
+    // mesh knows better: in the last half metre of water before the shore the real depth
+    // takes over, so shallow water is as clear as it is shallow (the ground and the shallow
+    // colour come through) and thickens to the assumed depth over the metre before. The blend
+    // is a smoothstep of e, which is 0 at one metre: no step where the shore range begins,
+    // and in open water (e = 0) this is Turbidity.y itself.
+    // tintStart is a user knob (0..1, see ShallowWater param above): a branchless
+    // max(tintStart, eps) before it feeds Smoothstep as the non-zero edge — equal
+    // Smoothstep edges (tintStart <= 0) are undefined behaviour. A true max rather
+    // than an unconditional epsilon add (like shoreW below) so any value already
+    // above eps, including the default, passes through unchanged.
+    const int epsTint = m.k(0.001f, 13, 3.5f);
+    const int tintOk  = m.op(T::Greater, tintStart, epsTint, 13, 4);
+    const int tintStartC = m.op3(T::If, tintOk, tintStart, epsTint, 14, 4);
+    const int tintMix = m.op3(T::Smoothstep, m.k(0.0f, 14, 5), tintStartC, shoreE, 15, 5);
+    const int tintD   = m.op3(T::Lerp, Pin{ ts, 1 }, shoreD, tintMix, 17, 5);
+    const int path  = m.op(T::Divide, tintD, m.op(T::Add, ndvR, m.k(0.05f, 24, 6), 25, 5), 26, 5);
     const int dens  = m.op(T::Multiply, m.op(T::Multiply, Pin{ ts, 0 }, path, 27, 5), m.k(-1.0f, 27, 6), 28, 5);
     const int trans = m.op(T::Power, m.k(kE, 28, 6), dens, 29, 5);
     const int body0 = m.op3(T::Lerp, shallow, deep, m.un(T::OneMinus, trans, 30, 6), 31, 5);
@@ -881,18 +969,60 @@ Mb waterMaterial()
     const int foamAmt = m.un(T::Saturate, m.op(T::Add, waveFoam, ringFoam, 35, 18), 36, 18);
     m.comment("Foam", 16, 16, 16, 8);
 
+    // Soft shore (docs/water-realistic-baseline-2026-10-20.md, Thema 206 Schritt 2). The
+    // material pass has no scene depth, so the water mesh brings the water's depth along:
+    // each vertex of a landscape's sheet tilts its normal in x by kShoreNormalGain · e
+    // (WaterMesh.cpp), e = 1 at the waterline falling to 0 at kShoreFadeDepth metres of
+    // water. Read back here (shoreE above) as e = |n.xz| / n.y / gain, depth = (1 − e) ·
+    // kShoreFadeDepth — the magnitude, not n.x alone, because a landscape rotated about Y
+    // moves the tilt between x and z (Thema 206 Schritt 8). A plane (or any mesh without the
+    // channel) has n.x = n.z = 0: e = 0, the depth is the full fade depth, and every term
+    // below is exactly neutral (ramp 1, foam 0, the gate shut), so open water is bit for bit
+    // what it was.
+    //   * alpha ramp: smoothstep over the width, so the edge fades out instead of cutting;
+    //   * the ramp's own edge is wobbled by the foam lace, so the line of the water is
+    //     organic, not the contour of a lattice cell;
+    //   * foam fringe: a lace band over the part of the ramp where it is half there.
+    const int shoreW  = m.op(T::Add, m.un(T::Saturate, Pin{ ts, 2 }, 47, 15), m.k(0.001f, 47, 16), 48, 15);      // never 0
+    const int shoreGate = m.op(T::Step, m.k(1e-4f, 51, 15), shoreE, 52, 15);                                      // 0 on open water
+    const int wobble  = m.op(T::Multiply, m.op(T::Multiply, m.op(T::Subtract, lace, m.k(0.5f, 49, 17), 50, 17), shoreW, 51, 17), m.k(0.6f, 51, 18), 52, 17);
+    const int shoreF  = m.op(T::Divide, m.op(T::Add, shoreD, wobble, 53, 12), shoreW, 54, 12);                    // depth in widths
+    const int rampS   = m.op3(T::Smoothstep, m.k(0.0f, 53, 14), m.k(1.0f, 53, 14.5f), shoreF, 55, 12);
+    const int ramp    = m.op3(T::Lerp, m.k(1.0f, 55, 14), rampS, shoreGate, 56, 12);
+    const int fringe  = m.op(T::Multiply,
+                             m.op3(T::Smoothstep, m.k(0.04f, 53, 16), m.k(0.14f, 53, 16.5f), shoreF, 55, 16),
+                             m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(0.14f, 53, 18), m.k(0.5f, 53, 18.5f), shoreF, 55, 18), 56, 18), 57, 16);
+    const int shoreFoam = m.op(T::Multiply, m.op(T::Multiply, fringe, Pin{ ts, 3 }, 58, 16),
+                               m.op(T::Add, m.k(0.35f, 57, 19), m.op(T::Multiply, breakup, m.k(0.65f, 57, 20), 58, 19), 59, 19), 60, 16);
+    const int foamAll = m.un(T::Saturate, m.op(T::Add, foamAmt, shoreFoam, 61, 16), 62, 16);
+    m.comment("Soft shore", 47, 12, 16, 9);
+
     // Output tail. Far water is rougher: what a pixel can no longer resolve is
     // what a rougher surface averages, and it keeps the horizon from turning into
     // a mirror strip of single-pixel glints.
     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
                               m.k(0.25f, 42, 1.5f), 43, 1);
     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAmt, 46, 7);
-    const int bodyA  = m.op3(T::Lerp, opac, m.k(1.0f, 39, 3), m.un(T::OneMinus, trans, 39, 4), 40, 3);
+    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
+    // Opacity is what clear water still covers looking straight down. Water that is only
+    // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
+    // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
+    // where shoreD is a metre, so neutral outside the shore range).
+    // clearDepth is a user knob too: same branchless max(., eps) clamp as tintStart above.
+    const int epsClear = m.k(0.001f, 36, 1.5f);
+    const int clearOk  = m.op(T::Greater, clearDepth, epsClear, 36, 2);
+    const int clearDepthC = m.op3(T::If, clearOk, clearDepth, epsClear, 37, 2);
+    const int clearMix = m.op3(T::Smoothstep, m.k(0.0f, 37, 3), clearDepthC, shoreD, 38, 3);
+    const int opacEff  = m.op(T::Multiply, opac, m.op3(T::Lerp, opacFloor, m.k(1.0f, 38, 2.5f), clearMix, 39, 2), 40, 2.5f);
+    const int bodyA  = m.op3(T::Lerp, opacEff, m.k(1.0f, 39, 3), m.un(T::OneMinus, trans, 39, 4), 40, 3);
     const int alpha1 = m.op3(T::Lerp, bodyA, m.k(1.0f, 40, 4.5f), m.op(T::Multiply, refl, fres, 40, 2), 41, 3);
-    const int alpha  = m.op3(T::Lerp, alpha1, m.k(1.0f, 41, 4.5f), m.op(T::Multiply, foamAmt, m.k(0.85f, 41, 5), 42, 5), 43, 3);
+    const int alpha0 = m.op3(T::Lerp, alpha1, m.k(1.0f, 41, 4.5f), m.op(T::Multiply, foamAmt, m.k(0.85f, 41, 5), 42, 5), 43, 3);
+    // The shore: the water (and the wave foam on it) fades in over the width, the
+    // shore's own foam comes on top of the ramp and is opaque where it is thick.
+    const int alpha  = m.op3(T::Lerp, m.op(T::Multiply, alpha0, ramp, 44, 3.5f), m.k(1.0f, 44, 4.5f),
+                             m.op(T::Multiply, shoreFoam, m.k(0.85f, 44, 5), 45, 5), 46, 3);
     const int specO  = m.op(T::Multiply, spec, refl, 41, 0);
-    const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAmt, 45, 2);
+    const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAll, 45, 2);
 
     const Under under = undersideTerms(m, geoN, view, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
 
@@ -925,10 +1055,77 @@ Mb waterMaterial()
 // The parameters a material promises, in no particular order — the codegen
 // numbers slots by first use, not by canvas position.
 const std::set<std::string> kWaterParams = {
-    "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "FresnelPower",
-    "Reflection", "Roughness", "Specular", "Opacity", "Refraction", "FoamColor", "Foam",
+    "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "Surface",
+    "ShallowWater", "Opacity", "Refraction", "FoamColor", "Foam",
     "Caustics", "Variation",
 };
+
+// ── Displacement demo (Thema 207) ────────────────────────────────────────────
+// The example for the Output node's Displacement pin: a quilted surface whose
+// cushions GPU tessellation pushes out along the normal (D3D11, D3D12, Vulkan,
+// OpenGL; Metal and Software draw it flat, the pattern still in the colour).
+//
+//     height = |sin(pi N u) · sin(pi N v)| · Height,   N = kDemoCells
+//
+// Plain sine maths and no noise on purpose: value noise hashes a lattice point
+// differently on two GPU compilers (docs/material-graph-tessellation-backends-
+// 2026-10-18.md, the D3D12/Vulkan band), and as a height that is a crack. The
+// height is ZERO on every cell border, and the borders include u, v = 0 and 1,
+// where a mesh's UVs jump: the duplicated vertices of a UV sphere's seam and
+// poles and of a cube's face edges all stay where they are, so nothing tears.
+// N is a baked constant and not a knob for the same reason: a fractional cell
+// count would put a cushion's flank on the seam.
+//
+// The colour reads the same cushion value, so the grooves are dark where the
+// surface stays down and the shape shows on a backend that cannot move it.
+constexpr float kDemoCells = 4.0f;
+
+Mb displacementDemoMaterial()
+{
+    Mb m;
+    const int height = m.param(T::ParamFloat, "Height", { 0.15f }, "Displacement",
+                               "How far a cushion's top rises along the surface normal, in metres. "
+                               "0.5 is the Output node's Max Displacement: more is clamped.", 0,
+                               0.0f, 0.5f);
+    const int top    = m.param(T::ParamColor, "TopColor", { 0.78f, 0.60f, 0.42f }, "Surface",
+                               "Colour of the cushion tops.", 1);
+    const int groove = m.param(T::ParamColor, "GrooveColor", { 0.16f, 0.10f, 0.07f }, "Surface",
+                               "Colour of the grooves between the cushions.", 2);
+
+    const int uv    = m.node(T::UV, 1, 4);
+    const int split = m.un(T::SplitRGBA, uv, 2, 4);
+    const int cells = m.k(kPi * kDemoCells, 2, 5.5f);
+    const int su    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 0 }, cells, 3, 4), 4, 4);
+    const int sv    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 1 }, cells, 3, 5), 4, 5);
+    const int quilt = m.un(T::Absolute, m.op(T::Multiply, su, sv, 5, 4.5f), 6, 4.5f);
+    m.comment("Cushions: zero on every cell border", 1, 4, 6, 2.5f);
+
+    const int disp  = m.op(T::Multiply, quilt, height, 7, 3);
+    const int base  = m.op3(T::Lerp, groove, top, quilt, 7, 1);
+    // Two constants made in one argument list would take their ids in the order the
+    // compiler happens to evaluate it (Clang first-first, MSVC and GCC last-first), so
+    // the .hasset would differ per platform: name them in order.
+    const int roughB  = m.k(0.5f, 6, 7);
+    const int roughA  = m.k(0.85f, 6, 6);
+    const int rough = m.op3(T::Lerp, roughA, roughB, quilt, 7, 6);
+
+    const int out = m.node(T::Output, 9, 3);
+    MatGraphNode& o = *m.g.findNode(out);
+    o.p[0] = 1.0f;                                                  // lit
+    o.p[1] = static_cast<float>(MatBlendMode::Opaque);
+    o.p[3] = static_cast<float>(MatDomain::Surface);
+    // Full factor up to 8 m, none from 40 m on; the clamp is the Height slider's top.
+    o.tess.maxFactor       = 16.0f;
+    o.tess.fadeNear        = 8.0f;
+    o.tess.fadeFar         = 40.0f;
+    o.tess.maxDisplacement = 0.5f;
+    m.link(base,  out, kMatOutputBaseColorPin);
+    m.link(rough, out, kMatOutputRoughnessPin);
+    m.link(disp,  out, kMatOutputDisplacementPin);
+    return m;
+}
+
+const std::set<std::string> kDisplacementDemoParams = { "Height", "TopColor", "GrooveColor" };
 
 // A cap on the longest wire chain, well inside what the editor's own stack
 // holds on every platform (CMakeLists.txt "MSVC main-thread stack"). A graph
@@ -950,9 +1147,10 @@ int main(int argc, char** argv)
 
     // ORDER IS IDENTITY: the index picks the UUID, and a scene that already uses
     // one of these stores that UUID. Append, never reorder.
-    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; };
+    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; bool doubleSided; };
     std::vector<Entry> entries;
-    entries.push_back({ "Water", waterMaterial(), &kWaterParams });
+    entries.push_back({ "Water", waterMaterial(), &kWaterParams, true });
+    entries.push_back({ "DisplacementDemo", displacementDemoMaterial(), &kDisplacementDemoParams, false });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)
@@ -988,7 +1186,7 @@ int main(int argc, char** argv)
         a.nodeGraphJson = materialGraphToJson(e.mb.g);
         // Not read by any backend today (every draw is two-sided), but it is
         // the truth about a water plane seen from below.
-        a.doubleSided   = true;
+        a.doubleSided   = e.doubleSided;
 
         // Pass 1 writes the graph; pass 2 writes what the editor's load path
         // makes of it (see the header: the packer ships the baked fields).

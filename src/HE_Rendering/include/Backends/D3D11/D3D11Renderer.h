@@ -79,6 +79,7 @@ public:
     // the top of the next DrawScene so the build lands on the render thread with the
     // material resources up) — mirrors GL/Metal; cache hits are free.
     void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+    bool SupportsTessellation() const override;
     // Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
     // next material draw re-uploads it.
     void InvalidateTexture(const HE::UUID& textureId) override;

@@ -278,6 +278,14 @@ add_executable(HorizonEditor WIN32
 	NotificationStore.cpp
 	NotificationBar.cpp
 	NotificationPopups.cpp
+	# The Planner's databases and pages (Config/Planner/*): data and files only, no
+	# ImGui; it shares TaskBoard's JSON helpers (TaskBoardJson.h).
+	Planner.cpp
+	PlannerImport.cpp
+	PlannerTasks.cpp
+	PlannerWorkspace.cpp
+	# ...and the editor tab on top of them (Window > Planner).
+	PlannerPanel.cpp
 	# The project's to-do list (Config/TaskBoard.json): data and file only, no ImGui.
 	TaskBoard.cpp
 	# ...its team half: assignees and notices through a team link, no ImGui, no sockets.

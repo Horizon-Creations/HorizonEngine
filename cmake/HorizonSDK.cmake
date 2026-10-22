@@ -56,6 +56,14 @@ include(CMakePackageConfigHelpers)
 # old sibling path in its cache: reconfigure with -UHE_ENGINE_SDK_DIR to move.
 set(HE_ENGINE_SDK_DIR "${DEPLOY_EDITOR}/EngineSDK" CACHE PATH
     "Where the HorizonSDK target installs this tree's lib set of the engine SDK (inside the editor deploy folder; never <editor>/SDK: the editor's POST_BUILD wipes that)")
+# A tree configured before the move still caches the sibling path, and a CACHE set()
+# never overwrites it: the SDK kept going to <deploy>/EngineSDK while the editor (and
+# package_macos.sh) look in <deploy>/Editor/EngineSDK. Move that exact old default
+# along; a path somebody chose on purpose is left alone.
+if(HE_ENGINE_SDK_DIR STREQUAL "${DEPLOY_DIR}/EngineSDK")
+    set(HE_ENGINE_SDK_DIR "${DEPLOY_EDITOR}/EngineSDK" CACHE PATH
+        "Where the HorizonSDK target installs this tree's lib set of the engine SDK (inside the editor deploy folder; never <editor>/SDK: the editor's POST_BUILD wipes that)" FORCE)
+endif()
 
 # The engine as ONE library (step 10): what the exported game loads from its
 # HorizonEngine/ folder. The editor keeps the four libraries it is made of; the

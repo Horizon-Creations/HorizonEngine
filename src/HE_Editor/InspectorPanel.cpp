@@ -12,6 +12,7 @@
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
+#include <HorizonScene/LayerMeshPresets.h>   // the engine's layer meshes as ready-made settings
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -3551,6 +3552,30 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			FoliageLayer* fol = folc->active();
 			Row::inputText("Name##fol", &fol->name); trackEdit();
+			// The engine's own layer meshes (Engine/Meshes, written by mesh_gen) with the
+			// settings that suit them: mesh, detail levels, density, shadows and the
+			// placement rules. Everything stays editable below; applying overwrites it.
+			{
+				static int presetKind = 0;
+				Row::comboZ("Mesh Preset##fol", &presetKind, "Grass Tuft\0Pebble\0Rock A\0Rock B\0Rock C\0Snow Drift\0");
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Apply Preset##fol"))
+				{
+					if (undo) undo->snapshotNow("Apply Foliage Mesh Preset");
+					const HE::LayerMeshKind kind = static_cast<HE::LayerMeshKind>(std::clamp(presetKind, 0, HE::kLayerMeshKindCount - 1));
+					HE::applyLayerMeshPreset(*fol, kind);
+					// The meshes are engine FILES: nothing loads them on its own, and a mesh
+					// that is not resident draws as the fallback cube without a word (see the
+					// cross card below). By UUID once the engine folder is scanned, else by path.
+					for (int lv = 0; lv < HE::layerMeshLevelCount(kind) && ctx.contentManager; ++lv)
+						if (!ctx.contentManager->ensureResident(HE::layerMeshLevelId(kind, lv))
+						    && ctx.contentManager->loadAsset(HE::layerMeshLevelPath(kind, lv)) != HE::layerMeshLevelId(kind, lv))
+							HE_LOG_WARN(Editor, "Foliage: the engine mesh %s is not available — the layer draws the fallback mesh",
+							            HE::layerMeshLevelPath(kind, lv).c_str());
+					trackEdit();
+				}
+				EditorWidgets::helpForLabel("Apply Preset##fol");
+			}
 			// The layer had no way to be pointed at a mesh from here at all:
 			// a Foliage component added from "Add Component" kept a null mesh
 			// and scattered nothing, with only a log line to say why. Same
@@ -3581,6 +3606,33 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
 			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
 			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
+
+			// Where the layer may grow (FoliageLayer::slopeMin ..): all of it decides
+			// the scatter, so every edit re-scatters this layer when it is let go.
+			ImGui::Separator();
+			ImGui::TextUnformatted("Placement");
+			EditorWidgets::helpForKey("Foliage/Placement");
+			Row::dragFloat("Slope Min##fol", &fol->slopeMin, 0.005f, 0.0f, 1.0f, "%.2f");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Slope Max##fol", &fol->slopeMax, 0.005f, 0.0f, 1.0f, "%.2f");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Height Min##fol", &fol->heightMin, 0.5f, -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit,
+			               fol->heightMin > -FoliageLayer::kNoHeightLimit ? "%.1f m" : "no limit");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Height Max##fol", &fol->heightMax, 0.5f, -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit,
+			               fol->heightMax < FoliageLayer::kNoHeightLimit ? "%.1f m" : "no limit");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			{
+				static const char* const kWeightItems[] = { "Off", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
+				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7" };
+				int wl = fol->weightLayer + 1;
+				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, 9))
+				{
+					if (undo) undo->snapshotNow("Foliage Paint Layer");
+					fol->weightLayer = wl - 1;
+					fol->dirty = true;
+				}
+			}
 
 			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
 			// layer, the engine's cross card at the far end. The mesh above is the

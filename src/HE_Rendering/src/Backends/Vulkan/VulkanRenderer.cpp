@@ -4,6 +4,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -1540,9 +1541,27 @@ void VulkanRenderer::createDevice()
     asEnable.pNext = &rqEnable;
     rqEnable.pNext = &bdaEnable;
 
+    // The one core feature: tessellationShader, for the material Displacement pin
+    // (Thema 207). Optional — without it every displacement material draws
+    // untessellated, exactly as with the pin unconnected. HE_TESSELLATION=0 leaves
+    // it off (GL's switch, the A/B reference on the same binary).
+    VkPhysicalDeviceFeatures coreEnable{};
+    {
+        VkPhysicalDeviceFeatures have{};
+        vkGetPhysicalDeviceFeatures(m_physDevice, &have);
+        const char* tessEnv = std::getenv("HE_TESSELLATION");
+        m_tessSupported = have.tessellationShader == VK_TRUE && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        coreEnable.tessellationShader = m_tessSupported ? VK_TRUE : VK_FALSE;
+        HE_LOG_INFO(RHI, "%s", m_tessSupported
+            ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
+            : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
+              "displacement materials draw untessellated");
+    }
+
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dci.pNext                   = wantHwRt ? &asEnable : nullptr;
+    dci.pEnabledFeatures        = &coreEnable;
     dci.queueCreateInfoCount    = 1;
     dci.pQueueCreateInfos       = &qci;
     dci.enabledExtensionCount   = static_cast<uint32_t>(devExts.size());
@@ -2829,6 +2848,8 @@ void VulkanRenderer::createMaterialResources()
     //    the plain fragment(), a baked pak blob). ──
     static_assert(HE::vkmat::kStageVertex   == VK_SHADER_STAGE_VERTEX_BIT,   "vkmat stage bits are Vulkan's");
     static_assert(HE::vkmat::kStageFragment == VK_SHADER_STAGE_FRAGMENT_BIT, "vkmat stage bits are Vulkan's");
+    static_assert(HE::vkmat::kStageTessControl == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, "vkmat stage bits are Vulkan's");
+    static_assert(HE::vkmat::kStageTessEval == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, "vkmat stage bits are Vulkan's");
     auto vkType = [](HE::vkmat::DescKind k) -> VkDescriptorType {
         switch (k)
         {
@@ -2876,7 +2897,9 @@ void VulkanRenderer::createMaterialResources()
         b[nb].binding         = HE::vkmat::kBindings[i].binding;
         b[nb].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
         b[nb].descriptorCount = 1;
-        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages;
+        // The tessellation bits only where the device enabled the feature.
+        b[nb].stageFlags      = HE::vkmat::kBindings[i].stages
+                              & (m_tessSupported ? ~0u : ~HE::vkmat::kStageTess);
         ++nb;
     }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
@@ -3123,6 +3146,18 @@ void VulkanRenderer::updateSkyEnvCube(VkCommandBuffer cmd)
     m_skyEnvValid  = true;
 }
 
+// Displacement pin (Thema 207), OpenGLRenderer::foldDisplacement's rule: the body
+// goes into the shader hash only where it can take effect, so a device without
+// tessellation keeps the unconnected pin's key and pipeline.
+void VulkanRenderer::foldDisplacement(const HE::UUID& materialId, uint64_t& hash)
+{
+    if (!m_tessSupported) return;
+    const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+    if (!ma || ma->customShaderDispGlsl.empty()) return;
+    hash ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+    m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
+}
+
 // `precompiled` (the pak's baked SPIR-V for Vulkan, MaterialShaderLibrary::precompiledFor)
 // wins over the runtime cross-compile — same split as GL's GetOrBuildMaterialProgram and
 // Metal's GetOrBuildMaterialPipeline, and the only source of shaders in a flavour built
@@ -3139,6 +3174,15 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     // handed out as a forward one would write attributes into the lit colour.
     // Cross-compiled only and never the clustered variant: the pak bakes no
     // G-buffer SPIR-V, and its forward variant would write LIT colour into GB0.
+    // Displacement (Thema 207): foldDisplacement filed the body under this very
+    // hash (before the G-buffer salt below), only on a device with tessellation.
+    const std::string* disp = nullptr;
+    if (m_tessSupported)
+        if (auto it = m_tessDispByKey.find(hash); it != m_tessDispByKey.end()) disp = &it->second;
+    // A height that samples heLandscapeWeights on a device whose layout left binding
+    // 14 out (see below) would make the pipeline invalid: draw it untessellated.
+    if (disp && !m_matLandscapeWeights && disp->find("heLandscapeWeights") != std::string::npos)
+        disp = nullptr;
     if (gbuffer)
     {
         if (m_gbufferRP == VK_NULL_HANDLE) return VK_NULL_HANDLE;
@@ -3274,11 +3318,40 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         return VK_NULL_HANDLE;
     }
 
-    VkPipelineShaderStageCreateInfo stages[2]{};
+    // Displacement: the two tessellation stages between the (unchanged) vertex and
+    // fragment stage. Cross-compiled even next to a baked pair (a pak carries no
+    // tessellation stages yet), so without shaderc the material simply draws
+    // untessellated — the fallback, never a missing draw.
+    VkShaderModule tcs = VK_NULL_HANDLE, tes = VK_NULL_HANDLE;
+    if (disp)
+    {
+        const uint64_t dh = std::hash<std::string>{}(*disp);
+        const HE::MaterialShaderLibrary::Compiled& tc = m_matShaderLib.tessControl(dh, *disp, Backend::SpirV);
+        const HE::MaterialShaderLibrary::Compiled& te = m_matShaderLib.tessEval(dh, *disp, Backend::SpirV);
+        if (tc.ok && te.ok && !tc.spirv.empty() && !te.spirv.empty())
+        {
+            tcs = makeModule(tc.spirv);
+            tes = makeModule(te.spirv);
+        }
+        if (!tcs || !tes)
+        {
+            if (tcs) vkDestroyShaderModule(m_device, tcs, nullptr);
+            if (tes) vkDestroyShaderModule(m_device, tes, nullptr);
+            tcs = tes = VK_NULL_HANDLE;
+            HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: displacement stages failed to cross-compile, "
+                "drawing the material untessellated\n") + tc.log + te.log).c_str());
+        }
+    }
+
+    VkPipelineShaderStageCreateInfo stages[4]{};
     stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vs; stages[0].pName = "main";
     stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+    stages[2].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[2].stage  = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;    stages[2].module = tcs; stages[2].pName = "main";
+    stages[3].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[3].stage  = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT; stages[3].module = tes; stages[3].pName = "main";
 
     // Vertex input identical to the scene pipeline (binding 0 = interleaved pos/normal/uv,
     // 32 B; the standard/custom vertex reads attribute locations 0/1/2). The instanced
@@ -3307,6 +3380,10 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    // Patches of the mesh's own triangles; the topology is baked into the
+    // pipeline, so the draw loop's vkCmdDrawIndexed stays as it is.
+    VkPipelineTessellationStateCreateInfo ts{ VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+    ts.patchControlPoints = 3;
     VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
     vp.viewportCount = 1; vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
@@ -3368,20 +3445,41 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     pci.renderPass          = rp;
     pci.subpass             = 0;
 
+    // Four stages as one PATCH_LIST pipeline; one the tessellation stages broke is
+    // built again without them (displacement ignored, logged — cached either way).
+    auto setTess = [&](bool on) {
+        pci.stageCount         = on ? 4u : 2u;
+        pci.pTessellationState = on ? &ts : nullptr;
+        ia.topology            = on ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    };
+    setTess(tcs != VK_NULL_HANDLE);
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (createGraphicsPipelines(1, &pci, nullptr, &pipe) != VK_SUCCESS)
+    VkResult pr = createGraphicsPipelines(1, &pci, nullptr, &pipe);
+    if (pr != VK_SUCCESS && tcs != VK_NULL_HANDLE)
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: material pipeline with tessellation stages failed, "
+            "drawing it untessellated");
+        setTess(false);
+        pipe = VK_NULL_HANDLE;
+        pr = createGraphicsPipelines(1, &pci, nullptr, &pipe);
+    }
+    if (pr != VK_SUCCESS)
     {
         HE_LOG_ERROR(RHI, "%s", instanced
             ? "VulkanRenderer: A4 instanced material pipeline creation failed, its batches draw per instance"
             : "VulkanRenderer: A4 material pipeline creation failed");
         pipe = VK_NULL_HANDLE;
     }
+    else if (pci.stageCount == 4u)
+        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: built a tessellated material pipeline (Displacement pin)");
     else if (instanced)
         HE_LOG_INFO(RHI, "%s", gbuffer
             ? "VulkanRenderer: built an INSTANCED G-buffer material twin (one draw per batch)"
             : "VulkanRenderer: built an INSTANCED material twin (one draw per batch)");
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
+    if (tcs) vkDestroyShaderModule(m_device, tcs, nullptr);
+    if (tes) vkDestroyShaderModule(m_device, tes, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
     return pipe;
 }
@@ -8040,7 +8138,7 @@ bool VulkanRenderer::uploadRGBA8Image(const uint8_t* rgba, uint32_t width, uint3
     return true;
 }
 
-// Upload a cooked TextureAsset (RGBA8 or block-compressed BC7/BC3) with its full
+// Upload a cooked TextureAsset (RGBA8 or block-compressed BC7/BC3/BC1/BC4/BC5) with its full
 // pre-baked mip chain to a device-local sampled image + view. All levels are staged
 // into one buffer and copied per-mip; block formats use no runtime mip generation.
 // Returns false when the device can't sample the shipped format (→ untextured draw).
@@ -8069,24 +8167,40 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     case TextureFormat::RGBA8: vkFmt = srgb ? VK_FORMAT_R8G8B8A8_SRGB   : VK_FORMAT_R8G8B8A8_UNORM;  isBlock = false; break;
     case TextureFormat::BC7:   vkFmt = srgb ? VK_FORMAT_BC7_SRGB_BLOCK  : VK_FORMAT_BC7_UNORM_BLOCK; isBlock = true;  break;
     case TextureFormat::BC3:   vkFmt = srgb ? VK_FORMAT_BC3_SRGB_BLOCK  : VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
+    // BC1 as the opaque RGB variant (alpha reads 1), like GL's RGB_S3TC_DXT1.
+    case TextureFormat::BC1:   vkFmt = srgb ? VK_FORMAT_BC1_RGB_SRGB_BLOCK : VK_FORMAT_BC1_RGB_UNORM_BLOCK; isBlock = true; break;
+    // BC4 / BC5 have no sRGB twin: they carry data (single channel, normal XY).
+    case TextureFormat::BC4:   vkFmt = VK_FORMAT_BC4_UNORM_BLOCK; isBlock = true; break;
+    case TextureFormat::BC5:   vkFmt = VK_FORMAT_BC5_UNORM_BLOCK; isBlock = true; break;
     default: return false;
     }
     // Texture ARRAY (Thema 158): every slice of a layers > 1 asset, one after the
     // other in the staging buffer exactly as HE::buildTextureArray stores them
-    // (slice-major, each slice with its full chain). RGBA8 only. A 2D asset in an
+    // (slice-major, each slice with its full chain), RGBA8 or a block format. A 2D asset in an
     // array slot is one slice; an array asset in a 2D slot reads slice 0 -- its
     // leading bytes -- through the plain path below.
     const uint32_t layers = asArray ? std::max<uint32_t>(1, tex->layers) : 1;
-    if (layers > 1 && (isBlock || !HE::textureArrayPayloadValid(*tex))) return false;
-    // Device must actually sample this format (BC support is optional in Vulkan).
+    if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false;
+    // Device must actually sample this format (BC support is optional in Vulkan). A
+    // format the CPU can expand (BC1/BC3/BC4/BC5) is uploaded as RGBA8 instead of
+    // leaving the draw untextured.
     VkFormatProperties fp{};
     vkGetPhysicalDeviceFormatProperties(m_physDevice, vkFmt, &fp);
-    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) return false;
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+    {
+        TextureAsset rgba;
+        if (!isBlock || !HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+            return false;
+        HE_LOG_WARN(RHI, "VulkanRenderer: device can't sample %s textures; uploading them as RGBA8",
+                    textureFormatName(tex->format));
+        return uploadTextureImage(&rgba, image, memory, view, asArray, honourSrgb);
+    }
 
-    // Per-level byte size + running offsets (level 0 first). Block: 16 B/4x4 block.
-    auto levelBytes = [isBlock](uint32_t w, uint32_t h) -> VkDeviceSize {
-        return isBlock ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * 16
-                       : static_cast<VkDeviceSize>(w) * h * 4;
+    // Per-level byte size + running offsets (level 0 first). Block: 8 B (BC1/BC4) or
+    // 16 B per 4x4 block.
+    const TextureFormat texFmt = tex->format;
+    auto levelBytes = [texFmt](uint32_t w, uint32_t h) -> VkDeviceSize {
+        return static_cast<VkDeviceSize>(textureLevelBytes(texFmt, w, h));
     };
     std::vector<VkDeviceSize> offsets(mips);
     VkDeviceSize total = 0;
@@ -8164,8 +8278,9 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
       for (uint32_t l = 0; l < mips; ++l)
       {
         VkBufferImageCopy region{};
-        // Multiple of 16 for blocks; a multiple of 4 for RGBA8 (the only array
-        // format). stageOff is 16-aligned, so the sum keeps both.
+        // Must be a multiple of the texel block size: 8 or 16 for blocks, 4 for RGBA8.
+        // stageOff is 16-aligned and every level/slice size is a whole number of
+        // blocks, so the sum keeps it.
         region.bufferOffset     = stageOff + s * sliceBytes + offsets[l];
         region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, s, 1 };
         region.imageExtent      = { lw, lh, 1 };
@@ -8346,15 +8461,19 @@ void VulkanRenderer::drainMaterialWarmup(bool hdr)
     {
         uint64_t hash = 0; std::string frag, vertBody;
         if (!m_matShaderLib.resolveShaders(*m_contentManager, id, hash, frag, vertBody)) continue;
+        foldDisplacement(id, hash);
         // Deferred (Thema 150): the G-buffer variant too, so the first deferred
         // frame does not hitch on its cross-compile (GL's WarmupMaterials rule).
         // Only for the HDR viewport frame, the one that renders deferred.
         if (hdr && m_deferredReady && m_renderPath == HE::RenderPath::Deferred)
         {
             uint64_t gbHash = 0; std::string gbFrag, gbVert;
-            if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, id, gbHash, gbFrag, gbVert)
-                && GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
-                ++built;
+            if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, id, gbHash, gbFrag, gbVert))
+            {
+                foldDisplacement(id, gbHash);
+                if (GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
+                    ++built;
+            }
         }
         const MaterialAsset* ma = m_contentManager->getMaterial(id);
         const bool transparent = ma && (ma->blendMode == 2
@@ -8939,6 +9058,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                   matHash, matFrag, matVertBody))
                 {
+                    foldDisplacement(dc.materialAssetId, matHash);
                     // Transparent graph materials get a blend-on / depth-write-off
                     // pipeline variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
@@ -8967,8 +9087,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
                         if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                  gbHash, gbFrag, gbVertBody))
+                        {
+                            foldDisplacement(dc.materialAssetId, gbHash);
                             matPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
                                                                  true, false, /*gbuffer=*/true);
+                        }
                         if (matPipe == VK_NULL_HANDLE)
                         {
                             deferredForwardDCs.push_back(&dc);

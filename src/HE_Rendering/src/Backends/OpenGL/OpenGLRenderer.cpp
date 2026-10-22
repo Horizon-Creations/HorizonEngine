@@ -3,6 +3,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the context cannot sample them
 #include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
@@ -3386,6 +3387,18 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", m_forwardClustered
 		? "OpenGLRenderer: graph materials use clustered lighting (SSBO 4/5/6)"
 		: "OpenGLRenderer: graph materials use the 8-light window (GL < 4.3 or HE_FORWARD_CLUSTER=0)");
+	// Displacement tessellation (Thema 207): core since GL 4.0, so macOS (4.1)
+	// has it too. HE_TESSELLATION=0 turns it off for an A/B against the fallback,
+	// which draws exactly what an unconnected pin draws. Patches are always
+	// triangles; nothing else on GL draws patches, so the state is set once.
+	m_tessSupported = GLAD_GL_VERSION_4_0 != 0 && glPatchParameteri != nullptr;
+	if (const char* t = std::getenv("HE_TESSELLATION"); t && *t && std::atoi(t) == 0)
+		m_tessSupported = false;
+	if (m_tessSupported)
+		glPatchParameteri(GL_PATCH_VERTICES, 3);
+	HE_LOG_INFO(RHI, "%s", m_tessSupported
+		? "OpenGLRenderer: displacement materials tessellate (GL 4.0+)"
+		: "OpenGLRenderer: no tessellation (GL < 4.0 or HE_TESSELLATION=0), displacement is ignored");
 
 	// Deferred-path debug/headless knobs (mirrors the Metal backend):
 	// HE_RENDER_PATH=1/deferred forces the path without touching config,
@@ -3599,14 +3612,27 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
                                            std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody)) return false;
+	foldDisplacement(materialId, key);
+	return true;
 }
 
 bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                              std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody)) return false;
+	foldDisplacement(materialId, key);
+	return true;
+}
+
+void OpenGLRenderer::foldDisplacement(const HE::UUID& materialId, uint64_t& key)
+{
+	if (!m_tessSupported) return; // the fallback: the unconnected pin's key and program
+	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	if (!ma || ma->customShaderDispGlsl.empty()) return;
+	key ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+	m_tessDispByKey.try_emplace(key, ma->customShaderDispGlsl);
 }
 
 // Build (or fetch) a GL program for a material's custom fragment. The shared library
@@ -3783,6 +3809,20 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
 	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
+	// A displacement material gets no instanced twin (yet): DrawGraphBatchInstanced draws
+	// GL_TRIANGLES, which a program with tessellation stages rejects (GL_INVALID_OPERATION,
+	// the batch vanishes). The batch falls back to the per-instance loop, which draws the
+	// plain program as GL_PATCHES (MaterialPrimitive). Tessellated instancing would pass
+	// GL_PATCHES there and is a step of its own. The twin shares the plain program's
+	// displacement body (m_tessDispByKey is filed under `key`), so without this return it
+	// would link TCS/TES too.
+	if (instanced && m_tessSupported && m_tessDispByKey.count(key))
+	{
+		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: no instanced twin for a displacement material, "
+			"its batches draw per instance (tessellated)");
+		m_materialPrograms[progKey] = 0;
+		return 0;
+	}
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
@@ -3811,6 +3851,24 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
 		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
+	};
+	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
+	// the rest of the program. Cross-compiled even next to a PRECOMPILED pair (a pak
+	// carries no tessellation stages yet), so without shaderc the material simply
+	// draws untessellated — the fallback, never a missing draw.
+	const std::string* disp = nullptr;
+	if (m_tessSupported)
+		if (auto it = m_tessDispByKey.find(key); it != m_tessDispByKey.end()) disp = &it->second;
+	std::string tcSrc, teSrc;
+	auto tessStages = [&](Backend b) {
+		tcSrc.clear(); teSrc.clear();
+		if (!disp) return;
+		const uint64_t h = std::hash<std::string>{}(*disp);
+		const auto& tc = m_matShaderLib.tessControl(h, *disp, b);
+		const auto& te = m_matShaderLib.tessEval(h, *disp, b);
+		if (tc.ok && te.ok) { tcSrc = tc.source; teSrc = te.source; return; }
+		HE_LOG_WARN(RHI, "%s", (std::string("OpenGLRenderer: displacement stages failed to cross-compile, "
+			"drawing the material untessellated\n") + tc.log + te.log).c_str());
 	};
 	if (precompiled)
 		usePrecompiled(clustered);
@@ -3888,8 +3946,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// Fast path: a linked binary cached from a previous launch — skips the
 		// GLSL compile + link entirely. Only when the driver supports binaries.
 		const bool cacheable = glProgramBinarySupported();
+		// The tessellation stages are part of the program, so part of its cache
+		// key (a two-stage binary must never answer for a four-stage key).
+		const std::string vertKey = tcSrc.empty() ? vertSrc
+			: vertSrc + "\x1d" + tcSrc + "\x1d" + teSrc;
 		const std::filesystem::path cachePath =
-			cacheable ? glProgramCachePath(vertSrc, fragSrc) : std::filesystem::path{};
+			cacheable ? glProgramCachePath(vertKey, fragSrc) : std::filesystem::path{};
 		if (cacheable)
 			if (GLuint cached = glTryLoadCachedProgram(cachePath))
 			{
@@ -3899,14 +3961,33 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 				return cached;
 			}
 
+		// Tessellation stages first: a driver that rejects them leaves the material
+		// to the two-stage program (the caller retries without), not to an exception.
+		GLuint tcs = 0, tes = 0;
+		if (!tcSrc.empty())
+		{
+			try
+			{
+				tcs = CompileStage(GL_TESS_CONTROL_SHADER,    tcSrc.c_str());
+				tes = CompileStage(GL_TESS_EVALUATION_SHADER, teSrc.c_str());
+			}
+			catch (const std::exception& e)
+			{
+				if (tcs) glDeleteShader(tcs);
+				HE_LOG_ERROR(RHI, "%s", e.what());
+				return 0u;
+			}
+		}
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
 		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
 		if (cacheable) glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 		glAttachShader(prog, vs);
+		if (tcs) { glAttachShader(prog, tcs); glAttachShader(prog, tes); }
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
+		if (tcs) { glDeleteShader(tcs); glDeleteShader(tes); }
 		GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
 		if (!linked)
 		{
@@ -3928,7 +4009,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		return prog;
 	};
 
-	unsigned int program = ok ? linkSources() : 0;
+	// Link; a program the tessellation stages broke is linked again without them
+	// (displacement ignored, logged once — this program is cached either way).
+	auto linkWithTess = [&](Backend tessBackend) -> unsigned int {
+		tessStages(tessBackend);
+		unsigned int p = ok ? linkSources() : 0;
+		if (!p && ok && !tcSrc.empty())
+		{
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: material program with tessellation stages failed, "
+				"drawing it untessellated");
+			tcSrc.clear(); teSrc.clear();
+			p = linkSources();
+		}
+		return p;
+	};
+	unsigned int program = linkWithTess(clustered ? Backend::GLSL430 : Backend::GLSL410);
 	if (!program && clustered)
 	{
 		// The GLSL 4.30 pair (cross-compiled or baked) but the driver rejected
@@ -3938,8 +4033,10 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		clustered = false;
 		if (precompiled) usePrecompiled(false);
 		else             crossCompile(Backend::GLSL410, false);
-		program = ok ? linkSources() : 0;
+		program = linkWithTess(Backend::GLSL410);
 	}
+	if (program && !tcSrc.empty())
+		m_tessPrograms.insert(program); // drawn as GL_PATCHES (MaterialPrimitive)
 	if (!ok)
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
@@ -8503,6 +8600,12 @@ bool OpenGLRenderer::EnsureDecalProgram()
 #ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
 #  define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
 #endif
+#ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
+#  define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
+#endif
+#ifndef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+#  define GL_COMPRESSED_SRGB_S3TC_DXT1_EXT 0x8C4C
+#endif
 
 namespace {
 
@@ -8542,6 +8645,66 @@ bool glSupportsS3tc()
 	return has;
 }
 
+// BC4/BC5 (RED_RGTC1 / RG_RGTC2): core since GL 3.0, so it is never listed as an
+// extension on a 3.0+ context (macOS GL 4.1 lists none and takes both; measured
+// with glCompressedTexImage3D on a 2D array). The extension names cover a context
+// below 3.0 that still ships it.
+bool glSupportsRgtc()
+{
+	static const bool has = [] {
+		GLint major = 0;
+		glGetIntegerv(GL_MAJOR_VERSION, &major);
+		if (major >= 3) return true;
+		return glHasExtension("GL_ARB_texture_compression_rgtc")
+		    || glHasExtension("GL_EXT_texture_compression_rgtc");
+	}();
+	return has;
+}
+
+// The GL internalformat for a block TextureFormat, or 0 when this context can't
+// sample it (ASTC never; BC7 below GL 4.2, i.e. Apple GL). RGTC has no sRGB twin, so
+// BC4/BC5 ignore the flag (they carry data: roughness, height, normal XY).
+GLenum glBlockInternalFormat(TextureFormat f, bool srgb)
+{
+	switch (f)
+	{
+	case TextureFormat::BC7:
+		if (!glSupportsBptc()) return 0;
+		return srgb ? GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM : GL_COMPRESSED_RGBA_BPTC_UNORM;
+	case TextureFormat::BC3:
+		if (!glSupportsS3tc()) return 0;
+		return srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+	case TextureFormat::BC1:
+		if (!glSupportsS3tc()) return 0;
+		return srgb ? GL_COMPRESSED_SRGB_S3TC_DXT1_EXT : GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+	case TextureFormat::BC4:
+		return glSupportsRgtc() ? GL_COMPRESSED_RED_RGTC1 : 0;
+	case TextureFormat::BC5:
+		return glSupportsRgtc() ? GL_COMPRESSED_RG_RGTC2 : 0;
+	default:
+		return 0;
+	}
+}
+
+// A block-compressed asset this context can't sample but the CPU can expand (BC1,
+// BC3, BC4, BC5): one log line per format, then the caller uploads the RGBA8 copy
+// instead of leaving the draw flat. Returns false when there is no decode (BC7 on
+// Apple GL, ASTC) — the caller bails as before.
+bool glDecodeUnsupportedBlock(const TextureAsset* tex, TextureAsset& rgba)
+{
+	if (!HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+		return false;
+	static bool warned[8] = {};
+	const size_t f = static_cast<size_t>(tex->format);
+	if (f < 8 && !warned[f])
+	{
+		warned[f] = true;
+		HE_LOG_WARN(RHI, "OpenGLRenderer: this GL context can't sample %s textures; uploading them as RGBA8",
+		            textureFormatName(tex->format));
+	}
+	return true;
+}
+
 // Upload a TextureAsset (RGBA8 or a cooked block format) to a fresh GL texture and
 // return its id (0 if unusable / the GPU can't sample the shipped format). Cooked
 // textures ship a pre-baked mip chain — for block formats there is no runtime mip
@@ -8563,19 +8726,18 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
 	const bool srgb = tex->srgb && honourSrgb;
 
-	// Resolve the block format's GL internalformat, or bail (→ flat) when this GL
-	// context can't sample it. ASTC is Metal-only and never shipped to GL.
+	// Resolve the block format's GL internalformat, or fall back to an RGBA8 copy when
+	// this GL context can't sample it (BC7 and ASTC have no CPU decoder → flat). ASTC
+	// is Metal-only and never shipped to GL.
 	GLenum blockFmt = 0;
-	switch (tex->format)
+	if (tex->format != TextureFormat::RGBA8)
 	{
-	case TextureFormat::RGBA8: break;
-	case TextureFormat::BC7:
-		if (!glSupportsBptc()) return 0;
-		blockFmt = srgb ? GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM : GL_COMPRESSED_RGBA_BPTC_UNORM; break;
-	case TextureFormat::BC3:
-		if (!glSupportsS3tc()) return 0;
-		blockFmt = srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
-	default: return 0; // ASTC_4x4 / unknown → GL can't sample it
+		blockFmt = glBlockInternalFormat(tex->format, srgb);
+		if (blockFmt == 0)
+		{
+			TextureAsset rgba;
+			return glDecodeUnsupportedBlock(tex, rgba) ? uploadTextureAssetGL(&rgba, honourSrgb) : 0;
+		}
 	}
 	const GLenum rgbaFmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 
@@ -8585,11 +8747,11 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 
 	if (blockFmt != 0)
 	{
-		// Pre-baked, pre-compressed mip chain (16 B / 4x4 block, level 0 first).
+		// Pre-baked, pre-compressed mip chain (8 or 16 B / 4x4 block, level 0 first).
 		size_t off = 0; uint32_t lw = static_cast<uint32_t>(tex->width), lh = static_cast<uint32_t>(tex->height);
 		for (uint32_t l = 0; l < mips; ++l)
 		{
-			const size_t bytes = static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+			const size_t bytes = textureLevelBytes(tex->format, lw, lh);
 			if (off + bytes > tex->data.size()) break; // truncated payload guard
 			glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), blockFmt,
 			                       static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 0,
@@ -8627,44 +8789,76 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = tru
 }
 
 // The GL_TEXTURE_2D_ARRAY twin of uploadTextureAssetGL for a sampler2DArray heTexP
-// slot (Thema 158). A texture ARRAY asset (layers > 1, RGBA8, HE::buildTextureArray
-// layout: slice-major, each slice with its own chain) uploads every stored level of
-// every slice — no glGenerateMipmap, so GL samples the very levels D3D/Vulkan/Metal
-// do. A plain 2D asset in an array slot becomes a ONE-slice array, mipped the way
-// uploadTextureAssetGL mips it. 0 = unusable (block formats are not array-capable
-// yet) → the caller binds the white array.
+// slot (Thema 158). A texture ARRAY asset (layers > 1, HE::buildTextureArray layout:
+// slice-major, each slice with its own chain) uploads every stored level of every
+// slice — no glGenerateMipmap, so GL samples the very levels D3D/Vulkan/Metal do. A
+// plain 2D asset in an array slot becomes a ONE-slice array, mipped the way
+// uploadTextureAssetGL mips it. Block formats (BC1/BC3/BC4/BC5/BC7) upload per level
+// through glCompressedTexImage3D. 0 = unusable → the caller binds the white array.
 unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 {
-	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
-	    || tex->format != TextureFormat::RGBA8)
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
 		return 0;
 	const bool     isArray = tex->layers > 1;
 	if (isArray && !HE::textureArrayPayloadValid(*tex)) return 0;
 	const uint32_t layers  = isArray ? tex->layers : 1;
 	const uint32_t mips    = tex->mipLevels > 0 ? tex->mipLevels : 1;
-	const GLenum   fmt     = tex->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 	const uint32_t w = tex->width, h = tex->height;
-	if (!isArray && tex->data.size() < HE::textureArraySliceBytes(w, h, mips)) return 0;
+	if (!isArray && tex->data.size() < HE::textureArraySliceBytes(w, h, mips, tex->format)) return 0;
+
+	GLenum blockFmt = 0;
+	if (tex->format != TextureFormat::RGBA8)
+	{
+		blockFmt = glBlockInternalFormat(tex->format, tex->srgb);
+		if (blockFmt == 0)
+		{
+			TextureAsset rgba;
+			return glDecodeUnsupportedBlock(tex, rgba) ? uploadTextureArrayGL(&rgba) : 0;
+		}
+	}
+	const GLenum   fmt     = tex->srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 
 	unsigned int id = 0;
 	glGenTextures(1, &id);
 	glBindTexture(GL_TEXTURE_2D_ARRAY, id);
 	uint32_t lw = w, lh = h;
+	std::vector<uint8_t> gather; // one level of every slice, contiguous (block formats)
 	for (uint32_t l = 0; l < mips; ++l)
 	{
-		glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), static_cast<GLint>(fmt),
-		             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
-		             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		for (uint32_t s = 0; s < layers; ++s)
-			glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), 0, 0, static_cast<GLint>(s),
-			                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE,
-			                tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l));
+		if (blockFmt != 0)
+		{
+			// glCompressedTexImage3D takes the whole level, slices back to back; the asset
+			// stores slice-major, so collect this level from each slice first. (A null data
+			// pointer to allocate and then fill per slice is not portable for compressed
+			// formats, the uncompressed path below can do that.)
+			const size_t levelBytes = textureLevelBytes(tex->format, lw, lh);
+			gather.resize(levelBytes * layers);
+			for (uint32_t s = 0; s < layers; ++s)
+				std::memcpy(gather.data() + levelBytes * s,
+				            tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l, tex->format),
+				            levelBytes);
+			glCompressedTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), blockFmt,
+			                       static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
+			                       0, static_cast<GLsizei>(gather.size()), gather.data());
+		}
+		else
+		{
+			glTexImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), static_cast<GLint>(fmt),
+			             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), static_cast<GLsizei>(layers),
+			             0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			for (uint32_t s = 0; s < layers; ++s)
+				glTexSubImage3D(GL_TEXTURE_2D_ARRAY, static_cast<GLint>(l), 0, 0, static_cast<GLint>(s),
+				                static_cast<GLsizei>(lw), static_cast<GLsizei>(lh), 1, GL_RGBA, GL_UNSIGNED_BYTE,
+				                tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l));
+		}
 		lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
 	}
 	if (mips > 1)
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(mips - 1));
-	else
+	else if (blockFmt == 0)
 		glGenerateMipmap(GL_TEXTURE_2D_ARRAY); // a loose single-level 2D asset, as for 2D
+	else
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0); // compressed data can't be mipped on the GPU
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -9201,7 +9395,7 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	}
 
 	glBindVertexArray(drawVAO);
-	glDrawElements(GL_TRIANGLES, drawIdxCount, GL_UNSIGNED_INT, nullptr);
+	glDrawElements(MaterialPrimitive(prog), drawIdxCount, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 	glActiveTexture(GL_TEXTURE0);
 	return true;
@@ -10412,6 +10606,8 @@ void OpenGLRenderer::Shutdown()
 	// variants), and a cleanup that skipped them there would simply leak.
 	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
 	m_materialPrograms.clear();
+	m_tessPrograms.clear(); // ids are reused once deleted
+	m_tessDispByKey.clear();
 	for (auto& [k, prog] : m_uiMaterialPrograms) if (prog) glDeleteProgram(prog);
 	m_uiMaterialPrograms.clear();
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
@@ -12051,7 +12247,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
-						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						glDrawElements(MaterialPrimitive(gbProg), indexCount, GL_UNSIGNED_INT, indexOffset);
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
@@ -12358,7 +12554,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
-						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						glDrawElements(MaterialPrimitive(matProg), indexCount, GL_UNSIGNED_INT, indexOffset);
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
@@ -12655,7 +12851,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
+					glDrawElements(MaterialPrimitive(t.matProg), t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 					continue;
@@ -12954,7 +13150,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glActiveTexture(GL_TEXTURE17);
 					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
+					glDrawElements(MaterialPrimitive(t.matProg), t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);

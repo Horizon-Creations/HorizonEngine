@@ -8,6 +8,8 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_material_tessellation.cpp
+    test_auto_landscape_variants.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
@@ -97,6 +99,9 @@ add_executable(he_tests
     # HE_DUMP_RHI against the config's RHI: the forced backend is the one the
     # editor keeps after OnInit, or its first UI frame crashes (Thema 124, A6).
     test_editor_backend_choice.cpp
+    # Window size/position/maximized remembered across starts: the pure rules,
+    # incl. the fall-back when the saved monitor is gone.
+    test_editor_window_placement.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
@@ -117,12 +122,13 @@ add_executable(he_tests
     # The Watch window, driven the same way: sections and rows from a real
     # runtime stopped at a breakpoint, Go to Node raising the reveal.
     test_hc_watch_ui.cpp
-    # The Task Board window, driven the same way: cards from a real board in a
-    # real project, links dropped onto them, chips that select and jump.
-    test_taskboard_ui.cpp
     # The board's footer widget in a stand-in footer: one line tall in every
     # state, kept out of the middle, and its list ticks tasks off on disk.
     test_taskboard_footer_ui.cpp
+    # The Planner tab, driven the same way: Tasks is the Task Board (a new row, a
+    # title typed into a cell, links dropped on it and chips that jump, a pull under
+    # it, assignees from a team), a header sort, a card dragged to another lane.
+    test_planner_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -140,6 +146,10 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    # The Material Editor tab, driven the same way: the Tessellation cell and its
+    # popup while the Displacement pin is wired, on a renderer that tessellates
+    # and on one that does not (Thema 207).
+    test_material_editor_ui.cpp
     # The reward moments: once per frame, once per build run, the fade.
     test_editor_rewards.cpp
     test_editorcamera.cpp
@@ -200,6 +210,10 @@ add_executable(he_tests
     test_foliage_cluster.cpp
     # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
     test_foliage_layers.cpp
+    # Placement rules of a foliage layer (Thema 180 S4): slope, height, paint weight, determinism.
+    test_foliage_rules.cpp
+    # The layer meshes through the instancing path (Thema 180 S5): boxes, flat draw count, passes.
+    test_layer_mesh_instancing.cpp
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
@@ -307,6 +321,10 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
+    test_texture_bcn.cpp
+    # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
+    test_bench_landscape_arrays.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
@@ -322,6 +340,10 @@ add_executable(he_tests
     test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
+    # The Planner's databases and pages and their files (Config/Planner/*).
+    test_planner.cpp
+    # ...its workspace and the Task Board import (ImGui-free).
+    test_planner_workspace.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
     test_taskboard_team.cpp
@@ -665,6 +687,11 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     # The task board's data and its project file (test_task_board.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
+    # The Planner over the same helpers (test_planner.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Planner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerImport.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerTasks.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerWorkspace.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
@@ -888,12 +915,15 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
-    # The Task Board window, for test_taskboard_ui.cpp: same AppContext, same
-    # per-file HE_IMGUI_ENABLED. It reads TaskBoard, EditorCommands and the
-    # thumbnail cache, all already here.
+    # The Task Board's data core and link chips (the window is the Planner's now):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. It reads TaskBoard,
+    # EditorCommands and the thumbnail cache, all already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
     # And its footer widget, for test_taskboard_footer_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
+    # The Planner tab, for test_planner_ui.cpp: same AppContext, same per-file
+    # HE_IMGUI_ENABLED. It reads the Planner (already here) and the Task Board.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -951,6 +981,10 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The Material Editor tab, for test_material_editor_ui.cpp (Thema 207): same
+    # AppContext, same per-file HE_IMGUI_ENABLED. The canvas (GraphEditor), the
+    # pickers, the thumbnail cache and the shader library are already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
     # The profiler's Streaming tab and the editor's split/merge of streaming
     # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
     # outside symbol, the Scene window's show flags, is stubbed in
@@ -986,12 +1020,13 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
-    test_taskboard_ui.cpp
     # Builds an AppContext for TaskBoardPanel::board/edit: its layout must be
     # the one the panel was compiled with.
     test_mcp_tools_taskboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     test_taskboard_footer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
+    test_planner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
@@ -1023,6 +1058,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
+    test_material_editor_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp

@@ -75,6 +75,7 @@ public:
 	// the top of the next DrawScene: render thread, material resources up, and the pass
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	bool SupportsTessellation() const override { return m_tessSupported; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
 	void InvalidateTexture(const HE::UUID& textureId) override;
@@ -484,6 +485,15 @@ private:
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
+	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
+	// the material's displacement body into the shader hash right after resolveShaders
+	// and files it under the folded hash, where GetOrBuildMaterialPipeline picks it up
+	// and builds a four-stage PATCH_LIST pipeline. Off, or failed → the unconnected
+	// pin's key and pipeline (the fallback).
+	bool        m_tessSupported = false;
+	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+	void        foldDisplacement(const HE::UUID& materialId, uint64_t& hash);
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 

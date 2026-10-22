@@ -9403,15 +9403,18 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 // ─── Material override texture ──────────────────────────────────────────────
 // Map a cooked TextureFormat to its Metal pixel format, whether this DEVICE can
 // sample it, and whether it's block-compressed (all block formats here are
-// 16 B / 4x4 so they share the upload byte-math). ASTC needs Apple-family GPUs
-// (Apple Silicon); BC7/BC3 need BC support (Intel/AMD Macs, macOS 11+). These are
+// 4x4 texel blocks; their byte size is textureLevelBytes). ASTC needs Apple-family
+// GPUs (Apple Silicon); the BC formats need BC support (Intel/AMD Macs, macOS 11+;
+// BC1/BC4/BC5 are available wherever BC7/BC3 are, but nothing in the engine ships
+// them to Metal yet: Apple Silicon takes ASTC). These are
 // mutually exclusive on a given GPU — which is why one pak can't serve both Metal
 // and OpenGL on Apple Silicon (see EditorUI texture-compression selection).
 // `srgb` (TextureAsset::srgb, the importer's colour-vs-data decision) selects the
 // _sRGB twin of each format: the sampler then decodes to linear, so colour
 // textures shade in linear light and only the tonemap's gamma encode re-curves
-// them. Every format here has an sRGB variant with identical block/byte layout,
-// so the upload math and the device-support checks are the same for both.
+// them. Every colour format here has an sRGB variant with identical block/byte
+// layout, so the upload math and the device-support checks are the same for both.
+// BC4 / BC5 carry data (single channel, normal XY) and have none.
 static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool srgb,
                                 MTLPixelFormat& outFmt, bool& outIsBlock, bool& outSupported)
 {
@@ -9431,6 +9434,21 @@ static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool sr
 		return true;
 	case TextureFormat::BC3:
 		outFmt = srgb ? MTLPixelFormatBC3_RGBA_sRGB : MTLPixelFormatBC3_RGBA;
+		outSupported = false;
+		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
+		return true;
+	case TextureFormat::BC1:
+		outFmt = srgb ? MTLPixelFormatBC1_RGBA_sRGB : MTLPixelFormatBC1_RGBA;
+		outSupported = false;
+		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
+		return true;
+	case TextureFormat::BC4:
+		outFmt = MTLPixelFormatBC4_RUnorm;
+		outSupported = false;
+		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
+		return true;
+	case TextureFormat::BC5:
+		outFmt = MTLPixelFormatBC5_RGUnorm;
 		outSupported = false;
 		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
 		return true;
@@ -9462,13 +9480,12 @@ static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, b
 	if (texture)
 	{
 		// Upload the pre-baked mip chain (level 0 first). Block formats are
-		// compressed (16 B / 4x4 block); RGBA8 is 4 B / texel.
+		// compressed (8 or 16 B / 4x4 block); RGBA8 is 4 B / texel.
 		size_t off = 0; uint32_t lw = (uint32_t)tex->width, lh = (uint32_t)tex->height;
 		for (uint32_t l = 0; l < mips; ++l)
 		{
-			const size_t bpr = isBlock ? ((size_t)((lw + 3) / 4) * 16) : ((size_t)lw * 4);
-			const size_t lvl = isBlock ? ((size_t)((lw + 3) / 4) * ((lh + 3) / 4) * 16)
-			                           : ((size_t)lw * lh * 4);
+			const size_t bpr = isBlock ? ((size_t)((lw + 3) / 4) * textureFormatBlockBytes(tex->format)) : ((size_t)lw * 4);
+			const size_t lvl = textureLevelBytes(tex->format, lw, lh);
 			if (off + lvl > tex->data.size()) break; // truncated payload guard
 			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l
 			             withBytes:tex->data.data() + off bytesPerRow:bpr];
@@ -9505,24 +9522,26 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 }
 
 // The MTLTextureType2DArray twin of uploadMetalTexture for a sampler2DArray heTexP
-// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8, the
-// HE::buildTextureArray layout — slice-major, each slice with its full chain), or a
-// plain 2D asset as one slice. nullptr = unusable → the caller binds the white array.
+// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8 or a block
+// format, the HE::buildTextureArray layout — slice-major, each slice with its full
+// chain), or a plain 2D asset as one slice. nullptr = unusable (or a block format
+// this GPU can't sample) → the caller binds the white array.
 static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* tex)
 {
-	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
-	    || tex->format != TextureFormat::RGBA8)
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
+		return nullptr;
+	MTLPixelFormat pf = MTLPixelFormatRGBA8Unorm; bool isBlock = false, supported = false;
+	if (!metalTexPixelFormat(device, tex->format, tex->srgb, pf, isBlock, supported) || !supported)
 		return nullptr;
 	const bool     isArray = tex->layers > 1;
 	if (isArray && !HE::textureArrayPayloadValid(*tex)) return nullptr;
 	const uint32_t layers = isArray ? tex->layers : 1;
 	const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
 	const uint32_t w = tex->width, h = tex->height;
-	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips)) return nullptr;
+	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips, tex->format)) return nullptr;
 
 	MTLTextureDescriptor* desc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:(tex->srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm)
-		width:w height:h mipmapped:(mips > 1)];
+		texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:(mips > 1)];
 	desc.textureType      = MTLTextureType2DArray;
 	desc.arrayLength      = layers;
 	desc.mipmapLevelCount = mips;
@@ -9535,9 +9554,10 @@ static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* t
 		uint32_t lw = w, lh = h;
 		for (uint32_t l = 0; l < mips; ++l)
 		{
+			const size_t bpr = isBlock ? (size_t)((lw + 3) / 4) * textureFormatBlockBytes(tex->format) : (size_t)lw * 4;
 			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l slice:s
-			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l)
-			           bytesPerRow:(size_t)lw * 4 bytesPerImage:(size_t)lw * lh * 4];
+			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l, tex->format)
+			           bytesPerRow:bpr bytesPerImage:textureLevelBytes(tex->format, lw, lh)];
 			lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
 		}
 	}

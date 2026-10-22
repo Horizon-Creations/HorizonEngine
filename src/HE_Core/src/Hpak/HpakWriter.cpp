@@ -3,6 +3,7 @@
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
 #include <ContentManager/HAsset.h>
+#include <ContentManager/TextureArrayBuild.h> // slice math for cooked texture arrays
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
@@ -148,6 +149,64 @@ static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t 
             gatherRGBA8Block(rgba, w, h, bx, by, block);
             stb_compress_dxt_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 16,
                                    block, /*alpha=*/1, mode); // alpha → DXT5
+        }
+    return out;
+}
+
+// BC1 (DXT1, 8 B / 4x4 block): opaque RGB, the alpha channel is ignored. Half the size
+// of BC3 for albedo that carries no alpha. Same `quality` mapping as encodeBc3.
+static std::vector<uint8_t> encodeBc1(const uint8_t* rgba, uint32_t w, uint32_t h,
+                                      uint8_t quality)
+{
+    if (!rgba || w == 0 || h == 0) return {};
+    const int mode = quality >= 1 ? STB_DXT_HIGHQUAL : STB_DXT_NORMAL;
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 8);
+    uint8_t block[64];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            gatherRGBA8Block(rgba, w, h, bx, by, block);
+            stb_compress_dxt_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 8,
+                                   block, /*alpha=*/0, mode);
+        }
+    return out;
+}
+
+// BC4 (8 B / 4x4 block): ONE channel, the R of the RGBA8 mip (G, B, A are dropped).
+// For single-channel data: roughness, height, AO, a mask. stb's BC4 has no quality
+// knob, so the pack quality setting doesn't change its output.
+static std::vector<uint8_t> encodeBc4(const uint8_t* rgba, uint32_t w, uint32_t h)
+{
+    if (!rgba || w == 0 || h == 0) return {};
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 8);
+    uint8_t block[64], r[16];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            gatherRGBA8Block(rgba, w, h, bx, by, block);
+            for (int t = 0; t < 16; ++t) r[t] = block[t * 4];
+            stb_compress_bc4_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 8, r);
+        }
+    return out;
+}
+
+// BC5 (16 B / 4x4 block): TWO channels, R and G of the RGBA8 mip, each its own BC4
+// block. Tangent-space normals as XY. Z is not stored: a shader that reads .xyz gets
+// z = 0 and has to rebuild it (sqrt(1 - x*x - y*y)).
+static std::vector<uint8_t> encodeBc5(const uint8_t* rgba, uint32_t w, uint32_t h)
+{
+    if (!rgba || w == 0 || h == 0) return {};
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 16);
+    uint8_t block[64], rg[32];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            gatherRGBA8Block(rgba, w, h, bx, by, block);
+            for (int t = 0; t < 16; ++t) { rg[t * 2] = block[t * 4]; rg[t * 2 + 1] = block[t * 4 + 1]; }
+            stb_compress_bc5_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 16, rg);
         }
     return out;
 }
@@ -698,10 +757,17 @@ static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t 
 // levels directly (Metal gains mips it never had; GL drops glGenerateMipmap).
 // Level 0 stays the leading bytes, so backends that don't read mips are unaffected.
 // `targetFormat` is a HE::TextureFormat value: 0 keeps RGBA8, 1 ASTC_4x4, 2 BC7,
-// 3 BC3 — each mip is block-compressed to it (all encoding done here at pack time),
-// degrading to RGBA8 whenever that encoder isn't built or a level fails to encode.
+// 3 BC3, 4 BC1, 5 BC4, 6 BC5 — each mip is block-compressed to it (all encoding done
+// here at pack time), degrading to RGBA8 whenever that encoder isn't built or a level
+// fails to encode. BC4 keeps only R and BC5 only R and G of the source.
+//
+// A texture ARRAY (layers > 1) is only cooked when PackSettings::cookTextureArrays asks
+// for it. It arrives with its mip chains already baked per slice
+// (HE::buildTextureArray), so its levels are not rebuilt: every slice and level is
+// encoded as it stands, `layers` and `mipLevels` are kept, and the payload is the
+// slice-major concatenation HE::textureArraySliceBytes describes for `format`.
 static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
-                                        uint8_t quality)
+                                        uint8_t quality, bool cookArrays)
 {
     const HAsset::Reader::Chunk* tm = nullptr;
     const HAsset::Reader::Chunk* px = nullptr;
@@ -719,45 +785,23 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     if (!HAsset::readTextureHeader(tm->data, o, width, height, channels)) return {};
     uint32_t existingMips = 1;
     if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, existingMips);
-    // The loose asset's cook tail continues with format + srgb. The format byte is
-    // irrelevant here (only single-level RGBA8 sources get cooked, see below), but
-    // the sRGB flag is the importer's colour-vs-data decision and MUST survive the
-    // cook: the runtime picks the sampler's pixel format from it. Absent tail
-    // (pre-cook TXMI) → linear, as the loader defaults it.
-    uint8_t srgb = 0;
-    if (o + 1 <= tm->data.size()) { uint8_t f = 0; HAsset::Reader::readPOD(tm->data, o, f); }
+    // The loose asset's cook tail continues with format + srgb. The format byte only
+    // matters for arrays (a plain texture is cooked only from a single-level RGBA8
+    // source, see below), but the sRGB flag is the importer's colour-vs-data decision
+    // and MUST survive the cook: the runtime picks the sampler's pixel format from it.
+    // Absent tail (pre-cook TXMI) → linear, as the loader defaults it.
+    uint8_t srcFormat = 0, srgb = 0;
+    if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srcFormat);
     if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srgb);
-    // A texture ARRAY (Thema 158) is never cooked: buildTextureArray already baked
-    // its mips, and the rewrite below would drop the slice count. {} = the blob
-    // ships unchanged.
     uint32_t layers = 1;
     if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, layers);
-    if (layers > 1) return {};
+    if (layers == 0) layers = 1;
 
-    // Only cook plain single-level RGBA8 base textures (skip already-cooked,
-    // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).
-    if (channels != 4 || width < 2 || height < 2 || existingMips > 1) return {};
-    if (px->data.size() != static_cast<size_t>(width) * height * 4) return {};
-
-    // Build the RGBA8 mip chain first (also the fallback if compression is unavailable).
-    std::vector<uint8_t> rgbaLevels = px->data;  // level 0
-    std::vector<uint8_t> prev       = px->data;
-    uint32_t cw = static_cast<uint32_t>(width), ch = static_cast<uint32_t>(height), count = 1;
-    while (cw > 1 || ch > 1)
-    {
-        uint32_t nw = 0, nh = 0;
-        std::vector<uint8_t> lvl = halveRGBA8(prev.data(), cw, ch, nw, nh);
-        rgbaLevels.insert(rgbaLevels.end(), lvl.begin(), lvl.end());
-        prev = std::move(lvl); cw = nw; ch = nh; ++count;
-    }
-
-    std::vector<uint8_t> levels = std::move(rgbaLevels);
-    uint8_t format = 0; // TextureFormat: 0 RGBA8, 1 ASTC_4x4, 2 BC7, 3 BC3
-
-    // Block-compress each RGBA8 mip to the requested format (all three are 16 B/4x4
-    // block, so the source stride is width*4 and the encoded blocks concatenate the
-    // same way). Any missing encoder or failed level falls the whole texture back to
-    // RGBA8 — the runtime then samples it uncompressed instead of a broken format.
+    // Block-compress each RGBA8 level to the requested format. The source stride is
+    // width*4 and the encoded blocks concatenate the same way (the byte size per level
+    // is HE::textureLevelBytes). Any missing encoder or failed level falls the whole
+    // texture back to RGBA8 — the runtime then samples it uncompressed instead of a
+    // broken format.
     auto encodeLevel = [targetFormat, quality](const uint8_t* src, uint32_t lw, uint32_t lh)
         -> std::vector<uint8_t>
     {
@@ -772,26 +816,75 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
 #endif
 #ifdef HE_HAVE_STB_DXT
         case 3: return encodeBc3(src, lw, lh, quality);
+        case 4: return encodeBc1(src, lw, lh, quality);
+        case 5: return encodeBc4(src, lw, lh);
+        case 6: return encodeBc5(src, lw, lh);
 #endif
         default: return {}; // unknown / unbuilt encoder → RGBA8 fallback
         }
     };
-
-    if (targetFormat != 0)
+    // Encode `slices` consecutive mip chains of `count` levels each, starting at w x h,
+    // from tightly packed RGBA8 `src`. False when any level fails.
+    auto encodeChains = [&](const uint8_t* src, uint32_t slices, uint32_t count,
+                            std::vector<uint8_t>& dst) -> bool
     {
-        std::vector<uint8_t> encLevels;
-        size_t off = 0; uint32_t lw = static_cast<uint32_t>(width), lh = static_cast<uint32_t>(height);
-        bool ok = true;
-        for (uint32_t l = 0; l < count; ++l)
+        size_t off = 0;
+        for (uint32_t s = 0; s < slices; ++s)
         {
-            std::vector<uint8_t> enc = encodeLevel(levels.data() + off, lw, lh);
-            if (enc.empty()) { ok = false; break; }
-            encLevels.insert(encLevels.end(), enc.begin(), enc.end());
-            off += static_cast<size_t>(lw) * lh * 4;
-            lw = std::max<uint32_t>(1, lw >> 1);
-            lh = std::max<uint32_t>(1, lh >> 1);
+            uint32_t lw = width, lh = height;
+            for (uint32_t l = 0; l < count; ++l)
+            {
+                std::vector<uint8_t> enc = encodeLevel(src + off, lw, lh);
+                if (enc.empty()) return false;
+                dst.insert(dst.end(), enc.begin(), enc.end());
+                off += static_cast<size_t>(lw) * lh * 4;
+                lw = std::max<uint32_t>(1, lw >> 1);
+                lh = std::max<uint32_t>(1, lh >> 1);
+            }
         }
-        if (ok) { levels = std::move(encLevels); format = targetFormat; }
+        return true;
+    };
+
+    std::vector<uint8_t> levels;
+    uint8_t  format = 0; // HE::TextureFormat value
+    uint32_t count  = 1;
+    if (layers > 1)
+    {
+        // Only an RGBA8 array that is to be compressed is touched; anything else ships
+        // as it is (already cooked, already compressed, or no target set).
+        if (!cookArrays || targetFormat == 0 || srcFormat != 0 || channels != 4 || width == 0 || height == 0)
+            return {};
+        count = std::max<uint32_t>(1, existingMips);
+        if (px->data.size() != static_cast<size_t>(layers) * HE::textureArraySliceBytes(width, height, count))
+            return {};
+        if (!encodeChains(px->data.data(), layers, count, levels)) return {};
+        format = targetFormat;
+    }
+    else
+    {
+        // Only cook plain single-level RGBA8 base textures (skip already-cooked,
+        // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).
+        if (channels != 4 || width < 2 || height < 2 || existingMips > 1) return {};
+        if (px->data.size() != static_cast<size_t>(width) * height * 4) return {};
+
+        // Build the RGBA8 mip chain first (also the fallback if compression is unavailable).
+        std::vector<uint8_t> rgbaLevels = px->data;  // level 0
+        std::vector<uint8_t> prev       = px->data;
+        uint32_t cw = static_cast<uint32_t>(width), ch = static_cast<uint32_t>(height);
+        while (cw > 1 || ch > 1)
+        {
+            uint32_t nw = 0, nh = 0;
+            std::vector<uint8_t> lvl = halveRGBA8(prev.data(), cw, ch, nw, nh);
+            rgbaLevels.insert(rgbaLevels.end(), lvl.begin(), lvl.end());
+            prev = std::move(lvl); cw = nw; ch = nh; ++count;
+        }
+
+        levels = std::move(rgbaLevels);
+        if (targetFormat != 0)
+        {
+            std::vector<uint8_t> enc;
+            if (encodeChains(levels.data(), 1, count, enc)) { levels = std::move(enc); format = targetFormat; }
+        }
     }
 
     HAsset::Writer w;
@@ -804,6 +897,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
             HAsset::Writer::appendPOD(b, count);
             HAsset::Writer::appendPOD(b, format);
             HAsset::Writer::appendPOD(b, static_cast<uint8_t>(srgb ? 1 : 0)); // as imported
+            if (layers > 1) HAsset::Writer::appendPOD(b, layers);            // arrays only, like saveAsset
             w.addChunk(HAsset::CHUNK_TXMI, b.data(), b.size());
         }
         else if (c.id == HAsset::CHUNK_PIXL)
@@ -821,14 +915,14 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
 // their full mip chain baked into PIXL. Unknown/uncookable assets pass through
 // unchanged. Must be lossless w.r.t. what the runtime uploads.
 static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob, uint8_t textureCompression,
-                                        uint8_t textureQuality)
+                                        uint8_t textureQuality, bool cookTextureArrays)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
     const HE::AssetType type = static_cast<HE::AssetType>(r.assetType());
     if (type == HE::AssetType::Texture)
     {
-        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality);
+        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality, cookTextureArrays);
         return cooked.empty() ? blob : cooked;
     }
     if (type != HE::AssetType::StaticMesh) return blob;
@@ -1143,7 +1237,8 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         // ── The pipeline, recording what it looked at ───────────────────────────
         Hpak::PackDeps deps;
         std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath, &deps);
-        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality);
+        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality,
+                                                 settings.cookTextureArrays);
         // After every rewrite above (each of which copies META through verbatim)
         // and BEFORE the hash below: the incremental cache keys on these bytes, so
         // stripping later would leave entries packed by an older build matching

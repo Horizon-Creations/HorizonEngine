@@ -2,6 +2,7 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -61,6 +62,7 @@
 #include <fstream>     // GI HW: offline-compiled DXR kernel blobs (.cso)
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <cstring>
@@ -3706,8 +3708,26 @@ struct D3D12RendererImpl
     // FXC output per SHADER hash, shared by the up to four PSO variants (LDR/HDR ×
     // opaque/blended) of one material family. A null `vs` is a cached compile miss, so
     // a shader that fails FXC fails once, not once per variant. Cleared with the PSOs.
-    struct MatBytecode { ComPtr<ID3DBlob> vs, ps; };
+    // hs/ds: the Displacement pin's hull + domain shells (Thema 207), null when the
+    // material has none or they failed FXC (the fallback: the plain pair).
+    struct MatBytecode { ComPtr<ID3DBlob> vs, ps, hs, ds; };
     std::unordered_map<uint64_t, MatBytecode> m_matBytecode;
+    // GL's scheme (OpenGLRenderer::foldDisplacement): the displacement body is folded
+    // into the shader hash right after resolveShaders and filed under the folded hash,
+    // where GetOrBuildMaterialPSO picks it up. A PSO built with HS/DS lands in
+    // m_tessPSOs and is drawn as a 3-control-point patch list. Every D3D12 device is
+    // feature level 11_0, so only HE_TESSELLATION=0 (GL's A/B switch) turns it off.
+    bool m_tessSupported = false;
+    std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+    std::unordered_set<ID3D12PipelineState*>  m_tessPSOs;
+    void foldDisplacement(const ContentManager& cm, const HE::UUID& materialId, uint64_t& hash)
+    {
+        if (!m_tessSupported) return;
+        const MaterialAsset* ma = cm.getMaterial(materialId);
+        if (!ma || ma->customShaderDispGlsl.empty()) return;
+        hash ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+        m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
+    }
     ComPtr<ID3D12RootSignature>  m_matRootSig;
     // Shader-visible ring of per-DrawCall SRV blocks — k_matSrvPerDraw consecutive slots
     // in the root table's order: [0] heTex0 (t2), [1..4] heTexP0..3 (t4..t7), [5..6] the
@@ -4368,7 +4388,7 @@ struct D3D12RendererImpl
     // the graph project textures, whose views live in the material ring instead.
     //
     // asArray (Thema 158): a texture ARRAY resource for a sampler2DArray slot — every
-    // slice of a layers > 1 asset (RGBA8, HE::buildTextureArray layout: slice-major,
+    // slice of a layers > 1 asset (RGBA8 or a block format, HE::buildTextureArray layout: slice-major,
     // each slice with its chain, which IS D3D's subresource order, so the copy below
     // walks it unchanged), or a plain 2D asset as one slice.
     // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
@@ -4380,7 +4400,7 @@ struct D3D12RendererImpl
         if (!cl || !tex) return false;
         if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
         const UINT layers = asArray ? std::max<UINT>(1, tex->layers) : 1;
-        if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false; // RGBA8 only
+        if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return false;
 
         const bool srgb = tex->srgb && honourSrgb;
         DXGI_FORMAT fmt; bool isBlock;
@@ -4389,6 +4409,10 @@ struct D3D12RendererImpl
         case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
         case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
         case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC1:   fmt = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB      : DXGI_FORMAT_BC1_UNORM;      isBlock = true;  break;
+        // BC4 / BC5 have no sRGB twin: they carry data (single channel, normal XY).
+        case TextureFormat::BC4:   fmt = DXGI_FORMAT_BC4_UNORM; isBlock = true; break;
+        case TextureFormat::BC5:   fmt = DXGI_FORMAT_BC5_UNORM; isBlock = true; break;
         default: return false; // ASTC / unknown → D3D can't sample it
         }
         if (isBlock) // BC is core on FL11, but stay defensive.
@@ -4396,7 +4420,15 @@ struct D3D12RendererImpl
             D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{ fmt };
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
                 !(fs.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D))
-                return false;
+            {
+                // A format the CPU can expand (BC1/BC3/BC4/BC5) is uploaded as RGBA8 instead.
+                TextureAsset rgba;
+                if (!HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+                    return false;
+                HE_LOG_WARN(RHI, "D3D12Renderer: device can't sample %s textures; uploading them as RGBA8",
+                            textureFormatName(tex->format));
+                return uploadTexture2D(cl, &rgba, outTex, asArray, honourSrgb);
+            }
         }
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
@@ -4621,12 +4653,16 @@ struct D3D12RendererImpl
         {
             uint64_t hash = 0; std::string frag, vertBody;
             if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            foldDisplacement(*cm, id, hash);
             if (deferred && deferredReady && usingHDR)
             {
                 uint64_t gbHash = 0; std::string gbFrag, gbVert;
-                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert)
-                    && GetOrBuildMaterialPSO(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
-                    ++built;
+                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert))
+                {
+                    foldDisplacement(*cm, id, gbHash);
+                    if (GetOrBuildMaterialPSO(gbHash, gbFrag, gbVert, nullptr, true, false, /*gbuffer=*/true))
+                        ++built;
+                }
             }
             const MaterialAsset* ma = cm->getMaterial(id);
             const bool transparent = ma && (ma->blendMode == 2
@@ -9762,6 +9798,11 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     // one would write attributes into the lit colour (plan §10.7 #4). Cross-compiled only
     // and never the clustered variant: the pak bakes no G-buffer HLSL, and its forward
     // variant would write LIT colour into GB0 — plausible-looking and wrong.
+    // Displacement (Thema 207): foldDisplacement filed the body under this very hash
+    // (before the G-buffer salt), only with tessellation on.
+    const std::string* disp = nullptr;
+    if (m_tessSupported)
+        if (auto it = m_tessDispByKey.find(hash); it != m_tessDispByKey.end()) disp = &it->second;
     if (gbuffer) { precompiled = nullptr; transparent = false; hash ^= 0x6742756666657231ULL; }
     // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
     // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
@@ -9782,7 +9823,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     // (the HDR twin, the blended twin, a material instance that shares the source) only
     // pays CreateGraphicsPipelineState. A cached null = the compile already failed and
     // was logged for this hash — cache the variant miss and stop.
-    ComPtr<ID3DBlob> vs, ps;
+    ComPtr<ID3DBlob> vs, ps, hs, ds;
     if (auto bc = m_matBytecode.find(hash); bc != m_matBytecode.end())
     {
         if (!bc->second.vs)
@@ -9792,6 +9833,8 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         }
         vs = bc->second.vs;
         ps = bc->second.ps;
+        hs = bc->second.hs;
+        ds = bc->second.ds;
     }
     else
     {
@@ -9897,7 +9940,33 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             m_materialPSOs.emplace(key, nullptr);
             return nullptr;
         }
-        m_matBytecode.emplace(hash, MatBytecode{ vs, ps });
+        // Displacement: the hull + domain shells, FXC hs_5_0 / ds_5_0. Cross-compiled
+        // even next to a baked pair (a pak carries no tessellation stages yet), so
+        // without shaderc the material draws untessellated — the fallback.
+        if (disp)
+        {
+            const uint64_t dh = std::hash<std::string>{}(*disp);
+            const HE::MaterialShaderLibrary::Compiled& hc = m_matShaderLib.tessControl(dh, *disp, Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& dcs = m_matShaderLib.tessEval(dh, *disp, Backend::HLSL);
+            std::string why = hc.log + dcs.log;
+            ComPtr<ID3DBlob> terr;
+            if (hc.ok && dcs.ok)
+            {
+                if (FAILED(D3DCompile(hc.source.c_str(), hc.source.size(), "matHS", nullptr, nullptr,
+                                      HE::MaterialShaderLibrary::kHlslHullEntry, "hs_5_0", cflags, 0, &hs, &terr)))
+                    why += std::string("hs_5_0: ") + (terr ? static_cast<const char*>(terr->GetBufferPointer()) : "");
+                else if (FAILED(D3DCompile(dcs.source.c_str(), dcs.source.size(), "matDS", nullptr, nullptr,
+                                           HE::MaterialShaderLibrary::kHlslDomainEntry, "ds_5_0", cflags, 0, &ds, &terr)))
+                    why += std::string("ds_5_0: ") + (terr ? static_cast<const char*>(terr->GetBufferPointer()) : "");
+            }
+            if (!hs || !ds)
+            {
+                hs.Reset(); ds.Reset();
+                HE_LOG_WARN(RHI, "%s", ("D3D12Renderer: displacement stages failed, drawing the material "
+                                        "untessellated\n" + why).c_str());
+            }
+        }
+        m_matBytecode.emplace(hash, MatBytecode{ vs, ps, hs, ds });
     } // FXC once per hash
 
     // IMPORTANT: SPIRV-Cross names GLSL vertex inputs by location as TEXCOORD{location}
@@ -9963,14 +10032,39 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         rt.BlendOpAlpha   = D3D12_BLEND_OP_ADD;
     }
 
+    // Displacement: VS → HS → DS → PS on patches. The root signature's SRV table and
+    // static samplers are visible to ALL stages for this (D3D12MaterialRootSignature.h),
+    // the CBVs always were. A PSO the two stages break is built again without them.
+    const bool tess = hs && ds;
+    if (tess)
+    {
+        pd.HS = { hs->GetBufferPointer(), hs->GetBufferSize() };
+        pd.DS = { ds->GetBufferPointer(), ds->GetBufferSize() };
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    }
     ComPtr<ID3D12PipelineState> pso12;
-    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12))))
+    HRESULT phr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12));
+    if (FAILED(phr) && tess)
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: material PSO with tessellation stages failed, "
+            "drawing it untessellated");
+        pd.HS = {}; pd.DS = {};
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pso12.Reset();
+        phr = device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12));
+    }
+    if (FAILED(phr))
     {
         HE_LOG_ERROR(RHI, "%s", instanced
             ? "D3D12Renderer: A4 instanced material PSO creation failed, its batches draw per instance"
             : "D3D12Renderer: A4 material PSO creation failed");
         m_materialPSOs.emplace(key, nullptr); // cache the failure → no per-draw retry
         return nullptr;
+    }
+    if (pd.DS.pShaderBytecode)
+    {
+        m_tessPSOs.insert(pso12.Get()); // drawn as a 3-control-point patch list
+        HE_LOG_INFO(RHI, "%s", "D3D12Renderer: built a tessellated material PSO (Displacement pin)");
     }
     if (instanced)
         HE_LOG_INFO(RHI, "%s", gbuffer
@@ -10638,6 +10732,13 @@ void D3D12Renderer::Initialize(HE::Window* window)
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device))))
         throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
     laps.mark("D3D12CreateDevice");
+    {   // Hull/domain shaders come with feature level 11_0, the floor above.
+        const char* tessEnv = std::getenv("HE_TESSELLATION");
+        m_impl->m_tessSupported = !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        HE_LOG_INFO(RHI, "%s", m_impl->m_tessSupported
+            ? "D3D12Renderer: tessellation available (material Displacement pin)"
+            : "D3D12Renderer: HE_TESSELLATION=0, displacement materials draw untessellated");
+    }
 
     // The debug layer writes validation errors to the InfoQueue. Without a debugger
     // attached those messages are invisible — grab the queue so we can drain it into
@@ -10899,6 +11000,7 @@ void D3D12Renderer::Shutdown()
     m_impl->m_matHlslLogged = false;
     m_impl->m_materialPSOs.clear();
     m_impl->m_matBytecode.clear();
+    m_impl->m_tessPSOs.clear();
     m_impl->m_matSrvHeap.Reset();
     m_impl->m_matSrvStaging.Reset();
     // Deferred path (Thema 150): the device is idle here.
@@ -11791,6 +11893,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody))
                 {
+                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
                     // Transparent graph materials get a blend-on / depth-write-off PSO
                     // variant. MUST use the same predicate the opaque/blended partition
                     // above used, or a draw lands in the blended pass with a
@@ -11818,8 +11921,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
                         if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                    gbHash, gbFrag, gbVertBody))
+                        {
+                            p.foldDisplacement(*m_contentManager, dc.materialAssetId, gbHash);
                             matPso = p.GetOrBuildMaterialPSO(gbHash, gbFrag, gbVertBody, nullptr,
                                                              p.usingHDR, false, /*gbuffer=*/true);
+                        }
                         if (!matPso)
                         {
                             deferredForwardDCs.push_back(&dc);
@@ -11960,7 +12066,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
                         p.bindClusterRoots(cl); // t24..t26 — fragmentClustered's light lists
                         cl->SetPipelineState(matPso);
-                        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        // A Displacement PSO (HS/DS) takes the same index buffer as patches;
+                        // the restore below sets TRIANGLELIST again either way.
+                        cl->IASetPrimitiveTopology(p.m_tessPSOs.count(matPso)
+                            ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                         cl->SetGraphicsRootDescriptorTable(5, p.matSrvGpu(blk));
                         cl->IASetVertexBuffers(0, 1, &m.vbv);
                         cl->IASetIndexBuffer(&m.ibv);
@@ -13781,6 +13890,11 @@ void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)
     // Deferred to the next DrawScene (render thread), where touching the heap is safe.
     if (m_impl && materialId != HE::UUID{})
         m_impl->m_pendingMatInval.push_back(materialId);
+}
+
+bool D3D12Renderer::SupportsTessellation() const
+{
+    return m_impl && m_impl->m_tessSupported;
 }
 
 void D3D12Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)

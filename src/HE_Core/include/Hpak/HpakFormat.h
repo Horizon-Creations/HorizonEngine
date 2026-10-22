@@ -205,8 +205,9 @@ struct PackSettings {
     bool cook = false;
     // Additionally block-compress RGBA8 textures at pack time to this HE::TextureFormat
     // value (kept as a raw uint8_t so this low-level header needn't include Assets.h):
-    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3. Each needs its encoder in the
-    // build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC / HE_HAVE_STB_DXT); on a missing encoder or
+    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3, 4 = BC1, 5 = BC4 (R only), 6 = BC5
+    // (R and G only). Each needs its encoder in the build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC /
+    // HE_HAVE_STB_DXT, which covers BC1/BC3/BC4/BC5); on a missing encoder or
     // an encode failure the cook silently keeps RGBA8 + baked mipmaps. The chosen format
     // must match what the target's GPU can sample — the editor picks it per target/backend.
     uint8_t textureCompression = 0;
@@ -217,6 +218,12 @@ struct PackSettings {
     // the incremental-pack fingerprint: changing it re-encodes every texture,
     // which is the whole point of changing it.
     uint8_t textureQuality = 0;
+    // Also cook texture ARRAYS (layers > 1) to `textureCompression`, every slice and level
+    // encoded as it stands. Off: arrays ship RGBA8 as they always did. It is off because
+    // some readers still expect RGBA8 arrays in a shipped game (the GI's landscape slice
+    // means, giAutoLandscapeSliceMeans, cannot read BC7 or ASTC); whoever turns it on for
+    // the Auto landscape arrays has to cover that first. Part of the pack fingerprint.
+    bool cookTextureArrays = false;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,

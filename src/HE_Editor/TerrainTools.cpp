@@ -70,8 +70,11 @@ static bool        s_waterErase       = false;  // the tab's Paint | Erase; Ctrl
 static bool        s_waterFromGround  = true;   // level = the ground under the first point + offset
 static float       s_waterLevel       = 0.0f;   // ... or this number (terrain-local Y)
 static float       s_waterOffset      = 0.3f;   // above the ground at the first point
-static bool        s_waterDig         = false;  // also dig a bed under the water
-static float       s_waterDigDepth    = 1.0f;   // bed this far below the level
+static bool        s_waterDig         = true;   // also dig a bed under the water (a pond without one is all shore, see the help)
+static float       s_waterDigDepth    = 2.0f;   // Max Depth: the bed never goes deeper below the level
+static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres of depth per metre from the shore
+static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
+static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
 static bool        s_waterResEditing  = false;
@@ -502,6 +505,9 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.levelOffset     = s_waterOffset;
 			waterParams.dig             = s_waterDig;
 			waterParams.digDepth        = s_waterDigDepth;
+			waterParams.bedSlope        = s_waterBedSlope;
+			waterParams.bedRoughness    = s_waterBedRough;
+			waterParams.closeBed        = s_waterCloseBed;
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -1700,11 +1706,22 @@ void renderPanel(AppContext& ctx)
                 EditorWidgets::checkbox("Dig Bed##water", &s_waterDig);
                 EditorWidgets::helpForLabel("Dig Bed##water");
                 ImGui::BeginDisabled(!s_waterDig);
-                rowLabel("Depth");
+                rowLabel("Max Depth");
                 ImGui::DragFloat("##water_depth", &s_waterDigDepth, 0.05f, 0.0f, 200.0f, "%.2f m");
-                EditorWidgets::helpForLabel("Depth##water");
-                ImGui::EndDisabled();
+                EditorWidgets::helpForLabel("Max Depth##water");
+                rowLabel("Slope");
+                ImGui::DragFloat("##water_slope", &s_waterBedSlope, 0.005f, HE::water::kMinBedSlope, HE::water::kMaxBedSlope, "%.3f");
+                EditorWidgets::helpForLabel("Slope##water");
+                rowLabel("Bed Roughness");
+                ImGui::SliderFloat("##water_rough", &s_waterBedRough, 0.0f, 1.0f, "%.2f");
+                EditorWidgets::helpForLabel("Bed Roughness##water");
                 s_waterDigDepth = std::max(0.0f, s_waterDigDepth);
+                s_waterBedSlope = std::clamp(s_waterBedSlope, HE::water::kMinBedSlope, HE::water::kMaxBedSlope);
+                s_waterBedRough = std::clamp(s_waterBedRough, 0.0f, 1.0f);
+                dimText("Full depth %.1f m from the shore", s_waterDigDepth / s_waterBedSlope);
+                ImGui::EndDisabled();
+                EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
+                EditorWidgets::helpForLabel("Close Bed on Erase##water");
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few
