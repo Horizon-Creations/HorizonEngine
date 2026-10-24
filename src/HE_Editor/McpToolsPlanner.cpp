@@ -1125,7 +1125,8 @@ void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
 			Board* b0 = boardFrom(*ws, args, fail);
 			if (!b0) return fail;
 			const UUID boardId = b0->id;
-			const std::string typeWord = lower(strArg(args, "type").empty() ? "text" : strArg(args, "type"));
+			const std::string typeArg = strArg(args, "type");
+			const std::string typeWord = lower(typeArg.empty() ? "text" : typeArg);
 			NodeType type;
 			if (!nodeTypeFromName(typeWord, type) || (type != NodeType::Text && type != NodeType::Frame && type != NodeType::Page && type != NodeType::Row))
 				return invalid("type must be text, frame, page or row");
