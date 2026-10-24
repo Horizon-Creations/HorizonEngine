@@ -396,7 +396,7 @@ void drawScene(AppContext& ctx)
 static void postStreamingMessage(std::string& message)
 {
 	if (message.empty()) return;
-	const bool refused = message.rfind("Not ", 0) == 0;
+	const bool refused = message.starts_with("Not ");
 	HE::Ed::notify(refused ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
 	               "Streaming cells", message);
 	message.clear();
