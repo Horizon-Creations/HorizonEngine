@@ -685,18 +685,15 @@ void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
 			if (!errors.empty()) return ToolResult::fail("invalid_payload", errors.dump());
 
 			UUID rowId;
-			bool changed = false;
 			const bool saved = ws->edit(dbId, [&](Database& d) {
 				Row* r = d.addRow(title, author, taskNowMs());
 				rowId = r->id;
 				json again = json::array();
 				applyValues(*ws, d, rowId, values, create, again);
-				changed = true;
 				return true;
 			});
 			if (!saved)
 				return ToolResult::fail("save_failed", "the row was not written: " + ws->lastError());
-			(void)changed;
 			const Database* now = ws->find(dbId);
 			const Row* row = now ? now->findRow(rowId) : nullptr;
 			if (!row)
