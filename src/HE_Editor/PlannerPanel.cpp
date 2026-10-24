@@ -325,6 +325,7 @@ std::vector<std::string> splitNames(const std::string& text)
 {
 	std::vector<std::string> out;
 	std::string cur;
+	cur.reserve(text.size());
 	auto flush = [&] {
 		const auto b = cur.find_first_not_of(' ');
 		const auto e = cur.find_last_not_of(' ');
