@@ -72,17 +72,18 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 
 	st.assetId = openPanelAsset(ctx, path, st.name, st.relPath);
 
-	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId);
-	    asset && !asset->graphJson.empty())
+	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId))
 	{
-		HE::AnimatorStateMachineGraph parsed;
-		if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) st.graph = std::move(parsed);
-	}
-	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId);
-	    asset && !asset->syncGraphJson.empty())
-	{
-		HorizonCode::Graph parsed;
-		if (HorizonCode::fromJson(asset->syncGraphJson, parsed)) st.syncGraph = std::move(parsed);
+		if (!asset->graphJson.empty())
+		{
+			HE::AnimatorStateMachineGraph parsed;
+			if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) st.graph = std::move(parsed);
+		}
+		if (!asset->syncGraphJson.empty())
+		{
+			HorizonCode::Graph parsed;
+			if (HorizonCode::fromJson(asset->syncGraphJson, parsed)) st.syncGraph = std::move(parsed);
+		}
 	}
 
 	// A sync graph has exactly one entry point and it is not optional, so it is
