@@ -75,7 +75,10 @@ std::string allPinNames()
 {
 	std::string s;
 	for (const ParticlePinDesc& p : emitterPins())
-		s += (s.empty() ? "" : ", ") + std::string(p.name);
+	{
+		if (!s.empty()) s += ", ";
+		s += p.name;
+	}
 	return s;
 }
 
