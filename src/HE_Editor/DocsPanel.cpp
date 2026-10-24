@@ -398,8 +398,6 @@ namespace
 	// ── Blocks ───────────────────────────────────────────────────────────────
 	void drawBlock(const Ctx& ctx, const docs::Block& b);
 
-	void drawCells(const Ctx& ctx, const docs::Cell& cell) { drawRuns(ctx, cell); }
-
 	void drawTable(const Ctx& ctx, const docs::Block& b)
 	{
 		const int cols = static_cast<int>(
@@ -452,7 +450,7 @@ namespace
 			{
 				ImGui::TableSetColumnIndex(c);
 				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-				if (c < static_cast<int>(b.head.size())) drawCells(ctx, b.head[c]);
+				if (c < static_cast<int>(b.head.size())) drawRuns(ctx, b.head[c]);
 				ImGui::PopStyleColor();
 			}
 		}
@@ -462,7 +460,7 @@ namespace
 			for (int c = 0; c < cols; ++c)
 			{
 				ImGui::TableSetColumnIndex(c);
-				if (c < static_cast<int>(row.size())) drawCells(ctx, row[c]);
+				if (c < static_cast<int>(row.size())) drawRuns(ctx, row[c]);
 			}
 		}
 		ImGui::EndTable();
