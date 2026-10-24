@@ -684,7 +684,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						// typed, because it is the only thing keeping strangers
 						// on this network out.
 						if (ImGui::Selectable(
-								(s.hostName.empty() ? std::string("Someone") : s.hostName).c_str(),
+								(s.hostName.empty() ? "Someone" : s.hostName.c_str()),
 								s_lanPicked == s.instance, 0, ImVec2(0, 0)))
 						{
 							s_lanPicked = s.instance;
