@@ -337,6 +337,8 @@ void drawJobs()
 	                    "for the frame. The Timeline tab names every job on the worker lanes.");
 }
 
+constexpr double kBytesPerMB = 1048576.0;
+
 void drawAssets(ContentManager& cm)
 {
 	ImGui::SeparatorText("Asset streaming");
@@ -356,7 +358,7 @@ void drawAssets(ContentManager& cm)
 		{
 			char overlay[64];
 			std::snprintf(overlay, sizeof(overlay), "%.1f / %.1f MB",
-			              static_cast<double>(read) / 1048576.0, static_cast<double>(total) / 1048576.0);
+			              static_cast<double>(read) / kBytesPerMB, static_cast<double>(total) / kBytesPerMB);
 			ImGui::ProgressBar(static_cast<float>(static_cast<double>(read) / static_cast<double>(total)),
 			                   ImVec2(160.0f, 0.0f), overlay);
 			ImGui::SameLine();
