@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -134,7 +135,7 @@ constexpr float kNodeW = 172.0f;
 
 ImU32 categoryColor(const char* cat)
 {
-	const std::string c = cat;
+	const std::string_view c = cat;
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
 	if (c == "Constant") return IM_COL32( 60, 120, 130, 255);
