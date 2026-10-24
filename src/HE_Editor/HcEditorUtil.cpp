@@ -1335,7 +1335,7 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 			if (!*headerDrawn)
 			{ ImGui::TextDisabled("%s", onlyCategory ? onlyCategory : fn.category); *headerDrawn = true; }
 		}
-		else if (!header || std::string(header) != fn.category)
+		else if (!header || std::strcmp(header, fn.category) != 0)
 		{ ImGui::TextDisabled("%s", fn.category); header = fn.category; }
 		// Unique ImGui id via the stable api id (display names may repeat later).
 		// One buffer for every row's label.
