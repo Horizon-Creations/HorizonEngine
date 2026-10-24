@@ -117,10 +117,11 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
 	const auto ring = [&](float cx, float cz, float radius, const glm::vec3& col)
 	{
 		constexpr int kSegments = 96;
+		constexpr float kTwoPi = 6.2831853f;
 		for (int i = 0; i < kSegments; ++i)
 		{
-			const float a0 = 6.2831853f * static_cast<float>(i) / kSegments;
-			const float a1 = 6.2831853f * static_cast<float>(i + 1) / kSegments;
+			const float a0 = kTwoPi * static_cast<float>(i) / kSegments;
+			const float a1 = kTwoPi * static_cast<float>(i + 1) / kSegments;
 			out.line({ cx + radius * std::cos(a0), y, cz + radius * std::sin(a0) },
 			         { cx + radius * std::cos(a1), y, cz + radius * std::sin(a1) }, col);
 		}
