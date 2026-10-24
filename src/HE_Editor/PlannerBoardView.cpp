@@ -101,6 +101,9 @@ std::string s_labelBuf;
 constexpr double kMinZoom = 0.1, kMaxZoom = 4.0;
 constexpr float  kHandle = 8.0f, kDotRadius = 5.0f;
 
+// A card that stands for something in the editor rather than holding its own text.
+inline bool isLinkNode(NodeType t) { return t == NodeType::Row || t == NodeType::Page || t == NodeType::Object; }
+
 // ── Colours ──────────────────────────────────────────────────────────────────
 struct Swatch { const char* word; ImVec4 colour; };
 const Swatch kSwatches[] = {
@@ -561,7 +564,7 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 	else
 	{
 		// A link keeps a neutral card: a colour recolours its accent (bar, glyph, name), not the background.
-		const bool isLink = n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object;
+		const bool isLink = isLinkNode(n.type);
 		const ImVec4 fill = coloured && !isLink ? tint : Theme::warm(0.20f);
 		dl->AddRectFilled(ImVec2(a.x + 2 * z, a.y + 3 * z), ImVec2(b.x + 2 * z, b.y + 3 * z), IM_COL32(0, 0, 0, 60), round);
 		dl->AddRectFilled(a, b, Theme::u32(fill), round);
@@ -595,7 +598,7 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 
 	// A card that stands for something in the editor is a link: a coloured bar and glyph, the name in the link
 	// colour (underlined under the mouse), what it is under it, and an arrow out.
-	if (n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object)
+	if (isLinkNode(n.type))
 	{
 		const bool missing = linkMissing(ws, n);
 		const ImVec4 linkCol = missing ? Theme::Bad : coloured ? tint : ImVec4(0.50f, 0.74f, 1.0f, 1.0f);
@@ -1177,7 +1180,7 @@ void draw(const Services& services, const UUID& boardId)
 	// The card under the mouse: a link underlines and the cursor says it opens.
 	s_hoverNode = hovered && s_drag == Drag::None && !editing ? board->hitTest(mx, my) : UUID{};
 	if (const Node* hot = s_hoverNode == UUID{} ? nullptr : board->findNode(s_hoverNode))
-		if (hot->type == NodeType::Row || hot->type == NodeType::Page || hot->type == NodeType::Object) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+		if (isLinkNode(hot->type)) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
 	// ── Cards (only those on screen) ──
 	const Rect2 visible{ view.x, view.y, size.x / view.zoom, size.y / view.zoom };
