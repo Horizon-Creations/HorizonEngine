@@ -41,11 +41,10 @@ Mask: `AUTOLAND=masks` at the same camera, water = blue>128 and red,green<60; pl
   human's "permanent noise" (step-6 answer #147: weather puddles, constant noise, not a pop) with a MOVING camera.
 
 ## Reproduce (not in the tree)
-`env HE_CONFIG_DIR=<tmp> HE_COLLAB_OFFLINE=1 HE_DUMP_PATH=x.bmp HE_DUMP_QUIT=1 HE_DUMP_RHI=Metal HE_DUMP_SKYTEST=1 HE_DUMP_TOD=0.4
-HE_DUMP_COVERAGE=0 HE_DUMP_CLOUDMODE=0 HE_DUMP_CLOUDSHADOWS=0 HE_DUMP_CAMX=0 HE_DUMP_CAMY=400 HE_DUMP_CAMZ=0 HE_DUMP_PITCH=-89
-HE_DUMP_GI=0 HE_DUMP_SSR=0 HE_DUMP_AA=0 HE_DUMP_BLOOM=0 HE_DUMP_DOF=0 HE_DUMP_MOTIONBLUR=0 HE_DUMP_RENDERPATH=0 HE_SKY_TIME=30
-HE_DUMP_FRAMES=16 HE_DUMP_AUTOLAND=1 ./HorizonEditor` (cwd = deploy/Editor; same recipe as `scripts/auto-landscape-repro/cap158auto.sh`).
-Vary one of FRAMES / SKY_TIME / AA / GI / GIREFL / TOD per run; diff with a pure-Python BMP reader.
+Recipe of `scripts/auto-landscape-repro/cap158auto.sh` (Metal; sky pinned: `HE_SKY_TIME=30 HE_DUMP_SKYTEST=1 HE_DUMP_TOD=0.4`,
+clouds/GI/SSR/AA/bloom/DoF/MB off, `HE_DUMP_FRAMES=16 HE_DUMP_AUTOLAND=1`, one process per image), varying one knob per run.
+Pure-Python BMP differ. zsh does not word-split `$VAR`: a knob list passed as `$B` becomes ONE bogus arg and every run silently
+uses defaults (my first camera probe was all zeros for that reason); use `${=B}` and keep a positive control.
 
 ## Not verified
 - Windows/D3D11/D3D12/Vulkan/GL not run. No game or editor-Play run: the dump never ticks the world, so
