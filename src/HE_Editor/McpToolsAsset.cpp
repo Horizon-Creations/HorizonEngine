@@ -108,7 +108,7 @@ json assetEntry(ContentManager& content, const std::string& rel, const std::stri
 	if (id == HE::UUID{} && !unreadable) id = content.idForPath(rel);
 	j["uuid"]   = uuidJson(id);
 	// Asked about THAT id rather than about the path, for the same reason.
-	j["loaded"] = !(id == HE::UUID{}) && content.isLoaded(id);
+	j["loaded"] = id != HE::UUID{} && content.isLoaded(id);
 	// Stated rather than folded into a null uuid: "this file has no id" and "this
 	// file could not be read" are different answers, and the second one is a
 	// reason to look at the file rather than at the reference.
@@ -173,7 +173,7 @@ HE::AssetRefs::ScanResult scanReferrers(const McpAssetHooks& h, ContentManager& 
 	targets.paths.push_back(rel);
 	bool unreadable = false;
 	const HE::UUID id = HE::AssetRefs::assetUuidOfFile(abs, &unreadable);
-	if (!(id == HE::UUID{})) targets.uuids.push_back(id);
+	if (id != HE::UUID{}) targets.uuids.push_back(id);
 
 	HE::AssetRefs::ScanRequest req;
 	req.contentRoot    = content.contentRoot();
