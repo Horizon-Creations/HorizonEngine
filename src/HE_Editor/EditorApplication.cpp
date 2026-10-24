@@ -3434,7 +3434,7 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
-	// ── Automatischer asynchroner Content-Refresh ─────────────────────────────
+	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
 		m_contentRefreshTimer += dt;
