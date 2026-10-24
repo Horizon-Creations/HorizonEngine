@@ -10800,10 +10800,8 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	// for one.
 	constexpr std::uint64_t kAutosaveIntervalMs = 1000;
 
-	const std::string& root = contentManager().contentRoot();
 	AppContext ctx = makeContext();
 
-	(void)root;
 	std::unordered_set<std::string> openRel;
 	for (const auto& tab : m_tabs)
 	{
