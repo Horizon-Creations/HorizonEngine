@@ -159,7 +159,6 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <algorithm>
 #include <nlohmann/json.hpp>
 
 // stb_image — declaration only (implementation in stb_image_impl.cpp)
