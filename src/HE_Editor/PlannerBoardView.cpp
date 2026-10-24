@@ -218,7 +218,7 @@ void deleteSelection(const UUID& boardId)
 	change(boardId, [=](Board& b) {
 		bool any = false;
 		for (const UUID& id : nodes) any |= b.removeNode(id, taskNowMs());
-		if (!(edge == UUID{})) any |= b.removeEdge(edge, taskNowMs());
+		if (edge != UUID{}) any |= b.removeEdge(edge, taskNowMs());
 		return any;
 	}, [] { s_sel.clear(); s_selEdge = UUID{}; });
 }
@@ -282,7 +282,7 @@ Pic pictureOf(const Node& n)
 	Pic p;
 	if (s_exportTex)
 	{
-		if (n.media.empty() || !(n.asset == UUID{}) || !S) return p;
+		if (n.media.empty() || n.asset != UUID{} || !S) return p;
 		MediaTex& m = (*s_exportTex)[n.media];
 		if (!m.tried)
 		{
@@ -300,7 +300,7 @@ Pic pictureOf(const Node& n)
 		}
 		return { m.id, m.w, m.h };
 	}
-	if (!(n.asset == UUID{}))
+	if (n.asset != UUID{})
 	{
 		if (!S || !S->ctx || !S->ctx->contentManager) return p;
 		const std::string rel = S->ctx->contentManager->pathForId(n.asset);
@@ -879,8 +879,8 @@ void draw(const Services& services, const UUID& boardId)
 	}
 	// A selection that a pull or an undo made stale.
 	s_sel.erase(std::remove_if(s_sel.begin(), s_sel.end(), [&](const UUID& id) { return !board->findNode(id); }), s_sel.end());
-	if (!(s_selEdge == UUID{}) && !board->findEdge(s_selEdge)) s_selEdge = UUID{};
-	if (!(s_editNode == UUID{}) && !board->findNode(s_editNode)) s_editNode = UUID{};
+	if (s_selEdge != UUID{} && !board->findEdge(s_selEdge)) s_selEdge = UUID{};
+	if (s_editNode != UUID{} && !board->findNode(s_editNode)) s_editNode = UUID{};
 
 	ViewState view = viewOf(boardId);
 	const ImGuiIO& io = ImGui::GetIO();
@@ -1029,7 +1029,7 @@ void draw(const Services& services, const UUID& boardId)
 			if (importPictureFile(boardId, f.path, fx + step, fy + step)) step += 28.0 / view.zoom;
 		}
 	}
-	const bool editing = !(s_editNode == UUID{});
+	const bool editing = s_editNode != UUID{};
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 
@@ -1290,7 +1290,7 @@ void draw(const Services& services, const UUID& boardId)
 			s_drag = Drag::Connect;
 			s_connectFrom = inHand->id;
 		}
-		else if (!(hit == UUID{}))
+		else if (hit != UUID{})
 		{
 			s_dragHit = hit;
 			s_dragShift = shift;
@@ -1328,7 +1328,7 @@ void draw(const Services& services, const UUID& boardId)
 				anchorOf(*to, from->x + from->w * 0.5, from->y + from->h * 0.5, bx, by);
 				if (distanceToSegment(io.MousePos, xf.toScreen(ax, ay), xf.toScreen(bx, by)) <= 6.0f) { edgeHit = e.id; break; }
 			}
-			if (!(edgeHit == UUID{}))
+			if (edgeHit != UUID{})
 			{
 				s_selEdge = edgeHit;
 				s_sel.clear();
@@ -1412,7 +1412,7 @@ void draw(const Services& services, const UUID& boardId)
 			const UUID over = board->hitTest(mx, my);
 			dl->AddLine(pa, io.MousePos, Theme::u32(Theme::AccentBright), 2.0f);
 			drawArrowHead(dl, io.MousePos, pa, 10.0f, Theme::u32(Theme::AccentBright));
-			if (!(over == UUID{}) && !(over == s_connectFrom))
+			if (over != UUID{} && !(over == s_connectFrom))
 				if (const Node* target = board->findNode(over))
 				{
 					ImVec2 a, b;
@@ -1433,7 +1433,7 @@ void draw(const Services& services, const UUID& boardId)
 				const double dx = d.x, dy = d.y;
 				change(boardId, [=](Board& b) { return b.moveNodesBy(ids, dx, dy, taskNowMs()) > 0; });
 			}
-			else if (!s_dragShift && s_sel.size() > 1 && !(s_dragHit == UUID{}))
+			else if (!s_dragShift && s_sel.size() > 1 && s_dragHit != UUID{})
 				s_sel = { s_dragHit };   // a click on one of several selected cards keeps that one
 			break;
 		case Drag::Resize:
@@ -1462,7 +1462,7 @@ void draw(const Services& services, const UUID& boardId)
 		{
 			const UUID from = s_connectFrom;
 			const UUID to = board->hitTest(mx, my);
-			if (!(to == UUID{}) && !(to == from))
+			if (to != UUID{} && !(to == from))
 				change(boardId, [=](Board& b) { return b.addEdge(from, to, "", taskNowMs()) != nullptr; });
 			break;
 		}
@@ -1561,7 +1561,7 @@ void draw(const Services& services, const UUID& boardId)
 		endPlate();
 
 		// Over the selection: what can be done to it.
-		const bool anyCards = !s_sel.empty(), anyEdge = !(s_selEdge == UUID{});
+		const bool anyCards = !s_sel.empty(), anyEdge = s_selEdge != UUID{};
 		if ((anyCards || anyEdge) && s_drag == Drag::None && !editing)
 		{
 			const int buttons = anyCards ? (s_sel.size() >= 2 ? 4 : 3) : 1;
