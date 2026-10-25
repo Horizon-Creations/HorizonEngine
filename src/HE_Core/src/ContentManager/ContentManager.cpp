@@ -1202,9 +1202,9 @@ void ContentManager::loadPathAsync(const std::string& relativePath,
                                     std::function<void(HE::UUID)> callback,
                                     const LoadRequester& requester)
 {
-	if (isLoaded(relativePath))
+	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
 	{
-		if (callback) callback(m_pathToUUID.at(relativePath));
+		if (callback) callback(loaded->second);
 		return;
 	}
 
