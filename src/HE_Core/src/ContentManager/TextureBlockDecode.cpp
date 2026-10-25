@@ -142,7 +142,7 @@ bool decodeTextureToRGBA8(const TextureAsset& in, TextureAsset& out)
     if (in.data.size() < static_cast<size_t>(layers) * textureArraySliceBytes(in.width, in.height, mips, in.format))
         return false;
 
-    std::vector<uint8_t> data(static_cast<size_t>(layers) * textureArraySliceBytes(in.width, in.height, mips));
+    std::vector<uint8_t> data(static_cast<size_t>(layers) * textureArraySliceBytes(in.width, in.height, mips, ::TextureFormat::RGBA8));
     size_t src = 0, dst = 0;
     for (uint32_t s = 0; s < layers; ++s)
     {
