@@ -1922,12 +1922,18 @@ static void drawFooterBar(AppContext& ctx)
 
 	// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 	// The resolution is the actual viewport framebuffer size the scene renders at.
-	std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
 	int viewportPxW = 0, viewportPxH = 0;
 	ViewportPanel::renderSizePx(viewportPxW, viewportPxH);
+	std::string fpsText;
 	if (viewportPxW > 0 && viewportPxH > 0)
-		fpsText = std::to_string(viewportPxW) + "x" + std::to_string(viewportPxH)
-		        + "   " + fpsText;
+	{
+		fpsText += std::to_string(viewportPxW);
+		fpsText += 'x';
+		fpsText += std::to_string(viewportPxH);
+		fpsText += "   ";
+	}
+	fpsText += "FPS: ";
+	fpsText += std::to_string(static_cast<int>(ctx.smoothFps));
 	const float fpsW = ImGui::CalcTextSize(fpsText.c_str()).x;
 	ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
 	ImGui::Text("%s", fpsText.c_str());
