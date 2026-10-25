@@ -518,7 +518,14 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		ImGui::SetNextItemWidth(180.0f);
 		ImGui::InputTextWithHint("##typesearch", "Search…", &search);
 		const std::string q = lc(search);
-		auto hit = [&](const std::string& s){ return q.empty() || lc(s).find(q) != std::string::npos; };
+		std::string lower; // one buffer for every item's lowered label, not a string per item
+		auto hit = [&](std::string_view s)
+		{
+			if (q.empty()) return true;
+			lower.assign(s);
+			for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+			return lower.find(q) != std::string::npos;
+		};
 
 		ImGui::TextDisabled("Default");
 		const P defs[] = { P::Float, P::Double, P::Bool, P::Int, P::String,
