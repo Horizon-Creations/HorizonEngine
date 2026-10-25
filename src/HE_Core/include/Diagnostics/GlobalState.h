@@ -147,8 +147,8 @@ public:
 	// pointers by path when it changed.
 	std::atomic<uint64_t> contentFolderVersion{0};
 
-	// Thread-safe read accessor: hält den shared_lock für die Lebensdauer des zurückgegebenen lock-Objekts.
-	// Verwendung: auto [folder, lock] = globalState->lockContentFolder();
+	// Thread-safe read accessor: holds the shared_lock for the lifetime of the returned lock-object.
+	// Usage: auto [folder, lock] = globalState->lockContentFolder();
 	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockContentFolder() const
 	{
 		return { m_contentFolder, std::shared_lock<std::shared_mutex>(m_contentFolderMutex) };
