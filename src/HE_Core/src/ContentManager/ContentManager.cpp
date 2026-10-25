@@ -1030,21 +1030,32 @@ std::string ContentManager::resolveSavePath(const std::string& relativePath) con
 	return m_contentRoot + "/" + relativePath;
 }
 
+namespace {
+
+// `absolutePath` relative to `root`, or empty when it is not below it (the
+// relative path then starts with '.') or the paths cannot be related.
+std::filesystem::path relativeBelowRoot(const std::string& absolutePath,
+                                        const std::filesystem::path& root)
+{
+	std::error_code ec;
+	std::filesystem::path rel = std::filesystem::relative(absolutePath, root, ec);
+	if (ec || rel.empty() || rel.native()[0] == '.') return {};
+	return rel;
+}
+
+} // namespace
+
 bool ContentManager::isEngineDefaultPath(const std::string& absolutePath) const
 {
 	if (m_engineContentRoot.empty()) return false;
-	std::error_code ec;
-	const std::filesystem::path rel = std::filesystem::relative(absolutePath, m_engineContentRoot, ec);
-	return !ec && !rel.empty() && rel.native()[0] != '.';
+	return !relativeBelowRoot(absolutePath, m_engineContentRoot).empty();
 }
 
 bool ContentManager::isEngineOverridePath(const std::string& absolutePath) const
 {
 	if (m_contentRoot.empty()) return false;
 	const std::string overrideRoot = m_contentRoot + "/" + kEnginePrefix; // "<contentRoot>/Engine/"
-	std::error_code ec;
-	const std::filesystem::path rel = std::filesystem::relative(absolutePath, overrideRoot, ec);
-	return !ec && !rel.empty() && rel.native()[0] != '.';
+	return !relativeBelowRoot(absolutePath, overrideRoot).empty();
 }
 
 std::string ContentManager::toContentRelativePath(const std::string& absolutePath) const
