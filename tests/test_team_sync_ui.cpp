@@ -282,6 +282,24 @@ TEST_CASE("Team sync UI: a save syncs, the other editor pulls, unsaved edits are
 	dump(h.shot(anna.sync), "team-sync-other-team.bmp");
 }
 
+TEST_CASE("Team sync UI: the project's team name matches the sign-in whatever its case")
+{
+	FakeTeamServer server;
+	FakeScServer   sc(server);
+	Editor anna("Anna");
+	anna.projectTeam = "STUDIO";
+	REQUIRE(anna.team.signIn(addressOf(server), "studio", "Anna", "correct-horse"));
+	REQUIRE(pump(server, { &anna }, [&] { return anna.settled(0); }));
+	CHECK(anna.sync.blocker() == TeamSyncController::Blocker::None);
+	CHECK(anna.sync.running());
+
+	// A different name stays blocked, also when it only differs in length.
+	anna.projectTeam = "studios";
+	pump(server, { &anna }, [] { return true; });
+	CHECK(anna.sync.blocker() == TeamSyncController::Blocker::OtherTeam);
+	CHECK_FALSE(anna.sync.running());
+}
+
 TEST_CASE("Team sync UI: a first sync that differs asks before anything moves")
 {
 	FakeTeamServer server;
