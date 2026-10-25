@@ -1382,7 +1382,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	const auto dragCtr   = dp.ctr;
 
 	const std::string q = HcEditorUtil::searchMenuBegin("##dragSearch", "Search…", 232.0f);
-	auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
+	auto matches = [&](std::string_view name){ return containsFolded(name, q); };
 
 	// Node types the hand-written "Reference" section already offers. The
 	// generic registry walk below must skip them, or a Ref-output drag lists
