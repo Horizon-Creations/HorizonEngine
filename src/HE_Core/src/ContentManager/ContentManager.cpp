@@ -1251,6 +1251,13 @@ std::shared_ptr<HAsset::Reader> splitChunks(std::vector<uint8_t>& bytes)
 	return reader;
 }
 
+// The synthetic m_pendingPaths key of a UUID-addressed load, e.g. "pak://12-34":
+// `scheme` keeps it apart from real relative paths and from the other scheme.
+std::string uuidCoalesceKey(const char* scheme, HE::UUID id)
+{
+	return std::string(scheme) + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+}
+
 } // namespace
 
 void ContentManager::launchPathLoad(const std::string& relativePath, const std::string& fullPath,
@@ -1601,8 +1608,7 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 		// cannot collide with a pak UUID or a real relative path.
 		if (const auto r = m_remoteAssets.find(id); r != m_remoteAssets.end())
 		{
-			const std::string coalesceKey =
-				"remote://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+			const std::string coalesceKey = uuidCoalesceKey("remote://", id);
 			{
 				std::unique_lock<std::mutex> lock(m_pendingMutex);
 				if (m_pendingPaths.count(coalesceKey))
@@ -1633,8 +1639,7 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 	}
 	// Coalesce by a synthetic per-UUID key so it shares the pending set with the
 	// path-based overload without colliding with real relative paths.
-	const std::string coalesceKey =
-		"pak://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+	const std::string coalesceKey = uuidCoalesceKey("pak://", id);
 	{
 		std::unique_lock<std::mutex> lock(m_pendingMutex);
 		if (m_pendingPaths.count(coalesceKey))
