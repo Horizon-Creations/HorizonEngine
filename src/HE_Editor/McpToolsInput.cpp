@@ -338,20 +338,15 @@ json axisRowJson(const AxisRow& r)
 // and "the binding is in the file" is not the same as "the binding works".
 void collectDeadNames(const AxisRow& r, const char* list, int index, json& into)
 {
-	const auto add = [&](const char* field, const std::string& name) {
-		if (name.empty() || isKnownKey(name)) return;
+	const auto addInvalid = [&](const char* field, const std::string& name, auto isKnown) {
+		if (name.empty() || isKnown(name)) return;
 		into.push_back(json{ { "list", list }, { "index", index },
 		                     { "field", field }, { "name", name } });
 	};
-	const auto addPad = [&](const char* field, const std::string& name) {
-		if (name.empty() || isKnownPadButton(name)) return;
-		into.push_back(json{ { "list", list }, { "index", index },
-		                     { "field", field }, { "name", name } });
-	};
-	add("positive", r.positive);
-	add("negative", r.negative);
-	addPad("positiveButton", r.positiveButton);
-	addPad("negativeButton", r.negativeButton);
+	addInvalid("positive", r.positive, isKnownKey);
+	addInvalid("negative", r.negative, isKnownKey);
+	addInvalid("positiveButton", r.positiveButton, isKnownPadButton);
+	addInvalid("negativeButton", r.negativeButton, isKnownPadButton);
 }
 
 json entryJson(const MapEntry& e)
