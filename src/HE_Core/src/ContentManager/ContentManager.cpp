@@ -1550,9 +1550,11 @@ std::vector<std::string> ContentManager::asyncInFlightPaths(size_t max) const
 		paths.assign(m_pendingPaths.begin(), m_pendingPaths.end());
 	}
 	// Sorted before cut, so the same loads show from frame to frame rather than
-	// whichever the hash set happens to hand out first.
-	std::sort(paths.begin(), paths.end());
-	if (paths.size() > max) paths.resize(max);
+	// whichever the hash set happens to hand out first. Only the first `max` have
+	// to be in order (the keys of a set are distinct, so the cut is unambiguous).
+	const size_t keep = std::min(max, paths.size());
+	std::partial_sort(paths.begin(), paths.begin() + static_cast<std::ptrdiff_t>(keep), paths.end());
+	paths.resize(keep);
 	return paths;
 }
 
