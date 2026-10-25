@@ -2688,11 +2688,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// The unsaved-changes half, once anything upstream has agreed to proceed.
 	auto requestGuardedInner = [&](GuardedAction a, const std::string& arg)
 	{
-		const bool tabsDirty = endsSession(a) && !unsavedTabEntries().empty();
+		std::vector<std::pair<std::string, std::string>> unsaved;
+		if (endsSession(a)) unsaved = unsavedTabEntries();
+		const bool tabsDirty = !unsaved.empty();
 		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
 		if (a == GuardedAction::InstallUpdate)
 			HE_LOG_INFO(Editor, "Editor: unsaved changes (scene %s, %zu asset tab(s)) -- asking before the update",
-			            ctx.sceneDirty ? "dirty" : "clean", unsavedTabEntries().size());
+			            ctx.sceneDirty ? "dirty" : "clean", unsaved.size());
 		s_guardAction      = a;
 		s_guardArg         = arg;
 		s_guardSaveThenAct = false;
