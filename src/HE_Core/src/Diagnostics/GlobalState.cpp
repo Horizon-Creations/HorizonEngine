@@ -592,7 +592,7 @@ bool GlobalState::refreshContentFolder()
 		return false;
 	}
 
-	// Daten ausserhalb des Locks zusammenstellen, dann atomar eintauschen
+	// Assemble data outside the lock, then atomically swap
 	HE::Folder fresh;
 	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = contentFolderpath.filename().string();
