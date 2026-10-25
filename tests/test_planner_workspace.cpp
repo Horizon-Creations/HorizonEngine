@@ -65,6 +65,17 @@ TaskBoard sampleBoard()
 
 } // namespace
 
+TEST_CASE("planner import: derived ids keep their stored values")
+{
+	// The ids are persisted in saved databases: FNV-1a over "kind\nname", high half "planner\0".
+	CHECK(derivedId("property", "Status").hi == 0x706c616e6e657200ULL);
+	CHECK(derivedId("property", "Status").lo == 0x63c28b435e9e0242ULL);
+	CHECK(derivedId("database", "Tasks").lo == 0xea0334f346401e26ULL);
+	CHECK(derivedId("option:Status", "Open").lo == 0x9a3916263cb0bad4ULL);
+	CHECK(derivedId("", "").lo == 0x44bd31d473cd01cbULL);
+	CHECK(derivedId("view", "caf\xC3\xA9").lo == 0x4df67f8bf068590aULL);
+}
+
 TEST_CASE("planner import: derived ids are the same everywhere")
 {
 	CHECK(derivedId("property", "Status") == derivedId("property", "Status"));
