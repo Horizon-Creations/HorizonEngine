@@ -236,6 +236,13 @@ const ParticleGraphNode* outputNode(const ParticleGraph& g)
 	return nullptr;
 }
 
+ParticleGraphNode* findMutableOutputNode(ParticleGraph& g)
+{
+	for (ParticleGraphNode& n : g.nodes)
+		if (n.type == ParticleNodeType::EmitterOutput) return &n;
+	return nullptr;
+}
+
 // The link feeding one input pin, or nullptr. An input pin holds at most one
 // (ParticleGraph::connect disconnects first), so this answers completely.
 const ParticleGraphLink* linkInto(const ParticleGraph& g, int dstNode, int dstPin)
@@ -529,9 +536,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 				"Either 'value' or 'reset' is required — a call with neither would report "
 				"success without changing anything.");
 
-		ParticleGraphNode* out = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
+		ParticleGraphNode* out = findMutableOutputNode(e.graph);
 		if (!out)
 			return ToolResult::fail("invalid_payload",
 				"'" + e.rel + "' has no Emitter Output node, which every particle graph the "
@@ -563,9 +568,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 				result["changed"]     = true;
 				result["removedNode"] = wasConst && onlyConsumer;
 			}
-			ParticleGraphNode* after = nullptr;
-			for (ParticleGraphNode& n : e.graph.nodes)
-				if (n.type == ParticleNodeType::EmitterOutput) { after = &n; break; }
+			ParticleGraphNode* after = findMutableOutputNode(e.graph);
 			if (after) result["state"] = pinJson(e.graph, *after, index);
 			bool randomised = false;
 			result["emitter"] = configJson(e.graph, randomised);
@@ -623,9 +626,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 		const int params = particleNodeDesc(node->type).paramCount;
 		for (int i = 0; i < params; ++i) node->p[i] = p[i];
 
-		ParticleGraphNode* after = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { after = &n; break; }
+		ParticleGraphNode* after = findMutableOutputNode(e.graph);
 
 		json result{
 			{ "pin",         pinName },
@@ -703,9 +704,7 @@ void addSlotSet(McpToolRegistry& registry, ContentManager& content,
 					"reference it. The editor log carries the reason.");
 		}
 
-		ParticleGraphNode* out = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
+		ParticleGraphNode* out = findMutableOutputNode(e.graph);
 		if (!out)
 			return ToolResult::fail("invalid_payload",
 				"'" + e.rel + "' has no Emitter Output node, which every particle graph the "
