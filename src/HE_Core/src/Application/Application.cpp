@@ -148,11 +148,17 @@ struct InputLatencyProbe
 		pending.clear();
 	}
 
-	static double pct(std::vector<double> v, double p)
+	// `v` must be sorted ascending: report() sorts each series once for all its percentiles.
+	static double pct(const std::vector<double>& v, double p)
 	{
 		if (v.empty()) return 0.0;
-		std::sort(v.begin(), v.end());
 		return v[std::min(v.size() - 1, static_cast<size_t>(p / 100.0 * (v.size() - 1) + 0.5))];
+	}
+
+	static std::vector<double> sorted(std::vector<double> v)
+	{
+		std::sort(v.begin(), v.end());
+		return v;
 	}
 
 	void report(const char* when)
@@ -161,14 +167,16 @@ struct InputLatencyProbe
 		const double secs = (SDL_GetTicksNS() - windowStartNs) * 1e-9;
 		const double rate = secs > 0.0
 			? (pushed.load(std::memory_order_relaxed) - pushedAtStart) / secs : 0.0;
+		const std::vector<double> commit = sorted(toCommit), poll = sorted(toPoll),
+		                          pollCommit = sorted(pollToCommit);
 		HE_LOG_INFO(Core, "HE_PERF_INPUT_LATENCY (%s): %zu events over %llu frames (from frame %llu, "
 		            "pushed %.0f Hz) | event->commit p50 %.2f p90 %.2f p99 %.2f ms | "
 		            "event->poll p50 %.2f p90 %.2f | poll->commit p50 %.2f p90 %.2f",
 		            when, toCommit.size(), static_cast<unsigned long long>(frames),
 		            static_cast<unsigned long long>(firstFrame), rate,
-		            pct(toCommit, 50), pct(toCommit, 90), pct(toCommit, 99),
-		            pct(toPoll, 50), pct(toPoll, 90),
-		            pct(pollToCommit, 50), pct(pollToCommit, 90));
+		            pct(commit, 50), pct(commit, 90), pct(commit, 99),
+		            pct(poll, 50), pct(poll, 90),
+		            pct(pollCommit, 50), pct(pollCommit, 90));
 	}
 };
 InputLatencyProbe g_inputLatency;
