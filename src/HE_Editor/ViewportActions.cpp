@@ -133,12 +133,18 @@ std::vector<Entity> showAll(HorizonWorld& world)
 bool anyHidden(HorizonWorld& world)
 {
 	auto& reg = world.registry();
-	bool any = false;
-	forEachInScene(world, [&](Entity e)
+	// Its own walk rather than forEachInScene: that one cannot stop early.
+	std::function<bool(Entity)> walk = [&](Entity e)
 	{
-		if (!any && HE::entityVisibility(reg, e) == HE::Visibility::Hidden) any = true;
-	});
-	return any;
+		if (!reg.valid(e)) return false;
+		if (e != world.rootEntity() && HE::entityVisibility(reg, e) == HE::Visibility::Hidden)
+			return true;
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			for (const Entity c : h->children)
+				if (walk(c)) return true;
+		return false;
+	};
+	return walk(world.rootEntity());
 }
 
 std::vector<Entity> selectableEntities(HorizonWorld& world)
