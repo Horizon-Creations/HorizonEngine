@@ -2362,7 +2362,7 @@ void drawQuickPickPopup(const Host& h)
 			const HC::Variable& v = *vp;
 			// Locals belong to their own function only.
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
-			if (!q.empty() && lower(v.name).find(q) == std::string::npos) continue;
+			if (!containsFolded(v.name, q)) continue;
 			any = true;
 			if (HcEditorUtil::searchMenuItem(v.name + "  \xe2\x80\x94  " + variableTypeLabel(v)))
 			{
