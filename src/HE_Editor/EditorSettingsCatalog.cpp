@@ -520,6 +520,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	{
 	case SettingType::Bool:
 	{
+		if (!d.pb) { outError = "setting has no config member"; return false; }
 		if (!in.is_boolean()) { outError = "expected a boolean"; return false; }
 		const bool v = in.get<bool>();
 		outChanged = (cfg.*(d.pb) != v);
@@ -528,6 +529,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::Int:
 	{
+		if (!d.pi) { outError = "setting has no config member"; return false; }
 		if (!in.is_number_integer()) { outError = "expected an integer"; return false; }
 		const long long v = in.get<long long>();
 		if (d.hasRange && (static_cast<double>(v) < d.minValue ||
@@ -543,6 +545,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::Float:
 	{
+		if (!d.pf) { outError = "setting has no config member"; return false; }
 		if (!in.is_number()) { outError = "expected a number"; return false; }
 		const double v = in.get<double>();
 		if (d.hasRange && (v < d.minValue || v > d.maxValue))
@@ -557,6 +560,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::String:
 	{
+		if (!d.ps) { outError = "setting has no config member"; return false; }
 		if (!in.is_string()) { outError = "expected a string"; return false; }
 		std::string v = in.get<std::string>();
 		outChanged = (cfg.*(d.ps) != v);
@@ -565,6 +569,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::Enum:
 	{
+		if (!d.pi) { outError = "setting has no config member"; return false; }
 		int v = -1;
 		if (in.is_number_integer())
 		{
