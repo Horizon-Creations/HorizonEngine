@@ -1131,6 +1131,10 @@ endif()
 if(HE_HAVE_ZSTD)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ZSTD)
 endif()
+# Only the OpenSSL backend caps aesGcm* lengths at INT_MAX (test_game_build_config.cpp).
+if(HE_HAVE_OPENSSL)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
+endif()
 # hpak encryption tests run whenever a crypto backend (system OpenSSL or the
 # fetched mbedTLS fallback) is compiled in — the round-trips go through
 # HorizonCore's backend-agnostic Hpak::aesGcm* API.
