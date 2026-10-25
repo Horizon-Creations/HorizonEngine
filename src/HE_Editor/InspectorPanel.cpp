@@ -4057,14 +4057,14 @@ constexpr AddGroup kAddGroups[] = {
 
 // Case-insensitive "needle somewhere in haystack" — the same test the Outliner
 // and Content Browser searches apply, so typing "mesh" finds Mesh, Skeletal
-// Mesh and Nav Mesh alike.
-bool labelMatches(const char* label, const std::string& needle)
+// Mesh and Nav Mesh alike. The needle comes already lowered: the caller tests
+// every row against the same one.
+bool labelMatches(const char* label, const std::string& loweredNeedle)
 {
-	if (needle.empty()) return true;
-	std::string hay(label), n(needle);
+	if (loweredNeedle.empty()) return true;
+	std::string hay(label);
 	std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return std::tolower(c); });
-	std::transform(n.begin(),   n.end(),   n.begin(),   [](unsigned char c) { return std::tolower(c); });
-	return hay.find(n) != std::string::npos;
+	return hay.find(loweredNeedle) != std::string::npos;
 }
 } // namespace
 #endif // HE_IMGUI_ENABLED
@@ -4214,11 +4214,14 @@ bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities, 
 		// ── Searching: the hits, flat, each with its group beside it ────────
 		int  hits  = 0;
 		bool first = true;
+		std::string loweredFilter = s_filter;
+		std::transform(loweredFilter.begin(), loweredFilter.end(), loweredFilter.begin(),
+		               [](unsigned char c) { return std::tolower(c); });
 		for (const AddGroup& g : kAddGroups)
 			for (int i = 0; i < g.count; ++i)
 			{
 				const AddRow& row = g.rows[i];
-				if (!anyLacks(row) || !labelMatches(row.label, s_filter)) continue;
+				if (!anyLacks(row) || !labelMatches(row.label, loweredFilter)) continue;
 				++hits;
 				// The group beside the hit: "Mesh" and "Nav Mesh" are told
 				// apart by where they live as much as by their names.
