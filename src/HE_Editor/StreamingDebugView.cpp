@@ -59,6 +59,22 @@ std::vector<HE::CellAnchor>& previewPins()
 	return s_pins;
 }
 
+namespace
+{
+// The camera first, then the pins; `eyeAbs` is already in absolute positions.
+std::vector<HE::CellAnchor> anchorsAround(const glm::dvec3& eyeAbs,
+                                          const std::vector<HE::CellAnchor>& pins)
+{
+	std::vector<HE::CellAnchor> anchors;
+	anchors.reserve(1 + pins.size());
+	HE::CellAnchor cam;
+	cam.position = eyeAbs;
+	anchors.push_back(cam);
+	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	return anchors;
+}
+} // namespace
+
 // ── The cells in the Scene window ────────────────────────────────────────────
 void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawBuffer& out)
 {
@@ -80,12 +96,7 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
 	const double range = std::max(static_cast<double>(m->unloadRadius) * 1.5, size * 2.0);
 	// The camera is an anchor like the pins: the nearest of them decides a cell's colour.
 	// A viewpoint has no velocity, so the lookahead does not enter.
-	std::vector<HE::CellAnchor> anchors;
-	anchors.reserve(1 + pins.size());
-	HE::CellAnchor cam;
-	cam.position = eyeAbs;
-	anchors.push_back(cam);
-	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	const std::vector<HE::CellAnchor> anchors = anchorsAround(eyeAbs, pins);
 	const std::vector<HE::CellManifest::View> cells = m->around(anchors, range);
 
 	const glm::vec3 kLoad(0.25f, 0.85f, 0.35f);   // the game builds it from here
@@ -482,13 +493,7 @@ void drawCells(AppContext& ctx)
 	if (!pins.empty())
 		ImGui::Text("%zu preview anchor(s) besides the camera.", pins.size());
 
-	std::vector<HE::CellAnchor> anchors;
-	anchors.reserve(1 + pins.size());
-	HE::CellAnchor cam;
-	cam.position = eye;
-	anchors.push_back(cam);
-	anchors.insert(anchors.end(), pins.begin(), pins.end());
-	const std::vector<HE::CellManifest::View> nearby = m->around(anchors, m->unloadRadius);
+	const std::vector<HE::CellManifest::View> nearby = m->around(anchorsAround(eye, pins), m->unloadRadius);
 	size_t   loadCells = 0, keepCells = 0;
 	uint64_t loadEnts = 0, keepEnts = 0;
 	uint32_t mostSlices = 0;
