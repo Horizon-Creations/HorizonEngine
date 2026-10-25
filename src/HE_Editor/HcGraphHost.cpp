@@ -1076,9 +1076,8 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 	HC::Graph& graph = *h.graph;
 	const ImVec2 drop = h.ge->addMenuGraphPos;
 	int created = 0;
-	auto matches = [&](const std::string& name, const std::string& cat)
-	{ return q.empty() || lower(name).find(q) != std::string::npos
-	      || lower(cat).find(q) != std::string::npos; };
+	auto matches = [&](std::string_view name, std::string_view cat)
+	{ return containsFolded(name, q) || containsFolded(cat, q); };
 
 	// Spawn the EngineCall node one registry pick stands for. Shared, because the
 	// rows now appear in two places: merged into a node category below, and in
