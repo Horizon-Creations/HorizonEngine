@@ -304,7 +304,7 @@ void GlobalState::readConfig()
 			if (!entry.is_string()) continue;
 			std::string p = entry.get<std::string>();
 			// Guard against corrupted entries (e.g. a settings string stored here by mistake)
-			if (p.size() >= 7 && p.substr(p.size() - 7) == ".heproj")
+			if (p.ends_with(".heproj"))
 				m_engineStatus.knownProjects.push_back(std::move(p));
 		}
 	}
@@ -402,7 +402,7 @@ void GlobalState::addKnownProject(const std::string& path)
 {
 	// Reject anything that isn't a .heproj path (guards against settings strings
 	// or other values being accidentally passed here).
-	if (path.size() < 7 || path.substr(path.size() - 7) != ".heproj")
+	if (!path.ends_with(".heproj"))
 		return;
 	auto& kp = m_engineStatus.knownProjects;
 	// Remove existing occurrence to avoid duplicates
