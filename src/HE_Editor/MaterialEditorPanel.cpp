@@ -31,6 +31,7 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -366,9 +367,10 @@ std::string serializeSelection(const State& st)
 			    n->type != MatNodeType::FnInput)
 				tmp.nodes.push_back(*n);
 	if (tmp.nodes.empty()) return {};
-	auto inSel = [&](int id){ for (auto& n : tmp.nodes) if (n.id == id) return true; return false; };
+	std::unordered_set<int> selIds;
+	for (const auto& n : tmp.nodes) selIds.insert(n.id);
 	for (const auto& l : st.graph.links)
-		if (inSel(l.srcNode) && inSel(l.dstNode)) tmp.links.push_back(l);
+		if (selIds.count(l.srcNode) && selIds.count(l.dstNode)) tmp.links.push_back(l);
 	return HE::materialGraphToJson(tmp);
 }
 
