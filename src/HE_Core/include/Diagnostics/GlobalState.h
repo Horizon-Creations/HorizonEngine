@@ -9,8 +9,6 @@
 #include <shared_mutex>
 #include <nlohmann/json.hpp>
 
-using json = nlohmann::json;
-
 class HE_API GlobalState
 {
 public:
@@ -130,7 +128,7 @@ public:
 	// runs, so no test can reach a real user's settings, while tests that pin a
 	// directory of their own still get theirs.
 	static std::filesystem::path configFilePath();
-	void setCustomConfigEntry(const std::string& key, const json& value);
+	void setCustomConfigEntry(const std::string& key, const nlohmann::json& value);
 
 	int getCustomConfigInt(const std::string& key, int defaultValue = 0) const;
 	float getCustomConfigFloat(const std::string& key, float defaultValue = 0.0f) const;
@@ -229,5 +227,5 @@ private:
 	mutable std::shared_mutex m_sourceFolderMutex;
 
 	//Custom config entries
-	json m_customConfig;
+	nlohmann::json m_customConfig;
 };
