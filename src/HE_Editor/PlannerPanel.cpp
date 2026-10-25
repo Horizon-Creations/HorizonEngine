@@ -1202,7 +1202,12 @@ std::string summary(const Database& db, const Row& row, const Property& p)
 	{
 		std::string out;
 		for (const UUID& id : db.multiSelect(row.id, p.id))
-			if (const SelectOption* o = p.findOption(id)) out += (out.empty() ? "" : ", ") + o->name;
+		{
+			const SelectOption* o = p.findOption(id);
+			if (!o) continue;
+			if (!out.empty()) out += ", ";
+			out += o->name;
+		}
 		return out;
 	}
 	default:
