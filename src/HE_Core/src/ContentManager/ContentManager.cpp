@@ -1061,11 +1061,10 @@ bool ContentManager::isEngineOverridePath(const std::string& absolutePath) const
 std::string ContentManager::toContentRelativePath(const std::string& absolutePath) const
 {
 	namespace fs = std::filesystem;
-	std::error_code ec;
 	if (!m_engineContentRoot.empty())
 	{
-		const fs::path rel = fs::relative(absolutePath, m_engineContentRoot, ec);
-		if (!ec && !rel.empty() && rel.native()[0] != '.')
+		const fs::path rel = relativeBelowRoot(absolutePath, m_engineContentRoot);
+		if (!rel.empty())
 			return std::string(kEnginePrefix) + rel.generic_string();
 	}
 	// The SFTP download cache is a third EngineContent root (see
@@ -1075,20 +1074,16 @@ std::string ContentManager::toContentRelativePath(const std::string& absolutePat
 	// relative path here, and an empty path loads nothing: the tab opened and
 	// stayed blank. Checked after the shipped default, mirroring the read-side
 	// precedence exactly.
-	ec.clear();
 	{
 		const fs::path cacheRoot = GlobalState::engineContentCacheDir();
 		if (!cacheRoot.empty())
 		{
-			const fs::path rel = fs::relative(absolutePath, cacheRoot, ec);
-			if (!ec && !rel.empty() && rel.native()[0] != '.')
+			const fs::path rel = relativeBelowRoot(absolutePath, cacheRoot);
+			if (!rel.empty())
 				return std::string(kEnginePrefix) + rel.generic_string();
 		}
 	}
-	ec.clear();
-	const fs::path rel = fs::relative(absolutePath, m_contentRoot, ec);
-	if (ec || rel.empty() || rel.native()[0] == '.') return std::string(); // outside both roots
-	return rel.generic_string();
+	return relativeBelowRoot(absolutePath, m_contentRoot).generic_string(); // empty when outside both roots
 }
 
 // ─── loadAsset ────────────────────────────────────────────────────────────────
