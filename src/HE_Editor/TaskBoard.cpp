@@ -52,6 +52,8 @@ const char* const kUpdateKindNames[] = { "comment", "status", "assignment" };
 // timegm() on one platform and _mkgmtime() on another, and both stop at the
 // year 2038 or 3000 depending on who built them.
 
+constexpr std::int64_t kMillisecondsPerDay = 86400000;
+
 std::int64_t daysFromCivil(std::int64_t y, unsigned m, unsigned d)
 {
 	y -= m <= 2;
@@ -417,9 +419,9 @@ std::int64_t taskNowMs()
 
 std::string taskTimeToIso(std::int64_t ms)
 {
-	std::int64_t days = ms / 86400000;
-	std::int64_t rem  = ms % 86400000;
-	if (rem < 0) { rem += 86400000; --days; }
+	std::int64_t days = ms / kMillisecondsPerDay;
+	std::int64_t rem  = ms % kMillisecondsPerDay;
+	if (rem < 0) { rem += kMillisecondsPerDay; --days; }
 	std::int64_t y; unsigned m, d;
 	civilFromDays(days, y, m, d);
 	const int msec = static_cast<int>(rem % 1000);
