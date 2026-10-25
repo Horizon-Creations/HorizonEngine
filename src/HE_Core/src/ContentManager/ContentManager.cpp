@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <unordered_set>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -3185,6 +3186,24 @@ ContentManager::ContentManager(std::string contentPath)
 	: m_contentRoot(std::move(contentPath)) { initDefaultAssets(); }
 ContentManager::~ContentManager() = default;
 
+namespace {
+
+// "hi:lo" (two decimal numbers) as written into the pak's path and type indexes.
+// Not-a-UUID text is reported as empty, never thrown: a bad entry is skipped.
+std::optional<HE::UUID> parseHiLoId(const std::string& text)
+{
+	const auto colon = text.find(':');
+	if (colon == std::string::npos) return std::nullopt;
+	HE::UUID id{};
+	try {
+		id.hi = std::stoull(text.substr(0, colon));
+		id.lo = std::stoull(text.substr(colon + 1));
+	} catch (...) { return std::nullopt; }
+	return id;
+}
+
+} // namespace
+
 bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 {
 	auto reader = std::make_unique<HpakReader>();
@@ -3218,16 +3237,10 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 					for (auto it = j.begin(); it != j.end(); ++it)
 					{
 						if (!it.value().is_string()) continue;
-						const std::string v = it.value().get<std::string>();
-						const auto colon = v.find(':');
-						if (colon == std::string::npos) continue;
-						HE::UUID id{};
-						try {
-							id.hi = std::stoull(v.substr(0, colon));
-							id.lo = std::stoull(v.substr(colon + 1));
-						} catch (...) { continue; }
-						m_pakPathIndex[it.key()] = id;
-						m_pakIdToAddressedPath[id] = it.key();
+						const std::optional<HE::UUID> id = parseHiLoId(it.value().get<std::string>());
+						if (!id) continue;
+						m_pakPathIndex[it.key()] = *id;
+						m_pakIdToAddressedPath[*id] = it.key();
 					}
 			}
 		}
@@ -3255,14 +3268,8 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 						// Mirror image of the path index: here the "hi:lo" is the KEY
 						// and the value is the AssetType as a number.
 						if (!it.value().is_number_unsigned()) continue;
-						const std::string& idKey = it.key();
-						const auto colon = idKey.find(':');
-						if (colon == std::string::npos) continue;
-						HE::UUID id{};
-						try {
-							id.hi = std::stoull(idKey.substr(0, colon));
-							id.lo = std::stoull(idKey.substr(colon + 1));
-						} catch (...) { continue; }
+						const std::optional<HE::UUID> id = parseHiLoId(it.key());
+						if (!id) continue;
 						const auto t = static_cast<HE::AssetType>(it.value().get<uint32_t>());
 						// Unknown says nothing a missing entry does not already say
 						// (assetType() reports Unknown either way). A value from a
@@ -3270,7 +3277,7 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 						// kept as-is and simply never equals any type a caller asks
 						// for — no range check needed to make that safe.
 						if (t == HE::AssetType::Unknown) continue;
-						m_assetTypeIndex[id] = t;
+						m_assetTypeIndex[*id] = t;
 					}
 			}
 		}
