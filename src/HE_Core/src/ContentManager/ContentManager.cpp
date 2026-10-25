@@ -142,9 +142,8 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 		if (HE::decodeMeshSections(c->data, a.sections)
 		    && HE::meshSectionsCover(a.sections, a.indices.size()))
 			return;
-		HE_LOG_WARN(Asset, "%s",
-			("ContentManager: '" + relativePath + "' carries a section table that does not cover its "
-			 + std::to_string(a.indices.size()) + " indices — drawing it as one section").c_str());
+		HE_LOG_WARN(Asset, "ContentManager: '%s' carries a section table that does not cover its "
+			"%zu indices — drawing it as one section", relativePath.c_str(), a.indices.size());
 	}
 	a.sections.clear();
 	MeshSection whole;
