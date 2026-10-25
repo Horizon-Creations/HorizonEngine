@@ -12,10 +12,12 @@
 #include <imgui_internal.h>   // GetHoveredID
 
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -133,6 +135,40 @@ namespace
 	}
 
 	constexpr std::uint8_t kBgR = 20, kBgG = 18, kBgB = 15;
+
+	// How many chord buttons the page shows: one per visible row, found by
+	// walking down the Shortcut column and collecting the distinct hovered ids.
+	size_t visibleRows()
+	{
+		const float colX = float(W) - 120.0f;
+		std::set<ImGuiID> ids;
+		for (float y = 0.0f; y < float(H); y += 2.0f)
+		{
+			ImGui::GetIO().AddMousePosEvent(colX, y);
+			frame(false);
+			if (const ImGuiID id = frame(false); id != 0) ids.insert(id);
+		}
+		return ids.size();
+	}
+
+	// Replaces the Search box's text: the box is the first item at x=60, below
+	// the hint.
+	void typeFilter(const char* text)
+	{
+		float y = 0.0f;
+		for (; y < float(H); y += 2.0f)
+		{
+			ImGui::GetIO().AddMousePosEvent(60.0f, y);
+			frame(false);
+			if (frame(false) != 0) break;
+		}
+		REQUIRE(y < float(H));
+		clickAt(60.0f, y);
+		tap({ ImGuiMod_Ctrl, ImGuiKey_A });
+		tap({ ImGuiKey_Backspace });
+		if (*text) { ImGui::GetIO().AddInputCharactersUTF8(text); frame(false); }
+		frame(false);
+	}
 }
 
 TEST_CASE("shortcuts page: every action has a row, a click arms a capture, a keystroke rebinds and persists")
@@ -232,4 +268,48 @@ TEST_CASE("shortcuts page: every action has a row, a click arms a capture, a key
 	clickAt(resetX, saveY);
 	CHECK(isDefault("file.save"));
 	CHECK(h.persisted().empty());
+}
+
+TEST_CASE("shortcuts page: the search box filters rows case-insensitively over label, category and key")
+{
+	Harness h;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) frame(false);
+
+	const size_t all = visibleRows();
+	REQUIRE(all > 3);
+
+	typeFilter("save");
+	const size_t save = visibleRows();
+	CHECK(save >= 1);
+	CHECK(save < all);
+
+	// Mixed case and upper case find the same rows as lower case.
+	typeFilter("SaVe");
+	CHECK(visibleRows() == save);
+	typeFilter("SAVE");
+	CHECK(visibleRows() == save);
+
+	// The key itself counts (its spelling is the platform's: Ctrl or Cmd).
+	std::string key = label("file.save");
+	REQUIRE(key.size() >= 2);
+	std::string mixed = key, lower = key;
+	for (size_t i = 0; i < key.size(); ++i)
+	{
+		mixed[i] = i % 2 ? char(std::tolower((unsigned char)key[i])) : char(std::toupper((unsigned char)key[i]));
+		lower[i] = char(std::tolower((unsigned char)key[i]));
+	}
+	typeFilter(mixed.c_str());
+	const size_t byKey = visibleRows();
+	CHECK(byKey >= 1);
+	CHECK(byKey < all);
+	typeFilter(lower.c_str());
+	CHECK(visibleRows() == byKey);
+
+	typeFilter("no such action zzz");
+	CHECK(visibleRows() == 0);
+
+	// An emptied box shows everything again.
+	typeFilter("");
+	CHECK(visibleRows() == all);
 }
