@@ -2273,13 +2273,20 @@ static void drawEditorTabBar(AppContext& ctx)
             const HE::Ed::Rewards::TabMark mark =
                 HE::Ed::Rewards::tabMark(ctx, tab.assetPath, tabDirty);
             std::string suffix = tabDirty ? " *" : "";
+            std::string probe;  // label + trailing text to measure, grown in place
             if (mark.check)
             {
-                const float markW = ImGui::CalcTextSize((tab.label + " *").c_str()).x;
+                probe = tab.label;
+                probe += " *";
+                const float markW = ImGui::CalcTextSize(probe.c_str()).x;
                 suffix = " ";
-                while (ImGui::CalcTextSize((tab.label + suffix).c_str()).x < markW
+                probe.resize(tab.label.size() + 1);
+                while (ImGui::CalcTextSize(probe.c_str()).x < markW
                        && suffix.size() < 8)
+                {
                     suffix += ' ';
+                    probe += ' ';
+                }
             }
             const std::string shown = tab.label + suffix
                 + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
@@ -2293,8 +2300,9 @@ static void drawEditorTabBar(AppContext& ctx)
                 const ImVec2 mn    = ImGui::GetItemRectMin();
                 const float  lineH = ImGui::GetTextLineHeight();
                 const float  size  = std::floor(lineH * 0.62f);
+                probe.resize(tab.label.size() + 1);  // label + one space
                 const float  x     = mn.x + ImGui::GetStyle().FramePadding.x
-                                   + ImGui::CalcTextSize((tab.label + " ").c_str()).x;
+                                   + ImGui::CalcTextSize(probe.c_str()).x;
                 const float  y     = mn.y + ImGui::GetStyle().FramePadding.y
                                    + (lineH - size) * 0.5f;
                 HE::Ed::Rewards::drawCheckMark(x, y, size, mark.stroke, mark.alpha);
