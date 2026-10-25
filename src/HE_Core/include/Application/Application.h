@@ -136,7 +136,7 @@ namespace HE
 		IRenderer*       renderer()     const { return m_renderer.get(); }
 		Input&           input()              { return m_input; }
 		ContentManager&  contentManager()     { return m_contentManager; }
-		GlobalState* m_globalState;
+		GlobalState* m_globalState = nullptr;
 
 		HorizonWorld* world() const                 { return m_world; }
 		void          setWorld(HorizonWorld* world)
