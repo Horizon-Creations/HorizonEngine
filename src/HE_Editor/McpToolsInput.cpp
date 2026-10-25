@@ -360,19 +360,15 @@ json entryJson(const MapEntry& e)
 	if (!e.gamepadButtons.empty()) j["gamepadButtons"] = e.gamepadButtons;
 	if (!e.mouseButtons.empty())   j["mouseButtons"]   = e.mouseButtons;
 
+	const auto buildAxisArray = [&](const auto& src, const char* key) {
+		if (src.empty()) return;
+		json arr = json::array();
+		for (const AxisRow& r : src) arr.push_back(axisRowJson(r));
+		j[key] = std::move(arr);
+	};
 	const char* xList = e.valueType == kVtAxis2D ? "axesX" : "axes";
-	if (!e.axes.empty())
-	{
-		json arr = json::array();
-		for (const AxisRow& r : e.axes) arr.push_back(axisRowJson(r));
-		j[xList] = std::move(arr);
-	}
-	if (!e.axesY.empty())
-	{
-		json arr = json::array();
-		for (const AxisRow& r : e.axesY) arr.push_back(axisRowJson(r));
-		j["axesY"] = std::move(arr);
-	}
+	buildAxisArray(e.axes, xList);
+	buildAxisArray(e.axesY, "axesY");
 
 	json dead = json::array();
 	for (size_t i = 0; i < e.keys.size(); ++i)
