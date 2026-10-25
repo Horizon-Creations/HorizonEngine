@@ -1127,12 +1127,13 @@ void drawTable(const Database& db, const View& view, const std::vector<std::size
 		ImGui::TableSetColumnIndex(c);
 		ImGui::PushID(c);
 		const bool isTitle = c == 0;
-		const UUID prop = isTitle ? UUID{} : cols[static_cast<std::size_t>(c - 1)]->id;
-		const std::string& name = isTitle ? std::string("Title") : cols[static_cast<std::size_t>(c - 1)]->name;
+		const Property* col = isTitle ? nullptr : cols[static_cast<std::size_t>(c - 1)];
+		const UUID prop = col ? col->id : UUID{};
+		const char* name = col ? col->name.c_str() : "Title";
 		const bool sorted = !view.sorts.empty() && view.sorts[0].property == prop;
-		if (ImGui::Selectable(isTitle ? "Title" : name.c_str(), false, 0, ImVec2(0, 0)))
+		if (ImGui::Selectable(name, false, 0, ImVec2(0, 0)))
 			cycleSort(db.id, view.id, prop);
-		if (isTitle) note("header:Title"); else note("header:" + name);
+		if (isTitle) note("header:Title"); else note("header:" + col->name);
 		if (sorted)
 		{
 			const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
