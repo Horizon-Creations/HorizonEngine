@@ -23,7 +23,7 @@ bool GameLoop::tick(HorizonWorld& world, IGameLogic* logic, float deltaTime)
     m_accumulator += deltaTime;
     uint32_t steps = 0;
     while (m_accumulator >= m_config.fixedTimestep && steps < m_config.maxFixedSteps) {
-        if (logic) logic->onUpdate(world, m_config.fixedTimestep);
+        logic->onUpdate(world, m_config.fixedTimestep);
         m_accumulator -= m_config.fixedTimestep;
         ++steps;
     }
