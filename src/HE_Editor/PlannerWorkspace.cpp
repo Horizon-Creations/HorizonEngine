@@ -392,13 +392,8 @@ std::vector<Board*> Workspace::boards()
 {
 	std::vector<Board*> out;
 	for (BoardEntry& e : m_boards) out.push_back(&e.board);
-	auto lowered = [](std::string t) {
-		for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-		return t;
-	};
-	std::sort(out.begin(), out.end(), [&](const Board* a, const Board* b) {
-		const std::string x = lowered(a->title), y = lowered(b->title);
-		if (x != y) return x < y;
+	std::sort(out.begin(), out.end(), [](const Board* a, const Board* b) {
+		if (const int c = compareTitlesNoCase(a->title, b->title)) return c < 0;
 		return a->id.hi != b->id.hi ? a->id.hi < b->id.hi : a->id.lo < b->id.lo;
 	});
 	return out;
