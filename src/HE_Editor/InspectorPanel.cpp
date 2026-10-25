@@ -33,6 +33,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -2825,6 +2826,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TrailComponent>(entity); }
 	}
 
+	// The Rigid Body and Character Controller rows share one set of layer names;
+	// built at the first use, since most entities carry neither component.
+	std::optional<CollisionLayerNames> layerNames;
+	const auto collisionLayers = [&]() -> const CollisionLayerNames&
+	{
+		if (!layerNames) layerNames.emplace(ctx);
+		return *layerNames;
+	};
+
 	// ── Rigid Body ──────────────────────────────────────────────────────────
 	if (auto* r = registry.try_get<RigidBodyComponent>(entity))
 	{
@@ -2853,7 +2863,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -3142,7 +3152,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// because a character need not have one. It decides what BLOCKS the
 			// character as it walks.
 			collisionLayerRow("Collision Layer##character", &cc->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
