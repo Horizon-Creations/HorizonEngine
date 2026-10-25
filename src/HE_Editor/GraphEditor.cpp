@@ -294,21 +294,17 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // silently removed nodes somewhere the user was not even looking — they
     // only found out on going back. Dropping what is not on screen is the one
     // place that fixes all of them at once.
-    if (!st.selection.empty() || st.selected != 0)
+    if (!st.selection.empty() || st.selected != 0 || !st.raised.empty())
     {
         const std::unordered_set<int> visible(ids.begin(), ids.end());
         st.selection.erase(std::remove_if(st.selection.begin(), st.selection.end(),
             [&](int id){ return !visible.count(id); }), st.selection.end());
         if (st.selected != 0 && !visible.count(st.selected))
             st.selected = st.selection.empty() ? 0 : st.selection.front();
-    }
 
-    // The raise list is subject to the same rule and for the same reason: an id
-    // left over from another sub-graph would pull whatever node happens to carry
-    // that number here to the front.
-    if (!st.raised.empty())
-    {
-        const std::unordered_set<int> visible(ids.begin(), ids.end());
+        // The raise list is subject to the same rule and for the same reason: an id
+        // left over from another sub-graph would pull whatever node happens to carry
+        // that number here to the front.
         st.raised.erase(std::remove_if(st.raised.begin(), st.raised.end(),
             [&](int id){ return !visible.count(id); }), st.raised.end());
     }
