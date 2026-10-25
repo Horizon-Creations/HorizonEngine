@@ -10,6 +10,24 @@ namespace fs = std::filesystem;
 namespace HE::Planner
 {
 
+namespace
+{
+
+// Byte-wise, like std::string::operator< on the lowered titles, but without building them.
+int compareTitlesNoCase(const std::string& a, const std::string& b)
+{
+	const size_t n = std::min(a.size(), b.size());
+	for (size_t i = 0; i < n; ++i)
+	{
+		const int x = std::tolower(static_cast<unsigned char>(a[i]));
+		const int y = std::tolower(static_cast<unsigned char>(b[i]));
+		if (x != y) return x < y ? -1 : 1;
+	}
+	return a.size() == b.size() ? 0 : (a.size() < b.size() ? -1 : 1);
+}
+
+} // namespace
+
 void Workspace::stamp(Entry& e) const
 {
 	std::error_code ec;
@@ -255,13 +273,8 @@ std::vector<Page*> Workspace::pages()
 {
 	std::vector<Page*> out;
 	for (PageEntry& e : m_pages) out.push_back(&e.page);
-	auto lowered = [](std::string t) {
-		for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-		return t;
-	};
-	std::sort(out.begin(), out.end(), [&](const Page* a, const Page* b) {
-		const std::string x = lowered(a->title), y = lowered(b->title);
-		if (x != y) return x < y;
+	std::sort(out.begin(), out.end(), [](const Page* a, const Page* b) {
+		if (const int c = compareTitlesNoCase(a->title, b->title)) return c < 0;
 		return a->id.hi != b->id.hi ? a->id.hi < b->id.hi : a->id.lo < b->id.lo;
 	});
 	return out;
