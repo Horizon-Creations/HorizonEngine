@@ -207,7 +207,8 @@ public:
 	void setLiveEnabled(bool on) { m_liveEnabled = on; }
 	bool liveEnabled() const     { return m_liveEnabled; }
 	void pushLive(const ProfLiveFrame& f);
-	std::vector<ProfLiveFrame> liveSnapshot() const { return m_live; }
+	// Valid until the next pushLive (same thread); copy it to keep it longer.
+	const std::vector<ProfLiveFrame>& liveSnapshot() const { return m_live; }
 	double lastCpuFrameMs() const { return m_lastCpuFrameMs; }
 
 	// ── Single-frame capture ────────────────────────────────────────────────
