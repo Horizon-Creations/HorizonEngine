@@ -2684,15 +2684,22 @@ const EnumTypeAsset*      ContentManager::getEnumType(HE::UUID id) const      { 
 EnumTypeAsset*            ContentManager::getEnumTypeMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_enumTypeAssets, id); }
 MaterialAsset*            ContentManager::getMaterialMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_materialAssets, id); }
 
+// The parameter slot named `name` (graphParamNames is in slot order), -1 when the
+// material has no such parameter.
+static int graphParamSlot(const MaterialAsset& m, const std::string& name)
+{
+	for (size_t i = 0; i < m.graphParamNames.size(); ++i)
+		if (m.graphParamNames[i] == name) return static_cast<int>(i);
+	return -1;
+}
+
 bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
                                       const float* values, int count)
 {
 	if (!values || count < 1) return false;
 	MaterialAsset* a = getMaterialMutable(id);
 	if (!a) return false;
-	int slot = -1;
-	for (size_t i = 0; i < a->graphParamNames.size(); ++i)
-		if (a->graphParamNames[i] == name) { slot = (int)i; break; }
+	const int slot = graphParamSlot(*a, name);
 	if (slot < 0) return false;
 	// Each parameter occupies one vec4 (4 floats) in shaderParamData, in slot order.
 	const size_t base = (size_t)slot * 4;
@@ -2705,9 +2712,7 @@ bool ContentManager::getMaterialParam(HE::UUID id, const std::string& name, floa
 {
 	const MaterialAsset* a = getMaterial(id);
 	if (!a) return false;
-	int slot = -1;
-	for (size_t i = 0; i < a->graphParamNames.size(); ++i)
-		if (a->graphParamNames[i] == name) { slot = (int)i; break; }
+	const int slot = graphParamSlot(*a, name);
 	if (slot < 0) return false;
 	const size_t base = (size_t)slot * 4;
 	for (int i = 0; i < 4; ++i)
