@@ -27,6 +27,7 @@
 #include <cstdarg>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
@@ -154,7 +155,8 @@ namespace
 	std::string upperCase(const char* s)
 	{
 		std::string out;
-		for (; *s; ++s) out += static_cast<char>(std::toupper(static_cast<unsigned char>(*s)));
+		out.reserve(std::strlen(s));
+		for (; *s; ++s) out +=static_cast<char>(std::toupper(static_cast<unsigned char>(*s)));
 		return out;
 	}
 
