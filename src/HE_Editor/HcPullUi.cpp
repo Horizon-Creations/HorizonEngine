@@ -24,14 +24,6 @@ namespace
 	constexpr ImU32 kOk  = IM_COL32(120, 200, 130, 255);
 	constexpr ImU32 kBad = IM_COL32(235, 120, 90, 255);
 
-	std::string stem(const std::string& path)
-	{
-		std::string s = path;
-		if (const size_t p = s.find_last_of("/\\"); p != std::string::npos) s.erase(0, p + 1);
-		if (const size_t d = s.rfind('.'); d != std::string::npos) s.erase(d);
-		return s;
-	}
-
 	// The source's public variables, or false when the source class is not
 	// known here (a creator without an expected class, a reference of no
 	// declared class, or no Game Instance). A class is read flattened, so what
@@ -96,7 +88,7 @@ namespace
 			if (const std::string why = s_targets.blockedBecause(classPath); !why.empty())
 			{
 				HE_LOG_WARN(Editor, "Add to Target: %s is %s - save or close it first.",
-				            stem(classPath).c_str(), why.c_str());
+				            HcEditorUtil::pathStem(classPath).c_str(), why.c_str());
 				return;
 			}
 		// Load first, THEN take the pointer, and use it before anything else
@@ -118,7 +110,7 @@ namespace
 		}
 		*json = HC::toJson(g);
 		if (cm->saveAsset(*asset))
-			HE_LOG_INFO(Editor, "Add to Target: %s in %s.", what.c_str(), stem(classPath).c_str());
+			HE_LOG_INFO(Editor, "Add to Target: %s in %s.", what.c_str(), HcEditorUtil::pathStem(classPath).c_str());
 	}
 
 	// The member case where the struct variable exists but its definition
@@ -133,7 +125,7 @@ namespace
 		if (HE::TypeRegistry::instance().structWouldCycle(def))
 		{
 			HE_LOG_WARN(Editor, "Add to Target: a field of that type would make %s refer to itself.",
-			            stem(structPath).c_str());
+			            HcEditorUtil::pathStem(structPath).c_str());
 			return;
 		}
 		const HE::UUID id = cm->loadAsset(structPath);
@@ -143,7 +135,7 @@ namespace
 		if (!cm->saveAsset(*a)) return;
 		HE::TypeRegistry::instance().registerStruct(def);
 		HE_LOG_INFO(Editor, "Add to Target: added member '%s' to %s.", v.pullMember.c_str(),
-		            stem(structPath).c_str());
+		            HcEditorUtil::pathStem(structPath).c_str());
 	}
 }
 
@@ -259,7 +251,7 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 			{
 				const std::string cls = HcPull::refClassOf(owner, r);
 				const std::string label = r + (cls.empty() ? std::string("  (any object)")
-				                                           : "  " + stem(cls));
+				                                           : "  " + HcEditorUtil::pathStem(cls));
 				if (ImGui::Selectable((label + "##" + r).c_str(), r == v.pullRef))
 				{
 					if (r != v.pullRef) { v.pullVar.clear(); v.pullMember.clear(); }
@@ -277,7 +269,7 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 	// ── Expected creator class ───────────────────────────────────────────────
 	if (v.pullSource == HC::kPullFromCreator)
 	{
-		const std::string shown = v.pullClass.empty() ? std::string("(any creator)") : stem(v.pullClass);
+		const std::string shown = v.pullClass.empty() ? std::string("(any creator)") : HcEditorUtil::pathStem(v.pullClass);
 		if (ImGui::BeginCombo("Creator Class", shown.c_str()))
 		{
 			if (ImGui::Selectable("(any creator)", v.pullClass.empty()))
@@ -413,10 +405,10 @@ bool drawSection(HC::Variable& v, const HC::Graph& owner)
 			{
 				if (std::find(fits.begin(), fits.end(), s_structType) == fits.end())
 					s_structType = fits.front();
-				if (ImGui::BeginCombo("Struct Type", stem(s_structType).c_str()))
+				if (ImGui::BeginCombo("Struct Type", HcEditorUtil::pathStem(s_structType).c_str()))
 				{
 					for (const std::string& p : fits)
-						if (ImGui::Selectable((stem(p) + "##" + p).c_str(), p == s_structType))
+						if (ImGui::Selectable((HcEditorUtil::pathStem(p) + "##" + p).c_str(), p == s_structType))
 							s_structType = p;
 					ImGui::EndCombo();
 				}

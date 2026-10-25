@@ -76,6 +76,14 @@ std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type)
 	return toClassRefs(cm->assetFiles(type));
 }
 
+std::string pathStem(const std::string& path)
+{
+	std::string s = path;
+	if (const size_t p = s.find_last_of("/\\"); p != std::string::npos) s.erase(0, p + 1);
+	if (const size_t d = s.rfind('.'); d != std::string::npos) s.erase(d);
+	return s;
+}
+
 std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 { return listAssets(cm, HE::AssetType::HorizonCodeClass); }
 

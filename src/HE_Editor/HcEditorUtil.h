@@ -31,6 +31,11 @@ namespace HcEditorUtil
 	};
 	std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type);
 
+	// An asset path with its directories and extension stripped, e.g.
+	// "Classes/Spawner.hasset" -> "Spawner". The directory goes first, so a dot in
+	// a folder name ("a.b/c") is not taken for the extension.
+	std::string pathStem(const std::string& path);
+
 	// Does this asset match what someone typed into a picker's search box?
 	// Case-insensitive, and every whitespace-separated term has to appear in
 	// either the display name or the path — so "char idle" finds
