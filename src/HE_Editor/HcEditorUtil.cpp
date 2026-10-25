@@ -1897,14 +1897,14 @@ namespace
 	// frame and pin: the pin asks every frame whether it has a list. Keyed on the
 	// text itself, so an unsaved edit in the template's own tab shows up as it
 	// always did, and the cache cannot answer for another project's template.
-	std::vector<std::string> saveFieldChoices(const std::string& row, ContentManager* cm)
+	// The template's parsed schema, or null when there is no project, no default
+	// template or no such asset.
+	const HE::StructDef* saveSchema(ContentManager* cm)
 	{
-		using P = HorizonCode::PinType;
-		std::vector<std::string> out;
 		const std::string tpl = HE::api::save::defaultTemplate();
-		if (!cm || tpl.empty()) return out;
+		if (!cm || tpl.empty()) return nullptr;
 		const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(cm->loadAsset(tpl));
-		if (!a) return out;
+		if (!a) return nullptr;
 		static std::string    s_json;
 		static HE::StructDef  s_schema;
 		static bool           s_parsed = false;
@@ -1915,18 +1915,48 @@ namespace
 			s_parsed = true;
 			if (!HE::TypeRegistry::structFromJson(s_json, s_schema)) s_schema = HE::StructDef{};
 		}
-		auto accepts = [&row](const HE::StructField& f) -> bool {
-			if (f.isArray) return false;
-			if (row == "save.getNumber" || row == "save.setNumber")
-				return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
-			if (row == "save.getString" || row == "save.setString") return f.type == P::String;
-			if (row == "save.getBool"   || row == "save.setBool")   return f.type == P::Bool;
-			if (row == "save.getStruct" || row == "save.setStruct") return f.type == P::Struct;
-			return true;
-		};
-		for (const auto& f : s_schema.fields)
-			if (accepts(f)) out.push_back(f.name);
+		return &s_schema;
+	}
+
+	bool acceptsSaveField(const std::string& row, const HE::StructField& f)
+	{
+		using P = HorizonCode::PinType;
+		if (f.isArray) return false;
+		if (row == "save.getNumber" || row == "save.setNumber")
+			return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
+		if (row == "save.getString" || row == "save.setString") return f.type == P::String;
+		if (row == "save.getBool"   || row == "save.setBool")   return f.type == P::Bool;
+		if (row == "save.getStruct" || row == "save.setStruct") return f.type == P::Struct;
+		return true;
+	}
+
+	std::vector<std::string> saveFieldChoices(const std::string& row, ContentManager* cm)
+	{
+		std::vector<std::string> out;
+		const HE::StructDef* schema = saveSchema(cm);
+		if (!schema) return out;
+		for (const auto& f : schema->fields)
+			if (acceptsSaveField(row, f)) out.push_back(f.name);
 		return out;
+	}
+
+	// Same answer as !saveFieldChoices(...).empty(), without the list: the pin asks
+	// this every frame.
+	bool hasSaveFields(const std::string& row, ContentManager* cm)
+	{
+		const HE::StructDef* schema = saveSchema(cm);
+		return schema && std::any_of(schema->fields.begin(), schema->fields.end(),
+			[&row](const HE::StructField& f){ return acceptsSaveField(row, f); });
+	}
+
+	// Same answer as !vocabularyChoices(...).empty(). The UI vocabularies are
+	// closed enums, so only SDL's spellings still need asking.
+	bool hasVocabulary(const std::string& row, const std::string& param)
+	{
+		if (param == "easing")    return (int)HE::UIEase::COUNT > 0;
+		if (param == "direction") return (int)HE::UIAnimDirection::COUNT > 0;
+		if (param == "mode")      return row == "theme.setMode";
+		return !vocabularyChoices(row, param).empty();
 	}
 }
 
@@ -1937,10 +1967,10 @@ bool engineParamHasChoices(const HorizonCode::Node& n, const std::string& param,
 	switch (src.from)
 	{
 		case ChoiceSource::None:       return false;
-		case ChoiceSource::Vocabulary: return !vocabularyChoices(n.s, param).empty();
+		case ChoiceSource::Vocabulary: return hasVocabulary(n.s, param);
 		case ChoiceSource::Scenes:     return cm && !cm->sceneFiles()->empty();
 		case ChoiceSource::Assets:     return cm && !cm->assetFiles(src.type)->empty();
-		case ChoiceSource::SaveFields: return !saveFieldChoices(n.s, cm).empty();
+		case ChoiceSource::SaveFields: return hasSaveFields(n.s, cm);
 	}
 	return false;
 }
