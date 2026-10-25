@@ -2288,8 +2288,12 @@ static void drawEditorTabBar(AppContext& ctx)
                     probe += ' ';
                 }
             }
-            const std::string shown = tab.label + suffix
-                + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
+            std::string shown;
+            shown.reserve(tab.label.size() + suffix.size() + 7 + tab.assetPath.size());
+            shown += tab.label;
+            shown += suffix;
+            shown += "###tab_";
+            shown += tab.assetPath.empty() ? std::string_view("scene") : std::string_view(tab.assetPath);
             const bool tabOpen =
                 ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags);
             if (mark.check)
