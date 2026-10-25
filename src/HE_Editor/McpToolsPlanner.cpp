@@ -306,9 +306,9 @@ bool applyValue(Workspace& ws, Database& db, const UUID& rowId, const Property& 
 	case PropertyType::MultiSelect:
 	{
 		std::vector<UUID> ids;
+		const Property* cur = db.findProperty(pid);
 		for (const std::string& name : stringList(v))
 		{
-			const Property* cur = db.findProperty(pid);
 			const SelectOption* o = cur ? cur->findOptionByName(name) : nullptr;
 			if (!o && createOptions) o = db.addOption(pid, name);
 			if (!o) { err = "no option '" + name + "' (pass createOptions: true to add it)"; return false; }
