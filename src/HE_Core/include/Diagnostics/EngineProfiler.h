@@ -339,7 +339,7 @@ struct HE_API ProfileScope
 	{
 		if (m_opened) EngineProfiler::instance().beginScope(name);
 	}
-	~ProfileScope()
+	~ProfileScope() noexcept
 	{
 		if (m_opened) EngineProfiler::instance().endScope();
 	}
