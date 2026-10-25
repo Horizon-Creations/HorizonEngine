@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -934,8 +935,9 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		// Group by the params' metadata group (first-seen order; "" first as ungrouped).
 		std::vector<std::string> groupOrder;
 		auto groupOf = [](const MatGraphNode* n){ return n->group; };
+		std::set<std::string> seenGroups;
 		for (MatGraphNode* n : params)
-			if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(n)) == groupOrder.end())
+			if (seenGroups.insert(groupOf(n)).second)
 				groupOrder.push_back(groupOf(n));
 		std::stable_sort(groupOrder.begin(), groupOrder.end(),
 			[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
