@@ -978,7 +978,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					if (ImGui::IsItemHovered())
 					{
 						std::string list;
-						for (const std::string& p : props) list += (list.empty() ? "" : ", ") + p;
+						for (const std::string& p : props)
+						{
+							if (!list.empty()) list += ", ";
+							list += p;
+						}
 						ImGui::SetTooltip("Changed on this placement: %s.\nThe prefab's value does "
 						                  "not reach these — revert them in the Prefab Instance "
 						                  "section above.", list.c_str());
