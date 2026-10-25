@@ -2126,8 +2126,9 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 	std::vector<std::string> groupOrder;
 	auto groupOf = [&](size_t i) -> std::string
 	{ return i < inst.graphParamGroups.size() ? inst.graphParamGroups[i] : std::string(); };
+	std::set<std::string> seenGroups;
 	for (size_t i = 0; i < inst.graphParamNames.size(); ++i)
-		if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(i)) == groupOrder.end())
+		if (seenGroups.insert(groupOf(i)).second)
 			groupOrder.push_back(groupOf(i));
 	std::stable_sort(groupOrder.begin(), groupOrder.end(),
 		[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
