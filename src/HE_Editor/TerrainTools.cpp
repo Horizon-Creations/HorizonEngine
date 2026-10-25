@@ -125,7 +125,8 @@ namespace
 	ImU32 layerColour(const std::string& name)
 	{
 		std::string n;
-		for (char c : name) n += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		n.reserve(name.size());
+		for (char c : name) n +=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 		auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
 		if (has("auto"))                                 return IM_COL32(120, 150, 110, 255);
 		if (has("grass") || has("gras") || has("moss"))  return IM_COL32( 90, 154,  69, 255);
