@@ -1090,8 +1090,8 @@ std::string ContentManager::toContentRelativePath(const std::string& absolutePat
 HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 {
 	HE_PROFILE_SCOPE_N("ContentManager::load");
-	if (isLoaded(relativePath))
-		return m_pathToUUID.at(relativePath);
+	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
+		return loaded->second;
 
 	// Packed build: resolve the content path to a mounted-pak UUID via the asset
 	// index, then load that entry synchronously (registers it under its embedded
