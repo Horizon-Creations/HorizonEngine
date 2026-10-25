@@ -1843,8 +1843,9 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 				dl->AddLine(ImVec2(x, origin.y), ImVec2(x, lanesTop), tickCol);
 				if (iso.compare(8, 2, "01") == 0) dl->AddLine(ImVec2(x, lanesTop), ImVec2(x, corner.y), Theme::u32(Theme::warm(0.24f)));
 				const int mon = std::clamp(std::atoi(iso.substr(5, 2).c_str()), 1, 12);
-				dl->AddText(ImVec2(std::max(x, origin.x) + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading),
-				            (std::string(kMonthsShort[mon - 1]) + " " + iso.substr(0, 4)).c_str());
+				char monthLabel[16];
+				std::snprintf(monthLabel, sizeof monthLabel, "%s %.4s", kMonthsShort[mon - 1], iso.c_str());
+				dl->AddText(ImVec2(std::max(x, origin.x) + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading), monthLabel);
 			}
 		}
 	}
