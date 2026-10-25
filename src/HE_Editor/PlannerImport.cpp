@@ -11,9 +11,11 @@ namespace
 // "plan" + "ner" in ASCII: a high half no random UUID is going to have.
 constexpr std::uint64_t kDerivedHi = 0x706c616e6e657200ULL;
 
-std::uint64_t fnv1a(std::string_view s)
+constexpr std::uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
+
+// `h` continues a hash over the bytes before `s`, so a key can be fed in pieces.
+std::uint64_t fnv1a(std::string_view s, std::uint64_t h = kFnvOffsetBasis)
 {
-	std::uint64_t h = 1469598103934665603ULL;
 	for (const char c : s)
 	{
 		h ^= static_cast<unsigned char>(c);
@@ -89,7 +91,7 @@ UUID derivedId(std::string_view kind, std::string_view name)
 {
 	UUID id;
 	id.hi = kDerivedHi;
-	id.lo = fnv1a(std::string(kind) + "\n" + std::string(name));
+	id.lo = fnv1a(name, fnv1a("\n", fnv1a(kind)));
 	return id;
 }
 
