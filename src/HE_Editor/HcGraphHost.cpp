@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <functional>
+#include <string_view>
 
 namespace HcGraphHost
 {
@@ -54,6 +55,16 @@ GraphEditor::Container containerPin(HC::ContainerKind k)
 	return GraphEditor::Container::None;
 }
 
+// `lower(hay).find(needle) != npos` without the lowered copy of `hay`: search
+// menus test every candidate name on every frame. Folds like lower() (tolower
+// on unsigned char); the needle is compared as given, so pass it lowercased.
+bool containsFolded(std::string_view hay, std::string_view needle)
+{
+	if (needle.empty()) return true;
+	return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
+		[](char h, char n){ return (char)std::tolower((unsigned char)h) == n; }) != hay.end();
+}
+
 // Does the search query hit the words people actually TYPE for this node, as
 // opposed to what it is called? A node's display name is its serialisation key
 // (fromJson resolves the type by comparing against nodeDisplayName), so a node
@@ -63,7 +74,7 @@ bool aliasHit(NT t, const std::string& lowerQuery)
 {
 	if (lowerQuery.empty()) return false;   // an empty query already matches everything
 	const char* a = HC::nodeSearchAliases(t);
-	return a && *a && lower(a).find(lowerQuery) != std::string::npos;
+	return a && *a && containsFolded(a, lowerQuery);
 }
 
 // What kind of pin a wire is being dragged off: exec vs data, and for a data pin
