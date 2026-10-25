@@ -1833,9 +1833,10 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 				dl->AddLine(ImVec2(x, lanesTop - 12.0f), ImVec2(x, lanesTop), tickCol);
 				dl->AddLine(ImVec2(x, lanesTop), ImVec2(x, corner.y), gridCol);
 				static const char* const kWd[] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-				std::string label = iso.substr(8, 2);
-				if (ppd >= 56.0f) label = std::string(kWd[weekdayOf(d)]) + " " + label;
-				dl->AddText(ImVec2(x + 3.0f, lanesTop - 28.0f), Theme::u32(d == today ? Theme::Warn : Theme::TextDim), label.c_str());
+				char label[16];
+				if (ppd >= 56.0f) std::snprintf(label, sizeof label, "%s %.2s", kWd[weekdayOf(d)], iso.c_str() + 8);
+				else              std::snprintf(label, sizeof label, "%.2s", iso.c_str() + 8);
+				dl->AddText(ImVec2(x + 3.0f, lanesTop - 28.0f), Theme::u32(d == today ? Theme::Warn : Theme::TextDim), label);
 			}
 			if (iso.compare(8, 2, "01") == 0 || d == d0)
 			{
