@@ -301,10 +301,12 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 				std::error_code e;
 				const bool isDir = de.is_directory(e);
 				if (!isDir && !de.is_regular_file(e)) return;
-				// The same rule GlobalState's content scan uses: dotfiles are
-				// VCS/OS bookkeeping, not content anyone put there.
-				if (de.path().filename().string().rfind('.', 0) == 0) return;
 				found.emplace_back(de.path().lexically_normal().string(), isDir);
+			};
+			// The same rule GlobalState's content scan uses: dotfiles are
+			// VCS/OS bookkeeping, not content anyone put there.
+			auto isDotfile = [](const std::filesystem::path& p) {
+				return p.filename().string().rfind('.', 0) == 0;
 			};
 			if (recursive)
 			{
@@ -313,7 +315,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 				const std::filesystem::recursive_directory_iterator end;
 				for (; !ec && it != end; it.increment(ec))
 				{
-					if (it->path().filename().string().rfind('.', 0) == 0)
+					if (isDotfile(it->path()))
 					{
 						std::error_code dirEc;
 						if (it->is_directory(dirEc)) it.disable_recursion_pending();
@@ -327,7 +329,11 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 				std::filesystem::directory_iterator it(
 					dirAbs, std::filesystem::directory_options::skip_permission_denied, ec);
 				const std::filesystem::directory_iterator end;
-				for (; !ec && it != end; it.increment(ec)) take(*it);
+				for (; !ec && it != end; it.increment(ec))
+				{
+					if (isDotfile(it->path())) continue;
+					take(*it);
+				}
 			}
 			std::sort(found.begin(), found.end());
 
