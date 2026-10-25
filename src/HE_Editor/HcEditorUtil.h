@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class ContentManager;
@@ -63,7 +64,7 @@ namespace HcEditorUtil
 			const size_t start = i;
 			while (i < q.size() && !std::isspace(static_cast<unsigned char>(q[i]))) ++i;
 			if (i == start) break;   // trailing whitespace, no term left
-			if (hay.find(q.substr(start, i - start)) == std::string::npos) return false;
+			if (hay.find(std::string_view(q.data() + start, i - start)) == std::string::npos) return false;
 		}
 		return true;   // no terms at all (an untouched search box) matches everything
 	}
