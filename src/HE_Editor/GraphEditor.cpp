@@ -8,7 +8,6 @@
 #include <unordered_set>
 #include <cmath>
 #include <limits>
-#include <unordered_map>
 
 namespace GraphEditor {
 
