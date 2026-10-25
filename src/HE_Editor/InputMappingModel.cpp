@@ -50,27 +50,27 @@ void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
 std::string encodeMapping(const std::vector<MapEntry>& entries)
 {
 	nlohmann::json j; j["entries"] = nlohmann::json::array();
+	auto writeAxes = [](const std::vector<AxisRow>& rows)
+	{
+		nlohmann::json arr = nlohmann::json::array();
+		for (const auto& a : rows)
+		{
+			nlohmann::json ja = { {"positive", a.positive}, {"negative", a.negative},
+			                      {"scale", a.scale},
+			                      {"source", HE::axisSourceName(a.source)} };
+			// Written only when set — old contexts round-trip byte-stable.
+			if (!a.positiveButton.empty()) ja["positiveButton"] = a.positiveButton;
+			if (!a.negativeButton.empty()) ja["negativeButton"] = a.negativeButton;
+			arr.push_back(std::move(ja));
+		}
+		return arr;
+	};
 	for (const auto& e : entries)
 	{
 		nlohmann::json je; je["action"] = e.actionPath;
 		if (!e.keys.empty()) je["keys"] = e.keys;
 		if (!e.gamepadButtons.empty()) je["gamepadButtons"] = e.gamepadButtons;
 		if (!e.mouseButtons.empty())   je["mouseButtons"]   = e.mouseButtons;
-		auto writeAxes = [](const std::vector<AxisRow>& rows)
-		{
-			nlohmann::json arr = nlohmann::json::array();
-			for (const auto& a : rows)
-			{
-				nlohmann::json ja = { {"positive", a.positive}, {"negative", a.negative},
-				                      {"scale", a.scale},
-				                      {"source", HE::axisSourceName(a.source)} };
-				// Written only when set — old contexts round-trip byte-stable.
-				if (!a.positiveButton.empty()) ja["positiveButton"] = a.positiveButton;
-				if (!a.negativeButton.empty()) ja["negativeButton"] = a.negativeButton;
-				arr.push_back(std::move(ja));
-			}
-			return arr;
-		};
 		// An entry is 2D when its ACTION declares Axis2D — or, for an entry
 		// whose action could not be resolved, when a Y list exists (the old
 		// shape rule, kept as the fallback). Writing axesX for a 2D entry even
