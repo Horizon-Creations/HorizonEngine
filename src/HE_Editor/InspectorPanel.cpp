@@ -250,8 +250,8 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	    s_multi.revision != ctx.selection.revision() ||
 	    ImGui::GetFrameCount() - s_multi.frame >= period)
 		refreshMultiSelection(ctx, world, primary, members);
-	const std::vector<std::string> common  = s_multi.common;
-	const std::vector<std::string> partial = s_multi.partial;
+	const std::vector<std::string>& common  = s_multi.common;
+	const std::vector<std::string>& partial = s_multi.partial;
 
 	hint("Edits below apply to every selected entity that has the component; "
 	     "the active entity's values are shown, and a field the selection "
