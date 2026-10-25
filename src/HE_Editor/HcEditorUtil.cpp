@@ -84,6 +84,11 @@ std::string pathStem(const std::string& path)
 	return s;
 }
 
+bool contains(const std::vector<std::string>& v, const std::string& s)
+{
+	return std::find(v.begin(), v.end(), s) != v.end();
+}
+
 std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 { return listAssets(cm, HE::AssetType::HorizonCodeClass); }
 

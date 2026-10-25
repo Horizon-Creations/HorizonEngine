@@ -36,6 +36,10 @@ namespace HcEditorUtil
 	// a folder name ("a.b/c") is not taken for the extension.
 	std::string pathStem(const std::string& path);
 
+	// Is `s` one of the strings in `v`? A linear scan, meant for the short key lists
+	// the rename passes build.
+	bool contains(const std::vector<std::string>& v, const std::string& s);
+
 	// Does this asset match what someone typed into a picker's search box?
 	// Case-insensitive, and every whitespace-separated term has to appear in
 	// either the display name or the path — so "char idle" finds
