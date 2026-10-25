@@ -572,6 +572,12 @@ void drawIdentityForm(AppContext& ctx)
 	if (applying) { ImGui::EndDisabled(); ImGui::SameLine(); ImGui::TextDisabled("Saving…"); }
 }
 
+std::string installLogFor(const AppContext& ctx, bool gitSlot)
+{
+	const std::function<std::string()>& fetch = gitSlot ? ctx.gitInstallLog : ctx.toolchainInstallLog;
+	return fetch ? fetch() : std::string();
+}
+
 void drawRow(AppContext& ctx, Tool t)
 {
 	HE::Ed::Help::Scope helpScope("Tool Setup");
@@ -666,8 +672,7 @@ void drawRow(AppContext& ctx, Tool t)
 
 	case RowState::Installing:
 	{
-		const std::string log = gitSlot ? (ctx.gitInstallLog ? ctx.gitInstallLog() : std::string())
-		                                : (ctx.toolchainInstallLog ? ctx.toolchainInstallLog() : std::string());
+		const std::string log = installLogFor(ctx, gitSlot);
 		const bool apple = log.find("Apple") != std::string::npos;
 		drawPhases(log.empty() ? 0 : 1,
 		           apple ? "Apple's installer"
@@ -712,8 +717,7 @@ void drawRow(AppContext& ctx, Tool t)
 
 	case RowState::Failed:
 	{
-		const std::string log = gitSlot ? (ctx.gitInstallLog ? ctx.gitInstallLog() : std::string())
-		                                : (ctx.toolchainInstallLog ? ctx.toolchainInstallLog() : std::string());
+		const std::string log = installLogFor(ctx, gitSlot);
 		ImGui::PushStyleColor(ImGuiCol_Text, rowText(Theme::Warn));
 		ImGui::TextWrapped("%s was not installed.", toolName(t));
 		ImGui::PopStyleColor();
