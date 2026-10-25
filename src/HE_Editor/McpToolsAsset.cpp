@@ -122,11 +122,10 @@ json assetEntry(ContentManager& content, const std::string& rel, const std::stri
 
 // ── The collaboration key ────────────────────────────────────────────────────
 
-std::string collabKeyOf(const McpAssetHooks& h, ContentManager& content,
+std::string collabKeyOf(const McpAssetHooks& h,
                         const std::string& abs, const std::string& rel, bool folder)
 {
 	if (h.collabKey) return h.collabKey(abs, folder);
-	(void)content;
 	return rel;
 }
 
@@ -430,7 +429,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"to have meant a different one, so nothing was overwritten. Choose "
 					"another path, or delete that asset first.");
 
-			const std::string key = collabKeyOf(*h, *cm, p.abs, p.rel, /*folder=*/false);
+			const std::string key = collabKeyOf(*h, p.abs, p.rel, /*folder=*/false);
 			if (ToolResult* r = checkLocked(*h, key, p.rel, scratch)) return *r;
 
 			std::filesystem::create_directories(std::filesystem::path(p.abs).parent_path(), ec);
@@ -511,7 +510,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"with it, which is not something to do without seeing the list — do "
 					"it in the Content Browser, which shows that list first.");
 
-			const std::string key = collabKeyOf(*h, *cm, p.abs, p.rel, /*folder=*/false);
+			const std::string key = collabKeyOf(*h, p.abs, p.rel, /*folder=*/false);
 			if (ToolResult* r = checkLocked(*h, key, p.rel, scratch)) return *r;
 
 			const bool force = boolArg(args, "force");
@@ -624,8 +623,8 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"'" + to.rel + "' already exists. Nothing was overwritten — moving "
 					"an asset onto another one would destroy the second without asking.");
 
-			const std::string keyFrom = collabKeyOf(*h, *cm, from.abs, from.rel, false);
-			const std::string keyTo   = collabKeyOf(*h, *cm, to.abs,   to.rel,   false);
+			const std::string keyFrom = collabKeyOf(*h, from.abs, from.rel, false);
+			const std::string keyTo   = collabKeyOf(*h, to.abs,   to.rel,   false);
 			if (ToolResult* r = checkLocked(*h, keyFrom, from.rel, scratch)) return *r;
 
 			// Same reasoning as the delete above: a rename breaks every reference to
