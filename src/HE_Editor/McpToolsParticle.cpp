@@ -591,10 +591,11 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 					"than to a value — these tools do not make it. Use 'reset' to take the "
 					"input back to its default first if that is what you want, or edit the "
 					"graph in the Particle Graph Editor.");
-			if (consumersOf(e.graph, driver->id) != 1)
+			const int driverConsumers = consumersOf(e.graph, driver->id);
+			if (driverConsumers != 1)
 				return ToolResult::fail("driven_by_graph",
 					"'" + pinName + "' is driven by node " + std::to_string(driver->id) +
-					", which also feeds " + std::to_string(consumersOf(e.graph, driver->id) - 1) +
+					", which also feeds " + std::to_string(driverConsumers - 1) +
 					" other input(s). Changing its value would change those too, so it is "
 					"refused rather than applied wider than asked. Use 'reset' on this input "
 					"first to give it a constant of its own.");
