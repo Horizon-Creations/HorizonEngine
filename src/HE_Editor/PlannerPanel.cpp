@@ -310,7 +310,14 @@ std::string dateText(const Database& db, const UUID& row, const UUID& prop)
 // "2026-10-14" (or a full ISO time) to milliseconds.
 bool parseDay(const std::string& text, std::int64_t& ms)
 {
-	if (text.size() == 10) return taskTimeFromIso(text + "T00:00:00.000Z", ms);
+	constexpr std::string_view kMidnight = "T00:00:00.000Z";
+	if (text.size() == 10)
+	{
+		char full[10 + kMidnight.size()];
+		std::memcpy(full, text.data(), 10);
+		std::memcpy(full + 10, kMidnight.data(), kMidnight.size());
+		return taskTimeFromIso(std::string_view(full, sizeof full), ms);
+	}
 	return taskTimeFromIso(text, ms);
 }
 
