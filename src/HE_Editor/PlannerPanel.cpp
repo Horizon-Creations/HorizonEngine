@@ -740,6 +740,27 @@ void editView(const UUID& dbId, const UUID& viewId, std::function<bool(View&)> f
 	});
 }
 
+// A labelled combo in a view's settings popup that picks the Date property a timeline or calendar
+// runs from (isEnd: until, with a "(none)" entry).
+void dateCombo(const Database& db, const UUID& dbId, const UUID& viewId, const char* label, const char* id,
+               const char* none, const UUID& current, bool isEnd)
+{
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine(90);
+	ImGui::SetNextItemWidth(160);
+	const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
+	if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
+	if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
+		editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
+	for (const Property& p : db.properties)
+		if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
+		{
+			const UUID pid = p.id;
+			editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
+		}
+	ImGui::EndCombo();
+}
+
 // ── Tables, timelines, boards and calendars are the things you make; the data behind them is shared ──
 const char* kindWord(ViewKind k)
 {
@@ -3207,25 +3228,9 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		note("timeline:settings");
 		if (ImGui::BeginPopup("##tlsettings"))
 		{
-			auto dateCombo = [&](const char* label, const char* id, const char* none, const UUID& current, bool isEnd) {
-				ImGui::TextUnformatted(label);
-				ImGui::SameLine(90);
-				ImGui::SetNextItemWidth(160);
-				const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
-				if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
-				if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
-					editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
-				for (const Property& p : db.properties)
-					if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
-					{
-						const UUID pid = p.id;
-						editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
-					}
-				ImGui::EndCombo();
-			};
-			dateCombo("Starts at", "##tlstart", "Start", view->dateProperty, false);
+			dateCombo(db, dbId, viewId, "Starts at", "##tlstart", "Start", view->dateProperty, false);
 			note("timeline:start");
-			dateCombo("Ends at", "##tlend", "End", view->endProperty, true);
+			dateCombo(db, dbId, viewId, "Ends at", "##tlend", "End", view->endProperty, true);
 			ImGui::TextUnformatted("Colour by");
 			ImGui::SameLine(90);
 			ImGui::SetNextItemWidth(160);
@@ -3277,25 +3282,9 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		note("timeline:settings");
 		if (ImGui::BeginPopup("##calsettings"))
 		{
-			auto dateCombo = [&](const char* label, const char* id, const char* none, const UUID& current, bool isEnd) {
-				ImGui::TextUnformatted(label);
-				ImGui::SameLine(90);
-				ImGui::SetNextItemWidth(160);
-				const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
-				if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
-				if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
-					editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
-				for (const Property& p : db.properties)
-					if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
-					{
-						const UUID pid = p.id;
-						editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
-					}
-				ImGui::EndCombo();
-			};
-			dateCombo("Day from", "##tlstart", "Date", view->dateProperty, false);
+			dateCombo(db, dbId, viewId, "Day from", "##tlstart", "Date", view->dateProperty, false);
 			note("timeline:start");
-			dateCombo("Until", "##tlend", "End", view->endProperty, true);
+			dateCombo(db, dbId, viewId, "Until", "##tlend", "End", view->endProperty, true);
 			ImGui::TextUnformatted("Colour by");
 			ImGui::SameLine(90);
 			ImGui::SetNextItemWidth(160);
