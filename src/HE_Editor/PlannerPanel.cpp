@@ -324,7 +324,11 @@ bool parseDay(const std::string& text, std::int64_t& ms)
 std::string joinNames(const std::vector<std::string>& names)
 {
 	std::string out;
-	for (const std::string& n : names) out += (out.empty() ? "" : ", ") + n;
+	for (const std::string& n : names)
+	{
+		if (!out.empty()) out += ", ";
+		out += n;
+	}
 	return out;
 }
 
