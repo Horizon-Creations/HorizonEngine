@@ -2206,9 +2206,9 @@ namespace
 	{
 		constexpr std::string_view kGet = "env.get";
 		constexpr std::string_view kSet = "env.set";
-		if (id.size() > kGet.size() && id.substr(0, kGet.size()) == kGet)
+		if (id.size() > kGet.size() && id.starts_with(kGet))
 		{ isSet = false; field = id.substr(kGet.size()); return true; }
-		if (id.size() > kSet.size() && id.substr(0, kSet.size()) == kSet)
+		if (id.size() > kSet.size() && id.starts_with(kSet))
 		{ isSet = true;  field = id.substr(kSet.size()); return true; }
 		return false;
 	}
