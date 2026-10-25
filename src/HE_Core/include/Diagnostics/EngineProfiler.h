@@ -31,6 +31,7 @@
 #include "Types/Defines.h"
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -207,7 +208,7 @@ public:
 	void setLiveEnabled(bool on) { m_liveEnabled = on; }
 	bool liveEnabled() const     { return m_liveEnabled; }
 	void pushLive(const ProfLiveFrame& f);
-	std::vector<ProfLiveFrame> liveSnapshot() const { return m_live; }
+	std::vector<ProfLiveFrame> liveSnapshot() const { return { m_live.begin(), m_live.end() }; }
 	double lastCpuFrameMs() const { return m_lastCpuFrameMs; }
 
 	// ── Single-frame capture ────────────────────────────────────────────────
@@ -298,7 +299,7 @@ private:
 
 	// Live overview (always-on when enabled; no scopes).
 	bool                       m_liveEnabled   = false;
-	std::vector<ProfLiveFrame> m_live;
+	std::deque<ProfLiveFrame>  m_live;
 	size_t                     m_liveCap       = 240;
 	double                     m_lastCpuFrameMs = 0.0;
 

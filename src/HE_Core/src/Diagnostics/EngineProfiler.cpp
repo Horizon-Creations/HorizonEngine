@@ -320,7 +320,7 @@ void EngineProfiler::endFrame()
 
 void EngineProfiler::pushLive(const ProfLiveFrame& f)
 {
-	if (m_live.size() >= m_liveCap) m_live.erase(m_live.begin());
+	if (m_live.size() >= m_liveCap) m_live.pop_front();
 	m_live.push_back(f);
 }
 
