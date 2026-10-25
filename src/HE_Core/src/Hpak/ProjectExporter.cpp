@@ -207,7 +207,11 @@ static bool looksMachO(const std::vector<uint8_t>& bytes)
 static std::string shellQuote(const std::filesystem::path& p)
 {
     std::string out = "'";
-    for (const char c : p.string()) out += (c == '\'') ? "'\\''" : std::string(1, c);
+    for (const char c : p.string())
+    {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
     return out + "'";
 }
 
