@@ -360,11 +360,8 @@ namespace HE
 			int lw = 0, lh = 0, pw = 0, ph = 0;
 			SDL_GetWindowSize(sw, &lw, &lh);
 			SDL_GetWindowSizeInPixels(sw, &pw, &ph);
-			HE_LOG_INFO(Core, "%s",
-				("Window size: " + std::to_string(lw) + "x" + std::to_string(lh) +
-				 " logical, " + std::to_string(pw) + "x" + std::to_string(ph) +
-				 " pixels (HiDPI scale " +
-				 std::to_string(lw > 0 ? (float)pw / (float)lw : 1.0f) + ")").c_str());
+			HE_LOG_INFO(Core, "Window size: %dx%d logical, %dx%d pixels (HiDPI scale %.2f)",
+				lw, lh, pw, ph, lw > 0 ? (float)pw / (float)lw : 1.0f);
 		}
 
 		switch (cfg.windowprops.mode)
@@ -1110,7 +1107,7 @@ namespace HE
         uint32_t id = win->GetWindowId();
         if (m_renderer) m_renderer->AttachWindow(win.get());
         m_secondaryWindows[id] = std::move(win);
-        HE_LOG_INFO(Core, "%s", ("Secondary window created (id=" + std::to_string(id) + ")").c_str());
+        HE_LOG_INFO(Core, "Secondary window created (id=%u)", id);
         return { id };
     }
 
@@ -1127,7 +1124,7 @@ namespace HE
         OnWindowClosing(handle);
         if (m_renderer) m_renderer->DetachWindow(win.get());
         win.reset();
-        HE_LOG_INFO(Core, "%s", ("Secondary window destroyed (id=" + std::to_string(handle.id) + ")").c_str());
+        HE_LOG_INFO(Core, "Secondary window destroyed (id=%u)", handle.id);
     }
 
     Window* Application::getWindow(WindowHandle handle) const
