@@ -2145,12 +2145,13 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 			const auto kind = i < inst.graphParamTypes.size()
 				? static_cast<HE::MatParamKind>(inst.graphParamTypes[i]) : HE::MatParamKind::Float;
 			ImGui::PushID((int)i);
-			bool ov = ovIndex(nm) >= 0;
+			const int ovIdx = ovIndex(nm);
+			bool ov = ovIdx >= 0;
 			if (ImGui::Checkbox("##ov", &ov))
 			{
 				if (ov) inst.instanceOverriddenParams.push_back(nm);
 				else    inst.instanceOverriddenParams.erase(
-					        inst.instanceOverriddenParams.begin() + ovIndex(nm));
+					        inst.instanceOverriddenParams.begin() + ovIdx);
 				structureEdit = true; // un-override → value falls back to the parent (sync)
 			}
 			ImGui::SameLine();
