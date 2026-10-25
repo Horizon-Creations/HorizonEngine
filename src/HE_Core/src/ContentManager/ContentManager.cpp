@@ -3082,9 +3082,7 @@ size_t ContentManager::retargetAssetReferencesOnDisk(const std::vector<MoveSpec>
 		const std::string what = moves.size() == 1
 			? ("'" + firstOld + "' to '" + lastNew + "'")
 			: (std::to_string(moves.size()) + " moved paths");
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: retargeted " + std::to_string(rewritten) +
-			 " file(s) for " + what).c_str());
+		HE_LOG_INFO(Asset, "ContentManager: retargeted %zu file(s) for %s", rewritten, what.c_str());
 	}
 	return rewritten;
 }
