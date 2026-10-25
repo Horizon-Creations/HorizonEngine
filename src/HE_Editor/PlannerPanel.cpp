@@ -482,11 +482,14 @@ void assigneesCell(const Database& db, const Row& row, const Property& p)
 	const bool open = ImGui::BeginCombo("##assignedTo", preview.c_str());
 	note("assignees:" + row.title);
 	if (!open) return;
+	std::string label;   // one buffer for every member row
 	for (const HE::TaskTeamMember& m : team->members())
 	{
 		const bool on = std::any_of(have.begin(), have.end(),
 		                            [&](const std::string& a) { return HE::sameTaskMember(a, m.name); });
-		const std::string label = m.name + (m.online ? "" : "  (offline)") + "##member";
+		label.assign(m.name);
+		if (!m.online) label += "  (offline)";
+		label += "##member";
 		ImGui::PushID(m.name.c_str());
 		// Stays open: assigning two people is two ticks, not two trips.
 		const bool picked = ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_NoAutoClosePopups);
