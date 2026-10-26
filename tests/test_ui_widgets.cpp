@@ -6974,6 +6974,37 @@ TEST_CASE("Clips: what a timeline says at a moment, including the boring ends")
     CHECK(HE::uiAnimFind({ c }, "fadein") == nullptr);   // names are exact
 }
 
+TEST_CASE("Clips: keys out of time order evaluate by time, not by list position")
+{
+    // A hand-edited file need not be sorted, and the editor indexes keys by list
+    // position, so evaluation has to cope instead of the loader sorting.
+    HE::UIAnimClip c;
+    c.name = "Unsorted"; c.duration = 1.0f;
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Render Opacity";
+    tr.keys.push_back({ 0.0f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });   // A
+    tr.keys.push_back({ 0.3f, HE::UIPropValue::ofFloat(0.6f), HE::UIEase::Linear });   // B
+    tr.keys.push_back({ 0.1f, HE::UIPropValue::ofFloat(0.2f), HE::UIEase::Linear });   // C
+    c.tracks.push_back(std::move(tr));
+    std::vector<HE::UIAnimSample> s;
+    auto at = [&](float t) { s.clear(); HE::uiAnimEvaluate(c, t, s); REQUIRE(s.size() == 1);
+                             return s[0].value.f; };
+
+    // Time order is A(0) C(0.1) B(0.3).
+    CHECK(at(0.35f) == doctest::Approx(0.6f));    // after the last by time: B, not C
+    CHECK(at(0.2f)  == doctest::Approx(0.4f));    // halfway from C to B
+    CHECK(at(0.05f) == doctest::Approx(0.1f));    // halfway from A to C
+    CHECK(at(-1.0f) == doctest::Approx(0.0f));    // before the first by time
+
+    // Before the first when the earliest key is not at the front of the list.
+    c.tracks[0].keys.erase(c.tracks[0].keys.begin());
+    CHECK(at(0.0f) == doctest::Approx(0.2f));     // C (0.1), not B (0.3)
+
+    // Two keys at the earliest time: the earlier in the list holds, as front() did.
+    c.tracks[0].keys.push_back({ 0.1f, HE::UIPropValue::ofFloat(0.9f), HE::UIEase::Linear });
+    CHECK(at(0.0f) == doctest::Approx(0.2f));
+}
+
 TEST_CASE("Clips: they survive a save, and a widget without any saves as before")
 {
     HE::UIWidgetTree t;
