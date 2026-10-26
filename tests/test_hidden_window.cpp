@@ -1,5 +1,7 @@
 #include "doctest.h"
 #include <Window/Window.h>
+#include <SDL3/SDL.h>
+#include <stdexcept>
 
 // Hidden mode decides whether a test or script run puts a window on somebody's
 // screen. The decision is three environment variables deep, and the one case
@@ -104,4 +106,22 @@ TEST_CASE("Background throttle: a profiler capture records uncapped")
 {
     const uint64_t interval = HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, nullptr);
     CHECK(HE::backgroundThrottleDelayNs(interval, true, true, 0) == 0);
+}
+
+// ── A Window whose Init throws ─────────────────────────────────────────────
+// A throwing constructor never runs the destructor, so the constructor itself
+// has to hand SDL back: otherwise the primary window's SDL_Init stays up (and,
+// when the throw comes after SDL_CreateWindow, the window with it).
+
+TEST_CASE("Window: a primary Window whose Init throws leaves SDL shut down")
+{
+    // The dummy driver has no OpenGL, so SDL_CreateWindow with an OpenGL
+    // window fails after SDL_Init(VIDEO) succeeded: a failure on any machine.
+    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+    HE::WindowProps props;
+    props.api         = HE::RendererBackend::OpenGL;
+    props.startHidden = true;
+    CHECK_THROWS_AS(HE::Window(props, /*isPrimary=*/true), std::runtime_error);
+    CHECK(SDL_WasInit(SDL_INIT_VIDEO) == 0);
+    SDL_ResetHint(SDL_HINT_VIDEO_DRIVER);
 }

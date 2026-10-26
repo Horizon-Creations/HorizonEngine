@@ -161,7 +161,14 @@ namespace
         return elapsedNs < intervalNs ? intervalNs - elapsedNs : 0;
     }
 
-    Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
+    Window::Window(const WindowProps& props, bool isPrimary)
+    {
+        m_isPrimary = isPrimary;
+        // A throwing constructor never runs the destructor, so a half-built
+        // window (and the primary's SDL_Init) would be left behind.
+        try { Init(props); }
+        catch (...) { Shutdown(); throw; }
+    }
     Window::~Window()                        { Shutdown(); }
 
     void Window::Init(const WindowProps& requested)
