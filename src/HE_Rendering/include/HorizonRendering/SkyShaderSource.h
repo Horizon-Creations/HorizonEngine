@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 // ─── The procedural sky shader: one source, four backends ────────────────────
 // kSkyFS + kSkyFuncGLSL below are THE sky: the single-scattering atmosphere,
@@ -2540,11 +2541,11 @@ vec4 heSkyTexture(sampler3D s, vec3 p)  { return textureLod(s, p, 0.0); }
 // missing, which the callers treat like a failed compile.
 inline std::string BuildSkyFragmentGLSL450()
 {
-	const std::string fs     = kSkyFS;
-	const std::string marker = "//#SKYFUNC#";
-	const size_t      at     = fs.find(marker);
+	const std::string_view fs     = kSkyFS; // view, not a copy of the ~2200-line shader
+	const std::string      marker = "//#SKYFUNC#";
+	const size_t           at     = fs.find(marker);
 	if (at == std::string::npos) return {};
-	return std::string(kSkyVulkanPrelude) + kSkyFuncGLSL + fs.substr(at + marker.size());
+	return std::string(kSkyVulkanPrelude) + kSkyFuncGLSL + std::string(fs.substr(at + marker.size()));
 }
 
 // Fullscreen far-plane triangle for the cross-compiled sky pixel shader on
