@@ -2844,7 +2844,7 @@ void UIImage::writeJson(nlohmann::json& j) const
 void UIImage::readJson(const nlohmann::json& j)
 {
     tint = colFrom(j.value("tint", nlohmann::json()), tint);
-    if (const auto& s = j.value("slice", nlohmann::json::array()); s.size() >= 4)
+    if (const auto& s = j.value("slice", nlohmann::json::array()); startsWithFourNumbers(s))
     {
         sliceLeft   = s[0].get<float>(); sliceTop    = s[1].get<float>();
         sliceRight  = s[2].get<float>(); sliceBottom = s[3].get<float>();

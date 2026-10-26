@@ -9791,6 +9791,47 @@ TEST_CASE("A colour that is not four numbers loads as the default instead of thr
     }
 }
 
+TEST_CASE("A slice that is not four numbers loads as no slice instead of throwing")
+{
+    const HE::UIImage defImage;
+
+    SUBCASE("given as an object")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(
+            panelAndImageDoc("[1,1,1,1]", R"(,"slice":{"a":1,"b":2,"c":3,"d":4})"), t));
+        auto* img = dynamic_cast<HE::UIImage*>(t.find(2));
+        REQUIRE(img != nullptr);
+        CHECK(img->sliceLeft == doctest::Approx(defImage.sliceLeft));
+        CHECK(img->sliceBottom == doctest::Approx(defImage.sliceBottom));
+    }
+    SUBCASE("given as a string")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,1,1,1]", R"(,"slice":"4,5,6,7")"), t));
+        CHECK(dynamic_cast<HE::UIImage*>(t.find(2))->sliceTop == doctest::Approx(defImage.sliceTop));
+    }
+    SUBCASE("with a non-number entry")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,1,1,1]", R"(,"slice":[4,"x",6,7])"), t));
+        auto* img = dynamic_cast<HE::UIImage*>(t.find(2));
+        REQUIRE(img != nullptr);
+        // All four stay: a half-read slice would be a margin nobody authored.
+        CHECK(img->sliceLeft == doctest::Approx(defImage.sliceLeft));
+        CHECK(img->sliceRight == doctest::Approx(defImage.sliceRight));
+    }
+    SUBCASE("four numbers still load")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,1,1,1]", R"(,"slice":[4,5,6,7])"), t));
+        auto* img = dynamic_cast<HE::UIImage*>(t.find(2));
+        REQUIRE(img != nullptr);
+        CHECK(img->sliceLeft == doctest::Approx(4.0f));
+        CHECK(img->sliceBottom == doctest::Approx(7.0f));
+    }
+}
+
 // ═══ Clipping ════════════════════════════════════════════════════════════════
 // "Clip children" cuts a subtree off at the clipping element's own rect. It is
 // what a list longer than its box, a text wider than its field and eventually a
