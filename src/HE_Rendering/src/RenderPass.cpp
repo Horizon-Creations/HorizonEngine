@@ -5,6 +5,30 @@
 #include "HorizonRendering/RenderConstants.h"
 #include "HorizonRendering/FrustumCuller.h"
 
+namespace
+{
+	// The next `n` instances of a run into dst, from object sortedIndices[k], instance inObj on;
+	// k and inObj move past them, so a run cut into several draws continues where the last one
+	// stopped. Laid out serially, filled on the workers (RenderWorld::writeInstancePieces).
+	void fillRunInstances(const RenderWorld& world, const std::vector<uint32_t>& sortedIndices,
+	                      size_t& k, uint32_t& inObj, size_t n, glm::mat4* dst)
+	{
+		std::vector<RenderWorld::InstancePiece> pieces;
+		size_t pos = 0;
+		while (pos < n)
+		{
+			const RenderObject& o   = world.objects[sortedIndices[k]];
+			const uint32_t      cnt = world.instanceCountOf(o);
+			const uint32_t take = static_cast<uint32_t>(std::min<size_t>(cnt - inObj, n - pos));
+			world.addInstancePiece(pieces, o, inObj, take, pos);
+			pos   += take;
+			inObj += take;
+			if (inObj == cnt) { ++k; inObj = 0; }
+		}
+		world.writeInstancePieces(pieces, dst);
+	}
+}
+
 // ─── GeometryPass ───────────────────────────────────────────────────────────
 // Turns the culled + sorted visible objects into draw calls. It produces no
 // GPU work itself — the backend replays the resulting command buffer with its
@@ -135,9 +159,10 @@ void GeometryPass::execute(const RenderWorld&           world,
 		else if (total <= HE::kMaxInstancesPerDraw)
 		{
 			dc.instanceCount = static_cast<uint32_t>(total);
-			dc.instanceTransforms.reserve(total);
-			for (size_t k = i; k < j; ++k)
-				world.appendInstances(world.objects[sortedIndices[k]], dc.instanceTransforms);
+			dc.instanceTransforms.resize(total);
+			size_t   k = i;
+			uint32_t inObj = 0;
+			fillRunInstances(world, sortedIndices, k, inObj, total, dc.instanceTransforms.data());
 			recordRun(std::move(dc));
 		}
 		else
@@ -152,17 +177,8 @@ void GeometryPass::execute(const RenderWorld&           world,
 			for (size_t from = 0; from < total; from += HE::kMaxInstancesPerDraw)
 			{
 				const size_t n = std::min<size_t>(total - from, HE::kMaxInstancesPerDraw);
-				std::vector<glm::mat4> list;
-				list.reserve(n);
-				while (list.size() < n)
-				{
-					const RenderObject& o   = world.objects[sortedIndices[k]];
-					const uint32_t      cnt = world.instanceCountOf(o);
-					const uint32_t take = static_cast<uint32_t>(std::min<size_t>(cnt - inObj, n - list.size()));
-					world.appendInstanceRange(o, inObj, take, list);
-					inObj += take;
-					if (inObj == cnt) { ++k; inObj = 0; }
-				}
+				std::vector<glm::mat4> list(n);
+				fillRunInstances(world, sortedIndices, k, inObj, n, list.data());
 				DrawCall chunk   = dc;
 				chunk.transform  = list[0];
 				if (n == 1)
