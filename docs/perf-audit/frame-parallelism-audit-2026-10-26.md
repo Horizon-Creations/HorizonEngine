@@ -289,6 +289,50 @@ Bei 50k wandert der Cull in den SSAO-Pass (er rechnet ihn, Scene liest ihn), die
 Die verdeckten Fenster laufen dort GPU-begrenzt (Render enthält das Warten), deshalb ändert sich der CPU-Frame kaum.
 **Nicht gemessen:** P-Kerne bei sichtbarem, entsperrtem Fenster im Spiel; andere Backends (siehe offene Punkte in den Hive-Themen 238 und 239).
 
+## 5b. Windows: D3D11, D3D12, Vulkan (Zweig `claude/frame-levers-d3d-vulkan`, NN-WS03, RTX 4070, 26.10.2026)
+
+Umgesetzt (Basis `release/0.7.0` @ `97f84ab0`, ein Commit):
+
+| Hebel | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|
+| 7 kompaktes Bounds-Array | `cullObjects` im Impl, gefüllt in der Verfeinern-Schleife von `drawFrame` (Kamera + Kaskaden) | dito | `m_refinedBounds` in `refineObjectBounds`, `cullObjects` mit Walk-Prüfung wie Metal (Kamera + Kaskaden) |
+| 4b Kaskaden nur nach Mesh | `sortByMesh` | `sortByMesh` | `sortByMesh` |
+| 4a Kamera-Cull einmal je Frame | nicht nötig: ein Cull je Frame (kein zweiter in SSAO/GI/Decals) | dito | `cullCameraObjects` + `m_cameraCull` (Schlüssel Frame-Stempel, Walk, Objektarray, VP, Kameraposition), vier Pässe teilen es |
+| 5 Wolkenschatten-Box | entfällt: keine Schleife über alle Objekte für die Box im Backend | dito | dito |
+| 1a Foliage parallel | Szenen-Pass schon über `GeometryPass`; Schatten über `batchDepthCasters` (unverändert) | dito | **nicht umgestellt**: `appendInstances` (zwei Stellen) läuft schon über `addInstancePiece`/`writeInstancePieces` und geht ab 4096 Instanzen eines Clusters breit; die Draws sind je Objekt, ein Zusammenfassen über Objekte hieße die Schleifen umbauen |
+| 1b Matrizen in den Upload-Ring | nicht angefasst (optional, erst nach 1a) | | |
+
+**Bild.** `scripts/perf/frame_pixel_ab_win.ps1` (Windows-Fassung von `frame_pixel_ab.sh`: 28 Zeugen, `HE_DUMP_*`, `HE_DUMP_SKYTEST=1`, MD5 der BMPs),
+je Backend, alter Deploy `97f84ab0` gegen neuen. Mit Wolken (`COVERAGE=0.3`) sind die Bilder unter Windows nicht bitgleich (alt gegen alt: 19 von 28 Zeugen
+je Backend verschieden, Mittel 0,01 bis 0,3, Max bis 83 von 255), alt gegen neu liegt im selben Band. Mit `COVERAGE=0 CLOUDMODE=0 CLOUDSHADOWS=0`:
+**25 von 28 Zeugen je Backend md5-gleich alt gegen neu**, in beiden Läufen. Die drei übrigen (`dn_0`, `dn_25`, `dn_75`: Mond und Sterne bei Nacht/Dämmerung)
+sind schon alt gegen alt nicht bitgleich (D3D12 `dn_25`: alt 2 Läufe gleich, neu gegen alt Max 2/255 auf 0,1 % der Pixel, neu gegen neu Max 1/255). Kein Zeuge fehlt.
+
+**Tests** (`he_tests`, scratch-APPDATA): `test_culling`, `test_foliage_cluster`, `test_material_graph`, `test_mcp_tools_material`, `test_profiler`, `test_auto_landscape_variants`:
+287 Fälle, 325 077 Assertions, alle grün (enthält die D3D11/D3D12-WARP-Zeugen).
+
+**Perf** (`he_perf_capture.py --detailed`, 400 Warmup + 1200 Frames, 2000x1125, vsync aus, fester Aufnahme-Blick, abwechselnd alt/neu, je 3 Läufe, Median der Lauf-p50; A/A-Kontrolle alt gegen Kopie von alt in D3D12 w50k: CPU 10,2-10,5 gegen 10,1-10,6, `extract` 4,9-5,1 gegen 4,9-5,1: kein Bias).
+Szenen: `w50k` = `gen_reference_world.py --count 50000 --extent 1000`, `fol300k` = `--count 0 --foliage 300000`.
+CPU-ms je Frame (p50), alt -> neu:
+
+| Backend | Szene | Frame (CPU) | `Render` | `FrustumCuller::cull` | `RenderExtractor::extract` |
+|---|---|---|---|---|---|
+| D3D11 | w50k | 17,01 -> 16,54 (-2,8 %) | 16,01 -> 15,57 | 0,269 -> 0,254 | 4,96 -> 4,25 (-14 %) |
+| D3D12 | w50k | 10,42 -> 9,46 (-9,2 %) | 9,47 -> 8,50 | 0,275 -> 0,250 | 5,13 -> 4,12 (-20 %) |
+| Vulkan | w50k | 9,80 -> 9,03 (-7,9 %) | 8,80 -> 8,05 | 0,315 -> 0,248 (-21 %) | 4,97 -> 4,11 (-17 %) |
+| D3D11 | fol300k | 5,47 -> 5,32 (-2,7 %) | 5,14 -> 5,01 | 0,005 | 0,035 -> 0,034 |
+| D3D12 | fol300k | 3,30 -> 3,29 (0 %) | 3,04 -> 3,05 | 0,004 | 0,030 -> 0,029 |
+| Vulkan | fol300k | 3,64 -> 3,79 (+4,2 %) | 3,34 -> 3,45 | 0,006 -> 0,005 | 0,031 -> 0,034 |
+
+GPU (Gesamt-Frame, der Zeitstempel einer ganzen Frame-Spanne): w50k D3D11 6,21 -> 6,06, D3D12 4,06 -> 3,62, Vulkan 3,41 -> 3,05 ms; fol300k unverändert (1,94/1,91, 2,31/2,32, 2,27/2,27).
+Die GPU-Zahl folgt hier der CPU (verdecktes Fenster, CPU-begrenzt): kein eigener GPU-Gewinn belegt.
+
+Lesart:
+- Der Gewinn sitzt in 50k-Szenen. Die Cull-Scopes selbst sind klein (0,25-0,3 ms je Frame, nur Vulkan fällt um 21 %, weil dort vier statt einem Cull je Frame liefen), den Hauptteil des Frame-Gewinns liefert **`RenderExtractor::extract` (-0,7 bis -1,0 ms), obwohl der Extractor nicht geändert wurde**. Wahrscheinliche Ursache (nicht belegt): die Culls lasen vorher in jedem Frame 14 MB `RenderObject`s mehrfach und verdrängten damit den Cache für den nächsten Walk. Gemessen ist nur, dass die Wirkung reproduzierbar ist (3 von 3 Läufen, beide Reihenfolgen) und nicht vom Deploy-Pfad kommt (A/A).
+- Foliage 300k: wie erwartet kein Gewinn von diesen Hebeln (kein Cull-Anteil, Hebel 1a ist hier schon in der Szene). Vulkan fol300k +0,15 ms (+4 %), in allen drei Läufen, nicht untersucht (verdächtig: das Kopieren von `visible`/`sorted` für den Cache, ist bei 4 Objekten aber nichts; eher Rauschen von 0,1 ms).
+
+**Nicht gemacht / nicht gemessen:** Catania (Projekt nur auf dem Mac), `HE_PARALLEL_UNFOLD=0`-A/B, Hebel 1a auf Vulkan (s. o.), Hebel 1b, FbmGrad/Wasser (PR 189) auf D3D und Vulkan (Compile- und Bildcheck), Thema 238 Schritt 3, sichtbares entsperrtes Fenster (die Sitzung war gesperrt: CPU-Scopes sind belastbar, FPS und GPU-Zeit nicht), Vulkan: ob der Cache wirklich trifft (nur aus dem Cull-Scope geschlossen).
+
 ## Handoff
 
 - **Topic / step:** Umsetzung der Hebel (direkter Auftrag des Menschen), Zweig `claude/frame-perf-levers` ab `490ed019`, gepusht, kein PR.
@@ -310,3 +354,13 @@ Die verdeckten Fenster laufen dort GPU-begrenzt (Render enthält das Warten), de
 - **Decisions suggested, not taken:** Reihenfolge in §3 (5, 6, 4, Moves aus 3, dann 1, 7, Cache aus 3, zuletzt 2).
 - **Traps:** `pgrep -n HorizonEditor` traf beim ersten Versuch einen kurzlebigen Prozess, `pgrep -f deploy/Editor/HorizonEditor` nach 18 s Wartezeit funktioniert. `he_perf_capture --scene` überschreibt die Startszene der Projektkopie: nach jedem Lauf zurückkopieren. Fremde Testläufe (Load 48) verfälschen CPU-Zahlen: `uptime` je Lauf notieren.
 - **Next steps:** 1. Hebel 5 (`EncodeCloudShadow` nutzt `m_frameShadowBox`) und 6 (`entityActionState` in der Menüleiste ohne `anyHidden`), je mit 50k-Vorher/Nachher. 2. Hebel 4: Frame-Cache für `CullCameraObjects`, Schattensortierung nur nach Mesh. 3. Moves in `extractMeshes` (`RenderExtractor.cpp:449/471/472`). 4. Hebel 1 als eigenes Thema (Instanzpuffer persistent, alle Backends). 5. Messung mit Stromsparmodus aus und entsperrtem Bildschirm, wenn der Mensch das einrichtet.
+
+## Handoff (Windows-Port der Frame-Hebel, D3D11/D3D12/Vulkan)
+
+- **Topic / step:** Hebel 7, 4a, 4b nach D3D11, D3D12, Vulkan (direkter Auftrag des Menschen), Zweig `claude/frame-levers-d3d-vulkan` ab `97f84ab0`, ein Commit, nicht gepusht.
+- **Done:** `D3D11Renderer.cpp` (`cullObjects`, Verfeinern-Schleife, Schatten), `D3D12Renderer.cpp` dito, `VulkanRenderer.{h,cpp}` (`m_refinedBounds`, `cullObjects`, `cullCameraObjects`, `m_cameraCull`, `m_frameStamp`, Schatten über `sortByMesh`). §5b.
+- **Verified:** Build Release (D3D11/D3D12/Vulkan) und `he_tests` in `C:\hw237`; sechs Testdateien grün; Pixel-A/B ohne Wolken 25/28 Zeugen je Backend md5-gleich (Rest = Nachtsterne-Rauschen, schon alt gegen alt); Perf-A/B w50k/fol300k je Backend, 3 Läufe, A/A-Kontrolle.
+- **Not verified:** siehe §5b "Nicht gemacht" (Catania, FbmGrad auf D3D/Vulkan, Hebel 1a/1b auf Vulkan, entsperrtes Fenster, Cache-Treffer auf Vulkan, Ursache des Extract-Gewinns).
+- **Decisions taken:** Hebel 5 entfällt (keine Box-Schleife in diesen Backends); Hebel 1a auf Vulkan nicht umgebaut, weil `appendInstances` schon die Stücke-Pfade nutzt; Bild-A/B ohne Wolken, weil Wolken unter Windows nicht bitgleich sind.
+- **Next steps:** 1. Sichtbar entsperrt messen (FPS, GPU), Catania kopieren. 2. FbmGrad-Wasser auf D3D/Vulkan ansehen. 3. Prüfen, ob die Extract-Wirkung vom Cache-Druck der Culls kommt (z. B. Cull-Zugriffe zählen oder `HE_PARALLEL_UNFOLD` und Cull einzeln schalten). 4. Hebel 1a/1b auf Vulkan nur, wenn eine Foliage-Szene dort GPU-frei ist.
+- **Pitfalls:** MSVC: der Baum `C:\hw237` ist mit VS **18** konfiguriert, `vcvars64.bat` von 2022 gibt LNK2019 `__std_find_first_not_of_trivial_pos_1`. `he_perf_capture.py` nimmt `--editor` für einen zur Seite gelegten Deploy. `HE_DUMP_SKYTEST=1` muss bei jedem Zeugen gesetzt sein (sonst greifen TOD/Kamera nicht und alle Bilder sind gleich). Zwei Läufe desselben Deploys gleichzeitig stören sich über `HorizonEngine.log`.
