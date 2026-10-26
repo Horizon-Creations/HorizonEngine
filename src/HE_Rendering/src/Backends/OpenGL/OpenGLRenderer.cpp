@@ -9011,17 +9011,31 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	interleaved.reserve(vertexCount * 8);
 	for (size_t v = 0; v < vertexCount; ++v)
 	{
-		interleaved.insert(interleaved.end(),
-			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		interleaved.push_back(asset->vertices[v*3+0]);
+		interleaved.push_back(asset->vertices[v*3+1]);
+		interleaved.push_back(asset->vertices[v*3+2]);
 		if (v * 3 + 2 < asset->normals.size())
-			interleaved.insert(interleaved.end(),
-				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		{
+			interleaved.push_back(asset->normals[v*3+0]);
+			interleaved.push_back(asset->normals[v*3+1]);
+			interleaved.push_back(asset->normals[v*3+2]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 		if (v * 2 + 1 < asset->uvs.size())
-			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		{
+			interleaved.push_back(asset->uvs[v*2+0]);
+			interleaved.push_back(asset->uvs[v*2+1]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 	}
 
 	// Bone IDs per vertex  (4 × uint32, attrib loc 3) — zero-padded if missing
