@@ -110,6 +110,37 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
                                   DepthBatchList&              out)
 {
 	out.clear();
+	if (out.useSpans)
+	{
+		// The same runs, the instances read in place (DepthBatchList::useSpans): a span per
+		// object, cut where a run reaches kMaxInstancesPerDraw.
+		for (uint32_t idx : sortedIndices)
+		{
+			if (idx >= world.objects.size()) continue;
+			const RenderObject& obj = world.objects[idx];
+			if (filter == DepthFilter::ShadowCasters  && !obj.castsShadow)   continue;
+			if (filter == DepthFilter::AoContributors && !obj.contributesAO) continue;
+			if (obj.entityId == skipEntity) continue;
+			const uint32_t total = world.instanceCountOf(obj);
+			uint32_t done = 0;
+			while (done < total)
+			{
+				const bool extend = !out.batches.empty() && out.batches.back().meshAssetId == obj.meshAssetId
+				                 && out.batches.back().count < HE::kMaxInstancesPerDraw;
+				if (!extend)
+					out.batches.push_back(DepthBatch{ obj.meshAssetId, 0, 0,
+					                                  static_cast<uint32_t>(out.spans.size()), 0 });
+				DepthBatch&    b    = out.batches.back();
+				const uint32_t room = HE::kMaxInstancesPerDraw - b.count;
+				const uint32_t take = std::min(total - done, room);
+				out.spans.push_back(world.instanceSpan(obj, done, take));
+				++b.spanCount;
+				b.count += take;
+				done    += take;
+			}
+		}
+		return;
+	}
 	// Two phases: the runs and where each object's instances go (serial, no matrix touched),
 	// then the matrices into one array sized once, on the job system's workers. With foliage the
 	// list used to grow through every doubling while each cluster unfolded on the main thread,

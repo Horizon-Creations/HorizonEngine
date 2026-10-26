@@ -801,6 +801,148 @@ TEST_CASE("batchDepthRuns unfolds a cluster and cuts the run at the instance cap
 	CHECK(list.transforms.size() == 4u);
 }
 
+namespace
+{
+// Two 50 000-plant clusters under a rotated parent (the General product) around an
+// ordinary object, all one mesh: one run cut at the instance cap inside the second cluster.
+RenderWorld twoGeneralClusters()
+{
+	RenderWorld rw;
+	const HE::UUID mesh{ 7, 7 };
+	const glm::mat4 parent = glm::rotate(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 4.0f, 5.0f)),
+	                                     0.7f, glm::vec3(0.3f, 1.0f, 0.2f));
+	for (int c = 0; c < 2; ++c)
+	{
+		auto mats = std::make_shared<std::vector<glm::mat4>>();
+		for (uint32_t i = 0; i < 50000; ++i)
+			mats->push_back(glm::translate(glm::mat4(1.0f), glm::vec3(float(i) * 0.37f, float(c), 1.0f)));
+		InstanceBlock b;
+		b.matrices = mats;
+		b.count    = 50000;
+		b.parent   = parent;
+		b.kind     = InstanceBlock::classify(parent);
+		rw.instanceBlocks.push_back(b);
+		RenderObject o;
+		o.meshAssetId   = mesh;
+		o.transform     = b.world(0);
+		o.instanceBlock = c;
+		rw.objects.push_back(o);
+		if (c == 0)
+		{
+			RenderObject plain;
+			plain.meshAssetId = mesh;
+			plain.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(-9.0f, 0.0f, 0.0f));
+			rw.objects.push_back(plain);
+		}
+	}
+	return rw;
+}
+
+std::vector<glm::mat4> flatten(const DrawCall& dc)
+{
+	std::vector<glm::mat4> out;
+	if (dc.instanceTotal() == 0) { out.push_back(dc.transform); return out; }
+	dc.forEachInstance([&](const glm::mat4& m) { out.push_back(m); });
+	return out;
+}
+} // namespace
+
+TEST_CASE("GeometryPass with instance spans draws the same instances, in the same draws, as the copies")
+{
+	// Metal reads a run's instances in place (GeometryPass::setInstanceSpans): the foliage
+	// matrices are unfolded once per block, not once per pass. Draw for draw the instances,
+	// their order and dc.transform must be what the copying path hands every other backend.
+	const RenderWorld rw = twoGeneralClusters();
+	std::vector<uint32_t> idx(rw.objects.size());
+	std::iota(idx.begin(), idx.end(), 0u);
+	CommandBuffer copies, spans;
+	GeometryPass{}.execute(rw, idx, copies);
+	GeometryPass spanPass;
+	spanPass.setInstanceSpans(true);
+	spanPass.execute(rw, idx, spans);
+	REQUIRE(copies.drawCalls().size() == spans.drawCalls().size());
+	REQUIRE(spans.drawCalls().size() == 2u);   // 100 001 instances, one cut
+	for (size_t d = 0; d < copies.drawCalls().size(); ++d)
+	{
+		const DrawCall& a = copies.drawCalls()[d];
+		const DrawCall& b = spans.drawCalls()[d];
+		CAPTURE(d);
+		CHECK(b.instanceTransforms.empty());
+		CHECK(a.instanceCount == b.instanceCount);
+		CHECK(a.instanceTotal() == b.instanceTotal());
+		CHECK(std::memcmp(&a.transform, &b.transform, sizeof(glm::mat4)) == 0);
+		CHECK(std::memcmp(&a.firstInstance(), &b.firstInstance(), sizeof(glm::mat4)) == 0);
+		const std::vector<glm::mat4> fa = flatten(a), fb = flatten(b);
+		REQUIRE(fa.size() == fb.size());
+		CHECK(std::memcmp(fa.data(), fb.data(), fa.size() * sizeof(glm::mat4)) == 0);
+	}
+}
+
+TEST_CASE("batchDepthRuns with spans forms the same runs over the same instances as the copies")
+{
+	for (const RenderWorld& rw : { syntheticRun(150000, 4), twoGeneralClusters() })
+	{
+		std::vector<uint32_t> idx(rw.objects.size());
+		std::iota(idx.begin(), idx.end(), 0u);
+		for (RenderSorter::DepthFilter f : { RenderSorter::DepthFilter::ShadowCasters, RenderSorter::DepthFilter::All })
+		{
+			RenderSorter::DepthBatchList copies, spans;
+			spans.useSpans = true;
+			RenderSorter::batchDepthRuns(rw, idx, f, kNoOwnerEntity, copies);
+			RenderSorter::batchDepthRuns(rw, idx, f, kNoOwnerEntity, spans);
+			CHECK(spans.transforms.empty());
+			CHECK(spans.useSpans);   // clear() keeps the mode
+			REQUIRE(copies.batches.size() == spans.batches.size());
+			for (size_t i = 0; i < copies.batches.size(); ++i)
+			{
+				const auto& a = copies.batches[i];
+				const auto& b = spans.batches[i];
+				CHECK(a.meshAssetId == b.meshAssetId);
+				REQUIRE(a.count == b.count);
+				std::vector<glm::mat4> fb;
+				for (uint32_t s = 0; s < b.spanCount; ++s)
+				{
+					const InstanceSpan& sp = spans.spans[b.spanFirst + s];
+					fb.insert(fb.end(), sp.src, sp.src + sp.n);
+				}
+				REQUIRE(fb.size() == a.count);
+				CHECK(std::memcmp(fb.data(), copies.transforms.data() + a.first, fb.size() * sizeof(glm::mat4)) == 0);
+			}
+		}
+	}
+}
+
+TEST_CASE("instanceWorldMatrices: once per block, in place for an identity parent, released when unused")
+{
+	RenderWorld rw = twoGeneralClusters();
+	const InstanceBlock& g = rw.instanceBlocks[0];
+	const glm::mat4* first = instanceWorldMatrices(g);
+	CHECK(instanceWorldMatrices(g) == first);              // the same array, not a second unfolding
+	for (uint32_t i : { 0u, 1u, 777u, 49999u })
+	{
+		const glm::mat4 w = g.world(i);
+		CHECK(std::memcmp(&first[i], &w, sizeof(glm::mat4)) == 0);
+	}
+
+	InstanceBlock id = g;
+	id.parent = glm::mat4(1.0f);
+	id.kind   = InstanceBlock::Parent::Identity;
+	CHECK(instanceWorldMatrices(id) == id.matrices->data());   // nothing to compute
+
+	// A moved parent is a new entry; one no frame asks for any more ages out.
+	InstanceBlock moved = g;
+	moved.parent = glm::translate(g.parent, glm::vec3(1.0f, 0.0f, 0.0f));
+	CHECK(instanceWorldMatrices(moved) != first);
+	const size_t before = instanceWorldCacheEntries();
+	for (int f = 0; f < 12; ++f)
+	{
+		instanceWorldCacheNextFrame();
+		(void)instanceWorldMatrices(g);   // still in use every frame
+	}
+	CHECK(instanceWorldCacheEntries() < before);
+	CHECK(instanceWorldMatrices(g) == first);              // the one in use survived
+}
+
 TEST_CASE("InstanceBlock::position is exactly world()[3] for every kind of parent")
 {
 	// The draw-distance test reads the position alone and builds the matrix only for what passes;

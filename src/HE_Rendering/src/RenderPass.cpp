@@ -157,6 +157,40 @@ void GeometryPass::execute(const RenderWorld&           world,
 			// transform in dc.transform. Backends keep their non-instanced program for it.
 			recordRun(std::move(dc));
 		}
+		else if (m_instanceSpans)
+		{
+			// The same draws, the instances read in place (DrawCall::instanceSpans): a span
+			// per object, cut where a draw reaches kMaxInstancesPerDraw.
+			size_t   k     = i;
+			uint32_t inObj = 0;
+			for (size_t from = 0; from < total; from += HE::kMaxInstancesPerDraw)
+			{
+				const size_t n = std::min<size_t>(total - from, HE::kMaxInstancesPerDraw);
+				DrawCall chunk = dc;
+				size_t   got   = 0;
+				while (got < n)
+				{
+					const RenderObject& o   = world.objects[sortedIndices[k]];
+					const uint32_t      cnt = world.instanceCountOf(o);
+					const uint32_t take = static_cast<uint32_t>(std::min<size_t>(cnt - inObj, n - got));
+					chunk.instanceSpans.push_back(world.instanceSpan(o, inObj, take));
+					got   += take;
+					inObj += take;
+					if (inObj == cnt) { ++k; inObj = 0; }
+				}
+				// dc.transform as the copying path leaves it: untouched for one draw, the
+				// draw's first instance for a cut run.
+				if (total > HE::kMaxInstancesPerDraw) chunk.transform = chunk.instanceSpans.front().src[0];
+				if (n == 1)
+				{
+					chunk.instanceCount = 1;   // "exactly one instance = empty list", as below
+					chunk.instanceSpans.clear();
+				}
+				else
+					chunk.instanceCount = static_cast<uint32_t>(n);
+				recordRun(std::move(chunk));
+			}
+		}
 		else if (total <= HE::kMaxInstancesPerDraw)
 		{
 			dc.instanceCount = static_cast<uint32_t>(total);

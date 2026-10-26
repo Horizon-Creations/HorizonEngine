@@ -87,15 +87,25 @@ public:
     // One run of same-mesh objects: `count` transforms starting at
     // DepthBatchList::transforms[first]. count == 1 is the plain single draw
     // (the backends keep their non-instanced program for it).
+    //
+    // With `useSpans` set (a backend that reads the matrices in place, Metal) the
+    // run's instances are not copied into `transforms`: batch b's are the spans
+    // spans[b.spanFirst, b.spanFirst + b.spanCount), `count` matrices in all, read
+    // straight from instanceWorldMatrices / RenderObject::transform. Same runs, same
+    // order, same bits; `transforms` stays empty.
     struct DepthBatch {
         HE::UUID meshAssetId;
         uint32_t first = 0;
         uint32_t count = 0;
+        uint32_t spanFirst = 0;
+        uint32_t spanCount = 0;
     };
     struct DepthBatchList {
-        std::vector<DepthBatch> batches;
-        std::vector<glm::mat4>  transforms; // world transforms, batch-contiguous
-        void clear() { batches.clear(); transforms.clear(); }
+        std::vector<DepthBatch>   batches;
+        std::vector<glm::mat4>    transforms; // world transforms, batch-contiguous
+        std::vector<InstanceSpan> spans;      // useSpans: batch-contiguous spans instead
+        bool                      useSpans = false;
+        void clear() { batches.clear(); transforms.clear(); spans.clear(); }
     };
 
     // Which per-object opt-out a depth-only pass honours. The flags live on

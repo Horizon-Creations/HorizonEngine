@@ -1427,6 +1427,8 @@ private:
 	// {viewProj * model, model} per instance, written into the ring (in parallel for a big run).
 	bool  UploadMvpModel(const std::vector<glm::mat4>& models, const glm::mat4& viewProj,
 	                     void*& outBuf, size_t& outOffset);
+	// The same for a GeometryPass batch, read from its spans in place when it has them.
+	bool  UploadMvpModel(const DrawCall& dc, const glm::mat4& viewProj, void*& outBuf, size_t& outOffset);
 	void  ReleaseUploadRing();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──

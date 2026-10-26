@@ -25,6 +25,11 @@ class HE_RENDERING_API GeometryPass : public RenderPass {
 public:
     void execute(const RenderWorld&, const std::vector<uint32_t>&, CommandBuffer&) override;
     const char* name() const override { return "GeometryPass"; }
+    // On: a batch carries DrawCall::instanceSpans (its instances read in place) instead
+    // of a copied instanceTransforms list. For a backend that reads both forms (Metal).
+    void setInstanceSpans(bool on) { m_instanceSpans = on; }
+private:
+    bool m_instanceSpans = false;
 };
 
 class HE_RENDERING_API ShadowPass : public RenderPass {
