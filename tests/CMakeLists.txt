@@ -306,6 +306,7 @@ add_executable(he_tests
     test_ui_font_weight.cpp
     # Same reason: needs a process whose shared font is not baked yet.
     test_ui_font_scripts.cpp
+    test_ui_text_layout_digest.cpp
     test_app_icon.cpp
     test_hidden_window.cpp
     test_document_types.cpp
