@@ -115,6 +115,50 @@ heute Modellmatrizen hoch: Die Spans schreiben sie direkt in den Upload-Ring, st
 - ThreadSanitizer: nicht gelaufen. Die parallelen Aufgaben schreiben nur in ihre eigene `ShadowView` bzw. in `m_cameraCull` und lesen `m_refinedBounds` und `m_renderWorld`.
 - Spiel (`HorizonGame`) nicht gesondert gemessen. Es nutzt denselben Renderer.
 
+## 6. Windows: GL, D3D11, D3D12, Vulkan (NN-WS03, RTX 4070, 26.10.2026)
+
+Zweig `claude/foliage-spans-windows` = dieser Zweig + PR #187 (`FrameCull`, `fillInstancePairs`). Die
+Hebel aus §4 sind umgesetzt, als gemeinsamer Code statt je Backend einmal:
+
+- **`InstanceRun`** (`CommandBuffer.h`): die Matrizen eines Laufs als Spans oder als kopierte Liste, `DrawCall::instanceRun`,
+  `DepthBatchList::run`, `RenderWorld::instanceRun(obj)`. `RenderSorter::fillInstancePairs(run, fill)` und
+  `copyInstanceModels` schreiben die Ring-Records Span für Span, ab 4096 Instanzen breit. Jeder Leser von
+  `instanceTransforms` in D3D11, D3D12 und Vulkan geht darüber (Szene, Material-Zwilling, SSAO-, GI-, Decal- und
+  Reflexions-Vorpass); die Quelltext-Wächter in `test_foliage_cluster` verbieten `instanceTransforms` dort.
+- **`FrameCull::prepareShadowViews` + `ShadowViewCpu`:** Cull, `sortByMesh` und Läufe jeder Kaskade und jedes lokalen Layers
+  nebeneinander (`parallel_for`), danach wird je Ansicht gezeichnet. GL nutzt dasselbe (sein `ShadowView` ist weg).
+- **Schalter einmal:** `RenderSorter::instanceSpansEnabled()` (`HE_INSTANCE_SPANS`) und `parallelShadowViewsEnabled()`
+  (`HE_MTL_PARALLEL_SHADOW`); Metal und GL lasen sie je einmal selbst und rufen jetzt diese. **Metal ist deshalb auf dem Mac
+  neu zu bauen** (nur die zwei Schalter-Aufrufe geändert, auf Windows nicht übersetzbar).
+- `instanceWorldCacheNextFrame()` pro Frame auch in GL, D3D11, D3D12, Vulkan (vorher nur Metal: der Cache gab nie etwas frei).
+- Teil D (Hebel 7/4a/5) kam mit #187; Vulkans zwei Reste in §4 C (Decal-Tiefe, SSAO) sind jetzt Spans, der SSR-Vorpass liest den Block in place.
+
+**Bild.** `frame_pixel_ab_win.ps1`-Zeugen (28 je Backend, Wolken aus), alter Deploy (Merge-Stand) gegen neuen:
+D3D11 28/28 md5-gleich, D3D12 und Vulkan je 25/28. Die drei übrigen (`dn_0/25/75_fwd`, Sterne) weichen um höchstens 3/255
+ab; alt gegen alt rauscht dieselbe Aufnahme um bis zu 30/255. OpenGL nicht neu gemessen (nur der Schalter-Aufruf und
+der gemeinsame Schattenpfad geändert, `test_foliage_cluster` prüft Spans gegen Kopien bitgenau).
+
+**Tests.** `test_foliage_cluster`, `test_culling` (neu: `InstanceRun` Spans gegen Liste, `copyInstanceModels`),
+`test_graph_instancing`, `test_material_graph`, `test_profiler` (neu: `GpuPassTimeline`), `test_auto_landscape_variants`,
+`test_mcp_tools_material`: 305 Fälle grün.
+
+**Perf A/B: NICHT belastbar.** 3 Läufe je Zelle, alt / neu / `HE_INSTANCE_SPANS=0` / `HE_MTL_PARALLEL_SHADOW=0`
+(`matrix4.py`): dieselbe Konfiguration streute um das Zwei- bis Dreifache (Vulkan Foliage 3,4 / 8,0 / 13,4 ms),
+weil auf dem Rechner VALORANT lief. Verworfen; zu wiederholen auf ruhigem Rechner.
+
+**Zeit pro Pass auf D3D11, D3D12, Vulkan (neu, war bisher nur Gesamt-Frame).** `GpuPassTimeline` + `GpuPassScope`
+(`HE_Core/Renderer/GpuPassTimeline.h`): eine Marke je Pass-Grenze, verschachtelte Pässe unterbrechen den äußeren, die GPU-Zeilen
+sind exklusiv und ergeben den Frame. Modi `d3d11-ts` (nur während einer Aufnahme), `d3d12-ts`, `vk-ts`; Namen wie GL
+(`Shadow`, `SSAO`, `GIShadow`, `GIProbes`, `GIRefl`, `Decals`, `Scene`, `Bloom`, `Tonemap`, `TAA`, `AA`, `UI`). Derselbe Scope ist
+der CPU-Scope des Passes (inklusiv). Dazu CPU-Scopes `RenderGraph::record`, `RefineBounds`, `MaterialScalars`, `SortObjects`,
+`WaitFrame`, `Present`/`SubmitPresent`.
+
+Erste Beobachtung (50k-Szene, 2000x1125, ein Lauf, nicht A/B): **die Szene ist CPU-gebunden**, 10 bis 15 ms CPU gegen 2 bis 3 ms GPU.
+CPU p50 je Frame (D3D11 / D3D12 / Vulkan): `RenderExtractor::extract` 5,7 / 5,5 / 5,2 ms (der größte Posten, etwa 40 %),
+`RefineBounds` 1,4 / 1,4 ms, `Shadow` 1,0 / 1,1 / 1,3 ms, `RenderGraph::record` 1,1 / 1,05 ms, `Present` 0,3 ms;
+auf D3D11 bleiben etwa 4 ms in `Render` ohne Scope. GPU je Pass (D3D11): SSAO 2,3 ms, Shadow 0,6 ms, Scene 0,16 ms;
+(D3D12) SSAO 1,6 ms, Shadow 0,65 ms; (Vulkan) Shadow 1,5 ms, Scene 0,3 ms, Bloom 0,28 ms.
+
 ## Handoff
 
 - **Topic / step:** Thema 238 (direkter Auftrag des Menschen), Zweig `claude/perf-foliage-persistent-encode`.
@@ -123,3 +167,11 @@ heute Modellmatrizen hoch: Die Spans schreiben sie direkt in den Upload-Ring, st
 - **Not verified:** §5.
 - **Decisions taken:** paralleles Vorbereiten statt paralleles Kodieren (Profil §1); kein neues Instanz-Layout in Shadern, alle Backends behalten `{mvp, model}` bzw. Modellmatrizen.
 - **Next steps:** 1. §4 auf NN-WS03. 2. Optional: `mvp` in Metal per Compute aus einer dauerhaften Arena (spart die restlichen ca. 1,5 ms `ShadowInstanceMvp` in der Foliage-Szene), braucht Compute vor dem Pass-Encoder.
+
+### Handoff Windows (26.10.2026)
+
+- **Done / verified:** §6 (Bild, Tests). **Not verified:** Perf A/B (ruhiger Rechner nötig: `python C:/hw237_perf/matrix4.py D3D11,D3D12,Vulkan 3`
+  mit den Deploys `Sp_old` / `Sp_new`, Fenster hidden), Metal-Build, OpenGL-Bild neu, Hebel 1b, Vulkans SSR-Vorpass gegen Kopie.
+- **Next steps:** 1. Perf A/B wiederholen. 2. Die CPU-Zeit selbst: `RenderExtractor::extract` (5 ms bei 50k) und `RefineBounds` (Mesh-Auflösung je
+  Objekt und Frame) sind die großen Posten, nicht die Draws; auf D3D11 etwa 4 ms in `Render` noch ohne Scope. 3. Metal auf `FrameCull` und
+  `prepareShadowViews` umstellen (Doppelungen laut PR #187).
