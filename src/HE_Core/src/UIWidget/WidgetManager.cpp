@@ -2564,10 +2564,14 @@ void WidgetManager::tick(float dt)
 	// (the "animate() replaces a clip's track" half of the rule) has the last
 	// word on the property they share within the same frame.
 	if (dt > 0.0f)
+	{
+		// (widget id, clip) of every clip that ended, fired after the walk: a
+		// graph reacting to one may create or destroy widgets, which moves
+		// m_instances under the reference the walk holds.
+		std::vector<std::pair<int, std::string>> clipsEnded;
 		for (auto& w : m_instances)
 		{
 			if (w.playing.empty()) continue;
-			std::vector<std::string> ended;
 			std::vector<HE::UIAnimSample> samples;
 			for (auto& p : w.playing)
 			{
@@ -2609,18 +2613,21 @@ void WidgetManager::tick(float dt)
 					if (p.restore)
 						for (const HE::UIAnimTrack& tr : c->tracks)
 							restoreOne(w, tr.element + offset, tr.prop);
-					ended.push_back(p.clip);
+					clipsEnded.emplace_back(w.id, p.clip);
 					p.t = -1.0f;
 				}
 			}
 			w.playing.erase(std::remove_if(w.playing.begin(), w.playing.end(),
 				[](const Instance::Playing& p){ return p.t < 0.0f; }), w.playing.end());
 			m_visualDirty = true;
-			// Fired after the list is settled, like the tweens': a graph reacting
-			// to the end may start the next clip on this same widget.
-			for (const std::string& name : ended)
-				rt().fireOnClipFinished(w.scriptId, name);
 		}
+		// Fired after the lists are settled, like the tweens': a graph reacting
+		// to the end may start the next clip on this same widget. The widget is
+		// found again for each, since an earlier handler may have destroyed it.
+		for (const auto& [widgetId, name] : clipsEnded)
+			if (const Instance* w = find(widgetId))
+				rt().fireOnClipFinished(w->scriptId, name);
+	}
 
 	// ── Animations ───────────────────────────────────────────────────────────
 	// Before the Tick events, so a graph that reads a property in its Tick reads
@@ -2629,14 +2636,15 @@ void WidgetManager::tick(float dt)
 	// Hidden widgets animate too, on purpose: "fade it in" is started on the
 	// frame the thing appears, and half of those start while it is still hidden.
 	if (dt > 0.0f)
+	{
+		// Finished ones are collected and fired AFTER both loops: a graph
+		// reacting to one may start the next animation on this same widget, or
+		// create or destroy widgets, and either moves what the loops hold.
+		struct Finished { int widgetId; int elem; std::string prop; };
+		std::vector<Finished> finished;
 		for (auto& w : m_instances)
 		{
 			if (w.anims.empty()) continue;
-			// Finished ones are collected and fired AFTER the loop: a graph
-			// reacting to one may start the next animation on this same widget,
-			// and appending to a vector being iterated is how that ends in a
-			// dangling reference.
-			std::vector<std::pair<int, std::string>> finished;
 			for (auto& a : w.anims)
 			{
 				a.t += dt;
@@ -2651,17 +2659,21 @@ void WidgetManager::tick(float dt)
 				// that was ever seen. It costs a branch.
 				e->setPropAny(a.prop, done ? a.to
 					: animLerp(a.from, a.to, HE::uiEaseApply(a.ease, a.t / a.dur)));
-				if (done) finished.emplace_back(a.elem, a.prop);
+				if (done) finished.push_back({ w.id, a.elem, a.prop });
 			}
 			w.anims.erase(std::remove_if(w.anims.begin(), w.anims.end(),
 				[](const Instance::Anim& a){ return a.t >= a.dur; }), w.anims.end());
 			m_visualDirty = true;
-			for (const auto& [elem, prop] : finished)
-			{
-				const ScriptTarget t = scriptTargetFor(w, elem);
-				rt().fireOnAnimationFinished(t.scriptId, t.elem, prop);
-			}
 		}
+		// The widget is found again for each: an earlier handler may have
+		// destroyed it, and scriptTargetFor needs the live Instance.
+		for (const Finished& f : finished)
+			if (const Instance* w = find(f.widgetId))
+			{
+				const ScriptTarget t = scriptTargetFor(*w, f.elem);
+				rt().fireOnAnimationFinished(t.scriptId, t.elem, f.prop);
+			}
+	}
 
 	// ── Transitions between states ───────────────────────────────────────────
 	// Hover and press stop being a switch and become a journey, for the elements
@@ -2799,14 +2811,24 @@ void WidgetManager::tick(float dt)
 		if (m_tooltipHeld >= kTooltipDelay) { m_tooltipUp = true; m_visualDirty = true; }
 	}
 
-	for (auto& w : m_instances)
+	// By id, not by reference: a Tick is graph code and may create or destroy
+	// widgets (its own included), which moves m_instances. A widget made during
+	// the walk first ticks next frame; one destroyed during it is skipped.
+	std::vector<int> widgetIds;
+	widgetIds.reserve(m_instances.size());
+	for (const Instance& w : m_instances) widgetIds.push_back(w.id);
+	std::vector<HorizonCode::InstanceId> scripts;
+	for (const int widgetId : widgetIds)
 	{
-		if (!w.visible) continue;
-		rt().fireTick(w.scriptId, dt);
+		const Instance* w = find(widgetId);
+		if (!w || !w->visible) continue;
 		// Embedded widgets tick as themselves — a health bar that animates has
-		// its own Tick, and it must run while the page holding it is up.
-		for (const Instance::Embed& em : w.embeds)
-			rt().fireTick(em.scriptId, dt);
+		// its own Tick, and it must run while the page holding it is up. All the
+		// scripts are read now, before the first of them runs.
+		scripts.clear();
+		scripts.push_back(w->scriptId);
+		for (const Instance::Embed& em : w->embeds) scripts.push_back(em.scriptId);
+		for (const HorizonCode::InstanceId sid : scripts) rt().fireTick(sid, dt);
 	}
 }
 

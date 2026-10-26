@@ -18828,3 +18828,104 @@ TEST_CASE("Text field: an OnTextChanged that destroys the widget leaves nothing 
     wm.inputText("X");
     CHECK_FALSE(wm.isAlive(widget));
 }
+
+// ── Handlers that run while the manager is walking its widgets ───────────────
+// An event handler is graph code and may create or destroy widgets, which moves
+// m_instances. Each case below has a handler that creates a widget (so the
+// vector reallocates under a held reference) on the first of TWO events fired by
+// one pass, so the second event reads whatever the walk still holds. A plain
+// run passes either way; the failing form is a crash under guard malloc
+// (DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib) or ASan.
+namespace
+{
+    struct HandlerRig
+    {
+        TempWidgetDir dir;
+        ContentManager cm{ dir.path.string() };
+        HorizonCode::Runtime rt;
+        WidgetManager wm;
+        int panel = 0, widget = 0;
+        int created = 0;
+
+        // `event` names the handler that creates a filler widget; `arg` is the
+        // event's payload type. Called with the tree already holding its
+        // elements and clips.
+        void build(HE::UIWidgetTree& t, const char* event, PinType arg, int onElem = 0)
+        {
+            HE::UIWidgetTree filler;
+            filler.canvasWidth = 100.0f; filler.canvasHeight = 100.0f;
+            registerWidget(cm, filler, nullptr, "mem://filler.hasset");
+
+            HorizonCode::Graph g;
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = onElem;
+            ev.hasArg = true; ev.propType = arg;
+            const int evId = g.addNode(ev);
+            HorizonCode::Node cw; cw.type = NodeType::CreateWidget; cw.s = "mem://filler.hasset";
+            const int cwId = g.addNode(cw);
+            REQUIRE(g.connect(evId, 0, cwId, 0));
+            registerWidget(cm, t, &g);
+
+            wm.setRuntime(&rt);
+            HorizonCode::Runtime::Services svc;
+            svc.createWidget = [this](const std::string& p, const HorizonCode::SpawnValues&)
+            {
+                ++created;
+                return wm.createWidget(cm, p);
+            };
+            rt.setServices(std::move(svc));
+            widget = createShown(wm, cm, "mem://w.hasset");
+            REQUIRE(widget != 0);
+        }
+    };
+
+    HE::UIWidgetTree handlerRigTree(int& panel)
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        panel = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        return t;
+    }
+}
+
+TEST_CASE("Tick: two clips ending in one frame both announce, though the first handler creates a widget")
+{
+    HandlerRig rig;
+    HE::UIWidgetTree t = handlerRigTree(rig.panel);
+    t.animations.push_back(fadeClip(rig.panel, "A"));
+    t.animations.push_back(fadeClip(rig.panel, "B"));
+    rig.build(t, "OnClipFinished", PinType::String);
+
+    REQUIRE(rig.wm.playAnimation(rig.widget, "A"));
+    REQUIRE(rig.wm.playAnimation(rig.widget, "B"));
+    rig.wm.tick(2.0f);
+    CHECK(rig.created == 2);
+    CHECK(rig.wm.count() == 3);
+}
+
+TEST_CASE("Tick: two tweens ending in one frame both announce, though the first handler creates a widget")
+{
+    HandlerRig rig;
+    HE::UIWidgetTree t = handlerRigTree(rig.panel);
+    rig.build(t, "OnAnimationFinished", PinType::String, rig.panel);
+
+    REQUIRE(rig.wm.animate(rig.widget, rig.panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    REQUIRE(rig.wm.animate(rig.widget, rig.panel, "Corner Radius", HE::UIPropValue::ofFloat(8.0f), 1.0f));
+    rig.wm.tick(2.0f);
+    CHECK(rig.created == 2);
+    CHECK(rig.wm.count() == 3);
+}
+
+TEST_CASE("Tick: a Tick handler that creates a widget does not derail the walk")
+{
+    HandlerRig rig;
+    HE::UIWidgetTree t = handlerRigTree(rig.panel);
+    rig.build(t, "Tick", PinType::Float);
+
+    rig.wm.tick(0.016f);
+    CHECK(rig.created == 1);
+    CHECK(rig.wm.count() == 2);
+}
