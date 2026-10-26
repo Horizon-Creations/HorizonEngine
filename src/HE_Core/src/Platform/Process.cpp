@@ -128,18 +128,6 @@ std::wstring widen(std::string_view utf8)
 	return out;
 }
 
-std::string narrow(const wchar_t* w, std::size_t len)
-{
-	if (len == 0) return {};
-	const int n = ::WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(len),
-	                                    nullptr, 0, nullptr, nullptr);
-	if (n <= 0) return {};
-	std::string out(static_cast<std::size_t>(n), '\0');
-	::WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(len), out.data(), n,
-	                      nullptr, nullptr);
-	return out;
-}
-
 // Quote one argument per the rules the MSVC runtime uses to split a command line
 // back into argv. Windows has no argv array at the OS level — the child parses
 // one string — so this is where "an argument containing a quote" is either
