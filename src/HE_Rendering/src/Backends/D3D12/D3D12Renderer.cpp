@@ -12989,6 +12989,24 @@ void D3D12Renderer::DrawViewportFrame()
     }
 }
 
+// Retires a (value, countdown) vector in place: decrements every countdown,
+// erasing the entry once it reaches zero (after invoking onExpire with the value).
+template <typename T, typename OnExpire>
+static void reapExpired(std::vector<std::pair<T, int>>& items, OnExpire onExpire)
+{
+    for (auto it = items.begin(); it != items.end(); )
+    {
+        if (--it->second <= 0) { onExpire(it->first); it = items.erase(it); }
+        else                    ++it;
+    }
+}
+
+template <typename T>
+static void reapExpired(std::vector<std::pair<T, int>>& items)
+{
+    reapExpired(items, [](T&) {});
+}
+
 void D3D12Renderer::Render()
 {
     auto& p = *m_impl;
@@ -12996,35 +13014,15 @@ void D3D12Renderer::Render()
 
     // Free retired viewport RTs once enough frames have passed that the GPU is done
     // with them (countdown set when the RT was retired on resize).
-    for (auto it = p.retiredViewportRTs.begin(); it != p.retiredViewportRTs.end(); )
-    {
-        if (--it->second <= 0) it = p.retiredViewportRTs.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.retiredViewportRTs);
     // Same for font-atlas staging buffers recorded into an earlier frame's list.
-    for (auto it = p.m_uiAtlasUploads.begin(); it != p.m_uiAtlasUploads.end(); )
-    {
-        if (--it->second <= 0) it = p.m_uiAtlasUploads.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.m_uiAtlasUploads);
     // Same for per-mesh base-color texture staging buffers.
-    for (auto it = p.meshTexUploads.begin(); it != p.meshTexUploads.end(); )
-    {
-        if (--it->second <= 0) it = p.meshTexUploads.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.meshTexUploads);
     // GPU resources retired by material/mesh hot-reload — free once past frames in flight.
-    for (auto it = p.m_retiredTextures.begin(); it != p.m_retiredTextures.end(); )
-    {
-        if (--it->second <= 0) it = p.m_retiredTextures.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.m_retiredTextures);
     // Heap slots freed by invalidation become reusable once past frames in flight.
-    for (auto it = p.m_freeSlotPending.begin(); it != p.m_freeSlotPending.end(); )
-    {
-        if (--it->second <= 0) { p.m_freeSlots.push_back(it->first); it = p.m_freeSlotPending.erase(it); }
-        else                   ++it;
-    }
+    reapExpired(p.m_freeSlotPending, [&p](UINT slot) { p.m_freeSlots.push_back(slot); });
 
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
