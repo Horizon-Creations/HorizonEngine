@@ -14,7 +14,7 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
 {
     if (!fs::exists(path))
     {
-        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanShaderManager: shader file not found: ") + path).c_str());
+        HE_LOG_ERROR(RHI, "VulkanShaderManager: shader file not found: %s", path);
         return { 0, false };
     }
 
@@ -22,7 +22,7 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open())
     {
-        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanShaderManager: failed to open shader file: ") + path).c_str());
+        HE_LOG_ERROR(RHI, "VulkanShaderManager: failed to open shader file: %s", path);
         return { 0, false };
     }
 
