@@ -593,6 +593,7 @@ private:
 	// ANDed onto the fresh frustum result, never copied over it. The shadow
 	// pass culls into its own list against the light and stays out of this.
 	void  CullCameraObjects();
+	void  CullCameraObjectsFresh();   // the cull itself, without the frame's cache (m_cameraCull)
 	OcclusionCuller       m_occlusionCuller;
 	std::vector<uint8_t>  m_occlusionCacheVisible;
 	uint64_t              m_occlusionCacheStamp = ~0ull;
@@ -600,6 +601,25 @@ private:
 	glm::mat4             m_occlusionCacheViewProj = glm::mat4(1.0f);
 	uint32_t              m_occlusionCacheCulled = 0;
 	uint64_t              m_frameStamp = 0;      // bumped once per primary EncodeFrame
+	// The whole answer (visible flags and draw order) of the last cull, for the next pass of the
+	// same frame that asks with the same walk, the same refined bounds and the same camera: the
+	// SSAO pre-pass and the scene pass cull and sort the same 50k objects with the same view
+	// (4.8 ms a frame for the two, docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 4).
+	// Bounds change only in RefineObjectBounds, once per walk, which every pass runs before this;
+	// a pass at another aspect (SSAO at half size, RENDERSCALE) has another projection and misses.
+	struct CameraCullCache
+	{
+		uint64_t              stamp   = ~0ull;
+		uint64_t              walk    = ~0ull;
+		const RenderObject*   objects = nullptr;
+		size_t                count   = 0;
+		glm::mat4             viewProj{ 1.0f };
+		glm::vec3             camPos{ 0.0f };
+		bool                  occlusion = false;
+		uint32_t              occlusionCulled = 0;
+		std::vector<uint8_t>  visible;
+		std::vector<uint32_t> sorted;
+	} m_cameraCull;
 
 	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>
@@ -667,6 +687,12 @@ private:
 	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
 	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
 	size_t              m_refinedCount   = 0;
+	// The union of every object's refined bound, gathered in the same loop: EncodeCloudShadow
+	// needs it for its ground height and used to walk all objects again for it (1.9 ms at 50k).
+	HE::AABB            m_refinedSceneBox{};
+	// The scene box of the walk m_renderWorld holds: the one RefineObjectBounds gathered when it
+	// ran for this walk, otherwise a loop of its own (a frame whose passes never refined).
+	HE::AABB FrameSceneBox() const;
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
@@ -1392,6 +1418,9 @@ private:
 	void* UploadTransient(size_t len, void*& outBuf, size_t& outOffset);
 	// Same, filled with a copy of `data`; false (nothing bound) only on failure.
 	bool  UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset);
+	// {viewProj * model, model} per instance, written into the ring (in parallel for a big run).
+	bool  UploadMvpModel(const std::vector<glm::mat4>& models, const glm::mat4& viewProj,
+	                     void*& outBuf, size_t& outOffset);
 	void  ReleaseUploadRing();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──
