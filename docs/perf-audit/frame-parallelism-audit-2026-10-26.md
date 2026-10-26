@@ -238,7 +238,67 @@ größte Einzelposten, sobald Foliage im Spiel ist), dann 7 und der Cache aus 3,
 - **Gewinne:** aus Profilanteilen geschätzt, kein Hebel wurde umgesetzt oder A/B gemessen.
 - **50k-Szene:** liegt auf 2000 m verteilt, 16 252 von 50 324 sichtbar, 120 Draws (Instanzbündel). Eine Welt mit vielen verschiedenen Meshes und Materialien würde Hebel 3 (Abschnitte, Param-Blöcke) stärker zeigen.
 
+## 5. Umsetzung (Zweig `claude/frame-perf-levers`, 26.10.2026)
+
+Umgesetzt wurden die Hebel 1 (Instanzen), 3 (Kopien im Sammelteil), 4 (Kamera-Cull geteilt, Schatten nur nach Mesh),
+5 (Wolkenschatten-Box), 6 (Menüleiste) und 7 (kompaktes Bounds-Array). Die Hebel 2, 8 und der Cache aus 3 sind offen.
+
+| Hebel | Was | Wo | Backends |
+|---|---|---|---|
+| 1 | Instanzen erst anordnen, dann in Stücken ≤ 2048 auf den Workern füllen; gewöhnliche Objekte direkt kopiert; keine Zwischenliste beim Schneiden; Draws werden verschoben statt kopiert | `RenderWorld.h` (`addInstancePiece`, `writeInstancePieces`), `RenderSorter::batchDepthRuns`, `GeometryPass`, `CommandBuffer::recordDraw(DrawCall&&)` | alle |
+| 1 | Matrizen pro Instanz direkt in den Upload-Ring, groß parallel | `MetalRenderer::UploadMvpModel`, Schatten- und SSAO-Vorpass | Metal |
+| 3 | Ein-Abschnitt-Mesh ohne fremdes LOD0 ohne Tabellenkopien; Moves in den RenderObject | `RenderExtractor.cpp` `extractMeshes` | alle |
+| 4 | Cull + Sortierung einmal je Frame, Walk und Kamera, SSAO und Scene teilen es | `MetalRenderer::CullCameraObjects`, `m_cameraCull` | Metal |
+| 4 | Schatten-Kaskaden nur nach Mesh sortiert | `RenderSorter::sortByMesh` | Metal nutzt es |
+| 5 | Szenen-Box aus der Verfeinern-Schleife | `MetalRenderer::FrameSceneBox` | Metal |
+| 6 | Menüleiste fragt nur `primaryLocked`, `anyHidden` bricht beim ersten Treffer ab | `ViewportPanel`, `ViewportActions` | Editor (`anyHidden` überall, Menüleiste macOS) |
+| 7 | Frustum-Test über kompaktes `std::vector<HE::AABB>` je Walk | `FrustumCuller::cull(bounds, …)`, `MetalRenderer::CullObjects` | Metal nutzt es |
+
+A/B-Schalter: `HE_PARALLEL_UNFOLD=0` hält das Auspacken und die Matrizen pro Instanz auf dem Aufrufer.
+
+**Bild:** alle 42 Zeugen von `frame_pixel_ab.sh all` md5-gleich zu `4dade2a2`, nach jedem Schritt
+(Listen in `raw-frame-levers-2026-10-26/pixel_ab_md5_*.txt`).
+
+**Tests:** gezielte Dateien grün, neu sind „GeometryPass keeps the instance order across its cuts…“
+(`test_foliage_cluster.cpp`) und „FrustumCuller over a compact bounds array…“ (`test_culling.cpp`).
+Volle Suite: 5795 von 5798 grün. Die drei roten haben mit dem Zweig nichts zu tun:
+- `test_hpak.cpp:1188` zählt die 4 Assets in `~/Library/Application Support/HorizonEngine/EngineContentCache` mit (der Test isoliert `userDataDir` nicht).
+- zwei `test_profiler`-Fälle, die allein grün sind.
+
+**Messung.** Alt ist der zur Seite gelegte Deploy `4dade2a2` (selfcontain), neu der Zweig. Abwechselnd gemessen, gleiche Szenen und Kamera.
+Zwei Bedingungen kamen in der Sitzung vor, die Zahlen sind nur innerhalb einer Bedingung vergleichbar:
+
+*E-Kerne* (Stromsparmodus an, Bildschirm gesperrt, Runden 1 bis 3 und 5), CPU-Frame p50:
+- 50k: 28,5 / 27,3 / 27,7 → 24,6 / 23,8 / 24,4 ms.
+- Foliage 300k: 36,7 / 36,0 / 37,0 → 29,2 / 28,0 / 32,6 ms.
+- Foliage-Pässe (Runde 5): Shadow 16,1 → 9,9, SSAO 12,2 → 3,3, Scene 12,5 → 3,1 ms. Der Hauptthread arbeitet 18 statt 36 ms je Frame und wartet danach 13 ms auf das Drawable: GPU-begrenzt.
+- `ExtractFrame` wurde dort trotz entfallener Kopien länger. Im Time Profiler sind die Ziele von Hebel 3 weg (`resolveEntitySlots`, `MeshSection`-Kopien, `operator new`: ~30 % des Walks). Unveränderte Funktionen (`propagateTransforms`, `RenderWorld::clear`) brauchten aber ~30 % länger: das gemeinsame Strombudget im Stromsparmodus. Auf P-Kernen ist der Effekt weg (unten).
+
+*P-Kerne* (Stromsparmodus aus, entsperrt, Akku, verstecktes Fenster), p50 je Frame in ms, je zwei Läufe:
+
+| Scope | 50k alt | 50k neu | Foliage alt | Foliage neu |
+|---|---|---|---|---|
+| `Metal::ExtractFrame` | 3,15 / 3,19 | 3,09 / 3,18 | 0,18 / 0,17 | 0,24 / 0,25 |
+| `Metal::EncodeShadowMap` | 0,70 / 0,81 | 0,68 | 3,63 / 3,58 | 2,63 |
+| `Metal::EncodeSSAO` | 0,81 / 0,96 | 0,99 | 2,32 / 2,30 | 1,18 |
+| `Metal::EncodeScene` | 0,87 / 1,01 | 0,30 | 2,72 / 2,82 | 1,09 |
+| `FrustumCuller::cull` (je Frame) | 0,47 / 0,61 | 0,31 / 0,32 | | |
+| `OnRender` | 1,02 / 1,03 | 0,56 / 0,58 | | |
+
+Bei 50k wandert der Cull in den SSAO-Pass (er rechnet ihn, Scene liest ihn), die drei Pässe zusammen 2,10 → 1,96 ms.
+Die verdeckten Fenster laufen dort GPU-begrenzt (Render enthält das Warten), deshalb ändert sich der CPU-Frame kaum.
+**Nicht gemessen:** P-Kerne bei sichtbarem, entsperrtem Fenster im Spiel; andere Backends (siehe offene Punkte in den Hive-Themen 238 und 239).
+
 ## Handoff
+
+- **Topic / step:** Umsetzung der Hebel (direkter Auftrag des Menschen), Zweig `claude/frame-perf-levers` ab `490ed019`, gepusht, kein PR.
+- **Done:** Hebel 1, 3, 4, 5, 6, 7 (Metal; Hebel 1 und 3 im gemeinsamen Code), §5.
+- **Verified:** Build `cmake-build-release` rc 0; 42 Pixel-Zeugen md5-gleich nach jedem Schritt; gezielte Tests grün, volle Suite bis auf drei fremde Fälle (§5); Messung §5.
+- **Not verified:** Vulkan, D3D11, D3D12, OpenGL (gemeinsamer Code nur von Metal ausgeübt; kein Windows-Build auf diesem Zweig); Spiel (`HorizonGame`).
+- **Decisions taken:** Gewinne nur als Scope-p50 je Bedingung berichtet; `HE_PARALLEL_UNFOLD` als A/B-Schalter.
+- **Next steps:** 1. Gleiche Muster in den anderen Backends (Hive, Themen 238/239: Vulkan `VulkanRenderer.cpp:4083/7323/8638/12376`, D3D11 `:7001/7407`, D3D12 `:11273/11680`, OpenGL `:5171/11230/11335`). 2. Hebel 2 (Pässe parallel kodieren) als eigenes Thema. 3. Cache aus Hebel 3. 4. Hebel 8 (`lowResClouds` in Catania) entscheidet der Mensch.
+
+## Handoff (Audit, vor der Umsetzung)
 
 - **Topic / step:** Frame- und Parallelisierungs-Audit (direkter Auftrag des Menschen, kein Hive-Thema), ein Schritt
 - **Branch / commit:** release/0.7.0, nur dieses Dokument und `raw-frame-parallelism-2026-10-26/`
