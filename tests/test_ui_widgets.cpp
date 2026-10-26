@@ -2802,6 +2802,38 @@ TEST_CASE("uiHcValueToProp converts every Float/Double/Int/Bool pair, and the ta
     CHECK(HE::uiHcValueToProp(HCV::ofString("x"),  T::Bool).b == false);
 }
 
+TEST_CASE("uiHcValueToProp saturates a Float or Double that does not fit an Int, and maps NaN to 0")
+{
+    // A bare (int) cast of these is undefined behaviour.
+    using HCV = HorizonCode::Value;
+    using T   = HE::UIPropType;
+    constexpr int   kMax = std::numeric_limits<int>::max();
+    constexpr int   kMin = std::numeric_limits<int>::min();
+    constexpr float fNaN = std::numeric_limits<float>::quiet_NaN();
+    constexpr float fInf = std::numeric_limits<float>::infinity();
+    constexpr double dNaN = std::numeric_limits<double>::quiet_NaN();
+    constexpr double dInf = std::numeric_limits<double>::infinity();
+
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(fNaN),    T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(fInf),    T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-fInf),   T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(3.0e9f),  T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-3.0e9f), T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(2147483648.0f), T::Int).i == kMax);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(dNaN),    T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(dInf),    T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-dInf),   T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(1.0e12),  T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-1.0e12), T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(2147483647.9),  T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-2147483648.0), T::Int).i == kMin);
+
+    // Values that fit still truncate toward zero.
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-0.9f),   T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-2147483647.5), T::Int).i == -2147483647);
+}
+
 TEST_CASE("uiHcValueToProp passes ARRAYS through uncoerced")
 {
     // REGRESSION: arrays are never scalar-coerced (HorizonCode.cpp `coerce`, and

@@ -1,5 +1,7 @@
 #include <UIWidget/UIWidgetBinding.h>
 
+#include <limits>
+
 namespace HE {
 
 HorizonCode::PinType uiPropTypeToPin(UIPropType t)
@@ -56,14 +58,24 @@ float asFloat(const HorizonCode::Value& v)
     }
 }
 
+// A float->int cast of NaN or of a value outside the int range is undefined
+// behaviour, so saturate (NaN -> 0) first. A float widens to double exactly.
+int saturatingInt(double x)
+{
+    if (x != x) return 0;
+    if (x >= 2147483648.0) return std::numeric_limits<int>::max();
+    if (x <= -2147483648.0) return std::numeric_limits<int>::min();
+    return (int)x;
+}
+
 int asInt(const HorizonCode::Value& v)
 {
     using P = HorizonCode::PinType;
     switch (v.type)
     {
-        case P::Float:  return (int)v.f;
+        case P::Float:  return saturatingInt(v.f);
         case P::Bool:   return v.b ? 1 : 0;
-        case P::Double: return (int)v.d;
+        case P::Double: return saturatingInt(v.d);
         default:        return v.i;
     }
 }
