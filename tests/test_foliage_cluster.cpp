@@ -1369,13 +1369,45 @@ TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, de
 	// the same ring: unfolded foliage must leave that pass its slots (100k plants under TAA
 	// otherwise cost the frame its water: "the rest of the frame is not drawn", RTX 4070).
 	const std::string d3d12 = readFile(dir / "D3D12" / "D3D12Renderer.cpp");
-	CHECK(d3d12.find("tail += std::max<size_t>(1, dc->instanceTransforms.size());") != std::string::npos);
+	CHECK(d3d12.find("tail += std::max<size_t>(1, dc->instanceTotal());") != std::string::npos);
 	CHECK(countOf(d3d12, "if (velFull())") == 2); // the object loop and the plant loop
-	// Vulkan's decal depth and reflection pre-pass take the whole cluster.
+	// Vulkan's decal depth and reflection pre-pass take the whole cluster, read in place (an
+	// InstanceRun over the block's world matrices, no list).
 	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
-	CHECK(countOf(vk, "m_renderWorld.appendInstances(obj, m_clusterScratch);") == 1);   // the reflection pre-pass
-	CHECK(vk.find("m_renderWorld.instanceMatrix(obj, k)") != std::string::npos);        // decal depth reads the block
+	CHECK(countOf(vk, "m_renderWorld.instanceRun(obj);") == 2);     // decal depth, the reflection pre-pass
+	CHECK(vk.find("appendInstances(") == std::string::npos);
 	CHECK(vk.find("m_reflPrepassInstPipeline && n > 1 && allocInstances(n") != std::string::npos);
+}
+
+TEST_CASE("D3D11, D3D12 and Vulkan read a run's instances in place and prepare the shadow views together")
+{
+	// Foliage spans (docs/perf-audit/foliage-spans-parallel-shadow-2026-10-26.md, section 4): the
+	// geometry pass hands out InstanceSpans instead of copies, every reader goes through
+	// instanceTotal / forEachInstance / instanceRun, and the shadow pass cuts all its views
+	// side by side (FrameCull::prepareShadowViews) before the first is drawn. The bits are the
+	// copies' (tests above); here the sources are held to it, so a reader that goes back to
+	// DrawCall::instanceTransforms (empty in span mode: the plants would vanish) fails here.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - spans check skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	for (const char* rel : { "D3D11/D3D11Renderer.cpp", "D3D12/D3D12Renderer.cpp", "Vulkan/VulkanRenderer.cpp" })
+	{
+		INFO(rel);
+		const std::string text = readFile(dir / rel);
+		REQUIRE(!text.empty());
+		CHECK(countOf(text, "setInstanceSpans(RenderSorter::instanceSpansEnabled())") == 1);
+		CHECK(text.find("instanceTransforms") == std::string::npos);
+		CHECK(countOf(text, "prepareShadowViews(") == 1);
+		CHECK(text.find("batchDepthCasters(") == std::string::npos);       // FrameCull does it, per view
+		CHECK(countOf(text, "instanceWorldCacheNextFrame();") == 1);      // the unfolded blocks are let go
+	}
+	// Vulkan's two pre-pass batch lists read in place too.
+	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
+	CHECK(countOf(vk, "m_preBatches.useSpans = RenderSorter::instanceSpansEnabled();") == 2);
 }
 
 TEST_CASE("The SSAO position pre-pass depth is D32 on D3D11, D3D12 and Vulkan, at every site")

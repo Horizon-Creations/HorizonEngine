@@ -204,6 +204,24 @@ bool RenderSorter::depthInstancingEnabled()
 	return on;
 }
 
+bool RenderSorter::instanceSpansEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_INSTANCE_SPANS");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+
+bool RenderSorter::parallelShadowViewsEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_MTL_PARALLEL_SHADOW");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+
 bool RenderSorter::graphInstancingEnabled()
 {
 	static const bool on = []{

@@ -274,6 +274,56 @@ TEST_CASE("RenderSorter::fillInstancePairs writes the same records wide and seri
 	}
 }
 
+TEST_CASE("InstanceRun: spans and the copied list give the same pairs and the same ring bytes")
+{
+	// 9000 matrices cut into spans of 3, 5000 and 3997 (one span past the wide threshold), as
+	// pieces of a foliage block and a single object would be; the copied list is all of them.
+	const uint32_t total = 9000;
+	std::vector<glm::mat4> all(total);
+	for (uint32_t i = 0; i < total; ++i)
+		all[i] = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), float(i % 5), -float(i % 11)));
+	const std::vector<InstanceSpan> spans = { { all.data(), 3 }, { all.data() + 3, 5000 }, { all.data() + 5003, 3997 } };
+	const InstanceRun inPlace(spans.data(), spans.size(), nullptr, total);
+	const InstanceRun copied(nullptr, 0, all.data(), total);
+	CHECK(inPlace.size() == total);
+	CHECK(copied.size() == total);
+
+	const glm::mat4 vp = glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+	auto fill = [&vp](const glm::mat4& model, glm::mat4* pair) { pair[0] = vp * model; pair[1] = model; };
+	std::vector<uint8_t> a(size_t(total) * 128), b(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(a.data(), inPlace, fill);
+	RenderSorter::fillInstancePairs(b.data(), copied, fill);
+	CHECK(a == b);
+
+	std::vector<glm::mat4> ringA(total), ringB(total);
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(ringA.data()), sizeof(glm::mat4), inPlace);
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(ringB.data()), sizeof(glm::mat4), copied);
+	CHECK(ringA == all);
+	CHECK(ringB == all);
+	// Records of two matrices with the model in the second half (the node-graph twin's layout).
+	std::vector<glm::mat4> rec(size_t(total) * 2, glm::mat4(0.0f));
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(rec.data()) + sizeof(glm::mat4), 2 * sizeof(glm::mat4), inPlace);
+	bool recOk = true;
+	for (uint32_t i = 0; i < total; ++i) recOk = recOk && rec[2 * i + 1] == all[i] && rec[2 * i] == glm::mat4(0.0f);
+	CHECK(recOk);
+
+	// The two forms of one DepthBatchList batch read the same.
+	RenderSorter::DepthBatchList list;
+	list.transforms = all;
+	RenderSorter::DepthBatch b0{};
+	b0.first = 0; b0.count = total;
+	std::vector<uint8_t> c(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(c.data(), list.run(b0), fill);
+	CHECK(c == a);
+	list.useSpans = true;
+	list.spans = spans;
+	b0.spanFirst = 0; b0.spanCount = static_cast<uint32_t>(spans.size());
+	list.transforms.clear();
+	std::vector<uint8_t> d(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(d.data(), list.run(b0), fill);
+	CHECK(d == a);
+}
+
 TEST_CASE("AABB build and ray intersection")
 {
 	const float verts[] = { -1,-1,-1,  1,1,1,  0,0,0 };

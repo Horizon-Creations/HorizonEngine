@@ -319,7 +319,9 @@ TEST_CASE("D3D11, D3D12 and Vulkan draw a graph-material batch once, with the ma
 		CHECK(src.find(s.lastInstElement) != std::string::npos);
 		CHECK(countOf(src, s.batchDraw) == 1);
 		// The per-instance material loop stays as the fallback.
-		CHECK(src.find("drawMatInstance(t)") != std::string::npos);
+		// (read in place or copied: forEachInstance serves both forms of the batch)
+		CHECK((src.find("drawMatInstance(t)") != std::string::npos
+		       || src.find("forEachInstance(drawMatInstance)") != std::string::npos));
 	}
 }
 

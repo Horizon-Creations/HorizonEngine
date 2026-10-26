@@ -710,16 +710,7 @@ private:
 	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
 	// One depth layer (a cascade or a local light's view), culled, sorted and batched
 	// before any layer is drawn, the layers side by side (DrawScene's shadow branch).
-	struct ShadowView
-	{
-		glm::mat4                    viewProj{ 1.0f };
-		uint32_t                     skip = 0;
-		std::vector<uint8_t>         visible;
-		std::vector<uint32_t>        sorted;
-		RenderSorter                 sorter;
-		RenderSorter::DepthBatchList batches;
-	};
-	std::vector<ShadowView> m_shadowViews;
+	std::vector<ShadowViewCpu> m_shadowViews;
 	void CreateShadowResources();
 
 	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────

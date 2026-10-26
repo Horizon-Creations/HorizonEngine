@@ -454,6 +454,7 @@ void VulkanRenderer::Render()
 
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     ++m_frameStamp;
+    instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
     m_giRanThisFrame   = false;  // cleared each frame; set true only inside runGi()
     m_ssrRanThisFrame  = false;  // cleared each frame; set true only by RenderForwardSSR()
@@ -4137,14 +4138,14 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
             vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
-            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount,
-                    m_renderWorld.instanceCountOf(obj),
-                    [&](uint32_t k, glm::mat4* pair) {
-                        pair[1] = m_renderWorld.instanceMatrix(obj, k);
-                        pair[0] = camClip * pair[1];
+            const InstanceRun run = m_renderWorld.instanceRun(obj);
+            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount, run,
+                    [&](const glm::mat4& model, glm::mat4* pair) {
+                        pair[0] = camClip * model;
+                        pair[1] = model;
                     }))
                 continue;
-            m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
+            run.forEach([&](const glm::mat4& model)
             {
                 PushConstants ipc{ camClip * model, model };
                 vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ipc), &ipc);
@@ -7152,14 +7153,15 @@ bool VulkanRenderer::allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize&
 // reused inside one frame.
 template <class Fill>
 bool VulkanRenderer::drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
-                                        uint32_t indexCount, uint32_t count, Fill&& fill)
+                                        uint32_t indexCount, const InstanceRun& run, Fill&& fill)
 {
     static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
+    const uint32_t count = run.size();
     VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize off = 0; uint8_t* dst = nullptr;
     if (!instPipe || count < 2 || !RenderSorter::depthInstancingEnabled()
         || !allocInstances(count, ibuf, off, dst))
         return false;
-    RenderSorter::fillInstancePairs(dst, count, fill);
+    RenderSorter::fillInstancePairs(dst, run, fill);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
     vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &off);
     vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, 0);
@@ -7306,18 +7308,29 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     // buffer — the push-constant path's own product); a run of one, or one the
     // buffer cannot take, stays on the per-caster push-constant draw. Mirrors
     // GL's renderDepthLayer / Metal's encodeDepthLayer / D3D11 + D3D12.
-    auto drawDepthLayer = [&](uint32_t size, const glm::mat4& viewProj, const glm::mat4& clip,
-                              uint32_t skipEntity)
+    // Every view (the cascades, then the local layers) is culled, sorted by mesh and cut into
+    // runs before the first is drawn, side by side on the workers (FrameCull::prepareShadowViews);
+    // the Vulkan calls stay on this thread, layer after layer.
+    const int nLocalViews = wantLocal ? std::clamp(csm.localLayerCount, 0, kLocalShadowLayers) : 0;
+    if (m_shadowViews.size() < static_cast<size_t>(nCascades + nLocalViews))
+        m_shadowViews.resize(static_cast<size_t>(nCascades + nLocalViews));
+    for (int v = 0; v < nCascades + nLocalViews; ++v)
+    {
+        ShadowViewCpu& sv = m_shadowViews[static_cast<size_t>(v)];
+        sv.viewProj = v < nCascades ? csm.cascadeViewProj[v] : csm.localViewProj[v - nCascades];
+        sv.skip     = v < nCascades ? kNoOwnerEntity : csm.localOwnerEntity[v - nCascades];
+    }
+    m_frameCull.prepareShadowViews(m_culler, m_renderWorld, m_extractor.fullExtractCount(),
+                                   m_shadowViews.data(), static_cast<size_t>(nCascades + nLocalViews),
+                                   "VkShadowViews");
+    auto drawDepthLayer = [&](uint32_t size, const ShadowViewCpu& view, const glm::mat4& clip)
     {
         VkViewport vp{ 0.0f, 0.0f, (float)size, (float)size, 0.0f, 1.0f };
         VkRect2D   sc{ { 0, 0 }, { size, size } };
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdSetDepthBias(cmd, kShadowBiasConstant, 0.0f, kShadowBiasSlope);
-        m_frameCull.cull(m_culler, m_renderWorld, m_extractor.fullExtractCount(), viewProj, m_shadowVisible);
-        m_sorter.sortByMesh(m_renderWorld, m_shadowVisible, m_shadowSorted);
-        RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity, m_shadowBatches);
-        for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+        for (const RenderSorter::DepthBatch& b : view.batches.batches)
         {
             const GpuMesh* mesh = resolveMesh(b.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
@@ -7325,11 +7338,11 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
             vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
-            const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
-            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount, b.count,
-                    [&](uint32_t k, glm::mat4* pair) {
-                        pair[0] = clip * xf[k];
-                        pair[1] = xf[k];
+            const InstanceRun run = view.batches.run(b);
+            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount, run,
+                    [&](const glm::mat4& model, glm::mat4* pair) {
+                        pair[0] = clip * model;
+                        pair[1] = model;
                     }))
             {
                 static bool loggedOnce = false; // the runtime witness on Windows
@@ -7340,12 +7353,12 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
                 }
                 continue;
             }
-            for (uint32_t k = 0; k < b.count; ++k)
+            run.forEach([&](const glm::mat4& model)
             {
-                PushConstants pc{ clip * xf[k], xf[k] };
+                PushConstants pc{ clip * model, model };
                 vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                 vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
-            }
+            });
         }
     };
 
@@ -7376,7 +7389,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
             rpbi.pClearValues      = &clear;
             vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
             if (c < nCascades)
-                drawDepthLayer(m_shadowSize, csm.cascadeViewProj[c], m_cascadeClip[c], kNoOwnerEntity);
+                drawDepthLayer(m_shadowSize, m_shadowViews[static_cast<size_t>(c)], m_cascadeClip[c]);
             vkCmdEndRenderPass(cmd);
         }
         m_shadowLayoutValid       = true; // every layer went through the pass → SHADER_READ_ONLY
@@ -7392,7 +7405,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     // (same reason as m_cascadeClip).
     if (wantLocal)
     {
-        const int nLocal = std::clamp(csm.localLayerCount, 0, kLocalShadowLayers);
+        const int nLocal = nLocalViews;
         for (int v = 0; v < nLocal; ++v)
         {
             m_localShadowClip[v] = HE::kVulkanClipFix * csm.localViewProj[v];
@@ -7405,8 +7418,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
             rpbi.clearValueCount   = 1;
             rpbi.pClearValues      = &clear;
             vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-            drawDepthLayer(kLocalShadowSize, csm.localViewProj[v], m_localShadowClip[v],
-                           csm.localOwnerEntity[v]);
+            drawDepthLayer(kLocalShadowSize, m_shadowViews[static_cast<size_t>(nCascades + v)], m_localShadowClip[v]);
             vkCmdEndRenderPass(cmd);
         }
         for (int v = nLocal; v < kLocalShadowLayers; ++v) m_localShadowClip[v] = glm::mat4(1.0f);
@@ -8635,7 +8647,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) return;
 
     if (m_renderGraph.empty())
-        m_renderGraph.addPass(std::make_unique<GeometryPass>());
+    {
+        auto geometry = std::make_unique<GeometryPass>();
+        geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see InstanceRun
+        m_renderGraph.addPass(std::move(geometry));
+    }
 
     // GL-convention projection from the extractor → Vulkan clip space. On a TAA
     // frame the scene rasterises with the jittered matrix (taaJittered); the
@@ -9068,7 +9084,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
                     // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
                     // build failed) sends it back to the per-instance loop.
-                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                    const bool wantTwin = dc.instanceTotal() > 1 && allowInstancing && !matTransp
                                        && m_instCur.mapped
                                        && RenderSorter::graphInstancingEnabled();
                     VkPipeline matInstPipe = VK_NULL_HANDLE;
@@ -9396,7 +9412,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             ++m_statDraws;
                             m_statTris += range.count / 3;
                         };
-                        const uint32_t instCount = static_cast<uint32_t>(dc.instanceTransforms.size());
+                        const uint32_t instCount = static_cast<uint32_t>(dc.instanceTotal());
                         VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize instOff = 0; uint8_t* dst = nullptr;
                         if (matInstPipe != VK_NULL_HANDLE && allocInstances(instCount, ibuf, instOff, dst))
                         {
@@ -9406,19 +9422,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // model in), one instanced draw.
                             if (bindMatSlot(matInstPipe, viewProj, glm::mat4(1.0f)))
                             {
-                                for (uint32_t k = 0; k < instCount; ++k)
-                                    std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
-                                                &dc.instanceTransforms[k], sizeof(glm::mat4));
+                                RenderSorter::copyInstanceModels(dst + sizeof(glm::mat4), k_instStride,
+                                                                 dc.instanceRun());
                                 vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &instOff);
                                 vkCmdDrawIndexed(cmd, range.count, instCount, range.start, 0, 0);
                                 ++m_statDraws;
                                 m_statTris += (range.count / 3) * instCount;
                             }
                         }
-                        else if (!dc.instanceTransforms.empty())
+                        else if (dc.instanceTotal())
                             // No twin (or the instance buffer is full): each instance through
                             // the material path, one ring slot apiece.
-                            for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
+                            dc.forEachInstance(drawMatInstance);
                         else
                             drawMatInstance(dc.transform);
 
@@ -9493,12 +9508,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 ++m_statDraws;
                 m_statTris += range.count / 3;
             };
-            if (!dc.instanceTransforms.empty())
+            if (dc.instanceTotal())
             {
                 // A3: real instancing — fill the per-frame instance buffer with every
                 // instance's {mvp,model}, bind the instanced pipeline + binding 1, ONE draw.
                 static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
-                const uint32_t count = static_cast<uint32_t>(dc.instanceTransforms.size());
+                const uint32_t count = static_cast<uint32_t>(dc.instanceTotal());
                 // Match the instanced pipeline to the active scene target (= what the
                 // non-instanced bind resolves to). Null → fits=false → per-instance fallback
                 // (never bind an LDR pipeline to the HDR render pass).
@@ -9509,12 +9524,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 const bool fits = allowInstancing && instPipe && allocInstances(count, ibuf, instOff, dst);
                 if (fits)
                 {
-                    for (uint32_t k = 0; k < count; ++k)
-                    {
-                        const glm::mat4& t = dc.instanceTransforms[k];
-                        const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major)
-                        std::memcpy(dst + static_cast<size_t>(k) * k_instStride, xf, sizeof(xf));
-                    }
+                    RenderSorter::fillInstancePairs(dst, dc.instanceRun(),
+                        [&](const glm::mat4& t, glm::mat4* pair) {
+                            pair[0] = viewProj * t;   // mvp, model (column-major)
+                            pair[1] = t;
+                        });
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
                     vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &instOff);
                     vkCmdDrawIndexed(cmd, range.count, count, range.start, 0, 0);
@@ -9527,7 +9541,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 }
                 else
                 {
-                    for (const glm::mat4& t : dc.instanceTransforms) drawOne(t); // fallback
+                    dc.forEachInstance(drawOne); // fallback
                 }
             }
             else
@@ -12534,6 +12548,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // Runs of consecutive same-mesh objects (precip/particles don't shade the
     // mask — AoContributors); a run of more than one is ONE instanced draw with
     // the push-constant path's {mvp, model} per instance.
+    m_preBatches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see InstanceRun
     RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
                                  RenderSorter::DepthFilter::AoContributors, kNoOwnerEntity, m_preBatches);
     for (const RenderSorter::DepthBatch& b : m_preBatches.batches)
@@ -12544,11 +12559,11 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
         vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
-        const glm::mat4* xf = m_preBatches.transforms.data() + b.first;
-        if (drawDepthInstanced(cmd, m_giGBufInstancedPipe, m_giGBufPipe, gm.indexCount, b.count,
-                [&](uint32_t k, glm::mat4* pair) {
-                    pair[0] = vp * xf[k];
-                    pair[1] = xf[k];
+        const InstanceRun run = m_preBatches.run(b);
+        if (drawDepthInstanced(cmd, m_giGBufInstancedPipe, m_giGBufPipe, gm.indexCount, run,
+                [&](const glm::mat4& model, glm::mat4* pair) {
+                    pair[0] = vp * model;
+                    pair[1] = model;
                 }))
         {
             static bool loggedOnce = false;
@@ -12559,13 +12574,13 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
             }
             continue;
         }
-        for (uint32_t k = 0; k < b.count; ++k)
+        run.forEach([&](const glm::mat4& model)
         {
             // gi_gbuf.vert: uMVP (clip-fixed) + uModel — same 128-byte shape.
-            PushConstants pc{ vp * xf[k], xf[k] };
+            PushConstants pc{ vp * model, model };
             vkCmdPushConstants(cmd, m_giGBufPL, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
-        }
+        });
     }
     vkCmdEndRenderPass(cmd); // colors → SHADER_READ_ONLY (dep covers COMPUTE too)
 
@@ -14131,6 +14146,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
         // instance. The MRT reflection pre-pass below keeps the loop: its VS is
         // the library's cross-compiled GLSL with a per-draw UBO slot, not the
         // 128-byte instance buffer (same split as D3D11/D3D12).
+        m_preBatches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see InstanceRun
         RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
                                      RenderSorter::DepthFilter::AoContributors, kNoOwnerEntity, m_preBatches);
         for (const RenderSorter::DepthBatch& b : m_preBatches.batches)
@@ -14141,11 +14157,11 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
             vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
-            const glm::mat4* xf = m_preBatches.transforms.data() + b.first;
-            if (drawDepthInstanced(cmd, m_ssaoPosInstancedPipeline, m_ssaoPosGfxPipeline, gm.indexCount, b.count,
-                    [&](uint32_t k, glm::mat4* pair) {
-                        pair[0] = vp   * xf[k];
-                        pair[1] = view * xf[k];
+            const InstanceRun run = m_preBatches.run(b);
+            if (drawDepthInstanced(cmd, m_ssaoPosInstancedPipeline, m_ssaoPosGfxPipeline, gm.indexCount, run,
+                    [&](const glm::mat4& model, glm::mat4* pair) {
+                        pair[0] = vp   * model;
+                        pair[1] = view * model;
                     }))
             {
                 static bool loggedOnce = false; // the runtime witness on Windows
@@ -14156,15 +14172,15 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
                 }
                 continue;
             }
-            for (uint32_t k = 0; k < b.count; ++k)
+            run.forEach([&](const glm::mat4& model)
             {
                 // Push constants: mvp (clip-space) + modelView (view-space) —
                 // ssao_pos.vert's push_constant block has the PushConstants layout.
-                PushConstants pc{ vp * xf[k], view * xf[k] };
+                PushConstants pc{ vp * model, view * model };
                 vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                    0, sizeof(pc), &pc);
                 vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
-            }
+            });
         }
     }
     else
@@ -14214,15 +14230,12 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
             // each, up to the ring's end).
             if (obj.isCluster())
             {
-                m_clusterScratch.clear();
-                m_renderWorld.appendInstances(obj, m_clusterScratch);
-                const uint32_t n = static_cast<uint32_t>(m_clusterScratch.size());
+                const InstanceRun run = m_renderWorld.instanceRun(obj);
+                const uint32_t n = run.size();
                 VkBuffer ibuf = VK_NULL_HANDLE; VkDeviceSize ioff = 0; uint8_t* dst = nullptr;
                 if (m_reflPrepassInstPipeline && n > 1 && allocInstances(n, ibuf, ioff, dst))
                 {
-                    for (uint32_t k = 0; k < n; ++k)
-                        std::memcpy(dst + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
-                                    &m_clusterScratch[k], sizeof(glm::mat4));
+                    RenderSorter::copyInstanceModels(dst + sizeof(glm::mat4), k_instStride, run);
                     HE::MaterialShaderLibrary::ReflPrepassInstUniforms iu;
                     std::memcpy(iu.viewProj, &vp[0][0],   16 * sizeof(float));
                     std::memcpy(iu.view,     &view[0][0], 16 * sizeof(float));
@@ -14239,11 +14252,12 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
                     }
                     continue;
                 }
-                for (const glm::mat4& model : m_clusterScratch)
+                bool slotsLeft = true;
+                run.forEach([&](const glm::mat4& model)
                 {
-                    if (prepassSlot >= k_ssrMaxPrepassDraws) break; // said once above, at the next object
+                    if (!slotsLeft || prepassSlot >= k_ssrMaxPrepassDraws) { slotsLeft = false; return; } // said once above, at the next object
                     drawOne(model);
-                }
+                });
                 continue;
             }
             drawOne(obj.transform);

@@ -107,6 +107,12 @@ public:
         std::vector<InstanceSpan> spans;      // useSpans: batch-contiguous spans instead
         bool                      useSpans = false;
         void clear() { batches.clear(); transforms.clear(); spans.clear(); }
+        // Batch `b`'s matrices, in whichever form the list was built.
+        InstanceRun run(const DepthBatch& b) const
+        {
+            return InstanceRun(spans.data() + b.spanFirst, useSpans ? b.spanCount : 0,
+                               transforms.data() + b.first, b.count);
+        }
     };
 
     // Which per-object opt-out a depth-only pass honours. The flags live on
@@ -149,6 +155,13 @@ public:
     // HE_MTL_INSTANCING plays on Metal. Read once per process.
     static bool depthInstancingEnabled();
 
+    // HE_INSTANCE_SPANS=0 makes every backend copy a run's instances per pass again instead of
+    // reading them in place (GeometryPass::setInstanceSpans, DepthBatchList::useSpans): the A/B
+    // switch, same bits either way. HE_MTL_PARALLEL_SHADOW=0 prepares the shadow views one after
+    // the other instead of side by side (the name is Metal's, every backend honours it). Read once.
+    static bool instanceSpansEnabled();
+    static bool parallelShadowViewsEnabled();
+
     // Write `count` instance records of two matrices each ({mvp, model} on D3D11, D3D12 and Vulkan;
     // fill(k, pair) sets pair[0] and pair[1]) to `dst`, the one loop behind every instanced depth draw
     // of those backends. A big batch (a foliage cluster's thousands of plants) goes wide on the job
@@ -167,6 +180,37 @@ public:
             parallel_for(count, one, "FillInstancePairs", RenderWorld::kInstancePieceMax);
         else
             for (uint32_t k = 0; k < count; ++k) one(k);
+    }
+
+    // The same records for a run's matrices (DrawCall::instanceRun, DepthBatchList::run):
+    // fill(model, pair) sets pair[0] and pair[1] from one matrix. A span after the other,
+    // each wide when it is big, so one foliage cluster in place goes as wide as a copy did.
+    template <class Fill>
+    static void fillInstancePairs(uint8_t* dst, const InstanceRun& run, Fill&& fill)
+    {
+        for (const InstanceSpan& s : run)
+        {
+            const glm::mat4* src = s.src;
+            fillInstancePairs(dst, s.n, [src, &fill](uint32_t k, glm::mat4* pair) { fill(src[k], pair); });
+            dst += static_cast<size_t>(s.n) * 2 * sizeof(glm::mat4);
+        }
+    }
+
+    // The run's matrices into a ring or mapped buffer, `stride` bytes apart (64 = back to back;
+    // a node-graph material's instance record has its model after the first 64 bytes: pass
+    // dst + 64 and stride 128). Wide from kParallelUnfoldMin on, like fillInstancePairs.
+    static void copyInstanceModels(uint8_t* dst, size_t stride, const InstanceRun& run)
+    {
+        for (const InstanceSpan& s : run)
+        {
+            const glm::mat4* src = s.src;
+            auto one = [dst, stride, src](size_t k) { std::memcpy(dst + k * stride, src + k, sizeof(glm::mat4)); };
+            if (s.n >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled())
+                parallel_for(s.n, one, "CopyInstanceModels", RenderWorld::kInstancePieceMax);
+            else
+                for (uint32_t k = 0; k < s.n; ++k) one(k);
+            dst += static_cast<size_t>(s.n) * stride;
+        }
     }
 
     // HE_GRAPH_INSTANCING=0 sends a batch of a node-graph material back to the

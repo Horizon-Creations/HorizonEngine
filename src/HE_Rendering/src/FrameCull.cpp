@@ -1,5 +1,21 @@
 #include "HorizonRendering/FrameCull.h"
 
+void FrameCull::prepareShadowViews(FrustumCuller& culler, const RenderWorld& world, uint64_t walk,
+                                   ShadowViewCpu* views, size_t n, const char* label) const
+{
+	const bool spans = RenderSorter::instanceSpansEnabled();
+	for (size_t v = 0; v < n; ++v) views[v].batches.useSpans = spans;
+	auto prepare = [&](size_t v)
+	{
+		ShadowViewCpu& sv = views[v];
+		cull(culler, world, walk, sv.viewProj, sv.visible);
+		sv.sorter.sortByMesh(world, sv.visible, sv.sorted);
+		RenderSorter::batchDepthCasters(world, sv.sorted, sv.skip, sv.batches);
+	};
+	if (n > 1 && RenderSorter::parallelShadowViewsEnabled()) parallel_for(n, prepare, label, 1);
+	else for (size_t v = 0; v < n; ++v) prepare(v);
+}
+
 HE::AABB FrameCull::sceneBox(const RenderWorld& world, uint64_t walk)
 {
 	if (!holds(world, walk))

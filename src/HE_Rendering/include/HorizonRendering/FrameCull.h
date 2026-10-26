@@ -22,6 +22,19 @@
 // The compact copy belongs to ONE walk. A cull asked for another walk, another object array or
 // another object count does not read it: it tests the objects themselves, so a pass that runs
 // before its backend refined (or after a new extract) is slower but never wrong.
+// One depth view of the shadow pass (a cascade or a local light's face) and what is prepared for it
+// on the CPU before any view is drawn: the objects its frustum sees, in draw order by mesh, cut into
+// same-mesh runs. Every view owns its scratch (and its sorter), so the views are independent.
+struct ShadowViewCpu
+{
+	glm::mat4                    viewProj{ 1.0f };
+	uint32_t                     skip = kNoOwnerEntity;   // the light's own entity: its mesh casts nothing here
+	std::vector<uint8_t>         visible;
+	std::vector<uint32_t>        sorted;
+	RenderSorter                 sorter;
+	RenderSorter::DepthBatchList batches;
+};
+
 class HE_RENDERING_API FrameCull {
 public:
 	// Refine the bounds of `world` for the walk `walk` (RenderExtractor::fullExtractCount()), unless
@@ -65,6 +78,14 @@ public:
 
 	// Union of every object's bound (invalid when there is none).
 	HE::AABB sceneBox(const RenderWorld& world, uint64_t walk);
+
+	// Cull, sort by mesh and cut into runs views[0, n) (their viewProj and skip set), side by side on
+	// the job system's workers: a cascade's cull, sort and batching do not depend on another's, and
+	// the backend's API calls stay on its own thread afterwards. Runs read in place or copied as
+	// RenderSorter::instanceSpansEnabled() says; RenderSorter::parallelShadowViewsEnabled() = false
+	// prepares them one after the other. Never call cullCamera from inside: it keeps its answer.
+	void prepareShadowViews(FrustumCuller& culler, const RenderWorld& world, uint64_t walk,
+	                        ShadowViewCpu* views, size_t n, const char* label) const;
 
 	// The camera cull and distance sort of `world` into `visible` / `sorted`. `frame` is the backend's
 	// frame counter and `variant` whatever else the answer depends on (occlusion on or off): a hit

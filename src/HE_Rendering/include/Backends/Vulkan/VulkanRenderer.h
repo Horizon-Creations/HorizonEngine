@@ -241,9 +241,7 @@ private:
 	bool           m_debugShadowCascades = false;
 	// Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
 	// those hold the camera cull DrawScene consumes).
-	std::vector<uint8_t>         m_shadowVisible;
-	std::vector<uint32_t>        m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches;
+	std::vector<ShadowViewCpu>   m_shadowViews;
 	// The cascade constants DrawScene uploads into the Frame UBO; filled by
 	// EncodeShadowMap from the SAME extract the cascades were rendered with
 	// (DrawScene re-extracts, and a mid-frame world edit would otherwise let
@@ -420,9 +418,8 @@ private:
 	void destroyInstanceBuf(InstanceBuf& b);
 	void beginInstanceFrame();
 	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
-	std::vector<glm::mat4> m_clusterScratch; // one cluster's world matrices (decal depth)
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
-	// G-buffer); the shadow layers keep m_shadowBatches.
+	// G-buffer); the shadow layers keep m_shadowViews.
 	RenderSorter::DepthBatchList m_preBatches;
 	// One instanced draw for a depth-only run (shadow caster run, SSAO or GI
 	// pre-pass run): `count` {A, B} matrix pairs from fill(k, pair) go into the
@@ -433,7 +430,7 @@ private:
 	// only translation unit that calls it.
 	template <class Fill>
 	bool drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
-	                        uint32_t indexCount, uint32_t count, Fill&& fill);
+	                        uint32_t indexCount, const InstanceRun& run, Fill&& fill);
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{
