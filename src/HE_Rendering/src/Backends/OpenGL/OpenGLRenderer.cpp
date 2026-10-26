@@ -4189,8 +4189,8 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
-		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-		if (ok)
+		GLint linkStatus = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
+		if (linkStatus)
 		{
 			// Same block bindings + sampler units as the mesh material path (GL 4.1
 			// has no layout(binding), so wire them by name post-link).
@@ -4230,9 +4230,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		}
 		else
 		{
-			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			char linkLog[2048]; glGetProgramInfoLog(prog, sizeof(linkLog), nullptr, linkLog);
 			HE_LOG_ERROR(RHI, "%s",
-				(std::string("OpenGLRenderer: UI material program link failed: ") + log).c_str());
+				(std::string("OpenGLRenderer: UI material program link failed: ") + linkLog).c_str());
 			glDeleteProgram(prog);
 		}
 	}
@@ -8907,17 +8907,31 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		built.reserve(vertexCount * 8);
 		for (size_t v = 0; v < vertexCount; ++v)
 		{
-			built.insert(built.end(),
-				{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+			built.push_back(asset->vertices[v*3+0]);
+			built.push_back(asset->vertices[v*3+1]);
+			built.push_back(asset->vertices[v*3+2]);
 			if (v * 3 + 2 < asset->normals.size())
-				built.insert(built.end(),
-					{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+			{
+				built.push_back(asset->normals[v*3+0]);
+				built.push_back(asset->normals[v*3+1]);
+				built.push_back(asset->normals[v*3+2]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 			if (v * 2 + 1 < asset->uvs.size())
-				built.insert(built.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+			{
+				built.push_back(asset->uvs[v*2+0]);
+				built.push_back(asset->uvs[v*2+1]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 		}
 		vtx = &built;
 		mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
@@ -9002,17 +9016,31 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	interleaved.reserve(vertexCount * 8);
 	for (size_t v = 0; v < vertexCount; ++v)
 	{
-		interleaved.insert(interleaved.end(),
-			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		interleaved.push_back(asset->vertices[v*3+0]);
+		interleaved.push_back(asset->vertices[v*3+1]);
+		interleaved.push_back(asset->vertices[v*3+2]);
 		if (v * 3 + 2 < asset->normals.size())
-			interleaved.insert(interleaved.end(),
-				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		{
+			interleaved.push_back(asset->normals[v*3+0]);
+			interleaved.push_back(asset->normals[v*3+1]);
+			interleaved.push_back(asset->normals[v*3+2]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 		if (v * 2 + 1 < asset->uvs.size())
-			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		{
+			interleaved.push_back(asset->uvs[v*2+0]);
+			interleaved.push_back(asset->uvs[v*2+1]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 	}
 
 	// Bone IDs per vertex  (4 × uint32, attrib loc 3) — zero-padded if missing
@@ -9853,7 +9881,8 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 			std::vector<float> lineVerts; // pos3 + color3 per vertex
 			const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
 			auto pushVert = [&](const glm::vec3& p, const glm::vec3& c) {
-				lineVerts.insert(lineVerts.end(), { p.x, p.y, p.z, c.x, c.y, c.z });
+				lineVerts.push_back(p.x); lineVerts.push_back(p.y); lineVerts.push_back(p.z);
+				lineVerts.push_back(c.x); lineVerts.push_back(c.y); lineVerts.push_back(c.z);
 			};
 			const float markerSize = std::max(extent * 0.015f, 0.005f);
 			for (size_t i = 0; i < asset->skeleton.size(); ++i)
@@ -10266,8 +10295,12 @@ void OpenGLRenderer::DrawParticlePreviewGeometry(const HE::UUID& materialId,
 		std::vector<float> inst;
 		inst.reserve(particles.size() * 8);
 		for (const auto& p : particles)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
-			                          p.color.r, p.color.g, p.color.b, p.alpha });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.color.r); inst.push_back(p.color.g); inst.push_back(p.color.b);
+			inst.push_back(p.alpha);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particlePreviewInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
@@ -10461,10 +10494,10 @@ void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
 	verts.reserve(m_debugLines.size() * 12); // 2 verts * 6 floats
 	for (const DebugLine& l : m_debugLines)
 	{
-		verts.insert(verts.end(), { l.start.x, l.start.y, l.start.z,
-		                            l.color.r,  l.color.g,  l.color.b });
-		verts.insert(verts.end(), { l.end.x,   l.end.y,   l.end.z,
-		                            l.color.r,  l.color.g,  l.color.b });
+		verts.push_back(l.start.x); verts.push_back(l.start.y); verts.push_back(l.start.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
+		verts.push_back(l.end.x);   verts.push_back(l.end.y);   verts.push_back(l.end.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, m_debugLineVBO);
@@ -13621,7 +13654,11 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		inst.clear();
 		inst.reserve(batch.instances.size() * 5);
 		for (const ParticleInstance& p : batch.instances)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.t01);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particleInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),

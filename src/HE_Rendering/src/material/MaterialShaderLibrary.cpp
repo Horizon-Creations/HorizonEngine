@@ -84,6 +84,7 @@ std::string assembleVertex(VertexInput input, const WpoBody* wpo, bool instanced
     const char* wpPad = wpo ? "   " : (ssbo ? "  " : " ");
 
     std::string src = "#version 450\n";
+    src.reserve(2048);
     if (ssbo)
         src += "layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };\n";
     else
@@ -890,8 +891,9 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
 // clustered-lighting variant (fragmentClustered).
 std::string injectPreamble(const std::string& src, bool clustered = false)
 {
-    const std::string pre = clustered ? std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble
-                                      : std::string(kLightingPreamble);
+    static const std::string kPre(kLightingPreamble);
+    static const std::string kPreClustered = std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble;
+    const std::string& pre = clustered ? kPreClustered : kPre;
     const size_t vpos = src.find("#version");
     if (vpos == std::string::npos)
         return std::string("#version 450\n") + pre + src;
@@ -1029,6 +1031,7 @@ std::string tessEdgeFunction(const MatTessSettings& t)
 std::string assembleTessControl(const MatTessSettings& t)
 {
     std::string src = "#version 450\nlayout(vertices = 3) out;\n";
+    src.reserve(4608); // measured final size ~4.3 KB across the fixture materials
     src += tessLightingBlock();
     src += "layout(location = 0) in vec3 vNormal[];\n"
            "layout(location = 1) in vec3 vColor[];\n"
@@ -1075,6 +1078,7 @@ std::string assembleDomain(DomainInput input, const MatTessSettings& t,
 {
     const bool eval = (input == DomainInput::TessEval);
     std::string src = "#version 450\n";
+    src.reserve(8192); // measured final size up to ~6.4 KB across the fixture materials
     if (eval)
         src += std::string("layout(triangles, fractional_odd_spacing, ") + (upperLeft ? "cw" : "ccw") + ") in;\n"
                "layout(location = 0) in vec3 tcNormal[];\n"
@@ -1317,17 +1321,20 @@ const MaterialShaderVariant* MaterialShaderLibrary::precompiledFor(const Materia
 {
     if (!ma) return nullptr;
     const uint8_t want = static_cast<uint8_t>(backend);
-    // Exact tag first, so a pak that carries both D3D variants hands each backend
-    // its own; the sibling only steps in when the exact one is missing.
-    for (const MaterialShaderVariant& var : ma->precompiledShaders)
-        if (var.backend == want) return &var;
     uint8_t sibling = want;
     if (backend == RendererBackend::D3D11) sibling = static_cast<uint8_t>(RendererBackend::D3D12);
     if (backend == RendererBackend::D3D12) sibling = static_cast<uint8_t>(RendererBackend::D3D11);
-    if (sibling != want)
-        for (const MaterialShaderVariant& var : ma->precompiledShaders)
-            if (var.backend == sibling) return &var;
-    return nullptr;
+    // Exact tag first, so a pak that carries both D3D variants hands each backend
+    // its own; the sibling only steps in when the exact one is missing — one pass,
+    // the first sibling seen is kept as the fallback while the scan keeps looking
+    // for an exact match.
+    const MaterialShaderVariant* siblingMatch = nullptr;
+    for (const MaterialShaderVariant& var : ma->precompiledShaders)
+    {
+        if (var.backend == want) return &var;
+        if (!siblingMatch && sibling != want && var.backend == sibling) siblingMatch = &var;
+    }
+    return siblingMatch;
 }
 
 bool MaterialShaderLibrary::spirvFromBytes(const std::string& bytes, std::vector<uint32_t>& out)
@@ -1487,6 +1494,7 @@ namespace
 std::string buildDeferredResolveSource(bool tile, bool clustered)
 {
     std::string src = "#version 450\n";
+    src.reserve(8192); // measured final size up to ~8 KB for the clustered variant
     // Output: attachment 0 (own pass) or attachment 4 (single pass, behind the
     // four G-buffer attachments).
     src += tile ? "layout(location = 4) out vec4 oColor;\n"
@@ -1689,8 +1697,12 @@ std::string explicitLodClusterSamples(std::string src)
         { "texture(heGILocal, uv)", "textureLod(heGILocal, uv, 0.0)" },
     };
     for (const auto& [from, to] : swaps)
-        for (size_t p = src.find(from); p != std::string::npos; p = src.find(from, p + std::strlen(to)))
-            src.replace(p, std::strlen(from), to);
+    {
+        const size_t fromLen = std::strlen(from);
+        const size_t toLen = std::strlen(to);
+        for (size_t p = src.find(from); p != std::string::npos; p = src.find(from, p + toLen))
+            src.replace(p, fromLen, to);
+    }
     return src;
 }
 
@@ -1744,7 +1756,9 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         // them live (heAO's s0 is dead: texelFetch), all in s0..s15.
         if (tile) return {}; // framebuffer fetch is Apple-only
         using MSL = MaterialShaderLibrary;
-        std::vector<HlslPin> pins = {
+        std::vector<HlslPin> pins;
+        pins.reserve(20); // 17 fixed below + up to 3 clustered raw buffers
+        pins.insert(pins.end(), {
             //        stage           set bind reg  sampler
             { Stage::Fragment, 0,  0,  0 },     // HeLighting      → b0
             { Stage::Fragment, 0, 10, 10 },     // heGIShadow      → t10/s10
@@ -1763,7 +1777,7 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
             { Stage::Fragment, 0, 21, MSL::kHlslResolveGB2Reg,   MSL::kHlslResolveGB2Sampler },
             { Stage::Fragment, 0, 22, MSL::kHlslResolveDepthReg, MSL::kHlslResolveDepthSampler },
             { Stage::Fragment, 0, 23, MSL::kHlslResolveUboReg },  // HeResolve → b4
-        };
+        });
         if (clustered)
         {
             // Raw ByteAddressBuffers, no sampler — the forward clustered
@@ -1788,7 +1802,9 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         if (tile || clustered) return {};
         return toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
     }
-    std::vector<MslPin> pins = {
+    std::vector<MslPin> pins;
+    pins.reserve(20); // 13 fixed below + up to 4 G-buffer pins (!tile) + 3 clustered buffers
+    pins.insert(pins.end(), {
         { Stage::Fragment, 0, 0, static_cast<uint32_t>(MaterialShaderLibrary::kMetalLightingBufferIndex) },
         { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
         // GI screen-space masks on 5/8 and the forward reflection results on
@@ -1811,7 +1827,7 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
         { Stage::Fragment, 0, 18, 7 },    // DDGI visibility atlas
         { Stage::Fragment, 0, 33, 16 },   // cloud-shadow map → texture 16 (constexpr sampler)
-    };
+    });
     if (!tile)
     {
         pins.push_back({ Stage::Fragment, 0, 19, 0 }); // heGB0 → texture/sampler 0
@@ -1831,44 +1847,60 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
 }
 } // namespace
 
+namespace
+{
+// Shared cache-or-build step every deferredResolve*/ssr*/reflPrepass*/decal* variant
+// follows: look the key up first, build only on a miss, and let the cache own the
+// result. A free template, not a class member, so it needs no header change — `cache`
+// is one of the class's private unordered_map<int, Compiled> members, passed by the
+// caller, and `build` is invoked at most once, only on the miss path.
+template <typename Build>
+const MaterialShaderLibrary::Compiled& cachedCompile(std::unordered_map<int, MaterialShaderLibrary::Compiled>& cache,
+                                                      int key, Build&& build)
+{
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+    return cache.emplace(key, build()).first->second;
+}
+} // namespace
+
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolve(Backend backend)
 {
-    const int key = static_cast<int>(backend);
-    if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false)),
-        backend, false, false);
-    return m_resolveCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveCache, static_cast<int>(backend), [&]
+    {
+        return compileResolveVariant(
+            injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false)),
+            backend, false, false);
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveClustered(Backend backend)
 {
-    const int key = static_cast<int>(backend) + 64;
-    if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
-    std::string src = buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true);
-    if (backend != Backend::Metal) src = explicitLodClusterSamples(std::move(src));
-    Compiled out = compileResolveVariant(injectPreamble(src), backend, false, true);
-    return m_resolveCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveCache, static_cast<int>(backend) + 64, [&]
+    {
+        std::string src = buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true);
+        if (backend != Backend::Metal) src = explicitLodClusterSamples(std::move(src));
+        return compileResolveVariant(injectPreamble(src), backend, false, true);
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTile(Backend backend)
 {
-    const int key = static_cast<int>(backend);
-    if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false)),
-        backend, true, false);
-    return m_resolveTileCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveTileCache, static_cast<int>(backend), [&]
+    {
+        return compileResolveVariant(
+            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false)),
+            backend, true, false);
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTileClustered(Backend backend)
 {
-    const int key = static_cast<int>(backend) + 64;
-    if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
-        backend, true, true);
-    return m_resolveTileCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveTileCache, static_cast<int>(backend) + 64, [&]
+    {
+        return compileResolveVariant(
+            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
+            backend, true, true);
+    });
 }
 
 namespace
@@ -2356,90 +2388,94 @@ std::vector<he::shaderc::HlslPin> kSSRHlslPins()
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrRoughMix(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 3;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kSSRRoughMixFS, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },     // HeSSRBlur UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 },     // narrow → texture/sampler 0
-              { Stage::Fragment, 0, 20, 1 },     // wide   → texture/sampler 1
-              { Stage::Fragment, 0, 21, 2 } })); // attr   → texture/sampler 2
-    else if (backend == Backend::HLSL)
-        // Pinned even though no D3D backend draws this stage today (the forward
-        // path has no wide blur — see the GL and Vulkan checkpoints): the moment
-        // one does, it must land on the same numbers as the trace.
-        out = toCompiled(compileHlslPinned(kSSRRoughMixFS, Stage::Fragment, kSSRHlslPins()));
-    else
-        out = toCompiled(compile(kSSRRoughMixFS, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 3, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kSSRRoughMixFS, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },     // HeSSRBlur UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 },     // narrow → texture/sampler 0
+                  { Stage::Fragment, 0, 20, 1 },     // wide   → texture/sampler 1
+                  { Stage::Fragment, 0, 21, 2 } })); // attr   → texture/sampler 2
+        else if (backend == Backend::HLSL)
+            // Pinned even though no D3D backend draws this stage today (the forward
+            // path has no wide blur — see the GL and Vulkan checkpoints): the moment
+            // one does, it must land on the same numbers as the trace.
+            out = toCompiled(compileHlslPinned(kSSRRoughMixFS, Stage::Fragment, kSSRHlslPins()));
+        else
+            out = toCompiled(compile(kSSRRoughMixFS, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kSSRTraceFS, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeSSRTrace UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 },    // scene colour → texture/sampler 0
-              { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
-              { Stage::Fragment, 0, 22, 2 },    // depth → 2
-              { Stage::Fragment, 0, 24, 3 },    // history radiance (prev) → 3
-              { Stage::Fragment, 0, 25, 4 } }));// history receiver pos (prev) → 4
-    else if (backend == Backend::HLSL)
-        // The variant D3D11 actually draws with, moved into its bindable
-        // register range (see kSSRHlslPins).
-        out = toCompiled(compileHlslPinned(kSSRTraceFS, Stage::Fragment, kSSRHlslPins()));
-    else
-        out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kSSRTraceFS, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeSSRTrace UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 },    // scene colour → texture/sampler 0
+                  { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
+                  { Stage::Fragment, 0, 22, 2 },    // depth → 2
+                  { Stage::Fragment, 0, 24, 3 },    // history radiance (prev) → 3
+                  { Stage::Fragment, 0, 25, 4 } }));// history receiver pos (prev) → 4
+        else if (backend == Backend::HLSL)
+            // The variant D3D11 actually draws with, moved into its bindable
+            // register range (see kSSRHlslPins).
+            out = toCompiled(compileHlslPinned(kSSRTraceFS, Stage::Fragment, kSSRHlslPins()));
+        else
+            out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 1;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    const std::string injected = injectPreamble(kSSRCompositeFS);
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
-            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
-              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
-              { Stage::Fragment, 0, 19, 0 },    // GB0 → 0
-              { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
-              { Stage::Fragment, 0, 21, 2 },    // GB2 → 2
-              { Stage::Fragment, 0, 22, 3 },    // depth → 3
-              { Stage::Fragment, 0, 27, 4 },    // SSR result (near-sharp) → 4
-              { Stage::Fragment, 0, 28, 5 },    // SSR result (wide blur) → 5
-              { Stage::Fragment, 0, 29, 6 },    // ray-traced GI reflections → 6
-              { Stage::Fragment, 0, 30, 7 },    // GI reflections (wide blur) → 7
-              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
-              { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
-    else
-        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 1, [&]
+    {
+        using namespace he::shaderc;
+        const std::string injected = injectPreamble(kSSRCompositeFS);
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+                { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
+                  { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
+                  { Stage::Fragment, 0, 19, 0 },    // GB0 → 0
+                  { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
+                  { Stage::Fragment, 0, 21, 2 },    // GB2 → 2
+                  { Stage::Fragment, 0, 22, 3 },    // depth → 3
+                  { Stage::Fragment, 0, 27, 4 },    // SSR result (near-sharp) → 4
+                  { Stage::Fragment, 0, 28, 5 },    // SSR result (wide blur) → 5
+                  { Stage::Fragment, 0, 29, 6 },    // ray-traced GI reflections → 6
+                  { Stage::Fragment, 0, 30, 7 },    // GI reflections (wide blur) → 7
+                  { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
+                  { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
+        else
+            out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrBlur(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 2;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kSSRBlurFS, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeSSRBlur UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 } }));// trace result → texture/sampler 0
-    else if (backend == Backend::HLSL)
-        out = toCompiled(compileHlslPinned(kSSRBlurFS, Stage::Fragment, kSSRHlslPins()));
-    else
-        out = toCompiled(compile(kSSRBlurFS, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 2, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kSSRBlurFS, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeSSRBlur UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 } }));// trace result → texture/sampler 0
+        else if (backend == Backend::HLSL)
+            out = toCompiled(compileHlslPinned(kSSRBlurFS, Stage::Fragment, kSSRHlslPins()));
+        else
+            out = toCompiled(compile(kSSRBlurFS, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 namespace
@@ -2577,37 +2613,40 @@ void main() {
 
 std::string reflPrepassVS(bool ssbo)
 {
-    return std::string(ssbo ? kReflPrepassVSSsbo : kReflPrepassVSAttr)
-         + kReflPrepassVSTail
-         + (ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr)
-         + kReflPrepassVSEnd;
+    std::string src = ssbo ? kReflPrepassVSSsbo : kReflPrepassVSAttr;
+    src += kReflPrepassVSTail;
+    src += ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr;
+    src += kReflPrepassVSEnd;
+    return src;
 }
 std::string reflPrepassInstVS(bool ssbo)
 {
-    return std::string(ssbo ? kReflPrepassInstVSSsbo : kReflPrepassInstVSAttr)
-         + kReflPrepassInstVSTail
-         + (ssbo ? kReflPrepassInstVSBodySsbo : kReflPrepassInstVSBodyAttr)
-         + kReflPrepassInstVSEnd;
+    std::string src = ssbo ? kReflPrepassInstVSSsbo : kReflPrepassInstVSAttr;
+    src += kReflPrepassInstVSTail;
+    src += ssbo ? kReflPrepassInstVSBodySsbo : kReflPrepassInstVSBodyAttr;
+    src += kReflPrepassInstVSEnd;
+    return src;
 }
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertexInstanced(Backend backend)
 {
     // Own key range: the plain vertex/fragment pair occupies backend*2 + 0/1.
-    const int key = 0x100 + static_cast<int>(backend);
-    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Same pins as the plain variant plus the instance array at vertex
-        // buffer 5 — the slot MetalRenderer binds for every instanced draw.
-        out = toCompiled(compileMslPinned(reflPrepassInstVS(/*ssbo=*/true), Stage::Vertex,
-            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
-              { Stage::Vertex, 0, 1, 1 },      // UI camera pair → vertex buffer 1
-              { Stage::Vertex, 0, 2, 5 } }));  // Inst model array → vertex buffer 5
-    else
-        out = toCompiled(compile(reflPrepassInstVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
-    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_reflPrepassCache, 0x100 + static_cast<int>(backend), [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Same pins as the plain variant plus the instance array at vertex
+            // buffer 5 — the slot MetalRenderer binds for every instanced draw.
+            out = toCompiled(compileMslPinned(reflPrepassInstVS(/*ssbo=*/true), Stage::Vertex,
+                { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+                  { Stage::Vertex, 0, 1, 1 },      // UI camera pair → vertex buffer 1
+                  { Stage::Vertex, 0, 2, 5 } }));  // Inst model array → vertex buffer 5
+        else
+            out = toCompiled(compile(reflPrepassInstVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
@@ -2618,31 +2657,32 @@ const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 0;
-    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Pinned to the bind points the MRT pre-pass encoder already issues per
-        // draw: the mesh vertex buffer at 0, the per-object matrices at 1.
-        out = toCompiled(compileMslPinned(reflPrepassVS(/*ssbo=*/true), Stage::Vertex,
-            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
-              { Stage::Vertex, 0, 1, 1 } }));  // U matrices → vertex buffer 1
-    else
-        out = toCompiled(compile(reflPrepassVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
-    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_reflPrepassCache, static_cast<int>(backend) * 2 + 0, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Pinned to the bind points the MRT pre-pass encoder already issues per
+            // draw: the mesh vertex buffer at 0, the per-object matrices at 1.
+            out = toCompiled(compileMslPinned(reflPrepassVS(/*ssbo=*/true), Stage::Vertex,
+                { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+                  { Stage::Vertex, 0, 1, 1 } }));  // U matrices → vertex buffer 1
+        else
+            out = toCompiled(compile(reflPrepassVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassFragment(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 1;
-    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
-    using namespace he::shaderc;
-    // No resources at all — three attachments and two varyings, nothing to pin.
-    Compiled out = toCompiled(backend == Backend::Metal
-        ? compileMslPinned(kReflPrepassFS, Stage::Fragment, {})
-        : compile(kReflPrepassFS, Stage::Fragment, toTarget(backend)));
-    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_reflPrepassCache, static_cast<int>(backend) * 2 + 1, [&]
+    {
+        using namespace he::shaderc;
+        // No resources at all — three attachments and two varyings, nothing to pin.
+        return toCompiled(backend == Backend::Metal
+            ? compileMslPinned(kReflPrepassFS, Stage::Fragment, {})
+            : compile(kReflPrepassFS, Stage::Fragment, toTarget(backend)));
+    });
 }
 
 namespace
@@ -2792,108 +2832,113 @@ std::vector<he::shaderc::HlslPin> kDecalHlslPins()
 
 std::string makeDecalFS(bool sampled, bool forward = false)
 {
-    return std::string(kDecalFSHead)
-         + (sampled ? kDecalDepthSampledDecl : kDecalDepthFetchDecl)
-         + kDecalFSBodyPre
-         + (sampled ? "texture(heGBDepth, uv).r" : "subpassLoad(heGBDepth).r")
-         + (forward ? kDecalFSForwardPost : kDecalFSBodyPost);
+    std::string src = kDecalFSHead;
+    src += sampled ? kDecalDepthSampledDecl : kDecalDepthFetchDecl;
+    src += kDecalFSBodyPre;
+    src += sampled ? "texture(heGBDepth, uv).r" : "subpassLoad(heGBDepth).r";
+    src += forward ? kDecalFSForwardPost : kDecalFSBodyPost;
+    return src;
 }
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 0;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
-            { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
-    else if (backend == Backend::HLSL)
-        out = toCompiled(compileHlslPinned(kDecalVS, Stage::Vertex,
-            { { Stage::Vertex, 0, 23, kDecalHlslUboReg } })); // HeDecal → b13
-    else
-        out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 0, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
+                { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
+        else if (backend == Backend::HLSL)
+            out = toCompiled(compileHlslPinned(kDecalVS, Stage::Vertex,
+                { { Stage::Vertex, 0, 23, kDecalHlslUboReg } })); // HeDecal → b13
+        else
+            out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 1;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 1, [&]
     {
-        MslOptions opts;
-        opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
-        out = toCompiled(compileMslPinned(makeDecalFS(/*sampled=*/false), Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
-            opts));
-    }
-    // Non-Metal backends have no framebuffer-fetch decal path — they use
-    // decalFragmentSampled() instead.
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+        {
+            MslOptions opts;
+            opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
+            out = toCompiled(compileMslPinned(makeDecalFS(/*sampled=*/false), Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
+                opts));
+        }
+        // Non-Metal backends have no framebuffer-fetch decal path — they use
+        // decalFragmentSampled() instead.
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentSampled(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 2;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    const std::string src = makeDecalFS(/*sampled=*/true);
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Metal's TWO-PASS fallback has no tile storage to fetch from: the depth
-        // is a stored texture like everywhere else. Pinned so a hand-written
-        // pipeline can bind it (UBO → buffer 0, decal tex → 0, depth → 1).
-        out = toCompiled(compileMslPinned(src, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
-              { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
-    else if (backend == Backend::HLSL)
-        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
-    else
-        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 2, [&]
+    {
+        using namespace he::shaderc;
+        const std::string src = makeDecalFS(/*sampled=*/true);
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Metal's TWO-PASS fallback has no tile storage to fetch from: the depth
+            // is a stored texture like everywhere else. Pinned so a hand-written
+            // pipeline can bind it (UBO → buffer 0, decal tex → 0, depth → 1).
+            out = toCompiled(compileMslPinned(src, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
+                  { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
+        else if (backend == Backend::HLSL)
+            out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
+        else
+            out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentForward(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 3;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    const std::string src = makeDecalFS(/*sampled=*/true, /*forward=*/true);
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Metal never uses this variant in the engine (it has a G-buffer), but it
-        // is cross-compiled anyway so the shared tail cannot rot unnoticed.
-        out = toCompiled(compileMslPinned(src, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },
-              { Stage::Fragment, 0, 19, 0 },
-              { Stage::Fragment, 0, 22, 1 } }));
-    else if (backend == Backend::HLSL)
-        // The variant D3D11 and D3D12 actually draw with — pinned into their
-        // bindable register range (see kDecalHlslPins).
-        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
-    else
-        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 3, [&]
+    {
+        using namespace he::shaderc;
+        const std::string src = makeDecalFS(/*sampled=*/true, /*forward=*/true);
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Metal never uses this variant in the engine (it has a G-buffer), but it
+            // is cross-compiled anyway so the shared tail cannot rot unnoticed.
+            out = toCompiled(compileMslPinned(src, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },
+                  { Stage::Fragment, 0, 19, 0 },
+                  { Stage::Fragment, 0, 22, 1 } }));
+        else if (backend == Backend::HLSL)
+            // The variant D3D11 and D3D12 actually draw with — pinned into their
+            // bindable register range (see kDecalHlslPins).
+            out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
+        else
+            out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend);
-    if (auto it = m_fsVertCache.find(key); it != m_fsVertCache.end()) return it->second;
-
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kFullscreenVS, Stage::Vertex, {}));
-    else
-        out = toCompiled(compile(kFullscreenVS, Stage::Vertex, toTarget(backend)));
-    return m_fsVertCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_fsVertCache, static_cast<int>(backend), [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kFullscreenVS, Stage::Vertex, {}));
+        else
+            out = toCompiled(compile(kFullscreenVS, Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
@@ -2951,7 +2996,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // SceneUniforms occupies fragment buffer 0 in the scene pass), and the material
         // texture (set 0, binding 2 in canonical GLSL) to texture/sampler 0 — the slot the
         // geometry loop already binds per draw (material/mesh texture + linear sampler).
-        std::vector<MslPin> pins =
+        std::vector<MslPin> pins;
+        pins.reserve(24); // 21 fixed below + up to 3 clustered buffers
+        pins.insert(pins.end(),
             { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
               { Stage::Fragment, 0, 2, 0 },     // legacy/mesh texture → texture/sampler 0
               { Stage::Fragment, 0, 3, 2 },     // HeParams UBO → fragment buffer 2
@@ -3014,7 +3061,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
               // uses an inline constexpr sampler (kMaterialMslOptions below), so
               // the sampler budget stays untouched. Per-frame bind shared with
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } };
+              { Stage::Fragment, 0, 33, 16 } });
         // Clustered variant: the three light lists are BUFFERS, so the sampler
         // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
         // pass (fragmentMain reads 0 and 3), and the slots the clustered
@@ -3118,7 +3165,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // ByteAddressBuffer, not StructuredBuffer — D3D11 must bind RAW views
         // (D3D11_BUFFEREX_SRV_FLAG_RAW); the built-in shader's structured
         // t18..t20 cannot be reused as they are. D3D12 root SRVs take either.
-        std::vector<he::shaderc::HlslPin> pins = kHlslMaterialPins;
+        std::vector<he::shaderc::HlslPin> pins;
+        pins.reserve(kHlslMaterialPins.size() + 3); // + the clustered variant's 3 SRVs below
+        pins.insert(pins.end(), kHlslMaterialPins.begin(), kHlslMaterialPins.end());
         if (clustered)
         {
             pins.push_back({ Stage::Fragment, 0, 24, 24 }); // HeClusterLights → t24

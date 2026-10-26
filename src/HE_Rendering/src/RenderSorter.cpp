@@ -77,6 +77,7 @@ void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
 	outOpaque.clear();
 	outTransparent.clear();
 	outOpaque.reserve(drawCalls.size());
+	outTransparent.reserve(drawCalls.size());
 	for (const DrawCall& dc : drawCalls)
 	{
 		// GL and Metal classify inline and honour DrawCall::indexOffset/
@@ -164,20 +165,20 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 	world.writeInstancePieces(pieces, out.transforms.data());
 }
 
+static bool isFeatureEnabled(const char* envVarName)
+{
+	const char* v = std::getenv(envVarName);
+	return !(v && *v && std::atoi(v) == 0);
+}
+
 bool RenderSorter::depthInstancingEnabled()
 {
-	static const bool on = []{
-		const char* v = std::getenv("HE_DEPTH_INSTANCING");
-		return !(v && *v && std::atoi(v) == 0);
-	}();
+	static const bool on = isFeatureEnabled("HE_DEPTH_INSTANCING");
 	return on;
 }
 
 bool RenderSorter::graphInstancingEnabled()
 {
-	static const bool on = []{
-		const char* v = std::getenv("HE_GRAPH_INSTANCING");
-		return !(v && *v && std::atoi(v) == 0);
-	}();
+	static const bool on = isFeatureEnabled("HE_GRAPH_INSTANCING");
 	return on;
 }
