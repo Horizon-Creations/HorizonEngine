@@ -4337,6 +4337,45 @@ TEST_CASE("The caret is measured at the size the glyphs were drawn at")
     CHECK(at200 == big.caretAtPoint(60.0f, 0.0f, 1.0f));
 }
 
+TEST_CASE("Text field: a click lands on the first boundary whose midpoint it has not passed")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    const std::string content = "Hello w\xC3\xB6rld \xE6\x97\xA5 end";
+    for (bool password : { false, true })
+    {
+        CAPTURE(password);
+        HE::UITextInput ti;
+        ti.text = content; ti.fontSize = 18.0f; ti.password = password;
+        // What the walk measures: the dots for a password, the text otherwise.
+        auto widthOfPrefix = [&](size_t bytes)
+        {
+            std::string run = content.substr(0, bytes);
+            if (password)
+            {
+                std::string dots;
+                for (size_t i = 0; i < run.size(); i = HE::uiUtf8Next(run, i)) dots += "\xE2\x80\xA2";
+                run = dots;
+            }
+            return run.empty() ? 0.0f : HE::measureUIText(run, 18.0f, 0.0f, HE::UITextLayout{}).x;
+        };
+        for (float x = -2.0f; x < 200.0f; x += 0.5f)
+        {
+            size_t want = 0;
+            if (x > 0.0f)
+            {
+                want = content.size();
+                for (size_t i = 0; i < content.size(); )
+                {
+                    const size_t next = HE::uiUtf8Next(content, i);
+                    if (x < (widthOfPrefix(i) + widthOfPrefix(next)) * 0.5f) { want = i; break; }
+                    i = next;
+                }
+            }
+            CHECK(ti.caretAtPoint(x, 0.0f, 1.0f) == want);
+        }
+    }
+}
+
 TEST_CASE("The reader's text size reaches the picture AND the pointer")
 {
     // The end-to-end one: through the manager, which is the only place that
@@ -5090,6 +5129,43 @@ TEST_CASE("Text field: an input method's unfinished text is held apart from the 
     TextFieldFixture ro("locked", 0, /*editable=*/false);
     ro.wm.inputComposition("nihao", 5);
     CHECK_FALSE(ro.wm.hasComposition());
+}
+
+TEST_CASE("Text field: the caret sits where the IME put its own, in both layouts")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    const std::string preedit = "xyz\xC3\xA9";   // 5 bytes
+    for (bool multiline : { false, true })
+    {
+        CAPTURE(multiline);
+        HE::UITextInput ti;
+        ti.text = "abc"; ti.caret = ti.selAnchor = 3; ti.fontSize = 18.0f;
+        ti.multiline = multiline;
+        ti.composition = preedit;
+        const HE::UIWidgetRect px{ 0.0f, 0.0f, 300.0f, 60.0f };
+        HE::UIElementRenderState st; st.editing = true;
+        auto caretX = [&](int cursor)
+        {
+            ti.compositionCursor = cursor;
+            std::vector<UIRenderObject> out;
+            ti.render(px, st, {}, 1.0f, out);
+            REQUIRE_FALSE(out.empty());
+            return out.back().position.x;   // the caret is drawn last
+        };
+        const float atStart = caretX(0);
+        // A byte offset into the preedit: the caret moves by the width of what
+        // precedes it, nothing more.
+        for (int c : { 1, 3, 5 })
+        {
+            CAPTURE(c);
+            const float want = HE::measureUIText(preedit.substr(0, static_cast<size_t>(c)),
+                                                 18.0f, 0.0f, HE::UITextLayout{}).x;
+            CHECK(caretX(c) - atStart == doctest::Approx(want).epsilon(1e-4));
+        }
+        // -1 = unspecified: the end of the preedit. Past the end clamps to it.
+        CHECK(caretX(-1) == doctest::Approx(caretX(5)));
+        CHECK(caretX(99) == doctest::Approx(caretX(5)));
+    }
 }
 
 // ─── Undo and redo, per field ────────────────────────────────────────────────
