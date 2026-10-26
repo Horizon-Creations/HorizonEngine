@@ -317,6 +317,7 @@ namespace
         // blurry" or "the viewport is half the window" reports; the display scale
         // beside it is the first thing to check for "everything is tiny", which is
         // the same report one platform further along.
+        const SDL_DisplayID display = SDL_GetDisplayForWindow(m_window);
         HE_LOG_INFO(Window, "%s window created: %ux%u logical, %ux%u pixels, display scale %.2f, "
                             "backend %d, vsync %s, display '%s'",
                     m_isPrimary ? "Primary" : "Secondary", m_width, m_height,
@@ -324,8 +325,7 @@ namespace
                     static_cast<double>(SDL_GetWindowDisplayScale(m_window)),
                     static_cast<int>(props.api),
                     props.vsync ? "on" : "off",
-                    SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window))
-                        ? SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window)) : "?");
+                    SDL_GetDisplayName(display) ? SDL_GetDisplayName(display) : "?");
 
         if (props.api == RendererBackend::OpenGL)
         {
