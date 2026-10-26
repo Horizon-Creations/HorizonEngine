@@ -860,6 +860,23 @@ HorizonCode::InstanceId WidgetManager::childInstance(int widgetId,
 	return 0;
 }
 
+namespace
+{
+	// The scripts of a widget in the order they must be destroyed: the embeds
+	// that pass `keep`, innermost first (nested embeds have larger offsets), then
+	// the host. An embedded script acts on the host's tree, so it must not
+	// outlive the script that owns that tree. A template because Instance is
+	// private to WidgetManager.
+	template <class Inst, class Keep>
+	void appendTeardownOrder(std::vector<HorizonCode::InstanceId>& out, const Inst& w,
+	                         HorizonCode::InstanceId host, Keep keep)
+	{
+		for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
+			if (keep(*it)) out.push_back(it->scriptId);
+		out.push_back(host);
+	}
+}
+
 bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 {
 	Instance* w = find(widgetId);
@@ -878,10 +895,9 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 	// that range too, so they are caught by the same test.
 	const int rootElem = it->rootElem;
 	const int lo = it->idOffset, hi = it->idMax;
-	std::vector<HorizonCode::InstanceId> dying{ child };
-	for (const Instance::Embed& em : w->embeds)
-		if (em.scriptId != child && em.idOffset >= lo && em.idMax <= hi)
-			dying.push_back(em.scriptId);
+	std::vector<HorizonCode::InstanceId> dying;
+	appendTeardownOrder(dying, *w, child, [&](const Instance::Embed& em)
+		{ return em.scriptId != child && em.idOffset >= lo && em.idMax <= hi; });
 
 	w->tree.elements.erase(
 		std::remove_if(w->tree.elements.begin(), w->tree.elements.end(),
@@ -897,9 +913,7 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 			return std::find(dying.begin(), dying.end(), em.scriptId) != dying.end();
 		}), w->embeds.end());
 
-	// Innermost first, so a nested row's script never outlives the tree it acts
-	// on — the same order destroyWidget uses.
-	for (auto d = dying.rbegin(); d != dying.rend(); ++d) rt().destroy(*d);
+	for (const HorizonCode::InstanceId d : dying) rt().destroy(d);
 
 	// A destroyed row must not keep the hover, the press or the focus. Nothing
 	// says which element they were on any more, and a stale id would light up
@@ -2075,11 +2089,9 @@ void WidgetManager::destroyWidget(int id)
 		// the very next loop iteration reads a freed embed list.
 		std::vector<HorizonCode::InstanceId> scripts;
 		scripts.reserve(w->embeds.size() + 1);
-		// Embedded widgets are instances of their own and have to go with it,
-		// innermost first — otherwise their scripts outlive the tree they act on.
-		for (auto it = w->embeds.rbegin(); it != w->embeds.rend(); ++it)
-			scripts.push_back(it->scriptId);
-		scripts.push_back(w->scriptId);
+		// Embedded widgets are instances of their own and have to go with it.
+		appendTeardownOrder(scripts, *w, w->scriptId,
+		                    [](const Instance::Embed&) { return true; });
 		for (const HorizonCode::InstanceId sid : scripts)
 			rt().destroy(sid); // fires "Destruct", then drops it
 	}
@@ -2116,10 +2128,8 @@ void WidgetManager::clear()
 	ids.reserve(m_instances.size());
 	for (const auto& w : m_instances)
 	{
-		// Embedded instances first: they act on the host's tree.
-		for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
-			ids.push_back(it->scriptId);
-		ids.push_back(w.scriptId);
+		appendTeardownOrder(ids, w, w.scriptId,
+		                    [](const Instance::Embed&) { return true; });
 	}
 	if (!ids.empty()) HE_LOG_DEBUG(Widget, "Clearing %zu live widget(s)", ids.size());
 	for (const HorizonCode::InstanceId sid : ids) rt().destroy(sid);
