@@ -5,6 +5,31 @@
 #include "HorizonRendering/RenderConstants.h"
 #include "HorizonRendering/FrustumCuller.h"
 
+namespace
+{
+	// The next `n` instances of a run into dst, from object sortedIndices[k], instance inObj on;
+	// k and inObj move past them, so a run cut into several draws continues where the last one
+	// stopped. Laid out serially, filled on the workers (RenderWorld::writeInstancePieces).
+	void fillRunInstances(const RenderWorld& world, const std::vector<uint32_t>& sortedIndices,
+	                      size_t& k, uint32_t& inObj, size_t n, glm::mat4* dst)
+	{
+		std::vector<RenderWorld::InstancePiece> pieces;
+		size_t pos = 0;
+		while (pos < n)
+		{
+			const RenderObject& o   = world.objects[sortedIndices[k]];
+			const uint32_t      cnt = world.instanceCountOf(o);
+			const uint32_t take = static_cast<uint32_t>(std::min<size_t>(cnt - inObj, n - pos));
+			if (o.isCluster()) world.addInstancePiece(pieces, o, inObj, take, pos);
+			else               dst[pos] = o.transform;   // one matrix: copied here, no piece
+			pos   += take;
+			inObj += take;
+			if (inObj == cnt) { ++k; inObj = 0; }
+		}
+		world.writeInstancePieces(pieces, dst);
+	}
+}
+
 // ─── GeometryPass ───────────────────────────────────────────────────────────
 // Turns the culled + sorted visible objects into draw calls. It produces no
 // GPU work itself — the backend replays the resulting command buffer with its
@@ -78,15 +103,16 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.paramOverride   = first.paramOverride; // per-entity HeParams block (empty = none)
 		dc.weightmapTextureId = first.weightmapTextureId; // landscape layer weights
 
-		// One draw (per section) over the instance list `d` already carries.
-		auto recordRun = [&](const DrawCall& d)
+		// One draw (per section) over the instance list `d` already carries. It takes the
+		// draw: the one-section case hands its instance list on instead of copying it.
+		auto recordRun = [&](DrawCall&& d)
 		{
 			if (first.sections.empty())
 			{
 				// One-section mesh (and every primitive, terrain chunk, override):
 				// exactly the draw this pass always recorded — whole index buffer,
 				// one material, one DrawCall per run.
-				outCmds.recordDraw(d);
+				outCmds.recordDraw(std::move(d));
 				return;
 			}
 			// Multi-section mesh: one DrawCall per material slot over the same
@@ -129,31 +155,34 @@ void GeometryPass::execute(const RenderWorld&           world,
 		{
 			// A single instance stays a plain draw: instanceTransforms empty, the
 			// transform in dc.transform. Backends keep their non-instanced program for it.
-			recordRun(dc);
+			recordRun(std::move(dc));
 		}
 		else if (total <= HE::kMaxInstancesPerDraw)
 		{
 			dc.instanceCount = static_cast<uint32_t>(total);
-			dc.instanceTransforms.reserve(total);
-			for (size_t k = i; k < j; ++k)
-				world.appendInstances(world.objects[sortedIndices[k]], dc.instanceTransforms);
-			recordRun(dc);
+			dc.instanceTransforms.resize(total);
+			size_t   k = i;
+			uint32_t inObj = 0;
+			fillRunInstances(world, sortedIndices, k, inObj, total, dc.instanceTransforms.data());
+			recordRun(std::move(dc));
 		}
 		else
 		{
 			// More than one instanced draw may carry: cut the run into draws of at most
 			// kMaxInstancesPerDraw. Without this every backend quietly fell back to one
 			// draw per instance above its ring size (140k plants = 140k draws).
-			std::vector<glm::mat4> all;
-			all.reserve(total);
-			for (size_t k = i; k < j; ++k)
-				world.appendInstances(world.objects[sortedIndices[k]], all);
+			// Each draw's list is filled straight from the objects, a cluster cut where a
+			// draw is full; the whole run is no longer unfolded first and then copied.
+			size_t   k      = i;   // the object the next instance comes from
+			uint32_t inObj  = 0;   // and how many of its instances earlier draws took
 			for (size_t from = 0; from < total; from += HE::kMaxInstancesPerDraw)
 			{
-				const size_t to = std::min<size_t>(total, from + HE::kMaxInstancesPerDraw);
+				const size_t n = std::min<size_t>(total - from, HE::kMaxInstancesPerDraw);
+				std::vector<glm::mat4> list(n);
+				fillRunInstances(world, sortedIndices, k, inObj, n, list.data());
 				DrawCall chunk   = dc;
-				chunk.transform  = all[from];
-				if (to - from == 1)
+				chunk.transform  = list[0];
+				if (n == 1)
 				{
 					// The tail of a split can be one instance: keep the "exactly one
 					// instance = empty list" contract.
@@ -161,11 +190,10 @@ void GeometryPass::execute(const RenderWorld&           world,
 				}
 				else
 				{
-					chunk.instanceCount = static_cast<uint32_t>(to - from);
-					chunk.instanceTransforms.assign(all.begin() + static_cast<std::ptrdiff_t>(from),
-					                                all.begin() + static_cast<std::ptrdiff_t>(to));
+					chunk.instanceCount      = static_cast<uint32_t>(n);
+					chunk.instanceTransforms = std::move(list);
 				}
-				recordRun(chunk);
+				recordRun(std::move(chunk));
 			}
 		}
 		i = j;

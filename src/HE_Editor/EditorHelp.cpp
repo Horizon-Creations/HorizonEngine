@@ -264,7 +264,7 @@ namespace
 	  "the transparent pass — so it no longer writes depth. On the engine water "
 	  "(already transparent) the parameter of that name is the opacity looking "
 	  "straight down into clear water; depth tint, Fresnel and foam raise it. "
-	  "In the last metre before a landscape's shore it falls toward a quarter "
+	  "In the last metres before a landscape's shore it falls toward a quarter "
 	  "of itself as the water gets shallower, so the ground shows through.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
@@ -295,10 +295,10 @@ namespace
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
-	  "below the surface is not read yet (in the last metre before a landscape's "
-	  "shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
+	  "below the surface is not read yet (in the last three metres before a "
+	  "landscape's shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
 	  "waterline the water fades in over this many metres of depth instead of "
-	  "ending in a hard edge (0 = hard, up to 0.7). w = shore foam: the lace "
+	  "ending in a hard edge (0 = hard, up to 1). w = shore foam: the lace "
 	  "along the waterline (0 = none, 1 = strong).",
 	  "", "materials#water" },
 	{ "Material/WaveA", "",
@@ -334,13 +334,13 @@ namespace
 	  "multiplied by the reflection; about 0.3 gives water's real F0 of 0.02.",
 	  "", "materials#water" },
 	{ "Material/ShallowWater", "",
-	  "How water behaves in the last metre before a landscape's shore (a plane "
-	  "has no shore, so nothing changes there). x = clear depth in metres: "
+	  "How water behaves in the last three metres before a landscape's shore (a plane "
+	  "has no shore, so nothing changes there). x = clear depth in metres (0 to 3): "
 	  "from this much water on, Opacity is whole; shallower water lets the "
 	  "ground show through more. Raise it to see further into the shallows "
 	  "before the water turns opaque. y = tint start (0 to 1, shore closeness "
-	  "where 0 is a metre of water or more and 1 is none): where the depth tint "
-	  "has fully taken over the real depth, 0.5 is half a metre; further out it "
+	  "where 0 is three metres of water or more and 1 is none): where the depth tint "
+	  "has fully taken over the real depth, 0.5 is a metre and a half; further out it "
 	  "blends to the assumed depth in Turbidity. z = opacity floor (0 to 1): "
 	  "the share of Opacity left at no depth at all. w is reserved and does "
 	  "nothing yet.",
@@ -2221,10 +2221,10 @@ namespace
 	  "Instance's variables live.",
 	  "", "horizoncode#debugging" },
 	{ "Window/Task Board", "",
-	  "The project's to-do list: tasks with a status and a priority, linked to "
-	  "the assets, entities, scenes and panels they are about. Kept in "
-	  "Config/TaskBoard.json, so it travels with the project through source "
-	  "control and the whole team sees the same list.",
+	  "Opens the Planner on its Tasks database: the project's to-do list, with a "
+	  "status and a priority per task, linked to the assets, entities, scenes and "
+	  "panels it is about. Kept in Config/TaskBoard.json, so it travels with the "
+	  "project through source control and the whole team sees the same list.",
 	  "", "editor#menus" },
 	{ "View/View Mode", "",
 	  "How the Scene window draws the whole scene: Lit, Unlit, Wireframe, or "
@@ -2288,6 +2288,12 @@ namespace
 	  "The graph that outlives every scene: the app-wide state a level change "
 	  "must not reset.",
 	  "", "horizoncode#hosts" },
+	{ "Window/Planner", "",
+	  "Project planning for the game: databases of features, bugs, tasks and "
+	  "milestones, shown as a table or as lanes, kept in Config/Planner so they "
+	  "travel with the project through source control. Opens as a tab, so the "
+	  "content gets the whole window.",
+	  "", "editor#menus" },
 	// ── The Entity menu ──────────────────────────────────────────────────────
 	// The viewport's and the Outliner's right-click verbs with a fixed address.
 	// Same actions, same sentences in spirit as "Viewport Menu/…" — written
@@ -3070,86 +3076,311 @@ namespace
 	  "goes through as usual.",
 	  "", "horizoncode#debugging" },
 
-	// ── Task Board ───────────────────────────────────────────────────────────
-	// The project's to-do list. The cards, the chips and the panel names in
-	// Link Panel are the board's own data, built at run time; the fixed
-	// controls are the toolbar, the details of the selected task and the
-	// banner a file that cannot be read or written raises.
-	{ "Task Board/New Task", "New Task",
-	  "Adds a task to the board, selects it and opens its details, where you "
-	  "give it a title. It is saved into Config/TaskBoard.json at once.",
+	// ── Planner ──────────────────────────────────────────────────────────────
+	// The planning tab (Window > Planner). The databases, rows, property names
+	// and options are the project's own data, built at run time; the fixed
+	// controls are the sidebar, the view bar and the toolbar.
+	{ "Planner/New Database", "New Database",
+	  "Makes an empty database with one table view and saves it into "
+	  "Config/Planner/Databases. Rename it at the top, then add columns with "
+	  "Properties.",
 	  "", "" },
-	{ "Task Board/Columns", "Columns",
-	  "Shows the board as four lanes — Open, In Progress, Blocked, Done. Drag "
-	  "a card into another lane to change its status.",
+	{ "Planner/Reload", "Reload",
+	  "Reads the databases from disk again, for a file that could not be read "
+	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or one you "
+	  "changed outside the editor.",
 	  "", "" },
-	{ "Task Board/List", "List",
-	  "Shows the board as one list, grouped by status. Done is folded away "
-	  "until you open it.",
+	{ "Planner/Open", "Open",
+	  "Lists everything you can open: tables, timelines, boards, calendars, pages and whiteboards. Each is open once; picking one that is open takes you to its tab. The x on a tab closes the tab, not the thing.",
 	  "", "" },
-	{ "Task Board/Reload", "Reload",
-	  "Reads Config/TaskBoard.json again. For a file that could not be read — "
-	  "fix it first (a merge conflict leaves <<<<<<< markers in it) — or to "
-	  "drop an edit that could not be saved and take what is on disk instead.",
+	{ "Planner/+ Table", "+ Table",
+	  "Adds a table view to this database: rows down, one column per property. "
+	  "Each view keeps its own filters, sorting and hidden columns.",
 	  "", "" },
-	{ "Task Board/Retry Save", "Retry Save",
-	  "Writes the board to Config/TaskBoard.json again, after a save failed "
+	{ "Planner/+ Board", "+ Board",
+	  "Adds a board view: one lane per option of a Select property, a card per "
+	  "row. Drag a card to another lane to change its value.",
+	  "", "" },
+	{ "Planner/New data", "New data",
+	  "Creates a new database for this view to show (a table, board, timeline or "
+	  "calendar of its own) instead of showing one of the databases listed below.",
+	  "", "" },
+	{ "Planner/This database", "This database",
+	  "Makes the relation point at rows of this same database, for things like "
+	  "\"blocked by\" between two tasks. Pick another database in the list to "
+	  "point at its rows instead.",
+	  "", "" },
+	{ "Planner/New Page", "New Page",
+	  "Makes an empty page in the sidebar: a write-up for the design document, a "
+	  "level concept, playtest notes. Saved in Config/Planner/Pages, so it travels "
+	  "with the project through source control.",
+	  "", "" },
+	{ "Planner/Open Page", "Open Page",
+	  "Opens this row as a page: its properties on top, and below them a "
+	  "document you write in blocks. The page is saved only once it has a block.",
+	  "", "" },
+	{ "Planner/Add Block", "Add Block",
+	  "Adds an empty text block at the end of the page and puts the cursor in it. "
+	  "Enter in a block makes the next one; type # for a heading, - for a list, "
+	  "[] for a to-do, > for a quote, --- for a divider.",
+	  "", "" },
+	{ "Planner/Turn into", "Turn into",
+	  "Changes this block into another kind: text, heading, list, to-do, quote, "
+	  "callout, code, divider, an engine object, a database view or a link to "
+	  "another page. The text stays.",
+	  "", "" },
+	{ "Planner/New Sub-page", "New Sub-page",
+	  "Makes a page under this one and adds a link to it at the end of this page. "
+	  "The sub-page also shows under this page in the sidebar; deleting this page "
+	  "deletes it too.",
+	  "", "" },
+	{ "Planner/Add Block Below", "Add Block Below",
+	  "Adds an empty text block right under this one, at the same level.",
+	  "", "" },
+	{ "Planner/Move Up", "Move Up",
+	  "Moves this block one place up among the blocks at its level.",
+	  "", "" },
+	{ "Planner/Move Down", "Move Down",
+	  "Moves this block one place down among the blocks at its level.",
+	  "", "" },
+	{ "Planner/Indent", "Indent",
+	  "Makes this block a child of the block above it, shown indented under it.",
+	  "", "" },
+	{ "Planner/Outdent", "Outdent",
+	  "Takes this block out of its parent, so it follows the parent at the level "
+	  "above. The blocks that came after it stay under it.",
+	  "", "" },
+	{ "Planner/Delete Block", "Delete Block",
+	  "Removes this block and the blocks indented under it. Backspace in an empty "
+	  "block does the same. Source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Page", "Delete Page",
+	  "Deletes this page, its sub-pages and their files after you confirm. Source "
+	  "control has the previous version.",
+	  "", "" },
+	{ "Planner/+ Calendar", "+ Calendar",
+	  "Adds a calendar view: a month in a grid, each row on the day of its Date "
+	  "property (on every day up to its End, if you pick one). Drag a row onto "
+	  "another day to move it, double-click a day to add a row there, click a row "
+	  "to open it.",
+	  "", "" },
+	{ "Planner/Previous", "Previous",
+	  "Shows the month before the one on screen.",
+	  "", "" },
+	{ "Planner/Today", "Today",
+	  "Jumps the calendar back to the current month.",
+	  "", "" },
+	{ "Planner/Next", "Next",
+	  "Shows the month after the one on screen.",
+	  "", "" },
+	{ "Planner/New Board", "New Board",
+	  "Makes an empty whiteboard: a free surface for cards and arrows, for ideas "
+	  "that a document is too tidy for. Saved in Config/Planner/Boards.",
+	  "", "" },
+	{ "Planner/Delete Board", "Delete Board",
+	  "Deletes this whiteboard and its file after you confirm. Source control has "
+	  "the previous version.",
+	  "", "" },
+	{ "Planner/New Card", "New Card",
+	  "Adds a text card in the middle of what you see and puts the cursor in it. "
+	  "Double-click empty space to make one there instead.",
+	  "", "" },
+	{ "Planner/New Frame", "New Frame",
+	  "Adds a frame: a titled rectangle behind the cards. A frame moves with "
+	  "everything that lies wholly inside it.",
+	  "", "" },
+	{ "Planner/Add", "Add",
+	  "Puts a card for a page or a row of a database in the middle of what you see. Double-click the card to open the page or row. Assets, scenes and entities are dragged in from the Content Browser or the Outliner.",
+	  "", "" },
+	{ "Planner/Duplicate", "Duplicate",
+	  "Copies the selected cards, with the arrows between them, a little to the side (Cmd/Ctrl+D). Cmd/Ctrl+C and V copy and paste, also into another board.",
+	  "", "" },
+	{ "Planner/Align", "Align",
+	  "Lines up the selected cards (two or more) on their left, right, top or bottom edge or on their middle, or spreads three or more evenly.",
+	  "", "" },
+	{ "Planner/Align Left", "Align Left",
+	  "Moves the selected cards to the leftmost edge among them.",
+	  "", "" },
+	{ "Planner/Align Center", "Align Center",
+	  "Centres the selected cards on a common vertical line.",
+	  "", "" },
+	{ "Planner/Align Right", "Align Right",
+	  "Moves the selected cards to the rightmost edge among them.",
+	  "", "" },
+	{ "Planner/Align Top", "Align Top",
+	  "Moves the selected cards up to the topmost edge among them.",
+	  "", "" },
+	{ "Planner/Align Middle", "Align Middle",
+	  "Centres the selected cards on a common horizontal line.",
+	  "", "" },
+	{ "Planner/Align Bottom", "Align Bottom",
+	  "Moves the selected cards down to the lowest edge among them.",
+	  "", "" },
+	{ "Planner/Distribute Horizontally", "Distribute Horizontally",
+	  "Spaces three or more selected cards evenly from the leftmost to the rightmost; those two stay where they are.",
+	  "", "" },
+	{ "Planner/Distribute Vertically", "Distribute Vertically",
+	  "Spaces three or more selected cards evenly from the topmost to the lowest; those two stay where they are.",
+	  "", "" },
+	{ "Planner/Snap", "Snap",
+	  "While on, moving or resizing a card puts it on a grid of 20 units.",
+	  "", "" },
+	{ "Planner/Map", "Map",
+	  "Shows or hides the overview in the bottom right corner of the board: every card as a small box and the part you see as an outline. Click or drag in it to go there.",
+	  "", "" },
+	{ "Planner/Export PNG", "Export PNG",
+	  "Saves the whole board as a picture in the project's Export/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
+	  "", "" },
+	{ "Planner/Zoom In", "Zoom In",
+	  "Zooms in around the middle of what you see. The mouse wheel and the trackpad's pinch zoom at the cursor. Drag with the right or middle mouse button to pan.",
+	  "", "" },
+	{ "Planner/Zoom Out", "Zoom Out",
+	  "Zooms out around the middle of what you see.",
+	  "", "" },
+	{ "Planner/New Step", "New Step",
+	  "Adds an event that starts today and runs three days, and opens its details to name it. Double-click the axis to make a one-day event anywhere; drag an event to move it and the ends of a bar to change its length.",
+	  "", "" },
+	{ "Planner/Timeline Zoom", "Timeline Zoom",
+	  "How wide a day is: Days to plan closely, Weeks and Months to see far ahead. The mouse wheel (a trackpad's pinch) zooms freely at the cursor; drag the background to move along the time.",
+	  "", "" },
+	{ "Planner/Timeline Settings", "Timeline Settings",
+	  "Which Date properties a step starts and ends at, and which Select property colours the bars.",
+	  "", "" },
+	{ "Planner/New Table", "New Table",
+	  "Makes a table: rows down, a column per property. Choose new data of its own, or data that exists, to look at the same rows another way.",
+	  "", "" },
+	{ "Planner/New Timeline", "New Timeline",
+	  "Makes a timeline: a bar per row from its Start to its End date. Choose new data (with Start and End columns ready) or data that exists.",
+	  "", "" },
+	{ "Planner/New Calendar", "New Calendar",
+	  "Makes a calendar: each row on its day. New data comes with a Date column.",
+	  "", "" },
+	{ "Planner/Data", "Data",
+	  "The rows and columns behind this view. Rename them here. Tables, timelines, boards and calendars made from the same data show the same rows; change a row in one and it changes in all.",
+	  "", "" },
+	{ "Planner/Delete Data", "Delete Data",
+	  "Deletes the data behind a view that is its only one, with all its rows, after you confirm. Source control has the previous version.",
+	  "", "" },
+	{ "Planner/New Event", "New Event",
+	  "Adds an event on today (or the first day of the month shown) and opens it. A + in the corner of a day, or a double-click on it, makes one there; drag across several days to make an event that covers them, and pull the right end of a bar to give it more or fewer days.",
+	  "", "" },
+	{ "Planner/New Item", "New Item",
+	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
+	  "", "" },
+	{ "Planner/Close Details", "Close Details",
+	  "Closes the details of this row (Esc does too). The row stays as it is.",
+	  "", "" },
+	{ "Planner/Undo", "Undo",
+	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "
+	  "the history is not saved with the project.",
+	  "", "" },
+	{ "Planner/Redo", "Redo",
+	  "Puts back what Undo took away (Shift+Cmd/Ctrl+Z).",
+	  "", "" },
+	{ "Planner/Delete", "Delete",
+	  "Removes the selected cards, or the selected arrow. Cards take the arrows that "
+	  "ended at them along. Delete or Backspace does the same.",
+	  "", "" },
+	{ "Planner/Card color", "",
+	  "Colours the selected cards. The first square takes the colour away.",
+	  "", "" },
+	{ "Planner/Fit", "Fit",
+	  "Zooms and scrolls so that every card is in view.",
+	  "", "" },
+	{ "Planner/100%", "100%",
+	  "Back to normal size, around the middle of what you see.",
+	  "", "" },
+	{ "Planner/Arrow", "Arrow",
+	  "Whether the selected arrow has a head at the end. Click an arrow to select it, "
+	  "then give it a label in the field beside this.",
+	  "", "" },
+	{ "Planner/+ Timeline", "+ Timeline",
+	  "Adds a timeline view: a row per line and a day per column, a bar from "
+	  "each row's Start date to its End date. Drag a bar to move the row's "
+	  "dates; click it to open the row. Pick the Date properties above.",
+	  "", "" },
+	{ "Planner/New Row", "New Row",
+	  "Adds an empty row at the end and saves it. Type its title in the first "
+	  "column; click a cell to fill in the rest.",
+	  "", "" },
+	{ "Planner/Filter", "Filter",
+	  "Choose which rows this view shows. All conditions must hold. The filter "
+	  "belongs to the view and is saved with it; the search box beside it is "
+	  "temporary.",
+	  "", "" },
+	{ "Planner/Add Filter", "Add Filter",
+	  "Adds a condition to this view: pick a property, how to compare it and "
+	  "the value.",
+	  "", "" },
+	{ "Planner/Properties", "Properties",
+	  "The columns of this database: show or hide each in this view, rename "
+	  "them, delete them, or add a new one with a type (text, number, checkbox, "
+	  "date, select, multi-select, person, relation, engine link, URL).",
+	  "", "" },
+	{ "Planner/Add Property", "Add Property",
+	  "Adds a column of the chosen type to the database. Every row gets an "
+	  "empty cell for it.",
+	  "", "" },
+	{ "Planner/Title", "Title",
+	  "The row's name. Click the header to sort by it: once ascending, twice "
+	  "descending, a third time to clear the sort. Every other column header "
+	  "works the same way.",
+	  "", "" },
+	{ "Planner/Delete Row", "Delete Row",
+	  "Removes this row from the database, and from any relation that pointed "
+	  "at it. There is no undo for it; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Step", "Delete Step",
+	  "Removes this step from the data behind the timeline (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Event", "Delete Event",
+	  "Removes this event from the data behind the calendar (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Card", "Delete Card",
+	  "Removes this card from the data behind the board (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete View", "Delete View",
+	  "Removes this view. The rows and properties stay; a database always keeps "
+	  "at least one view.",
+	  "", "" },
+	{ "Planner/Delete Property", "Delete Property",
+	  "Deletes the column and its value in every row. Press twice to confirm; "
+	  "source control has the previous version.",
+	  "", "" },
+	{ "Planner/Link Selection", "Link Selection",
+	  "Links the entities selected in the scene to this row. Each link is "
+	  "stored by the entity's lasting id, so it survives a reload.",
+	  "", "" },
+	{ "Planner/Link Scene", "Link Scene",
+	  "Links the scene that is open to this row. Needs a saved scene.",
+	  "", "" },
+	{ "Planner/Link Panel", "Link Panel",
+	  "Links an editor panel to this row, so a click on the chip brings that "
+	  "panel up. Pick the panel from the list.",
+	  "", "" },
+	{ "Planner/Add Comment", "Add Comment",
+	  "Adds your comment to the task's history, under your name. The people it "
+	  "concerns hear about it when you are signed in to a team.",
+	  "", "" },
+	{ "Planner/From the Team", "From the Team",
+	  "What teammates did to tasks that concern you: assigned, commented, "
+	  "changed the status. A row opens its task. Shown once something has come in.",
+	  "", "" },
+	{ "Planner/Reload Tasks", "Reload Tasks",
+	  "Reads Config/TaskBoard.json again. For a file that could not be read "
+	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or to drop "
+	  "an edit that could not be saved and take what is on disk instead.",
+	  "", "" },
+	{ "Planner/Retry Save", "Retry Save",
+	  "Writes the tasks to Config/TaskBoard.json again, after a save failed "
 	  "(the file was locked or read-only).",
 	  "", "" },
-	{ "Task Board/Title", "",
-	  "What the task is, in a sentence. Saved when you leave the field.",
+	{ "Planner/Search titles", "Search titles",
+	  "Shows only rows whose title contains this text. Not saved with the view.",
 	  "", "" },
-	{ "Task Board/Status", "",
-	  "Open, In Progress, Blocked or Done. Each change is written into the "
-	  "task's history with your name; on the board the card moves to its "
-	  "group or lane.",
-	  "", "" },
-	{ "Task Board/Priority", "",
-	  "Low, Normal, High or Urgent — the colour of the stripe down the card's "
-	  "left edge.",
-	  "", "" },
-	{ "Task Board/Description", "",
-	  "The details: what is wrong, what done looks like, where to start. "
-	  "Saved when you leave the field.",
-	  "", "" },
-	// Only while signed in to a team server (Preferences ▸ Team).
-	{ "Task Board/Assigned To", "",
-	  "Who on your team does this task. Tick members in the list, one or "
-	  "several; untick to take it from them. Whoever it concerns hears about "
-	  "it: the people it is given to or taken from, whoever created it and "
-	  "whoever wrote in its history. Someone who is not online hears it when "
-	  "they sign in. Without a team server the field is not shown.",
-	  "", "" },
-	{ "Task Board/From the Team", "From the Team",
-	  "What your teammates did to tasks that concern you: assigned you one, "
-	  "changed a status, wrote a comment. The same lines are in the bell. "
-	  "Click one to open the task — a task created on another machine shows "
-	  "up here after your next pull.",
-	  "", "" },
-	{ "Task Board/Link Selection", "Link Selection",
-	  "Links the entities selected in the scene to this task. Dragging an "
-	  "entity from the World Outliner onto the task does the same. A link "
-	  "remembers the entity by its id and the scene it is in, so it still "
-	  "finds it after a reload; click the chip to select it again.",
-	  "", "" },
-	{ "Task Board/Link Scene", "Link Scene",
-	  "Links the open scene to this task. Click the chip to open it — through "
-	  "the unsaved-changes prompt, like File ▸ Open Scene.",
-	  "", "" },
-	{ "Task Board/Link Panel", "Link Panel",
-	  "Links an editor panel to this task — for work that is about the editor "
-	  "itself. Click the chip to bring the panel up. Assets are linked by "
-	  "dragging them from the Content Browser onto the task.",
-	  "", "" },
-	{ "Task Board/Add Comment", "Add Comment",
-	  "Adds what you wrote to the task's history, with your name and the time.",
-	  "", "" },
-	{ "Task Board/Delete Task", "Delete Task",
-	  "Removes the task from the board and from Config/TaskBoard.json. What "
-	  "it linked to is not touched.",
-	  "", "" },
-	// The board's widget in the footer, and the list it opens. The widget and
-	// the rows are drawn by hand, so they are looked up by key.
+	// ── Task Board (footer) ──────────────────────────────────────────────────
+	// The task list is the Planner's Tasks database now (the "Planner/..." entries
+	// above); what is left under this scope is the footer widget and its list.
 	{ "Task Board/Footer", "Tasks",
 	  "How many tasks are still open in this project — everything not Done — "
 	  "and, in the accent colour, how many of them are assigned to you; then "
@@ -5265,6 +5496,26 @@ namespace
 	  "Where a masked material cuts: pixels whose opacity falls below this are "
 	  "discarded entirely, leaving a hard edge. It is what makes leaves and "
 	  "chain-link fences out of one quad.",
+	  "", "materials#concept" },
+	{ "Material Settings/Max Factor", "Tessellation Factor",
+	  "How finely each triangle is subdivided close to the camera, so the "
+	  "Displacement pin has vertices to move. 1 adds none, 64 is the most the "
+	  "engine allows (the D3D11 limit). Detail costs: a factor of 16 turns one "
+	  "triangle into a few hundred.",
+	  "", "materials#concept" },
+	{ "Material Settings/Fade Near", "Fade Near",
+	  "Up to this distance from the camera, in metres, triangles get the full "
+	  "Max Factor.",
+	  "", "materials#concept" },
+	{ "Material Settings/Fade Far", "Fade Far",
+	  "From this distance on, in metres, triangles are no longer subdivided and "
+	  "only the mesh's own vertices move. Between Fade Near and here the factor "
+	  "falls off. It always stays above Fade Near.",
+	  "", "materials#concept" },
+	{ "Material Settings/Max Displacement", "Max Displacement",
+	  "The furthest, in metres, the Displacement pin may push the surface in or "
+	  "out. Larger heights are clamped to it. Keep it close to what the graph "
+	  "really produces: shadows and lighting still see the flat mesh.",
 	  "", "materials#concept" },
 	{ "Material Preview/Show Material", "Show Material",
 	  "Puts the finished material back on the preview ball, after Preview This "
@@ -9629,6 +9880,7 @@ namespace
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
 		{ "Task Board/",       "editor-interface", "Editor Interface", "Task Board" },
+		{ "Planner/",          "editor-interface", "Editor Interface", "Planner" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },
@@ -9845,6 +10097,7 @@ const Entry* findKey(std::string_view key)
 const Entry* find(std::string_view label)
 {
 	if (label.empty()) return nullptr;
+	const std::string_view vis = visible(label);
 
 	// Most specific first: the label EXACTLY as written, "##" suffix included.
 	// That suffix is the only thing telling two rows apart when a component has
@@ -9862,7 +10115,6 @@ const Entry* find(std::string_view label)
 		const std::size_t prefix = scoped.size();
 		scoped.append(label);
 		if (const Entry* e = findKey(scoped)) return e;
-		const std::string_view vis = visible(label);
 		if (vis.size() != label.size())
 		{
 			scoped.resize(prefix);
@@ -9871,7 +10123,7 @@ const Entry* find(std::string_view label)
 		}
 	}
 	if (const Entry* e = findKey(label)) return e;
-	return findKey(visible(label));
+	return findKey(vis);
 }
 
 Scope::Scope(const char* name) { scopes().push_back(name ? name : ""); }

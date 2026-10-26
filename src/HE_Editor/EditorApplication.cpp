@@ -28,6 +28,8 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "CinematicPanel.h"                  // …and the sequence tools this one
+#include "PlannerBoardView.h"
+#include "PlannerPanel.h"                    // ...and the Planner tools reach the tab's workspace through this one
 #include "TaskBoardPanel.h"                  // …and the task tools edit through this one's board
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
@@ -157,7 +159,6 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <algorithm>
 #include <nlohmann/json.hpp>
 
 // stb_image — declaration only (implementation in stb_image_impl.cpp)
@@ -3433,7 +3434,7 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
-	// ── Automatischer asynchroner Content-Refresh ─────────────────────────────
+	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
 		m_contentRefreshTimer += dt;
@@ -3732,6 +3733,7 @@ void EditorApplication::OnRender(float dt)
 			if (s_grBlurOv && *s_grBlurOv) gr.blur    = std::atof(s_grBlurOv) > 0.5;
 			if (s_grQualOv && *s_grQualOv) gr.quality = std::atoi(s_grQualOv);
 			if (s_grBncOv  && *s_grBncOv)  gr.bounces = std::atoi(s_grBncOv);
+			gr.enabled = gr.enabled && renderer()->GetCapabilities().supportsGIReflections;
 			renderer()->SetGIReflectionSettings(gr);
 		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
@@ -5711,6 +5713,52 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				g.connect(met, 0, out, HE::kMatOutputMetallicPin);
 				g.connect(rgh, 0, out, HE::kMatOutputRoughnessPin);
 			}
+			else if (std::string(mt) == "displace")
+			{
+				// Displacement witness (Thema 207): a lit sphere, value noise × height on
+				// the Displacement pin — tessellated where the backend can (GL 4.0+).
+				// HE_DUMP_DISPHEIGHT = metres (default 0.4), HE_DUMP_DISPPIN=0 leaves the
+				// pin unconnected (the A/B reference), HE_DUMP_DISPFACTOR = maxFactor
+				// (1 adds no vertices, so height 0 must match the reference bit for bit).
+				const char* hEnv = std::getenv("HE_DUMP_DISPHEIGHT");
+				const char* pEnv = std::getenv("HE_DUMP_DISPPIN");
+				const char* fEnv = std::getenv("HE_DUMP_DISPFACTOR");
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.80f; g.findNode(col)->p[1] = 0.72f; g.findNode(col)->p[2] = 0.62f;
+				const int rgh = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(rgh)->p[0] = 0.6f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				g.connect(rgh, 0, out, HE::kMatOutputRoughnessPin);
+				// Noise over WORLD xy, not uv: the sphere's uv seam duplicates its vertices,
+				// and a height that differs across the seam would tear it open.
+				const int wpos  = g.addNode(HE::MatNodeType::WorldPos);
+				const int noise = g.addNode(HE::MatNodeType::ValueNoise);
+				const int scale = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(scale)->p[0] = 2.0f;
+				g.connect(wpos, 0, noise, 0);
+				const int amp = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(amp)->p[0] = (hEnv && *hEnv) ? static_cast<float>(std::atof(hEnv)) : 0.4f;
+				const int mul = g.addNode(HE::MatNodeType::Multiply);
+				g.connect(scale, 0, noise, 1);
+				g.connect(noise, 0, mul, 0);
+				g.connect(amp, 0, mul, 1);
+				// HE_DUMP_DISPCONST = metres: a constant height instead of the noise (the
+				// sphere just grows), which takes the noise's own arithmetic out of a
+				// cross-backend comparison.
+				const char* cEnv = std::getenv("HE_DUMP_DISPCONST");
+				int height = mul;
+				if (cEnv && *cEnv)
+				{
+					height = g.addNode(HE::MatNodeType::ConstFloat);
+					g.findNode(height)->p[0] = static_cast<float>(std::atof(cEnv));
+				}
+				if (!(pEnv && std::string(pEnv) == "0"))
+					g.connect(height, 0, out, HE::kMatOutputDisplacementPin);
+				HE::MatTessSettings& t = g.findNode(out)->tess;
+				t.maxFactor = (fEnv && *fEnv) ? static_cast<float>(std::atof(fEnv)) : 16.0f;
+				t.fadeNear = 20.0f; t.fadeFar = 60.0f; t.maxDisplacement = 1.0f;
+			}
 			else if (std::string(mt) == "noise")
 			{
 				// v6 witness: colour × Noise Texture → mottled ("fleckig") BaseColor.
@@ -5751,6 +5799,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			mat.customShaderFragGlsl = gen.glsl;
 			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
+			mat.customShaderDispGlsl = gen.displacementBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
 			for (const auto& slot : gen.params)
@@ -5786,7 +5835,30 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					"EditorApplication: HE_DUMP_MATPRECOMPILE baked precompiled shader variants");
 			}
 		}
-		const HE::UUID matId = contentManager().registerMaterial(std::move(mat));
+		// HE_DUMP_MATTESTASSET = content path: the sphere wears a material FILE instead
+		// of the inline graph above — e.g. the shipped Engine/Materials/DisplacementDemo
+		// (Thema 207), so the capture is of what a project gets, not of a look-alike.
+		// HE_DUMP_DISPPIN=0 drops its displacement body, which is what an unconnected
+		// pin generates (the fragment does not change with the pin).
+		HE::UUID matId{};
+		if (const char* ma = std::getenv("HE_DUMP_MATTESTASSET"); ma && *ma)
+		{
+			matId = contentManager().loadAsset(ma);
+			MaterialAsset* fileMat = contentManager().getMaterialMutable(matId);
+			if (fileMat)
+			{
+				if (const char* pEnv = std::getenv("HE_DUMP_DISPPIN"); pEnv && std::string(pEnv) == "0")
+					fileMat->customShaderDispGlsl.clear();
+				HE_LOG_INFO(Editor, "%s", ("EditorApplication: HE_DUMP_MATTESTASSET '" + std::string(ma) +
+				                           "' on the test sphere" +
+				                           (fileMat->customShaderDispGlsl.empty() ? "" : " (displaced)")).c_str());
+			}
+			else
+				HE_LOG_WARN(Editor, "%s", ("EditorApplication: HE_DUMP_MATTESTASSET '" + std::string(ma) +
+				                           "' is not a material").c_str());
+		}
+		if (!contentManager().getMaterial(matId))
+			matId = contentManager().registerMaterial(std::move(mat));
 		s_matTestId = matId;
 
 		// Witness the runtime scripting param path (HE_DUMP_SETPARAM="Name,r,g,b"):
@@ -6872,6 +6944,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			fm.customShaderFragGlsl = gen.glsl;
 			fm.customShaderGBufGlsl = gen.glslGBuffer;
 			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.customShaderDispGlsl = gen.displacementBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
 			reg.emplace<MaterialComponent>(floorE,
@@ -6947,6 +7020,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			fm.customShaderFragGlsl = gen.glsl;
 			fm.customShaderGBufGlsl = gen.glslGBuffer;
 			fm.customShaderVertGlsl = gen.vertexBody;
+			fm.customShaderDispGlsl = gen.displacementBody;
 			fm.blendMode            = gen.blendMode;
 			fm.domain               = gen.domain;
 			// HE_DUMP_MATPRECOMPILE bakes the floor exactly as the exporter would
@@ -7138,6 +7212,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		lm.customShaderFragGlsl = gen.glsl;
 		lm.customShaderGBufGlsl = gen.glslGBuffer;
 		lm.customShaderVertGlsl = gen.vertexBody;
+		lm.customShaderDispGlsl = gen.displacementBody;
 		lm.blendMode            = gen.blendMode;
 		lm.domain               = gen.domain;
 		lm.graphLayerNames      = gen.layerNames;
@@ -7285,6 +7360,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		am.customShaderFragGlsl = gen.glsl;
 		am.customShaderGBufGlsl = gen.glslGBuffer;
 		am.customShaderVertGlsl = gen.vertexBody;
+		am.customShaderDispGlsl = gen.displacementBody;
 		am.blendMode            = gen.blendMode;
 		am.domain               = gen.domain;
 		am.graphTexturePaths    = gen.textures;
@@ -7411,6 +7487,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		am.customShaderFragGlsl = gen.glsl;
 		am.customShaderGBufGlsl = gen.glslGBuffer;
 		am.customShaderVertGlsl = gen.vertexBody;
+		am.customShaderDispGlsl = gen.displacementBody;
 		am.blendMode            = gen.blendMode;
 		am.domain               = gen.domain;
 		am.graphTexturePaths    = gen.textures;
@@ -7501,11 +7578,16 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// HE_SKY_TIME (the graph's clock), and A/B against HE_GRAPH_INSTANCING=0.
 		const char* fm = std::getenv("HE_DUMP_FOLIAGEMAT");
 		const bool  windMat = fm && std::string_view(fm) == "wind";
-		if (fm && (std::string_view(fm) == "graph" || windMat))
+		// =displace puts a constant height (HE_DUMP_DISPCONST metres, default 0.1) on the
+		// Displacement pin: on a tessellating GL the batch must draw per instance as
+		// patches, not as one GL_TRIANGLES instanced call a tessellation program rejects
+		// (Thema 207, step 9). A/B against HE_TESSELLATION=0 (untessellated, instanced).
+		const bool  dispMat = fm && std::string_view(fm) == "displace";
+		if (fm && (std::string_view(fm) == "graph" || windMat || dispMat))
 		{
 			MaterialAsset mat;
 			mat.type = HE::AssetType::Material;
-			mat.name = windMat ? "FoliageWindTest" : "FoliageGraphTest";
+			mat.name = windMat ? "FoliageWindTest" : dispMat ? "FoliageDisplaceTest" : "FoliageGraphTest";
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
@@ -7513,11 +7595,21 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			g.connect(col, 0, out, 0);
 			if (windMat)
 				g.connect(g.addNode(HE::MatNodeType::WindSway), 0, out, HE::kMatOutputWPOPin);
+			if (dispMat)
+			{
+				const char* dc = std::getenv("HE_DUMP_DISPCONST");
+				const int height = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(height)->p[0] = (dc && *dc) ? static_cast<float>(std::atof(dc)) : 0.1f;
+				g.connect(height, 0, out, HE::kMatOutputDisplacementPin);
+				HE::MatTessSettings& t = g.findNode(out)->tess;
+				t.maxFactor = 8.0f; t.fadeNear = 20.0f; t.fadeFar = 60.0f; t.maxDisplacement = 1.0f;
+			}
 			mat.nodeGraphJson = HE::materialGraphToJson(g);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 			mat.customShaderFragGlsl = gen.glsl;
 			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody;
+			mat.customShaderDispGlsl = gen.displacementBody;
 			mat.blendMode            = gen.blendMode;
 			mat.domain               = gen.domain;
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEMAT=%s (vertex body %zu chars)",
@@ -8933,6 +9025,7 @@ void EditorApplication::dumpFrameHeadless()
 		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
 		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
 			gr.bounces = std::atoi(bc);
+		gr.enabled = gr.enabled && r->GetCapabilities().supportsGIReflections;
 		r->SetGIReflectionSettings(gr);
 	}
 	{
@@ -9067,6 +9160,7 @@ void EditorApplication::dumpFrameHeadless()
 				mat->customShaderFragGlsl = gen.glsl;
 				mat->customShaderGBufGlsl = gen.glslGBuffer;
 				mat->customShaderVertGlsl = gen.vertexBody;
+				mat->customShaderDispGlsl = gen.displacementBody;
 				mat->blendMode            = gen.blendMode;
 				mat->domain               = gen.domain;
 				mat->graphLayerNames      = gen.layerNames;
@@ -9668,6 +9762,7 @@ void EditorApplication::dumpFrameHeadless()
 			m.customShaderFragGlsl = gen.glsl;
 			m.customShaderGBufGlsl = gen.glslGBuffer;
 			m.customShaderVertGlsl = gen.vertexBody;
+			m.customShaderDispGlsl = gen.displacementBody;
 			m.blendMode            = gen.blendMode;
 			m.domain               = gen.domain;
 			for (const auto& slot : gen.params)
@@ -10705,10 +10800,8 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	// for one.
 	constexpr std::uint64_t kAutosaveIntervalMs = 1000;
 
-	const std::string& root = contentManager().contentRoot();
 	AppContext ctx = makeContext();
 
-	(void)root;
 	std::unordered_set<std::string> openRel;
 	for (const auto& tab : m_tabs)
 	{
@@ -11752,6 +11845,16 @@ void EditorApplication::setupMcpTools()
 	tasks.author    = [] { return TaskBoardPanel::author(); };
 	tasks.team      = [] { return TaskBoardPanel::team(); };
 	HE::Ed::registerTaskBoardTools(m_mcp->registry(), std::move(tasks));
+
+	// The Planner: the same one workspace the tab draws from (PlannerPanel::workspace), so
+	// the tools and the open tab are one copy of the databases and one writer of the files.
+	HE::Ed::McpPlannerHooks planner;
+	planner.workspace = [this] {
+		if (!m_mcpPlannerCtx) m_mcpPlannerCtx = std::make_unique<AppContext>(makeContext());
+		return PlannerPanel::workspace(*m_mcpPlannerCtx);
+	};
+	planner.author = [] { return TaskBoardPanel::author(); };
+	HE::Ed::registerPlannerTools(m_mcp->registry(), std::move(planner));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not
@@ -15129,6 +15232,16 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			// missed it stays available to whatever the editor grows next.
 			if (m_dropInPreview || event.type == SDL_EVENT_DROP_BEGIN) return true;
 		}
+	}
+
+	// ── A picture let go over the Planner's whiteboard ──────────────────────
+	// It becomes a card there (PlannerBoardView.h); only a picture over the drawn canvas, so a
+	// project dropped anywhere else is still opened below.
+	if (event.type == SDL_EVENT_DROP_FILE && event.drop.data && event.drop.windowID != 0 &&
+	    PlannerBoardView::wantsFileDrop(event.drop.data, event.drop.x, event.drop.y))
+	{
+		PlannerBoardView::dropFile(event.drop.data, event.drop.x, event.drop.y);
+		return true;
 	}
 
 	// ── A project handed over by the system (ProjectLaunchOpen.h) ────────────

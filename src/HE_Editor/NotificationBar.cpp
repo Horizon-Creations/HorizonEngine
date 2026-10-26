@@ -25,6 +25,7 @@ namespace
 {
 	using HE::Ed::NoteLevel;
 	using HE::Ed::Notification;
+	using HE::Ed::levelColor;
 
 	// ── One snapshot per frame ───────────────────────────────────────────────
 	// FooterWidth, DrawFooter and DrawOverlay all need the same list, and the
@@ -81,18 +82,10 @@ namespace
 	}
 
 	// ── Colours ──────────────────────────────────────────────────────────────
-	// The amber is the same literal the collab activity line uses for "you may
-	// need to act": two footer widgets sitting inches apart that mean the same
-	// thing in two different oranges would read as two different states.
-	ImVec4 levelColor(NoteLevel level)
-	{
-		switch (level)
-		{
-			case NoteLevel::Critical:  return ImVec4(0.95f, 0.36f, 0.33f, 1.0f);
-			case NoteLevel::Important: return ImVec4(1.00f, 0.72f, 0.35f, 1.0f);
-			default:                 return ImVec4(0.55f, 0.70f, 0.95f, 1.0f);
-		}
-	}
+	// levelColor() (NotificationStore.h) is the same literal the collab activity
+	// line uses for "you may need to act": two footer widgets sitting inches
+	// apart that mean the same thing in two different oranges would read as two
+	// different states.
 
 	// What the bell itself is tinted. Grey unless something UNSEEN earns a
 	// colour — an unread Info is worth a count, not an alarm, and a bell that is

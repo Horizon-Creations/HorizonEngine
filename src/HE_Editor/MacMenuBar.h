@@ -83,11 +83,11 @@ namespace MacMenuBar
 		// ── Window: everything that opens a panel or a tab ──
 		ToggleConsole, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleTeam,
 		ToggleSourceControl, ToggleAudioMixer, ToggleUndoHistory, ToggleWatch,
-		ToggleTaskBoard,
+		OpenTaskBoard,
 		// Window ▸ Scene 2 / 3 / 4, the secondary scene viewports. Game-only
 		// like the grid: an application has no level to look at from above.
 		ToggleScene2, ToggleScene3, ToggleScene4,
-		OpenLevelScript, OpenGameInstance,
+		OpenLevelScript, OpenGameInstance, OpenPlanner,
 		// Window ▸ Landscape Tools: the Scene toolbar's Landscape mode, which
 		// turns the Quick Settings panel into the landscape tool panel.
 		ToggleLandscapeTools,

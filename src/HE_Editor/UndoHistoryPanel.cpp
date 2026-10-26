@@ -57,7 +57,7 @@ void DrawUndoHistoryWindow(AppContext& ctx, bool& open)
 	{
 		char head[96];
 		std::snprintf(head, sizeof(head), "%zu step%s to undo, %zu to redo",
-		              nUndo, nUndo == 1 ? "" : "s", nRedo, nRedo == 1 ? "" : "s");
+		              nUndo, nUndo == 1 ? "" : "s", nRedo);
 		ImGui::TextDisabled("%s", head);
 		ImGui::SameLine();
 		const float clearW = ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f;

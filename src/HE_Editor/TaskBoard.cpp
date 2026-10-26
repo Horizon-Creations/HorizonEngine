@@ -1,4 +1,5 @@
 #include "TaskBoard.h"
+#include "TaskBoardJson.h"
 
 #include <Diagnostics/Log.h>
 
@@ -50,6 +51,8 @@ const char* const kUpdateKindNames[] = { "comment", "status", "assignment" };
 // algorithms. Hand-rolled because the C library's inverse of gmtime is
 // timegm() on one platform and _mkgmtime() on another, and both stop at the
 // year 2038 or 3000 depending on who built them.
+
+constexpr std::int64_t kMillisecondsPerDay = 86400000;
 
 std::int64_t daysFromCivil(std::int64_t y, unsigned m, unsigned d)
 {
@@ -416,9 +419,9 @@ std::int64_t taskNowMs()
 
 std::string taskTimeToIso(std::int64_t ms)
 {
-	std::int64_t days = ms / 86400000;
-	std::int64_t rem  = ms % 86400000;
-	if (rem < 0) { rem += 86400000; --days; }
+	std::int64_t days = ms / kMillisecondsPerDay;
+	std::int64_t rem  = ms % kMillisecondsPerDay;
+	if (rem < 0) { rem += kMillisecondsPerDay; --days; }
 	std::int64_t y; unsigned m, d;
 	civilFromDays(days, y, m, d);
 	const int msec = static_cast<int>(rem % 1000);
@@ -911,5 +914,20 @@ bool saveTaskBoard(const std::filesystem::path& projectRoot, TaskBoard& board,
 	board.m_diskBytes   = text;
 	return true;
 }
+
+// ── The door for the Planner (TaskBoardJson.h) ───────────────────────────────
+
+namespace TaskJson
+{
+void readString(const ojson& j, const char* key, std::string& out) { HE::readString(j, key, out); }
+void readStrings(const ojson& j, const char* key, std::vector<std::string>& out) { HE::readStrings(j, key, out); }
+bool readUuid(const ojson& j, const char* key, UUID& out) { return HE::readUuid(j, key, out); }
+void readTime(const ojson& j, const char* key, std::int64_t& out) { HE::readTime(j, key, out); }
+std::string extrasOf(const ojson& obj, std::initializer_list<std::string_view> known) { return HE::extrasOf(obj, known); }
+void appendExtras(ojson& out, const std::string& extraJson) { HE::appendExtras(out, extraJson); }
+std::string dumpDocument(const ojson& j) { return HE::dumpDocument(j); }
+TaskLink readLink(const ojson& j) { return HE::readLink(j); }
+ojson    writeLink(const TaskLink& l) { return HE::writeLink(l); }
+} // namespace TaskJson
 
 } // namespace HE

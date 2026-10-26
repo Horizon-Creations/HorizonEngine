@@ -5,6 +5,8 @@
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
+#include <JobSystem/JobSystem.h>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -343,11 +345,76 @@ public:
     // that unfolds a cluster; GeometryPass and RenderSorter::batchDepthRuns call it.
     void appendInstances(const RenderObject& obj, std::vector<glm::mat4>& out) const
     {
-        const InstanceBlock* b = blockOf(obj);
-        if (!b) { out.push_back(obj.transform); return; }
+        appendInstanceRange(obj, 0, instanceCountOf(obj), out);
+    }
+
+    // Instances [from, from + n) of obj, for a caller that cuts one cluster across two
+    // draws (an ordinary object is instance 0 of one).
+    void appendInstanceRange(const RenderObject& obj, uint32_t from, uint32_t n,
+                             std::vector<glm::mat4>& out) const
+    {
+        if (n == 0) return;
         const size_t base = out.size();
-        out.resize(base + b->count);
-        for (uint32_t i = 0; i < b->count; ++i) out[base + i] = b->world(i);
+        out.resize(base + (blockOf(obj) ? n : 1u));
+        std::vector<InstancePiece> pieces;
+        addInstancePiece(pieces, obj, from, n, 0);
+        writeInstancePieces(pieces, out.data() + base);
+    }
+
+    // Unfolding on the job system's workers. A caller lays out where each object's instances go
+    // (addInstancePiece, serial and cheap), sizes its array once, and writeInstancePieces fills it.
+    // At 300k plants the five unfoldings a frame (three cascades, SSAO, scene) ran on the main
+    // thread with ten workers idle: the matrix products, and copies through every doubling of
+    // the lists (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1). A big block is
+    // cut into pieces so that one cluster spreads too, many small ones share out as they are.
+    // Every instance is still world(i), so the bits are the same on either path.
+    struct InstancePiece
+    {
+        const RenderObject* obj;
+        uint32_t            from;   // first instance of obj
+        uint32_t            n;
+        size_t              pos;    // where in the destination array
+    };
+    static constexpr uint32_t kInstancePieceMax  = 2048;
+    static constexpr size_t   kParallelUnfoldMin = 4096;   // fewer instances stay on the caller
+    // HE_PARALLEL_UNFOLD=0 keeps every unfolding on the calling thread: the A/B switch, like
+    // HE_DEPTH_INSTANCING (same bits either way).
+    static bool parallelUnfoldEnabled()
+    {
+        static const bool on = [] {
+            const char* v = std::getenv("HE_PARALLEL_UNFOLD");
+            return !(v && *v && std::atoi(v) == 0);
+        }();
+        return on;
+    }
+    void addInstancePiece(std::vector<InstancePiece>& pieces, const RenderObject& obj,
+                          uint32_t from, uint32_t n, size_t pos) const
+    {
+        if (!blockOf(obj)) { if (n > 0) pieces.push_back({ &obj, 0, 1, pos }); return; }
+        while (n > kInstancePieceMax)
+        {
+            pieces.push_back({ &obj, from, kInstancePieceMax, pos });
+            from += kInstancePieceMax; pos += kInstancePieceMax; n -= kInstancePieceMax;
+        }
+        if (n > 0) pieces.push_back({ &obj, from, n, pos });
+    }
+    void writeInstancePieces(const std::vector<InstancePiece>& pieces, glm::mat4* dst) const
+    {
+        auto one = [this, &pieces, dst](size_t p)
+        {
+            const InstancePiece& x = pieces[p];
+            const InstanceBlock* b = blockOf(*x.obj);
+            if (!b) { dst[x.pos] = x.obj->transform; return; }
+            for (uint32_t i = 0; i < x.n; ++i) dst[x.pos + i] = b->world(x.from + i);
+        };
+        // Only cluster instances count toward going wide: an ordinary object is one matrix
+        // copy, and 16k of them (the 50k reference world) were faster on the caller than shared out.
+        size_t clustered = 0;
+        for (const InstancePiece& x : pieces) if (x.obj->isCluster()) clustered += x.n;
+        if (pieces.size() > 1 && clustered >= kParallelUnfoldMin && parallelUnfoldEnabled())
+            parallel_for(pieces.size(), one, "UnfoldInstances", 1);
+        else
+            for (size_t p = 0; p < pieces.size(); ++p) one(p);
     }
 
     // The same walk without materialising a list: call fn(world matrix) per instance.

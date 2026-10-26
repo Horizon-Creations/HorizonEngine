@@ -1,0 +1,11 @@
+--- /tmp/wm/src/before.cpp	2026-10-26 10:31:02
++++ /tmp/wm/src/A.cpp	2026-10-26 10:31:02
+@@ -1005,7 +1005,7 @@
+     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
+                               m.k(0.25f, 42, 1.5f), 43, 1);
+     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
+-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
++    const int base   = m.op3(T::Lerp, m.k(0.0f, 45, 6), foamTint, foamAll, 46, 7);
+     // Opacity is what clear water still covers looking straight down. Water that is only
+     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
+     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0

@@ -257,11 +257,11 @@ void BoneMaskPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 	if (!cm) return;
 	s_states.forEach([&](const std::string&, PanelState& st) {
 		if (!st.dirty || st.relPath.empty()) return;
-		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
-			const BoneMaskAsset* a = cm->getBoneMask(st.assetId);
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, assetId = st.assetId, mask = st.mask](const std::string& dest) {
+			const BoneMaskAsset* a = cm->getBoneMask(assetId);
 			if (!a) return false;
 			BoneMaskAsset copy = *a;
-			copy.json = HE::boneMaskToJson(st.mask);
+			copy.json = HE::boneMaskToJson(mask);
 			return cm->writeAssetTo(copy, dest);
 		} });
 	});

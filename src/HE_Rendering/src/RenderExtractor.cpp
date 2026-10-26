@@ -431,6 +431,24 @@ namespace
 					// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
 					// and culling against it drops the object the moment its pivot exits the view.
 					if (b.isValid() && b.max != b.min) d.localBounds = b;
+					// The common case without a copy of the table: a one-section mesh with no
+					// other LOD0 to map its slot through. resolveEntitySlots answers it with an
+					// empty list and the whole draw's material (its one-section branch, with
+					// identity slots and no LOD0 table); copying the table and the LOD0 table per
+					// entity per frame was a quarter of the serial walk at 50k entities
+					// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 3).
+					const auto* lodComp = reg.try_get<LODComponent>(e);
+					const bool  ownLod0 = !lodComp || lodComp->levels.empty()
+					                   || lodComp->levels[0].meshId == HE::UUID{}
+					                   || lodComp->levels[0].meshId == d.meshId;
+					if (m->sections.size() <= 1 && ownLod0)
+					{
+						const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
+						if (ov != HE::UUID{}) d.matId = ov;
+						if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
+						items.push_back(std::move(d));
+						continue;
+					}
 					// Material slots, after the entity's overrides (see
 					// resolveEntitySlots for the precedence and for when the list
 					// stays empty = the unchanged whole-mesh draw). `m` is dead
@@ -446,13 +464,13 @@ namespace
 					// that material plain.
 					if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
 				}
-			items.push_back(d);
+			items.push_back(std::move(d));
 		}
 
 		out.objects.resize(items.size());
 		parallel_for(items.size(), [&](size_t i) {
-			const EntityData& d = items[i];
-			RenderObject&   obj = out.objects[i];
+			EntityData&   d   = items[i];   // each item is this job's alone: its vectors move out
+			RenderObject& obj = out.objects[i];
 			obj.meshAssetId     = d.meshId;
 			obj.materialAssetId = d.matId;
 			obj.transform       = d.world;
@@ -468,8 +486,8 @@ namespace
 			obj.lod             = d.lod;
 			obj.castsShadow     = d.castsShadow;
 			obj.receivesShadow  = d.receivesShadow;
-			obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
-			obj.sections        = d.sections;      // material slots (multi-section mesh only)
+			obj.paramOverride   = std::move(d.paramOverride); // per-entity HeParams block (empty = none)
+			obj.sections        = std::move(d.sections);      // material slots (multi-section mesh only)
 			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
 			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
 			obj.landscapeIndex     = d.landscapeIndex;     // → RenderWorld::landscapes

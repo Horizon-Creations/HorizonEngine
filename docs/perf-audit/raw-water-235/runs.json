@@ -1,0 +1,8702 @@
+{
+"base-down3-nowater-r1": {
+"size": "2840x1528",
+"fps": 39.65278379748615,
+"cpuMsP50": 11.550749999999999,
+"gpuMsP50": 16.496249940246344,
+"passP50": {},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-down3-nowater-r2": {
+"size": "2840x1528",
+"fps": 38.62486639661771,
+"cpuMsP50": 11.30725,
+"gpuMsP50": 17.22049992531538,
+"passP50": {},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-down3-nowater-r3": {
+"size": "2840x1528",
+"fps": 39.165568134307385,
+"cpuMsP50": 11.616791,
+"gpuMsP50": 17.495916690677404,
+"passP50": {},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-down3-water-r1": {
+"size": "2840x1528",
+"fps": 36.05529010260274,
+"cpuMsP50": 12.424458,
+"gpuMsP50": 8.501000003889203,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-down3-water-r2": {
+"size": "2840x1528",
+"fps": 38.96914217571577,
+"cpuMsP50": 10.164958,
+"gpuMsP50": 8.707375032827258,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-down3-water-r3": {
+"size": "2840x1528",
+"fps": 39.537518251613655,
+"cpuMsP50": 10.687999999999999,
+"gpuMsP50": 7.931125117465854,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-far-nowater-r1": {
+"size": "2840x1528",
+"fps": 38.72955075027328,
+"cpuMsP50": 11.162167,
+"gpuMsP50": 17.41433353163302,
+"passP50": {},
+"counters": {
+"draws": 16,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-far-nowater-r2": {
+"size": "2840x1528",
+"fps": 38.38594895954236,
+"cpuMsP50": 10.755457999999999,
+"gpuMsP50": 18.050583312287927,
+"passP50": {},
+"counters": {
+"draws": 16,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-far-nowater-r3": {
+"size": "2840x1528",
+"fps": 37.57441350951879,
+"cpuMsP50": 10.066709,
+"gpuMsP50": 17.918500117957592,
+"passP50": {},
+"counters": {
+"draws": 16,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-far-water-r1": {
+"size": "2840x1528",
+"fps": 39.130107092526146,
+"cpuMsP50": 13.023458,
+"gpuMsP50": 17.176791792735457,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-far-water-r2": {
+"size": "2840x1528",
+"fps": 38.21428261003878,
+"cpuMsP50": 10.998958,
+"gpuMsP50": 17.22741685807705,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-far-water-r3": {
+"size": "2840x1528",
+"fps": 36.74421144421876,
+"cpuMsP50": 12.013542,
+"gpuMsP50": 17.129041720181704,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-live-down3-nowater-r1": {
+"size": "2840x1528",
+"fps": 38.63929926335134,
+"cpuMsP50": 10.793334,
+"gpuMsP50": 8.659749990329146,
+"passP50": {},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-down3-nowater-r2": {
+"size": "2840x1528",
+"fps": 38.0741201869951,
+"cpuMsP50": 11.775125,
+"gpuMsP50": 8.094750111922622,
+"passP50": {},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-down3-nowater-r3": {
+"size": "2840x1528",
+"fps": 38.57465546287084,
+"cpuMsP50": 10.364916,
+"gpuMsP50": 8.145083207637072,
+"passP50": {},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-down3-water-r1": {
+"size": "2840x1528",
+"fps": 37.3096596083097,
+"cpuMsP50": 11.4775,
+"gpuMsP50": 18.323499942198396,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-down3-water-r2": {
+"size": "2840x1528",
+"fps": 38.100784927428116,
+"cpuMsP50": 12.230209,
+"gpuMsP50": 17.184208380058408,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-down3-water-r3": {
+"size": "2840x1528",
+"fps": 38.992950117364884,
+"cpuMsP50": 12.028333,
+"gpuMsP50": 16.972916666418314,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-far-nowater-r1": {
+"size": "2840x1528",
+"fps": 36.93665125715317,
+"cpuMsP50": 10.347541999999999,
+"gpuMsP50": 7.94429169036448,
+"passP50": {},
+"counters": {
+"draws": 16,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-far-nowater-r2": {
+"size": "2840x1528",
+"fps": 37.014081709559086,
+"cpuMsP50": 12.130749999999999,
+"gpuMsP50": 8.096625097095966,
+"passP50": {},
+"counters": {
+"draws": 16,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-far-nowater-r3": {
+"size": "2840x1528",
+"fps": 36.96907219500439,
+"cpuMsP50": 12.93925,
+"gpuMsP50": 8.042666828259826,
+"passP50": {},
+"counters": {
+"draws": 16,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-far-water-r1": {
+"size": "2840x1528",
+"fps": 36.693922113517054,
+"cpuMsP50": 12.510458,
+"gpuMsP50": 8.165499893948436,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-far-water-r2": {
+"size": "2840x1528",
+"fps": 37.8269311959976,
+"cpuMsP50": 11.092082999999999,
+"gpuMsP50": 6.394833326339722,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-far-water-r3": {
+"size": "2840x1528",
+"fps": 38.41846278390418,
+"cpuMsP50": 10.931916,
+"gpuMsP50": 7.905958220362663,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-mid-nowater-r1": {
+"size": "2840x1528",
+"fps": 38.5418041017053,
+"cpuMsP50": 13.295874999999999,
+"gpuMsP50": 8.040249813348055,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 121856,
+"visible": 14
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-mid-nowater-r2": {
+"size": "2840x1528",
+"fps": 37.99833890714637,
+"cpuMsP50": 11.342082999999999,
+"gpuMsP50": 7.925416575744748,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 121856,
+"visible": 14
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-mid-nowater-r3": {
+"size": "2840x1528",
+"fps": 37.83236196129847,
+"cpuMsP50": 12.321917,
+"gpuMsP50": 8.358375169336796,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 121856,
+"visible": 14
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-mid-water-r1": {
+"size": "2840x1528",
+"fps": 37.26643892728793,
+"cpuMsP50": 10.29725,
+"gpuMsP50": 16.675249906256795,
+"passP50": {},
+"counters": {
+"draws": 15,
+"lights": 2,
+"tris": 131739,
+"visible": 15
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-mid-water-r2": {
+"size": "2840x1528",
+"fps": 37.559007415044704,
+"cpuMsP50": 10.686667,
+"gpuMsP50": 17.987208208069205,
+"passP50": {},
+"counters": {
+"draws": 15,
+"lights": 2,
+"tris": 131739,
+"visible": 15
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-mid-water-r3": {
+"size": "2840x1528",
+"fps": 39.26648984085402,
+"cpuMsP50": 10.509041,
+"gpuMsP50": 15.847499947994947,
+"passP50": {},
+"counters": {
+"draws": 15,
+"lights": 2,
+"tris": 131739,
+"visible": 15
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near1-water-r1": {
+"size": "2840x1528",
+"fps": 38.46983040907541,
+"cpuMsP50": 11.723832999999999,
+"gpuMsP50": 17.989458283409476,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,1.2,-60,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near1-water-r2": {
+"size": "2840x1528",
+"fps": 36.759418835257804,
+"cpuMsP50": 10.297792,
+"gpuMsP50": 17.454625107347965,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,1.2,-60,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near1-water-r3": {
+"size": "2840x1528",
+"fps": 37.376223316826035,
+"cpuMsP50": 10.944291999999999,
+"gpuMsP50": 17.12912507355213,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,1.2,-60,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near3-nowater-r1": {
+"size": "2840x1528",
+"fps": 38.55438392375133,
+"cpuMsP50": 12.258375,
+"gpuMsP50": 7.733624894171953,
+"passP50": {},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near3-nowater-r2": {
+"size": "2840x1528",
+"fps": 38.77810061186734,
+"cpuMsP50": 11.563915999999999,
+"gpuMsP50": 7.724874885752797,
+"passP50": {},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near3-nowater-r3": {
+"size": "2840x1528",
+"fps": 40.07809943657719,
+"cpuMsP50": 12.393583999999999,
+"gpuMsP50": 7.700375048443675,
+"passP50": {},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near3-water-r1": {
+"size": "2840x1528",
+"fps": 37.519384953464964,
+"cpuMsP50": 9.719125,
+"gpuMsP50": 17.930374946445227,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near3-water-r2": {
+"size": "2840x1528",
+"fps": 37.79748630264592,
+"cpuMsP50": 11.355542,
+"gpuMsP50": 17.844124929979444,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-near3-water-r3": {
+"size": "2840x1528",
+"fps": 38.37024312353799,
+"cpuMsP50": 11.038459,
+"gpuMsP50": 16.88395836390555,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-under-water-r1": {
+"size": "2840x1528",
+"fps": 39.13880996449256,
+"cpuMsP50": 11.605374999999999,
+"gpuMsP50": 17.655958188697696,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,-1.5,-60,3.14159,0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-under-water-r2": {
+"size": "2840x1528",
+"fps": 37.37307747517294,
+"cpuMsP50": 12.011999999999999,
+"gpuMsP50": 17.32633332721889,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,-1.5,-60,3.14159,0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-live-under-water-r3": {
+"size": "2840x1528",
+"fps": 37.95765870502839,
+"cpuMsP50": 13.1565,
+"gpuMsP50": 17.554374877363443,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,-1.5,-60,3.14159,0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": false,
+"frames": 400
+},
+"base-mid-nowater-r1": {
+"size": "2840x1528",
+"fps": 37.27669147473957,
+"cpuMsP50": 10.754208,
+"gpuMsP50": 17.370250076055527,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 121856,
+"visible": 14
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-mid-nowater-r2": {
+"size": "2840x1528",
+"fps": 39.259081500781065,
+"cpuMsP50": 11.26,
+"gpuMsP50": 16.435374971479177,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 121856,
+"visible": 14
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-mid-nowater-r3": {
+"size": "2840x1528",
+"fps": 37.61790470426792,
+"cpuMsP50": 10.433917,
+"gpuMsP50": 17.058791825547814,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 121856,
+"visible": 14
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-mid-water-r1": {
+"size": "2840x1528",
+"fps": 39.00946084348847,
+"cpuMsP50": 11.919165999999999,
+"gpuMsP50": 15.439541777595878,
+"passP50": {},
+"counters": {
+"draws": 15,
+"lights": 2,
+"tris": 131739,
+"visible": 15
+},
+"scene": "lake.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-mid-water-r2": {
+"size": "2840x1528",
+"fps": 37.17498318178567,
+"cpuMsP50": 9.46475,
+"gpuMsP50": 16.1957498639822,
+"passP50": {},
+"counters": {
+"draws": 15,
+"lights": 2,
+"tris": 131739,
+"visible": 15
+},
+"scene": "lake.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-mid-water-r3": {
+"size": "2840x1528",
+"fps": 38.150675662404524,
+"cpuMsP50": 12.651416999999999,
+"gpuMsP50": 13.76174995675683,
+"passP50": {},
+"counters": {
+"draws": 15,
+"lights": 2,
+"tris": 131739,
+"visible": 15
+},
+"scene": "lake.hescene",
+"cam": "0,10,-150,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near1-water-r1": {
+"size": "2840x1528",
+"fps": 36.36634549832873,
+"cpuMsP50": 10.023916999999999,
+"gpuMsP50": 6.98716682381928,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,1.2,-60,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near1-water-r2": {
+"size": "2840x1528",
+"fps": 35.92332003886034,
+"cpuMsP50": 11.593375,
+"gpuMsP50": 7.278625154867768,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,1.2,-60,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near1-water-r3": {
+"size": "2840x1528",
+"fps": 37.35358983571464,
+"cpuMsP50": 12.354875,
+"gpuMsP50": 8.12916667200625,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,1.2,-60,3.14159,-0.08",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near3-nowater-r1": {
+"size": "2840x1528",
+"fps": 37.55034637192259,
+"cpuMsP50": 10.391499999999999,
+"gpuMsP50": 19.185083219781518,
+"passP50": {},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near3-nowater-r2": {
+"size": "2840x1528",
+"fps": 38.33232281058014,
+"cpuMsP50": 10.942124999999999,
+"gpuMsP50": 17.005749978125095,
+"passP50": {},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near3-nowater-r3": {
+"size": "2840x1528",
+"fps": 37.592127710143856,
+"cpuMsP50": 10.918707999999999,
+"gpuMsP50": 17.604374792426825,
+"passP50": {},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near3-water-r1": {
+"size": "2840x1528",
+"fps": 38.51914800373326,
+"cpuMsP50": 10.4015,
+"gpuMsP50": 7.461208384484053,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near3-water-r2": {
+"size": "2840x1528",
+"fps": 39.31955606678649,
+"cpuMsP50": 11.809583,
+"gpuMsP50": 8.50762496702373,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-near3-water-r3": {
+"size": "2840x1528",
+"fps": 39.222677513235695,
+"cpuMsP50": 12.434624999999999,
+"gpuMsP50": 6.68170815333724,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-under-water-r1": {
+"size": "2840x1528",
+"fps": 37.236062187277064,
+"cpuMsP50": 9.725583,
+"gpuMsP50": 16.295625129714608,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,-1.5,-60,3.14159,0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-under-water-r2": {
+"size": "2840x1528",
+"fps": 37.6327503842595,
+"cpuMsP50": 10.870249999999999,
+"gpuMsP50": 16.309083439409733,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,-1.5,-60,3.14159,0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"base-under-water-r3": {
+"size": "2840x1528",
+"fps": 39.47652268042464,
+"cpuMsP50": 11.279625,
+"gpuMsP50": 16.588041558861732,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,-1.5,-60,3.14159,0.05",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"live-det-s2-lake-down3-asset-r1": {
+"size": "2840x1528",
+"fps": 46.19276169799933,
+"cpuMsP50": 21.573959,
+"gpuMsP50": 17.05779181793332,
+"passP50": {
+"Shadow": 0.805,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.486,
+"Scene": 5.928,
+"Bloom": 2.239,
+"Tonemap": 0.783,
+"Present": 0.798
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-down3-asset-r2": {
+"size": "2840x1528",
+"fps": 53.96946467421356,
+"cpuMsP50": 18.783666999999998,
+"gpuMsP50": 15.338791534304619,
+"passP50": {
+"Shadow": 0.539,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.255,
+"Scene": 5.606,
+"Bloom": 2.196,
+"Tonemap": 0.764,
+"Present": 0.741
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-down3-asset-r3": {
+"size": "2840x1528",
+"fps": 49.48082325522918,
+"cpuMsP50": 20.641458999999998,
+"gpuMsP50": 16.37662504799664,
+"passP50": {
+"Shadow": 0.652,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.286,
+"Scene": 5.677,
+"Bloom": 2.237,
+"Tonemap": 0.781,
+"Present": 0.793
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-down3-noasset-r1": {
+"size": "2840x1528",
+"fps": 50.83906952584812,
+"cpuMsP50": 18.832667,
+"gpuMsP50": 15.350166242569685,
+"passP50": {
+"Shadow": 0.542,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.277,
+"Scene": 5.641,
+"Bloom": 2.197,
+"Tonemap": 0.765,
+"Present": 0.742
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-down3-noasset-r2": {
+"size": "2840x1528",
+"fps": 51.54166716526659,
+"cpuMsP50": 19.167583,
+"gpuMsP50": 15.728708589449525,
+"passP50": {
+"Shadow": 0.546,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.262,
+"Scene": 5.606,
+"Bloom": 2.196,
+"Tonemap": 0.764,
+"Present": 0.741
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-down3-noasset-r3": {
+"size": "2840x1528",
+"fps": 48.554404268957164,
+"cpuMsP50": 20.281333999999998,
+"gpuMsP50": 16.019624657928944,
+"passP50": {
+"Shadow": 0.664,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.273,
+"Scene": 5.659,
+"Bloom": 2.299,
+"Tonemap": 0.797,
+"Present": 0.809
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-near3-asset-r1": {
+"size": "2840x1528",
+"fps": 48.3923858723568,
+"cpuMsP50": 20.914541,
+"gpuMsP50": 16.438624821603298,
+"passP50": {
+"Shadow": 0.65,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.498,
+"Scene": 8.197,
+"Bloom": 2.326,
+"Tonemap": 0.812,
+"Present": 0.8
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-near3-asset-r2": {
+"size": "2840x1528",
+"fps": 49.663240304996776,
+"cpuMsP50": 21.409709,
+"gpuMsP50": 17.01150042936206,
+"passP50": {
+"Shadow": 0.632,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.502,
+"Scene": 8.196,
+"Bloom": 2.326,
+"Tonemap": 0.809,
+"Present": 0.8
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-near3-asset-r3": {
+"size": "2840x1528",
+"fps": 60.654385109412786,
+"cpuMsP50": 18.4285,
+"gpuMsP50": 15.125583624467254,
+"passP50": {
+"Shadow": 0.548,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.26,
+"Scene": 7.68,
+"Bloom": 2.065,
+"Tonemap": 0.767,
+"Present": 0.74
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-near3-noasset-r1": {
+"size": "2840x1528",
+"fps": 51.73975239895225,
+"cpuMsP50": 21.116708,
+"gpuMsP50": 16.666958574205637,
+"passP50": {
+"Shadow": 0.634,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.505,
+"Scene": 8.185,
+"Bloom": 2.326,
+"Tonemap": 0.81,
+"Present": 0.798
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-near3-noasset-r2": {
+"size": "2840x1528",
+"fps": 46.550972309126536,
+"cpuMsP50": 21.548208,
+"gpuMsP50": 17.043291591107845,
+"passP50": {
+"Shadow": 0.757,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.506,
+"Scene": 8.308,
+"Bloom": 2.331,
+"Tonemap": 0.813,
+"Present": 0.804
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-lake-near3-noasset-r3": {
+"size": "2840x1528",
+"fps": 53.38343331252748,
+"cpuMsP50": 19.015,
+"gpuMsP50": 15.61124948784709,
+"passP50": {
+"Shadow": 0.542,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.488,
+"Scene": 7.883,
+"Bloom": 2.196,
+"Tonemap": 0.768,
+"Present": 0.74
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-down3-asset-r1": {
+"size": "2840x1528",
+"fps": 48.912346500637526,
+"cpuMsP50": 20.832584,
+"gpuMsP50": 16.54487499035895,
+"passP50": {
+"Shadow": 0.663,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.314,
+"Scene": 5.695,
+"Bloom": 2.304,
+"Tonemap": 0.796,
+"Present": 0.826
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-down3-asset-r2": {
+"size": "2840x1528",
+"fps": 49.401148877558846,
+"cpuMsP50": 19.931417,
+"gpuMsP50": 15.767833450809121,
+"passP50": {
+"Shadow": 0.644,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.269,
+"Scene": 5.649,
+"Bloom": 2.296,
+"Tonemap": 0.795,
+"Present": 0.81
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-down3-asset-r3": {
+"size": "2840x1528",
+"fps": 57.79800709419278,
+"cpuMsP50": 19.66575,
+"gpuMsP50": 16.184666892513633,
+"passP50": {
+"Shadow": 0.546,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.262,
+"Scene": 5.646,
+"Bloom": 2.232,
+"Tonemap": 0.772,
+"Present": 0.749
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-down3-noasset-r1": {
+"size": "2840x1528",
+"fps": 53.31023481450802,
+"cpuMsP50": 21.003125,
+"gpuMsP50": 16.77241688594222,
+"passP50": {
+"Shadow": 0.638,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.268,
+"Scene": 5.662,
+"Bloom": 2.297,
+"Tonemap": 0.797,
+"Present": 0.813
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-down3-noasset-r2": {
+"size": "2840x1528",
+"fps": 51.93966856304541,
+"cpuMsP50": 19.456542,
+"gpuMsP50": 16.147458227351308,
+"passP50": {
+"Shadow": 0.547,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.268,
+"Scene": 5.644,
+"Bloom": 2.197,
+"Tonemap": 0.767,
+"Present": 0.742
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-down3-noasset-r3": {
+"size": "2840x1528",
+"fps": 50.41701112147766,
+"cpuMsP50": 20.587042,
+"gpuMsP50": 16.43083360977471,
+"passP50": {
+"Shadow": 0.646,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 5.288,
+"Scene": 5.676,
+"Bloom": 2.3,
+"Tonemap": 0.796,
+"Present": 0.815
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-near3-asset-r1": {
+"size": "2840x1528",
+"fps": 50.80149428191798,
+"cpuMsP50": 19.293208999999997,
+"gpuMsP50": 15.958999516442418,
+"passP50": {
+"Shadow": 0.776,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.009,
+"Scene": 6.161,
+"Bloom": 2.685,
+"Tonemap": 0.973,
+"Present": 0.847
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-near3-asset-r2": {
+"size": "2840x1528",
+"fps": 47.44091746848613,
+"cpuMsP50": 21.454542,
+"gpuMsP50": 17.039458267390728,
+"passP50": {
+"Shadow": 0.874,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.368,
+"Scene": 6.597,
+"Bloom": 2.929,
+"Tonemap": 1.102,
+"Present": 1.066
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-near3-asset-r3": {
+"size": "2840x1528",
+"fps": 53.90706185667234,
+"cpuMsP50": 18.029792,
+"gpuMsP50": 14.029124984517694,
+"passP50": {
+"Shadow": 0.618,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.526,
+"Scene": 5.501,
+"Bloom": 2.249,
+"Tonemap": 0.781,
+"Present": 0.75
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-near3-noasset-r1": {
+"size": "2840x1528",
+"fps": 51.62063317682539,
+"cpuMsP50": 19.502416999999998,
+"gpuMsP50": 15.535291749984026,
+"passP50": {
+"Shadow": 0.684,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.741,
+"Scene": 5.889,
+"Bloom": 2.486,
+"Tonemap": 0.86,
+"Present": 0.812
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-near3-noasset-r2": {
+"size": "2840x1528",
+"fps": 54.184279610339225,
+"cpuMsP50": 20.571666999999998,
+"gpuMsP50": 15.522416681051254,
+"passP50": {
+"Shadow": 0.63,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.525,
+"Scene": 5.646,
+"Bloom": 2.438,
+"Tonemap": 0.843,
+"Present": 0.804
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_lake-near3-noasset-r3": {
+"size": "2840x1528",
+"fps": 51.88526041569691,
+"cpuMsP50": 18.602,
+"gpuMsP50": 15.30191651545465,
+"passP50": {
+"Shadow": 0.69,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.043,
+"Scene": 6.116,
+"Bloom": 2.502,
+"Tonemap": 0.881,
+"Present": 0.874
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_nowater-down3-r1": {
+"size": "2840x1528",
+"fps": 50.30630649876004,
+"cpuMsP50": 20.570999999999998,
+"gpuMsP50": 16.628666780889034,
+"passP50": {
+"Shadow": 0.643,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.809,
+"Scene": 5.746,
+"Bloom": 2.33,
+"Tonemap": 0.799,
+"Present": 0.811
+},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_nowater-down3-r2": {
+"size": "2840x1528",
+"fps": 56.60857220802045,
+"cpuMsP50": 17.261291,
+"gpuMsP50": 13.90512497164309,
+"passP50": {
+"Shadow": 0.53,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.77,
+"Scene": 5.61,
+"Bloom": 2.195,
+"Tonemap": 0.764,
+"Present": 0.741
+},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_nowater-down3-r3": {
+"size": "2840x1528",
+"fps": 48.69028401022442,
+"cpuMsP50": 21.02825,
+"gpuMsP50": 16.930291429162025,
+"passP50": {
+"Shadow": 0.662,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.877,
+"Scene": 5.898,
+"Bloom": 2.347,
+"Tonemap": 0.806,
+"Present": 0.82
+},
+"counters": {
+"draws": 2,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_nowater-near3-r1": {
+"size": "2840x1528",
+"fps": 65.56584037597499,
+"cpuMsP50": 14.774792,
+"gpuMsP50": 10.262749390676618,
+"passP50": {
+"Shadow": 0.579,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 2.662,
+"Scene": 4.31,
+"Bloom": 1.741,
+"Tonemap": 0.625,
+"Present": 0.596
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_nowater-near3-r2": {
+"size": "2840x1528",
+"fps": 61.53094040452793,
+"cpuMsP50": 14.218459,
+"gpuMsP50": 9.261666797101498,
+"passP50": {
+"Shadow": 0.512,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 2.331,
+"Scene": 4.032,
+"Bloom": 1.684,
+"Tonemap": 0.588,
+"Present": 0.496
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"live-det-s2-plain_nowater-near3-r3": {
+"size": "2840x1528",
+"fps": 46.36524078963639,
+"cpuMsP50": 22.041375,
+"gpuMsP50": 17.56725017912686,
+"passP50": {
+"Shadow": 0.953,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 4.434,
+"Scene": 7.03,
+"Bloom": 3.097,
+"Tonemap": 1.128,
+"Present": 1.071
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [],
+"counters_on": true,
+"frames": 400
+},
+"player-down3-nowater-r1": {
+"size": "2840x1528",
+"fps": 38.13087466824164,
+"cpuMsP50": 10.489666,
+"gpuMsP50": 14.527249848470092,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-down3-nowater-r2": {
+"size": "2840x1528",
+"fps": 35.762232652933456,
+"cpuMsP50": 9.192375,
+"gpuMsP50": 16.406624810770154,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-down3-nowater-r3": {
+"size": "2840x1528",
+"fps": 36.47432860919952,
+"cpuMsP50": 10.385917,
+"gpuMsP50": 16.813458176329732,
+"passP50": {},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-down3-water-r1": {
+"size": "2840x1528",
+"fps": 35.9066886017687,
+"cpuMsP50": 10.739374999999999,
+"gpuMsP50": 6.877624895423651,
+"passP50": {},
+"counters": {
+"draws": 4,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-down3-water-r2": {
+"size": "2840x1528",
+"fps": 36.2624382752145,
+"cpuMsP50": 9.271042,
+"gpuMsP50": 5.560375051572919,
+"passP50": {},
+"counters": {
+"draws": 4,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-down3-water-r3": {
+"size": "2840x1528",
+"fps": 36.11841870017302,
+"cpuMsP50": 11.312959,
+"gpuMsP50": 6.269291741773486,
+"passP50": {},
+"counters": {
+"draws": 4,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-far-nowater-r1": {
+"size": "2840x1528",
+"fps": 60.86241113813244,
+"cpuMsP50": 14.230915999999999,
+"gpuMsP50": 10.36833319813013,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-far-nowater-r2": {
+"size": "2840x1528",
+"fps": 64.07588346219566,
+"cpuMsP50": 14.229040999999999,
+"gpuMsP50": 10.326999938115478,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-far-nowater-r3": {
+"size": "2840x1528",
+"fps": 64.2123447094566,
+"cpuMsP50": 14.279333999999999,
+"gpuMsP50": 10.524500161409378,
+"passP50": {},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-far-water-r1": {
+"size": "2840x1528",
+"fps": 65.16477406781549,
+"cpuMsP50": 14.017792,
+"gpuMsP50": 9.573083370923996,
+"passP50": {},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-far-water-r2": {
+"size": "2840x1528",
+"fps": 62.53583257326189,
+"cpuMsP50": 14.231,
+"gpuMsP50": 9.90716670639813,
+"passP50": {},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-far-water-r3": {
+"size": "2840x1528",
+"fps": 63.51271077821693,
+"cpuMsP50": 14.143082999999999,
+"gpuMsP50": 10.41537499986589,
+"passP50": {},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-live-det-down3-nowater-r1": {
+"size": "2840x1528",
+"fps": 68.1533507378074,
+"cpuMsP50": 13.98475,
+"gpuMsP50": 7.420499576255679,
+"passP50": {
+"Shadow": 0.53,
+"GIAccel": 0.329,
+"GIShadow": 1.734,
+"GIProbes": 0.095,
+"SSAO": 2.91,
+"Scene": 0.124,
+"Bloom": 0.633,
+"Tonemap": 0.319,
+"Present": 0.739
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-down3-nowater-r2": {
+"size": "2840x1528",
+"fps": 61.512747372745814,
+"cpuMsP50": 15.464958,
+"gpuMsP50": 7.879666751250625,
+"passP50": {
+"Shadow": 0.651,
+"GIAccel": 0.296,
+"GIShadow": 1.742,
+"GIProbes": 0.129,
+"SSAO": 2.73,
+"Scene": 0.156,
+"Bloom": 0.584,
+"Tonemap": 0.259,
+"Present": 0.749
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-down3-nowater-r3": {
+"size": "2840x1528",
+"fps": 64.63285298999118,
+"cpuMsP50": 14.960958999999999,
+"gpuMsP50": 7.713916944339871,
+"passP50": {
+"Shadow": 0.596,
+"GIAccel": 0.306,
+"GIShadow": 1.734,
+"GIProbes": 0.107,
+"SSAO": 2.885,
+"Scene": 0.146,
+"Bloom": 0.625,
+"Tonemap": 0.263,
+"Present": 0.739
+},
+"counters": {
+"draws": 3,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-down3-water-r1": {
+"size": "2840x1528",
+"fps": 45.206371878603704,
+"cpuMsP50": 23.078625,
+"gpuMsP50": 16.341458773240447,
+"passP50": {
+"Shadow": 0.313,
+"GIAccel": 0.194,
+"GIShadow": 0.752,
+"GIProbes": 0.06,
+"SSAO": 1.597,
+"Scene": 12.02,
+"Bloom": 0.374,
+"Tonemap": 0.187,
+"Present": 0.41
+},
+"counters": {
+"draws": 4,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-down3-water-r2": {
+"size": "2840x1528",
+"fps": 43.0346290499572,
+"cpuMsP50": 24.121166,
+"gpuMsP50": 16.668292228132486,
+"passP50": {
+"Shadow": 0.361,
+"GIAccel": 0.208,
+"GIShadow": 0.781,
+"GIProbes": 0.068,
+"SSAO": 1.605,
+"Scene": 12.123,
+"Bloom": 0.408,
+"Tonemap": 0.192,
+"Present": 0.429
+},
+"counters": {
+"draws": 4,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-down3-water-r3": {
+"size": "2840x1528",
+"fps": 43.66252118298008,
+"cpuMsP50": 22.991166999999997,
+"gpuMsP50": 16.202333383262157,
+"passP50": {
+"Shadow": 0.342,
+"GIAccel": 0.194,
+"GIShadow": 0.753,
+"GIProbes": 0.064,
+"SSAO": 1.597,
+"Scene": 12.067,
+"Bloom": 0.394,
+"Tonemap": 0.187,
+"Present": 0.41
+},
+"counters": {
+"draws": 4,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-far-nowater-r1": {
+"size": "2840x1528",
+"fps": 39.284823182127596,
+"cpuMsP50": 25.349833999999998,
+"gpuMsP50": 9.499333566054702,
+"passP50": {
+"Shadow": 0.865,
+"GIAccel": 0.461,
+"GIShadow": 2.17,
+"GIProbes": 0.126,
+"SSAO": 2.55,
+"Scene": 0.623,
+"Bloom": 0.911,
+"Tonemap": 0.33,
+"Present": 0.894
+},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-far-nowater-r2": {
+"size": "2840x1528",
+"fps": 40.91262663949999,
+"cpuMsP50": 24.308249999999997,
+"gpuMsP50": 9.391874773427844,
+"passP50": {
+"Shadow": 0.818,
+"GIAccel": 0.464,
+"GIShadow": 2.141,
+"GIProbes": 0.114,
+"SSAO": 2.739,
+"Scene": 0.625,
+"Bloom": 0.909,
+"Tonemap": 0.459,
+"Present": 1.062
+},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-far-nowater-r3": {
+"size": "2840x1528",
+"fps": 39.08066740161896,
+"cpuMsP50": 25.258041,
+"gpuMsP50": 9.501250460743904,
+"passP50": {
+"Shadow": 0.786,
+"GIAccel": 0.478,
+"GIShadow": 2.151,
+"GIProbes": 0.124,
+"SSAO": 2.74,
+"Scene": 0.631,
+"Bloom": 0.911,
+"Tonemap": 0.46,
+"Present": 1.063
+},
+"counters": {
+"draws": 17,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-far-water-r1": {
+"size": "2840x1528",
+"fps": 36.65923764475252,
+"cpuMsP50": 26.799,
+"gpuMsP50": 10.429457994177938,
+"passP50": {
+"Shadow": 0.811,
+"GIAccel": 0.415,
+"GIShadow": 2.122,
+"GIProbes": 0.125,
+"SSAO": 2.283,
+"Scene": 1.701,
+"Bloom": 0.897,
+"Tonemap": 0.336,
+"Present": 0.863
+},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-far-water-r2": {
+"size": "2840x1528",
+"fps": 41.36114172584108,
+"cpuMsP50": 23.527292,
+"gpuMsP50": 8.52670893073082,
+"passP50": {
+"Shadow": 0.661,
+"GIAccel": 0.332,
+"GIShadow": 1.524,
+"GIProbes": 0.101,
+"SSAO": 1.921,
+"Scene": 1.415,
+"Bloom": 0.636,
+"Tonemap": 0.323,
+"Present": 0.741
+},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-far-water-r3": {
+"size": "2840x1528",
+"fps": 37.11878493331409,
+"cpuMsP50": 26.447584,
+"gpuMsP50": 9.233916876837611,
+"passP50": {
+"Shadow": 0.811,
+"GIAccel": 0.363,
+"GIShadow": 1.681,
+"GIProbes": 0.118,
+"SSAO": 1.959,
+"Scene": 1.498,
+"Bloom": 0.663,
+"Tonemap": 0.327,
+"Present": 0.807
+},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-near3-nowater-r1": {
+"size": "2840x1528",
+"fps": 40.61171507506852,
+"cpuMsP50": 24.479416999999998,
+"gpuMsP50": 9.61708347313106,
+"passP50": {
+"Shadow": 0.94,
+"GIAccel": 0.477,
+"GIShadow": 2.16,
+"GIProbes": 0.135,
+"SSAO": 2.762,
+"Scene": 0.385,
+"Bloom": 0.669,
+"Tonemap": 0.331,
+"Present": 1.064
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-near3-nowater-r2": {
+"size": "2840x1528",
+"fps": 44.6154917569858,
+"cpuMsP50": 22.718208,
+"gpuMsP50": 8.46695783548057,
+"passP50": {
+"Shadow": 0.777,
+"GIAccel": 0.354,
+"GIShadow": 1.645,
+"GIProbes": 0.108,
+"SSAO": 2.178,
+"Scene": 0.371,
+"Bloom": 0.655,
+"Tonemap": 0.324,
+"Present": 0.805
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-near3-nowater-r3": {
+"size": "2840x1528",
+"fps": 43.291586018791996,
+"cpuMsP50": 23.073833999999998,
+"gpuMsP50": 9.062583558261395,
+"passP50": {
+"Shadow": 0.799,
+"GIAccel": 0.376,
+"GIShadow": 1.994,
+"GIProbes": 0.115,
+"SSAO": 2.524,
+"Scene": 0.386,
+"Bloom": 0.671,
+"Tonemap": 0.325,
+"Present": 0.826
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-near3-water-r1": {
+"size": "2840x1528",
+"fps": 30.085691922957775,
+"cpuMsP50": 33.437625,
+"gpuMsP50": 18.800416961312294,
+"passP50": {
+"Shadow": 0.576,
+"GIAccel": 0.287,
+"GIShadow": 1.186,
+"GIProbes": 0.089,
+"SSAO": 1.772,
+"Scene": 12.629,
+"Bloom": 0.641,
+"Tonemap": 0.315,
+"Present": 0.654
+},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-near3-water-r2": {
+"size": "2840x1528",
+"fps": 28.46625676349012,
+"cpuMsP50": 35.108208,
+"gpuMsP50": 19.32995836250484,
+"passP50": {
+"Shadow": 0.647,
+"GIAccel": 0.316,
+"GIShadow": 1.244,
+"GIProbes": 0.105,
+"SSAO": 1.885,
+"Scene": 12.884,
+"Bloom": 0.676,
+"Tonemap": 0.319,
+"Present": 0.749
+},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-live-det-near3-water-r3": {
+"size": "2840x1528",
+"fps": 29.480205860451676,
+"cpuMsP50": 33.736416999999996,
+"gpuMsP50": 19.17254156433046,
+"passP50": {
+"Shadow": 0.591,
+"GIAccel": 0.319,
+"GIShadow": 1.228,
+"GIProbes": 0.092,
+"SSAO": 1.884,
+"Scene": 12.838,
+"Bloom": 0.644,
+"Tonemap": 0.379,
+"Present": 0.741
+},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-near3-nowater-r1": {
+"size": "2840x1528",
+"fps": 63.94440917600963,
+"cpuMsP50": 12.333667,
+"gpuMsP50": 8.951375028118491,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-near3-nowater-r2": {
+"size": "2840x1528",
+"fps": 67.89475630135401,
+"cpuMsP50": 12.385041999999999,
+"gpuMsP50": 9.386833291500807,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-near3-nowater-r3": {
+"size": "2840x1528",
+"fps": 69.4812513047272,
+"cpuMsP50": 12.590874999999999,
+"gpuMsP50": 9.222500026226044,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-near3-water-r1": {
+"size": "2840x1528",
+"fps": 63.467844588943805,
+"cpuMsP50": 12.321166999999999,
+"gpuMsP50": 6.4199999906122684,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-near3-water-r2": {
+"size": "2840x1528",
+"fps": 67.42391455087085,
+"cpuMsP50": 12.565292,
+"gpuMsP50": 6.5560415387153625,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-near3-water-r3": {
+"size": "2840x1528",
+"fps": 69.57674551576945,
+"cpuMsP50": 12.475999999999999,
+"gpuMsP50": 6.632749922573566,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-down3-nowater-r1": {
+"size": "2840x1528",
+"fps": 34.821926876650835,
+"cpuMsP50": 10.679541,
+"gpuMsP50": 15.785791678354144,
+"passP50": {},
+"counters": {
+"draws": 5,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-down3-nowater-r2": {
+"size": "2840x1528",
+"fps": 35.91505307524614,
+"cpuMsP50": 8.743667,
+"gpuMsP50": 16.291124979034066,
+"passP50": {},
+"counters": {
+"draws": 5,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-down3-nowater-r3": {
+"size": "2840x1528",
+"fps": 36.09650582390966,
+"cpuMsP50": 9.428082999999999,
+"gpuMsP50": 15.279958257451653,
+"passP50": {},
+"counters": {
+"draws": 5,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-down3-water-r1": {
+"size": "2840x1528",
+"fps": 36.60287094604534,
+"cpuMsP50": 9.43675,
+"gpuMsP50": 11.912083253264427,
+"passP50": {},
+"counters": {
+"draws": 6,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-down3-water-r2": {
+"size": "2840x1528",
+"fps": 35.227531636455986,
+"cpuMsP50": 9.315541999999999,
+"gpuMsP50": 10.472083231434226,
+"passP50": {},
+"counters": {
+"draws": 6,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-down3-water-r3": {
+"size": "2840x1528",
+"fps": 35.52400998088956,
+"cpuMsP50": 10.842542,
+"gpuMsP50": 12.375833466649055,
+"passP50": {},
+"counters": {
+"draws": 6,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-far-nowater-r1": {
+"size": "2840x1528",
+"fps": 57.340866157523465,
+"cpuMsP50": 14.615041999999999,
+"gpuMsP50": 11.153625091537833,
+"passP50": {},
+"counters": {
+"draws": 19,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-far-nowater-r2": {
+"size": "2840x1528",
+"fps": 64.79384028906111,
+"cpuMsP50": 14.480834,
+"gpuMsP50": 10.413124924525619,
+"passP50": {},
+"counters": {
+"draws": 19,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-far-nowater-r3": {
+"size": "2840x1528",
+"fps": 61.627137654919295,
+"cpuMsP50": 14.579791,
+"gpuMsP50": 9.57750016823411,
+"passP50": {},
+"counters": {
+"draws": 19,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-far-water-r1": {
+"size": "2840x1528",
+"fps": 66.21589088710651,
+"cpuMsP50": 13.594,
+"gpuMsP50": 8.75579146668315,
+"passP50": {},
+"counters": {
+"draws": 20,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-far-water-r2": {
+"size": "2840x1528",
+"fps": 65.95139621655716,
+"cpuMsP50": 14.253207999999999,
+"gpuMsP50": 9.108999976888299,
+"passP50": {},
+"counters": {
+"draws": 20,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-far-water-r3": {
+"size": "2840x1528",
+"fps": 60.48693016528673,
+"cpuMsP50": 14.502792,
+"gpuMsP50": 10.307874996215105,
+"passP50": {},
+"counters": {
+"draws": 20,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-live-det-down3-nowater-r1": {
+"size": "2840x1528",
+"fps": 56.18066026204103,
+"cpuMsP50": 17.130667,
+"gpuMsP50": 8.983625331893563,
+"passP50": {
+"Shadow": 0.656,
+"GIAccel": 0.304,
+"GIShadow": 1.768,
+"GIProbes": 0.128,
+"SSAO": 4.02,
+"Scene": 0.165,
+"Bloom": 0.516,
+"Tonemap": 0.256,
+"Present": 0.708
+},
+"counters": {
+"draws": 5,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-down3-nowater-r2": {
+"size": "2840x1528",
+"fps": 58.543811518822686,
+"cpuMsP50": 15.922666,
+"gpuMsP50": 8.426624815911055,
+"passP50": {
+"Shadow": 0.555,
+"GIAccel": 0.285,
+"GIShadow": 1.61,
+"GIProbes": 0.1,
+"SSAO": 3.792,
+"Scene": 0.133,
+"Bloom": 0.509,
+"Tonemap": 0.254,
+"Present": 0.689
+},
+"counters": {
+"draws": 5,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-down3-nowater-r3": {
+"size": "2840x1528",
+"fps": 62.07565845351354,
+"cpuMsP50": 15.494041999999999,
+"gpuMsP50": 8.506708545610309,
+"passP50": {
+"Shadow": 0.529,
+"GIAccel": 0.289,
+"GIShadow": 1.688,
+"GIProbes": 0.094,
+"SSAO": 4.036,
+"Scene": 0.13,
+"Bloom": 0.508,
+"Tonemap": 0.255,
+"Present": 0.68
+},
+"counters": {
+"draws": 5,
+"lights": 2,
+"tris": 17408,
+"visible": 2
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-down3-water-r1": {
+"size": "2840x1528",
+"fps": 42.39764778049105,
+"cpuMsP50": 24.687040999999997,
+"gpuMsP50": 16.89908350817859,
+"passP50": {
+"Shadow": 0.363,
+"GIAccel": 0.207,
+"GIShadow": 0.766,
+"GIProbes": 0.068,
+"SSAO": 2.23,
+"Scene": 11.69,
+"Bloom": 0.407,
+"Tonemap": 0.19,
+"Present": 0.427
+},
+"counters": {
+"draws": 6,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-down3-water-r2": {
+"size": "2840x1528",
+"fps": 40.77726364595269,
+"cpuMsP50": 25.036333,
+"gpuMsP50": 17.148125218227506,
+"passP50": {
+"Shadow": 0.326,
+"GIAccel": 0.195,
+"GIShadow": 0.754,
+"GIProbes": 0.062,
+"SSAO": 2.285,
+"Scene": 12.045,
+"Bloom": 0.391,
+"Tonemap": 0.186,
+"Present": 0.411
+},
+"counters": {
+"draws": 6,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-down3-water-r3": {
+"size": "2840x1528",
+"fps": 44.089600865033425,
+"cpuMsP50": 23.508875,
+"gpuMsP50": 16.34483365342021,
+"passP50": {
+"Shadow": 0.339,
+"GIAccel": 0.192,
+"GIShadow": 0.738,
+"GIProbes": 0.06,
+"SSAO": 2.093,
+"Scene": 11.389,
+"Bloom": 0.394,
+"Tonemap": 0.179,
+"Present": 0.41
+},
+"counters": {
+"draws": 6,
+"lights": 2,
+"tris": 27291,
+"visible": 3
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.9",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-far-nowater-r1": {
+"size": "2840x1528",
+"fps": 36.89786848168062,
+"cpuMsP50": 26.804917,
+"gpuMsP50": 9.3450837302953,
+"passP50": {
+"Shadow": 0.793,
+"GIAccel": 0.361,
+"GIShadow": 1.676,
+"GIProbes": 0.116,
+"SSAO": 3.194,
+"Scene": 0.453,
+"Bloom": 0.651,
+"Tonemap": 0.324,
+"Present": 0.819
+},
+"counters": {
+"draws": 19,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-far-nowater-r2": {
+"size": "2840x1528",
+"fps": 38.500735965906884,
+"cpuMsP50": 25.530375,
+"gpuMsP50": 10.072667384520173,
+"passP50": {
+"Shadow": 0.785,
+"GIAccel": 0.375,
+"GIShadow": 1.696,
+"GIProbes": 0.106,
+"SSAO": 3.759,
+"Scene": 0.456,
+"Bloom": 0.653,
+"Tonemap": 0.325,
+"Present": 0.821
+},
+"counters": {
+"draws": 19,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-far-nowater-r3": {
+"size": "2840x1528",
+"fps": 40.608408914354364,
+"cpuMsP50": 24.519541999999998,
+"gpuMsP50": 9.344957768917084,
+"passP50": {
+"Shadow": 0.803,
+"GIAccel": 0.362,
+"GIShadow": 1.997,
+"GIProbes": 0.103,
+"SSAO": 3.279,
+"Scene": 0.45,
+"Bloom": 0.653,
+"Tonemap": 0.324,
+"Present": 0.811
+},
+"counters": {
+"draws": 19,
+"lights": 2,
+"tris": 139264,
+"visible": 16
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-far-water-r1": {
+"size": "2840x1528",
+"fps": 34.08657018975082,
+"cpuMsP50": 28.932541999999998,
+"gpuMsP50": 11.726916301995516,
+"passP50": {
+"Shadow": 0.843,
+"GIAccel": 0.384,
+"GIShadow": 2.018,
+"GIProbes": 0.13,
+"SSAO": 4.173,
+"Scene": 1.576,
+"Bloom": 0.668,
+"Tonemap": 0.329,
+"Present": 0.833
+},
+"counters": {
+"draws": 20,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-far-water-r2": {
+"size": "2840x1528",
+"fps": 33.54424604334838,
+"cpuMsP50": 29.635583999999998,
+"gpuMsP50": 12.024541618302464,
+"passP50": {
+"Shadow": 0.865,
+"GIAccel": 0.394,
+"GIShadow": 2.165,
+"GIProbes": 0.13,
+"SSAO": 4.217,
+"Scene": 1.657,
+"Bloom": 0.91,
+"Tonemap": 0.34,
+"Present": 0.985
+},
+"counters": {
+"draws": 20,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-far-water-r3": {
+"size": "2840x1528",
+"fps": 34.201265235011476,
+"cpuMsP50": 29.307582999999997,
+"gpuMsP50": 12.88108341395855,
+"passP50": {
+"Shadow": 0.828,
+"GIAccel": 0.487,
+"GIShadow": 2.154,
+"GIProbes": 0.128,
+"SSAO": 4.467,
+"Scene": 1.824,
+"Bloom": 0.917,
+"Tonemap": 0.464,
+"Present": 1.065
+},
+"counters": {
+"draws": 20,
+"lights": 2,
+"tris": 149147,
+"visible": 17
+},
+"scene": "plain_lake.hescene",
+"cam": "0,10,-250,3.14159,-0.05",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-near3-nowater-r1": {
+"size": "2840x1528",
+"fps": 42.821869284038904,
+"cpuMsP50": 23.307333,
+"gpuMsP50": 8.521500276401639,
+"passP50": {
+"Shadow": 0.642,
+"GIAccel": 0.332,
+"GIShadow": 1.503,
+"GIProbes": 0.103,
+"SSAO": 3.309,
+"Scene": 0.349,
+"Bloom": 0.634,
+"Tonemap": 0.32,
+"Present": 0.741
+},
+"counters": {
+"draws": 13,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-near3-nowater-r2": {
+"size": "2840x1528",
+"fps": 44.20569071572453,
+"cpuMsP50": 22.991625,
+"gpuMsP50": 9.093958185985684,
+"passP50": {
+"Shadow": 0.742,
+"GIAccel": 0.348,
+"GIShadow": 1.636,
+"GIProbes": 0.114,
+"SSAO": 3.393,
+"Scene": 0.361,
+"Bloom": 0.648,
+"Tonemap": 0.323,
+"Present": 0.754
+},
+"counters": {
+"draws": 13,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-near3-nowater-r3": {
+"size": "2840x1528",
+"fps": 38.9648306287542,
+"cpuMsP50": 25.249958,
+"gpuMsP50": 9.326791390776634,
+"passP50": {
+"Shadow": 0.798,
+"GIAccel": 0.36,
+"GIShadow": 1.587,
+"GIProbes": 0.124,
+"SSAO": 3.385,
+"Scene": 0.37,
+"Bloom": 0.653,
+"Tonemap": 0.323,
+"Present": 0.813
+},
+"counters": {
+"draws": 13,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-near3-water-r1": {
+"size": "2840x1528",
+"fps": 29.145781811258544,
+"cpuMsP50": 34.67675,
+"gpuMsP50": 19.42524965852499,
+"passP50": {
+"Shadow": 0.582,
+"GIAccel": 0.288,
+"GIShadow": 1.076,
+"GIProbes": 0.088,
+"SSAO": 2.611,
+"Scene": 12.114,
+"Bloom": 0.607,
+"Tonemap": 0.312,
+"Present": 0.701
+},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-near3-water-r2": {
+"size": "2840x1528",
+"fps": 28.299039843731162,
+"cpuMsP50": 35.543875,
+"gpuMsP50": 19.733082968741655,
+"passP50": {
+"Shadow": 0.594,
+"GIAccel": 0.288,
+"GIShadow": 1.099,
+"GIProbes": 0.09,
+"SSAO": 2.733,
+"Scene": 12.416,
+"Bloom": 0.64,
+"Tonemap": 0.313,
+"Present": 0.72
+},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-live-det-near3-water-r3": {
+"size": "2840x1528",
+"fps": 29.669315487451186,
+"cpuMsP50": 33.999874999999996,
+"gpuMsP50": 19.091041991487145,
+"passP50": {
+"Shadow": 0.555,
+"GIAccel": 0.285,
+"GIShadow": 1.077,
+"GIProbes": 0.085,
+"SSAO": 2.615,
+"Scene": 12.074,
+"Bloom": 0.605,
+"Tonemap": 0.313,
+"Present": 0.674
+},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"player-refl-near3-nowater-r1": {
+"size": "2840x1528",
+"fps": 59.63817617083815,
+"cpuMsP50": 11.899167,
+"gpuMsP50": 8.775708498433232,
+"passP50": {},
+"counters": {
+"draws": 13,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-near3-nowater-r2": {
+"size": "2840x1528",
+"fps": 69.35401825417118,
+"cpuMsP50": 12.513708999999999,
+"gpuMsP50": 9.022625163197517,
+"passP50": {},
+"counters": {
+"draws": 13,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-near3-nowater-r3": {
+"size": "2840x1528",
+"fps": 67.46345096008258,
+"cpuMsP50": 12.792083,
+"gpuMsP50": 9.73462499678135,
+"passP50": {},
+"counters": {
+"draws": 13,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "lake_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-near3-water-r1": {
+"size": "2840x1528",
+"fps": 61.10678093434505,
+"cpuMsP50": 11.905375,
+"gpuMsP50": 8.51524993777275,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-near3-water-r2": {
+"size": "2840x1528",
+"fps": 63.626331154812846,
+"cpuMsP50": 12.863541,
+"gpuMsP50": 9.092666674405336,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"player-refl-near3-water-r3": {
+"size": "2840x1528",
+"fps": 67.0478918728501,
+"cpuMsP50": 12.85075,
+"gpuMsP50": 8.958499878644943,
+"passP50": {},
+"counters": {
+"draws": 14,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"GlobalIlluminationEnabled=true",
+"OcclusionCulling=true",
+"GIReflectionsEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-deferred-r1": {
+"size": "2840x1528",
+"fps": 38.05525802149658,
+"cpuMsP50": 10.441917,
+"gpuMsP50": 7.047124905511737,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-deferred-r2": {
+"size": "2840x1528",
+"fps": 38.357360307503086,
+"cpuMsP50": 12.137583,
+"gpuMsP50": 7.345166755840182,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-deferred-r3": {
+"size": "2840x1528",
+"fps": 38.07650225143885,
+"cpuMsP50": 11.425542,
+"gpuMsP50": 7.0247498806566,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-gi-deferred-r1": {
+"size": "2840x1528",
+"fps": 37.8810165941061,
+"cpuMsP50": 10.29725,
+"gpuMsP50": 10.24166657589376,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"GlobalIlluminationEnabled=true",
+"RenderPath=1"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-gi-deferred-r2": {
+"size": "2840x1528",
+"fps": 38.30143446658009,
+"cpuMsP50": 11.480291999999999,
+"gpuMsP50": 9.058374911546707,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"GlobalIlluminationEnabled=true",
+"RenderPath=1"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-gi-deferred-r3": {
+"size": "2840x1528",
+"fps": 37.3574256256324,
+"cpuMsP50": 12.664625,
+"gpuMsP50": 10.532541666179895,
+"passP50": {},
+"counters": {
+"draws": 12,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"GlobalIlluminationEnabled=true",
+"RenderPath=1"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-gi-r1": {
+"size": "2840x1528",
+"fps": 37.955229105794615,
+"cpuMsP50": 11.114457999999999,
+"gpuMsP50": 7.94608355499804,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"GlobalIlluminationEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-gi-r2": {
+"size": "2840x1528",
+"fps": 37.34136388233915,
+"cpuMsP50": 10.220165999999999,
+"gpuMsP50": 9.584666462615132,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"GlobalIlluminationEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-gi-r3": {
+"size": "2840x1528",
+"fps": 38.33261731358066,
+"cpuMsP50": 12.667,
+"gpuMsP50": 8.1172501668334,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"GlobalIlluminationEnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-ssao-off-r1": {
+"size": "2840x1528",
+"fps": 37.39085063952533,
+"cpuMsP50": 12.251999999999999,
+"gpuMsP50": 7.826791610568762,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"SSAOEnabled=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-ssao-off-r2": {
+"size": "2840x1528",
+"fps": 38.42363817782938,
+"cpuMsP50": 11.451708,
+"gpuMsP50": 7.559624966233969,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"SSAOEnabled=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-ssao-off-r3": {
+"size": "2840x1528",
+"fps": 38.74389233208758,
+"cpuMsP50": 10.625542,
+"gpuMsP50": 7.8447917476296425,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"SSAOEnabled=false"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-ssr-deferred-r1": {
+"size": "2840x1528",
+"fps": 37.55428394306968,
+"cpuMsP50": 11.938374999999999,
+"gpuMsP50": 11.524749919772148,
+"passP50": {},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"SSREnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-ssr-deferred-r2": {
+"size": "2840x1528",
+"fps": 40.034603366620246,
+"cpuMsP50": 9.618041999999999,
+"gpuMsP50": 13.455000007525086,
+"passP50": {},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"SSREnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-ssr-deferred-r3": {
+"size": "2840x1528",
+"fps": 37.23984426901667,
+"cpuMsP50": 11.016083,
+"gpuMsP50": 9.630375076085329,
+"passP50": {},
+"counters": {
+"draws": 18,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderPath=1",
+"SSREnabled=true"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-taa-r1": {
+"size": "2840x1528",
+"fps": 37.72255228998103,
+"cpuMsP50": 11.967082999999999,
+"gpuMsP50": 7.962999865412712,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"AntiAliasing=3"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-taa-r2": {
+"size": "2840x1528",
+"fps": 38.03889095918575,
+"cpuMsP50": 11.282,
+"gpuMsP50": 9.28874989040196,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"AntiAliasing=3"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"settings-taa-r3": {
+"size": "2840x1528",
+"fps": 37.37180771467963,
+"cpuMsP50": 12.819958999999999,
+"gpuMsP50": 9.42512508481741,
+"passP50": {},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"AntiAliasing=3"
+],
+"env": [],
+"counters_on": false,
+"frames": 400
+},
+"variants-live-det-noasset-r1": {
+"size": "2840x1528",
+"fps": 76.90204598228323,
+"cpuMsP50": 10.509292,
+"gpuMsP50": 6.8542498629540205,
+"passP50": {
+"Shadow": 0.786,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.431,
+"Scene": 2.181,
+"Bloom": 0.91,
+"Tonemap": 0.46,
+"Present": 1.063
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-noasset-r2": {
+"size": "2840x1528",
+"fps": 77.74001934663849,
+"cpuMsP50": 11.380167,
+"gpuMsP50": 6.857541855424643,
+"passP50": {
+"Shadow": 0.784,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.432,
+"Scene": 2.182,
+"Bloom": 0.912,
+"Tonemap": 0.46,
+"Present": 1.064
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-noasset-r3": {
+"size": "2840x1528",
+"fps": 76.90657390559014,
+"cpuMsP50": 11.603708,
+"gpuMsP50": 7.157208397984505,
+"passP50": {
+"Shadow": 0.817,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.441,
+"Scene": 2.202,
+"Bloom": 0.916,
+"Tonemap": 0.462,
+"Present": 1.069
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nocaus-r1": {
+"size": "2840x1528",
+"fps": 53.78715510889903,
+"cpuMsP50": 18.59425,
+"gpuMsP50": 14.681125059723854,
+"passP50": {
+"Shadow": 0.528,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.779,
+"Scene": 11.261,
+"Bloom": 0.564,
+"Tonemap": 0.312,
+"Present": 0.597
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nocaus-r2": {
+"size": "2840x1528",
+"fps": 58.07032636238969,
+"cpuMsP50": 17.04875,
+"gpuMsP50": 13.3134585339576,
+"passP50": {
+"Shadow": 0.415,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.765,
+"Scene": 10.502,
+"Bloom": 0.502,
+"Tonemap": 0.297,
+"Present": 0.569
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nocaus-r3": {
+"size": "2840x1528",
+"fps": 56.30441459317355,
+"cpuMsP50": 18.825916,
+"gpuMsP50": 14.654916943982244,
+"passP50": {
+"Shadow": 0.541,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.773,
+"Scene": 11.101,
+"Bloom": 0.561,
+"Tonemap": 0.313,
+"Present": 0.674
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nochop-r1": {
+"size": "2840x1528",
+"fps": 60.862358088327156,
+"cpuMsP50": 15.946499999999999,
+"gpuMsP50": 12.31670775450766,
+"passP50": {
+"Shadow": 0.548,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.998,
+"Scene": 8.587,
+"Bloom": 0.637,
+"Tonemap": 0.35,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nochop-r2": {
+"size": "2840x1528",
+"fps": 61.94639140073775,
+"cpuMsP50": 15.757957999999999,
+"gpuMsP50": 12.308750301599503,
+"passP50": {
+"Shadow": 0.541,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.992,
+"Scene": 8.55,
+"Bloom": 0.636,
+"Tonemap": 0.35,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nochop-r3": {
+"size": "2840x1528",
+"fps": 58.05179508992475,
+"cpuMsP50": 17.158208,
+"gpuMsP50": 13.734499923884869,
+"passP50": {
+"Shadow": 0.543,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.004,
+"Scene": 9.16,
+"Bloom": 0.664,
+"Tonemap": 0.351,
+"Present": 0.742
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofine-r1": {
+"size": "2840x1528",
+"fps": 57.13825275858165,
+"cpuMsP50": 17.226542,
+"gpuMsP50": 13.393041910603642,
+"passP50": {
+"Shadow": 0.542,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.859,
+"Scene": 9.978,
+"Bloom": 0.608,
+"Tonemap": 0.301,
+"Present": 0.722
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofine-r2": {
+"size": "2840x1528",
+"fps": 59.052884866064076,
+"cpuMsP50": 17.029667,
+"gpuMsP50": 13.394958339631557,
+"passP50": {
+"Shadow": 0.569,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.986,
+"Scene": 9.552,
+"Bloom": 0.636,
+"Tonemap": 0.369,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofine-r3": {
+"size": "2840x1528",
+"fps": 57.482019009414174,
+"cpuMsP50": 18.612624999999998,
+"gpuMsP50": 14.34320816770196,
+"passP50": {
+"Shadow": 0.553,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.993,
+"Scene": 10.709,
+"Bloom": 0.641,
+"Tonemap": 0.37,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofiner-r1": {
+"size": "2840x1528",
+"fps": 57.33437211420603,
+"cpuMsP50": 18.067375,
+"gpuMsP50": 14.152666786685586,
+"passP50": {
+"Shadow": 0.468,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.767,
+"Scene": 10.766,
+"Bloom": 0.548,
+"Tonemap": 0.301,
+"Present": 0.593
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofiner-r2": {
+"size": "2840x1528",
+"fps": 61.451237189637695,
+"cpuMsP50": 16.497,
+"gpuMsP50": 13.061249628663063,
+"passP50": {
+"Shadow": 0.418,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.758,
+"Scene": 10.027,
+"Bloom": 0.494,
+"Tonemap": 0.294,
+"Present": 0.567
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofiner-r3": {
+"size": "2840x1528",
+"fps": 56.891747781282675,
+"cpuMsP50": 18.093208,
+"gpuMsP50": 14.038499910384417,
+"passP50": {
+"Shadow": 0.522,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.771,
+"Scene": 10.461,
+"Bloom": 0.541,
+"Tonemap": 0.31,
+"Present": 0.606
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofoam-r1": {
+"size": "2840x1528",
+"fps": 52.86267596169751,
+"cpuMsP50": 18.72475,
+"gpuMsP50": 14.785249950364232,
+"passP50": {
+"Shadow": 0.556,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.807,
+"Scene": 11.212,
+"Bloom": 0.637,
+"Tonemap": 0.383,
+"Present": 0.74
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofoam-r2": {
+"size": "2840x1528",
+"fps": 56.38955148918028,
+"cpuMsP50": 17.829625,
+"gpuMsP50": 14.189166715368629,
+"passP50": {
+"Shadow": 0.551,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.776,
+"Scene": 10.601,
+"Bloom": 0.559,
+"Tonemap": 0.312,
+"Present": 0.69
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nofoam-r3": {
+"size": "2840x1528",
+"fps": 57.952627905305825,
+"cpuMsP50": 18.075291999999997,
+"gpuMsP50": 14.058250002563,
+"passP50": {
+"Shadow": 0.558,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.776,
+"Scene": 10.343,
+"Bloom": 0.562,
+"Tonemap": 0.314,
+"Present": 0.693
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-noshore-r1": {
+"size": "2840x1528",
+"fps": 60.21096101492337,
+"cpuMsP50": 17.357542,
+"gpuMsP50": 13.634291710332036,
+"passP50": {
+"Shadow": 0.421,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.764,
+"Scene": 10.771,
+"Bloom": 0.492,
+"Tonemap": 0.296,
+"Present": 0.568
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-noshore-r2": {
+"size": "2840x1528",
+"fps": 61.274910128200354,
+"cpuMsP50": 17.207167,
+"gpuMsP50": 13.818333391100168,
+"passP50": {
+"Shadow": 0.416,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.765,
+"Scene": 10.659,
+"Bloom": 0.491,
+"Tonemap": 0.296,
+"Present": 0.568
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-noshore-r3": {
+"size": "2840x1528",
+"fps": 53.5175755904977,
+"cpuMsP50": 18.943042,
+"gpuMsP50": 14.80049965903163,
+"passP50": {
+"Shadow": 0.575,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.768,
+"Scene": 11.485,
+"Bloom": 0.546,
+"Tonemap": 0.313,
+"Present": 0.602
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nounder-r1": {
+"size": "2840x1528",
+"fps": 55.883290525888555,
+"cpuMsP50": 18.324082999999998,
+"gpuMsP50": 14.473541174083948,
+"passP50": {
+"Shadow": 0.485,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.774,
+"Scene": 11.006,
+"Bloom": 0.595,
+"Tonemap": 0.313,
+"Present": 0.617
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nounder-r2": {
+"size": "2840x1528",
+"fps": 60.10396843825121,
+"cpuMsP50": 17.082583,
+"gpuMsP50": 13.354999711737037,
+"passP50": {
+"Shadow": 0.414,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.768,
+"Scene": 10.444,
+"Bloom": 0.496,
+"Tonemap": 0.296,
+"Present": 0.568
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nounder-r3": {
+"size": "2840x1528",
+"fps": 62.45853918973882,
+"cpuMsP50": 17.563834,
+"gpuMsP50": 13.484083581715822,
+"passP50": {
+"Shadow": 0.484,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.766,
+"Scene": 10.372,
+"Bloom": 0.54,
+"Tonemap": 0.311,
+"Present": 0.596
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nowater-r1": {
+"size": "2840x1528",
+"fps": 76.7918685726695,
+"cpuMsP50": 12.046249999999999,
+"gpuMsP50": 7.42608355358243,
+"passP50": {
+"Shadow": 1.041,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.428,
+"Scene": 2.397,
+"Bloom": 0.922,
+"Tonemap": 0.462,
+"Present": 1.111
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nowater-r2": {
+"size": "2840x1528",
+"fps": 76.5647306592324,
+"cpuMsP50": 11.943666,
+"gpuMsP50": 7.427333388477564,
+"passP50": {
+"Shadow": 1.049,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.423,
+"Scene": 2.401,
+"Bloom": 0.921,
+"Tonemap": 0.462,
+"Present": 1.107
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-nowater-r3": {
+"size": "2840x1528",
+"fps": 78.07499316382788,
+"cpuMsP50": 11.881958,
+"gpuMsP50": 7.378541864454746,
+"passP50": {
+"Shadow": 1.018,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.418,
+"Scene": 2.396,
+"Bloom": 0.919,
+"Tonemap": 0.462,
+"Present": 1.102
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-noasset-r1": {
+"size": "2840x1528",
+"fps": 55.605491312639,
+"cpuMsP50": 18.362416,
+"gpuMsP50": 14.943291898816824,
+"passP50": {
+"Shadow": 0.564,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.512,
+"Scene": 5.392,
+"Bloom": 2.199,
+"Tonemap": 0.772,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-noasset-r2": {
+"size": "2840x1528",
+"fps": 51.42002484809074,
+"cpuMsP50": 19.551790999999998,
+"gpuMsP50": 15.49575012177229,
+"passP50": {
+"Shadow": 0.656,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.519,
+"Scene": 5.569,
+"Bloom": 2.463,
+"Tonemap": 0.852,
+"Present": 0.757
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-noasset-r3": {
+"size": "2840x1528",
+"fps": 51.58202647894905,
+"cpuMsP50": 20.028834,
+"gpuMsP50": 15.445333207026124,
+"passP50": {
+"Shadow": 0.676,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.518,
+"Scene": 5.612,
+"Bloom": 2.476,
+"Tonemap": 0.851,
+"Present": 0.806
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nocaus-r1": {
+"size": "2840x1528",
+"fps": 41.92802915138369,
+"cpuMsP50": 23.724916999999998,
+"gpuMsP50": 20.26133332401514,
+"passP50": {
+"Shadow": 0.215,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.157,
+"Scene": 17.391,
+"Bloom": 0.835,
+"Tonemap": 0.35,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nocaus-r2": {
+"size": "2840x1528",
+"fps": 42.014144335785396,
+"cpuMsP50": 23.778040999999998,
+"gpuMsP50": 20.37183358334005,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.157,
+"Scene": 17.357,
+"Bloom": 0.838,
+"Tonemap": 0.351,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nocaus-r3": {
+"size": "2840x1528",
+"fps": 42.0861625867553,
+"cpuMsP50": 23.734083,
+"gpuMsP50": 20.394416293129325,
+"passP50": {
+"Shadow": 0.218,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.158,
+"Scene": 17.472,
+"Bloom": 0.83,
+"Tonemap": 0.356,
+"Present": 0.257
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nochop-r1": {
+"size": "2840x1528",
+"fps": 53.73347072135179,
+"cpuMsP50": 18.500667,
+"gpuMsP50": 14.98737488873303,
+"passP50": {
+"Shadow": 0.225,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.24,
+"Scene": 11.798,
+"Bloom": 0.862,
+"Tonemap": 0.346,
+"Present": 0.274
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nochop-r2": {
+"size": "2840x1528",
+"fps": 53.72377432699048,
+"cpuMsP50": 18.273584,
+"gpuMsP50": 14.546875143423676,
+"passP50": {
+"Shadow": 0.223,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.198,
+"Scene": 11.676,
+"Bloom": 0.836,
+"Tonemap": 0.352,
+"Present": 0.261
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nochop-r3": {
+"size": "2840x1528",
+"fps": 53.18546750369406,
+"cpuMsP50": 18.544166999999998,
+"gpuMsP50": 14.74433345720172,
+"passP50": {
+"Shadow": 0.224,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.241,
+"Scene": 11.62,
+"Bloom": 0.858,
+"Tonemap": 0.345,
+"Present": 0.274
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofine-r1": {
+"size": "2840x1528",
+"fps": 47.66258789557498,
+"cpuMsP50": 20.882375,
+"gpuMsP50": 17.566708382219076,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.151,
+"Scene": 14.334,
+"Bloom": 0.82,
+"Tonemap": 0.345,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofine-r2": {
+"size": "2840x1528",
+"fps": 47.6469088076299,
+"cpuMsP50": 20.855041,
+"gpuMsP50": 17.628041794523597,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.156,
+"Scene": 14.327,
+"Bloom": 0.823,
+"Tonemap": 0.348,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofine-r3": {
+"size": "2840x1528",
+"fps": 47.55025348183675,
+"cpuMsP50": 21.098542,
+"gpuMsP50": 17.63083366677165,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 14.304,
+"Bloom": 0.827,
+"Tonemap": 0.341,
+"Present": 0.254
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofiner-r1": {
+"size": "2840x1528",
+"fps": 42.57299847058129,
+"cpuMsP50": 23.434625,
+"gpuMsP50": 19.970416789874434,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.156,
+"Scene": 17.063,
+"Bloom": 0.832,
+"Tonemap": 0.35,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofiner-r2": {
+"size": "2840x1528",
+"fps": 42.77944730886627,
+"cpuMsP50": 23.440542,
+"gpuMsP50": 20.104082766920328,
+"passP50": {
+"Shadow": 0.217,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.152,
+"Scene": 17.179,
+"Bloom": 0.828,
+"Tonemap": 0.355,
+"Present": 0.257
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofiner-r3": {
+"size": "2840x1528",
+"fps": 42.68453323210733,
+"cpuMsP50": 23.48875,
+"gpuMsP50": 20.031417021527886,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.154,
+"Scene": 16.984,
+"Bloom": 0.831,
+"Tonemap": 0.352,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofoam-r1": {
+"size": "2840x1528",
+"fps": 43.619669448629075,
+"cpuMsP50": 22.915333999999998,
+"gpuMsP50": 19.579207990318537,
+"passP50": {
+"Shadow": 0.216,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 16.45,
+"Bloom": 0.831,
+"Tonemap": 0.352,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofoam-r2": {
+"size": "2840x1528",
+"fps": 42.987361934789845,
+"cpuMsP50": 23.156042,
+"gpuMsP50": 19.72108311019838,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.155,
+"Scene": 16.734,
+"Bloom": 0.838,
+"Tonemap": 0.349,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nofoam-r3": {
+"size": "2840x1528",
+"fps": 43.30966879166686,
+"cpuMsP50": 23.132917,
+"gpuMsP50": 19.68716667033732,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 16.44,
+"Bloom": 0.835,
+"Tonemap": 0.353,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-noshore-r1": {
+"size": "2840x1528",
+"fps": 39.91815485024778,
+"cpuMsP50": 24.993499999999997,
+"gpuMsP50": 21.608375012874603,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.151,
+"Scene": 18.759,
+"Bloom": 0.831,
+"Tonemap": 0.355,
+"Present": 0.257
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-noshore-r2": {
+"size": "2840x1528",
+"fps": 39.78113313121214,
+"cpuMsP50": 25.082874999999998,
+"gpuMsP50": 21.661833627149463,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.155,
+"Scene": 18.823,
+"Bloom": 0.83,
+"Tonemap": 0.353,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-noshore-r3": {
+"size": "2840x1528",
+"fps": 39.654867178670905,
+"cpuMsP50": 25.217208,
+"gpuMsP50": 21.732124965637922,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.152,
+"Scene": 18.873,
+"Bloom": 0.838,
+"Tonemap": 0.35,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nounder-r1": {
+"size": "2840x1528",
+"fps": 42.940966004432674,
+"cpuMsP50": 23.305708,
+"gpuMsP50": 19.805458607152104,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.156,
+"Scene": 16.89,
+"Bloom": 0.836,
+"Tonemap": 0.353,
+"Present": 0.257
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nounder-r2": {
+"size": "2840x1528",
+"fps": 43.00885688023598,
+"cpuMsP50": 23.152834,
+"gpuMsP50": 19.786000018939376,
+"passP50": {
+"Shadow": 0.215,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.152,
+"Scene": 16.879,
+"Bloom": 0.834,
+"Tonemap": 0.355,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nounder-r3": {
+"size": "2840x1528",
+"fps": 42.91007057038222,
+"cpuMsP50": 23.278375,
+"gpuMsP50": 19.87525005824864,
+"passP50": {
+"Shadow": 0.215,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.154,
+"Scene": 16.885,
+"Bloom": 0.835,
+"Tonemap": 0.355,
+"Present": 0.257
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nowater-r1": {
+"size": "2840x1528",
+"fps": 49.69674744662617,
+"cpuMsP50": 20.902084,
+"gpuMsP50": 16.356458887457848,
+"passP50": {
+"Shadow": 0.718,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.505,
+"Scene": 6.033,
+"Bloom": 2.454,
+"Tonemap": 0.846,
+"Present": 0.805
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nowater-r2": {
+"size": "2840x1528",
+"fps": 58.04908194104803,
+"cpuMsP50": 16.908791,
+"gpuMsP50": 13.267792062833905,
+"passP50": {
+"Shadow": 0.568,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.484,
+"Scene": 4.999,
+"Bloom": 2.071,
+"Tonemap": 0.77,
+"Present": 0.741
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-nowater-r3": {
+"size": "2840x1528",
+"fps": 53.42812192075536,
+"cpuMsP50": 18.623458,
+"gpuMsP50": 14.72024992108345,
+"passP50": {
+"Shadow": 0.679,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.504,
+"Scene": 5.649,
+"Bloom": 2.279,
+"Tonemap": 0.791,
+"Present": 0.752
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-regen-r1": {
+"size": "2840x1528",
+"fps": 39.840815467374696,
+"cpuMsP50": 25.019125,
+"gpuMsP50": 21.58620860427618,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.155,
+"Scene": 18.761,
+"Bloom": 0.829,
+"Tonemap": 0.351,
+"Present": 0.257
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-regen-r2": {
+"size": "2840x1528",
+"fps": 39.59860333419743,
+"cpuMsP50": 25.206542,
+"gpuMsP50": 21.72487461939454,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.149,
+"Scene": 18.881,
+"Bloom": 0.834,
+"Tonemap": 0.347,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-regen-r3": {
+"size": "2840x1528",
+"fps": 39.68441233702409,
+"cpuMsP50": 25.193042,
+"gpuMsP50": 21.71966712921858,
+"passP50": {
+"Shadow": 0.213,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 18.891,
+"Bloom": 0.832,
+"Tonemap": 0.355,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-shipped-r1": {
+"size": "2840x1528",
+"fps": 39.37694680846688,
+"cpuMsP50": 25.178874999999998,
+"gpuMsP50": 21.64412452839315,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.145,
+"Scene": 18.821,
+"Bloom": 0.834,
+"Tonemap": 0.347,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-shipped-r2": {
+"size": "2840x1528",
+"fps": 39.812487282642124,
+"cpuMsP50": 25.147707999999998,
+"gpuMsP50": 21.695333532989025,
+"passP50": {
+"Shadow": 0.212,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.152,
+"Scene": 18.801,
+"Bloom": 0.834,
+"Tonemap": 0.352,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-shipped-r3": {
+"size": "2840x1528",
+"fps": 39.77853482929646,
+"cpuMsP50": 25.119583,
+"gpuMsP50": 21.727875107899308,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.149,
+"Scene": 18.812,
+"Bloom": 0.832,
+"Tonemap": 0.356,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-trivial-r1": {
+"size": "2840x1528",
+"fps": 46.91264100013047,
+"cpuMsP50": 21.254625,
+"gpuMsP50": 17.66433333978057,
+"passP50": {
+"Shadow": 0.212,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 14.707,
+"Bloom": 0.771,
+"Tonemap": 0.304,
+"Present": 0.251
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-trivial-r2": {
+"size": "2840x1528",
+"fps": 47.25590988130298,
+"cpuMsP50": 20.965291,
+"gpuMsP50": 17.67620863392949,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 14.562,
+"Bloom": 0.77,
+"Tonemap": 0.306,
+"Present": 0.251
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-s2-trivial-r3": {
+"size": "2840x1528",
+"fps": 47.37715395853306,
+"cpuMsP50": 21.005333,
+"gpuMsP50": 17.669750144705176,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.154,
+"Scene": 14.512,
+"Bloom": 0.77,
+"Tonemap": 0.307,
+"Present": 0.252
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-shipped-r1": {
+"size": "2840x1528",
+"fps": 54.48332661453661,
+"cpuMsP50": 18.141583,
+"gpuMsP50": 14.39895830117166,
+"passP50": {
+"Shadow": 0.417,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.767,
+"Scene": 11.389,
+"Bloom": 0.503,
+"Tonemap": 0.297,
+"Present": 0.569
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-shipped-r2": {
+"size": "2840x1528",
+"fps": 52.27652290869211,
+"cpuMsP50": 19.518333,
+"gpuMsP50": 15.002583153545856,
+"passP50": {
+"Shadow": 0.593,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.771,
+"Scene": 11.419,
+"Bloom": 0.559,
+"Tonemap": 0.313,
+"Present": 0.61
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants-live-det-shipped-r3": {
+"size": "2840x1528",
+"fps": 54.46464868333133,
+"cpuMsP50": 19.17025,
+"gpuMsP50": 14.523416524752975,
+"passP50": {
+"Shadow": 0.586,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.768,
+"Scene": 11.31,
+"Bloom": 0.545,
+"Tonemap": 0.314,
+"Present": 0.611
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-lean-r1": {
+"size": "2840x1528",
+"fps": 75.09104892447642,
+"cpuMsP50": 11.686791,
+"gpuMsP50": 7.262708153575659,
+"passP50": {
+"Shadow": 0.578,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.013,
+"Scene": 3.035,
+"Bloom": 0.636,
+"Tonemap": 0.322,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-lean-r2": {
+"size": "2840x1528",
+"fps": 75.33243251643974,
+"cpuMsP50": 11.455292,
+"gpuMsP50": 6.5020418260246515,
+"passP50": {
+"Shadow": 0.643,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.998,
+"Scene": 2.976,
+"Bloom": 0.635,
+"Tonemap": 0.321,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-lean-r3": {
+"size": "2840x1528",
+"fps": 74.12752070920413,
+"cpuMsP50": 11.166667,
+"gpuMsP50": 5.954541498795152,
+"passP50": {
+"Shadow": 0.601,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.784,
+"Scene": 2.594,
+"Bloom": 0.535,
+"Tonemap": 0.256,
+"Present": 0.732
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nochop-r1": {
+"size": "2840x1528",
+"fps": 58.2930095932774,
+"cpuMsP50": 18.152124999999998,
+"gpuMsP50": 13.708958169445395,
+"passP50": {
+"Shadow": 0.667,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.004,
+"Scene": 8.95,
+"Bloom": 0.671,
+"Tonemap": 0.355,
+"Present": 0.827
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nochop-r2": {
+"size": "2840x1528",
+"fps": 59.93999448266362,
+"cpuMsP50": 18.429417,
+"gpuMsP50": 13.942083343863487,
+"passP50": {
+"Shadow": 0.674,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.005,
+"Scene": 9.273,
+"Bloom": 0.688,
+"Tonemap": 0.355,
+"Present": 0.817
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nochop-r3": {
+"size": "2840x1528",
+"fps": 59.86284896505303,
+"cpuMsP50": 17.144417,
+"gpuMsP50": 13.357833260670304,
+"passP50": {
+"Shadow": 0.596,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.004,
+"Scene": 8.974,
+"Bloom": 0.64,
+"Tonemap": 0.351,
+"Present": 0.743
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nowater-r1": {
+"size": "2840x1528",
+"fps": 76.93803767941552,
+"cpuMsP50": 12.018457999999999,
+"gpuMsP50": 7.426166674122214,
+"passP50": {
+"Shadow": 1.036,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.429,
+"Scene": 2.397,
+"Bloom": 0.92,
+"Tonemap": 0.462,
+"Present": 1.108
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nowater-r2": {
+"size": "2840x1528",
+"fps": 80.33509807837596,
+"cpuMsP50": 11.460041,
+"gpuMsP50": 7.193792145699263,
+"passP50": {
+"Shadow": 0.787,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.428,
+"Scene": 2.392,
+"Bloom": 0.916,
+"Tonemap": 0.461,
+"Present": 1.065
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nowater-r3": {
+"size": "2840x1528",
+"fps": 77.57800861021076,
+"cpuMsP50": 11.836333,
+"gpuMsP50": 7.361291674897075,
+"passP50": {
+"Shadow": 1.003,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.417,
+"Scene": 2.398,
+"Bloom": 0.919,
+"Tonemap": 0.462,
+"Present": 1.102
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nowaves-r1": {
+"size": "2840x1528",
+"fps": 71.16103961569797,
+"cpuMsP50": 11.679708999999999,
+"gpuMsP50": 6.675166776403785,
+"passP50": {
+"Shadow": 0.576,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.76,
+"Scene": 4.034,
+"Bloom": 0.489,
+"Tonemap": 0.246,
+"Present": 0.573
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nowaves-r2": {
+"size": "2840x1528",
+"fps": 70.21914011133629,
+"cpuMsP50": 11.555959,
+"gpuMsP50": 6.277000065892935,
+"passP50": {
+"Shadow": 0.413,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.759,
+"Scene": 3.96,
+"Bloom": 0.486,
+"Tonemap": 0.246,
+"Present": 0.566
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-nowaves-r3": {
+"size": "2840x1528",
+"fps": 69.87222412841174,
+"cpuMsP50": 11.468,
+"gpuMsP50": 6.330916890874505,
+"passP50": {
+"Shadow": 0.564,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.756,
+"Scene": 3.795,
+"Bloom": 0.487,
+"Tonemap": 0.21,
+"Present": 0.553
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-lean-r1": {
+"size": "2840x1528",
+"fps": 48.549474990841915,
+"cpuMsP50": 20.574624999999997,
+"gpuMsP50": 15.949000138789415,
+"passP50": {
+"Shadow": 0.583,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 2.684,
+"Scene": 8.706,
+"Bloom": 1.907,
+"Tonemap": 0.712,
+"Present": 0.591
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-lean-r2": {
+"size": "2840x1528",
+"fps": 51.998708837015684,
+"cpuMsP50": 20.477541,
+"gpuMsP50": 16.122999833896756,
+"passP50": {
+"Shadow": 0.57,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 2.68,
+"Scene": 8.64,
+"Bloom": 1.845,
+"Tonemap": 0.671,
+"Present": 0.591
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-lean-r3": {
+"size": "2840x1528",
+"fps": 49.0048702611214,
+"cpuMsP50": 20.202792,
+"gpuMsP50": 15.884999884292483,
+"passP50": {
+"Shadow": 0.542,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 2.682,
+"Scene": 8.793,
+"Bloom": 1.846,
+"Tonemap": 0.641,
+"Present": 0.582
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nochop-r1": {
+"size": "2840x1528",
+"fps": 53.12361814614794,
+"cpuMsP50": 18.724415999999998,
+"gpuMsP50": 15.04274969920516,
+"passP50": {
+"Shadow": 0.229,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.243,
+"Scene": 11.883,
+"Bloom": 0.872,
+"Tonemap": 0.35,
+"Present": 0.276
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nochop-r2": {
+"size": "2840x1528",
+"fps": 54.9077801110518,
+"cpuMsP50": 18.009625,
+"gpuMsP50": 14.367666793987155,
+"passP50": {
+"Shadow": 0.219,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.161,
+"Scene": 11.522,
+"Bloom": 0.822,
+"Tonemap": 0.342,
+"Present": 0.259
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nochop-r3": {
+"size": "2840x1528",
+"fps": 53.080136206914055,
+"cpuMsP50": 18.816208,
+"gpuMsP50": 14.781874371692538,
+"passP50": {
+"Shadow": 0.228,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.243,
+"Scene": 11.682,
+"Bloom": 0.874,
+"Tonemap": 0.353,
+"Present": 0.274
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nowater-r1": {
+"size": "2840x1528",
+"fps": 56.62991411517692,
+"cpuMsP50": 17.518542,
+"gpuMsP50": 14.081291621550918,
+"passP50": {
+"Shadow": 0.546,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.489,
+"Scene": 5.641,
+"Bloom": 2.197,
+"Tonemap": 0.771,
+"Present": 0.741
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nowater-r2": {
+"size": "2840x1528",
+"fps": 54.204707686615905,
+"cpuMsP50": 19.662791,
+"gpuMsP50": 15.214083017781377,
+"passP50": {
+"Shadow": 0.686,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.499,
+"Scene": 5.668,
+"Bloom": 2.433,
+"Tonemap": 0.839,
+"Present": 0.767
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nowater-r3": {
+"size": "2840x1528",
+"fps": 48.48110006395635,
+"cpuMsP50": 20.690125,
+"gpuMsP50": 16.056042164564133,
+"passP50": {
+"Shadow": 0.715,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 3.508,
+"Scene": 6.014,
+"Bloom": 2.46,
+"Tonemap": 0.847,
+"Present": 0.818
+},
+"counters": {
+"draws": 10,
+"lights": 2,
+"tris": 87040,
+"visible": 10
+},
+"scene": "plain_nowater.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nowaves-r1": {
+"size": "2840x1528",
+"fps": 53.817629702075706,
+"cpuMsP50": 19.939916999999998,
+"gpuMsP50": 15.90999960899353,
+"passP50": {
+"Shadow": 0.35,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.915,
+"Scene": 10.904,
+"Bloom": 1.375,
+"Tonemap": 0.474,
+"Present": 0.419
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nowaves-r2": {
+"size": "2840x1528",
+"fps": 55.16493365193937,
+"cpuMsP50": 19.354457999999997,
+"gpuMsP50": 15.288958325982094,
+"passP50": {
+"Shadow": 0.349,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.876,
+"Scene": 10.561,
+"Bloom": 1.286,
+"Tonemap": 0.461,
+"Present": 0.41
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-nowaves-r3": {
+"size": "2840x1528",
+"fps": 62.60455131897099,
+"cpuMsP50": 16.095499999999998,
+"gpuMsP50": 13.112458633258939,
+"passP50": {
+"Shadow": 0.266,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.571,
+"Scene": 9.153,
+"Bloom": 1.055,
+"Tonemap": 0.377,
+"Present": 0.339
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-shipped-r1": {
+"size": "2840x1528",
+"fps": 39.837308286741425,
+"cpuMsP50": 25.027874999999998,
+"gpuMsP50": 21.57933358103037,
+"passP50": {
+"Shadow": 0.216,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.141,
+"Scene": 18.761,
+"Bloom": 0.832,
+"Tonemap": 0.351,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-shipped-r2": {
+"size": "2840x1528",
+"fps": 39.74356769245052,
+"cpuMsP50": 25.075416999999998,
+"gpuMsP50": 21.59808319993317,
+"passP50": {
+"Shadow": 0.212,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.15,
+"Scene": 18.737,
+"Bloom": 0.835,
+"Tonemap": 0.348,
+"Present": 0.255
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-shipped-r3": {
+"size": "2840x1528",
+"fps": 39.28578486150141,
+"cpuMsP50": 25.094583,
+"gpuMsP50": 21.600167034193873,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 18.742,
+"Bloom": 0.832,
+"Tonemap": 0.352,
+"Present": 0.256
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-trivial-r1": {
+"size": "2840x1528",
+"fps": 47.567592116900435,
+"cpuMsP50": 20.934625,
+"gpuMsP50": 17.652875278145075,
+"passP50": {
+"Shadow": 0.217,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.146,
+"Scene": 14.528,
+"Bloom": 0.768,
+"Tonemap": 0.305,
+"Present": 0.254
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-trivial-r2": {
+"size": "2840x1528",
+"fps": 47.34082605821161,
+"cpuMsP50": 21.046333999999998,
+"gpuMsP50": 17.75079104118049,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.154,
+"Scene": 14.793,
+"Bloom": 0.768,
+"Tonemap": 0.308,
+"Present": 0.252
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-trivial-r3": {
+"size": "2840x1528",
+"fps": 47.588049508397205,
+"cpuMsP50": 20.958416,
+"gpuMsP50": 17.638374818488955,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.153,
+"Scene": 14.505,
+"Bloom": 0.77,
+"Tonemap": 0.307,
+"Present": 0.252
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-unlit-r1": {
+"size": "2840x1528",
+"fps": 42.42796983486397,
+"cpuMsP50": 23.486957999999998,
+"gpuMsP50": 20.01312468200922,
+"passP50": {
+"Shadow": 0.212,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.141,
+"Scene": 17.171,
+"Bloom": 0.793,
+"Tonemap": 0.31,
+"Present": 0.251
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-unlit-r2": {
+"size": "2840x1528",
+"fps": 42.570191553319475,
+"cpuMsP50": 23.473333,
+"gpuMsP50": 20.09870787151158,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.156,
+"Scene": 17.179,
+"Bloom": 0.794,
+"Tonemap": 0.314,
+"Present": 0.252
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-unlit-r3": {
+"size": "2840x1528",
+"fps": 42.477884427226925,
+"cpuMsP50": 23.381874999999997,
+"gpuMsP50": 20.061750430613756,
+"passP50": {
+"Shadow": 0.214,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.149,
+"Scene": 17.21,
+"Bloom": 0.794,
+"Tonemap": 0.313,
+"Present": 0.252
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-waves-only-r1": {
+"size": "2840x1528",
+"fps": 57.12292987885682,
+"cpuMsP50": 19.351292,
+"gpuMsP50": 15.561041422188282,
+"passP50": {
+"Shadow": 0.335,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.724,
+"Scene": 10.869,
+"Bloom": 1.22,
+"Tonemap": 0.455,
+"Present": 0.376
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-waves-only-r2": {
+"size": "2840x1528",
+"fps": 62.12114446336461,
+"cpuMsP50": 14.898458999999999,
+"gpuMsP50": 11.443833587691188,
+"passP50": {
+"Shadow": 0.236,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.339,
+"Scene": 8.285,
+"Bloom": 0.951,
+"Tonemap": 0.37,
+"Present": 0.294
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-s2-waves-only-r3": {
+"size": "2840x1528",
+"fps": 57.63132839878441,
+"cpuMsP50": 18.114916,
+"gpuMsP50": 14.540166594088078,
+"passP50": {
+"Shadow": 0.277,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 1.713,
+"Scene": 10.589,
+"Bloom": 1.136,
+"Tonemap": 0.425,
+"Present": 0.37
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false",
+"RenderScale=2.0"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-shipped-r1": {
+"size": "2840x1528",
+"fps": 56.877446196809665,
+"cpuMsP50": 17.763832999999998,
+"gpuMsP50": 14.253833098337054,
+"passP50": {
+"Shadow": 0.419,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.767,
+"Scene": 11.194,
+"Bloom": 0.499,
+"Tonemap": 0.297,
+"Present": 0.568
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-shipped-r2": {
+"size": "2840x1528",
+"fps": 61.906360494348526,
+"cpuMsP50": 16.859208,
+"gpuMsP50": 13.36137531325221,
+"passP50": {
+"Shadow": 0.42,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.763,
+"Scene": 10.483,
+"Bloom": 0.494,
+"Tonemap": 0.297,
+"Present": 0.568
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-shipped-r3": {
+"size": "2840x1528",
+"fps": 51.50370870168981,
+"cpuMsP50": 20.167875,
+"gpuMsP50": 15.672208275645971,
+"passP50": {
+"Shadow": 0.601,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.771,
+"Scene": 11.918,
+"Bloom": 0.59,
+"Tonemap": 0.316,
+"Present": 0.697
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-trivial-r1": {
+"size": "2840x1528",
+"fps": 56.22392583987763,
+"cpuMsP50": 18.412083,
+"gpuMsP50": 13.957791263237596,
+"passP50": {
+"Shadow": 0.636,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.877,
+"Scene": 10.385,
+"Bloom": 0.636,
+"Tonemap": 0.321,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-trivial-r2": {
+"size": "2840x1528",
+"fps": 55.24376005288574,
+"cpuMsP50": 18.795749999999998,
+"gpuMsP50": 14.449750306084752,
+"passP50": {
+"Shadow": 0.63,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.992,
+"Scene": 10.618,
+"Bloom": 0.652,
+"Tonemap": 0.321,
+"Present": 0.743
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-trivial-r3": {
+"size": "2840x1528",
+"fps": 55.36203067067943,
+"cpuMsP50": 18.178375,
+"gpuMsP50": 14.437332982197404,
+"passP50": {
+"Shadow": 0.551,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.991,
+"Scene": 10.338,
+"Bloom": 0.635,
+"Tonemap": 0.321,
+"Present": 0.741
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-unlit-r1": {
+"size": "2840x1528",
+"fps": 51.54461419390367,
+"cpuMsP50": 19.360667,
+"gpuMsP50": 15.03795851022005,
+"passP50": {
+"Shadow": 0.589,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.773,
+"Scene": 11.629,
+"Bloom": 0.569,
+"Tonemap": 0.26,
+"Present": 0.681
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-unlit-r2": {
+"size": "2840x1528",
+"fps": 57.45331224219803,
+"cpuMsP50": 17.72625,
+"gpuMsP50": 13.815333601087332,
+"passP50": {
+"Shadow": 0.583,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.767,
+"Scene": 10.758,
+"Bloom": 0.524,
+"Tonemap": 0.257,
+"Present": 0.588
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-unlit-r3": {
+"size": "2840x1528",
+"fps": 62.34521938043385,
+"cpuMsP50": 16.892208,
+"gpuMsP50": 13.328291708603501,
+"passP50": {
+"Shadow": 0.416,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.765,
+"Scene": 10.469,
+"Bloom": 0.489,
+"Tonemap": 0.25,
+"Present": 0.567
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-waves-only-r1": {
+"size": "2840x1528",
+"fps": 72.53269593215634,
+"cpuMsP50": 12.470834,
+"gpuMsP50": 7.746958872303367,
+"passP50": {
+"Shadow": 0.596,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.77,
+"Scene": 4.482,
+"Bloom": 0.531,
+"Tonemap": 0.281,
+"Present": 0.707
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-waves-only-r2": {
+"size": "2840x1528",
+"fps": 73.09293206228627,
+"cpuMsP50": 11.033415999999999,
+"gpuMsP50": 6.707458291202784,
+"passP50": {
+"Shadow": 0.423,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.757,
+"Scene": 4.338,
+"Bloom": 0.487,
+"Tonemap": 0.267,
+"Present": 0.567
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+},
+"variants2-live-det-waves-only-r3": {
+"size": "2840x1528",
+"fps": 68.1102312325383,
+"cpuMsP50": 12.051959,
+"gpuMsP50": 6.556833395734429,
+"passP50": {
+"Shadow": 0.554,
+"GIAccel": 0.0,
+"GIShadow": 0.0,
+"GIProbes": 0.0,
+"SSAO": 0.637,
+"Scene": 3.886,
+"Bloom": 0.443,
+"Tonemap": 0.224,
+"Present": 0.547
+},
+"counters": {
+"draws": 11,
+"lights": 2,
+"tris": 96923,
+"visible": 11
+},
+"scene": "plain_lake.hescene",
+"cam": "0,3,-60,3.14159,-0.15",
+"sets": [
+"ViewportGroundGrid=false"
+],
+"env": [
+"HOME=/tmp/he235/home"
+],
+"counters_on": true,
+"frames": 400
+}
+}

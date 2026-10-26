@@ -404,10 +404,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// Sun is the LAST enum value today; a node added after it
+	// FbmGrad is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::Sun; ++t)
+	for (int t = 0; t <= (int)MatNodeType::FbmGrad; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -2825,6 +2825,74 @@ TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
 	}
 }
 
+TEST_CASE("FBM Noise Gradient: the integer fbm and its exact slope in one call")
+{
+	// Thema 235: the engine water took each chop layer's slope by finite differences, three
+	// fbm calls; this node gives the value and the gradient from one.
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int uv   = g.addNode(MatNodeType::UV);
+	const int fg   = g.addNode(MatNodeType::FbmGrad);
+	const int comb = g.addNode(MatNodeType::Combine3);
+	CHECK(g.connect(uv, 0, fg, 0));
+	CHECK(g.connect(fg, 0, comb, 0));
+	CHECK(g.connect(fg, 1, comb, 1));
+	CHECK(g.connect(fg, 2, comb, 2));
+	CHECK(g.connect(comb, 0, out, 0));
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	CHECK(glsl.find("heFbmIGrad(") != std::string::npos);
+	CHECK(glsl.find("vec3 heValueNoiseIGrad(vec2 p)") != std::string::npos);
+	CHECK(glsl.find("float heHashI2(ivec2 i)") != std::string::npos);
+	CHECK(glsl.find(".x, ") != std::string::npos);   // the three pins read .x .y .z of one call
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	CHECK(HE::generateFragmentGlsl(back) == glsl);
+
+	// The formula the GLSL carries, in C++: its gradient is the limit of the finite
+	// difference the water used (step 0.04 cells), not an approximation of it.
+	auto hash = [](int x, int y) {
+		uint32_t vx = uint32_t(x) * 1664525u + 1013904223u, vy = uint32_t(y) * 1664525u + 1013904223u;
+		vx += vy * 1664525u; vy += vx * 1664525u; vx ^= vx >> 16u; vy ^= vy >> 16u;
+		vx += vy * 1664525u; vy += vx * 1664525u; vx ^= vx >> 16u; vy ^= vy >> 16u;
+		return float(vx >> 8u) * (1.0f / 16777216.0f);
+	};
+	auto noiseGrad = [&](double px, double py, double& dx, double& dy) {
+		const double fx0 = std::floor(px), fy0 = std::floor(py);
+		const int ix = int(fx0), iy = int(fy0);
+		const double fx = px - fx0, fy = py - fy0;
+		const double ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+		const double dux = 6 * fx * (1 - fx), duy = 6 * fy * (1 - fy);
+		const double a = hash(ix, iy), b = hash(ix + 1, iy), c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
+		dx = dux * ((b - a) + (a - b - c + d) * uy);
+		dy = duy * ((c - a) + (a - b - c + d) * ux);
+		return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+	};
+	auto fbm = [&](double px, double py, double& gx, double& gy) {
+		double v = 0, amp = 0.5, s = 1;
+		gx = gy = 0;
+		for (int k = 0; k < 4; ++k)
+		{
+			double dx, dy;
+			v += amp * noiseGrad(px, py, dx, dy);
+			gx += amp * s * dx; gy += amp * s * dy;
+			px *= 2; py *= 2; amp *= 0.5; s *= 2;
+		}
+		return v;
+	};
+	int checked = 0;
+	for (int i = 0; i < 200; ++i)
+	{
+		const double x = 0.137 * i + 3.3, y = 0.071 * i - 7.9, h = 1e-5;
+		double gx, gy, t1, t2;
+		const double v0 = fbm(x, y, gx, gy);
+		const double fdx = (fbm(x + h, y, t1, t2) - v0) / h, fdy = (fbm(x, y + h, t1, t2) - v0) / h;
+		CHECK(gx == doctest::Approx(fdx).epsilon(1e-3).scale(1.0));
+		CHECK(gy == doctest::Approx(fdy).epsilon(1e-3).scale(1.0));
+		++checked;
+	}
+	CHECK(checked == 200);
+}
+
 // ═══ Container semantics shared with the other graph systems ═════════════════
 
 TEST_CASE("MaterialGraph::connect REPLACES an existing link on the same input pin")
@@ -4652,12 +4720,13 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	HE::MaterialShaderLibrary lib;
 	const VkUse weights{ 0, HE::vkmat::kLandscapeWeightsBinding, static_cast<int>(DescKind::CombinedImageSampler) };
 
-	// The row itself, fragment stage, ahead of the cluster lists.
+	// The row itself, fragment stage (plus the Displacement pin's tessellation
+	// stages, Thema 207 — never the vertex stage), ahead of the cluster lists.
 	bool row = false;
 	for (uint32_t i = 0; i < HE::vkmat::kPreClusterBindingCount; ++i)
 		row = row || (HE::vkmat::kBindings[i].binding == 14
 		              && HE::vkmat::kBindings[i].kind == DescKind::CombinedImageSampler
-		              && HE::vkmat::kBindings[i].stages == HE::vkmat::kStageFragment);
+		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
 	// The device limit: 17 fragment samplers with the row, 16 (the spec

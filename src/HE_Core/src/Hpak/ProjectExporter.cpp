@@ -160,7 +160,7 @@ std::string exportedExecutableName(const std::string& projectName, bool windowsE
         name += c;
     }
     while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
-    while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+    name.erase(0, std::min(name.find_first_not_of(' '), name.size()));
     if (name.empty()) name = "Game";
     return windowsExe ? name + ".exe" : name;
 }
@@ -207,7 +207,11 @@ static bool looksMachO(const std::vector<uint8_t>& bytes)
 static std::string shellQuote(const std::filesystem::path& p)
 {
     std::string out = "'";
-    for (const char c : p.string()) out += (c == '\'') ? "'\\''" : std::string(1, c);
+    for (const char c : p.string())
+    {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
     return out + "'";
 }
 

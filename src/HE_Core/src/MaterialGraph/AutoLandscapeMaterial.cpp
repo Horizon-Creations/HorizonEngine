@@ -235,7 +235,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // layers; a texel that sums to nothing falls back to input 0 = (0,0,0) = "no
     // paint", i.e. fully automatic.
     const int none = w.node(T::ConstColor, 6);
-    r.graph.findNode(none)->p[0] = r.graph.findNode(none)->p[1] = r.graph.findNode(none)->p[2] = 0.0f;
+    { MatGraphNode* c = r.graph.findNode(none); c->p[0] = c->p[1] = c->p[2] = 0.0f; }
     auto unit = [&](int axis) {
         const int n = w.node(T::ConstColor, 6);
         MatGraphNode* c = r.graph.findNode(n);

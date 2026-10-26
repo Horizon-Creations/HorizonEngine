@@ -407,11 +407,12 @@ std::uint32_t uiEngineFaceKey(UIFontFace face)
         // visible no-op in a project whose base weight IS bold, instead of a
         // second atlas that draws the same glyphs.
         if (g_weightBold) return 0;
-        static const std::uint32_t s_key = UIFontCache::keyFor(
-            0x8B01D0FACEull,
-            std::vector<uint8_t>(Roboto_data, Roboto_data + Roboto_size),
-            BakedUIFont::kBakePx);
-        return s_key;
+        // Asked for on every call, not remembered: keyFor folds the scripts in,
+        // and they may still change until the shared font bakes. A key kept from
+        // the first `<b>` would leave bold on the old scripts while the base
+        // face moved to the new ones. Past the first call it is a hash and a find.
+        static const std::vector<uint8_t> s_ttf(Roboto_data, Roboto_data + Roboto_size);
+        return UIFontCache::keyFor(0x8B01D0FACEull, s_ttf, BakedUIFont::kBakePx);
     }
     case UIFontFace::Icon:
     {
@@ -452,6 +453,23 @@ namespace
         float w = 0.0f;
         for (std::size_t i = 0; i < s.size(); )
             if (const BakedGlyph* g = font.glyph(uiUtf8Decode(s, i))) w += g->xadvance * scale;
+        return w;
+    }
+
+    // lineWidth, continued: adds the advances of `s` to a running sum `w`, one
+    // character after the other, so the result is the very float lineWidth gives
+    // for the text before `s` followed by `s`. `ink` is that sum as of the last
+    // character that is not a space — the width of the text with its trailing
+    // spaces cut off — and stays as it was when `s` has none.
+    float advanceFrom(const BakedUIFont& font, const std::string& s, float scale,
+                      float w, float& ink)
+    {
+        for (std::size_t i = 0; i < s.size(); )
+        {
+            const std::uint32_t cp = uiUtf8Decode(s, i);
+            if (const BakedGlyph* g = font.glyph(cp)) w += g->xadvance * scale;
+            if (cp != ' ') ink = w;
+        }
         return w;
     }
 } // namespace
@@ -499,6 +517,10 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
     {
         if (lineWidth(font, line, scale) <= wrapWidth) { wrapped.push_back(line); continue; }
         std::string acc;
+        // What `acc` measures, kept as it grows instead of measured again per word:
+        // its whole width, and its width without trailing spaces. Both are 0 while
+        // `acc` is empty.
+        float accW = 0.0f, accInk = 0.0f;
         size_t i = 0;
         while (i < line.size())
         {
@@ -509,33 +531,46 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
             std::string word = line.substr(i, e - i);
             i = e;
 
+            // `acc + word` as `acc` is now, and its width without trailing spaces.
+            float nextInk = accInk;
+            float nextW   = advanceFrom(font, word, scale, accW, nextInk);
+
             // Doesn't fit after what's already on this line → flush the line.
-            if (!acc.empty() && lineWidth(font, trimmed(acc + word), scale) > wrapWidth)
+            if (!acc.empty() && nextInk > wrapWidth)
             {
                 wrapped.push_back(trimmed(acc));
                 acc.clear();
+                accW = accInk = nextInk = 0.0f;
+                nextW = advanceFrom(font, word, scale, 0.0f, nextInk);
             }
             // Even alone the word overflows → hard-break it, longest prefix first.
             // The prefix always takes at least one character, so this terminates.
-            while (acc.empty() && word.size() > 1 &&
-                   lineWidth(font, trimmed(word), scale) > wrapWidth)
+            while (acc.empty() && word.size() > 1 && nextInk > wrapWidth)
             {
                 // Character by character, not byte by byte: a break inside a
                 // two-byte umlaut would leave half a character on each line, and
                 // neither half is anything.
-                std::string head;
-                for (std::size_t k = 0; k < word.size(); )
+                std::size_t headEnd = 0;
+                float headW = 0.0f;
+                while (headEnd < word.size())
                 {
-                    const std::size_t next = uiUtf8Next(word, k);
-                    const std::string ch = word.substr(k, next - k);
-                    if (!head.empty() && lineWidth(font, head + ch, scale) > wrapWidth) break;
-                    head += ch;
-                    k = next;
+                    const std::size_t next = uiUtf8Next(word, headEnd);
+                    float withCh = headW;
+                    for (std::size_t n = headEnd; n < next; )
+                        if (const BakedGlyph* g = font.glyph(uiUtf8Decode(word, n)))
+                            withCh += g->xadvance * scale;
+                    if (headEnd > 0 && withCh > wrapWidth) break;
+                    headW   = withCh;
+                    headEnd = next;
                 }
-                wrapped.push_back(head);
-                word.erase(0, head.size());
+                wrapped.push_back(word.substr(0, headEnd));
+                word.erase(0, headEnd);
+                nextInk = 0.0f;
+                nextW   = advanceFrom(font, word, scale, 0.0f, nextInk);
             }
             acc += word;
+            accW   = nextW;
+            accInk = nextInk;
         }
         wrapped.push_back(trimmed(acc));
     }
@@ -644,15 +679,19 @@ UIRichText uiParseRichText(const std::string& markup)
     // The run being built. Flushed whenever the attributes change, so the run
     // list covers the plain text exactly once with no empty runs in it.
     UITextRun cur;
-    auto attrs = [&]() -> RichScope { return stack.empty() ? RichScope{} : stack.back(); };
+    const RichScope noScope;
+    auto attrs = [&]() -> const RichScope& { return stack.empty() ? noScope : stack.back(); };
+    // A fresh run at the end of the text so far, carrying the scope's attributes.
+    auto startRun = [&](const RichScope& a) {
+        cur = UITextRun{};
+        cur.begin = out.text.size();
+        cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+        cur.face  = a.face;
+    };
     auto flush = [&]() {
         cur.end = out.text.size();
         if (cur.end > cur.begin) out.runs.push_back(cur);
-        cur = UITextRun{};
-        cur.begin = out.text.size();
-        const RichScope a = attrs();
-        cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
-        cur.face  = a.face;
+        startRun(attrs());
     };
 
     for (std::size_t i = 0; i < markup.size(); )
@@ -672,9 +711,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 if (stack.empty()) { out.text += "</>"; i = end; continue; }
                 flush();
                 stack.pop_back();
-                const RichScope a = attrs();
-                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
-                cur.face  = a.face;
+                startRun(attrs());
             }
             else if (name == "icon")
             {
@@ -684,7 +721,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 // icon in a coloured run is that colour — because the alternative
                 // is explaining which attributes reach it and which do not.
                 flush();
-                const RichScope a = attrs();
+                const RichScope& a = attrs();
                 UITextRun ic;
                 ic.begin = out.text.size();
                 appendUtf8(out.text, uiIconCodepoint(value));
@@ -694,12 +731,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 ic.link      = a.link;
                 ic.face      = UIFontFace::Icon;
                 out.runs.push_back(ic);
-                cur = UITextRun{};
-                cur.begin     = out.text.size();
-                cur.color     = a.color;
-                cur.sizeScale = a.sizeScale;
-                cur.link      = a.link;
-                cur.face      = a.face;
+                startRun(a);
                 i = end;
                 continue;
             }
@@ -712,8 +744,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 else if (name == "link") { a.link = value; out.hasLinks = true; }
                 else if (name == "b") a.face = UIFontFace::Bold;
                 stack.push_back(a);
-                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
-                cur.face  = a.face;
+                startRun(a);
             }
             i = end;
             continue;
@@ -752,6 +783,25 @@ namespace
         const BakedUIFont* f = UIFontCache::find(k);
         return (f && f->ok) ? ResolvedFace{ f, k } : ResolvedFace{ &base, baseKey };
     }
+
+    // One glyph's quad, for the plain and the rich emit alike. `penX` is the pen
+    // position INCLUDING the line's left edge: the plain path hands in `x + penX`,
+    // so the sum is formed before the glyph's offset is added, as it always was.
+    void pushGlyphQuad(std::vector<UIRenderObject>& out, const BakedGlyph& g,
+                       float penX, float baseline, float scale, float invW, float invH,
+                       const glm::vec4& color, int layer, std::uint32_t atlasKey)
+    {
+        UIRenderObject ro;
+        ro.position = { penX + g.xoff * scale, baseline + g.yoff * scale };
+        ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
+        ro.uvMin    = { g.x0 * invW, g.y0 * invH };
+        ro.uvMax    = { g.x1 * invW, g.y1 * invH };
+        ro.color    = color;
+        ro.type     = 2;
+        ro.layer    = layer;
+        ro.fontAtlasKey = atlasKey;
+        out.push_back(std::move(ro));
+    }
 } // namespace
 
 UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
@@ -789,6 +839,12 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
         const BakedGlyph* g = rf.font->glyph(uiUtf8Decode(rt.text, j));
         return g ? g->xadvance * (sizeAt(b) / rf.font->bakePx) : 0.0f;
     };
+    // Measured once per character, up front: the line scan, each line's width and
+    // the pieces all walk the same characters, and every advanceAt is a face
+    // lookup and a glyph lookup. Indexed by the byte a character starts at.
+    std::vector<float> advance(rt.text.size(), 0.0f);
+    for (std::size_t b = 0; b < rt.text.size(); b = uiUtf8Next(rt.text, b))
+        advance[b] = advanceAt(b);
 
     // ── Lines ────────────────────────────────────────────────────────────────
     // Byte ranges, because a piece has to name bytes to know its run. Hard breaks
@@ -815,7 +871,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             const char c = rt.text[i];
             if (c == '\r') { ++i; continue; }
             if (c == '\n') { push(i); cur.begin = i + 1; ++i; continue; }
-            const float adv = advanceAt(i);
+            const float adv = advance[i];
             const bool wrapHere = opts.wrap && rectSize.x > 0.0f &&
                                   width + adv > rectSize.x && i > cur.begin;
             if (wrapHere)
@@ -856,23 +912,21 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
     std::vector<float> lineSize(lines.size(), sizePx), lineWidthPx(lines.size(), 0.0f);
     for (std::size_t li = 0; li < lines.size(); ++li)
     {
-        float mx = 0.0f, w = 0.0f;
+        float mx = 0.0f;
         std::size_t lastInk = lines[li].begin;
         for (std::size_t b = lines[li].begin; b < lines[li].end; )
         {
             const std::size_t next = uiUtf8Next(rt.text, b);
             mx = std::max(mx, sizeAt(b));
-            w += advanceAt(b);
             if (rt.text[b] != ' ') lastInk = next;
             b = next;
         }
         // Trailing spaces neither widen the line nor shift a centred one.
         float trimmed = 0.0f;
         for (std::size_t b = lines[li].begin; b < lastInk; b = uiUtf8Next(rt.text, b))
-            trimmed += advanceAt(b);
+            trimmed += advance[b];
         lineSize[li]    = mx > 0.0f ? mx : sizePx;
         lineWidthPx[li] = lines[li].end > lines[li].begin ? trimmed : 0.0f;
-        (void)w;
     }
     float blockHeight = lineSize.empty() ? 0.0f : lineSize.back();
     for (std::size_t li = 0; li + 1 < lines.size(); ++li)
@@ -902,7 +956,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             std::size_t e = b;
             float w = 0.0f;
             while (e < lines[li].end && runAt(e) == r)
-            { w += advanceAt(e); e = uiUtf8Next(rt.text, e); }
+            { w += advance[e]; e = uiUtf8Next(rt.text, e); }
             UIRichPiece pc;
             pc.run = r; pc.begin = b; pc.end = e;
             pc.line = static_cast<int>(li);
@@ -955,16 +1009,7 @@ void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
             const BakedGlyph* gp = rf.font->glyph(uiUtf8Decode(rt.text, b));
             if (!gp) continue;
             const BakedGlyph& g = *gp;
-            UIRenderObject ro;
-            ro.position = { penX + g.xoff * scale, pc.baseline + g.yoff * scale };
-            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
-            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
-            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
-            ro.color    = colour;
-            ro.type     = 2;
-            ro.layer    = layer;
-            ro.fontAtlasKey = rf.key;
-            out.push_back(std::move(ro));
+            pushGlyphQuad(out, g, penX, pc.baseline, scale, invW, invH, colour, layer, rf.key);
             penX += g.xadvance * scale;
         }
     }
@@ -1025,9 +1070,18 @@ std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font, const st
     if (!font.ok || sizePx <= 0.0f || wrapWidth <= 0.0f) return uiTextVisualLines(text);
     const float scale = sizePx / font.bakePx;
     auto isBlank = [](char c) { return c == ' ' || c == '\t'; };
+    // `w` plus the advances of the bytes [from, to), one character after the
+    // other, which is how lineWidth sums them. Both ends sit on character
+    // boundaries, so decoding in place reads what decoding a copy would.
+    auto extendWidth = [&](float w, std::size_t from, std::size_t to)
+    {
+        while (from < to)
+            if (const BakedGlyph* g = font.glyph(uiUtf8Decode(text, from)))
+                w += g->xadvance * scale;
+        return w;
+    };
     // Width of a byte run, measured exactly the way the glyphs are emitted.
-    auto widthOf = [&](std::size_t from, std::size_t to)
-    { return lineWidth(font, text.substr(from, to - from), scale); };
+    auto widthOf = [&](std::size_t from, std::size_t to) { return extendWidth(0.0f, from, to); };
 
     const std::vector<UITextLineRange> hard = uiTextLineRanges(text);
     std::vector<UITextVisualLine> out;
@@ -1067,11 +1121,14 @@ std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font, const st
                 // break by bytes would leave half an umlaut on each row, and
                 // neither half is anything.
                 std::size_t k = uiUtf8Next(text, segStart), fit = k;
+                float prefixW = widthOf(segStart, k);   // the row so far, up to k
                 while (k < wEnd)
                 {
-                    if (widthOf(segStart, k) > wrapWidth) break;
+                    if (prefixW > wrapWidth) break;
                     fit = k;
-                    k = uiUtf8Next(text, k);
+                    const std::size_t next = uiUtf8Next(text, k);
+                    prefixW = extendWidth(prefixW, k, next);
+                    k = next;
                 }
                 out.push_back({ segStart, fit, fit, false });
                 segStart = visEnd = cur = fit;
@@ -1178,16 +1235,7 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
             const BakedGlyph* gp = font.glyph(uiUtf8Decode(line, b));
             if (!gp) continue;
             const BakedGlyph& g = *gp;
-            UIRenderObject ro;
-            ro.position = { x + penX + g.xoff * scale, baseline + g.yoff * scale };
-            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
-            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
-            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
-            ro.color    = color;
-            ro.type     = 2;
-            ro.layer    = layer;
-            ro.fontAtlasKey = atlasKey;
-            out.push_back(std::move(ro));
+            pushGlyphQuad(out, g, x + penX, baseline, scale, invW, invH, color, layer, atlasKey);
             penX += g.xadvance * scale;
         }
     }

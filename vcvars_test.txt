@@ -1,0 +1,9 @@
+﻿cmd : Der Befehl "\" C:\Program Files\Microsoft Visual "Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" ist 
+entweder falsch geschrieben oder
+In Zeile:1 Zeichen:302
++ ... tch {} } }; cmd /c "call \"C:\Program Files\Microsoft Visual Studio\1 ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Der Befehl "\" ...eschrieben oder:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+konnte nicht gefunden werden.

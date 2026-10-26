@@ -58,9 +58,11 @@ using namespace HE;
 // Well-known UUID base for the built-in materials. `hi` stays far below the
 // version-4 bit pattern UUID::generate() enforces and clear of the DefaultAssets
 // sentinels, mesh_gen's 0x100, widget_gen's 0x200 and matfn_gen's 0x300 block.
-constexpr uint64_t kMatBaseHi = 0x0000000000000400ULL;
+// Not 0x400: landscape_tex_gen owns 0x400..0x41F, and one UUID names ONE asset in
+// the ContentManager (Water used to be {0x400, 1} next to T_Landscape_Grass_Albedo).
+constexpr uint64_t kMatBaseHi = 0x0000000000000600ULL;
 static_assert(kEngineWaterMaterialId.hi == kMatBaseHi + 0 && kEngineWaterMaterialId.lo == 1,
-              "Water is entry 0 of the 0x400 block — DefaultAssets.h must agree");
+              "Water is entry 0 of the 0x600 block — DefaultAssets.h must agree");
 
 constexpr float kColStep = 230.0f;
 constexpr float kRowStep = 110.0f;
@@ -449,10 +451,16 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
 constexpr float kChopBase = 0.3f, kChopMid = 0.9f, kChopFine = 0.8f, kChopFiner = 0.55f;
 
 // Shallow water (Thema 206 step 4), defaults of the ShallowWater parameter (step 6).
-// The tint depth follows the real shore depth for e above 0 (water shallower than one metre)
-// and has fully taken over at e = kShallowTintE (half a metre); the Opacity floor falls to
-// kShallowOpacity of itself at no depth and is whole again from kShallowClearDepth metres.
-constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 0.8f;
+// The tint depth follows the real shore depth for e above 0 (water shallower than kShoreFadeDepth,
+// three metres since Thema 320; it was one) and has fully taken over at e = kShallowTintE (a metre
+// and a half); the Opacity floor falls to kShallowOpacity of itself at no depth and is whole again
+// from kShallowClearDepth metres.
+constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 1.5f;
+
+// The water's own colour from above (Thema 320): the lit body colour times a gain that runs from
+// kBodyShallow where the light reaches the floor (trans = 1) to kBodyDeep in deep water, after
+// kBodyMute of its saturation is taken out. 1 / 1 / 0 is the old, fully lit teal.
+constexpr float kBodyShallow = 0.85f, kBodyDeep = 0.50f, kBodyMute = 0.12f;
 
 // ── Fine ripples ─────────────────────────────────────────────────────────────
 // The slope of a drifting FBM height field, by finite differences — the plan's
@@ -470,22 +478,20 @@ struct Grad { Pin x, z; };
 Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin driftZ,
                  Pin amp, float col, float row)
 {
-    constexpr float kStep = 0.04f;                            // finite-difference step, in noise cells
+    // The slope of one fbm layer, from the FBM Noise Gradient node: its value and its exact
+    // gradient in one call. This used to be a finite difference of three fbm calls (0.04
+    // cells apart), the largest cost of the water's near field at ~12 fbm calls a pixel
+    // (docs/perf-water-cost-2026-10-21.md, lever a); the gradient is that difference's
+    // limit, so the chop keeps its look. gain: a step of one noise cell is `size` metres,
+    // and the old (h(x + 0.04 size) - h(x)) * amp / 0.04 is amp times the noise-space slope.
     const int ox = m.op(T::Add, px, m.op(T::Multiply, driftX, time, col, row), col + 1, row);
     const int oz = m.op(T::Add, pz, m.op(T::Multiply, driftZ, time, col, row + 1), col + 1, row + 1);
-    const int exx = m.op(T::Add, ox, m.k(size * kStep, col + 1, row + 2), col + 2, row + 2);
-    const int ezz = m.op(T::Add, oz, m.k(size * kStep, col + 1, row + 3), col + 2, row + 3);
     const int uv0 = m.op(T::CombineRGBA, ox, oz, col + 2, row);
-    const int uvX = m.op(T::CombineRGBA, exx, oz, col + 3, row + 2);
-    const int uvZ = m.op(T::CombineRGBA, ox, ezz, col + 3, row + 3);
     const int inv = m.k(1.0f / size, col + 2, row + 1);
-    const int h0  = m.fbm(uv0, inv, col + 4, row);
-    const int hX  = m.fbm(uvX, inv, col + 4, row + 2);
-    const int hZ  = m.fbm(uvZ, inv, col + 4, row + 3);
-    const int gain = m.op(T::Multiply, amp, m.k(1.0f / kStep, col + 4, row + 1), col + 5, row + 1);
+    const int hg  = m.op(T::FbmGrad, uv0, inv, col + 4, row);
     Grad g;
-    g.x = m.op(T::Multiply, m.op(T::Subtract, hX, h0, col + 5, row + 2), gain, col + 6, row + 2);
-    g.z = m.op(T::Multiply, m.op(T::Subtract, hZ, h0, col + 5, row + 3), gain, col + 6, row + 3);
+    g.x = m.op(T::Multiply, Pin{ hg, 1 }, amp, col + 6, row + 2);
+    g.z = m.op(T::Multiply, Pin{ hg, 2 }, amp, col + 6, row + 3);
     return g;
 }
 
@@ -647,12 +653,12 @@ Mb waterMaterial()
         "Water colour where the view ray through the water is short (looking straight down).", 0);
     const int deep = m.param(T::ParamColor, "DeepColor", { 0.004f, 0.028f, 0.052f }, "Color",
         "Water colour where the view ray through the water is long (toward the horizon).", 1);
-    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.35f, 0.7f }, "Color",
+    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.6f, 0.7f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
-        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last metre "
+        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last three metres "
         "before a landscape's shore the real depth takes over, so shallows are clear). "
         "z = shore width: the water fades in over this many metres of depth at the water's "
-        "edge (0 = a hard edge, up to 0.7). w = shore foam: the lace along the water's edge "
+        "edge (0 = a hard edge, up to 1). w = shore foam: the lace along the water's edge "
         "(0 = none, 1 = strong). Needs the water mesh of a landscape; a plane has no shore.", 2);
     // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
     // the water physics follows (WaterQuery), so retuning the water here retunes
@@ -681,13 +687,13 @@ Mb waterMaterial()
         "w = dielectric specular (0..1): 0.5 = F0 0.04, multiplied by reflection, ~0.3 gives "
         "water's F0 0.02.", 6);
     // Shallow water (Thema 206 step 4): the tint and the Opacity floor follow the real shore
-    // depth in the last metre before a landscape's shore. Defaults reproduce the step 4 constants.
+    // depth in the last kShoreFadeDepth metres before a landscape's shore (Thema 320: three, was one).
     const int shallowW = m.param(T::ParamVec4, "ShallowWater", { kShallowClearDepth, kShallowTintE, kShallowOpacity, 0.0f }, "Surface",
         "Shore shallows (need the water mesh of a landscape; a plane has no shore, no effect). "
-        "x = clear depth (m, 0..1): from this much water on the opacity floor is whole, "
+        "x = clear depth (m, 0..3): from this much water on the opacity floor is whole, "
         "shallower water lets the ground show through more. "
-        "y = tint start (0..1, shore closeness: 0 = a metre of water or more, 1 = none): "
-        "where the depth tint has fully taken over the real depth, 0.5 = half a metre; "
+        "y = tint start (0..1, shore closeness: 0 = three metres of water or more, 1 = none): "
+        "where the depth tint has fully taken over the real depth, 0.5 = a metre and a half; "
         "further out it blends to the assumed depth (Turbidity.y). "
         "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
         "w = reserved, no effect yet.", 7);
@@ -697,7 +703,7 @@ Mb waterMaterial()
     const Pin clearDepth{ shs, 0 }, tintStart{ shs, 1 }, opacFloor{ shs, 2 };
     const int opac = m.param(T::ParamFloat, "Opacity", { 0.5f }, "Surface",
         "Opacity looking straight down into clear water. Depth tint, Fresnel and foam raise it. "
-        "In the last metre before a landscape's shore it falls toward a quarter of itself as the "
+        "In the last metres before a landscape's shore it falls toward a quarter of itself as the "
         "water gets shallower, so the ground shows through.",
         10, 0.0f, 1.0f);
     const int refr = m.param(T::ParamFloat, "Refraction", { 0.3f }, "Surface",
@@ -882,10 +888,11 @@ Mb waterMaterial()
     const int refrN = m.un(T::Normalize3, m.op3(T::Lerp, geoN, waveN, refr, 21, 5), 22, 5);
     const int ndvR  = m.un(T::Saturate, m.op(T::DotProduct, refrN, view, 23, 5), 24, 5);
     // The depth the tint assumes is Turbidity.y (a guess, no scene depth is read), until the
-    // mesh knows better: in the last half metre of water before the shore the real depth
+    // mesh knows better: in the last metre and a half of water before the shore the real depth
     // takes over, so shallow water is as clear as it is shallow (the ground and the shallow
-    // colour come through) and thickens to the assumed depth over the metre before. The blend
-    // is a smoothstep of e, which is 0 at one metre: no step where the shore range begins,
+    // colour come through) and thickens to the assumed depth over the metre and a half before.
+    // The blend is a smoothstep of e, which is 0 at kShoreFadeDepth: no step where the shore range
+    // begins,
     // and in open water (e = 0) this is Turbidity.y itself.
     // tintStart is a user knob (0..1, see ShallowWater param above): a branchless
     // max(tintStart, eps) before it feeds Smoothstep as the non-zero edge — equal
@@ -1003,11 +1010,29 @@ Mb waterMaterial()
     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
                               m.k(0.25f, 42, 1.5f), 43, 1);
     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
+    // The water's own (diffuse) colour is a faint scatter, not a paint: the colour of water is
+    // mostly what it reflects and lets through, so the body colour goes in dim and a little
+    // grey (kBodyMute toward its luma: no saturated light blue), lighter where the light still
+    // gets through to the floor (trans -> 1: the shallows) and darker where it does not
+    // (trans -> 0: deep water). Emissive stays 0, so at night it is dark like the rest of the
+    // scene. Foam keeps its own colour (foamTint), and the underside branch below is untouched.
+    const int lumaW   = m.node(T::ConstColor, 44, 6);
+    const int onesC   = m.node(T::ConstColor, 44, 7);
+    {
+        MatGraphNode& lw = *m.g.findNode(lumaW);
+        lw.p[0] = 0.299f; lw.p[1] = 0.587f; lw.p[2] = 0.114f;
+        MatGraphNode& on = *m.g.findNode(onesC);
+        on.p[0] = on.p[1] = on.p[2] = 1.0f;
+    }
+    const int litGray = m.op(T::Multiply, onesC, m.op(T::DotProduct, lit, lumaW, 45, 6), 46, 6);
+    const int litMute = m.op3(T::Lerp, lit, litGray, m.k(kBodyMute, 45, 7), 47, 6);
+    const int bodyGain = m.op3(T::Lerp, m.k(kBodyDeep, 45, 8), m.k(kBodyShallow, 45, 9), trans, 47, 8);
+    const int bodyDim = m.op(T::Multiply, litMute, bodyGain, 48, 6);
+    const int base   = m.op3(T::Lerp, bodyDim, foamTint, foamAll, 49, 7);
     // Opacity is what clear water still covers looking straight down. Water that is only
     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
-    // where shoreD is a metre, so neutral outside the shore range).
+    // where shoreD is kShoreFadeDepth, so neutral outside the shore range).
     // clearDepth is a user knob too: same branchless max(., eps) clamp as tintStart above.
     const int epsClear = m.k(0.001f, 36, 1.5f);
     const int clearOk  = m.op(T::Greater, clearDepth, epsClear, 36, 2);
@@ -1060,6 +1085,73 @@ const std::set<std::string> kWaterParams = {
     "Caustics", "Variation",
 };
 
+// ── Displacement demo (Thema 207) ────────────────────────────────────────────
+// The example for the Output node's Displacement pin: a quilted surface whose
+// cushions GPU tessellation pushes out along the normal (D3D11, D3D12, Vulkan,
+// OpenGL; Metal and Software draw it flat, the pattern still in the colour).
+//
+//     height = |sin(pi N u) · sin(pi N v)| · Height,   N = kDemoCells
+//
+// Plain sine maths and no noise on purpose: value noise hashes a lattice point
+// differently on two GPU compilers (docs/material-graph-tessellation-backends-
+// 2026-10-18.md, the D3D12/Vulkan band), and as a height that is a crack. The
+// height is ZERO on every cell border, and the borders include u, v = 0 and 1,
+// where a mesh's UVs jump: the duplicated vertices of a UV sphere's seam and
+// poles and of a cube's face edges all stay where they are, so nothing tears.
+// N is a baked constant and not a knob for the same reason: a fractional cell
+// count would put a cushion's flank on the seam.
+//
+// The colour reads the same cushion value, so the grooves are dark where the
+// surface stays down and the shape shows on a backend that cannot move it.
+constexpr float kDemoCells = 4.0f;
+
+Mb displacementDemoMaterial()
+{
+    Mb m;
+    const int height = m.param(T::ParamFloat, "Height", { 0.15f }, "Displacement",
+                               "How far a cushion's top rises along the surface normal, in metres. "
+                               "0.5 is the Output node's Max Displacement: more is clamped.", 0,
+                               0.0f, 0.5f);
+    const int top    = m.param(T::ParamColor, "TopColor", { 0.78f, 0.60f, 0.42f }, "Surface",
+                               "Colour of the cushion tops.", 1);
+    const int groove = m.param(T::ParamColor, "GrooveColor", { 0.16f, 0.10f, 0.07f }, "Surface",
+                               "Colour of the grooves between the cushions.", 2);
+
+    const int uv    = m.node(T::UV, 1, 4);
+    const int split = m.un(T::SplitRGBA, uv, 2, 4);
+    const int cells = m.k(kPi * kDemoCells, 2, 5.5f);
+    const int su    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 0 }, cells, 3, 4), 4, 4);
+    const int sv    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 1 }, cells, 3, 5), 4, 5);
+    const int quilt = m.un(T::Absolute, m.op(T::Multiply, su, sv, 5, 4.5f), 6, 4.5f);
+    m.comment("Cushions: zero on every cell border", 1, 4, 6, 2.5f);
+
+    const int disp  = m.op(T::Multiply, quilt, height, 7, 3);
+    const int base  = m.op3(T::Lerp, groove, top, quilt, 7, 1);
+    // Two constants made in one argument list would take their ids in the order the
+    // compiler happens to evaluate it (Clang first-first, MSVC and GCC last-first), so
+    // the .hasset would differ per platform: name them in order.
+    const int roughB  = m.k(0.5f, 6, 7);
+    const int roughA  = m.k(0.85f, 6, 6);
+    const int rough = m.op3(T::Lerp, roughA, roughB, quilt, 7, 6);
+
+    const int out = m.node(T::Output, 9, 3);
+    MatGraphNode& o = *m.g.findNode(out);
+    o.p[0] = 1.0f;                                                  // lit
+    o.p[1] = static_cast<float>(MatBlendMode::Opaque);
+    o.p[3] = static_cast<float>(MatDomain::Surface);
+    // Full factor up to 8 m, none from 40 m on; the clamp is the Height slider's top.
+    o.tess.maxFactor       = 16.0f;
+    o.tess.fadeNear        = 8.0f;
+    o.tess.fadeFar         = 40.0f;
+    o.tess.maxDisplacement = 0.5f;
+    m.link(base,  out, kMatOutputBaseColorPin);
+    m.link(rough, out, kMatOutputRoughnessPin);
+    m.link(disp,  out, kMatOutputDisplacementPin);
+    return m;
+}
+
+const std::set<std::string> kDisplacementDemoParams = { "Height", "TopColor", "GrooveColor" };
+
 // A cap on the longest wire chain, well inside what the editor's own stack
 // holds on every platform (CMakeLists.txt "MSVC main-thread stack"). A graph
 // that creeps past it fails here, not in a Debug test on another OS.
@@ -1080,9 +1172,10 @@ int main(int argc, char** argv)
 
     // ORDER IS IDENTITY: the index picks the UUID, and a scene that already uses
     // one of these stores that UUID. Append, never reorder.
-    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; };
+    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; bool doubleSided; };
     std::vector<Entry> entries;
-    entries.push_back({ "Water", waterMaterial(), &kWaterParams });
+    entries.push_back({ "Water", waterMaterial(), &kWaterParams, true });
+    entries.push_back({ "DisplacementDemo", displacementDemoMaterial(), &kDisplacementDemoParams, false });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)
@@ -1118,7 +1211,7 @@ int main(int argc, char** argv)
         a.nodeGraphJson = materialGraphToJson(e.mb.g);
         // Not read by any backend today (every draw is two-sided), but it is
         // the truth about a water plane seen from below.
-        a.doubleSided   = true;
+        a.doubleSided   = e.doubleSided;
 
         // Pass 1 writes the graph; pass 2 writes what the editor's load path
         // makes of it (see the header: the packer ships the baked fields).

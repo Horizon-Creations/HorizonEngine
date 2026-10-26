@@ -4,6 +4,7 @@
 // clicked through — the drawing (HcPullUi) only shows these answers.
 #include "doctest.h"
 
+#include "HcEditorUtil.h"
 #include "HcPull.h"
 #include <HorizonCode/HorizonCode.h>
 #include <Types/TypeRegistry.h>
@@ -218,4 +219,14 @@ TEST_CASE("Pull editor: Add to Target writes what is missing, and nothing else")
 		CHECK_FALSE(HcPull::addMember(def, t, "Deaths"));    // already there
 		CHECK_FALSE(HcPull::addMember(def, t, "Points"));    // a former name counts
 	}
+}
+
+TEST_CASE("pathStem strips the directory first, then the last extension")
+{
+	CHECK(HcEditorUtil::pathStem("Classes/Spawner.hasset") == "Spawner");
+	CHECK(HcEditorUtil::pathStem("Classes\\Spawner.hasset") == "Spawner");
+	CHECK(HcEditorUtil::pathStem("Spawner") == "Spawner");
+	CHECK(HcEditorUtil::pathStem("a.b/c") == "c");            // a dot in a folder is not an extension
+	CHECK(HcEditorUtil::pathStem("dir/x.y.hasset") == "x.y"); // only the last dot goes
+	CHECK(HcEditorUtil::pathStem("").empty());
 }

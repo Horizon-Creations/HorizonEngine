@@ -33,6 +33,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -250,8 +251,8 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	    s_multi.revision != ctx.selection.revision() ||
 	    ImGui::GetFrameCount() - s_multi.frame >= period)
 		refreshMultiSelection(ctx, world, primary, members);
-	const std::vector<std::string> common  = s_multi.common;
-	const std::vector<std::string> partial = s_multi.partial;
+	const std::vector<std::string>& common  = s_multi.common;
+	const std::vector<std::string>& partial = s_multi.partial;
 
 	hint("Edits below apply to every selected entity that has the component; "
 	     "the active entity's values are shown, and a field the selection "
@@ -978,7 +979,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					if (ImGui::IsItemHovered())
 					{
 						std::string list;
-						for (const std::string& p : props) list += (list.empty() ? "" : ", ") + p;
+						for (const std::string& p : props)
+						{
+							if (!list.empty()) list += ", ";
+							list += p;
+						}
 						ImGui::SetTooltip("Changed on this placement: %s.\nThe prefab's value does "
 						                  "not reach these — revert them in the Prefab Instance "
 						                  "section above.", list.c_str());
@@ -2821,6 +2826,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TrailComponent>(entity); }
 	}
 
+	// The Rigid Body and Character Controller rows share one set of layer names;
+	// built at the first use, since most entities carry neither component.
+	std::optional<CollisionLayerNames> layerNames;
+	const auto collisionLayers = [&]() -> const CollisionLayerNames&
+	{
+		if (!layerNames) layerNames.emplace(ctx);
+		return *layerNames;
+	};
+
 	// ── Rigid Body ──────────────────────────────────────────────────────────
 	if (auto* r = registry.try_get<RigidBodyComponent>(entity))
 	{
@@ -2849,7 +2863,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -3138,7 +3152,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// because a character need not have one. It decides what BLOCKS the
 			// character as it walks.
 			collisionLayerRow("Collision Layer##character", &cc->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
@@ -4043,14 +4057,14 @@ constexpr AddGroup kAddGroups[] = {
 
 // Case-insensitive "needle somewhere in haystack" — the same test the Outliner
 // and Content Browser searches apply, so typing "mesh" finds Mesh, Skeletal
-// Mesh and Nav Mesh alike.
-bool labelMatches(const char* label, const std::string& needle)
+// Mesh and Nav Mesh alike. The needle comes already lowered: the caller tests
+// every row against the same one.
+bool labelMatches(const char* label, const std::string& loweredNeedle)
 {
-	if (needle.empty()) return true;
-	std::string hay(label), n(needle);
+	if (loweredNeedle.empty()) return true;
+	std::string hay(label);
 	std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return std::tolower(c); });
-	std::transform(n.begin(),   n.end(),   n.begin(),   [](unsigned char c) { return std::tolower(c); });
-	return hay.find(n) != std::string::npos;
+	return hay.find(loweredNeedle) != std::string::npos;
 }
 } // namespace
 #endif // HE_IMGUI_ENABLED
@@ -4200,11 +4214,14 @@ bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities, 
 		// ── Searching: the hits, flat, each with its group beside it ────────
 		int  hits  = 0;
 		bool first = true;
+		std::string loweredFilter = s_filter;
+		std::transform(loweredFilter.begin(), loweredFilter.end(), loweredFilter.begin(),
+		               [](unsigned char c) { return std::tolower(c); });
 		for (const AddGroup& g : kAddGroups)
 			for (int i = 0; i < g.count; ++i)
 			{
 				const AddRow& row = g.rows[i];
-				if (!anyLacks(row) || !labelMatches(row.label, s_filter)) continue;
+				if (!anyLacks(row) || !labelMatches(row.label, loweredFilter)) continue;
 				++hits;
 				// The group beside the hit: "Mesh" and "Nav Mesh" are told
 				// apart by where they live as much as by their names.
