@@ -1,6 +1,5 @@
 #include "UIWidget/UIShortcut.h"
 
-#include <algorithm>
 #include <cctype>
 #include <cstdio>
 
