@@ -17246,6 +17246,54 @@ TEST_CASE("CheckBox: AutoSize fits the row to control, gap and label")
     CHECK(shortOne->sizeY >= doctest::Approx(m.box));
 }
 
+TEST_CASE("CheckBox, switch and radio button: the AutoSize row is control + gap + label + slack")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    // The formula is written out here and not read from the code under test:
+    // checkbox and radio share one implementation, and this is what pins it.
+    auto expected = [](const HE::UICheckBox::BoxMetrics& m, const std::string& label,
+                       float fontPx)
+    {
+        glm::vec2 lm(0.0f);
+        if (!label.empty()) lm = HE::measureUIText(label, fontPx, 0.0f, HE::UITextLayout{});
+        return glm::vec2(m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fontPx * 0.25f),
+                         std::max(m.box, lm.y + fontPx * 0.35f));
+    };
+    for (const char* label : { "", "Show the grid", "On" })
+        for (float scale : { 1.0f, 1.5f })
+        {
+            CAPTURE(label); CAPTURE(scale);
+            const float fs = 18.0f * scale;
+            HE::UICheckBox box;
+            box.label = label; box.fontSize = 18.0f; box.autoSize = true;
+            box.applyAutoSize(0.0f, scale);
+            const glm::vec2 wantBox = expected(HE::UICheckBox::metricsFor(fs, 0.0f, false), label, fs);
+            CHECK(box.sizeX == doctest::Approx(wantBox.x));
+            CHECK(box.sizeY == doctest::Approx(wantBox.y));
+
+            HE::UICheckBox sw;
+            sw.label = label; sw.fontSize = 18.0f; sw.autoSize = true; sw.switchStyle = true;
+            sw.applyAutoSize(0.0f, scale);
+            const glm::vec2 wantSw = expected(HE::UICheckBox::metricsFor(fs, 0.0f, true), label, fs);
+            CHECK(sw.sizeX == doctest::Approx(wantSw.x));
+            CHECK(sw.sizeY == doctest::Approx(wantSw.y));
+
+            HE::UIRadioButton radio;
+            radio.label = label; radio.fontSize = 18.0f; radio.autoSize = true;
+            radio.applyAutoSize(0.0f, scale);
+            CHECK(radio.sizeX == doctest::Approx(wantBox.x));
+            CHECK(radio.sizeY == doctest::Approx(wantBox.y));
+        }
+
+    // An axis a stretching anchor owns is left alone.
+    HE::UIRadioButton stretched;
+    stretched.label = "Wide"; stretched.autoSize = true;
+    HE::uiSetAnchorPreset(stretched, 11);          // bottom row, stretched width
+    const float keepX = stretched.sizeX;
+    stretched.applyAutoSize(0.0f, 1.0f);
+    CHECK(stretched.sizeX == doctest::Approx(keepX));
+}
+
 TEST_CASE("CheckBox: a switch measures wider than a tick box for the same label")
 {
     HE::UIWidgetTree t;
