@@ -18,6 +18,7 @@
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 struct SDL_Window;
@@ -54,6 +55,7 @@ public:
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
 	                            float timeSeconds = -1.0f) override;
+	bool  SupportsTessellation() const override { return m_tessSupported; }
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
@@ -284,6 +286,10 @@ private:
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
+	// DrawScene's refine loop: every object's refined bound (what the frustum culls read) and
+	// their union (the cloud-shadow map's ground height), see the audit levers 5 and 7.
+	std::vector<HE::AABB> m_refinedBounds;
+	HE::AABB              m_frameSceneBox{};
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh
@@ -465,6 +471,18 @@ private:
 	// without ever colliding with the forward key space.
 	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                     std::string& vertBody);
+	// Displacement pin (Thema 207): GL 4.0+ adds tessellation stages to a material
+	// whose customShaderDispGlsl is set. Both resolvers fold that body into the key
+	// (only here, where it can take effect: on a context without tessellation the
+	// key stays the unconnected pin's) and file it under the key, where
+	// GetOrBuildMaterialProgram picks it up on a cache miss. Programs that did link
+	// with the two stages land in m_tessPrograms and draw GL_PATCHES.
+	bool         m_tessSupported = false;
+	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+	std::unordered_set<unsigned int>          m_tessPrograms;
+	void         foldDisplacement(const HE::UUID& materialId, uint64_t& key);
+	unsigned int MaterialPrimitive(unsigned int program) const
+	{ return m_tessPrograms.count(program) ? 0x000Eu /*GL_PATCHES*/ : 0x0004u /*GL_TRIANGLES*/; }
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
@@ -1205,10 +1223,8 @@ private:
 		glm::vec4 autoSnow{0.0f};
 	};
 	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the GLSL GiLand layout");
-	// How far, in SCREEN pixels, the widest allowed lobe scatters — the span the
-	// blur must cover for the rays not to show as noise. Same constant and same
-	// meaning as MetalRenderer::kGIReflLobeScreenPx; keep them together.
-	static constexpr float kGIReflLobeScreenPx = 24.0f;
+	// The blur's lobe reach (kGIReflLobeScreenPx) and the rays per tier come from
+	// HorizonRendering/GIReflectionTier.h, shared with every backend.
 	bool         m_giReflBlurEnabled = true; // IRenderer::GIReflectionSettings::blur
 	unsigned int m_giReflMixProgram = 0; // sharp/blurred roughness lerp (kGiReflMixFS)
 	unsigned int m_giLandSSBO = 0;

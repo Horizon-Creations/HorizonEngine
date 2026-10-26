@@ -758,6 +758,13 @@ public:
                                         float /*timeSeconds*/ = -1.0f)
     { return nullptr; }
 
+    // Whether this backend draws a graph material's Displacement pin with GPU
+    // tessellation (Thema 207). False = the fallback: the pin has no effect and
+    // the material draws exactly like its unconnected twin. The Material Editor
+    // asks this to say so next to the pin, instead of a flat preview that looks
+    // like a broken graph.
+    virtual bool SupportsTessellation() const { return false; }
+
     // ── Skeletal mesh preview ──────────────────────────────────────────────
     // Render a skeletal mesh (skinned with `boneMatrices`, or the bind pose if
     // empty) into a small dedicated offscreen target — same conventions as

@@ -346,6 +346,9 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			for (int i = 0; i < 4; ++i)
 				for (int k = 0; k < 3; ++k) HAsset::Reader::readPOD(c->data,o,a.approxLayerColor[i][k]);
 			HAsset::Reader::readPOD(c->data,o,a.approxLayerCount);
+			// Tessellation displacement (Thema 207): appended after the approx block,
+			// absent in older files → empty = no tessellation.
+			HAsset::Reader::readString(c->data,o,a.customShaderDispGlsl);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -817,6 +820,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->customShaderFragGlsl = gen.glsl;
 	mat->customShaderGBufGlsl = gen.glslGBuffer;
 	mat->customShaderVertGlsl = gen.vertexBody;
+	mat->customShaderDispGlsl = gen.displacementBody;
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->graphTexturePaths    = gen.textures;
@@ -897,6 +901,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			inst->blendMode            = gen.blendMode;
 			inst->domain               = gen.domain;
 			inst->customShaderVertGlsl = gen.vertexBody;
+			inst->customShaderDispGlsl = gen.displacementBody;
 			applyApproxSurface(*inst, g, &ov); // GI-hit colours FOR THE PERMUTATION (switches taken)
 			// A regenerated permutation invalidates any parent-baked shaders.
 			inst->precompiledShaders.clear();
@@ -923,6 +928,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;
 		inst->customShaderVertGlsl = parent->customShaderVertGlsl;
+		inst->customShaderDispGlsl = parent->customShaderDispGlsl;
 		// Same shader = same fold; the slots stay valid because the param layout
 		// is copied verbatim above — an overridden colour slot then reads the
 		// INSTANCE's value live (exactly the point of the slot indirection).
@@ -2081,6 +2087,9 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		for (int i = 0; i < 4; ++i)
 			for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(b,a.approxLayerColor[i][k]);
 		HAsset::Writer::appendPOD(b,a.approxLayerCount);
+		// Tessellation displacement body — after the approx block, which the packer
+		// re-folds and then copies everything behind it verbatim, so this ships too.
+		HAsset::Writer::appendString(b,a.customShaderDispGlsl);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

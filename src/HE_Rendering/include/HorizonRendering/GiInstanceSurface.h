@@ -2,6 +2,7 @@
 #include "../HE_RENDERING_API.h"
 #include "RenderObject.h"
 #include <Math/Math.h>
+#include <vector>
 
 class ContentManager; // global namespace (HE_Core's ContentManager is not namespaced)
 
@@ -25,6 +26,8 @@ class ContentManager; // global namespace (HE_Core's ContentManager is not names
 namespace HE
 {
 
+struct GiLandscape; // GiLandscape.h
+
 struct GiInstanceSurface
 {
 	glm::vec3 albedo    = { 1.0f, 1.0f, 1.0f }; // flat bounce/reflection colour
@@ -39,5 +42,16 @@ struct GiInstanceSurface
 // mirror shows (docs/gi-reflections-plan.md P4).
 HE_RENDERING_API GiInstanceSurface giInstanceSurface(const RenderObject&  obj,
                                                      const ContentManager* cm);
+
+// The same, knowing the scene's landscapes (RenderWorld::landscapes). The kernels of GL and Metal read a
+// landscape's paint, slope and height per hit (GiLandscape.h); a backend whose kernels do not yet (D3D11,
+// D3D12, Vulkan) shades a landscape chunk from this ONE flat colour — and the CPU fold cannot fold an AUTO
+// landscape's texture-array BaseColor, so without help it was plain white. With `landscapes` an auto
+// landscape's flat colour is its ground (grass mixed with dirt by Dirt Amount) over flat, snowless terrain,
+// from the slice means the extractor keeps current: the right colour at the right hue, none of the rock
+// on slopes or snow on peaks (those need the kernel).
+HE_RENDERING_API GiInstanceSurface giInstanceSurface(const RenderObject&  obj,
+                                                     const ContentManager* cm,
+                                                     const std::vector<GiLandscape>* landscapes);
 
 } // namespace HE

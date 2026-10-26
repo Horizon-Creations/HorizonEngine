@@ -60,6 +60,7 @@ public:
 	void SetBloomSettings(const BloomSettings& s) override;
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
+	void SetGIReflectionSettings(const GIReflectionSettings& s) override;
 	void SetSSRSettings(const SSRSettings& s) override;
 	// Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
 	// tint — the same contract GL, Metal, D3D11 and D3D12 honour.
@@ -74,6 +75,7 @@ public:
 	// the top of the next DrawScene: render thread, material resources up, and the pass
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	bool SupportsTessellation() const override { return m_tessSupported; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
 	void InvalidateTexture(const HE::UUID& textureId) override;
@@ -483,6 +485,15 @@ private:
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
+	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
+	// the material's displacement body into the shader hash right after resolveShaders
+	// and files it under the folded hash, where GetOrBuildMaterialPipeline picks it up
+	// and builds a four-stage PATCH_LIST pipeline. Off, or failed → the unconnected
+	// pin's key and pipeline (the fallback).
+	bool        m_tessSupported = false;
+	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+	void        foldDisplacement(const HE::UUID& materialId, uint64_t& hash);
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 
@@ -1405,12 +1416,23 @@ private:
 	// = false: flipping it on is the LAST step, once the full pipeline exists.
 	// Compute is core Vulkan, so no extension/feature gate is needed.
 	using GIBlasRange = HE::GiBlasRange;
-	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
+	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp/gi_refl.comp's GiInst (std430, 96 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
 		glm::vec4 baseColor{1.0f};
-		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+		// emissiveRG / emissiveB hold the hit's emissive as packed halves (r,g
+		// and b,0) for gi_refl.comp's giHitEmissive — the former pad words, so
+		// the struct stays 96 bytes and the shadow/probe kernels (which only
+		// read nodeOffset/triOffset) keep reading it unchanged. Only meaningful
+		// in m_giReflInstanceBuf (updateGiAccel's reflection-only copy, with the
+		// graph material folded in via HE::giInstanceSurface) — m_giInstanceBuf,
+		// the one gi_shadow.comp/gi_probe.comp read, keeps obj.baseColor
+		// regardless of whether reflections are on (Thema 191 step 11: a shared
+		// buffer here made the diffuse-GI bounce colour change whenever
+		// reflections got toggled).
+		int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
 	};
+	static_assert(sizeof(GIInstanceGpu) == 96, "gi_*.comp's GiInst is 96 bytes (invTransform + baseColor + offsets)");
 	struct GiBuffer // host-visible, persistently mapped
 	{
 		VkBuffer       buf    = VK_NULL_HANDLE;
@@ -1433,6 +1455,23 @@ private:
 	void ensureGiProbeAtlas();
 	void destroyGiProbeAtlas();
 	void runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+
+	// GI reflections (Thema 191 step 6): one specular ray per prepass pixel
+	// against the same SW BVH, shaded from the sun + local lights + the DDGI
+	// probe field, blurred and roughness-mixed. The GL/D3D model: the gate is
+	// Lighting::giRefl (heGIReflFwd, binding 32), consumed only by graph
+	// materials (forward + the deferred resolve) — the built-in scene.frag
+	// shader has no giRefl cascade on ANY backend yet (documented gap, not a
+	// Vulkan-only one). Own descriptor pool/layouts/pipelines, outside
+	// createGiPipelines' ok-chain: a failure here costs only the reflections.
+	void createGiReflPipelines();              // lazy, one attempt; failure → reflections off for the session
+	void ensureGiReflTargets();                // keyed on the prepass size (m_giW/m_giH)
+	void destroyGiReflTargets();
+	// Runs the trace + blur + mix chain. `diffuseActive` = the diffuse GI's
+	// probe atlases hold valid data this frame (gates the indirect term and
+	// matches D3D12's `probesValid` parameter). Returns true iff m_giReflTex
+	// holds this frame's result.
+	bool runGiReflections(VkCommandBuffer cmd, bool diffuseActive);
 
 	static constexpr int   kGIProbeOctSize     = 8;
 
@@ -1511,6 +1550,24 @@ private:
 	// bones UBO ring.
 	GiBuffer m_giInstanceBuf[3]; // k_maxFramesInFlight (static_assert at use site)
 	int      m_giInstanceCount = 0;
+	// gi_refl.comp's own copy of the ring above: folded graph-material colour
+	// (HE::giInstanceSurface) instead of obj.baseColor, only built/uploaded
+	// while m_giReflEnabled. Kept separate from m_giInstanceBuf so enabling
+	// reflections never changes what gi_probe.comp bounces (Thema 191 step 11).
+	GiBuffer m_giReflInstanceBuf[3];
+	// Painted / auto landscapes for gi_refl.comp (HE::GiLandscape, GiLandscape.h): one table entry each, capped at
+	// HE::kGiMaxLandscapes, with a weightmap view per entry (the white fallback for an auto entry or one not
+	// resident). Only kept current while m_giReflEnabled. Mirrors the kernel's GiLand — 192 bytes, std430.
+	struct GILandGpu
+	{
+		glm::mat4 worldToLocal{1.0f};
+		glm::vec4 cfg{0.0f};       // xy = 1/size, z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};
+		glm::vec4 autoWet{0.0f}, autoSlope{0.0f}, autoSnow{0.0f};
+	};
+	static_assert(sizeof(GILandGpu) == 192, "gi_refl.comp's GiLand is 192 bytes");
+	GiBuffer    m_giLandBuf[3];
+	VkImageView m_giLandWeightView[4] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
 	// ── Hardware ray tracing (VK_KHR_ray_query in compute) ──────────────────
 	// When the device offers VK_KHR_acceleration_structure + VK_KHR_ray_query
@@ -1584,6 +1641,55 @@ private:
 	int      m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
 	float    m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
 	bool     m_giShadowFilter        = true;  // edge-aware a-trous on the mask
+
+	// ── GI reflections (SetGIReflectionSettings) ─────────────────────────────
+	// The GL model: one specular ray per prepass pixel against the software
+	// BVH, shaded from the sun + local lights + the probe field, blurred, and
+	// handed to graph materials through heGIReflFwd (binding 32). Runs with or
+	// without the diffuse GI; without it the G-buffer prepass is the only GI
+	// pass that executes (updateGiAccel/runGi gate on m_giEnabled ||
+	// m_giReflEnabled).
+	bool  m_giReflEnabled        = false;
+	float m_giReflIntensity      = 1.0f;
+	float m_giReflMaxRoughness   = 0.6f;
+	float m_giReflMaxDistance    = 200.0f;
+	int   m_giReflQuality        = 1;
+	bool  m_giReflBlurEnabled    = true;
+	bool  m_giReflPipesTried     = false; // one compile attempt per session
+	bool  m_giReflReady          = false; // m_giReflTex holds this frame's result
+	float m_giReflFrameSeed      = 0.0f;
+	VkDescriptorSetLayout m_giReflDSL   = VK_NULL_HANDLE; // compute: 3 SSBOs + 4 samplers + storage image + UBO
+	VkDescriptorSetLayout m_giReflFsDSL = VK_NULL_HANDLE; // blur/mix: 3 samplers (unused bindings hold valid views)
+	VkPipelineLayout m_giReflPL   = VK_NULL_HANDLE; // compute
+	VkPipelineLayout m_giReflFsPL = VK_NULL_HANDLE; // blur + mix, vec4 fragment push constant
+	VkPipeline m_giReflPipe     = VK_NULL_HANDLE; // compute (gi_refl.comp)
+	VkPipeline m_giReflBlurPipe = VK_NULL_HANDLE; // gi_refl_blur.frag
+	VkPipeline m_giReflMixPipe  = VK_NULL_HANDLE; // gi_refl_mix.frag
+	VkRenderPass m_giReflFsRP = VK_NULL_HANDLE; // RGBA16F → SHADER_READ_ONLY, backs ping/blur/final
+	// raw = the trace (storage image, GENERAL); ping/blur = the separable
+	// chain's two targets; final = the roughness-mixed result the materials
+	// sample. All RGBA16F at the prepass' size (m_giW/m_giH — the GL/D3D gap:
+	// the trace runs at the shared GI prepass resolution, resDivUsed = 2).
+	GiImage m_giReflRaw, m_giReflPing, m_giReflBlur, m_giReflFinal;
+	// Raw ping-pongs every frame between GENERAL (the compute write) and
+	// SHADER_READ_ONLY_OPTIMAL (the blur/mix draws' read) — tracked so
+	// runGiReflections can transition FROM wherever it actually is, not just
+	// assume GENERAL (a missing transition here showed up on the RTX 4070 as
+	// vkQueueSubmit() "expects ... GENERAL -- instead ... SHADER_READ_ONLY").
+	VkImageLayout m_giReflRawLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkFramebuffer m_giReflPingFB = VK_NULL_HANDLE, m_giReflBlurFB = VK_NULL_HANDLE, m_giReflFinalFB = VK_NULL_HANDLE;
+	int m_giReflW = 0, m_giReflH = 0;
+	VkDescriptorPool m_giReflDescPool = VK_NULL_HANDLE; // own pool (advisor: don't grow the shared GI one)
+	VkDescriptorSet  m_giReflSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE }; // compute, per in-flight frame
+	GiBuffer m_giReflUBO[3]; // GiReflUBOData, per in-flight frame
+	// Fullscreen "tables" for the blur/mix chain — FIXED, one set per texture
+	// role, rewritten only when ensureGiReflTargets rebuilds the images (not
+	// per frame or per a-trous level: only the push-constant stride/floor
+	// changes between draws, same shape as D3D12's four SRV tables).
+	VkDescriptorSet m_giReflTabRaw = VK_NULL_HANDLE;  // binding0 = raw   (H-pass source, level 0)
+	VkDescriptorSet m_giReflTabPing = VK_NULL_HANDLE; // binding0 = ping  (V-pass source, every level)
+	VkDescriptorSet m_giReflTabBlur = VK_NULL_HANDLE; // binding0 = blur  (H-pass source, level >= 1)
+	VkDescriptorSet m_giReflTabMix = VK_NULL_HANDLE;  // binding0 = raw (sharp), 1 = blur (blurred), 2 = gNorm
 
 	// ── GPU skeletal-mesh skinning ───────────────────────────────────────────
 	// Each skeletal mesh uploaded to the GPU gets three vertex buffers:

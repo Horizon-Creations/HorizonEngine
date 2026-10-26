@@ -707,6 +707,75 @@ TEST_CASE("GeometryPass cuts a run longer than one instanced draw may carry")
 	CHECK(drawnInstances(syntheticRun(100, 3)).size() == 103u);
 }
 
+TEST_CASE("GeometryPass keeps the instance order across its cuts, and a big block unfolds on the workers bit for bit")
+{
+	// Two clusters under a rotated parent (the General product) around an ordinary object, all of
+	// one mesh: one run of 2 * 50 000 + 1 instances, cut at the cap in the middle of the second
+	// cluster. The draws are filled straight from the objects now (frame-parallelism audit, lever
+	// 1), so the order across a cut is the thing to keep: draw by draw it must be the serial
+	// unfolding, world(i) of each block in turn.
+	RenderWorld rw;
+	const HE::UUID mesh{ 7, 7 };
+	const glm::mat4 parent = glm::rotate(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 4.0f, 5.0f)),
+	                                     0.7f, glm::vec3(0.3f, 1.0f, 0.2f));
+	for (int c = 0; c < 2; ++c)
+	{
+		auto mats = std::make_shared<std::vector<glm::mat4>>();
+		for (uint32_t i = 0; i < 50000; ++i)
+			mats->push_back(glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(float(i) * 0.37f, float(c), 1.0f)),
+			                           glm::vec3(1.0f + float(i % 7) * 0.1f)));
+		InstanceBlock b;
+		b.matrices = mats;
+		b.count    = 50000;
+		b.parent   = parent;
+		b.kind     = InstanceBlock::classify(parent);
+		rw.instanceBlocks.push_back(b);
+		RenderObject o;
+		o.meshAssetId   = mesh;
+		o.transform     = b.world(0);
+		o.instanceBlock = c;
+		rw.objects.push_back(o);
+		if (c == 0)
+		{
+			RenderObject plain;
+			plain.meshAssetId = mesh;
+			plain.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(-9.0f, 0.0f, 0.0f));
+			rw.objects.push_back(plain);
+		}
+	}
+	REQUIRE(rw.instanceBlocks[0].kind == InstanceBlock::Parent::General);
+
+	std::vector<glm::mat4> expected;
+	for (const RenderObject& o : rw.objects) rw.forEachInstance(o, [&](const glm::mat4& m) { expected.push_back(m); });
+
+	std::vector<uint32_t> idx(rw.objects.size());
+	std::iota(idx.begin(), idx.end(), 0u);
+	CommandBuffer cmds;
+	GeometryPass{}.execute(rw, idx, cmds);
+	std::vector<glm::mat4> drawn;
+	for (const DrawCall& dc : cmds.drawCalls())
+	{
+		if (dc.instanceTransforms.empty()) drawn.push_back(dc.transform);
+		else
+		{
+			CHECK(dc.transform == dc.instanceTransforms.front());
+			drawn.insert(drawn.end(), dc.instanceTransforms.begin(), dc.instanceTransforms.end());
+		}
+	}
+	REQUIRE(drawn.size() == expected.size());
+	CHECK(std::memcmp(drawn.data(), expected.data(), drawn.size() * sizeof(glm::mat4)) == 0);
+
+	// A part of a block, as a cut takes it, is the same instances in place.
+	std::vector<glm::mat4> part;
+	rw.appendInstanceRange(rw.objects[2], 1234, 20000, part);
+	REQUIRE(part.size() == 20000u);
+	CHECK(std::memcmp(part.data(), expected.data() + 50001 + 1234, part.size() * sizeof(glm::mat4)) == 0);
+	part.clear();
+	rw.appendInstanceRange(rw.objects[1], 0, 1, part);   // an ordinary object is instance 0 of one
+	REQUIRE(part.size() == 1u);
+	CHECK(part[0] == rw.objects[1].transform);
+}
+
 TEST_CASE("batchDepthRuns unfolds a cluster and cuts the run at the instance cap")
 {
 	const uint32_t cap = HE::kMaxInstancesPerDraw;

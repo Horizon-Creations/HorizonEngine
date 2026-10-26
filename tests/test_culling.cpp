@@ -16,6 +16,7 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonRendering/GiLandscape.h>
+#include <HorizonRendering/GiInstanceSurface.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -105,6 +106,38 @@ TEST_CASE("FrustumCuller keeps objects with unknown (invalid) bounds visible")
 	REQUIRE(vis.size() == 2);
 	CHECK(vis[0] == 0u);   // valid box outside the frustum → culled
 	CHECK(vis[1] == 1u);   // unknown/invalid bounds → kept visible
+}
+
+TEST_CASE("FrustumCuller over a compact bounds array answers exactly as over the objects")
+{
+	// The Metal passes cull a per-walk copy of the refined bounds (audit lever 7): same test,
+	// 24 bytes per object instead of a RenderObject each. Boxes inside, outside, across the
+	// planes and invalid ones, enough to go through the parallel chunks.
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	std::vector<HE::AABB> bounds;
+	for (int i = 0; i < 5000; ++i)
+	{
+		RenderObject o;
+		if (i % 97 != 0)   // every 97th stays invalid
+		{
+			const glm::vec3 c(float((i * 37) % 200) - 100.0f, float((i * 11) % 40) - 20.0f, -float((i * 53) % 150));
+			o.worldBounds.expand(c);
+			o.worldBounds.expand(c + glm::vec3(0.5f + float(i % 5)));
+		}
+		rw.objects.push_back(o);
+		bounds.push_back(o.worldBounds);
+	}
+	FrustumCuller culler;
+	const glm::mat4 vp = rw.camera.projection * rw.camera.view;
+	std::vector<uint8_t> fromObjects, fromBounds;
+	culler.cull(rw, vp, fromObjects);
+	culler.cull(bounds, vp, fromBounds);
+	CHECK(fromObjects == fromBounds);
+	const size_t kept = static_cast<size_t>(std::count(fromBounds.begin(), fromBounds.end(), uint8_t(1)));
+	CHECK(kept > 50u);
+	CHECK(kept < 4950u);   // both answers occur, the comparison means something
 }
 
 TEST_CASE("AABB build and ray intersection")
@@ -2055,6 +2088,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "gi_shadow.comp",     sh / "gi_shadow.comp" },
 			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp" },
 			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl" },
+			{ "gi_refl.comp",       sh / "gi_refl.comp" }, // Vulkan reflection kernel, its own giHash2/giPcg3d copy
 			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h" },
 			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp" },
 			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm" },
@@ -2251,19 +2285,46 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			return stripLineComments(gl.substr(from, to - from));
 		};
 
+		// The D3D12/D3D11 reflection kernel (kGiReflCSHLSL, HlslSources.h) is the
+		// fifth copy: a hit shaded from the same probe field in HLSL. Sliced by its
+		// literal name, like the GL ones.
+		const std::string hlslAll = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                     "Backends" / "D3D_Shared" / "HlslSources.h");
+		const std::string hlslDecl = "inline constexpr const char* kGiReflCSHLSL = R\"HLSL(";
+		const size_t hlslAt = hlslAll.find(hlslDecl);
+		REQUIRE(hlslAt != std::string::npos); // literal renamed/moved
+		const size_t hlslFrom = hlslAt + hlslDecl.size();
+		const size_t hlslTo   = hlslAll.find(")HLSL\";", hlslFrom);
+		REQUIRE(hlslTo != std::string::npos);
+
+		// gi_refl.comp (Vulkan, Thema 191 step 6) is the sixth copy: a whole
+		// file, like scene.frag above (not sliced by literal name — there is
+		// only one GLSL reflection kernel per file on this backend).
 		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag",
-		                                         "kUnlitFS (GL)", "kGiReflCS (GL)" };
+		                                         "kUnlitFS (GL)", "kGiReflCS (GL)",
+		                                         "kGiReflCSHLSL (D3D)", "gi_refl.comp (Vulkan)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib.substr(open + 3, close - open - 3)),
 			stripLineComments(readFile(sh / "scene.frag")),
 			glslLiteral("kUnlitFS"),
 			glslLiteral("kGiReflCS"),
+			stripLineComments(hlslAll.substr(hlslFrom, hlslTo - hlslFrom)),
+			stripLineComments(readFile(sh / "gi_refl.comp")),
 		};
 		checkGroup(names, src, {
-			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
+			// HLSL spells the parameter `float3 n`, and the regex runs before
+			// canonicalise() rewrites the dialect, so the D3D copy has its own.
+			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(float3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
 			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
 			                              R"(const int kOctSize = (\d+);)" } },
 			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },
 			{ "trilinear weight cutoff",{ R"(weight <= ([0-9.e+-]+)\) continue)" } },
@@ -3925,6 +3986,37 @@ bool near3(const glm::vec3& a, const glm::vec3& b, float eps = 1e-4f)
 	return glm::all(glm::lessThan(glm::abs(a - b), glm::vec3(eps)));
 }
 } // namespace
+
+TEST_CASE("GI auto landscape: a backend without the per-hit kernel gets the ground colour, not white")
+{
+	// D3D11, D3D12 and Vulkan shade a landscape chunk from one flat colour (HE::giInstanceSurface). The CPU fold
+	// cannot fold the auto material's texture-array BaseColor, so that colour was plain white.
+	HE::GiLandscape L = autoLandFixture();
+	std::vector<HE::GiLandscape> lands{ L };
+	RenderObject chunk;
+	chunk.landscapeIndex = 0;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	// Without the scene's landscapes it stays what it was: the object's own colour.
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr).albedo, { 1, 1, 1 }));
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, nullptr).albedo, { 1, 1, 1 }));
+	// With them: grass on flat ground, whatever the snow line (a flat colour cannot know the height).
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 0, 0 }));
+	// Dirt Amount mixes dirt into the ground.
+	lands[0].autoSlope.z = 0.5f;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.5f, 0.5f, 0 }));
+	// The instance tint still multiplies.
+	chunk.instanceTint = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.25f, 0.5f, 0 }));
+	// A chunk of no landscape, a bad index and a painted landscape keep their own colour.
+	RenderObject plain;
+	CHECK(near3(HE::giInstanceSurface(plain, nullptr, &lands).albedo, { 1, 1, 1 }));
+	chunk.landscapeIndex = 3;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+	lands[0].layerCount = 2;
+	chunk.landscapeIndex = 0;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+}
 
 TEST_CASE("GI auto landscape: the hit colour follows the material's slope and height masks")
 {

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -34,7 +35,8 @@ const std::vector<MatNodeDesc>& registry()
             { "Opacity", F::Float, 1.0f },     // 5 — meaning depends on the blend mode
             { "Normal", F::Vec3, 0.0f },       // 6 — WORLD-space; unconnected = vNormal
             { "Ambient Occlusion", F::Float, 1.0f }, // 7 — scales the ambient term only
-            { "World Position Offset", F::Vec3, 0.0f } }, // 8 — vertex stage
+            { "World Position Offset", F::Vec3, 0.0f },  // 8 — vertex stage
+            { "Displacement", F::Float, 0.0f } },         // 9 — tessellation (domain) stage
           {}, 3 }, // p[0] = lit, p[1] = blend mode, p[2] = mask cutoff, p[3] = domain
         { MatNodeType::ConstFloat, "Float", "Constant",
           {}, { { "Value", F::Float, 0 } }, 1 },
@@ -576,6 +578,13 @@ struct Scope
     const MatGraphNode*  callNode = nullptr; // the FunctionCall node in the parent scope
 };
 
+// The Displacement body is emitted in scope "ds" (a function it calls inlines as
+// "ds/<id>"), and it runs in the tessellation DOMAIN stage: after the vertices,
+// before rasterisation. There are no screen derivatives and no pixel there, so the
+// nodes that need one read mip 0 or hand back a neutral value instead of failing
+// to compile (the same courtesy Water Ripple extends to the WPO scope "vs").
+bool dsStage(const Scope& sc) { return sc.key == "ds" || sc.key.rfind("ds/", 0) == 0; }
+
 std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
                       int pinIdx, MatPinType wantType);
 bool        hasInput(const Scope& sc, const MatGraphNode& node, int pinIdx);
@@ -682,8 +691,10 @@ std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const s
     if (variants) decl += "uvec3 " + g + "s; ";
     decl += std::string(variants ? "heBombGridV(" : "heBombGrid(") + uv + ", " + cell + ", " + fmtF(rot) + ", "
           + fmtF(sharp) + ", " + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, "
-          + g + "r2, " + g + "w" + (variants ? ", " + g + "s" : std::string()) + "); vec2 " + g + "dx = dFdx("
-          + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ";
+          + g + "r2, " + g + "w" + (variants ? ", " + g + "s" : std::string()) + "); "
+          // Domain stage: no derivatives, and zero gradients make textureGrad read mip 0.
+          + (dsStage(sc) ? "vec2 " + g + "dx = vec2(0.0); vec2 " + g + "dy = vec2(0.0); "
+                         : "vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ");
     c.bombGrids.emplace(key, g);
     return g;
 }
@@ -792,7 +803,9 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
         case MatNodeType::CameraDistance:
             decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ScreenPos:
-            decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+            decl = dsStage(sc) ? "vec2 " + v + " = vec2(0.0); // Screen Position: no pixel in the domain stage"
+                               : "vec2 " + v + " = gl_FragCoord.xy;";
+            break;
         case MatNodeType::Weather:
             // heLight.weather: x wetness, y snow amount (the generic response), z puddles,
             // w snow cover (set per scene in the Weather details panel).
@@ -894,12 +907,19 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
         case MatNodeType::TextureSample:
         {
             const std::string sampler = textureSampler(c, n);
-            decl = "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
+            decl = dsStage(sc) // no derivatives → mip 0
+                ? "vec4 " + v + " = textureLod(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ", 0.0);"
+                : "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
         }
         case MatNodeType::NormalMapSample:
         {
+            if (dsStage(sc)) // the frame needs screen derivatives: the plain normal
+            {
+                decl = "vec3 " + v + " = normalize(vNormal); // Normal Map: fragment stage only";
+                break;
+            }
             // Tangent-space normal map → world space WITHOUT vertex tangents: build the
             // cotangent frame from screen-space derivatives of position+UV (Mikkelsen).
             // Same slot machinery as Texture Sample (empty s → the mesh texture).
@@ -916,6 +936,11 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
         case MatNodeType::TextureArraySample:
         case MatNodeType::NormalMapArraySample:
         {
+            if (n.type == MatNodeType::NormalMapArraySample && dsStage(sc))
+            {
+                decl = "vec3 " + v + " = normalize(vNormal); // Normal Map: fragment stage only";
+                break;
+            }
             bool isArr = false;
             const std::string sampler = textureSampler(c, n, /*array=*/true, &isArr);
             const std::string uv      = uvInput(c, sc, n, 0);
@@ -936,7 +961,9 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
             }
             if (n.type == MatNodeType::TextureArraySample)
             {
-                decl += " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
+                decl += dsStage(sc)
+                    ? " vec4 " + v + " = textureLod(" + sampler + ", " + coord + ", 0.0);"
+                    : " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
                 pinExpr = { v + ".xyz", v + ".w" };
             }
             else
@@ -971,6 +998,11 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                                 || n.type == MatNodeType::NormalMapArrayBombSample;
             const bool normal = n.type == MatNodeType::NormalMapBombSample
                              || n.type == MatNodeType::NormalMapArrayBombSample;
+            if (normal && dsStage(sc)) // like Normal Map: the frame needs derivatives
+            {
+                decl = "vec3 " + v + " = normalize(vNormal); // Normal Map: fragment stage only";
+                break;
+            }
             bool isArr = false;
             const std::string sampler = textureSampler(c, n, wantArray, &isArr);
             // The uv EXPRESSION (not a per-node copy) keys the grid, so two nodes
@@ -1180,41 +1212,75 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
     (void)pinExpr;
     switch (n.type)
     {
+        // A node with several inputs emits the nodes behind them as a side effect of
+        // inputExpr, so the ORDER of the calls is the order of the statements (and of
+        // the numbering and the parameter slots). Operands of one expression are
+        // unsequenced: MSVC and GCC run the last operand first, Clang the first. The
+        // locals below fix it to last-textual-first — the order the shipped
+        // .hasset files were baked in — so the shader no longer depends on the compiler.
         case MatNodeType::Add:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " + " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " + " + b + ";"; break;
+        }
         case MatNodeType::Multiply:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " * " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " * " + b + ";"; break;
+        }
         case MatNodeType::Lerp:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3)
-                 + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string t = inputExpr(c, sc, n, 2, F::Float), b = inputExpr(c, sc, n, 1, F::Vec3),
+                              a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = mix(" + a + ", " + b + ", " + t + ");"; break;
+        }
         case MatNodeType::OneMinus:
             decl = "vec3 " + v + " = vec3(1.0) - " + inputExpr(c, sc, n, 0, F::Vec3) + ";"; break;
         case MatNodeType::Power:
-            decl = "float " + v + " = pow(max(" + inputExpr(c, sc, n, 0, F::Float) + ", 0.0), " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string e = inputExpr(c, sc, n, 1, F::Float), b = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = pow(max(" + b + ", 0.0), " + e + ");"; break;
+        }
         case MatNodeType::Saturate:
             decl = "vec3 " + v + " = clamp(" + inputExpr(c, sc, n, 0, F::Vec3) + ", 0.0, 1.0);"; break;
         case MatNodeType::DotProduct:
-            decl = "float " + v + " = dot(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "float " + v + " = dot(" + a + ", " + b + ");"; break;
+        }
         case MatNodeType::Sine:
             decl = "float " + v + " = sin(" + inputExpr(c, sc, n, 0, F::Float) + ");"; break;
         case MatNodeType::Combine3:
-            decl = "vec3 " + v + " = vec3(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string z = inputExpr(c, sc, n, 2, F::Float), y = inputExpr(c, sc, n, 1, F::Float),
+                              x = inputExpr(c, sc, n, 0, F::Float);
+            decl = "vec3 " + v + " = vec3(" + x + ", " + y + ", " + z + ");"; break;
+        }
         case MatNodeType::Subtract:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " - " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " - " + b + ";"; break;
+        }
         case MatNodeType::Divide:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " / max("
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", vec3(1e-5));"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = " + a + " / max(" + b + ", vec3(1e-5));"; break;
+        }
         case MatNodeType::Absolute:
             decl = "vec3 " + v + " = abs(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Fract:
             decl = "vec3 " + v + " = fract(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Smoothstep:
-            decl = "float " + v + " = smoothstep(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string x = inputExpr(c, sc, n, 2, F::Float), e1 = inputExpr(c, sc, n, 1, F::Float),
+                              e0 = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = smoothstep(" + e0 + ", " + e1 + ", " + x + ");"; break;
+        }
         case MatNodeType::Step:
-            decl = "float " + v + " = step(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string x = inputExpr(c, sc, n, 1, F::Float), e = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = step(" + e + ", " + x + ");"; break;
+        }
         case MatNodeType::Normalize3:
             decl = "vec3 " + v + " = normalize(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         default: return false;
@@ -1233,38 +1299,60 @@ HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNod
             decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";";
             pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
             break;
+        // Sequenced last-textual-first, see emitMathNode.
         case MatNodeType::CombineRGBA:
-            decl = "vec4 " + v + " = vec4(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ", "
-                 + inputExpr(c, sc, n, 3, F::Float) + ");"; break;
+        {
+            const std::string w = inputExpr(c, sc, n, 3, F::Float), z = inputExpr(c, sc, n, 2, F::Float),
+                              y = inputExpr(c, sc, n, 1, F::Float), x = inputExpr(c, sc, n, 0, F::Float);
+            decl = "vec4 " + v + " = vec4(" + x + ", " + y + ", " + z + ", " + w + ");"; break;
+        }
         case MatNodeType::If:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 2, F::Vec3) + ", "
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", step(0.5, "
-                 + inputExpr(c, sc, n, 0, F::Float) + "));"; break;
+        {
+            // The text names pin 2, 1, 0 in that order, so last-first is pin 0, 1, 2.
+            const std::string cond = inputExpr(c, sc, n, 0, F::Float), yes = inputExpr(c, sc, n, 1, F::Vec3),
+                              no = inputExpr(c, sc, n, 2, F::Vec3);
+            decl = "vec3 " + v + " = mix(" + no + ", " + yes + ", step(0.5, " + cond + "));"; break;
+        }
         case MatNodeType::Greater:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > " + b + ");"; break;
+        }
         case MatNodeType::Less:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " < "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " < " + b + ");"; break;
+        }
         case MatNodeType::GreaterEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " >= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " >= " + b + ");"; break;
+        }
         case MatNodeType::LessEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " <= " + b + ");"; break;
+        }
         case MatNodeType::Equal:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") < 1e-4);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(abs(" + a + " - " + b + ") < 1e-4);"; break;
+        }
         case MatNodeType::NotEqual:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") >= 1e-4);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(abs(" + a + " - " + b + ") >= 1e-4);"; break;
+        }
         case MatNodeType::And:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 && "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > 0.5 && " + b + " > 0.5);"; break;
+        }
         case MatNodeType::Or:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 || "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > 0.5 || " + b + " > 0.5);"; break;
+        }
         case MatNodeType::Not:
             decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
         default: return false;
@@ -1280,20 +1368,24 @@ HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphN
     switch (n.type)
     {
         case MatNodeType::Panner:
-            decl = "vec2 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec2) + " + vec2("
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float)
-                 + ") * heLight.sunDir.w;"; break;
+        {
+            const std::string sy = inputExpr(c, sc, n, 2, F::Float), sx = inputExpr(c, sc, n, 1, F::Float),
+                              uv = inputExpr(c, sc, n, 0, F::Vec2);
+            decl = "vec2 " + v + " = " + uv + " + vec2(" + sx + ", " + sy + ") * heLight.sunDir.w;"; break;
+        }
         case MatNodeType::ValueNoise:
+        {
             c.usesNoise = true;
-            decl = "float " + v + " = heValueNoise(" + uvInput(c, sc, n, 0) + " * "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "float " + v + " = heValueNoise(" + uv + " * " + freq + ");"; break;
+        }
         case MatNodeType::Fbm:
         {
             // p[0] = 1 → the integer-hash fbm (see heFbmI); 0 keeps the old text.
             const bool robust = n.p[0] > 0.5f;
             (robust ? c.usesNoiseI : c.usesNoise) = true;
-            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uvInput(c, sc, n, 0)
-                 + " * " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uv + " * " + freq + ");"; break;
         }
         case MatNodeType::Checker:
         {
@@ -1626,106 +1718,16 @@ std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinI
 {
     return hasInput(sc, n, pinIdx) ? inputExpr(c, sc, n, pinIdx, F::Vec2) : std::string("vUV");
 }
-} // namespace
 
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
-                              const std::map<std::string, bool>* switchOverrides)
+// The declaration block of a generated stage: texture samplers, the parameter
+// block, the UI inputs and the helpers the emitted nodes asked for. The fragment
+// and the displacement (domain) stage both take theirs from here, so a helper is
+// written once. `domainStage` leaves out what only a fragment can have: the
+// derivative-based normal frame and the UI pass's backdrop (the nodes that would
+// call them emit neutral values in scope "ds", see dsStage).
+std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, uint32_t& arrayMask)
 {
-    const MatGraphNode* out = nullptr;
-    for (const auto& n : graph.nodes)
-        if (n.type == MatNodeType::Output) { out = &n; break; }
-
-    const std::string headerCommon =
-        "#version 450\n"
-        "// GENERATED by the material node graph — do not edit by hand.\n"
-        "layout(location = 0) in vec3 vNormal;\n"
-        "layout(location = 1) in vec3 vColor;\n"
-        "layout(location = 2) in vec2 vUV;\n"
-        "layout(location = 3) in vec3 vWorldPos;\n";
-    const std::string header = headerCommon + "layout(location = 0) out vec4 oColor;\n";
-    // Deferred variant: three MRT outputs instead of the lit colour — the SAME
-    // graph body feeds both, only the emit tail differs (see the plan's §2).
-    const std::string headerGB = headerCommon +
-        "layout(location = 0) out vec4 oGB0;\n"   // rgb = BaseColor, a = Metallic
-        "layout(location = 1) out vec4 oGB1;\n"   // rg = oct normal, b = Roughness, a = Specular
-        "layout(location = 2) out vec4 oGB2;\n"   // rgb = Emissive (HDR), a = Material-AO
-        // NDC depth for the tile-memory resolve (Metal single-pass P6, which can
-        // framebuffer-fetch colour attachments but not the depth buffer). GL
-        // binds only 3 draw buffers → the write is dropped there; the two-pass
-        // Metal fallback stores it unused (R32F, DontCare).
-        "layout(location = 3) out vec4 oGB3;\n";
-
-    MatShaderGen gen;
-    if (!out)
-    {
-        gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";
-        gen.glslGBuffer = headerGB +
-            "void main() { oGB0 = vec4(1.0, 0.0, 1.0, 0.0);"
-            " oGB1 = vec4(0.5, 0.5, 1.0, 0.5); oGB2 = vec4(0.0);"
-            " oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); } // no Output node\n";
-        return gen;
-    }
-
-    EmitCtx c;
-    c.loader   = &loader;
-    c.switchOv = switchOverrides;
-    Scope root;
-    root.g = &graph;
-    // Read the domain HERE and not with its siblings below: emitting a node is
-    // what needs it (Backdrop), and that happens in the inputExpr calls that
-    // follow. Same expression as `uiDomain` further down, which stays the one
-    // the tail reads.
-    c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
-
-    const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
-    const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
-    const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
-    const std::string rough   = inputExpr(c, root, *out, kMatOutputRoughnessPin, F::Float);
-    const std::string emis    = inputExpr(c, root, *out, kMatOutputEmissivePin,  F::Vec3);
-    const std::string ao      = inputExpr(c, root, *out, kMatOutputAOPin,        F::Float);
-    // The domain (Output p[3]) decides what this material may compute at all. A
-    // UI material is unlit whatever the Lit toggle says: there is no lighting
-    // where it is drawn, so "lit" there means shaded by a stand-in sun and
-    // fogged against a world position that is really a pixel coordinate.
-    // A value that names no domain is the Surface one: falling back to the
-    // default a graph was written with beats clamping UP into a domain that
-    // changes what the material may compute.
-    const bool uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
-    const int  domain   = uiDomain ? static_cast<int>(MatDomain::UserInterface)
-                                   : static_cast<int>(MatDomain::Surface);
-    const bool lit = !uiDomain && out->p[0] > 0.5f;
-
-    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
-    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
-    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
-    std::string opacity   = "1.0";                                // Opaque/Masked → solid
-    std::string mask;
-    if (blendMode == (int)MatBlendMode::Masked)
-        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
-    else if (blendMode == (int)MatBlendMode::Translucent)
-        opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
-
-    // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
-    const std::string normalExpr = hasInput(root, *out, kMatOutputNormalPin)
-        ? "normalize(" + inputExpr(c, root, *out, kMatOutputNormalPin, F::Vec3) + ")"
-        : "normalize(vNormal)";
-
-    // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
-    // scope ("vs") so its statements never share variables with the fragment body. The
-    // same varying NAMES are readable in the vertex template, so the text is reusable. ──
-    if (hasInput(root, *out, kMatOutputWPOPin))
-    {
-        Scope vs;
-        vs.g   = &graph;
-        vs.key = "vs";
-        const size_t mark = c.body.size();
-        const std::string wpoExpr = inputExpr(c, vs, *out, kMatOutputWPOPin, F::Vec3);
-        gen.vertexBody = c.body.substr(mark)
-                       + "    vec3 heWpo = " + wpoExpr + ";\n";
-        c.body.resize(mark); // the WPO statements belong to the vertex stage only
-    }
-
-    std::string src; // shared declaration block (appended to either header)
+    std::string src;
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
     if (c.usesLandscapeWeights)
@@ -1738,7 +1740,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // Project textures (binding 4 + slot). An array slot keeps the SAME binding and
     // register as a 2D one — only the declared type differs — so no backend's pin
     // table, descriptor layout or root signature changes for it.
-    uint32_t arrayMask = 0;
+    arrayMask = 0;
     for (size_t i = 0; i < c.textures.size(); ++i)
     {
         if (c.textureIsArray[i]) arrayMask |= 1u << i;
@@ -1793,7 +1795,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // so a shared shader text would sample the screen mirrored on one of the two
     // backends. GL flips instead through heUI.screen.z, because ITS snapshot is a
     // framebuffer copy and thus upside down as a texture.
-    if (c.usesBackdrop)
+    if (c.usesBackdrop && !domainStage)
         src +=
             "layout(set = 0, binding = 9) uniform sampler2D heBackdrop;\n"
             "vec3 heBd(vec2 uv, float lod) {\n"
@@ -1868,7 +1870,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5;"
             " for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
-    if (c.usesNormalPerturb)
+    if (c.usesNormalPerturb && !domainStage)
         // The cotangent frame (Schüler) comes out multiplied by the SIGN of the
         // screen basis: dFdy runs up the screen on OpenGL and down it on D3D,
         // Vulkan and Metal, which mirrored every normal map there (measured,
@@ -2027,6 +2029,137 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     f = clamp(f, 0.0, 1.0);
 }
 )HE";
+    return src;
+}
+} // namespace
+
+MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
+                              const std::map<std::string, bool>* switchOverrides)
+{
+    const MatGraphNode* out = nullptr;
+    for (const auto& n : graph.nodes)
+        if (n.type == MatNodeType::Output) { out = &n; break; }
+
+    const std::string headerCommon =
+        "#version 450\n"
+        "// GENERATED by the material node graph — do not edit by hand.\n"
+        "layout(location = 0) in vec3 vNormal;\n"
+        "layout(location = 1) in vec3 vColor;\n"
+        "layout(location = 2) in vec2 vUV;\n"
+        "layout(location = 3) in vec3 vWorldPos;\n";
+    const std::string header = headerCommon + "layout(location = 0) out vec4 oColor;\n";
+    // Deferred variant: three MRT outputs instead of the lit colour — the SAME
+    // graph body feeds both, only the emit tail differs (see the plan's §2).
+    const std::string headerGB = headerCommon +
+        "layout(location = 0) out vec4 oGB0;\n"   // rgb = BaseColor, a = Metallic
+        "layout(location = 1) out vec4 oGB1;\n"   // rg = oct normal, b = Roughness, a = Specular
+        "layout(location = 2) out vec4 oGB2;\n"   // rgb = Emissive (HDR), a = Material-AO
+        // NDC depth for the tile-memory resolve (Metal single-pass P6, which can
+        // framebuffer-fetch colour attachments but not the depth buffer). GL
+        // binds only 3 draw buffers → the write is dropped there; the two-pass
+        // Metal fallback stores it unused (R32F, DontCare).
+        "layout(location = 3) out vec4 oGB3;\n";
+
+    MatShaderGen gen;
+    if (!out)
+    {
+        gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";
+        gen.glslGBuffer = headerGB +
+            "void main() { oGB0 = vec4(1.0, 0.0, 1.0, 0.0);"
+            " oGB1 = vec4(0.5, 0.5, 1.0, 0.5); oGB2 = vec4(0.0);"
+            " oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); } // no Output node\n";
+        return gen;
+    }
+
+    EmitCtx c;
+    c.loader   = &loader;
+    c.switchOv = switchOverrides;
+    Scope root;
+    root.g = &graph;
+    // Read the domain HERE and not with its siblings below: emitting a node is
+    // what needs it (Backdrop), and that happens in the inputExpr calls that
+    // follow. Same expression as `uiDomain` further down, which stays the one
+    // the tail reads.
+    c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
+
+    const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
+    const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
+    const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
+    const std::string rough   = inputExpr(c, root, *out, kMatOutputRoughnessPin, F::Float);
+    const std::string emis    = inputExpr(c, root, *out, kMatOutputEmissivePin,  F::Vec3);
+    const std::string ao      = inputExpr(c, root, *out, kMatOutputAOPin,        F::Float);
+    // The domain (Output p[3]) decides what this material may compute at all. A
+    // UI material is unlit whatever the Lit toggle says: there is no lighting
+    // where it is drawn, so "lit" there means shaded by a stand-in sun and
+    // fogged against a world position that is really a pixel coordinate.
+    // A value that names no domain is the Surface one: falling back to the
+    // default a graph was written with beats clamping UP into a domain that
+    // changes what the material may compute.
+    const bool uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
+    const int  domain   = uiDomain ? static_cast<int>(MatDomain::UserInterface)
+                                   : static_cast<int>(MatDomain::Surface);
+    const bool lit = !uiDomain && out->p[0] > 0.5f;
+
+    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
+    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
+    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
+    std::string opacity   = "1.0";                                // Opaque/Masked → solid
+    std::string mask;
+    if (blendMode == (int)MatBlendMode::Masked)
+        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
+    else if (blendMode == (int)MatBlendMode::Translucent)
+        opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
+
+    // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
+    const std::string normalExpr = hasInput(root, *out, kMatOutputNormalPin)
+        ? "normalize(" + inputExpr(c, root, *out, kMatOutputNormalPin, F::Vec3) + ")"
+        : "normalize(vNormal)";
+
+    // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
+    // scope ("vs") so its statements never share variables with the fragment body. The
+    // same varying NAMES are readable in the vertex template, so the text is reusable. ──
+    if (hasInput(root, *out, kMatOutputWPOPin))
+    {
+        Scope vs;
+        vs.g   = &graph;
+        vs.key = "vs";
+        const size_t mark = c.body.size();
+        const std::string wpoExpr = inputExpr(c, vs, *out, kMatOutputWPOPin, F::Vec3);
+        gen.vertexBody = c.body.substr(mark)
+                       + "    vec3 heWpo = " + wpoExpr + ";\n";
+        c.body.resize(mark); // the WPO statements belong to the vertex stage only
+    }
+
+    // ── Displacement (pin 9) → the tessellation DOMAIN stage, scope "ds" (see
+    // dsStage). Emitted with the fragment's context, so a texture or parameter it
+    // reads takes the fragment's slot: both stages read one binding table. A UI
+    // material ignores the pin, a widget quad is never tessellated. Unconnected,
+    // nothing here touches `c`, so every other output stays byte-identical. ──
+    std::string dispStatements;
+    if (!uiDomain && hasInput(root, *out, kMatOutputDisplacementPin))
+    {
+        Scope ds;
+        ds.g   = &graph;
+        ds.key = "ds";
+        const size_t mark = c.body.size();
+        const std::string dispExpr = inputExpr(c, ds, *out, kMatOutputDisplacementPin, F::Float);
+        dispStatements = c.body.substr(mark) + "    float heDisp = " + dispExpr + ";\n";
+        c.body.resize(mark); // the displacement statements belong to the domain stage only
+    }
+
+    uint32_t arrayMask = 0;
+    std::string src = emitDeclarations(c, uiDomain, /*domainStage=*/false, arrayMask);
+    if (!dispStatements.empty())
+    {
+        // The settings ride along as the first line (matSplitDisplacement), so the
+        // asset needs one field for all of it and a changed setting is new text.
+        const MatTessSettings t = matSanitizeTess(out->tess);
+        uint32_t dsArrayMask = 0; // same slots, same mask as the fragment's
+        gen.displacementBody = "// heTess " + fmtF(t.maxFactor) + " " + fmtF(t.fadeNear) + " "
+                             + fmtF(t.fadeFar) + " " + fmtF(t.maxDisplacement) + "\n"
+                             + emitDeclarations(c, /*uiDomain=*/false, /*domainStage=*/true, dsArrayMask)
+                             + "// heDispBody\n" + dispStatements;
+    }
     src += "void main() {\n" + c.body;
     // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
     if (blendMode == (int)MatBlendMode::Masked)
@@ -2114,6 +2247,45 @@ uint32_t matGlslTextureArrayMask(const std::string& glsl)
     return mask & ((1u << kMatMaxGraphTextures) - 1);
 }
 
+MatTessSettings matSanitizeTess(const MatTessSettings& t)
+{
+    const MatTessSettings def;
+    auto finite = [](float v, float d) { return std::isfinite(v) ? v : d; };
+    MatTessSettings s;
+    s.maxFactor       = std::clamp(finite(t.maxFactor, def.maxFactor), 1.0f, kMatTessMaxFactor);
+    s.fadeNear        = std::max(finite(t.fadeNear, def.fadeNear), 0.0f);
+    s.fadeFar         = std::max(finite(t.fadeFar, def.fadeFar), s.fadeNear + 0.01f);
+    s.maxDisplacement = std::max(finite(t.maxDisplacement, def.maxDisplacement), 0.0f);
+    return s;
+}
+
+bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
+                          std::string& declarations, std::string& statements)
+{
+    static const std::string kHead = "// heTess ";
+    static const std::string kBody = "// heDispBody\n";
+    if (disp.compare(0, kHead.size(), kHead) != 0) return false;
+    const size_t eol = disp.find('\n');
+    const size_t body = disp.find(kBody);
+    if (eol == std::string::npos || body == std::string::npos || body < eol) return false;
+    const std::string line = disp.substr(kHead.size(), eol - kHead.size());
+    float v[4];
+    const char* p = line.c_str();
+    for (float& f : v)
+    {
+        char* end = nullptr;
+        f = std::strtof(p, &end);
+        if (end == p) return false;
+        p = end;
+    }
+    MatTessSettings t;
+    t.maxFactor = v[0]; t.fadeNear = v[1]; t.fadeFar = v[2]; t.maxDisplacement = v[3];
+    tess         = matSanitizeTess(t);
+    declarations = disp.substr(eol + 1, body - eol - 1);
+    statements   = disp.substr(body + kBody.size());
+    return statements.find("heDisp") != std::string::npos;
+}
+
 bool matGlslUsesTime(const std::string& glsl)
 {
     return glsl.find("heLight.sunDir.w") != std::string::npos;
@@ -2143,6 +2315,11 @@ nlohmann::json matNodeToJsonObj(const MatGraphNode& n)
     if (!n.s.empty())       jn["s"]  = n.s;
     if (!n.group.empty())   jn["g"]  = n.group;   // param metadata (optional keys)
     if (!n.tooltip.empty()) jn["tt"] = n.tooltip;
+    // Tessellation settings (Output node): only when they differ from the defaults,
+    // so every graph saved before them keeps its exact JSON.
+    if (n.type == MatNodeType::Output && n.tess != MatTessSettings{})
+        jn["tess"] = { { "max", n.tess.maxFactor }, { "near", n.tess.fadeNear },
+                       { "far", n.tess.fadeFar }, { "maxDisp", n.tess.maxDisplacement } };
     return jn;
 }
 
@@ -2159,6 +2336,18 @@ bool matNodeFromJsonObj(const nlohmann::json& jn, MatGraphNode& n)
     n.s       = jn.value("s", std::string());
     n.group   = jn.value("g", std::string());
     n.tooltip = jn.value("tt", std::string());
+    if (auto t = jn.find("tess"); t != jn.end() && t->is_object())
+    {
+        const MatTessSettings def;
+        auto num = [&](const char* k, float d) {
+            const auto it = t->find(k);
+            return (it != t->end() && it->is_number()) ? it->get<float>() : d;
+        };
+        n.tess.maxFactor       = num("max", def.maxFactor);
+        n.tess.fadeNear        = num("near", def.fadeNear);
+        n.tess.fadeFar         = num("far", def.fadeFar);
+        n.tess.maxDisplacement = num("maxDisp", def.maxDisplacement);
+    }
     n.x = jn.value("x", 0.0f);
     n.y = jn.value("y", 0.0f);
     // Migration: UV gained tiling params (p[0..1]) after these graphs were

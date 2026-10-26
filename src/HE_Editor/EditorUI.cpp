@@ -10,6 +10,8 @@
 #include "UIEditorPanel.h"
 #include "LevelScriptPanel.h"
 #include "GameInstancePanel.h"
+#include "PlannerPanel.h"               // Window > Planner (project planning, an editor tab)
+#include "PlannerImport.h"              // tasksDatabaseId: Window > Task Board opens the Tasks database
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
 #include "TypeAssetPanel.h"
@@ -271,8 +273,6 @@ static bool s_showUndoHistory = false;
 // Toggled by Window > Watch; drives the window that shows what a HorizonCode run
 // stopped at a breakpoint is holding. Also raised by a stop itself (below).
 static bool s_showWatch = false;
-// Toggled by Window > Task Board; drives the project's to-do list.
-static bool s_showTaskBoard = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -306,7 +306,6 @@ static bool docsPanelOpener(const char* window)
 		{ "Audio Mixer",          &s_showAudioMixer    },
 		{ "Undo History",         &s_showUndoHistory   },
 		{ "Watch",                &s_showWatch         },
-		{ "Task Board",           &s_showTaskBoard     },
 		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
 		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
 		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
@@ -360,7 +359,6 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
 	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
-	{ "Task Board",           "PanelOpenTaskBoard",     &s_showTaskBoard     },
 	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
@@ -2444,6 +2442,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
+		    || path == PlannerPanel::kTabPath
 		    || path == EditorSettingsPanel::kTabPath)
 		{
 			doSaveScene();
@@ -2765,6 +2764,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		EditorTabs::openOrFocus(ctx.tabs, ctx.activeTab, s_tabSelectRequest, path, label);
 	};
+	// The Task Board is the Planner's Tasks database now: Window > Task Board, the
+	// footer, a link to the old panel and a "From the Team" row all end here. A task
+	// given opens with its details.
+	auto openPlannerTasks = [&](const HE::UUID& task)
+	{
+		openVirtualTab("Planner", PlannerPanel::kTabPath);
+		if (task == HE::UUID{}) PlannerPanel::selectDatabase(HE::Planner::tasksDatabaseId());
+		else                    PlannerPanel::openTask(task);
+	};
 	// Back to the scene tab (the one with no asset behind it, normally index 0).
 	auto openViewportTab = [&]()
 	{
@@ -2781,7 +2789,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	    jump.kind != TaskBoardPanel::Jump::Kind::None)
 	{
 		using K = TaskBoardPanel::Jump::Kind;
-		openViewportTab();
+		// A link to the old Task Board panel (made before the Planner took over its
+		// window) goes to the Planner, which is not on the scene tab.
+		const bool toPlanner = jump.kind == K::Panel && (jump.target == "Task Board" || jump.target == "Planner");
+		if (toPlanner) openPlannerTasks(HE::UUID{});
+		else           openViewportTab();
 		switch (jump.kind)
 		{
 		case K::Asset:  ContentBrowserPanel::revealAsset(jump.target); break;
@@ -2799,7 +2811,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			s_revealTitle       = "World Outliner";
 			s_revealFocusFrames = 2;
 			break;
-		case K::Panel:  docsPanelOpener(jump.target.c_str()); break;
+		case K::Panel:  if (!toPlanner) docsPanelOpener(jump.target.c_str()); break;
 		case K::None:   break;
 		}
 	}
@@ -2969,7 +2981,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
-		MacMenuBar::setToggleState(MC::ToggleTaskBoard,     s_showTaskBoard);
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
@@ -3002,7 +3013,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		// Rows whose verb follows the state, like the ImGui rows' labels.
 		MacMenuBar::setItemTitle(MC::ToggleLock,
-			(ctx.world && sceneTabActiveNow && ViewportPanel::entityActionState(ctx).primaryLocked)
+			(ctx.world && sceneTabActiveNow && ViewportPanel::primaryLocked(ctx))
 				? "Unlock" : "Lock");
 		MacMenuBar::setRecentProjects(recentProjects());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
@@ -3120,7 +3131,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
-			case MC::ToggleTaskBoard: togglePanelWindow(s_showTaskBoard, "Task Board");      break;
+			case MC::OpenTaskBoard:   if (ctx.projectLoaded) openPlannerTasks(HE::UUID{});  break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
 			case MC::ToggleScene3:
@@ -3132,6 +3143,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				break;
 			case MC::OpenGameInstance:
 				if (ctx.projectLoaded) openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
+				break;
+			case MC::OpenPlanner:
+				if (ctx.projectLoaded) openVirtualTab("Planner", PlannerPanel::kTabPath);
 				break;
 			case MC::ToggleLandscapeTools: toggleLandscapeTools();                          break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
@@ -3490,8 +3504,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showUndoHistory, "Undo History");
         if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
             togglePanelWindow(s_showWatch, "Watch");
-        if (EditorWidgets::menuItem("Task Board", nullptr, s_showTaskBoard))
-            togglePanelWindow(s_showTaskBoard, "Task Board");
+        if (EditorWidgets::menuItem("Task Board", nullptr, false, ctx.projectLoaded))
+            openPlannerTasks(HE::UUID{});
         // The extra scene panes and the level's own graph: game things, like
         // the grid — an application has no level to look at from above. The
         // Game Instance is the one graph an app really does own, and stays.
@@ -3511,6 +3525,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
+        if (EditorWidgets::menuItem("Planner", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Planner", PlannerPanel::kTabPath);
         if (!appProj)
         {
             ImGui::Separator();
@@ -4265,6 +4281,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)
             GameInstancePanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == PlannerPanel::kTabPath)
+            PlannerPanel::render(ctx, tabPos, tabSize);
         else
             assetPanelFor(tabPath).render(ctx, tabPath, tabPos, tabSize);
 
@@ -4458,7 +4476,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// The task board: a task is read and ticked off from wherever the work is,
 	// which is as often a graph tab as the scene. Drawn even while closed — a
 	// chip that had to open a scene selects its entity once the scene is in.
-	TaskBoardPanel::DrawTaskBoardWindow(ctx, s_showTaskBoard);
+	TaskBoardPanel::tick(ctx);
 	// The console, for the first error of a play session — the same gesture as
 	// the Watch window above, for the same reason: the console is closed by
 	// default, the bell in the footer is ambient by its own description and the
@@ -4504,7 +4522,15 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
         revealFloatingWindow(s_showTeam, "Team");
     NotificationBar::DrawOverlay(ctx);
     NotificationPopups::DrawOverlay(ctx);   // last: toasts above the panels, the modal above all
-    if (TaskBoardFooter::DrawOverlay(ctx)) revealFloatingWindow(s_showTaskBoard, "Task Board");
+    if (TaskBoardFooter::DrawOverlay(ctx))
+    {
+        // The footer's "Open Task Board" and a task's title: the Planner tab, on Tasks.
+        EditorTabs::openOrFocus(ctx.tabs, ctx.activeTab, s_tabSelectRequest, PlannerPanel::kTabPath, "Planner");
+        if (const HE::UUID task = TaskBoardPanel::selectedTask(); task == HE::UUID{})
+            PlannerPanel::selectDatabase(HE::Planner::tasksDatabaseId());
+        else
+            PlannerPanel::openTask(task);
+    }
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

@@ -6,6 +6,7 @@
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
+#include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
@@ -7122,6 +7123,27 @@ bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& ou
 	return true;
 }
 
+bool MetalRenderer::UploadMvpModel(const std::vector<glm::mat4>& models, const glm::mat4& viewProj,
+                                   void*& outBuf, size_t& outOffset)
+{
+	// {mvp, model} per instance, the layout of every instanced scene and G-buffer pipeline
+	// (k_instStride), written straight into the ring: the four instanced paths each built
+	// the array on the main thread first and then copied it. A foliage-sized run goes to the
+	// job system's workers (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
+	const size_t n   = models.size();
+	auto*        dst = static_cast<glm::mat4*>(UploadTransient(n * 2 * sizeof(glm::mat4), outBuf, outOffset));
+	if (!dst) return false;
+	const glm::mat4* src = models.data();
+	auto fill = [dst, src, &viewProj](size_t k)
+	{
+		dst[2 * k]     = viewProj * src[k]; // mvp
+		dst[2 * k + 1] = src[k];            // model
+	};
+	if (n >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled()) parallel_for(n, fill, "SceneInstanceMvp", 1024);
+	else for (size_t k = 0; k < n; ++k) fill(k);
+	return true;
+}
+
 void MetalRenderer::ReleaseUploadRing()
 {
 	// In-flight command buffers retain the chunks they bound, so dropping our
@@ -7949,15 +7971,42 @@ void MetalRenderer::RefineObjectBounds()
 	const RenderObject* objects = m_renderWorld.objects.data();
 	const size_t        count   = m_renderWorld.objects.size();
 	if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
+	HE::AABB sceneBox;
 	{
 		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+		m_refinedBounds.resize(count);
+		size_t i = 0;
 		for (RenderObject& obj : m_renderWorld.objects)
+		{
 			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
 				obj.refineWorldBounds(mesh->localBounds);
+			sceneBox.expand(obj.worldBounds);
+			m_refinedBounds[i++] = obj.worldBounds;
+		}
 	}
-	m_refinedWalk    = walk;
-	m_refinedObjects = objects;
-	m_refinedCount   = count;
+	m_refinedWalk     = walk;
+	m_refinedObjects  = objects;
+	m_refinedCount    = count;
+	m_refinedSceneBox = sceneBox;
+}
+
+void MetalRenderer::CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
+{
+	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
+	    && m_refinedCount == m_renderWorld.objects.size())
+		m_culler.cull(m_refinedBounds, viewProj, outVisible);
+	else
+		m_culler.cull(m_renderWorld, viewProj, outVisible);
+}
+
+HE::AABB MetalRenderer::FrameSceneBox() const
+{
+	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
+	    && m_refinedCount == m_renderWorld.objects.size())
+		return m_refinedSceneBox;
+	HE::AABB sceneBox;
+	for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+	return sceneBox;
 }
 
 void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
@@ -8002,8 +8051,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj,
 		                            uint32_t skipEntity)
 		{
-			m_culler.cull(m_renderWorld, viewProj, m_visible);
-			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+			CullObjects(viewProj, m_visible);
+			m_sorter.sortByMesh(m_renderWorld, m_visible, m_sortedIndices);
 			const glm::mat4 lightClip = HE::kMetalClipFix * viewProj;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -8028,7 +8077,6 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			                                m_shadowBatches);
 			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 			void* boundPipeline = m_shadowPipeline;
-			std::vector<glm::mat4> mvps;
 			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 			{
 				const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
@@ -8048,9 +8096,6 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 							(__bridge id<MTLRenderPipelineState>)m_shadowInstancedPipeline];
 						boundPipeline = m_shadowInstancedPipeline;
 					}
-					mvps.clear();
-					mvps.reserve(b.count);
-					for (uint32_t k = 0; k < b.count; ++k) mvps.push_back(lightClip * xf[k]);
 					// Once per session: the headless A/B (HE_MTL_INSTANCING=0 vs on)
 					// only proves something if this path actually ran.
 					static bool loggedOnce = false;
@@ -8061,11 +8106,19 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 						            static_cast<unsigned>(b.count));
 					}
 					// A slice of the frame's upload ring (UploadTransient), released
-					// when this frame's command buffer completes.
+					// when this frame's command buffer completes. The products go straight
+					// into it, a foliage-sized run on the job system's workers: per cascade
+					// this was a list built on the main thread and then copied into the ring
+					// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
 					void*  instBuf = nullptr;
 					size_t instOff = 0;
-					if (!UploadTransientBytes(mvps.data(), mvps.size() * sizeof(glm::mat4), instBuf, instOff))
-						continue;
+					auto* mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), instBuf, instOff));
+					if (!mvp) continue;
+					if (b.count >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled())
+						parallel_for(b.count, [mvp, xf, &lightClip](size_t k) { mvp[k] = lightClip * xf[k]; },
+						             "ShadowInstanceMvp", 1024);
+					else
+						for (uint32_t k = 0; k < b.count; ++k) mvp[k] = lightClip * xf[k];
 					[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic
@@ -11902,8 +11955,7 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	// streaming in and out of the scene bounds cannot make the region — and
 	// with it the map's edge fade — breathe.
 	{
-		HE::AABB sceneBox;
-		for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+		const HE::AABB sceneBox = FrameSceneBox();
 		const float groundY = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
 		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = groundY;
 		const float dead = cloudH * 0.35f;
@@ -12524,7 +12576,6 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		                             kNoOwnerEntity, m_prepassBatches);
 		const bool canInstance = instPipeline && metalInstancingEnabled();
 		void* boundPipeline = plainPipeline;
-		std::vector<glm::mat4> xf;
 		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
 			const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
@@ -12550,20 +12601,6 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 						[enc setVertexBytes:&cu length:sizeof(cu) atIndex:1];
 					}
 				}
-				xf.clear();
-				if (mrt)
-				{
-					xf.assign(models, models + b.count);
-				}
-				else
-				{
-					xf.reserve(b.count * 2);
-					for (uint32_t k = 0; k < b.count; ++k)
-					{
-						xf.push_back(viewProj * models[k]); // mvp
-						xf.push_back(view * models[k]);     // modelView
-					}
-				}
 				static bool loggedOnce = false; // once per session, like the shadow pass
 				if (!loggedOnce)
 				{
@@ -12571,11 +12608,26 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 					HE_LOG_INFO(RHI, "MetalRenderer: SSAO pre-pass instanced (first run: %u objects, %s)",
 					            static_cast<unsigned>(b.count), mrt ? "MRT" : "plain");
 				}
-				// A slice of the frame's upload ring (UploadTransient).
+				// A slice of the frame's upload ring (UploadTransient), written in place:
+				// the models (MRT) or mvp + modelView per instance, a foliage-sized run on
+				// the workers as in the shadow pass.
 				void*  instBuf = nullptr;
 				size_t instOff = 0;
-				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
-					continue;
+				const size_t per = mrt ? 1 : 2;
+				auto* dst = static_cast<glm::mat4*>(UploadTransient(b.count * per * sizeof(glm::mat4), instBuf, instOff));
+				if (!dst) continue;
+				if (mrt)
+					std::memcpy(dst, models, b.count * sizeof(glm::mat4));
+				else
+				{
+					auto fill = [dst, models, &viewProj, &view](size_t k)
+					{
+						dst[2 * k]     = viewProj * models[k]; // mvp
+						dst[2 * k + 1] = view * models[k];     // modelView
+					};
+					if (b.count >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled()) parallel_for(b.count, fill, "PrepassInstanceMvp", 1024);
+					else for (uint32_t k = 0; k < b.count; ++k) fill(k);
+				}
 				[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
@@ -14745,16 +14797,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			}
 			if (graphBatch && cMaterialPipelineInst)
 			{
-				std::vector<glm::mat4> xf;
-				xf.reserve(instCount * 2);
-				for (const glm::mat4& t : dc.instanceTransforms)
-				{
-					xf.push_back(viewProj * t); // mvp
-					xf.push_back(t);            // model
-				}
 				void*  instBuf = nullptr;
 				size_t instOff = 0;
-				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				if (UploadMvpModel(dc.instanceTransforms, viewProj, instBuf, instOff))
 				{
 					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineInst, instBuf, instOff,
 					             (NSUInteger)instCount);
@@ -14782,19 +14827,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						(__bridge id<MTLRenderPipelineState>)m_sceneInstancedPipeline];
 					boundPipeline = m_sceneInstancedPipeline;
 				}
-				std::vector<glm::mat4> xf;
-				xf.reserve(instCount * 2);
-				for (const glm::mat4& t : dc.instanceTransforms)
-				{
-					xf.push_back(viewProj * t); // mvp
-					xf.push_back(t);            // model
-				}
 				// A slice of the frame's upload ring (UploadTransient): released by
 				// the frame command buffer's completion handler, so nothing to
 				// hand-synchronise. Outside EncodeFrame (previews) a fresh buffer.
 				void*  instBuf = nullptr;
 				size_t instOff = 0;
-				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				if (!UploadMvpModel(dc.instanceTransforms, viewProj, instBuf, instOff))
 					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
@@ -15915,13 +15953,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// did not trace, so its width follows resDiv — quarter-res gets four
 		// texels of it, full res one. Higher tier = more rays AND more pixels =
 		// sharper, which is the direction a quality setting should move in.
-		const int resDiv = m_giReflQuality >= 2 ? 1 : (m_giReflQuality >= 1 ? 2 : 4);
+		const HE::GIReflTier tier = HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled);
+		const int resDiv = tier.resDiv;
 		const int tw = std::max(1, width / resDiv), th = std::max(1, height / resDiv);
 		// How much blur even a MIRROR gets, purely to hide the resolution:
 		// none at full res, most at quarter. Without it a quarter-res mirror
 		// keeps its stair-steps — "sharp" is not the same as "detailed".
-		const float giReflBlurFloor = m_giReflBlurEnabled
-			? (resDiv >= 4 ? 0.75f : (resDiv >= 2 ? 0.35f : 0.0f)) : 0.0f;
+		const float giReflBlurFloor = tier.blurFloor;
 		m_giReflBlurFloor = giReflBlurFloor;
 		EnsureGIReflTarget(tw, th);
 		if (!m_giReflTex) return;
@@ -15942,8 +15980,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// EMA, so it looked WORSE than the tier below whenever that EMA had to
 		// be damped. A near-mirror still traces one ray (its cone is narrower
 		// than a pixel), so mirrors cost the same at every tier.
-		const int  rays     = m_giReflQuality >= 2 ? 4 : (m_giReflQuality >= 1 ? 2 : 1);
-		const bool jitter   = rays > 1;
+		const int  rays     = tier.rays;
+		const bool jitter   = tier.jitter;
 		const bool meshData = m_giHwRt && m_giMeshPtrBuf && m_giInstanceMeshBuf;
 		m_giReflFrameSeed = HE::NextGIJitterSeed(m_giReflFrameSeed); // wraps: GIJitter.h
 
@@ -16150,20 +16188,15 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			// composite, forward: the mix pass below) is what keeps a MIRROR
 			// mirror-sharp at every tier while a rough surface gets the lobe.
 			// Screen pixels → reflection texels: one texel spans resDiv of them.
-			const float lobeScreen = kGIReflLobeScreenPx
-			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f)
-			                       / static_cast<float>(std::max(rays, 1));
-			const float reach = std::clamp(1.0f + lobeScreen / static_cast<float>(resDiv),
-			                               1.0f, 512.0f); // also pins a NaN setting
+			const HE::GIReflBlurReach br = HE::giReflBlurReachFor(m_giReflMaxRoughness, rays, resDiv);
 			// Levels, then strides SCALED to land on `reach` exactly. Doubling raw
 			// strides 1,2,4,… and stopping at the first one past the target snaps
 			// the total to 2^n − 1, so the "tier-independent" screen reach came out
 			// quantized — Medium could end up blurring WIDER than Low, which is the
 			// inversion this whole rework exists to remove. n levels of scaled
 			// strides sum to `reach` for any value.
-			const int levels = std::clamp(
-				static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
-			const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+			const int levels = br.levels;
+			const float unit = br.unit;
 			// Every pass reads ONE texture and writes a DIFFERENT one: H always
 			// lands in ping, V always in rough, and the next level reads rough.
 			// Letting a non-final level write back into ping is a read-write
@@ -16586,16 +16619,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			}
 			if (graphBatch && cMaterialPipelineGBInst)
 			{
-				std::vector<glm::mat4> xf;
-				xf.reserve(instCount * 2);
-				for (const glm::mat4& t : dc.instanceTransforms)
-				{
-					xf.push_back(viewProj * t); // mvp
-					xf.push_back(t);            // model
-				}
 				void*  instBuf = nullptr;
 				size_t instOff = 0;
-				if (UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				if (UploadMvpModel(dc.instanceTransforms, viewProj, instBuf, instOff))
 				{
 					drawInstance(dc.instanceTransforms.front(), cMaterialPipelineGBInst, instBuf, instOff,
 					             (NSUInteger)instCount);
@@ -16618,16 +16644,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						(__bridge id<MTLRenderPipelineState>)m_gbufferInstancedPipeline];
 					boundPipeline = m_gbufferInstancedPipeline;
 				}
-				std::vector<glm::mat4> xf;
-				xf.reserve(instCount * 2);
-				for (const glm::mat4& t : dc.instanceTransforms)
-				{
-					xf.push_back(viewProj * t); // mvp
-					xf.push_back(t);            // model
-				}
 				void*  instBuf = nullptr;   // a slice of the frame's upload ring
 				size_t instOff = 0;
-				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				if (!UploadMvpModel(dc.instanceTransforms, viewProj, instBuf, instOff))
 					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
@@ -18098,7 +18117,34 @@ void MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& 
 
 void MetalRenderer::CullCameraObjects()
 {
-	m_culler.cull(m_renderWorld, m_visible);
+	const uint64_t  walk      = m_extractor.fullExtractCount();
+	const glm::mat4 vp        = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const bool      occlusion = m_occlusionCuller.settings().enabled;
+	CameraCullCache& c = m_cameraCull;
+	const bool refined = m_refinedWalk == walk && m_refinedObjects == m_renderWorld.objects.data()
+	                  && m_refinedCount == m_renderWorld.objects.size();
+	if (refined && c.stamp == m_frameStamp && c.walk == walk && c.objects == m_renderWorld.objects.data()
+	    && c.count == m_renderWorld.objects.size() && c.viewProj == vp
+	    && c.camPos == m_renderWorld.camera.position && c.occlusion == occlusion)
+	{
+		HE_PROFILE_SCOPE_N("Metal::CullCameraObjects::reuse");
+		m_visible       = c.visible;
+		m_sortedIndices = c.sorted;
+		if (occlusion) m_counters.occlusionCulled = c.occlusionCulled;
+		return;
+	}
+	CullCameraObjectsFresh();
+	if (!refined) { c.stamp = ~0ull; return; }   // bounds may still change this walk: keep nothing
+	c.stamp = m_frameStamp; c.walk = walk; c.objects = m_renderWorld.objects.data();
+	c.count = m_renderWorld.objects.size(); c.viewProj = vp; c.camPos = m_renderWorld.camera.position;
+	c.occlusion = occlusion; c.occlusionCulled = m_counters.occlusionCulled;
+	c.visible = m_visible;
+	c.sorted  = m_sortedIndices;
+}
+
+void MetalRenderer::CullCameraObjectsFresh()
+{
+	CullObjects(m_renderWorld.camera.projection * m_renderWorld.camera.view, m_visible);
 	if (m_occlusionCuller.settings().enabled)
 	{
 		const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;

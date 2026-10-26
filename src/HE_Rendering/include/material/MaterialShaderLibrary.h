@@ -500,6 +500,31 @@ public:
     const Compiled& standardVertexInstanced(Backend backend);
     const Compiled& customVertexInstanced(uint64_t bodyHash, const std::string& body, Backend backend);
 
+    // ── Tessellation for the Displacement pin (Thema 207) ─────────────────────
+    // `disp` is MaterialAsset::customShaderDispGlsl (settings line, declarations,
+    // statements ending in `float heDisp`, see HE::matSplitDisplacement). The two
+    // stages sit between the vertex (standard or WPO, unchanged) and the fragment:
+    //   control: per-edge factors from the camera distance of the edge midpoint
+    //            (shared edges get the same factor → no cracks), fractional_odd;
+    //   eval:    interpolates the varyings, runs the statements, moves the vertex
+    //            along the normalised interpolated normal. Height 0 gives back the
+    //            interpolated clip position exactly (the offset is added to it).
+    // Bindings are the FRAGMENT's: HeLighting 0, U 1, heTex0 2, HeParams 3,
+    // heTexP0..3 4..7, heLandscapeWeights 14 — one table serves both stages.
+    // GLSL410/GLSL430/SpirV: real tesc/tese (triangles, ccw = the input winding in
+    // GL's lower-left domain; SpirV says cw, the same winding in Vulkan's default
+    // upper-left domain).
+    // HLSL: hand-written shells (SPIRV-Cross has no HLSL tessellation): the control
+    // source is an hs_5_0 unit with entry kHlslHullEntry, the eval source the
+    // statements as a kernel (compileHlslKernel) plus a ds_5_0 shell with entry
+    // kHlslDomainEntry, same registers as the material fragment.
+    // Metal / GLSLES300, or text that is not a displacement body → ok = false; the
+    // caller then draws the material without tessellation (the fallback).
+    const Compiled& tessControl(uint64_t dispHash, const std::string& disp, Backend backend);
+    const Compiled& tessEval(uint64_t dispHash, const std::string& disp, Backend backend);
+    static constexpr const char* kHlslHullEntry   = "HSMain";
+    static constexpr const char* kHlslDomainEntry = "DSMain";
+
     // Screen-space quad vertex for materials on IN-GAME UI elements: emits the
     // same varyings as standardVertex (so any material fragment drops in) from
     // an attribute-less 4-vertex strip. Repurposes the standard U block (same
@@ -514,7 +539,7 @@ public:
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
                    m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
-                   m_reflPrepassCache.clear(); }
+                   m_reflPrepassCache.clear(); m_tessCache.clear(); }
 
 private:
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
@@ -533,5 +558,6 @@ private:
     // full, and a collision there hands a caller someone else's shader while
     // still reporting ok.
     std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment); 0x100 + backend = instanced vertex
+    std::unordered_map<uint64_t, Compiled> m_tessCache;   // key = mix(dispHash, backend, control/eval)
 };
 } // namespace HE

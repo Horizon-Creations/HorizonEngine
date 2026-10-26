@@ -74,6 +74,7 @@ class HE_RENDERING_API CommandBuffer {
 public:
     void reset();
     void recordDraw(const DrawCall& call);
+    void recordDraw(DrawCall&& call);   // keeps the instance list instead of copying it
     void recordSkinnedDraw(const SkinnedDrawCall& call);
     void recordPostProcess();   // signals that a post-process pass ran this frame
 
