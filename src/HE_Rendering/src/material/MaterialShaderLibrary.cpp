@@ -2832,108 +2832,113 @@ std::vector<he::shaderc::HlslPin> kDecalHlslPins()
 
 std::string makeDecalFS(bool sampled, bool forward = false)
 {
-    return std::string(kDecalFSHead)
-         + (sampled ? kDecalDepthSampledDecl : kDecalDepthFetchDecl)
-         + kDecalFSBodyPre
-         + (sampled ? "texture(heGBDepth, uv).r" : "subpassLoad(heGBDepth).r")
-         + (forward ? kDecalFSForwardPost : kDecalFSBodyPost);
+    std::string src = kDecalFSHead;
+    src += sampled ? kDecalDepthSampledDecl : kDecalDepthFetchDecl;
+    src += kDecalFSBodyPre;
+    src += sampled ? "texture(heGBDepth, uv).r" : "subpassLoad(heGBDepth).r";
+    src += forward ? kDecalFSForwardPost : kDecalFSBodyPost;
+    return src;
 }
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 0;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
-            { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
-    else if (backend == Backend::HLSL)
-        out = toCompiled(compileHlslPinned(kDecalVS, Stage::Vertex,
-            { { Stage::Vertex, 0, 23, kDecalHlslUboReg } })); // HeDecal → b13
-    else
-        out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 0, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kDecalVS, Stage::Vertex,
+                { { Stage::Vertex, 0, 23, 0 } })); // HeDecal UBO → vertex buffer 0
+        else if (backend == Backend::HLSL)
+            out = toCompiled(compileHlslPinned(kDecalVS, Stage::Vertex,
+                { { Stage::Vertex, 0, 23, kDecalHlslUboReg } })); // HeDecal → b13
+        else
+            out = toCompiled(compile(kDecalVS, Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragment(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 1;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 1, [&]
     {
-        MslOptions opts;
-        opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
-        out = toCompiled(compileMslPinned(makeDecalFS(/*sampled=*/false), Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
-            opts));
-    }
-    // Non-Metal backends have no framebuffer-fetch decal path — they use
-    // decalFragmentSampled() instead.
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+        {
+            MslOptions opts;
+            opts.framebufferFetchSubpasses = true; // heGBDepth → [[color(3)]]
+            out = toCompiled(compileMslPinned(makeDecalFS(/*sampled=*/false), Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 } },  // decal texture → texture/sampler 0
+                opts));
+        }
+        // Non-Metal backends have no framebuffer-fetch decal path — they use
+        // decalFragmentSampled() instead.
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentSampled(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 2;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    const std::string src = makeDecalFS(/*sampled=*/true);
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Metal's TWO-PASS fallback has no tile storage to fetch from: the depth
-        // is a stored texture like everywhere else. Pinned so a hand-written
-        // pipeline can bind it (UBO → buffer 0, decal tex → 0, depth → 1).
-        out = toCompiled(compileMslPinned(src, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
-              { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
-    else if (backend == Backend::HLSL)
-        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
-    else
-        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 2, [&]
+    {
+        using namespace he::shaderc;
+        const std::string src = makeDecalFS(/*sampled=*/true);
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Metal's TWO-PASS fallback has no tile storage to fetch from: the depth
+            // is a stored texture like everywhere else. Pinned so a hand-written
+            // pipeline can bind it (UBO → buffer 0, decal tex → 0, depth → 1).
+            out = toCompiled(compileMslPinned(src, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeDecal UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 },    // decal texture → texture/sampler 0
+                  { Stage::Fragment, 0, 22, 1 } })); // G-buffer depth → texture/sampler 1
+        else if (backend == Backend::HLSL)
+            out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
+        else
+            out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::decalFragmentForward(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 3;
-    if (auto it = m_decalCache.find(key); it != m_decalCache.end()) return it->second;
-    using namespace he::shaderc;
-    const std::string src = makeDecalFS(/*sampled=*/true, /*forward=*/true);
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Metal never uses this variant in the engine (it has a G-buffer), but it
-        // is cross-compiled anyway so the shared tail cannot rot unnoticed.
-        out = toCompiled(compileMslPinned(src, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },
-              { Stage::Fragment, 0, 19, 0 },
-              { Stage::Fragment, 0, 22, 1 } }));
-    else if (backend == Backend::HLSL)
-        // The variant D3D11 and D3D12 actually draw with — pinned into their
-        // bindable register range (see kDecalHlslPins).
-        out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
-    else
-        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
-    return m_decalCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_decalCache, static_cast<int>(backend) * 4 + 3, [&]
+    {
+        using namespace he::shaderc;
+        const std::string src = makeDecalFS(/*sampled=*/true, /*forward=*/true);
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Metal never uses this variant in the engine (it has a G-buffer), but it
+            // is cross-compiled anyway so the shared tail cannot rot unnoticed.
+            out = toCompiled(compileMslPinned(src, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },
+                  { Stage::Fragment, 0, 19, 0 },
+                  { Stage::Fragment, 0, 22, 1 } }));
+        else if (backend == Backend::HLSL)
+            // The variant D3D11 and D3D12 actually draw with — pinned into their
+            // bindable register range (see kDecalHlslPins).
+            out = toCompiled(compileHlslPinned(src, Stage::Fragment, kDecalHlslPins()));
+        else
+            out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fullscreenVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend);
-    if (auto it = m_fsVertCache.find(key); it != m_fsVertCache.end()) return it->second;
-
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kFullscreenVS, Stage::Vertex, {}));
-    else
-        out = toCompiled(compile(kFullscreenVS, Stage::Vertex, toTarget(backend)));
-    return m_fsVertCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_fsVertCache, static_cast<int>(backend), [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kFullscreenVS, Stage::Vertex, {}));
+        else
+            out = toCompiled(compile(kFullscreenVS, Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
