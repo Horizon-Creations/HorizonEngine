@@ -167,6 +167,86 @@ std::string sequenceToJson(const SequenceAsset& s)
 namespace
 {
 
+// The readers below fill one track kind each. A section that is not an object is
+// counted in `lost` and skipped; the rest of the track still loads.
+
+// False when the whole track is unusable (unknown target, times and values of
+// different length): counted in `lost` here, the caller drops the track.
+bool parsePropertyChannel(const json& t, SequenceTrack& st, int& lost)
+{
+    const int target = t.value("target", -1);
+    if (target < 0 || target > static_cast<int>(kLastPropTarget)) { ++lost; return false; }
+    st.channel.target = static_cast<PropTarget>(target);
+    st.channel.times  = floats(t, "times");
+    st.channel.values = floats(t, "values");
+    if (st.channel.times.size() != st.channel.values.size()) { ++lost; return false; }
+    return true;
+}
+
+void parseSkeletalSections(const json& t, const json& kEmpty, SequenceTrack& st, int& lost)
+{
+    for (const auto& s : t.value("sections", kEmpty))
+    {
+        if (!s.is_object()) { ++lost; continue; }
+        SequenceSkeletalSection sec;
+        if (auto it = s.find("clipId"); it != s.end()) sec.clipId = HE::graph::uuidFromJson(*it);
+        sec.start      = s.value("start", 0.0f);
+        sec.end        = s.value("end", 0.0f);
+        sec.clipOffset = s.value("clipOffset", 0.0f);
+        sec.playRate   = s.value("playRate", 1.0f);
+        sec.loop       = s.value("loop", false);
+        st.sections.push_back(sec);
+    }
+}
+
+void parseCameraCuts(const json& t, const json& kEmpty, SequenceTrack& st, int& lost)
+{
+    for (const auto& c : t.value("cuts", kEmpty))
+    {
+        if (!c.is_object()) { ++lost; continue; }
+        SequenceCameraCut cut;
+        cut.time    = c.value("time", 0.0f);
+        cut.binding = getBinding(c);
+        cut.blendIn = c.value("blendIn", 0.0f);
+        if (!(cut.blendIn >= 0.0f)) cut.blendIn = 0.0f;
+        cut.curve   = curveFromInt(c.value("curve", static_cast<int>(SequenceBlendCurve::SmoothStep)));
+        st.cuts.push_back(cut);
+    }
+    // Kept in time order, so the list a reader sees is the order the
+    // cuts happen in. Stable: two cuts at one instant keep the order
+    // they were written in, and the later one wins (SequenceEval).
+    std::stable_sort(st.cuts.begin(), st.cuts.end(),
+                     [](const SequenceCameraCut& a, const SequenceCameraCut& b)
+                     { return a.time < b.time; });
+}
+
+void parseEvents(const json& t, const json& kEmpty, SequenceTrack& st, int& lost)
+{
+    for (const auto& e : t.value("events", kEmpty))
+    {
+        if (!e.is_object()) { ++lost; continue; }
+        AnimationNotify n;
+        n.name     = e.value("name", std::string());
+        n.time     = e.value("time", 0.0f);
+        n.duration = e.value("duration", 0.0f);
+        st.events.push_back(std::move(n));
+    }
+}
+
+void parseAudioSections(const json& t, const json& kEmpty, SequenceTrack& st, int& lost)
+{
+    for (const auto& a : t.value("sections", kEmpty))
+    {
+        if (!a.is_object()) { ++lost; continue; }
+        SequenceAudioSection sec;
+        if (auto it = a.find("assetId"); it != a.end()) sec.assetId = HE::graph::uuidFromJson(*it);
+        sec.start  = a.value("start", 0.0f);
+        sec.volume = a.value("volume", 1.0f);
+        sec.pitch  = a.value("pitch", 1.0f);
+        st.audio.push_back(sec);
+    }
+}
+
 bool parseSequence(const json& j, SequenceAsset& out, int* dropped)
 {
     int lost = 0;
@@ -208,71 +288,12 @@ bool parseSequence(const json& j, SequenceAsset& out, int* dropped)
         switch (st.kind)
         {
             case SequenceTrackKind::Property:
-            {
-                const int target = t.value("target", -1);
-                if (target < 0 || target > static_cast<int>(kLastPropTarget)) { ++lost; continue; }
-                st.channel.target = static_cast<PropTarget>(target);
-                st.channel.times  = floats(t, "times");
-                st.channel.values = floats(t, "values");
-                if (st.channel.times.size() != st.channel.values.size()) { ++lost; continue; }
+                if (!parsePropertyChannel(t, st, lost)) continue;
                 break;
-            }
-            case SequenceTrackKind::Skeletal:
-                for (const auto& s : t.value("sections", kEmpty))
-                {
-                    if (!s.is_object()) { ++lost; continue; }
-                    SequenceSkeletalSection sec;
-                    if (auto it = s.find("clipId"); it != s.end()) sec.clipId = HE::graph::uuidFromJson(*it);
-                    sec.start      = s.value("start", 0.0f);
-                    sec.end        = s.value("end", 0.0f);
-                    sec.clipOffset = s.value("clipOffset", 0.0f);
-                    sec.playRate   = s.value("playRate", 1.0f);
-                    sec.loop       = s.value("loop", false);
-                    st.sections.push_back(sec);
-                }
-                break;
-            case SequenceTrackKind::CameraCut:
-                for (const auto& c : t.value("cuts", kEmpty))
-                {
-                    if (!c.is_object()) { ++lost; continue; }
-                    SequenceCameraCut cut;
-                    cut.time    = c.value("time", 0.0f);
-                    cut.binding = getBinding(c);
-                    cut.blendIn = c.value("blendIn", 0.0f);
-                    if (!(cut.blendIn >= 0.0f)) cut.blendIn = 0.0f;
-                    cut.curve   = curveFromInt(c.value("curve", static_cast<int>(SequenceBlendCurve::SmoothStep)));
-                    st.cuts.push_back(cut);
-                }
-                // Kept in time order, so the list a reader sees is the order the
-                // cuts happen in. Stable: two cuts at one instant keep the order
-                // they were written in, and the later one wins (SequenceEval).
-                std::stable_sort(st.cuts.begin(), st.cuts.end(),
-                                 [](const SequenceCameraCut& a, const SequenceCameraCut& b)
-                                 { return a.time < b.time; });
-                break;
-            case SequenceTrackKind::Event:
-                for (const auto& e : t.value("events", kEmpty))
-                {
-                    if (!e.is_object()) { ++lost; continue; }
-                    AnimationNotify n;
-                    n.name     = e.value("name", std::string());
-                    n.time     = e.value("time", 0.0f);
-                    n.duration = e.value("duration", 0.0f);
-                    st.events.push_back(std::move(n));
-                }
-                break;
-            case SequenceTrackKind::Audio:
-                for (const auto& a : t.value("sections", kEmpty))
-                {
-                    if (!a.is_object()) { ++lost; continue; }
-                    SequenceAudioSection sec;
-                    if (auto it = a.find("assetId"); it != a.end()) sec.assetId = HE::graph::uuidFromJson(*it);
-                    sec.start  = a.value("start", 0.0f);
-                    sec.volume = a.value("volume", 1.0f);
-                    sec.pitch  = a.value("pitch", 1.0f);
-                    st.audio.push_back(sec);
-                }
-                break;
+            case SequenceTrackKind::Skeletal:  parseSkeletalSections(t, kEmpty, st, lost); break;
+            case SequenceTrackKind::CameraCut: parseCameraCuts(t, kEmpty, st, lost);       break;
+            case SequenceTrackKind::Event:     parseEvents(t, kEmpty, st, lost);           break;
+            case SequenceTrackKind::Audio:     parseAudioSections(t, kEmpty, st, lost);    break;
         }
         tracks.push_back(std::move(st));
     }
