@@ -763,6 +763,21 @@ TEST_CASE("EngineProfiler live ring captures lightweight frames when enabled")
     CHECK_FALSE(prof.liveEnabled());
 }
 
+TEST_CASE("EngineProfiler live ring drops the oldest frame once full")
+{
+    auto& prof = EngineProfiler::instance();
+    for (int i = 0; i < 300; ++i)
+    {
+        ProfLiveFrame lf;
+        lf.draws = static_cast<uint32_t>(i);
+        prof.pushLive(lf);
+    }
+    const std::vector<ProfLiveFrame> snap = prof.liveSnapshot();
+    REQUIRE(snap.size() == 240);            // m_liveCap
+    CHECK(snap.front().draws == 60);        // 0..59 fell off the front
+    CHECK(snap.back().draws == 299);
+}
+
 TEST_CASE("EngineProfiler toggle stops an active capture")
 {
     setupTempDeploy("toggle");

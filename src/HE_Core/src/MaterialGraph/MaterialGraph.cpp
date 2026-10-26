@@ -6,9 +6,11 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -345,15 +347,37 @@ const std::vector<MatNodeDesc>& matNodeRegistry() { return registry(); }
 
 const MatNodeDesc& matNodeDesc(MatNodeType type)
 {
-    for (const auto& d : registry())
-        if (d.type == type) return d;
-    return registry().front();
+    // Indexed once from the registry (a function-local static, so it never changes).
+    // The FIRST entry of a type wins, exactly as the old front-to-back scan did.
+    static const std::array<const MatNodeDesc*, 256> kByType = [] {
+        std::array<const MatNodeDesc*, 256> t{};
+        for (const auto& d : registry())
+            if (!t[static_cast<uint8_t>(d.type)]) t[static_cast<uint8_t>(d.type)] = &d;
+        return t;
+    }();
+    const MatNodeDesc* d = kByType[static_cast<uint8_t>(type)];
+    return d ? *d : registry().front();
 }
 
 const MatNodeDesc* matNodeDescByName(const std::string& name)
 {
-    for (const auto& d : registry())
-        if (name == d.name) return &d;
+    // The names are string literals, so the views stay valid. First entry wins, as
+    // in the registry order (emplace keeps the existing key).
+    static const std::unordered_map<std::string_view, const MatNodeDesc*> kByName = [] {
+        std::unordered_map<std::string_view, const MatNodeDesc*> m;
+        m.reserve(registry().size());
+        for (const auto& d : registry()) m.emplace(d.name, &d);
+        return m;
+    }();
+    const auto it = kByName.find(name);
+    return it != kByName.end() ? it->second : nullptr;
+}
+
+// The graph's Output node: the first one in node order (a well-formed graph has one).
+static const MatGraphNode* firstOutputNode(const MaterialGraph& g)
+{
+    for (const MatGraphNode& n : g.nodes)
+        if (n.type == MatNodeType::Output) return &n;
     return nullptr;
 }
 
@@ -688,8 +712,13 @@ std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const s
     const long  seedI = std::lround(std::clamp(n.p[2], -2.0e9f, 2.0e9f));
     const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
     (variants ? c.usesBombGridV : c.usesBombGrid) = true;
-    const std::string key = sc.key + "|" + uv + "|" + cell + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed
-                          + (variants ? "|V" : "");
+    std::string key = sc.key;
+    key += '|'; key += uv;
+    key += '|'; key += cell;
+    key += '|'; key += fmtF(rot);
+    key += '|'; key += fmtF(sharp);
+    key += '|'; key += seed;
+    if (variants) key += "|V";
     if (auto it = c.bombGrids.find(key); it != c.bombGrids.end()) return it->second;
     const std::string g = "n" + std::to_string(++c.varCounter) + "_g";
     decl += "vec2 " + g + "t0, " + g + "t1, " + g + "t2; mat2 " + g + "r0, " + g + "r1, " + g
@@ -1162,6 +1191,11 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // result equals the plain fetch; only the shape between them changes. The
             // coordinate is clamped to the page's texel centres, which is what the
             // clamp sampler did to the plain uv anyway.
+            // One declaration line, in dependency order: the size probe and page test
+            // first, then the smoothed coordinate, then BOTH page fetches (so the
+            // implicit-derivative one stays outside any branch), then the sum. The
+            // statements are not reordered or split for readability: the emitted text
+            // is baked into the shipped .hasset files and keys the pipeline caches.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
                  + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
                  + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
@@ -1187,6 +1221,18 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
     return true;
 }
 
+// Inputs 0 and 1 of a two-operand Vec3 node. Pin 1 is emitted FIRST: the emission
+// order is the order of the statements and of the variable numbering (see the note
+// in emitMathNode), and the shipped .hasset files were baked that way.
+struct Vec3Operands { std::string a, b; };
+Vec3Operands vec3Operands(EmitCtx& c, const Scope& sc, const MatGraphNode& n)
+{
+    Vec3Operands ops;
+    ops.b = inputExpr(c, sc, n, 1, F::Vec3);
+    ops.a = inputExpr(c, sc, n, 0, F::Vec3);
+    return ops;
+}
+
 // Arithmetic.
 HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
                                  std::string& decl, std::vector<std::string>& pinExpr)
@@ -1202,12 +1248,12 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
         // .hasset files were baked in — so the shader no longer depends on the compiler.
         case MatNodeType::Add:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " + " + b + ";"; break;
         }
         case MatNodeType::Multiply:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " * " + b + ";"; break;
         }
         case MatNodeType::Lerp:
@@ -1227,7 +1273,7 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             decl = "vec3 " + v + " = clamp(" + inputExpr(c, sc, n, 0, F::Vec3) + ", 0.0, 1.0);"; break;
         case MatNodeType::DotProduct:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "float " + v + " = dot(" + a + ", " + b + ");"; break;
         }
         case MatNodeType::Sine:
@@ -1240,12 +1286,12 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
         }
         case MatNodeType::Subtract:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " - " + b + ";"; break;
         }
         case MatNodeType::Divide:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " / max(" + b + ", vec3(1e-5));"; break;
         }
         case MatNodeType::Absolute:
@@ -1595,9 +1641,15 @@ HE_MG_NOINLINE bool emitWaterNode(EmitCtx& c, const Scope& sc, const MatGraphNod
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
-    const std::string memoKey = sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(pin);
+    // "<scope>:<node>" keys the cycle guard; the memo key (outVar) adds ":<pin>".
+    std::string memoKey = sc.key;
+    memoKey += ':';
+    memoKey += std::to_string(n.id);
+    const size_t nodeKeyLen = memoKey.size();
+    memoKey += ':';
+    memoKey += std::to_string(pin);
     if (auto it = c.outVar.find(memoKey); it != c.outVar.end()) return it->second;
-    const std::string cycleKey = sc.key + ":" + std::to_string(n.id);
+    const std::string cycleKey = memoKey.substr(0, nodeKeyLen);
     if (c.emitting.count(cycleKey))
         return "vec3(1.0, 0.0, 1.0)"; // cycle → magenta
     c.emitting.insert(cycleKey);
@@ -1628,10 +1680,14 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
 
     // Register per-pin expressions (default: the single var for every output pin).
     const size_t pinCount = std::max<size_t>(d.outputs.size(), pinExpr.size());
+    std::string pinKey = cycleKey;
     for (size_t i = 0; i < std::max<size_t>(pinCount, 1); ++i)
     {
         const std::string expr = i < pinExpr.size() && !pinExpr[i].empty() ? pinExpr[i] : v;
-        c.outVar[sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(i)] = expr;
+        pinKey.resize(nodeKeyLen);
+        pinKey += ':';
+        pinKey += std::to_string(i);
+        c.outVar[pinKey] = expr;
     }
     return c.outVar[memoKey];
 }
@@ -1717,6 +1773,7 @@ std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinI
 std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, uint32_t& arrayMask)
 {
     std::string src;
+    src.reserve(4096); // the block grows by dozens of appends; none measured above 4 KB
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
     if (c.usesLandscapeWeights)
@@ -2043,9 +2100,7 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
 MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
                               const std::map<std::string, bool>* switchOverrides)
 {
-    const MatGraphNode* out = nullptr;
-    for (const auto& n : graph.nodes)
-        if (n.type == MatNodeType::Output) { out = &n; break; }
+    const MatGraphNode* out = firstOutputNode(graph);
 
     const std::string headerCommon =
         "#version 450\n"
@@ -2385,14 +2440,28 @@ std::string materialGraphToJson(const MaterialGraph& graph)
     nlohmann::json j;
     j["version"] = kMatGraphVersion;
     j["nextId"]  = graph.nextId;
-    for (const auto& n : graph.nodes)
-        j["nodes"].push_back(matNodeToJsonObj(n));
-    for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
-        j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
+    // Each key is looked up once, and only when there is something to put in it: an
+    // empty list leaves its key out of the document (it is not written as []).
+    if (!graph.nodes.empty())
+    {
+        nlohmann::json& jnodes = j["nodes"];
+        for (const auto& n : graph.nodes)
+            jnodes.push_back(matNodeToJsonObj(n));
+    }
+    if (!graph.links.empty())
+    {
+        nlohmann::json& jlinks = j["links"];
+        for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
+            jlinks.push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
+    }
     // Editor-only comment boxes. Older parsers ignore the extra key (forward-compatible);
     // absent key → no comments (backward-compatible).
-    for (const auto& cm : graph.comments)
-        j["comments"].push_back(matCommentToJsonObj(cm));
+    if (!graph.comments.empty())
+    {
+        nlohmann::json& jcomments = j["comments"];
+        for (const auto& cm : graph.comments)
+            jcomments.push_back(matCommentToJsonObj(cm));
+    }
     return j.dump();
 }
 
@@ -2492,6 +2561,9 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
 constexpr float kApproxNoiseMean   = 0.5f;
 constexpr float kApproxFbmMean     = 0.46875f;
 constexpr float kApproxCheckerMean = 0.5f;
+
+// a / b; a divisor too close to zero folds to 0 instead of Inf/NaN.
+float approxSafeDivide(float a, float b) { return std::abs(b) > 1e-8f ? a / b : 0.0f; }
 
 // Fold one INPUT pin: linked → fold the source node, unconnected → the pin's
 // registry default (splat — the same coercion codegen applies to scalars).
@@ -2610,7 +2682,7 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
             out[k] = n->type == MatNodeType::Add      ? a[k] + b[k]
                    : n->type == MatNodeType::Subtract ? a[k] - b[k]
                    : n->type == MatNodeType::Multiply ? a[k] * b[k]
-                   : (std::abs(b[k]) > 1e-8f ? a[k] / b[k] : 0.0f);
+                   : approxSafeDivide(a[k], b[k]);
         return true;
     case MatNodeType::Lerp:
         if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
@@ -2725,9 +2797,7 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g,
                                        const std::map<std::string, bool>* switchOverrides)
 {
     MatApproxSurface out;
-    const MatGraphNode* output = nullptr;
-    for (const MatGraphNode& n : g.nodes)
-        if (n.type == MatNodeType::Output) { output = &n; break; }
+    const MatGraphNode* output = firstOutputNode(g);
     if (!output) return out;
 
     auto foldPin = [&](int pin, float rgb[3], std::string& param)

@@ -1,4 +1,5 @@
 #include <Hpak/Aes256Gcm.h>
+#include <climits>
 #include <cstdint>
 
 #if defined(HE_HAVE_OPENSSL)
@@ -16,6 +17,7 @@ bool randomBytes(uint8_t* out, size_t n)
 {
     if (n == 0) return true;
     if (!out)   return false;
+    if (n > static_cast<size_t>(INT_MAX)) return false; // RAND_bytes takes an int
     return RAND_bytes(out, static_cast<int>(n)) == 1;
 }
 
@@ -23,6 +25,8 @@ bool aesGcmEncrypt(const uint8_t key[32], const uint8_t nonce[12],
                    const uint8_t* plaintext, size_t len,
                    std::vector<uint8_t>& out)
 {
+    if (len > static_cast<size_t>(INT_MAX)) return false; // EVP_EncryptUpdate takes an int
+
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return false;
 
@@ -60,6 +64,7 @@ bool aesGcmDecrypt(const uint8_t key[32], const uint8_t nonce[12],
 {
     if (len < static_cast<size_t>(kTagLen)) return false;
     const size_t   ctLen = len - kTagLen;
+    if (ctLen > static_cast<size_t>(INT_MAX)) return false; // EVP_DecryptUpdate takes an int
     const uint8_t* tag   = data + ctLen;
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
