@@ -1707,12 +1707,15 @@ size_t UIText::caretAtPoint(const UIWidgetRect& px, float pxScaleY, float x, flo
     // Walk the boundaries and take the one whose midpoint the point passed —
     // aiming at the left half of a character puts the caret in front of it.
     size_t best = r.begin;
+    float left = 0.0f;   // widthTo(r.begin)
     for (size_t i = r.begin; i < r.end; )
     {
         const size_t nx = HE::uiUtf8Next(text, i);
-        if (local < (widthTo(i) + widthTo(nx)) * 0.5f) return i;
+        const float right = widthTo(nx);
+        if (local < (left + right) * 0.5f) return i;
         best = nx;
         i = nx;
+        left = right;   // this boundary is the next step's left one
     }
     return best;
 }
