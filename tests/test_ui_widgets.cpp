@@ -2245,6 +2245,46 @@ TEST_CASE("Selectable label: the up arrow keeps the column it left from")
     CHECK(t.byteAtRowX(rows[1], col) == rows[1].end);
 }
 
+TEST_CASE("Selectable label: byteAtRowX and caretAtPoint follow the midpoint rule at every column")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    HE::UIText t;
+    t.selectable = true; t.autoSize = false; t.fontSize = 18.0f; t.alignV = 0;
+    t.text = "Hello w\xC3\xB6rld \xE6\x97\xA5 end\nsecond row";
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 120.0f };
+    std::vector<UIRenderObject> out;
+    t.render(px, {}, {}, 1.0f, out);
+
+    const std::vector<HE::UITextVisualLine> rows = t.rowRanges();
+    REQUIRE(rows.size() == 2);
+    const auto sel = t.selectRows(px, 1.0f, 1.0f);
+    REQUIRE(sel.size() == 2);
+    for (size_t r = 0; r < rows.size(); ++r)
+        for (float x = -2.0f; x < 220.0f; x += 0.5f)
+        {
+            // The definition: the first boundary whose midpoint with the next
+            // one lies beyond x, measured from the row start each time.
+            size_t want = rows[r].begin;
+            if (x > 0.0f)
+            {
+                want = rows[r].end;
+                for (size_t i = rows[r].begin; i < rows[r].end; )
+                {
+                    const size_t nx = HE::uiUtf8Next(t.text, i);
+                    if (x < (t.caretXInRow(rows[r], i) + t.caretXInRow(rows[r], nx)) * 0.5f)
+                    {
+                        want = i;
+                        break;
+                    }
+                    i = nx;
+                }
+            }
+            CHECK(t.byteAtRowX(rows[r], x) == want);
+            const float y = sel[r].top + 9.0f;
+            CHECK(t.caretAtPoint(px, 1.0f, sel[r].x + x, y) == want);
+        }
+}
+
 // ── Multi-line text ───────────────────────────────────────────────────────────
 // emitUITextGlyphs used to lay out strictly one line and DROP every byte < 32,
 // so '\n' silently vanished and the whole string ran together.
