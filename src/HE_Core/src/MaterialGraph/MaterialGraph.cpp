@@ -1207,6 +1207,18 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
     return true;
 }
 
+// Inputs 0 and 1 of a two-operand Vec3 node. Pin 1 is emitted FIRST: the emission
+// order is the order of the statements and of the variable numbering (see the note
+// in emitMathNode), and the shipped .hasset files were baked that way.
+struct Vec3Operands { std::string a, b; };
+Vec3Operands vec3Operands(EmitCtx& c, const Scope& sc, const MatGraphNode& n)
+{
+    Vec3Operands ops;
+    ops.b = inputExpr(c, sc, n, 1, F::Vec3);
+    ops.a = inputExpr(c, sc, n, 0, F::Vec3);
+    return ops;
+}
+
 // Arithmetic.
 HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
                                  std::string& decl, std::vector<std::string>& pinExpr)
@@ -1222,12 +1234,12 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
         // .hasset files were baked in — so the shader no longer depends on the compiler.
         case MatNodeType::Add:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " + " + b + ";"; break;
         }
         case MatNodeType::Multiply:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " * " + b + ";"; break;
         }
         case MatNodeType::Lerp:
@@ -1247,7 +1259,7 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             decl = "vec3 " + v + " = clamp(" + inputExpr(c, sc, n, 0, F::Vec3) + ", 0.0, 1.0);"; break;
         case MatNodeType::DotProduct:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "float " + v + " = dot(" + a + ", " + b + ");"; break;
         }
         case MatNodeType::Sine:
@@ -1260,12 +1272,12 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
         }
         case MatNodeType::Subtract:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " - " + b + ";"; break;
         }
         case MatNodeType::Divide:
         {
-            const std::string b = inputExpr(c, sc, n, 1, F::Vec3), a = inputExpr(c, sc, n, 0, F::Vec3);
+            const auto [a, b] = vec3Operands(c, sc, n);
             decl = "vec3 " + v + " = " + a + " / max(" + b + ", vec3(1e-5));"; break;
         }
         case MatNodeType::Absolute:
