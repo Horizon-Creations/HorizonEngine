@@ -3088,7 +3088,16 @@ std::unique_ptr<UIElement> uiElementFromJson(const std::string& json)
 {
     nlohmann::json j;
     if (!HE::graph::parseGraphObject(json, j)) return nullptr;
-    return uiElementFromJsonObj(j);
+    // A mistyped field ("id": "x") makes json::value() throw; the callers are
+    // fed by collaboration peers and hand-edited files, so it is a refusal.
+    try
+    {
+        return uiElementFromJsonObj(j);
+    }
+    catch (const nlohmann::json::exception&)
+    {
+        return nullptr;
+    }
 }
 
 // ── A selection of several elements (docs/he-apps-plan.md D4) ────────────────

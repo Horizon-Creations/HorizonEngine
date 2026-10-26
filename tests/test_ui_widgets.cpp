@@ -18653,3 +18653,16 @@ TEST_CASE("uiWidgetTreeFromJson: a mistyped field or a non-object element refuse
         CHECK(out.elements.empty());
     }
 }
+
+TEST_CASE("uiElementFromJson: input that is not an element document gives null without throwing")
+{
+    for (const char* text : { "[1,2]", "7", "\"x\"", "null", "{", "",
+                              R"({"id":"x"})", R"({"type":"Panel","size":["a","b"]})",
+                              R"({"type":"Panel","pos":["a","b"]})" })
+    {
+        std::unique_ptr<HE::UIElement> e;
+        CHECK_NOTHROW(e = HE::uiElementFromJson(text));
+        CHECK_FALSE(e);
+    }
+    CHECK(HE::uiElementFromJson(R"({"id":9,"type":"Panel"})"));
+}
