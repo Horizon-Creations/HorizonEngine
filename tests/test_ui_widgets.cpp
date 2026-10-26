@@ -18666,3 +18666,25 @@ TEST_CASE("uiElementFromJson: input that is not an element document gives null w
     }
     CHECK(HE::uiElementFromJson(R"({"id":9,"type":"Panel"})"));
 }
+
+TEST_CASE("Text catalog: loading keeps first-write order and lets a repeated key overwrite in place")
+{
+    HE::UITextCatalog c;
+    REQUIRE(HE::uiTextCatalogFromJson(R"({"fallback":"de","languages":[
+        {"language":"en","entries":[{"key":"a","text":"A1"},{"key":"b","text":"B1"},{"key":"a","text":"A2"}]},
+        {"language":"fr","entries":[]},
+        {"language":"","entries":[{"key":"z","text":"Z"}]},
+        {"language":"de","entries":[{"key":"x","text":"X"}]},
+        {"language":"en","entries":[{"key":"c","text":"C"},{"key":"b","text":"B2"},{"key":"","text":"skip"},7]}
+    ]})", c));
+    CHECK(c.fallback == "de");
+    CHECK(c.languageNames() == std::vector<std::string>{ "en", "de" });
+    REQUIRE(c.languages.size() == 2);
+    const auto& en = c.languages[0].second;
+    REQUIRE(en.size() == 3);
+    CHECK(en[0] == std::pair<std::string, std::string>{ "a", "A2" });
+    CHECK(en[1] == std::pair<std::string, std::string>{ "b", "B2" });
+    CHECK(en[2] == std::pair<std::string, std::string>{ "c", "C" });
+    REQUIRE(c.languages[1].second.size() == 1);
+    CHECK(*c.find("de", "x") == "X");
+}

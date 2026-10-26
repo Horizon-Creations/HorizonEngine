@@ -2883,6 +2883,12 @@ bool uiTextCatalogFromJson(const std::string& json, UITextCatalog& out)
     if (!HE::graph::parseGraphObject(json, j)) return false;
     UITextCatalog c;
     c.fallback = j.value("fallback", std::string("en"));
+    // set() scans the language list and then every entry of the language, which
+    // makes n keys cost n^2 compares. The load keeps its own position index
+    // instead: first-write order and "a repeated key overwrites in place" are
+    // exactly what set() does.
+    std::unordered_map<std::string, std::size_t> languageAt;                  // → c.languages
+    std::vector<std::unordered_map<std::string, std::size_t>> entryAt;        // per language
     if (const auto langs = j.find("languages"); langs != j.end() && langs->is_array())
         for (const auto& l : *langs)
         {
@@ -2896,7 +2902,17 @@ bool uiTextCatalogFromJson(const std::string& json, UITextCatalog& out)
                 if (!item.is_object()) continue;
                 const std::string k = item.value("key", std::string());
                 if (k.empty()) continue;
-                c.set(name, k, item.value("text", std::string()));
+                std::string text = item.value("text", std::string());
+                const auto [lang, newLanguage] = languageAt.try_emplace(name, c.languages.size());
+                if (newLanguage)
+                {
+                    c.languages.push_back({ name, {} });
+                    entryAt.emplace_back();
+                }
+                auto& list = c.languages[lang->second].second;
+                const auto [entry, newKey] = entryAt[lang->second].try_emplace(k, list.size());
+                if (newKey) list.emplace_back(k, std::move(text));
+                else        list[entry->second].second = std::move(text);
             }
         }
     out = std::move(c);
