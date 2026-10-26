@@ -951,7 +951,7 @@ const WidgetManager::Grab* WidgetManager::topGrabOf(uint32_t windowId) const
 	for (auto it = m_grabs.rbegin(); it != m_grabs.rend(); ++it)
 	{
 		const Instance* gw = it->widget != 0
-			? const_cast<WidgetManager*>(this)->find(it->widget) : nullptr;
+			? find(it->widget) : nullptr;
 		const uint32_t gwin = gw ? gw->windowId : 0u;
 		if (gwin == windowId) return &*it;
 	}
@@ -960,7 +960,7 @@ const WidgetManager::Grab* WidgetManager::topGrabOf(uint32_t windowId) const
 
 bool WidgetManager::takesInput(int widgetId) const
 {
-	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Instance* w = find(widgetId);
 	const Grab* top = topGrabOf(w ? w->windowId : 0u);
 	// Nothing is up in this widget's window: everybody there hears everything,
 	// which is how it was before layers existed and is still the overwhelmingly
@@ -979,7 +979,7 @@ bool WidgetManager::takesInput(int widgetId) const
 // window land on the main window's button of the same name.
 bool WidgetManager::inPointerWindow(int widgetId) const
 {
-	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Instance* w = find(widgetId);
 	return (w ? w->windowId : 0u) == m_pointerWindow;
 }
 
@@ -1000,7 +1000,7 @@ float WidgetManager::displayScale(uint32_t windowId) const
 uint32_t WidgetManager::keyboardWindow() const
 {
 	if (m_focusWidget != 0)
-		if (const Instance* w = const_cast<WidgetManager*>(this)->find(m_focusWidget))
+		if (const Instance* w = find(m_focusWidget))
 			return w->windowId;
 	return m_pointerWindow;
 }
@@ -1017,7 +1017,7 @@ bool WidgetManager::hasModalIn(uint32_t windowId) const
 	{
 		if (g.kind != Grab::Kind::Modal) continue;
 		const Instance* gw = g.widget != 0
-			? const_cast<WidgetManager*>(this)->find(g.widget) : nullptr;
+			? find(g.widget) : nullptr;
 		if ((gw ? gw->windowId : 0u) == windowId) return true;
 	}
 	return false;
@@ -6568,7 +6568,7 @@ void WidgetManager::setWidgetWindow(int widgetId, uint32_t windowId)
 
 uint32_t WidgetManager::widgetWindow(int widgetId) const
 {
-	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Instance* w = find(widgetId);
 	return w ? w->windowId : 0u;
 }
 
