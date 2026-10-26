@@ -1752,6 +1752,7 @@ std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinI
 std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, uint32_t& arrayMask)
 {
     std::string src;
+    src.reserve(4096); // the block grows by dozens of appends; none measured above 4 KB
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
     if (c.usesLandscapeWeights)
