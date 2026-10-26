@@ -2791,7 +2791,7 @@ TEST_CASE("UI image quads have a texture path on D3D11 and D3D12 (Thema 157)")
 	// D3D11: own cache, dropped on a re-import.
 	CHECK(d3d11.find("resolveUITexture(obj.textureAssetId, cm)") != std::string::npos);
 	CHECK(d3d11.find("resolveGraphTexture(obj.textureAssetId") == std::string::npos);
-	CHECK(d3d11.find("uiTexCache.erase(graphTexKey(id, {}))") != std::string::npos);
+	CHECK(d3d11.find("uiTexCache.erase(key)") != std::string::npos);
 	// D3D12: the UI pass binds only m_uiAtlasHeap, so the images need their own
 	// region there (not the 16 font slots); uploads are recorded before the draws.
 	CHECK(d3d12.find("hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;") != std::string::npos);
