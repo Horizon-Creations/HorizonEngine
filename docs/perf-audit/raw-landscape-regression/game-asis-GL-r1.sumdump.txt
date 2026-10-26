@@ -1,0 +1,9 @@
+game-asis-GL-r1.profile.json 2880 x 1806 Metal
+fps 29.4  delta p50 34.07  cpu p50 34.06  gpu p50 None
+modes None counters {'draws': 75, 'tris': 388096, 'visible': 74, 'total': 261, 'lights': 2, 'entities': 269}
+  CPU Render                                       p50 32.67 p90 34.11
+  CPU OcclusionCuller::refine                      p50 3.67 p90 3.85
+  CPU SwapBuffers                                  p50 1.06 p90 1.21
+  CPU RenderExtractor::extract                     p50 0.33 p90 0.36
+  CPU OnRender                                     p50 0.21 p90 0.24
+  CPU SceneSystemsTick                             p50 0.13 p90 0.13
