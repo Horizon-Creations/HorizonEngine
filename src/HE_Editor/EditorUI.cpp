@@ -1922,12 +1922,18 @@ static void drawFooterBar(AppContext& ctx)
 
 	// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 	// The resolution is the actual viewport framebuffer size the scene renders at.
-	std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
 	int viewportPxW = 0, viewportPxH = 0;
 	ViewportPanel::renderSizePx(viewportPxW, viewportPxH);
+	std::string fpsText;
 	if (viewportPxW > 0 && viewportPxH > 0)
-		fpsText = std::to_string(viewportPxW) + "x" + std::to_string(viewportPxH)
-		        + "   " + fpsText;
+	{
+		fpsText += std::to_string(viewportPxW);
+		fpsText += 'x';
+		fpsText += std::to_string(viewportPxH);
+		fpsText += "   ";
+	}
+	fpsText += "FPS: ";
+	fpsText += std::to_string(static_cast<int>(ctx.smoothFps));
 	const float fpsW = ImGui::CalcTextSize(fpsText.c_str()).x;
 	ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
 	ImGui::Text("%s", fpsText.c_str());
@@ -2267,16 +2273,27 @@ static void drawEditorTabBar(AppContext& ctx)
             const HE::Ed::Rewards::TabMark mark =
                 HE::Ed::Rewards::tabMark(ctx, tab.assetPath, tabDirty);
             std::string suffix = tabDirty ? " *" : "";
+            std::string probe;  // label + trailing text to measure, grown in place
             if (mark.check)
             {
-                const float markW = ImGui::CalcTextSize((tab.label + " *").c_str()).x;
+                probe = tab.label;
+                probe += " *";
+                const float markW = ImGui::CalcTextSize(probe.c_str()).x;
                 suffix = " ";
-                while (ImGui::CalcTextSize((tab.label + suffix).c_str()).x < markW
+                probe.resize(tab.label.size() + 1);
+                while (ImGui::CalcTextSize(probe.c_str()).x < markW
                        && suffix.size() < 8)
+                {
                     suffix += ' ';
+                    probe += ' ';
+                }
             }
-            const std::string shown = tab.label + suffix
-                + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
+            std::string shown;
+            shown.reserve(tab.label.size() + suffix.size() + 7 + tab.assetPath.size());
+            shown += tab.label;
+            shown += suffix;
+            shown += "###tab_";
+            shown += tab.assetPath.empty() ? std::string_view("scene") : std::string_view(tab.assetPath);
             const bool tabOpen =
                 ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags);
             if (mark.check)
@@ -2287,8 +2304,9 @@ static void drawEditorTabBar(AppContext& ctx)
                 const ImVec2 mn    = ImGui::GetItemRectMin();
                 const float  lineH = ImGui::GetTextLineHeight();
                 const float  size  = std::floor(lineH * 0.62f);
+                probe.resize(tab.label.size() + 1);  // label + one space
                 const float  x     = mn.x + ImGui::GetStyle().FramePadding.x
-                                   + ImGui::CalcTextSize((tab.label + " ").c_str()).x;
+                                   + ImGui::CalcTextSize(probe.c_str()).x;
                 const float  y     = mn.y + ImGui::GetStyle().FramePadding.y
                                    + (lineH - size) * 0.5f;
                 HE::Ed::Rewards::drawCheckMark(x, y, size, mark.stroke, mark.alpha);
@@ -2670,11 +2688,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// The unsaved-changes half, once anything upstream has agreed to proceed.
 	auto requestGuardedInner = [&](GuardedAction a, const std::string& arg)
 	{
-		const bool tabsDirty = endsSession(a) && !unsavedTabEntries().empty();
+		std::vector<std::pair<std::string, std::string>> unsaved;
+		if (endsSession(a)) unsaved = unsavedTabEntries();
+		const bool tabsDirty = !unsaved.empty();
 		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
 		if (a == GuardedAction::InstallUpdate)
 			HE_LOG_INFO(Editor, "Editor: unsaved changes (scene %s, %zu asset tab(s)) -- asking before the update",
-			            ctx.sceneDirty ? "dirty" : "clean", unsavedTabEntries().size());
+			            ctx.sceneDirty ? "dirty" : "clean", unsaved.size());
 		s_guardAction      = a;
 		s_guardArg         = arg;
 		s_guardSaveThenAct = false;

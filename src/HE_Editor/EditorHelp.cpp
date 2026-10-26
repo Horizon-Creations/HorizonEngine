@@ -10097,6 +10097,7 @@ const Entry* findKey(std::string_view key)
 const Entry* find(std::string_view label)
 {
 	if (label.empty()) return nullptr;
+	const std::string_view vis = visible(label);
 
 	// Most specific first: the label EXACTLY as written, "##" suffix included.
 	// That suffix is the only thing telling two rows apart when a component has
@@ -10114,7 +10115,6 @@ const Entry* find(std::string_view label)
 		const std::size_t prefix = scoped.size();
 		scoped.append(label);
 		if (const Entry* e = findKey(scoped)) return e;
-		const std::string_view vis = visible(label);
 		if (vis.size() != label.size())
 		{
 			scoped.resize(prefix);
@@ -10123,7 +10123,7 @@ const Entry* find(std::string_view label)
 		}
 	}
 	if (const Entry* e = findKey(label)) return e;
-	return findKey(visible(label));
+	return findKey(vis);
 }
 
 Scope::Scope(const char* name) { scopes().push_back(name ? name : ""); }

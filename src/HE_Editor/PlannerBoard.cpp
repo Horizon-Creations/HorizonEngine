@@ -299,11 +299,14 @@ bool Board::sendToBack(const UUID& nid, std::int64_t nowMs)
 UUID Board::hitTest(double x, double y) const
 {
 	// Cards first, topmost first: a card inside a frame is what you meant, not the frame.
+	UUID frameHit{};
 	for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
-		if (it->type != NodeType::Frame && it->rect().contains(x, y)) return it->id;
-	for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
-		if (it->type == NodeType::Frame && it->rect().contains(x, y)) return it->id;
-	return UUID{};
+	{
+		if (!it->rect().contains(x, y)) continue;
+		if (it->type != NodeType::Frame) return it->id;
+		if (frameHit == UUID{}) frameHit = it->id;
+	}
+	return frameHit;
 }
 
 std::vector<UUID> Board::nodesIn(const Rect2& area) const

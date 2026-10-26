@@ -417,8 +417,7 @@ enum class RowKind { Conflict, Staged, Unstaged, Untracked };
 // The whole row is a Selectable (hover wash, double-click) and everything on it is
 // drawn over it and hit-tested with InvisibleButtons that overlap it, so a click on
 // the checkbox is a click on the checkbox and not also on the row.
-RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
-                  const std::string& root)
+RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite)
 {
 	namespace T = EditorToolbar;
 	RowResult res;
@@ -584,7 +583,6 @@ RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
 	{
 		s_hoverId = 0;
 	}
-	(void)root;
 
 	// The selectable already moved the cursor on; the buttons moved it around. Put it
 	// back and let one item of the row's size account for the line.
@@ -930,7 +928,7 @@ void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatu
 			if (!s_sectionOpen[idx]) return;
 			ImGui::PushID(idx);
 			drawRows(idx, rows, m.tree[idx], [&](const ChangeRow& r) {
-				const RowResult res = drawRow(r, kind, showDir, mayWrite, m.root);
+				const RowResult res = drawRow(r, kind, showDir, mayWrite);
 				if (res.toggle)
 				{
 					if (kind == RowKind::Staged) toUnstage.push_back(r.path);

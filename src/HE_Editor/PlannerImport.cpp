@@ -11,9 +11,11 @@ namespace
 // "plan" + "ner" in ASCII: a high half no random UUID is going to have.
 constexpr std::uint64_t kDerivedHi = 0x706c616e6e657200ULL;
 
-std::uint64_t fnv1a(std::string_view s)
+constexpr std::uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
+
+// `h` continues a hash over the bytes before `s`, so a key can be fed in pieces.
+std::uint64_t fnv1a(std::string_view s, std::uint64_t h = kFnvOffsetBasis)
 {
-	std::uint64_t h = 1469598103934665603ULL;
 	for (const char c : s)
 	{
 		h ^= static_cast<unsigned char>(c);
@@ -75,13 +77,21 @@ View& ensureView(Database& db, const char* name, ViewKind kind)
 	return db.views.back();
 }
 
+// A Select property with its four options populated.
+UUID ensureSelectOptions(Database& db, const char* propertyName, const char* const* words, const char* const* colors)
+{
+	const UUID id = ensureProperty(db, propertyName, PropertyType::Select).id;
+	for (int i = 0; i < 4; ++i) ensureOption(db, id, words[i], colors[i]);
+	return id;
+}
+
 } // namespace
 
 UUID derivedId(std::string_view kind, std::string_view name)
 {
 	UUID id;
 	id.hi = kDerivedHi;
-	id.lo = fnv1a(std::string(kind) + "\n" + std::string(name));
+	id.lo = fnv1a(name, fnv1a("\n", fnv1a(kind)));
 	return id;
 }
 
@@ -92,12 +102,10 @@ void ensureTasksSchema(Database& db)
 	if (db.id == UUID{})  db.id = tasksDatabaseId();
 	if (db.name.empty())  db.name = "Tasks";
 
-	const UUID status = ensureProperty(db, "Status", PropertyType::Select).id;
-	const char* const statusColors[] = { "gray", "blue", "red", "green" };
-	for (int i = 0; i < 4; ++i) ensureOption(db, status, kStatusWords[i], statusColors[i]);
-	const UUID priority = ensureProperty(db, "Priority", PropertyType::Select).id;
+	const char* const statusColors[]   = { "gray", "blue", "red", "green" };
 	const char* const priorityColors[] = { "gray", "blue", "orange", "red" };
-	for (int i = 0; i < 4; ++i) ensureOption(db, priority, kPriorityWords[i], priorityColors[i]);
+	const UUID status = ensureSelectOptions(db, "Status", kStatusWords, statusColors);
+	ensureSelectOptions(db, "Priority", kPriorityWords, priorityColors);
 	ensureProperty(db, "Assignees", PropertyType::Person);
 	ensureProperty(db, "Description", PropertyType::Text);
 	ensureProperty(db, "Links", PropertyType::EngineLink);

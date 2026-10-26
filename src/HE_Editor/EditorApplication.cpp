@@ -159,7 +159,6 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <algorithm>
 #include <nlohmann/json.hpp>
 
 // stb_image — declaration only (implementation in stb_image_impl.cpp)
@@ -3435,7 +3434,7 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
-	// ── Automatischer asynchroner Content-Refresh ─────────────────────────────
+	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
 		m_contentRefreshTimer += dt;
@@ -10801,10 +10800,8 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	// for one.
 	constexpr std::uint64_t kAutosaveIntervalMs = 1000;
 
-	const std::string& root = contentManager().contentRoot();
 	AppContext ctx = makeContext();
 
-	(void)root;
 	std::unordered_set<std::string> openRel;
 	for (const auto& tab : m_tabs)
 	{
