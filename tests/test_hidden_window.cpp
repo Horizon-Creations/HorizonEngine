@@ -93,6 +93,11 @@ TEST_CASE("Background throttle: HE_BACKGROUND_FPS sets the rate, 0 turns it off"
     // Unreadable or negative is not a request: the default stays.
     CHECK(HE::backgroundFrameIntervalFromEnv("fast", nullptr, nullptr, nullptr) == kDefaultNs);
     CHECK(HE::backgroundFrameIntervalFromEnv("-3", nullptr, nullptr, nullptr) == kDefaultNs);
+    // A rate so small that 1e9 / rate does not fit a uint64 is not a request
+    // either (the cast would be undefined), while a slow but fitting one is.
+    CHECK(HE::backgroundFrameIntervalFromEnv("1e-12", nullptr, nullptr, nullptr) == kDefaultNs);
+    CHECK(HE::backgroundFrameIntervalFromEnv("1e-300", nullptr, nullptr, nullptr) == kDefaultNs);
+    CHECK(HE::backgroundFrameIntervalFromEnv("0.5", nullptr, nullptr, nullptr) == 2'000'000'000);
 }
 
 TEST_CASE("Background throttle: a profiler capture records uncapped")

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <SDL3/SDL.h>
 #include "Diagnostics/Log.h"
 #include "Platform/BuildProfile.h"   // HE_FEATURE_TEST_HOOKS: the HE_HIDDEN_WINDOW family
@@ -113,9 +114,13 @@ namespace
             char* end = nullptr;
             const double v = std::strtod(backgroundFps, &end);
             // "0" is the off switch; garbage or a negative rate is not a
-            // request for anything, so it keeps the default.
+            // request for anything, so it keeps the default. A rate so small
+            // that the interval does not fit a uint64 is no request either: the
+            // cast below would be undefined.
             if (end != backgroundFps && v == 0.0) return 0;
-            if (end != backgroundFps && v > 0.0) fps = v;
+            if (end != backgroundFps && v > 0.0 &&
+                1.0e9 / v < static_cast<double>(std::numeric_limits<uint64_t>::max()))
+                fps = v;
         }
         return static_cast<uint64_t>(1.0e9 / fps);
     }
