@@ -4521,11 +4521,17 @@ void WidgetManager::inputText(const std::string& utf8)
 	// return below goes through it: dropping the selection HAS changed the text
 	// even when the filter then throws the character away, and that used to
 	// leave the field changed with nobody told.
-	auto commit = [&](bool coalesce)
+	// The announcement runs graph code, and a handler may destroy the field, so
+	// it is the last thing this does and nothing touches `ti` after it:
+	// `keepRunOpen` is settled before it fires, and the text is handed over as a
+	// copy because the field's own string dies with the field.
+	auto commit = [&](bool coalesce, bool keepRunOpen = false)
 	{
 		ti->recordEdit(before, HE::UITextInput::EditKind::Insert, coalesce);
+		if (keepRunOpen) ti->openRun = HE::UITextInput::EditKind::Insert;
 		const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
-		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+		const std::string text = ti->text;
+		rt().fireOnTextChanged(t.scriptId, t.elem, text);
 	};
 
 	// Typing over a selection replaces it — the thing every text field does and
@@ -4582,12 +4588,11 @@ void WidgetManager::inputText(const std::string& utf8)
 	// replaced selection each begin their own, because undo should take back a
 	// paste in one step rather than letter by letter.
 	const bool single = HE::uiUtf8Next(add, 0) == add.size();
-	commit(!replaced && single);
 	// …but a keystroke that replaced a selection leaves its run OPEN, so the
 	// letters after it join in. "Select the word, type a new one" is the most
 	// ordinary edit there is and has to come back in one Ctrl+Z; only a paste
 	// closes itself off.
-	if (replaced && single) ti->openRun = HE::UITextInput::EditKind::Insert;
+	commit(!replaced && single, /*keepRunOpen=*/replaced && single);
 }
 
 void WidgetManager::inputComposition(const std::string& utf8, int cursorByte)

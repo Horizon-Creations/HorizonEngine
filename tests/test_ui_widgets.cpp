@@ -18778,3 +18778,53 @@ TEST_CASE("Hiding a dialog releases every grab it holds, however many are stacke
     wm.hideWidget(dlg);
     CHECK_FALSE(wm.hasModal());
 }
+
+TEST_CASE("Text field: an OnTextChanged that destroys the widget leaves nothing to write through")
+{
+    // Typing over a selection leaves the undo run open AFTER the change was
+    // announced; the announcement runs graph code, and this one destroys the
+    // widget the field lives in. Under a guard-malloc or ASan run the old order
+    // wrote through the freed field.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int fieldId = t.add(HE::UIWidgetType::TextInput);
+    {
+        auto* e = dynamic_cast<HE::UITextInput*>(t.find(fieldId));
+        e->text = "hello";
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 400.0f; e->sizeY = 40.0f;
+    }
+    HorizonCode::Graph g;
+    {
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnTextChanged"; ev.elem = fieldId;
+        const int evId = g.addNode(ev);
+        HorizonCode::Node self; self.type = NodeType::GetSelf;
+        const int selfId = g.addNode(self);
+        HorizonCode::Node kill; kill.type = NodeType::DestroyWidget;
+        const int killId = g.addNode(kill);
+        REQUIRE(g.connect(evId, 0, killId, 0));
+        REQUIRE(g.connect(selfId, 0, killId, 2));
+    }
+    registerWidget(cm, t, &g);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    {
+        HorizonCode::Runtime::Services svc;
+        svc.destroyWidget = [&wm](int w) { wm.destroyWidget(w); };
+        rt.setServices(std::move(svc));
+    }
+    const int widget = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(widget != 0);
+    REQUIRE(wm.processPointer(400.0f, 200.0f, 395.0f, 20.0f, true, true));
+    wm.processPointer(400.0f, 200.0f, 395.0f, 20.0f, false, true);
+    REQUIRE(wm.hasFocusedTextField());
+    REQUIRE(wm.editFocusedText(WidgetManager::TextEdit::SelectAll, false));
+
+    wm.inputText("X");
+    CHECK_FALSE(wm.isAlive(widget));
+}
