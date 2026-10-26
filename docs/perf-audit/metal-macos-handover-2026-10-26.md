@@ -44,10 +44,12 @@ Stellen in `MetalRenderer.mm` (Zeilennummern vom 26.10., vor der Umstellung grep
 3. Perf-A/B auf den P-Kernen (`he_perf_capture.py`, 50k-Szene, Foliage 300k, Catania), je alter gegen neuer Stand, `HE_HIDDEN_WINDOW=1
    HE_BACKGROUND_FPS=0`, Capture ohne `--detailed` für die CPU-Zeit. Schalter: `HE_INSTANCE_SPANS=0` und `HE_MTL_PARALLEL_SHADOW=0`.
    Verglichen: p50 von `Render`, `RenderExtractor::extract` (mit `Extract::meshes`, `Extract::transforms`), `Metal::RefineBounds`, `Metal::ShadowPrepare`.
-4. Erwartung nach den Windows-Messungen (50k Objekte, CPU-Frame, Median aus 5 verschachtelten Läufen, Richtwerte, ein Rechner mit
-   Hintergrundlast): **D3D11 12,6 auf 7,2 ms, D3D12 12,9 auf 7,6 ms, Vulkan 12,0 auf 6,4 ms**. Davon der Extract (`extract` 5,5 auf etwa 2,3 ms,
-   `Extract::meshes` 4,6 auf 1,5 ms) ist der gemeinsame Teil, der auf dem Mac genauso greifen muss; die Backend-Teile (Spans, Schatten-Ansichten
-   `Shadow` 1,1 auf 0,5 ms) hat Metal schon (PR 198).
+4. Erwartung nach den Windows-Messungen (50k Objekte, Referenzwelt, CPU-Frame, Median aus 4 verschachtelten Läufen, ruhiger Rechner):
+   **D3D11 9,8 auf 5,0 ms, D3D12 9,9 auf 5,1 ms, Vulkan 9,3 auf 5,6 ms (-49 / -49 / -39 %)**. Der gemeinsame Teil, der auf dem Mac genauso greifen muss:
+   `extract` 5,5 auf 2,3 ms (`Extract::meshes` 4,6 auf 1,5 bis 1,9), `Extract::transforms` 0,33 auf 0,12, `RefineBounds` (nur nach der FrameCull-Umstellung) 1,4 auf 0,45,
+   `ShadowPrepare` 0,8 auf 0,33. Nur Windows/GL, nicht Metal: `RenderGraph::record` 1,05 auf unter 0,1 ms, weil `ShadowPass::setRecordDraws(false)` dort das Aufzeichnen
+   nie gelesener Schatten-DrawCalls abstellt; **Metal hat keinen `ShadowPass` im Graph und gewinnt daraus nichts**, bitte prüfen, ob sein Graph tatsächlich nie einen hat.
+   Skalierung: etwa 0,085 ms je 1000 Entities (vorher 0,17); 60 FPS etwa 195k, 120 FPS etwa 95k (Details und Vorbehalte in `foliage-spans-parallel-shadow-2026-10-26.md` §6b).
 5. Auf dem Mac Zeit pro Pass gibt es schon (`GpuPassAccumulator`, detaillierter Modus); `GpuPassTimeline` ist für die Backends ohne eigenes Verfahren
    (D3D11/D3D12/Vulkan) und für Metal nicht nötig.
 
