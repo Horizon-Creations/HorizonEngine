@@ -48,6 +48,7 @@
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
+#include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
@@ -1449,16 +1450,21 @@ struct D3D12RendererImpl
     ComPtr<ID3D12InfoQueue>           infoQueue;  // drained to Logger each frame when gpuDebug
 
     // ── GPU frame timing (timestamp query heap) ─────────────────────────────
-    // Two timestamps per frame-in-flight slot (list begin/end), resolved into a
-    // persistently-mapped READBACK buffer at end-of-list. A slot is only read the
+    // GpuPassTimeline::kMaxTimestamps marks per frame-in-flight slot: the list's begin and
+    // end (the whole frame) and one at every GpuPassScope boundary between them, resolved
+    // into a persistently-mapped READBACK buffer at end-of-list. A slot is only read the
     // next time that slot is reused — i.e. after waitForFrame(slot) — so the value
     // consumed is k_frameCount frames old and the readback never stalls the CPU.
-    ComPtr<ID3D12QueryHeap> tsQueryHeap;              // 2 × k_frameCount timestamps
-    ComPtr<ID3D12Resource>  tsReadback;               // 2 × k_frameCount × uint64
+    static constexpr UINT   k_tsPerFrame = GpuPassTimeline::kMaxTimestamps;
+    ComPtr<ID3D12QueryHeap> tsQueryHeap;              // k_tsPerFrame × k_frameCount timestamps
+    ComPtr<ID3D12Resource>  tsReadback;               // k_tsPerFrame × k_frameCount × uint64
     const uint64_t*         tsReadbackPtr = nullptr;  // READBACK buffers may stay mapped
     UINT64                  tsFrequency   = 0;        // ticks/s; 0 → timing unavailable
     bool                    tsPending[k_frameCount]{};
+    GpuPassTimeline         tsTimeline[k_frameCount]; // the marks of the list recorded in that slot
+    bool                    tsPassOn = false;         // per-pass marks this frame: a capture or the overlay is on
     double                  lastGpuFrameMs = -1.0;    // newest reaped whole-frame time
+    std::vector<IRenderer::GpuPassTime> lastGpuPasses; // ... and its per-pass rows
     // CPU counters (draws/tris this frame, cull results) merged by GetFrameGpuStats.
     uint32_t statDraws = 0, statTris = 0, statVisible = 0, statTotal = 0;
 
@@ -1471,7 +1477,7 @@ struct D3D12RendererImpl
         }
         D3D12_QUERY_HEAP_DESC qd{};
         qd.Type  = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qd.Count = 2 * k_frameCount;
+        qd.Count = k_tsPerFrame * k_frameCount;
         if (FAILED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&tsQueryHeap))))
         {
             tsFrequency = 0;
@@ -1480,7 +1486,7 @@ struct D3D12RendererImpl
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC rd{};
         rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width            = 2ull * k_frameCount * sizeof(uint64_t);
+        rd.Width            = 1ull * k_tsPerFrame * k_frameCount * sizeof(uint64_t);
         rd.Height           = 1;
         rd.DepthOrArraySize = 1;
         rd.MipLevels        = 1;
@@ -1504,6 +1510,26 @@ struct D3D12RendererImpl
         }
         tsReadbackPtr = static_cast<const uint64_t*>(mapped);
     }
+
+    // The timestamp for timeline mark `i` of the list being recorded, written now.
+    void gpuMark(uint32_t i)
+    {
+        cmdList->EndQuery(tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, frameIndex * k_tsPerFrame + i);
+    }
+    // GpuPassScope's two calls (GpuPassScopeT).
+    bool gpuPassBegin(const char* name)
+    {
+        uint32_t i = 0;
+        if (!tsQueryHeap || !tsPassOn || !tsTimeline[frameIndex].push(name, i)) return false;
+        gpuMark(i);
+        return true;
+    }
+    void gpuPassEnd()
+    {
+        uint32_t i = 0;
+        if (tsQueryHeap && tsTimeline[frameIndex].pop(i)) gpuMark(i);
+    }
+    using GpuPassScope = GpuPassScopeT<D3D12RendererImpl>;
 
     // ── Depth ───────────────────────────────────────────────────────────────
     ComPtr<ID3D12DescriptorHeap> dsvHeap; // [0] = scene depth, [1..kCsmCascades] = shadow cascade slices,
@@ -1537,9 +1563,7 @@ struct D3D12RendererImpl
     bool                         debugShadowCascades = false;
     // Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
     // those hold the camera cull the geometry pass consumes).
-    std::vector<uint8_t>         shadowVisible;
-    std::vector<uint32_t>        shadowSorted;
-    RenderSorter::DepthBatchList shadowBatches;
+    std::vector<ShadowViewCpu>   shadowViews;
 
     // The array SRV every consumer of the cascade array uses (scene t0, graph
     // material t12): R32_FLOAT over the R32_TYPELESS resource, all slices.
@@ -2459,6 +2483,7 @@ struct D3D12RendererImpl
     void runPostFX(ID3D12GraphicsCommandList* cl, UINT w, UINT h)
     {
         if (!postFxReady || !postFxSrvHeap || !hdrRT) return;
+        GpuPassScope _post(this, "PostFX");   // what runs before the bloom: caustics, fog, DoF, motion blur
 
         const UINT bw = std::max(1u, w/2), bh = std::max(1u, h/2);
         const float tw = 1.0f/float(bw), th = 1.0f/float(bh);
@@ -2588,6 +2613,7 @@ struct D3D12RendererImpl
         barrier12(cl, hdrRT.Get(), hdrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         hdrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
+        _post.next("Bloom");
         // ── Bloom bright pass: hdrSRV → bloomRT[0] ─────────────────────────
         barrier12(cl, bloomRT[0].Get(), bloomState[0], D3D12_RESOURCE_STATE_RENDER_TARGET);
         bloomState[0] = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -2622,6 +2648,7 @@ struct D3D12RendererImpl
         barrier12(cl, bloomRT[0].Get(), bloomState[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         bloomState[0] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
+        _post.next("Tonemap");
         // ── Tonemap: (hdrSRV, bloomSRV[0]) → ldrRT ─────────────────────────
         barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_RENDER_TARGET);
         ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -2636,6 +2663,7 @@ struct D3D12RendererImpl
         barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
+        _post.next("TAA");
         // ── TAA resolve (A3): (ldr, history[prev], velocity) → history[cur] ─
         // On the tonemapped image, so a single bright HDR sample cannot poison
         // the next dozen frames. The AA slot below then sharpens history[cur]
@@ -2678,6 +2706,7 @@ struct D3D12RendererImpl
             taaHistoryValid = true;
         }
 
+        _post.next(aaTaa ? "TAA Sharpen" : "AA");
         // ── AA resolve: ldrSRV → viewportRT (method picks the PSO) ────────
         // TAA's slot is the sharpen the temporal blur asks for.
         barrier12(cl, viewportRT.Get(), viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -3623,7 +3652,7 @@ struct D3D12RendererImpl
     }
 
     // One instanced draw for a depth-only batch (a shadow caster run, an SSAO
-    // or GI pre-pass batch): `count` {A, B} matrix pairs from fill(k, pair) go
+    // or GI pre-pass batch): the run's {A, B} matrix pairs from fill(model, pair) go
     // into the next free slots of the frame's instance arena (allocInstances) —
     // the geometry pass's 128-byte ring — and the bound PSO's instanced VS reads them through the
     // root SRV `t3Param` of instPSO's root signature (the same one restorePSO
@@ -3635,14 +3664,15 @@ struct D3D12RendererImpl
     template <class Fill>
     bool drawDepthInstanced(ID3D12GraphicsCommandList* cl, UINT fi,
                             ID3D12PipelineState* instPSO, ID3D12PipelineState* restorePSO,
-                            UINT t3Param, UINT indexCount, UINT startIndex, UINT count, Fill&& fill)
+                            UINT t3Param, UINT indexCount, UINT startIndex, const InstanceRun& run, Fill&& fill)
     {
         static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
+        const UINT count = run.size();
         InstSlice sl;
         if (!instPSO || count < 2 || !RenderSorter::depthInstancingEnabled()
             || !allocInstances(fi, count, sl))
             return false;
-        RenderSorter::fillInstancePairs(sl.cpu, count, fill);
+        RenderSorter::fillInstancePairs(sl.cpu, run, fill);
         cl->SetPipelineState(instPSO);
         cl->SetGraphicsRootShaderResourceView(t3Param, sl.gpu);
         cl->DrawIndexedInstanced(indexCount, count, startIndex, 0, 0);
@@ -5117,6 +5147,7 @@ struct D3D12RendererImpl
 
     void renderUIPass12(ID3D12GraphicsCommandList* cmd, int fi, int w, int h, ContentManager* cm)
     {
+        GpuPassScope _passTimer(this, "UI");
         if (!m_uiPSO || !m_uiAtlasHeap || m_renderWorld.uiObjects.empty()) return;
 
         // Record any missing atlas/image uploads BEFORE the pass state is bound so
@@ -6819,6 +6850,7 @@ struct D3D12RendererImpl
                  ContentManager* cm,
                  bool reflMrt = false, bool aoWanted = true)
     {
+        GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
         // GL, Vulkan and D3D11 grew). SSR needs pass 1 on frames where SSAO is
         // off or the GI probes replaced it, and it needs it with three
@@ -6901,22 +6933,22 @@ struct D3D12RendererImpl
                 ++posDrawIdx;
             };
 
-            // A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is
+            // A GeometryPass batch (instanceTotal() > 1 ⇔ run > 1) is
             // one instanced draw on the position-only path, with the loop's
             // {mvp, modelView} per instance (root parameter 1 of ssaoPosRS =
             // t3). The MRT reflection pre-pass keeps the loop: its VS is the
             // library's cross-compiled GLSL, whose instanced variant reads the
             // model as vertex attributes, not from a structured buffer.
-            const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+            const InstanceRun inst = dc->instanceRun();
             if (!reflMrt)
             {
                 cl->IASetVertexBuffers(0, 1, &m.vbv);
                 cl->IASetIndexBuffer(&m.ibv);
                 if (drawDepthInstanced(cl, fi, ssaoPosPSOInstanced.Get(), ssaoPosPSO.Get(), 1,
-                        range.count, range.start, static_cast<UINT>(inst.size()),
-                        [&](UINT k, glm::mat4* pair) {
-                            pair[0] = viewProj * inst[k];
-                            pair[1] = view     * inst[k];
+                        range.count, range.start, inst,
+                        [&](const glm::mat4& model, glm::mat4* pair) {
+                            pair[0] = viewProj * model;
+                            pair[1] = view     * model;
                         }))
                 {
                     static bool loggedOnce = false; // the runtime witness on Windows
@@ -6929,8 +6961,8 @@ struct D3D12RendererImpl
                     continue;
                 }
             }
-            if (!inst.empty())
-                for (const glm::mat4& t : inst) drawPosOne(t);
+            if (inst.size())
+                inst.forEach(drawPosOne);
             else
                 drawPosOne(dc->transform);
         }
@@ -8464,6 +8496,7 @@ struct D3D12RendererImpl
     bool runGiReflections(ID3D12GraphicsCommandList* cl, UINT fi, const RenderWorld& rw,
                           bool probesValid)
     {
+        GpuPassScope _passTimer(this, "GIRefl");
         createGiReflPipelines();
         if (!giReflPSO || !giReflBlurPSO || !giReflMixPSO || !giReflCB[fi] || !giReflFsCB[fi])
             return false;
@@ -8645,6 +8678,7 @@ struct D3D12RendererImpl
                      const glm::mat4& viewProj, int w, int h,
                      const RenderWorld& rw, ContentManager* cm, bool maskPasses = true)
     {
+        GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
         if (!giSupported || !giGBufPSO || !giShadowPSO || !giTemporalPSO || !giAtrousPSO)
             return false;
@@ -8715,7 +8749,7 @@ struct D3D12RendererImpl
                 // still reads uPBR from b0 (the receiver's roughness for the
                 // reflection pass): one ring slot per batch carries it, since the
                 // batch shares one DrawCall's material.
-                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                const InstanceRun inst = dc->instanceRun();
                 if (inst.size() >= 2 && gbufIdx < k_maxDraws)
                 {
                     PerObjectCB o{};
@@ -8727,10 +8761,10 @@ struct D3D12RendererImpl
                         ringBase + static_cast<UINT64>(gbufIdx) * k_cbSlot);
                     ++gbufIdx;
                     if (drawDepthInstanced(cl, fi, giGBufPSOInstanced.Get(), giGBufPSO.Get(), 1,
-                            range.count, range.start, static_cast<UINT>(inst.size()),
-                            [&](UINT k, glm::mat4* pair) {
-                                pair[0] = viewProj * inst[k];
-                                pair[1] = inst[k];
+                            range.count, range.start, inst,
+                            [&](const glm::mat4& model, glm::mat4* pair) {
+                                pair[0] = viewProj * model;
+                                pair[1] = model;
                             }))
                     {
                         static bool loggedOnce = false;
@@ -8743,8 +8777,8 @@ struct D3D12RendererImpl
                         continue;
                     }
                 }
-                if (!inst.empty())
-                    for (const glm::mat4& t : inst) drawOne(t);
+                if (inst.size())
+                    inst.forEach(drawOne);
                 else
                     drawOne(dc->transform);
             }
@@ -8894,6 +8928,7 @@ struct D3D12RendererImpl
 
     void dispatchGiProbeUpdate(ID3D12GraphicsCommandList* cl, UINT fi, const RenderWorld& rw)
     {
+        GpuPassScope _passTimer(this, "GIProbes");
         if (!giProbePSO || giInstanceCount == 0) return;
         ensureGiProbeGrid(rw);
         if (!giProbeGridBuilt) return;
@@ -10457,6 +10492,7 @@ void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::m
                                      int width, int height, ContentManager* cm,
                                      const D3D12_CPU_DESCRIPTOR_HANDLE* gb0Rtv)
 {
+    GpuPassScope _passTimer(this, "Decals");
 #if !defined(HE_HAVE_SHADERC)
     (void)cl; (void)viewProj; (void)width; (void)height; (void)cm; (void)gb0Rtv;
 #else
@@ -11280,15 +11316,21 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
-    p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
     {
-        const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
-        return mesh ? &mesh->localBounds : nullptr;
-    });
+        HE_PROFILE_SCOPE_N("RefineBounds");
+        p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
+        {
+            const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+            return mesh ? &mesh->localBounds : nullptr;
+        });
+    }
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
-    HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
+    {
+        HE_PROFILE_SCOPE_N("MaterialScalars");
+        HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
+    }
 
     // GI acceleration structures: refresh the BLAS cache + this frame slot's
     // instance array right after extraction + bounds refresh (UNCULLED —
@@ -11297,15 +11339,22 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     p.updateGiAccel(m_contentManager, p.m_renderWorld, p.frameIndex);
 
     p.m_frameCull.cull(p.m_culler, p.m_renderWorld, walk, p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view, p.m_visible);
-    p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    {
+        HE_PROFILE_SCOPE_N("SortObjects");
+        p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    }
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
     if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     if (p.m_renderGraph.empty())
     {
-        p.m_renderGraph.addPass(std::make_unique<ShadowPass>());
-        p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
+        auto shadow = std::make_unique<ShadowPass>();
+        shadow->setRecordDraws(false);   // the depth views are built by prepareShadowViews; the recorded set is not read
+        p.m_renderGraph.addPass(std::move(shadow));
+        auto geometry = std::make_unique<GeometryPass>();
+        geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see InstanceRun
+        p.m_renderGraph.addPass(std::move(geometry));
     }
 
     const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowDepth && p.depthPSO;
@@ -11673,6 +11722,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // are written back to back.
         if (io.output.id == kShadowMapTarget)
         {
+            D3D12RendererImpl::GpuPassScope _shadowTimer(&p, "Shadow");
             // CSM needs a directional light; the local (point/spot) atlas is
             // independent of it — night scenes with only shadow-casting point
             // lights still render their atlas (mirrors Metal/GL/D3D11).
@@ -11693,9 +11743,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // t3 — VSDepth's own product); a run of one, or one the ring cannot
             // take, stays on the per-caster draw with one b0 ring slot each.
             // Mirrors GL's renderDepthLayer / Metal's encodeDepthLayer.
+            // Every view (the cascades, then the local layers) is culled, sorted by mesh and cut
+            // into runs before the first is drawn, side by side on the workers (FrameCull::
+            // prepareShadowViews); the D3D12 calls stay on this thread, view after view.
+            const int cascades = shadows ? std::clamp(csm.cascadeCount, 1, D3D12RendererImpl::kCsmCascades) : 0;
+            const int nLocal   = localShadows ? nLocalLayers : 0;
+            if (p.shadowViews.size() < static_cast<size_t>(cascades + nLocal))
+                p.shadowViews.resize(static_cast<size_t>(cascades + nLocal));
+            for (int v = 0; v < cascades + nLocal; ++v)
+            {
+                ShadowViewCpu& sv = p.shadowViews[static_cast<size_t>(v)];
+                sv.viewProj = v < cascades ? csm.cascadeViewProj[v] : csm.localViewProj[v - cascades];
+                sv.skip     = v < cascades ? kNoOwnerEntity : csm.localOwnerEntity[v - cascades];
+            }
+            p.m_frameCull.prepareShadowViews(p.m_culler, p.m_renderWorld, p.m_extractor.fullExtractCount(),
+                                             p.shadowViews.data(), static_cast<size_t>(cascades + nLocal),
+                                             "D3D12ShadowViews");
             auto renderDepthLayer = [&](D3D12_CPU_DESCRIPTOR_HANDLE sdsv, int size,
-                                        const glm::mat4& viewProj, const glm::mat4& clip,
-                                        uint32_t skipEntity)
+                                        const ShadowViewCpu& view, const glm::mat4& clip)
             {
                 D3D12_VIEWPORT svp{ 0, 0, (float)size, (float)size, 0.0f, 1.0f };
                 D3D12_RECT     ssc{ 0, 0, size, size };
@@ -11703,24 +11768,20 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->RSSetScissorRects(1, &ssc);
                 cl->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
                 cl->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-                p.m_frameCull.cull(p.m_culler, p.m_renderWorld, p.m_extractor.fullExtractCount(), viewProj, p.shadowVisible);
-                p.m_sorter.sortByMesh(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
-                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
-                                                p.shadowBatches);
-                for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
+                for (const RenderSorter::DepthBatch& b : view.batches.batches)
                 {
                     const GpuMesh* mesh = p.resolveMesh(b.meshAssetId, m_contentManager);
                     const GpuMesh& m    = mesh ? *mesh : p.cube;
                     if (!m.indexCount) continue;
                     cl->IASetVertexBuffers(0, 1, &m.vbv);
                     cl->IASetIndexBuffer(&m.ibv);
-                    const glm::mat4* xf = p.shadowBatches.transforms.data() + b.first;
+                    const InstanceRun run = view.batches.run(b);
                     // Root parameter 4 of rootSig = the t3 instance SRV.
                     if (p.drawDepthInstanced(cl, p.frameIndex, p.depthPSOInstanced.Get(), p.depthPSO.Get(),
-                            4, m.indexCount, 0, b.count,
-                            [&](UINT k, glm::mat4* pair) {
-                                pair[0] = clip * xf[k];
-                                pair[1] = xf[k];
+                            4, m.indexCount, 0, run,
+                            [&](const glm::mat4& model, glm::mat4* pair) {
+                                pair[0] = clip * model;
+                                pair[1] = model;
                             }))
                     {
                         ++p.statDraws; p.statTris += (m.indexCount / 3) * b.count;
@@ -11733,18 +11794,20 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         }
                         continue;
                     }
-                    for (uint32_t k = 0; k < b.count; ++k)
+                    bool ringFull = false;
+                    run.forEach([&](const glm::mat4& model)
                     {
-                        if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); break; }
+                        if (ringFull) return;
+                        if (drawIdx >= k_maxDraws) { p.noteDrawRingFull(); ringFull = true; return; }
                         PerObjectCB o{};
-                        o.mvp = clip * xf[k]; o.model = xf[k];
+                        o.mvp = clip * model; o.model = model;
                         if (ringPtr)
                             std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                         cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
                         cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
                         ++p.statDraws; p.statTris += m.indexCount / 3;
                         ++drawIdx;
-                    }
+                    });
                 }
             };
             // One barrier over ALL subresources before each array's loop and
@@ -11753,10 +11816,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             {
                 transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                            D3D12_RESOURCE_STATE_DEPTH_WRITE);
-                const int cascades = std::clamp(csm.cascadeCount, 1, D3D12RendererImpl::kCsmCascades);
                 for (int c = 0; c < cascades; ++c)
                     renderDepthLayer(p.dsvHandle(1 + static_cast<UINT>(c)), p.shadowSize,
-                                     csm.cascadeViewProj[c], cascadeClip[c], kNoOwnerEntity);
+                                     p.shadowViews[static_cast<size_t>(c)], cascadeClip[c]);
                 transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
@@ -11764,9 +11826,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             {
                 transition(p.localShadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                            D3D12_RESOURCE_STATE_DEPTH_WRITE);
-                for (int v = 0; v < nLocalLayers; ++v)
+                for (int v = 0; v < nLocal; ++v)
                     renderDepthLayer(p.localShadowDsv(v), D3D12RendererImpl::kLocalShadowSize,
-                                     csm.localViewProj[v], localClip[v], csm.localOwnerEntity[v]);
+                                     p.shadowViews[static_cast<size_t>(cascades + v)], localClip[v]);
                 transition(p.localShadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
@@ -11776,6 +11838,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         }
 
         if (io.output.id != kBackbufferTarget) return;
+        // The scene body: the passes inside it (SSAO, GI, decals) interrupt this scope, so its
+        // row is what is left, the opaque and blended draws and the sky.
+        D3D12RendererImpl::GpuPassScope _sceneTimer(&p, "Scene");
 
         // Collect draw calls split by opacity (needed for SSAO and for transparency sort).
         // BEHAVIOUR CHANGE: the loop this replaced classified on dc.opacity alone, so a
@@ -12056,7 +12121,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
                     // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
                     // build failed) sends it back to the per-instance loop.
-                    const bool wantTwin = dc.instanceTransforms.size() > 1 && allowInstancing && !matTransp
+                    const bool wantTwin = dc.instanceTotal() > 1 && allowInstancing && !matTransp
                                        && instArena && RenderSorter::graphInstancingEnabled();
                     ID3D12PipelineState* matInstPso = nullptr;
                     if (gbufferPass)
@@ -12268,7 +12333,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                             ++p.statDraws; p.statTris += range.count / 3;
                         };
-                        const UINT instCount = static_cast<UINT>(dc.instanceTransforms.size());
+                        const UINT instCount = static_cast<UINT>(dc.instanceTotal());
                         D3D12RendererImpl::InstSlice isl;
                         if (matInstPso && p.allocInstances(p.frameIndex, instCount, isl))
                         {
@@ -12277,9 +12342,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             // twin multiplies the model in), one instanced draw.
                             if (bindMatSlot(viewProj, glm::mat4(1.0f)))
                             {
-                                for (UINT k = 0; k < instCount; ++k)
-                                    std::memcpy(isl.cpu + static_cast<size_t>(k) * k_instStride + sizeof(glm::mat4),
-                                                &dc.instanceTransforms[k], sizeof(glm::mat4));
+                                RenderSorter::copyInstanceModels(isl.cpu + sizeof(glm::mat4), k_instStride,
+                                                                 dc.instanceRun());
                                 D3D12_VERTEX_BUFFER_VIEW ivb{};
                                 ivb.BufferLocation = isl.gpu;
                                 ivb.SizeInBytes    = instCount * k_instStride;
@@ -12290,10 +12354,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                 ++p.statDraws; p.statTris += (range.count / 3) * instCount;
                             }
                         }
-                        else if (!dc.instanceTransforms.empty())
+                        else if (dc.instanceTotal())
                             // No twin (or the instance ring is full): each instance through
                             // the material path, one ring slot apiece.
-                            for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
+                            dc.forEachInstance(drawMatInstance);
                         else
                             drawMatInstance(dc.transform);
 
@@ -12360,14 +12424,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 ++p.statDraws; p.statTris += range.count / 3;
                 ++drawIdx;
             };
-            if (!dc.instanceTransforms.empty())
+            if (dc.instanceTotal())
             {
                 // A3: real instancing — upload every instance's {mvp,model} to the
                 // instance ring and issue ONE DrawIndexedInstanced. Falls back to the
                 // per-instance loop when instancing isn't allowed (transparent pass) or
                 // a ring is exhausted.
                 static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
-                const UINT count = static_cast<UINT>(dc.instanceTransforms.size());
+                const UINT count = static_cast<UINT>(dc.instanceTotal());
                 // Pick the instanced PSO matching the active scene target — must equal the
                 // format scenePso resolves to. If that variant is null → fits=false → the
                 // per-instance fallback (never bind an LDR PSO to the HDR target).
@@ -12379,13 +12443,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                   && p.allocInstances(p.frameIndex, count, isl);
                 if (fits)
                 {
-                    uint8_t* dst = isl.cpu;
-                    for (UINT k = 0; k < count; ++k)
-                    {
-                        const glm::mat4& t = dc.instanceTransforms[k];
-                        const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major, as InstXform)
-                        std::memcpy(dst + static_cast<size_t>(k) * k_instStride, xf, sizeof(xf));
-                    }
+                    RenderSorter::fillInstancePairs(isl.cpu, dc.instanceRun(),
+                        [&](const glm::mat4& t, glm::mat4* pair) {
+                            pair[0] = viewProj * t;   // mvp, model (column-major, as InstXform)
+                            pair[1] = t;
+                        });
                     // One PerObject CB carries the batch-constant colour/pbr (the instanced
                     // VS reads mvp/model from t3, so the CB's mvp/model are unused here).
                     PerObjectCB o{};
@@ -12406,7 +12468,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 }
                 else
                 {
-                    for (const glm::mat4& t : dc.instanceTransforms) drawOne(t); // fallback
+                    dc.forEachInstance(drawOne); // fallback
                 }
             }
             else
@@ -12731,7 +12793,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             {
                 size_t tail = 64;
                 for (const DrawCall* dc : transparentDCs)
-                    tail += std::max<size_t>(1, dc->instanceTransforms.size());
+                    tail += std::max<size_t>(1, dc->instanceTotal());
                 velLimit = tail >= k_maxDraws ? 0u : static_cast<UINT>(k_maxDraws - tail);
             }
             auto velFull = [&]() -> bool {
@@ -12882,6 +12944,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 // RenderSceneImage() follows it with a readback instead.
 void D3D12Renderer::DrawViewportFrame()
 {
+    HE_PROFILE_SCOPE_N("DrawViewportFrame");
     auto& p = *m_impl;
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
@@ -13081,24 +13144,36 @@ void D3D12Renderer::Render()
                           && p.viewportW == bbW && p.viewportH == bbH;
     const bool useViewport = !gameChain && p.viewportRT && p.viewportW > 0 && p.viewportH > 0;
 
-    p.waitForFrame(p.frameIndex);
+    {
+        HE_PROFILE_SCOPE_N("WaitFrame");   // the CPU idles here when the GPU is the slower side
+        p.waitForFrame(p.frameIndex);
+    }
 
     // Reap this slot's timestamps from k_frameCount frames ago: the fence wait
     // above guarantees the resolve completed, so the mapped read never stalls.
     if (p.tsPending[p.frameIndex] && p.tsReadbackPtr && p.tsFrequency)
     {
-        const uint64_t t0 = p.tsReadbackPtr[2 * p.frameIndex];
-        const uint64_t t1 = p.tsReadbackPtr[2 * p.frameIndex + 1];
+        const uint64_t* ticks = p.tsReadbackPtr + static_cast<size_t>(p.frameIndex) * p.k_tsPerFrame;
+        const uint32_t  last  = p.tsTimeline[p.frameIndex].used() - 1;   // the frame's end mark
+        const uint64_t t0 = ticks[0];
+        const uint64_t t1 = ticks[last];
         p.lastGpuFrameMs = (t1 > t0)
             ? static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(p.tsFrequency)
             : 0.0;
+        p.tsTimeline[p.frameIndex].toPasses(ticks, static_cast<double>(p.tsFrequency), p.lastGpuPasses);
         p.tsPending[p.frameIndex] = false;
     }
 
     p.cmdAllocators[p.frameIndex]->Reset();
     p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
     if (p.tsQueryHeap)
-        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * p.frameIndex);
+    {
+        p.tsTimeline[p.frameIndex].reset();
+        p.gpuMark(p.tsTimeline[p.frameIndex].start());
+        // Per-pass marks only for a frame somebody reads them from: they make the GPU drain at every pass boundary.
+        const EngineProfiler& prof = EngineProfiler::instance();
+        p.tsPassOn = (prof.isRecording() || prof.liveEnabled()) && GpuPassTimeline::envEnabled();
+    }
 
     // CPU counters restart each frame; DrawScene fills them back in.
     p.statDraws = p.statTris = p.statVisible = p.statTotal = 0;
@@ -13181,30 +13256,39 @@ void D3D12Renderer::Render()
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
-    if (m_overlayCallback) m_overlayCallback(p.cmdList.Get());
+    if (m_overlayCallback)
+    {
+        HE_PROFILE_SCOPE_N("Overlay");   // the editor's ImGui draw lists
+        m_overlayCallback(p.cmdList.Get());
+    }
 
     swapBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     swapBarrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
     p.cmdList->ResourceBarrier(1, &swapBarrier);
     if (p.tsQueryHeap && p.tsReadback)
     {
-        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * p.frameIndex + 1);
+        GpuPassTimeline& tl = p.tsTimeline[p.frameIndex];
+        p.gpuMark(tl.finish());
         p.cmdList->ResolveQueryData(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-            2 * p.frameIndex, 2, p.tsReadback.Get(),
-            static_cast<UINT64>(2 * p.frameIndex) * sizeof(uint64_t));
+            p.frameIndex * p.k_tsPerFrame, tl.used(), p.tsReadback.Get(),
+            static_cast<UINT64>(p.frameIndex) * p.k_tsPerFrame * sizeof(uint64_t));
         p.tsPending[p.frameIndex] = true;
     }
+    instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
     p.cmdList->Close();
 
     ID3D12CommandList* lists[] = { p.cmdList.Get() };
-    p.cmdQueue->ExecuteCommandLists(1, lists);
-    // PRESENT_ALLOW_TEARING is only valid on a swapchain created with the matching
-    // flag AND when unsynced (sync interval 0). Gate it on the queried capability.
     HRESULT prHr;
-    if (p.vsync)
-        prHr = p.swapchain->Present(1, 0);
-    else
-        prHr = p.swapchain->Present(0, p.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    {
+        HE_PROFILE_SCOPE_N("SubmitPresent");
+        p.cmdQueue->ExecuteCommandLists(1, lists);
+        // PRESENT_ALLOW_TEARING is only valid on a swapchain created with the matching
+        // flag AND when unsynced (sync interval 0). Gate it on the queried capability.
+        if (p.vsync)
+            prHr = p.swapchain->Present(1, 0);
+        else
+            prHr = p.swapchain->Present(0, p.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    }
 
     // A failed Present usually means the device was removed/reset. Log the reason +
     // a DRED breadcrumb dump (which op hung) ONCE — a permanently-removed device fails
@@ -14073,7 +14157,8 @@ IRenderer::FrameGpuStats D3D12Renderer::GetFrameGpuStats() const
     // counters are this frame's — mirrors OpenGL's merge in GetFrameGpuStats.
     FrameGpuStats s;
     s.gpuFrameMs     = m_impl->lastGpuFrameMs;
-    s.gpuTimingMode  = m_impl->lastGpuFrameMs >= 0.0 ? "whole-frame" : "";
+    s.passes         = m_impl->lastGpuPasses;
+    s.gpuTimingMode  = m_impl->lastGpuFrameMs < 0.0 ? "" : s.passes.empty() ? "whole-frame" : "d3d12-ts";
     s.drawCalls      = m_impl->statDraws;
     s.triangles      = m_impl->statTris;
     s.visibleObjects = m_impl->statVisible;

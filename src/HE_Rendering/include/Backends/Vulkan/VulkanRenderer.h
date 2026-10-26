@@ -11,6 +11,7 @@
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
+#include <Renderer/GpuPassTimeline.h>   // per-pass GPU timing: GpuPassScope
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GiBlasStore.h>
@@ -241,9 +242,7 @@ private:
 	bool           m_debugShadowCascades = false;
 	// Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
 	// those hold the camera cull DrawScene consumes).
-	std::vector<uint8_t>         m_shadowVisible;
-	std::vector<uint32_t>        m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches;
+	std::vector<ShadowViewCpu>   m_shadowViews;
 	// The cascade constants DrawScene uploads into the Frame UBO; filled by
 	// EncodeShadowMap from the SAME extract the cascades were rendered with
 	// (DrawScene re-extracts, and a mid-frame world edit would otherwise let
@@ -421,9 +420,8 @@ private:
 	void destroyInstanceBuf(InstanceBuf& b);
 	void beginInstanceFrame();
 	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
-	std::vector<glm::mat4> m_clusterScratch; // one cluster's world matrices (decal depth)
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
-	// G-buffer); the shadow layers keep m_shadowBatches.
+	// G-buffer); the shadow layers keep m_shadowViews.
 	RenderSorter::DepthBatchList m_preBatches;
 	// One instanced draw for a depth-only run (shadow caster run, SSAO or GI
 	// pre-pass run): `count` {A, B} matrix pairs from fill(k, pair) go into the
@@ -434,7 +432,7 @@ private:
 	// only translation unit that calls it.
 	template <class Fill>
 	bool drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
-	                        uint32_t indexCount, uint32_t count, Fill&& fill);
+	                        uint32_t indexCount, const InstanceRun& run, Fill&& fill);
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{
@@ -1796,7 +1794,8 @@ private:
 	bool m_uiImagePoolWarned = false;
 
 	// ── GPU frame timing (VkQueryPool timestamps) ───────────────────────────
-	// Two timestamps (frame begin/end) per ring slot. The ring is deeper than
+	// GpuPassTimeline::kMaxTimestamps marks per ring slot: the frame's begin and end and one
+	// at every GpuPassScope boundary between them. The ring is deeper than
 	// k_maxFramesInFlight so the slot reused each frame finished at least one
 	// fence-wait ago — its readback (availability-checked, no RESULT_WAIT)
 	// never stalls. GetFrameGpuStats therefore reports 1–N frames late,
@@ -1811,6 +1810,16 @@ private:
 	uint64_t    m_tsValidMask = 0;                  // queue timestampValidBits mask
 	bool        m_tsPending[kGpuTimerRing] = {};    // slot has unread results
 	uint64_t    m_tsFrameIdx  = 0;
+	GpuPassTimeline m_tsTimeline[kGpuTimerRing];    // the marks of the frame recorded in that slot
+	VkCommandBuffer m_tsCmd = VK_NULL_HANDLE;       // the frame's command buffer while it is timed
+	bool            m_tsPassOn = false;             // per-pass marks this frame: a capture or the overlay is on
+	// GpuPassScope's two calls (GpuPassScopeT): a mark in the frame's command buffer, a no-op
+	// anywhere else (a still, a preview) and when timestamps are unsupported.
+	bool gpuPassBegin(const char* name);
+	void gpuPassEnd();
+	void gpuMark(uint32_t i);
+	friend class GpuPassScopeT<VulkanRenderer>;
+	using GpuPassScope = GpuPassScopeT<VulkanRenderer>;
 	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
 	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
 	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;

@@ -3,6 +3,7 @@
 #include <Types/Handle.h>
 #include <Types/UUID.h>
 #include <Math/Math.h>
+#include <cstring>
 #include <vector>
 #include <cstdint>
 
@@ -14,6 +15,29 @@
 struct InstanceSpan {
     const glm::mat4* src = nullptr;
     uint32_t         n   = 0;
+};
+
+// A run's matrices as spans, whichever form the run carries: its own spans, or the one
+// copied list as a single span. What a backend that reads both forms loops over, so the
+// copying and the in-place form share every reader (DrawCall::run, DepthBatchList::run).
+class InstanceRun {
+public:
+    InstanceRun(const InstanceSpan* spans, size_t nSpans, const glm::mat4* copied, uint32_t count)
+        : m_spans(nSpans ? spans : nullptr), m_nSpans(nSpans), m_one{ copied, count }, m_total(count) {}
+    const InstanceSpan* begin() const { return m_spans ? m_spans : &m_one; }
+    const InstanceSpan* end() const { return m_spans ? m_spans + m_nSpans : &m_one + 1; }
+    uint32_t size() const { return m_total; }
+    template <class Fn>
+    void forEach(Fn&& fn) const
+    {
+        for (const InstanceSpan& s : *this)
+            for (uint32_t i = 0; i < s.n; ++i) fn(s.src[i]);
+    }
+private:
+    const InstanceSpan* m_spans;
+    size_t              m_nSpans;
+    InstanceSpan        m_one;
+    uint32_t            m_total;
 };
 
 // A single draw recorded by a render pass and replayed by the backend.
@@ -75,6 +99,12 @@ struct DrawCall {
         if (instanceSpans.empty()) { for (const glm::mat4& m : instanceTransforms) fn(m); return; }
         for (const InstanceSpan& s : instanceSpans)
             for (uint32_t i = 0; i < s.n; ++i) fn(s.src[i]);
+    }
+    // The batch's matrices as an InstanceRun (a single object: its own transform is not in it).
+    InstanceRun instanceRun() const
+    {
+        return InstanceRun(instanceSpans.data(), instanceSpans.size(), instanceTransforms.data(),
+                           static_cast<uint32_t>(instanceTotal()));
     }
     const glm::mat4& firstInstance() const
     {

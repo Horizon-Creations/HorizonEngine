@@ -21,6 +21,7 @@
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EntityActive.h>
 #include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -45,6 +46,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
@@ -173,10 +175,10 @@ TEST_CASE("FrameCull refines once per walk and every cull over it matches the ob
 	CHECK(!fc.holds(rw, 1));
 
 	fc.refine(rw, 1, localBounds);
-	CHECK(resolved == 3000);
+	CHECK(resolved == 7);   // each of the 7 meshes asked once, not each of the 3000 objects
 	CHECK(fc.holds(rw, 1));
 	fc.refine(rw, 1, localBounds);                  // same walk: nothing to do
-	CHECK(resolved == 3000);
+	CHECK(resolved == 7);   // each of the 7 meshes asked once, not each of the 3000 objects
 	CHECK(!fc.holds(rw, 2));                        // another walk does not read the copy
 
 	std::vector<uint8_t> viaCopy, viaObjects;
@@ -194,7 +196,7 @@ TEST_CASE("FrameCull refines once per walk and every cull over it matches the ob
 	CHECK(got.max == box.max);
 
 	fc.refine(rw, 2, localBounds);                  // a new walk starts over
-	CHECK(resolved == 6000);
+	CHECK(resolved == 14);
 	CHECK(fc.holds(rw, 2));
 }
 
@@ -272,6 +274,235 @@ TEST_CASE("RenderSorter::fillInstancePairs writes the same records wide and seri
 		}
 		CHECK(a == b);
 	}
+}
+
+TEST_CASE("InstanceRun: spans and the copied list give the same pairs and the same ring bytes")
+{
+	// 9000 matrices cut into spans of 3, 5000 and 3997 (one span past the wide threshold), as
+	// pieces of a foliage block and a single object would be; the copied list is all of them.
+	const uint32_t total = 9000;
+	std::vector<glm::mat4> all(total);
+	for (uint32_t i = 0; i < total; ++i)
+		all[i] = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), float(i % 5), -float(i % 11)));
+	const std::vector<InstanceSpan> spans = { { all.data(), 3 }, { all.data() + 3, 5000 }, { all.data() + 5003, 3997 } };
+	const InstanceRun inPlace(spans.data(), spans.size(), nullptr, total);
+	const InstanceRun copied(nullptr, 0, all.data(), total);
+	CHECK(inPlace.size() == total);
+	CHECK(copied.size() == total);
+
+	const glm::mat4 vp = glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+	auto fill = [&vp](const glm::mat4& model, glm::mat4* pair) { pair[0] = vp * model; pair[1] = model; };
+	std::vector<uint8_t> a(size_t(total) * 128), b(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(a.data(), inPlace, fill);
+	RenderSorter::fillInstancePairs(b.data(), copied, fill);
+	CHECK(a == b);
+
+	std::vector<glm::mat4> ringA(total), ringB(total);
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(ringA.data()), sizeof(glm::mat4), inPlace);
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(ringB.data()), sizeof(glm::mat4), copied);
+	CHECK(ringA == all);
+	CHECK(ringB == all);
+	// Records of two matrices with the model in the second half (the node-graph twin's layout).
+	std::vector<glm::mat4> rec(size_t(total) * 2, glm::mat4(0.0f));
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(rec.data()) + sizeof(glm::mat4), 2 * sizeof(glm::mat4), inPlace);
+	bool recOk = true;
+	for (uint32_t i = 0; i < total; ++i) recOk = recOk && rec[2 * i + 1] == all[i] && rec[2 * i] == glm::mat4(0.0f);
+	CHECK(recOk);
+
+	// The two forms of one DepthBatchList batch read the same.
+	RenderSorter::DepthBatchList list;
+	list.transforms = all;
+	RenderSorter::DepthBatch b0{};
+	b0.first = 0; b0.count = total;
+	std::vector<uint8_t> c(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(c.data(), list.run(b0), fill);
+	CHECK(c == a);
+	list.useSpans = true;
+	list.spans = spans;
+	b0.spanFirst = 0; b0.spanCount = static_cast<uint32_t>(spans.size());
+	list.transforms.clear();
+	std::vector<uint8_t> d(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(d.data(), list.run(b0), fill);
+	CHECK(d == a);
+}
+
+TEST_CASE("RenderSorter::sortByMesh: the counting sort gives the comparison sort's order")
+{
+	// Mesh (hi, lo) ascending, then object index ascending: what the std::sort it replaced did.
+	// 700 distinct meshes force the id table to grow (1024 slots, half full at 512).
+	for (uint32_t distinctMeshes : { 1u, 7u, 700u })
+	{
+		RenderWorld world;
+		std::vector<uint8_t> visible;
+		uint64_t seed = 0x9E3779B97F4A7C15ull + distinctMeshes;
+		auto next = [&seed] { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return seed >> 33; };
+		const uint32_t n = 20000;
+		world.objects.resize(n);
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			const uint64_t m = next() % distinctMeshes;
+			world.objects[i].meshAssetId.hi = (m * 0x100000001B3ull) ^ 0xABCDull;   // not in index order
+			world.objects[i].meshAssetId.lo = m * 7u + 1u;
+			visible.push_back(next() % 5 != 0);
+		}
+		RenderSorter sorter;
+		std::vector<uint32_t> got;
+		sorter.sortByMesh(world, visible, got);
+
+		std::vector<uint32_t> want;
+		for (uint32_t i = 0; i < n; ++i) if (visible[i]) want.push_back(i);
+		std::sort(want.begin(), want.end(), [&](uint32_t a, uint32_t b)
+		{
+			const HE::UUID& x = world.objects[a].meshAssetId; const HE::UUID& y = world.objects[b].meshAssetId;
+			if (x.hi != y.hi) return x.hi < y.hi;
+			if (x.lo != y.lo) return x.lo < y.lo;
+			return a < b;
+		});
+		CHECK(got == want);
+		// A second call on the same sorter (its scratch is reused) and an empty frame.
+		sorter.sortByMesh(world, visible, got);
+		CHECK(got == want);
+		std::vector<uint8_t> none(n, 0);
+		sorter.sortByMesh(world, none, got);
+		CHECK(got.empty());
+	}
+}
+
+TEST_CASE("FrameCull::refine: every object gets the bound the serial walk gives it, wide or not")
+{
+	for (uint32_t count : { 50u, 9000u })   // under and over the wide threshold
+	{
+		RenderWorld a, b;
+		a.objects.resize(count);
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			RenderObject& o = a.objects[i];
+			o.meshAssetId.hi = 1; o.meshAssetId.lo = 1 + i % 13;
+			o.transform = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), float(i % 7), 0.0f));
+			o.worldBounds = HE::AABB{};   // invalid: the walk gave none
+		}
+		b.objects = a.objects;
+		// Mesh lo == 13 is "not resolved": it keeps what the walk gave it.
+		auto local = [](const RenderObject& o) -> const HE::AABB*
+		{
+			static HE::AABB boxes[14];
+			if (o.meshAssetId.lo == 13) return nullptr;
+			HE::AABB& bx = boxes[o.meshAssetId.lo];
+			bx = HE::AABB{};
+			bx.expand(glm::vec3(-1.0f, -1.0f, -1.0f) * float(o.meshAssetId.lo));
+			bx.expand(glm::vec3( 1.0f,  2.0f,  1.0f) * float(o.meshAssetId.lo));
+			return &bx;
+		};
+		FrameCull fc;
+		fc.refine(a, 5, local);
+		for (RenderObject& o : b.objects)   // the old serial loop
+			if (const HE::AABB* l = local(o)) o.refineWorldBounds(*l);
+		bool same = true;
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			same = same && a.objects[i].worldBounds.isValid() == b.objects[i].worldBounds.isValid();
+			if (a.objects[i].worldBounds.isValid())
+				same = same && a.objects[i].worldBounds.min == b.objects[i].worldBounds.min
+				            && a.objects[i].worldBounds.max == b.objects[i].worldBounds.max;
+		}
+		CHECK(same);
+		CHECK(fc.holds(a, 5));
+	}
+}
+
+TEST_CASE("RenderExtractor: the wide mesh walk gives every object the fields the entity's components say, in view order")
+{
+	// 6000 entities = three blocks of the wide walk. Mixed on purpose: single-section meshes (bounds
+	// memo), a two-slot mesh (the serial fix-up), whole-mesh and slot overrides, param overrides, an
+	// unregistered mesh (no bounds), hidden and switched-off entities, and ones with no mesh at all.
+	ContentManager cm;
+	std::vector<HE::UUID> plain;
+	for (int k = 0; k < 5; ++k)
+	{
+		StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "plain" + std::to_string(k);
+		mesh.indices = { 0, 1, 2 };
+		mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = -1.0f - float(k);
+		mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] =  1.0f + float(k);
+		plain.push_back(cm.registerStaticMesh(mesh));
+	}
+	MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "m";
+	ma.graphParamNames = { "Tint" }; ma.shaderParamData = std::vector<float>(64, 0.5f);
+	const HE::UUID matA = cm.registerMaterial(ma);
+	ma.name = "ov"; const HE::UUID matOv = cm.registerMaterial(ma);
+	StaticMeshAsset two; two.type = HE::AssetType::StaticMesh; two.name = "two";
+	two.indices = { 0, 1, 2, 3, 4, 5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialId = matA;
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialId = matOv;
+	two.sections = { s0, s1 };
+	two.boundsMin[0] = two.boundsMin[1] = two.boundsMin[2] = -2.0f;
+	two.boundsMax[0] = two.boundsMax[1] = two.boundsMax[2] =  2.0f;
+	const HE::UUID twoId = cm.registerStaticMesh(two);
+	const HE::UUID missing{ 0xDEADBEEFull, 0x1234ull };
+
+	HorizonWorld world;
+	auto& reg = world.registry();
+	for (uint32_t i = 0; i < 6000; ++i)
+	{
+		auto e = world.createEntity("e" + std::to_string(i));
+		TransformComponent t; t.position = glm::vec3(float(i % 97), float(i % 13), -float(i % 31));
+		reg.emplace<TransformComponent>(e, t);
+		if (i % 37 == 0) continue;                                 // no mesh at all
+		MeshComponent mc;
+		mc.meshAssetId = i % 11 == 0 ? twoId : i % 29 == 0 ? missing : plain[i % 5];
+		mc.visible = i % 17 != 0;
+		mc.castsShadow = i % 3 != 0;
+		mc.receivesShadow = i % 7 != 0;
+		reg.emplace<MeshComponent>(e, mc);
+		if (i % 5 == 1)
+		{
+			MaterialComponent mat; mat.materialAssetId = matA;
+			if (i % 10 == 1) { MaterialParamOverride ov; ov.name = "Tint"; ov.value[0] = 2.0f; mat.paramOverrides.push_back(ov); }
+			if (i % 15 == 1) mat.slotOverrides = { matOv };
+			reg.emplace<MaterialComponent>(e, mat);
+		}
+		if (i % 23 == 0) HE::setEntityActive(reg, e, false);
+	}
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+
+	size_t k = 0;
+	std::unordered_map<HE::UUID, HE::AABB> local;   // the meshes' bounds, as the test sees them
+	for (int j = 0; j < 5; ++j)
+		local[plain[j]] = HE::AABB{ glm::vec3(-1.0f - float(j)), glm::vec3(1.0f + float(j)) };
+	local[twoId] = HE::AABB{ glm::vec3(-2.0f), glm::vec3(2.0f) };
+	const HE::ActiveFilter active(reg);
+	bool allOk = true;
+	for (auto [e, t, mesh] : reg.view<TransformComponent, MeshComponent>().each())
+	{
+		if (!mesh.visible || active.off(e)) continue;
+		REQUIRE(k < rw.objects.size());
+		const RenderObject& o = rw.objects[k++];
+		bool ok = o.entityId == static_cast<uint32_t>(e) && o.meshAssetId == mesh.meshAssetId
+		       && o.transform == t.worldMatrix && o.castsShadow == mesh.castsShadow
+		       && o.receivesShadow == mesh.receivesShadow;
+		const MaterialComponent* mc = reg.try_get<MaterialComponent>(e);
+		const bool multi = mesh.meshAssetId == twoId;
+		HE::UUID wantMat = mc ? mc->materialAssetId : HE::UUID{};
+		if (!multi && mc && mesh.meshAssetId != missing && mc->slotOverride(0) != HE::UUID{}) wantMat = mc->slotOverride(0);
+		ok = ok && o.materialAssetId == wantMat;
+		const auto it = local.find(mesh.meshAssetId);
+		if (it == local.end()) ok = ok && !o.worldBounds.isValid();
+		else
+		{
+			const HE::AABB want = it->second.transformed(t.worldMatrix);
+			ok = ok && o.worldBounds.min == want.min && o.worldBounds.max == want.max;
+		}
+		ok = ok && (multi ? o.sections.size() == 2 || o.sections.empty() : o.sections.empty());
+		const bool wantParam = mc && !mc->paramOverrides.empty() && wantMat == mc->materialAssetId;
+		ok = ok && (o.paramOverride.empty() != wantParam);
+		allOk = allOk && ok;
+		if (!ok) { INFO("entity ", uint32_t(e)); CHECK(ok); break; }
+	}
+	CHECK(allOk);
+	CHECK(k == rw.objects.size());
+	CHECK(k > 4000);   // the mix draws most of them
 }
 
 TEST_CASE("AABB build and ray intersection")

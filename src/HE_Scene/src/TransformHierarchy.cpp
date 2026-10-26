@@ -1,4 +1,5 @@
 #include "HorizonScene/TransformHierarchy.h"
+#include <JobSystem/JobSystem.h>
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
@@ -171,18 +172,39 @@ namespace {
         std::vector<entt::entity>& flagged = st.flagged;
         flagged.clear();
         auto& storage = reg.storage<TransformComponent>();
-        if (g_switches.ignoreValueCompare)
+        const bool compare = !g_switches.ignoreValueCompare;
+        // A large world is scanned in blocks on the workers: the check reads one component and
+        // writes only its own `dirty`, and the blocks' lists are joined in the order the serial
+        // walk (storage.each(), last to first) lists them.
+        constexpr size_t kBlock = 4096;
+        const size_t n = storage.size();
+        if (n < 2 * kBlock)
         {
             for (auto [e, t] : storage.each())
-                if (t.dirty) flagged.push_back(e);
+                if (t.dirty || (compare && !cacheKeyHolds(t)))
+                {
+                    t.dirty = true;
+                    flagged.push_back(e);
+                }
             return;
         }
-        for (auto [e, t] : storage.each())
-            if (t.dirty || !cacheKeyHolds(t))
+        const entt::entity* ents = storage.data();   // the dense order each() walks backwards
+        const size_t        nBlocks = (n + kBlock - 1) / kBlock;
+        std::vector<std::vector<entt::entity>> parts(nBlocks);
+        parallel_for(nBlocks, [&](size_t b) {
+            const size_t from = b * kBlock, to = std::min(n, from + kBlock);
+            for (size_t i = to; i-- > from; )
             {
-                t.dirty = true;
-                flagged.push_back(e);
+                TransformComponent& t = storage.get(ents[i]);
+                if (t.dirty || (compare && !cacheKeyHolds(t)))
+                {
+                    t.dirty = true;
+                    parts[b].push_back(ents[i]);
+                }
             }
+        }, "TransformScan", 1);
+        for (size_t b = nBlocks; b-- > 0; )
+            flagged.insert(flagged.end(), parts[b].begin(), parts[b].end());
     }
 
     // How far up a parent chain is followed. The chain is as deep as the hierarchy

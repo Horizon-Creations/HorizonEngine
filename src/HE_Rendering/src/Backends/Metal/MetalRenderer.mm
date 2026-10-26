@@ -7125,20 +7125,13 @@ bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& ou
 
 // Metal reads a run's instances in place (InstanceSpan) in every instanced pass: the
 // foliage matrices are unfolded once per block (instanceWorldMatrices), not once per pass.
-// HE_INSTANCE_SPANS=0 copies them per pass as before: the A/B switch, same bits either way.
-static bool instanceSpansEnabled()
-{
-	static const bool on = [] {
-		const char* v = std::getenv("HE_INSTANCE_SPANS");
-		return !(v && *v && std::atoi(v) == 0);
-	}();
-	return on;
-}
+// HE_INSTANCE_SPANS=0 copies them per pass as before: the A/B switch, same bits either way
+// (RenderSorter::instanceSpansEnabled).
 
 static std::unique_ptr<GeometryPass> MakeMetalGeometryPass()
 {
 	auto pass = std::make_unique<GeometryPass>();
-	pass->setInstanceSpans(instanceSpansEnabled());
+	pass->setInstanceSpans(RenderSorter::instanceSpansEnabled());
 	return pass;
 }
 
@@ -8149,7 +8142,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			sv.size     = csm ? m_shadowSize : m_localShadowSize;
 			sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
 			sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
-			sv.batches.useSpans = instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
+			sv.batches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
 		}
 		auto prepareView = [this](size_t v)
 		{
@@ -8158,10 +8151,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
 			RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
 		};
-		static const bool parallelViews = [] {
-			const char* e = std::getenv("HE_MTL_PARALLEL_SHADOW");
-			return !(e && *e && std::atoi(e) == 0);
-		}();
+		const bool parallelViews = RenderSorter::parallelShadowViewsEnabled();
 		{
 			HE_PROFILE_SCOPE_N("Metal::ShadowPrepare");
 			// The camera's cull + sort rides along: SSAO and the scene take it from
@@ -12724,7 +12714,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 		// Same-mesh runs → one instanced draw each; a run of one stays on the
 		// plain pipeline. HE_MTL_INSTANCING=0 is the A/B switch, as everywhere.
-		m_prepassBatches.useSpans = instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
+		m_prepassBatches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
 		RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
 		                             RenderSorter::DepthFilter::AoContributors,
 		                             kNoOwnerEntity, m_prepassBatches);

@@ -4081,17 +4081,6 @@ static void BufferInstances(const DrawCall& dc)
 	             dc.instanceTransforms.data(), GL_STREAM_DRAW);
 }
 
-// A GeometryPass instance switch for the GL graph (see the Metal backend's twin):
-// HE_INSTANCE_SPANS=0 keeps the copied lists, the A/B switch, same bits either way.
-static bool glInstanceSpansEnabled()
-{
-	static const bool on = [] {
-		const char* v = std::getenv("HE_INSTANCE_SPANS");
-		return !(v && *v && std::atoi(v) == 0);
-	}();
-	return on;
-}
-
 void OpenGLRenderer::DrawGraphBatchInstanced(const DrawCall& dc,
                                              const glm::mat4& viewProj, const glm::vec3& baseColor,
                                              unsigned int tex, float metallic, float roughness,
@@ -11170,6 +11159,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// Reset the render counters before the early-return guards so a non-rendered
 	// frame (no world / zero-size) honestly reports zeros, not last frame's values.
 	// total/visible are filled after the cull below; draws/tris at the draw sites.
+	instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
 	m_counters = FrameCounters{};
 	if (!m_world) return;
 	if (pw <= 0 || ph <= 0) return;
@@ -11368,10 +11358,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// tonemaps that into the backbuffer/viewport.
 	if (m_renderGraph.empty())
 	{
-		m_renderGraph.addPass(std::make_unique<ShadowPass>());
+		{
+			auto shadow = std::make_unique<ShadowPass>();
+			shadow->setRecordDraws(false);   // the depth views are built by prepareShadowViews; the recorded set is not read
+			m_renderGraph.addPass(std::move(shadow));
+		}
 		{
 			auto geometry = std::make_unique<GeometryPass>();
-			geometry->setInstanceSpans(glInstanceSpansEnabled());   // read in place, see BufferInstances
+			geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see BufferInstances
 			m_renderGraph.addPass(std::move(geometry));
 		}
 		m_renderGraph.addPass(std::make_unique<PostProcessPass>());
@@ -11421,29 +11415,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (m_shadowViews.size() < nViews) m_shadowViews.resize(nViews);
 			for (size_t v = 0; v < nViews; ++v)
 			{
-				ShadowView& sv  = m_shadowViews[v];
-				const bool  csm = v < static_cast<size_t>(nCasc);
-				const int   l   = csm ? static_cast<int>(v) : static_cast<int>(v) - nCasc;
+				ShadowViewCpu& sv = m_shadowViews[v];
+				const bool csm = v < static_cast<size_t>(nCasc);
+				const int  l   = csm ? static_cast<int>(v) : static_cast<int>(v) - nCasc;
 				sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
 				sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
-				sv.batches.useSpans = glInstanceSpansEnabled();   // read in place, see BufferInstances
 			}
-			{
-				static const bool parallelViews = [] {
-					const char* e = std::getenv("HE_MTL_PARALLEL_SHADOW");
-					return !(e && *e && std::atoi(e) == 0);
-				}();
-				auto prepare = [this, walk](size_t v)
-				{
-					ShadowView& sv = m_shadowViews[v];
-					m_frameCull.cull(m_culler, m_renderWorld, walk, sv.viewProj, sv.visible);   // const: safe side by side
-					sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
-					RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
-				};
-				if (parallelViews && nViews > 1) parallel_for(nViews, prepare, "GLShadowViews", 1);
-				else for (size_t v = 0; v < nViews; ++v) prepare(v);
-			}
-			auto renderDepthLayer = [&](unsigned int target, int layer, const ShadowView& sv)
+			m_frameCull.prepareShadowViews(m_culler, m_renderWorld, walk, m_shadowViews.data(), nViews, "GLShadowViews");
+			auto renderDepthLayer = [&](unsigned int target, int layer, const ShadowViewCpu& sv)
 			{
 				const glm::mat4& vp = sv.viewProj;
 				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);

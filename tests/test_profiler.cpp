@@ -6,6 +6,7 @@
 #include <Diagnostics/ProfilerCaptureFile.h>
 #include <JobSystem/JobSystem.h>
 #include <Renderer/GpuPassAccumulator.h>
+#include <Renderer/GpuPassTimeline.h>
 
 #include <nlohmann/json.hpp>
 #include <atomic>
@@ -221,6 +222,72 @@ TEST_CASE("EngineProfiler ring buffer caps retained frames")
 }
 
 // ── GpuPassAccumulator (detailed-capture per-pass GPU timing bookkeeping) ──────
+
+namespace {
+// A backend stand-in: every mark it "writes" is the next tick of a fake clock, `step` apart.
+struct FakeTimestamps
+{
+	GpuPassTimeline tl;
+	std::vector<uint64_t> ticks = std::vector<uint64_t>(GpuPassTimeline::kMaxTimestamps, 0);
+	uint64_t clock = 0, step = 100;
+	void begin() { tl.reset(); ticks[tl.start()] = (clock += step); }
+	bool gpuPassBegin(const char* name)
+	{
+		uint32_t i;
+		if (!tl.push(name, i)) return false;
+		ticks[i] = (clock += step);
+		return true;
+	}
+	void gpuPassEnd()
+	{
+		uint32_t i;
+		if (tl.pop(i)) ticks[i] = (clock += step);
+	}
+	void finish() { ticks[tl.finish()] = (clock += step); }
+};
+}
+
+TEST_CASE("GpuPassTimeline: a pass inside another interrupts it, and the rows add up exclusive")
+{
+	FakeTimestamps f;                // 1000 ticks per second below: 100 ticks = 100 ms
+	f.begin();                       // mark 0 at 100
+	{
+		GpuPassScopeT<FakeTimestamps> scene(&f, "Scene");        // mark 1 at 200
+		f.clock += 400;                                          // 400 ticks of Scene work
+		{ GpuPassScopeT<FakeTimestamps> decals(&f, "Decals"); }  // marks 2, 3 at 700, 800
+		f.clock += 300;                                          // 300 more of Scene
+	}                                                            // mark 4 at 1200 (+100 step)
+	{ GpuPassScopeT<FakeTimestamps> none(static_cast<FakeTimestamps*>(nullptr), "Null"); }
+	f.finish();
+	std::vector<IRenderer::GpuPassTime> rows;
+	f.tl.toPasses(f.ticks.data(), 1000.0, rows);
+	REQUIRE(rows.size() == 2);
+	CHECK(std::string(rows[0].name) == "Scene");
+	CHECK(std::string(rows[1].name) == "Decals");
+	CHECK(rows[1].ms == doctest::Approx(100.0));                 // mark 2 -> 3
+	// Scene: mark 1 -> 2 (500) + mark 3 -> 4 (400 + 100 + 300 + 100... the clock steps), computed:
+	const double sceneTicks = double(f.ticks[2] - f.ticks[1]) + double(f.ticks[4] - f.ticks[3]);
+	CHECK(rows[0].ms == doctest::Approx(sceneTicks));
+	CHECK(rows[0].ms + rows[1].ms <= double(f.ticks[f.tl.used() - 1] - f.ticks[0]) + 1e-9);
+}
+
+TEST_CASE("GpuPassTimeline: a full frame leaves the passes that do not fit out, a backwards clock reads 0")
+{
+	FakeTimestamps f;
+	f.begin();
+	for (int i = 0; i < 100; ++i) { GpuPassScopeT<FakeTimestamps> s(&f, "P"); }
+	f.finish();
+	CHECK(f.tl.used() <= GpuPassTimeline::kMaxTimestamps);
+	CHECK(f.tl.used() >= GpuPassTimeline::kMaxTimestamps - 4);   // filled, never overrun
+	std::vector<IRenderer::GpuPassTime> rows;
+	f.tl.toPasses(f.ticks.data(), 1000.0, rows);
+	REQUIRE(rows.size() == 1);                                   // one name, its stretches added up
+	CHECK(rows[0].ms > 0.0);
+	std::vector<uint64_t> backwards(GpuPassTimeline::kMaxTimestamps, 0);
+	backwards[1] = 500; backwards[2] = 100;
+	f.tl.toPasses(backwards.data(), 1000.0, rows);
+	CHECK(rows[0].ms == 0.0);
+}
 
 TEST_CASE("GpuPassAccumulator completes a frame once all expected passes report")
 {

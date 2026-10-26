@@ -45,28 +45,68 @@ void RenderSorter::sortByMesh(const RenderWorld&          world,
                               const std::vector<uint8_t>& visible,
                               std::vector<uint32_t>&       outSortedIndices)
 {
-	m_keys.clear();
-	m_keys.reserve(world.objects.size());
-	for (uint32_t i = 0; i < world.objects.size(); ++i)
+	// Mesh ascending, then object index ascending. A scene has a few hundred meshes under tens
+	// of thousands of objects, so this is a counting sort over the meshes' rank (sorting only
+	// the distinct ids), not a comparison sort of every object: the same order, in O(n).
+	const uint32_t total = static_cast<uint32_t>(world.objects.size());
+	m_visible.clear();
+	m_denseOf.clear();
+	m_visible.reserve(total);
+	m_denseOf.reserve(total);
+	size_t cap = 1024;   // power of two, kept under half full
+	m_meshTable.assign(cap, MeshSlot{ 0, 0, 0, false });
+	std::vector<std::pair<uint64_t, uint64_t>> distinct;   // (hi, lo) by dense id
+	for (uint32_t i = 0; i < total; ++i)
 	{
 		if (i < visible.size() && !visible[i])
 			continue;
-		const RenderObject& o = world.objects[i];
-		m_keys.push_back(SortKey{ o.meshAssetId.hi, o.meshAssetId.lo, 0.0f, i });
+		const HE::UUID& id = world.objects[i].meshAssetId;
+		size_t at = static_cast<size_t>((id.hi * 0x9E3779B97F4A7C15ull) ^ (id.lo * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+		while (m_meshTable[at].used && !(m_meshTable[at].hi == id.hi && m_meshTable[at].lo == id.lo))
+			at = (at + 1) & (cap - 1);
+		if (!m_meshTable[at].used)
+		{
+			m_meshTable[at] = MeshSlot{ id.hi, id.lo, static_cast<uint32_t>(distinct.size()), true };
+			distinct.emplace_back(id.hi, id.lo);
+			if (distinct.size() * 2 > cap)
+			{
+				// Grow and re-insert; `at` of the object in hand is looked up again below.
+				cap *= 2;
+				std::vector<MeshSlot> old;
+				old.swap(m_meshTable);
+				m_meshTable.assign(cap, MeshSlot{ 0, 0, 0, false });
+				for (const MeshSlot& s : old)
+					if (s.used)
+					{
+						size_t k = static_cast<size_t>((s.hi * 0x9E3779B97F4A7C15ull) ^ (s.lo * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+						while (m_meshTable[k].used) k = (k + 1) & (cap - 1);
+						m_meshTable[k] = s;
+					}
+				at = static_cast<size_t>((id.hi * 0x9E3779B97F4A7C15ull) ^ (id.lo * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+				while (!(m_meshTable[at].hi == id.hi && m_meshTable[at].lo == id.lo && m_meshTable[at].used))
+					at = (at + 1) & (cap - 1);
+			}
+		}
+		m_visible.push_back(i);
+		m_denseOf.push_back(m_meshTable[at].dense);
 	}
 
-	std::sort(m_keys.begin(), m_keys.end(),
-		[](const SortKey& a, const SortKey& b)
-		{
-			if (a.meshHi != b.meshHi) return a.meshHi < b.meshHi;
-			if (a.meshLo != b.meshLo) return a.meshLo < b.meshLo;
-			return a.index < b.index;
-		});
+	// Rank of each distinct mesh in (hi, lo) order.
+	const uint32_t nMesh = static_cast<uint32_t>(distinct.size());
+	std::vector<uint32_t> order(nMesh);
+	for (uint32_t d = 0; d < nMesh; ++d) order[d] = d;
+	std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return distinct[a] < distinct[b]; });
+	m_rankOfDense.assign(nMesh, 0);
+	for (uint32_t r = 0; r < nMesh; ++r) m_rankOfDense[order[r]] = r;
 
-	outSortedIndices.clear();
-	outSortedIndices.reserve(m_keys.size());
-	for (const SortKey& k : m_keys)
-		outSortedIndices.push_back(k.index);
+	// Counting sort by rank; the scatter walks the objects in index order, so each mesh's
+	// objects stay in index order (the old comparator's tie-break).
+	m_bucket.assign(static_cast<size_t>(nMesh) + 1, 0);
+	for (uint32_t d : m_denseOf) ++m_bucket[m_rankOfDense[d] + 1];
+	for (uint32_t r = 0; r < nMesh; ++r) m_bucket[r + 1] += m_bucket[r];
+	outSortedIndices.resize(m_visible.size());
+	for (size_t k = 0; k < m_visible.size(); ++k)
+		outSortedIndices[m_bucket[m_rankOfDense[m_denseOf[k]]]++] = m_visible[k];
 }
 
 void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
@@ -205,6 +245,18 @@ static bool isFeatureEnabled(const char* envVarName)
 bool RenderSorter::depthInstancingEnabled()
 {
 	static const bool on = isFeatureEnabled("HE_DEPTH_INSTANCING");
+	return on;
+}
+
+bool RenderSorter::instanceSpansEnabled()
+{
+	static const bool on = isFeatureEnabled("HE_INSTANCE_SPANS");
+	return on;
+}
+
+bool RenderSorter::parallelShadowViewsEnabled()
+{
+	static const bool on = isFeatureEnabled("HE_MTL_PARALLEL_SHADOW");
 	return on;
 }
 
