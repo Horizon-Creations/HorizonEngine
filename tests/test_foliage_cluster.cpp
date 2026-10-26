@@ -1306,7 +1306,7 @@ TEST_CASE("OpenGL: a graph material keeps its own program, only built-in PBR tak
 	size_t gated = 0;
 	for (size_t i = 0; i < rows.size(); ++i)
 	{
-		if (rows[i].find("dc.instanceTransforms.empty()") == std::string::npos) continue;
+		if (rows[i].find("dc.instanceTotal() > 0") == std::string::npos) continue;   // spans or copies
 		const std::string both = rows[i] + "\n" + (i + 1 < rows.size() ? rows[i + 1] : std::string());
 		const bool builtInInstanced = both.find("m_gbufferInstancedProgram") != std::string::npos
 		                           || both.find("m_instancedProgram") != std::string::npos;
