@@ -1,6 +1,7 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include "RenderObject.h"
+#include "CommandBuffer.h"
 #include "GiLandscape.h"
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -287,6 +288,21 @@ struct InstanceBlock {
     }
 };
 
+// The world matrices of a block's `count` instances, world(0..count-1) bit for bit,
+// computed ONCE per block and kept across frames: foliage does not move, and every
+// pass of every frame used to multiply (or copy) each plant again, five times a frame
+// (three cascades, SSAO, scene; docs/perf-audit/frame-parallelism-audit-2026-10-26.md
+// lever 1). An Identity parent needs no copy: the pointer goes straight into the
+// block's storage. The cache holds a reference to that storage, so a re-scatter
+// that frees it can never alias a stale entry; instanceWorldCacheNextFrame() drops
+// what no frame has asked for in a while. Thread-safe.
+HE_RENDERING_API const glm::mat4* instanceWorldMatrices(const InstanceBlock& block);
+// Call once per frame before any pass reads spans (the Metal frame does): entries
+// not used for a few frames are released.
+HE_RENDERING_API void instanceWorldCacheNextFrame();
+// Entries and matrices held (tests, diagnostics).
+HE_RENDERING_API size_t instanceWorldCacheEntries();
+
 class RenderWorld {
 public:
     void clear();
@@ -424,6 +440,14 @@ public:
             parallel_for(pieces.size(), one, "UnfoldInstances", 1);
         else
             for (size_t p = 0; p < pieces.size(); ++p) one(p);
+    }
+
+    // Instances [from, from + n) of obj as one span (see InstanceSpan): no copy, no product.
+    InstanceSpan instanceSpan(const RenderObject& obj, uint32_t from, uint32_t n) const
+    {
+        const InstanceBlock* b = blockOf(obj);
+        if (!b) return { &obj.transform, 1u };
+        return { instanceWorldMatrices(*b) + from, n };
     }
 
     // The same walk without materialising a list: call fn(world matrix) per instance.

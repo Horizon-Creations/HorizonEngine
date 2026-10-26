@@ -444,7 +444,7 @@ private:
 	// One glDrawElementsInstanced for a graph-material batch with the instanced
 	// program already in use and its textures/params bound: the models go to
 	// m_instanceVBO, the U block gets mvp = viewProj (model unused).
-	void DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms, const glm::mat4& viewProj,
+	void DrawGraphBatchInstanced(const DrawCall& dc, const glm::mat4& viewProj,
 	                             const glm::vec3& baseColor, unsigned int tex, float metallic,
 	                             float roughness, float opacity, int indexCount, const void* indexOffset);
 	// Clustered heLitP (Thema 117, GL 4.3+): the three cluster lists of
@@ -703,11 +703,18 @@ private:
 	unsigned int m_depthInstancedProgram = 0;
 	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
-	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
-	// shadow pass never clobbers the camera cull the geometry pass relies on).
-	std::vector<uint8_t>  m_shadowVisible;
-	std::vector<uint32_t> m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
+	// One depth layer (a cascade or a local light's view), culled, sorted and batched
+	// before any layer is drawn, the layers side by side (DrawScene's shadow branch).
+	struct ShadowView
+	{
+		glm::mat4                    viewProj{ 1.0f };
+		uint32_t                     skip = 0;
+		std::vector<uint8_t>         visible;
+		std::vector<uint32_t>        sorted;
+		RenderSorter                 sorter;
+		RenderSorter::DepthBatchList batches;
+	};
+	std::vector<ShadowView> m_shadowViews;
 	void CreateShadowResources();
 
 	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────

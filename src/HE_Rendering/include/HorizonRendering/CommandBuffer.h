@@ -6,6 +6,16 @@
 #include <vector>
 #include <cstdint>
 
+// `n` world matrices at `src`, read in place: a run's instances without copying them
+// (RenderSorter::DepthBatchList::useSpans, GeometryPass::setInstanceSpans). For a
+// cluster `src` points into instanceWorldMatrices(block) (RenderWorld.h), for an
+// ordinary object at its RenderObject::transform; valid while the RenderWorld and
+// the frame last.
+struct InstanceSpan {
+    const glm::mat4* src = nullptr;
+    uint32_t         n   = 0;
+};
+
 // A single draw recorded by a render pass and replayed by the backend.
 //
 // Until the RenderResourceManager (3.7) resolves UUIDs to RenderHandles at
@@ -50,6 +60,27 @@ struct DrawCall {
     // Non-empty when GeometryPass batched multiple same-mesh+same-material objects.
     // The backend uploads these to the instance VBO and calls glDrawElementsInstanced.
     std::vector<glm::mat4> instanceTransforms;
+    // GeometryPass::setInstanceSpans: the batch's instances read in place instead of
+    // copied into instanceTransforms (which then stays empty); instanceCount says how
+    // many. A backend that turns it on reads instances through forEachInstance /
+    // instanceTotal, which serve either form.
+    std::vector<InstanceSpan> instanceSpans;
+    size_t instanceTotal() const
+    {
+        return instanceSpans.empty() ? instanceTransforms.size() : static_cast<size_t>(instanceCount);
+    }
+    template <class Fn>
+    void forEachInstance(Fn&& fn) const
+    {
+        if (instanceSpans.empty()) { for (const glm::mat4& m : instanceTransforms) fn(m); return; }
+        for (const InstanceSpan& s : instanceSpans)
+            for (uint32_t i = 0; i < s.n; ++i) fn(s.src[i]);
+    }
+    const glm::mat4& firstInstance() const
+    {
+        if (!instanceSpans.empty()) return instanceSpans.front().src[0];
+        return instanceTransforms.empty() ? transform : instanceTransforms.front();
+    }
     // Per-entity node-graph param override: empty = use the material's own
     // shaderParamData; otherwise the FULL merged HeParams block (16 vec4 = 64
     // floats) the backend uploads instead. Objects carrying an override are never

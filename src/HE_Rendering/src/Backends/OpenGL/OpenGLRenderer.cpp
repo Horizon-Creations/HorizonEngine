@@ -4049,14 +4049,57 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	return program;
 }
 
-void OpenGLRenderer::DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms,
+// The instance matrices of a run into the bound GL_ARRAY_BUFFER (orphaned, GL_STREAM_DRAW):
+// the copied list in one call, spans each straight from where they live (instanceWorldMatrices,
+// RenderObject::transform; GeometryPass::setInstanceSpans, DepthBatchList::useSpans), so a
+// foliage block is never unfolded into a list per pass: the driver copies it from the cache.
+static void BufferInstanceSpans(const InstanceSpan* spans, size_t count, size_t total)
+{
+	if (count == 1)
+	{
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(total * sizeof(glm::mat4)), spans[0].src, GL_STREAM_DRAW);
+		return;
+	}
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(total * sizeof(glm::mat4)), nullptr, GL_STREAM_DRAW);
+	GLintptr at = 0;
+	for (size_t s = 0; s < count; ++s)
+	{
+		const GLsizeiptr len = static_cast<GLsizeiptr>(spans[s].n * sizeof(glm::mat4));
+		glBufferSubData(GL_ARRAY_BUFFER, at, len, spans[s].src);
+		at += len;
+	}
+}
+
+static void BufferInstances(const DrawCall& dc)
+{
+	if (!dc.instanceSpans.empty())
+	{
+		BufferInstanceSpans(dc.instanceSpans.data(), dc.instanceSpans.size(), dc.instanceTotal());
+		return;
+	}
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+	             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+}
+
+// A GeometryPass instance switch for the GL graph (see the Metal backend's twin):
+// HE_INSTANCE_SPANS=0 keeps the copied lists, the A/B switch, same bits either way.
+static bool glInstanceSpansEnabled()
+{
+	static const bool on = [] {
+		const char* v = std::getenv("HE_INSTANCE_SPANS");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+
+void OpenGLRenderer::DrawGraphBatchInstanced(const DrawCall& dc,
                                              const glm::mat4& viewProj, const glm::vec3& baseColor,
                                              unsigned int tex, float metallic, float roughness,
                                              float opacity, int indexCount, const void* indexOffset)
 {
+	const size_t total = dc.instanceTotal();
 	glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(transforms.size() * sizeof(glm::mat4)),
-	             transforms.data(), GL_STREAM_DRAW);
+	BufferInstances(dc);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	// Same block as the per-instance loops write, with the batch-constant half:
 	// the instanced vertex forms mvp = U.mvp * model itself.
@@ -4070,9 +4113,9 @@ void OpenGLRenderer::DrawGraphBatchInstanced(const std::vector<glm::mat4>& trans
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 	glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
-	                        static_cast<GLsizei>(transforms.size()));
+	                        static_cast<GLsizei>(total));
 	++m_counters.draws;
-	m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(transforms.size());
+	m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(total);
 }
 
 // Build (or fetch) the GL program that draws GPU-instanced ParticleGraph particles
@@ -6715,12 +6758,10 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 			// A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is one
 			// instanced draw: the transforms go through the scene pass's scratch
 			// VBO, which every mesh VAO reads at attribs 4–7 with divisor 1.
-			if (!dc.instanceTransforms.empty() && canInstance)
+			if (dc.instanceTotal() > 0 && canInstance)
 			{
 				glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-				glBufferData(GL_ARRAY_BUFFER,
-				             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-				             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+				BufferInstances(dc);   // spans straight from where they live, or the copied list
 				glBindBuffer(GL_ARRAY_BUFFER, 0);
 				if (boundProgram != m_giGBufInstancedProgram)
 				{
@@ -6730,13 +6771,13 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 				}
 				if (uInstRoughMetal >= 0) glUniform2f(uInstRoughMetal, dcRough, dcMetal);
 				glDrawElementsInstanced(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset,
-				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				                        static_cast<GLsizei>(dc.instanceTotal()));
 				static bool loggedOnce = false; // once per session, like the shadow pass
 				if (!loggedOnce)
 				{
 					loggedOnce = true;
 					HE_LOG_INFO(RHI, "OpenGLRenderer: GI pre-pass instanced (first batch: %u instances)",
-					            static_cast<unsigned>(dc.instanceTransforms.size()));
+					            static_cast<unsigned>(dc.instanceTotal()));
 				}
 				continue;
 			}
@@ -6752,8 +6793,8 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 				glUniformMatrix4fv(uModel, 1, GL_FALSE, glm::value_ptr(t));
 				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 			};
-			if (!dc.instanceTransforms.empty())
-				for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
+			if (dc.instanceTotal() > 0)
+				dc.forEachInstance([&](const glm::mat4& t) { drawOne(t); });
 			else
 				drawOne(dc.transform);
 		}
@@ -7530,12 +7571,10 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 		// instanced draw over the scene pass's scratch VBO — every mesh VAO
 		// reads it at attribs 4–7 with divisor 1. The batch-constant camera
 		// matrices are pushed once, on the first switch to the instanced program.
-		if (!dc.instanceTransforms.empty() && instProgram)
+		if (dc.instanceTotal() > 0 && instProgram)
 		{
 			glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-			glBufferData(GL_ARRAY_BUFFER,
-			             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-			             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+			BufferInstances(dc);   // spans straight from where they live, or the copied list
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 			if (boundProgram != instProgram)
 			{
@@ -7558,13 +7597,13 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 				}
 			}
 			glDrawElementsInstanced(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset,
-			                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+			                        static_cast<GLsizei>(dc.instanceTotal()));
 			static bool loggedOnce = false; // once per session, like the shadow pass
 			if (!loggedOnce)
 			{
 				loggedOnce = true;
 				HE_LOG_INFO(RHI, "OpenGLRenderer: SSAO pre-pass instanced (first batch: %u instances, %s)",
-				            static_cast<unsigned>(dc.instanceTransforms.size()),
+				            static_cast<unsigned>(dc.instanceTotal()),
 				            reflMrt ? "MRT" : "plain");
 			}
 			continue;
@@ -7577,13 +7616,13 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			// per-draw block before the loop writes into it again.
 			if (reflMrt) glBindBufferBase(GL_UNIFORM_BUFFER, 5, m_reflPrepassUBO);
 		}
-		if (!dc.instanceTransforms.empty())
+		if (dc.instanceTotal() > 0)
 		{
-			for (const glm::mat4& t : dc.instanceTransforms)
+			dc.forEachInstance([&](const glm::mat4& t)
 			{
 				pushDraw(t);
 				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
-			}
+			});
 		}
 		else
 		{
@@ -11271,7 +11310,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// Occlusion (off by default): drops what the frustum kept but a nearer
 	// opaque surface hides — the same m_visible the sort and every camera pass
 	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
-	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	// The shadow pass below culls into its own per-view scratch (m_shadowViews) and is untouched.
 	m_counters.occlusionCulled =
 		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
@@ -11330,7 +11369,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	if (m_renderGraph.empty())
 	{
 		m_renderGraph.addPass(std::make_unique<ShadowPass>());
-		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+		{
+			auto geometry = std::make_unique<GeometryPass>();
+			geometry->setInstanceSpans(glInstanceSpansEnabled());   // read in place, see BufferInstances
+			m_renderGraph.addPass(std::move(geometry));
+		}
 		m_renderGraph.addPass(std::make_unique<PostProcessPass>());
 	}
 
@@ -11367,34 +11410,64 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// entity renders that mesh at z≈0 into its own depth map and shadows
 			// itself out completely. kNoOwnerEntity (every cascade) skips nothing.
 			// Mirrors the Metal backend's encodeDepthLayer.
-			auto renderDepthLayer = [&](unsigned int target, int layer, const glm::mat4& vp,
-			                            uint32_t skipEntity)
+			// Every view (cascades, then local layers) is culled, sorted by mesh and cut into
+			// runs before the first is drawn, side by side on the workers, each on its own
+			// scratch (the culler keeps no state, each view has its own sorter); the GL calls
+			// stay on this thread. They ran one after the other, cull to draw. Mirrors the Metal
+			// backend's EncodeShadowMap. HE_MTL_PARALLEL_SHADOW=0 prepares them one by one.
+			const int    nCasc  = shadows ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades) : 0;
+			const int    nLoc   = localShadows ? nLocalLayers : 0;
+			const size_t nViews = static_cast<size_t>(nCasc + nLoc);
+			if (m_shadowViews.size() < nViews) m_shadowViews.resize(nViews);
+			for (size_t v = 0; v < nViews; ++v)
 			{
+				ShadowView& sv  = m_shadowViews[v];
+				const bool  csm = v < static_cast<size_t>(nCasc);
+				const int   l   = csm ? static_cast<int>(v) : static_cast<int>(v) - nCasc;
+				sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
+				sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
+				sv.batches.useSpans = glInstanceSpansEnabled();   // read in place, see BufferInstances
+			}
+			{
+				static const bool parallelViews = [] {
+					const char* e = std::getenv("HE_MTL_PARALLEL_SHADOW");
+					return !(e && *e && std::atoi(e) == 0);
+				}();
+				auto prepare = [this, walk](size_t v)
+				{
+					ShadowView& sv = m_shadowViews[v];
+					m_frameCull.cull(m_culler, m_renderWorld, walk, sv.viewProj, sv.visible);   // const: safe side by side
+					sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
+					RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
+				};
+				if (parallelViews && nViews > 1) parallel_for(nViews, prepare, "GLShadowViews", 1);
+				else for (size_t v = 0; v < nViews; ++v) prepare(v);
+			}
+			auto renderDepthLayer = [&](unsigned int target, int layer, const ShadowView& sv)
+			{
+				const glm::mat4& vp = sv.viewProj;
 				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);
 				glClear(GL_DEPTH_BUFFER_BIT);
-				m_frameCull.cull(m_culler, m_renderWorld, walk, vp, m_shadowVisible);
-				m_sorter.sortByMesh(m_renderWorld, m_shadowVisible, m_shadowSorted);
 				// Same-mesh runs → one instanced draw each. A run of one keeps the
 				// plain depth program (no instance upload for a single caster).
-				RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity,
-				                                m_shadowBatches);
+				const RenderSorter::DepthBatchList& batches = sv.batches;
 				const bool canInstance = m_depthInstancedProgram && m_instanceVBO;
 				unsigned int boundProgram = m_depthProgram; // glUseProgram'd by the caller
-				for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+				for (const RenderSorter::DepthBatch& b : batches.batches)
 				{
 					const GpuMesh* mesh = ResolveMesh(b.meshAssetId);
 					if (!mesh) mesh = ResolveMesh(HE::kDefaultCubeMeshId);
 					if (!mesh) continue;
-					const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
+					const InstanceSpan  whole{ batches.useSpans ? nullptr : batches.transforms.data() + b.first, b.count };
+					const InstanceSpan* spans = batches.useSpans ? batches.spans.data() + b.spanFirst : &whole;
+					const size_t        nSpan = batches.useSpans ? b.spanCount : 1;
 					glBindVertexArray(mesh->vao);
 					if (b.count > 1 && canInstance)
 					{
 						// Scene-pass convention: orphan the scratch VBO per batch.
 						// Every mesh VAO reads attribs 4–7 from it with divisor 1.
 						glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-						glBufferData(GL_ARRAY_BUFFER,
-						             static_cast<GLsizeiptr>(b.count * sizeof(glm::mat4)),
-						             xf, GL_STREAM_DRAW);
+						BufferInstanceSpans(spans, nSpan, b.count);
 						glBindBuffer(GL_ARRAY_BUFFER, 0);
 						if (boundProgram != m_depthInstancedProgram)
 						{
@@ -11418,11 +11491,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glUseProgram(m_depthProgram);
 						boundProgram = m_depthProgram;
 					}
-					for (uint32_t k = 0; k < b.count; ++k)
-					{
-						glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(vp * xf[k]));
-						glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
-					}
+					for (size_t sp = 0; sp < nSpan; ++sp)
+						for (uint32_t k = 0; k < spans[sp].n; ++k)
+						{
+							glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(vp * spans[sp].src[k]));
+							glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+						}
 				}
 				// Leave the plain depth program bound: the next layer's lambda
 				// entry assumes it, like the caller's glUseProgram above.
@@ -11433,15 +11507,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			{
 				const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
 				for (int c = 0; c < cascades; ++c)
-					renderDepthLayer(m_shadowDepthTex, c, m_renderWorld.shadow.cascadeViewProj[c],
-					                 kNoOwnerEntity);
+					renderDepthLayer(m_shadowDepthTex, c, m_shadowViews[static_cast<size_t>(c)]);
 			}
 			if (localShadows)
 			{
 				glViewport(0, 0, m_localShadowSize, m_localShadowSize);
 				for (int v = 0; v < nLocalLayers; ++v)
-					renderDepthLayer(m_localShadowDepthTex, v, m_renderWorld.shadow.localViewProj[v],
-					                 m_renderWorld.shadow.localOwnerEntity[v]);
+					renderDepthLayer(m_localShadowDepthTex, v, m_shadowViews[static_cast<size_t>(nCasc + v)]);
 			}
 			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -12119,7 +12191,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
 							// A batch draws once with the instanced twin (2e); only
 							// built for batches, and 0 sends it back to the loop.
-							if (gbProg && !dc.instanceTransforms.empty() && m_instanceVBO
+							if (gbProg && dc.instanceTotal() > 0 && m_instanceVBO
 							    && RenderSorter::graphInstancingEnabled())
 								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
 								                                       /*gbuffer=*/true, /*instanced=*/true);
@@ -12159,8 +12231,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.wmTex     = wm;
 						transparent.push_back(std::move(tp));
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { pushTP(t); });
 					else
 						pushTP(dc.transform);
 					continue;
@@ -12169,15 +12241,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// program would swap the look (no wind, no alpha discard, flat PBR),
 				// so those batches fall through to the per-instance loops below —
 				// the same rule Metal applies (cMaterialPipeline == nullptr).
-				if (!dc.instanceTransforms.empty() && !(gbProg || matProg)
+				if (dc.instanceTotal() > 0 && !(gbProg || matProg)
 				    && m_gbufferInstancedProgram && m_instanceVBO)
 				{
 					// Built-in PBR batches take the built-in instanced program —
 					// the same routing the forward loop uses.
 					glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-					glBufferData(GL_ARRAY_BUFFER,
-					             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-					             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+					BufferInstances(dc);   // spans straight from where they live, or the copied list
 					glBindBuffer(GL_ARRAY_BUFFER, 0);
 					glUseProgram(m_gbufferInstancedProgram);
 					glUniformMatrix4fv(m_uGBInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
@@ -12189,10 +12259,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glActiveTexture(GL_TEXTURE0);
 					glBindTexture(GL_TEXTURE_2D, tex);
 					glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
-					                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+					                        static_cast<GLsizei>(dc.instanceTotal()));
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
-					                   static_cast<uint32_t>(dc.instanceTransforms.size());
+					                   static_cast<uint32_t>(dc.instanceTotal());
 					glUseProgram(m_gbufferProgram);
 					continue;
 				}
@@ -12218,8 +12288,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.wmTex     = wmTex;
 						deferredForward.push_back(std::move(tp));
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) pushForward(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { pushForward(t); });
 					else
 						pushForward(dc.transform);
 					continue;
@@ -12270,7 +12340,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// above (blocks and units are per program state, applied
 						// at link), U.mvp = viewProj, the models at attribs 4-7.
 						glUseProgram(gbInstProg);
-						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						DrawGraphBatchInstanced(dc, viewProj, baseColor, tex,
 						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
 						glUseProgram(m_gbufferProgram);
 						continue;
@@ -12291,8 +12361,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { drawGraphInstance(t); });
 					else
 						drawGraphInstance(dc.transform);
 					glUseProgram(m_gbufferProgram);
@@ -12415,8 +12485,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					tp.wmTex     = tpWm;
 					transparent.push_back(std::move(tp));
 				};
-				if (!dc.instanceTransforms.empty())
-					for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+				if (dc.instanceTotal() > 0)
+					dc.forEachInstance([&](const glm::mat4& t) { pushTP(t); });
 				else
 					pushTP(dc.transform);
 				continue; // drawn in the transparency pass below
@@ -12443,7 +12513,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-					if (matProg && !dc.instanceTransforms.empty() && m_instanceVBO
+					if (matProg && dc.instanceTotal() > 0 && m_instanceVBO
 					    && RenderSorter::graphInstancingEnabled())
 						matInstProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre,
 						                                        /*gbuffer=*/false, /*instanced=*/true);
@@ -12451,14 +12521,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 #endif
 
-			if (!dc.instanceTransforms.empty() && !matProg && m_instancedProgram && m_instanceVBO)
+			if (dc.instanceTotal() > 0 && !matProg && m_instancedProgram && m_instanceVBO)
 			{
 				// GPU-instanced opaque draw: upload all transforms to the scratch VBO,
 				// then call glDrawElementsInstanced with the instanced program.
 				glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-				glBufferData(GL_ARRAY_BUFFER,
-				             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-				             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+				BufferInstances(dc);   // spans straight from where they live, or the copied list
 				glBindBuffer(GL_ARRAY_BUFFER, 0);
 
 				glUseProgram(m_instancedProgram);
@@ -12472,10 +12540,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uInstHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
 				glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
-				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				                        static_cast<GLsizei>(dc.instanceTotal()));
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
-				                   static_cast<uint32_t>(dc.instanceTransforms.size());
+				                   static_cast<uint32_t>(dc.instanceTotal());
 				glUseProgram(m_unlitProgram); // restore for the next single-draw
 			}
 			else
@@ -12577,7 +12645,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// The whole batch in one draw (the binds above are context
 						// state; blocks and units are set per program at link).
 						glUseProgram(matInstProg);
-						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						DrawGraphBatchInstanced(dc, viewProj, baseColor, tex,
 						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
 						glUseProgram(m_unlitProgram); // restore for the next single-draw
 						continue;
@@ -12598,8 +12666,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { drawGraphInstance(t); });
 					else
 						drawGraphInstance(dc.transform);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
