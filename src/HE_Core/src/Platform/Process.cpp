@@ -128,18 +128,6 @@ std::wstring widen(std::string_view utf8)
 	return out;
 }
 
-std::string narrow(const wchar_t* w, std::size_t len)
-{
-	if (len == 0) return {};
-	const int n = ::WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(len),
-	                                    nullptr, 0, nullptr, nullptr);
-	if (n <= 0) return {};
-	std::string out(static_cast<std::size_t>(n), '\0');
-	::WideCharToMultiByte(CP_UTF8, 0, w, static_cast<int>(len), out.data(), n,
-	                      nullptr, nullptr);
-	return out;
-}
-
 // Quote one argument per the rules the MSVC runtime uses to split a command line
 // back into argv. Windows has no argv array at the OS level — the child parses
 // one string — so this is where "an argument containing a quote" is either
@@ -363,6 +351,18 @@ Result run(const Options& o)
 		if (job) ::TerminateJobObject(job, 1);
 		else     ::TerminateProcess(pi.hProcess, 1);
 		::WaitForSingleObject(pi.hProcess, 5000);
+		if (!job)
+		{
+			// A grandchild that inherited the pipes survives TerminateProcess and keeps
+			// them open, so the readers never see EOF. Abort their blocking ReadFile
+			// instead; retried because a reader between two reads has none to abort.
+			for (std::thread* reader : { &outThread, &errThread })
+			{
+				const HANDLE h = reader->native_handle();
+				do { ::CancelSynchronousIo(h); }
+				while (::WaitForSingleObject(h, 50) == WAIT_TIMEOUT);
+			}
+		}
 	}
 
 	outThread.join();
@@ -490,6 +490,12 @@ Result run(const Options& o)
 	{
 #if defined(__APPLE__) || (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L)
 		::posix_spawn_file_actions_addchdir_np(&actions, o.cwd.c_str());
+#else
+		// No way to chdir the child: running it in the wrong directory would be worse.
+		// The Fd members close the pipes; attr is not initialised yet.
+		::posix_spawn_file_actions_destroy(&actions);
+		r.launchFailed = true;
+		return r;
 #endif
 	}
 
@@ -655,6 +661,9 @@ std::optional<std::filesystem::path> which(std::string_view exe)
 			return std::filesystem::path(name);
 		return std::nullopt;
 	}
+
+	// dir / "" is the directory itself, and a searchable directory passes access(X_OK).
+	if (name.empty()) return std::nullopt;
 
 	const char* path = ::getenv("PATH");
 	if (!path) return std::nullopt;

@@ -304,6 +304,9 @@ add_executable(he_tests
     # Its own file so it gets its own PROCESS: the shared font atlas is baked
     # once, and this is the one run that bakes it in the regular weight.
     test_ui_font_weight.cpp
+    # Same reason: needs a process whose shared font is not baked yet.
+    test_ui_font_scripts.cpp
+    test_ui_text_layout_digest.cpp
     test_app_icon.cpp
     test_hidden_window.cpp
     test_document_types.cpp
@@ -492,6 +495,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiInstanceSurface.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrameCull.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
@@ -1130,6 +1134,10 @@ if(HE_HAVE_LZ4)
 endif()
 if(HE_HAVE_ZSTD)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ZSTD)
+endif()
+# Only the OpenSSL backend caps aesGcm* lengths at INT_MAX (test_game_build_config.cpp).
+if(HE_HAVE_OPENSSL)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
 endif()
 # hpak encryption tests run whenever a crypto backend (system OpenSSL or the
 # fetched mbedTLS fallback) is compiled in — the round-trips go through

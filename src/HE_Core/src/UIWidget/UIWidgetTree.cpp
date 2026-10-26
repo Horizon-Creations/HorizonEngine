@@ -7,6 +7,7 @@
 #include <UIWidget/UIElements.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <unordered_map>
 
@@ -833,13 +834,12 @@ namespace
     // and an auto-sized element inside it has a width to measure against. What
     // makes it invisible is hidesChild, and that is the only thing that does.
     UIWidgetRect tabSlotRect(const UIWidgetTree& tree, const UITabBox& tabs,
-                             const UIElement& child, const UIWidgetCanvas* canvas)
+                             const UIWidgetCanvas* canvas)
     {
         const UIWidgetRect b = uiElementRect(tree, tabs, canvas);
         float bus = 1.0f, bvs = 1.0f;
         uiElementUnitScale(tree, tabs, bus, bvs, canvas);
         const float strip = std::min(b.h, tabs.tabHeight * bvs);
-        (void)child;
         return { b.x, b.y + strip, b.w, std::max(0.0f, b.h - strip) };
     }
 
@@ -886,11 +886,12 @@ namespace
         uiElementUnitScale(tree, sp, bus, bvs, canvas);
 
         const float len = sp.vertical ? b.h : b.w;
-        const float div = std::min(sp.dividerSize * (sp.vertical ? bvs : bus), len);
+        const float divScale = sp.vertical ? bvs : bus;
+        const float div = std::min(sp.dividerSize * divScale, len);
         // The SAME clamp the drag and the divider's own drawing use, in the same
         // units — a ratio the layout honoured but the divider drew elsewhere is
         // a splitter you cannot grab where you see it.
-        const float first = sp.clampedRatio(len) * std::max(0.0f, len - div);
+        const float first = sp.clampedRatio(len, divScale) * std::max(0.0f, len - div);
 
         const int idx = uiChildIndexOf(tree, sp.id, child.id);
         if (idx == 0)
@@ -944,7 +945,7 @@ namespace
     // apart as well.
     //
     // Stateless like the box's walk, and for the same reason: no cached line
-    // table to invalidate, and the lists are short. `outLines` is an optional
+    // table to invalidate, and the lists are short. `outContentHeight` is an optional
     // by-product for the caller that wants the total height (size-to-content)
     // rather than one child's rect.
     UIWidgetRect wrapSlotRect(const UIWidgetTree& tree, const UIWrapBox& box,
@@ -1003,12 +1004,12 @@ namespace
         // thing on this line": a row of chips with one tall entry must not grow
         // every chip beside it. Top/Center/Bottom pin the child's own height
         // within the line.
-        const auto slotOf = [&](const Placed& p)
+        const auto slotOf = [&](const Placed& p, const UIElement& aligned)
         {
             UIWidgetRect slot{ p.x, p.y, p.w, p.h };
-            if (p.e->slotVAlign != UISlotVAlign::Fill)
+            if (aligned.slotVAlign != UISlotVAlign::Fill)
                 slot.h = lineHeights[static_cast<std::size_t>(p.line)];
-            return alignInSlot(*p.e, slot, us, vs);
+            return alignInSlot(aligned, slot, us, vs);
         };
         // With values memoized every child's slot is written now, as the box
         // does: the lines were broken for all of them anyway.
@@ -1016,19 +1017,14 @@ namespace
             for (const Placed& p : placed)
                 if (LayoutMemo* m = memoFor(tree, *p.e, canvas, true))
                 {
-                    m->unbounded = slotOf(p);
+                    m->unbounded = slotOf(p, *p.e);
                     m->have |= LayoutMemo::kUnbounded;
                 }
         for (const Placed& p : placed)
             if (p.e->id == child->id)
-            {
                 // The CHILD asked, not the placed entry with its id: the same
                 // element unless a hand-edited file repeats an id.
-                UIWidgetRect slot{ p.x, p.y, p.w, p.h };
-                if (child->slotVAlign != UISlotVAlign::Fill)
-                    slot.h = lineHeights[static_cast<std::size_t>(p.line)];
-                return alignInSlot(*child, slot, us, vs);
-            }
+                return slotOf(p, *child);
         return found;                            // not a child of this box
     }
 
@@ -1384,6 +1380,20 @@ namespace
     }
 }
 
+namespace
+{
+    // How many rect solves are nested on this thread. A rect asks its parent's
+    // rect (parentRectOf, and every slot walk), so the nesting is the parent
+    // chain; a hand-edited file that makes the chain a cycle would otherwise
+    // recurse until the stack is gone.
+    thread_local std::size_t t_rectNesting = 0;
+    struct RectNesting
+    {
+        RectNesting()  { ++t_rectNesting; }
+        ~RectNesting() { --t_rectNesting; }
+    };
+}
+
 UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                            const UIWidgetCanvas* canvas)
 {
@@ -1391,6 +1401,12 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
     // chain every child walks up is then one lookup per step, not a solve.
     LayoutMemo* m = memoFor(tree, e, canvas, true);
     if (m && (m->have & LayoutMemo::kRect)) return m->rect;
+    // Deeper than there are elements means the chain loops: the canvas, which
+    // is what an element with no parent gets.
+    if (t_rectNesting > tree.elements.size() + 1)
+        return { 0.0f, 0.0f, canvas ? canvas->width  : tree.canvasWidth,
+                             canvas ? canvas->height : tree.canvasHeight };
+    const RectNesting nesting;
     UIWidgetRect r = uiElementRectUnbounded(tree, e, canvas);
     applySizeBounds(tree, e, canvas, r);
     if (m) { m->rect = r; m->have |= LayoutMemo::kRect; }
@@ -1437,7 +1453,7 @@ UIWidgetRect rectUnboundedWalk(const UIWidgetTree& tree, const UIElement& e,
             if (const auto* gr = dynamic_cast<const UIGrid*>(p))
                 return gridSlotRect(tree, *gr, e, canvas);
             if (const auto* tb = dynamic_cast<const UITabBox*>(p))
-                return tabSlotRect(tree, *tb, e, canvas);
+                return tabSlotRect(tree, *tb, canvas);
             if (const auto* sp = dynamic_cast<const UISplitter*>(p))
                 return splitSlotRect(tree, *sp, e, canvas);
             if (const auto* ac = dynamic_cast<const UIAccordion*>(p))
@@ -1637,6 +1653,21 @@ int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode)
     return written;
 }
 
+namespace
+{
+// Slot `i` of a per-frame label cache, set to `name` (or `fallback` when the
+// name is empty). The string already standing there is reused, so a frame in
+// which no name changed allocates nothing; the caller trims the cache to the
+// child count afterwards.
+void setCachedLabel(std::vector<std::string>& labels, std::size_t i,
+                    const std::string& name, const char* fallback)
+{
+    if (i == labels.size()) labels.emplace_back();
+    if (name.empty()) labels[i].assign(fallback);
+    else              labels[i].assign(name);
+}
+}
+
 void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fontScale)
 {
     // What each Tab Box's strip will SAY, refreshed before anything draws. The
@@ -1650,13 +1681,14 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
     {
         auto* tabs = dynamic_cast<UITabBox*>(e.get());
         if (!tabs) continue;
-        tabs->tabLabels.clear();
+        std::size_t pages = 0;
         forEachChild(tree, tabs->id, [&](const UIElement& c)
         {
             // An unnamed page still needs something on its tab, or the strip
             // grows a gap nobody can click with any confidence.
-            tabs->tabLabels.push_back(c.name.empty() ? std::string("Page") : c.name);
+            setCachedLabel(tabs->tabLabels, pages++, c.name, "Page");
         });
+        tabs->tabLabels.resize(pages);
     }
 
     // The measured extent, held between the element's floor and its ceiling. The
@@ -1937,21 +1969,33 @@ int uiChildCountOf(const UIWidgetTree& tree, int parentId)
     return n;
 }
 
-bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
+namespace
+{
+// `ancestorsLeft` bounds the climb: a parent chain longer than the tree has
+// elements is a cycle from a hand-edited file, and ends the walk as "shown".
+bool effectiveVisibleWalk(const UIWidgetTree& tree, const UIElement& e,
+                          std::size_t ancestorsLeft)
 {
     if (!e.visible) return false;
     if (e.parentId == 0) return true;
     LayoutMemo* m = memoFor(tree, e, nullptr, false);
     if (m && (m->have & LayoutMemo::kVisible)) return m->visible;
     const UIElement* p = tree.find(e.parentId);
-    if (!p) return true;
+    if (!p || ancestorsLeft == 0) return true;
     // …and whether the PARENT is showing it. A Tab Box hides every page but
     // one, and this is the single place that has to know, because everything
     // that asks "is this on screen" — the extract, the hit test, the designer —
     // already comes through here.
-    const bool shown = !p->hidesChild(tree, e) && uiElementEffectiveVisible(tree, *p);
+    const bool shown = !p->hidesChild(tree, e) &&
+                       effectiveVisibleWalk(tree, *p, ancestorsLeft - 1);
     if (m) { m->visible = shown; m->have |= LayoutMemo::kVisible; }
     return shown;
+}
+}
+
+bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
+{
+    return effectiveVisibleWalk(tree, e, tree.elements.size() + 1);
 }
 
 void uiUpdateScrollExtents(UIWidgetTree& tree)
@@ -1982,16 +2026,16 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         // right height, and before any rect is asked for.
         if (auto* acc = dynamic_cast<UIAccordion*>(bp.get()))
         {
-            acc->sectionLabels.clear();
             acc->sectionBodies.clear();
+            std::size_t sections = 0;
             forEachChild(tree, acc->id, [&](const UIElement& cp)
             {
                 // An unnamed section still needs something on its heading, or
                 // the stack grows a band nobody can aim at with any confidence.
-                acc->sectionLabels.push_back(cp.name.empty() ? std::string("Section")
-                                                             : cp.name);
+                setCachedLabel(acc->sectionLabels, sections++, cp.name, "Section");
                 acc->sectionBodies.push_back(cp.sizeY);
             });
+            acc->sectionLabels.resize(sections);
             const int n = static_cast<int>(acc->sectionBodies.size());
             if (n > UIAccordion::kMaxSections && !acc->warnedOverflow)
             {
@@ -2071,6 +2115,11 @@ float uiElementEffectiveOpacityWalk(const UIWidgetTree& tree, const UIElement& e
 }
 }
 
+namespace
+{
+constexpr float kPi = 3.14159265358979323846f;
+}
+
 bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
                        UIRotation& out, const UIWidgetCanvas* canvas)
 {
@@ -2125,7 +2174,7 @@ bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
             const UIWidgetRect pr = uiElementRect(tree, *p, canvas);
             const float ax = pr.x + p->pivotX * pr.w;
             const float ay = pr.y + p->pivotY * pr.h;
-            const float a  = p->rotation * 3.14159265358979323846f / 180.0f;
+            const float a  = p->rotation * kPi / 180.0f;
             const float c = std::cos(a), s = std::sin(a);
             const float dx = px - ax, dy = py - ay;
             px = ax + dx * c - dy * s;
@@ -2140,7 +2189,7 @@ bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
 
 void uiUnrotatePoint(const UIRotation& r, float x, float y, float& outX, float& outY)
 {
-    const float a = -r.degrees * 3.14159265358979323846f / 180.0f;
+    const float a = -r.degrees * kPi / 180.0f;
     const float c = std::cos(a), s = std::sin(a);
     const float dx = x - r.dstX, dy = y - r.dstY;
     outX = r.srcX + dx * c - dy * s;
@@ -2181,6 +2230,25 @@ bool uiElementEffectiveEnabledWalk(const UIWidgetTree& tree, const UIElement& e)
 
 namespace
 {
+// The corner radius a freshly made element of `type` starts with; false when
+// there is no element of that type. Built once per type and thread, not once
+// per element saved: collaboration sends every edited element through here.
+bool defaultCornerRadius(UIWidgetType type, glm::vec4& out)
+{
+    struct Slot { bool known = false, exists = false; glm::vec4 radius{ 0.0f }; };
+    thread_local std::array<Slot, 256> cache;
+    Slot& slot = cache[static_cast<std::size_t>(type)];
+    if (!slot.known)
+    {
+        const std::unique_ptr<UIElement> proto = makeUIElement(type);
+        slot.known  = true;
+        slot.exists = proto != nullptr;
+        if (proto) slot.radius = proto->cornerRadius;
+    }
+    out = slot.radius;
+    return slot.exists;
+}
+
 nlohmann::json uiElementToJsonObj(const UIElement& e)
 {
     nlohmann::json o = {
@@ -2262,8 +2330,8 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     // one number for all four corners keeps the ORIGINAL scalar key (so a widget
     // that only ever had one rounding still saves and loads exactly as it did),
     // and only genuinely different corners cost the four-element array.
-    if (const std::unique_ptr<UIElement> proto = makeUIElement(e.type());
-        !proto || e.cornerRadius != proto->cornerRadius)
+    glm::vec4 defaultRadius{};
+    if (!defaultCornerRadius(e.type(), defaultRadius) || e.cornerRadius != defaultRadius)
     {
         if (e.uniformCornerRadius()) o["cornerRadius"] = e.cornerRadius.x;
         else o["cornerRadii"] = { e.cornerRadius.x, e.cornerRadius.y,
@@ -2576,8 +2644,10 @@ int uiApplyWidgetParams(UIWidgetTree& tree,
     return written;
 }
 
-bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
-                          UIWidgetParamRead paramRead)
+namespace
+{
+bool widgetTreeFromText(const std::string& json, UIWidgetTree& out,
+                        UIWidgetParamRead paramRead)
 {
     nlohmann::json j;
     if (!HE::graph::parseGraphObject(json, j)) return false;
@@ -2667,6 +2737,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
 
     for (const auto& o : j.value("elements", nlohmann::json::array()))
     {
+        if (!o.is_object()) continue;
         std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
         HE::graph::bumpNextId(t.nextId, e->id);
         // ── Migration: a negative parent means the canvas ────────────────────
@@ -2704,7 +2775,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
         label->name     = "Label";
         // Centred and stretched across the button, which is exactly where the
         // built-in caption used to be drawn.
-        uiSetAnchorPreset(*label, 15);
+        uiSetAnchorPreset(*label, kUIAnchorFill);
         label->posX = label->posY = 0.0f;
         label->sizeX = label->sizeY = 0.0f;
         // A caption must never swallow the click meant for the button under it.
@@ -2726,6 +2797,23 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
 
     out = std::move(t);
     return true;
+}
+}
+
+bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
+                          UIWidgetParamRead paramRead)
+{
+    // json::value() throws when a key holds the wrong type ("canvasWidth":
+    // "wide"). A hand-edited file is not a reason to take the frame path down
+    // with it; the document is refused whole and `out` stays as it was.
+    try
+    {
+        return widgetTreeFromText(json, out, paramRead);
+    }
+    catch (const nlohmann::json::exception&)
+    {
+        return false;
+    }
 }
 
 // ── The text catalog ─────────────────────────────────────────────────────────
@@ -2763,7 +2851,7 @@ std::vector<std::string> UITextCatalog::languageNames() const
 {
     std::vector<std::string> out;
     out.reserve(languages.size());
-    for (const auto& [name, entries] : languages) { (void)entries; out.push_back(name); }
+    for (const auto& lang : languages) out.push_back(lang.first);
     return out;
 }
 
@@ -2795,6 +2883,12 @@ bool uiTextCatalogFromJson(const std::string& json, UITextCatalog& out)
     if (!HE::graph::parseGraphObject(json, j)) return false;
     UITextCatalog c;
     c.fallback = j.value("fallback", std::string("en"));
+    // set() scans the language list and then every entry of the language, which
+    // makes n keys cost n^2 compares. The load keeps its own position index
+    // instead: first-write order and "a repeated key overwrites in place" are
+    // exactly what set() does.
+    std::unordered_map<std::string, std::size_t> languageAt;                  // → c.languages
+    std::vector<std::unordered_map<std::string, std::size_t>> entryAt;        // per language
     if (const auto langs = j.find("languages"); langs != j.end() && langs->is_array())
         for (const auto& l : *langs)
         {
@@ -2808,7 +2902,17 @@ bool uiTextCatalogFromJson(const std::string& json, UITextCatalog& out)
                 if (!item.is_object()) continue;
                 const std::string k = item.value("key", std::string());
                 if (k.empty()) continue;
-                c.set(name, k, item.value("text", std::string()));
+                std::string text = item.value("text", std::string());
+                const auto [lang, newLanguage] = languageAt.try_emplace(name, c.languages.size());
+                if (newLanguage)
+                {
+                    c.languages.push_back({ name, {} });
+                    entryAt.emplace_back();
+                }
+                auto& list = c.languages[lang->second].second;
+                const auto [entry, newKey] = entryAt[lang->second].try_emplace(k, list.size());
+                if (newKey) list.emplace_back(k, std::move(text));
+                else        list[entry->second].second = std::move(text);
             }
         }
     out = std::move(c);
@@ -3000,7 +3104,16 @@ std::unique_ptr<UIElement> uiElementFromJson(const std::string& json)
 {
     nlohmann::json j;
     if (!HE::graph::parseGraphObject(json, j)) return nullptr;
-    return uiElementFromJsonObj(j);
+    // A mistyped field ("id": "x") makes json::value() throw; the callers are
+    // fed by collaboration peers and hand-edited files, so it is a refusal.
+    try
+    {
+        return uiElementFromJsonObj(j);
+    }
+    catch (const nlohmann::json::exception&)
+    {
+        return nullptr;
+    }
 }
 
 // ── A selection of several elements (docs/he-apps-plan.md D4) ────────────────

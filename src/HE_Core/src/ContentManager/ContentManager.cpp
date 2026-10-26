@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <unordered_set>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -141,9 +142,8 @@ static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::s
 		if (HE::decodeMeshSections(c->data, a.sections)
 		    && HE::meshSectionsCover(a.sections, a.indices.size()))
 			return;
-		HE_LOG_WARN(Asset, "%s",
-			("ContentManager: '" + relativePath + "' carries a section table that does not cover its "
-			 + std::to_string(a.indices.size()) + " indices — drawing it as one section").c_str());
+		HE_LOG_WARN(Asset, "ContentManager: '%s' carries a section table that does not cover its "
+			"%zu indices — drawing it as one section", relativePath.c_str(), a.indices.size());
 	}
 	a.sections.clear();
 	MeshSection whole;
@@ -1030,31 +1030,41 @@ std::string ContentManager::resolveSavePath(const std::string& relativePath) con
 	return m_contentRoot + "/" + relativePath;
 }
 
+namespace {
+
+// `absolutePath` relative to `root`, or empty when it is not below it (the
+// relative path then starts with '.') or the paths cannot be related.
+std::filesystem::path relativeBelowRoot(const std::string& absolutePath,
+                                        const std::filesystem::path& root)
+{
+	std::error_code ec;
+	std::filesystem::path rel = std::filesystem::relative(absolutePath, root, ec);
+	if (ec || rel.empty() || rel.native()[0] == '.') return {};
+	return rel;
+}
+
+} // namespace
+
 bool ContentManager::isEngineDefaultPath(const std::string& absolutePath) const
 {
 	if (m_engineContentRoot.empty()) return false;
-	std::error_code ec;
-	const std::filesystem::path rel = std::filesystem::relative(absolutePath, m_engineContentRoot, ec);
-	return !ec && !rel.empty() && rel.native()[0] != '.';
+	return !relativeBelowRoot(absolutePath, m_engineContentRoot).empty();
 }
 
 bool ContentManager::isEngineOverridePath(const std::string& absolutePath) const
 {
 	if (m_contentRoot.empty()) return false;
 	const std::string overrideRoot = m_contentRoot + "/" + kEnginePrefix; // "<contentRoot>/Engine/"
-	std::error_code ec;
-	const std::filesystem::path rel = std::filesystem::relative(absolutePath, overrideRoot, ec);
-	return !ec && !rel.empty() && rel.native()[0] != '.';
+	return !relativeBelowRoot(absolutePath, overrideRoot).empty();
 }
 
 std::string ContentManager::toContentRelativePath(const std::string& absolutePath) const
 {
 	namespace fs = std::filesystem;
-	std::error_code ec;
 	if (!m_engineContentRoot.empty())
 	{
-		const fs::path rel = fs::relative(absolutePath, m_engineContentRoot, ec);
-		if (!ec && !rel.empty() && rel.native()[0] != '.')
+		const fs::path rel = relativeBelowRoot(absolutePath, m_engineContentRoot);
+		if (!rel.empty())
 			return std::string(kEnginePrefix) + rel.generic_string();
 	}
 	// The SFTP download cache is a third EngineContent root (see
@@ -1064,28 +1074,24 @@ std::string ContentManager::toContentRelativePath(const std::string& absolutePat
 	// relative path here, and an empty path loads nothing: the tab opened and
 	// stayed blank. Checked after the shipped default, mirroring the read-side
 	// precedence exactly.
-	ec.clear();
 	{
 		const fs::path cacheRoot = GlobalState::engineContentCacheDir();
 		if (!cacheRoot.empty())
 		{
-			const fs::path rel = fs::relative(absolutePath, cacheRoot, ec);
-			if (!ec && !rel.empty() && rel.native()[0] != '.')
+			const fs::path rel = relativeBelowRoot(absolutePath, cacheRoot);
+			if (!rel.empty())
 				return std::string(kEnginePrefix) + rel.generic_string();
 		}
 	}
-	ec.clear();
-	const fs::path rel = fs::relative(absolutePath, m_contentRoot, ec);
-	if (ec || rel.empty() || rel.native()[0] == '.') return std::string(); // outside both roots
-	return rel.generic_string();
+	return relativeBelowRoot(absolutePath, m_contentRoot).generic_string(); // empty when outside both roots
 }
 
 // ─── loadAsset ────────────────────────────────────────────────────────────────
 HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 {
 	HE_PROFILE_SCOPE_N("ContentManager::load");
-	if (isLoaded(relativePath))
-		return m_pathToUUID.at(relativePath);
+	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
+		return loaded->second;
 
 	// Packed build: resolve the content path to a mounted-pak UUID via the asset
 	// index, then load that entry synchronously (registers it under its embedded
@@ -1196,9 +1202,9 @@ void ContentManager::loadPathAsync(const std::string& relativePath,
                                     std::function<void(HE::UUID)> callback,
                                     const LoadRequester& requester)
 {
-	if (isLoaded(relativePath))
+	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
 	{
-		if (callback) callback(m_pathToUUID.at(relativePath));
+		if (callback) callback(loaded->second);
 		return;
 	}
 
@@ -1243,6 +1249,13 @@ std::shared_ptr<HAsset::Reader> splitChunks(std::vector<uint8_t>& bytes)
 	if (!reader->openData(bytes)) return nullptr;
 	std::vector<uint8_t>().swap(bytes);
 	return reader;
+}
+
+// The synthetic m_pendingPaths key of a UUID-addressed load, e.g. "pak://12-34":
+// `scheme` keeps it apart from real relative paths and from the other scheme.
+std::string uuidCoalesceKey(const char* scheme, HE::UUID id)
+{
+	return std::string(scheme) + std::to_string(id.hi) + "-" + std::to_string(id.lo);
 }
 
 } // namespace
@@ -1536,9 +1549,11 @@ std::vector<std::string> ContentManager::asyncInFlightPaths(size_t max) const
 		paths.assign(m_pendingPaths.begin(), m_pendingPaths.end());
 	}
 	// Sorted before cut, so the same loads show from frame to frame rather than
-	// whichever the hash set happens to hand out first.
-	std::sort(paths.begin(), paths.end());
-	if (paths.size() > max) paths.resize(max);
+	// whichever the hash set happens to hand out first. Only the first `max` have
+	// to be in order (the keys of a set are distinct, so the cut is unambiguous).
+	const size_t keep = std::min(max, paths.size());
+	std::partial_sort(paths.begin(), paths.begin() + static_cast<std::ptrdiff_t>(keep), paths.end());
+	paths.resize(keep);
 	return paths;
 }
 
@@ -1595,8 +1610,7 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 		// cannot collide with a pak UUID or a real relative path.
 		if (const auto r = m_remoteAssets.find(id); r != m_remoteAssets.end())
 		{
-			const std::string coalesceKey =
-				"remote://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+			const std::string coalesceKey = uuidCoalesceKey("remote://", id);
 			{
 				std::unique_lock<std::mutex> lock(m_pendingMutex);
 				if (m_pendingPaths.count(coalesceKey))
@@ -1627,8 +1641,7 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 	}
 	// Coalesce by a synthetic per-UUID key so it shares the pending set with the
 	// path-based overload without colliding with real relative paths.
-	const std::string coalesceKey =
-		"pak://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+	const std::string coalesceKey = uuidCoalesceKey("pak://", id);
 	{
 		std::unique_lock<std::mutex> lock(m_pendingMutex);
 		if (m_pendingPaths.count(coalesceKey))
@@ -2670,15 +2683,22 @@ const EnumTypeAsset*      ContentManager::getEnumType(HE::UUID id) const      { 
 EnumTypeAsset*            ContentManager::getEnumTypeMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_enumTypeAssets, id); }
 MaterialAsset*            ContentManager::getMaterialMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_materialAssets, id); }
 
+// The parameter slot named `name` (graphParamNames is in slot order), -1 when the
+// material has no such parameter.
+static int graphParamSlot(const MaterialAsset& m, const std::string& name)
+{
+	for (size_t i = 0; i < m.graphParamNames.size(); ++i)
+		if (m.graphParamNames[i] == name) return static_cast<int>(i);
+	return -1;
+}
+
 bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
                                       const float* values, int count)
 {
 	if (!values || count < 1) return false;
 	MaterialAsset* a = getMaterialMutable(id);
 	if (!a) return false;
-	int slot = -1;
-	for (size_t i = 0; i < a->graphParamNames.size(); ++i)
-		if (a->graphParamNames[i] == name) { slot = (int)i; break; }
+	const int slot = graphParamSlot(*a, name);
 	if (slot < 0) return false;
 	// Each parameter occupies one vec4 (4 floats) in shaderParamData, in slot order.
 	const size_t base = (size_t)slot * 4;
@@ -2691,9 +2711,7 @@ bool ContentManager::getMaterialParam(HE::UUID id, const std::string& name, floa
 {
 	const MaterialAsset* a = getMaterial(id);
 	if (!a) return false;
-	int slot = -1;
-	for (size_t i = 0; i < a->graphParamNames.size(); ++i)
-		if (a->graphParamNames[i] == name) { slot = (int)i; break; }
+	const int slot = graphParamSlot(*a, name);
 	if (slot < 0) return false;
 	const size_t base = (size_t)slot * 4;
 	for (int i = 0; i < 4; ++i)
@@ -3064,9 +3082,7 @@ size_t ContentManager::retargetAssetReferencesOnDisk(const std::vector<MoveSpec>
 		const std::string what = moves.size() == 1
 			? ("'" + firstOld + "' to '" + lastNew + "'")
 			: (std::to_string(moves.size()) + " moved paths");
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: retargeted " + std::to_string(rewritten) +
-			 " file(s) for " + what).c_str());
+		HE_LOG_INFO(Asset, "ContentManager: retargeted %zu file(s) for %s", rewritten, what.c_str());
 	}
 	return rewritten;
 }
@@ -3174,6 +3190,24 @@ ContentManager::ContentManager(std::string contentPath)
 	: m_contentRoot(std::move(contentPath)) { initDefaultAssets(); }
 ContentManager::~ContentManager() = default;
 
+namespace {
+
+// "hi:lo" (two decimal numbers) as written into the pak's path and type indexes.
+// Not-a-UUID text is reported as empty, never thrown: a bad entry is skipped.
+std::optional<HE::UUID> parseHiLoId(const std::string& text)
+{
+	const auto colon = text.find(':');
+	if (colon == std::string::npos) return std::nullopt;
+	HE::UUID id{};
+	try {
+		id.hi = std::stoull(text.substr(0, colon));
+		id.lo = std::stoull(text.substr(colon + 1));
+	} catch (...) { return std::nullopt; }
+	return id;
+}
+
+} // namespace
+
 bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 {
 	auto reader = std::make_unique<HpakReader>();
@@ -3207,16 +3241,10 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 					for (auto it = j.begin(); it != j.end(); ++it)
 					{
 						if (!it.value().is_string()) continue;
-						const std::string v = it.value().get<std::string>();
-						const auto colon = v.find(':');
-						if (colon == std::string::npos) continue;
-						HE::UUID id{};
-						try {
-							id.hi = std::stoull(v.substr(0, colon));
-							id.lo = std::stoull(v.substr(colon + 1));
-						} catch (...) { continue; }
-						m_pakPathIndex[it.key()] = id;
-						m_pakIdToAddressedPath[id] = it.key();
+						const std::optional<HE::UUID> id = parseHiLoId(it.value().get<std::string>());
+						if (!id) continue;
+						m_pakPathIndex[it.key()] = *id;
+						m_pakIdToAddressedPath[*id] = it.key();
 					}
 			}
 		}
@@ -3244,14 +3272,8 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 						// Mirror image of the path index: here the "hi:lo" is the KEY
 						// and the value is the AssetType as a number.
 						if (!it.value().is_number_unsigned()) continue;
-						const std::string& idKey = it.key();
-						const auto colon = idKey.find(':');
-						if (colon == std::string::npos) continue;
-						HE::UUID id{};
-						try {
-							id.hi = std::stoull(idKey.substr(0, colon));
-							id.lo = std::stoull(idKey.substr(colon + 1));
-						} catch (...) { continue; }
+						const std::optional<HE::UUID> id = parseHiLoId(it.key());
+						if (!id) continue;
 						const auto t = static_cast<HE::AssetType>(it.value().get<uint32_t>());
 						// Unknown says nothing a missing entry does not already say
 						// (assetType() reports Unknown either way). A value from a
@@ -3259,7 +3281,7 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 						// kept as-is and simply never equals any type a caller asks
 						// for — no range check needed to make that safe.
 						if (t == HE::AssetType::Unknown) continue;
-						m_assetTypeIndex[id] = t;
+						m_assetTypeIndex[*id] = t;
 					}
 			}
 		}

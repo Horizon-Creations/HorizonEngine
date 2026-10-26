@@ -28,6 +28,64 @@ namespace
 		}
 		return HE::uiSortKey(e.layer, depth);
 	}
+
+	// The first element on the way up from `elemId` (itself included) for which
+	// `pred` holds, or nullptr. Bounded by the element count + 1 rather than a
+	// fixed depth, so a parent cycle in a hand-edited file ends the walk and a
+	// deep but honest chain is not cut short.
+	template <class Pred>
+	const HE::UIElement* firstAncestorWhere(const HE::UIWidgetTree& tree, int elemId, Pred pred)
+	{
+		int guard = 0;
+		for (const HE::UIElement* e = tree.find(elemId);
+		     e && guard++ < static_cast<int>(tree.elements.size()) + 1;
+		     e = tree.find(e->parentId))
+		{
+			if (pred(*e)) return e;
+			if (e->parentId == 0) break;
+		}
+		return nullptr;
+	}
+
+	// A rect in a canvas's units, in the pixels of the render target: the four
+	// products the hit tests and the draw all need, written once so they cannot
+	// drift apart.
+	HE::UIWidgetRect toPixelRect(const HE::UIWidgetRect& r, const HE::UIWidgetCanvas& canvas)
+	{
+		return { r.x * canvas.scaleX, r.y * canvas.scaleY,
+		         r.w * canvas.scaleX, r.h * canvas.scaleY };
+	}
+
+	struct AnyWidget
+	{
+		template <class T> bool operator()(const T&) const { return true; }
+	};
+
+	// The visible widgets of one window, ordered by zOrder, ties in creation
+	// order (stable): topmost first for the pointer and the keyboard, bottom
+	// first for the draw. `keep` narrows it further. A template because Instance
+	// is private to WidgetManager.
+	template <class Vec, class Keep = AnyWidget>
+	auto widgetsByZ(Vec& all, uint32_t windowId, bool topFirst, Keep keep = Keep{})
+	{
+		using Ptr = decltype(&all.front());
+		std::vector<Ptr> sorted;
+		sorted.reserve(all.size());
+		for (auto& w : all)
+			if (w.visible && w.windowId == windowId && keep(w)) sorted.push_back(&w);
+		std::stable_sort(sorted.begin(), sorted.end(),
+			[topFirst](Ptr a, Ptr b)
+			{ return topFirst ? a->zOrder > b->zOrder : a->zOrder < b->zOrder; });
+		return sorted;
+	}
+
+	// How many parents `e` has: how far down the tree it sits.
+	int ancestorDepth(const HE::UIWidgetTree& tree, const HE::UIElement& e)
+	{
+		int depth = 0;
+		firstAncestorWhere(tree, e.parentId, [&depth](const HE::UIElement&) { ++depth; return false; });
+		return depth;
+	}
 }
 
 WidgetManager::Instance* WidgetManager::find(int id)
@@ -815,14 +873,28 @@ HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager
 	// The theme, then materials and fonts, for what just arrived — a row grafted
 	// in at run time is themed like one that was there from the start, and by
 	// the HOST widget's theme: what is grafted in becomes part of this instance,
-	// so it wears what the instance wears.
-	HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
+	// so it wears what the instance wears. Only what arrived: the ref and the ids
+	// the graft renumbered into this tree (see embedWidgetRefs). The rest of the
+	// page was dressed already, and dressing it again per row would be quadratic
+	// in rows and would undo what a script has set since.
+	int lo = w.embeds[embedsBefore].idOffset, hi = w.embeds[embedsBefore].idMax;
+	for (std::size_t i = embedsBefore + 1; i < w.embeds.size(); ++i)
+	{
+		lo = std::min(lo, w.embeds[i].idOffset);
+		hi = std::max(hi, w.embeds[i].idMax);
+	}
+	const auto arrived = [&](const HE::UIElement& e)
+	{ return e.id == refId || (e.id > lo && e.id <= hi); };
+	const HE::UITheme& theme = themeFor(w);
+	for (const auto& e : w.tree.elements)
+		if (e && arrived(*e)) HE::uiApplyTheme(*e, theme, themeMode());
 	// …and it speaks the language the instance speaks, for the same reason: a
 	// row grafted in after a language switch must not come up in the one it was
 	// authored in.
-	HE::uiApplyTextCatalog(w.tree, m_catalog, m_language);
 	for (const auto& e : w.tree.elements)
-		if (e && e->id > 0) refreshElementAssets(w, *e);
+		if (e && arrived(*e)) HE::uiApplyTextCatalog(*e, m_catalog, m_language);
+	for (const auto& e : w.tree.elements)
+		if (e && e->id > 0 && arrived(*e)) refreshElementAssets(w, *e);
 
 	// PreConstruct, then Construct, last, like createWidget does: the row is
 	// fully in the tree before its own logic can look at it. The ids are copied
@@ -860,6 +932,23 @@ HorizonCode::InstanceId WidgetManager::childInstance(int widgetId,
 	return 0;
 }
 
+namespace
+{
+	// The scripts of a widget in the order they must be destroyed: the embeds
+	// that pass `keep`, innermost first (nested embeds have larger offsets), then
+	// the host. An embedded script acts on the host's tree, so it must not
+	// outlive the script that owns that tree. A template because Instance is
+	// private to WidgetManager.
+	template <class Inst, class Keep>
+	void appendTeardownOrder(std::vector<HorizonCode::InstanceId>& out, const Inst& w,
+	                         HorizonCode::InstanceId host, Keep keep)
+	{
+		for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
+			if (keep(*it)) out.push_back(it->scriptId);
+		out.push_back(host);
+	}
+}
+
 bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 {
 	Instance* w = find(widgetId);
@@ -878,10 +967,9 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 	// that range too, so they are caught by the same test.
 	const int rootElem = it->rootElem;
 	const int lo = it->idOffset, hi = it->idMax;
-	std::vector<HorizonCode::InstanceId> dying{ child };
-	for (const Instance::Embed& em : w->embeds)
-		if (em.scriptId != child && em.idOffset >= lo && em.idMax <= hi)
-			dying.push_back(em.scriptId);
+	std::vector<HorizonCode::InstanceId> dying;
+	appendTeardownOrder(dying, *w, child, [&](const Instance::Embed& em)
+		{ return em.scriptId != child && em.idOffset >= lo && em.idMax <= hi; });
 
 	w->tree.elements.erase(
 		std::remove_if(w->tree.elements.begin(), w->tree.elements.end(),
@@ -897,9 +985,7 @@ bool WidgetManager::removeChild(int widgetId, HorizonCode::InstanceId child)
 			return std::find(dying.begin(), dying.end(), em.scriptId) != dying.end();
 		}), w->embeds.end());
 
-	// Innermost first, so a nested row's script never outlives the tree it acts
-	// on — the same order destroyWidget uses.
-	for (auto d = dying.rbegin(); d != dying.rend(); ++d) rt().destroy(*d);
+	for (const HorizonCode::InstanceId d : dying) rt().destroy(d);
 
 	// A destroyed row must not keep the hover, the press or the focus. Nothing
 	// says which element they were on any more, and a stale id would light up
@@ -951,7 +1037,7 @@ const WidgetManager::Grab* WidgetManager::topGrabOf(uint32_t windowId) const
 	for (auto it = m_grabs.rbegin(); it != m_grabs.rend(); ++it)
 	{
 		const Instance* gw = it->widget != 0
-			? const_cast<WidgetManager*>(this)->find(it->widget) : nullptr;
+			? find(it->widget) : nullptr;
 		const uint32_t gwin = gw ? gw->windowId : 0u;
 		if (gwin == windowId) return &*it;
 	}
@@ -960,7 +1046,7 @@ const WidgetManager::Grab* WidgetManager::topGrabOf(uint32_t windowId) const
 
 bool WidgetManager::takesInput(int widgetId) const
 {
-	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Instance* w = find(widgetId);
 	const Grab* top = topGrabOf(w ? w->windowId : 0u);
 	// Nothing is up in this widget's window: everybody there hears everything,
 	// which is how it was before layers existed and is still the overwhelmingly
@@ -979,7 +1065,7 @@ bool WidgetManager::takesInput(int widgetId) const
 // window land on the main window's button of the same name.
 bool WidgetManager::inPointerWindow(int widgetId) const
 {
-	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Instance* w = find(widgetId);
 	return (w ? w->windowId : 0u) == m_pointerWindow;
 }
 
@@ -1000,7 +1086,7 @@ float WidgetManager::displayScale(uint32_t windowId) const
 uint32_t WidgetManager::keyboardWindow() const
 {
 	if (m_focusWidget != 0)
-		if (const Instance* w = const_cast<WidgetManager*>(this)->find(m_focusWidget))
+		if (const Instance* w = find(m_focusWidget))
 			return w->windowId;
 	return m_pointerWindow;
 }
@@ -1017,7 +1103,7 @@ bool WidgetManager::hasModalIn(uint32_t windowId) const
 	{
 		if (g.kind != Grab::Kind::Modal) continue;
 		const Instance* gw = g.widget != 0
-			? const_cast<WidgetManager*>(this)->find(g.widget) : nullptr;
+			? find(g.widget) : nullptr;
 		if ((gw ? gw->windowId : 0u) == windowId) return true;
 	}
 	return false;
@@ -1073,24 +1159,41 @@ void WidgetManager::popGrabAt(std::size_t index, bool notify)
 	if (notify && w) rt().fireOnDismissed(w->scriptId);
 }
 
+namespace
+{
+	// Templates on the instance and grab types because both are private to
+	// WidgetManager; the callers name them, these only deduce them.
+	template <class G, class K, class Inst>
+	void fillGrab(G& g, K kind, int widgetId, int focusWidget, const Inst* focused, int zOrder)
+	{
+		g.kind = kind;
+		g.widget = widgetId;
+		g.prevFocusWidget = focusWidget;
+		if (focused) g.prevFocusElem = focused->focusedElem;
+		g.prevZOrder = zOrder;
+	}
+
+	template <class Inst>
+	void raiseAboveAll(const std::vector<Inst>& all, Inst& w)
+	{
+		int top = w.zOrder;
+		for (const Inst& other : all) top = std::max(top, other.zOrder);
+		w.zOrder = top + 1;
+	}
+}
+
 void WidgetManager::showModal(int widgetId)
 {
 	Instance* w = find(widgetId);
 	if (!w) { HE_LOG_WARN(Widget, "showModal: no widget with id %d", widgetId); return; }
 
 	Grab g;
-	g.kind = Grab::Kind::Modal;
-	g.widget = widgetId;
-	g.prevFocusWidget = m_focusWidget;
-	if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
-	g.prevZOrder = w->zOrder;
+	fillGrab(g, Grab::Kind::Modal, widgetId, m_focusWidget, find(m_focusWidget), w->zOrder);
 
 	// On TOP, always. A dialog that blocks the input while drawing behind
 	// something is the worst of both, and it is exactly what happens when an
 	// author sets a z-order once and forgets about it.
-	int top = w->zOrder;
-	for (const Instance& other : m_instances) top = std::max(top, other.zOrder);
-	w->zOrder = top + 1;
+	raiseAboveAll(m_instances, *w);
 	w->visible = true;
 	// The focus belongs to the dialog from here on — the trap is that
 	// takesInput() refuses everything else, and this is the other half: the
@@ -1107,11 +1210,7 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 	if (!w) { HE_LOG_WARN(Widget, "openPopup: no widget with id %d", widgetId); return; }
 
 	Grab g;
-	g.kind = Grab::Kind::Popup;
-	g.widget = widgetId;
-	g.prevFocusWidget = m_focusWidget;
-	if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
-	g.prevZOrder = w->zOrder;
+	fillGrab(g, Grab::Kind::Popup, widgetId, m_focusWidget, find(m_focusWidget), w->zOrder);
 
 	// Where it goes is decided HERE, not by how the asset was authored. A
 	// convention ("anchor your root top-left") is a convention the first user
@@ -1142,9 +1241,7 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 		e.posY = std::clamp(y / sy, 0.0f, maxY);
 	}
 
-	int top = w->zOrder;
-	for (const Instance& other : m_instances) top = std::max(top, other.zOrder);
-	w->zOrder = top + 1;
+	raiseAboveAll(m_instances, *w);
 	w->visible = true;
 	m_focusWidget = widgetId;
 	w->focusedElem = 0;
@@ -1647,8 +1744,7 @@ void WidgetManager::selectListRow(Instance& w, HE::UIListView& lv, int item)
 
 void WidgetManager::selectTreeNode(Instance& w, HE::UITreeView& tv, int node)
 {
-	if (node >= tv.nodeCount()) node = -1;
-	if (node < 0) node = -1;
+	if (node < 0 || node >= tv.nodeCount()) node = -1;
 	if (node == tv.selected) return;
 	tv.selected = node;
 	m_visualDirty = true;
@@ -1753,15 +1849,18 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 	if (it != m_columnInfo.end()) return &it->second;
 
 	ColumnInfo info;
+	// Every way out stores what it has, even "no columns": the next call for the
+	// path then answers from the cache instead of reading the asset again.
+	auto remember = [&] { return &(m_columnInfo[path] = std::move(info)); };
 	const HE::UUID id = content.loadAsset(path);
 	const UIWidgetAsset* asset = id == HE::UUID{} ? nullptr : content.getWidget(id);
-	if (!asset) return &(m_columnInfo[path] = info);
+	if (!asset) return remember();
 	// A COPY of the JSON before anything else touches the content manager: its
 	// getters point into a dense vector, and the next load moves what they show.
 	const std::string treeJson = asset->treeJson;
 
 	HE::UIWidgetTree sub;
-	if (!HE::uiWidgetTreeFromJson(treeJson, sub)) return &(m_columnInfo[path] = info);
+	if (!HE::uiWidgetTreeFromJson(treeJson, sub)) return remember();
 	info.canvasW = sub.canvasWidth;
 
 	// The root: the one element with no parent. More than one and there is no
@@ -1775,7 +1874,7 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 		HE_LOG_WARN(Widget, "Table row '%s': its root has to be a single Horizontal Box "
 		                    "for the header to name columns — showing none",
 		            path.c_str());
-		return &(m_columnInfo[path] = info);
+		return remember();
 	}
 	if (const auto* box = dynamic_cast<const HE::UIBoxBase*>(root))
 	{
@@ -1806,12 +1905,12 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 			                    "table writes — showing no columns",
 			            path.c_str(), ep->name.c_str());
 			info.titles.clear();
-			return &(m_columnInfo[path] = info);
+			return remember();
 		}
 		info.titles.push_back(ep->name);
 	}
 
-	return &(m_columnInfo[path] = info);
+	return remember();
 }
 
 void WidgetManager::syncLists(Instance& w)
@@ -1968,25 +2067,31 @@ void WidgetManager::syncLists(Instance& w)
 			const float availT = std::max(0.0f, lv->columnCanvasW
 			                                    - 2.0f * lv->columnPadding
 			                                    - (cols - 1) * lv->columnSpacing);
-			for (HE::UIWidgetRef* r : rows)
+			// The row's root box, then its cells. Both walks are over the host
+			// tree: a grafted row lives in it like anything else. One pass over
+			// the tree for each level, not two scans per row: with a few hundred
+			// rows in a tree of thousands of elements that was a million
+			// comparisons on every sync.
+			std::unordered_map<int, const HE::UIElement*> rowRootOf;   // ref id -> its first child
+			for (HE::UIWidgetRef* r : rows) rowRootOf.emplace(r->id, nullptr);
+			for (const auto& ep : w.tree.elements)
+				if (ep)
+					if (const auto root = rowRootOf.find(ep->parentId);
+					    root != rowRootOf.end() && !root->second)
+						root->second = ep.get();
+			std::unordered_map<int, int> cellsWritten;   // row root id -> cells so far
+			for (const auto& [refId, rowRoot] : rowRootOf)
+				if (rowRoot) cellsWritten.emplace(rowRoot->id, 0);
+			for (const auto& ep : w.tree.elements)
 			{
-				// The row's root box, then its cells. Both walks are over the
-				// host tree: a grafted row lives in it like anything else.
-				const HE::UIElement* rowRoot = nullptr;
-				for (const auto& ep : w.tree.elements)
-					if (ep && ep->parentId == r->id) { rowRoot = ep.get(); break; }
-				if (!rowRoot) continue;
-				int c = 0;
-				for (const auto& ep : w.tree.elements)
+				if (!ep) continue;
+				const auto written = cellsWritten.find(ep->parentId);
+				if (written == cellsWritten.end() || written->second >= cols) continue;
+				const float want = availT * fr[static_cast<std::size_t>(written->second++)];
+				if (std::abs(ep->sizeX - want) > 0.01f)
 				{
-					if (!ep || ep->parentId != rowRoot->id) continue;
-					if (c >= cols) break;
-					const float want = availT * fr[static_cast<std::size_t>(c++)];
-					if (std::abs(ep->sizeX - want) > 0.01f)
-					{
-						ep->sizeX = want;
-						m_visualDirty = true;
-					}
+					ep->sizeX = want;
+					m_visualDirty = true;
 				}
 			}
 		}
@@ -2062,11 +2167,9 @@ void WidgetManager::destroyWidget(int id)
 		// the very next loop iteration reads a freed embed list.
 		std::vector<HorizonCode::InstanceId> scripts;
 		scripts.reserve(w->embeds.size() + 1);
-		// Embedded widgets are instances of their own and have to go with it,
-		// innermost first — otherwise their scripts outlive the tree they act on.
-		for (auto it = w->embeds.rbegin(); it != w->embeds.rend(); ++it)
-			scripts.push_back(it->scriptId);
-		scripts.push_back(w->scriptId);
+		// Embedded widgets are instances of their own and have to go with it.
+		appendTeardownOrder(scripts, *w, w->scriptId,
+		                    [](const Instance::Embed&) { return true; });
 		for (const HorizonCode::InstanceId sid : scripts)
 			rt().destroy(sid); // fires "Destruct", then drops it
 	}
@@ -2103,10 +2206,8 @@ void WidgetManager::clear()
 	ids.reserve(m_instances.size());
 	for (const auto& w : m_instances)
 	{
-		// Embedded instances first: they act on the host's tree.
-		for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
-			ids.push_back(it->scriptId);
-		ids.push_back(w.scriptId);
+		appendTeardownOrder(ids, w, w.scriptId,
+		                    [](const Instance::Embed&) { return true; });
 	}
 	if (!ids.empty()) HE_LOG_DEBUG(Widget, "Clearing %zu live widget(s)", ids.size());
 	for (const HorizonCode::InstanceId sid : ids) rt().destroy(sid);
@@ -2137,17 +2238,29 @@ void WidgetManager::hideWidget(int id)
 // what they leave behind.
 void WidgetManager::releaseGrabsOf(int widgetId)
 {
-	bool any = false;
-	for (const Grab& g : m_grabs) if (g.widget == widgetId) { any = true; break; }
-	if (!any) return;
-	// Top down, so a popup opened FROM this dialog goes before the dialog does.
-	for (int guard = 0; guard < 64 && !m_grabs.empty(); ++guard)
+	const Instance* self = find(widgetId);
+	const uint32_t window = self ? self->windowId : 0u;
+	auto windowOf = [this](const Grab& g)
 	{
-		const bool mine = m_grabs.back().widget == widgetId;
-		popGrab(/*notify=*/mine);
-		bool more = false;
-		for (const Grab& g : m_grabs) if (g.widget == widgetId) { more = true; break; }
-		if (!more) break;
+		const Instance* gw = g.widget != 0 ? find(g.widget) : nullptr;
+		return gw ? gw->windowId : 0u;
+	};
+	// Each pass pops one grab, so the stack's size bounds the loop; a handler
+	// that opens the widget again from OnDismissed adds a grab per pop and must
+	// not keep it going forever.
+	for (std::size_t budget = m_grabs.size(); budget > 0; --budget)
+	{
+		std::size_t lowest = m_grabs.size();
+		for (std::size_t i = 0; i < m_grabs.size(); ++i)
+			if (m_grabs[i].widget == widgetId) { lowest = i; break; }
+		if (lowest == m_grabs.size()) return;
+		// Top down, so a popup opened FROM this dialog goes before the dialog does.
+		// Only this window's: a popup in another window is not the dialog's to
+		// close, and hiding it here would drop it without a word.
+		std::size_t at = m_grabs.size();
+		while (--at > lowest)
+			if (m_grabs[at].widget == widgetId || windowOf(m_grabs[at]) == window) break;
+		popGrabAt(at, /*notify=*/m_grabs[at].widget == widgetId);
 	}
 }
 void WidgetManager::setZOrder(int id, int z) { if (Instance* w = find(id)) { w->zOrder = z; m_visualDirty = true; } }
@@ -2529,10 +2642,14 @@ void WidgetManager::tick(float dt)
 	// (the "animate() replaces a clip's track" half of the rule) has the last
 	// word on the property they share within the same frame.
 	if (dt > 0.0f)
+	{
+		// (widget id, clip) of every clip that ended, fired after the walk: a
+		// graph reacting to one may create or destroy widgets, which moves
+		// m_instances under the reference the walk holds.
+		std::vector<std::pair<int, std::string>> clipsEnded;
 		for (auto& w : m_instances)
 		{
 			if (w.playing.empty()) continue;
-			std::vector<std::string> ended;
 			std::vector<HE::UIAnimSample> samples;
 			for (auto& p : w.playing)
 			{
@@ -2574,18 +2691,21 @@ void WidgetManager::tick(float dt)
 					if (p.restore)
 						for (const HE::UIAnimTrack& tr : c->tracks)
 							restoreOne(w, tr.element + offset, tr.prop);
-					ended.push_back(p.clip);
+					clipsEnded.emplace_back(w.id, p.clip);
 					p.t = -1.0f;
 				}
 			}
 			w.playing.erase(std::remove_if(w.playing.begin(), w.playing.end(),
 				[](const Instance::Playing& p){ return p.t < 0.0f; }), w.playing.end());
 			m_visualDirty = true;
-			// Fired after the list is settled, like the tweens': a graph reacting
-			// to the end may start the next clip on this same widget.
-			for (const std::string& name : ended)
-				rt().fireOnClipFinished(w.scriptId, name);
 		}
+		// Fired after the lists are settled, like the tweens': a graph reacting
+		// to the end may start the next clip on this same widget. The widget is
+		// found again for each, since an earlier handler may have destroyed it.
+		for (const auto& [widgetId, name] : clipsEnded)
+			if (const Instance* w = find(widgetId))
+				rt().fireOnClipFinished(w->scriptId, name);
+	}
 
 	// ── Animations ───────────────────────────────────────────────────────────
 	// Before the Tick events, so a graph that reads a property in its Tick reads
@@ -2594,14 +2714,15 @@ void WidgetManager::tick(float dt)
 	// Hidden widgets animate too, on purpose: "fade it in" is started on the
 	// frame the thing appears, and half of those start while it is still hidden.
 	if (dt > 0.0f)
+	{
+		// Finished ones are collected and fired AFTER both loops: a graph
+		// reacting to one may start the next animation on this same widget, or
+		// create or destroy widgets, and either moves what the loops hold.
+		struct Finished { int widgetId; int elem; std::string prop; };
+		std::vector<Finished> finished;
 		for (auto& w : m_instances)
 		{
 			if (w.anims.empty()) continue;
-			// Finished ones are collected and fired AFTER the loop: a graph
-			// reacting to one may start the next animation on this same widget,
-			// and appending to a vector being iterated is how that ends in a
-			// dangling reference.
-			std::vector<std::pair<int, std::string>> finished;
 			for (auto& a : w.anims)
 			{
 				a.t += dt;
@@ -2616,17 +2737,21 @@ void WidgetManager::tick(float dt)
 				// that was ever seen. It costs a branch.
 				e->setPropAny(a.prop, done ? a.to
 					: animLerp(a.from, a.to, HE::uiEaseApply(a.ease, a.t / a.dur)));
-				if (done) finished.emplace_back(a.elem, a.prop);
+				if (done) finished.push_back({ w.id, a.elem, a.prop });
 			}
 			w.anims.erase(std::remove_if(w.anims.begin(), w.anims.end(),
 				[](const Instance::Anim& a){ return a.t >= a.dur; }), w.anims.end());
 			m_visualDirty = true;
-			for (const auto& [elem, prop] : finished)
-			{
-				const ScriptTarget t = scriptTargetFor(w, elem);
-				rt().fireOnAnimationFinished(t.scriptId, t.elem, prop);
-			}
 		}
+		// The widget is found again for each: an earlier handler may have
+		// destroyed it, and scriptTargetFor needs the live Instance.
+		for (const Finished& f : finished)
+			if (const Instance* w = find(f.widgetId))
+			{
+				const ScriptTarget t = scriptTargetFor(*w, f.elem);
+				rt().fireOnAnimationFinished(t.scriptId, t.elem, f.prop);
+			}
+	}
 
 	// ── Transitions between states ───────────────────────────────────────────
 	// Hover and press stop being a switch and become a journey, for the elements
@@ -2764,14 +2889,24 @@ void WidgetManager::tick(float dt)
 		if (m_tooltipHeld >= kTooltipDelay) { m_tooltipUp = true; m_visualDirty = true; }
 	}
 
-	for (auto& w : m_instances)
+	// By id, not by reference: a Tick is graph code and may create or destroy
+	// widgets (its own included), which moves m_instances. A widget made during
+	// the walk first ticks next frame; one destroyed during it is skipped.
+	std::vector<int> widgetIds;
+	widgetIds.reserve(m_instances.size());
+	for (const Instance& w : m_instances) widgetIds.push_back(w.id);
+	std::vector<HorizonCode::InstanceId> scripts;
+	for (const int widgetId : widgetIds)
 	{
-		if (!w.visible) continue;
-		rt().fireTick(w.scriptId, dt);
+		const Instance* w = find(widgetId);
+		if (!w || !w->visible) continue;
 		// Embedded widgets tick as themselves — a health bar that animates has
-		// its own Tick, and it must run while the page holding it is up.
-		for (const Instance::Embed& em : w.embeds)
-			rt().fireTick(em.scriptId, dt);
+		// its own Tick, and it must run while the page holding it is up. All the
+		// scripts are read now, before the first of them runs.
+		scripts.clear();
+		scripts.push_back(w->scriptId);
+		for (const Instance::Embed& em : w->embeds) scripts.push_back(em.scriptId);
+		for (const HorizonCode::InstanceId sid : scripts) rt().fireTick(sid, dt);
 	}
 }
 
@@ -2822,8 +2957,7 @@ namespace
 	{
 		if (canvas.scaleX <= 0.0f || canvas.scaleY <= 0.0f) return false;
 		const HE::UIWidgetRect r = HE::uiElementRect(tree, lv, &canvas);
-		out = { r.x * canvas.scaleX, r.y * canvas.scaleY,
-		        r.w * canvas.scaleX, r.h * canvas.scaleY };
+		out = toPixelRect(r, canvas);
 		return true;
 	}
 
@@ -2840,8 +2974,9 @@ namespace
 		float us = 1.0f, vs = 1.0f;
 		HE::uiElementUnitScale(tree, sp, us, vs, &canvas);
 		const float len = sp.vertical ? r.h : r.w;
-		const float div = std::min(sp.dividerSize * (sp.vertical ? vs : us), len);
-		const float first = sp.clampedRatio(len) * std::max(0.0f, len - div);
+		const float divScale = sp.vertical ? vs : us;
+		const float div = std::min(sp.dividerSize * divScale, len);
+		const float first = sp.clampedRatio(len, divScale) * std::max(0.0f, len - div);
 		const float p  = sp.vertical ? canvasY : canvasX;
 		const float lo = (sp.vertical ? r.y : r.x) + first;
 		return p >= lo && p <= lo + div;
@@ -2907,15 +3042,8 @@ namespace
 	// rows.
 	bool isSelfOrDescendant(const HE::UIWidgetTree& tree, int ancestorId, int elemId)
 	{
-		int guard = 0;
-		for (const HE::UIElement* e = tree.find(elemId);
-		     e && guard++ < static_cast<int>(tree.elements.size()) + 1;
-		     e = tree.find(e->parentId))
-		{
-			if (e->id == ancestorId) return true;
-			if (e->parentId == 0) break;
-		}
-		return false;
+		return firstAncestorWhere(tree, elemId,
+			[ancestorId](const HE::UIElement& e) { return e.id == ancestorId; }) != nullptr;
 	}
 }
 
@@ -2953,7 +3081,7 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
                                                     float x, float y)
 {
 	PointerHit hit;
-	long topKey = 0;
+	long long topKey = 0;
 	for (auto& w : m_instances)
 	{
 		if (!w.visible) continue;
@@ -3011,7 +3139,7 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 			const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
 			if (testX < x0 || testX > x1 || testY < y0 || testY > y1)
 				continue;
-			const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
+			const long long key = (long long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 			if (!hit.widget || key >= topKey)
 			{
 				hit.widget = &w; hit.elem = e.id;
@@ -3093,7 +3221,7 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 	// one scan would never see it, and making it hit-testable to be draggable
 	// would swallow the clicks of everything inside it.
 	bool drag = false;
-	long topKey = 0;
+	long long topKey = 0;
 	for (auto& w : m_instances)
 	{
 		if (!w.visible || !takesInput(w.id) || w.windowId != m_pointerWindow) continue;
@@ -3126,7 +3254,7 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 				continue;
 			// Topmost wins, the same key the draw and the hit test rank by: a
 			// dialog laid over the title bar is not a handle for the window.
-			const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
+			const long long key = (long long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 			if (!drag || key >= topKey) { drag = true; topKey = key; }
 		}
 	}
@@ -3329,20 +3457,15 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	{
 		const HE::UIElement* hit = topW->tree.find(topElem);
 		topElem = 0;
-		for (int guard = 0; hit && hit->parentId != 0 && guard < 256; ++guard)
-		{
-			const HE::UIElement* p = topW->tree.find(hit->parentId);
-			if (!p) break;
-			if (isInteractive(*topW, *p))
+		if (hit)
+			if (const HE::UIElement* p = firstAncestorWhere(topW->tree, hit->parentId,
+			        [&](const HE::UIElement& c) { return isInteractive(*topW, c); }))
 			{
 				topElem = p->id;
 				// The cursor comes with the element that took the pointer,
 				// unless the thing under it named one of its own.
 				if (topCursor == HE::UICursor::Default) topCursor = p->hoverCursor;
-				break;
 			}
-			hit = p;
-		}
 	}
 	m_hoverCursor = topCursor; // app maps this to a system cursor
 
@@ -3355,14 +3478,9 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		int tipW = 0, tipE = 0;
 		if (topW && topHit != 0)
 		{
-			int guard = 0;
-			for (const HE::UIElement* e = topW->tree.find(topHit);
-			     e && guard++ < static_cast<int>(topW->tree.elements.size()) + 1; )
-			{
-				if (!e->tooltip.empty()) { tipW = topW->id; tipE = e->id; break; }
-				if (e->parentId == 0) break;
-				e = topW->tree.find(e->parentId);
-			}
+			if (const HE::UIElement* e = firstAncestorWhere(topW->tree, topHit,
+			        [](const HE::UIElement& c) { return !c.tooltip.empty(); }))
+			{ tipW = topW->id; tipE = e->id; }
 		}
 		if (tipW != m_tooltipWidget || tipE != m_tooltipElem)
 		{
@@ -3389,12 +3507,8 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	float     thumbGrab = 0.0f;
 	if (pressEdge)
 	{
-		std::vector<Instance*> byZ;
-		for (auto& w : m_instances)
-			if (w.visible && takesInput(w.id) && w.windowId == m_pointerWindow)
-				byZ.push_back(&w);
-		std::stable_sort(byZ.begin(), byZ.end(),
-			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		const auto byZ = widgetsByZ(m_instances, m_pointerWindow, /*topFirst=*/true,
+			[this](const Instance& w) { return takesInput(w.id); });
 		for (Instance* wp : byZ)
 		{
 			float g = 0.0f;
@@ -3402,6 +3516,13 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			{ thumbW = wp; thumbElem = t; thumbGrab = g; break; }
 		}
 	}
+
+	// The two widgets the loop below has to recognise, as ids: everything from
+	// here on can run graph code, and a handler that creates or destroys a
+	// widget moves m_instances, which makes the pointers above compare equal to
+	// nothing.
+	const int topWId   = topW ? topW->id : 0;
+	const int thumbWId = thumbW ? thumbW->id : 0;
 
 	// ── A press on nothing closes a popup ────────────────────────────────────
 	// That IS the difference between a popup and a modal: one is dismissed by
@@ -3425,19 +3546,16 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	// not a flag on OnClicked: a right-click opens things, it never presses one.
 	if (secondEdge && topW && topHit != 0)
 	{
-		int guard = 0;
-		for (const HE::UIElement* e = topW->tree.find(topHit);
-		     e && guard++ < static_cast<int>(topW->tree.elements.size()) + 1; )
-		{
-			const ScriptTarget t = scriptTargetFor(*topW, e->id);
-			bool listens = false;
-			for (const auto& b : rt().eventBindingsOf(t.scriptId))
-				if (b.name == "OnRightClicked" && (b.elem == 0 || b.elem == t.elem))
-				{ listens = true; break; }
-			if (listens) { rt().fireOnRightClicked(t.scriptId, t.elem); break; }
-			if (e->parentId == 0) break;
-			e = topW->tree.find(e->parentId);
-		}
+		ScriptTarget listener;
+		if (firstAncestorWhere(topW->tree, topHit, [&](const HE::UIElement& e)
+		    {
+			    const ScriptTarget t = scriptTargetFor(*topW, e.id);
+			    for (const auto& b : rt().eventBindingsOf(t.scriptId))
+				    if (b.name == "OnRightClicked" && (b.elem == 0 || b.elem == t.elem))
+				    { listener = t; return true; }
+			    return false;
+		    }))
+			rt().fireOnRightClicked(listener.scriptId, listener.elem);
 	}
 
 	// ── An armed press that has travelled far enough is a drag ───────────────
@@ -3499,9 +3617,18 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		setDragOver(te != 0 ? tw : nullptr, te);
 	}
 
-	for (auto& w : m_instances)
+	// By id, found again for each: a handler (OnClicked, OnHovered...) may create
+	// or destroy widgets, which moves m_instances under a held reference or
+	// iterator. A widget made during the pass is first seen by the next event.
+	std::vector<int> widgetIds;
+	widgetIds.reserve(m_instances.size());
+	for (const Instance& inst : m_instances) widgetIds.push_back(inst.id);
+	for (const int widgetId : widgetIds)
 	{
-		const bool isTop = topW == &w;
+		Instance* current = find(widgetId);
+		if (!current) continue;   // destroyed by an earlier widget's handler
+		Instance& w = *current;
+		const bool isTop = topWId == widgetId;
 		const int  hot   = isTop ? topElem : 0;
 		// Hover, press and focus are DRAWN states (a button lights up, a field
 		// takes the ring), so a change in any of them is a reason to redraw —
@@ -3511,14 +3638,16 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		          wasFocused = w.focusedElem;
 		struct DirtyOnStateChange
 		{
-			WidgetManager& m; const Instance& w;
+			// By id: the handlers this widget's block runs may have moved it.
+			WidgetManager& m; int widgetId;
 			int h, p, f;
 			~DirtyOnStateChange()
 			{
-				if (w.hoveredElem != h || w.pressedElem != p || w.focusedElem != f)
-					m.m_visualDirty = true;
+				if (const Instance* w = m.find(widgetId))
+					if (w->hoveredElem != h || w->pressedElem != p || w->focusedElem != f)
+						m.m_visualDirty = true;
 			}
-		} dirtyGuard{ *this, w, wasHovered, wasPressed, wasFocused };
+		} dirtyGuard{ *this, widgetId, wasHovered, wasPressed, wasFocused };
 		// Typed entry points: the compiled side takes a method, the interpreted
 		// one the same named path as before, and both still reach everyone bound
 		// to this widget's script.
@@ -3598,8 +3727,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			{
 				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
-				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+				const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 				dp->hoverCell = HE::UIDatePicker::cellAt(pxr, mouseX, mouseY);
 			}
 			if (dp->hoverCell != was) m_visualDirty = true;
@@ -3612,7 +3740,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			// the box's content, so a press that lands on it is a press on it —
 			// and letting the element underneath have the same press would
 			// select a row while dragging the thumb past it.
-			const int thumb = thumbW == &w ? thumbElem : 0;
+			const int thumb = thumbWId == widgetId ? thumbElem : 0;
 			if (thumb != 0)
 			{
 				w.draggingScroll = thumb;
@@ -3654,8 +3782,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetCanvas canvas =
 						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ti, &canvas);
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					auto inside = [&](const HE::UIWidgetRect& q)
 					{
 						return mouseX >= q.x && mouseX <= q.x + q.w &&
@@ -3713,8 +3840,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetCanvas canvas =
 						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					const int dir = HE::UIDatePicker::arrowAt(pxr, mouseX, mouseY);
 					if (dir != 0)
 						if (auto* live = dynamic_cast<HE::UIDatePicker*>(w.tree.find(hot)))
@@ -3736,8 +3862,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
 					float us = 1.0f, vs = 1.0f;
 					HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					const auto parts = HE::UIColorPicker::partsIn(
 						pxr, cp->barWidth * canvas.scaleY * vs,
 						cp->gap * canvas.scaleY * vs, cp->showAlpha);
@@ -3768,8 +3893,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 							labels.push_back(cp->name.empty() ? std::string("Page") : cp->name);
 					// In the element's own pixel space, like everything the
 					// shared layout answers in.
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					// The three numbers render() lays the strip out with, and
 					// they have to be the SAME three. Two things were wrong
 					// here: the canvas scale was missing (`pxr` is in canvas
@@ -3932,50 +4056,39 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					// list one you cannot select in — which is precisely the case
 					// B2 and B7 meet in. The hover highlight already walks from
 					// the raw hit for the same reason.
+					const HE::UIElement* onList = firstAncestorWhere(w.tree, isTop ? topHit : 0,
+						[](const HE::UIElement& c) { return dynamic_cast<const HE::UIListView*>(&c) != nullptr; });
+					if (auto* lv = onList ? dynamic_cast<HE::UIListView*>(w.tree.find(onList->id)) : nullptr)
 					{
-						int guard = 0;
-						for (const HE::UIElement* le = w.tree.find(isTop ? topHit : 0);
-						     le && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
+						setFocus(w.id, lv->id);
+						// The HEADER first, and instead of the rows. A
+						// press in the band is never a row: rowAt says
+						// -1 up there, and letting that through would
+						// clear the selection every time somebody
+						// reached for a column title.
+						const HE::UIWidgetCanvas canvas =
+							resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
+						HE::UIWidgetRect pxr{};
+						HE::UIListView::HeaderHit hh;
+						if (listPixelRect(w.tree, *lv, canvas, pxr))
+							hh = lv->headerAtPoint(pxr, mouseX, mouseY);
+						if (!hh.inBand)
+							selectListRow(w, *lv,
+								listRowAtPointer(w.tree, *lv, canvas, mouseY));
+						else if (hh.divider && lv->resizableColumns)
 						{
-							if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(le->id)))
-							{
-								setFocus(w.id, lv->id);
-								// The HEADER first, and instead of the rows. A
-								// press in the band is never a row: rowAt says
-								// -1 up there, and letting that through would
-								// clear the selection every time somebody
-								// reached for a column title.
-								const HE::UIWidgetCanvas canvas =
-									resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
-								HE::UIWidgetRect pxr{};
-								HE::UIListView::HeaderHit hh;
-								if (listPixelRect(w.tree, *lv, canvas, pxr))
-									hh = lv->headerAtPoint(pxr, mouseX, mouseY);
-								if (hh.inBand)
-								{
-									if (hh.divider && lv->resizableColumns)
-									{
-										w.draggingColumn = lv->id;
-										w.columnSeam     = hh.column;
-									}
-									// A seam that cannot be dragged is not a dead
-									// strip: it is part of the title it sits on,
-									// or a table with fixed columns has an
-									// eight-pixel hole beside every one of them.
-									else if (hh.column >= 0)
-									{
-										const ScriptTarget th = scriptTargetFor(w, lv->id);
-										rt().fireOnHeaderClicked(th.scriptId, th.elem,
-										                        hh.column);
-									}
-									break;
-								}
-								selectListRow(w, *lv,
-									listRowAtPointer(w.tree, *lv, canvas, mouseY));
-								break;
-							}
-							if (le->parentId == 0) break;
-							le = w.tree.find(le->parentId);
+							w.draggingColumn = lv->id;
+							w.columnSeam     = hh.column;
+						}
+						// A seam that cannot be dragged is not a dead
+						// strip: it is part of the title it sits on,
+						// or a table with fixed columns has an
+						// eight-pixel hole beside every one of them.
+						else if (hh.column >= 0)
+						{
+							const ScriptTarget th = scriptTargetFor(w, lv->id);
+							rt().fireOnHeaderClicked(th.scriptId, th.elem,
+							                        hh.column);
 						}
 					}
 				}
@@ -4043,7 +4156,8 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
 				const float len = sp->vertical ? r.h : r.w;
-				const float div = std::min(sp->dividerSize * (sp->vertical ? vs : us), len);
+				const float divScale = sp->vertical ? vs : us;
+				const float div = std::min(sp->dividerSize * divScale, len);
 				const float usable = std::max(1.0f, len - div);
 				const float p = (sp->vertical ? mouseY / canvas.scaleY - r.y
 				                              : mouseX / canvas.scaleX - r.x) - div * 0.5f;
@@ -4057,7 +4171,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					sp->ratio = nv;
 					m_visualDirty = true;
 					const ScriptTarget t2 = scriptTargetFor(w, w.draggingSplit);
-					rt().fireOnValueChanged(t2.scriptId, t2.elem, sp->clampedRatio(len));
+					rt().fireOnValueChanged(t2.scriptId, t2.elem, sp->clampedRatio(len, divScale));
 				}
 			}
 		}
@@ -4093,8 +4207,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
-				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+				const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 				const auto parts = HE::UIColorPicker::partsIn(
 					pxr, cp->barWidth * canvas.scaleY * vs,
 					cp->gap * canvas.scaleY * vs, cp->showAlpha);
@@ -4131,8 +4244,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetCanvas canvas =
 						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *e, &canvas);
-					const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect px = toPixelRect(r, canvas);
 					// The pointer minus where on the thumb it took hold IS the
 					// thumb's top, and the offset that puts it there is the
 					// drawing sum read backwards.
@@ -4161,17 +4273,23 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			// the one thing a drag must not do.
 			if (w.pressedElem != 0 && w.pressedElem == hot && !m_dragAteClick)
 				activateElement(w, hot);
-			w.pressedElem    = 0;
-			w.draggingSlider = 0;
-			w.draggingText   = 0;
-			w.draggingSplit  = 0;
-			w.draggingColor  = 0;
-			w.draggingColumn = 0;
-			w.columnSeam     = -1;
+			// Found again: OnClicked is graph code, and opening a dialog from it
+			// is the commonest thing it does — that moves m_instances, so `w`
+			// may no longer be this widget. If a handler destroyed it, there is
+			// nothing left to release.
+			Instance* released = find(widgetId);
+			if (!released) continue;
+			released->pressedElem    = 0;
+			released->draggingSlider = 0;
+			released->draggingText   = 0;
+			released->draggingSplit  = 0;
+			released->draggingColor  = 0;
+			released->draggingColumn = 0;
+			released->columnSeam     = -1;
 			// Let go of the bar and it STAYS: a thumb has been put exactly
 			// where it was wanted, and throwing it on afterwards would undo the
 			// aim the drag just took.
-			w.draggingScroll = 0;
+			released->draggingScroll = 0;
 		}
 	}
 
@@ -4214,15 +4332,9 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 // which is what makes the flag mean something.
 int WidgetManager::dropTargetAt(Instance& w, int hitElem) const
 {
-	int guard = 0;
-	for (const HE::UIElement* e = w.tree.find(hitElem);
-	     e && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
-	{
-		if (e->acceptsDrop) return e->id;
-		if (e->parentId == 0) break;
-		e = w.tree.find(e->parentId);
-	}
-	return 0;
+	const HE::UIElement* e = firstAncestorWhere(w.tree, hitElem,
+		[](const HE::UIElement& c) { return c.acceptsDrop; });
+	return e ? e->id : 0;
 }
 
 // The same walk for the other half of the gesture. Written out rather than
@@ -4230,15 +4342,9 @@ int WidgetManager::dropTargetAt(Instance& w, int hitElem) const
 // questions, and an element is often the answer to one and not the other.
 int WidgetManager::draggableAt(Instance& w, int hitElem) const
 {
-	int guard = 0;
-	for (const HE::UIElement* e = w.tree.find(hitElem);
-	     e && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
-	{
-		if (e->draggable) return e->id;
-		if (e->parentId == 0) break;
-		e = w.tree.find(e->parentId);
-	}
-	return 0;
+	const HE::UIElement* e = firstAncestorWhere(w.tree, hitElem,
+		[](const HE::UIElement& c) { return c.draggable; });
+	return e ? e->id : 0;
 }
 
 void WidgetManager::setDropMark(int widgetId, int elemId)
@@ -4334,10 +4440,6 @@ int WidgetManager::dragTargetUnder(float vpWidth, float vpHeight, float x, float
 	return t;
 }
 
-// ── The end of a carry ───────────────────────────────────────────────────────
-// One place for both endings. Letting go over a target and giving up are the
-// same event with a different answer, and writing them apart is how the two
-// drift until only one of them tells the source it is over.
 // ── What the carry says about itself ─────────────────────────────────────────
 // Its payload, or its name when nobody set one. The fallback is not a nicety —
 // it is what lets a drag between two named panels work without a line of
@@ -4382,6 +4484,10 @@ void WidgetManager::setDragOver(Instance* w, int elem)
 	}
 }
 
+// ── The end of a carry ───────────────────────────────────────────────────────
+// One place for both endings. Letting go over a target and giving up are the
+// same event with a different answer, and writing them apart is how the two
+// drift until only one of them tells the source it is over.
 void WidgetManager::finishDrag(bool accepted, Instance* targetW, int targetElem)
 {
 	// Everything the three events need is resolved HERE, before the first of
@@ -4484,11 +4590,17 @@ void WidgetManager::inputText(const std::string& utf8)
 	// return below goes through it: dropping the selection HAS changed the text
 	// even when the filter then throws the character away, and that used to
 	// leave the field changed with nobody told.
-	auto commit = [&](bool coalesce)
+	// The announcement runs graph code, and a handler may destroy the field, so
+	// it is the last thing this does and nothing touches `ti` after it:
+	// `keepRunOpen` is settled before it fires, and the text is handed over as a
+	// copy because the field's own string dies with the field.
+	auto commit = [&](bool coalesce, bool keepRunOpen = false)
 	{
 		ti->recordEdit(before, HE::UITextInput::EditKind::Insert, coalesce);
+		if (keepRunOpen) ti->openRun = HE::UITextInput::EditKind::Insert;
 		const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
-		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+		const std::string text = ti->text;
+		rt().fireOnTextChanged(t.scriptId, t.elem, text);
 	};
 
 	// Typing over a selection replaces it — the thing every text field does and
@@ -4545,12 +4657,11 @@ void WidgetManager::inputText(const std::string& utf8)
 	// replaced selection each begin their own, because undo should take back a
 	// paste in one step rather than letter by letter.
 	const bool single = HE::uiUtf8Next(add, 0) == add.size();
-	commit(!replaced && single);
 	// …but a keystroke that replaced a selection leaves its run OPEN, so the
 	// letters after it join in. "Select the word, type a new one" is the most
 	// ordinary edit there is and has to come back in one Ctrl+Z; only a paste
 	// closes itself off.
-	if (replaced && single) ti->openRun = HE::UITextInput::EditKind::Insert;
+	commit(!replaced && single, /*keepRunOpen=*/replaced && single);
 }
 
 void WidgetManager::inputComposition(const std::string& utf8, int cursorByte)
@@ -4582,8 +4693,7 @@ bool WidgetManager::focusedFieldRect(float vpWidth, float vpHeight, HE::UIWidget
 	if (!e) return false;
 	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *e, &canvas);
-	out.x = r.x * canvas.scaleX; out.y = r.y * canvas.scaleY;
-	out.w = r.w * canvas.scaleX; out.h = r.h * canvas.scaleY;
+	out = toPixelRect(r, canvas);
 	return true;
 }
 
@@ -4898,8 +5008,7 @@ bool WidgetManager::labelCaretAtPointer(float vpWidth, float vpHeight,
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *lb, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w->tree, *lb, us, vs, &canvas);
-	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+	const HE::UIWidgetRect px = toPixelRect(r, canvas);
 	outOffset = lb->caretAtPoint(px, canvas.scaleY * vs, mouseX, mouseY, m_fontScale);
 	return true;
 }
@@ -5176,18 +5285,20 @@ WidgetManager::StateSnapshot WidgetManager::captureState() const
 int WidgetManager::restoreState(const StateSnapshot& snapshot)
 {
 	int landed = 0;
-	std::unordered_map<std::string, int> seen;
-	// Which live widget answers to which key. Built once rather than searched
-	// per row: a page with a list of a hundred rows is a hundred widgets, and
-	// the snapshot has an entry for each of them.
-	std::vector<std::pair<StateSnapshot::Key, Instance*>> byKey;
+	// Which live widget answers to which key: the copies of each asset in
+	// creation order, so a key (asset, copy) is one hash lookup and an index.
+	// Built once rather than searched per row: a page with a list of a hundred
+	// rows is a hundred widgets, and the snapshot has an entry for each of them.
+	std::unordered_map<std::string, std::vector<Instance*>> copiesOf;
 	for (Instance& w : m_instances)
-		byKey.push_back({ StateSnapshot::Key{ w.assetPath, seen[w.assetPath]++ }, &w });
+		copiesOf[w.assetPath].push_back(&w);
 
 	auto findWidget = [&](const StateSnapshot::Key& k) -> Instance*
 	{
-		for (auto& [key, w] : byKey) if (key == k) return w;
-		return nullptr;
+		const auto it = copiesOf.find(k.asset);
+		if (it == copiesOf.end() || k.copy < 0 ||
+		    static_cast<std::size_t>(k.copy) >= it->second.size()) return nullptr;
+		return it->second[static_cast<std::size_t>(k.copy)];
 	};
 
 	for (const StateSnapshot::Element& row : snapshot.elements)
@@ -5381,8 +5492,7 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 			const HE::UIWidgetCanvas canvas =
 				resolveCanvas(w.tree, w.windowId,m_lastViewportW, m_lastViewportH);
 			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
-			const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-			                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+			const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 			const int cell = HE::UIDatePicker::cellAt(pxr, m_pointerX, m_pointerY);
 			if (cell >= 0)
 			{
@@ -5428,8 +5538,7 @@ std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y
 	const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *t, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w.tree, *t, us, vs, &canvas);
-	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+	const HE::UIWidgetRect px = toPixelRect(r, canvas);
 	return t->linkAt(px, canvas.scaleY * vs, x, y, m_fontScale);
 }
 
@@ -5636,13 +5745,9 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
                                       float mouseX, float mouseY)
 {
 	syncLists();
-	std::vector<Instance*> sorted;
 	// Only the window the pointer is in — this is a gesture aimed at a place,
 	// and a place is in exactly one window.
-	for (auto& w : m_instances)
-		if (w.visible && w.windowId == m_pointerWindow) sorted.push_back(&w);
-	std::stable_sort(sorted.begin(), sorted.end(),
-		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+	const auto sorted = widgetsByZ(m_instances, m_pointerWindow, /*topFirst=*/true);
 
 	for (Instance* wp : sorted)
 	{
@@ -5724,11 +5829,7 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 		if (const Grab* g = topGrabOf(kwin)) { w = find(g->widget); if (!w) return false; }
 		else
 		{
-			std::vector<Instance*> sorted;
-			for (auto& inst : m_instances)
-				if (inst.visible && inst.windowId == kwin) sorted.push_back(&inst);
-			std::stable_sort(sorted.begin(), sorted.end(),
-				[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+			const auto sorted = widgetsByZ(m_instances, kwin, /*topFirst=*/true);
 			w = sorted.empty() ? nullptr : sorted.front();
 			if (!w) return false;
 		}
@@ -5913,12 +6014,8 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	if (!w) w = find(m_focusWidget);
 	if (!w || !w->visible || !takesInput(w->id))
 	{
-		std::vector<Instance*> sorted;
-		for (auto& inst : m_instances)
-			if (inst.visible && inst.windowId == kwin && takesInput(inst.id))
-				sorted.push_back(&inst);
-		std::stable_sort(sorted.begin(), sorted.end(),
-			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		const auto sorted = widgetsByZ(m_instances, kwin, /*topFirst=*/true,
+			[this](const Instance& inst) { return takesInput(inst.id); });
 		w = sorted.empty() ? nullptr : sorted.front();
 	}
 	if (!w) return false;
@@ -6004,22 +6101,14 @@ int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeig
 		if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
 		if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
 		const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
-		const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-		                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+		const HE::UIWidgetRect px = toPixelRect(r, canvas);
 		HE::UIWidgetRect th;
 		if (!HE::uiScrollThumbRect(e, px, th)) continue;
 		if (mouseX < th.x || mouseX > th.x + th.w ||
 		    mouseY < th.y || mouseY > th.y + th.h) continue;
 		// Deepest wins, the same rule the wheel follows: a list inside a list
 		// hands its bar to the one the pointer is actually in.
-		int depth = 0, guard = 0;
-		for (const HE::UIElement* c = &e;
-		     c->parentId != 0 && guard++ < static_cast<int>(w.tree.elements.size()) + 1;)
-		{
-			const HE::UIElement* p = w.tree.find(c->parentId);
-			if (!p) break;
-			++depth; c = p;
-		}
+		const int depth = ancestorDepth(w.tree, e);
 		if (depth > bestDepth) { bestDepth = depth; best = e.id; grabDy = mouseY - th.y; }
 	}
 	return best;
@@ -6037,13 +6126,9 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 
 	// Topmost widget first, and within it the DEEPEST scroll box under the
 	// cursor: a list inside a list scrolls the one the pointer is in.
-	std::vector<Instance*> sorted;
 	// Only the window the pointer is in — this is a gesture aimed at a place,
 	// and a place is in exactly one window.
-	for (auto& w : m_instances)
-		if (w.visible && w.windowId == m_pointerWindow) sorted.push_back(&w);
-	std::stable_sort(sorted.begin(), sorted.end(),
-		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+	const auto sorted = widgetsByZ(m_instances, m_pointerWindow, /*topFirst=*/true);
 
 	for (Instance* wp : sorted)
 	{
@@ -6069,14 +6154,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 			const float x1 = (r.x + r.w) * canvas.scaleX, y1 = (r.y + r.h) * canvas.scaleY;
 			if (mouseX < x0 || mouseX > x1 || mouseY < y0 || mouseY > y1) continue;
 			// Depth = how far down the tree, so the innermost box wins.
-			int depth = 0, guard = 0;
-			for (const HE::UIElement* c = &e;
-			     c->parentId != 0 && guard++ < static_cast<int>(w.tree.elements.size()) + 1;)
-			{
-				const HE::UIElement* p = w.tree.find(c->parentId);
-				if (!p) break;
-				++depth; c = p;
-			}
+			const int depth = ancestorDepth(w.tree, e);
 			if (depth > bestDepth) { bestDepth = depth; best = e.id; }
 		}
 		if (best != 0 && HE::uiScrollBy(w.tree, best, -wheel * kUnitsPerNotch))
@@ -6115,12 +6193,7 @@ void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
 	syncLists();
 
 	// Widgets sorted by zOrder (stable: creation order breaks ties).
-	std::vector<Instance*> sorted;
-	sorted.reserve(m_instances.size());
-	for (auto& w : m_instances)
-		if (w.visible && w.windowId == windowId) sorted.push_back(&w);
-	std::stable_sort(sorted.begin(), sorted.end(),
-		[](const Instance* a, const Instance* b){ return a->zOrder < b->zOrder; });
+	const auto sorted = widgetsByZ(m_instances, windowId, /*topFirst=*/false);
 
 	// Which widget the scrim goes under: the LOWEST modal, so a dialog over a
 	// dialog dims the world once rather than twice as dark. It is emitted by
@@ -6567,7 +6640,7 @@ void WidgetManager::setWidgetWindow(int widgetId, uint32_t windowId)
 
 uint32_t WidgetManager::widgetWindow(int widgetId) const
 {
-	const Instance* w = const_cast<WidgetManager*>(this)->find(widgetId);
+	const Instance* w = find(widgetId);
 	return w ? w->windowId : 0u;
 }
 

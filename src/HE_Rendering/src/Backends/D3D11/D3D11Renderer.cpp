@@ -9,6 +9,7 @@
 #include <Renderer/UIFont.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/MaterialScalars.h>
@@ -2530,12 +2531,7 @@ struct D3D11RendererImpl
         D3D11_MAPPED_SUBRESOURCE im{};
         if (FAILED(ctx->Map(instanceSB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im))) return false;
         auto* dst = static_cast<uint8_t*>(im.pData);
-        for (UINT k = 0; k < count; ++k)
-        {
-            glm::mat4 pair[2];
-            fill(k, pair);
-            std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
-        }
+        RenderSorter::fillInstancePairs(dst, count, fill);
         ctx->Unmap(instanceSB.Get(), 0);
         ctx->VSSetShader(instVS, nullptr, 0);
         ctx->VSSetShaderResources(3, 1, instanceSRV.GetAddressOf());
@@ -4515,6 +4511,7 @@ struct D3D11RendererImpl
     RenderGraph     m_renderGraph;
     CommandBuffer   m_cmds;
     std::vector<uint8_t>  m_visible;
+    FrameCull             m_frameCull;   // refined bounds of the frame's walk, shared by every cull below
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
@@ -6983,11 +6980,12 @@ void D3D11Renderer::DrawScene(int width, int height)
     // that has nothing BUT a trail still has something to draw past here.
     if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
-    for (RenderObject& obj : p.m_renderWorld.objects)
+    const uint64_t walk = p.m_extractor.fullExtractCount();
+    p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
     {
-        if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager))
-            obj.refineWorldBounds(mesh->localBounds);
-    }
+        const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+        return mesh ? &mesh->localBounds : nullptr;
+    });
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
@@ -6998,7 +6996,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     // mirroring GL's UpdateGiAccel placement. No-op when GI is off.
     p.updateGiAccel(m_contentManager, p.m_renderWorld);
 
-    p.m_culler.cull(p.m_renderWorld, p.m_visible);
+    p.m_frameCull.cull(p.m_culler, p.m_renderWorld, walk, p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
@@ -7404,8 +7402,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ctx->RSSetViewports(1, &svp);
                 ctx->OMSetRenderTargets(1, &noRTV, dsv);
                 ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
-                p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
+                p.m_frameCull.cull(p.m_culler, p.m_renderWorld, p.m_extractor.fullExtractCount(), viewProj, p.shadowVisible);
+                p.m_sorter.sortByMesh(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
                 RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
                                                 p.shadowBatches);
                 for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)

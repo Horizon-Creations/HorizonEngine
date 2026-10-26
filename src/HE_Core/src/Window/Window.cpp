@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <SDL3/SDL.h>
 #include "Diagnostics/Log.h"
 #include "Platform/BuildProfile.h"   // HE_FEATURE_TEST_HOOKS: the HE_HIDDEN_WINDOW family
@@ -113,9 +114,13 @@ namespace
             char* end = nullptr;
             const double v = std::strtod(backgroundFps, &end);
             // "0" is the off switch; garbage or a negative rate is not a
-            // request for anything, so it keeps the default.
+            // request for anything, so it keeps the default. A rate so small
+            // that the interval does not fit a uint64 is no request either: the
+            // cast below would be undefined.
             if (end != backgroundFps && v == 0.0) return 0;
-            if (end != backgroundFps && v > 0.0) fps = v;
+            if (end != backgroundFps && v > 0.0 &&
+                1.0e9 / v < static_cast<double>(std::numeric_limits<uint64_t>::max()))
+                fps = v;
         }
         return static_cast<uint64_t>(1.0e9 / fps);
     }
@@ -156,7 +161,14 @@ namespace
         return elapsedNs < intervalNs ? intervalNs - elapsedNs : 0;
     }
 
-    Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
+    Window::Window(const WindowProps& props, bool isPrimary)
+    {
+        m_isPrimary = isPrimary;
+        // A throwing constructor never runs the destructor, so a half-built
+        // window (and the primary's SDL_Init) would be left behind.
+        try { Init(props); }
+        catch (...) { Shutdown(); throw; }
+    }
     Window::~Window()                        { Shutdown(); }
 
     void Window::Init(const WindowProps& requested)
@@ -312,6 +324,7 @@ namespace
         // blurry" or "the viewport is half the window" reports; the display scale
         // beside it is the first thing to check for "everything is tiny", which is
         // the same report one platform further along.
+        const SDL_DisplayID display = SDL_GetDisplayForWindow(m_window);
         HE_LOG_INFO(Window, "%s window created: %ux%u logical, %ux%u pixels, display scale %.2f, "
                             "backend %d, vsync %s, display '%s'",
                     m_isPrimary ? "Primary" : "Secondary", m_width, m_height,
@@ -319,8 +332,7 @@ namespace
                     static_cast<double>(SDL_GetWindowDisplayScale(m_window)),
                     static_cast<int>(props.api),
                     props.vsync ? "on" : "off",
-                    SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window))
-                        ? SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window)) : "?");
+                    SDL_GetDisplayName(display) ? SDL_GetDisplayName(display) : "?");
 
         if (props.api == RendererBackend::OpenGL)
         {
