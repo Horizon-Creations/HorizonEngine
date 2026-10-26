@@ -82,7 +82,13 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
                                   DepthBatchList&              out)
 {
 	out.clear();
-	out.transforms.reserve(sortedIndices.size());
+	// Reserve what the clusters unfold to, not one per object: with foliage the list grew
+	// through every doubling, and each one moved the matrices again (the memmove that
+	// led the 300k profile, docs/perf-audit/frame-parallelism-audit-2026-10-26.md).
+	size_t instances = 0;
+	for (uint32_t idx : sortedIndices)
+		if (idx < world.objects.size()) instances += world.instanceCountOf(world.objects[idx]);
+	out.transforms.reserve(instances);
 	for (uint32_t idx : sortedIndices)
 	{
 		if (idx >= world.objects.size()) continue;

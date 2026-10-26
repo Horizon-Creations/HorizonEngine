@@ -5,6 +5,7 @@
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
+#include <JobSystem/JobSystem.h>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -343,11 +344,29 @@ public:
     // that unfolds a cluster; GeometryPass and RenderSorter::batchDepthRuns call it.
     void appendInstances(const RenderObject& obj, std::vector<glm::mat4>& out) const
     {
+        appendInstanceRange(obj, 0, instanceCountOf(obj), out);
+    }
+
+    // Instances [from, from + n) of obj, for a caller that cuts one cluster across two
+    // draws (an ordinary object is instance 0 of one). A big block unfolds on the job
+    // system's workers: at 300k plants the five unfoldings a frame (three cascades, SSAO,
+    // scene) ran on the main thread with ten workers idle, ~16 ms of matrix products and
+    // copies (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1). Every
+    // instance is still world(i), so the bits are the same on either path.
+    static constexpr uint32_t kParallelUnfoldMin = 4096;
+    void appendInstanceRange(const RenderObject& obj, uint32_t from, uint32_t n,
+                             std::vector<glm::mat4>& out) const
+    {
         const InstanceBlock* b = blockOf(obj);
-        if (!b) { out.push_back(obj.transform); return; }
+        if (!b) { if (n > 0) out.push_back(obj.transform); return; }
         const size_t base = out.size();
-        out.resize(base + b->count);
-        for (uint32_t i = 0; i < b->count; ++i) out[base + i] = b->world(i);
+        out.resize(base + n);
+        glm::mat4* dst = out.data() + base;
+        if (n >= kParallelUnfoldMin)
+            parallel_for(n, [dst, b, from](size_t i) { dst[i] = b->world(from + static_cast<uint32_t>(i)); },
+                         "UnfoldInstances", 1024);
+        else
+            for (uint32_t i = 0; i < n; ++i) dst[i] = b->world(from + i);
     }
 
     // The same walk without materialising a list: call fn(world matrix) per instance.
