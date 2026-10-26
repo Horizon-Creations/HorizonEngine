@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <string_view>
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/AssetFile.h"

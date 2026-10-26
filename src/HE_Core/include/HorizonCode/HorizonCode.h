@@ -134,7 +134,7 @@ struct Value
     // isArray + items = struct elements.
     std::string        typeName;
 
-    static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
+    static Value ofFloat(float v)            { Value r; r.f = v;  return r; }
     static Value ofDouble(double v)          { Value r; r.type = PinType::Double; r.d = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }
     static Value ofInt(int v)                { Value r; r.type = PinType::Int;    r.i = v;  return r; }

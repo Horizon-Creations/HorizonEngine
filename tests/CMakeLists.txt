@@ -1507,6 +1507,17 @@ if(WIN32)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src)
 endif()
 
+# The Vulkan shader manager (review 4, findings 385/386): compiled straight into
+# the test exe, same reasoning as the D3D managers above — load() needs no
+# VkDevice to exercise its id allocation and file-to-SPIR-V-bytes path, so this
+# runs without a Vulkan driver, CI included.
+if(HE_VULKAN_ENABLED)
+    target_sources(he_tests PRIVATE
+        test_vulkan_shader_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Vulkan/VulkanShaderManager.cpp)
+    target_link_libraries(he_tests PRIVATE Vulkan::Vulkan)
+endif()
+
 # One ctest entry per test SOURCE FILE, not one for the whole binary.
 #
 # The suite is wait-bound, not CPU-bound: it spawns real git processes, kills

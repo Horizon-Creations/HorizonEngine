@@ -5910,9 +5910,10 @@ struct D3D11RendererImpl
         pendingMatInval.clear();
         for (const HE::UUID& id : pendingTexInval)
         {
-            graphTexCache.erase(graphTexKey(id, {}));
-            graphTexCache.erase(graphTexKey(id, {}) + "#arr"); // its texture-array upload
-            uiTexCache.erase(graphTexKey(id, {}));
+            std::string key = graphTexKey(id, {});
+            graphTexCache.erase(key);
+            graphTexCache.erase(key + "#arr"); // its texture-array upload
+            uiTexCache.erase(key);
         }
         pendingTexInval.clear();
         for (const HE::UUID& id : pendingMeshInval)

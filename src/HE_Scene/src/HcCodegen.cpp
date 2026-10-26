@@ -5208,13 +5208,14 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
 }
 
 std::filesystem::path findBuiltArtifact(const std::filesystem::path& buildDir,
-                                        const std::vector<std::string>& artifactNames)
+                                        const std::vector<std::string>& artifactNames,
+                                        const std::string& configuration)
 {
     namespace fs = std::filesystem;
     // Single-config generators put the library flat in the build dir; MSVC and
     // Xcode put it under the configuration's own folder.
     for (const std::string& n : artifactNames)
-        for (const fs::path& dir : { buildDir, buildDir / "Release" })
+        for (const fs::path& dir : { buildDir, buildDir / configuration })
         {
             std::error_code ec;
             if (fs::exists(dir / n, ec)) return dir / n;
@@ -5355,7 +5356,7 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
     }
     std::string configure =
         cmake + " -S " + shq(spec.sourceDir) + " -B " + shq(buildDir) + gen.args +
-        " -DCMAKE_BUILD_TYPE=Release";
+        " -DCMAKE_BUILD_TYPE=" + spec.configuration;
     // Quoted as ONE argument each: a define's value is a path (or a whole
     // semicolon-separated list of them) and may contain spaces.
     for (const std::string& d : spec.defines)
@@ -5367,7 +5368,7 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
             : "cmake configure failed (see " + out.logFile.string() + ")";
         return out;
     }
-    const std::string build = cmake + " --build " + shq(buildDir) + " --config Release";
+    const std::string build = cmake + " --build " + shq(buildDir) + " --config " + spec.configuration;
     if (runStreaming(build, onLine, captured, spec.cancel) != 0)
     {
         flushLog();
@@ -5377,7 +5378,7 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
     }
     flushLog();
 
-    if (fs::path found = findBuiltArtifact(buildDir, names); !found.empty())
+    if (fs::path found = findBuiltArtifact(buildDir, names, spec.configuration); !found.empty())
     {
         out.artifact = std::move(found);
         out.ok       = true;

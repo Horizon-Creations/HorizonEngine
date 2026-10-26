@@ -278,6 +278,11 @@ struct DylibBuildSpec
     // because a generated codegen project and a user's game project are told
     // about the engine in different ways.
     std::vector<std::string> defines;
+    // The configuration cmake builds (--config) and the artifact is looked for
+    // under. A game compiled against a Debug engine (the dev lib set of a Debug
+    // editor tree, which links the debug CRT) has to be Debug too: a Release exe
+    // beside it crashes on start inside VCRUNTIME140D.
+    std::string              configuration = "Release";
     // What the "nothing was produced" message calls the missing library.
     std::string              what = "HorizonCodeGen library";
     // Set from another thread to stop the run: checked per output line, the
@@ -289,11 +294,12 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
                         const std::function<void(const std::string& line)>& onLine = {});
 
 // Where buildDylib would find an already-built artifact, without building one:
-// the same two directories (flat, then Release/) and the same name list. Empty
-// path when none of them is there. The editor needs this to load a module that
-// was built earlier in the session — or in a previous one.
+// the same two directories (flat, then <configuration>/) and the same name list.
+// Empty path when none of them is there. The editor needs this to load a module
+// that was built earlier in the session — or in a previous one.
 std::filesystem::path findBuiltArtifact(const std::filesystem::path& buildDir,
-                                        const std::vector<std::string>& artifactNames);
+                                        const std::vector<std::string>& artifactNames,
+                                        const std::string& configuration = "Release");
 
 // ── A C++ project's native GameLogic module ─────────────────────────────────
 // Where it is, what it is called and how it is built. It lives HERE rather than
