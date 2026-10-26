@@ -8902,17 +8902,31 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		built.reserve(vertexCount * 8);
 		for (size_t v = 0; v < vertexCount; ++v)
 		{
-			built.insert(built.end(),
-				{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+			built.push_back(asset->vertices[v*3+0]);
+			built.push_back(asset->vertices[v*3+1]);
+			built.push_back(asset->vertices[v*3+2]);
 			if (v * 3 + 2 < asset->normals.size())
-				built.insert(built.end(),
-					{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+			{
+				built.push_back(asset->normals[v*3+0]);
+				built.push_back(asset->normals[v*3+1]);
+				built.push_back(asset->normals[v*3+2]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 			if (v * 2 + 1 < asset->uvs.size())
-				built.insert(built.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+			{
+				built.push_back(asset->uvs[v*2+0]);
+				built.push_back(asset->uvs[v*2+1]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 		}
 		vtx = &built;
 		mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
