@@ -1078,6 +1078,7 @@ std::string assembleDomain(DomainInput input, const MatTessSettings& t,
 {
     const bool eval = (input == DomainInput::TessEval);
     std::string src = "#version 450\n";
+    src.reserve(8192); // measured final size up to ~6.4 KB across the fixture materials
     if (eval)
         src += std::string("layout(triangles, fractional_odd_spacing, ") + (upperLeft ? "cw" : "ccw") + ") in;\n"
                "layout(location = 0) in vec3 tcNormal[];\n"
