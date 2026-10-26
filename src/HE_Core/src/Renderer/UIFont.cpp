@@ -1064,9 +1064,18 @@ std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font, const st
     if (!font.ok || sizePx <= 0.0f || wrapWidth <= 0.0f) return uiTextVisualLines(text);
     const float scale = sizePx / font.bakePx;
     auto isBlank = [](char c) { return c == ' ' || c == '\t'; };
+    // `w` plus the advances of the bytes [from, to), one character after the
+    // other, which is how lineWidth sums them. Both ends sit on character
+    // boundaries, so decoding in place reads what decoding a copy would.
+    auto extendWidth = [&](float w, std::size_t from, std::size_t to)
+    {
+        while (from < to)
+            if (const BakedGlyph* g = font.glyph(uiUtf8Decode(text, from)))
+                w += g->xadvance * scale;
+        return w;
+    };
     // Width of a byte run, measured exactly the way the glyphs are emitted.
-    auto widthOf = [&](std::size_t from, std::size_t to)
-    { return lineWidth(font, text.substr(from, to - from), scale); };
+    auto widthOf = [&](std::size_t from, std::size_t to) { return extendWidth(0.0f, from, to); };
 
     const std::vector<UITextLineRange> hard = uiTextLineRanges(text);
     std::vector<UITextVisualLine> out;
@@ -1106,11 +1115,14 @@ std::vector<UITextVisualLine> uiTextWrapRanges(const BakedUIFont& font, const st
                 // break by bytes would leave half an umlaut on each row, and
                 // neither half is anything.
                 std::size_t k = uiUtf8Next(text, segStart), fit = k;
+                float prefixW = widthOf(segStart, k);   // the row so far, up to k
                 while (k < wEnd)
                 {
-                    if (widthOf(segStart, k) > wrapWidth) break;
+                    if (prefixW > wrapWidth) break;
                     fit = k;
-                    k = uiUtf8Next(text, k);
+                    const std::size_t next = uiUtf8Next(text, k);
+                    prefixW = extendWidth(prefixW, k, next);
+                    k = next;
                 }
                 out.push_back({ segStart, fit, fit, false });
                 segStart = visEnd = cur = fit;
