@@ -2779,6 +2779,29 @@ TEST_CASE("uiHcValueToProp follows HorizonCode's coercion rule")
     CHECK(HE::uiHcValueToProp(HCV::ofString("x"), HE::UIPropType::Float).f == doctest::Approx(0.0f));
 }
 
+TEST_CASE("uiHcValueToProp converts every Float/Double/Int/Bool pair, and the target's own raw field otherwise")
+{
+    using HCV = HorizonCode::Value;
+    using T   = HE::UIPropType;
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(2.5),  T::Float).f == 2.5f);
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(false),  T::Float).f == 0.0f);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(1.25f), T::Float).f == 1.25f);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-2.7f), T::Int).i == -2);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(9.99), T::Int).i == 9);
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(true),   T::Int).i == 1);
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(-4),      T::Int).i == -4);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(0),       T::Bool).b == false);
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(-3),      T::Bool).b == true);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(0.0),  T::Bool).b == false);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(1e-9), T::Bool).b == true);
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(true),   T::Bool).b == true);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofString("x"),  T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofString("x"),  T::Bool).b == false);
+}
+
 TEST_CASE("uiHcValueToProp passes ARRAYS through uncoerced")
 {
     // REGRESSION: arrays are never scalar-coerced (HorizonCode.cpp `coerce`, and
