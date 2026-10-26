@@ -1,0 +1,3 @@
+temp-home.log:[20:43:36.153] [ INFO] [Asset      ] [Main    ] [f      3] TEMP235 water material: getMaterial=0x1047b9830 isLoaded=1
+temp-lake.log:[20:43:11.127] [ INFO] [Asset      ] [Main    ] [f      3] TEMP235 water material: getMaterial=0x0 isLoaded=1
+temp-plain_lake.log:[20:43:17.124] [ INFO] [Asset      ] [Main    ] [f      3] TEMP235 water material: getMaterial=0x0 isLoaded=1

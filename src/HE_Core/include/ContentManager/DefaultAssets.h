@@ -80,17 +80,28 @@ constexpr int kEditorIconTextureSize = 64;
 // ── Engine materials (FILES, not registered here) ───────────────────────────
 // Unlike everything above, these are NOT created by initDefaultAssets: they
 // live as .hasset files in EditorDeps/EngineContent/Materials, generated and
-// committed by mat_gen (UUID block hi = 0x400, entry index + 1 … append only).
+// committed by mat_gen (UUID block hi = 0x600, entry index + 1 … append only).
 // A file is what the Content Browser and the material picker list and what an
 // export ships; a mem:// default would be invisible to both. The constant is
 // here so code can find one by UUID once its file is loaded — registering the
 // same UUID in memory as well would collide with the file.
+//
+// The block is 0x600 and not 0x400 because 0x400..0x411 are landscape_tex_gen's
+// textures: the ContentManager keeps ONE entry per UUID whatever the asset type,
+// so a loaded T_Landscape_Grass_Albedo (0x400) left ensureResident(water) true
+// with no material behind it and the surface drew the white default (Thema 230).
 
 // Water: lit, translucent node-graph material with three animated wave trains,
 // depth tint, Fresnel, foam and caustics, 16 parameters for the Inspector (the
 // waves are bombed on a hex grid so a big surface does not tile).
 // Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
-constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
+constexpr UUID kEngineWaterMaterialId = { 0x0000000000000600ULL, 0x0000000000000001ULL };
+
+// What the water material was called before it moved out of the textures' block.
+// A scene saved up to then names it by this id; SceneSerializer maps it onto
+// kEngineWaterMaterialId when it reads a material reference. Only ever a material
+// slot: {0x400, 1} as a TEXTURE reference is T_Landscape_Grass_Albedo and stays.
+constexpr UUID kLegacyEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
 
 // ── Engine meshes (FILES, not registered here) ──────────────────────────────
 // The primitives under EditorDeps/EngineContent/Meshes ("Engine/Meshes/<Name>.hasset"),

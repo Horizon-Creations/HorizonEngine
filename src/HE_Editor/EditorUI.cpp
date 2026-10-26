@@ -3033,7 +3033,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		// Rows whose verb follows the state, like the ImGui rows' labels.
 		MacMenuBar::setItemTitle(MC::ToggleLock,
-			(ctx.world && sceneTabActiveNow && ViewportPanel::entityActionState(ctx).primaryLocked)
+			(ctx.world && sceneTabActiveNow && ViewportPanel::primaryLocked(ctx))
 				? "Unlock" : "Lock");
 		MacMenuBar::setRecentProjects(recentProjects());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )

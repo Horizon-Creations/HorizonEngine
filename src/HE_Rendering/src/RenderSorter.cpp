@@ -41,6 +41,34 @@ void RenderSorter::sort(const RenderWorld&          world,
 		outSortedIndices.push_back(k.index);
 }
 
+void RenderSorter::sortByMesh(const RenderWorld&          world,
+                              const std::vector<uint8_t>& visible,
+                              std::vector<uint32_t>&       outSortedIndices)
+{
+	m_keys.clear();
+	m_keys.reserve(world.objects.size());
+	for (uint32_t i = 0; i < world.objects.size(); ++i)
+	{
+		if (i < visible.size() && !visible[i])
+			continue;
+		const RenderObject& o = world.objects[i];
+		m_keys.push_back(SortKey{ o.meshAssetId.hi, o.meshAssetId.lo, 0.0f, i });
+	}
+
+	std::sort(m_keys.begin(), m_keys.end(),
+		[](const SortKey& a, const SortKey& b)
+		{
+			if (a.meshHi != b.meshHi) return a.meshHi < b.meshHi;
+			if (a.meshLo != b.meshLo) return a.meshLo < b.meshLo;
+			return a.index < b.index;
+		});
+
+	outSortedIndices.clear();
+	outSortedIndices.reserve(m_keys.size());
+	for (const SortKey& k : m_keys)
+		outSortedIndices.push_back(k.index);
+}
+
 void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
                                       std::vector<const DrawCall*>& outOpaque,
                                       std::vector<const DrawCall*>& outTransparent,
@@ -82,7 +110,17 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
                                   DepthBatchList&              out)
 {
 	out.clear();
-	out.transforms.reserve(sortedIndices.size());
+	// Two phases: the runs and where each object's instances go (serial, no matrix touched),
+	// then the matrices into one array sized once, on the job system's workers. With foliage the
+	// list used to grow through every doubling while each cluster unfolded on the main thread,
+	// half of the 300k frame (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
+	// An ordinary object's one matrix is copied right here; only clusters become pieces.
+	size_t upper = 0;
+	for (uint32_t idx : sortedIndices)
+		if (idx < world.objects.size()) upper += world.instanceCountOf(world.objects[idx]);
+	out.transforms.resize(upper);
+	std::vector<RenderWorld::InstancePiece> pieces;
+	size_t total = 0;
 	for (uint32_t idx : sortedIndices)
 	{
 		if (idx >= world.objects.size()) continue;
@@ -96,8 +134,10 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 		// its bucket. A depth-only pass has no per-instance state, so a cluster joins
 		// the run exactly as that many ordinary objects of the same mesh would.
 		uint32_t left = world.instanceCountOf(obj);
-		size_t   pos  = out.transforms.size();
-		world.appendInstances(obj, out.transforms);
+		size_t   pos  = total;
+		if (obj.isCluster()) world.addInstancePiece(pieces, obj, 0, left, pos);
+		else                 out.transforms[pos] = obj.transform;
+		total += left;
 
 		// Extend the current run when the mesh matches; the sorter grouped by
 		// mesh id, so a change here means a genuinely new mesh. A run holds at most
@@ -120,6 +160,8 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 			left -= take;
 		}
 	}
+	out.transforms.resize(total);   // the filters dropped what the upper bound counted
+	world.writeInstancePieces(pieces, out.transforms.data());
 }
 
 bool RenderSorter::depthInstancingEnabled()

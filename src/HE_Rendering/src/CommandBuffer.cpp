@@ -17,6 +17,11 @@ void CommandBuffer::recordDraw(const DrawCall& call)
 	m_drawCalls.push_back(call);
 }
 
+void CommandBuffer::recordDraw(DrawCall&& call)
+{
+	m_drawCalls.push_back(std::move(call));
+}
+
 void CommandBuffer::recordSkinnedDraw(const SkinnedDrawCall& call)
 {
 	m_skinnedDrawCalls.push_back(call);

@@ -1827,4 +1827,76 @@ TEST_CASE("Water surface: a surface that already exists is given its material ba
     rig.update();
     CHECK(reg.get<MaterialComponent>(e).materialAssetId == HE::kEngineWaterMaterialId);
 }
+
+// ── The water material has an id of its own (Thema 230 Schritt 2) ────────────
+// The water material was {0x400, 1}, the id of T_Landscape_Grass_Albedo, and the
+// ContentManager keeps ONE entry per id whatever the type. With that texture
+// resident (any project that has the landscape textures) ensureResident(water)
+// said yes, getMaterial(water) said null and the surface drew the white default,
+// with nothing in the log.
+TEST_CASE("Water surface: a landscape texture on the water material's old id does not take the material away")
+{
+    Rig rig;
+    rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+    TextureAsset grass;
+    grass.id   = HE::kLegacyEngineWaterMaterialId;   // T_Landscape_Grass_Albedo's real id
+    grass.name = "T_Landscape_Grass_Albedo";
+    REQUIRE(rig.cm.registerTexture(grass) == HE::kLegacyEngineWaterMaterialId);
+
+    const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 20 }, { -20, 20 } };
+    addLake(rig.tc(), poly, 2.0f);
+    rig.update();
+    REQUIRE(rig.surfaces().size() == 1);
+
+    // A material, not a texture, answers to the water's id ...
+    const MaterialAsset* water = rig.cm.getMaterial(HE::kEngineWaterMaterialId);
+    REQUIRE(water);
+    CHECK_FALSE(water->customShaderFragGlsl.empty());   // what the renderer draws with; empty = the white default
+    CHECK(rig.world.registry().get<MaterialComponent>(rig.surfaces()[0]).materialAssetId == HE::kEngineWaterMaterialId);
+    // ... and the texture keeps its own.
+    CHECK(rig.cm.getTexture(HE::kLegacyEngineWaterMaterialId) != nullptr);
+    CHECK(rig.cm.getMaterial(HE::kLegacyEngineWaterMaterialId) == nullptr);
+}
 #endif
+
+TEST_CASE("Water material id: a scene saved under the old id still gets the water material")
+{
+    CHECK(HE::kEngineWaterMaterialId != HE::kLegacyEngineWaterMaterialId);
+    // 0x400..0x41F is landscape_tex_gen's block (textures, M_AutoLandscape): one id, one asset.
+    CHECK((HE::kEngineWaterMaterialId.hi < 0x400 || HE::kEngineWaterMaterialId.hi > 0x41F));
+
+    HorizonWorld world;
+    auto& reg = world.registry();
+    const HE::UUID other{ 0x1234, 0x5678 };
+    const Entity e = world.createEntity("Plane");
+    MaterialComponent m;
+    m.materialAssetId = HE::kLegacyEngineWaterMaterialId;
+    m.slotOverrides   = { HE::kLegacyEngineWaterMaterialId, other, HE::UUID{} };
+    reg.emplace<MaterialComponent>(e, m);
+    const Entity f = world.createEntity("Other");
+    MaterialComponent mo;
+    mo.materialAssetId = other;
+    reg.emplace<MaterialComponent>(f, mo);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld world2;
+    REQUIRE(ser.loadFromMemory(world2, bytes));
+
+    int seen = 0;
+    for (auto [en, mat] : world2.registry().view<MaterialComponent>().each())
+    {
+        if (mat.materialAssetId == HE::kEngineWaterMaterialId)
+        {
+            ++seen;
+            REQUIRE(mat.slotOverrides.size() >= 2);
+            CHECK(mat.slotOverrides[0] == HE::kEngineWaterMaterialId);
+            CHECK(mat.slotOverrides[1] == other);   // the negative control: other ids are not touched
+        }
+        else
+            CHECK(mat.materialAssetId == other);
+    }
+    CHECK(seen == 1);
+}

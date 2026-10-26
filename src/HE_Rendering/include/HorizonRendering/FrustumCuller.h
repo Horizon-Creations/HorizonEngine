@@ -33,4 +33,12 @@ public:
     // objects keep casting into the visible scene.
     void cull(const RenderWorld& world, const glm::mat4& viewProj,
               std::vector<uint8_t>& outVisible);
+
+    // The same test over a compact copy of the objects' world bounds (bounds[i] is
+    // world.objects[i].worldBounds), for a backend that keeps one per walk. The test reads
+    // 24 bytes per object instead of a new cache line out of each ~280-byte RenderObject:
+    // five culls of 50k objects cost 12.8 ms of CPU a frame across the cores
+    // (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 7).
+    void cull(const std::vector<HE::AABB>& bounds, const glm::mat4& viewProj,
+              std::vector<uint8_t>& outVisible);
 };

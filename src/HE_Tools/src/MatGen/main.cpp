@@ -58,9 +58,11 @@ using namespace HE;
 // Well-known UUID base for the built-in materials. `hi` stays far below the
 // version-4 bit pattern UUID::generate() enforces and clear of the DefaultAssets
 // sentinels, mesh_gen's 0x100, widget_gen's 0x200 and matfn_gen's 0x300 block.
-constexpr uint64_t kMatBaseHi = 0x0000000000000400ULL;
+// Not 0x400: landscape_tex_gen owns 0x400..0x41F, and one UUID names ONE asset in
+// the ContentManager (Water used to be {0x400, 1} next to T_Landscape_Grass_Albedo).
+constexpr uint64_t kMatBaseHi = 0x0000000000000600ULL;
 static_assert(kEngineWaterMaterialId.hi == kMatBaseHi + 0 && kEngineWaterMaterialId.lo == 1,
-              "Water is entry 0 of the 0x400 block — DefaultAssets.h must agree");
+              "Water is entry 0 of the 0x600 block — DefaultAssets.h must agree");
 
 constexpr float kColStep = 230.0f;
 constexpr float kRowStep = 110.0f;
@@ -470,22 +472,20 @@ struct Grad { Pin x, z; };
 Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin driftZ,
                  Pin amp, float col, float row)
 {
-    constexpr float kStep = 0.04f;                            // finite-difference step, in noise cells
+    // The slope of one fbm layer, from the FBM Noise Gradient node: its value and its exact
+    // gradient in one call. This used to be a finite difference of three fbm calls (0.04
+    // cells apart), the largest cost of the water's near field at ~12 fbm calls a pixel
+    // (docs/perf-water-cost-2026-10-21.md, lever a); the gradient is that difference's
+    // limit, so the chop keeps its look. gain: a step of one noise cell is `size` metres,
+    // and the old (h(x + 0.04 size) - h(x)) * amp / 0.04 is amp times the noise-space slope.
     const int ox = m.op(T::Add, px, m.op(T::Multiply, driftX, time, col, row), col + 1, row);
     const int oz = m.op(T::Add, pz, m.op(T::Multiply, driftZ, time, col, row + 1), col + 1, row + 1);
-    const int exx = m.op(T::Add, ox, m.k(size * kStep, col + 1, row + 2), col + 2, row + 2);
-    const int ezz = m.op(T::Add, oz, m.k(size * kStep, col + 1, row + 3), col + 2, row + 3);
     const int uv0 = m.op(T::CombineRGBA, ox, oz, col + 2, row);
-    const int uvX = m.op(T::CombineRGBA, exx, oz, col + 3, row + 2);
-    const int uvZ = m.op(T::CombineRGBA, ox, ezz, col + 3, row + 3);
     const int inv = m.k(1.0f / size, col + 2, row + 1);
-    const int h0  = m.fbm(uv0, inv, col + 4, row);
-    const int hX  = m.fbm(uvX, inv, col + 4, row + 2);
-    const int hZ  = m.fbm(uvZ, inv, col + 4, row + 3);
-    const int gain = m.op(T::Multiply, amp, m.k(1.0f / kStep, col + 4, row + 1), col + 5, row + 1);
+    const int hg  = m.op(T::FbmGrad, uv0, inv, col + 4, row);
     Grad g;
-    g.x = m.op(T::Multiply, m.op(T::Subtract, hX, h0, col + 5, row + 2), gain, col + 6, row + 2);
-    g.z = m.op(T::Multiply, m.op(T::Subtract, hZ, h0, col + 5, row + 3), gain, col + 6, row + 3);
+    g.x = m.op(T::Multiply, Pin{ hg, 1 }, amp, col + 6, row + 2);
+    g.z = m.op(T::Multiply, Pin{ hg, 2 }, amp, col + 6, row + 3);
     return g;
 }
 

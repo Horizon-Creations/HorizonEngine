@@ -286,6 +286,10 @@ private:
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
+	// DrawScene's refine loop: every object's refined bound (what the frustum culls read) and
+	// their union (the cloud-shadow map's ground height), see the audit levers 5 and 7.
+	std::vector<HE::AABB> m_refinedBounds;
+	HE::AABB              m_frameSceneBox{};
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh

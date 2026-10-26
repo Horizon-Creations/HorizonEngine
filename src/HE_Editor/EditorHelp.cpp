@@ -3101,6 +3101,10 @@ namespace
 	  "Adds a board view: one lane per option of a Select property, a card per "
 	  "row. Drag a card to another lane to change its value.",
 	  "", "" },
+	{ "Planner/New data", "New data",
+	  "Creates a new database for this view to show (a table, board, timeline or "
+	  "calendar of its own) instead of showing one of the databases listed below.",
+	  "", "" },
 	{ "Planner/This database", "This database",
 	  "Makes the relation point at rows of this same database, for things like "
 	  "\"blocked by\" between two tasks. Pick another database in the list to "
