@@ -199,6 +199,63 @@ Linear: etwa 0,085 ms je 1000 Entities (vorher 0,17). Grenzen des Renderer-CPU-T
 30 FPS etwa 400k (vorher 195k). Obergrenzen: zwei Meshes, keine Materialien, Physik, Skripte oder Animation, Editor-Frame (rund 1 ms UI); ab etwa 300k
 begrenzt die GPU (14 ms bei 400k). Mit der halben Frame-Zeit als Reserve für das Spiel: etwa 95k bei 60 FPS, etwa 45k bei 120 FPS.
 
+## Mac (Metal, M5, 26.10.2026)
+
+Zweig `claude/frame-levers-metal` ab PR 199 (`2d82fcc5`). Metal nutzt jetzt den gemeinsamen Code (Handover §2):
+
+- **`FrameCull`:** `RefineObjectBounds()` (`MetalRenderer.mm:8037`) gibt die Schleife an `m_frameCull.refine` (jedes Mesh einmal, das Produkt wide);
+  `CullObjects`, `FrameSceneBox`, `m_refined*` und `CameraCullCache` sind weg (`m_frameCull.cull / sceneBox / cullCamera`, `:12068`, `:18227`).
+  Occlusion bleibt in Metal: mit ihr läuft `CullCameraObjectsFresh` (cull, Occlusion mit eigenem Frame-Cache, Sortieren); `cullCamera` kann nicht
+  nach der Occlusion sortieren. Mit Occlusion an sortiert damit jeder Pass neu (vorher hielt der Cache auch die Sortierung).
+- **Schatten Schritt 1:** `FrameCull::prepareShadowViews` über `m_shadowViewsCpu` (`:8128`); Metals `ShadowView` behält Ziel, `lightClip` und Ring-Abschnitte.
+  Der Kamera-Cull läuft weiter daneben (`parallel_for(2, …)`, verschachtelt erlaubt).
+- **Hebel 1b nicht übernommen:** `fillInstancePairs` geht pro Span erst ab 4096 Instanzen breit; Metals `forSpanInstances` entscheidet über die
+  Summe des Laufs und schneidet über alle Spans in 1024er-Stücke. Ein Foliage-Lauf aus vielen kleinen Clustern liefe mit dem gemeinsamen Weg seriell.
+  Das Layout `{mvp, model}` ist dasselbe; der Ring ist Shared-Memory, Schreibkombinierung spielt keine Rolle.
+- **`ShadowPass::setRecordDraws`:** bestätigt, Metal hat keinen `ShadowPass` im Graph (einziges `addPass` ist `MakeMetalGeometryPass`, `:14603`, `:16447`);
+  `RenderGraph::record` kostet hier 0,14 bis 0,23 ms.
+
+**Prüfung.** `he_tests` 5883 von 5884 grün vor und nach der Umstellung; rot nur `test_hpak.cpp:1188` (zählt den lokalen EngineContentCache, auch auf
+`release/0.7.0` rot). `frame_pixel_ab.sh all`: 42/42 md5-gleich, PR 199 und der umgestellte Stand je gegen release + PR 198 und gegen `ddd4a93e`.
+
+**Perf-A/B** (`he_perf_capture.py`, ohne `--detailed`, `HE_HIDDEN_WINDOW=1 HE_BACKGROUND_FPS=0`, 3200x1800, 4 Runden, Reihenfolge rotiert,
+Median der Scope-p50 in ms). Alt = release + PR 198, PR 199 = gemeinsamer Code, neu = Metal auf `FrameCull`.
+
+| Szene | Stand | Render | extract | Extract::meshes | Extract::transforms | Metal::RefineBounds | Metal::ShadowPrepare (davon ShadowPrepare) | FPS |
+|---|---|---|---|---|---|---|---|---|
+| 50k, RenderScale 0,5 (CPU-gebunden) | alt | 8,90 | 3,67 | - | - | 0,99 | 1,09 | 99,7 |
+| | PR 199 | 8,41 | 2,25 | 1,57 | 0,19 | 1,19 | 1,25 | 101,2 |
+| | neu | 8,45 | 2,21 | 1,57 | 0,18 | **0,55** | 1,16 (0,48) | 107,0 |
+| 50k, voll (GPU-gebunden, 27 ms) | alt | 15,98 | 2,67 | - | - | 0,68 | 0,74 | 62,2 |
+| | PR 199 | 15,64 | 1,64 | 1,12 | 0,16 | 0,74 | 0,80 | 63,8 |
+| | neu | 15,38 | 1,63 | 1,10 | 0,16 | **0,44** | 0,76 (0,34) | 64,0 |
+| Foliage 300k | alt / PR 199 / neu | 17,95 / 18,08 / 18,05 | 0,35 / 0,37 / 0,37 | - / 0,28 / 0,29 | - / 0,02 / 0,02 | 0,05 / 0,06 / 0,09 | 0,07 / 0,08 / 0,08 | 52,8 / 52,3 / 52,3 |
+| Catania | alt / PR 199 / neu | 8,82 / 8,68 / 8,64 | 0,13 / 0,04 / 0,31 | | | 0,01 / 0,00 / 0,08 | 0,02 / 0,01 / 0,04 | 70,4 / 69,6 / 69,4 |
+
+- `extract` -39 bis -40 % (Windows -58 %): Metal lag schon vorher bei 2,7 statt 5,5 ms. `Extract::transforms` und `Extract::meshes` gibt es erst ab PR 199.
+- `RefineBounds` -35 bis -44 % gegen alt, -54 % gegen PR 199 (nur durch die Umstellung).
+- `Metal::ShadowPrepare` bleibt: es misst Ansichten und Kamera-Cull zusammen, und der Kamera-Cull (Distanz-Sortierung) ist der längere Zweig.
+  Die Ansichten allein (`ShadowPrepare`) brauchen 0,34 bis 0,48 ms, wie auf Windows (0,33).
+- `Render` ist bei voller Auflösung GPU-gebunden (die CPU wartet; ab Runde 2 sprang die GPU von 22 auf 27 ms, alle Stände gleich). CPU-gebunden: -5 %, +7 % FPS.
+- Foliage: unverändert, die Zeit liegt in `ShadowInstanceMvp` (1,75 ms). Catania: `extract` ist zweigipflig (Wiederverwendung 0,04 oder Walk 0,2 bis 0,4,
+  je nach Lauf in allen drei Ständen); kein Unterschied ablesbar.
+
+### Handoff Mac (26.10.2026)
+
+- **Topic / step:** Thema 238 (Frame-Hebel), Metal/macOS-Teil.
+- **Branch / commit:** `claude/frame-levers-metal` (ab PR 199 `2d82fcc5`), gepusht.
+- **Done:** Metal auf `FrameCull` (refine, cull, sceneBox, cullCamera) und `prepareShadowViews`; Wächter in `test_foliage_cluster` angepasst.
+- **Files touched:** `MetalRenderer.h:611` (`m_frameCull`), `:659` (`m_shadowViewsCpu`); `MetalRenderer.mm:8037`, `:8128`, `:12068`, `:18227`;
+  `tests/test_foliage_cluster.cpp:1256`.
+- **Verified:** Build (Editor, `he_tests`), `he_tests` 5883/5884 (nur `test_hpak.cpp:1188`, lokal), 42/42 Zeugen md5-gleich vor und nach der Umstellung, Perf-Tabelle oben.
+- **Not verified:** Occlusion-Culling an (kein Zeuge schaltet es ein; der Pfad ist der alte `CullCameraObjectsFresh`, jetzt ohne Ganzantwort-Cache);
+  ThreadSanitizer über `prepareShadowViews` neben `cullCamera`; das Spiel (`HorizonGame`) separat.
+- **Decisions taken:** Hebel 1b weggelassen (Begründung oben); Kamera-Cull bleibt neben den Ansichten; Occlusion bleibt in Metal.
+- **Traps:** Auf dem Mac ist die 50k-Szene bei 3200x1800 GPU-gebunden, `Render` und CPU-Frame folgen dann der GPU; für CPU-Vergleiche `--set RenderScale=0.5`.
+  `Metal::ShadowPrepare` enthält den Kamera-Cull, für die Ansichten allein den gemeinsamen Scope `ShadowPrepare` lesen.
+- **Next steps:** 1. PR 199 mergen, danach diesen Zweig. 2. Kamera-Cull: Distanz-Sortierung (`RenderSorter::sort`) ist jetzt der längste Teil von
+  `Metal::ShadowPrepare`; eine Zählsortierung wie `sortByMesh` wäre der nächste Hebel (neu, nicht begonnen). 3. Handover §4.
+
 ## Handoff
 
 - **Topic / step:** Thema 238 (direkter Auftrag des Menschen), Zweig `claude/perf-foliage-persistent-encode`.
