@@ -839,6 +839,12 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
         const BakedGlyph* g = rf.font->glyph(uiUtf8Decode(rt.text, j));
         return g ? g->xadvance * (sizeAt(b) / rf.font->bakePx) : 0.0f;
     };
+    // Measured once per character, up front: the line scan, each line's width and
+    // the pieces all walk the same characters, and every advanceAt is a face
+    // lookup and a glyph lookup. Indexed by the byte a character starts at.
+    std::vector<float> advance(rt.text.size(), 0.0f);
+    for (std::size_t b = 0; b < rt.text.size(); b = uiUtf8Next(rt.text, b))
+        advance[b] = advanceAt(b);
 
     // ── Lines ────────────────────────────────────────────────────────────────
     // Byte ranges, because a piece has to name bytes to know its run. Hard breaks
@@ -865,7 +871,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             const char c = rt.text[i];
             if (c == '\r') { ++i; continue; }
             if (c == '\n') { push(i); cur.begin = i + 1; ++i; continue; }
-            const float adv = advanceAt(i);
+            const float adv = advance[i];
             const bool wrapHere = opts.wrap && rectSize.x > 0.0f &&
                                   width + adv > rectSize.x && i > cur.begin;
             if (wrapHere)
@@ -918,7 +924,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
         // Trailing spaces neither widen the line nor shift a centred one.
         float trimmed = 0.0f;
         for (std::size_t b = lines[li].begin; b < lastInk; b = uiUtf8Next(rt.text, b))
-            trimmed += advanceAt(b);
+            trimmed += advance[b];
         lineSize[li]    = mx > 0.0f ? mx : sizePx;
         lineWidthPx[li] = lines[li].end > lines[li].begin ? trimmed : 0.0f;
     }
@@ -950,7 +956,7 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             std::size_t e = b;
             float w = 0.0f;
             while (e < lines[li].end && runAt(e) == r)
-            { w += advanceAt(e); e = uiUtf8Next(rt.text, e); }
+            { w += advance[e]; e = uiUtf8Next(rt.text, e); }
             UIRichPiece pc;
             pc.run = r; pc.begin = b; pc.end = e;
             pc.line = static_cast<int>(li);
