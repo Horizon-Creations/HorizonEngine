@@ -4137,21 +4137,19 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
             vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
-            m_clusterScratch.clear();
-            m_renderWorld.appendInstances(obj, m_clusterScratch);
-            const uint32_t n = static_cast<uint32_t>(m_clusterScratch.size());
-            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount, n,
+            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount,
+                    m_renderWorld.instanceCountOf(obj),
                     [&](uint32_t k, glm::mat4* pair) {
-                        pair[0] = camClip * m_clusterScratch[k];
-                        pair[1] = m_clusterScratch[k];
+                        pair[1] = m_renderWorld.instanceMatrix(obj, k);
+                        pair[0] = camClip * pair[1];
                     }))
                 continue;
-            for (const glm::mat4& model : m_clusterScratch)
+            m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model)
             {
                 PushConstants ipc{ camClip * model, model };
                 vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ipc), &ipc);
                 vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
-            }
+            });
             continue;
         }
         PushConstants pc{ camClip * obj.transform, obj.transform };
@@ -7161,12 +7159,7 @@ bool VulkanRenderer::drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe
     if (!instPipe || count < 2 || !RenderSorter::depthInstancingEnabled()
         || !allocInstances(count, ibuf, off, dst))
         return false;
-    for (uint32_t k = 0; k < count; ++k)
-    {
-        glm::mat4 pair[2];
-        fill(k, pair);
-        std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
-    }
+    RenderSorter::fillInstancePairs(dst, count, fill);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
     vkCmdBindVertexBuffers(cmd, 1, 1, &ibuf, &off);
     vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, 0);
@@ -7198,56 +7191,17 @@ void VulkanRenderer::refineObjectBounds()
     // the loop ran keeps the bound the walk gave it for
     // the rest of the walk, invalid at worst, and an object with an invalid bound is never culled:
     // the conservative side, the draw loops resolve the mesh on their own.
-    const uint64_t      walk    = m_extractor.fullExtractCount();
-    const RenderObject* objects = m_renderWorld.objects.data();
-    const size_t        count   = m_renderWorld.objects.size();
-    if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
-    m_refinedBounds.resize(count);
-    for (size_t i = 0; i < count; ++i)
+    m_frameCull.refine(m_renderWorld, m_extractor.fullExtractCount(), [this](const RenderObject& obj) -> const HE::AABB*
     {
-        RenderObject& obj = m_renderWorld.objects[i];
-        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
-            obj.refineWorldBounds(mesh->localBounds);
-        m_refinedBounds[i] = obj.worldBounds;
-    }
-    m_refinedWalk    = walk;
-    m_refinedObjects = objects;
-    m_refinedCount   = count;
-}
-
-void VulkanRenderer::cullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
-{
-    if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
-        && m_refinedCount == m_renderWorld.objects.size())
-        m_culler.cull(m_refinedBounds, viewProj, outVisible);
-    else
-        m_culler.cull(m_renderWorld, viewProj, outVisible);
+        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+        return mesh ? &mesh->localBounds : nullptr;
+    });
 }
 
 void VulkanRenderer::cullCameraObjects()
 {
-    const uint64_t  walk = m_extractor.fullExtractCount();
-    const glm::mat4 vp   = m_renderWorld.camera.projection * m_renderWorld.camera.view;
-    CameraCullCache& c   = m_cameraCull;
-    // Bounds change only in refineObjectBounds, once per walk, which every pass runs before this;
-    // a pass at another aspect has another projection and misses.
-    const bool refined = m_refinedWalk == walk && m_refinedObjects == m_renderWorld.objects.data()
-                      && m_refinedCount == m_renderWorld.objects.size();
-    if (refined && c.stamp == m_frameStamp && c.walk == walk && c.objects == m_renderWorld.objects.data()
-        && c.count == m_renderWorld.objects.size() && c.viewProj == vp
-        && c.camPos == m_renderWorld.camera.position)
-    {
-        m_visible       = c.visible;
-        m_sortedIndices = c.sorted;
-        return;
-    }
-    cullObjects(vp, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-    if (!refined) { c.stamp = ~0ull; return; }   // bounds may still change this walk: keep nothing
-    c.stamp = m_frameStamp; c.walk = walk; c.objects = m_renderWorld.objects.data();
-    c.count = m_renderWorld.objects.size(); c.viewProj = vp; c.camPos = m_renderWorld.camera.position;
-    c.visible = m_visible;
-    c.sorted  = m_sortedIndices;
+    m_frameCull.cullCamera(m_culler, m_sorter, m_renderWorld, m_extractor.fullExtractCount(), m_frameStamp,
+                           /*variant=*/0, m_visible, m_sortedIndices);
 }
 
 void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
@@ -7360,7 +7314,7 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdSetDepthBias(cmd, kShadowBiasConstant, 0.0f, kShadowBiasSlope);
-        cullObjects(viewProj, m_shadowVisible);
+        m_frameCull.cull(m_culler, m_renderWorld, m_extractor.fullExtractCount(), viewProj, m_shadowVisible);
         m_sorter.sortByMesh(m_renderWorld, m_shadowVisible, m_shadowSorted);
         RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity, m_shadowBatches);
         for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)

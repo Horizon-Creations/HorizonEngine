@@ -7,6 +7,7 @@
 #include <HorizonRendering/InstanceArena.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
@@ -199,32 +200,11 @@ private:
 	// after the walk, and every pass calls this again as its guarantee that the bounds are real
 	// and finds it done. A new walk or a different object array starts over (Thema 162, step 4).
 	void refineObjectBounds();
-	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
-	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
-	size_t              m_refinedCount   = 0;
-	// Every object's refined bound in object order, from the same loop: what the frustum culls
-	// read (FrustumCuller's compact overload) instead of a cache line out of each ~280-byte
-	// RenderObject (audit lever 7). Valid for the walk m_refined* names.
-	std::vector<HE::AABB> m_refinedBounds;
-	// The frustum cull of every pass (cascades, the camera): over m_refinedBounds when they belong
-	// to the walk in m_renderWorld, over the objects themselves otherwise.
-	void cullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible);
+	FrameCull m_frameCull;   // the walk's refined bounds, the culls over them and the camera cull of the frame
+	uint64_t  m_frameStamp = 0;   // bumped once per Render()
 	// Camera cull + draw order of m_renderWorld into m_visible / m_sortedIndices, shared by the
-	// passes of one frame that ask with the same walk and camera (audit lever 4): the decal depth
-	// pre-pass, GI, SSAO and the scene all cull and sort the same objects with the same view.
+	// passes of one frame that ask with the same walk and camera.
 	void cullCameraObjects();
-	uint64_t m_frameStamp = 0;   // bumped once per Render()
-	struct CameraCullCache
-	{
-		uint64_t              stamp   = ~0ull;
-		uint64_t              walk    = ~0ull;
-		const RenderObject*   objects = nullptr;
-		size_t                count   = 0;
-		glm::mat4             viewProj{ 1.0f };
-		glm::vec3             camPos{ 0.0f };
-		std::vector<uint8_t>  visible;
-		std::vector<uint32_t> sorted;
-	} m_cameraCull;
 	// Own render pass, before the scene. `aspect` is the camera aspect the
 	// cascades are fit against — the single map never cared, a cascade fit to
 	// a square frustum drops the screen edges of a wide viewport.

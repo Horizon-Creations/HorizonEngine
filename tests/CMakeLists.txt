@@ -495,6 +495,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiInstanceSurface.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrameCull.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
