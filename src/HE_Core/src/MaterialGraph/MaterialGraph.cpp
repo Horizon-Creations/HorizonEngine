@@ -1620,9 +1620,15 @@ HE_MG_NOINLINE bool emitWaterNode(EmitCtx& c, const Scope& sc, const MatGraphNod
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
-    const std::string memoKey = sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(pin);
+    // "<scope>:<node>" keys the cycle guard; the memo key (outVar) adds ":<pin>".
+    std::string memoKey = sc.key;
+    memoKey += ':';
+    memoKey += std::to_string(n.id);
+    const size_t nodeKeyLen = memoKey.size();
+    memoKey += ':';
+    memoKey += std::to_string(pin);
     if (auto it = c.outVar.find(memoKey); it != c.outVar.end()) return it->second;
-    const std::string cycleKey = sc.key + ":" + std::to_string(n.id);
+    const std::string cycleKey = memoKey.substr(0, nodeKeyLen);
     if (c.emitting.count(cycleKey))
         return "vec3(1.0, 0.0, 1.0)"; // cycle → magenta
     c.emitting.insert(cycleKey);
@@ -1653,10 +1659,14 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
 
     // Register per-pin expressions (default: the single var for every output pin).
     const size_t pinCount = std::max<size_t>(d.outputs.size(), pinExpr.size());
+    std::string pinKey = cycleKey;
     for (size_t i = 0; i < std::max<size_t>(pinCount, 1); ++i)
     {
         const std::string expr = i < pinExpr.size() && !pinExpr[i].empty() ? pinExpr[i] : v;
-        c.outVar[sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(i)] = expr;
+        pinKey.resize(nodeKeyLen);
+        pinKey += ':';
+        pinKey += std::to_string(i);
+        c.outVar[pinKey] = expr;
     }
     return c.outVar[memoKey];
 }
